@@ -41,3 +41,7 @@ go.work.sum
 
 # Generated documentation
 docs/_site/
+
+# Compiled example binaries (matching examples/<NN>_*)
+[0-9][0-9]_*
+!examples/[0-9][0-9]_*/
