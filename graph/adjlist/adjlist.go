@@ -324,6 +324,27 @@ func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 // that may benefit from explicit compaction.
 func (a *AdjList[N, W]) Compact() {}
 
+// MaxNodeID returns one more than the largest [graph.NodeID] that has
+// been assigned by the underlying Mapper. The value is a stable upper
+// bound on the NodeID space at the moment of the call and is the
+// natural size of a NodeID-indexed companion array (for example, the
+// CSR offsets array).
+func (a *AdjList[N, W]) MaxNodeID() graph.NodeID {
+	return a.mapper.MaxNodeID()
+}
+
+// LoadEntry returns immutable snapshots of the neighbours and parallel
+// weights of the node identified by id, or (nil, nil) if id has no
+// outgoing edges. The returned slices are owned by the current
+// adjacency snapshot and must not be mutated by the caller.
+func (a *AdjList[N, W]) LoadEntry(id graph.NodeID) (neighbours []graph.NodeID, weights []W) {
+	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
+	if e == nil {
+		return nil, nil
+	}
+	return e.neighbours, e.weights
+}
+
 // loadEntry atomically reads the entry stored at intraIdx within s.
 // It returns nil when intraIdx is beyond the shard's allocated slot
 // range or when no entry has yet been published at that slot.

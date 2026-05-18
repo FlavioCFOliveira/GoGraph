@@ -134,6 +134,30 @@ func (m *Mapper[N]) Len() int {
 	return n
 }
 
+// MaxNodeID returns one more than the largest [NodeID] that has been
+// assigned by this Mapper. It is the natural size for an array
+// indexed directly by NodeID (e.g. a CSR offsets array). Returns 0
+// when no value has been interned.
+func (m *Mapper[N]) MaxNodeID() NodeID {
+	var maxIntra uint64
+	for i := range m.shards {
+		s := &m.shards[i]
+		s.mu.RLock()
+		if uint64(len(s.reverse)) > maxIntra {
+			maxIntra = uint64(len(s.reverse))
+		}
+		s.mu.RUnlock()
+	}
+	if maxIntra == 0 {
+		return 0
+	}
+	// Last assignable intra-shard index is maxIntra-1. The largest
+	// possible NodeID is therefore packed with that index and shard
+	// 255. We return one more than that, so the result equals the
+	// length of a NodeID-indexed array large enough to cover every id.
+	return packNodeID(mapperShardCount-1, maxIntra-1) + 1
+}
+
 // mapperShardFor routes a comparable value to a shard index using the
 // runtime's typehash, exposed via [hash/maphash.Comparable].
 func mapperShardFor[N comparable](k N) uint64 {
