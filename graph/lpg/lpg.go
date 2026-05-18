@@ -94,24 +94,38 @@ type edgeKey struct {
 type Graph[N comparable, W any] struct {
 	adj     *adjlist.AdjList[N, W]
 	reg     *LabelRegistry
+	pkeys   *PropertyKeyRegistry
 	nodeIdx *label.Index
 	edgeIdx *label.Index
 	nodeMu  sync.RWMutex
 	edgeMu  sync.RWMutex
+	propMu  sync.RWMutex
 	nodeBag map[graph.NodeID]map[LabelID]struct{}
 	edgeBag map[edgeKey]map[LabelID]struct{}
+
+	nodeProps map[graph.NodeID]map[PropertyKeyID]PropertyValue
+	edgeProps map[edgeKey]map[PropertyKeyID]PropertyValue
 }
+
+// propKeys returns the property-key registry.
+func (g *Graph[N, W]) propKeys() *PropertyKeyRegistry { return g.pkeys }
+
+// PropertyKeys returns the property-key registry.
+func (g *Graph[N, W]) PropertyKeys() *PropertyKeyRegistry { return g.pkeys }
 
 // New returns a fresh LPG built on top of a new [adjlist.AdjList]
 // configured by cfg.
 func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	return &Graph[N, W]{
-		adj:     adjlist.New[N, W](cfg),
-		reg:     NewLabelRegistry(),
-		nodeIdx: label.NewIndex(),
-		edgeIdx: label.NewIndex(),
-		nodeBag: make(map[graph.NodeID]map[LabelID]struct{}),
-		edgeBag: make(map[edgeKey]map[LabelID]struct{}),
+		adj:       adjlist.New[N, W](cfg),
+		reg:       NewLabelRegistry(),
+		pkeys:     NewPropertyKeyRegistry(),
+		nodeIdx:   label.NewIndex(),
+		edgeIdx:   label.NewIndex(),
+		nodeBag:   make(map[graph.NodeID]map[LabelID]struct{}),
+		edgeBag:   make(map[edgeKey]map[LabelID]struct{}),
+		nodeProps: make(map[graph.NodeID]map[PropertyKeyID]PropertyValue),
+		edgeProps: make(map[edgeKey]map[PropertyKeyID]PropertyValue),
 	}
 }
 
