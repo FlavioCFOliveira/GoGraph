@@ -87,6 +87,21 @@ func (m *Mapper[N]) internSlow(s *mapperShard[N], shardIdx uint64, k N) NodeID {
 	return id
 }
 
+// Lookup returns the [NodeID] previously assigned to k and true, or
+// the zero NodeID and false when k has not been interned. The fast
+// path holds a read lock only and performs no heap allocation. Unlike
+// [Mapper.Intern], Lookup never mutates the Mapper, which makes it
+// the right primitive for read-only operations (HasEdge, Neighbours,
+// existence checks) on backends layered above the Mapper.
+func (m *Mapper[N]) Lookup(k N) (NodeID, bool) {
+	shardIdx := mapperShardFor(k)
+	s := &m.shards[shardIdx]
+	s.mu.RLock()
+	id, ok := s.forward[k]
+	s.mu.RUnlock()
+	return id, ok
+}
+
 // Resolve returns the value previously interned under id, or the zero
 // value of N and false when id was not produced by this Mapper.
 func (m *Mapper[N]) Resolve(id NodeID) (N, bool) {

@@ -79,6 +79,22 @@ func TestMapper_InternAndResolve_Struct(t *testing.T) {
 	}
 }
 
+func TestMapper_Lookup(t *testing.T) {
+	t.Parallel()
+	m := NewMapper[string]()
+	if _, ok := m.Lookup("absent"); ok {
+		t.Fatalf("Lookup of unknown key should report ok=false")
+	}
+	id := m.Intern("present")
+	got, ok := m.Lookup("present")
+	if !ok || got != id {
+		t.Fatalf("Lookup(present) = (%d, %v), want (%d, true)", got, ok, id)
+	}
+	if l := m.Len(); l != 1 {
+		t.Fatalf("Lookup of unknown key must not insert: Len = %d", l)
+	}
+}
+
 func TestMapper_Resolve_Unknown(t *testing.T) {
 	t.Parallel()
 	m := NewMapper[string]()
