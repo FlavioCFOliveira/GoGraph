@@ -105,6 +105,53 @@ Before writing a single line of code for any non-trivial component, conduct a **
 
 ---
 
+## Reliability and Concurrency Mandates
+
+This module must operate **without failure under sustained high load and high concurrency**. Every component — public or internal — must satisfy the following non-negotiable contract.
+
+### Correctness under concurrency
+
+- **Zero data races.** `go test -race ./...` must pass on every change. No exceptions. CI must block merges if the race detector reports any access.
+- **Explicit concurrency contract.** Every exported type carries a godoc clause stating whether it is safe for concurrent use, and if so under which operations. Ambiguity is a defect.
+- **No hidden global state.** Package-level mutable variables are forbidden outside of carefully reviewed registries; every shared resource is passed explicitly.
+- **Context-aware blocking.** Every public API that may block on I/O, a channel, a lock, or a long computation accepts a `context.Context` and honours cancellation and deadlines.
+
+### Robustness under load
+
+- **Bounded resources.** No unbounded queues, no unbounded goroutine spawn, no unbounded caches. Every queue, pool, semaphore, and cache declares an explicit upper bound surfaced in its constructor.
+- **Backpressure, never panic.** When a downstream is saturated, callers either receive a typed error or block on a bounded channel; the library must never crash, deadlock, or silently drop work.
+- **No goroutine leaks.** Every goroutine spawned by the library has a defined lifecycle and is terminated on `Close`/`Shutdown`/context cancellation. Verified via `go.uber.org/goleak` in test teardown for every package that spawns goroutines.
+- **Graceful degradation.** Under memory pressure or saturation, the library degrades predictably (slower, fewer concurrent operations) rather than failing catastrophically.
+
+### Performance under contention
+
+- **Lock contention budget.** Hot paths must not hold a global lock. Use sharded structures (`hash(NodeID) mod N` shards), lock-free atomics, or copy-on-write snapshots. Any new global mutex requires explicit justification in code review.
+- **Readers do not block writers and vice versa where avoidable.** Prefer `atomic.Pointer[Snapshot]` swap patterns for read-heavy workloads; use RW-mutexes only when a fully lock-free design is impractical.
+- **Lock-free read paths on immutable structures.** Traversal of an immutable CSR snapshot must require zero synchronisation primitives in the hot loop.
+- **Fair scheduling.** Long-running operations yield (`runtime.Gosched` or chunked work) to keep latency tails bounded for concurrent short queries.
+
+### Failure handling
+
+- **Fail-stop, never fail-silent.** Errors are returned, logged, and counted via metrics. Corrupted state triggers a clean shutdown via a sentinel error rather than continuing with silent inconsistency.
+- **Defensive validation at boundaries only.** Internal code trusts its callers; external inputs are validated once at the public API boundary and never again.
+- **Recoverable panics are forbidden.** The library does not `recover()` to hide bugs; panics indicate programmer error and must surface immediately. Exception: goroutines that the library owns may recover **only** to log the panic, record it as a metric, and terminate cleanly.
+- **Crash safety.** Any persistent state survives `kill -9` mid-write. Verified by deterministic crash-injection tests (Sprint 3 acceptance criterion).
+
+### Observability
+
+- **Every long-lived goroutine is observable.** Name (via `pprof.SetGoroutineLabels`), lifecycle metrics (started, running, exited), and recent activity timestamp.
+- **Every cache, pool, and bounded queue exports utilisation metrics.** Size, capacity, hit ratio, eviction count, blocked-acquire count.
+- **Latency histograms on every public blocking API.** Prometheus exposition format, with consistent label names across the module.
+- **Race-detector and `goleak` integration in CI.** Both run on every PR; both must be green to merge.
+
+### Acceptance gates
+
+- **Soak test before any release.** A multi-hour mixed-workload run under `GODEBUG=gctrace=1` showing zero growth in heap, file descriptors, and goroutine count after warm-up.
+- **Concurrency stress test in CI.** A short variant of the soak workload runs on every PR with the race detector enabled.
+- **Load-test report alongside benchmarks.** Each release ships latency and throughput numbers at multiple concurrency levels (1, 8, 64, 256, 1024 goroutines), recorded in `docs/benchmarks/`.
+
+---
+
 ## Sub-Agents (Specialists)
 
 The following sub-agents are available and **must be actively consulted** to maximise output quality. Do not implement a component in isolation when a relevant specialist can provide material input.
