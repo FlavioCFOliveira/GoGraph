@@ -1,0 +1,43 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+build/
+dist/
+
+# Test and coverage artefacts
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# pprof profiles
+cpu.pprof
+mem.pprof
+*.pprof
+
+# Benchmarks
+benchstat.txt
+*.bench
+
+# Editor and OS detritus
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+*.iml
+
+# Go workspace
+go.work
+go.work.sum
+
+# Local environment
+.env
+.envrc
+
+# Generated documentation
+docs/_site/
