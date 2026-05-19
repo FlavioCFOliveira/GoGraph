@@ -1,6 +1,8 @@
 package search
 
 import (
+	"context"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
@@ -24,6 +26,14 @@ type Matching struct {
 //
 // Complexity O(E * sqrt(V)).
 func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
+	out, _ := HopcroftKarpCtx(context.Background(), c, nLeft)
+	return out
+}
+
+// HopcroftKarpCtx is the context-aware variant of [HopcroftKarp].
+// ctx.Err() is checked at every phase boundary (BFS-layer + DFS-augment
+// pair); on cancellation returns (zero Matching, wrapped ctx.Err()).
+func HopcroftKarpCtx[W any](ctx context.Context, c *csr.CSR[W], nLeft int) (Matching, error) {
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -39,6 +49,9 @@ func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
 	dist := make([]int, nLeft)
 	size := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return Matching{}, err
+		}
 		queue := bfsLayer(matchL, matchR, dist, verts, edges, nLeft)
 		if !queue {
 			break
@@ -51,7 +64,7 @@ func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
 			}
 		}
 	}
-	return Matching{MatchL: matchL, MatchR: matchR, Size: size}
+	return Matching{MatchL: matchL, MatchR: matchR, Size: size}, nil
 }
 
 // bfsLayer assigns dist[u] to every free left vertex u and to every

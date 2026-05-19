@@ -1,6 +1,8 @@
 package search
 
 import (
+	"context"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
@@ -23,6 +25,14 @@ type tarjanFrame struct {
 // destination) are considered; NodeIDs that were assigned by the
 // Mapper but never gained an edge are not emitted as singleton SCCs.
 func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
+	out, _ := TarjanSCCCtx(context.Background(), c)
+	return out
+}
+
+// TarjanSCCCtx is the context-aware variant of [TarjanSCC]. ctx.Err()
+// is checked at every restart of the outer DFS loop (i.e. before each
+// new root); on cancellation returns (nil, wrapped ctx.Err()).
+func TarjanSCCCtx[W any](ctx context.Context, c *csr.CSR[W]) ([][]graph.NodeID, error) {
 	maxID := uint64(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -54,6 +64,9 @@ func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
 		if !live[start] || index[start] != unvisited {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// Begin DFS from start.
 		index[start] = nextIndex
 		lowlink[start] = nextIndex
@@ -84,7 +97,7 @@ func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // tarjanVisitNeighbour processes one neighbour during Tarjan's DFS.

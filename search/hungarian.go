@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"errors"
 	"math"
 )
@@ -31,9 +32,16 @@ type Assignment struct {
 // contains any NaN or +/-Inf entry — the dual potentials accumulate
 // across iterations and a single non-finite value silently corrupts
 // the entire run, so validation is mandatory.
-//
-//nolint:gocyclo // textbook Hungarian: relaxation + dual update + augment
 func Hungarian(cost []float64, n, m int) (Assignment, error) {
+	return HungarianCtx(context.Background(), cost, n, m)
+}
+
+// HungarianCtx is the context-aware variant of [Hungarian]. ctx.Err()
+// is checked at every row-augmenting iteration; on cancellation
+// returns (zero Assignment, wrapped ctx.Err()).
+//
+//nolint:gocyclo // textbook Hungarian: validation + dual update + augment
+func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, error) {
 	if n == 0 || m == 0 {
 		return Assignment{RowToCol: make([]int, n)}, nil
 	}
@@ -53,6 +61,9 @@ func Hungarian(cost []float64, n, m int) (Assignment, error) {
 	way := make([]int, m+1)
 
 	for i := 1; i <= n; i++ {
+		if err := ctx.Err(); err != nil {
+			return Assignment{}, err
+		}
 		p[0] = i
 		j0 := 0
 		minv := make([]float64, m+1)

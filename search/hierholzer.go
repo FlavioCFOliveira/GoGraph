@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"errors"
 
 	"gograph/graph"
@@ -22,6 +23,13 @@ var ErrNoEulerian = errors.New("search: graph has no Eulerian circuit or path")
 // or the graph is not connected through its non-zero degree
 // vertices.
 func Hierholzer[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
+	return HierholzerCtx(context.Background(), c)
+}
+
+// HierholzerCtx is the context-aware variant of [Hierholzer]. ctx.Err()
+// is checked every 4096 trail steps; on cancellation returns
+// (nil, wrapped ctx.Err()).
+func HierholzerCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -47,7 +55,14 @@ func Hierholzer[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
 
 	stack := []graph.NodeID{graph.NodeID(start)}
 	var trail []graph.NodeID
+	stepCount := 0
 	for len(stack) > 0 {
+		if stepCount&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		stepCount++
 		v := stack[len(stack)-1]
 		if nextEdge[uint64(v)] < verts[uint64(v)+1] {
 			w := edges[nextEdge[uint64(v)]]

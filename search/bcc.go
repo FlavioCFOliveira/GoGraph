@@ -1,6 +1,8 @@
 package search
 
 import (
+	"context"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
@@ -32,9 +34,17 @@ type BCCResult struct {
 //
 // The implementation uses an explicit DFS stack (no recursion) so
 // it survives deep graphs.
+func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
+	out, _ := HopcroftTarjanBCCCtx(context.Background(), c)
+	return out
+}
+
+// HopcroftTarjanBCCCtx is the context-aware variant of
+// [HopcroftTarjanBCC]. ctx.Err() is checked at every outer-DFS root;
+// on cancellation returns (zero BCCResult, wrapped ctx.Err()).
 //
 //nolint:gocyclo // canonical Hopcroft-Tarjan: DFS frame stack + edge-stack + articulation + bridge detection
-func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
+func HopcroftTarjanBCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (BCCResult, error) {
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -66,6 +76,9 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 		}
 		if verts[start+1] == verts[start] {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return BCCResult{}, err
 		}
 		disc[start] = timer
 		low[start] = timer
@@ -167,7 +180,7 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 			artic = append(artic, graph.NodeID(i))
 		}
 	}
-	return BCCResult{Components: components, Bridges: bridges, Articulation: artic}
+	return BCCResult{Components: components, Bridges: bridges, Articulation: artic}, nil
 }
 
 func dedupe(in []graph.NodeID) []graph.NodeID {
