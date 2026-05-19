@@ -32,13 +32,15 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 		maxID:   maxID,
 		compact: compact,
 		dist:    make([]W, live*live),
+		found:   make([]bool, live*live),
 	}
 	if live == 0 {
 		return out, nil
 	}
-	infV := out.inf()
-	for i := range out.dist {
-		out.dist[i] = infV
+	// Diagonal: every live node reaches itself at distance 0.
+	for i := 0; i < live; i++ {
+		idx := i*live + i
+		out.found[idx] = true
 	}
 	for src := 0; src < maxID; src++ {
 		si := compact[src]
@@ -55,7 +57,9 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 				continue
 			}
 			if v, ok := d.Distance(graph.NodeID(dst)); ok {
-				out.dist[si*live+di] = v
+				idx := si*live + di
+				out.dist[idx] = v
+				out.found[idx] = true
 			}
 		}
 	}
