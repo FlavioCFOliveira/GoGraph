@@ -228,6 +228,65 @@ func (c *CSR[W]) LiveCount() int {
 	return n
 }
 
+// BuildReverse returns a fresh CSR representing the same vertex set
+// as c but with every edge (u, v) replaced by its reverse (v, u).
+// Weights are carried over unchanged.
+//
+// The reverse CSR is the canonical adjacency for in-edge enumeration:
+// it pairs with the forward CSR to support algorithms that require
+// both directions (bidirectional Dijkstra, weakly-connected
+// components, semi-external in-degree queries). On an undirected
+// graph (one whose CSR is already symmetric) the returned CSR is
+// structurally identical to c.
+//
+// Complexity: O(V + E) time, O(V + E) memory. The returned CSR is
+// independent of c; mutating its slices does not affect c (per the
+// immutable-snapshot contract callers must in any case respect).
+func (c *CSR[W]) BuildReverse() *CSR[W] {
+	maxID := uint64(c.MaxNodeID())
+	if maxID == 0 {
+		return &CSR[W]{vertices: []uint64{0}}
+	}
+	// Pass 1: count incoming edges per destination.
+	inDeg := make([]uint64, maxID+1)
+	for u := uint64(0); u+1 < uint64(len(c.vertices)); u++ {
+		for k := c.vertices[u]; k < c.vertices[u+1]; k++ {
+			inDeg[uint64(c.edges[k])+1]++
+		}
+	}
+	// Prefix sum -> reversed-vertices offsets.
+	revVerts := make([]uint64, maxID+1)
+	for i := uint64(1); i <= maxID; i++ {
+		revVerts[i] = revVerts[i-1] + inDeg[i]
+	}
+	totalEdges := revVerts[maxID]
+	revEdges := make([]graph.NodeID, totalEdges)
+	var revWeights []W
+	if c.weights != nil {
+		revWeights = make([]W, totalEdges)
+	}
+	// Pass 2: scatter edges into their reversed slots.
+	cursor := make([]uint64, maxID)
+	for u := uint64(0); u+1 < uint64(len(c.vertices)); u++ {
+		for k := c.vertices[u]; k < c.vertices[u+1]; k++ {
+			v := uint64(c.edges[k])
+			pos := revVerts[v] + cursor[v]
+			revEdges[pos] = graph.NodeID(u)
+			if revWeights != nil {
+				revWeights[pos] = c.weights[k]
+			}
+			cursor[v]++
+		}
+	}
+	return &CSR[W]{
+		vertices: revVerts,
+		edges:    revEdges,
+		weights:  revWeights,
+		order:    c.order,
+		size:     c.size,
+	}
+}
+
 // IsSymmetric reports whether the CSR is symmetric — that is, whether
 // every directed edge (u, v) has a matching reverse edge (v, u). A
 // symmetric CSR is the canonical representation of an undirected

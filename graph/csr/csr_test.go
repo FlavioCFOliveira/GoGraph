@@ -303,3 +303,58 @@ func TestCSR_LiveMask_DanglingSink(t *testing.T) {
 		t.Fatalf("LiveCount = %d, want 2", got)
 	}
 }
+
+func TestCSR_BuildReverse_BasicDirected(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a.AddEdge(0, 1, 5)
+	a.AddEdge(1, 2, 7)
+	a.AddEdge(0, 2, 9)
+	c := BuildFromAdjList(a)
+	rev := c.BuildReverse()
+
+	id0, _ := a.Mapper().Lookup(0)
+	id1, _ := a.Mapper().Lookup(1)
+	id2, _ := a.Mapper().Lookup(2)
+
+	// rev should have edges 1->0, 2->1, 2->0 with original weights.
+	gotEdges := map[[2]graph.NodeID]int64{}
+	for u := uint64(0); u+1 < uint64(len(rev.VerticesSlice())); u++ {
+		for k := rev.VerticesSlice()[u]; k < rev.VerticesSlice()[u+1]; k++ {
+			gotEdges[[2]graph.NodeID{graph.NodeID(u), rev.EdgesSlice()[k]}] = rev.WeightsSlice()[k]
+		}
+	}
+	want := map[[2]graph.NodeID]int64{
+		{id1, id0}: 5,
+		{id2, id1}: 7,
+		{id2, id0}: 9,
+	}
+	for k, v := range want {
+		got, ok := gotEdges[k]
+		if !ok || got != v {
+			t.Fatalf("missing or wrong rev edge %v: got=%v ok=%v want=%v", k, got, ok, v)
+		}
+	}
+}
+
+func TestCSR_BuildReverse_OnSymmetricGraphPreservesEdges(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a.AddEdge(0, 1, 1)
+	a.AddEdge(1, 2, 2)
+	c := BuildFromAdjList(a)
+	rev := c.BuildReverse()
+	if rev.Size() != c.Size() {
+		t.Fatalf("rev size = %d, want = original %d", rev.Size(), c.Size())
+	}
+}
+
+func TestCSR_BuildReverse_EmptyGraph(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	c := BuildFromAdjList(a)
+	rev := c.BuildReverse()
+	if rev.Size() != 0 {
+		t.Fatalf("empty rev size = %d", rev.Size())
+	}
+}
