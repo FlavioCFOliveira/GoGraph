@@ -47,22 +47,37 @@ func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node gra
 	visited[uint64(src)>>6] |= 1 << (uint64(src) & 63)
 	cur = append(cur, src)
 	depth := 0
-	// alpha gates the top-down -> bottom-up switch (Beamer 2012).
-	// The inverse beta heuristic that switches back to top-down on
-	// the tail is the job of task #129; the current implementation
-	// runs at most one bottom-up step per iteration, which already
-	// captures the bulk of the headline win on power-law inputs.
+	// Beamer 2012 thresholds:
+	//   - alpha gates the top-down -> bottom-up switch when the
+	//     frontier's outgoing edges exceed unvisitedEdges / alpha;
+	//   - beta gates the bottom-up -> top-down switch back when the
+	//     frontier shrinks below maxID / beta.
+	// Together they bracket the bottom-up phase to the dense middle
+	// of a power-law BFS, recovering the 3-7x headline win.
 	const alpha uint64 = 14
+	const beta uint64 = 24
+	inBottomUp := false
 	for len(cur) > 0 {
 		var frontierEdges uint64
 		for _, n := range cur {
 			frontierEdges += verts[uint64(n)+1] - verts[uint64(n)]
 		}
 		unvisitedEdges := edgesUnvisited(verts, visited)
+		if !inBottomUp && frontierEdges > unvisitedEdges/alpha {
+			inBottomUp = true
+		} else if inBottomUp && uint64(len(cur)) < maxID/beta {
+			inBottomUp = false
+		}
 		var stopped bool
-		if frontierEdges > unvisitedEdges/alpha {
+		if inBottomUp {
+			if bfsDoStepObserver != nil {
+				bfsDoStepObserver(depth, true)
+			}
 			cur, next, stopped = bottomUpStep(verts, edges, visited, frontier, maxID, cur, next, &depth, visit)
 		} else {
+			if bfsDoStepObserver != nil {
+				bfsDoStepObserver(depth, false)
+			}
 			cur, next, stopped = topDownStep(verts, edges, visited, cur, next, &depth, visit)
 		}
 		if stopped {
@@ -170,6 +185,20 @@ func bottomUpStep(
 	}
 	*depth++
 	return next, cur[:0], false
+}
+
+// bfsDoStepObserver is a test-only hook invoked once per BFS-DO step
+// with (depth, isBottomUp). Tests set it via [setBFSDoStepObserver]
+// to verify the Beamer alpha/beta switch behaviour from outside; it
+// is nil and a single inlined branch in production builds.
+//
+//nolint:gochecknoglobals // test-only observer hook
+var bfsDoStepObserver func(depth int, isBottomUp bool)
+
+// SetBFSDoStepObserver installs (or clears with nil) the BFS-DO step
+// observer for use by package tests. Not part of the public API.
+func setBFSDoStepObserver(f func(depth int, isBottomUp bool)) {
+	bfsDoStepObserver = f
 }
 
 // bfsDoScratch bundles the BFS-DO per-call working storage so it can

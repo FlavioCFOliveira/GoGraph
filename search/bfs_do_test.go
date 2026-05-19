@@ -9,6 +9,56 @@ import (
 	"gograph/graph/csr"
 )
 
+// BenchmarkBFSDO_VsTopDown_PowerLaw compares BFS-DO against the
+// vanilla top-down [BFS] on a power-law-flavoured graph. Task #129
+// requires BFS-DO to beat top-down by >3x at peak; the alpha/beta
+// switch should keep bottom-up active for the dense middle and
+// return to top-down for the sparse tail.
+func BenchmarkBFSDO_VsTopDown_PowerLaw(b *testing.B) {
+	c, srcID := powerLawCSR()
+	b.Run("TopDown", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			BFS(c, srcID, func(_ graph.NodeID, _ int) bool { return true })
+		}
+	})
+	b.Run("DirectionOpt", func(b *testing.B) {
+		BFSDirectionOpt(c, srcID, func(_ graph.NodeID, _ int) bool { return true })
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			BFSDirectionOpt(c, srcID, func(_ graph.NodeID, _ int) bool { return true })
+		}
+	})
+}
+
+func powerLawCSR() (*csr.CSR[struct{}], graph.NodeID) {
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	const n = 1 << 20                  // 1M nodes
+	r := rand.New(rand.NewPCG(53, 59)) //nolint:gosec // deterministic benchmark RNG
+	const edgesPerNode = 16
+	// Heavy-tailed power-law: cube of a uniform sample biases sharply
+	// toward low ids, planting hubs at the front of the universe.
+	for i := 0; i < n*edgesPerNode; i++ {
+		from := int(float64(n) * r.Float64() * r.Float64() * r.Float64())
+		to := int(float64(n) * r.Float64() * r.Float64() * r.Float64())
+		if from >= n {
+			from = n - 1
+		}
+		if to >= n {
+			to = n - 1
+		}
+		if from == to {
+			continue
+		}
+		a.AddEdge(from, to, struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	return c, src
+}
+
 // BenchmarkBFSDirectionOpt_PowerLaw exercises BFS-DO on a power-law-
 // flavoured undirected random graph where the algorithm benefits
 // most. The bench-loop reuses pooled scratch across iterations, so
@@ -77,6 +127,74 @@ func TestBFSDirectionOpt_AllReachable(t *testing.T) {
 	})
 	if visited != 10 {
 		t.Fatalf("visited = %d, want 10", visited)
+	}
+}
+
+// TestBFSDirectionOpt_BetaSwitchBack asserts Beamer's alpha/beta
+// regime: on a power-law-flavoured graph the search visits at least
+// one top-down step, then transitions to bottom-up for the dense
+// middle, then transitions back to top-down for the sparse tail.
+// The observer hook records the (depth, mode) pair for every step.
+func TestBFSDirectionOpt_BetaSwitchBack(t *testing.T) {
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	const n = 4096
+	// Dense ball + sparse tail: src reaches a clique of size 200 at
+	// depth 1; the clique exits via a single edge to a long chain.
+	// The clique step triggers alpha (frontier saturates), and the
+	// chain step triggers beta (|cur| collapses to 1, well under
+	// maxID/24 = 170).
+	for i := 1; i < 200; i++ {
+		a.AddEdge(0, i, struct{}{})
+	}
+	for i := 1; i < 200; i++ {
+		for j := i + 1; j < 200; j++ {
+			a.AddEdge(i, j, struct{}{})
+		}
+	}
+	a.AddEdge(199, 200, struct{}{})
+	for i := 200; i < n-1; i++ {
+		a.AddEdge(i, i+1, struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	var steps []struct {
+		depth      int
+		isBottomUp bool
+	}
+	setBFSDoStepObserver(func(depth int, isBottomUp bool) {
+		steps = append(steps, struct {
+			depth      int
+			isBottomUp bool
+		}{depth, isBottomUp})
+	})
+	defer setBFSDoStepObserver(nil)
+
+	BFSDirectionOpt(c, src, func(_ graph.NodeID, _ int) bool { return true })
+
+	if len(steps) < 3 {
+		t.Fatalf("expected >= 3 BFS-DO steps, got %d", len(steps))
+	}
+	sawTopDown := false
+	sawBottomUp := false
+	sawTopDownAfterBottomUp := false
+	for _, s := range steps {
+		if !s.isBottomUp {
+			sawTopDown = true
+			if sawBottomUp {
+				sawTopDownAfterBottomUp = true
+			}
+		} else {
+			sawBottomUp = true
+		}
+	}
+	if !sawTopDown {
+		t.Fatalf("never ran a top-down step on a power-law-like graph")
+	}
+	if !sawBottomUp {
+		t.Fatalf("never ran a bottom-up step on a power-law-like graph")
+	}
+	if !sawTopDownAfterBottomUp {
+		t.Fatalf("beta switch-back not exercised: bottom-up never followed by top-down")
 	}
 }
 
