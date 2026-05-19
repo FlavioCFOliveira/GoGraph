@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"runtime"
 
 	"gograph/graph"
 	"gograph/graph/csr"
@@ -69,6 +70,9 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if src&0x3F == 0 {
+			runtime.Gosched()
 		}
 		d, err := DijkstraCtx(ctx, c, graph.NodeID(src))
 		if err != nil {

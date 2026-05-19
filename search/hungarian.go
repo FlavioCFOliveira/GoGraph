@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"runtime"
 )
 
 // ErrInvalidInput is returned by algorithms that detect NaN or +/-Inf
@@ -63,6 +64,9 @@ func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, er
 	for i := 1; i <= n; i++ {
 		if err := ctx.Err(); err != nil {
 			return Assignment{}, err
+		}
+		if i&0x3F == 0 {
+			runtime.Gosched()
 		}
 		p[0] = i
 		j0 := 0

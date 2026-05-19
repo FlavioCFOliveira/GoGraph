@@ -11,6 +11,7 @@ package community
 
 import (
 	"context"
+	"runtime"
 
 	"gograph/graph"
 	"gograph/graph/csr"
@@ -110,6 +111,7 @@ func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (P
 		if err := ctx.Err(); err != nil {
 			return Partition{}, err
 		}
+		runtime.Gosched()
 		// Phase 1: local moving in g.
 		moved := g.localMove(comm, opts)
 		// Phase 2: refinement.

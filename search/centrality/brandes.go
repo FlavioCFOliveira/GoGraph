@@ -5,6 +5,7 @@ package centrality
 
 import (
 	"context"
+	"runtime"
 
 	"gograph/graph"
 	"gograph/graph/csr"
@@ -41,6 +42,9 @@ func BetweennessCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]float64, error
 	for s := 0; s < maxID; s++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if s&0x3F == 0 {
+			runtime.Gosched()
 		}
 		brandesSource(s, maxID, verts, edges, sigma, dist, delta, pred, cb)
 	}
