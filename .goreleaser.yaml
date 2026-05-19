@@ -1,0 +1,70 @@
+# goreleaser configuration for GoGraph.
+#
+# GoGraph is a library, not a CLI, so the primary release artefact
+# is the source tarball plus the version-stamped Go module. The
+# config also builds the bundled examples and the soak harness as
+# convenience binaries so consumers can download a ready-to-run
+# soak driver alongside the tagged source.
+
+version: 2
+
+project_name: gograph
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: soak
+    main: ./bench/soak
+    binary: soak
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }}
+
+archives:
+  - id: source-and-tools
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    formats:
+      - tar.gz
+    files:
+      - README.md
+      - CHANGELOG.md
+      - LICENSE
+      - docs/**/*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "merge conflict"
+      - "Merge branch"
+
+release:
+  github:
+    owner: xumiga
+    name: GoGraph
+  draft: true
+  prerelease: auto
+  header: |
+    GoGraph {{ .Tag }} — see CHANGELOG.md for the per-release entry.
+  footer: |
+    ---
+    Reproducibility: built from commit {{ .FullCommit }} with Go {{ .Env.GOVERSION }}.

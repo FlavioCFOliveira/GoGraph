@@ -69,6 +69,19 @@ soak: ## Run the 4-hour mixed-workload soak harness (use SOAK_FLAGS to override)
 soak-smoke: ## 60-second smoke run of the soak harness — exercises the harness without the full 4h
 	$(GO) run ./bench/soak -duration=60s -sample-interval=15s
 
+.PHONY: release-check
+release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, no publish)
+	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed; install: brew install goreleaser or see https://goreleaser.com/install/"; exit 1; }
+	goreleaser release --snapshot --clean --skip=publish
+
+.PHONY: release
+release: ## Run goreleaser to publish a release for the current tag — requires VERSION and a clean tree
+	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "working tree dirty"; exit 1; }
+	@git rev-parse "$$VERSION" >/dev/null 2>&1 || { echo "tag $$VERSION does not exist; create it first"; exit 1; }
+	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed"; exit 1; }
+	GOVERSION=$$($(GO) version | awk '{print $$3}') goreleaser release --clean
+
 .PHONY: clean
 clean: ## Remove build artefacts
 	rm -f $(COVER_PROFILE) coverage.html
