@@ -111,13 +111,13 @@ func normaliseOptions(opts PageRankOptions) PageRankOptions {
 	return opts
 }
 
-func seedRanks(verts []uint64, edges []graph.NodeID, n int) (ranks, outdeg []float64, isLive []bool, live int) {
+func seedRanks(verts []uint64, edges []graph.NodeID, n int) (ranks []float64, outdeg []uint32, isLive []bool, live int) {
 	ranks = make([]float64, n)
-	outdeg = make([]float64, n)
+	outdeg = make([]uint32, n)
 	isLive = make([]bool, n)
 	for i := 0; i < n; i++ {
 		if deg := verts[i+1] - verts[i]; deg > 0 {
-			outdeg[i] = float64(deg)
+			outdeg[i] = uint32(deg)
 			isLive[i] = true
 			for k := verts[i]; k < verts[i+1]; k++ {
 				isLive[int(edges[k])] = true
@@ -141,7 +141,7 @@ func seedRanks(verts []uint64, edges []graph.NodeID, n int) (ranks, outdeg []flo
 	return ranks, outdeg, isLive, live
 }
 
-func stepIteration(verts []uint64, edges []graph.NodeID, cur, next, outdeg []float64, isLive []bool, teleport, damping float64, live int) {
+func stepIteration(verts []uint64, edges []graph.NodeID, cur, next []float64, outdeg []uint32, isLive []bool, teleport, damping float64, live int) {
 	var danglingMass float64
 	for i := range cur {
 		if isLive[i] && outdeg[i] == 0 {
@@ -161,7 +161,7 @@ func stepIteration(verts []uint64, edges []graph.NodeID, cur, next, outdeg []flo
 		if outdeg[src] == 0 {
 			continue
 		}
-		share := damping * cur[src] / outdeg[src]
+		share := damping * cur[src] / float64(outdeg[src])
 		start := verts[src]
 		end := verts[src+1]
 		for k := start; k < end; k++ {

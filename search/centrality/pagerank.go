@@ -89,11 +89,16 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 	// Dangling sinks (out-degree 0, in-degree > 0) count as live;
 	// totally isolated ghost slots from sharded NodeID packing do not.
 	isLive := make([]bool, n)
-	outdeg := make([]float64, n)
+	// outdeg is logically an unsigned integer count; storing it as
+	// uint32 halves its memory footprint (n nodes saved 4 bytes each
+	// vs the v1.0 float64) and doubles its L1 lane density. The
+	// per-source float64 conversion at use site is a single FCVT
+	// instruction with no measurable cost on M4-class cores.
+	outdeg := make([]uint32, n)
 	for i := 0; i < n; i++ {
 		deg := verts[i+1] - verts[i]
 		if deg > 0 {
-			outdeg[i] = float64(deg)
+			outdeg[i] = uint32(deg)
 			isLive[i] = true
 			for k := verts[i]; k < verts[i+1]; k++ {
 				isLive[int(edges[k])] = true
@@ -148,7 +153,7 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 			if outdeg[src] == 0 {
 				continue
 			}
-			share := opts.Damping * cur[src] / outdeg[src]
+			share := opts.Damping * cur[src] / float64(outdeg[src])
 			for k := verts[src]; k < verts[src+1]; k++ {
 				next[int(edges[k])] += share
 			}
