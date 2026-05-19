@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"sort"
 
 	"gograph/graph"
@@ -22,25 +23,38 @@ type YenPath[W Weight] struct {
 // or implicit-path representations, prefer Eppstein's algorithm
 // (scheduled for a later task).
 func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
+	out, _ := YenKShortestCtx(context.Background(), c, src, dst, k)
+	return out
+}
+
+// YenKShortestCtx is the context-aware variant of [YenKShortest].
+// ctx.Err() is checked at every spur iteration; on cancellation
+// returns (nil, wrapped ctx.Err()).
+//
+//nolint:gocyclo // canonical Yen: initial Dijkstra + k-1 spur rounds + candidate sort
+func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
 	if k <= 0 {
-		return nil
+		return nil, nil
 	}
-	d, err := Dijkstra(c, src)
+	d, err := DijkstraCtx(ctx, c, src)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	first := d.Path(dst)
 	if first == nil {
-		return nil
+		return nil, nil
 	}
 	firstCost, _ := d.Distance(dst)
 	result := []YenPath[W]{{Nodes: first, Cost: firstCost}}
 	if k == 1 {
-		return result
+		return result, nil
 	}
 
 	candidates := []YenPath[W]{}
 	for i := 1; i < k; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		prevPath := result[i-1].Nodes
 		for spurIdx := 0; spurIdx < len(prevPath)-1; spurIdx++ {
 			spurNode := prevPath[spurIdx]
@@ -63,7 +77,7 @@ func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPa
 		result = append(result, candidates[0])
 		candidates = candidates[1:]
 	}
-	return result
+	return result, nil
 }
 
 // edgeKey identifies a directed edge by its endpoints.

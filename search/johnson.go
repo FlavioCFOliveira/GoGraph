@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"errors"
 
 	"gograph/graph"
@@ -28,6 +29,13 @@ var ErrNegativeEdgeAPSP = errors.New("search: DijkstraAPSP requires non-negative
 // Dijkstra-from-every-vertex variant. JohnsonAPSP is preserved as a
 // deprecated alias for backward compatibility.
 func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
+	return DijkstraAPSPCtx(context.Background(), c)
+}
+
+// DijkstraAPSPCtx is the context-aware variant of [DijkstraAPSP].
+// ctx.Err() is checked once per source vertex; on cancellation
+// returns (nil, wrapped ctx.Err()).
+func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)
@@ -59,7 +67,10 @@ func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 		if si < 0 {
 			continue
 		}
-		d, err := Dijkstra(c, graph.NodeID(src))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		d, err := DijkstraCtx(ctx, c, graph.NodeID(src))
 		if err != nil {
 			if errors.Is(err, ErrNegativeWeight) {
 				return nil, ErrNegativeEdgeAPSP

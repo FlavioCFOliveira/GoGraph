@@ -1,6 +1,8 @@
 package search
 
 import (
+	"context"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
@@ -55,9 +57,17 @@ func (a *APSP[W]) N() int { return a.live }
 //
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR; allocates its own working buffers per call.
+func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
+	out, _ := FloydWarshallCtx(context.Background(), c)
+	return out
+}
+
+// FloydWarshallCtx is the context-aware variant of [FloydWarshall].
+// ctx.Err() is checked at every k-pivot iteration (the outermost
+// loop); on cancellation returns (nil, wrapped ctx.Err()).
 //
 //nolint:gocyclo // canonical Floyd-Warshall: live-mask compaction + matrix init + edge ingest + DP
-func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
+func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)
@@ -78,7 +88,7 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 		found:   make([]bool, live*live),
 	}
 	if live == 0 {
-		return out
+		return out, nil
 	}
 	for i := 0; i < live; i++ {
 		idx := i*live + i
@@ -113,6 +123,9 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 		}
 	}
 	for k := 0; k < live; k++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		for i := 0; i < live; i++ {
 			ikIdx := i*live + k
 			if !out.found[ikIdx] {
@@ -134,5 +147,5 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
