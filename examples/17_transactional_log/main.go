@@ -48,7 +48,7 @@ func main() {
 	}
 	for _, c := range commits {
 		tx := store.Begin()
-		_ = tx.AddEdge(c[0], c[1])
+		_ = tx.AddEdge(c[0], c[1], 0)
 		_ = tx.SetEdgeLabel(c[0], c[1], c[2])
 		_ = tx.Commit()
 		time.Sleep(20 * time.Millisecond)

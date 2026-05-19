@@ -15,7 +15,7 @@ func TestTx_SetEdgeLabel_AppliedOnCommit(t *testing.T) {
 	defer cleanup()
 
 	tx := s.Begin()
-	if err := tx.AddEdge("alice", "bob"); err != nil {
+	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	if err := tx.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {

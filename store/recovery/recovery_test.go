@@ -36,7 +36,7 @@ func writeWorkload(t *testing.T, dir string, ops []committedOp, syncEvery int) {
 		tx := store.Begin()
 		switch op.kind {
 		case txn.OpAddEdge:
-			_ = tx.AddEdge(op.src, op.dst)
+			_ = tx.AddEdge(op.src, op.dst, 0)
 		case txn.OpSetNodeLabel:
 			_ = tx.SetNodeLabel(op.src, op.label)
 		case txn.OpSetEdgeLabel:

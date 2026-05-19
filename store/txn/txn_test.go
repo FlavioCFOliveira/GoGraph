@@ -38,7 +38,7 @@ func TestTx_CommitApplies(t *testing.T) {
 	if err := tx.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.AddEdge("alice", "bob"); err != nil {
+	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -76,7 +76,7 @@ func TestTx_FinishedErrors(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.AddEdge("a", "b"); !errors.Is(err, ErrTxFinished) {
+	if err := tx.AddEdge("a", "b", 0); !errors.Is(err, ErrTxFinished) {
 		t.Fatalf("AddEdge after commit: %v", err)
 	}
 	if err := tx.Commit(); !errors.Is(err, ErrTxFinished) {
@@ -115,7 +115,7 @@ func TestTx_DurableViaWAL(t *testing.T) {
 	defer cleanup()
 	tx := s.Begin()
 	_ = tx.SetNodeLabel("alice", "Person")
-	_ = tx.AddEdge("alice", "bob")
+	_ = tx.AddEdge("alice", "bob", 0)
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}

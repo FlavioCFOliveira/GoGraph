@@ -23,24 +23,24 @@ func TestEncodeOpLegacy_GoldenBytes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		op   Op[string]
+		op   Op[string, int64]
 		hex  string
 	}{
 		{
 			name: "AddEdge alice->bob",
-			op:   Op[string]{Kind: OpAddEdge, Src: "alice", Dst: "bob"},
+			op:   Op[string, int64]{Kind: OpAddEdge, Src: "alice", Dst: "bob"},
 			// kind=01, srcLen=0005 alice, dstLen=0003 bob, labelLen=0000
 			hex: "01" + "0500" + "616c696365" + "0300" + "626f62" + "0000",
 		},
 		{
 			name: "SetNodeLabel alice Person",
-			op:   Op[string]{Kind: OpSetNodeLabel, Src: "alice", Label: "Person"},
+			op:   Op[string, int64]{Kind: OpSetNodeLabel, Src: "alice", Label: "Person"},
 			// kind=02, srcLen=0005 alice, dstLen=0000, labelLen=0006 Person
 			hex: "02" + "0500" + "616c696365" + "0000" + "0600" + "506572736f6e",
 		},
 		{
 			name: "SetEdgeLabel alice->bob KNOWS",
-			op:   Op[string]{Kind: OpSetEdgeLabel, Src: "alice", Dst: "bob", Label: "KNOWS"},
+			op:   Op[string, int64]{Kind: OpSetEdgeLabel, Src: "alice", Dst: "bob", Label: "KNOWS"},
 			// kind=03, srcLen=0005 alice, dstLen=0003 bob, labelLen=0005 KNOWS
 			hex: "03" + "0500" + "616c696365" + "0300" + "626f62" + "0500" + "4b4e4f5753",
 		},
@@ -65,8 +65,8 @@ func TestEncodeOpLegacy_GoldenBytes(t *testing.T) {
 func TestEncodeOpTyped_V2HeaderTag(t *testing.T) {
 	t.Parallel()
 	codec := NewStringCodec()
-	op := Op[string]{Kind: OpAddEdge, Src: "alice", Dst: "bob"}
-	got := encodeOpTyped(op, codec)
+	op := Op[string, int64]{Kind: OpAddEdge, Src: "alice", Dst: "bob"}
+	got := encodeOpTyped(op, codec, WeightCodec[int64](nil))
 	if len(got) < 2 {
 		t.Fatalf("typed payload too short: %d", len(got))
 	}
@@ -116,7 +116,7 @@ func TestTxn_BackwardsCompat_NewStoreUnchanged(t *testing.T) {
 	if err := tx.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.AddEdge("alice", "bob"); err != nil {
+	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {

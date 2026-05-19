@@ -119,14 +119,16 @@ func decodeV1(payload []byte) (Op, error) {
 	return op, nil
 }
 
-// decodeV2 parses a typed tagged record. The codec-encoded endpoints
-// and the trailing label are opaque to this layer: locating the
-// boundary between them requires walking the codec, so [Decode]
-// returns the entire post-header region in [Op.Body] and leaves
-// [Op.Label] empty. The typed open path ([OpenWithCodec]) is
-// responsible for invoking the codec on [Op.Body] to extract src and
-// dst, then reading the uint16 label length prefix and label bytes
-// from the remaining tail.
+// decodeV2 parses a typed tagged record. The codec-encoded endpoints,
+// optional weight payload, and trailing label are opaque to this
+// layer: locating the boundaries between them requires walking the
+// codec (and the weight codec for [txn.OpAddEdgeWeighted]), so
+// [Decode] returns the entire post-header region in [Op.Body] and
+// leaves [Op.Label] empty. The typed open path
+// ([OpenWithCodec] / [OpenWithOptions]) is responsible for invoking
+// the codec on [Op.Body] to extract src, dst, the optional weight,
+// then reading the uint16 label length prefix and label bytes from
+// the remaining tail.
 func decodeV2(payload []byte) (Op, error) {
 	// version + kind = 2 bytes minimum. The body may be empty for
 	// hypothetical zero-byte-codec endpoints, so we do not enforce a
@@ -153,6 +155,15 @@ func decodeV2(payload []byte) (Op, error) {
 // (string nodes only in this v1) so the WAL payload decode can map
 // the byte src/dst back to N. Future N types are added by mirroring
 // this constructor.
+//
+// Edge weights are not interpreted by [OpenString]: [txn.OpAddEdge]
+// frames apply with a zero weight (unchanged from before T8) and
+// [txn.OpAddEdgeWeighted] frames also apply with a zero weight
+// because no [txn.WeightCodec] is wired through this entry point.
+// The fallback is reported via the
+// `store.recovery.applyOp.fallbackZeroWeight` metric counter so
+// observability surfaces the loss. Callers that need to preserve
+// weights on replay should use [OpenWithOptions].
 func OpenString(dir string) (Result[string, int64], error) {
 	defer metrics.Time("store.recovery.OpenString")()
 	res, err := OpenStringCtx(context.Background(), dir)
@@ -227,6 +238,16 @@ func applyOpString(g *lpg.Graph[string, int64], op *Op) {
 		// uint32 LE length prefix + utf-8 bytes. Walk it twice to peel
 		// src and dst, then parse the trailing uint16 label length and
 		// label bytes from what remains.
+		//
+		// OpAddEdgeWeighted frames cannot be parsed here because
+		// OpenString has no WeightCodec wired in, and the weight
+		// payload's length is encoding-dependent (varint vs fixed).
+		// We drop them and meter the loss; callers needing typed
+		// weights must use OpenWithOptions.
+		if op.Kind == txn.OpAddEdgeWeighted {
+			metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
+			return
+		}
 		codec := txn.NewStringCodec()
 		var rest []byte
 		var err error
@@ -270,6 +291,14 @@ func applyOpString(g *lpg.Graph[string, int64], op *Op) {
 // using codec to decode endpoint identifiers from v2 (tagged) WAL
 // frames. It is the generalised dual of [OpenString].
 //
+// Edge weights are not interpreted: [txn.OpAddEdge] frames apply with
+// a zero weight (unchanged from before T8) and [txn.OpAddEdgeWeighted]
+// frames also apply with a zero weight because no [txn.WeightCodec]
+// is wired through this entry point. The fallback is reported via the
+// `store.recovery.applyOp.fallbackZeroWeight` metric counter. Callers
+// that need to preserve weights on replay should use
+// [OpenWithOptions].
+//
 // v1 (legacy fmt.Sprintf-based) frames are not generally invertible
 // because the original write path used fmt.Sprintf("%v") which has no
 // inverse for arbitrary N. The function therefore only supports
@@ -297,17 +326,67 @@ func OpenWithCodecCtx[N comparable, W any](ctx context.Context, dir string, code
 	if codec == nil {
 		return Result[N, W]{}, errors.New("recovery: nil codec")
 	}
+	return openCodec[N, W](ctx, dir, codec, nil)
+}
+
+// OpenWithOptions opens the store at dir for graphs keyed by N values
+// and weighted by W values, using opts.Codec for endpoint
+// identifiers and opts.WeightCodec for [txn.OpAddEdgeWeighted] frames.
+//
+// Pre-T8 WALs that contain only [txn.OpAddEdge] frames replay
+// identically to [OpenWithCodec]: the apply path writes the zero
+// value of W to the graph (forward compatibility). Mixed WALs that
+// contain both [txn.OpAddEdge] and [txn.OpAddEdgeWeighted] frames
+// preserve weights for the weighted records and apply zero for the
+// unweighted ones.
+//
+// Both opts.Codec and opts.WeightCodec must be non-nil.
+func OpenWithOptions[N comparable, W any](dir string, opts txn.Options[N, W]) (Result[N, W], error) {
+	defer metrics.Time("store.recovery.OpenWithOptions")()
+	res, err := OpenWithOptionsCtx[N, W](context.Background(), dir, opts)
+	if err != nil {
+		metrics.IncCounter("store.recovery.OpenWithOptions.errors", 1)
+	}
+	return res, err
+}
+
+// OpenWithOptionsCtx is the context-aware variant of
+// [OpenWithOptions]. ctx.Err() is checked at the snapshot-load
+// boundary and every 4096 WAL frames during replay.
+//
+//nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
+func OpenWithOptionsCtx[N comparable, W any](ctx context.Context, dir string, opts txn.Options[N, W]) (Result[N, W], error) {
+	defer metrics.Time("store.recovery.OpenWithOptionsCtx")()
+	if opts.Codec == nil {
+		return Result[N, W]{}, errors.New("recovery: nil codec")
+	}
+	if opts.WeightCodec == nil {
+		return Result[N, W]{}, errors.New("recovery: nil weight codec")
+	}
+	return openCodec[N, W](ctx, dir, opts.Codec, opts.WeightCodec)
+}
+
+// openCodec is the shared core of [OpenWithCodecCtx] and
+// [OpenWithOptionsCtx]. wcodec is nil for the codec-only path; when
+// non-nil the function honours [txn.OpAddEdgeWeighted] records by
+// decoding the typed weight payload before applying.
+func openCodec[N comparable, W any](
+	ctx context.Context,
+	dir string,
+	codec txn.Codec[N],
+	wcodec txn.WeightCodec[W],
+) (Result[N, W], error) {
 	g := lpg.New[N, W](adjlist.Config{Directed: true})
 	res := Result[N, W]{Graph: g}
 
 	if err := ctx.Err(); err != nil {
-		metrics.IncCounter("store.recovery.OpenWithCodecCtx.errors", 1)
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
 		return res, err
 	}
 	snapDir := filepath.Join(dir, "snapshot")
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		if _, err := snapshot.Open(snapDir); err != nil {
-			metrics.IncCounter("store.recovery.OpenWithCodecCtx.errors", 1)
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			return res, fmt.Errorf("recovery: snapshot open: %w", err)
 		}
 		res.SnapshotHit = true
@@ -318,19 +397,19 @@ func OpenWithCodecCtx[N comparable, W any](ctx context.Context, dir string, code
 		if errors.Is(err, os.ErrNotExist) {
 			return res, nil
 		}
-		metrics.IncCounter("store.recovery.OpenWithCodecCtx.errors", 1)
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
 		return res, err
 	}
 	r, err := wal.OpenReader(walPath)
 	if err != nil {
-		metrics.IncCounter("store.recovery.OpenWithCodecCtx.errors", 1)
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
 		return res, err
 	}
 	defer func() { _ = r.Close() }()
 	for f := range r.Frames() {
 		if res.WALOps&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
-				metrics.IncCounter("store.recovery.OpenWithCodecCtx.errors", 1)
+				metrics.IncCounter("store.recovery.openCodec.errors", 1)
 				return res, err
 			}
 		}
@@ -339,7 +418,7 @@ func OpenWithCodecCtx[N comparable, W any](ctx context.Context, dir string, code
 			res.TailErr = derr
 			break
 		}
-		if !applyOpCodec(g, &op, codec) {
+		if !applyOpCodec(g, &op, codec, wcodec) {
 			// A v1 frame met an instantiation with no inverse; stop
 			// replay so callers see the cut-off boundary deterministically.
 			res.TailErr = errors.New("recovery: v1 frame is not decodable through the supplied codec")
@@ -356,11 +435,26 @@ func OpenWithCodecCtx[N comparable, W any](ctx context.Context, dir string, code
 // function returns false because the legacy fmt.Sprintf encoding is
 // not generally invertible: callers needing to replay a v1 corpus
 // must use [OpenString] (string-keyed only) and then re-emit via
-// [txn.NewStoreWithCodec] to migrate the WAL to v2.
+// [txn.NewStoreWithCodec] / [txn.NewStoreWithOptions] to migrate the
+// WAL to v2.
+//
+// When wcodec is non-nil and the op is [txn.OpAddEdgeWeighted], the
+// typed weight payload between codec.dst and the trailing label is
+// decoded and applied to the graph. When wcodec is nil and the op is
+// [txn.OpAddEdgeWeighted], the apply falls back to a zero weight and
+// the `store.recovery.applyOp.fallbackZeroWeight` counter is
+// incremented.
 //
 // The Op is taken by pointer to keep the inner recovery loop
 // allocation-free; the function does not mutate op.
-func applyOpCodec[N comparable, W any](g *lpg.Graph[N, W], op *Op, codec txn.Codec[N]) bool {
+//
+//nolint:gocyclo // recovery: per-frame walk through codec, optional weight codec, and trailing label
+func applyOpCodec[N comparable, W any](
+	g *lpg.Graph[N, W],
+	op *Op,
+	codec txn.Codec[N],
+	wcodec txn.WeightCodec[W],
+) bool {
 	if op.Version != txn.OpRecordV2 {
 		return false
 	}
@@ -371,6 +465,23 @@ func applyOpCodec[N comparable, W any](g *lpg.Graph[N, W], op *Op, codec txn.Cod
 	dst, rest, err := codec.Decode(rest)
 	if err != nil {
 		return false
+	}
+	var weight W
+	weighted := op.Kind == txn.OpAddEdgeWeighted
+	if weighted {
+		if wcodec != nil {
+			weight, rest, err = wcodec.Decode(rest)
+			if err != nil {
+				return false
+			}
+		} else {
+			// No weight codec wired; we cannot decode the payload, so
+			// we must drop the frame to avoid corrupting the label
+			// trailer. Surface the loss via a metric counter so
+			// observability picks it up.
+			metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
+			return false
+		}
 	}
 	if len(rest) < 2 {
 		return false
@@ -385,6 +496,8 @@ func applyOpCodec[N comparable, W any](g *lpg.Graph[N, W], op *Op, codec txn.Cod
 	case txn.OpAddEdge:
 		var zero W
 		g.AddEdge(src, dst, zero)
+	case txn.OpAddEdgeWeighted:
+		g.AddEdge(src, dst, weight)
 	case txn.OpSetNodeLabel:
 		g.SetNodeLabel(src, label)
 	case txn.OpSetEdgeLabel:

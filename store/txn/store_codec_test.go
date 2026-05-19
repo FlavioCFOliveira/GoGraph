@@ -28,7 +28,7 @@ func TestNewStoreWithCodec_EmitsV2(t *testing.T) {
 		t.Fatal("Store.Codec returned nil")
 	}
 	tx := s.Begin()
-	if err := tx.AddEdge("alice", "bob"); err != nil {
+	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -106,7 +106,7 @@ func TestNewStoreWithCodec_LegacyCodecKeepsLegacyOutput(t *testing.T) {
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	s := NewStoreWithCodec[string, int64](g, w, legacyFmtCodec[string]{})
 	tx := s.Begin()
-	if err := tx.AddEdge("alice", "bob"); err != nil {
+	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

@@ -55,15 +55,29 @@ on the read path, while writes serialise.
 Each WAL frame carries one op payload. The encoder supports two
 on-disk layouts, distinguished by the first byte of the payload:
 
-| Version | First byte                  | Producer                      |
-|---------|-----------------------------|-------------------------------|
-| v1      | `[OpKind]` (one of 0x01..0x03 today) | `txn.NewStore` (legacy)       |
-| v2      | `0xFE` (`txn.OpRecordV2`)   | `txn.NewStoreWithCodec`       |
+| Version | First byte                  | Producer                                       |
+|---------|-----------------------------|------------------------------------------------|
+| v1      | `[OpKind]` (one of 0x01..0x04) | `txn.NewStore` (legacy)                        |
+| v2      | `0xFE` (`txn.OpRecordV2`)   | `txn.NewStoreWithCodec` / `txn.NewStoreWithOptions` |
 
-`OpKind` values currently occupy 0x01..0x03, leaving the low byte
+`OpKind` values currently occupy 0x01..0x04, leaving the low byte
 region free for future kinds. The v2 magic byte 0xFE is chosen far
 outside that range so a reader can disambiguate by peeking the first
 byte alone — any payload starting with 0xFE is necessarily a v2 frame.
+
+| `OpKind`              | Value | Mutation                                          |
+|-----------------------|-------|---------------------------------------------------|
+| `OpAddEdge`           | 0x01  | `AddEdge(src, dst, zero)` — no weight payload     |
+| `OpSetNodeLabel`      | 0x02  | `SetNodeLabel(node, label)`                       |
+| `OpSetEdgeLabel`      | 0x03  | `SetEdgeLabel(src, dst, label)`                   |
+| `OpAddEdgeWeighted`   | 0x04  | `AddEdge(src, dst, w)` — typed weight payload     |
+
+`OpAddEdgeWeighted` is the only kind whose v2 layout differs from the
+plain `OpAddEdge` shape (see below). A pre-T8 reader that only knows
+about `OpAddEdge` skips `OpAddEdgeWeighted` frames as an unknown
+kind, which is the intended forward-compat behaviour: the typed
+weight payload cannot be inferred without the registered
+`WeightCodec`.
 
 ### v1 (legacy, untagged) layout
 
@@ -86,6 +100,8 @@ into a typed store and re-emit v2 frames.
 
 ### v2 (tagged, typed) layout
 
+For `OpAddEdge`, `OpSetNodeLabel`, and `OpSetEdgeLabel`:
+
 ```
 uint8  version  (always 0xFE — txn.OpRecordV2)
 uint8  kind
@@ -95,11 +111,25 @@ uint16 labelLen (LE)
 [labelLen]byte label
 ```
 
-The codec writes the framing for src/dst inline — no separate length
-prefix at the payload level. The trailing label keeps the v1 uint16
-prefix for symmetry with the legacy reader.
+For `OpAddEdgeWeighted` (only emitted by `txn.NewStoreWithOptions`):
 
-### Built-in codecs
+```
+uint8       version  (always 0xFE — txn.OpRecordV2)
+uint8       kind     (0x04 — txn.OpAddEdgeWeighted)
+codec       src      (self-delimiting)
+codec       dst      (self-delimiting)
+wcodec      w        (self-delimiting; see weight-codec table below)
+uint16      labelLen (LE, always 0 today; reserved for future use)
+[labelLen]byte label
+```
+
+The codec writes the framing for src/dst inline — no separate length
+prefix at the payload level. The optional weight payload follows the
+same self-delimiting contract via the `WeightCodec`. The trailing
+label keeps the v1 uint16 prefix for symmetry with the legacy
+reader.
+
+### Built-in node codecs
 
 | Type                              | Wire form                                       |
 |-----------------------------------|-------------------------------------------------|
@@ -111,20 +141,72 @@ prefix for symmetry with the legacy reader.
 | `[16]byte` (`NewUUIDCodec`)       | fixed 16 bytes                                  |
 | `encoding.BinaryMarshaler` (`NewBinaryMarshalerCodec[N, *N]`) | uint32 LE length prefix + opaque marshaler payload |
 
-All built-in codecs are stateless and safe for concurrent use.
+### Built-in weight codecs
+
+| Type                              | Wire form                                       |
+|-----------------------------------|-------------------------------------------------|
+| `int64` (`NewInt64WeightCodec`)   | varint                                          |
+| `float64` (`NewFloat64WeightCodec`) | fixed 8 bytes (`math.Float64bits` little-endian)|
+| `encoding.BinaryMarshaler` (`NewBinaryMarshalerWeightCodec[W, *W]`) | uint32 LE length prefix + opaque marshaler payload |
+
+`Float64WeightCodec` round-trips bits losslessly, including ±0.0,
+±Inf, and every NaN payload. Note that NaN comparison rules apply on
+read (`NaN != NaN`); compare via `math.Float64bits` or `math.IsNaN`
+when checking equality.
+
+All built-in codecs (node and weight) are stateless and safe for
+concurrent use.
+
+## Weighted edges
+
+A store constructed via `txn.NewStoreWithOptions` carries both a
+`Codec[N]` and a `WeightCodec[W]`. `Tx.AddEdge(src, dst, w)` then
+records every commit as an `OpAddEdgeWeighted` frame (kind byte
+`0x04`) — the weight payload sits between the codec-encoded
+endpoints and the trailing label, framed by the registered
+`WeightCodec`.
+
+Stores constructed via `NewStore` or `NewStoreWithCodec` have no
+`WeightCodec`. They accept zero-valued `AddEdge` calls (which buffer
+an `OpAddEdge` frame, applied with `var zero W`) and reject
+non-zero weights with `txn.ErrNoWeightCodec`. Callers that need
+durable weighted edges must upgrade to `NewStoreWithOptions`.
+
+The recovery side mirrors the constructor matrix:
+
+| Open path             | N decoded via | W decoded via | OpAddEdge | OpAddEdgeWeighted |
+|-----------------------|---------------|----------------|-----------|-------------------|
+| `OpenString`          | `string(SrcBytes)` (v1) or `NewStringCodec` (v2) | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
+| `OpenWithCodec`       | typed `Codec[N]` | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
+| `OpenWithOptions`     | typed `Codec[N]` | typed `WeightCodec[W]` | applied with `W=zero` | applied with decoded weight |
+
+Forward compatibility: a pre-T8 WAL that contains only `OpAddEdge`
+frames replays cleanly under `OpenWithOptions`. The apply path
+writes `var zero W` for those records and reserves the typed weight
+payload for `OpAddEdgeWeighted` frames only. The recovery test
+`TestTxn_ForwardCompat_PreT8WALReplays` locks this contract.
 
 ### Recovery surface
 
 `recovery.OpenString(dir)` accepts both v1 and v2-`StringCodec` frames
-on the same WAL. For arbitrary `N`, use
+on the same WAL. It has no `WeightCodec` and therefore drops
+`OpAddEdgeWeighted` frames (the loss is metered via
+`store.recovery.applyOp.fallbackZeroWeight`).
+
+For arbitrary `N` with no durable weights, use
 `recovery.OpenWithCodec[N, W](dir, codec)`; this variant supports v2
-frames natively and supports v1 frames only when the codec is
-`NewStringCodec` (because legacy v1 bytes are raw utf-8).
+`OpAddEdge` frames natively, applies a zero W for them, and drops
+`OpAddEdgeWeighted` frames with the same fallback metric.
+
+For arbitrary `N` and durable weights, use
+`recovery.OpenWithOptions[N, W](dir, opts)` where `opts` carries
+both `Codec[N]` and `WeightCodec[W]`. This is the only open path
+that preserves edge weights on replay.
 
 ### Migrating a v1 corpus
 
 Existing stores keep emitting v1 frames bit-for-bit while the
-constructor is `NewStore`. To migrate:
+constructor is `NewStore`. To migrate to a typed-codec v2 store:
 
 1. Replay the v1 log via `recovery.OpenString` into an in-memory
    graph.
@@ -135,6 +217,27 @@ constructor is `NewStore`. To migrate:
 
 This is the same migration recipe used by snapshot + WAL-truncation
 checkpoints, so the workflow does not require any new tooling.
+
+### Migrating an unweighted v2 corpus to durable weights
+
+A store that started life under `NewStoreWithCodec` (typed N, no W
+codec) emits v2 frames with only `OpAddEdge`. To upgrade to durable
+weights:
+
+1. Replay the existing WAL via `recovery.OpenWithCodec[N, W]` (or
+   `OpenWithOptions` with the legacy weights interpreted as zero).
+   The recovered graph carries every committed edge with `W=zero`.
+2. Reassign the real weights in memory if they are known from an
+   out-of-band source (otherwise the migration is a no-op weight-
+   wise; only future commits will carry typed weights).
+3. Construct a new store via `txn.NewStoreWithOptions[N, W]`
+   against a fresh WAL.
+4. Re-commit any explicit weighted edges through the new store;
+   subsequent frames are `OpAddEdgeWeighted` (v2 kind `0x04`).
+
+No on-disk migration of existing `OpAddEdge` frames is required —
+post-T8 readers continue to walk them with `W=zero`, exactly as
+pre-T8 readers did.
 
 Future revisions will add `snapshot/labels.bin`,
 `snapshot/properties.bin`, and `snapshot/indexes/*.bin` to extend

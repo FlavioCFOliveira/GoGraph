@@ -28,7 +28,7 @@ func main() {
 		{"bob", "carol", "KNOWS"},
 	} {
 		tx := store.Begin()
-		_ = tx.AddEdge(op.src, op.dst)
+		_ = tx.AddEdge(op.src, op.dst, 0)
 		_ = tx.SetEdgeLabel(op.src, op.dst, op.label)
 		_ = tx.Commit()
 	}

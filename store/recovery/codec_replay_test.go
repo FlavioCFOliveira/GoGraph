@@ -96,7 +96,7 @@ func writeV2Workload(t *testing.T, dir string, codec txn.Codec[string]) {
 		}
 	}
 	tx := store.Begin()
-	if err := tx.AddEdge("alice", "bob"); err != nil {
+	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
@@ -170,7 +170,7 @@ func TestTxn_V2Replay_BinaryMarshaler(t *testing.T) {
 	a := textKey{prefix: "node", n: 1}
 	b := textKey{prefix: "node", n: 2}
 	tx := store.Begin()
-	if err := tx.AddEdge(a, b); err != nil {
+	if err := tx.AddEdge(a, b, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.SetEdgeLabel(a, b, "FRIENDS"); err != nil {
