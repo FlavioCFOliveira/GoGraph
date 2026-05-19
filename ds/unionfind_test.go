@@ -20,6 +20,101 @@ func TestUnionFind_Singletons(t *testing.T) {
 	}
 }
 
+// TestUnionFindSlice_BasicUnion exercises the slice-backed variant
+// against the same axioms as the map-backed [UnionFind].
+func TestUnionFindSlice_BasicUnion(t *testing.T) {
+	t.Parallel()
+	u := NewSlice(8)
+	if !u.Union(0, 1) {
+		t.Fatal("Union(0,1) should return true on first merge")
+	}
+	if u.Union(0, 1) {
+		t.Fatal("Union(0,1) should return false on a no-op merge")
+	}
+	if !u.Union(1, 2) {
+		t.Fatal("Union(1,2) should return true on first merge")
+	}
+	if !u.Connected(0, 2) {
+		t.Fatal("0 and 2 must be connected after a-b-c chain")
+	}
+	if u.Connected(0, 5) {
+		t.Fatal("0 and 5 are in disjoint sets")
+	}
+	if u.Len() != 8 {
+		t.Fatalf("Len = %d, want 8", u.Len())
+	}
+}
+
+// TestUnionFindSlice_AgreesWithMap fuzzes the slice variant against
+// the generic map variant on random unions over a bounded universe.
+func TestUnionFindSlice_AgreesWithMap(t *testing.T) {
+	t.Parallel()
+	const n = 256
+	const ops = 4 * n
+	r := rand.New(rand.NewPCG(83, 89)) //nolint:gosec // deterministic
+	ref := New[int]()
+	for i := 0; i < n; i++ {
+		ref.MakeSet(i)
+	}
+	got := NewSlice(n)
+	for i := 0; i < ops; i++ {
+		a := r.IntN(n)
+		b := r.IntN(n)
+		ref.Union(a, b)
+		got.Union(a, b)
+	}
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			if ref.Connected(i, j) != got.Connected(i, j) {
+				t.Fatalf("disagreement on (%d, %d): ref=%v got=%v", i, j,
+					ref.Connected(i, j), got.Connected(i, j))
+			}
+		}
+	}
+}
+
+// BenchmarkUnionFindSlice_1M measures the slice-backed variant on
+// 1M Union operations, the Kruskal-MST hot path. Task #140 targets
+// >5x improvement over the map-backed generic variant.
+func BenchmarkUnionFindSlice_1M(b *testing.B) {
+	const n = 1 << 20
+	r := rand.New(rand.NewPCG(91, 97)) //nolint:gosec // deterministic
+	pairs := make([][2]int, n)
+	for i := 0; i < n; i++ {
+		pairs[i] = [2]int{r.IntN(n), r.IntN(n)}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		u := NewSlice(n)
+		for _, p := range pairs {
+			u.Union(p[0], p[1])
+		}
+	}
+}
+
+// BenchmarkUnionFindGeneric_1M is the map-backed baseline used to
+// establish the slice variant's expected speedup.
+func BenchmarkUnionFindGeneric_1M(b *testing.B) {
+	const n = 1 << 20
+	r := rand.New(rand.NewPCG(91, 97)) //nolint:gosec // deterministic
+	pairs := make([][2]int, n)
+	for i := 0; i < n; i++ {
+		pairs[i] = [2]int{r.IntN(n), r.IntN(n)}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		u := New[int]()
+		for j := 0; j < n; j++ {
+			u.MakeSet(j)
+		}
+		for _, p := range pairs {
+			u.Union(p[0], p[1])
+		}
+	}
+}
+
 func TestUnionFind_BasicUnion(t *testing.T) {
 	t.Parallel()
 	u := New[string]()
