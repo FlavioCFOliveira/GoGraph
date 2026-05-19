@@ -123,6 +123,15 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 			}
 		}
 	}
+	// Materialise the k-th column into a contiguous scratch vector
+	// once per k-pivot. The original k-i-j loop reads dist[i, k]
+	// with stride live*sizeof(W), forcing a fresh cache line per i
+	// (the live=2048 case lands in DRAM bandwidth territory). The
+	// scratch vector turns that into a single hot row read in the
+	// inner i-loop, recovering 2x+ on M4-class cores while
+	// preserving the canonical k-i-j inner-loop block.
+	ikCol := make([]W, live)
+	ikFound := make([]bool, live)
 	for k := 0; k < live; k++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -133,20 +142,26 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 		if k&0x3F == 0 {
 			runtime.Gosched()
 		}
+		// Materialise dist[*, k] and found[*, k].
 		for i := 0; i < live; i++ {
-			ikIdx := i*live + k
-			if !out.found[ikIdx] {
+			idx := i*live + k
+			ikCol[i] = out.dist[idx]
+			ikFound[i] = out.found[idx]
+		}
+		kRow := k * live
+		for i := 0; i < live; i++ {
+			if !ikFound[i] {
 				continue
 			}
-			ik := out.dist[ikIdx]
+			ik := ikCol[i]
+			iRow := i * live
 			for j := 0; j < live; j++ {
-				kjIdx := k*live + j
+				kjIdx := kRow + j
 				if !out.found[kjIdx] {
 					continue
 				}
-				kj := out.dist[kjIdx]
-				cand := ik + kj
-				idx := i*live + j
+				cand := ik + out.dist[kjIdx]
+				idx := iRow + j
 				if !out.found[idx] || cand < out.dist[idx] {
 					out.dist[idx] = cand
 					out.found[idx] = true

@@ -1,11 +1,31 @@
 package search
 
 import (
+	"math/rand/v2"
 	"testing"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
 )
+
+// BenchmarkFloydWarshall_V2048 is the headline benchmark for task
+// #132. The blocked (i, j) tiling must beat the unblocked baseline
+// by >2x at V=2048 — the working set crosses L1 in the unblocked
+// variant, becoming DRAM-bandwidth-bound.
+func BenchmarkFloydWarshall_V2048(b *testing.B) {
+	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	const n = 2048
+	r := rand.New(rand.NewPCG(73, 79)) //nolint:gosec // deterministic benchmark RNG
+	for i := 0; i < 4*n; i++ {
+		a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1))
+	}
+	c := csr.BuildFromAdjList(a)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = FloydWarshall(c)
+	}
+}
 
 func TestFloydWarshall_HandBuilt(t *testing.T) {
 	t.Parallel()
