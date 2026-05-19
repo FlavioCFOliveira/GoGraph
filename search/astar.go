@@ -6,6 +6,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // ErrNoPath is returned by point-to-point search algorithms when no
@@ -29,7 +30,12 @@ func AStar[W Weight](
 	src, dst graph.NodeID,
 	h func(graph.NodeID) W,
 ) ([]graph.NodeID, W, error) {
-	return AStarCtx(context.Background(), c, src, dst, h)
+	defer metrics.Time("search.AStar")()
+	path, cost, err := AStarCtx(context.Background(), c, src, dst, h)
+	if err != nil {
+		metrics.IncCounter("search.AStar.errors", 1)
+	}
+	return path, cost, err
 }
 
 // AStarCtx is the context-aware variant of [AStar]. ctx.Err() is
@@ -41,6 +47,7 @@ func AStarCtx[W Weight](
 	src, dst graph.NodeID,
 	h func(graph.NodeID) W,
 ) ([]graph.NodeID, W, error) {
+	defer metrics.Time("search.AStarCtx")()
 	var zero W
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
@@ -49,6 +56,7 @@ func AStarCtx[W Weight](
 	var path []graph.NodeID
 	cost, err := aStarCore[W](ctx, c, src, dst, h, st.dist[:maxID], st.parent[:maxID], st.found[:maxID], &st.heap, &path)
 	if err != nil {
+		metrics.IncCounter("search.AStarCtx.errors", 1)
 		return nil, zero, err
 	}
 	return path, cost, nil
@@ -73,14 +81,20 @@ func AStarInto[W Weight](
 	found []bool,
 	path *[]graph.NodeID,
 ) (W, error) {
+	defer metrics.Time("search.AStarInto")()
 	var zero W
 	maxID := uint64(c.MaxNodeID())
 	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {
+		metrics.IncCounter("search.AStarInto.errors", 1)
 		return zero, ErrBufferTooSmall
 	}
 	heap := acquireDijkHeap[W]()
 	defer releaseDijkHeap(heap)
-	return aStarCore[W](ctx, c, src, dst, h, dist[:maxID], parent[:maxID], found[:maxID], heap, path)
+	cost, err := aStarCore[W](ctx, c, src, dst, h, dist[:maxID], parent[:maxID], found[:maxID], heap, path)
+	if err != nil {
+		metrics.IncCounter("search.AStarInto.errors", 1)
+	}
+	return cost, err
 }
 
 // aStarCore is the shared algorithm body. Pre-conditions:

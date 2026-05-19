@@ -5,6 +5,8 @@ import (
 	"errors"
 	"math"
 	"runtime"
+
+	"gograph/internal/metrics"
 )
 
 // ErrInvalidInput is returned by algorithms that detect NaN or +/-Inf
@@ -45,7 +47,12 @@ type Assignment struct {
 // Integer-weighted assignment is therefore deferred; callers with
 // integer cost matrices should currently convert to float64.
 func Hungarian(cost []float64, n, m int) (Assignment, error) {
-	return HungarianCtx(context.Background(), cost, n, m)
+	defer metrics.Time("search.Hungarian")()
+	res, err := HungarianCtx(context.Background(), cost, n, m)
+	if err != nil {
+		metrics.IncCounter("search.Hungarian.errors", 1)
+	}
+	return res, err
 }
 
 // HungarianCtx is the context-aware variant of [Hungarian]. ctx.Err()
@@ -54,14 +61,17 @@ func Hungarian(cost []float64, n, m int) (Assignment, error) {
 //
 //nolint:gocyclo // textbook Hungarian: validation + dual update + augment
 func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, error) {
+	defer metrics.Time("search.HungarianCtx")()
 	if n == 0 || m == 0 {
 		return Assignment{RowToCol: make([]int, n)}, nil
 	}
 	if len(cost) != n*m {
+		metrics.IncCounter("search.HungarianCtx.errors", 1)
 		return Assignment{}, errors.New("search: Hungarian cost length must equal n*m")
 	}
 	for _, v := range cost {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
+			metrics.IncCounter("search.HungarianCtx.errors", 1)
 			return Assignment{}, ErrInvalidInput
 		}
 	}
@@ -74,6 +84,7 @@ func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, er
 
 	for i := 1; i <= n; i++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.HungarianCtx.errors", 1)
 			return Assignment{}, err
 		}
 		if i&0x3F == 0 {

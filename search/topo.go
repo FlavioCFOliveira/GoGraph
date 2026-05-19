@@ -6,6 +6,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // ErrCycle is returned by algorithms that require a directed acyclic
@@ -23,13 +24,19 @@ var ErrCycle = errors.New("search: cycle detected in directed graph")
 // gaps in the NodeID space (NodeIDs that were never assigned by the
 // Mapper) are omitted from the output.
 func TopologicalSort[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
-	return TopologicalSortCtx(context.Background(), c)
+	defer metrics.Time("search.TopologicalSort")()
+	res, err := TopologicalSortCtx(context.Background(), c)
+	if err != nil {
+		metrics.IncCounter("search.TopologicalSort.errors", 1)
+	}
+	return res, err
 }
 
 // TopologicalSortCtx is the context-aware variant of [TopologicalSort].
 // ctx.Err() is checked every 4096 emits; on cancellation returns
 // (nil, wrapped ctx.Err()).
 func TopologicalSortCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
+	defer metrics.Time("search.TopologicalSortCtx")()
 	maxID := uint64(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -68,6 +75,7 @@ func TopologicalSortCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.Node
 	for qh := 0; qh < len(queue); qh++ {
 		if emitted&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.TopologicalSortCtx.errors", 1)
 				return nil, err
 			}
 		}
@@ -85,6 +93,7 @@ func TopologicalSortCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.Node
 		}
 	}
 	if emitted != totalLive {
+		metrics.IncCounter("search.TopologicalSortCtx.errors", 1)
 		return nil, ErrCycle
 	}
 	return out, nil

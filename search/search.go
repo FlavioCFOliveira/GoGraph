@@ -28,6 +28,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // bfsState is the per-call working state of [BFS]. The wavefront
@@ -118,6 +119,7 @@ func bitsetWordsFor(maxID graph.NodeID) int {
 // the next level is built in a separate buffer; the two buffers swap
 // per level.
 func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
+	defer metrics.Time("search.BFS")()
 	_ = BFSCtx(context.Background(), c, src, visit)
 }
 
@@ -126,6 +128,7 @@ func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 // wrapped ctx.Err() without invoking visit on the partially-explored
 // frontier.
 func BFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
+	defer metrics.Time("search.BFSCtx")()
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
 		return nil
 	}
@@ -141,6 +144,7 @@ func BFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit f
 	depth := 0
 	for len(st.cur) > 0 {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.BFSCtx.errors", 1)
 			return err
 		}
 		for _, node := range st.cur {
@@ -175,6 +179,7 @@ func BFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit f
 //
 // DFS is allocation-free on the hot path after the first call.
 func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
+	defer metrics.Time("search.DFS")()
 	_ = DFSCtx(context.Background(), c, src, visit)
 }
 
@@ -182,6 +187,7 @@ func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 // every 4096 frame pops; on cancellation the traversal returns
 // the wrapped ctx.Err() without further visit invocations.
 func DFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
+	defer metrics.Time("search.DFSCtx")()
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
 		return nil
 	}
@@ -197,6 +203,7 @@ func DFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit f
 	for len(st.stack) > 0 {
 		if popCount&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.DFSCtx.errors", 1)
 				return err
 			}
 		}

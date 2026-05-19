@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // tarjanFrame is one stack record of Tarjan's iterative DFS.
@@ -25,6 +26,7 @@ type tarjanFrame struct {
 // destination) are considered; NodeIDs that were assigned by the
 // Mapper but never gained an edge are not emitted as singleton SCCs.
 func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
+	defer metrics.Time("search.TarjanSCC")()
 	out, _ := TarjanSCCCtx(context.Background(), c)
 	return out
 }
@@ -33,6 +35,7 @@ func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
 // is checked at every restart of the outer DFS loop (i.e. before each
 // new root); on cancellation returns (nil, wrapped ctx.Err()).
 func TarjanSCCCtx[W any](ctx context.Context, c *csr.CSR[W]) ([][]graph.NodeID, error) {
+	defer metrics.Time("search.TarjanSCCCtx")()
 	maxID := uint64(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -65,6 +68,7 @@ func TarjanSCCCtx[W any](ctx context.Context, c *csr.CSR[W]) ([][]graph.NodeID, 
 			continue
 		}
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.TarjanSCCCtx.errors", 1)
 			return nil, err
 		}
 		// Begin DFS from start.

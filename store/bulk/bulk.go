@@ -17,6 +17,7 @@ import (
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 	"gograph/store/csrfile"
 )
 
@@ -69,7 +70,9 @@ func New(opts Options) *Loader {
 // Add ingests one edge. Returns [ErrTooManyRows] when the row cap is
 // exceeded.
 func (l *Loader) Add(e Edge) error {
+	defer metrics.Time("store.bulk.Add")()
 	if l.opts.MaxRows > 0 && l.rows >= l.opts.MaxRows {
+		metrics.IncCounter("store.bulk.Add.errors", 1)
 		return ErrTooManyRows
 	}
 	l.adj.AddEdge(e.Src, e.Dst, e.Weight)
@@ -81,8 +84,10 @@ func (l *Loader) Add(e Edge) error {
 // on the first edge that would cross the cap; edges accepted before
 // that point remain ingested.
 func (l *Loader) AddBatch(es []Edge) error {
+	defer metrics.Time("store.bulk.AddBatch")()
 	for k := range es {
 		if err := l.Add(es[k]); err != nil {
+			metrics.IncCounter("store.bulk.AddBatch.errors", 1)
 			return err
 		}
 	}
@@ -93,16 +98,19 @@ func (l *Loader) AddBatch(es []Edge) error {
 // Returns the number of edges drained and any error from the input
 // channel ([ErrTooManyRows] when the row cap is exceeded).
 func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
+	defer metrics.Time("store.bulk.Drain")()
 	drained := 0
 	for {
 		select {
 		case <-ctx.Done():
+			metrics.IncCounter("store.bulk.Drain.errors", 1)
 			return drained, ctx.Err()
 		case e, ok := <-ch:
 			if !ok {
 				return drained, nil
 			}
 			if err := l.Add(e); err != nil {
+				metrics.IncCounter("store.bulk.Drain.errors", 1)
 				return drained, err
 			}
 			drained++
@@ -114,9 +122,11 @@ func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 // to opts.OutputPath as a csrfile. Returns the row count, the
 // resulting CSR (for chaining into search/extern), and any error.
 func (l *Loader) Finalise() (int, *csr.CSR[int64], error) {
+	defer metrics.Time("store.bulk.Finalise")()
 	c := csr.BuildFromAdjList(l.adj)
 	if l.opts.OutputPath != "" {
 		if _, err := csrfile.WriteToFile(l.opts.OutputPath, c); err != nil {
+			metrics.IncCounter("store.bulk.Finalise.errors", 1)
 			return l.rows, c, fmt.Errorf("bulk: write csrfile: %w", err)
 		}
 	}

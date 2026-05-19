@@ -1,6 +1,10 @@
 package flow
 
-import "context"
+import (
+	"context"
+
+	"gograph/internal/metrics"
+)
 
 // EdmondsKarp computes the max-flow from src to sink in g using the
 // Edmonds-Karp algorithm (Ford-Fulkerson with BFS-discovered
@@ -9,6 +13,7 @@ import "context"
 // structure — useful as a reference implementation and a baseline
 // for property testing.
 func EdmondsKarp(g *Network, src, sink int) int {
+	defer metrics.Time("search.flow.EdmondsKarp")()
 	out, _ := EdmondsKarpCtx(context.Background(), g, src, sink)
 	return out
 }
@@ -18,12 +23,14 @@ func EdmondsKarp(g *Network, src, sink int) int {
 // path boundary); on cancellation returns (totalSoFar, wrapped
 // ctx.Err()).
 func EdmondsKarpCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
+	defer metrics.Time("search.flow.EdmondsKarpCtx")()
 	n := g.N()
 	parentEdge := make([]int, n)
 	queue := make([]int, 0, n)
 	total := 0
 	for {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.flow.EdmondsKarpCtx.errors", 1)
 			return total, err
 		}
 		// BFS for an augmenting path. parentEdge[v] holds the index

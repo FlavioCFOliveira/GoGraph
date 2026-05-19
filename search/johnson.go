@@ -7,6 +7,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // ErrNegativeEdgeAPSP is returned by [DijkstraAPSP] when the input
@@ -30,13 +31,19 @@ var ErrNegativeEdgeAPSP = errors.New("search: DijkstraAPSP requires non-negative
 // Dijkstra-from-every-vertex variant. JohnsonAPSP is preserved as a
 // deprecated alias for backward compatibility.
 func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
-	return DijkstraAPSPCtx(context.Background(), c)
+	defer metrics.Time("search.DijkstraAPSP")()
+	res, err := DijkstraAPSPCtx(context.Background(), c)
+	if err != nil {
+		metrics.IncCounter("search.DijkstraAPSP.errors", 1)
+	}
+	return res, err
 }
 
 // DijkstraAPSPCtx is the context-aware variant of [DijkstraAPSP].
 // ctx.Err() is checked once per source vertex; on cancellation
 // returns (nil, wrapped ctx.Err()).
 func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
+	defer metrics.Time("search.DijkstraAPSPCtx")()
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)
@@ -69,6 +76,7 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 			continue
 		}
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.DijkstraAPSPCtx.errors", 1)
 			return nil, err
 		}
 		if src&0x3F == 0 {
@@ -76,6 +84,7 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 		}
 		d, err := DijkstraCtx(ctx, c, graph.NodeID(src))
 		if err != nil {
+			metrics.IncCounter("search.DijkstraAPSPCtx.errors", 1)
 			if errors.Is(err, ErrNegativeWeight) {
 				return nil, ErrNegativeEdgeAPSP
 			}
@@ -103,5 +112,10 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 // Deprecated: use [DijkstraAPSP]. JohnsonAPSP will be removed in a
 // future major release.
 func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
-	return DijkstraAPSP(c)
+	defer metrics.Time("search.JohnsonAPSP")()
+	res, err := DijkstraAPSP(c)
+	if err != nil {
+		metrics.IncCounter("search.JohnsonAPSP.errors", 1)
+	}
+	return res, err
 }

@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // BFSDirectionOpt performs direction-optimising breadth-first
@@ -27,6 +28,7 @@ import (
 // are acquired from a pool; in the steady state BFSDirectionOpt is
 // zero-allocation per call.
 func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
+	defer metrics.Time("search.BFSDirectionOpt")()
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	if uint64(src)+1 >= uint64(len(verts)) {

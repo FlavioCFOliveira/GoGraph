@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+
+	"gograph/internal/metrics"
 )
 
 // ErrWriterClosed is returned by methods on a [Writer] that has
@@ -50,8 +52,10 @@ type Writer struct {
 // already exist; existing data is preserved and new frames are
 // appended.
 func Open(path string) (*Writer, error) {
+	defer metrics.Time("store.wal.Open")()
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644) //nolint:gosec // caller-supplied path is by-design
 	if err != nil {
+		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: %w", path, err)
 	}
 	return &Writer{
@@ -64,26 +68,36 @@ func Open(path string) (*Writer, error) {
 // underlying file. The frame is buffered in process memory; call
 // [Writer.Sync] to durably commit.
 func (w *Writer) Append(payload []byte) error {
-	return w.AppendCtx(context.Background(), payload)
+	defer metrics.Time("store.wal.Append")()
+	err := w.AppendCtx(context.Background(), payload)
+	if err != nil {
+		metrics.IncCounter("store.wal.Append.errors", 1)
+	}
+	return err
 }
 
 // AppendCtx is the context-aware variant of [Writer.Append]. ctx.Err()
 // is checked before acquiring the internal mutex and again before
 // writing; on cancellation returns the wrapped ctx.Err.
 func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
+	defer metrics.Time("store.wal.AppendCtx")()
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return err
 	}
 	if w.closed.Load() {
+		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return ErrWriterClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return err
 	}
 	n, err := Encode(w.bw, Frame{Payload: payload})
 	if err != nil {
+		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return err
 	}
 	w.frames.Add(1)
@@ -96,30 +110,41 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 // returning. It must be invoked at every transaction commit
 // boundary.
 func (w *Writer) Sync() error {
-	return w.SyncCtx(context.Background())
+	defer metrics.Time("store.wal.Sync")()
+	err := w.SyncCtx(context.Background())
+	if err != nil {
+		metrics.IncCounter("store.wal.Sync.errors", 1)
+	}
+	return err
 }
 
 // SyncCtx is the context-aware variant of [Writer.Sync]. ctx.Err()
 // is checked before acquiring the internal mutex; on cancellation
 // returns the wrapped ctx.Err without flushing.
 func (w *Writer) SyncCtx(ctx context.Context) error {
+	defer metrics.Time("store.wal.SyncCtx")()
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
 	if w.closed.Load() {
+		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return ErrWriterClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
 	if err := w.bw.Flush(); err != nil {
 		w.syncFailed.Add(1)
+		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
 	if err := w.f.Sync(); err != nil {
 		w.syncFailed.Add(1)
+		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
 	w.syncs.Add(1)
@@ -154,25 +179,32 @@ func (w *Writer) Stats() Stats {
 // On error the WAL may be in a partially-truncated state; callers
 // should not continue using the Writer.
 func (w *Writer) Truncate() (int64, error) {
+	defer metrics.Time("store.wal.Truncate")()
 	if w.closed.Load() {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return 0, ErrWriterClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.bw.Flush(); err != nil {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return 0, err
 	}
 	sz, err := w.f.Seek(0, io.SeekEnd)
 	if err != nil {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return 0, err
 	}
 	if err := w.f.Truncate(0); err != nil {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return sz, err
 	}
 	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return sz, err
 	}
 	if err := w.f.Sync(); err != nil {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return sz, err
 	}
 	w.bw.Reset(w.f)
@@ -182,18 +214,26 @@ func (w *Writer) Truncate() (int64, error) {
 // Close flushes any buffered frames, calls Sync once, and releases
 // the underlying file.
 func (w *Writer) Close() error {
+	defer metrics.Time("store.wal.Close")()
 	if !w.closed.CompareAndSwap(false, true) {
+		metrics.IncCounter("store.wal.Close.errors", 1)
 		return ErrWriterClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.bw.Flush(); err != nil {
 		_ = w.f.Close()
+		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
 	if err := w.f.Sync(); err != nil {
 		_ = w.f.Close()
+		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
-	return w.f.Close()
+	if err := w.f.Close(); err != nil {
+		metrics.IncCounter("store.wal.Close.errors", 1)
+		return err
+	}
+	return nil
 }

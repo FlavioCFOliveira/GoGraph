@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"gograph/internal/metrics"
 )
 
 // ErrCorrupted is returned by [Open] when a component file CRC32C
@@ -26,9 +28,11 @@ type LoadedCSR struct {
 // manifest entry. Future versions may load additional components
 // (labels.bin, properties.bin, schema.bin) by extending Manifest.Files.
 func Open(dir string) (LoadedCSR, error) {
+	defer metrics.Time("store.snapshot.Open")()
 	manifestPath := filepath.Join(dir, "manifest.json")
 	m, err := ReadManifestFile(manifestPath)
 	if err != nil {
+		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, err
 	}
 	var csrEntry *FileEntry
@@ -39,11 +43,13 @@ func Open(dir string) (LoadedCSR, error) {
 		}
 	}
 	if csrEntry == nil {
+		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
 	}
 	csrPath := filepath.Join(dir, CSRFile)
 	f, err := os.Open(csrPath) //nolint:gosec // caller-supplied path
 	if err != nil {
+		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, err
 	}
 	defer func() { _ = f.Close() }()
@@ -52,14 +58,17 @@ func Open(dir string) (LoadedCSR, error) {
 	tee := io.TeeReader(f, hasher)
 	parsed, err := ReadCSR(tee)
 	if err != nil {
+		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
 	}
 	// Drain any trailing bytes through the hasher (e.g., padding) so
 	// the CRC matches the full on-disk file.
 	if _, err := io.Copy(io.Discard, tee); err != nil {
+		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
 	}
 	if got := hasher.Sum32(); got != csrEntry.CRC32C {
+		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
 			ErrCorrupted, CSRFile, got, csrEntry.CRC32C)
 	}

@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // Diameter estimates the diameter of c — the longest shortest-path
@@ -24,6 +25,7 @@ import (
 // CSR. The implementation expects c to encode an undirected graph
 // (symmetric directed CSR).
 func Diameter[W any](c *csr.CSR[W]) (lo, hi int, exact bool) {
+	defer metrics.Time("search.Diameter")()
 	lo, hi, exact, _ = DiameterCtx(context.Background(), c)
 	return lo, hi, exact
 }
@@ -34,6 +36,7 @@ func Diameter[W any](c *csr.CSR[W]) (lo, hi int, exact bool) {
 //
 //nolint:gocyclo // 2-sweep + iFUB refinement: precondition checks + sweeps + level walk
 func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact bool, err error) {
+	defer metrics.Time("search.DiameterCtx")()
 	n := int(c.MaxNodeID())
 	if n == 0 {
 		return 0, 0, true, nil
@@ -56,10 +59,12 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// find farthest w. dist[w] is a lower bound on the true diameter.
 	dist := make([]int, n)
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
 	farU, _ := bfsFarthest(verts, edges, graph.NodeID(seed), dist)
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
 	farW, distFromU := bfsFarthest(verts, edges, farU, dist)
@@ -90,6 +95,7 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// improvement is possible and the bounds have converged.
 	for k := maxLevel; k > 0; k-- {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.DiameterCtx.errors", 1)
 			return lo, hi, false, err
 		}
 		for v := 0; v < n; v++ {

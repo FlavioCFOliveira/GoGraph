@@ -7,12 +7,18 @@ import (
 	"strconv"
 
 	"gograph/graph/adjlist"
+	"gograph/internal/metrics"
 )
 
 // Write streams every edge of a in src,dst,weight order to w.
 // Returns the number of rows written.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, error) {
-	return WriteCtx(context.Background(), w, a, opts)
+	defer metrics.Time("graph.io.csv.Write")()
+	n, err := WriteCtx(context.Background(), w, a, opts)
+	if err != nil {
+		metrics.IncCounter("graph.io.csv.Write.errors", 1)
+	}
+	return n, err
 }
 
 // WriteCtx is the context-aware variant of [Write]. ctx.Err() is
@@ -21,6 +27,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, e
 //
 //nolint:gocyclo // CSV write loop: header + per-source resolve + per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, error) {
+	defer metrics.Time("graph.io.csv.WriteCtx")()
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}
@@ -30,6 +37,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	written := 0
 	if opts.HasHeader {
 		if err := cw.Write([]string{"src", "dst", "weight"}); err != nil {
+			metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 			return written, err
 		}
 	}
@@ -56,6 +64,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if written&0xFFF == 0 {
 				if cerr := ctx.Err(); cerr != nil {
 					cw.Flush()
+					metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 					return written, cerr
 				}
 			}
@@ -63,6 +72,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 				continue
 			}
 			if err := cw.Write([]string{src, names[uint64(n)], strconv.FormatInt(ws[i], 10)}); err != nil {
+				metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 				return written, err
 			}
 			written++
@@ -70,6 +80,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
+		metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 		return written, err
 	}
 	return written, nil

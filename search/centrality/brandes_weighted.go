@@ -7,6 +7,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // WeightedBetweenness computes the weighted betweenness centrality
@@ -20,6 +21,7 @@ import (
 // Concurrency: WeightedBetweenness is safe to invoke concurrently
 // on a shared CSR.
 func WeightedBetweenness(c *csr.CSR[float64]) []float64 {
+	defer metrics.Time("search.centrality.WeightedBetweenness")()
 	out, _ := WeightedBetweennessCtx(context.Background(), c)
 	return out
 }
@@ -28,6 +30,7 @@ func WeightedBetweenness(c *csr.CSR[float64]) []float64 {
 // [WeightedBetweenness]. ctx.Err() is checked once per source vertex;
 // on cancellation returns (nil, wrapped ctx.Err()).
 func WeightedBetweennessCtx(ctx context.Context, c *csr.CSR[float64]) ([]float64, error) {
+	defer metrics.Time("search.centrality.WeightedBetweennessCtx")()
 	n := int(c.MaxNodeID())
 	cb := make([]float64, n)
 	if n == 0 {
@@ -45,6 +48,7 @@ func WeightedBetweennessCtx(ctx context.Context, c *csr.CSR[float64]) ([]float64
 
 	for s := 0; s < n; s++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.centrality.WeightedBetweennessCtx.errors", 1)
 			return nil, err
 		}
 		if s&0x3F == 0 {

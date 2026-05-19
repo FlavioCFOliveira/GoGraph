@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // TC is a transitive-closure reachability oracle: a bitset matrix
@@ -47,6 +48,7 @@ func (t *TC) Reachable(src, dst graph.NodeID) bool {
 // Concurrency: TransitiveClosure is safe to invoke concurrently on
 // a shared CSR; the returned [TC] is safe for concurrent reads.
 func TransitiveClosure[W any](c *csr.CSR[W]) *TC {
+	defer metrics.Time("search.TransitiveClosure")()
 	out, _ := TransitiveClosureCtx(context.Background(), c)
 	return out
 }
@@ -55,6 +57,7 @@ func TransitiveClosure[W any](c *csr.CSR[W]) *TC {
 // [TransitiveClosure]. ctx.Err() is checked at every k-pivot; on
 // cancellation returns (nil, wrapped ctx.Err()).
 func TransitiveClosureCtx[W any](ctx context.Context, c *csr.CSR[W]) (*TC, error) {
+	defer metrics.Time("search.TransitiveClosureCtx")()
 	n := int(c.MaxNodeID())
 	if n == 0 {
 		return &TC{}, nil
@@ -74,6 +77,7 @@ func TransitiveClosureCtx[W any](ctx context.Context, c *csr.CSR[W]) (*TC, error
 	}
 	for k := 0; k < n; k++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.TransitiveClosureCtx.errors", 1)
 			return nil, err
 		}
 		kRow := bits[k*words : k*words+words]

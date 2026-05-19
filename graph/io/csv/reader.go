@@ -16,6 +16,7 @@ import (
 	"strconv"
 
 	"gograph/graph/adjlist"
+	"gograph/internal/metrics"
 )
 
 // Options controls Reader / Writer behaviour.
@@ -43,7 +44,12 @@ func DefaultOptions() Options {
 // have at least two fields (src, dst); a third field is parsed as
 // a int64 weight.
 func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
-	return ReadIntoCtx(context.Background(), r, opts)
+	defer metrics.Time("graph.io.csv.ReadInto")()
+	a, rows, err := ReadIntoCtx(context.Background(), r, opts)
+	if err != nil {
+		metrics.IncCounter("graph.io.csv.ReadInto.errors", 1)
+	}
+	return a, rows, err
 }
 
 // ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
@@ -52,6 +58,7 @@ func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, 
 //
 //nolint:gocyclo // csv decode + opt defaults + per-row parse + ctx tick
 func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
+	defer metrics.Time("graph.io.csv.ReadIntoCtx")()
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}
@@ -73,6 +80,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 	for {
 		if rows&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("graph.io.csv.ReadIntoCtx.errors", 1)
 				return a, rows, err
 			}
 		}
@@ -81,6 +89,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 			break
 		}
 		if err != nil {
+			metrics.IncCounter("graph.io.csv.ReadIntoCtx.errors", 1)
 			return nil, rows, fmt.Errorf("csv row %d: %w", rows+1, err)
 		}
 		if first {
@@ -88,12 +97,14 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 			continue
 		}
 		if len(rec) < 2 {
+			metrics.IncCounter("graph.io.csv.ReadIntoCtx.errors", 1)
 			return nil, rows, fmt.Errorf("csv row %d: need at least 2 fields, got %d", rows+1, len(rec))
 		}
 		var w int64
 		if len(rec) >= 3 && rec[2] != "" {
 			pw, perr := strconv.ParseInt(rec[2], 10, 64)
 			if perr != nil {
+				metrics.IncCounter("graph.io.csv.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("csv row %d weight %q: %w", rows+1, rec[2], perr)
 			}
 			w = pw

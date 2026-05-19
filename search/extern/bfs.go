@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"gograph/graph"
+	"gograph/internal/metrics"
 	"gograph/store/csrfile"
 )
 
@@ -23,12 +24,18 @@ import (
 // edge reads stay sequential, maximising the benefit of any
 // MADV_SEQUENTIAL hint configured on the reader.
 func BFS(r *csrfile.Reader, src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
-	return BFSCtx(context.Background(), r, src, visit)
+	defer metrics.Time("search.extern.BFS")()
+	err := BFSCtx(context.Background(), r, src, visit)
+	if err != nil {
+		metrics.IncCounter("search.extern.BFS.errors", 1)
+	}
+	return err
 }
 
 // BFSCtx is the context-aware variant of [BFS]. ctx.Err() is checked
 // once per BFS level; on cancellation returns the wrapped ctx.Err.
 func BFSCtx(ctx context.Context, r *csrfile.Reader, src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
+	defer metrics.Time("search.extern.BFSCtx")()
 	verts := r.Vertices()
 	edges := r.Edges()
 	if uint64(src)+1 >= uint64(len(verts)) {
@@ -43,6 +50,7 @@ func BFSCtx(ctx context.Context, r *csrfile.Reader, src graph.NodeID, visit func
 	depth := 0
 	for len(cur) > 0 {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.extern.BFSCtx.errors", 1)
 			return err
 		}
 		slices.Sort(cur)

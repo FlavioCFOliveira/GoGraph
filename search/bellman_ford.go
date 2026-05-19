@@ -6,6 +6,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // ErrNegativeCycle is returned by [BellmanFord] when the input graph
@@ -29,18 +30,25 @@ var ErrNegativeCycle = errors.New("search: negative cycle reachable from source"
 // For hot loops where the caller can amortise buffer allocation,
 // prefer the zero-allocation primitive [BellmanFordInto].
 func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
-	return BellmanFordCtx(context.Background(), c, src)
+	defer metrics.Time("search.BellmanFord")()
+	res, err := BellmanFordCtx(context.Background(), c, src)
+	if err != nil {
+		metrics.IncCounter("search.BellmanFord.errors", 1)
+	}
+	return res, err
 }
 
 // BellmanFordCtx is the context-aware variant of [BellmanFord].
 // ctx.Err() is checked at every relaxation round boundary; on
 // cancellation returns (nil, wrapped ctx.Err()).
 func BellmanFordCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
+	defer metrics.Time("search.BellmanFordCtx")()
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)
 
 	if err := bellmanFordCore[W](ctx, c, src, st.dist[:maxID], st.parent[:maxID], st.found[:maxID]); err != nil {
+		metrics.IncCounter("search.BellmanFordCtx.errors", 1)
 		return nil, err
 	}
 	return newDistancesCopy(st, src, maxID), nil
@@ -62,11 +70,17 @@ func BellmanFordInto[W Weight](
 	parent []graph.NodeID,
 	found []bool,
 ) error {
+	defer metrics.Time("search.BellmanFordInto")()
 	maxID := uint64(c.MaxNodeID())
 	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {
+		metrics.IncCounter("search.BellmanFordInto.errors", 1)
 		return ErrBufferTooSmall
 	}
-	return bellmanFordCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID])
+	err := bellmanFordCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID])
+	if err != nil {
+		metrics.IncCounter("search.BellmanFordInto.errors", 1)
+	}
+	return err
 }
 
 // bellmanFordCore is the shared algorithm body invoked by both

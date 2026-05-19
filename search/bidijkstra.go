@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // BidirectionalDijkstra computes a shortest path from src to dst in c
@@ -28,8 +29,13 @@ import (
 // [ErrNoPath] when no s-t path exists, or [ErrNegativeWeight] if c
 // contains any negative-weight edge.
 func BidirectionalDijkstra[W Weight](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, W, error) {
+	defer metrics.Time("search.BidirectionalDijkstra")()
 	rev := c.BuildReverse()
-	return BidirectionalDijkstraOnCtx(context.Background(), c, rev, src, dst)
+	path, cost, err := BidirectionalDijkstraOnCtx(context.Background(), c, rev, src, dst)
+	if err != nil {
+		metrics.IncCounter("search.BidirectionalDijkstra.errors", 1)
+	}
+	return path, cost, err
 }
 
 // BidirectionalDijkstraOn is [BidirectionalDijkstra] with a pre-
@@ -37,7 +43,12 @@ func BidirectionalDijkstra[W Weight](c *csr.CSR[W], src, dst graph.NodeID) ([]gr
 // queries on the same graph; the reverse-CSR construction is O(V+E)
 // and is the only allocation outside the algorithm's working state.
 func BidirectionalDijkstraOn[W Weight](c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, W, error) {
-	return BidirectionalDijkstraOnCtx(context.Background(), c, rev, src, dst)
+	defer metrics.Time("search.BidirectionalDijkstraOn")()
+	path, cost, err := BidirectionalDijkstraOnCtx(context.Background(), c, rev, src, dst)
+	if err != nil {
+		metrics.IncCounter("search.BidirectionalDijkstraOn.errors", 1)
+	}
+	return path, cost, err
 }
 
 // BidirectionalDijkstraOnCtx is the context-aware variant of
@@ -46,15 +57,18 @@ func BidirectionalDijkstraOn[W Weight](c, rev *csr.CSR[W], src, dst graph.NodeID
 //
 //nolint:gocyclo // canonical bidirectional Dijkstra: negative-weight scan + dual heap loop + meet bookkeeping + path stitching
 func BidirectionalDijkstraOnCtx[W Weight](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, W, error) {
+	defer metrics.Time("search.BidirectionalDijkstraOnCtx")()
 	var zero W
 	weights := c.WeightsSlice()
 	for _, w := range weights {
 		if w < zero {
+			metrics.IncCounter("search.BidirectionalDijkstraOnCtx.errors", 1)
 			return nil, zero, ErrNegativeWeight
 		}
 	}
 	verts := c.VerticesSlice()
 	if uint64(src)+1 >= uint64(len(verts)) || uint64(dst)+1 >= uint64(len(verts)) {
+		metrics.IncCounter("search.BidirectionalDijkstraOnCtx.errors", 1)
 		return nil, zero, ErrNoPath
 	}
 	if src == dst {
@@ -106,6 +120,7 @@ func BidirectionalDijkstraOnCtx[W Weight](ctx context.Context, c, rev *csr.CSR[W
 	for fSt.heap.len() > 0 && rSt.heap.len() > 0 {
 		if popCount&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.BidirectionalDijkstraOnCtx.errors", 1)
 				return nil, zero, err
 			}
 		}
@@ -172,6 +187,7 @@ func BidirectionalDijkstraOnCtx[W Weight](ctx context.Context, c, rev *csr.CSR[W
 	}
 
 	if !bestKnown {
+		metrics.IncCounter("search.BidirectionalDijkstraOnCtx.errors", 1)
 		return nil, zero, ErrNoPath
 	}
 

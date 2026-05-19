@@ -6,6 +6,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // ErrNotUndirected was returned by older versions of [BiBFS] when
@@ -31,7 +32,12 @@ var ErrNotUndirected = errors.New("search: BiBFS requires an undirected (symmetr
 // O(b^(d/2)) instead of O(b^d) for forward-only BFS, where b is the
 // branching factor and d is the path length.
 func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
-	return BiBFSCtx(context.Background(), c, src, dst)
+	defer metrics.Time("search.BiBFS")()
+	res, err := BiBFSCtx(context.Background(), c, src, dst)
+	if err != nil {
+		metrics.IncCounter("search.BiBFS.errors", 1)
+	}
+	return res, err
 }
 
 // BiBFSCtx is the context-aware variant of [BiBFS]. ctx.Err() is
@@ -44,10 +50,20 @@ func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) 
 // running BiBFS many times on the same graph should hoist the build
 // out via [BiBFSOnCtx].
 func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
+	defer metrics.Time("search.BiBFSCtx")()
+	var (
+		res []graph.NodeID
+		err error
+	)
 	if c.IsSymmetric() {
-		return BiBFSOnCtx(ctx, c, c, src, dst)
+		res, err = BiBFSOnCtx(ctx, c, c, src, dst)
+	} else {
+		res, err = BiBFSOnCtx(ctx, c, c.BuildReverse(), src, dst)
 	}
-	return BiBFSOnCtx(ctx, c, c.BuildReverse(), src, dst)
+	if err != nil {
+		metrics.IncCounter("search.BiBFSCtx.errors", 1)
+	}
+	return res, err
 }
 
 // BiBFSOn is [BiBFS] with a caller-provided reverse CSR. Required
@@ -55,21 +71,29 @@ func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) 
 // and recommended for any high-frequency caller — the O(V+E)
 // reverse-CSR construction is hoisted out of the inner loop.
 func BiBFSOn[W any](c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
-	return BiBFSOnCtx(context.Background(), c, rev, src, dst)
+	defer metrics.Time("search.BiBFSOn")()
+	res, err := BiBFSOnCtx(context.Background(), c, rev, src, dst)
+	if err != nil {
+		metrics.IncCounter("search.BiBFSOn.errors", 1)
+	}
+	return res, err
 }
 
 // BiBFSOnCtx is the context-aware variant of [BiBFSOn].
 //
 //nolint:gocyclo // canonical bidirectional BFS with separate forward/reverse adjacencies
 func BiBFSOnCtx[W any](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
+	defer metrics.Time("search.BiBFSOnCtx")()
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) ||
 		uint64(dst)+1 >= uint64(len(c.VerticesSlice())) {
+		metrics.IncCounter("search.BiBFSOnCtx.errors", 1)
 		return nil, ErrNoPath
 	}
 	if src == dst {
 		return []graph.NodeID{src}, nil
 	}
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("search.BiBFSOnCtx.errors", 1)
 		return nil, err
 	}
 
@@ -95,6 +119,7 @@ func BiBFSOnCtx[W any](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.N
 	found := false
 	for len(frontierF) > 0 && len(frontierB) > 0 {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.BiBFSOnCtx.errors", 1)
 			return nil, err
 		}
 		var grew []graph.NodeID
@@ -113,6 +138,7 @@ func BiBFSOnCtx[W any](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.N
 		}
 	}
 	if !found {
+		metrics.IncCounter("search.BiBFSOnCtx.errors", 1)
 		return nil, ErrNoPath
 	}
 	return joinPath(meet, parentF, parentB, src, dst), nil

@@ -18,6 +18,7 @@ import (
 	"io"
 
 	"gograph/graph/adjlist"
+	"gograph/internal/metrics"
 )
 
 // Record is the wire shape of a JSON-Lines event.
@@ -33,7 +34,12 @@ type Record struct {
 // adjacency list. Node records pre-intern endpoints; edge records
 // add the edge with optional weight.
 func ReadInto(r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64], int, error) {
-	return ReadIntoCtx(context.Background(), r, cfg)
+	defer metrics.Time("graph.io.jsonl.ReadInto")()
+	a, n, err := ReadIntoCtx(context.Background(), r, cfg)
+	if err != nil {
+		metrics.IncCounter("graph.io.jsonl.ReadInto.errors", 1)
+	}
+	return a, n, err
 }
 
 // ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
@@ -42,6 +48,7 @@ func ReadInto(r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64],
 //
 //nolint:gocyclo // JSONL decode + per-row parse + node/edge dispatch + ctx tick
 func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64], int, error) {
+	defer metrics.Time("graph.io.jsonl.ReadIntoCtx")()
 	a := adjlist.New[string, int64](cfg)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
@@ -49,6 +56,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 	for sc.Scan() {
 		if rows&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return a, rows, err
 			}
 		}
@@ -59,24 +67,29 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 		}
 		var rec Record
 		if err := json.Unmarshal(line, &rec); err != nil {
+			metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 			return nil, rows, fmt.Errorf("jsonl row %d: %w", rows, err)
 		}
 		switch rec.Type {
 		case "node":
 			if rec.ID == "" {
+				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: node missing id", rows)
 			}
 			a.AddNode(rec.ID)
 		case "edge":
 			if rec.Src == "" || rec.Dst == "" {
+				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: edge missing src/dst", rows)
 			}
 			a.AddEdge(rec.Src, rec.Dst, rec.Weight)
 		default:
+			metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 			return nil, rows, fmt.Errorf("jsonl row %d: unknown type %q", rows, rec.Type)
 		}
 	}
 	if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
+		metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 		return nil, rows, err
 	}
 	return a, rows, nil

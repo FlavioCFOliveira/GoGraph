@@ -1,6 +1,10 @@
 package flow
 
-import "context"
+import (
+	"context"
+
+	"gograph/internal/metrics"
+)
 
 // MinCutResult is the output of [StoerWagner].
 type MinCutResult struct {
@@ -16,6 +20,7 @@ type MinCutResult struct {
 //
 // Complexity O(V^3) with the simple maximum-adjacency form.
 func StoerWagner(weights []int, n int) MinCutResult {
+	defer metrics.Time("search.flow.StoerWagner")()
 	out, _ := StoerWagnerCtx(context.Background(), weights, n)
 	return out
 }
@@ -24,6 +29,7 @@ func StoerWagner(weights []int, n int) MinCutResult {
 // ctx.Err() is checked at every phase boundary; on cancellation
 // returns (zero MinCutResult, wrapped ctx.Err()).
 func StoerWagnerCtx(ctx context.Context, weights []int, n int) (MinCutResult, error) {
+	defer metrics.Time("search.flow.StoerWagnerCtx")()
 	if n <= 1 {
 		return MinCutResult{Weight: 0}, nil
 	}
@@ -45,6 +51,7 @@ func StoerWagnerCtx(ctx context.Context, weights []int, n int) (MinCutResult, er
 
 	for phase := 0; phase < n-1; phase++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.flow.StoerWagnerCtx.errors", 1)
 			return MinCutResult{}, err
 		}
 		s, tIdx, cutOfPhase := maxAdjacencyPhase(w, alive, n)

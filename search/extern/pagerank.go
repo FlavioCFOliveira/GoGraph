@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"gograph/graph"
+	"gograph/internal/metrics"
 	"gograph/store/csrfile"
 )
 
@@ -61,14 +62,21 @@ func DefaultPageRankOptions() PageRankOptions {
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared csrfile.Reader.
 func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
-	return PageRankCtx(context.Background(), r, opts)
+	defer metrics.Time("search.extern.PageRank")()
+	ranks, iterations, err = PageRankCtx(context.Background(), r, opts)
+	if err != nil {
+		metrics.IncCounter("search.extern.PageRank.errors", 1)
+	}
+	return ranks, iterations, err
 }
 
 // PageRankCtx is the context-aware variant of [PageRank]. ctx.Err()
 // is checked at every iteration boundary; on cancellation returns
 // (nil, 0, wrapped ctx.Err()).
 func PageRankCtx(ctx context.Context, r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	defer metrics.Time("search.extern.PageRankCtx")()
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+		metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
 		return nil, 0, ErrInvalidInput
 	}
 	opts = normaliseOptions(opts)
@@ -86,6 +94,7 @@ func PageRankCtx(ctx context.Context, r *csrfile.Reader, opts PageRankOptions) (
 	teleport := (1.0 - opts.Damping) / float64(live)
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
 		if cerr := ctx.Err(); cerr != nil {
+			metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
 			return nil, 0, cerr
 		}
 		stepIteration(verts, edges, cur, next, outdeg, isLive, teleport, opts.Damping, live)

@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // Matching is the result of [HopcroftKarp].
@@ -28,6 +29,7 @@ type Matching struct {
 //
 // Complexity O(E * sqrt(V)).
 func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
+	defer metrics.Time("search.HopcroftKarp")()
 	out, _ := HopcroftKarpCtx(context.Background(), c, nLeft)
 	return out
 }
@@ -36,6 +38,7 @@ func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
 // ctx.Err() is checked at every phase boundary (BFS-layer + DFS-augment
 // pair); on cancellation returns (zero Matching, wrapped ctx.Err()).
 func HopcroftKarpCtx[W any](ctx context.Context, c *csr.CSR[W], nLeft int) (Matching, error) {
+	defer metrics.Time("search.HopcroftKarpCtx")()
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -53,6 +56,7 @@ func HopcroftKarpCtx[W any](ctx context.Context, c *csr.CSR[W], nLeft int) (Matc
 	size := 0
 	for {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.HopcroftKarpCtx.errors", 1)
 			return Matching{}, err
 		}
 		queue := bfsLayer(matchL, matchR, dist, verts, edges, nLeft)

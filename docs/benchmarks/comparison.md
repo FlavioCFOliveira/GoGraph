@@ -53,7 +53,7 @@ which wrap SuiteSparse:GraphBLAS 8.2.1.0 over a CFFI bridge. On a
 16K-node graph each algorithm spends a meaningful fraction of its
 wall-clock budget in Python/FFI rather than in the C kernel, which
 inflates the GraphBLAS column relative to the bare-metal ceiling.
-The bare-metal C harness (`bench/comparison/lagraph_baseline.c`)
+The bare-metal C harness (`bench/comparison/c/lagraph_baseline.c`)
 removes that bridge; its expected steady-state numbers fall in the
 LAGraph release-note range (single-thread BFS ≈ 1 B edges/s,
 PageRank ≈ 50 M edges/s on commodity x86_64) and remain the
@@ -96,7 +96,7 @@ make comparison-graphblas PYTHON=/tmp/graphblas_venv/bin/python3
 ```
 
 The bare-metal C harness (for a reviewer who wants the absolute
-GraphBLAS ceiling) is in `bench/comparison/lagraph_baseline.c`;
+GraphBLAS ceiling) is in `bench/comparison/c/lagraph_baseline.c`;
 the header comment documents the build line for macOS and Linux
 plus the CSV edge-list format the program reads on stdin (the
 header includes a small inline Python one-liner that generates the

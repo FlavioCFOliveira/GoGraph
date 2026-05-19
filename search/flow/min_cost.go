@@ -3,6 +3,8 @@ package flow
 import (
 	"container/heap"
 	"context"
+
+	"gograph/internal/metrics"
 )
 
 // CostNetwork extends [Network] with a per-edge cost. AddEdge takes
@@ -46,6 +48,7 @@ func (g *CostNetwork) AddCostEdge(src, dst, capacity, cost int) {
 // flow magnitude — adequate for assignment-style problems with
 // modest source/sink counts.
 func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
+	defer metrics.Time("search.flow.MinCostMaxFlow")()
 	out, c, _ := MinCostMaxFlowCtx(context.Background(), g, src, sink)
 	return out, c
 }
@@ -56,6 +59,7 @@ func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
 //
 //nolint:gocyclo // canonical SSP with potentials: init + per-iteration Dijkstra + augmentation
 func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (totalFlow, totalCost int, err error) {
+	defer metrics.Time("search.flow.MinCostMaxFlowCtx")()
 	n := g.N()
 	if n == 0 || src == sink {
 		return 0, 0, nil
@@ -68,6 +72,7 @@ func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (tota
 	parentEdge := make([]int, n)
 	for {
 		if cerr := ctx.Err(); cerr != nil {
+			metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)
 			return totalFlow, totalCost, cerr
 		}
 		// Dijkstra on reduced costs.

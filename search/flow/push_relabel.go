@@ -1,6 +1,10 @@
 package flow
 
-import "context"
+import (
+	"context"
+
+	"gograph/internal/metrics"
+)
 
 // PushRelabelMaxFlow computes the max-flow from src to sink in g
 // using the FIFO push-relabel algorithm (Goldberg-Tarjan 1988) with
@@ -11,6 +15,7 @@ import "context"
 // are decremented and the reverse edges incremented); callers
 // needing to re-run the algorithm should rebuild the network.
 func PushRelabelMaxFlow(g *Network, src, sink int) int {
+	defer metrics.Time("search.flow.PushRelabelMaxFlow")()
 	out, _ := PushRelabelMaxFlowCtx(context.Background(), g, src, sink)
 	return out
 }
@@ -23,6 +28,7 @@ func PushRelabelMaxFlow(g *Network, src, sink int) int {
 //
 //nolint:gocyclo // textbook FIFO push-relabel with gap heuristic
 func PushRelabelMaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
+	defer metrics.Time("search.flow.PushRelabelMaxFlowCtx")()
 	n := g.N()
 	if n == 0 || src == sink {
 		return 0, nil
@@ -66,6 +72,7 @@ func PushRelabelMaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int,
 		tick++
 		if tick&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.flow.PushRelabelMaxFlowCtx.errors", 1)
 				return excess[sink], err
 			}
 		}

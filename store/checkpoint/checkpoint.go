@@ -21,6 +21,7 @@ import (
 
 	"gograph/graph/csr"
 	"gograph/graph/lpg"
+	"gograph/internal/metrics"
 	"gograph/store/snapshot"
 	"gograph/store/wal"
 )
@@ -128,7 +129,12 @@ func (c *Checkpointer[N, W]) Stop() {
 // calls race ahead of the loop) Trigger can block indefinitely;
 // prefer TriggerCtx in production code to bound the latency.
 func (c *Checkpointer[N, W]) Trigger() error {
-	return c.TriggerCtx(context.Background())
+	defer metrics.Time("store.checkpoint.Trigger")()
+	err := c.TriggerCtx(context.Background())
+	if err != nil {
+		metrics.IncCounter("store.checkpoint.Trigger.errors", 1)
+	}
+	return err
 }
 
 // TriggerCtx requests a checkpoint and blocks until it completes,
@@ -136,19 +142,26 @@ func (c *Checkpointer[N, W]) Trigger() error {
 // in-flight, and stop-signal. Returns ctx.Err() wrapped on
 // cancellation or deadline expiry.
 func (c *Checkpointer[N, W]) TriggerCtx(ctx context.Context) error {
+	defer metrics.Time("store.checkpoint.TriggerCtx")()
 	done := make(chan error, 1)
 	select {
 	case c.triggerCh <- done:
 		// Submitted; now wait for the result.
 	case <-c.stopCh:
+		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
 		return errors.New("checkpoint: checkpointer stopped")
 	case <-ctx.Done():
+		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
 		return fmt.Errorf("checkpoint: trigger submit cancelled: %w", ctx.Err())
 	}
 	select {
 	case err := <-done:
+		if err != nil {
+			metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
+		}
 		return err
 	case <-ctx.Done():
+		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
 		return fmt.Errorf("checkpoint: trigger wait cancelled: %w", ctx.Err())
 	}
 }

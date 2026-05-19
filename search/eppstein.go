@@ -6,6 +6,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // EppsteinKShortest computes up to k loopless shortest paths from
@@ -20,6 +21,7 @@ import (
 // explored. On graphs where k is large the asymptotic improvement
 // over Yen materialises.
 func EppsteinKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
+	defer metrics.Time("search.EppsteinKShortest")()
 	out, _ := EppsteinKShortestCtx(context.Background(), c, src, dst, k)
 	return out
 }
@@ -30,6 +32,7 @@ func EppsteinKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []
 //
 //nolint:gocyclo // canonical heap-based k-shortest with loopless guard
 func EppsteinKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
+	defer metrics.Time("search.EppsteinKShortestCtx")()
 	if k <= 0 {
 		return nil, nil
 	}
@@ -51,6 +54,7 @@ func EppsteinKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst
 		tick++
 		if tick&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.EppsteinKShortestCtx.errors", 1)
 				return nil, err
 			}
 		}

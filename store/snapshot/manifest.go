@@ -17,6 +17,8 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"gograph/internal/metrics"
 )
 
 // ManifestVersion is the on-disk schema version this build writes.
@@ -48,19 +50,27 @@ type Manifest struct {
 
 // WriteManifest writes m to w in canonical (pretty-printed) JSON.
 func WriteManifest(w io.Writer, m Manifest) error {
+	defer metrics.Time("store.snapshot.WriteManifest")()
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(m)
+	if err := enc.Encode(m); err != nil {
+		metrics.IncCounter("store.snapshot.WriteManifest.errors", 1)
+		return err
+	}
+	return nil
 }
 
 // LoadManifest parses m from r. Returns [ErrManifestUnsupported]
 // when the version is newer than this build.
 func LoadManifest(r io.Reader) (Manifest, error) {
+	defer metrics.Time("store.snapshot.LoadManifest")()
 	var m Manifest
 	if err := json.NewDecoder(r).Decode(&m); err != nil {
+		metrics.IncCounter("store.snapshot.LoadManifest.errors", 1)
 		return Manifest{}, fmt.Errorf("%w: %v", ErrManifestCorrupted, err)
 	}
 	if m.Version > ManifestVersion {
+		metrics.IncCounter("store.snapshot.LoadManifest.errors", 1)
 		return Manifest{}, fmt.Errorf("%w: %d", ErrManifestUnsupported, m.Version)
 	}
 	return m, nil
@@ -69,10 +79,16 @@ func LoadManifest(r io.Reader) (Manifest, error) {
 // ReadManifestFile is a convenience wrapper around [os.Open] +
 // [LoadManifest].
 func ReadManifestFile(path string) (Manifest, error) {
+	defer metrics.Time("store.snapshot.ReadManifestFile")()
 	f, err := os.Open(path) //nolint:gosec // caller-supplied path
 	if err != nil {
+		metrics.IncCounter("store.snapshot.ReadManifestFile.errors", 1)
 		return Manifest{}, err
 	}
 	defer func() { _ = f.Close() }()
-	return LoadManifest(f)
+	m, err := LoadManifest(f)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.ReadManifestFile.errors", 1)
+	}
+	return m, err
 }

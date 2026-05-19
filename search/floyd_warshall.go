@@ -6,6 +6,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // APSP is an all-pairs shortest-paths distance matrix.
@@ -61,6 +62,7 @@ func (a *APSP[W]) N() int { return a.live }
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR; allocates its own working buffers per call.
 func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
+	defer metrics.Time("search.FloydWarshall")()
 	out, _ := FloydWarshallCtx(context.Background(), c)
 	return out
 }
@@ -71,6 +73,7 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 //
 //nolint:gocyclo // canonical Floyd-Warshall: live-mask compaction + matrix init + edge ingest + DP
 func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
+	defer metrics.Time("search.FloydWarshallCtx")()
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)
@@ -136,6 +139,7 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 	ikFound := make([]bool, live)
 	for k := 0; k < live; k++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.FloydWarshallCtx.errors", 1)
 			return nil, err
 		}
 		// Cooperative yield every 64 k-pivots so concurrent short

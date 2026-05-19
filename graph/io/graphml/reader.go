@@ -14,6 +14,7 @@ import (
 	"strconv"
 
 	"gograph/graph/adjlist"
+	"gograph/internal/metrics"
 )
 
 // keyDecl mirrors a <key> declaration in a GraphML document.
@@ -60,7 +61,12 @@ type docElement struct {
 // Returns the loaded list, the number of edges added, and an error
 // on parse failure.
 func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
-	return ReadIntoCtx(context.Background(), r)
+	defer metrics.Time("graph.io.graphml.ReadInto")()
+	a, n, err := ReadIntoCtx(context.Background(), r)
+	if err != nil {
+		metrics.IncCounter("graph.io.graphml.ReadInto.errors", 1)
+	}
+	return a, n, err
 }
 
 // ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
@@ -69,9 +75,11 @@ func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
 //
 //nolint:gocyclo // GraphML decode + key lookup + per-edge parse + ctx tick
 func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
+	defer metrics.Time("graph.io.graphml.ReadIntoCtx")()
 	dec := xml.NewDecoder(r)
 	var doc docElement
 	if err := dec.Decode(&doc); err != nil {
+		metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
 		return nil, 0, fmt.Errorf("graphml: parse: %w", err)
 	}
 	if len(doc.Graphs) == 0 {
@@ -87,6 +95,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 	for _, e := range g.Edges {
 		if added&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
 				return a, added, err
 			}
 		}

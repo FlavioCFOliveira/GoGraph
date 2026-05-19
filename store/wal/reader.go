@@ -7,6 +7,8 @@ import (
 	"io"
 	"iter"
 	"os"
+
+	"gograph/internal/metrics"
 )
 
 // Reader iterates the frames of a WAL file. It is read-only and
@@ -26,8 +28,10 @@ type Reader struct {
 
 // OpenReader opens path for read-only frame iteration.
 func OpenReader(path string) (*Reader, error) {
+	defer metrics.Time("store.wal.OpenReader")()
 	f, err := os.Open(path) //nolint:gosec // caller-supplied path is by-design
 	if err != nil {
+		metrics.IncCounter("store.wal.OpenReader.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: %w", path, err)
 	}
 	return NewReader(f, f), nil
@@ -107,12 +111,15 @@ func (r *Reader) decodeOne() (Frame, error) {
 // caller. After Replay returns, TailOffset/TailError describe where
 // and why iteration stopped (frame-level errors).
 func (r *Reader) Replay(apply func(Frame) error) error {
+	defer metrics.Time("store.wal.Replay")()
 	for f := range r.Frames() {
 		if err := apply(f); err != nil {
+			metrics.IncCounter("store.wal.Replay.errors", 1)
 			return err
 		}
 	}
 	if r.tailErr != nil && !errors.Is(r.tailErr, ErrTornFrame) {
+		metrics.IncCounter("store.wal.Replay.errors", 1)
 		return r.tailErr
 	}
 	return nil

@@ -7,6 +7,7 @@ import (
 	"gograph/ds"
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // MSTEdge identifies one edge in a minimum-spanning-tree result.
@@ -33,14 +34,21 @@ type MSTEdge[W Weight] struct {
 // Concurrency: KruskalMST is safe to invoke from any number of
 // goroutines on a shared CSR — it allocates its own working storage.
 func KruskalMST[W Weight](c *csr.CSR[W]) (edges []MSTEdge[W], totalWeight W, err error) {
-	return KruskalMSTCtx(context.Background(), c)
+	defer metrics.Time("search.KruskalMST")()
+	edges, totalWeight, err = KruskalMSTCtx(context.Background(), c)
+	if err != nil {
+		metrics.IncCounter("search.KruskalMST.errors", 1)
+	}
+	return edges, totalWeight, err
 }
 
 // KruskalMSTCtx is the context-aware variant of [KruskalMST]. ctx.Err()
 // is checked once before the sort and every 4096 edges during the
 // scan; on cancellation returns (nil, zero, wrapped ctx.Err()).
 func KruskalMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (edges []MSTEdge[W], totalWeight W, err error) {
+	defer metrics.Time("search.KruskalMSTCtx")()
 	if cerr := ctx.Err(); cerr != nil {
+		metrics.IncCounter("search.KruskalMSTCtx.errors", 1)
 		return nil, totalWeight, cerr
 	}
 	maxID := int(c.MaxNodeID())
@@ -71,6 +79,7 @@ func KruskalMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (edges []MSTEdg
 	for i, e := range cand {
 		if i&0xFFF == 0 {
 			if cerr := ctx.Err(); cerr != nil {
+				metrics.IncCounter("search.KruskalMSTCtx.errors", 1)
 				return nil, totalWeight, cerr
 			}
 		}

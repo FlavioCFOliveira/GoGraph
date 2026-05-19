@@ -3,7 +3,11 @@
 // global min-cut; future work will add min-cost max-flow.
 package flow
 
-import "context"
+import (
+	"context"
+
+	"gograph/internal/metrics"
+)
 
 // Network is a directed capacitated graph. It is stored as a sum of
 // forward and reverse-edge adjacency lists (one slice per node) so
@@ -49,6 +53,7 @@ func (g *Network) AddEdge(src, dst, capacity int) {
 // total flow. Complexity O(V^2 * E) general; O(E * sqrt(V)) on
 // unit-capacity networks.
 func MaxFlow(g *Network, src, sink int) int {
+	defer metrics.Time("search.flow.MaxFlow")()
 	out, _ := MaxFlowCtx(context.Background(), g, src, sink)
 	return out
 }
@@ -57,12 +62,14 @@ func MaxFlow(g *Network, src, sink int) int {
 // checked at every BFS-level rebuild (the outer Dinic phase boundary);
 // on cancellation returns (totalSoFar, wrapped ctx.Err()).
 func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
+	defer metrics.Time("search.flow.MaxFlowCtx")()
 	level := make([]int, g.N())
 	iter := make([]int, g.N())
 	stack := make([]int, 0, g.N())
 	total := 0
 	for {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.flow.MaxFlowCtx.errors", 1)
 			return total, err
 		}
 		if !buildLevel(g, src, sink, level) {

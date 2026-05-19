@@ -7,6 +7,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // CountTriangles returns the total number of triangles in the
@@ -26,6 +27,7 @@ import (
 // Concurrency: CountTriangles is safe to invoke concurrently on a
 // shared CSR.
 func CountTriangles[W any](c *csr.CSR[W]) (total int64, perNode []int64) {
+	defer metrics.Time("search.CountTriangles")()
 	total, perNode, _ = CountTrianglesCtx(context.Background(), c)
 	return total, perNode
 }
@@ -36,7 +38,9 @@ func CountTriangles[W any](c *csr.CSR[W]) (total int64, perNode []int64) {
 //
 //nolint:gocyclo // canonical degree-ordered node-iterator triangle count
 func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, perNode []int64, err error) {
+	defer metrics.Time("search.CountTrianglesCtx")()
 	if cerr := ctx.Err(); cerr != nil {
+		metrics.IncCounter("search.CountTrianglesCtx.errors", 1)
 		return 0, nil, cerr
 	}
 	n := int(c.MaxNodeID())
@@ -80,6 +84,7 @@ func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, 
 		loops++
 		if loops&0xFFF == 0 {
 			if cerr := ctx.Err(); cerr != nil {
+				metrics.IncCounter("search.CountTrianglesCtx.errors", 1)
 				return 0, nil, cerr
 			}
 		}

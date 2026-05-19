@@ -13,6 +13,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/adjlist"
+	"gograph/internal/metrics"
 )
 
 var _ = io.Discard
@@ -21,7 +22,12 @@ var _ = io.Discard
 // uses 'digraph' for directed graphs and 'graph' for undirected.
 // Edge weights are emitted as a label="..." attribute when non-zero.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
-	return WriteCtx(context.Background(), w, a)
+	defer metrics.Time("graph.io.dot.Write")()
+	err := WriteCtx(context.Background(), w, a)
+	if err != nil {
+		metrics.IncCounter("graph.io.dot.Write.errors", 1)
+	}
+	return err
 }
 
 // WriteCtx is the context-aware variant of [Write]. ctx.Err() is
@@ -30,6 +36,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 //
 //nolint:gocyclo // DOT write: header + per-source resolve + per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
+	defer metrics.Time("graph.io.dot.WriteCtx")()
 	bw := bufio.NewWriterSize(w, 64*1024)
 	edgeOp := "->"
 	header := "digraph G {\n"
@@ -38,6 +45,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		edgeOp = "--"
 	}
 	if _, err := bw.WriteString(header); err != nil {
+		metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 		return err
 	}
 	maxID := uint64(a.MaxNodeID())
@@ -63,6 +71,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	for id := uint64(0); id < maxID; id++ {
 		if err := ctx.Err(); err != nil {
 			_ = bw.Flush()
+			metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 			return err
 		}
 		if !live[id] {
@@ -84,14 +93,20 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			}
 			line := fmt.Sprintf("  %s %s %s%s;\n", quote(srcName), edgeOp, quote(dstName), label)
 			if _, err := bw.WriteString(line); err != nil {
+				metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 				return err
 			}
 		}
 	}
 	if _, err := bw.WriteString("}\n"); err != nil {
+		metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 		return err
 	}
-	return bw.Flush()
+	if err := bw.Flush(); err != nil {
+		metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
+		return err
+	}
+	return nil
 }
 
 // quote escapes a DOT identifier when it contains characters

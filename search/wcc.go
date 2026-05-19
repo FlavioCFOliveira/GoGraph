@@ -5,6 +5,7 @@ import (
 
 	"gograph/ds"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // WCC computes the weakly-connected components of c — equivalence
@@ -20,14 +21,21 @@ import (
 //
 // Concurrency: WCC is safe to invoke concurrently on a shared CSR.
 func WCC[W any](c *csr.CSR[W]) (component []int, k int, err error) {
-	return WCCCtx(context.Background(), c)
+	defer metrics.Time("search.WCC")()
+	component, k, err = WCCCtx(context.Background(), c)
+	if err != nil {
+		metrics.IncCounter("search.WCC.errors", 1)
+	}
+	return component, k, err
 }
 
 // WCCCtx is the context-aware variant of [WCC]. ctx.Err() is checked
 // once before the union sweep and once before the relabel sweep; on
 // cancellation returns (nil, 0, wrapped ctx.Err()).
 func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, err error) {
+	defer metrics.Time("search.WCCCtx")()
 	if cerr := ctx.Err(); cerr != nil {
+		metrics.IncCounter("search.WCCCtx.errors", 1)
 		return nil, 0, cerr
 	}
 	maxID := int(c.MaxNodeID())
@@ -44,6 +52,7 @@ func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, 
 		}
 	}
 	if cerr := ctx.Err(); cerr != nil {
+		metrics.IncCounter("search.WCCCtx.errors", 1)
 		return nil, 0, cerr
 	}
 	component = make([]int, maxID)

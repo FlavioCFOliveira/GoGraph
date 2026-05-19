@@ -8,13 +8,19 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/adjlist"
+	"gograph/internal/metrics"
 )
 
 // Write streams every node and edge of a to w as JSON Lines. Nodes
 // come first, then edges, so that on-read every endpoint is known
 // before its referencing edge.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) (int, error) {
-	return WriteCtx(context.Background(), w, a)
+	defer metrics.Time("graph.io.jsonl.Write")()
+	n, err := WriteCtx(context.Background(), w, a)
+	if err != nil {
+		metrics.IncCounter("graph.io.jsonl.Write.errors", 1)
+	}
+	return n, err
 }
 
 // WriteCtx is the context-aware variant of [Write]. ctx.Err() is
@@ -23,6 +29,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) (int, error) {
 //
 //nolint:gocyclo // JSONL write: per-node and per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) (int, error) {
+	defer metrics.Time("graph.io.jsonl.WriteCtx")()
 	bw := bufio.NewWriterSize(w, 64*1024)
 	enc := json.NewEncoder(bw)
 	enc.SetEscapeHTML(false)
@@ -43,6 +50,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			continue
 		}
 		if err := enc.Encode(Record{Type: "node", ID: names[id]}); err != nil {
+			metrics.IncCounter("graph.io.jsonl.WriteCtx.errors", 1)
 			return written, err
 		}
 		written++
@@ -57,6 +65,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if written&0xFFF == 0 {
 				if cerr := ctx.Err(); cerr != nil {
 					_ = bw.Flush()
+					metrics.IncCounter("graph.io.jsonl.WriteCtx.errors", 1)
 					return written, cerr
 				}
 			}
@@ -64,12 +73,14 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 				continue
 			}
 			if err := enc.Encode(Record{Type: "edge", Src: src, Dst: names[uint64(n)], Weight: ws[i]}); err != nil {
+				metrics.IncCounter("graph.io.jsonl.WriteCtx.errors", 1)
 				return written, err
 			}
 			written++
 		}
 	}
 	if err := bw.Flush(); err != nil {
+		metrics.IncCounter("graph.io.jsonl.WriteCtx.errors", 1)
 		return written, err
 	}
 	return written, nil

@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // BCCResult bundles every output of [HopcroftTarjanBCC]: the
@@ -35,6 +36,7 @@ type BCCResult struct {
 // The implementation uses an explicit DFS stack (no recursion) so
 // it survives deep graphs.
 func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
+	defer metrics.Time("search.HopcroftTarjanBCC")()
 	out, _ := HopcroftTarjanBCCCtx(context.Background(), c)
 	return out
 }
@@ -45,6 +47,7 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 //
 //nolint:gocyclo // canonical Hopcroft-Tarjan: DFS frame stack + edge-stack + articulation + bridge detection
 func HopcroftTarjanBCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (BCCResult, error) {
+	defer metrics.Time("search.HopcroftTarjanBCCCtx")()
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -78,6 +81,7 @@ func HopcroftTarjanBCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (BCCResult,
 			continue
 		}
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.HopcroftTarjanBCCCtx.errors", 1)
 			return BCCResult{}, err
 		}
 		disc[start] = timer

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // KCore computes the coreness number of every vertex in c via the
@@ -19,6 +20,7 @@ import (
 //
 // Concurrency: KCore is safe to invoke concurrently on a shared CSR.
 func KCore[W any](c *csr.CSR[W]) []int {
+	defer metrics.Time("search.KCore")()
 	out, _ := KCoreCtx(context.Background(), c)
 	return out
 }
@@ -29,6 +31,7 @@ func KCore[W any](c *csr.CSR[W]) []int {
 //
 //nolint:gocyclo // canonical Batagelj-Zaversnik bucket-peel
 func KCoreCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]int, error) {
+	defer metrics.Time("search.KCoreCtx")()
 	n := int(c.MaxNodeID())
 	if n == 0 {
 		return nil, nil
@@ -77,6 +80,7 @@ func KCoreCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]int, error) {
 		peelCount++
 		if peelCount&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.KCoreCtx.errors", 1)
 				return nil, err
 			}
 		}

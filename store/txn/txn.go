@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"gograph/graph/lpg"
+	"gograph/internal/metrics"
 	"gograph/store/wal"
 )
 
@@ -60,6 +61,7 @@ func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 // Begin opens a new transaction. The returned Tx holds the
 // store's single-writer mutex until Commit or Rollback runs.
 func (s *Store[N, W]) Begin() *Tx[N, W] {
+	defer metrics.Time("store.txn.Begin")()
 	tx, _ := s.BeginCtx(context.Background())
 	return tx
 }
@@ -69,7 +71,9 @@ func (s *Store[N, W]) Begin() *Tx[N, W] {
 // (nil, wrapped ctx.Err). Once the lock is held the transaction
 // proceeds; further ctx checks happen at the caller's discretion.
 func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
+	defer metrics.Time("store.txn.BeginCtx")()
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("store.txn.BeginCtx.errors", 1)
 		return nil, err
 	}
 	s.mu.Lock()
@@ -124,7 +128,9 @@ func (t *Tx[N, W]) SetEdgeLabel(src, dst N, label string) error {
 // Commit fsync-appends every buffered op to the WAL and only then
 // applies it to the in-memory graph.
 func (t *Tx[N, W]) Commit() error {
+	defer metrics.Time("store.txn.Commit")()
 	if t.finished {
+		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return ErrTxFinished
 	}
 	defer t.release()
@@ -135,10 +141,12 @@ func (t *Tx[N, W]) Commit() error {
 	for _, op := range t.ops {
 		payload := encodeOp(op)
 		if err := t.store.wal.Append(payload); err != nil {
+			metrics.IncCounter("store.txn.Commit.errors", 1)
 			return err
 		}
 	}
 	if err := t.store.wal.Sync(); err != nil {
+		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return err
 	}
 	// Apply to the in-memory graph after durability is secured.
@@ -150,7 +158,9 @@ func (t *Tx[N, W]) Commit() error {
 
 // Rollback discards buffered ops without touching the WAL or graph.
 func (t *Tx[N, W]) Rollback() error {
+	defer metrics.Time("store.txn.Rollback")()
 	if t.finished {
+		metrics.IncCounter("store.txn.Rollback.errors", 1)
 		return ErrTxFinished
 	}
 	t.release()

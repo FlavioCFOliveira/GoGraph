@@ -15,6 +15,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // LeidenOptions configures [Leiden].
@@ -69,6 +70,7 @@ type Partition struct {
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR.
 func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
+	defer metrics.Time("search.community.Leiden")()
 	out, _ := LeidenCtx(context.Background(), c, opts)
 	return out
 }
@@ -79,6 +81,7 @@ func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 //
 //nolint:gocyclo // canonical Leiden: defaults + pass loop dispatches three phases through helpers
 func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (Partition, error) {
+	defer metrics.Time("search.community.LeidenCtx")()
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 64
 	}
@@ -109,6 +112,7 @@ func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (P
 	prevQ := g.modularity(comm, opts.Resolution)
 	for pass := 0; pass < opts.MaxPasses; pass++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.community.LeidenCtx.errors", 1)
 			return Partition{}, err
 		}
 		runtime.Gosched()

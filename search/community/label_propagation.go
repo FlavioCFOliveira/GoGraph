@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // LabelPropagationOptions configures [LabelPropagation].
@@ -27,6 +28,7 @@ func DefaultLabelPropagationOptions() LabelPropagationOptions {
 //
 // Complexity is O(k * (V + E)) for k iterations.
 func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partition {
+	defer metrics.Time("search.community.LabelPropagation")()
 	out, _ := LabelPropagationCtx(context.Background(), c, opts)
 	return out
 }
@@ -37,6 +39,7 @@ func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partit
 //
 //nolint:gocyclo // textbook label propagation: defaults + live mask + iteration loop + tie-break
 func LabelPropagationCtx[W any](ctx context.Context, c *csr.CSR[W], opts LabelPropagationOptions) (Partition, error) {
+	defer metrics.Time("search.community.LabelPropagationCtx")()
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 16
 	}
@@ -63,6 +66,7 @@ func LabelPropagationCtx[W any](ctx context.Context, c *csr.CSR[W], opts LabelPr
 	touched := make([]int, 0, 32)
 	for iter := 0; iter < opts.MaxIterations; iter++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.community.LabelPropagationCtx.errors", 1)
 			return Partition{}, err
 		}
 		changed := false

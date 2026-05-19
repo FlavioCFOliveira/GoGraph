@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // HierholzerUndirected computes an Eulerian circuit (or path) over
@@ -19,7 +20,12 @@ import (
 // exactly two vertices may have odd degree (these become the path's
 // endpoints).
 func HierholzerUndirected[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
-	return HierholzerUndirectedCtx(context.Background(), c)
+	defer metrics.Time("search.HierholzerUndirected")()
+	res, err := HierholzerUndirectedCtx(context.Background(), c)
+	if err != nil {
+		metrics.IncCounter("search.HierholzerUndirected.errors", 1)
+	}
+	return res, err
 }
 
 // HierholzerUndirectedCtx is the context-aware variant of
@@ -28,6 +34,7 @@ func HierholzerUndirected[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
 //
 //nolint:gocyclo // canonical Hierholzer with twin-edge consumption
 func HierholzerUndirectedCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
+	defer metrics.Time("search.HierholzerUndirectedCtx")()
 	maxID := int(c.MaxNodeID())
 	if maxID == 0 {
 		return nil, nil
@@ -40,6 +47,7 @@ func HierholzerUndirectedCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph
 	if len(edges)%2 != 0 {
 		// A symmetric CSR must have an even total edge count; an odd
 		// count means c isn't an undirected encoding.
+		metrics.IncCounter("search.HierholzerUndirectedCtx.errors", 1)
 		return nil, ErrNoEulerian
 	}
 	// Build the twin index: twin[k] is the position in edges[] of
@@ -57,6 +65,7 @@ func HierholzerUndirectedCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph
 	// odd-degree vertices.
 	start, ok := pickUndirectedStart(deg, maxID)
 	if !ok {
+		metrics.IncCounter("search.HierholzerUndirectedCtx.errors", 1)
 		return nil, ErrNoEulerian
 	}
 
@@ -72,6 +81,7 @@ func HierholzerUndirectedCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph
 	for len(stack) > 0 {
 		if stepCount&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.HierholzerUndirectedCtx.errors", 1)
 				return nil, err
 			}
 		}
@@ -95,6 +105,7 @@ func HierholzerUndirectedCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph
 	}
 	expectedLen := len(edges)/2 + 1
 	if len(trail) != expectedLen {
+		metrics.IncCounter("search.HierholzerUndirectedCtx.errors", 1)
 		return nil, ErrNoEulerian
 	}
 	for i, j := 0, len(trail)-1; i < j; i, j = i+1, j-1 {

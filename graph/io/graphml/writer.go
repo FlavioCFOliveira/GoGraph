@@ -8,6 +8,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/adjlist"
+	"gograph/internal/metrics"
 )
 
 // Write streams a GraphML document representing a to w. The output
@@ -15,7 +16,12 @@ import (
 // inferred from a, a <key for=edge attr.name=weight attr.type=long>
 // declaration, and one <node>/<edge> per node and edge.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
-	return WriteCtx(context.Background(), w, a)
+	defer metrics.Time("graph.io.graphml.Write")()
+	err := WriteCtx(context.Background(), w, a)
+	if err != nil {
+		metrics.IncCounter("graph.io.graphml.Write.errors", 1)
+	}
+	return err
 }
 
 // WriteCtx is the context-aware variant of [Write]. ctx.Err() is
@@ -24,7 +30,9 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 //
 //nolint:gocyclo // GraphML write: XML header + key declaration + graph open + nodes + edges + close
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
+	defer metrics.Time("graph.io.graphml.WriteCtx")()
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("graph.io.graphml.WriteCtx.errors", 1)
 		return err
 	}
 	if _, err := io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>`+"\n"); err != nil {

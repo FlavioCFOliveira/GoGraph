@@ -19,6 +19,7 @@ import (
 
 	"gograph/graph/adjlist"
 	"gograph/graph/lpg"
+	"gograph/internal/metrics"
 	"gograph/store/snapshot"
 	"gograph/store/txn"
 	"gograph/store/wal"
@@ -43,7 +44,9 @@ type Op struct {
 
 // Decode parses one payload back into an [Op].
 func Decode(payload []byte) (Op, error) {
+	defer metrics.Time("store.recovery.Decode")()
 	if len(payload) < 1 {
+		metrics.IncCounter("store.recovery.Decode.errors", 1)
 		return Op{}, errors.New("recovery: short payload")
 	}
 	op := Op{Kind: txn.OpKind(payload[0])}
@@ -59,22 +62,26 @@ func Decode(payload []byte) (Op, error) {
 	for _, ptr := range []*[]byte{&op.SrcBytes, &op.DstBytes} {
 		lenb, err := read(2)
 		if err != nil {
+			metrics.IncCounter("store.recovery.Decode.errors", 1)
 			return Op{}, err
 		}
 		n := int(binary.LittleEndian.Uint16(lenb))
 		buf, err := read(n)
 		if err != nil {
+			metrics.IncCounter("store.recovery.Decode.errors", 1)
 			return Op{}, err
 		}
 		*ptr = append([]byte(nil), buf...)
 	}
 	lenb, err := read(2)
 	if err != nil {
+		metrics.IncCounter("store.recovery.Decode.errors", 1)
 		return Op{}, err
 	}
 	n := int(binary.LittleEndian.Uint16(lenb))
 	lbl, err := read(n)
 	if err != nil {
+		metrics.IncCounter("store.recovery.Decode.errors", 1)
 		return Op{}, err
 	}
 	op.Label = string(lbl)
@@ -91,7 +98,12 @@ func Decode(payload []byte) (Op, error) {
 // the byte src/dst back to N. Future N types are added by mirroring
 // this constructor.
 func OpenString(dir string) (Result[string, int64], error) {
-	return OpenStringCtx(context.Background(), dir)
+	defer metrics.Time("store.recovery.OpenString")()
+	res, err := OpenStringCtx(context.Background(), dir)
+	if err != nil {
+		metrics.IncCounter("store.recovery.OpenString.errors", 1)
+	}
+	return res, err
 }
 
 // OpenStringCtx is the context-aware variant of [OpenString]. ctx.Err()
@@ -101,15 +113,18 @@ func OpenString(dir string) (Result[string, int64], error) {
 //
 //nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
 func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], error) {
+	defer metrics.Time("store.recovery.OpenStringCtx")()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	res := Result[string, int64]{Graph: g}
 
 	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
 		return res, err
 	}
 	snapDir := filepath.Join(dir, "snapshot")
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		if _, err := snapshot.Open(snapDir); err != nil {
+			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
 			return res, fmt.Errorf("recovery: snapshot open: %w", err)
 		}
 		res.SnapshotHit = true
@@ -120,16 +135,19 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 		if errors.Is(err, os.ErrNotExist) {
 			return res, nil
 		}
+		metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
 		return res, err
 	}
 	r, err := wal.OpenReader(walPath)
 	if err != nil {
+		metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
 		return res, err
 	}
 	defer func() { _ = r.Close() }()
 	for f := range r.Frames() {
 		if res.WALOps&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
 				return res, err
 			}
 		}

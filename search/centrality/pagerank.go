@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // ErrInvalidInput is returned by centrality algorithms when their
@@ -57,7 +58,12 @@ func DefaultPageRankOptions() PageRankOptions {
 // total mass is conserved and the result is a true stationary
 // distribution.
 func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
-	return PageRankCtx(context.Background(), c, opts)
+	defer metrics.Time("search.centrality.PageRank")()
+	ranks, iterations, err = PageRankCtx(context.Background(), c, opts)
+	if err != nil {
+		metrics.IncCounter("search.centrality.PageRank.errors", 1)
+	}
+	return ranks, iterations, err
 }
 
 // PageRankCtx is the context-aware variant of [PageRank]. ctx.Err()
@@ -66,7 +72,9 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 //
 //nolint:gocyclo // canonical power-iteration: defaults + live detection + iteration loop
 func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	defer metrics.Time("search.centrality.PageRankCtx")()
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
 		return nil, 0, ErrInvalidInput
 	}
 	if opts.Damping == 0 {
@@ -127,6 +135,7 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
 		if cerr := ctx.Err(); cerr != nil {
+			metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
 			return nil, 0, cerr
 		}
 		// Dangling mass: sum of cur[i] for live nodes with no out-edges.

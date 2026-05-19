@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // PrimMST computes a minimum spanning tree of c rooted at src using
@@ -22,13 +23,19 @@ import (
 // Concurrency: PrimMST is safe to invoke concurrently on a shared
 // CSR — it allocates its own working storage.
 func PrimMST[W Weight](c *csr.CSR[W], src graph.NodeID) (parent []graph.NodeID, found []bool, totalWeight W, err error) {
-	return PrimMSTCtx(context.Background(), c, src)
+	defer metrics.Time("search.PrimMST")()
+	parent, found, totalWeight, err = PrimMSTCtx(context.Background(), c, src)
+	if err != nil {
+		metrics.IncCounter("search.PrimMST.errors", 1)
+	}
+	return parent, found, totalWeight, err
 }
 
 // PrimMSTCtx is the context-aware variant of [PrimMST]. ctx.Err() is
 // checked every 4096 heap pops; on cancellation returns
 // (nil, nil, zero, wrapped ctx.Err()).
 func PrimMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (parent []graph.NodeID, found []bool, totalWeight W, err error) {
+	defer metrics.Time("search.PrimMSTCtx")()
 	verts := c.VerticesSlice()
 	if uint64(src)+1 >= uint64(len(verts)) {
 		return nil, nil, totalWeight, nil
@@ -52,6 +59,7 @@ func PrimMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) 
 	for h.len() > 0 {
 		if popCount&0xFFF == 0 {
 			if cerr := ctx.Err(); cerr != nil {
+				metrics.IncCounter("search.PrimMSTCtx.errors", 1)
 				return nil, nil, totalWeight, cerr
 			}
 		}

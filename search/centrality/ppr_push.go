@@ -5,6 +5,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // PPRPushOptions controls [PersonalisedPushPageRank].
@@ -40,7 +41,12 @@ func DefaultPPRPushOptions() PPRPushOptions {
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR.
 func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
-	return PersonalisedPushPageRankCtx(context.Background(), c, src, opts)
+	defer metrics.Time("search.centrality.PersonalisedPushPageRank")()
+	res, err := PersonalisedPushPageRankCtx(context.Background(), c, src, opts)
+	if err != nil {
+		metrics.IncCounter("search.centrality.PersonalisedPushPageRank.errors", 1)
+	}
+	return res, err
 }
 
 // PersonalisedPushPageRankCtx is the context-aware variant of
@@ -49,7 +55,9 @@ func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPu
 //
 //nolint:gocyclo // canonical ACL push: defaults + worklist loop + dangling teleport
 func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
+	defer metrics.Time("search.centrality.PersonalisedPushPageRankCtx")()
 	if hasInvalidFloat(opts.Damping, opts.Epsilon) {
+		metrics.IncCounter("search.centrality.PersonalisedPushPageRankCtx.errors", 1)
 		return nil, ErrInvalidInput
 	}
 	if opts.Damping == 0 {
@@ -97,6 +105,7 @@ func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src 
 	for qh := 0; qh < len(queue) && steps < opts.MaxSteps; qh++ {
 		if steps&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.centrality.PersonalisedPushPageRankCtx.errors", 1)
 				return nil, err
 			}
 		}

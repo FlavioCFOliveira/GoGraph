@@ -8,6 +8,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // reflectTypeOf is named so it can be inlined / monkey-patched in
@@ -161,18 +162,25 @@ type dijkstraState[W Weight] struct {
 // (e.g. Yen's k-shortest-paths), prefer the zero-allocation primitive
 // [DijkstraInto].
 func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
-	return DijkstraCtx(context.Background(), c, src)
+	defer metrics.Time("search.Dijkstra")()
+	res, err := DijkstraCtx(context.Background(), c, src)
+	if err != nil {
+		metrics.IncCounter("search.Dijkstra.errors", 1)
+	}
+	return res, err
 }
 
 // DijkstraCtx is the context-aware variant of [Dijkstra]. ctx.Err()
 // is checked every 4096 heap pops; on cancellation it returns
 // (nil, wrapped ctx.Err()).
 func DijkstraCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
+	defer metrics.Time("search.DijkstraCtx")()
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)
 
 	if err := dijkstraCore[W](ctx, c, src, st.dist[:maxID], st.parent[:maxID], st.found[:maxID], &st.heap); err != nil {
+		metrics.IncCounter("search.DijkstraCtx.errors", 1)
 		return nil, err
 	}
 	return newDistancesCopy(st, src, maxID), nil
@@ -205,13 +213,19 @@ func DijkstraInto[W Weight](
 	parent []graph.NodeID,
 	found []bool,
 ) error {
+	defer metrics.Time("search.DijkstraInto")()
 	maxID := uint64(c.MaxNodeID())
 	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {
+		metrics.IncCounter("search.DijkstraInto.errors", 1)
 		return ErrBufferTooSmall
 	}
 	h := acquireDijkHeap[W]()
 	defer releaseDijkHeap(h)
-	return dijkstraCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID], h)
+	err := dijkstraCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID], h)
+	if err != nil {
+		metrics.IncCounter("search.DijkstraInto.errors", 1)
+	}
+	return err
 }
 
 // dijkstraCore is the shared traversal body invoked by both

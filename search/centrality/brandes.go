@@ -9,6 +9,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // Betweenness computes the exact betweenness centrality of every
@@ -19,6 +20,7 @@ import (
 // (n-1)(n-2)/2 (undirected) or (n-1)(n-2) (directed) for the
 // classical normalised score.
 func Betweenness[W any](c *csr.CSR[W]) []float64 {
+	defer metrics.Time("search.centrality.Betweenness")()
 	out, _ := BetweennessCtx(context.Background(), c)
 	return out
 }
@@ -27,6 +29,7 @@ func Betweenness[W any](c *csr.CSR[W]) []float64 {
 // ctx.Err() is checked once per source vertex; on cancellation
 // returns (nil, wrapped ctx.Err()).
 func BetweennessCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]float64, error) {
+	defer metrics.Time("search.centrality.BetweennessCtx")()
 	maxID := int(c.MaxNodeID())
 	cb := make([]float64, maxID)
 	if maxID == 0 {
@@ -43,6 +46,7 @@ func BetweennessCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]float64, error
 
 	for s := 0; s < maxID; s++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.centrality.BetweennessCtx.errors", 1)
 			return nil, err
 		}
 		if s&0x3F == 0 {

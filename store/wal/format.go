@@ -13,6 +13,8 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+
+	"gograph/internal/metrics"
 )
 
 // Magic is the 4-byte identifier prefix of every WAL frame: ASCII
@@ -57,6 +59,7 @@ type Frame struct {
 // Encode writes f to w as a single binary frame. It returns the
 // number of bytes written and any underlying writer error.
 func Encode(w io.Writer, f Frame) (int, error) {
+	defer metrics.Time("store.wal.Encode")()
 	if f.Version == 0 {
 		f.Version = CurrentVersion
 	}
@@ -74,6 +77,9 @@ func Encode(w io.Writer, f Frame) (int, error) {
 	binary.LittleEndian.PutUint32(header[10:14], crc)
 
 	n, err := w.Write(header)
+	if err != nil {
+		metrics.IncCounter("store.wal.Encode.errors", 1)
+	}
 	return n, err
 }
 
@@ -83,18 +89,23 @@ func Encode(w io.Writer, f Frame) (int, error) {
 // version, and ErrCRCMismatch on integrity failure. Any other error
 // is propagated from the underlying reader.
 func Decode(r io.Reader) (Frame, error) {
+	defer metrics.Time("store.wal.Decode")()
 	var head [HeaderSize]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			metrics.IncCounter("store.wal.Decode.errors", 1)
 			return Frame{}, ErrTornFrame
 		}
+		metrics.IncCounter("store.wal.Decode.errors", 1)
 		return Frame{}, err
 	}
 	if head[0] != Magic[0] || head[1] != Magic[1] || head[2] != Magic[2] || head[3] != Magic[3] {
+		metrics.IncCounter("store.wal.Decode.errors", 1)
 		return Frame{}, ErrBadMagic
 	}
 	version := binary.LittleEndian.Uint16(head[4:6])
 	if version > CurrentVersion {
+		metrics.IncCounter("store.wal.Decode.errors", 1)
 		return Frame{}, ErrUnsupportedVersion
 	}
 	plen := binary.LittleEndian.Uint32(head[6:10])
@@ -104,14 +115,17 @@ func Decode(r io.Reader) (Frame, error) {
 	if plen > 0 {
 		if _, err := io.ReadFull(r, payload); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				metrics.IncCounter("store.wal.Decode.errors", 1)
 				return Frame{}, ErrTornFrame
 			}
+			metrics.IncCounter("store.wal.Decode.errors", 1)
 			return Frame{}, err
 		}
 	}
 	gotCRC := crc32.Update(0, castagnoli, head[0:10])
 	gotCRC = crc32.Update(gotCRC, castagnoli, payload)
 	if gotCRC != expectCRC {
+		metrics.IncCounter("store.wal.Decode.errors", 1)
 		return Frame{}, ErrCRCMismatch
 	}
 	return Frame{Version: version, Payload: payload}, nil

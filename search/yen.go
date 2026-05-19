@@ -6,6 +6,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // YenPath is one shortest path produced by [YenKShortest].
@@ -26,6 +27,7 @@ type YenPath[W Weight] struct {
 // or implicit-path representations, prefer Eppstein's algorithm
 // (scheduled for a later task).
 func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
+	defer metrics.Time("search.YenKShortest")()
 	out, _ := YenKShortestCtx(context.Background(), c, src, dst, k)
 	return out
 }
@@ -41,6 +43,7 @@ func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPa
 //
 //nolint:gocyclo // canonical Yen: initial Dijkstra + k-1 spur rounds + candidate sort
 func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
+	defer metrics.Time("search.YenKShortestCtx")()
 	if k <= 0 {
 		return nil, nil
 	}
@@ -49,6 +52,7 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 	scr := newYenScratch[W](maxID)
 
 	if err := DijkstraInto(ctx, c, src, scr.dist, scr.parent, scr.found); err != nil {
+		metrics.IncCounter("search.YenKShortestCtx.errors", 1)
 		return nil, err
 	}
 	if !scr.found[uint64(dst)] {
@@ -77,6 +81,7 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 
 	for i := 1; i < k; i++ {
 		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.YenKShortestCtx.errors", 1)
 			return nil, err
 		}
 		prevPath := result[i-1].Nodes

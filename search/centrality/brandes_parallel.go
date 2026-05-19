@@ -7,6 +7,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/csr"
+	"gograph/internal/metrics"
 )
 
 // BetweennessParallel computes the exact (unweighted) betweenness
@@ -21,6 +22,7 @@ import (
 // below ~1024) the parallel overhead dominates and the serial
 // [Betweenness] is preferable.
 func BetweennessParallel[W any](c *csr.CSR[W], numWorkers int) []float64 {
+	defer metrics.Time("search.centrality.BetweennessParallel")()
 	out, _ := BetweennessParallelCtx(context.Background(), c, numWorkers)
 	return out
 }
@@ -30,6 +32,7 @@ func BetweennessParallel[W any](c *csr.CSR[W], numWorkers int) []float64 {
 // source vertex inside every worker; on cancellation returns
 // (nil, wrapped ctx.Err()).
 func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorkers int) ([]float64, error) {
+	defer metrics.Time("search.centrality.BetweennessParallelCtx")()
 	n := int(c.MaxNodeID())
 	cb := make([]float64, n)
 	if n == 0 {
@@ -74,6 +77,7 @@ func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorker
 	wg.Wait()
 	for _, r := range results {
 		if r.err != nil {
+			metrics.IncCounter("search.centrality.BetweennessParallelCtx.errors", 1)
 			return nil, r.err
 		}
 	}
