@@ -36,6 +36,14 @@ type Assignment struct {
 // contains any NaN or +/-Inf entry — the dual potentials accumulate
 // across iterations and a single non-finite value silently corrupts
 // the entire run, so validation is mandatory.
+//
+// v1 limitation. Hungarian is float64-only; the [Weight] constraint
+// supports both integer and float types, but Hungarian's dual-update
+// step requires a representable "infinity" sentinel that Go's generics
+// cannot cleanly produce for arbitrary named numeric types
+// (math.MaxFloat64 is not assignable to a ~int8 or ~uint64 W).
+// Integer-weighted assignment is therefore deferred; callers with
+// integer cost matrices should currently convert to float64.
 func Hungarian(cost []float64, n, m int) (Assignment, error) {
 	return HungarianCtx(context.Background(), cost, n, m)
 }
