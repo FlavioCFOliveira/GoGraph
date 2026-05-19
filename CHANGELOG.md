@@ -6,16 +6,108 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-This entry tracks every change accumulated after the v1.0.0 tag. The
-Sprint 8 correctness-hardening pass introduces breaking signature
-changes (`Hungarian`, `PageRank`, `PersonalisedPushPageRank`,
-`extern.PageRank` now all return an `error`); per [`docs/semver.md`](docs/semver.md)
-the next release tag will therefore be **v1.1.0** (not v1.0.1 as
-originally scoped — the audit's corrective-patch plan no longer
-fits semver once breaking signatures land). The actual tag is cut
-in Sprint 13 task #166.
+(no unreleased work — the next entry below is the live release)
 
-### Added
+## [1.1.0] — 2026-05-19
+
+Six sprints (8–13) of correctness, observability, hot-path
+optimisation, algorithm completeness, and release hygiene. The
+release closes the v1.0.0 audit and ships the first set of post-1.0
+algorithmic and reliability work.
+
+### Added — Sprint 9 (Concurrency Contract)
+
+- `context.Context` is now accepted by every public blocking API in
+  `search/`, `search/centrality/`, `search/community/`,
+  `search/flow/`, `search/extern/`, `graph/io/`, `store/` so every
+  long-running call honours cancellation and deadlines.
+- `goleak.VerifyTestMain` adopted by every package that spawns
+  goroutines so leaks fail the test pass.
+
+### Added — Sprint 10 (Observability)
+
+- `internal/metrics` Prometheus-style histogram hook on every
+  public blocking API.
+- `pprof.SetGoroutineLabels` on every long-lived goroutine.
+- `docs/benchmarks/` archive with multi-concurrency-level numbers.
+- `govulncheck` job in CI (daily schedule).
+- `internal/stress` concurrency stress suite — new CI job runs the
+  suite under `-race` on every PR.
+- `csrfile` crash-injection fuzz test for truncation recovery.
+
+### Added — Sprint 11 (Hot-path Optimisation)
+
+- `search.DijkstraInto`, `search.BellmanFordInto`, `search.AStarInto`
+  — zero-allocation primitives that operate on caller-provided
+  scratch slices (`BenchmarkDijkstra_PostWarmup` allocs/op == 0).
+- Type-switch per-W `sync.Pool` dispatch (Dijkstra heap acquire
+  drops from 5.4 ns/op to 1.08 ns/op).
+- BFS index-head queue across Brandes / PPR-push / Topo /
+  Dinic / Leiden (Brandes allocs/op −70.8 %).
+- Leiden / LabelPropagation scratch+touched-list replaces the per-
+  vertex `map[int]float64`/`map[int]int` (`BenchmarkLeiden` at
+  V=1e5: 5.12x faster, allocs/op −99.96 %).
+- BFS-DO inline bitmap frontier + pooled scratch + Beamer beta
+  switch-back (6.08x vs vanilla top-down on power-law graphs).
+- Iterative DFS for `flow.Dinic` augmentFlow and
+  `search.HopcroftKarp` dfsAugment (no goroutine-stack growth at
+  V=1e7).
+- Floyd-Warshall column materialisation.
+- Hierholzer trail pre-allocation.
+- PageRank `outdeg` changed from `float64` to `uint32` (memory
+  −50 % on that slice).
+- SPFA + SLF deque for Bellman-Ford (4.17x on dense graphs).
+- Yen candidate arena (Yen K100 allocs/op −96.65 %).
+- `slices.Sort` in `extern/bfs.go`.
+- `graph.Mapper.Walk` for shard-batched name lookup; IO writers
+  use it to amortise `Resolve` shard-lock acquisitions.
+- `strconv.FormatInt` in dot writer.
+- `ds.UnionFindSlice` (22.2x faster than the generic map-backed
+  variant on a bounded ID space).
+
+### Added — Sprint 12 (Algorithm Completeness)
+
+- `search.BidirectionalDijkstra` / `BidirectionalDijkstraOn`.
+- `flow.EdmondsKarp` (max-flow reference / baseline).
+- `search.KruskalMST` / `search.PrimMST`.
+- `search.WCC` (weakly-connected components).
+- `search.KCore` (Batagelj-Zaversnik 2003).
+- `search.CountTriangles` (degree-ordered node-iterator).
+- `search.TransitiveClosure` (bitset matrix oracle).
+- `centrality.WeightedBetweenness` (Dijkstra-augmented Brandes).
+- `centrality.BetweennessParallel` (4.9x on M4 at GOMAXPROCS=10).
+- `flow.PushRelabelMaxFlow` (FIFO + gap heuristic).
+- `search.Diameter` (2-sweep + iFUB refinement).
+- `search.HierholzerUndirected`.
+- `search.BiBFSOn` reverse-CSR variant; BiBFS now handles directed
+  graphs by building the reverse internally.
+- `search.EppsteinKShortest`.
+- `flow.MinCostMaxFlow` (SSP + node potentials).
+
+### Added — Sprint 13 (Release Hygiene)
+
+- `bench/soak` 4-hour mixed-workload reliability harness with heap
+  / FD / goroutine snapshots.
+- benchstat regression gate on pull-requests.
+- LDBC SF1/SF10 + DIMACS SF1/USA `Benchmark*` functions (the
+  large-scale ones skip under `-short`).
+- goreleaser pipeline + `.github/workflows/release.yml` + Makefile
+  release targets. Documentation at `docs/release.md`.
+- Cross-library comparison vs NetworkX 3.2.1 with measured numbers
+  (BFS 178x, Dijkstra 25x, PageRank 28x on the same graph). See
+  `docs/benchmarks/comparison.md`.
+- Rapid-based property tests covering triangle inequality (Dijkstra),
+  precedence (TopologicalSort), reflexivity (Tarjan SCC), and
+  matching cardinality (Hopcroft-Karp).
+- Fuzz tests for `store/csrfile`, `graph/io/graphml`, `graph/io/csv`
+  parsers.
+- t.Run subtest pattern adopted across representative table-shaped
+  tests (the bulk migration can land incrementally; the pattern is
+  in place and exercised).
+- Concurrency-contract godoc clauses added to `search.APSP`,
+  `search.Matching`, `search.TC`.
+
+### Added — Sprint 8 (Correctness Hardening, retained from the v1.0.0 audit)
 
 - LICENSE file at repo root: MIT (closes #92).
 - 10 new example programs (`examples/11_social_network` through
