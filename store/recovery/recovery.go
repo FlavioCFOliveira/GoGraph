@@ -31,11 +31,16 @@ type Result[N comparable, W any] struct {
 	SnapshotHit bool
 	// SnapshotLabels reports how many label records the snapshot
 	// contributed back into the graph after WAL replay. v1
-	// snapshots (CSR-only) leave this at 0; v2 snapshots (CSR +
-	// labels.bin) populate it.
+	// snapshots (CSR-only) leave this at 0; v2 snapshots that
+	// include labels.bin populate it.
 	SnapshotLabels int
-	WALOps         int
-	TailErr        error
+	// SnapshotProperties reports how many typed property records the
+	// snapshot contributed back into the graph after WAL replay. v1
+	// snapshots and v2 snapshots without a properties.bin leave it
+	// at 0; v2 snapshots that include properties.bin populate it.
+	SnapshotProperties int
+	WALOps             int
+	TailErr            error
 }
 
 // Op is the decoded form of a transaction-encoded WAL payload,
@@ -195,7 +200,8 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 	}
 	snapDir := filepath.Join(dir, "snapshot")
 	var snapLabels snapshot.LabelsReadback
-	var haveSnapLabels bool
+	var snapProps snapshot.PropertiesReadback
+	var haveSnapLabels, haveSnapProps bool
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		loaded, err := snapshot.LoadSnapshotFull(snapDir)
 		if err != nil {
@@ -204,7 +210,9 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 		}
 		res.SnapshotHit = true
 		snapLabels = loaded.Labels
+		snapProps = loaded.Properties
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
+		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
 	}
 
 	walPath := filepath.Join(dir, "wal")
@@ -253,6 +261,17 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 			return res, fmt.Errorf("recovery: apply snapshot labels: %w", err)
 		}
 		res.SnapshotLabels = len(snapLabels.NodeLabels) + len(snapLabels.EdgeLabels)
+	}
+	// Properties are applied after labels for symmetry with the
+	// write path (labels.bin, then properties.bin). Records whose
+	// NodeIDs are unresolvable or whose target edge is missing are
+	// dropped with metrics by ApplyPropertiesToGraph.
+	if haveSnapProps {
+		if err := snapshot.ApplyPropertiesToGraph(g, snapProps); err != nil {
+			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
+			return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
+		}
+		res.SnapshotProperties = len(snapProps.NodeProperties) + len(snapProps.EdgeProperties)
 	}
 	return res, nil
 }
@@ -414,7 +433,8 @@ func openCodec[N comparable, W any](
 	}
 	snapDir := filepath.Join(dir, "snapshot")
 	var snapLabels snapshot.LabelsReadback
-	var haveSnapLabels bool
+	var snapProps snapshot.PropertiesReadback
+	var haveSnapLabels, haveSnapProps bool
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		loaded, err := snapshot.LoadSnapshotFull(snapDir)
 		if err != nil {
@@ -423,7 +443,9 @@ func openCodec[N comparable, W any](
 		}
 		res.SnapshotHit = true
 		snapLabels = loaded.Labels
+		snapProps = loaded.Properties
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
+		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
 	}
 
 	walPath := filepath.Join(dir, "wal")
@@ -474,6 +496,16 @@ func openCodec[N comparable, W any](
 			return res, fmt.Errorf("recovery: apply snapshot labels: %w", err)
 		}
 		res.SnapshotLabels = len(snapLabels.NodeLabels) + len(snapLabels.EdgeLabels)
+	}
+	// Apply snapshot-side properties after labels for symmetry with
+	// the write order. Resilient skip-on-unresolved semantics mirror
+	// the labels apply path.
+	if haveSnapProps {
+		if err := snapshot.ApplyPropertiesToGraph(g, snapProps); err != nil {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
+		}
+		res.SnapshotProperties = len(snapProps.NodeProperties) + len(snapProps.EdgeProperties)
 	}
 	return res, nil
 }

@@ -16,24 +16,26 @@ import (
 )
 
 // LoadedSnapshot is the result of [LoadSnapshotFull]: the parsed CSR
-// arrays, the parsed labels readback (empty for v1 snapshots), and
-// the manifest that produced them.
+// arrays, the parsed labels readback (empty for v1 snapshots), the
+// parsed properties readback (empty when properties.bin is absent),
+// and the manifest that produced them.
 type LoadedSnapshot struct {
-	Manifest Manifest
-	CSR      CSRReadback
-	Labels   LabelsReadback
+	Manifest   Manifest
+	CSR        CSRReadback
+	Labels     LabelsReadback
+	Properties PropertiesReadback
 }
 
 // WriteSnapshotFull is the v2 high-level helper: it lays out a
 // snapshot directory containing csr.bin (legacy v1 component),
-// labels.bin (new v2 component), and a v2 manifest indexing both.
-// Atomic publication is achieved by assembling the snapshot under
-// dir + ".tmp" and renaming it to dir on success — the same protocol
-// used by [WriteSnapshotCSR].
+// labels.bin (v2 component), properties.bin (v2 component), and a
+// v2 manifest indexing all three. Atomic publication is achieved by
+// assembling the snapshot under dir + ".tmp" and renaming it to dir
+// on success — the same protocol used by [WriteSnapshotCSR].
 //
-// Callers that do not need durable LPG labels can keep using
-// [WriteSnapshotCSR]; it writes a v1-shaped directory that future
-// readers (including this one) accept transparently.
+// Callers that do not need durable LPG labels or properties can keep
+// using [WriteSnapshotCSR]; it writes a v1-shaped directory that
+// future readers (including this one) accept transparently.
 func WriteSnapshotFull[N comparable, W any](dir string, c *csr.CSR[W], g *lpg.Graph[N, W]) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotFull")()
 	err := WriteSnapshotFullCtx(context.Background(), dir, c, g)
@@ -44,13 +46,13 @@ func WriteSnapshotFull[N comparable, W any](dir string, c *csr.CSR[W], g *lpg.Gr
 }
 
 // WriteSnapshotFullCtx is the context-aware variant of
-// [WriteSnapshotFull]. ctx.Err() is checked at four stage boundaries:
-// before the CSR write, before the labels write, before the manifest
-// write, and before the atomic rename. On cancellation the temporary
-// staging directory is cleaned up and the wrapped ctx.Err is
-// returned.
+// [WriteSnapshotFull]. ctx.Err() is checked at five stage boundaries:
+// before the CSR write, before the labels write, before the
+// properties write, before the manifest write, and before the
+// atomic rename. On cancellation the temporary staging directory is
+// cleaned up and the wrapped ctx.Err is returned.
 //
-//nolint:gocyclo // snapshot publish: dir prep + CSR write + labels write + manifest write + atomic rename + ctx ticks
+//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + manifest + atomic rename + ctx ticks
 func WriteSnapshotFullCtx[N comparable, W any](
 	ctx context.Context,
 	dir string,
@@ -110,6 +112,23 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		return err
 	}
 
+	// properties.bin
+	propertiesPath := filepath.Join(tmp, PropertiesFile)
+	propsSize, propsCRC, err := writeAndSync(propertiesPath, func(w io.Writer) (int64, uint32, error) {
+		return WriteProperties(w, g)
+	})
+	if err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
 	m := Manifest{
 		Version:   ManifestVersion,
 		CreatedAt: time.Now().UTC(),
@@ -118,6 +137,7 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		Files: []FileEntry{
 			{Name: CSRFile, Size: csrSize, CRC32C: csrCRC},
 			{Name: LabelsFile, Size: labelsSize, CRC32C: labelsCRC},
+			{Name: PropertiesFile, Size: propsSize, CRC32C: propsCRC},
 		},
 	}
 
@@ -195,15 +215,17 @@ func writeAndSync(
 }
 
 // LoadSnapshotFull verifies and loads the snapshot rooted at dir,
-// returning both the CSR and the labels readback. v1 snapshots are
-// accepted transparently: their manifest has no labels.bin entry,
-// and the returned [LoadedSnapshot.Labels] is the zero value (empty
-// strings table, no records). v2 snapshots additionally read and
-// CRC-validate labels.bin.
+// returning the CSR, the labels readback, and the properties
+// readback. v1 snapshots are accepted transparently: their manifest
+// has no labels.bin or properties.bin entry, and the returned
+// [LoadedSnapshot.Labels] / [LoadedSnapshot.Properties] are zero
+// values (empty tables, no records). v2 snapshots may carry any
+// combination of labels.bin and properties.bin; each component is
+// CRC-validated only when its manifest entry is present.
 //
-// CSR CRC verification mirrors [Open]; labels CRC verification uses
-// the same TeeReader pattern so a corrupted labels.bin surfaces as
-// [ErrCorrupted].
+// CSR CRC verification mirrors [Open]; labels and properties CRC
+// verification use the same TeeReader pattern so a corrupted
+// component surfaces as [ErrCorrupted].
 func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	defer metrics.Time("store.snapshot.LoadSnapshotFull")()
 	manifestPath := filepath.Join(dir, "manifest.json")
@@ -213,7 +235,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		return LoadedSnapshot{}, err
 	}
 
-	csrEntry, labelsEntry := findEntries(m.Files)
+	csrEntry, labelsEntry, propsEntry := findEntries(m.Files)
 	if csrEntry == nil {
 		metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 		return LoadedSnapshot{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
@@ -234,27 +256,39 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		}
 	}
 
+	var propsParsed PropertiesReadback
+	if propsEntry != nil {
+		propsParsed, err = readVerifiedProperties(filepath.Join(dir, PropertiesFile), propsEntry.CRC32C)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, err
+		}
+	}
+
 	return LoadedSnapshot{
-		Manifest: m,
-		CSR:      csrParsed,
-		Labels:   labelsParsed,
+		Manifest:   m,
+		CSR:        csrParsed,
+		Labels:     labelsParsed,
+		Properties: propsParsed,
 	}, nil
 }
 
-// findEntries returns pointers to the csr.bin and labels.bin entries
-// in files, or nil for either when absent. The slice is walked once
-// and pointers index into the original storage so the caller can
-// inspect them without copying.
-func findEntries(files []FileEntry) (csrEntry, labelsEntry *FileEntry) {
+// findEntries returns pointers to the csr.bin, labels.bin, and
+// properties.bin entries in files, or nil for any that are absent.
+// The slice is walked once and pointers index into the original
+// storage so the caller can inspect them without copying.
+func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry *FileEntry) {
 	for k := range files {
 		switch files[k].Name {
 		case CSRFile:
 			csrEntry = &files[k]
 		case LabelsFile:
 			labelsEntry = &files[k]
+		case PropertiesFile:
+			propsEntry = &files[k]
 		}
 	}
-	return csrEntry, labelsEntry
+	return csrEntry, labelsEntry, propsEntry
 }
 
 // readVerifiedCSR opens path, runs the file bytes through CRC32C and
@@ -304,6 +338,31 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 	if got := hasher.Sum32(); got != expected {
 		return LabelsReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
 			ErrCorrupted, LabelsFile, got, expected)
+	}
+	return parsed, nil
+}
+
+// readVerifiedProperties is the dual of [readVerifiedCSR] for
+// properties.bin.
+func readVerifiedProperties(path string, expected uint32) (PropertiesReadback, error) {
+	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	if err != nil {
+		return PropertiesReadback{}, err
+	}
+	defer func() { _ = f.Close() }()
+
+	hasher := crc32.New(castagnoli)
+	tee := io.TeeReader(f, hasher)
+	parsed, err := ReadProperties(tee)
+	if err != nil {
+		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+	}
+	if _, err := io.Copy(io.Discard, tee); err != nil {
+		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+	}
+	if got := hasher.Sum32(); got != expected {
+		return PropertiesReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
+			ErrCorrupted, PropertiesFile, got, expected)
 	}
 	return parsed, nil
 }

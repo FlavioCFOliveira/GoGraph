@@ -49,8 +49,8 @@ func TestLabels_Roundtrip(t *testing.T) {
 	if loaded.Manifest.Version != ManifestVersion {
 		t.Fatalf("Manifest.Version = %d, want %d", loaded.Manifest.Version, ManifestVersion)
 	}
-	if got := len(loaded.Manifest.Files); got != 2 {
-		t.Fatalf("Manifest.Files = %d, want 2 (csr.bin + labels.bin)", got)
+	if got := len(loaded.Manifest.Files); got != 3 {
+		t.Fatalf("Manifest.Files = %d, want 3 (csr.bin + labels.bin + properties.bin)", got)
 	}
 
 	// Materialise the readback into a fresh LPG with the same

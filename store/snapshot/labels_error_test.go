@@ -356,8 +356,8 @@ func TestWriteSnapshotFullCtx_AtomicPublish(t *testing.T) {
 	if m.Version != ManifestVersion {
 		t.Fatalf("manifest version %d, want %d", m.Version, ManifestVersion)
 	}
-	if len(m.Files) != 2 {
-		t.Fatalf("manifest files = %d, want 2", len(m.Files))
+	if len(m.Files) != 3 {
+		t.Fatalf("manifest files = %d, want 3", len(m.Files))
 	}
 }
 

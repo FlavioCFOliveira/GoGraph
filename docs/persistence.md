@@ -49,6 +49,7 @@ on the read path, while writes serialise.
     manifest.json    — versioned index of files + CRC32C per file
     csr.bin          — serialised CSR (vertices / edges / weights)
     labels.bin       — serialised LPG labels (v2 manifests only)
+    properties.bin   — serialised LPG typed properties (v2 manifests only)
 ```
 
 ## WAL payload schema
@@ -240,10 +241,10 @@ No on-disk migration of existing `OpAddEdge` frames is required —
 post-T8 readers continue to walk them with `W=zero`, exactly as
 pre-T8 readers did.
 
-Future revisions will add `snapshot/properties.bin` and
+`snapshot/labels.bin` and `snapshot/properties.bin` are shipped as
+of manifest **v2** (see below). A future revision will add
 `snapshot/indexes/*.bin` to extend the snapshot to the full LPG
-state. `snapshot/labels.bin` is shipped as of manifest **v2** (see
-below).
+state.
 
 ## Snapshot file format
 
@@ -254,14 +255,19 @@ transparently:
   `snapshot.WriteSnapshotCSR` / `WriteSnapshotCSRCtx` helpers and by
   the current `store/checkpoint.Checkpointer`. The on-disk shape is
   identical to v1.0.0 so existing fixtures keep loading bit-for-bit.
-- **v2** — `csr.bin` + `labels.bin`. Written by
-  `snapshot.WriteSnapshotFull` / `WriteSnapshotFullCtx`. Adds durable
-  LPG label state to the snapshot.
+- **v2** — `csr.bin` + `labels.bin` + `properties.bin`. Written by
+  `snapshot.WriteSnapshotFull` / `WriteSnapshotFullCtx`. Adds
+  durable LPG label and typed-property state to the snapshot. The
+  individual component files are independent of each other: a v2
+  manifest may carry any combination of `labels.bin` and
+  `properties.bin`, or neither (CSR-only v2), and
+  `snapshot.LoadSnapshotFull` tolerates every combination.
 
 `snapshot.LoadManifest` accepts both versions; a future version 3+
 manifest surfaces `snapshot.ErrManifestUnsupported`. The high-level
-`snapshot.LoadSnapshotFull` reads both shapes and returns an empty
-`LabelsReadback` for v1 directories.
+`snapshot.LoadSnapshotFull` reads both shapes and returns empty
+`LabelsReadback` / `PropertiesReadback` for components that are
+absent.
 
 ### `snapshot/manifest.json` (v1)
 
@@ -286,11 +292,17 @@ manifest surfaces `snapshot.ErrManifestUnsupported`. The high-level
   "order": 1000,
   "size": 5000,
   "files": [
-    {"name": "csr.bin",    "size": 24014, "crc32c": 305419896},
-    {"name": "labels.bin", "size":   312, "crc32c":  47119123}
+    {"name": "csr.bin",        "size": 24014, "crc32c": 305419896},
+    {"name": "labels.bin",     "size":   312, "crc32c":  47119123},
+    {"name": "properties.bin", "size":   568, "crc32c": 837469102}
   ]
 }
 ```
+
+The `labels.bin` and `properties.bin` entries are independent. A v2
+manifest written by an older build (or by a custom emitter) may
+include only one or omit both; readers handle each case
+transparently.
 
 ### `snapshot/csr.bin` (binary, identical across v1 and v2)
 
@@ -358,6 +370,89 @@ on-disk migration step — the next call to
 `snapshot.WriteSnapshotFull` simply emits a fresh v2 directory at
 the same path under the atomic `.tmp` + `os.Rename` protocol.
 
+### `snapshot/properties.bin` (binary, v2 only)
+
+Little-endian throughout. The whole file is covered by the CRC32C
+stored in the manifest entry, including the magic header.
+
+| Offset  | Field             | Type                                                                |
+|---------|-------------------|---------------------------------------------------------------------|
+| 0       | magic             | uint32 LE = `0x50525053` (`'SPRP'`)                                 |
+| 4       | formatVersion     | uint32 LE (currently 1)                                             |
+| 8       | keyTableLen       | uint64 LE                                                           |
+| ...     | keys              | keyTableLen × (uint32 utf8Len, [utf8Len]byte)                       |
+| ...     | nodeEntries       | uint64 LE                                                           |
+| ...     | node records      | nodeEntries × (uint64 NodeID, uint32 keyIdx, uint8 kind, uint32 valueLen, [valueLen]byte) |
+| ...     | edgeEntries       | uint64 LE                                                           |
+| ...     | edge records      | edgeEntries × (uint64 src, uint64 dst, uint32 keyIdx, uint8 kind, uint32 valueLen, [valueLen]byte) |
+
+The key table is the deduplicated set of property keys, written in
+the order the writer interns them from `lpg.PropertyKeyRegistry`.
+Each record's `keyIdx` indexes into that table. A reader rebuilds
+the registry by re-interning each key in order; because
+`lpg.PropertyKeyID` is assigned in interning order, the resulting
+key IDs match the IDs that were live when the snapshot was taken,
+with no extra remap step.
+
+`properties.bin` is independent of the manifest version: a future
+change to the properties layout (e.g., variable-width integer
+encoding, new kinds) bumps the `formatVersion` byte without forcing
+a `manifest.json` schema bump.
+
+#### Value encoding per kind
+
+The `kind` byte matches `lpg.PropertyValue.Kind` exactly. The
+on-disk representation is fixed-width for all numeric and
+fixed-size kinds so the file is straightforward to dump and
+inspect with `xxd`:
+
+| Kind tag | `lpg.PropertyKind` | `valueLen`         | Bytes                                                                  |
+|----------|--------------------|--------------------|------------------------------------------------------------------------|
+| 1        | `PropString`       | variable           | raw utf-8 bytes                                                        |
+| 2        | `PropInt64`        | 8                  | little-endian two's-complement                                         |
+| 3        | `PropFloat64`      | 8                  | `math.Float64bits` little-endian                                       |
+| 4        | `PropBool`         | 1                  | `0x00` (false) / `0x01` (true)                                         |
+| 5        | `PropTime`         | 16                 | uint64 seconds since Unix epoch ‖ uint64 nanoseconds-within-second     |
+| 6        | `PropBytes`        | variable           | raw opaque bytes                                                       |
+
+`PropTime` is reconstituted via `time.Unix(sec, nsec).UTC()` —
+snapshots travel between machines so the caller's location is
+deliberately dropped on read. `PropFloat64` round-trips bits
+losslessly, including ±0.0, ±Inf, and every NaN payload (note that
+`NaN != NaN` by IEEE rules; compare via `math.Float64bits`).
+
+A record whose `kind` tag is outside the documented enum surfaces
+as `snapshot.ErrPropertiesCorrupted`; the reader does not silently
+drop unknown kinds.
+
+#### Recovery semantics
+
+`snapshot.ApplyPropertiesToGraph` re-attaches the readback to a
+live `*lpg.Graph`. Its pre-condition mirrors
+`ApplyLabelsToGraph`: the underlying `graph.Mapper` must already
+be populated with every NodeID the properties reference. In the
+standard durability path that pre-condition is met by the WAL
+replay performed earlier in `recovery.OpenString` /
+`OpenWithCodec` / `OpenWithOptions`. Property records whose
+NodeID cannot be resolved by the mapper are skipped and counted
+via `store.snapshot.ApplyProperties.unresolved` so observability
+surfaces the loss instead of failing recovery.
+
+Edge property records whose endpoints resolve but whose edge is
+absent from the adjacency list are skipped and counted via
+`store.snapshot.ApplyProperties.edgeMissing`. This matches
+`lpg.Graph.SetEdgeProperty`'s own no-op-on-missing-edge contract.
+
+#### Today's WAL coverage
+
+Typed property writes are not currently part of the WAL surface
+(`txn.Tx` records edge and label ops only). Properties survive
+exclusively via the snapshot's `properties.bin`. A crash between
+two snapshots therefore loses any property changes that were not
+captured in the prior snapshot. Closing this gap by extending the
+WAL with typed-property ops is tracked under the LPG durability
+sub-roadmap.
+
 ## Checkpoint policy
 
 `store/checkpoint.Checkpointer` runs a goroutine that takes a
@@ -381,10 +476,25 @@ rebuilt `*lpg.Graph[string, int64]` plus:
 
 - `SnapshotHit bool` — whether `snapshot/manifest.json` was found
   and validated.
+- `SnapshotLabels int` — how many label records the snapshot's
+  `labels.bin` contributed back into the graph after WAL replay.
+  v1 snapshots and v2 snapshots without `labels.bin` leave this at
+  0.
+- `SnapshotProperties int` — how many typed-property records the
+  snapshot's `properties.bin` contributed back into the graph after
+  WAL replay. v1 snapshots and v2 snapshots without
+  `properties.bin` leave this at 0.
 - `WALOps int` — how many WAL ops were applied.
 - `TailErr error` — `wal.ErrTornFrame` is normal (clean tail
   truncation after a crash); `wal.ErrCRCMismatch` indicates real
   corruption and must be surfaced.
+
+Component apply order during open is fixed: CSR (implicit, via
+mapper replay from WAL) → labels.bin → properties.bin. The
+properties pass runs last so the mapper is fully populated and the
+edge bag (built from CSR + WAL) is in place — property records
+that point at endpoints the apply phase has not yet seen are
+skipped and metered rather than aborting recovery.
 
 The recovery contract is verified by the fuzz test in
 `store/recovery/recovery_test.go::TestRecovery_FuzzedTruncation`,
