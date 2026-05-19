@@ -95,6 +95,12 @@ func bannedEdges[W Weight](paths []YenPath[W], rootPath []graph.NodeID, spurIdx 
 
 // dijkstraAvoiding runs Dijkstra from spur to dst while skipping the
 // edges in banned and the intermediate nodes in rootInterior.
+//
+// Reachability is tracked via an explicit found[] bitmap rather than
+// an in-band +Inf sentinel — this avoids overflow/wraparound on
+// integer weight types (the v1.0.0 implementation built the sentinel
+// by 60 iterations of "v += v" which wraps mod 2^64 on uint64 and
+// saturates on float32).
 func dijkstraAvoiding[W Weight](c *csr.CSR[W], spur, dst graph.NodeID, banned map[edgeKey]struct{}, rootInterior []graph.NodeID) *YenPath[W] {
 	excluded := make(map[graph.NodeID]struct{}, len(rootInterior))
 	for _, n := range rootInterior {
@@ -104,23 +110,12 @@ func dijkstraAvoiding[W Weight](c *csr.CSR[W], spur, dst graph.NodeID, banned ma
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
 	maxID := uint64(c.MaxNodeID())
-	var inf W
-	{
-		var zero W
-		inf = zero
-		// Use a very-large sentinel by repeated addition.
-		for i := 0; i < 60; i++ {
-			inf++
-			inf += inf
-		}
-	}
 	dist := make([]W, maxID)
 	parent := make([]graph.NodeID, maxID)
 	visited := make([]bool, maxID)
-	for i := range dist {
-		dist[i] = inf
-	}
+	found := make([]bool, maxID)
 	dist[uint64(spur)] = 0
+	found[uint64(spur)] = true
 	h := &dijkHeap[W]{}
 	h.push(0, spur)
 	for h.len() > 0 {
@@ -147,14 +142,15 @@ func dijkstraAvoiding[W Weight](c *csr.CSR[W], spur, dst graph.NodeID, banned ma
 				w = weights[k]
 			}
 			cand := top.dist + w
-			if cand < dist[uint64(nb)] {
+			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
 				dist[uint64(nb)] = cand
 				parent[uint64(nb)] = top.node
+				found[uint64(nb)] = true
 				h.push(cand, nb)
 			}
 		}
 	}
-	if dist[uint64(dst)] == inf {
+	if !found[uint64(dst)] {
 		return nil
 	}
 	length := 1
