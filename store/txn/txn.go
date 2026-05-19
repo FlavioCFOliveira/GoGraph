@@ -37,6 +37,40 @@ const (
 	OpSetEdgeLabel
 )
 
+// Op-record version markers. The marker is a single byte written at
+// offset zero of every v2 WAL payload. v1 records have no marker —
+// their first byte is the [OpKind] value (always 1..3 today, with
+// room to grow into the low region of the byte space). We pick a v2
+// marker far outside the [OpKind] range so a v1-vs-v2 reader can
+// disambiguate by peeking the first byte: any payload that starts
+// with OpRecordV2 is necessarily a v2 frame because no legitimate
+// OpKind value reaches 0xFE.
+//
+// 0xFE is chosen specifically because it leaves 0x00..0x0F free for
+// future OpKind growth, is not a printable ASCII character (so
+// hex-dumped logs are visually unambiguous), and is one less than the
+// universally-recognised "all bits set" sentinel 0xFF — leaving room
+// for at least one further version bump (e.g. OpRecordV3 = 0xFD) in
+// the same disambiguation scheme.
+const (
+	// OpRecordV1 is the logical version of legacy untagged records.
+	// The byte is never written to disk; the constant exists so call
+	// sites can name the version they expect.
+	OpRecordV1 uint8 = 0
+	// OpRecordV2 is the magic byte that marks the start of a v2-tagged
+	// op record. See the package doc above for the rationale.
+	OpRecordV2 uint8 = 0xFE
+)
+
+// codecHolder is the type-erased view of [Codec] used by Store so the
+// Store struct itself does not need to be parameterised on whether the
+// codec is the legacy fmt fallback or a typed implementation. Methods
+// on the holder are called from the Commit fast path; the indirection
+// is a single interface dispatch per op.
+type codecHolder[N comparable] interface {
+	Codec[N]
+}
+
 // Store bundles an [lpg.Graph] with a [wal.Writer] and the single-
 // writer lock that serialises transactions.
 //
@@ -45,15 +79,57 @@ const (
 // active at any moment. Reads on the underlying lpg.Graph remain
 // concurrent and lock-free per the lpg/adjlist contracts.
 type Store[N comparable, W any] struct {
-	mu  sync.Mutex
-	g   *lpg.Graph[N, W]
-	wal *wal.Writer
+	mu     sync.Mutex
+	g      *lpg.Graph[N, W]
+	wal    *wal.Writer
+	codec  codecHolder[N]
+	legacy bool
 }
 
-// NewStore returns a Store wrapping g and wal.
+// NewStore returns a Store wrapping g and wal. The store emits v1
+// (untagged, fmt.Sprintf-based) WAL payloads so that callers that
+// existed prior to the typed codec introduction observe byte-identical
+// on-disk frames.
+//
+// New code should prefer [NewStoreWithCodec], which installs a typed
+// [Codec] and emits v2 (tagged) frames that survive arbitrary N
+// types — strings with embedded length bytes, composite identifiers,
+// unicode boundaries, and so on.
 func NewStore[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer) *Store[N, W] {
-	return &Store[N, W]{g: g, wal: wlog}
+	return &Store[N, W]{
+		g:      g,
+		wal:    wlog,
+		codec:  legacyFmtCodec[N]{},
+		legacy: true,
+	}
 }
+
+// NewStoreWithCodec returns a Store wrapping g and wal that encodes
+// node identifiers via the supplied typed [Codec]. Each WAL payload is
+// emitted in the v2 format: a one-byte version tag ([OpRecordV2]),
+// then the [OpKind], then the codec-encoded src and dst values
+// inline, then a uint16 little-endian label length and the label
+// bytes. The frame is the dual of the v2 branch in
+// [store/recovery.Decode], which detects the version tag and walks
+// the body back through the same codec.
+//
+// codec must not be nil. The function does not validate that codec
+// is non-legacy; passing the legacy fmt codec is undefined behaviour.
+func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N]) *Store[N, W] {
+	defer metrics.Time("store.txn.NewStoreWithCodec")()
+	return &Store[N, W]{
+		g:      g,
+		wal:    wlog,
+		codec:  codec,
+		legacy: isLegacyCodec[N](codec),
+	}
+}
+
+// Codec returns the [Codec] installed on the Store. The returned value
+// is the same one passed to [NewStoreWithCodec], or the internal legacy
+// codec installed by [NewStore]. Callers should treat the return as
+// read-only.
+func (s *Store[N, W]) Codec() Codec[N] { return s.codec }
 
 // Graph returns the underlying graph.
 func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
@@ -139,7 +215,12 @@ func (t *Tx[N, W]) Commit() error {
 	// any point in the batch only loses tail ops, never partial
 	// ones.
 	for _, op := range t.ops {
-		payload := encodeOp(op)
+		var payload []byte
+		if t.store.legacy {
+			payload = encodeOpLegacy(op)
+		} else {
+			payload = encodeOpTyped(op, t.store.codec)
+		}
 		if err := t.store.wal.Append(payload); err != nil {
 			metrics.IncCounter("store.txn.Commit.errors", 1)
 			return err
@@ -172,20 +253,23 @@ func (t *Tx[N, W]) release() {
 	t.store.mu.Unlock()
 }
 
-// encodeOp serialises one op to a WAL payload. Layout:
+// encodeOpLegacy serialises one op to a v1 (untagged) WAL payload.
+// Layout:
 //
 //	uint8  kind
 //	uint16 srcLen
-//	[srcLen]byte src
+//	[srcLen]byte src   (fmt.Sprintf("%v") of op.Src)
 //	uint16 dstLen
-//	[dstLen]byte dst
+//	[dstLen]byte dst   (fmt.Sprintf("%v") of op.Dst)
 //	uint16 labelLen
 //	[labelLen]byte label
 //
-// Endpoints are serialised via fmt.Sprintf("%v") — sufficient for
-// the v1 N types (string, integer) and the test fixtures. A future
-// iteration will plug in a typed codec for N.
-func encodeOp[N comparable](op Op[N]) []byte {
+// Endpoints are serialised via fmt.Sprintf("%v") — sufficient for the
+// v1 N types (string, integer) and the test fixtures. This function
+// is preserved bit-for-bit so call sites using [NewStore] continue to
+// produce WAL frames identical to the ones written prior to the typed
+// codec introduction.
+func encodeOpLegacy[N comparable](op Op[N]) []byte {
 	src := encodeAny(op.Src)
 	dst := encodeAny(op.Dst)
 	label := []byte(op.Label)
@@ -206,14 +290,34 @@ func encodeOp[N comparable](op Op[N]) []byte {
 	return buf
 }
 
-func encodeAny[N comparable](v N) []byte {
-	return []byte(stringify(v))
+// encodeOpTyped serialises one op to a v2 (tagged) WAL payload using
+// the supplied codec. Layout:
+//
+//	uint8  version   (always [OpRecordV2])
+//	uint8  kind
+//	codec  src       (codec-encoded, self-delimiting)
+//	codec  dst       (codec-encoded, self-delimiting)
+//	uint16 labelLen
+//	[labelLen]byte label
+//
+// The codec is responsible for the framing of src and dst, so the
+// payload has no per-field length prefix at this level. The label
+// trailer is identical to the v1 trailer.
+func encodeOpTyped[N comparable](op Op[N], codec Codec[N]) []byte {
+	// Allocate with a conservative head room: header + label trailer
+	// plus a few bytes per endpoint. The codec may extend beyond this
+	// estimate; append handles the regrowth.
+	const headroom = 2 + 2 // version + kind + uint16 labelLen
+	buf := make([]byte, 0, headroom+len(op.Label)+32)
+	buf = append(buf, OpRecordV2, byte(op.Kind))
+	buf = codec.Encode(buf, op.Src)
+	buf = codec.Encode(buf, op.Dst)
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
+	return append(buf, op.Label...)
 }
 
-// stringify renders a value as a string for WAL payload encoding.
-// It exists as a separate function to centralise the encoding rule.
-func stringify[N comparable](v N) string {
-	return goFormat(v)
+func encodeAny[N comparable](v N) []byte {
+	return []byte(goFormat(v))
 }
 
 func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N]) {

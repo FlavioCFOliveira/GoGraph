@@ -50,6 +50,92 @@ on the read path, while writes serialise.
     csr.bin          — serialised CSR (vertices / edges / weights)
 ```
 
+## WAL payload schema
+
+Each WAL frame carries one op payload. The encoder supports two
+on-disk layouts, distinguished by the first byte of the payload:
+
+| Version | First byte                  | Producer                      |
+|---------|-----------------------------|-------------------------------|
+| v1      | `[OpKind]` (one of 0x01..0x03 today) | `txn.NewStore` (legacy)       |
+| v2      | `0xFE` (`txn.OpRecordV2`)   | `txn.NewStoreWithCodec`       |
+
+`OpKind` values currently occupy 0x01..0x03, leaving the low byte
+region free for future kinds. The v2 magic byte 0xFE is chosen far
+outside that range so a reader can disambiguate by peeking the first
+byte alone — any payload starting with 0xFE is necessarily a v2 frame.
+
+### v1 (legacy, untagged) layout
+
+```
+uint8  kind
+uint16 srcLen (LE)
+[srcLen]byte src   (fmt.Sprintf("%v") of op.Src)
+uint16 dstLen (LE)
+[dstLen]byte dst   (fmt.Sprintf("%v") of op.Dst)
+uint16 labelLen (LE)
+[labelLen]byte label
+```
+
+v1 endpoints are serialised via `fmt.Sprintf("%v")`, which is only
+reliably reversible for the `string` type. Recovery via
+`recovery.OpenString` works because `string(SrcBytes)` returns the
+original key. For arbitrary node types, v1 is **not** generally
+reversible; callers wanting to migrate must first replay the v1 log
+into a typed store and re-emit v2 frames.
+
+### v2 (tagged, typed) layout
+
+```
+uint8  version  (always 0xFE — txn.OpRecordV2)
+uint8  kind
+codec  src      (self-delimiting; see codec table below)
+codec  dst      (self-delimiting)
+uint16 labelLen (LE)
+[labelLen]byte label
+```
+
+The codec writes the framing for src/dst inline — no separate length
+prefix at the payload level. The trailing label keeps the v1 uint16
+prefix for symmetry with the legacy reader.
+
+### Built-in codecs
+
+| Type                              | Wire form                                       |
+|-----------------------------------|-------------------------------------------------|
+| `string` (`NewStringCodec`)       | uint32 LE length prefix + utf-8 bytes           |
+| `int` (`NewIntCodec`)             | varint                                          |
+| `int32` (`NewInt32Codec`)         | varint                                          |
+| `int64` (`NewInt64Codec`)         | varint                                          |
+| `uint64` (`NewUint64Codec`)       | uvarint                                         |
+| `[16]byte` (`NewUUIDCodec`)       | fixed 16 bytes                                  |
+| `encoding.BinaryMarshaler` (`NewBinaryMarshalerCodec[N, *N]`) | uint32 LE length prefix + opaque marshaler payload |
+
+All built-in codecs are stateless and safe for concurrent use.
+
+### Recovery surface
+
+`recovery.OpenString(dir)` accepts both v1 and v2-`StringCodec` frames
+on the same WAL. For arbitrary `N`, use
+`recovery.OpenWithCodec[N, W](dir, codec)`; this variant supports v2
+frames natively and supports v1 frames only when the codec is
+`NewStringCodec` (because legacy v1 bytes are raw utf-8).
+
+### Migrating a v1 corpus
+
+Existing stores keep emitting v1 frames bit-for-bit while the
+constructor is `NewStore`. To migrate:
+
+1. Replay the v1 log via `recovery.OpenString` into an in-memory
+   graph.
+2. Construct a new store via `txn.NewStoreWithCodec` against a fresh
+   WAL.
+3. Re-commit the recovered ops through the new store; subsequent
+   frames are v2-tagged.
+
+This is the same migration recipe used by snapshot + WAL-truncation
+checkpoints, so the workflow does not require any new tooling.
+
 Future revisions will add `snapshot/labels.bin`,
 `snapshot/properties.bin`, and `snapshot/indexes/*.bin` to extend
 the snapshot to the full LPG state.
