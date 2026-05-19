@@ -5,7 +5,8 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-Sprint 1 — Foundation & In-Memory Core. The module currently provides:
+Sprint 1 — Foundation & In-Memory Core, and Sprint 2 — Property Graph
+(LPG) + Indexes are complete. The module currently provides:
 
 - `gograph/graph` — generic node identifiers and the `Graph[N, W]`
   contract.
@@ -13,6 +14,18 @@ Sprint 1 — Foundation & In-Memory Core. The module currently provides:
   with copy-on-write snapshots and lock-free reads.
 - `gograph/graph/csr` — immutable Compressed Sparse Row view for
   read-mostly analytics.
+- `gograph/graph/lpg` — Labelled Property Graph model (vertex and
+  edge labels, typed properties; `PropertyValue` covers string,
+  int64, float64, bool, time.Time, []byte).
+- `gograph/graph/lpg/schema` — optional type schema with `Validate`.
+- `gograph/graph/index/label` — Roaring-bitmap inverted label index.
+- `gograph/graph/index/hash` — sharded hash exact-match property
+  index.
+- `gograph/graph/index/btree` — order-preserving range property
+  index.
+- `gograph/graph/index` — `Manager` coordinating named indexes and
+  fanning out `Change` events to subscribers.
+- `gograph/graph/query` — fluent `MATCH`-style pattern engine.
 - `gograph/search` — traversal and path-finding algorithms (BFS,
   iterative DFS, Dijkstra, Bellman-Ford, A\*, bidirectional BFS,
   topological sort (Kahn), Tarjan SCC).
@@ -85,11 +98,38 @@ Benchmarks (Apple M4, Go 1.26.3):
 ## Module Layout
 
 ```
-graph/        — core types and Mapper
-graph/adjlist — mutable adjacency list (writer-side)
-graph/csr     — immutable CSR (reader-side)
-search/       — algorithms over CSR
-ds/           — supporting data structures
+graph/             — core types and Mapper
+graph/adjlist      — mutable adjacency list (writer-side)
+graph/csr          — immutable CSR (reader-side)
+graph/lpg          — labelled property graph (labels + typed properties)
+graph/lpg/schema   — declarative type schema with Validate
+graph/index/label  — Roaring-bitmap label index
+graph/index/hash   — sharded hash exact-match property index
+graph/index/btree  — order-preserving range property index
+graph/index        — Manager fanning out Change events to subscribers
+graph/query        — fluent MATCH-style pattern engine
+search/            — algorithms over CSR
+ds/                — supporting data structures
+```
+
+## Sprint 2 Example
+
+```go
+g := lpg.New[string, int64](adjlist.Config{Directed: true})
+g.SetNodeLabel("alice", "Person")
+g.SetNodeLabel("alice", "Admin")
+g.SetNodeProperty("alice", "age", lpg.Int64Value(30))
+g.AddEdge("alice", "bob", 1)
+
+c := csr.BuildFromAdjList(g.AdjList())
+e := query.New(g, c)
+
+for _, n := range e.Match().Vertex(
+    query.WithLabel[string, int64]("Admin"),
+    query.WithProperty[string, int64]("age", lpg.Int64Value(30)),
+).Collect() {
+    fmt.Println(n)
+}
 ```
 
 ## License
