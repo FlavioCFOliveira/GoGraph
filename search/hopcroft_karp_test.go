@@ -56,3 +56,60 @@ func TestHopcroftKarp_NoEdges(t *testing.T) {
 		t.Fatalf("Size = %d, want 0", m.Size)
 	}
 }
+
+// TestHopcroftKarp_CompleteBipartite_K3x4 covers K(3,4): every left
+// vertex is adjacent to every right vertex; the maximum matching is
+// 3 (saturates the smaller side). Strengthens the previous test
+// suite, which only exercised the partial bipartite case.
+func TestHopcroftKarp_CompleteBipartite_K3x4(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	left := []string{"L0", "L1", "L2"}
+	right := []string{"R0", "R1", "R2", "R3"}
+	for _, l := range left {
+		for _, r := range right {
+			a.AddEdge(l, r, struct{}{})
+		}
+	}
+	c := csr.BuildFromAdjList(a)
+	m := HopcroftKarp(c, int(c.MaxNodeID()))
+	if m.Size != 3 {
+		t.Fatalf("K(3,4) max matching = %d, want 3", m.Size)
+	}
+}
+
+// TestHopcroftKarp_HallCounterexample asserts the algorithm correctly
+// reports a non-perfect matching when Hall's condition fails — here,
+// two left vertices share a single right vertex and a third left
+// vertex has no edges, so the maximum matching is at most 1.
+func TestHopcroftKarp_HallCounterexample(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	// Left {L0, L1, L2}; right {R0}. Only L0 and L1 connect to R0;
+	// L2 has no neighbours. By Hall's theorem the matching has at
+	// most 1 (only R0 is reachable from any left vertex).
+	a.AddNode("L0")
+	a.AddNode("L1")
+	a.AddNode("L2")
+	a.AddNode("R0")
+	a.AddEdge("L0", "R0", struct{}{})
+	a.AddEdge("L1", "R0", struct{}{})
+	c := csr.BuildFromAdjList(a)
+	m := HopcroftKarp(c, int(c.MaxNodeID()))
+	if m.Size != 1 {
+		t.Fatalf("Hall-deficient bipartite max matching = %d, want 1", m.Size)
+	}
+}
+
+// TestHopcroftKarp_SingleEdge is a smoke test that the smallest
+// possible bipartite graph (one edge) yields a matching of size 1.
+func TestHopcroftKarp_SingleEdge(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a.AddEdge("L", "R", struct{}{})
+	c := csr.BuildFromAdjList(a)
+	m := HopcroftKarp(c, int(c.MaxNodeID()))
+	if m.Size != 1 {
+		t.Fatalf("single-edge bipartite matching = %d, want 1", m.Size)
+	}
+}
