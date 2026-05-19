@@ -38,6 +38,8 @@ func BetweennessCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]float64, error
 	dist := make([]int, maxID)
 	delta := make([]float64, maxID)
 	pred := make([][]int, maxID)
+	queue := make([]int, 0, maxID)
+	stack := make([]int, 0, maxID)
 
 	for s := 0; s < maxID; s++ {
 		if err := ctx.Err(); err != nil {
@@ -46,12 +48,17 @@ func BetweennessCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]float64, error
 		if s&0x3F == 0 {
 			runtime.Gosched()
 		}
-		brandesSource(s, maxID, verts, edges, sigma, dist, delta, pred, cb)
+		queue, stack = brandesSource(s, maxID, verts, edges, sigma, dist, delta, pred, cb, queue, stack)
 	}
 	return cb, nil
 }
 
-func brandesSource(s, maxID int, verts []uint64, edges []graph.NodeID, sigma []float64, dist []int, delta []float64, pred [][]int, cb []float64) {
+// brandesSource runs one single-source BFS-based betweenness
+// accumulation. queue and stack are caller-owned scratch slices —
+// the function truncates them to zero length before use and returns
+// the (possibly grown) headers so the caller keeps the larger
+// capacity across iterations.
+func brandesSource(s, maxID int, verts []uint64, edges []graph.NodeID, sigma []float64, dist []int, delta []float64, pred [][]int, cb []float64, queue, stack []int) (queueOut, stackOut []int) {
 	for i := 0; i < maxID; i++ {
 		sigma[i] = 0
 		dist[i] = -1
@@ -60,11 +67,10 @@ func brandesSource(s, maxID int, verts []uint64, edges []graph.NodeID, sigma []f
 	}
 	sigma[s] = 1
 	dist[s] = 0
-	queue := []int{s}
-	stack := make([]int, 0, maxID)
-	for len(queue) > 0 {
-		v := queue[0]
-		queue = queue[1:]
+	queue = append(queue[:0], s)
+	stack = stack[:0]
+	for qh := 0; qh < len(queue); qh++ {
+		v := queue[qh]
 		stack = append(stack, v)
 		for k := verts[v]; k < verts[v+1]; k++ {
 			w := int(edges[k])
@@ -87,4 +93,5 @@ func brandesSource(s, maxID int, verts []uint64, edges []graph.NodeID, sigma []f
 			cb[w] += delta[w]
 		}
 	}
+	return queue, stack
 }

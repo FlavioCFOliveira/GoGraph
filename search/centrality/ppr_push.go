@@ -94,14 +94,13 @@ func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src 
 	}
 
 	steps := 0
-	for len(queue) > 0 && steps < opts.MaxSteps {
+	for qh := 0; qh < len(queue) && steps < opts.MaxSteps; qh++ {
 		if steps&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 		}
-		v := queue[0]
-		queue = queue[1:]
+		v := queue[qh]
 		inQ[v] = false
 		rv := res[v]
 		deg := int(verts[v+1] - verts[v])

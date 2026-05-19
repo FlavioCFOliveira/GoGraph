@@ -2,6 +2,7 @@ package centrality
 
 import (
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"gograph/graph/adjlist"
@@ -26,6 +27,26 @@ func TestBetweenness_Path(t *testing.T) {
 	}
 	if bc[uint64(id2)] <= bc[uint64(id0)] {
 		t.Fatalf("centre betweenness must exceed endpoints")
+	}
+}
+
+// BenchmarkBrandes_RandomGraph measures the steady-state allocation
+// profile of Betweenness on a moderate undirected random graph. The
+// brandesSource per-source loop is the hot path; task #126 requires
+// allocs/op to drop by >=50% versus the v1.0 implementation, achieved
+// by lifting the queue and stack allocations to the outer loop.
+func BenchmarkBrandes_RandomGraph(b *testing.B) {
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	const n = 512
+	r := rand.New(rand.NewPCG(19, 23)) //nolint:gosec // deterministic benchmark RNG
+	for i := 0; i < 3*n; i++ {
+		a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Betweenness(c)
 	}
 }
 

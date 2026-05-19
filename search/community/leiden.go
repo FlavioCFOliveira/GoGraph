@@ -198,9 +198,8 @@ func splitDisconnectedPartition(comm []int, mask []bool, verts []uint64, edges [
 		// BFS through the same-community connected component.
 		queue := []int{start}
 		visited[start] = true
-		for len(queue) > 0 {
-			v := queue[0]
-			queue = queue[1:]
+		for qh := 0; qh < len(queue); qh++ {
+			v := queue[qh]
 			out[v] = id
 			for ki := verts[v]; ki < verts[v+1]; ki++ {
 				w := int(edges[ki])

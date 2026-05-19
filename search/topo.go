@@ -65,14 +65,13 @@ func TopologicalSortCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.Node
 		}
 	}
 
-	for len(queue) > 0 {
+	for qh := 0; qh < len(queue); qh++ {
 		if emitted&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 		}
-		n := queue[0]
-		queue = queue[1:]
+		n := queue[qh]
 		out = append(out, n)
 		emitted++
 		start := verts[uint64(n)]

@@ -86,9 +86,8 @@ func buildLevel(g *Network, src, sink int, level []int) bool {
 	}
 	level[src] = 0
 	queue := []int{src}
-	for len(queue) > 0 {
-		v := queue[0]
-		queue = queue[1:]
+	for qh := 0; qh < len(queue); qh++ {
+		v := queue[qh]
 		for _, e := range g.heads[v] {
 			if g.cap[e] > 0 && level[g.edgeTo[e]] < 0 {
 				level[g.edgeTo[e]] = level[v] + 1
