@@ -1,20 +1,33 @@
 package search
 
 import (
+	"errors"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
 
-// JohnsonAPSP computes APSP on c by running [Dijkstra] from every
-// live vertex. The v1 implementation handles non-negative weights
-// only; negative-cycle detection / reweighting via Bellman-Ford is
-// deferred — callers on graphs that may contain negative edges
-// should use [FloydWarshall] instead (which tolerates negative
-// weights without negative cycles).
+// ErrNegativeEdgeAPSP is returned by [DijkstraAPSP] when the input
+// CSR contains a strictly-negative edge weight. DijkstraAPSP does not
+// reweight negative edges; callers with mixed-sign weights and no
+// negative cycles should use [FloydWarshall].
+var ErrNegativeEdgeAPSP = errors.New("search: DijkstraAPSP requires non-negative edge weights")
+
+// DijkstraAPSP computes APSP on c by running [Dijkstra] from every
+// live vertex. It accepts only non-negative edge weights.
 //
-// For non-negative graphs the complexity is O(V * (V + E) log V),
-// which beats Floyd-Warshall's O(V^3) on sparse graphs.
-func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
+// For graphs with negative edges (but no negative cycle), use
+// [FloydWarshall] which tolerates them at the cost of O(V^3) work.
+//
+// Complexity: O(V * (V + E) * log V).
+//
+// Naming note: the v1.0.0 export "JohnsonAPSP" was misnamed — true
+// Johnson's algorithm prefixes a Bellman-Ford reweighting pass to
+// handle negative edges. The reweighting pass is deferred to a
+// future release; this function is the actually-implemented
+// Dijkstra-from-every-vertex variant. JohnsonAPSP is preserved as a
+// deprecated alias for backward compatibility.
+func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)
@@ -37,7 +50,6 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 	if live == 0 {
 		return out, nil
 	}
-	// Diagonal: every live node reaches itself at distance 0.
 	for i := 0; i < live; i++ {
 		idx := i*live + i
 		out.found[idx] = true
@@ -49,6 +61,9 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 		}
 		d, err := Dijkstra(c, graph.NodeID(src))
 		if err != nil {
+			if errors.Is(err, ErrNegativeWeight) {
+				return nil, ErrNegativeEdgeAPSP
+			}
 			return nil, err
 		}
 		for dst := 0; dst < maxID; dst++ {
@@ -64,4 +79,14 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 		}
 	}
 	return out, nil
+}
+
+// JohnsonAPSP is a deprecated alias for [DijkstraAPSP]; the original
+// v1.0.0 export was misnamed as it did not implement Bellman-Ford
+// reweighting.
+//
+// Deprecated: use [DijkstraAPSP]. JohnsonAPSP will be removed in a
+// future major release.
+func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
+	return DijkstraAPSP(c)
 }
