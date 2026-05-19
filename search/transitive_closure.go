@@ -11,6 +11,8 @@ import (
 // over the live NodeID space of the source CSR. The matrix is dense
 // in memory (V * V bits, padded to whole uint64 words) but supports
 // O(1) point-to-point reachability queries via [TC.Reachable].
+//
+// TC is safe for concurrent reads.
 type TC struct {
 	n     int
 	words int // (n + 63) / 64

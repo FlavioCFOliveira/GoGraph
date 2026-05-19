@@ -8,6 +8,8 @@ import (
 )
 
 // Matching is the result of [HopcroftKarp].
+//
+// Matching is safe for concurrent reads.
 type Matching struct {
 	// MatchL maps each left vertex to its matched right vertex or
 	// -1 if unmatched.
