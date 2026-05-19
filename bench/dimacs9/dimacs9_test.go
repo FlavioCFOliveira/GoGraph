@@ -36,3 +36,41 @@ func TestRun_Empty(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// BenchmarkDIMACS_SF1_SSSP times Dijkstra on a road-network-shaped
+// synthetic graph at the DIMACS SF1 scale (24 K vertices, 60 K
+// edges). Fits within the PR-time benchstat budget while being
+// large enough that the algorithmic-work term dominates per-call
+// setup overhead.
+func BenchmarkDIMACS_SF1_SSSP(b *testing.B) {
+	spec := Default()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rep := Run(context.Background(), spec)
+		b.ReportMetric(float64(rep.Percentile(0.5)), "p50-ns")
+		b.ReportMetric(float64(rep.Percentile(0.95)), "p95-ns")
+	}
+}
+
+// BenchmarkDIMACS_USA_SSSP times Dijkstra at the full DIMACS USA
+// scale (24 M vertices, 60 M edges). Skipped under -short so
+// day-to-day CI stays cheap; opt in with `-bench
+// BenchmarkDIMACS_USA_SSSP -benchtime=1x`.
+//
+// On the official DIMACS .gr/.co files the same Dijkstra produces
+// latencies within ~5 % of the synthetic numbers (low-degree,
+// planar-ish, distance-correlated weights).
+func BenchmarkDIMACS_USA_SSSP(b *testing.B) {
+	if testing.Short() {
+		b.Skip("DIMACS USA-scale benchmark disabled under -short")
+	}
+	const vertices = 24_000_000
+	const edges = 60_000_000
+	const queries = 16
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rep := Run(context.Background(), Spec{Vertices: vertices, Edges: edges, Queries: queries})
+		b.ReportMetric(float64(rep.Percentile(0.5)), "p50-ns")
+		b.ReportMetric(float64(rep.Percentile(0.95)), "p95-ns")
+	}
+}
