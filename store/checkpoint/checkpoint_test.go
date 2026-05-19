@@ -174,3 +174,37 @@ func TestCheckpoint_TruncatesWAL(t *testing.T) {
 		t.Fatalf("WAL not growing after post-truncate append")
 	}
 }
+
+// TestCheckpoint_StopIdempotent asserts Stop is safe under serial
+// and concurrent re-entry. The v1.0.0 implementation called
+// close(stopCh) directly and panicked on the second call.
+func TestCheckpoint_StopIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	var mu sync.Mutex
+	cp := New(Config{Dir: dir}, g, w, &mu)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cp.Start(ctx)
+	cp.Stop()
+	cp.Stop() // must not panic
+	cp.Stop() // and again
+
+	cp2 := New(Config{Dir: dir}, g, w, &mu)
+	cp2.Start(ctx)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cp2.Stop()
+		}()
+	}
+	wg.Wait()
+}

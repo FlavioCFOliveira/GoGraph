@@ -47,6 +47,10 @@ type Stats struct {
 }
 
 // Checkpointer holds the goroutine state.
+//
+// Concurrency: Start, Stop, Trigger, and Stats are safe to call from
+// any number of goroutines. Stop is idempotent (safe to call any
+// number of times serially or concurrently).
 type Checkpointer[N comparable, W any] struct {
 	cfg     Config
 	g       *lpg.Graph[N, W]
@@ -56,6 +60,7 @@ type Checkpointer[N comparable, W any] struct {
 	stopCh    chan struct{}
 	triggerCh chan chan error
 	doneCh    chan struct{}
+	stopOnce  sync.Once
 
 	checkpoints  atomic.Uint64
 	walTrunc     atomic.Uint64
@@ -99,8 +104,12 @@ func (c *Checkpointer[N, W]) Start(ctx context.Context) {
 }
 
 // Stop signals the goroutine to exit and blocks until it does.
+// Stop is idempotent: subsequent calls are no-ops once the
+// goroutine has exited.
 func (c *Checkpointer[N, W]) Stop() {
-	close(c.stopCh)
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 	<-c.doneCh
 }
 
