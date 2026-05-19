@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"gograph/graph"
@@ -79,7 +80,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			dstName := names[uint64(n)]
 			label := ""
 			if ws[i] != 0 {
-				label = fmt.Sprintf(` [label=%q]`, fmt.Sprintf("%d", ws[i]))
+				label = fmt.Sprintf(` [label=%q]`, strconv.FormatInt(ws[i], 10))
 			}
 			line := fmt.Sprintf("  %s %s %s%s;\n", quote(srcName), edgeOp, quote(dstName), label)
 			if _, err := bw.WriteString(line); err != nil {
