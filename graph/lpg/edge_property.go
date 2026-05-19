@@ -10,15 +10,16 @@ func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValu
 	srcID, _ := g.adj.Mapper().Lookup(src)
 	dstID, _ := g.adj.Mapper().Lookup(dst)
 	keyID := g.pkeys.Intern(key)
-	g.propMu.Lock()
 	k := edgeKey{src: srcID, dst: dstID}
-	bag, ok := g.edgeProps[k]
+	s := g.edgePropShardFor(k)
+	s.mu.Lock()
+	bag, ok := s.m[k]
 	if !ok {
 		bag = make(map[PropertyKeyID]PropertyValue)
-		g.edgeProps[k] = bag
+		s.m[k] = bag
 	}
 	bag[keyID] = value
-	g.propMu.Unlock()
+	s.mu.Unlock()
 }
 
 // GetEdgeProperty returns the property value attached to the
@@ -36,9 +37,11 @@ func (g *Graph[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bo
 	if !ok {
 		return PropertyValue{}, false
 	}
-	g.propMu.RLock()
-	defer g.propMu.RUnlock()
-	bag, ok := g.edgeProps[edgeKey{src: srcID, dst: dstID}]
+	k := edgeKey{src: srcID, dst: dstID}
+	s := g.edgePropShardFor(k)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bag, ok := s.m[k]
 	if !ok {
 		return PropertyValue{}, false
 	}
@@ -61,15 +64,16 @@ func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) {
 	if !ok {
 		return
 	}
-	g.propMu.Lock()
 	k := edgeKey{src: srcID, dst: dstID}
-	if bag, ok2 := g.edgeProps[k]; ok2 {
+	s := g.edgePropShardFor(k)
+	s.mu.Lock()
+	if bag, ok2 := s.m[k]; ok2 {
 		delete(bag, keyID)
 		if len(bag) == 0 {
-			delete(g.edgeProps, k)
+			delete(s.m, k)
 		}
 	}
-	g.propMu.Unlock()
+	s.mu.Unlock()
 }
 
 // EdgeProperties returns a snapshot of every property currently
@@ -83,18 +87,20 @@ func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
 	if !ok {
 		return nil
 	}
-	g.propMu.RLock()
-	bag, ok := g.edgeProps[edgeKey{src: srcID, dst: dstID}]
+	k := edgeKey{src: srcID, dst: dstID}
+	s := g.edgePropShardFor(k)
+	s.mu.RLock()
+	bag, ok := s.m[k]
 	if !ok {
-		g.propMu.RUnlock()
+		s.mu.RUnlock()
 		return nil
 	}
 	out := make(map[string]PropertyValue, len(bag))
-	for k, v := range bag {
-		if name, ok := g.pkeys.Resolve(k); ok {
+	for kk, v := range bag {
+		if name, ok := g.pkeys.Resolve(kk); ok {
 			out[name] = v
 		}
 	}
-	g.propMu.RUnlock()
+	s.mu.RUnlock()
 	return out
 }

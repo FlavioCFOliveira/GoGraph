@@ -169,14 +169,15 @@ func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) {
 	g.adj.AddNode(n)
 	id, _ := g.adj.Mapper().Lookup(n)
 	keyID := g.propKeys().Intern(key)
-	g.propMu.Lock()
-	bag, ok := g.nodeProps[id]
+	s := g.nodePropShardFor(id)
+	s.mu.Lock()
+	bag, ok := s.m[id]
 	if !ok {
 		bag = make(map[PropertyKeyID]PropertyValue)
-		g.nodeProps[id] = bag
+		s.m[id] = bag
 	}
 	bag[keyID] = value
-	g.propMu.Unlock()
+	s.mu.Unlock()
 }
 
 // GetNodeProperty returns the property value attached to n under
@@ -190,9 +191,10 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 	if !ok {
 		return PropertyValue{}, false
 	}
-	g.propMu.RLock()
-	defer g.propMu.RUnlock()
-	bag, ok := g.nodeProps[id]
+	s := g.nodePropShardFor(id)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bag, ok := s.m[id]
 	if !ok {
 		return PropertyValue{}, false
 	}
@@ -210,14 +212,15 @@ func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
 	if !ok {
 		return
 	}
-	g.propMu.Lock()
-	if bag, ok2 := g.nodeProps[id]; ok2 {
+	s := g.nodePropShardFor(id)
+	s.mu.Lock()
+	if bag, ok2 := s.m[id]; ok2 {
 		delete(bag, keyID)
 		if len(bag) == 0 {
-			delete(g.nodeProps, id)
+			delete(s.m, id)
 		}
 	}
-	g.propMu.Unlock()
+	s.mu.Unlock()
 }
 
 // NodeProperties returns a snapshot of every property currently
@@ -227,10 +230,11 @@ func (g *Graph[N, W]) NodeProperties(n N) map[string]PropertyValue {
 	if !ok {
 		return nil
 	}
-	g.propMu.RLock()
-	bag, ok := g.nodeProps[id]
+	s := g.nodePropShardFor(id)
+	s.mu.RLock()
+	bag, ok := s.m[id]
 	if !ok {
-		g.propMu.RUnlock()
+		s.mu.RUnlock()
 		return nil
 	}
 	out := make(map[string]PropertyValue, len(bag))
@@ -239,6 +243,6 @@ func (g *Graph[N, W]) NodeProperties(n N) map[string]PropertyValue {
 			out[name] = v
 		}
 	}
-	g.propMu.RUnlock()
+	s.mu.RUnlock()
 	return out
 }

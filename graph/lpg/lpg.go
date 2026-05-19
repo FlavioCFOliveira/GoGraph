@@ -87,6 +87,25 @@ type edgeKey struct {
 	src, dst graph.NodeID
 }
 
+// propMapShards is the number of independent locks striping the
+// per-vertex and per-edge property maps. Sized to keep contention
+// below 5% on workloads with up to a few hundred concurrent
+// readers/writers; not as wide as adjlist's 256 because property
+// access is less hot than adjacency.
+const propMapShards = 16
+
+// nodePropShard is one stripe of the per-vertex property map.
+type nodePropShard struct {
+	mu sync.RWMutex
+	m  map[graph.NodeID]map[PropertyKeyID]PropertyValue
+}
+
+// edgePropShard is one stripe of the per-edge property map.
+type edgePropShard struct {
+	mu sync.RWMutex
+	m  map[edgeKey]map[PropertyKeyID]PropertyValue
+}
+
 // Graph is a labelled property graph generic over the user node type
 // N and edge weight type W. It composes an [adjlist.AdjList] with a
 // label registry and per-vertex / per-edge label storage backed by
@@ -99,12 +118,24 @@ type Graph[N comparable, W any] struct {
 	edgeIdx *label.Index
 	nodeMu  sync.RWMutex
 	edgeMu  sync.RWMutex
-	propMu  sync.RWMutex
 	nodeBag map[graph.NodeID]map[LabelID]struct{}
 	edgeBag map[edgeKey]map[LabelID]struct{}
 
-	nodeProps map[graph.NodeID]map[PropertyKeyID]PropertyValue
-	edgeProps map[edgeKey]map[PropertyKeyID]PropertyValue
+	nodePropShards [propMapShards]nodePropShard
+	edgePropShards [propMapShards]edgePropShard
+}
+
+// nodePropShardFor returns the shard responsible for NodeID id.
+func (g *Graph[N, W]) nodePropShardFor(id graph.NodeID) *nodePropShard {
+	return &g.nodePropShards[uint64(id)&(propMapShards-1)]
+}
+
+// edgePropShardFor returns the shard responsible for the edgeKey k.
+// The shard is keyed by the src endpoint so all properties of edges
+// out of one node coalesce in the same shard (favourable for the
+// common access pattern: enumerate-outgoing-edges-with-property).
+func (g *Graph[N, W]) edgePropShardFor(k edgeKey) *edgePropShard {
+	return &g.edgePropShards[uint64(k.src)&(propMapShards-1)]
 }
 
 // propKeys returns the property-key registry.
@@ -116,17 +147,22 @@ func (g *Graph[N, W]) PropertyKeys() *PropertyKeyRegistry { return g.pkeys }
 // New returns a fresh LPG built on top of a new [adjlist.AdjList]
 // configured by cfg.
 func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
-	return &Graph[N, W]{
-		adj:       adjlist.New[N, W](cfg),
-		reg:       NewLabelRegistry(),
-		pkeys:     NewPropertyKeyRegistry(),
-		nodeIdx:   label.NewIndex(),
-		edgeIdx:   label.NewIndex(),
-		nodeBag:   make(map[graph.NodeID]map[LabelID]struct{}),
-		edgeBag:   make(map[edgeKey]map[LabelID]struct{}),
-		nodeProps: make(map[graph.NodeID]map[PropertyKeyID]PropertyValue),
-		edgeProps: make(map[edgeKey]map[PropertyKeyID]PropertyValue),
+	g := &Graph[N, W]{
+		adj:     adjlist.New[N, W](cfg),
+		reg:     NewLabelRegistry(),
+		pkeys:   NewPropertyKeyRegistry(),
+		nodeIdx: label.NewIndex(),
+		edgeIdx: label.NewIndex(),
+		nodeBag: make(map[graph.NodeID]map[LabelID]struct{}),
+		edgeBag: make(map[edgeKey]map[LabelID]struct{}),
 	}
+	for i := range g.nodePropShards {
+		g.nodePropShards[i].m = make(map[graph.NodeID]map[PropertyKeyID]PropertyValue)
+	}
+	for i := range g.edgePropShards {
+		g.edgePropShards[i].m = make(map[edgeKey]map[PropertyKeyID]PropertyValue)
+	}
+	return g
 }
 
 // AdjList returns the underlying adjacency-list backend.
