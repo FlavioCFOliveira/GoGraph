@@ -7,7 +7,7 @@ package extern
 
 import (
 	"context"
-	"sort"
+	"slices"
 
 	"gograph/graph"
 	"gograph/store/csrfile"
@@ -45,7 +45,7 @@ func BFSCtx(ctx context.Context, r *csrfile.Reader, src graph.NodeID, visit func
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		sort.Slice(cur, func(i, j int) bool { return cur[i] < cur[j] })
+		slices.Sort(cur)
 		for _, node := range cur {
 			if !visit(node, depth) {
 				return nil
