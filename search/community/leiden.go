@@ -7,31 +7,29 @@
 //     guarantees the canonical Louvain algorithm lacks.
 //   - [LabelPropagation] — Raghavan-Albert-Kumara 2007, the
 //     near-linear-time simple counterpart.
-//
-// The Leiden implementation in this package follows the local-
-// moving + refinement + aggregation outline of the paper but uses
-// a simplified single-phase modularity-greedy heuristic; the
-// connected-community guarantee that distinguishes Leiden from
-// Louvain is enforced by the post-pass that splits any
-// disconnected community into its connected components.
 package community
 
 import (
-	"sort"
-
 	"gograph/graph"
 	"gograph/graph/csr"
 )
 
 // LeidenOptions configures [Leiden].
 type LeidenOptions struct {
-	// MaxIterations bounds the number of local-moving sweeps.
+	// MaxIterations bounds the number of local-moving sweeps per pass.
 	MaxIterations int
+	// MaxPasses bounds the number of Leiden passes (local-move +
+	// refine + aggregate) before the algorithm stops.
+	MaxPasses int
+	// Resolution scales the modularity expectation term (typically 1.0).
+	// Larger values bias toward smaller communities; smaller values
+	// toward fewer larger communities.
+	Resolution float64
 }
 
 // DefaultLeidenOptions returns the default parameters.
 func DefaultLeidenOptions() LeidenOptions {
-	return LeidenOptions{MaxIterations: 32}
+	return LeidenOptions{MaxIterations: 64, MaxPasses: 16, Resolution: 1.0}
 }
 
 // Partition is the result of a community-detection run.
@@ -45,126 +43,556 @@ type Partition struct {
 	NumCommunities int
 }
 
-// Leiden runs the simplified Leiden community-detection algorithm
-// over the undirected graph c. The returned partition guarantees
-// connected communities (the Leiden-vs-Louvain distinction) by
-// splitting any disconnected community into its connected
-// components in a post-pass.
+// Leiden runs the Traag-Waltman-van Eck Leiden community-detection
+// algorithm on the undirected graph c.
+//
+// Three phases per pass:
+//  1. Local moving — each node greedily moves to the community that
+//     maximises the modularity gain ΔQ (Newman's formula).
+//  2. Refinement — within each community, restart with singletons and
+//     allow moves only inside the parent community, producing a
+//     well-separated refined partition. This is the Leiden-vs-Louvain
+//     guarantee that no community is internally poorly connected.
+//  3. Aggregation — contract each refined sub-community into a single
+//     super-node; iterate on the smaller graph.
+//
+// Repeats passes until modularity no longer improves or MaxPasses is
+// reached. A final splitDisconnected post-pass guarantees every
+// returned community is internally connected.
 //
 // Only live NodeIDs (those with at least one incident edge) are
 // assigned to a community; ghost slots receive the sentinel -1.
 //
-// Complexity is near-linear on sparse graphs in practice; the
-// worst case is O(V*E) per iteration.
+// Concurrency: safe to invoke from any number of goroutines on a
+// shared CSR.
 //
-//nolint:gocyclo // simplified Leiden: defaults + live mask + local-moving sweeps + splitDisconnected
+//nolint:gocyclo // canonical Leiden: defaults + pass loop dispatches three phases through helpers
 func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 	if opts.MaxIterations <= 0 {
-		opts.MaxIterations = 32
+		opts.MaxIterations = 64
+	}
+	if opts.MaxPasses <= 0 {
+		opts.MaxPasses = 16
+	}
+	if opts.Resolution <= 0 {
+		opts.Resolution = 1.0
 	}
 	maxID := int(c.MaxNodeID())
 	if maxID == 0 {
 		return Partition{}
 	}
+	mask := c.LiveMask()
+
+	// Build the compact aggregation-graph view of c.
+	g, idMap := aggGraphFromCSR(c, mask)
+	if g.n == 0 {
+		return Partition{Community: makeAllMinusOne(maxID), NumCommunities: 0}
+	}
+
+	// Each live node starts in its own community.
+	comm := make([]int, g.n)
+	for i := range comm {
+		comm[i] = i
+	}
+
+	prevQ := g.modularity(comm, opts.Resolution)
+	for pass := 0; pass < opts.MaxPasses; pass++ {
+		// Phase 1: local moving in g.
+		moved := g.localMove(comm, opts)
+		// Phase 2: refinement.
+		refined := g.refine(comm, opts)
+		// Phase 3: aggregation — build a smaller graph where each
+		// refined community is a single super-node. The outer
+		// partition (comm) is projected onto the super-graph; the
+		// refined partition is the per-super-node identity.
+		nextG, nextComm := g.aggregate(comm, refined)
+		nextQ := nextG.modularity(nextComm, opts.Resolution)
+		if !moved && nextQ <= prevQ {
+			// No further improvement.
+			break
+		}
+		g = nextG
+		comm = nextComm
+		// "refined" lives in the previous-level node space; the
+		// aggregation step folds it into nextComm directly via the
+		// super-node identity, so no separate projection is needed.
+		prevQ = nextQ
+	}
+
+	// Project the final super-graph partition back to the original
+	// CSR NodeID space via idMap, building the result slice.
+	out := makeAllMinusOne(maxID)
+	for origID := 0; origID < maxID; origID++ {
+		if !mask[origID] {
+			continue
+		}
+		// Walk the chain of compact mappings: original -> level-0 idMap[origID]
+		// -> ... -> final super-node. idMap is the inverse: idMap[level0] = origID.
+		// We maintain the projection through a running per-pass mapping inside
+		// aggregate(); after the loop, comm[finalNodeIdx] holds the partition
+		// id, and the per-original-node mapping is stored on g.lifted.
+		out[origID] = comm[g.lifted[idMap[origID]]]
+	}
+
+	// Compact final community IDs into [0, K).
+	out, k := compactIDs(out)
+	// Final connectivity guarantee.
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
-	mask := c.LiveMask()
-	comm := make([]int, maxID)
-	for i := 0; i < maxID; i++ {
-		if mask[i] {
-			comm[i] = i
-		} else {
-			comm[i] = -1
+	out, k = splitDisconnectedPartition(out, mask, verts, edges, maxID, k)
+	return Partition{Community: out, NumCommunities: k}
+}
+
+// makeAllMinusOne returns a slice of length n filled with -1.
+func makeAllMinusOne(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = -1
+	}
+	return out
+}
+
+// compactIDs renumbers community IDs into [0, K) preserving order of
+// first occurrence and leaves -1 sentinels untouched.
+func compactIDs(p []int) (community []int, k int) {
+	remap := map[int]int{}
+	next := 0
+	for _, v := range p {
+		if v < 0 {
+			continue
+		}
+		if _, ok := remap[v]; !ok {
+			remap[v] = next
+			next++
 		}
 	}
-	for iter := 0; iter < opts.MaxIterations; iter++ {
-		changed := false
-		for v := 0; v < maxID; v++ {
-			if !mask[v] {
-				continue
-			}
-			best := comm[v]
-			bestScore := 0
-			seen := make(map[int]int)
-			for k := verts[v]; k < verts[v+1]; k++ {
-				w := int(edges[k])
-				if !mask[w] {
+	for i, v := range p {
+		if v >= 0 {
+			p[i] = remap[v]
+		}
+	}
+	return p, next
+}
+
+// splitDisconnectedPartition is the Leiden post-pass that ensures
+// every community is internally connected. Disjoint pieces of a
+// nominally-single community are split into separate new IDs.
+func splitDisconnectedPartition(comm []int, mask []bool, verts []uint64, edges []graph.NodeID, maxID, _ int) (out []int, k int) {
+	visited := make([]bool, maxID)
+	out = makeAllMinusOne(maxID)
+	for start := 0; start < maxID; start++ {
+		if !mask[start] || visited[start] {
+			continue
+		}
+		cid := comm[start]
+		id := k
+		k++
+		// BFS through the same-community connected component.
+		queue := []int{start}
+		visited[start] = true
+		for len(queue) > 0 {
+			v := queue[0]
+			queue = queue[1:]
+			out[v] = id
+			for ki := verts[v]; ki < verts[v+1]; ki++ {
+				w := int(edges[ki])
+				if !mask[w] || visited[w] || comm[w] != cid {
 					continue
 				}
-				seen[comm[w]]++
-			}
-			for cid, count := range seen {
-				if count > bestScore || (count == bestScore && cid < best) {
-					best = cid
-					bestScore = count
-				}
-			}
-			if best != comm[v] {
-				comm[v] = best
-				changed = true
+				visited[w] = true
+				queue = append(queue, w)
 			}
 		}
-		if !changed {
+	}
+	return out, k
+}
+
+// --- aggregation graph -----------------------------------------------
+//
+// aggGraph is a weighted compact representation used by Leiden's
+// inner loop. Each Leiden pass turns the previous aggGraph into a
+// smaller one whose nodes are refined communities.
+
+type aggGraph struct {
+	n       int       // number of nodes
+	verts   []int     // length n+1, CSR-style offsets
+	edges   []int     // adjacency (compact node IDs)
+	weights []float64 // parallel to edges
+	deg     []float64 // node degree (sum of incident weights, including self-loop *2)
+	loop    []float64 // self-loop weight per node (carries internal mass after aggregation)
+	m2      float64   // 2 * total edge weight (sum of deg)
+	// lifted maps level-0 compact node ID -> current node ID at this aggregation level.
+	// It is rewritten on each aggregate() call so that, at the end, lifted[origLevel0]
+	// returns the index into comm[] for the original node.
+	lifted []int
+}
+
+// aggGraphFromCSR builds the initial aggGraph from c (using only live
+// NodeIDs). idMap[level0Compact] returns the original CSR NodeID.
+//
+//nolint:gocyclo // two-pass CSR build + degree + identity-lift initialisation
+func aggGraphFromCSR[W any](c *csr.CSR[W], mask []bool) (g *aggGraph, idMap []int) {
+	maxID := int(c.MaxNodeID())
+	compact := make([]int, maxID)
+	level0Order := make([]int, 0, maxID)
+	n := 0
+	for i := 0; i < maxID; i++ {
+		if mask[i] {
+			compact[i] = n
+			level0Order = append(level0Order, i)
+			n++
+		} else {
+			compact[i] = -1
+		}
+	}
+
+	cVerts := c.VerticesSlice()
+	cEdges := c.EdgesSlice()
+	verts := make([]int, n+1)
+	for src := 0; src < maxID; src++ {
+		if !mask[src] {
+			continue
+		}
+		s := compact[src]
+		var count int
+		for k := cVerts[src]; k < cVerts[src+1]; k++ {
+			if mask[cEdges[k]] {
+				count++
+			}
+		}
+		verts[s+1] = count
+	}
+	for i := 1; i <= n; i++ {
+		verts[i] += verts[i-1]
+	}
+	edges := make([]int, verts[n])
+	weights := make([]float64, verts[n])
+	cursor := make([]int, n)
+	for src := 0; src < maxID; src++ {
+		if !mask[src] {
+			continue
+		}
+		s := compact[src]
+		for k := cVerts[src]; k < cVerts[src+1]; k++ {
+			dst := cEdges[k]
+			if !mask[dst] {
+				continue
+			}
+			d := compact[dst]
+			off := verts[s] + cursor[s]
+			edges[off] = d
+			weights[off] = 1.0 // unweighted
+			cursor[s]++
+		}
+	}
+	deg := make([]float64, n)
+	loop := make([]float64, n)
+	var m2 float64
+	for v := 0; v < n; v++ {
+		for k := verts[v]; k < verts[v+1]; k++ {
+			deg[v] += weights[k]
+		}
+		m2 += deg[v]
+	}
+	lifted := make([]int, n)
+	for i := range lifted {
+		lifted[i] = i
+	}
+	// idMap from level-0 compact -> original NodeID; level-0 compact is identity here.
+	idMap = make([]int, maxID)
+	for i := range idMap {
+		idMap[i] = -1
+	}
+	for compactID, origID := range level0Order {
+		idMap[origID] = compactID
+	}
+	g = &aggGraph{
+		n:       n,
+		verts:   verts,
+		edges:   edges,
+		weights: weights,
+		deg:     deg,
+		loop:    loop,
+		m2:      m2,
+		lifted:  lifted,
+	}
+	return g, idMap
+}
+
+// modularity computes Q for the given partition on this aggregation graph.
+func (g *aggGraph) modularity(comm []int, resolution float64) float64 {
+	if g.m2 == 0 {
+		return 0
+	}
+	cMax := 0
+	for _, c := range comm {
+		if c+1 > cMax {
+			cMax = c + 1
+		}
+	}
+	sigmaIn := make([]float64, cMax)
+	sigmaTot := make([]float64, cMax)
+	for v := 0; v < g.n; v++ {
+		c := comm[v]
+		sigmaTot[c] += g.deg[v]
+		sigmaIn[c] += g.loop[v]
+		for k := g.verts[v]; k < g.verts[v+1]; k++ {
+			u := g.edges[k]
+			if comm[u] == c {
+				sigmaIn[c] += g.weights[k]
+			}
+		}
+	}
+	var q float64
+	for c := 0; c < cMax; c++ {
+		q += sigmaIn[c]/g.m2 - resolution*(sigmaTot[c]/g.m2)*(sigmaTot[c]/g.m2)
+	}
+	return q
+}
+
+// localMove performs modularity-greedy local moving until no node
+// improves or MaxIterations is reached. Returns true if at least one
+// node moved.
+//
+//nolint:gocyclo // canonical Louvain inner loop: sigma maintenance + per-node best-community search
+func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
+	if g.m2 == 0 {
+		return false
+	}
+	cMax := 0
+	for _, c := range comm {
+		if c+1 > cMax {
+			cMax = c + 1
+		}
+	}
+	sigmaTot := make([]float64, cMax)
+	for v := 0; v < g.n; v++ {
+		sigmaTot[comm[v]] += g.deg[v]
+	}
+	anyMoved := false
+	for iter := 0; iter < opts.MaxIterations; iter++ {
+		moved := false
+		for v := 0; v < g.n; v++ {
+			cv := comm[v]
+			// k_v_to_c for every neighbour community.
+			kvc := map[int]float64{}
+			for k := g.verts[v]; k < g.verts[v+1]; k++ {
+				u := g.edges[k]
+				if u == v {
+					continue
+				}
+				kvc[comm[u]] += g.weights[k]
+			}
+			// Pretend v is removed from cv for the candidate
+			// evaluation: subtract its degree from sigmaTot[cv]. The
+			// k_v,c values were collected with v's edges; v's own
+			// degree contributes to deg[v] but not to k_v,c for c == cv
+			// because we skipped self-loops.
+			sigmaTot[cv] -= g.deg[v]
+			bestC := cv
+			bestDelta := 0.0
+			for c, kv := range kvc {
+				// ΔQ for v joining community c (with v previously
+				// removed) per the Louvain formula:
+				//   ΔQ = (k_v,c)/m - resolution * (deg[v] * sigmaTot[c]) / (2*m^2)
+				// where m = m2/2. Re-expressing in m2:
+				//   ΔQ = (2*k_v,c)/m2 - resolution * (2*deg[v]*sigmaTot[c]) / (m2^2)
+				// Constant 2 factor is omitted from comparison.
+				delta := 2*kv/g.m2 - opts.Resolution*2*g.deg[v]*sigmaTot[c]/(g.m2*g.m2)
+				if delta > bestDelta || (delta == bestDelta && c < bestC) {
+					bestDelta = delta
+					bestC = c
+				}
+			}
+			// Add v to bestC. If bestC == cv it's a no-op except for
+			// restoring sigmaTot[cv].
+			sigmaTot[bestC] += g.deg[v]
+			if bestC != cv {
+				comm[v] = bestC
+				moved = true
+				anyMoved = true
+			}
+		}
+		if !moved {
 			break
 		}
 	}
-	return splitDisconnected(comm, mask, verts, edges, maxID)
+	return anyMoved
 }
 
-// splitDisconnected ensures every community is internally connected
-// by splitting disconnected communities into their connected
-// components. Only live NodeIDs are included in the result; ghost
-// slots stay at -1.
-func splitDisconnected(comm []int, mask []bool, verts []uint64, edges []graph.NodeID, maxID int) Partition {
-	visited := make([]bool, maxID)
-	newComm := make([]int, maxID)
-	for i := range newComm {
-		newComm[i] = -1
+// refine implements Leiden's refinement phase: within each community
+// in the input partition, restart with singletons and run a restricted
+// local move where each node may join only neighbour communities that
+// are subsets of its parent community. Produces a refined partition
+// in fresh community IDs; returned slice is comm-indexed.
+//
+//nolint:gocyclo // canonical Leiden refinement: per-parent singleton restart with restricted moves
+func (g *aggGraph) refine(parent []int, opts LeidenOptions) []int {
+	if g.m2 == 0 {
+		return parent
 	}
-	next := 0
-	byCommunity := map[int][]int{}
-	for i, c := range comm {
-		if !mask[i] {
-			continue
+	refined := make([]int, g.n)
+	for i := range refined {
+		refined[i] = i // each node starts in its own refined community
+	}
+	cMax := 0
+	for _, c := range parent {
+		if c+1 > cMax {
+			cMax = c + 1
 		}
-		byCommunity[c] = append(byCommunity[c], i)
 	}
-	cids := make([]int, 0, len(byCommunity))
-	for cid := range byCommunity {
-		cids = append(cids, cid)
+	sigmaTot := make([]float64, g.n) // indexed by refined-community ID, initially == node ID
+	for v := 0; v < g.n; v++ {
+		sigmaTot[v] += g.deg[v]
 	}
-	sort.Ints(cids)
-	for _, cid := range cids {
-		members := byCommunity[cid]
-		memberSet := make(map[int]struct{}, len(members))
-		for _, m := range members {
-			memberSet[m] = struct{}{}
-		}
-		for _, m := range members {
-			if visited[m] {
-				continue
+	for iter := 0; iter < opts.MaxIterations; iter++ {
+		moved := false
+		for v := 0; v < g.n; v++ {
+			parentV := parent[v]
+			cv := refined[v]
+			kvc := map[int]float64{}
+			for k := g.verts[v]; k < g.verts[v+1]; k++ {
+				u := g.edges[k]
+				if u == v {
+					continue
+				}
+				if parent[u] != parentV {
+					continue
+				}
+				kvc[refined[u]] += g.weights[k]
 			}
-			id := next
-			next++
-			queue := []int{m}
-			visited[m] = true
-			for len(queue) > 0 {
-				v := queue[0]
-				queue = queue[1:]
-				newComm[v] = id
-				for k := verts[v]; k < verts[v+1]; k++ {
-					w := int(edges[k])
-					if _, in := memberSet[w]; !in {
-						continue
-					}
-					if visited[w] {
-						continue
-					}
-					visited[w] = true
-					queue = append(queue, w)
+			sigmaTot[cv] -= g.deg[v]
+			bestC := cv
+			bestDelta := 0.0
+			for c, kv := range kvc {
+				delta := 2*kv/g.m2 - opts.Resolution*2*g.deg[v]*sigmaTot[c]/(g.m2*g.m2)
+				if delta > bestDelta || (delta == bestDelta && c < bestC) {
+					bestDelta = delta
+					bestC = c
 				}
 			}
+			sigmaTot[bestC] += g.deg[v]
+			if bestC != cv {
+				refined[v] = bestC
+				moved = true
+			}
+		}
+		if !moved {
+			break
 		}
 	}
-	return Partition{Community: newComm, NumCommunities: next}
+	return refined
+}
+
+// aggregate builds a new aggGraph in which each refined community is
+// a single super-node. The returned comm slice projects the outer
+// (non-refined) partition onto the super-nodes.
+//
+//nolint:gocyclo // canonical aggregation: refined-community renumber + super-edge accumulation + lifted projection
+func (g *aggGraph) aggregate(parent, refined []int) (newG *aggGraph, newComm []int) {
+	// Renumber refined communities into [0, nNew).
+	remap := map[int]int{}
+	next := 0
+	for v := 0; v < g.n; v++ {
+		r := refined[v]
+		if _, ok := remap[r]; !ok {
+			remap[r] = next
+			next++
+		}
+	}
+	nNew := next
+
+	// New aggGraph: nodes = refined communities; edges accumulated by
+	// summing weights between distinct refined communities; self-loops
+	// accumulate internal weight.
+	type edgeKey struct{ a, b int }
+	weight := map[edgeKey]float64{}
+	deg := make([]float64, nNew)
+	loop := make([]float64, nNew)
+	// Invariant maintained at every level: deg[v] = sum(g.weights for
+	// non-self edges from v) + g.loop[v]. The previous level's loop
+	// represents already-contracted internal mass; it contributes to
+	// the new node's degree exactly once (already CSR-doubled).
+	for v := 0; v < g.n; v++ {
+		a := remap[refined[v]]
+		loop[a] += g.loop[v]
+		deg[a] += g.loop[v] // self-loop's contribution to degree
+		for k := g.verts[v]; k < g.verts[v+1]; k++ {
+			u := g.edges[k]
+			b := remap[refined[u]]
+			deg[a] += g.weights[k]
+			if a == b {
+				loop[a] += g.weights[k]
+				continue
+			}
+			key := edgeKey{a, b}
+			weight[key] += g.weights[k]
+		}
+	}
+	// Each non-self edge was counted twice (a->b and b->a) — that's
+	// the CSR doubling convention; we keep it. Build verts/edges.
+	verts := make([]int, nNew+1)
+	for key := range weight {
+		verts[key.a+1]++
+	}
+	for i := 1; i <= nNew; i++ {
+		verts[i] += verts[i-1]
+	}
+	edges := make([]int, verts[nNew])
+	weights := make([]float64, verts[nNew])
+	cursor := make([]int, nNew)
+	for key, w := range weight {
+		off := verts[key.a] + cursor[key.a]
+		edges[off] = key.b
+		weights[off] = w
+		cursor[key.a]++
+	}
+	var m2 float64
+	for _, d := range deg {
+		m2 += d
+	}
+
+	// Project the outer (non-refined) partition: each super-node
+	// inherits parent[v] from one of its underlying v's (all members
+	// share the same parent by construction).
+	newParent := make([]int, nNew)
+	seen := make([]bool, nNew)
+	for v := 0; v < g.n; v++ {
+		a := remap[refined[v]]
+		if !seen[a] {
+			newParent[a] = parent[v]
+			seen[a] = true
+		}
+	}
+
+	// Lift the level-0 compact NodeID -> current node mapping.
+	newLifted := make([]int, len(g.lifted))
+	for level0 := 0; level0 < len(g.lifted); level0++ {
+		old := g.lifted[level0]
+		newLifted[level0] = remap[refined[old]]
+	}
+
+	// Renumber newParent to [0, kOuter): preserves first-occurrence order.
+	pRemap := map[int]int{}
+	pNext := 0
+	for _, p := range newParent {
+		if _, ok := pRemap[p]; !ok {
+			pRemap[p] = pNext
+			pNext++
+		}
+	}
+	for i, p := range newParent {
+		newParent[i] = pRemap[p]
+	}
+
+	return &aggGraph{
+		n:       nNew,
+		verts:   verts,
+		edges:   edges,
+		weights: weights,
+		deg:     deg,
+		loop:    loop,
+		m2:      m2,
+		lifted:  newLifted,
+	}, newParent
 }

@@ -9,4 +9,5 @@ require (
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
+	pgregory.net/rapid v1.3.0 // indirect
 )

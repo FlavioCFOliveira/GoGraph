@@ -24,15 +24,13 @@ func TestLeiden_TwoCliques(t *testing.T) {
 	a.AddEdge(3, 4, struct{}{})
 	c := csr.BuildFromAdjList(a)
 	p := Leiden(c, DefaultLeidenOptions())
-	// The v1 simplified Leiden (majority-vote label propagation) cannot
-	// reliably separate two K4 cliques joined by a single bridge — the
-	// real Traag-Waltman implementation lands in task #80. For now we
-	// only assert (a) the partition exists, (b) every live NodeID is
-	// assigned a non-sentinel community ID, and (c) ghost slots are
-	// flagged with -1.
-	if p.NumCommunities < 1 {
-		t.Fatalf("Leiden found 0 communities")
+	// Traag-Waltman Leiden separates two strongly-internally-connected
+	// cliques across a single bridge edge: modularity gain on moving
+	// any K4 node to the opposite clique is negative.
+	if p.NumCommunities != 2 {
+		t.Fatalf("Leiden TwoCliques found %d communities, want 2", p.NumCommunities)
 	}
+	// Verify the partition correctly groups the two K4s.
 	mask := c.LiveMask()
 	for id, m := range mask {
 		if m {
@@ -42,6 +40,19 @@ func TestLeiden_TwoCliques(t *testing.T) {
 		} else if p.Community[id] != -1 {
 			t.Fatalf("ghost NodeID %d got community %d, want -1", id, p.Community[id])
 		}
+	}
+	id0, _ := a.Mapper().Lookup(0)
+	id3, _ := a.Mapper().Lookup(3)
+	id4, _ := a.Mapper().Lookup(4)
+	id7, _ := a.Mapper().Lookup(7)
+	if p.Community[id0] != p.Community[id3] {
+		t.Fatalf("left clique split: c(0)=%d c(3)=%d", p.Community[id0], p.Community[id3])
+	}
+	if p.Community[id4] != p.Community[id7] {
+		t.Fatalf("right clique split: c(4)=%d c(7)=%d", p.Community[id4], p.Community[id7])
+	}
+	if p.Community[id0] == p.Community[id4] {
+		t.Fatalf("Leiden merged left and right cliques: c(0)=c(4)=%d", p.Community[id0])
 	}
 }
 
