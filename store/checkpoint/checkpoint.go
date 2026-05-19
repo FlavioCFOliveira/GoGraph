@@ -183,7 +183,11 @@ func (c *Checkpointer[N, W]) loop(ctx context.Context) {
 			done <- err
 		case <-tickCh:
 			if c.cfg.MaxAge > 0 && time.Since(lastFire) >= c.cfg.MaxAge {
-				_ = c.runCheckpoint()
+				// Periodic firings record the error in Stats.LastError
+				// (via setErr inside runCheckpoint) so observability
+				// surfaces; there is no caller to return to from the
+				// loop, so the value itself is intentionally discarded.
+				_ = c.runCheckpoint() //nolint:errcheck // error captured in stats
 				lastFire = time.Now()
 			}
 		}
