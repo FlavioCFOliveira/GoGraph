@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,9 +100,15 @@ func New[N comparable, W any](
 }
 
 // Start launches the background goroutine. ctx cancellation stops
-// the goroutine.
+// the goroutine. The goroutine is tagged with pprof labels
+// (goroutine=checkpoint-loop, dir=<cfg.Dir>) so it appears named
+// in pprof goroutine profiles rather than as anonymous "go c.loop".
 func (c *Checkpointer[N, W]) Start(ctx context.Context) {
-	go c.loop(ctx)
+	labels := pprof.Labels(
+		"goroutine", "checkpoint-loop",
+		"dir", c.cfg.Dir,
+	)
+	go pprof.Do(ctx, labels, c.loop)
 }
 
 // Stop signals the goroutine to exit and blocks until it does.
