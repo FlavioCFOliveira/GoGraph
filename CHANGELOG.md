@@ -6,7 +6,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-(no unreleased work — the next entry below is the live release)
+### Fixed (documentation)
+
+- The Sprint 10 observability entry below and the matching paragraph
+  in `release-notes/v1.1.0.md` previously stated that the
+  `internal/metrics` Prometheus-style histogram hook was wired into
+  every public blocking API. The hook ships and the
+  Backend/IncCounter/ObserveLatency/Time API is stable, but the
+  call-site integration across `search/`, `search/centrality/`,
+  `search/community/`, `search/flow/`, `search/extern/`,
+  `graph/io/{csv,graphml,dot,jsonl}`, and
+  `store/{wal,snapshot,txn,checkpoint,recovery,bulk}` has not
+  landed yet. The package doc of `internal/metrics` already records
+  this as "a Sprint 11 or 12 follow-up"; the changelog and release
+  notes are now consistent with the code. No source change; no
+  retag of `v1.1.0`. Wire-up is tracked for a future release.
 
 ## [1.1.0] — 2026-05-19
 
@@ -26,8 +40,16 @@ algorithmic and reliability work.
 
 ### Added — Sprint 10 (Observability)
 
-- `internal/metrics` Prometheus-style histogram hook on every
-  public blocking API.
+- `internal/metrics` Prometheus-style histogram **API hook** — a
+  Backend interface, lock-free `atomic.Pointer[Backend]` swap, and
+  the `IncCounter` / `ObserveLatency` / `Time` helpers, all backed
+  by a zero-overhead no-op default. The hook is the interface
+  contract for the CLAUDE.md "latency histograms on every public
+  blocking API" mandate; **wiring it into individual call-sites
+  across `search/`, `store/`, and `graph/io/` is deferred** so the
+  wire-up can land incrementally without further API churn (see
+  the `internal/metrics` package doc and the Unreleased note
+  above).
 - `pprof.SetGoroutineLabels` on every long-lived goroutine.
 - `docs/benchmarks/` archive with multi-concurrency-level numbers.
 - `govulncheck` job in CI (daily schedule).
