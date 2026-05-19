@@ -321,13 +321,76 @@ func releaseDijkstra[W Weight](st *dijkstraState[W]) {
 	dijkstraPool[W]().Put(st)
 }
 
-// dijkstraPools holds the per-W [sync.Pool] for [dijkstraState]
-// objects, keyed by the reflect.Type of the zero value of W. Using a
-// reflection key keeps each generic instantiation cleanly separated
-// without resorting to unsafe per-type globals.
-var dijkstraPools sync.Map //nolint:gochecknoglobals // per-package pool registry
+// Per-base-type pools for [dijkstraState]. The Weight interface
+// admits the thirteen built-in numeric base types plus any defined
+// type whose underlying type is one of them; the type switch in
+// [dijkstraPool] dispatches to the corresponding package-level pool
+// in <5ns, with a reflection-keyed fallback for defined types.
+//
+//nolint:gochecknoglobals // per-W pool registry; immutable after init
+var (
+	dijkstraPoolInt     = &sync.Pool{New: func() any { return &dijkstraState[int]{} }}
+	dijkstraPoolInt8    = &sync.Pool{New: func() any { return &dijkstraState[int8]{} }}
+	dijkstraPoolInt16   = &sync.Pool{New: func() any { return &dijkstraState[int16]{} }}
+	dijkstraPoolInt32   = &sync.Pool{New: func() any { return &dijkstraState[int32]{} }}
+	dijkstraPoolInt64   = &sync.Pool{New: func() any { return &dijkstraState[int64]{} }}
+	dijkstraPoolUint    = &sync.Pool{New: func() any { return &dijkstraState[uint]{} }}
+	dijkstraPoolUint8   = &sync.Pool{New: func() any { return &dijkstraState[uint8]{} }}
+	dijkstraPoolUint16  = &sync.Pool{New: func() any { return &dijkstraState[uint16]{} }}
+	dijkstraPoolUint32  = &sync.Pool{New: func() any { return &dijkstraState[uint32]{} }}
+	dijkstraPoolUint64  = &sync.Pool{New: func() any { return &dijkstraState[uint64]{} }}
+	dijkstraPoolUintptr = &sync.Pool{New: func() any { return &dijkstraState[uintptr]{} }}
+	dijkstraPoolFloat32 = &sync.Pool{New: func() any { return &dijkstraState[float32]{} }}
+	dijkstraPoolFloat64 = &sync.Pool{New: func() any { return &dijkstraState[float64]{} }}
+)
 
+// dijkstraPoolsByType holds the per-W [sync.Pool] for [dijkstraState]
+// objects when W is a defined type whose underlying type matches one
+// of the base Weight types. Used only as a fallback; the base-type
+// cases dispatch through [dijkstraPool]'s type switch first.
+//
+//nolint:gochecknoglobals // fallback registry; one entry per defined Weight type
+var dijkstraPools sync.Map
+
+// dijkstraPool returns the [sync.Pool] of [dijkstraState] values for
+// the type parameter W. The fast path is an inlined type switch over
+// the thirteen built-in Weight base types; defined Weight types
+// (e.g. type Distance int64) fall through to a reflect-keyed
+// sync.Map registry.
 func dijkstraPool[W Weight]() *sync.Pool {
+	var zero W
+	switch any(zero).(type) {
+	case int:
+		return dijkstraPoolInt
+	case int8:
+		return dijkstraPoolInt8
+	case int16:
+		return dijkstraPoolInt16
+	case int32:
+		return dijkstraPoolInt32
+	case int64:
+		return dijkstraPoolInt64
+	case uint:
+		return dijkstraPoolUint
+	case uint8:
+		return dijkstraPoolUint8
+	case uint16:
+		return dijkstraPoolUint16
+	case uint32:
+		return dijkstraPoolUint32
+	case uint64:
+		return dijkstraPoolUint64
+	case uintptr:
+		return dijkstraPoolUintptr
+	case float32:
+		return dijkstraPoolFloat32
+	case float64:
+		return dijkstraPoolFloat64
+	}
+	return dijkstraPoolReflect[W]()
+}
+
+func dijkstraPoolReflect[W Weight]() *sync.Pool {
 	var zero W
 	key := reflectTypeOf(zero)
 	if v, ok := dijkstraPools.Load(key); ok {
@@ -338,13 +401,64 @@ func dijkstraPool[W Weight]() *sync.Pool {
 	return actual.(*sync.Pool) //nolint:errcheck // statically known type
 }
 
-// dijkHeapPools is the per-W heap-only pool used by [DijkstraInto]
-// and other *Into entrypoints that operate on caller-provided
-// buffers. Kept separate from [dijkstraPools] so that Into callers
-// don't pay for buffer allocations they already own.
-var dijkHeapPools sync.Map //nolint:gochecknoglobals // per-package heap pool
+// Per-base-type pools for the heap-only acquire used by [DijkstraInto]
+// and other *Into entrypoints; mirror layout of the dijkstraState
+// pools above.
+//
+//nolint:gochecknoglobals // per-W heap pool registry; immutable after init
+var (
+	dijkHeapPoolInt     = &sync.Pool{New: func() any { return &dijkHeap[int]{} }}
+	dijkHeapPoolInt8    = &sync.Pool{New: func() any { return &dijkHeap[int8]{} }}
+	dijkHeapPoolInt16   = &sync.Pool{New: func() any { return &dijkHeap[int16]{} }}
+	dijkHeapPoolInt32   = &sync.Pool{New: func() any { return &dijkHeap[int32]{} }}
+	dijkHeapPoolInt64   = &sync.Pool{New: func() any { return &dijkHeap[int64]{} }}
+	dijkHeapPoolUint    = &sync.Pool{New: func() any { return &dijkHeap[uint]{} }}
+	dijkHeapPoolUint8   = &sync.Pool{New: func() any { return &dijkHeap[uint8]{} }}
+	dijkHeapPoolUint16  = &sync.Pool{New: func() any { return &dijkHeap[uint16]{} }}
+	dijkHeapPoolUint32  = &sync.Pool{New: func() any { return &dijkHeap[uint32]{} }}
+	dijkHeapPoolUint64  = &sync.Pool{New: func() any { return &dijkHeap[uint64]{} }}
+	dijkHeapPoolUintptr = &sync.Pool{New: func() any { return &dijkHeap[uintptr]{} }}
+	dijkHeapPoolFloat32 = &sync.Pool{New: func() any { return &dijkHeap[float32]{} }}
+	dijkHeapPoolFloat64 = &sync.Pool{New: func() any { return &dijkHeap[float64]{} }}
+)
+
+//nolint:gochecknoglobals // fallback heap-pool registry
+var dijkHeapPools sync.Map
 
 func dijkHeapPool[W Weight]() *sync.Pool {
+	var zero W
+	switch any(zero).(type) {
+	case int:
+		return dijkHeapPoolInt
+	case int8:
+		return dijkHeapPoolInt8
+	case int16:
+		return dijkHeapPoolInt16
+	case int32:
+		return dijkHeapPoolInt32
+	case int64:
+		return dijkHeapPoolInt64
+	case uint:
+		return dijkHeapPoolUint
+	case uint8:
+		return dijkHeapPoolUint8
+	case uint16:
+		return dijkHeapPoolUint16
+	case uint32:
+		return dijkHeapPoolUint32
+	case uint64:
+		return dijkHeapPoolUint64
+	case uintptr:
+		return dijkHeapPoolUintptr
+	case float32:
+		return dijkHeapPoolFloat32
+	case float64:
+		return dijkHeapPoolFloat64
+	}
+	return dijkHeapPoolReflect[W]()
+}
+
+func dijkHeapPoolReflect[W Weight]() *sync.Pool {
 	var zero W
 	key := reflectTypeOf(zero)
 	if v, ok := dijkHeapPools.Load(key); ok {

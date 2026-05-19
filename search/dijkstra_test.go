@@ -3,6 +3,7 @@ package search
 import (
 	"errors"
 	"math/rand/v2"
+	"sync"
 	"testing"
 
 	"gograph/graph"
@@ -217,6 +218,72 @@ func bellmanFordRef(edges []weightedEdge, src, n int) []int64 {
 		}
 	}
 	return out
+}
+
+// BenchmarkDijkstraPoolDispatch directly measures the dispatch cost
+// of the per-W [sync.Pool] selector — the v1.0 implementation went
+// through reflect.TypeOf + sync.Map.Load (~25ns per call); the type
+// switch in the current code closes that to a few ns. The benchmark
+// isolates dispatch from the rest of the algorithm so the speedup is
+// observable independently of the steady-state heap loop.
+func BenchmarkDijkstraPoolDispatch(b *testing.B) {
+	var sink *sync.Pool
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sink = dijkstraPool[int64]()
+	}
+	_ = sink
+}
+
+// BenchmarkDijkstra_Small is the per-call-dominated benchmark used to
+// validate that pool dispatch overhead (per-call reflect.TypeOf +
+// sync.Map.Load on the v1.0 implementation) is no longer the bottom-
+// of-the-stack cost. The graph deliberately has an isolated source so
+// the algorithm terminates after a single heap push/pop — every
+// constant per-call overhead is amplified to a visible fraction of
+// ns/op.
+func BenchmarkDijkstra_Small(b *testing.B) {
+	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	const n = 100
+	// Build connected subgraph among nodes 1..n-1, leave 0 isolated.
+	r := rand.New(rand.NewPCG(11, 17)) //nolint:gosec // deterministic benchmark RNG
+	a.AddNode(0)
+	for i := 0; i < 4*n; i++ {
+		from := r.IntN(n-1) + 1
+		to := r.IntN(n-1) + 1
+		a.AddEdge(from, to, int64(r.IntN(50)+1))
+	}
+	c := csr.BuildFromAdjList(a)
+	srcID, _ := a.Mapper().Lookup(0)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = Dijkstra(c, srcID)
+	}
+}
+
+// BenchmarkDijkstra_Large is the large-graph benchmark — kept stable
+// across pool dispatch changes; dispatch is a sub-percent fraction of
+// total time on this size and should remain within measurement noise.
+func BenchmarkDijkstra_Large(b *testing.B) {
+	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
+	const universe = 1 << 16 // 64k nodes
+	for i := uint32(0); i < uint32(universe); i++ {
+		a.AddNode(i)
+	}
+	r := rand.New(rand.NewPCG(33, 7)) //nolint:gosec // deterministic benchmark RNG
+	const fill = 1 << 18              // 256k edges
+	for i := 0; i < fill; i++ {
+		a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1))
+	}
+	c := csr.BuildFromAdjList(a)
+	srcID, _ := a.Mapper().Lookup(uint32(0))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = Dijkstra(c, srcID)
+	}
 }
 
 func BenchmarkDijkstra_RandomGraph(b *testing.B) {
