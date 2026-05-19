@@ -15,13 +15,21 @@
 package btree
 
 import (
+	"bufio"
+	"bytes"
 	"cmp"
+	"encoding/binary"
+	"fmt"
+	"hash/crc32"
+	"io"
+	"math"
 	"sort"
 	"sync"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
 	"gograph/graph"
+	"gograph/graph/index"
 )
 
 // entry is one (value, set-of-nodes) record in the sorted array.
@@ -170,4 +178,296 @@ func (i *Index[V]) DistinctValues() int {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return len(i.entries)
+}
+
+// Kind returns "btree" — satisfies [index.Subscriber].
+func (*Index[V]) Kind() string { return "btree" }
+
+// Apply is a no-op for the generic B+ tree index. See the matching
+// note on [hash.Index.Apply] — the index cannot auto-project arbitrary
+// [index.Change] values without caller-supplied bindings.
+func (*Index[V]) Apply(index.Change) {}
+
+// btreeMagic is the four-byte magic at the head of a serialised
+// btree index ('SBTR' little-endian — 0x52544253).
+const btreeMagic uint32 = 0x52544253
+
+// btreeFormatVersion is the on-disk format version of a serialised
+// btree index.
+const btreeFormatVersion uint32 = 1
+
+var castagnoli = crc32.MakeTable(crc32.Castagnoli)
+
+// encodeOrdered serialises one cmp.Ordered value to bytes. The
+// supported set matches [hash.Index] for the types that are both
+// comparable and ordered.
+//
+//nolint:gocyclo // type switch over supported ordered kinds
+func encodeOrdered[V cmp.Ordered](v V) ([]byte, error) {
+	switch x := any(v).(type) {
+	case string:
+		return []byte(x), nil
+	case int64:
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], uint64(x))
+		return buf[:], nil
+	case int32:
+		var buf [4]byte
+		binary.LittleEndian.PutUint32(buf[:], uint32(x))
+		return buf[:], nil
+	case int:
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], uint64(x))
+		return buf[:], nil
+	case uint64:
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], x)
+		return buf[:], nil
+	case uint32:
+		var buf [4]byte
+		binary.LittleEndian.PutUint32(buf[:], x)
+		return buf[:], nil
+	case uint:
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], uint64(x))
+		return buf[:], nil
+	case float64:
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], math.Float64bits(x))
+		return buf[:], nil
+	}
+	return nil, fmt.Errorf("%w: %T", index.ErrIndexValueTypeUnsupported, v)
+}
+
+// decodeOrdered is the inverse of [encodeOrdered].
+//
+//nolint:gocyclo // type switch over supported ordered kinds
+func decodeOrdered[V cmp.Ordered](b []byte) (V, error) {
+	var zero V
+	switch any(zero).(type) {
+	case string:
+		var out V
+		assignAny(&out, string(b))
+		return out, nil
+	case int64:
+		if len(b) != 8 {
+			return zero, fmt.Errorf("%w: int64 wants 8 bytes, got %d",
+				index.ErrIndexCorrupted, len(b))
+		}
+		var out V
+		assignAny(&out, int64(binary.LittleEndian.Uint64(b)))
+		return out, nil
+	case int32:
+		if len(b) != 4 {
+			return zero, fmt.Errorf("%w: int32 wants 4 bytes, got %d",
+				index.ErrIndexCorrupted, len(b))
+		}
+		var out V
+		assignAny(&out, int32(binary.LittleEndian.Uint32(b)))
+		return out, nil
+	case int:
+		if len(b) != 8 {
+			return zero, fmt.Errorf("%w: int wants 8 bytes, got %d",
+				index.ErrIndexCorrupted, len(b))
+		}
+		var out V
+		assignAny(&out, int(int64(binary.LittleEndian.Uint64(b))))
+		return out, nil
+	case uint64:
+		if len(b) != 8 {
+			return zero, fmt.Errorf("%w: uint64 wants 8 bytes, got %d",
+				index.ErrIndexCorrupted, len(b))
+		}
+		var out V
+		assignAny(&out, binary.LittleEndian.Uint64(b))
+		return out, nil
+	case uint32:
+		if len(b) != 4 {
+			return zero, fmt.Errorf("%w: uint32 wants 4 bytes, got %d",
+				index.ErrIndexCorrupted, len(b))
+		}
+		var out V
+		assignAny(&out, binary.LittleEndian.Uint32(b))
+		return out, nil
+	case uint:
+		if len(b) != 8 {
+			return zero, fmt.Errorf("%w: uint wants 8 bytes, got %d",
+				index.ErrIndexCorrupted, len(b))
+		}
+		var out V
+		assignAny(&out, uint(binary.LittleEndian.Uint64(b)))
+		return out, nil
+	case float64:
+		if len(b) != 8 {
+			return zero, fmt.Errorf("%w: float64 wants 8 bytes, got %d",
+				index.ErrIndexCorrupted, len(b))
+		}
+		var out V
+		assignAny(&out, math.Float64frombits(binary.LittleEndian.Uint64(b)))
+		return out, nil
+	}
+	return zero, fmt.Errorf("%w: %T", index.ErrIndexValueTypeUnsupported, zero)
+}
+
+// assignAny copies src into *dst, treating dst as an any.
+func assignAny[V any](dst *V, src any) {
+	*dst = src.(V)
+}
+
+// Serialize writes every (value, NodeID-set) pair in key order to w.
+// The on-disk layout is:
+//
+//	uint32 magic ('SBTR')
+//	uint32 formatVersion
+//	uint64 entryCount
+//	repeat entryCount times:
+//	  uint32 keyLen
+//	  [keyLen]byte key (kind-specific encoding)
+//	  uint64 idCount
+//	  [idCount]uint64 NodeIDs (sorted ascending)
+//	uint32 crc32c (little-endian)
+//
+// Writing in key order lets [Deserialize] use [Index.BulkLoad]
+// indirectly: the reader appends one entry at a time and the sorted
+// order is preserved.
+func (i *Index[V]) Serialize(w io.Writer) error {
+	bw := bufio.NewWriterSize(w, 1<<16)
+	hasher := crc32.New(castagnoli)
+	tee := io.MultiWriter(bw, hasher)
+
+	if err := binary.Write(tee, binary.LittleEndian, btreeMagic); err != nil {
+		return err
+	}
+	if err := binary.Write(tee, binary.LittleEndian, btreeFormatVersion); err != nil {
+		return err
+	}
+
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if err := binary.Write(tee, binary.LittleEndian, uint64(len(i.entries))); err != nil {
+		return err
+	}
+	for k := range i.entries {
+		key, err := encodeOrdered(i.entries[k].value)
+		if err != nil {
+			return err
+		}
+		if uint64(len(key)) > uint64(^uint32(0)) {
+			return fmt.Errorf("btree: key too long to serialize: %d", len(key))
+		}
+		if err := binary.Write(tee, binary.LittleEndian, uint32(len(key))); err != nil {
+			return err
+		}
+		if _, err := tee.Write(key); err != nil {
+			return err
+		}
+		ids := i.entries[k].bm.ToArray()
+		if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
+			return err
+		}
+		if err := binary.Write(tee, binary.LittleEndian, ids); err != nil {
+			return err
+		}
+	}
+
+	if err := binary.Write(bw, binary.LittleEndian, hasher.Sum32()); err != nil {
+		return err
+	}
+	return bw.Flush()
+}
+
+// Deserialize replaces the receiver's state with the contents of r.
+// Because the writer dumps entries in ascending key order, the
+// reader can build the sorted entries slice directly without an
+// extra sort pass; the loader is therefore O(n) instead of
+// [Index.BulkLoad]'s O(n log n).
+//
+//nolint:gocyclo // index deserialize: header + per-entry decode + per-step bounds checks
+func (i *Index[V]) Deserialize(r io.Reader) error {
+	all, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("%w: read: %v", index.ErrIndexCorrupted, err)
+	}
+	if len(all) < 4 {
+		return fmt.Errorf("%w: short payload", index.ErrIndexCorrupted)
+	}
+	body := all[:len(all)-4]
+	trailer := binary.LittleEndian.Uint32(all[len(all)-4:])
+	if got := crc32.Checksum(body, castagnoli); got != trailer {
+		return fmt.Errorf("%w: crc32c mismatch: got %d, want %d",
+			index.ErrIndexCorrupted, got, trailer)
+	}
+
+	br := bufio.NewReader(bytes.NewReader(body))
+	var magic, version uint32
+	if err := binary.Read(br, binary.LittleEndian, &magic); err != nil {
+		return fmt.Errorf("%w: magic: %v", index.ErrIndexCorrupted, err)
+	}
+	if magic != btreeMagic {
+		return fmt.Errorf("%w: bad magic %#x", index.ErrIndexCorrupted, magic)
+	}
+	if err := binary.Read(br, binary.LittleEndian, &version); err != nil {
+		return fmt.Errorf("%w: version: %v", index.ErrIndexCorrupted, err)
+	}
+	if version != btreeFormatVersion {
+		return fmt.Errorf("%w: unsupported format version %d",
+			index.ErrIndexCorrupted, version)
+	}
+	var entryCount uint64
+	if err := binary.Read(br, binary.LittleEndian, &entryCount); err != nil {
+		return fmt.Errorf("%w: entryCount: %v", index.ErrIndexCorrupted, err)
+	}
+	if entryCount > 1<<40 {
+		return fmt.Errorf("%w: implausible entryCount %d",
+			index.ErrIndexCorrupted, entryCount)
+	}
+
+	out := make([]entry[V], 0, entryCount)
+	var prev V
+	hasPrev := false
+	for e := uint64(0); e < entryCount; e++ {
+		var keyLen uint32
+		if err := binary.Read(br, binary.LittleEndian, &keyLen); err != nil {
+			return fmt.Errorf("%w: keyLen: %v", index.ErrIndexCorrupted, err)
+		}
+		if uint64(keyLen) > uint64(len(body)) {
+			return fmt.Errorf("%w: implausible keyLen %d",
+				index.ErrIndexCorrupted, keyLen)
+		}
+		kbuf := make([]byte, keyLen)
+		if _, err := io.ReadFull(br, kbuf); err != nil {
+			return fmt.Errorf("%w: key bytes: %v", index.ErrIndexCorrupted, err)
+		}
+		v, derr := decodeOrdered[V](kbuf)
+		if derr != nil {
+			return derr
+		}
+		if hasPrev && v < prev {
+			return fmt.Errorf("%w: keys not in ascending order",
+				index.ErrIndexCorrupted)
+		}
+		prev = v
+		hasPrev = true
+		var idCount uint64
+		if err := binary.Read(br, binary.LittleEndian, &idCount); err != nil {
+			return fmt.Errorf("%w: idCount: %v", index.ErrIndexCorrupted, err)
+		}
+		if idCount > uint64(len(body)) {
+			return fmt.Errorf("%w: implausible idCount %d",
+				index.ErrIndexCorrupted, idCount)
+		}
+		ids := make([]uint64, idCount)
+		if err := binary.Read(br, binary.LittleEndian, ids); err != nil {
+			return fmt.Errorf("%w: ids: %v", index.ErrIndexCorrupted, err)
+		}
+		bm := roaring64.New()
+		bm.AddMany(ids)
+		out = append(out, entry[V]{value: v, bm: bm})
+	}
+
+	i.mu.Lock()
+	i.entries = out
+	i.mu.Unlock()
+	return nil
 }

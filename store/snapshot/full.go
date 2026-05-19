@@ -18,12 +18,21 @@ import (
 // LoadedSnapshot is the result of [LoadSnapshotFull]: the parsed CSR
 // arrays, the parsed labels readback (empty for v1 snapshots), the
 // parsed properties readback (empty when properties.bin is absent),
-// and the manifest that produced them.
+// the optional per-index byte payloads (one entry per
+// indexes/<name>.bin file referenced by the manifest), and the
+// manifest that produced them.
+//
+// Each [IndexReadback].Bytes may be nil even when the manifest
+// references the index — that signals the file was missing or its
+// CRC32C did not validate. Callers must treat nil bytes as "rebuild
+// from LPG" rather than as a fatal error; the corruption was already
+// metered by [LoadIndexes] under `store.snapshot.indexes.corrupted`.
 type LoadedSnapshot struct {
 	Manifest   Manifest
 	CSR        CSRReadback
 	Labels     LabelsReadback
 	Properties PropertiesReadback
+	Indexes    []IndexReadback
 }
 
 // WriteSnapshotFull is the v2 high-level helper: it lays out a
@@ -32,6 +41,13 @@ type LoadedSnapshot struct {
 // v2 manifest indexing all three. Atomic publication is achieved by
 // assembling the snapshot under dir + ".tmp" and renaming it to dir
 // on success — the same protocol used by [WriteSnapshotCSR].
+//
+// When g carries a non-nil [index.Manager] (set via
+// [lpg.Graph.SetIndexManager]) with at least one registered index
+// that implements [index.Serializer], an indexes/ sub-directory is
+// also produced — one file per registered serializable index, each
+// referenced from the manifest's Indexes field. Subscribers that do
+// not implement [index.Serializer] are skipped (rebuild-on-restart).
 //
 // Callers that do not need durable LPG labels or properties can keep
 // using [WriteSnapshotCSR]; it writes a v1-shaped directory that
@@ -129,6 +145,26 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		return err
 	}
 
+	// indexes/<name>.bin — one file per registered index that
+	// implements [index.Serializer]. Subscribers without serializer
+	// support are silently skipped (rebuild-on-restart contract).
+	var idxEntries []IndexFileEntry
+	if mgr := g.IndexManager(); mgr != nil && mgr.Count() > 0 {
+		entries, ierr := WriteIndexes(tmp, mgr)
+		if ierr != nil {
+			_ = os.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return ierr
+		}
+		idxEntries = entries
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
 	m := Manifest{
 		Version:   ManifestVersion,
 		CreatedAt: time.Now().UTC(),
@@ -139,6 +175,7 @@ func WriteSnapshotFullCtx[N comparable, W any](
 			{Name: LabelsFile, Size: labelsSize, CRC32C: labelsCRC},
 			{Name: PropertiesFile, Size: propsSize, CRC32C: propsCRC},
 		},
+		Indexes: idxEntries,
 	}
 
 	manifestPath := filepath.Join(tmp, "manifest.json")
@@ -265,11 +302,24 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		}
 	}
 
+	// indexes/<name>.bin — best-effort load. Corruption surfaces as
+	// nil Bytes on the IndexReadback so the recovery path can rebuild
+	// from the LPG rather than aborting.
+	var idxReadback []IndexReadback
+	if len(m.Indexes) > 0 {
+		idxReadback, err = LoadIndexes(dir, m.Indexes)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, err
+		}
+	}
+
 	return LoadedSnapshot{
 		Manifest:   m,
 		CSR:        csrParsed,
 		Labels:     labelsParsed,
 		Properties: propsParsed,
+		Indexes:    idxReadback,
 	}, nil
 }
 

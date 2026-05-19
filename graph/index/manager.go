@@ -11,6 +11,7 @@ package index
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"gograph/graph"
@@ -24,6 +25,20 @@ var ErrIndexExists = errors.New("index: an index by that name already exists")
 // [Manager.GetIndex] when the named index does not exist.
 var ErrIndexNotFound = errors.New("index: no index by that name")
 
+// ErrIndexCorrupted is returned by [Serializer.Deserialize] when the
+// serialised form is structurally malformed or its CRC32C trailer
+// does not match the payload. Callers (snapshot recovery in
+// particular) treat this as "rebuild from the LPG" rather than as a
+// fatal error.
+var ErrIndexCorrupted = errors.New("index: serialized form corrupted")
+
+// ErrIndexValueTypeUnsupported is returned by a generic index's
+// Serialize / Deserialize methods when the value-type parameter is
+// not in the supported on-disk encoding set (currently: string).
+// Callers can convert their value type to string before registering
+// the index for snapshot durability.
+var ErrIndexValueTypeUnsupported = errors.New("index: value type not supported for serialization")
+
 // Subscriber is implemented by every concrete index that wishes to
 // receive change events from the [Manager]. The Apply method must
 // be idempotent: replays of the same change must not produce
@@ -34,6 +49,31 @@ type Subscriber interface {
 	// implementation, used for introspection (e.g. "label", "hash",
 	// "btree").
 	Kind() string
+}
+
+// Serializer is implemented by indexes that can persist and restore
+// their internal state through an [io.Writer] / [io.Reader] pair.
+// The Manager type-asserts every registered [Subscriber] to this
+// interface during snapshot writes; subscribers that do not
+// implement Serializer are silently skipped (rebuild-on-restart).
+//
+// Implementations must:
+//
+//   - Write a fixed self-describing header (magic + format version) so
+//     a future format bump can be detected on read.
+//   - Cover the entire on-disk payload with a CRC32C trailer (uint32
+//     little-endian) so corruption surfaces as [ErrIndexCorrupted].
+//   - Be safe for concurrent reads from other goroutines while
+//     Serialize executes (typically by holding the index's own
+//     RLock for the duration of the write).
+//
+// Deserialize replaces the receiver's state with the contents of r.
+// On any structural problem or CRC mismatch the function returns a
+// wrapped [ErrIndexCorrupted] and leaves the receiver in its
+// previous state.
+type Serializer interface {
+	Serialize(w io.Writer) error
+	Deserialize(r io.Reader) error
 }
 
 // ChangeOp tags the shape of a [Change].

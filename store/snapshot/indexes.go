@@ -1,0 +1,171 @@
+package snapshot
+
+import (
+	"errors"
+	"fmt"
+	"hash/crc32"
+	"io"
+	"os"
+	"path/filepath"
+
+	"gograph/graph/index"
+	"gograph/internal/metrics"
+)
+
+// IndexesDir is the conventional sub-directory inside a v2 snapshot
+// that holds one [index.Serializer]-encoded file per registered
+// secondary index. The file name is <indexName>.bin; the manifest
+// records the size and CRC32C of every entry under [Manifest.Indexes].
+const IndexesDir = "indexes"
+
+// IndexFileEntry pairs an index file's logical name (the name it was
+// registered under with [index.Manager.CreateIndex]) with its
+// on-disk size and CRC32C. It is the secondary-index analogue of
+// [FileEntry] and travels in [Manifest.Indexes].
+type IndexFileEntry struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	CRC32C uint32 `json:"crc32c"`
+}
+
+// IndexReadback is the raw byte payload of one secondary index file
+// returned by [LoadSnapshotFull]. The bytes are passed verbatim to
+// [index.Serializer.Deserialize] by [store/recovery.Open*]; the
+// snapshot loader does not interpret them further.
+type IndexReadback struct {
+	Name  string
+	Bytes []byte
+}
+
+// WriteIndexes serialises every registered index in m to one file
+// per index under dir/IndexesDir. Returns one [IndexFileEntry] per
+// successfully serialised index, which the caller threads into the
+// manifest. Subscribers that do not implement [index.Serializer] are
+// silently skipped (rebuild-on-restart contract).
+//
+// On any I/O error the partial directory under dir/IndexesDir is
+// removed (best effort) so the caller does not need to clean up.
+//
+//nolint:gocyclo // per-index write + per-index serialize + per-index sync
+func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
+	defer metrics.Time("store.snapshot.WriteIndexes")()
+	if m == nil || m.Count() == 0 {
+		return nil, nil
+	}
+	idxDir := filepath.Join(dir, IndexesDir)
+	if err := os.MkdirAll(idxDir, 0o750); err != nil {
+		metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
+		return nil, err
+	}
+	names := m.ListIndexes()
+	out := make([]IndexFileEntry, 0, len(names))
+	for _, name := range names {
+		sub, err := m.GetIndex(name)
+		if err != nil {
+			// Race: the index was dropped between ListIndexes and
+			// GetIndex. Skip silently — the manager is the source of
+			// truth, and a dropped index has no on-disk state to keep.
+			continue
+		}
+		ser, ok := sub.(index.Serializer)
+		if !ok {
+			// Subscriber does not implement Serializer; rebuild on
+			// restart is acceptable per the index Manager contract.
+			continue
+		}
+		filename := filepath.Join(idxDir, name+".bin")
+		size, crc, werr := writeAndSyncIndex(filename, ser)
+		if werr != nil {
+			_ = os.RemoveAll(idxDir)
+			metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
+			return nil, fmt.Errorf("snapshot: index %q: %w", name, werr)
+		}
+		out = append(out, IndexFileEntry{Name: name, Size: size, CRC32C: crc})
+	}
+	metrics.IncCounter("store.snapshot.indexes.loaded", uint64(len(out)))
+	return out, nil
+}
+
+// writeAndSyncIndex creates path, asks ser to populate it, fsyncs,
+// closes, and returns the file size plus the CRC32C of the entire
+// on-disk payload (including the magic header and the index's own
+// internal CRC trailer). Mirroring [writeAndSync] used for the other
+// snapshot components keeps the layout uniform.
+func writeAndSyncIndex(path string, ser index.Serializer) (size int64, crc uint32, err error) {
+	f, err := os.Create(path) //nolint:gosec // caller-controlled directory
+	if err != nil {
+		return 0, 0, err
+	}
+	hasher := crc32.New(castagnoli)
+	tee := io.MultiWriter(f, hasher)
+	if serr := ser.Serialize(tee); serr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return 0, 0, serr
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return 0, 0, err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return 0, 0, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return 0, 0, err
+	}
+	return st.Size(), hasher.Sum32(), nil
+}
+
+// LoadIndexes reads every entry in entries from dir/IndexesDir and
+// returns the raw bytes for each. Files whose on-disk CRC32C does
+// not match the manifest record surface a metric warning via
+// `store.snapshot.indexes.corrupted` and are reported with
+// [IndexReadback.Bytes] == nil; the caller treats nil bytes as
+// "rebuild from LPG" rather than as a fatal error.
+//
+// A missing indexes/ directory is not an error: it simply means the
+// snapshot does not carry persisted indexes (forward compat with
+// snapshots produced before this format extension).
+func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) {
+	defer metrics.Time("store.snapshot.LoadIndexes")()
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	idxDir := filepath.Join(dir, IndexesDir)
+	if _, err := os.Stat(idxDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Manifest references indexes but the directory is gone.
+			// Treat every entry as corrupted (rebuild path).
+			out := make([]IndexReadback, 0, len(entries))
+			for _, e := range entries {
+				metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
+				out = append(out, IndexReadback{Name: e.Name})
+			}
+			return out, nil
+		}
+		metrics.IncCounter("store.snapshot.LoadIndexes.errors", 1)
+		return nil, err
+	}
+	out := make([]IndexReadback, 0, len(entries))
+	for _, e := range entries {
+		filename := filepath.Join(idxDir, e.Name+".bin")
+		buf, err := os.ReadFile(filename) //nolint:gosec // path built from manifest entry
+		if err != nil {
+			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
+			out = append(out, IndexReadback{Name: e.Name})
+			continue
+		}
+		if got := crc32.Checksum(buf, castagnoli); got != e.CRC32C {
+			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
+			out = append(out, IndexReadback{Name: e.Name})
+			continue
+		}
+		out = append(out, IndexReadback{Name: e.Name, Bytes: buf})
+	}
+	return out, nil
+}

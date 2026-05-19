@@ -10,14 +10,17 @@
 package recovery
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	"gograph/graph/adjlist"
+	"gograph/graph/index"
 	"gograph/graph/lpg"
 	"gograph/internal/metrics"
 	"gograph/store/snapshot"
@@ -39,8 +42,59 @@ type Result[N comparable, W any] struct {
 	// snapshots and v2 snapshots without a properties.bin leave it
 	// at 0; v2 snapshots that include properties.bin populate it.
 	SnapshotProperties int
-	WALOps             int
-	TailErr            error
+	// SnapshotIndexes reports how many secondary indexes were
+	// re-hydrated from indexes/<name>.bin payloads. Indexes whose
+	// snapshot file was missing or whose CRC32C did not validate are
+	// NOT counted here: they were rebuilt-on-replay instead, which is
+	// metered separately via `store.snapshot.indexes.corrupted`.
+	SnapshotIndexes int
+	WALOps          int
+	TailErr         error
+}
+
+// applySnapshotIndexes feeds every readback in rb into the live
+// manager m, calling [index.Serializer.Deserialize] on the matching
+// registered index. An index whose readback Bytes are nil (file
+// missing or corrupted upstream), or whose Deserialize fails, is
+// logged via the standard library [log] package and counted under
+// `store.snapshot.indexes.corrupted`; the recovery proceeds with the
+// index in its zero state so the LPG remains usable.
+//
+// Returns the number of indexes successfully re-hydrated.
+func applySnapshotIndexes(m *index.Manager, rb []snapshot.IndexReadback) int {
+	if m == nil || len(rb) == 0 {
+		return 0
+	}
+	loaded := 0
+	for _, r := range rb {
+		sub, err := m.GetIndex(r.Name)
+		if err != nil {
+			// The manager does not know this index — skip; the
+			// corresponding file's bytes are dropped.
+			log.Printf("recovery: index %q on disk but not registered, ignoring", r.Name)
+			continue
+		}
+		if r.Bytes == nil {
+			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
+			log.Printf("recovery: index %q corrupted, will rebuild from LPG", r.Name)
+			continue
+		}
+		ser, ok := sub.(index.Serializer)
+		if !ok {
+			log.Printf("recovery: index %q does not implement Serializer, skipping", r.Name)
+			continue
+		}
+		if derr := ser.Deserialize(bytes.NewReader(r.Bytes)); derr != nil {
+			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
+			log.Printf("recovery: index %q corrupted (%v), will rebuild from LPG", r.Name, derr)
+			continue
+		}
+		loaded++
+	}
+	if loaded > 0 {
+		metrics.IncCounter("store.snapshot.indexes.loaded", uint64(loaded))
+	}
+	return loaded
 }
 
 // Op is the decoded form of a transaction-encoded WAL payload,
@@ -201,6 +255,7 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 	snapDir := filepath.Join(dir, "snapshot")
 	var snapLabels snapshot.LabelsReadback
 	var snapProps snapshot.PropertiesReadback
+	var snapIndexes []snapshot.IndexReadback
 	var haveSnapLabels, haveSnapProps bool
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		loaded, err := snapshot.LoadSnapshotFull(snapDir)
@@ -211,6 +266,7 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 		res.SnapshotHit = true
 		snapLabels = loaded.Labels
 		snapProps = loaded.Properties
+		snapIndexes = loaded.Indexes
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
 	}
@@ -272,6 +328,15 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 			return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
 		}
 		res.SnapshotProperties = len(snapProps.NodeProperties) + len(snapProps.EdgeProperties)
+	}
+	// Secondary indexes (label / hash / btree) are re-hydrated last so
+	// the live graph is fully populated when we ask the Manager for the
+	// matching subscribers. Indexes whose snapshot file was missing or
+	// failed CRC32C validation are skipped and logged; the LPG is
+	// usable either way (the index stays empty until the next mutation
+	// pass rebuilds it via the Manager change stream).
+	if len(snapIndexes) > 0 {
+		res.SnapshotIndexes = applySnapshotIndexes(g.IndexManager(), snapIndexes)
 	}
 	return res, nil
 }
@@ -434,6 +499,7 @@ func openCodec[N comparable, W any](
 	snapDir := filepath.Join(dir, "snapshot")
 	var snapLabels snapshot.LabelsReadback
 	var snapProps snapshot.PropertiesReadback
+	var snapIndexes []snapshot.IndexReadback
 	var haveSnapLabels, haveSnapProps bool
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		loaded, err := snapshot.LoadSnapshotFull(snapDir)
@@ -444,6 +510,7 @@ func openCodec[N comparable, W any](
 		res.SnapshotHit = true
 		snapLabels = loaded.Labels
 		snapProps = loaded.Properties
+		snapIndexes = loaded.Indexes
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
 	}
@@ -506,6 +573,13 @@ func openCodec[N comparable, W any](
 			return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
 		}
 		res.SnapshotProperties = len(snapProps.NodeProperties) + len(snapProps.EdgeProperties)
+	}
+	// Secondary indexes — same semantics as OpenStringCtx. Indexes are
+	// only re-hydrated when the LPG has a Manager wired in; absent
+	// that, the snapshot bytes are dropped (the index is rebuilt
+	// lazily on the next mutation pass).
+	if len(snapIndexes) > 0 {
+		res.SnapshotIndexes = applySnapshotIndexes(g.IndexManager(), snapIndexes)
 	}
 	return res, nil
 }

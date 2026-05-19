@@ -19,6 +19,7 @@ import (
 
 	"gograph/graph"
 	"gograph/graph/adjlist"
+	"gograph/graph/index"
 	"gograph/graph/index/label"
 )
 
@@ -123,6 +124,8 @@ type Graph[N comparable, W any] struct {
 
 	nodePropShards [propMapShards]nodePropShard
 	edgePropShards [propMapShards]edgePropShard
+
+	idxMgr *index.Manager
 }
 
 // nodePropShardFor returns the shard responsible for NodeID id.
@@ -178,6 +181,25 @@ func (g *Graph[N, W]) NodeIndex() *label.Index { return g.nodeIdx }
 // keyed by the source NodeID; this is suitable for label-filtered
 // out-neighbour scans but not for direct edge enumeration.
 func (g *Graph[N, W]) EdgeIndex() *label.Index { return g.edgeIdx }
+
+// IndexManager returns the manager of secondary indexes attached to
+// this graph, or nil when no manager has been set. Callers that need
+// snapshot-durable indexes must register them via [index.Manager.CreateIndex]
+// on a manager set via [Graph.SetIndexManager].
+//
+// IndexManager is safe for concurrent use.
+func (g *Graph[N, W]) IndexManager() *index.Manager { return g.idxMgr }
+
+// SetIndexManager installs m as the manager of secondary indexes on
+// this graph. Passing nil detaches the current manager. The Graph
+// retains a borrowed reference to m; the caller owns m's lifetime.
+//
+// SetIndexManager is intended to be called during graph construction
+// (before any concurrent mutators are spawned). It is safe to call
+// from any goroutine, but readers that captured g.IndexManager()
+// before the swap continue to see the previous value until they
+// re-read.
+func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr = m }
 
 // AddNode inserts n if not already present.
 func (g *Graph[N, W]) AddNode(n N) { g.adj.AddNode(n) }

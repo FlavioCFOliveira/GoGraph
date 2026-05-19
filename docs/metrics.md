@@ -233,6 +233,10 @@ with no return value).
 | `store.snapshot.WriteManifest`          | Write a snapshot manifest to an `io.Writer`.                   |
 | `store.snapshot.LoadManifest`           | Parse a snapshot manifest from an `io.Reader`.                 |
 | `store.snapshot.ReadManifestFile`       | Open + parse a manifest from disk.                             |
+| `store.snapshot.WriteIndexes`           | Serialise every registered index under `indexes/<name>.bin`.   |
+| `store.snapshot.LoadIndexes`            | Read every `indexes/<name>.bin` referenced by the manifest.    |
+| `store.snapshot.indexes.loaded`         | Counter: number of indexes successfully re-hydrated.           |
+| `store.snapshot.indexes.corrupted`      | Counter: number of indexes whose file was missing or CRC-bad.  |
 
 ### `store/txn`
 

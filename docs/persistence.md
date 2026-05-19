@@ -50,6 +50,8 @@ on the read path, while writes serialise.
     csr.bin          — serialised CSR (vertices / edges / weights)
     labels.bin       — serialised LPG labels (v2 manifests only)
     properties.bin   — serialised LPG typed properties (v2 manifests only)
+    indexes/         — secondary indexes registered with index.Manager
+      <name>.bin     — one file per registered serialisable index (v2)
 ```
 
 ## WAL payload schema
@@ -241,10 +243,13 @@ No on-disk migration of existing `OpAddEdge` frames is required —
 post-T8 readers continue to walk them with `W=zero`, exactly as
 pre-T8 readers did.
 
-`snapshot/labels.bin` and `snapshot/properties.bin` are shipped as
-of manifest **v2** (see below). A future revision will add
-`snapshot/indexes/*.bin` to extend the snapshot to the full LPG
-state.
+`snapshot/labels.bin`, `snapshot/properties.bin`, and
+`snapshot/indexes/*.bin` are all shipped as part of manifest **v2**
+(see below). The CSR, labels, and properties components are required
+to recover the graph state; the `indexes/` sub-directory is optional
+and only present when at least one secondary index registered with
+[`index.Manager`](../graph/index/manager.go) implements the
+`index.Serializer` interface.
 
 ## Snapshot file format
 
@@ -295,6 +300,11 @@ absent.
     {"name": "csr.bin",        "size": 24014, "crc32c": 305419896},
     {"name": "labels.bin",     "size":   312, "crc32c":  47119123},
     {"name": "properties.bin", "size":   568, "crc32c": 837469102}
+  ],
+  "indexes": [
+    {"name": "labels.nodes",  "size":  1024, "crc32c": 123456789},
+    {"name": "hash.email",    "size": 16384, "crc32c": 987654321},
+    {"name": "btree.score",   "size":  8192, "crc32c": 246813579}
   ]
 }
 ```
@@ -302,7 +312,9 @@ absent.
 The `labels.bin` and `properties.bin` entries are independent. A v2
 manifest written by an older build (or by a custom emitter) may
 include only one or omit both; readers handle each case
-transparently.
+transparently. The `indexes` array is omitted entirely when no
+registered indexes implement `index.Serializer`, keeping the on-disk
+form bit-identical to pre-extension v2 snapshots.
 
 ### `snapshot/csr.bin` (binary, identical across v1 and v2)
 
@@ -452,6 +464,88 @@ two snapshots therefore loses any property changes that were not
 captured in the prior snapshot. Closing this gap by extending the
 WAL with typed-property ops is tracked under the LPG durability
 sub-roadmap.
+
+### `snapshot/indexes/<name>.bin` (binary, v2 only)
+
+Each registered secondary index that implements `index.Serializer`
+is persisted under `snapshot/indexes/<name>.bin`, where `<name>` is
+the logical name the index was created under via
+`index.Manager.CreateIndex(name, sub)`. The manifest's `indexes`
+array carries the size and CRC32C of each file so a corrupted
+component can be detected at load time without re-running the
+serializer.
+
+| Index kind | Magic         | Layout                                                                                                    |
+|------------|---------------|-----------------------------------------------------------------------------------------------------------|
+| `label`    | `0x49424C53` `'SLBI'` | `magic`, `formatVersion`, `labelCount`, repeat `(labelID, bitmapLen, bitmap bytes via Roaring)`           |
+| `hash`     | `0x48534853` `'SHSH'` | `magic`, `formatVersion`, `entryCount`, repeat `(valueLen, value bytes, idCount, [idCount]uint64)`        |
+| `btree`    | `0x52544253` `'SBTR'` | `magic`, `formatVersion`, `entryCount`, repeat `(keyLen, key bytes, idCount, [idCount]uint64)` (in order) |
+
+Every payload terminates with a `uint32` little-endian CRC32C
+trailer covering the entire prefix (magic through last record). The
+manifest's CRC32C covers the whole file, including that trailer, so
+either a corrupted trailer or a corrupted byte upstream surfaces at
+load time. The B+ tree dump is written in ascending key order so
+the reader can build the sorted internal slice in a single O(n) pass
+without re-sorting.
+
+#### Supported value-type encodings
+
+The generic hash and B+ tree indexes serialise the comparable
+(respectively `cmp.Ordered`) value type through a kind-aware
+encoder:
+
+| Go type    | Wire form                                       |
+|------------|-------------------------------------------------|
+| `string`   | raw utf-8 bytes                                 |
+| `[]byte`   | raw bytes (hash only)                           |
+| `int64`    | 8 bytes little-endian two's-complement          |
+| `int32`    | 4 bytes little-endian                           |
+| `int`      | 8 bytes little-endian (btree only)              |
+| `uint64`   | 8 bytes little-endian                           |
+| `uint32`   | 4 bytes little-endian                           |
+| `uint`     | 8 bytes little-endian (btree only)              |
+| `float64`  | 8 bytes `math.Float64bits` little-endian        |
+| `bool`     | 1 byte (`0x00` / `0x01`, hash only)             |
+
+Other value types surface `index.ErrIndexValueTypeUnsupported` on
+`Serialize`. Callers that need to persist an index keyed by an
+exotic type should convert to one of the supported types before
+registering for snapshot.
+
+#### Recovery semantics
+
+`snapshot.LoadSnapshotFull` returns one `IndexReadback` per entry
+in `manifest.indexes`. When the on-disk file is missing or the
+manifest's CRC32C does not match the file bytes,
+`IndexReadback.Bytes` is `nil` and the counter
+`store.snapshot.indexes.corrupted` is incremented; the recovery
+code path in `store/recovery` logs the warning
+`recovery: index "<name>" corrupted, will rebuild from LPG` and
+the index is left empty. The next mutation pass through the live
+`index.Manager` re-populates it via the change-stream fan-out, so
+the in-memory state is eventually consistent again without manual
+intervention.
+
+A clean readback's `Bytes` are passed to
+`index.Serializer.Deserialize` on the live index registered under
+the same name; an extra `Deserialize` error (for example because
+the inner format version was bumped between writer and reader)
+surfaces as another `index.ErrIndexCorrupted` and the same
+rebuild-from-LPG path applies.
+
+`recovery.Result.SnapshotIndexes` records how many indexes
+successfully re-hydrated. Indexes that were rebuilt instead are
+not counted here; they show up via
+`store.snapshot.indexes.corrupted`.
+
+#### Migrating a snapshot directory without `indexes/`
+
+A v2 snapshot produced before this extension simply has no
+`indexes` array in its manifest and no `indexes/` sub-directory.
+Such snapshots continue to load cleanly; `LoadedSnapshot.Indexes`
+is `nil` and the next snapshot pass produces an updated layout the
+moment a serialisable index is registered with the graph.
 
 ## Checkpoint policy
 

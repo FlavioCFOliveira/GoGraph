@@ -50,15 +50,24 @@ type FileEntry struct {
 }
 
 // Manifest is the JSON-encoded index of a snapshot directory.
+//
+// Indexes is the secondary-index sub-manifest: it carries one
+// [IndexFileEntry] per file written under indexes/<name>.bin. The
+// field is omitted from the JSON form when empty so v2 manifests
+// produced before this extension are byte-identical to the ones
+// produced by current builds when no indexes are registered.
 type Manifest struct {
-	Version   int         `json:"version"`
-	CreatedAt time.Time   `json:"created_at"`
-	Order     uint64      `json:"order"`
-	Size      uint64      `json:"size"`
-	Files     []FileEntry `json:"files"`
+	Version   int              `json:"version"`
+	CreatedAt time.Time        `json:"created_at"`
+	Order     uint64           `json:"order"`
+	Size      uint64           `json:"size"`
+	Files     []FileEntry      `json:"files"`
+	Indexes   []IndexFileEntry `json:"indexes,omitempty"`
 }
 
 // WriteManifest writes m to w in canonical (pretty-printed) JSON.
+//
+//nolint:gocritic // public API: Manifest is passed by value to preserve the existing call sites; the encoder only reads from it.
 func WriteManifest(w io.Writer, m Manifest) error {
 	defer metrics.Time("store.snapshot.WriteManifest")()
 	enc := json.NewEncoder(w)
