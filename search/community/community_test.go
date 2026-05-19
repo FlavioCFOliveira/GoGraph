@@ -1,11 +1,66 @@
 package community
 
 import (
+	"math/rand/v2"
 	"testing"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
 )
+
+// BenchmarkLeiden_RandomGraph measures the steady-state allocation
+// profile of Leiden on a moderate undirected random graph. Task #127
+// requires allocs/op to drop by >95% and ns/op by >5x versus the v1.0
+// per-vertex map[int]float64 implementation, achieved by replacing
+// the per-vertex map with a preallocated scratch+touched-list combo.
+//
+// The graph size (n=1e5) is the acceptance-bench size specified by
+// task #127; at this scale the per-vertex map allocation cost
+// dominates total wall-clock time and the win is most visible.
+func BenchmarkLeiden_RandomGraph(b *testing.B) {
+	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	const n = 100_000
+	r := rand.New(rand.NewPCG(29, 31)) //nolint:gosec // deterministic benchmark RNG
+	// Plant two clusters with denser intra-cluster edges so Leiden has
+	// real structure to find.
+	for i := 0; i < 8*n; i++ {
+		var from, to int
+		if r.IntN(4) < 3 {
+			cluster := r.IntN(2)
+			from = cluster*n/2 + r.IntN(n/2)
+			to = cluster*n/2 + r.IntN(n/2)
+		} else {
+			from = r.IntN(n)
+			to = r.IntN(n)
+		}
+		a.AddEdge(from, to, 1.0)
+	}
+	c := csr.BuildFromAdjList(a)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Leiden(c, DefaultLeidenOptions())
+	}
+}
+
+// BenchmarkLabelPropagation_RandomGraph mirrors BenchmarkLeiden but
+// for the simpler Raghavan-Albert-Kumara label-propagation algorithm.
+// The per-vertex map[int]int allocation was the v1.0 hot-path
+// bottleneck.
+func BenchmarkLabelPropagation_RandomGraph(b *testing.B) {
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	const n = 4096
+	r := rand.New(rand.NewPCG(41, 43)) //nolint:gosec // deterministic benchmark RNG
+	for i := 0; i < 8*n; i++ {
+		a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = LabelPropagation(c, DefaultLabelPropagationOptions())
+	}
+}
 
 func TestLeiden_TwoCliques(t *testing.T) {
 	t.Parallel()

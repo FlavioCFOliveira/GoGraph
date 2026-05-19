@@ -55,6 +55,12 @@ func LabelPropagationCtx[W any](ctx context.Context, c *csr.CSR[W], opts LabelPr
 			labels[i] = -1
 		}
 	}
+	// Scratch buffers for per-vertex label-count accumulation:
+	// counts is zero-initialised and the touched list records which
+	// indices were written so the reset is O(unique-neighbour-labels)
+	// rather than O(maxID) per vertex.
+	counts := make([]int, maxID)
+	touched := make([]int, 0, 32)
 	for iter := 0; iter < opts.MaxIterations; iter++ {
 		if err := ctx.Err(); err != nil {
 			return Partition{}, err
@@ -67,21 +73,30 @@ func LabelPropagationCtx[W any](ctx context.Context, c *csr.CSR[W], opts LabelPr
 			if verts[v+1] == verts[v] {
 				continue
 			}
-			counts := map[int]int{}
+			touched = touched[:0]
 			for k := verts[v]; k < verts[v+1]; k++ {
 				w := int(edges[k])
 				if !mask[w] {
 					continue
 				}
-				counts[labels[w]]++
+				lw := labels[w]
+				if counts[lw] == 0 {
+					touched = append(touched, lw)
+				}
+				counts[lw]++
 			}
 			best := labels[v]
 			bestCount := -1
-			for cid, c := range counts {
-				if c > bestCount || (c == bestCount && cid < best) {
+			for _, cid := range touched {
+				cnt := counts[cid]
+				if cnt > bestCount || (cnt == bestCount && cid < best) {
 					best = cid
-					bestCount = c
+					bestCount = cnt
 				}
+			}
+			// Reset touched entries to zero for the next vertex.
+			for _, cid := range touched {
+				counts[cid] = 0
 			}
 			if best != labels[v] {
 				labels[v] = best

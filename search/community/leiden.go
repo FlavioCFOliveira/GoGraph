@@ -377,18 +377,29 @@ func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
 		sigmaTot[comm[v]] += g.deg[v]
 	}
 	anyMoved := false
+	// Scratch buffers for per-vertex community-weight accumulation:
+	// kvcArr is zero-initialised and stays at zero between vertices
+	// (reset via touched-list scan); touched records the indices that
+	// have been written so the reset is O(unique-neighbour-communities)
+	// rather than O(cMax).
+	kvcArr := make([]float64, cMax)
+	touched := make([]int, 0, 32)
 	for iter := 0; iter < opts.MaxIterations; iter++ {
 		moved := false
 		for v := 0; v < g.n; v++ {
 			cv := comm[v]
+			touched = touched[:0]
 			// k_v_to_c for every neighbour community.
-			kvc := map[int]float64{}
 			for k := g.verts[v]; k < g.verts[v+1]; k++ {
 				u := g.edges[k]
 				if u == v {
 					continue
 				}
-				kvc[comm[u]] += g.weights[k]
+				cu := comm[u]
+				if kvcArr[cu] == 0 {
+					touched = append(touched, cu)
+				}
+				kvcArr[cu] += g.weights[k]
 			}
 			// Pretend v is removed from cv for the candidate
 			// evaluation: subtract its degree from sigmaTot[cv]. The
@@ -398,18 +409,22 @@ func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
 			sigmaTot[cv] -= g.deg[v]
 			bestC := cv
 			bestDelta := 0.0
-			for c, kv := range kvc {
-				// ΔQ for v joining community c (with v previously
-				// removed) per the Louvain formula:
-				//   ΔQ = (k_v,c)/m - resolution * (deg[v] * sigmaTot[c]) / (2*m^2)
-				// where m = m2/2. Re-expressing in m2:
-				//   ΔQ = (2*k_v,c)/m2 - resolution * (2*deg[v]*sigmaTot[c]) / (m2^2)
-				// Constant 2 factor is omitted from comparison.
-				delta := 2*kv/g.m2 - opts.Resolution*2*g.deg[v]*sigmaTot[c]/(g.m2*g.m2)
+			// Hoist per-vertex invariants out of the inner candidate
+			// loop. ΔQ for v joining community c is the Louvain formula:
+			//   ΔQ = (2*k_v,c)/m2 - resolution * (2*deg[v]*sigmaTot[c]) / (m2^2)
+			invM2 := 1.0 / g.m2
+			twoInvM2 := 2 * invM2
+			vFactor := opts.Resolution * 2 * g.deg[v] * invM2 * invM2
+			for _, c := range touched {
+				delta := twoInvM2*kvcArr[c] - vFactor*sigmaTot[c]
 				if delta > bestDelta || (delta == bestDelta && c < bestC) {
 					bestDelta = delta
 					bestC = c
 				}
+			}
+			// Reset touched entries to zero for the next vertex.
+			for _, c := range touched {
+				kvcArr[c] = 0
 			}
 			// Add v to bestC. If bestC == cv it's a no-op except for
 			// restoring sigmaTot[cv].
@@ -452,12 +467,15 @@ func (g *aggGraph) refine(parent []int, opts LeidenOptions) []int {
 	for v := 0; v < g.n; v++ {
 		sigmaTot[v] += g.deg[v]
 	}
+	// Scratch buffers (see localMove for the touched-list rationale).
+	kvcArr := make([]float64, g.n)
+	touched := make([]int, 0, 32)
 	for iter := 0; iter < opts.MaxIterations; iter++ {
 		moved := false
 		for v := 0; v < g.n; v++ {
 			parentV := parent[v]
 			cv := refined[v]
-			kvc := map[int]float64{}
+			touched = touched[:0]
 			for k := g.verts[v]; k < g.verts[v+1]; k++ {
 				u := g.edges[k]
 				if u == v {
@@ -466,17 +484,27 @@ func (g *aggGraph) refine(parent []int, opts LeidenOptions) []int {
 				if parent[u] != parentV {
 					continue
 				}
-				kvc[refined[u]] += g.weights[k]
+				ru := refined[u]
+				if kvcArr[ru] == 0 {
+					touched = append(touched, ru)
+				}
+				kvcArr[ru] += g.weights[k]
 			}
 			sigmaTot[cv] -= g.deg[v]
 			bestC := cv
 			bestDelta := 0.0
-			for c, kv := range kvc {
-				delta := 2*kv/g.m2 - opts.Resolution*2*g.deg[v]*sigmaTot[c]/(g.m2*g.m2)
+			invM2 := 1.0 / g.m2
+			twoInvM2 := 2 * invM2
+			vFactor := opts.Resolution * 2 * g.deg[v] * invM2 * invM2
+			for _, c := range touched {
+				delta := twoInvM2*kvcArr[c] - vFactor*sigmaTot[c]
 				if delta > bestDelta || (delta == bestDelta && c < bestC) {
 					bestDelta = delta
 					bestC = c
 				}
+			}
+			for _, c := range touched {
+				kvcArr[c] = 0
 			}
 			sigmaTot[bestC] += g.deg[v]
 			if bestC != cv {
