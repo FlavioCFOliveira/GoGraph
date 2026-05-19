@@ -69,6 +69,13 @@ type Config struct {
 	// idempotent — the existing edge stays and the new weight is
 	// ignored.
 	Multigraph bool
+
+	// MaxShardCapacity, when > 0, caps the number of node-slots that
+	// any individual shard may grow to. AddNode (or AddEdge that
+	// would create a new node) returns an error when the responsible
+	// shard is full. The default (0) places no upper bound — a shard
+	// doubles its slot slice indefinitely.
+	MaxShardCapacity int
 }
 
 // AdjList is a mutable adjacency-list graph generic over the user node

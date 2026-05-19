@@ -2,6 +2,7 @@ package bulk
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -12,8 +13,8 @@ func TestLoader_AddAndFinalise(t *testing.T) {
 	t.Parallel()
 	out := filepath.Join(t.TempDir(), "graph.csr")
 	l := New(Options{OutputPath: out, Directed: true})
-	l.Add(Edge{Src: "a", Dst: "b", Weight: 1})
-	l.AddBatch([]Edge{{Src: "b", Dst: "c", Weight: 2}, {Src: "c", Dst: "a", Weight: 3}})
+	_ = l.Add(Edge{Src: "a", Dst: "b", Weight: 1})
+	_ = l.AddBatch([]Edge{{Src: "b", Dst: "c", Weight: 2}, {Src: "c", Dst: "a", Weight: 3}})
 	if l.Rows() != 3 {
 		t.Fatalf("Rows = %d, want 3", l.Rows())
 	}
@@ -61,5 +62,19 @@ func TestLoader_DrainCancelled(t *testing.T) {
 	cancel()
 	if _, err := l.Drain(ctx, ch); err == nil {
 		t.Fatalf("expected context error")
+	}
+}
+
+func TestLoader_MaxRowsCap(t *testing.T) {
+	t.Parallel()
+	l := New(Options{Directed: true, MaxRows: 2})
+	if err := l.Add(Edge{Src: "a", Dst: "b", Weight: 1}); err != nil {
+		t.Fatalf("Add 1: %v", err)
+	}
+	if err := l.Add(Edge{Src: "b", Dst: "c", Weight: 2}); err != nil {
+		t.Fatalf("Add 2: %v", err)
+	}
+	if err := l.Add(Edge{Src: "c", Dst: "d", Weight: 3}); !errors.Is(err, ErrTooManyRows) {
+		t.Fatalf("Add 3: err=%v want ErrTooManyRows", err)
 	}
 }

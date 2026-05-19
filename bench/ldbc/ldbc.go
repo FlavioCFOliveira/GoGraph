@@ -136,7 +136,7 @@ func Synthetic(ctx context.Context, v, e uint64, loader *bulk.Loader) {
 		}
 		for d := uint64(0); d < avgDeg; d++ {
 			dst := (src*131 + d*17) % v
-			loader.Add(bulk.Edge{
+			_ = loader.Add(bulk.Edge{
 				Src: strID(src), Dst: strID(dst), Weight: int64(d),
 			})
 		}

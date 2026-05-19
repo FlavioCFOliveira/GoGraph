@@ -51,7 +51,7 @@ func Generate(spec Spec, loader *bulk.Loader) (vertices, edges uint64) {
 	abc := ab + spec.C
 	for i := uint64(0); i < m; i++ {
 		src, dst := pick(r, n, ab, abc, spec.A+spec.B+spec.C+spec.D)
-		loader.Add(bulk.Edge{Src: itoa(src), Dst: itoa(dst), Weight: 1})
+		_ = loader.Add(bulk.Edge{Src: itoa(src), Dst: itoa(dst), Weight: 1})
 	}
 	return n, m
 }

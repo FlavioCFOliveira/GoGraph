@@ -12,12 +12,17 @@ package bulk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
 	"gograph/store/csrfile"
 )
+
+// ErrTooManyRows is returned by [Loader.Add], [Loader.AddBatch], and
+// [Loader.Drain] when the configured Options.MaxRows cap is exceeded.
+var ErrTooManyRows = errors.New("bulk: row cap exceeded")
 
 // Edge is one record the bulk loader consumes.
 type Edge struct {
@@ -34,6 +39,10 @@ type Options struct {
 	Directed bool
 	// Multigraph allows parallel edges in the loaded graph.
 	Multigraph bool
+	// MaxRows, when > 0, caps the number of edge records the loader
+	// will ingest. Add / AddBatch / Drain return [ErrTooManyRows]
+	// on the row that crosses the cap. Default (0) is unbounded.
+	MaxRows int
 }
 
 // Loader streams edges through an in-memory adjacency list and
@@ -57,23 +66,32 @@ func New(opts Options) *Loader {
 	}
 }
 
-// Add ingests one edge.
-func (l *Loader) Add(e Edge) {
+// Add ingests one edge. Returns [ErrTooManyRows] when the row cap is
+// exceeded.
+func (l *Loader) Add(e Edge) error {
+	if l.opts.MaxRows > 0 && l.rows >= l.opts.MaxRows {
+		return ErrTooManyRows
+	}
 	l.adj.AddEdge(e.Src, e.Dst, e.Weight)
 	l.rows++
+	return nil
 }
 
-// AddBatch ingests a contiguous batch of edges.
-func (l *Loader) AddBatch(es []Edge) {
+// AddBatch ingests a contiguous batch of edges. Returns [ErrTooManyRows]
+// on the first edge that would cross the cap; edges accepted before
+// that point remain ingested.
+func (l *Loader) AddBatch(es []Edge) error {
 	for k := range es {
-		l.adj.AddEdge(es[k].Src, es[k].Dst, es[k].Weight)
+		if err := l.Add(es[k]); err != nil {
+			return err
+		}
 	}
-	l.rows += len(es)
+	return nil
 }
 
 // Drain consumes from ch until it is closed or ctx is cancelled.
 // Returns the number of edges drained and any error from the input
-// channel (none in the v1 API; reserved for future stream sources).
+// channel ([ErrTooManyRows] when the row cap is exceeded).
 func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 	drained := 0
 	for {
@@ -84,7 +102,9 @@ func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 			if !ok {
 				return drained, nil
 			}
-			l.Add(e)
+			if err := l.Add(e); err != nil {
+				return drained, err
+			}
 			drained++
 		}
 	}
