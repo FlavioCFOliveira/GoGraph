@@ -53,8 +53,11 @@ func HierholzerCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, e
 		nextEdge[i] = verts[i]
 	}
 
+	// The resulting trail has exactly E+1 entries; pre-sizing it
+	// eliminates the O(log E) cascade of append doublings that the
+	// v1.0 implementation incurred (and the ~80 MB copy at E=10^7).
 	stack := []graph.NodeID{graph.NodeID(start)}
-	var trail []graph.NodeID
+	trail := make([]graph.NodeID, 0, len(edges)+1)
 	stepCount := 0
 	for len(stack) > 0 {
 		if stepCount&0xFFF == 0 {

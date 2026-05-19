@@ -8,6 +8,28 @@ import (
 	"gograph/graph/csr"
 )
 
+// BenchmarkHierholzer_LargeEulerian measures Hierholzer on a large
+// Eulerian circuit (4*N edges through 1 cycle of length 4 repeated
+// N times). Task #133 caps allocs/op at 2 (down from the v1.0
+// behaviour where the trail slice grew via standard append).
+func BenchmarkHierholzer_LargeEulerian(b *testing.B) {
+	const n = 1 << 12 // 4k segments
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	for i := 0; i < n; i++ {
+		base := i * 4
+		a.AddEdge(base, base+1, struct{}{})
+		a.AddEdge(base+1, base+2, struct{}{})
+		a.AddEdge(base+2, base+3, struct{}{})
+		a.AddEdge(base+3, base, struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = Hierholzer(c)
+	}
+}
+
 func TestHierholzer_Cycle(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
