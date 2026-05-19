@@ -90,33 +90,42 @@ func TestDecodeHeader_UnknownWeight(t *testing.T) {
 func TestAlignUp(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
+		name       string
 		n, a, want uint64
 	}{
-		{0, 64, 0},
-		{1, 64, 64},
-		{63, 64, 64},
-		{64, 64, 64},
-		{65, 64, 128},
+		{"zero", 0, 64, 0},
+		{"one", 1, 64, 64},
+		{"just-below-boundary", 63, 64, 64},
+		{"on-boundary", 64, 64, 64},
+		{"just-above-boundary", 65, 64, 128},
 	}
 	for _, c := range cases {
-		if got := AlignUp(c.n, c.a); got != c.want {
-			t.Fatalf("AlignUp(%d, %d) = %d, want %d", c.n, c.a, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := AlignUp(c.n, c.a); got != c.want {
+				t.Fatalf("AlignUp(%d, %d) = %d, want %d", c.n, c.a, got, c.want)
+			}
+		})
 	}
 }
 
 func TestWeightKind_Size(t *testing.T) {
 	t.Parallel()
-	cases := map[WeightKind]int{
-		WeightAbsent:  0,
-		WeightUint32:  4,
-		WeightFloat32: 4,
-		WeightUint64:  8,
-		WeightFloat64: 8,
+	cases := []struct {
+		name string
+		k    WeightKind
+		want int
+	}{
+		{"absent", WeightAbsent, 0},
+		{"uint32", WeightUint32, 4},
+		{"float32", WeightFloat32, 4},
+		{"uint64", WeightUint64, 8},
+		{"float64", WeightFloat64, 8},
 	}
-	for k, want := range cases {
-		if got := k.Size(); got != want {
-			t.Fatalf("%d.Size = %d, want %d", k, got, want)
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.k.Size(); got != c.want {
+				t.Fatalf("%d.Size = %d, want %d", c.k, got, c.want)
+			}
+		})
 	}
 }

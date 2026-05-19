@@ -167,22 +167,25 @@ func TestMapper_Concurrent_DoubleCheck(t *testing.T) {
 func TestMapper_PackUnpack(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
+		name       string
 		shard, idx uint64
 	}{
-		{0, 0},
-		{1, 0},
-		{255, 0},
-		{0, 1},
-		{42, 12345},
-		{255, (1 << 56) - 1},
+		{"shard0-idx0", 0, 0},
+		{"shard1-idx0", 1, 0},
+		{"shard255-idx0", 255, 0},
+		{"shard0-idx1", 0, 1},
+		{"shard42-idx12345", 42, 12345},
+		{"shard255-idxMax", 255, (1 << 56) - 1},
 	}
 	for _, c := range cases {
-		id := packNodeID(c.shard, c.idx)
-		shard, idx := unpackNodeID(id)
-		if shard != c.shard || idx != c.idx {
-			t.Fatalf("pack/unpack drift: (%d,%d) -> %d -> (%d,%d)",
-				c.shard, c.idx, id, shard, idx)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			id := packNodeID(c.shard, c.idx)
+			shard, idx := unpackNodeID(id)
+			if shard != c.shard || idx != c.idx {
+				t.Fatalf("pack/unpack drift: (%d,%d) -> %d -> (%d,%d)",
+					c.shard, c.idx, id, shard, idx)
+			}
+		})
 	}
 }
 

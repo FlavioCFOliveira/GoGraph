@@ -37,13 +37,25 @@ func TestFloydWarshall_HandBuilt(t *testing.T) {
 	})
 	apsp := FloydWarshall(c)
 	src, _ := a.Mapper().Lookup(0)
-	cases := map[int]int64{0: 0, 1: 7, 2: 3, 3: 8, 4: 5}
-	for k, expected := range cases {
-		id, _ := a.Mapper().Lookup(k)
-		v, ok := apsp.At(src, id)
-		if !ok || v != expected {
-			t.Fatalf("d(0,%d) = (%d, %v), want %d", k, v, ok, expected)
-		}
+	cases := []struct {
+		name     string
+		k        int
+		expected int64
+	}{
+		{"to-self", 0, 0},
+		{"to-1", 1, 7},
+		{"to-2", 2, 3},
+		{"to-3", 3, 8},
+		{"to-4", 4, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, _ := a.Mapper().Lookup(tc.k)
+			v, ok := apsp.At(src, id)
+			if !ok || v != tc.expected {
+				t.Fatalf("d(0,%d) = (%d, %v), want %d", tc.k, v, ok, tc.expected)
+			}
+		})
 	}
 }
 

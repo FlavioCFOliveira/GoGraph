@@ -11,20 +11,23 @@ import (
 func TestPropertyValue_Kinds(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
+		name string
 		v    PropertyValue
 		kind PropertyKind
 	}{
-		{StringValue("abc"), PropString},
-		{Int64Value(42), PropInt64},
-		{Float64Value(3.14), PropFloat64},
-		{BoolValue(true), PropBool},
-		{TimeValue(time.Unix(0, 0)), PropTime},
-		{BytesValue([]byte{1, 2}), PropBytes},
+		{"string", StringValue("abc"), PropString},
+		{"int64", Int64Value(42), PropInt64},
+		{"float64", Float64Value(3.14), PropFloat64},
+		{"bool", BoolValue(true), PropBool},
+		{"time", TimeValue(time.Unix(0, 0)), PropTime},
+		{"bytes", BytesValue([]byte{1, 2}), PropBytes},
 	}
 	for _, c := range cases {
-		if c.v.Kind() != c.kind {
-			t.Fatalf("kind mismatch: got %d want %d", c.v.Kind(), c.kind)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if c.v.Kind() != c.kind {
+				t.Fatalf("kind mismatch: got %d want %d", c.v.Kind(), c.kind)
+			}
+		})
 	}
 }
 
