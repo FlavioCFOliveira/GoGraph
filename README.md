@@ -5,8 +5,8 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-Sprint 1 — Foundation & In-Memory Core, and Sprint 2 — Property Graph
-(LPG) + Indexes are complete. The module currently provides:
+Sprints 1 (Foundation), 2 (Property Graph + Indexes), and 3 (Durable
+Persistence) are complete. The module currently provides:
 
 - `gograph/graph` — generic node identifiers and the `Graph[N, W]`
   contract.
@@ -30,6 +30,14 @@ Sprint 1 — Foundation & In-Memory Core, and Sprint 2 — Property Graph
   iterative DFS, Dijkstra, Bellman-Ford, A\*, bidirectional BFS,
   topological sort (Kahn), Tarjan SCC).
 - `gograph/ds` — disjoint-set (union-find) primitive.
+- `gograph/store/wal` — Write-Ahead Log with CRC32C framing.
+- `gograph/store/snapshot` — atomic on-disk snapshot directories.
+- `gograph/store/txn` — single-writer transactional API
+  (Begin/Commit/Rollback).
+- `gograph/store/checkpoint` — background WAL → snapshot folder.
+- `gograph/store/recovery` — snapshot + WAL replay on open.
+
+Persistence details: see [docs/persistence.md](docs/persistence.md).
 
 ## Getting Started
 

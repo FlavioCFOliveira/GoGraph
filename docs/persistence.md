@@ -1,0 +1,117 @@
+# Persistence in GoGraph
+
+This document describes how GoGraph durably persists the in-memory
+graph state and how it recovers it after a process crash.
+
+## Components
+
+| Package             | Purpose                                                        |
+|---------------------|----------------------------------------------------------------|
+| `store/wal`         | Write-Ahead Log: framed records, CRC32C-checksummed.          |
+| `store/snapshot`    | Immutable directory snapshots of the CSR view.                |
+| `store/txn`         | Transactional surface (`Store.Begin`, `Tx.Commit/Rollback`).  |
+| `store/checkpoint`  | Background folder of WAL tail into a fresh snapshot.          |
+| `store/recovery`    | Inverse of commit: snapshot + WAL replay on open.             |
+
+## Durability contract
+
+`Tx.Commit` writes every buffered op to the WAL, calls
+`wal.Writer.Sync` (which fsyncs the file), and only then applies the
+ops to the live graph. A process killed at any point during this
+sequence is recoverable by `recovery.OpenString(dir)`:
+
+- If the crash happened **before the fsync**, the WAL tail is torn;
+  recovery drops it and the in-memory graph is exactly what was
+  durable at the last successful fsync.
+- If the crash happened **after the fsync but before any in-memory
+  apply**, the WAL contains the ops; recovery re-applies them.
+- If the crash happened **after some ops are applied in memory**,
+  the in-memory state is lost (it was not durable anyway) — recovery
+  re-applies from the WAL.
+
+`Tx.Rollback` neither writes to the WAL nor mutates the graph;
+nothing is durable, nothing is visible, mutex released.
+
+## Transaction isolation
+
+`Store` holds a single `sync.Mutex` taken by `Begin` and released
+by `Commit`/`Rollback`. The transactional layer is therefore
+**single-writer / multi-reader**: reads on the underlying graph go
+straight through `csr.CSR` / `adjlist.AdjList` which are lock-free
+on the read path, while writes serialise.
+
+## File layout on disk
+
+```
+<dir>/
+  wal                — single appended file of framed records
+  snapshot/
+    manifest.json    — versioned index of files + CRC32C per file
+    csr.bin          — serialised CSR (vertices / edges / weights)
+```
+
+Future revisions will add `snapshot/labels.bin`,
+`snapshot/properties.bin`, and `snapshot/indexes/*.bin` to extend
+the snapshot to the full LPG state.
+
+## Snapshot file format
+
+`snapshot/manifest.json`:
+
+```json
+{
+  "version": 1,
+  "created_at": "2026-05-19T14:00:00Z",
+  "order": 1000,
+  "size": 5000,
+  "files": [
+    {"name": "csr.bin", "size": 24014, "crc32c": 305419896}
+  ]
+}
+```
+
+`snapshot/csr.bin` (binary):
+
+| Offset  | Field            | Type                          |
+|---------|------------------|-------------------------------|
+| 0       | nVertices        | uint64 LE                     |
+| 8       | nEdges           | uint64 LE                     |
+| 16      | hasWeights       | uint8 (0 or 1)                |
+| 17      | weightSizeBytes  | uint8                         |
+| 18      | vertices         | uint64[nVertices]             |
+| ...     | edges            | uint64[nEdges]                |
+| ...     | weights          | raw[weightSize·nEdges] (opt.) |
+
+## Checkpoint policy
+
+`store/checkpoint.Checkpointer` runs a goroutine that takes a
+snapshot every `MaxAge` interval (or on `Trigger()`). Each
+checkpoint:
+
+1. Acquires the store mutex.
+2. Builds a CSR from the current adjacency list.
+3. Releases the mutex.
+4. Writes `snapshot/` atomically via the `.tmp` + `os.Rename`
+   protocol documented above.
+5. Calls `wal.Writer.Sync` so the WAL is in a defined state.
+
+A future revision will additionally truncate the WAL prefix once
+the snapshot covers the corresponding ops.
+
+## Recovery procedure
+
+`recovery.OpenString(dir)` returns a `Result` containing the
+rebuilt `*lpg.Graph[string, int64]` plus:
+
+- `SnapshotHit bool` — whether `snapshot/manifest.json` was found
+  and validated.
+- `WALOps int` — how many WAL ops were applied.
+- `TailErr error` — `wal.ErrTornFrame` is normal (clean tail
+  truncation after a crash); `wal.ErrCRCMismatch` indicates real
+  corruption and must be surfaced.
+
+The recovery contract is verified by the fuzz test in
+`store/recovery/recovery_test.go::TestRecovery_FuzzedTruncation`,
+which truncates the WAL at random offsets for 200 iterations and
+asserts that the recovered graph is always a prefix of the
+committed op sequence.
