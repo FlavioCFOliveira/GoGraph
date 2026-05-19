@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -162,6 +163,20 @@ func ReadCSR(r io.Reader) (CSRReadback, error) {
 // is achieved by assembling the snapshot under dir + ".tmp" and
 // renaming it to dir on success.
 func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
+	return WriteSnapshotCSRCtx(context.Background(), dir, c)
+}
+
+// WriteSnapshotCSRCtx is the context-aware variant of
+// [WriteSnapshotCSR]. ctx.Err() is checked at three stage boundaries:
+// before the CSR write, before the manifest write, and before the
+// atomic rename. On cancellation the temporary staging directory is
+// cleaned up and the wrapped ctx.Err is returned.
+//
+//nolint:gocyclo // snapshot publish: dir prep + CSR write + manifest write + atomic rename + ctx ticks
+func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
 		return err
 	}
@@ -199,6 +214,10 @@ func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
 			{Name: CSRFile, Size: size, CRC32C: csum},
 		},
 	}
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
 	manifestPath := filepath.Join(tmp, "manifest.json")
 	mf, err := os.Create(manifestPath) //nolint:gosec // caller-controlled directory
 	if err != nil {
@@ -216,6 +235,10 @@ func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
 		return err
 	}
 
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
 	if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -63,11 +64,24 @@ func Open(path string) (*Writer, error) {
 // underlying file. The frame is buffered in process memory; call
 // [Writer.Sync] to durably commit.
 func (w *Writer) Append(payload []byte) error {
+	return w.AppendCtx(context.Background(), payload)
+}
+
+// AppendCtx is the context-aware variant of [Writer.Append]. ctx.Err()
+// is checked before acquiring the internal mutex and again before
+// writing; on cancellation returns the wrapped ctx.Err.
+func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if w.closed.Load() {
 		return ErrWriterClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	n, err := Encode(w.bw, Frame{Payload: payload})
 	if err != nil {
 		return err
@@ -82,11 +96,24 @@ func (w *Writer) Append(payload []byte) error {
 // returning. It must be invoked at every transaction commit
 // boundary.
 func (w *Writer) Sync() error {
+	return w.SyncCtx(context.Background())
+}
+
+// SyncCtx is the context-aware variant of [Writer.Sync]. ctx.Err()
+// is checked before acquiring the internal mutex; on cancellation
+// returns the wrapped ctx.Err without flushing.
+func (w *Writer) SyncCtx(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if w.closed.Load() {
 		return ErrWriterClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := w.bw.Flush(); err != nil {
 		w.syncFailed.Add(1)
 		return err

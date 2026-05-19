@@ -10,6 +10,7 @@
 package recovery
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -90,9 +91,22 @@ func Decode(payload []byte) (Op, error) {
 // the byte src/dst back to N. Future N types are added by mirroring
 // this constructor.
 func OpenString(dir string) (Result[string, int64], error) {
+	return OpenStringCtx(context.Background(), dir)
+}
+
+// OpenStringCtx is the context-aware variant of [OpenString]. ctx.Err()
+// is checked at the snapshot-load boundary and at every 4096 WAL
+// frames replayed; on cancellation returns the partially-recovered
+// Result paired with the wrapped ctx.Err.
+//
+//nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
+func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], error) {
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	res := Result[string, int64]{Graph: g}
 
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
 	snapDir := filepath.Join(dir, "snapshot")
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		if _, err := snapshot.Open(snapDir); err != nil {
@@ -114,6 +128,11 @@ func OpenString(dir string) (Result[string, int64], error) {
 	}
 	defer func() { _ = r.Close() }()
 	for f := range r.Frames() {
+		if res.WALOps&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return res, err
+			}
+		}
 		op, derr := Decode(f.Payload)
 		if derr != nil {
 			res.TailErr = derr

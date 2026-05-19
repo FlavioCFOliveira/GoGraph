@@ -13,6 +13,7 @@
 package txn
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"sync"
@@ -54,8 +55,20 @@ func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 // Begin opens a new transaction. The returned Tx holds the
 // store's single-writer mutex until Commit or Rollback runs.
 func (s *Store[N, W]) Begin() *Tx[N, W] {
+	tx, _ := s.BeginCtx(context.Background())
+	return tx
+}
+
+// BeginCtx is the context-aware variant of [Store.Begin]. ctx.Err()
+// is checked before acquiring the store mutex; on cancellation returns
+// (nil, wrapped ctx.Err). Once the lock is held the transaction
+// proceeds; further ctx checks happen at the caller's discretion.
+func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
-	return &Tx[N, W]{store: s}
+	return &Tx[N, W]{store: s}, nil
 }
 
 // Op is a single buffered mutation.
