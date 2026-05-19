@@ -52,6 +52,7 @@ Persistence) are complete. The module currently provides:
 Persistence details: see [docs/persistence.md](docs/persistence.md).
 Tier 2 details: see [docs/tier2.md](docs/tier2.md).
 I/O formats: see [docs/io.md](docs/io.md).
+Algorithms catalogue: see [docs/algorithms.md](docs/algorithms.md).
 
 ## Getting Started
 
