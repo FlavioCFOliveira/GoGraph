@@ -36,8 +36,16 @@ Persistence) are complete. The module currently provides:
   (Begin/Commit/Rollback).
 - `gograph/store/checkpoint` — background WAL → snapshot folder.
 - `gograph/store/recovery` — snapshot + WAL replay on open.
+- `gograph/store/csrfile` — mmap-backed Tier 2 CSR file format,
+  writer, reader, `Reinterpret` zero-copy helper, deterministic
+  fixture generator.
+- `gograph/graph/generation` — atomic pointer swap for snapshot
+  rotation across readers/writers.
+- `gograph/search/extern` — semi-external BFS and PageRank over
+  Tier 2 csrfile readers.
 
 Persistence details: see [docs/persistence.md](docs/persistence.md).
+Tier 2 details: see [docs/tier2.md](docs/tier2.md).
 
 ## Getting Started
 
