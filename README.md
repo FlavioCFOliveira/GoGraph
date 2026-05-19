@@ -43,9 +43,15 @@ Persistence) are complete. The module currently provides:
   rotation across readers/writers.
 - `gograph/search/extern` — semi-external BFS and PageRank over
   Tier 2 csrfile readers.
+- `gograph/graph/io/csv` · `graph/io/graphml` · `graph/io/dot` ·
+  `graph/io/jsonl` — interchange formats for CSV, GraphML, DOT,
+  and JSON Lines.
+- `gograph/store/bulk` — high-throughput bulk loader bypassing
+  the WAL.
 
 Persistence details: see [docs/persistence.md](docs/persistence.md).
 Tier 2 details: see [docs/tier2.md](docs/tier2.md).
+I/O formats: see [docs/io.md](docs/io.md).
 
 ## Getting Started
 
