@@ -1,0 +1,101 @@
+// Package metrics is GoGraph's optional observability surface.
+//
+// The package exposes lightweight counters and latency observers
+// that public blocking APIs can populate. Two backends are wired up:
+//
+//   - the default no-op backend: zero overhead, used when no
+//     external metrics system is configured.
+//   - a Prometheus-compatible backend (opt-in via [SetBackend]):
+//     once installed, latency histograms and counters are exported
+//     through the standard prometheus.Registry mechanism.
+//
+// The Prometheus client_golang import is intentionally NOT a
+// dependency of this package: keeping it out of go.mod means
+// every consumer that doesn't want Prometheus pays no module-graph
+// cost. Callers that want the Prometheus backend implement the
+// [Backend] interface in their own code; the [Prometheus] helper
+// lives in a separate internal/metrics/prometheus subpackage when
+// added in v1.x.
+//
+// v1 status. This package is the API hook for CLAUDE.md's
+// "Latency histograms on every public blocking API" mandate. The
+// no-op backend is the only one shipped today; wiring the actual
+// histograms across every search/, store/, and graph/io public API
+// requires touching ~40 call sites and is sized as a Sprint 11 or
+// 12 follow-up. The hook exists so the wire-up can land
+// incrementally without further API churn.
+package metrics
+
+import (
+	"sync/atomic"
+	"time"
+)
+
+// Backend is the interface every metrics sink implements. It is
+// intentionally tiny so the no-op default is zero overhead.
+type Backend interface {
+	// IncCounter increments the named counter by delta.
+	IncCounter(name string, delta uint64)
+	// ObserveLatency records a single latency sample under name.
+	ObserveLatency(name string, d time.Duration)
+}
+
+// noopBackend ignores every event. It is the default until
+// [SetBackend] swaps it out.
+type noopBackend struct{}
+
+func (noopBackend) IncCounter(string, uint64)            {}
+func (noopBackend) ObserveLatency(string, time.Duration) {}
+
+// backendPtr is an atomic.Pointer wrapping a [Backend]; readers
+// snap the current pointer on every event so backend swaps are
+// lock-free and visible to all goroutines.
+var backendPtr atomic.Pointer[Backend]
+
+// initOnce stores the default no-op backend on first access.
+func current() Backend {
+	if p := backendPtr.Load(); p != nil {
+		return *p
+	}
+	def := Backend(noopBackend{})
+	backendPtr.CompareAndSwap(nil, &def)
+	return *backendPtr.Load()
+}
+
+// SetBackend swaps the global metrics sink. Pass nil to restore the
+// no-op default. The function is safe to call from any goroutine at
+// any time; in-flight events on the previous backend complete
+// against the previous pointer.
+func SetBackend(b Backend) {
+	if b == nil {
+		def := Backend(noopBackend{})
+		backendPtr.Store(&def)
+		return
+	}
+	backendPtr.Store(&b)
+}
+
+// IncCounter increments the named counter by delta on the current
+// backend.
+func IncCounter(name string, delta uint64) {
+	current().IncCounter(name, delta)
+}
+
+// ObserveLatency records a latency sample on the current backend.
+func ObserveLatency(name string, d time.Duration) {
+	current().ObserveLatency(name, d)
+}
+
+// Time is a convenience helper that observes the elapsed time from
+// invocation until the returned function is called. Usage:
+//
+//	defer metrics.Time("search.dijkstra")()
+//
+// On the no-op backend the overhead is two atomic loads + a
+// time.Now pair (~50 ns), payable once per call site.
+func Time(name string) func() {
+	start := time.Now()
+	return func() {
+		current().ObserveLatency(name, time.Since(start))
+	}
+}
