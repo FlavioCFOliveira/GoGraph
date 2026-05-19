@@ -178,34 +178,74 @@ durable weighted edges must upgrade to `NewStoreWithOptions`.
 
 The recovery side mirrors the constructor matrix:
 
-| Open path             | N decoded via | W decoded via | OpAddEdge | OpAddEdgeWeighted |
-|-----------------------|---------------|----------------|-----------|-------------------|
-| `OpenString`          | `string(SrcBytes)` (v1) or `NewStringCodec` (v2) | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
-| `OpenWithCodec`       | typed `Codec[N]` | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
-| `OpenWithOptions`     | typed `Codec[N]` | typed `WeightCodec[W]` | applied with `W=zero` | applied with decoded weight |
+| Open path                                 | N decoded via | W decoded via | OpAddEdge | OpAddEdgeWeighted |
+|-------------------------------------------|---------------|----------------|-----------|-------------------|
+| `Open` (canonical)                        | typed `Codec[N]` | typed `WeightCodec[W]` | applied with `W=zero` | applied with decoded weight |
+| `OpenString` (Deprecated)                 | `string(SrcBytes)` (v1) or `NewStringCodec` (v2) | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
+| `OpenWithCodec` (Deprecated)              | typed `Codec[N]` | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
+| `OpenWithOptions` (Deprecated)            | typed `Codec[N]` | typed `WeightCodec[W]` | applied with `W=zero` | applied with decoded weight |
 
 Forward compatibility: a pre-T8 WAL that contains only `OpAddEdge`
-frames replays cleanly under `OpenWithOptions`. The apply path
-writes `var zero W` for those records and reserves the typed weight
-payload for `OpAddEdgeWeighted` frames only. The recovery test
-`TestTxn_ForwardCompat_PreT8WALReplays` locks this contract.
+frames replays cleanly under `Open` / `OpenWithOptions`. The apply
+path writes `var zero W` for those records and reserves the typed
+weight payload for `OpAddEdgeWeighted` frames only. The recovery
+test `TestTxn_ForwardCompat_PreT8WALReplays` locks this contract.
 
-### Recovery surface
+### Generic recovery API
 
-`recovery.OpenString(dir)` accepts both v1 and v2-`StringCodec` frames
-on the same WAL. It has no `WeightCodec` and therefore drops
+`recovery.Open[N, W](dir, opts)` is the canonical recovery entry
+point. `opts` is a `recovery.Options[N, W]` carrying both `Codec[N]`
+and `WeightCodec[W]` — the same two codecs the typed Store was built
+with. Both fields are required; passing nil for either returns an
+error.
+
+```go
+res, err := recovery.Open[int64, float64](dir, recovery.Options[int64, float64]{
+    Codec:       txn.NewInt64Codec(),
+    WeightCodec: txn.NewFloat64WeightCodec(),
+})
+```
+
+`recovery.OpenCtx` is the context-aware variant: `ctx.Err()` is
+checked at the snapshot-load boundary and every 4096 WAL frames
+during replay. On cancellation the function returns the partially
+recovered `Result` paired with the wrapped `ctx.Err`.
+
+`Result[N, W]` exposes the same fields as before plus
+`SnapshotSchemaVersion int`, which reports the on-disk manifest
+version of the snapshot that was loaded (`1` for legacy CSR-only
+directories, `2` for the labels + properties + indexes shape). The
+field is `0` when no snapshot was found, so callers can branch on
+`res.SnapshotSchemaVersion >= 2` to detect a v2 directory without
+re-reading the manifest.
+
+`recovery.Options[N, W]` mirrors `txn.Options[N, W]` field-for-field
+so call sites that already hold a `txn.Options` value can convert
+in place (`recovery.Options[N, W](opts)`). Keeping the
+recovery-argument type local to the recovery package spares callers
+the cross-package import.
+
+### Recovery surface (legacy / wrappers)
+
+The following entry points predate the canonical `Open[N, W]` API.
+They remain available for backwards compatibility and are
+documented as `Deprecated:` in their godoc:
+
+`recovery.OpenString(dir)` accepts both v1 and v2-`StringCodec`
+frames on the same WAL. It has no `WeightCodec` and therefore drops
 `OpAddEdgeWeighted` frames (the loss is metered via
-`store.recovery.applyOp.fallbackZeroWeight`).
+`store.recovery.applyOp.fallbackZeroWeight`). New code should use
+`Open[string, int64]` with `txn.NewStringCodec()` +
+`txn.NewInt64WeightCodec()`.
 
-For arbitrary `N` with no durable weights, use
-`recovery.OpenWithCodec[N, W](dir, codec)`; this variant supports v2
-`OpAddEdge` frames natively, applies a zero W for them, and drops
-`OpAddEdgeWeighted` frames with the same fallback metric.
+`recovery.OpenWithCodec[N, W](dir, codec)` is the codec-only path
+that predates `txn.WeightCodec`. It supports v2 `OpAddEdge` frames
+natively, applies zero W for them, and drops `OpAddEdgeWeighted`
+frames with the same fallback metric.
 
-For arbitrary `N` and durable weights, use
-`recovery.OpenWithOptions[N, W](dir, opts)` where `opts` carries
-both `Codec[N]` and `WeightCodec[W]`. This is the only open path
-that preserves edge weights on replay.
+`recovery.OpenWithOptions[N, W](dir, opts)` takes a `txn.Options`
+across package boundaries. Behaviour is identical to `Open`; the
+only difference is the argument's package.
 
 ### Migrating a v1 corpus
 
@@ -565,11 +605,16 @@ the snapshot covers the corresponding ops.
 
 ## Recovery procedure
 
-`recovery.OpenString(dir)` returns a `Result` containing the
-rebuilt `*lpg.Graph[string, int64]` plus:
+`recovery.Open[N, W](dir, opts)` (canonical) and
+`recovery.OpenString(dir)` (deprecated wrapper) return a `Result`
+containing the rebuilt `*lpg.Graph[N, W]` plus:
 
 - `SnapshotHit bool` — whether `snapshot/manifest.json` was found
   and validated.
+- `SnapshotSchemaVersion int` — the on-disk manifest version of the
+  snapshot that was loaded (1 for legacy CSR-only directories, 2 for
+  the labels + properties + indexes shape). 0 when no snapshot was
+  found.
 - `SnapshotLabels int` — how many label records the snapshot's
   `labels.bin` contributed back into the graph after WAL replay.
   v1 snapshots and v2 snapshots without `labels.bin` leave this at
@@ -578,6 +623,8 @@ rebuilt `*lpg.Graph[string, int64]` plus:
   snapshot's `properties.bin` contributed back into the graph after
   WAL replay. v1 snapshots and v2 snapshots without
   `properties.bin` leave this at 0.
+- `SnapshotIndexes int` — how many secondary indexes were
+  re-hydrated from `indexes/<name>.bin` payloads.
 - `WALOps int` — how many WAL ops were applied.
 - `TailErr error` — `wal.ErrTornFrame` is normal (clean tail
   truncation after a crash); `wal.ErrCRCMismatch` indicates real

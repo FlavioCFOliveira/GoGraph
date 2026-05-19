@@ -32,6 +32,14 @@ import (
 type Result[N comparable, W any] struct {
 	Graph       *lpg.Graph[N, W]
 	SnapshotHit bool
+	// SnapshotSchemaVersion is the on-disk manifest version of the
+	// snapshot that was loaded — 1 for legacy CSR-only directories
+	// produced by [snapshot.WriteSnapshotCSR], 2 for directories
+	// produced by [snapshot.WriteSnapshotFull]. The field is 0 when
+	// no snapshot was found (SnapshotHit == false), so callers can
+	// branch on `Result.SnapshotSchemaVersion >= 2` to detect a v2
+	// snapshot without first re-reading the manifest from disk.
+	SnapshotSchemaVersion int
 	// SnapshotLabels reports how many label records the snapshot
 	// contributed back into the graph after WAL replay. v1
 	// snapshots (CSR-only) leave this at 0; v2 snapshots that
@@ -50,6 +58,24 @@ type Result[N comparable, W any] struct {
 	SnapshotIndexes int
 	WALOps          int
 	TailErr         error
+}
+
+// Options carries the codecs used by [Open] and [OpenCtx]. Both
+// fields are required: Codec serialises endpoint identifiers and
+// WeightCodec serialises edge weights for [txn.OpAddEdgeWeighted]
+// records.
+//
+// Options is the recovery-side mirror of [txn.Options]: keeping the
+// recovery-argument type local to the recovery package spares callers
+// the awkward cross-package import of `txn.Options` purely to feed
+// the open path. The two structs share the same shape so callers
+// holding a [txn.Options] can pass `Options(opts)` (Go allows the
+// conversion because the underlying types match field-for-field).
+type Options[N comparable, W any] struct {
+	// Codec serialises endpoint identifiers. Must not be nil.
+	Codec txn.Codec[N]
+	// WeightCodec serialises edge weights. Must not be nil.
+	WeightCodec txn.WeightCodec[W]
 }
 
 // applySnapshotIndexes feeds every readback in rb into the live
@@ -210,15 +236,80 @@ func decodeV2(payload []byte) (Op, error) {
 	return op, nil
 }
 
+// Open opens the store at dir for graphs keyed by N values and
+// weighted by W values, using opts.Codec for endpoint identifiers
+// and opts.WeightCodec for [txn.OpAddEdgeWeighted] frames. It is the
+// canonical recovery entry point: callers should reach for it first,
+// in preference to the specialised wrappers ([OpenString],
+// [OpenWithCodec], [OpenWithOptions]) which remain available for
+// backwards compatibility.
+//
+// Open loads any snapshot under dir/snapshot (v1 or v2; CSR-only or
+// CSR + labels + properties + indexes), then replays the WAL at
+// dir/wal applying each op into the live graph. Labels, properties,
+// and registered indexes carried by a v2 snapshot are reconstructed
+// into the returned [Result.Graph] when the LPG has a Manager wired
+// before the call returns (see [TestRecovery_IndexesSurviveRestart_WiredEarly]
+// for the recommended startup ordering).
+//
+// Both opts.Codec and opts.WeightCodec must be non-nil. Pre-T8 WALs
+// that contain only [txn.OpAddEdge] frames replay identically to the
+// codec-only path: the apply phase writes the zero value of W for
+// each unweighted record. Mixed WALs preserve weights for
+// [txn.OpAddEdgeWeighted] frames and apply zero for the unweighted
+// ones — the forward-compatibility contract documented at
+// [txn.NewStoreWithOptions].
+//
+// Open is safe to call on a dir that contains only a snapshot, only
+// a WAL, both, or neither: missing components are tolerated and the
+// returned [Result.Graph] is a fresh empty graph when neither exists.
+func Open[N comparable, W any](dir string, opts Options[N, W]) (Result[N, W], error) {
+	defer metrics.Time("store.recovery.Open")()
+	res, err := OpenCtx[N, W](context.Background(), dir, opts)
+	if err != nil {
+		metrics.IncCounter("store.recovery.Open.errors", 1)
+	}
+	return res, err
+}
+
+// OpenCtx is the context-aware variant of [Open]. ctx.Err() is
+// checked at the snapshot-load boundary and at every 4096 WAL frames
+// replayed; on cancellation the function returns the partially-
+// recovered Result paired with the wrapped ctx.Err.
+func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[N, W]) (Result[N, W], error) {
+	defer metrics.Time("store.recovery.OpenCtx")()
+	if opts.Codec == nil {
+		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
+		return Result[N, W]{}, errors.New("recovery: nil codec")
+	}
+	if opts.WeightCodec == nil {
+		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
+		return Result[N, W]{}, errors.New("recovery: nil weight codec")
+	}
+	res, err := openCodec[N, W](ctx, dir, opts.Codec, opts.WeightCodec)
+	if err != nil {
+		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
+	}
+	return res, err
+}
+
 // OpenString opens the store at dir for graphs keyed by string node
 // values. It loads any snapshot under dir/snapshot, then replays the
 // WAL at dir/wal applying each op into the live graph.
 //
-// The function is the recovery entry point used by both the test
-// harness and production restart logic; it is generic-by-instantiation
-// (string nodes only in this v1) so the WAL payload decode can map
-// the byte src/dst back to N. Future N types are added by mirroring
-// this constructor.
+// Deprecated: OpenString is the v1.0.0 string-keyed convenience
+// wrapper. New code should use [Open][string, int64] with the
+// canonical built-in codecs:
+//
+//	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+//	    Codec:       txn.NewStringCodec(),
+//	    WeightCodec: txn.NewInt64WeightCodec(),
+//	})
+//
+// The wrapper continues to load existing v1 (untagged) and v2
+// (string-codec) WALs verbatim; the deprecation is purely an API
+// surface signal — there is no behavioural change for callers who
+// keep using it.
 //
 // Edge weights are not interpreted by [OpenString]: [txn.OpAddEdge]
 // frames apply with a zero weight (unchanged from before T8) and
@@ -227,7 +318,8 @@ func decodeV2(payload []byte) (Op, error) {
 // The fallback is reported via the
 // `store.recovery.applyOp.fallbackZeroWeight` metric counter so
 // observability surfaces the loss. Callers that need to preserve
-// weights on replay should use [OpenWithOptions].
+// weights on replay should use [Open] (preferred) or
+// [OpenWithOptions] (deprecated).
 func OpenString(dir string) (Result[string, int64], error) {
 	defer metrics.Time("store.recovery.OpenString")()
 	res, err := OpenStringCtx(context.Background(), dir)
@@ -241,6 +333,10 @@ func OpenString(dir string) (Result[string, int64], error) {
 // is checked at the snapshot-load boundary and at every 4096 WAL
 // frames replayed; on cancellation returns the partially-recovered
 // Result paired with the wrapped ctx.Err.
+//
+// Deprecated: OpenStringCtx is the v1.0.0 string-keyed convenience
+// wrapper. New code should use [OpenCtx] with the canonical
+// [txn.NewStringCodec] / [txn.NewInt64WeightCodec] pair.
 //
 //nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
 func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], error) {
@@ -264,6 +360,7 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 			return res, fmt.Errorf("recovery: snapshot open: %w", err)
 		}
 		res.SnapshotHit = true
+		res.SnapshotSchemaVersion = loaded.Manifest.Version
 		snapLabels = loaded.Labels
 		snapProps = loaded.Properties
 		snapIndexes = loaded.Indexes
@@ -402,13 +499,20 @@ func applyOpString(g *lpg.Graph[string, int64], op *Op) {
 // using codec to decode endpoint identifiers from v2 (tagged) WAL
 // frames. It is the generalised dual of [OpenString].
 //
+// Deprecated: OpenWithCodec is the codec-only convenience path that
+// predates the introduction of [txn.WeightCodec]. New code should use
+// [Open] with a non-nil opts.WeightCodec to preserve durable weights;
+// callers that do not need weighted edges may pass
+// [txn.NewInt64WeightCodec] (or another built-in) and ignore the W
+// type parameter — the canonical entry point handles both shapes.
+//
 // Edge weights are not interpreted: [txn.OpAddEdge] frames apply with
 // a zero weight (unchanged from before T8) and [txn.OpAddEdgeWeighted]
 // frames also apply with a zero weight because no [txn.WeightCodec]
 // is wired through this entry point. The fallback is reported via the
 // `store.recovery.applyOp.fallbackZeroWeight` metric counter. Callers
-// that need to preserve weights on replay should use
-// [OpenWithOptions].
+// that need to preserve weights on replay should use [Open]
+// (preferred) or [OpenWithOptions] (deprecated).
 //
 // v1 (legacy fmt.Sprintf-based) frames are not generally invertible
 // because the original write path used fmt.Sprintf("%v") which has no
@@ -431,6 +535,9 @@ func OpenWithCodec[N comparable, W any](dir string, codec txn.Codec[N]) (Result[
 // ctx.Err() is checked at the snapshot-load boundary and every 4096
 // WAL frames during replay.
 //
+// Deprecated: see [OpenWithCodec]. New code should use [OpenCtx]
+// with both Codec and WeightCodec wired in.
+//
 //nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
 func OpenWithCodecCtx[N comparable, W any](ctx context.Context, dir string, codec txn.Codec[N]) (Result[N, W], error) {
 	defer metrics.Time("store.recovery.OpenWithCodecCtx")()
@@ -443,6 +550,12 @@ func OpenWithCodecCtx[N comparable, W any](ctx context.Context, dir string, code
 // OpenWithOptions opens the store at dir for graphs keyed by N values
 // and weighted by W values, using opts.Codec for endpoint
 // identifiers and opts.WeightCodec for [txn.OpAddEdgeWeighted] frames.
+//
+// Deprecated: OpenWithOptions takes a [txn.Options] across package
+// boundaries. New code should use [Open] with [Options] — the
+// recovery-local mirror that spares callers the cross-package
+// argument type. Behaviour is identical; the only change is the
+// argument's package.
 //
 // Pre-T8 WALs that contain only [txn.OpAddEdge] frames replay
 // identically to [OpenWithCodec]: the apply path writes the zero
@@ -464,6 +577,8 @@ func OpenWithOptions[N comparable, W any](dir string, opts txn.Options[N, W]) (R
 // OpenWithOptionsCtx is the context-aware variant of
 // [OpenWithOptions]. ctx.Err() is checked at the snapshot-load
 // boundary and every 4096 WAL frames during replay.
+//
+// Deprecated: see [OpenWithOptions]. New code should use [OpenCtx].
 //
 //nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
 func OpenWithOptionsCtx[N comparable, W any](ctx context.Context, dir string, opts txn.Options[N, W]) (Result[N, W], error) {
@@ -508,6 +623,7 @@ func openCodec[N comparable, W any](
 			return res, fmt.Errorf("recovery: snapshot open: %w", err)
 		}
 		res.SnapshotHit = true
+		res.SnapshotSchemaVersion = loaded.Manifest.Version
 		snapLabels = loaded.Labels
 		snapProps = loaded.Properties
 		snapIndexes = loaded.Indexes
