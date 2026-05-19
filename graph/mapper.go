@@ -120,6 +120,30 @@ func (m *Mapper[N]) Resolve(id NodeID) (N, bool) {
 	return s.reverse[idx], true
 }
 
+// Walk invokes fn for every interned (NodeID, value) pair, taking
+// each shard's RLock once for the whole iteration instead of once
+// per Resolve call. Returns early when fn returns false.
+//
+// Concurrency: Walk holds each shard's RLock while iterating that
+// shard, so concurrent Intern calls on the same shard block until
+// Walk advances past it. Concurrent Resolve calls on the same shard
+// also block (the read lock is held for the duration of the inner
+// loop). Use Walk for bulk export where many Resolves would
+// otherwise dominate; prefer Resolve for individual lookups.
+func (m *Mapper[N]) Walk(fn func(NodeID, N) bool) {
+	for shardIdx := uint64(0); shardIdx < mapperShardCount; shardIdx++ {
+		s := &m.shards[shardIdx]
+		s.mu.RLock()
+		for intraIdx, v := range s.reverse {
+			if !fn(packNodeID(shardIdx, uint64(intraIdx)), v) {
+				s.mu.RUnlock()
+				return
+			}
+		}
+		s.mu.RUnlock()
+	}
+}
+
 // Len returns the total number of values currently interned across
 // every shard. The returned count is a consistent snapshot per shard
 // but may not reflect concurrent inserts in other shards.

@@ -79,32 +79,39 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	return enc.Flush()
 }
 
-func encodeNodes(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint64) error {
-	for id := uint64(0); id < maxID; id++ {
-		name, ok := a.Mapper().Resolve(graph.NodeID(id))
-		if !ok {
-			continue
-		}
+func encodeNodes(enc *xml.Encoder, a *adjlist.AdjList[string, int64], _ uint64) error {
+	var encErr error
+	a.Mapper().Walk(func(_ graph.NodeID, name string) bool {
 		if err := encodeNode(enc, name); err != nil {
-			return err
+			encErr = err
+			return false
 		}
-	}
-	return nil
+		return true
+	})
+	return encErr
 }
 
 func encodeEdges(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint64) error {
+	// Pre-resolve every live name in one shard-batched pass so the
+	// inner edge loop pays no per-node Mapper.Resolve cost.
+	names := make([]string, maxID)
+	live := make([]bool, maxID)
+	a.Mapper().Walk(func(id graph.NodeID, v string) bool {
+		names[uint64(id)] = v
+		live[uint64(id)] = true
+		return true
+	})
 	for id := uint64(0); id < maxID; id++ {
-		src, ok := a.Mapper().Resolve(graph.NodeID(id))
-		if !ok {
+		if !live[id] {
 			continue
 		}
+		src := names[id]
 		nb, ws := a.LoadEntry(graph.NodeID(id))
 		for i, n := range nb {
-			dst, ok := a.Mapper().Resolve(n)
-			if !ok {
+			if uint64(n) >= maxID || !live[uint64(n)] {
 				continue
 			}
-			if err := encodeEdge(enc, src, dst, ws[i]); err != nil {
+			if err := encodeEdge(enc, src, names[uint64(n)], ws[i]); err != nil {
 				return err
 			}
 		}

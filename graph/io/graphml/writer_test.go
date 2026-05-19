@@ -2,11 +2,30 @@ package graphml
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
 	"gograph/graph/adjlist"
 )
+
+// BenchmarkWriteGraphML_1M measures the GraphML writer on a 1M-node
+// graph with light fanout (~3 edges/node). Task #138 targets >2x
+// speedup over the per-Resolve baseline by batching name resolution
+// once per shard via Mapper.Walk.
+func BenchmarkWriteGraphML_1M(b *testing.B) {
+	const n = 1_000_000
+	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	for i := 0; i < n; i++ {
+		a.AddEdge(fmt.Sprintf("n%07d", i), fmt.Sprintf("n%07d", (i+1)%n), 1)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Write(io.Discard, a)
+	}
+}
 
 func TestWrite_Roundtrip(t *testing.T) {
 	t.Parallel()

@@ -34,15 +34,24 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		}
 	}
 	maxID := uint64(a.MaxNodeID())
+	// Pre-resolve every live name in one shard-batched pass so the
+	// inner edge loop pays no per-node Mapper.Resolve cost.
+	names := make([]string, maxID)
+	live := make([]bool, maxID)
+	a.Mapper().Walk(func(id graphNodeID, v string) bool {
+		names[uint64(id)] = v
+		live[uint64(id)] = true
+		return true
+	})
 	for id := uint64(0); id < maxID; id++ {
+		if !live[id] {
+			continue
+		}
 		nb, ws := a.LoadEntry(graphNodeID(id))
 		if len(nb) == 0 {
 			continue
 		}
-		src, ok := a.Mapper().Resolve(graphNodeID(id))
-		if !ok {
-			continue
-		}
+		src := names[id]
 		for i, n := range nb {
 			if written&0xFFF == 0 {
 				if cerr := ctx.Err(); cerr != nil {
@@ -50,11 +59,10 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 					return written, cerr
 				}
 			}
-			dst, ok := a.Mapper().Resolve(n)
-			if !ok {
+			if uint64(n) >= maxID || !live[uint64(n)] {
 				continue
 			}
-			if err := cw.Write([]string{src, dst, strconv.FormatInt(ws[i], 10)}); err != nil {
+			if err := cw.Write([]string{src, names[uint64(n)], strconv.FormatInt(ws[i], 10)}); err != nil {
 				return written, err
 			}
 			written++
