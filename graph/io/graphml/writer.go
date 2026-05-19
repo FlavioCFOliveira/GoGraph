@@ -1,6 +1,7 @@
 package graphml
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -14,6 +15,18 @@ import (
 // inferred from a, a <key for=edge attr.name=weight attr.type=long>
 // declaration, and one <node>/<edge> per node and edge.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
+	return WriteCtx(context.Background(), w, a)
+}
+
+// WriteCtx is the context-aware variant of [Write]. ctx.Err() is
+// checked at the start of node and edge encoding; on cancellation
+// returns the wrapped ctx.Err.
+//
+//nolint:gocyclo // GraphML write: XML header + key declaration + graph open + nodes + edges + close
+func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>`+"\n"); err != nil {
 		return err
 	}

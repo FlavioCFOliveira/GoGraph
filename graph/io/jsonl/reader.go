@@ -11,6 +11,7 @@ package jsonl
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,11 +33,25 @@ type Record struct {
 // adjacency list. Node records pre-intern endpoints; edge records
 // add the edge with optional weight.
 func ReadInto(r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64], int, error) {
+	return ReadIntoCtx(context.Background(), r, cfg)
+}
+
+// ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
+// is checked every 4096 rows; on cancellation returns
+// (partialAdj, rowsConsumed, wrapped ctx.Err()).
+//
+//nolint:gocyclo // JSONL decode + per-row parse + node/edge dispatch + ctx tick
+func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64], int, error) {
 	a := adjlist.New[string, int64](cfg)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	rows := 0
 	for sc.Scan() {
+		if rows&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return a, rows, err
+			}
+		}
 		rows++
 		line := sc.Bytes()
 		if len(line) == 0 {

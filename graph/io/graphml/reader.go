@@ -7,6 +7,7 @@
 package graphml
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -59,6 +60,15 @@ type docElement struct {
 // Returns the loaded list, the number of edges added, and an error
 // on parse failure.
 func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
+	return ReadIntoCtx(context.Background(), r)
+}
+
+// ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
+// is checked every 4096 edges; on cancellation returns
+// (partialAdj, edgesAdded, wrapped ctx.Err()).
+//
+//nolint:gocyclo // GraphML decode + key lookup + per-edge parse + ctx tick
+func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
 	dec := xml.NewDecoder(r)
 	var doc docElement
 	if err := dec.Decode(&doc); err != nil {
@@ -75,6 +85,11 @@ func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
 	}
 	added := 0
 	for _, e := range g.Edges {
+		if added&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return a, added, err
+			}
+		}
 		var w int64
 		for _, d := range e.Data {
 			if d.Key == weightKey && weightKey != "" {

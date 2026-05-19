@@ -8,6 +8,7 @@
 package csv
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -42,6 +43,15 @@ func DefaultOptions() Options {
 // have at least two fields (src, dst); a third field is parsed as
 // a int64 weight.
 func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
+	return ReadIntoCtx(context.Background(), r, opts)
+}
+
+// ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
+// is checked every 4096 rows; on cancellation returns (partialAdj,
+// rowsConsumed, wrapped ctx.Err()).
+//
+//nolint:gocyclo // csv decode + opt defaults + per-row parse + ctx tick
+func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}
@@ -61,6 +71,11 @@ func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, 
 	rows := 0
 	first := opts.HasHeader
 	for {
+		if rows&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return a, rows, err
+			}
+		}
 		rec, err := c.Read()
 		if errors.Is(err, io.EOF) {
 			break

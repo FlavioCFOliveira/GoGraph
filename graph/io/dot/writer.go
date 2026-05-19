@@ -5,6 +5,7 @@ package dot
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -19,6 +20,15 @@ var _ = io.Discard
 // uses 'digraph' for directed graphs and 'graph' for undirected.
 // Edge weights are emitted as a label="..." attribute when non-zero.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
+	return WriteCtx(context.Background(), w, a)
+}
+
+// WriteCtx is the context-aware variant of [Write]. ctx.Err() is
+// checked once per source vertex; on cancellation flushes the buffer
+// and returns the wrapped ctx.Err.
+//
+//nolint:gocyclo // DOT write: header + per-source resolve + per-edge encode + ctx tick
+func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
 	bw := bufio.NewWriterSize(w, 64*1024)
 	edgeOp := "->"
 	header := "digraph G {\n"
@@ -39,6 +49,10 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 		return uint64(srcID) <= uint64(dstID)
 	}
 	for id := uint64(0); id < maxID; id++ {
+		if err := ctx.Err(); err != nil {
+			_ = bw.Flush()
+			return err
+		}
 		srcName, ok := a.Mapper().Resolve(graph.NodeID(id))
 		if !ok {
 			continue
