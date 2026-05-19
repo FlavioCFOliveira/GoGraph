@@ -162,18 +162,49 @@ Benchmarks (Apple M4, Go 1.26.3):
 ## Module Layout
 
 ```
-graph/             — core types and Mapper
-graph/adjlist      — mutable adjacency list (writer-side)
-graph/csr          — immutable CSR (reader-side)
-graph/lpg          — labelled property graph (labels + typed properties)
-graph/lpg/schema   — declarative type schema with Validate
-graph/index/label  — Roaring-bitmap label index
-graph/index/hash   — sharded hash exact-match property index
-graph/index/btree  — order-preserving range property index
-graph/index        — Manager fanning out Change events to subscribers
-graph/query        — fluent MATCH-style pattern engine
-search/            — algorithms over CSR
-ds/                — supporting data structures
+graph/                    — core types: NodeID, Graph[N,W] contract, sharded Mapper
+graph/adjlist             — mutable copy-on-write adjacency list (writer-side)
+graph/csr                 — immutable Compressed Sparse Row snapshot (reader-side)
+graph/generation          — refcount-protected Publisher for atomic snapshot rotation
+graph/lpg                 — labelled property graph (labels + typed properties)
+graph/lpg/schema          — declarative type schema with Validate
+graph/index               — Manager fanning out Change events to subscribers
+graph/index/label         — Roaring-bitmap inverted label index
+graph/index/hash          — sharded hash exact-match property index
+graph/index/btree         — order-preserving range property index
+graph/query               — fluent MATCH-style pattern engine
+graph/io/csv              — edge-list CSV reader and writer
+graph/io/graphml          — GraphML XML reader and writer
+graph/io/dot              — Graphviz DOT writer
+graph/io/jsonl            — JSON Lines reader and writer
+
+search/                   — traversal and path-finding over CSR (BFS, DFS, Dijkstra,
+                            Bellman-Ford, A*, BiBFS, Yen, APSP, BCC, Eulerian, ...)
+search/centrality         — Brandes betweenness, PageRank, personalised PageRank
+search/community          — Leiden, label propagation
+search/extern             — semi-external BFS/PageRank over a Tier 2 reader
+search/flow               — Dinic, Edmonds-Karp, push-relabel, Stoer-Wagner, MCMF
+
+store/wal                 — versioned, CRC32C-checksummed Write-Ahead Log
+store/snapshot            — atomic snapshot directories with manifest and per-file CRC
+store/txn                 — single-writer transactions (Begin/Commit/Rollback)
+store/checkpoint          — background WAL → snapshot folder goroutine
+store/recovery            — snapshot + WAL replay on open
+store/csrfile             — mmap'd Tier 2 CSR file format (versioned, 64-byte aligned)
+store/bulk                — high-throughput bulk ingestion bypassing the WAL
+
+ds/                       — supporting data structures (Union-Find, ...)
+
+bench/ldbc                — LDBC SNB SF1 / SF10 benchmark harness
+bench/dimacs9             — DIMACS 9 USA-road SSSP benchmark
+bench/rmat                — RMAT power-law graph generator
+bench/soak                — 4-hour mixed-workload reliability soak harness
+bench/comparison          — cross-library performance comparison vs NetworkX
+
+internal/metrics          — observability API hook (Backend, IncCounter, ObserveLatency, Time)
+internal/stress           — concurrency stress test suite (CI under -race)
+
+examples/                 — 20 runnable example programs (see "Examples" section)
 ```
 
 ## Sprint 2 Example
