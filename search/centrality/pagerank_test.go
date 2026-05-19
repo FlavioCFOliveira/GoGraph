@@ -1,6 +1,7 @@
 package centrality
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -15,7 +16,7 @@ func TestPageRank_Star(t *testing.T) {
 		a.AddEdge(i, 0, struct{}{})
 	}
 	c := csr.BuildFromAdjList(a)
-	ranks, _ := PageRank(c, DefaultPageRankOptions())
+	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
 	// Resolve leaf NodeIDs and assert symmetric ranks.
 	leafIDs := make([]int, 5)
 	for k, v := range []int{1, 2, 3, 4, 5} {
@@ -37,7 +38,7 @@ func TestPageRank_Empty(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	c := csr.BuildFromAdjList(a)
-	ranks, iters := PageRank(c, DefaultPageRankOptions())
+	ranks, iters, _ := PageRank(c, DefaultPageRankOptions())
 	if len(ranks) != 0 || iters != 0 {
 		t.Fatalf("empty: ranks=%v iters=%d", ranks, iters)
 	}
@@ -55,7 +56,7 @@ func TestPageRank_MassConservation_Star(t *testing.T) {
 		a.AddEdge(i, 0, struct{}{}) // leaves -> sink
 	}
 	c := csr.BuildFromAdjList(a)
-	ranks, _ := PageRank(c, DefaultPageRankOptions())
+	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
 	var total float64
 	for _, r := range ranks {
 		total += r
@@ -84,7 +85,7 @@ func TestPageRank_MassConservation_Cycle(t *testing.T) {
 		a.AddEdge(i, (i+1)%k, struct{}{})
 	}
 	c := csr.BuildFromAdjList(a)
-	ranks, _ := PageRank(c, DefaultPageRankOptions())
+	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
 	var total float64
 	var liveCount int
 	for _, r := range ranks {
@@ -119,7 +120,7 @@ func TestPageRank_MassConservation_Chain(t *testing.T) {
 	a.AddEdge(1, 2, struct{}{})
 	a.AddEdge(2, 3, struct{}{})
 	c := csr.BuildFromAdjList(a)
-	ranks, _ := PageRank(c, DefaultPageRankOptions())
+	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
 	var total float64
 	for _, r := range ranks {
 		total += r
@@ -147,7 +148,7 @@ func TestPageRank_IsolatedGhostNodes(t *testing.T) {
 	a.AddEdge(0, 1, struct{}{})
 	a.AddEdge(1, 0, struct{}{})
 	c := csr.BuildFromAdjList(a)
-	ranks, _ := PageRank(c, DefaultPageRankOptions())
+	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
 	var total float64
 	var nonZero int
 	for _, r := range ranks {
@@ -173,6 +174,17 @@ func BenchmarkPageRank_Cycle1K(b *testing.B) {
 	c := csr.BuildFromAdjList(a)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = PageRank(c, DefaultPageRankOptions())
+		_, _, _ = PageRank(c, DefaultPageRankOptions())
+	}
+}
+
+func TestPageRank_RejectsNaN(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a.AddEdge(0, 1, struct{}{})
+	c := csr.BuildFromAdjList(a)
+	_, _, err := PageRank(c, PageRankOptions{Damping: math.NaN()})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}
 }

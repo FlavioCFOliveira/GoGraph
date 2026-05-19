@@ -1,8 +1,27 @@
 package centrality
 
 import (
+	"errors"
+	"math"
+
 	"gograph/graph/csr"
 )
+
+// ErrInvalidInput is returned by centrality algorithms when their
+// float options carry NaN or +/-Inf. Non-finite inputs propagate
+// through the power iteration / push loops and silently corrupt
+// the rank vector; validating once at entry is mandatory.
+var ErrInvalidInput = errors.New("centrality: input option contains NaN or Inf")
+
+// hasInvalidFloat returns true when any of values is NaN or +/-Inf.
+func hasInvalidFloat(values ...float64) bool {
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return true
+		}
+	}
+	return false
+}
 
 // PageRankOptions configures [PageRank].
 type PageRankOptions struct {
@@ -38,7 +57,10 @@ func DefaultPageRankOptions() PageRankOptions {
 // distribution.
 //
 //nolint:gocyclo // canonical power-iteration: defaults + live detection + iteration loop
-func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int) {
+func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+		return nil, 0, ErrInvalidInput
+	}
 	if opts.Damping == 0 {
 		opts.Damping = 0.85
 	}
@@ -52,7 +74,7 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 	edges := c.EdgesSlice()
 	n := len(verts) - 1
 	if n <= 0 {
-		return nil, 0
+		return nil, 0, nil
 	}
 
 	// A node is "live" if it has at least one incident edge (in or out).
@@ -77,7 +99,7 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 		}
 	}
 	if live == 0 {
-		return make([]float64, n), 0
+		return make([]float64, n), 0, nil
 	}
 
 	cur := make([]float64, n)
@@ -133,8 +155,8 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 
 		cur, next = next, cur
 		if delta < opts.Tolerance {
-			return cur, iter
+			return cur, iter, nil
 		}
 	}
-	return cur, opts.MaxIterations
+	return cur, opts.MaxIterations, nil
 }

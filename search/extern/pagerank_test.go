@@ -27,7 +27,7 @@ func TestPageRank_Star(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 
-	ranks, _ := PageRank(r, DefaultPageRankOptions())
+	ranks, _, _ := PageRank(r, DefaultPageRankOptions())
 	if len(ranks) == 0 {
 		t.Fatalf("empty ranks")
 	}
@@ -60,7 +60,7 @@ func TestPageRank_EmptyGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	ranks, iters := PageRank(r, DefaultPageRankOptions())
+	ranks, iters, _ := PageRank(r, DefaultPageRankOptions())
 	if len(ranks) != 0 || iters != 0 {
 		t.Fatalf("empty graph: ranks=%d iters=%d", len(ranks), iters)
 	}
@@ -85,7 +85,7 @@ func TestPageRank_MassConservation_Star(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 
-	ranks, _ := PageRank(r, DefaultPageRankOptions())
+	ranks, _, _ := PageRank(r, DefaultPageRankOptions())
 	var total float64
 	for _, v := range ranks {
 		total += v
@@ -133,7 +133,7 @@ func TestPageRank_MatchesInMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	externRanks, _ := PageRank(r, DefaultPageRankOptions())
+	externRanks, _, _ := PageRank(r, DefaultPageRankOptions())
 	for i := 0; i < n; i++ {
 		if math.Abs(externRanks[i]-refRanks[i]) > 0.5 {
 			// Seed values are uniform; this should at least be sane.

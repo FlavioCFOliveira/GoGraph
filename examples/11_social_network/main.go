@@ -56,7 +56,7 @@ func main() {
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	fmt.Println("Influence (PageRank):")
-	ranks, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())
+	ranks, _, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())
 	type ranked struct {
 		name string
 		rank float64

@@ -1,6 +1,8 @@
 package centrality
 
 import (
+	"errors"
+	"math"
 	"testing"
 
 	"gograph/graph/adjlist"
@@ -16,7 +18,7 @@ func TestPPR_SourceCarriesMostMass(t *testing.T) {
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
-	r := PersonalisedPushPageRank(c, src, DefaultPPRPushOptions())
+	r, _ := PersonalisedPushPageRank(c, src, DefaultPPRPushOptions())
 	maxIdx := 0
 	for i, v := range r {
 		if v > r[maxIdx] {
@@ -33,7 +35,7 @@ func TestPPR_UnknownSrc(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	a.AddEdge(0, 1, struct{}{})
 	c := csr.BuildFromAdjList(a)
-	r := PersonalisedPushPageRank(c, 9999, DefaultPPRPushOptions())
+	r, _ := PersonalisedPushPageRank(c, 9999, DefaultPPRPushOptions())
 	if r != nil {
 		t.Fatalf("PPR from unknown src should return nil")
 	}
@@ -51,7 +53,7 @@ func TestPPR_BoundedMassAtSource(t *testing.T) {
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
-	r := PersonalisedPushPageRank(c, src, DefaultPPRPushOptions())
+	r, _ := PersonalisedPushPageRank(c, src, DefaultPPRPushOptions())
 	for i := 1; i <= 5; i++ {
 		leaf, _ := a.Mapper().Lookup(i)
 		if r[src] <= r[leaf] {
@@ -66,5 +68,17 @@ func TestPPR_BoundedMassAtSource(t *testing.T) {
 	}
 	if total <= 0 || total > 1.0+1e-9 {
 		t.Fatalf("rank sum = %.6f, want in (0, 1]", total)
+	}
+}
+
+func TestPPR_RejectsNaN(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a.AddEdge(0, 1, struct{}{})
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	_, err := PersonalisedPushPageRank(c, src, PPRPushOptions{Damping: math.NaN()})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}
 }

@@ -62,7 +62,7 @@ func main() {
 	// Goroutine 3 — PageRank to convergence.
 	go func() {
 		defer wg.Done()
-		ranks, iters := centrality.PageRank(c, centrality.DefaultPageRankOptions())
+		ranks, iters, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())
 		var live int
 		for _, r := range ranks {
 			if r > 0 {

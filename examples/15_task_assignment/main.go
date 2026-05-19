@@ -25,7 +25,10 @@ func main() {
 	n, m := len(workers), len(tasks)
 
 	fmt.Println("=== Minimum-cost assignment (Hungarian) ===")
-	a := search.Hungarian(cost, n, m)
+	a, err := search.Hungarian(cost, n, m)
+	if err != nil {
+		panic(err)
+	}
 	for i, j := range a.RowToCol {
 		if j < 0 {
 			continue

@@ -1,6 +1,15 @@
 package search
 
-import "math"
+import (
+	"errors"
+	"math"
+)
+
+// ErrInvalidInput is returned by algorithms that detect NaN or +/-Inf
+// in float-valued input arrays. The sentinel is shared across the
+// search and centrality packages so callers can errors.Is against it
+// uniformly.
+var ErrInvalidInput = errors.New("search: input contains NaN or Inf")
 
 // Assignment is the result of [Hungarian]: the minimum total cost
 // and the column assigned to each row.
@@ -18,13 +27,23 @@ type Assignment struct {
 // Adapted from the standard "potential" formulation. Pass costs
 // directly; do not negate for maximisation.
 //
-// augmenting-path stages share state and do not factor into
-// independent helpers without churn.
+// Returns an empty Assignment paired with [ErrInvalidInput] when cost
+// contains any NaN or +/-Inf entry — the dual potentials accumulate
+// across iterations and a single non-finite value silently corrupts
+// the entire run, so validation is mandatory.
 //
-//nolint:gocyclo // textbook Hungarian: relaxation + dual-update +
-func Hungarian(cost []float64, n, m int) Assignment {
+//nolint:gocyclo // textbook Hungarian: relaxation + dual update + augment
+func Hungarian(cost []float64, n, m int) (Assignment, error) {
 	if n == 0 || m == 0 {
-		return Assignment{RowToCol: make([]int, n)}
+		return Assignment{RowToCol: make([]int, n)}, nil
+	}
+	if len(cost) != n*m {
+		return Assignment{}, errors.New("search: Hungarian cost length must equal n*m")
+	}
+	for _, v := range cost {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return Assignment{}, ErrInvalidInput
+		}
 	}
 	const inf = math.MaxFloat64
 
@@ -94,5 +113,5 @@ func Hungarian(cost []float64, n, m int) Assignment {
 			total += cost[(p[j]-1)*m+(j-1)]
 		}
 	}
-	return Assignment{TotalCost: total, RowToCol: rowToCol}
+	return Assignment{TotalCost: total, RowToCol: rowToCol}, nil
 }

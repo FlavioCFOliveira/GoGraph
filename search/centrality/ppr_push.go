@@ -39,7 +39,10 @@ func DefaultPPRPushOptions() PPRPushOptions {
 // shared CSR.
 //
 //nolint:gocyclo // canonical ACL push: defaults + worklist loop + dangling teleport
-func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) []float64 {
+func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
+	if hasInvalidFloat(opts.Damping, opts.Epsilon) {
+		return nil, ErrInvalidInput
+	}
 	if opts.Damping == 0 {
 		opts.Damping = 0.85
 	}
@@ -53,7 +56,7 @@ func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPu
 	edges := c.EdgesSlice()
 	n := len(verts) - 1
 	if n <= 0 || uint64(src)+1 >= uint64(len(verts)) {
-		return nil
+		return nil, nil
 	}
 	rank := make([]float64, n)
 	res := make([]float64, n)
@@ -118,5 +121,5 @@ func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPu
 	// (1-alpha) factor (as v1.0.0 did) double-counted the absorption
 	// and biased the rank vector. Leaving residue in place keeps
 	// rank monotonically convergent.
-	return rank
+	return rank, nil
 }

@@ -73,7 +73,7 @@ bob,dave,1
 	})
 	fmt.Printf("  visited %d nodes.\n", visited)
 
-	ranks, iters := extern.PageRank(r, extern.DefaultPageRankOptions())
+	ranks, iters, _ := extern.PageRank(r, extern.DefaultPageRankOptions())
 	// Count live ranks (non-zero) so the report matches the actual
 	// graph size, not the sharded MaxNodeID-rounded slice length.
 	var live int

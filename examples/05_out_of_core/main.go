@@ -35,6 +35,6 @@ func main() {
 	defer func() { _ = r.Close() }()
 	_ = r.SetHint(csrfile.AccessSequential)
 
-	ranks, iters := extern.PageRank(r, extern.DefaultPageRankOptions())
+	ranks, iters, _ := extern.PageRank(r, extern.DefaultPageRankOptions())
 	fmt.Printf("Tier 2 PageRank converged in %d iters; %d ranks\n", iters, len(ranks))
 }

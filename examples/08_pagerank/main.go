@@ -16,7 +16,7 @@ func main() {
 		a.AddEdge(i, (i+1)%5, struct{}{})
 	}
 	c := csr.BuildFromAdjList(a)
-	ranks, iters := centrality.PageRank(c, centrality.DefaultPageRankOptions())
+	ranks, iters, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())
 	// Resolve the NodeIDs of the 5 user-facing nodes so we only print
 	// the live ranks (the rank slice is indexed by NodeID and rounds
 	// up to MaxNodeID across the 256-shard Mapper space).

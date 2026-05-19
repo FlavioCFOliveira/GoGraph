@@ -37,7 +37,7 @@ func main() {
 	dist, _ := d.Distance(dave)
 	fmt.Printf("Dijkstra alice -> dave: %d\n", dist)
 
-	ranks, iters := centrality.PageRank(c, centrality.DefaultPageRankOptions())
+	ranks, iters, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())
 	fmt.Printf("PageRank converged in %d iterations\n", iters)
 	_ = ranks
 }

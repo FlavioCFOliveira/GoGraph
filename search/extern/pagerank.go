@@ -1,9 +1,25 @@
 package extern
 
 import (
+	"errors"
+	"math"
+
 	"gograph/graph"
 	"gograph/store/csrfile"
 )
+
+// ErrInvalidInput is returned by extern algorithms when their float
+// options carry NaN or +/-Inf.
+var ErrInvalidInput = errors.New("extern: input option contains NaN or Inf")
+
+func hasInvalidFloat(values ...float64) bool {
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return true
+		}
+	}
+	return false
+}
 
 // PageRankOptions configures [PageRank].
 type PageRankOptions struct {
@@ -43,17 +59,20 @@ func DefaultPageRankOptions() PageRankOptions {
 //
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared csrfile.Reader.
-func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int) {
+func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+		return nil, 0, ErrInvalidInput
+	}
 	opts = normaliseOptions(opts)
 	verts := r.Vertices()
 	edges := r.Edges()
 	if len(verts) <= 1 {
-		return nil, 0
+		return nil, 0, nil
 	}
 	n := len(verts) - 1
 	cur, outdeg, isLive, live := seedRanks(verts, edges, n)
 	if live == 0 {
-		return cur, 0
+		return cur, 0, nil
 	}
 	next := make([]float64, n)
 	teleport := (1.0 - opts.Damping) / float64(live)
@@ -62,10 +81,10 @@ func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterati
 		delta := l1Delta(cur, next)
 		cur, next = next, cur
 		if delta < opts.Tolerance {
-			return cur, iter
+			return cur, iter, nil
 		}
 	}
-	return cur, opts.MaxIterations
+	return cur, opts.MaxIterations, nil
 }
 
 func normaliseOptions(opts PageRankOptions) PageRankOptions {
