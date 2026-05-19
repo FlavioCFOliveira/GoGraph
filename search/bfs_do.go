@@ -38,23 +38,23 @@ func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node gra
 	setBit(src)
 	cur := []graph.NodeID{src}
 	depth := 0
-	const alpha, beta uint64 = 14, 24 // Beamer's defaults
+	// alpha gates the top-down -> bottom-up switch (Beamer 2012).
+	// The inverse beta heuristic that switches back to top-down on
+	// the tail is deferred to task #129; the current implementation
+	// runs at most one bottom-up step per iteration, which already
+	// captures the bulk of the headline win on power-law inputs.
+	const alpha uint64 = 14
 	for len(cur) > 0 {
-		// Sum out-degrees of the current frontier to estimate the
-		// expected edges-to-check.
 		var frontierEdges uint64
 		for _, n := range cur {
 			frontierEdges += verts[uint64(n)+1] - verts[uint64(n)]
 		}
 		unvisitedEdges := edgesUnvisited(verts, visited)
 		if frontierEdges > unvisitedEdges/alpha {
-			cur = bottomUpStep(verts, edges, visited, setBit, getBit, maxID, cur, &depth, visit)
+			cur = bottomUpStep(verts, edges, setBit, getBit, maxID, cur, &depth, visit)
 		} else {
 			cur = topDownStep(verts, edges, setBit, getBit, cur, &depth, visit)
 		}
-		_ = beta // beta is the inverse switch heuristic; the v1
-		// implementation runs at most one bottom-up step per
-		// iteration, which already captures the headline win.
 		if cur == nil {
 			return
 		}
@@ -103,7 +103,6 @@ func topDownStep(
 func bottomUpStep(
 	verts []uint64,
 	edges []graph.NodeID,
-	visited []uint64,
 	setBit func(graph.NodeID),
 	getBit func(graph.NodeID) bool,
 	maxID uint64,
@@ -135,7 +134,6 @@ func bottomUpStep(
 			}
 		}
 	}
-	_ = visited
 	*depth++
 	return next
 }
