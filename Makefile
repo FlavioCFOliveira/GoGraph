@@ -46,6 +46,10 @@ cover: ## Run tests with coverage
 	$(GO) test $(GOFLAGS) -coverprofile=$(COVER_PROFILE) -covermode=atomic $(PACKAGES)
 	$(GO) tool cover -func=$(COVER_PROFILE) | tail -1
 
+.PHONY: cover-gate
+cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
+	GO=$(GO) MIN_TOTAL=85.0 MIN_PER_PKG=75.0 bash scripts/cover_gate.sh
+
 .PHONY: bench
 bench: ## Run benchmarks ($(BENCH_PATTERN), count=$(BENCH_COUNT))
 	$(GO) test -bench=$(BENCH_PATTERN) -benchmem -count=$(BENCH_COUNT) -run=^$$ $(PACKAGES)
@@ -59,7 +63,7 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: tidy fmt vet build test race lint ## Full pipeline: tidy + fmt + vet + build + test + race + lint
+ci: tidy fmt vet build test race lint cover-gate ## Full pipeline: tidy + fmt + vet + build + test + race + lint + cover-gate
 
 .PHONY: soak
 soak: ## Run the 4-hour mixed-workload soak harness (use SOAK_FLAGS to override)
@@ -84,6 +88,6 @@ release: ## Run goreleaser to publish a release for the current tag — requires
 
 .PHONY: clean
 clean: ## Remove build artefacts
-	rm -f $(COVER_PROFILE) coverage.html
+	rm -f $(COVER_PROFILE) coverage.html cover.out cover.lib.out
 	rm -rf bin build dist
 	$(GO) clean -testcache
