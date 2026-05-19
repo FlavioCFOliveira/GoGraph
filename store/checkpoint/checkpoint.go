@@ -166,26 +166,34 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 		c.lastDuration.Store(uint64(time.Since(start).Nanoseconds()))
 	}()
 
+	// Hold storeMu around the entire snapshot+truncate window so that
+	// no transaction commits new WAL frames between the snapshot
+	// capture and the truncation. The trade-off is that the lock is
+	// held during disk I/O for the duration of the snapshot write;
+	// for very large graphs this can stall writers and may be
+	// reworked later to a position-tracked truncate (capture LSN
+	// under lock, write snapshot lock-free, truncate up-to-LSN under
+	// lock). For v1 the simple correctness-first path is preferred.
 	c.storeMu.Lock()
-	cs := csr.BuildFromAdjList(c.g.AdjList())
-	c.storeMu.Unlock()
+	defer c.storeMu.Unlock()
 
+	cs := csr.BuildFromAdjList(c.g.AdjList())
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
 	if err := snapshot.WriteSnapshotCSR(snapDir, cs); err != nil {
 		c.setErr(err)
 		return err
 	}
-
-	// Truncate the WAL by closing + reopening; everything before
-	// this point is now folded into the snapshot. We record the
-	// truncated byte count from the writer stats.
-	before := c.wlog.Stats().Bytes
 	if err := c.wlog.Sync(); err != nil {
 		c.setErr(err)
 		return err
 	}
-	if before > 0 {
-		c.walTrunc.Add(before)
+	truncated, err := c.wlog.Truncate()
+	if err != nil {
+		c.setErr(err)
+		return err
+	}
+	if truncated > 0 {
+		c.walTrunc.Add(uint64(truncated))
 	}
 	c.checkpoints.Add(1)
 	c.setErr(nil)

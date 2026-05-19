@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -106,6 +107,49 @@ func (w *Writer) Stats() Stats {
 		Syncs:      w.syncs.Load(),
 		SyncFailed: w.syncFailed.Load(),
 	}
+}
+
+// Truncate empties the WAL: flushes any buffered frames, truncates
+// the underlying file to zero bytes, and fsyncs the result so the
+// empty state is durable on disk before returning. Subsequent
+// [Writer.Append] calls write to offset 0 of the freshly-empty file.
+//
+// Truncate is intended to be called by the checkpointer after a
+// snapshot covering all WAL frames has been durably persisted; on
+// success every frame previously durable in the WAL is logically
+// folded into the snapshot.
+//
+// Lifetime counters in [Writer.Stats] are NOT reset; the returned
+// int64 reports the number of bytes that were in the file at the
+// moment of truncation (after the in-memory buffer was flushed),
+// which is the canonical measure of WAL bytes freed by this call.
+//
+// On error the WAL may be in a partially-truncated state; callers
+// should not continue using the Writer.
+func (w *Writer) Truncate() (int64, error) {
+	if w.closed.Load() {
+		return 0, ErrWriterClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.bw.Flush(); err != nil {
+		return 0, err
+	}
+	sz, err := w.f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if err := w.f.Truncate(0); err != nil {
+		return sz, err
+	}
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return sz, err
+	}
+	if err := w.f.Sync(); err != nil {
+		return sz, err
+	}
+	w.bw.Reset(w.f)
+	return sz, nil
 }
 
 // Close flushes any buffered frames, calls Sync once, and releases
