@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Daily 04:13 UTC to catch newly-disclosed CVEs even when no
+    # commits land that day.
+    - cron: "13 4 * * *"
 
 permissions:
   contents: read
@@ -58,3 +62,19 @@ jobs:
         with:
           version: v2.5.0
           args: --timeout=5m
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run govulncheck
+        run: govulncheck ./...
