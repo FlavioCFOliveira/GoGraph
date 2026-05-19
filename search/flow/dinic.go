@@ -13,6 +13,12 @@ import "context"
 // and MaxFlow share the residual-capacity arrays without
 // synchronisation. Use a separate Network per goroutine, or
 // serialise externally.
+//
+// v1 limitation. Network's capacity type is int (not generic over
+// the Weight constraint). Genericising over W requires a
+// representable "infinity push" sentinel; Go's generics cannot
+// produce that cleanly for arbitrary named numeric types. Callers
+// needing other weight types should map their capacities to int.
 type Network struct {
 	heads  [][]int // edge indices per node (forward+reverse adjacency)
 	edgeTo []int   // destination of each edge
