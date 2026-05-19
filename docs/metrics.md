@@ -105,7 +105,8 @@ with no return value).
 | `search.DijkstraInto`                      | Zero-allocation Dijkstra primitive.                                  |
 | `search.DijkstraAPSP`                      | All-pairs Dijkstra (V * Dijkstra).                                   |
 | `search.DijkstraAPSPCtx`                   | All-pairs Dijkstra with context.                                     |
-| `search.JohnsonAPSP`                       | Deprecated alias for DijkstraAPSP.                                   |
+| `search.JohnsonAPSP`                       | Johnson APSP (Bellman-Ford reweight + per-source Dijkstra).          |
+| `search.JohnsonAPSPCtx`                    | Johnson APSP with context.                                           |
 | `search.EppsteinKShortest`                 | Eppstein k-shortest paths.                                           |
 | `search.EppsteinKShortestCtx`              | Eppstein k-shortest paths with context.                              |
 | `search.FloydWarshall`                     | All-pairs shortest paths (O(V^3)).                                   |

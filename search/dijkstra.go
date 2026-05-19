@@ -298,6 +298,80 @@ func dijkstraCore[W Weight](
 	return nil
 }
 
+// dijkstraCoreWithWeights mirrors [dijkstraCore] but reads edge
+// weights from a caller-provided slice instead of c.WeightsSlice(),
+// so the caller can run Dijkstra over a reweighted view of the same
+// CSR (Johnson's algorithm builds such a view after the Bellman-Ford
+// pass).
+//
+// Pre-conditions:
+//   - len(weights) >= len(c.EdgesSlice());
+//   - every weights[k] is non-negative (i.e. >= W's zero value);
+//   - len(dist), len(parent), len(found) all equal c.MaxNodeID();
+//   - h has been reset to empty.
+//
+// Concurrency: identical to [dijkstraCore] — the caller's slices are
+// written in place; concurrent callers must supply separate buffers.
+//
+//nolint:gocyclo // mirrors dijkstraCore body
+func dijkstraCoreWithWeights[W Weight](
+	ctx context.Context,
+	c *csr.CSR[W],
+	weights []W,
+	src graph.NodeID,
+	dist []W,
+	parent []graph.NodeID,
+	found []bool,
+	h *dijkHeap[W],
+) error {
+	var zero W
+	for i := range dist {
+		dist[i] = zero
+		parent[i] = 0
+		found[i] = false
+	}
+	h.items = h.items[:0]
+
+	verts := c.VerticesSlice()
+	if uint64(src)+1 >= uint64(len(verts)) {
+		return nil
+	}
+	edges := c.EdgesSlice()
+
+	found[uint64(src)] = true
+	parent[uint64(src)] = src
+	h.push(zero, src)
+
+	popCount := 0
+	for h.len() > 0 {
+		if popCount&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		popCount++
+		top := h.pop()
+		if top.dist != dist[uint64(top.node)] && found[uint64(top.node)] {
+			if top.dist > dist[uint64(top.node)] {
+				continue
+			}
+		}
+		start := verts[uint64(top.node)]
+		end := verts[uint64(top.node)+1]
+		for k := start; k < end; k++ {
+			nb := edges[k]
+			cand := top.dist + weights[k]
+			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
+				dist[uint64(nb)] = cand
+				parent[uint64(nb)] = top.node
+				found[uint64(nb)] = true
+				h.push(cand, nb)
+			}
+		}
+	}
+	return nil
+}
+
 // newDistancesCopy materialises a stable Distances value, copying the
 // pooled state so the caller is decoupled from the pool's lifecycle.
 func newDistancesCopy[W Weight](st *dijkstraState[W], src graph.NodeID, maxID uint64) *Distances[W] {

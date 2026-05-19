@@ -13,23 +13,19 @@ import (
 // ErrNegativeEdgeAPSP is returned by [DijkstraAPSP] when the input
 // CSR contains a strictly-negative edge weight. DijkstraAPSP does not
 // reweight negative edges; callers with mixed-sign weights and no
-// negative cycles should use [FloydWarshall].
+// negative cycles should use [JohnsonAPSP] (which reweights via
+// Bellman-Ford) or [FloydWarshall].
 var ErrNegativeEdgeAPSP = errors.New("search: DijkstraAPSP requires non-negative edge weights")
 
 // DijkstraAPSP computes APSP on c by running [Dijkstra] from every
 // live vertex. It accepts only non-negative edge weights.
 //
 // For graphs with negative edges (but no negative cycle), use
-// [FloydWarshall] which tolerates them at the cost of O(V^3) work.
+// [JohnsonAPSP] which prefixes a Bellman-Ford reweighting pass and
+// runs in O(V * (V + E) * log V), or [FloydWarshall] which tolerates
+// them at the cost of O(V^3) work.
 //
 // Complexity: O(V * (V + E) * log V).
-//
-// Naming note: the v1.0.0 export "JohnsonAPSP" was misnamed — true
-// Johnson's algorithm prefixes a Bellman-Ford reweighting pass to
-// handle negative edges. The reweighting pass is deferred to a
-// future release; this function is the actually-implemented
-// Dijkstra-from-every-vertex variant. JohnsonAPSP is preserved as a
-// deprecated alias for backward compatibility.
 func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.DijkstraAPSP")()
 	res, err := DijkstraAPSPCtx(context.Background(), c)
@@ -105,17 +101,235 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 	return out, nil
 }
 
-// JohnsonAPSP is a deprecated alias for [DijkstraAPSP]; the original
-// v1.0.0 export was misnamed as it did not implement Bellman-Ford
-// reweighting.
+// JohnsonAPSP computes APSP on c using Johnson's algorithm: a
+// Bellman-Ford reweighting pass from a virtual zero-weight source
+// computes a potential h(v); the original edge weights are reweighted
+// to w'(u,v) = w(u,v) + h(u) - h(v); a Dijkstra from every live
+// vertex on the reweighted (non-negative) graph yields d'(u,v); the
+// original distances are recovered via d(u,v) = d'(u,v) - h[u] + h[v].
 //
-// Deprecated: use [DijkstraAPSP]. JohnsonAPSP will be removed in a
-// future major release.
+// Compared to [DijkstraAPSP] which rejects negative edges, JohnsonAPSP
+// accepts arbitrary signed edge weights and reports a negative cycle
+// reachable from any source via [ErrNegativeCycle]. Compared to
+// [FloydWarshall] which is O(V^3), Johnson is O(V * (V + E) * log V)
+// — strictly better on sparse graphs (E = O(V)).
+//
+// Floating-point caveat: when W is a floating-point type, the
+// reweight/recover arithmetic w(u,v) + h(u) - h(v) followed by
+// d'(u,v) - h[u] + h[v] can accumulate ULP-level rounding error,
+// so the recovered d(u,v) may differ from [FloydWarshall]'s output
+// by a small tolerance. Integer Weight types reproduce
+// [FloydWarshall] exactly.
+//
+// Concurrency: JohnsonAPSP is safe for any number of concurrent
+// invocations on a shared, immutable CSR.
+//
+// Complexity: O(V * (V + E) * log V) for the Dijkstra pass plus
+// O(V * E) for the Bellman-Ford pass (SPFA worst-case bound).
 func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.JohnsonAPSP")()
-	res, err := DijkstraAPSP(c)
+	res, err := JohnsonAPSPCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.JohnsonAPSP.errors", 1)
 	}
 	return res, err
+}
+
+// JohnsonAPSPCtx is the context-aware variant of [JohnsonAPSP].
+// ctx.Err() is checked once per source vertex during the Dijkstra
+// pass and at every relaxation-round boundary during the
+// Bellman-Ford pass; on cancellation returns (nil, wrapped ctx.Err()).
+//
+//nolint:gocyclo // canonical Johnson: live-mask compaction + virtual-source BF + reweight + per-source Dijkstra + recover
+func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
+	defer metrics.Time("search.JohnsonAPSPCtx")()
+	maxID := int(c.MaxNodeID())
+	mask := c.LiveMask()
+	compact := make([]int, maxID)
+	live := 0
+	for i := 0; i < maxID; i++ {
+		if mask[i] {
+			compact[i] = live
+			live++
+		} else {
+			compact[i] = -1
+		}
+	}
+	out := &APSP[W]{
+		live:    live,
+		maxID:   maxID,
+		compact: compact,
+		dist:    make([]W, live*live),
+		found:   make([]bool, live*live),
+	}
+	if live == 0 {
+		return out, nil
+	}
+	for i := 0; i < live; i++ {
+		idx := i*live + i
+		out.found[idx] = true
+	}
+
+	// Bellman-Ford reweighting pass. Conceptually we add a synthetic
+	// source s with zero-weight edges to every vertex and compute the
+	// shortest-path potential h(v) = delta(s, v). Equivalently, we
+	// seed every vertex with dist=0 and run SPFA: any vertex that
+	// can be relaxed to a strictly negative value drags its
+	// reachable component down; a negative cycle is detected when
+	// any vertex enters the worklist more than V times.
+	h := make([]W, maxID)
+	if err := bellmanFordVirtualSource[W](ctx, c, h); err != nil {
+		metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
+		return nil, err
+	}
+
+	// Build the reweighted edge-weights view. By Johnson's lemma all
+	// w'(u,v) = w(u,v) + h(u) - h(v) are non-negative when there is
+	// no negative cycle reachable from the virtual source.
+	weights := c.WeightsSlice()
+	verts := c.VerticesSlice()
+	edges := c.EdgesSlice()
+	reweighted := make([]W, len(weights))
+	for u := 0; u < maxID; u++ {
+		start := verts[u]
+		end := verts[u+1]
+		for k := start; k < end; k++ {
+			v := uint64(edges[k])
+			reweighted[k] = weights[k] + h[u] - h[v]
+		}
+	}
+
+	// Reweighted Dijkstra from every live vertex. We use the same
+	// pooled state machinery as Dijkstra to keep per-source allocation
+	// down to the heap items themselves (which the per-W sync.Pool
+	// amortises). dijkstraCoreWithWeights reads the reweighted slice
+	// in place of c.WeightsSlice().
+	st := acquireDijkstra[W](uint64(maxID))
+	defer releaseDijkstra(st)
+	for src := 0; src < maxID; src++ {
+		si := compact[src]
+		if si < 0 {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
+			return nil, err
+		}
+		if src&0x3F == 0 {
+			runtime.Gosched()
+		}
+		if err := dijkstraCoreWithWeights[W](
+			ctx, c, reweighted, graph.NodeID(src),
+			st.dist[:maxID], st.parent[:maxID], st.found[:maxID], &st.heap,
+		); err != nil {
+			metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
+			return nil, err
+		}
+		// Recover original distances: d(src, dst) = d'(src, dst) - h[src] + h[dst].
+		hsrc := h[src]
+		for dst := 0; dst < maxID; dst++ {
+			di := compact[dst]
+			if di < 0 {
+				continue
+			}
+			if !st.found[dst] {
+				continue
+			}
+			idx := si*live + di
+			out.dist[idx] = st.dist[dst] - hsrc + h[dst]
+			out.found[idx] = true
+		}
+	}
+	return out, nil
+}
+
+// bellmanFordVirtualSource computes the Johnson potential h(v) for
+// every NodeID v in c. Conceptually we add a synthetic source s
+// connected to every vertex with a zero-weight edge and run Bellman-
+// Ford from s; the resulting h satisfies h(v) <= h(u) + w(u, v) for
+// every edge (u, v), which is exactly the inequality Johnson's lemma
+// needs.
+//
+// Implementation: SPFA seeded with every vertex in the worklist and
+// dist[*] = 0. A negative cycle reachable from any vertex (and
+// therefore from the virtual source) is detected by the
+// relaxes[v] > maxID guard inherited from [bellmanFordCore].
+//
+// Pre-condition: len(h) == int(c.MaxNodeID()).
+//
+//nolint:gocyclo // virtual-source SPFA with SLF + negative-cycle counter and ctx-yield path
+func bellmanFordVirtualSource[W Weight](ctx context.Context, c *csr.CSR[W], h []W) error {
+	maxID := uint64(c.MaxNodeID())
+	if maxID == 0 {
+		return nil
+	}
+	verts := c.VerticesSlice()
+	edges := c.EdgesSlice()
+	weights := c.WeightsSlice()
+
+	var zero W
+	for i := range h {
+		h[i] = zero
+	}
+
+	// SPFA with SLF on a circular deque, primed with every vertex.
+	bufSize := 1
+	for bufSize < int(maxID)+1 {
+		bufSize <<= 1
+	}
+	if bufSize < 8 {
+		bufSize = 8
+	}
+	dq := make([]graph.NodeID, bufSize)
+	mask := bufSize - 1
+	head := 0
+	tail := 0
+	inQueue := make([]bool, maxID)
+	relaxes := make([]uint32, maxID)
+	for v := uint64(0); v < maxID; v++ {
+		dq[tail] = graph.NodeID(v)
+		tail = (tail + 1) & mask
+		inQueue[v] = true
+		relaxes[v] = 1
+	}
+
+	yieldCtr := 0
+	for head != tail {
+		yieldCtr++
+		if yieldCtr&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		v := dq[head]
+		head = (head + 1) & mask
+		inQueue[uint64(v)] = false
+		dv := h[uint64(v)]
+		start := verts[uint64(v)]
+		end := verts[uint64(v)+1]
+		for k := start; k < end; k++ {
+			nb := uint64(edges[k])
+			cand := dv + weights[k]
+			if cand < h[nb] {
+				h[nb] = cand
+				if !inQueue[nb] {
+					relaxes[nb]++
+					if uint64(relaxes[nb]) > maxID {
+						return ErrNegativeCycle
+					}
+					// SLF: cheaper tentative goes to the front so we
+					// pop it sooner and minimise re-relaxation downstream.
+					if head != tail && cand < h[uint64(dq[head])] {
+						head = (head - 1) & mask
+						dq[head] = graph.NodeID(nb)
+					} else {
+						dq[tail] = graph.NodeID(nb)
+						tail = (tail + 1) & mask
+					}
+					inQueue[nb] = true
+				}
+			}
+		}
+	}
+	return nil
 }

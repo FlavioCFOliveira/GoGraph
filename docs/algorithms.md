@@ -23,7 +23,7 @@ algorithm has unit tests under the same package.
 | A*                       | admissible heuristic                             | `search/astar.go`          |
 | Yen's k-shortest         | sorted by total cost                             | `search/yen.go`            |
 | Floyd-Warshall           | O(V^3) APSP                                      | `search/floyd_warshall.go` |
-| Johnson                  | O(V * (V + E) log V) APSP, non-negative weights  | `search/johnson.go`        |
+| Johnson                  | O(V * (V + E) log V) APSP, mixed-sign weights; negative cycles detected | `search/johnson.go`        |
 
 ## Connectivity
 
@@ -79,9 +79,6 @@ The semi-external variants live under `search/extern/`:
 
 - Yen's k-shortest is O(k * (V + E) log V); Eppstein's
   algorithm (better k > 1000) is deferred.
-- Johnson APSP requires non-negative edges in v1; the Bellman-
-  Ford reweighting pass for negative weights is deferred (use
-  Floyd-Warshall instead).
 - Leiden in v1 is simplified to local moving + connected-
   community split; the refinement and aggregation phases of
   the full paper are deferred.
