@@ -9,6 +9,9 @@ import (
 // biconnected components (each component a slice of NodeIDs),
 // the bridges (each as an (a, b) pair), and the articulation
 // points.
+//
+// Concurrency: BCCResult is a value type returned freshly by every
+// call; safe to share across goroutines for read.
 type BCCResult struct {
 	Components   [][]graph.NodeID
 	Bridges      [][2]graph.NodeID
@@ -19,13 +22,18 @@ type BCCResult struct {
 // components / bridges / articulation-points algorithm on an
 // undirected graph captured by c. Complexity O(V + E).
 //
+// Multigraph correctness: when an undirected graph has multiple
+// parallel edges between the same vertex pair, every such edge
+// participates in a 2-cycle biconnected component. The algorithm
+// tracks the specific CSR edge index used to enter each vertex
+// (parentEdgeIdx) so that only that one edge is skipped — every
+// other parallel edge to the parent is correctly treated as a
+// real back-edge.
+//
 // The implementation uses an explicit DFS stack (no recursion) so
 // it survives deep graphs.
 //
-// loop maintaining DFS state + articulation/bridge detection +
-// edge stack management.
-//
-//nolint:gocyclo // canonical structure of the algorithm: a single
+//nolint:gocyclo // canonical Hopcroft-Tarjan: DFS frame stack + edge-stack + articulation + bridge detection
 func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
@@ -34,15 +42,17 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 	const unvisited = -1
 	disc := make([]int, maxID)
 	low := make([]int, maxID)
-	parent := make([]int, maxID)
 	isArtic := make([]bool, maxID)
 	for i := range disc {
 		disc[i] = unvisited
-		parent[i] = unvisited
 	}
+	// parentEdgeIdx in each frame is the CSR edge index used to
+	// arrive at v (i.e. the matching back-edge in v's CSR pointing
+	// to v's DFS parent). -1 for the DFS root.
 	type frame struct {
-		v    int
-		next uint64
+		v             int
+		parentEdgeIdx int
+		next          uint64
 	}
 	var stack []frame
 	var edgeStack [][2]graph.NodeID
@@ -60,7 +70,7 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 		disc[start] = timer
 		low[start] = timer
 		timer++
-		stack = append(stack, frame{v: start, next: verts[start]})
+		stack = append(stack, frame{v: start, parentEdgeIdx: -1, next: verts[start]})
 		rootChildren := 0
 		for len(stack) > 0 {
 			top := &stack[len(stack)-1]
@@ -76,14 +86,19 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 						if disc[p] != 0 || rootChildren > 1 {
 							isArtic[p] = true
 						}
-						// Pop edges off edgeStack until (p, v).
+						// Pop edges off edgeStack until the tree edge (p, v).
+						// Tree edges were pushed as {parent, child}; back
+						// edges as {descendant, ancestor}. Matching only on
+						// the tree-edge ordering ensures we pop every
+						// back-edge in the same BCC instead of exiting
+						// early on a back-edge whose endpoints happen to
+						// match the (p, v) pair.
 						var comp []graph.NodeID
 						for len(edgeStack) > 0 {
 							e := edgeStack[len(edgeStack)-1]
 							edgeStack = edgeStack[:len(edgeStack)-1]
 							comp = append(comp, e[0], e[1])
-							if (uint64(e[0]) == uint64(p) && uint64(e[1]) == uint64(v)) ||
-								(uint64(e[1]) == uint64(p) && uint64(e[0]) == uint64(v)) {
+							if uint64(e[0]) == uint64(p) && uint64(e[1]) == uint64(v) {
 								break
 							}
 						}
@@ -97,13 +112,17 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 				}
 				continue
 			}
-			w := int(edges[top.next])
+			e := top.next
 			top.next++
-			if w == parent[top.v] {
+			// Skip only the specific edge we used to descend into top.v.
+			// In multigraphs, other parallel edges back to the parent
+			// must still be processed as real back-edges to form the
+			// 2-cycle BCC they belong to.
+			if int(e) == top.parentEdgeIdx {
 				continue
 			}
+			w := int(edges[e])
 			if disc[w] == unvisited {
-				parent[w] = top.v
 				if top.v == start {
 					rootChildren++
 				}
@@ -111,7 +130,17 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 				low[w] = timer
 				timer++
 				edgeStack = append(edgeStack, [2]graph.NodeID{graph.NodeID(top.v), graph.NodeID(w)})
-				stack = append(stack, frame{v: w, next: verts[w]})
+				// Locate the back-edge in w's CSR pointing to top.v.
+				// In simple graphs there's exactly one; in multigraphs
+				// any unmarked parallel edge works (linear scan).
+				childParentEdgeIdx := -1
+				for k := verts[w]; k < verts[w+1]; k++ {
+					if int(edges[k]) == top.v {
+						childParentEdgeIdx = int(k)
+						break
+					}
+				}
+				stack = append(stack, frame{v: w, parentEdgeIdx: childParentEdgeIdx, next: verts[w]})
 			} else if disc[w] < disc[top.v] {
 				if disc[w] < low[top.v] {
 					low[top.v] = disc[w]
