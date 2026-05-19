@@ -45,3 +45,7 @@ docs/_site/
 # Compiled example binaries (matching examples/<NN>_*)
 [0-9][0-9]_*
 !examples/[0-9][0-9]_*/
+
+# Soak-harness artefacts and stray go-run binary
+/soak
+/soak-artefacts/
