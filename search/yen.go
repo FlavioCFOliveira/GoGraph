@@ -63,7 +63,16 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 
 	edgeIdx := buildEdgeIndex[W](c)
 
-	candidates := []YenPath[W]{}
+	type candRef struct {
+		start, end int
+		cost       W
+	}
+	// candArena holds every candidate path's nodes concatenated; each
+	// candidate is identified by a (start, end) range into the arena.
+	// The arena grows monotonically across the k-1 rounds, so previous
+	// indices stay valid until the function returns.
+	candArena := make([]graph.NodeID, 0, 128)
+	candidates := make([]candRef, 0, 16)
 	banned := make(map[edgeKey]struct{}, 16)
 
 	for i := 1; i < k; i++ {
@@ -81,22 +90,26 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 				continue
 			}
 			rootCost := pathCostFast[W](c.WeightsSlice(), edgeIdx, rootPath)
-			// Build the full candidate path: rootPath[:-1] + cand. We must
-			// copy because rootPath aliases prevPath, and cand.Nodes is the
-			// scratch path buffer that will be overwritten by the next call.
-			full := make([]graph.NodeID, 0, len(rootPath)-1+len(cand.Nodes))
-			full = append(full, rootPath[:len(rootPath)-1]...)
-			full = append(full, cand.Nodes...)
-			candidates = append(candidates, YenPath[W]{
-				Nodes: full,
-				Cost:  rootCost + cand.Cost,
+			candStart := len(candArena)
+			candArena = append(candArena, rootPath[:len(rootPath)-1]...)
+			candArena = append(candArena, cand.Nodes...)
+			candidates = append(candidates, candRef{
+				start: candStart,
+				end:   len(candArena),
+				cost:  rootCost + cand.Cost,
 			})
 		}
 		if len(candidates) == 0 {
 			break
 		}
-		sort.Slice(candidates, func(a, b int) bool { return candidates[a].Cost < candidates[b].Cost })
-		result = append(result, candidates[0])
+		sort.Slice(candidates, func(a, b int) bool { return candidates[a].cost < candidates[b].cost })
+		// Promote the cheapest candidate to result by materialising
+		// an owned NodeID slice (the arena may grow further on the
+		// next round and invalidate the reference's backing pointer).
+		best := candidates[0]
+		nodes := make([]graph.NodeID, best.end-best.start)
+		copy(nodes, candArena[best.start:best.end])
+		result = append(result, YenPath[W]{Nodes: nodes, Cost: best.cost})
 		candidates = candidates[1:]
 	}
 	return result, nil
