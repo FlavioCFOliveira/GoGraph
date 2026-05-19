@@ -38,6 +38,11 @@ const (
 
 // Store bundles an [lpg.Graph] with a [wal.Writer] and the single-
 // writer lock that serialises transactions.
+//
+// Concurrency: any number of goroutines may call Begin/BeginCtx;
+// transactions serialise on the store mutex, so only one Tx is
+// active at any moment. Reads on the underlying lpg.Graph remain
+// concurrent and lock-free per the lpg/adjlist contracts.
 type Store[N comparable, W any] struct {
 	mu  sync.Mutex
 	g   *lpg.Graph[N, W]

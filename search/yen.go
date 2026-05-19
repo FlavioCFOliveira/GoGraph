@@ -9,6 +9,9 @@ import (
 )
 
 // YenPath is one shortest path produced by [YenKShortest].
+//
+// Concurrency: YenPath values are freshly allocated per call and
+// safe for concurrent reads.
 type YenPath[W Weight] struct {
 	Nodes []graph.NodeID
 	Cost  W

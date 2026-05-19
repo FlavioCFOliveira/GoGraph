@@ -15,6 +15,9 @@ var ErrInvalidInput = errors.New("search: input contains NaN or Inf")
 
 // Assignment is the result of [Hungarian]: the minimum total cost
 // and the column assigned to each row.
+//
+// Concurrency: Assignment is a value type returned freshly per call
+// and is safe for concurrent reads.
 type Assignment struct {
 	TotalCost float64
 	RowToCol  []int

@@ -8,6 +8,11 @@ import "context"
 // Network is a directed capacitated graph. It is stored as a sum of
 // forward and reverse-edge adjacency lists (one slice per node) so
 // residual updates run in O(1) per edge.
+//
+// Concurrency: Network is not safe for concurrent mutation; AddEdge
+// and MaxFlow share the residual-capacity arrays without
+// synchronisation. Use a separate Network per goroutine, or
+// serialise externally.
 type Network struct {
 	heads  [][]int // edge indices per node (forward+reverse adjacency)
 	edgeTo []int   // destination of each edge

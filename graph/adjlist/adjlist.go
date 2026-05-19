@@ -80,6 +80,12 @@ type Config struct {
 
 // AdjList is a mutable adjacency-list graph generic over the user node
 // type N and the edge weight type W. Construct one with [New].
+//
+// Concurrency: AdjList is safe for any number of concurrent readers
+// (Neighbours, LoadEntry, HasEdge, Order, Size) AND concurrent
+// writers (AddEdge, AddNode, RemoveEdge). The 256-way shard layout
+// serialises only writers landing in the same shard; readers never
+// take a mutex and observe a consistent snapshot via atomic.Pointer.
 type AdjList[N comparable, W any] struct {
 	mapper *graph.Mapper[N]
 	cfg    Config
