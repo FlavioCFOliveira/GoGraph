@@ -1,12 +1,43 @@
 package search
 
 import (
+	"math/rand/v2"
 	"testing"
 
 	"gograph/graph"
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
 )
+
+// BenchmarkBFSDirectionOpt_PowerLaw exercises BFS-DO on a power-law-
+// flavoured undirected random graph where the algorithm benefits
+// most. The bench-loop reuses pooled scratch across iterations, so
+// allocs/op should be 0 post-warmup.
+func BenchmarkBFSDirectionOpt_PowerLaw(b *testing.B) {
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	const n = 1 << 20                  // 1M nodes
+	r := rand.New(rand.NewPCG(53, 59)) //nolint:gosec // deterministic benchmark RNG
+	// Power-law-ish: hubs (low indices) receive far more edges.
+	const edgesPerNode = 4
+	for i := 0; i < n*edgesPerNode; i++ {
+		from := r.IntN(n)
+		// Sample destination biased toward the low-id hubs.
+		to := int(float64(n) * r.Float64() * r.Float64())
+		if to >= n {
+			to = n - 1
+		}
+		a.AddEdge(from, to, struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	// Warm pool.
+	BFSDirectionOpt(c, src, func(_ graph.NodeID, _ int) bool { return true })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		BFSDirectionOpt(c, src, func(_ graph.NodeID, _ int) bool { return true })
+	}
+}
 
 func TestBFSDirectionOpt_Tree(t *testing.T) {
 	t.Parallel()
