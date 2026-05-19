@@ -47,6 +47,7 @@ func HopcroftKarpCtx[W any](ctx context.Context, c *csr.CSR[W], nLeft int) (Matc
 		matchR[i] = ^graph.NodeID(0)
 	}
 	dist := make([]int, nLeft)
+	stack := make([]hkFrame, 0, nLeft)
 	size := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -58,7 +59,9 @@ func HopcroftKarpCtx[W any](ctx context.Context, c *csr.CSR[W], nLeft int) (Matc
 		}
 		for u := 0; u < nLeft; u++ {
 			if matchL[u] == ^graph.NodeID(0) {
-				if dfsAugment(graph.NodeID(u), matchL, matchR, dist, verts, edges, nLeft) {
+				var ok bool
+				ok, stack = dfsAugment(graph.NodeID(u), matchL, matchR, dist, verts, edges, nLeft, stack)
+				if ok {
 					size++
 				}
 			}
@@ -100,18 +103,62 @@ func bfsLayer(matchL, matchR []graph.NodeID, dist []int, verts []uint64, edges [
 	return found
 }
 
-// dfsAugment recursively augments along a shortest path from u.
-func dfsAugment(u graph.NodeID, matchL, matchR []graph.NodeID, dist []int, verts []uint64, edges []graph.NodeID, nLeft int) bool {
-	for e := verts[uint64(u)]; e < verts[uint64(u)+1]; e++ {
-		v := edges[e]
-		pair := matchR[uint64(v)]
-		if pair == ^graph.NodeID(0) || (int(pair) < nLeft && dist[uint64(pair)] == dist[uint64(u)]+1 &&
-			dfsAugment(pair, matchL, matchR, dist, verts, edges, nLeft)) {
-			matchL[uint64(u)] = v
-			matchR[uint64(v)] = u
-			return true
+// hkFrame is one frame of the explicit DFS stack maintained by
+// [dfsAugment]. u is a left-side vertex; eIdx is the index of the
+// edge currently being tried at u.
+type hkFrame struct {
+	u    graph.NodeID
+	eIdx uint64
+}
+
+// dfsAugment walks one augmenting path from src using an explicit
+// stack — the recursive variant would grow the goroutine stack
+// through several boundaries at V=1e7 bipartite scale (CLAUDE.md
+// mandates iterative DFS on hot paths). On success the matches are
+// applied along the entire stacked path before returning true; on
+// failure dist[u] = -1 for every dead-ended left vertex (matches the
+// recursive variant). stack is reused across calls — pass the
+// previous slice and capture the returned header.
+func dfsAugment(src graph.NodeID, matchL, matchR []graph.NodeID, dist []int, verts []uint64, edges []graph.NodeID, nLeft int, stack []hkFrame) (bool, []hkFrame) {
+	stack = append(stack[:0], hkFrame{u: src, eIdx: verts[uint64(src)]})
+	for {
+		li := len(stack) - 1
+		if li < 0 {
+			return false, stack
 		}
+		u := stack[li].u
+		eIdx := stack[li].eIdx
+		end := verts[uint64(u)+1]
+		// Walk usable edges at u without going through the heap on
+		// every step.
+		for eIdx < end {
+			v := edges[eIdx]
+			pair := matchR[uint64(v)]
+			if pair == ^graph.NodeID(0) {
+				// Free right vertex: apply matches along the stacked
+				// path (including the current u -> v).
+				stack[li].eIdx = eIdx
+				for i := li; i >= 0; i-- {
+					f := stack[i]
+					vAt := edges[f.eIdx]
+					matchL[uint64(f.u)] = vAt
+					matchR[uint64(vAt)] = f.u
+				}
+				return true, stack
+			}
+			if int(pair) < nLeft && dist[uint64(pair)] == dist[uint64(u)]+1 {
+				stack[li].eIdx = eIdx
+				stack = append(stack, hkFrame{u: pair, eIdx: verts[uint64(pair)]})
+				goto next
+			}
+			eIdx++
+		}
+		// Exhausted u — dead-end. Pop and advance parent's edge.
+		dist[uint64(u)] = -1
+		stack = stack[:li]
+		if li > 0 {
+			stack[li-1].eIdx++
+		}
+	next:
 	}
-	dist[uint64(u)] = -1
-	return false
 }

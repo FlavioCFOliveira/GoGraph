@@ -1,6 +1,8 @@
 package search
 
 import (
+	"fmt"
+	"math/rand/v2"
 	"testing"
 
 	"gograph/graph/adjlist"
@@ -98,6 +100,61 @@ func TestHopcroftKarp_HallCounterexample(t *testing.T) {
 	m := HopcroftKarp(c, int(c.MaxNodeID()))
 	if m.Size != 1 {
 		t.Fatalf("Hall-deficient bipartite max matching = %d, want 1", m.Size)
+	}
+}
+
+// TestHopcroftKarp_DeepChain runs HK on a bipartite graph engineered
+// so each augmenting path crosses every left vertex in sequence,
+// forcing iterative-DFS depth equal to nLeft. With the recursive
+// variant this would grow the goroutine stack through several 8 KiB
+// boundaries; the iterative replacement must complete cleanly.
+func TestHopcroftKarp_DeepChain(t *testing.T) {
+	t.Parallel()
+	const n = 4000
+	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	// Pre-intern lefts first to keep them in the low NodeID range.
+	for i := 0; i < n; i++ {
+		a.AddNode(fmt.Sprintf("L%05d", i))
+	}
+	for i := 0; i < n; i++ {
+		a.AddNode(fmt.Sprintf("R%05d", i))
+	}
+	// Edges: L_i -> R_i and L_i -> R_{i-1} (i > 0). Forces successive
+	// shortest augmenting paths that grow by 2 each phase.
+	for i := 0; i < n; i++ {
+		a.AddEdge(fmt.Sprintf("L%05d", i), fmt.Sprintf("R%05d", i), struct{}{})
+		if i > 0 {
+			a.AddEdge(fmt.Sprintf("L%05d", i), fmt.Sprintf("R%05d", i-1), struct{}{})
+		}
+	}
+	c := csr.BuildFromAdjList(a)
+	m := HopcroftKarp(c, int(c.MaxNodeID()))
+	if m.Size != n {
+		t.Fatalf("DeepChain matching size = %d, want %d", m.Size, n)
+	}
+}
+
+// BenchmarkHopcroftKarp_Bipartite measures HK on a random sparse
+// bipartite graph — the iterative augmentation must stay within 5 %
+// of the recursive baseline (task #131 acceptance).
+func BenchmarkHopcroftKarp_Bipartite(b *testing.B) {
+	const n = 512
+	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	for i := 0; i < n; i++ {
+		a.AddNode(fmt.Sprintf("L%05d", i))
+	}
+	for i := 0; i < n; i++ {
+		a.AddNode(fmt.Sprintf("R%05d", i))
+	}
+	r := rand.New(rand.NewPCG(67, 71)) //nolint:gosec // deterministic benchmark RNG
+	for i := 0; i < 4*n; i++ {
+		a.AddEdge(fmt.Sprintf("L%05d", r.IntN(n)), fmt.Sprintf("R%05d", r.IntN(n)), struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = HopcroftKarp(c, int(c.MaxNodeID()))
 	}
 }
 
