@@ -8,24 +8,23 @@ import (
 	"gograph/graph/csr"
 )
 
-// ErrNotUndirected is returned by [BiBFS] (and any other algorithm
-// that operates on an undirected interpretation of its input) when
-// the supplied CSR is not symmetric — i.e. some directed edge (u, v)
-// has no matching (v, u) entry. Callers wishing to use BiBFS on a
-// directed graph must first materialise the reverse CSR (planned in
-// a later sprint) and merge it with the forward.
+// ErrNotUndirected was returned by older versions of [BiBFS] when
+// the supplied CSR was not symmetric. As of Sprint 12 [BiBFS] now
+// auto-builds the reverse CSR for directed inputs and the error is
+// never produced; the sentinel is kept for backwards compatibility
+// with callers using errors.Is to detect the legacy condition.
+//
+// Deprecated: BiBFS no longer requires a symmetric CSR.
 var ErrNotUndirected = errors.New("search: BiBFS requires an undirected (symmetric) CSR")
 
-// BiBFS performs bidirectional breadth-first search from src to dst on
-// the unweighted, undirected graph captured by c. The CSR must be
-// symmetric (built via [adjlist.AdjList] with Directed: false); on a
-// directed CSR BiBFS returns [ErrNotUndirected]. The symmetry check
-// runs once at the start of every call (O(V+E)) — callers running
-// BiBFS many times on the same CSR can pre-check via
-// [csr.CSR.IsSymmetric].
+// BiBFS performs bidirectional breadth-first search from src to dst
+// on the unweighted graph captured by c. For undirected graphs (a
+// symmetric directed CSR) the same CSR feeds both the forward and
+// reverse expansion; for directed graphs c must be paired with the
+// reverse CSR via [BiBFSOn].
 //
 // Returns the shortest path from src to dst inclusive, or [ErrNoPath]
-// when the two endpoints are in different connected components.
+// when the two endpoints are not connected.
 //
 // The two frontiers expand alternately; the iteration always grows
 // the smaller frontier next so the search space approximates
@@ -38,19 +37,38 @@ func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) 
 // BiBFSCtx is the context-aware variant of [BiBFS]. ctx.Err() is
 // checked at every alternation between the forward and backward
 // frontier expansion; on cancellation returns (nil, wrapped ctx.Err()).
+//
+// On undirected (symmetric) input it walks c in both directions; on
+// directed input it builds the reverse CSR once and delegates to
+// [BiBFSOnCtx]. The internal reverse build is O(V + E); callers
+// running BiBFS many times on the same graph should hoist the build
+// out via [BiBFSOnCtx].
 func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
+	if c.IsSymmetric() {
+		return BiBFSOnCtx(ctx, c, c, src, dst)
+	}
+	return BiBFSOnCtx(ctx, c, c.BuildReverse(), src, dst)
+}
+
+// BiBFSOn is [BiBFS] with a caller-provided reverse CSR. Required
+// for directed graphs (where the symmetric closure differs from c)
+// and recommended for any high-frequency caller — the O(V+E)
+// reverse-CSR construction is hoisted out of the inner loop.
+func BiBFSOn[W any](c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
+	return BiBFSOnCtx(context.Background(), c, rev, src, dst)
+}
+
+// BiBFSOnCtx is the context-aware variant of [BiBFSOn].
+//
+//nolint:gocyclo // canonical bidirectional BFS with separate forward/reverse adjacencies
+func BiBFSOnCtx[W any](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) ||
 		uint64(dst)+1 >= uint64(len(c.VerticesSlice())) {
 		return nil, ErrNoPath
 	}
-	if !c.IsSymmetric() {
-		return nil, ErrNotUndirected
-	}
 	if src == dst {
 		return []graph.NodeID{src}, nil
 	}
-	// ctx.Err() is checked once at start; further checks happen at
-	// the alternation point inside the loop below.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -58,6 +76,8 @@ func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) 
 	maxID := uint64(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
+	revVerts := rev.VerticesSlice()
+	revEdges := rev.EdgesSlice()
 
 	visitedF := make([]bool, maxID)
 	visitedB := make([]bool, maxID)
@@ -78,11 +98,14 @@ func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) 
 			return nil, err
 		}
 		var grew []graph.NodeID
+		// Forward search walks out-edges (c); reverse search walks
+		// in-edges (rev). On a symmetric graph both adjacencies are
+		// the same CSR.
 		if len(frontierF) <= len(frontierB) {
 			grew, meet, found = bibfsExpand(verts, edges, frontierF, visitedF, visitedB, parentF)
 			frontierF = grew
 		} else {
-			grew, meet, found = bibfsExpand(verts, edges, frontierB, visitedB, visitedF, parentB)
+			grew, meet, found = bibfsExpand(revVerts, revEdges, frontierB, visitedB, visitedF, parentB)
 			frontierB = grew
 		}
 		if found {

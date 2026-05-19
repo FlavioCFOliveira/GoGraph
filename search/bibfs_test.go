@@ -52,10 +52,9 @@ func TestBiBFS_NoPath(t *testing.T) {
 	}
 }
 
-// TestBiBFS_DirectedReturnsErrNotUndirected verifies BiBFS surfaces
-// the asymmetry of a directed graph as a typed sentinel rather than
-// silently producing wrong results.
-func TestBiBFS_DirectedReturnsErrNotUndirected(t *testing.T) {
+// TestBiBFS_Directed verifies BiBFS on a directed graph: BiBFSCtx
+// auto-builds the reverse CSR so the backward search walks in-edges.
+func TestBiBFS_Directed(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	a.AddEdge(0, 1, struct{}{})
@@ -63,7 +62,33 @@ func TestBiBFS_DirectedReturnsErrNotUndirected(t *testing.T) {
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(2)
-	if _, err := BiBFS(c, src, dst); !errors.Is(err, ErrNotUndirected) {
-		t.Fatalf("BiBFS on directed graph: err=%v want ErrNotUndirected", err)
+	path, err := BiBFS(c, src, dst)
+	if err != nil {
+		t.Fatalf("BiBFS directed: %v", err)
+	}
+	if len(path) != 3 || path[0] != src || path[len(path)-1] != dst {
+		t.Fatalf("path = %v, want src ... dst with length 3", path)
+	}
+}
+
+// TestBiBFS_DirectedNoReversePath verifies that on a directed graph
+// where the forward path exists but the reverse doesn't (1->0
+// exists, 0->2 doesn't), BiBFS still recovers the correct directed
+// path src=0 -> dst=2 via the auto-built reverse adjacency.
+func TestBiBFS_DirectedNoReversePath(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a.AddEdge(0, 1, struct{}{})
+	a.AddEdge(1, 2, struct{}{})
+	a.AddEdge(2, 3, struct{}{})
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	dst, _ := a.Mapper().Lookup(3)
+	path, err := BiBFS(c, src, dst)
+	if err != nil {
+		t.Fatalf("BiBFS directed-chain: %v", err)
+	}
+	if len(path) != 4 {
+		t.Fatalf("path length = %d, want 4", len(path))
 	}
 }
