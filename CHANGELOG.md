@@ -6,6 +6,97 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+This entry tracks every change accumulated after the v1.0.0 tag. The
+Sprint 8 correctness-hardening pass introduces breaking signature
+changes (`Hungarian`, `PageRank`, `PersonalisedPushPageRank`,
+`extern.PageRank` now all return an `error`); per [`docs/semver.md`](docs/semver.md)
+the next release tag will therefore be **v1.1.0** (not v1.0.1 as
+originally scoped — the audit's corrective-patch plan no longer
+fits semver once breaking signatures land). The actual tag is cut
+in Sprint 13 task #166.
+
+### Added
+
+- LICENSE file at repo root: MIT (closes #92).
+- 10 new example programs (`examples/11_social_network` through
+  `examples/20_concurrent_reads`) demonstrating every major feature
+  (commit `ffe335a`).
+- `graph/csr.CSR.LiveMask`, `LiveNodes`, `LiveCount`, `IsSymmetric`
+  helpers (closes #79 and the first half of #109).
+- `search.ErrInvalidInput`, `centrality.ErrInvalidInput`,
+  `extern.ErrInvalidInput` for NaN/Inf input rejection (closes #91).
+- `search.ErrNotUndirected` returned by `BiBFS` on directed CSRs
+  (closes #89).
+- `search.ErrNegativeEdgeAPSP` returned by `DijkstraAPSP` on negative
+  edges (closes #88).
+- `search.DijkstraAPSP` (primary export; `JohnsonAPSP` is now a
+  deprecated alias) (closes #88).
+- `wal.Writer.Truncate` returning the freed byte count (closes #82).
+- `checkpoint.Checkpointer.TriggerCtx` honouring context cancellation
+  (closes #84).
+- Property test `TestLeiden_ModularityNonDecrease` via
+  `pgregory.net/rapid` (closes #80).
+
+### Fixed
+
+- `centrality.PageRank` and `extern.PageRank` now conserve total mass
+  by redistributing dangling-node rank uniformly each iteration; the
+  v1.0.0 implementations lost the sink's accumulated mass at every
+  buffer swap (closes #77, #78).
+- `community.Leiden` is now an actual Traag-Waltman implementation
+  (local-moving + refinement + aggregation) rather than majority-vote
+  label propagation. `Partition.NumCommunities` reflects the live
+  community count, not the inflated MaxNodeID-based count (closes #80).
+- `centrality.PersonalisedPushPageRank` handles dangling nodes per
+  Andersen-Chung-Lang (teleport residue back to source); removed the
+  residue-drain pass that double-counted absorbed mass (closes #87).
+- `search.HopcroftTarjanBCC` correctly handles multigraph parallel
+  edges; tracks the entry-edge index per frame instead of the parent
+  NodeID, and the edge-stack pop condition now matches only the
+  tree-edge ordering (closes #81).
+- `search.Yen` and `search.FloydWarshall` no longer use the
+  overflow-prone `v += v` Inf sentinel; reachability is tracked via
+  an explicit `found[]` bitmap (closes #85, #86).
+- `store/checkpoint.runCheckpoint` actually truncates the WAL on
+  disk after writing a snapshot — the v1.0.0 implementation only
+  recorded a counter and the WAL grew unbounded in steady state
+  (closes #82).
+- `store/checkpoint.Stop` is now idempotent (closes #83).
+- The `maxID` over-iteration pattern in centrality/community/APSP is
+  eliminated; algorithms iterate only live NodeIDs and ghost slots
+  carry sentinel `-1` (closes #79).
+
+### Changed (breaking)
+
+- `search.Hungarian` signature: `(Assignment)` → `(Assignment, error)`
+  (closes #91).
+- `centrality.PageRank` signature: `(ranks, iters)` →
+  `(ranks, iters, error)` (closes #91).
+- `centrality.PersonalisedPushPageRank` signature: `(ranks)` →
+  `(ranks, error)` (closes #91).
+- `extern.PageRank` signature: `(ranks, iters)` →
+  `(ranks, iters, error)` (closes #91).
+- `community.Partition.Community[id]` returns `-1` for ghost NodeID
+  slots (closes #79).
+- `search.APSP` internal layout switched to a compact `live*live`
+  matrix with a NodeID→index map; the public `At`/`N` API is
+  preserved but `N` now returns the live count, not `MaxNodeID()`
+  (closes #79).
+
+### Deprecated
+
+- `search.JohnsonAPSP`: deprecated alias for `DijkstraAPSP`; scheduled
+  for removal in a future major release once Bellman-Ford reweighting
+  lands (closes #88).
+
+### Documentation
+
+- README license section updated to point at the LICENSE file
+  (closes #92).
+- Examples 08, 09, 18, 20 print live-NodeID counts via
+  `Mapper().Lookup` rather than the misleading `MaxNodeID`-sized
+  slice length (closes #79).
+
 ## [1.0.0] — 2026-05-19
 
 The first stable release of GoGraph. Seven sprints landed the
