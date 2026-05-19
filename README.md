@@ -198,4 +198,4 @@ for _, n := range e.Match().Vertex(
 
 ## License
 
-To be selected before the first public release.
+GoGraph is distributed under the [MIT License](LICENSE).
