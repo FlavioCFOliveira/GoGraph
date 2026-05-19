@@ -23,6 +23,7 @@
 package search
 
 import (
+	"context"
 	"sync"
 
 	"gograph/graph"
@@ -117,8 +118,16 @@ func bitsetWordsFor(maxID graph.NodeID) int {
 // the next level is built in a separate buffer; the two buffers swap
 // per level.
 func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
+	_ = BFSCtx(context.Background(), c, src, visit)
+}
+
+// BFSCtx is the context-aware variant of [BFS]. ctx.Err() is checked
+// once per BFS level; on cancellation the traversal returns the
+// wrapped ctx.Err() without invoking visit on the partially-explored
+// frontier.
+func BFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
-		return
+		return nil
 	}
 	maxID := c.MaxNodeID()
 	st := acquireBFS(bitsetWordsFor(maxID))
@@ -131,9 +140,12 @@ func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 	st.cur = append(st.cur, src)
 	depth := 0
 	for len(st.cur) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for _, node := range st.cur {
 			if !visit(node, depth) {
-				return
+				return nil
 			}
 			start := verts[uint64(node)]
 			end := verts[uint64(node)+1]
@@ -149,6 +161,7 @@ func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 		st.cur, st.next = st.next, st.cur[:0]
 		depth++
 	}
+	return nil
 }
 
 // DFS performs iterative depth-first traversal of c starting at src.
@@ -162,8 +175,15 @@ func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 //
 // DFS is allocation-free on the hot path after the first call.
 func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
+	_ = DFSCtx(context.Background(), c, src, visit)
+}
+
+// DFSCtx is the context-aware variant of [DFS]. ctx.Err() is checked
+// every 4096 frame pops; on cancellation the traversal returns
+// the wrapped ctx.Err() without further visit invocations.
+func DFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
-		return
+		return nil
 	}
 	maxID := c.MaxNodeID()
 	st := acquireDFS(bitsetWordsFor(maxID))
@@ -173,7 +193,14 @@ func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 
+	popCount := 0
 	for len(st.stack) > 0 {
+		if popCount&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		popCount++
 		top := st.stack[len(st.stack)-1]
 		st.stack = st.stack[:len(st.stack)-1]
 		if isVisited(st.visited, top.node) {
@@ -181,12 +208,10 @@ func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 		}
 		setVisited(st.visited, top.node)
 		if !visit(top.node, int(top.depth)) {
-			return
+			return nil
 		}
 		start := verts[uint64(top.node)]
 		end := verts[uint64(top.node)+1]
-		// Push in reverse so the first neighbour is popped first
-		// (mirrors recursive DFS visitation order).
 		for k := end; k > start; k-- {
 			nb := edges[k-1]
 			if isVisited(st.visited, nb) {
@@ -195,4 +220,5 @@ func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 			st.stack = append(st.stack, frontierItem{node: nb, depth: top.depth + 1})
 		}
 	}
+	return nil
 }

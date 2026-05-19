@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"errors"
 
 	"gograph/graph"
@@ -22,6 +23,20 @@ var ErrNoPath = errors.New("search: no path between endpoints")
 // total cost, or [ErrNoPath] when dst is unreachable. Returns
 // [ErrNegativeWeight] if any edge weight in c is strictly negative.
 func AStar[W Weight](
+	c *csr.CSR[W],
+	src, dst graph.NodeID,
+	h func(graph.NodeID) W,
+) ([]graph.NodeID, W, error) {
+	return AStarCtx(context.Background(), c, src, dst, h)
+}
+
+// AStarCtx is the context-aware variant of [AStar]. ctx.Err() is
+// checked every 4096 heap pops; on cancellation returns
+// (nil, zero, wrapped ctx.Err()).
+//
+//nolint:gocyclo // canonical A*: precondition checks + pool acquire + heap loop + reconstruction
+func AStarCtx[W Weight](
+	ctx context.Context,
 	c *csr.CSR[W],
 	src, dst graph.NodeID,
 	h func(graph.NodeID) W,
@@ -52,17 +67,21 @@ func AStar[W Weight](
 
 	st.found[uint64(src)] = true
 	st.parent[uint64(src)] = src
-	// The heap key is the f-score; we recover the g-score from
-	// st.dist when we expand the popped node.
 	st.heap.push(h(src), src)
 
+	popCount := 0
 	for st.heap.len() > 0 {
+		if popCount&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, zero, err
+			}
+		}
+		popCount++
 		top := st.heap.pop()
 		if top.node == dst {
 			return reconstructPath(st, src, dst), st.dist[uint64(dst)], nil
 		}
 		gCurrent := st.dist[uint64(top.node)]
-		// Stale entry — a shorter path has already been accepted.
 		if top.dist != gCurrent+h(top.node) {
 			continue
 		}

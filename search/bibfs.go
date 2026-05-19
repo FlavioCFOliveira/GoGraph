@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"errors"
 
 	"gograph/graph"
@@ -31,6 +32,13 @@ var ErrNotUndirected = errors.New("search: BiBFS requires an undirected (symmetr
 // O(b^(d/2)) instead of O(b^d) for forward-only BFS, where b is the
 // branching factor and d is the path length.
 func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
+	return BiBFSCtx(context.Background(), c, src, dst)
+}
+
+// BiBFSCtx is the context-aware variant of [BiBFS]. ctx.Err() is
+// checked at every alternation between the forward and backward
+// frontier expansion; on cancellation returns (nil, wrapped ctx.Err()).
+func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) ||
 		uint64(dst)+1 >= uint64(len(c.VerticesSlice())) {
 		return nil, ErrNoPath
@@ -40,6 +48,11 @@ func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) 
 	}
 	if src == dst {
 		return []graph.NodeID{src}, nil
+	}
+	// ctx.Err() is checked once at start; further checks happen at
+	// the alternation point inside the loop below.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	maxID := uint64(c.MaxNodeID())
@@ -61,7 +74,9 @@ func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) 
 	meet := graph.NodeID(0)
 	found := false
 	for len(frontierF) > 0 && len(frontierB) > 0 {
-		// Expand the smaller frontier next.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		var grew []graph.NodeID
 		if len(frontierF) <= len(frontierB) {
 			grew, meet, found = bibfsExpand(verts, edges, frontierF, visitedF, visitedB, parentF)

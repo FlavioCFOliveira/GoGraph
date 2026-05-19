@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"errors"
 
 	"gograph/graph"
@@ -25,6 +26,13 @@ var ErrNegativeCycle = errors.New("search: negative cycle reachable from source"
 // per-W pooled state of [Dijkstra]; the inner relaxation loop is
 // zero-alloc.
 func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
+	return BellmanFordCtx(context.Background(), c, src)
+}
+
+// BellmanFordCtx is the context-aware variant of [BellmanFord].
+// ctx.Err() is checked at every relaxation round boundary; on
+// cancellation returns (nil, wrapped ctx.Err()).
+func BellmanFordCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)
@@ -41,16 +49,15 @@ func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], erro
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
 
-	// V-1 relaxation rounds with early-exit when a pass produces no
-	// change.
 	for round := uint64(0); round < maxID-1; round++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !relaxOnce(st, verts, edges, weights, maxID) {
 			break
 		}
 	}
 
-	// One more pass — any successful relaxation indicates a
-	// negative cycle reachable from src.
 	if relaxOnce(st, verts, edges, weights, maxID) {
 		return nil, ErrNegativeCycle
 	}

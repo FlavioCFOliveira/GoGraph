@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"sync"
@@ -153,6 +154,15 @@ type dijkstraState[W Weight] struct {
 // Working storage is pooled across calls so steady-state workloads
 // reach zero allocations per inner-loop iteration.
 func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
+	return DijkstraCtx(context.Background(), c, src)
+}
+
+// DijkstraCtx is the context-aware variant of [Dijkstra]. ctx.Err()
+// is checked every 4096 heap pops; on cancellation it returns
+// (nil, wrapped ctx.Err()).
+//
+//nolint:gocyclo // canonical Dijkstra: negative-weight scan + pool acquire + heap loop + return
+func DijkstraCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
 	weights := c.WeightsSlice()
 	var zero W
 	for _, w := range weights {
@@ -183,10 +193,16 @@ func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) 
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 
+	popCount := 0
 	for st.heap.len() > 0 {
+		if popCount&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		popCount++
 		top := st.heap.pop()
 		if top.dist != st.dist[uint64(top.node)] && st.found[uint64(top.node)] {
-			// Stale entry — a shorter path was already accepted.
 			if top.dist > st.dist[uint64(top.node)] {
 				continue
 			}

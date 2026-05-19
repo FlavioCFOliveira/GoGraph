@@ -1,6 +1,8 @@
 package search
 
 import (
+	"context"
+	"errors"
 	"math/rand/v2"
 	"sort"
 	"sync"
@@ -314,5 +316,23 @@ func BenchmarkDFS_Chain10M(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		DFS(c, srcID, func(_ graph.NodeID, _ int) bool { return true })
+	}
+}
+
+// TestBFSCtx_HonoursCancel ensures BFSCtx surfaces ctx.Err on a
+// cancelled context.
+func TestBFSCtx_HonoursCancel(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	for i := 0; i < 100; i++ {
+		a.AddEdge(i, i+1, struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := BFSCtx(ctx, c, src, func(_ graph.NodeID, _ int) bool { return true })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("BFSCtx err=%v want context.Canceled", err)
 	}
 }
