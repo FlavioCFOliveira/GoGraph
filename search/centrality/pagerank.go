@@ -21,14 +21,23 @@ func DefaultPageRankOptions() PageRankOptions {
 // over c and returns the per-NodeID rank slice plus the iteration
 // count to convergence (capped at MaxIterations).
 //
-// The implementation mirrors the semi-external variant in
-// search/extern.PageRank but operates on the in-memory CSR
-// directly. It is the right choice when the graph fits in RAM and
-// the caller wants the simplest API.
+// The returned slice has length c.MaxNodeID(); only NodeIDs that
+// participate in at least one edge (live nodes) carry non-zero rank.
+// The sum over the slice equals 1.0 within numerical tolerance.
 //
-// L1 convergence as one cohesive routine.
+// Concurrency: PageRank is safe to invoke from any number of
+// goroutines on a snapshot CSR; the function allocates its working
+// buffers per call and does not share state.
 //
-//nolint:gocyclo // textbook PageRank: defaults + seed + iteration +
+// Algorithm. The implementation is the textbook power-iteration form
+// with proper handling of dangling nodes (nodes with out-degree 0):
+// at each iteration the mass currently held by dangling nodes is
+// redistributed uniformly across all live nodes, modelling them as
+// teleporting their entire share back into the system. This ensures
+// total mass is conserved and the result is a true stationary
+// distribution.
+//
+//nolint:gocyclo // canonical power-iteration: defaults + live detection + iteration loop
 func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int) {
 	if opts.Damping == 0 {
 		opts.Damping = 0.85
@@ -45,34 +54,63 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 	if n <= 0 {
 		return nil, 0
 	}
-	live := 0
+
+	// A node is "live" if it has at least one incident edge (in or out).
+	// Dangling sinks (out-degree 0, in-degree > 0) count as live;
+	// totally isolated ghost slots from sharded NodeID packing do not.
+	isLive := make([]bool, n)
 	outdeg := make([]float64, n)
 	for i := 0; i < n; i++ {
 		deg := verts[i+1] - verts[i]
 		if deg > 0 {
 			outdeg[i] = float64(deg)
+			isLive[i] = true
+			for k := verts[i]; k < verts[i+1]; k++ {
+				isLive[int(edges[k])] = true
+			}
+		}
+	}
+	live := 0
+	for i := 0; i < n; i++ {
+		if isLive[i] {
 			live++
 		}
 	}
 	if live == 0 {
 		return make([]float64, n), 0
 	}
+
 	cur := make([]float64, n)
 	next := make([]float64, n)
-	for i := range cur {
-		if outdeg[i] > 0 {
-			cur[i] = 1.0 / float64(live)
+	initRank := 1.0 / float64(live)
+	for i := 0; i < n; i++ {
+		if isLive[i] {
+			cur[i] = initRank
 		}
 	}
 	teleport := (1 - opts.Damping) / float64(live)
+
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
-		for i := range next {
-			if outdeg[i] > 0 {
-				next[i] = teleport
+		// Dangling mass: sum of cur[i] for live nodes with no out-edges.
+		// Redistributed uniformly across all live nodes (canonical PageRank).
+		var danglingMass float64
+		for i := 0; i < n; i++ {
+			if isLive[i] && outdeg[i] == 0 {
+				danglingMass += cur[i]
+			}
+		}
+		baseShare := teleport + opts.Damping*danglingMass/float64(live)
+
+		// Seed every live node with teleport + dangling redistribution.
+		for i := 0; i < n; i++ {
+			if isLive[i] {
+				next[i] = baseShare
 			} else {
 				next[i] = 0
 			}
 		}
+
+		// Distribute outgoing mass from non-dangling sources.
 		for src := 0; src < n; src++ {
 			if outdeg[src] == 0 {
 				continue
@@ -82,14 +120,17 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 				next[int(edges[k])] += share
 			}
 		}
+
+		// L1 delta.
 		var delta float64
-		for i := range cur {
+		for i := 0; i < n; i++ {
 			d := next[i] - cur[i]
 			if d < 0 {
 				d = -d
 			}
 			delta += d
 		}
+
 		cur, next = next, cur
 		if delta < opts.Tolerance {
 			return cur, iter
