@@ -10,6 +10,8 @@
 package community
 
 import (
+	"context"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
@@ -65,9 +67,17 @@ type Partition struct {
 //
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR.
+func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
+	out, _ := LeidenCtx(context.Background(), c, opts)
+	return out
+}
+
+// LeidenCtx is the context-aware variant of [Leiden]. ctx.Err() is
+// checked at every pass boundary; on cancellation returns (zero
+// Partition, wrapped ctx.Err()).
 //
 //nolint:gocyclo // canonical Leiden: defaults + pass loop dispatches three phases through helpers
-func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
+func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (Partition, error) {
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 64
 	}
@@ -79,14 +89,14 @@ func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 	}
 	maxID := int(c.MaxNodeID())
 	if maxID == 0 {
-		return Partition{}
+		return Partition{}, nil
 	}
 	mask := c.LiveMask()
 
 	// Build the compact aggregation-graph view of c.
 	g, idMap := aggGraphFromCSR(c, mask)
 	if g.n == 0 {
-		return Partition{Community: makeAllMinusOne(maxID), NumCommunities: 0}
+		return Partition{Community: makeAllMinusOne(maxID), NumCommunities: 0}, nil
 	}
 
 	// Each live node starts in its own community.
@@ -97,25 +107,21 @@ func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 
 	prevQ := g.modularity(comm, opts.Resolution)
 	for pass := 0; pass < opts.MaxPasses; pass++ {
+		if err := ctx.Err(); err != nil {
+			return Partition{}, err
+		}
 		// Phase 1: local moving in g.
 		moved := g.localMove(comm, opts)
 		// Phase 2: refinement.
 		refined := g.refine(comm, opts)
-		// Phase 3: aggregation — build a smaller graph where each
-		// refined community is a single super-node. The outer
-		// partition (comm) is projected onto the super-graph; the
-		// refined partition is the per-super-node identity.
+		// Phase 3: aggregation.
 		nextG, nextComm := g.aggregate(comm, refined)
 		nextQ := nextG.modularity(nextComm, opts.Resolution)
 		if !moved && nextQ <= prevQ {
-			// No further improvement.
 			break
 		}
 		g = nextG
 		comm = nextComm
-		// "refined" lives in the previous-level node space; the
-		// aggregation step folds it into nextComm directly via the
-		// super-node identity, so no separate projection is needed.
 		prevQ = nextQ
 	}
 
@@ -140,7 +146,7 @@ func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	out, k = splitDisconnectedPartition(out, mask, verts, edges, maxID, k)
-	return Partition{Community: out, NumCommunities: k}
+	return Partition{Community: out, NumCommunities: k}, nil
 }
 
 // makeAllMinusOne returns a slice of length n filled with -1.

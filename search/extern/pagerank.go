@@ -1,6 +1,7 @@
 package extern
 
 import (
+	"context"
 	"errors"
 	"math"
 
@@ -60,6 +61,13 @@ func DefaultPageRankOptions() PageRankOptions {
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared csrfile.Reader.
 func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	return PageRankCtx(context.Background(), r, opts)
+}
+
+// PageRankCtx is the context-aware variant of [PageRank]. ctx.Err()
+// is checked at every iteration boundary; on cancellation returns
+// (nil, 0, wrapped ctx.Err()).
+func PageRankCtx(ctx context.Context, r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
 		return nil, 0, ErrInvalidInput
 	}
@@ -77,6 +85,9 @@ func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterati
 	next := make([]float64, n)
 	teleport := (1.0 - opts.Damping) / float64(live)
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, 0, cerr
+		}
 		stepIteration(verts, edges, cur, next, outdeg, isLive, teleport, opts.Damping, live)
 		delta := l1Delta(cur, next)
 		cur, next = next, cur

@@ -1,6 +1,7 @@
 package centrality
 
 import (
+	"context"
 	"errors"
 	"math"
 
@@ -55,9 +56,16 @@ func DefaultPageRankOptions() PageRankOptions {
 // teleporting their entire share back into the system. This ensures
 // total mass is conserved and the result is a true stationary
 // distribution.
+func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	return PageRankCtx(context.Background(), c, opts)
+}
+
+// PageRankCtx is the context-aware variant of [PageRank]. ctx.Err()
+// is checked at every iteration boundary; on cancellation returns
+// (nil, 0, wrapped ctx.Err()).
 //
 //nolint:gocyclo // canonical power-iteration: defaults + live detection + iteration loop
-func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
+func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
 		return nil, 0, ErrInvalidInput
 	}
@@ -113,6 +121,9 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 	teleport := (1 - opts.Damping) / float64(live)
 
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, 0, cerr
+		}
 		// Dangling mass: sum of cur[i] for live nodes with no out-edges.
 		// Redistributed uniformly across all live nodes (canonical PageRank).
 		var danglingMass float64

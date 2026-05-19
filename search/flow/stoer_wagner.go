@@ -1,5 +1,7 @@
 package flow
 
+import "context"
+
 // MinCutResult is the output of [StoerWagner].
 type MinCutResult struct {
 	Weight int
@@ -14,8 +16,16 @@ type MinCutResult struct {
 //
 // Complexity O(V^3) with the simple maximum-adjacency form.
 func StoerWagner(weights []int, n int) MinCutResult {
+	out, _ := StoerWagnerCtx(context.Background(), weights, n)
+	return out
+}
+
+// StoerWagnerCtx is the context-aware variant of [StoerWagner].
+// ctx.Err() is checked at every phase boundary; on cancellation
+// returns (zero MinCutResult, wrapped ctx.Err()).
+func StoerWagnerCtx(ctx context.Context, weights []int, n int) (MinCutResult, error) {
 	if n <= 1 {
-		return MinCutResult{Weight: 0}
+		return MinCutResult{Weight: 0}, nil
 	}
 	// Copy the matrix so we can merge vertices in place.
 	w := make([]int, len(weights))
@@ -34,6 +44,9 @@ func StoerWagner(weights []int, n int) MinCutResult {
 	var bestA []int
 
 	for phase := 0; phase < n-1; phase++ {
+		if err := ctx.Err(); err != nil {
+			return MinCutResult{}, err
+		}
 		s, tIdx, cutOfPhase := maxAdjacencyPhase(w, alive, n)
 		if bestWeight < 0 || cutOfPhase < bestWeight {
 			bestWeight = cutOfPhase
@@ -62,7 +75,7 @@ func StoerWagner(weights []int, n int) MinCutResult {
 			b = append(b, i)
 		}
 	}
-	return MinCutResult{Weight: bestWeight, A: bestA, B: b}
+	return MinCutResult{Weight: bestWeight, A: bestA, B: b}, nil
 }
 
 // maxAdjacencyPhase runs one maximum-adjacency-ordering phase.

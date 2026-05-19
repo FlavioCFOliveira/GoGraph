@@ -1,6 +1,8 @@
 package centrality
 
 import (
+	"context"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
@@ -37,9 +39,16 @@ func DefaultPPRPushOptions() PPRPushOptions {
 //
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR.
+func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
+	return PersonalisedPushPageRankCtx(context.Background(), c, src, opts)
+}
+
+// PersonalisedPushPageRankCtx is the context-aware variant of
+// [PersonalisedPushPageRank]. ctx.Err() is checked every 4096 worklist
+// pops; on cancellation returns (nil, wrapped ctx.Err()).
 //
 //nolint:gocyclo // canonical ACL push: defaults + worklist loop + dangling teleport
-func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
+func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
 	if hasInvalidFloat(opts.Damping, opts.Epsilon) {
 		return nil, ErrInvalidInput
 	}
@@ -86,6 +95,11 @@ func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPu
 
 	steps := 0
 	for len(queue) > 0 && steps < opts.MaxSteps {
+		if steps&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		v := queue[0]
 		queue = queue[1:]
 		inQ[v] = false

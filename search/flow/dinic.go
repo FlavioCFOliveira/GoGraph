@@ -3,6 +3,8 @@
 // global min-cut; future work will add min-cost max-flow.
 package flow
 
+import "context"
+
 // Network is a directed capacitated graph. It is stored as a sum of
 // forward and reverse-edge adjacency lists (one slice per node) so
 // residual updates run in O(1) per edge.
@@ -36,12 +38,23 @@ func (g *Network) AddEdge(src, dst, capacity int) {
 // total flow. Complexity O(V^2 * E) general; O(E * sqrt(V)) on
 // unit-capacity networks.
 func MaxFlow(g *Network, src, sink int) int {
+	out, _ := MaxFlowCtx(context.Background(), g, src, sink)
+	return out
+}
+
+// MaxFlowCtx is the context-aware variant of [MaxFlow]. ctx.Err() is
+// checked at every BFS-level rebuild (the outer Dinic phase boundary);
+// on cancellation returns (totalSoFar, wrapped ctx.Err()).
+func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	level := make([]int, g.N())
 	iter := make([]int, g.N())
 	total := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
 		if !buildLevel(g, src, sink, level) {
-			return total
+			return total, nil
 		}
 		for i := range iter {
 			iter[i] = 0

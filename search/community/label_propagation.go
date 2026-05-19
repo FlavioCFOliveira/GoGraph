@@ -1,6 +1,7 @@
 package community
 
 import (
+	"context"
 	"sort"
 
 	"gograph/graph/csr"
@@ -25,9 +26,17 @@ func DefaultLabelPropagationOptions() LabelPropagationOptions {
 // in the returned partition.
 //
 // Complexity is O(k * (V + E)) for k iterations.
+func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partition {
+	out, _ := LabelPropagationCtx(context.Background(), c, opts)
+	return out
+}
+
+// LabelPropagationCtx is the context-aware variant of [LabelPropagation].
+// ctx.Err() is checked at every iteration boundary; on cancellation
+// returns (zero Partition, wrapped ctx.Err()).
 //
 //nolint:gocyclo // textbook label propagation: defaults + live mask + iteration loop + tie-break
-func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partition {
+func LabelPropagationCtx[W any](ctx context.Context, c *csr.CSR[W], opts LabelPropagationOptions) (Partition, error) {
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 16
 	}
@@ -35,7 +44,7 @@ func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partit
 	edges := c.EdgesSlice()
 	maxID := int(c.MaxNodeID())
 	if maxID == 0 {
-		return Partition{}
+		return Partition{}, nil
 	}
 	mask := c.LiveMask()
 	labels := make([]int, maxID)
@@ -47,6 +56,9 @@ func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partit
 		}
 	}
 	for iter := 0; iter < opts.MaxIterations; iter++ {
+		if err := ctx.Err(); err != nil {
+			return Partition{}, err
+		}
 		changed := false
 		for v := 0; v < maxID; v++ {
 			if !mask[v] {
@@ -80,7 +92,7 @@ func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partit
 			break
 		}
 	}
-	return relabel(labels, mask)
+	return relabel(labels, mask), nil
 }
 
 // relabel compacts arbitrary label values into [0, K) for live nodes.
