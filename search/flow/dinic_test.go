@@ -29,3 +29,44 @@ func TestMaxFlow_NoPath(t *testing.T) {
 		t.Fatalf("MaxFlow = %d, want 0 when sink unreachable", got)
 	}
 }
+
+// TestMaxFlow_DeepPipeline runs Dinic on a linear pipeline V=1e5 nodes
+// (each only connected to the next). The previous recursive
+// augmentFlow would blow the goroutine stack at this depth; the
+// iterative replacement must complete cleanly.
+func TestMaxFlow_DeepPipeline(t *testing.T) {
+	t.Parallel()
+	const n = 100_000
+	g := NewNetwork(n)
+	for i := 0; i < n-1; i++ {
+		g.AddEdge(i, i+1, 1)
+	}
+	if got := MaxFlow(g, 0, n-1); got != 1 {
+		t.Fatalf("MaxFlow on pipeline = %d, want 1", got)
+	}
+}
+
+// BenchmarkDinic_Pipeline measures Dinic on a moderately deep
+// pipeline so the per-augment work is dominated by stack manipulation
+// — the new iterative version should match the recursive one within
+// 5% on this geometry (task #130 acceptance).
+func BenchmarkDinic_Pipeline(b *testing.B) {
+	const n = 1024
+	g := NewNetwork(n)
+	for i := 0; i < n-1; i++ {
+		g.AddEdge(i, i+1, 100)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Reset capacities between runs.
+		for j := range g.cap {
+			if j%2 == 0 {
+				g.cap[j] = 100
+			} else {
+				g.cap[j] = 0
+			}
+		}
+		_ = MaxFlow(g, 0, n-1)
+	}
+}

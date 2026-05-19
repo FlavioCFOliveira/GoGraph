@@ -59,6 +59,7 @@ func MaxFlow(g *Network, src, sink int) int {
 func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	level := make([]int, g.N())
 	iter := make([]int, g.N())
+	stack := make([]int, 0, g.N())
 	total := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -71,7 +72,8 @@ func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 			iter[i] = 0
 		}
 		for {
-			f := augmentFlow(g, src, sink, 1<<62, level, iter)
+			var f int
+			f, stack = augmentFlow(g, src, sink, 1<<62, level, iter, stack)
 			if f == 0 {
 				break
 			}
@@ -98,28 +100,55 @@ func buildLevel(g *Network, src, sink int, level []int) bool {
 	return level[sink] >= 0
 }
 
-func augmentFlow(g *Network, v, sink, push int, level, iter []int) int {
-	if v == sink {
-		return push
-	}
-	for ; iter[v] < len(g.heads[v]); iter[v]++ {
-		e := g.heads[v][iter[v]]
-		if g.cap[e] <= 0 || level[g.edgeTo[e]] != level[v]+1 {
-			continue
+// augmentFlow walks one augmenting path from src to sink in the
+// current Dinic level graph using an explicit DFS stack, returning
+// the flow pushed (0 if no path remains). The stack slice is reused
+// across calls: callers should pass the slice from the previous call
+// and capture the returned (possibly grown) slice header.
+//
+// Iterative by design — recursion would blow up on deep layered
+// residual graphs at LDBC-SF10 scale (CLAUDE.md mandate).
+func augmentFlow(g *Network, src, sink, pushLim int, level, iter, stack []int) (pushed int, stackOut []int) {
+	stack = append(stack[:0], src)
+	for len(stack) > 0 {
+		v := stack[len(stack)-1]
+		if v == sink {
+			// Compute the bottleneck capacity along the stack.
+			push := pushLim
+			for i := 0; i < len(stack)-1; i++ {
+				u := stack[i]
+				e := g.heads[u][iter[u]]
+				if g.cap[e] < push {
+					push = g.cap[e]
+				}
+			}
+			// Apply the push to every edge on the path.
+			for i := 0; i < len(stack)-1; i++ {
+				u := stack[i]
+				e := g.heads[u][iter[u]]
+				g.cap[e] -= push
+				g.cap[e^1] += push
+			}
+			return push, stack
 		}
-		got := augmentFlow(g, g.edgeTo[e], sink, minInt(push, g.cap[e]), level, iter)
-		if got > 0 {
-			g.cap[e] -= got
-			g.cap[e^1] += got
-			return got
+		descended := false
+		for ; iter[v] < len(g.heads[v]); iter[v]++ {
+			e := g.heads[v][iter[v]]
+			if g.cap[e] <= 0 || level[g.edgeTo[e]] != level[v]+1 {
+				continue
+			}
+			stack = append(stack, g.edgeTo[e])
+			descended = true
+			break
+		}
+		if !descended {
+			// Dead-end at v: pop and advance the parent's iter past
+			// the edge that led here.
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 {
+				iter[stack[len(stack)-1]]++
+			}
 		}
 	}
-	return 0
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return 0, stack
 }
