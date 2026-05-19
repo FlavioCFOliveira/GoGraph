@@ -28,6 +28,10 @@ type Weight interface {
 // edge with weight strictly less than the zero value of W.
 var ErrNegativeWeight = errors.New("search: negative edge weight")
 
+// ErrBufferTooSmall is returned by the *Into variants when any of the
+// caller-provided scratch slices is shorter than c.MaxNodeID().
+var ErrBufferTooSmall = errors.New("search: caller-provided buffer is too small")
+
 // Distances is the result of a single-source shortest-path query.
 // It exposes constant-time distance lookup and parent-chain path
 // reconstruction.
@@ -64,7 +68,6 @@ func (d *Distances[W]) Path(node graph.NodeID) []graph.NodeID {
 	if id >= uint64(len(d.found)) || !d.found[id] {
 		return nil
 	}
-	// Determine the length first.
 	length := 1
 	for cur := node; cur != d.src; {
 		cur = d.parent[uint64(cur)]
@@ -153,6 +156,10 @@ type dijkstraState[W Weight] struct {
 // The implementation uses a classic binary-heap priority queue.
 // Working storage is pooled across calls so steady-state workloads
 // reach zero allocations per inner-loop iteration.
+//
+// For hot loops where the caller can amortise buffer allocation
+// (e.g. Yen's k-shortest-paths), prefer the zero-allocation primitive
+// [DijkstraInto].
 func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
 	return DijkstraCtx(context.Background(), c, src)
 }
@@ -160,50 +167,104 @@ func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) 
 // DijkstraCtx is the context-aware variant of [Dijkstra]. ctx.Err()
 // is checked every 4096 heap pops; on cancellation it returns
 // (nil, wrapped ctx.Err()).
-//
-//nolint:gocyclo // canonical Dijkstra: negative-weight scan + pool acquire + heap loop + return
 func DijkstraCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
-	weights := c.WeightsSlice()
-	var zero W
-	for _, w := range weights {
-		if w < zero {
-			return nil, ErrNegativeWeight
-		}
-	}
-
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)
 
-	for i := range st.dist {
-		st.dist[i] = zero
-		st.parent[i] = 0
-		st.found[i] = false
+	if err := dijkstraCore[W](ctx, c, src, st.dist[:maxID], st.parent[:maxID], st.found[:maxID], &st.heap); err != nil {
+		return nil, err
+	}
+	return newDistancesCopy(st, src, maxID), nil
+}
+
+// DijkstraInto is the zero-allocation primitive behind [Dijkstra]. It
+// writes single-source shortest-path results directly into the
+// caller-provided dist, parent, and found slices, each of which must
+// have length at least c.MaxNodeID(); otherwise it returns
+// [ErrBufferTooSmall]. The slices are reset in-place before the
+// traversal, so any previous contents are overwritten.
+//
+// On return, dist[i] holds the cost from src to node i when found[i]
+// is true and parent[i] is the predecessor on the shortest path
+// (with parent[src] = src by convention). When found[i] is false,
+// dist[i] is the zero value of W and parent[i] is zero.
+//
+// The only heap allocation performed is the priority queue itself,
+// which is obtained from a per-W [sync.Pool] and is therefore zero
+// in the steady state.
+//
+// Concurrency: the caller's slices are written in-place; concurrent
+// callers must supply separate buffers. The internal heap pool is
+// safe for concurrent acquisition.
+func DijkstraInto[W Weight](
+	ctx context.Context,
+	c *csr.CSR[W],
+	src graph.NodeID,
+	dist []W,
+	parent []graph.NodeID,
+	found []bool,
+) error {
+	maxID := uint64(c.MaxNodeID())
+	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {
+		return ErrBufferTooSmall
+	}
+	h := acquireDijkHeap[W]()
+	defer releaseDijkHeap(h)
+	return dijkstraCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID], h)
+}
+
+// dijkstraCore is the shared traversal body invoked by both
+// [DijkstraCtx] and [DijkstraInto]. Pre-conditions:
+//   - len(dist), len(parent), len(found) all equal c.MaxNodeID();
+//   - heap has been reset to empty.
+//
+//nolint:gocyclo // canonical Dijkstra: negative-weight scan + heap loop + relaxation
+func dijkstraCore[W Weight](
+	ctx context.Context,
+	c *csr.CSR[W],
+	src graph.NodeID,
+	dist []W,
+	parent []graph.NodeID,
+	found []bool,
+	h *dijkHeap[W],
+) error {
+	weights := c.WeightsSlice()
+	var zero W
+	for _, w := range weights {
+		if w < zero {
+			return ErrNegativeWeight
+		}
 	}
 
-	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
-		out := newDistancesCopy(st, src, maxID)
-		return out, nil
+	for i := range dist {
+		dist[i] = zero
+		parent[i] = 0
+		found[i] = false
 	}
-
-	st.found[uint64(src)] = true
-	st.parent[uint64(src)] = src
-	st.heap.push(zero, src)
+	h.items = h.items[:0]
 
 	verts := c.VerticesSlice()
+	if uint64(src)+1 >= uint64(len(verts)) {
+		return nil
+	}
 	edges := c.EdgesSlice()
 
+	found[uint64(src)] = true
+	parent[uint64(src)] = src
+	h.push(zero, src)
+
 	popCount := 0
-	for st.heap.len() > 0 {
+	for h.len() > 0 {
 		if popCount&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		popCount++
-		top := st.heap.pop()
-		if top.dist != st.dist[uint64(top.node)] && st.found[uint64(top.node)] {
-			if top.dist > st.dist[uint64(top.node)] {
+		top := h.pop()
+		if top.dist != dist[uint64(top.node)] && found[uint64(top.node)] {
+			if top.dist > dist[uint64(top.node)] {
 				continue
 			}
 		}
@@ -212,16 +273,15 @@ func DijkstraCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID)
 		for k := start; k < end; k++ {
 			nb := edges[k]
 			cand := top.dist + weights[k]
-			if !st.found[uint64(nb)] || cand < st.dist[uint64(nb)] {
-				st.dist[uint64(nb)] = cand
-				st.parent[uint64(nb)] = top.node
-				st.found[uint64(nb)] = true
-				st.heap.push(cand, nb)
+			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
+				dist[uint64(nb)] = cand
+				parent[uint64(nb)] = top.node
+				found[uint64(nb)] = true
+				h.push(cand, nb)
 			}
 		}
 	}
-
-	return newDistancesCopy(st, src, maxID), nil
+	return nil
 }
 
 // newDistancesCopy materialises a stable Distances value, copying the
@@ -276,4 +336,34 @@ func dijkstraPool[W Weight]() *sync.Pool {
 	p := &sync.Pool{New: func() any { return &dijkstraState[W]{} }}
 	actual, _ := dijkstraPools.LoadOrStore(key, p)
 	return actual.(*sync.Pool) //nolint:errcheck // statically known type
+}
+
+// dijkHeapPools is the per-W heap-only pool used by [DijkstraInto]
+// and other *Into entrypoints that operate on caller-provided
+// buffers. Kept separate from [dijkstraPools] so that Into callers
+// don't pay for buffer allocations they already own.
+var dijkHeapPools sync.Map //nolint:gochecknoglobals // per-package heap pool
+
+func dijkHeapPool[W Weight]() *sync.Pool {
+	var zero W
+	key := reflectTypeOf(zero)
+	if v, ok := dijkHeapPools.Load(key); ok {
+		return v.(*sync.Pool) //nolint:errcheck // statically known type
+	}
+	p := &sync.Pool{New: func() any { return &dijkHeap[W]{} }}
+	actual, _ := dijkHeapPools.LoadOrStore(key, p)
+	return actual.(*sync.Pool) //nolint:errcheck // statically known type
+}
+
+func acquireDijkHeap[W Weight]() *dijkHeap[W] {
+	h, _ := dijkHeapPool[W]().Get().(*dijkHeap[W])
+	if h == nil {
+		h = &dijkHeap[W]{}
+	}
+	h.items = h.items[:0]
+	return h
+}
+
+func releaseDijkHeap[W Weight](h *dijkHeap[W]) {
+	dijkHeapPool[W]().Put(h)
 }

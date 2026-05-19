@@ -34,26 +34,38 @@ func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPa
 // ctx.Err() is checked at every spur iteration; on cancellation
 // returns (nil, wrapped ctx.Err()).
 //
+// Memory: the implementation allocates one O(V) scratch set
+// (dist/parent/found/visited/excluded) and one O(E) edge-index map
+// at entry, then reuses them across all internal Dijkstra calls.
+// The v1.0 implementation reallocated all of these per spur step.
+//
 //nolint:gocyclo // canonical Yen: initial Dijkstra + k-1 spur rounds + candidate sort
 func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
 	if k <= 0 {
 		return nil, nil
 	}
-	d, err := DijkstraCtx(ctx, c, src)
-	if err != nil {
+
+	maxID := uint64(c.MaxNodeID())
+	scr := newYenScratch[W](maxID)
+
+	if err := DijkstraInto(ctx, c, src, scr.dist, scr.parent, scr.found); err != nil {
 		return nil, err
 	}
-	first := d.Path(dst)
-	if first == nil {
+	if !scr.found[uint64(dst)] {
 		return nil, nil
 	}
-	firstCost, _ := d.Distance(dst)
+	first := reconstructYenPath(scr.parent, src, dst)
+	firstCost := scr.dist[uint64(dst)]
 	result := []YenPath[W]{{Nodes: first, Cost: firstCost}}
 	if k == 1 {
 		return result, nil
 	}
 
+	edgeIdx := buildEdgeIndex[W](c)
+
 	candidates := []YenPath[W]{}
+	banned := make(map[edgeKey]struct{}, 16)
+
 	for i := 1; i < k; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -61,15 +73,22 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 		prevPath := result[i-1].Nodes
 		for spurIdx := 0; spurIdx < len(prevPath)-1; spurIdx++ {
 			spurNode := prevPath[spurIdx]
-			rootPath := append([]graph.NodeID(nil), prevPath[:spurIdx+1]...)
-			banned := bannedEdges(result, rootPath, spurIdx)
-			cand := dijkstraAvoiding(c, spurNode, dst, banned, rootPath[:len(rootPath)-1])
-			if cand == nil {
+			rootPath := prevPath[:spurIdx+1]
+			clear(banned)
+			fillBannedEdges(banned, result, rootPath, spurIdx)
+			cand, ok := dijkstraAvoidingInto(ctx, c, spurNode, dst, banned, rootPath[:len(rootPath)-1], scr)
+			if !ok {
 				continue
 			}
-			rootCost := pathCost[W](c, rootPath)
+			rootCost := pathCostFast[W](c.WeightsSlice(), edgeIdx, rootPath)
+			// Build the full candidate path: rootPath[:-1] + cand. We must
+			// copy because rootPath aliases prevPath, and cand.Nodes is the
+			// scratch path buffer that will be overwritten by the next call.
+			full := make([]graph.NodeID, 0, len(rootPath)-1+len(cand.Nodes))
+			full = append(full, rootPath[:len(rootPath)-1]...)
+			full = append(full, cand.Nodes...)
 			candidates = append(candidates, YenPath[W]{
-				Nodes: append(rootPath[:len(rootPath)-1], cand.Nodes...),
+				Nodes: full,
 				Cost:  rootCost + cand.Cost,
 			})
 		}
@@ -86,11 +105,35 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 // edgeKey identifies a directed edge by its endpoints.
 type edgeKey struct{ from, to graph.NodeID }
 
-// bannedEdges returns the set of (u, v) edges that any previously
+// yenScratch holds the per-Yen-call ephemeral working storage. All
+// slices have length c.MaxNodeID(); the heap and pathBuf are reused
+// across every internal Dijkstra call.
+type yenScratch[W Weight] struct {
+	dist     []W
+	parent   []graph.NodeID
+	found    []bool
+	visited  []bool
+	excluded []bool
+	heap     dijkHeap[W]
+	pathBuf  []graph.NodeID
+}
+
+func newYenScratch[W Weight](maxID uint64) *yenScratch[W] {
+	return &yenScratch[W]{
+		dist:     make([]W, maxID),
+		parent:   make([]graph.NodeID, maxID),
+		found:    make([]bool, maxID),
+		visited:  make([]bool, maxID),
+		excluded: make([]bool, maxID),
+		pathBuf:  make([]graph.NodeID, 0, 32),
+	}
+}
+
+// fillBannedEdges adds to banned the (u, v) edges that any previously
 // returned path uses at the current spurIdx — these are forbidden
-// for the next deviation.
-func bannedEdges[W Weight](paths []YenPath[W], rootPath []graph.NodeID, spurIdx int) map[edgeKey]struct{} {
-	out := make(map[edgeKey]struct{})
+// for the next deviation. banned is expected to have been cleared by
+// the caller; this function never allocates.
+func fillBannedEdges[W Weight](banned map[edgeKey]struct{}, paths []YenPath[W], rootPath []graph.NodeID, spurIdx int) {
 	for _, p := range paths {
 		if len(p.Nodes) <= spurIdx+1 {
 			continue
@@ -105,53 +148,78 @@ func bannedEdges[W Weight](paths []YenPath[W], rootPath []graph.NodeID, spurIdx 
 		if !match {
 			continue
 		}
-		out[edgeKey{from: p.Nodes[spurIdx], to: p.Nodes[spurIdx+1]}] = struct{}{}
+		banned[edgeKey{from: p.Nodes[spurIdx], to: p.Nodes[spurIdx+1]}] = struct{}{}
 	}
-	return out
 }
 
-// dijkstraAvoiding runs Dijkstra from spur to dst while skipping the
-// edges in banned and the intermediate nodes in rootInterior.
+// dijkstraAvoidingInto runs point-to-point Dijkstra from spur to dst
+// while skipping banned edges and excluded intermediate nodes, using
+// the caller-provided scratch. On success it returns a YenPath whose
+// Nodes slice aliases scr.pathBuf (valid only until the next call);
+// the caller must copy if the result needs to outlive the next spur
+// iteration.
 //
-// Reachability is tracked via an explicit found[] bitmap rather than
-// an in-band +Inf sentinel — this avoids overflow/wraparound on
-// integer weight types (the v1.0.0 implementation built the sentinel
-// by 60 iterations of "v += v" which wraps mod 2^64 on uint64 and
-// saturates on float32).
-func dijkstraAvoiding[W Weight](c *csr.CSR[W], spur, dst graph.NodeID, banned map[edgeKey]struct{}, rootInterior []graph.NodeID) *YenPath[W] {
-	excluded := make(map[graph.NodeID]struct{}, len(rootInterior))
-	for _, n := range rootInterior {
-		excluded[n] = struct{}{}
+//nolint:gocyclo // canonical point-to-point Dijkstra with ban/exclude filters
+func dijkstraAvoidingInto[W Weight](
+	ctx context.Context,
+	c *csr.CSR[W],
+	spur, dst graph.NodeID,
+	banned map[edgeKey]struct{},
+	rootInterior []graph.NodeID,
+	scr *yenScratch[W],
+) (YenPath[W], bool) {
+	var zeroPath YenPath[W]
+	var zero W
+
+	for i := range scr.dist {
+		scr.dist[i] = zero
+		scr.parent[i] = 0
+		scr.found[i] = false
+		scr.visited[i] = false
 	}
+	scr.heap.items = scr.heap.items[:0]
+	for _, n := range rootInterior {
+		scr.excluded[uint64(n)] = true
+	}
+	defer func() {
+		for _, n := range rootInterior {
+			scr.excluded[uint64(n)] = false
+		}
+	}()
+
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
-	maxID := uint64(c.MaxNodeID())
-	dist := make([]W, maxID)
-	parent := make([]graph.NodeID, maxID)
-	visited := make([]bool, maxID)
-	found := make([]bool, maxID)
-	dist[uint64(spur)] = 0
-	found[uint64(spur)] = true
-	h := &dijkHeap[W]{}
-	h.push(0, spur)
-	for h.len() > 0 {
-		top := h.pop()
+
+	scr.dist[uint64(spur)] = zero
+	scr.found[uint64(spur)] = true
+	scr.parent[uint64(spur)] = spur
+	scr.heap.push(zero, spur)
+
+	popCount := 0
+	for scr.heap.len() > 0 {
+		if popCount&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return zeroPath, false
+			}
+		}
+		popCount++
+		top := scr.heap.pop()
 		if top.node == dst {
 			break
 		}
-		if visited[uint64(top.node)] {
+		if scr.visited[uint64(top.node)] {
 			continue
 		}
-		visited[uint64(top.node)] = true
+		scr.visited[uint64(top.node)] = true
 		start := verts[uint64(top.node)]
 		end := verts[uint64(top.node)+1]
 		for k := start; k < end; k++ {
 			nb := edges[k]
-			if _, banned := banned[edgeKey{from: top.node, to: nb}]; banned {
+			if _, isBanned := banned[edgeKey{from: top.node, to: nb}]; isBanned {
 				continue
 			}
-			if _, ex := excluded[nb]; ex {
+			if scr.excluded[uint64(nb)] {
 				continue
 			}
 			var w W
@@ -159,19 +227,42 @@ func dijkstraAvoiding[W Weight](c *csr.CSR[W], spur, dst graph.NodeID, banned ma
 				w = weights[k]
 			}
 			cand := top.dist + w
-			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
-				dist[uint64(nb)] = cand
-				parent[uint64(nb)] = top.node
-				found[uint64(nb)] = true
-				h.push(cand, nb)
+			if !scr.found[uint64(nb)] || cand < scr.dist[uint64(nb)] {
+				scr.dist[uint64(nb)] = cand
+				scr.parent[uint64(nb)] = top.node
+				scr.found[uint64(nb)] = true
+				scr.heap.push(cand, nb)
 			}
 		}
 	}
-	if !found[uint64(dst)] {
-		return nil
+	if !scr.found[uint64(dst)] {
+		return zeroPath, false
 	}
 	length := 1
 	for cur := dst; cur != spur; {
+		cur = scr.parent[uint64(cur)]
+		length++
+	}
+	if cap(scr.pathBuf) < length {
+		scr.pathBuf = make([]graph.NodeID, length)
+	} else {
+		scr.pathBuf = scr.pathBuf[:length]
+	}
+	cur := dst
+	for i := length - 1; i > 0; i-- {
+		scr.pathBuf[i] = cur
+		cur = scr.parent[uint64(cur)]
+	}
+	scr.pathBuf[0] = spur
+	return YenPath[W]{Nodes: scr.pathBuf, Cost: scr.dist[uint64(dst)]}, true
+}
+
+// reconstructYenPath walks parents from dst back to src to materialise
+// a freshly-allocated path. Used only for the first (initial) shortest
+// path; subsequent spurs go through scr.pathBuf via copy in the caller.
+func reconstructYenPath(parent []graph.NodeID, src, dst graph.NodeID) []graph.NodeID {
+	length := 1
+	for cur := dst; cur != src; {
 		cur = parent[uint64(cur)]
 		length++
 	}
@@ -181,27 +272,43 @@ func dijkstraAvoiding[W Weight](c *csr.CSR[W], spur, dst graph.NodeID, banned ma
 		out[i] = cur
 		cur = parent[uint64(cur)]
 	}
-	out[0] = spur
-	return &YenPath[W]{Nodes: out, Cost: dist[uint64(dst)]}
+	out[0] = src
+	return out
 }
 
-func pathCost[W Weight](c *csr.CSR[W], path []graph.NodeID) W {
-	var cost W
+// buildEdgeIndex constructs a (from, to) -> edge-index map covering
+// every directed edge in c. For multigraphs the first occurrence of
+// each (from, to) pair wins, matching the v1.0 pathCost semantics.
+func buildEdgeIndex[W Weight](c *csr.CSR[W]) map[edgeKey]uint64 {
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
-	weights := c.WeightsSlice()
-	for i := 0; i < len(path)-1; i++ {
-		from := uint64(path[i])
-		to := path[i+1]
+	maxID := uint64(c.MaxNodeID())
+	idx := make(map[edgeKey]uint64, len(edges))
+	for from := uint64(0); from < maxID; from++ {
 		start := verts[from]
 		end := verts[from+1]
 		for k := start; k < end; k++ {
-			if edges[k] == to {
-				if weights != nil {
-					cost += weights[k]
-				}
-				break
+			key := edgeKey{from: graph.NodeID(from), to: edges[k]}
+			if _, exists := idx[key]; !exists {
+				idx[key] = k
 			}
+		}
+	}
+	return idx
+}
+
+// pathCostFast computes the total weight of path using a pre-built
+// edge index. Cost is O(len(path)) versus O(len(path) * avgDeg) for
+// the linear-scan equivalent.
+func pathCostFast[W Weight](weights []W, edgeIdx map[edgeKey]uint64, path []graph.NodeID) W {
+	var cost W
+	for i := 0; i < len(path)-1; i++ {
+		idx, ok := edgeIdx[edgeKey{from: path[i], to: path[i+1]}]
+		if !ok {
+			continue
+		}
+		if weights != nil {
+			cost += weights[idx]
 		}
 	}
 	return cost

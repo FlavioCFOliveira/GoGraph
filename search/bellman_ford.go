@@ -25,6 +25,9 @@ var ErrNegativeCycle = errors.New("search: negative cycle reachable from source"
 // The implementation reuses the [Distances] result type and the
 // per-W pooled state of [Dijkstra]; the inner relaxation loop is
 // zero-alloc.
+//
+// For hot loops where the caller can amortise buffer allocation,
+// prefer the zero-allocation primitive [BellmanFordInto].
 func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
 	return BellmanFordCtx(context.Background(), c, src)
 }
@@ -36,49 +39,90 @@ func BellmanFordCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.Node
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)
-	resetDijkstraState(st)
 
-	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
-		return newDistancesCopy(st, src, maxID), nil
+	if err := bellmanFordCore[W](ctx, c, src, st.dist[:maxID], st.parent[:maxID], st.found[:maxID]); err != nil {
+		return nil, err
+	}
+	return newDistancesCopy(st, src, maxID), nil
+}
+
+// BellmanFordInto is the zero-allocation primitive behind [BellmanFord].
+// It writes single-source shortest-path results directly into the
+// caller-provided slices, each of which must have length at least
+// c.MaxNodeID(); otherwise it returns [ErrBufferTooSmall]. The slices
+// are reset in-place before the traversal.
+//
+// Concurrency: the caller's slices are written in-place; concurrent
+// callers must supply separate buffers.
+func BellmanFordInto[W Weight](
+	ctx context.Context,
+	c *csr.CSR[W],
+	src graph.NodeID,
+	dist []W,
+	parent []graph.NodeID,
+	found []bool,
+) error {
+	maxID := uint64(c.MaxNodeID())
+	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {
+		return ErrBufferTooSmall
+	}
+	return bellmanFordCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID])
+}
+
+// bellmanFordCore is the shared algorithm body invoked by both
+// [BellmanFordCtx] and [BellmanFordInto]. Pre-conditions:
+//   - len(dist), len(parent), len(found) all equal c.MaxNodeID().
+//
+// Postconditions identical to [DijkstraInto].
+func bellmanFordCore[W Weight](
+	ctx context.Context,
+	c *csr.CSR[W],
+	src graph.NodeID,
+	dist []W,
+	parent []graph.NodeID,
+	found []bool,
+) error {
+	maxID := uint64(c.MaxNodeID())
+	var zero W
+	for i := range dist {
+		dist[i] = zero
+		parent[i] = 0
+		found[i] = false
 	}
 
-	st.found[uint64(src)] = true
-	st.parent[uint64(src)] = src
-
 	verts := c.VerticesSlice()
+	if uint64(src)+1 >= uint64(len(verts)) {
+		return nil
+	}
+
+	found[uint64(src)] = true
+	parent[uint64(src)] = src
+
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
 
 	for round := uint64(0); round < maxID-1; round++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
-		if !relaxOnce(st, verts, edges, weights, maxID) {
+		if !relaxOnceBuf(dist, parent, found, verts, edges, weights, maxID) {
 			break
 		}
 	}
 
-	if relaxOnce(st, verts, edges, weights, maxID) {
-		return nil, ErrNegativeCycle
+	if relaxOnceBuf(dist, parent, found, verts, edges, weights, maxID) {
+		return ErrNegativeCycle
 	}
-	return newDistancesCopy(st, src, maxID), nil
+	return nil
 }
 
-// resetDijkstraState clears the pooled buffers ahead of a fresh run.
-func resetDijkstraState[W Weight](st *dijkstraState[W]) {
-	var zero W
-	for i := range st.dist {
-		st.dist[i] = zero
-		st.parent[i] = 0
-		st.found[i] = false
-	}
-}
-
-// relaxOnce performs one Bellman-Ford relaxation sweep over every
-// edge whose source is already reachable. Returns true if any
-// distance was improved.
-func relaxOnce[W Weight](
-	st *dijkstraState[W],
+// relaxOnceBuf performs one Bellman-Ford relaxation sweep over every
+// edge whose source is already reachable, operating on caller buffers.
+// Returns true if any distance was improved.
+func relaxOnceBuf[W Weight](
+	dist []W,
+	parent []graph.NodeID,
+	found []bool,
 	verts []uint64,
 	edges []graph.NodeID,
 	weights []W,
@@ -86,18 +130,18 @@ func relaxOnce[W Weight](
 ) bool {
 	changed := false
 	for from := uint64(0); from < maxID; from++ {
-		if !st.found[from] {
+		if !found[from] {
 			continue
 		}
 		start := verts[from]
 		end := verts[from+1]
 		for k := start; k < end; k++ {
 			nb := uint64(edges[k])
-			cand := st.dist[from] + weights[k]
-			if !st.found[nb] || cand < st.dist[nb] {
-				st.dist[nb] = cand
-				st.parent[nb] = graph.NodeID(from)
-				st.found[nb] = true
+			cand := dist[from] + weights[k]
+			if !found[nb] || cand < dist[nb] {
+				dist[nb] = cand
+				parent[nb] = graph.NodeID(from)
+				found[nb] = true
 				changed = true
 			}
 		}

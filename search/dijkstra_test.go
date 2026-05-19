@@ -238,3 +238,103 @@ func BenchmarkDijkstra_RandomGraph(b *testing.B) {
 		_, _ = Dijkstra(c, srcID)
 	}
 }
+
+// BenchmarkDijkstra_PostWarmup measures the steady-state allocations
+// of [DijkstraInto] on caller-amortised buffers. After warm-up the
+// internal heap pool is hot and allocs/op must be 0 — this is the
+// acceptance gate for the zero-alloc primitive contract.
+func BenchmarkDijkstra_PostWarmup(b *testing.B) {
+	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
+	const universe = 1 << 16 // 64k nodes
+	for i := uint32(0); i < uint32(universe); i++ {
+		a.AddNode(i)
+	}
+	r := rand.New(rand.NewPCG(31, 1)) //nolint:gosec // deterministic benchmark RNG
+	const fill = 1 << 18              // 256k edges
+	for i := 0; i < fill; i++ {
+		a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1))
+	}
+	c := csr.BuildFromAdjList(a)
+	srcID, _ := a.Mapper().Lookup(uint32(0))
+
+	maxID := uint64(c.MaxNodeID())
+	dist := make([]int64, maxID)
+	parent := make([]graph.NodeID, maxID)
+	found := make([]bool, maxID)
+
+	// Warm the per-W heap pool so its first acquire alloc does not
+	// pollute the measurement.
+	if err := DijkstraInto(b.Context(), c, srcID, dist, parent, found); err != nil {
+		b.Fatalf("warmup DijkstraInto: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := DijkstraInto(b.Context(), c, srcID, dist, parent, found); err != nil {
+			b.Fatalf("DijkstraInto: %v", err)
+		}
+	}
+}
+
+// TestDijkstraInto_BufferSizeValidation verifies the ErrBufferTooSmall
+// gate fires when any caller buffer is shorter than c.MaxNodeID().
+func TestDijkstraInto_BufferSizeValidation(t *testing.T) {
+	t.Parallel()
+	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 2}, {1, 2, 3}})
+	src, _ := a.Mapper().Lookup(0)
+	maxID := uint64(c.MaxNodeID())
+	ctx := t.Context()
+
+	dist := make([]int64, maxID)
+	parent := make([]graph.NodeID, maxID)
+	found := make([]bool, maxID)
+	if err := DijkstraInto(ctx, c, src, dist, parent, found); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+
+	if err := DijkstraInto(ctx, c, src, dist[:maxID-1], parent, found); !errors.Is(err, ErrBufferTooSmall) {
+		t.Fatalf("short dist: got %v, want ErrBufferTooSmall", err)
+	}
+	if err := DijkstraInto(ctx, c, src, dist, parent[:maxID-1], found); !errors.Is(err, ErrBufferTooSmall) {
+		t.Fatalf("short parent: got %v, want ErrBufferTooSmall", err)
+	}
+	if err := DijkstraInto(ctx, c, src, dist, parent, found[:maxID-1]); !errors.Is(err, ErrBufferTooSmall) {
+		t.Fatalf("short found: got %v, want ErrBufferTooSmall", err)
+	}
+}
+
+// TestDijkstraInto_AgreesWithDijkstra asserts the *Into primitive
+// produces identical distances and parents to the copying wrapper on
+// the CLRS hand-built fixture.
+func TestDijkstraInto_AgreesWithDijkstra(t *testing.T) {
+	t.Parallel()
+	c, a := buildWeightedCSR([]weightedEdge{
+		{0, 1, 10}, {0, 2, 3},
+		{1, 3, 1},
+		{2, 1, 4}, {2, 3, 8}, {2, 4, 2},
+		{3, 4, 7},
+	})
+	src, _ := a.Mapper().Lookup(0)
+
+	maxID := uint64(c.MaxNodeID())
+	dist := make([]int64, maxID)
+	parent := make([]graph.NodeID, maxID)
+	found := make([]bool, maxID)
+	if err := DijkstraInto(t.Context(), c, src, dist, parent, found); err != nil {
+		t.Fatalf("DijkstraInto: %v", err)
+	}
+	d, err := Dijkstra(c, src)
+	if err != nil {
+		t.Fatalf("Dijkstra: %v", err)
+	}
+	for i := uint64(0); i < maxID; i++ {
+		wantDist, wantOk := d.Distance(graph.NodeID(i))
+		if found[i] != wantOk {
+			t.Fatalf("found[%d] = %v, want %v", i, found[i], wantOk)
+		}
+		if wantOk && dist[i] != wantDist {
+			t.Fatalf("dist[%d] = %d, want %d", i, dist[i], wantDist)
+		}
+	}
+}

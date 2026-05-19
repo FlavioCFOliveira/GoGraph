@@ -1,6 +1,7 @@
 package search
 
 import (
+	"math/rand/v2"
 	"testing"
 
 	"gograph/graph/adjlist"
@@ -86,5 +87,27 @@ func TestYenKShortest_UnreachableReturnsNil(t *testing.T) {
 	paths := YenKShortest(c, id0, id3, 3)
 	if paths != nil {
 		t.Fatalf("expected nil for unreachable target, got %v", paths)
+	}
+}
+
+// BenchmarkYen_K100 measures the steady-state allocation profile of
+// 100-shortest-paths on a moderate random graph. Task #124 sets a
+// regression budget of <10% of v1.0 allocations; we report
+// ReportAllocs() so the regression is visible in benchstat output.
+func BenchmarkYen_K100(b *testing.B) {
+	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	const n = 256
+	r := rand.New(rand.NewPCG(7, 13)) //nolint:gosec // deterministic benchmark RNG
+	for i := 0; i < 4*n; i++ {
+		a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(50)+1))
+	}
+	c := csr.BuildFromAdjList(a)
+	srcID, _ := a.Mapper().Lookup(0)
+	dstID, _ := a.Mapper().Lookup(n - 1)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = YenKShortest(c, srcID, dstID, 100)
 	}
 }
