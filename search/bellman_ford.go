@@ -73,7 +73,19 @@ func BellmanFordInto[W Weight](
 // [BellmanFordCtx] and [BellmanFordInto]. Pre-conditions:
 //   - len(dist), len(parent), len(found) all equal c.MaxNodeID().
 //
+// The implementation is SPFA (Shortest Path Faster Algorithm,
+// Bannister-Eppstein 2012 attribution): a worklist-driven relaxation
+// that only revisits nodes whose tentative distance has changed,
+// instead of the V-1 full-edge sweeps of textbook Bellman-Ford.
+// SLF (Smallest Label First) deque ordering pushes nodes with
+// smaller tentative distance to the front of the queue, which
+// usually relaxes their downstream once instead of multiple times.
+// Negative-cycle detection is preserved: any node enqueued more
+// than V times closes a cycle and yields [ErrNegativeCycle].
+//
 // Postconditions identical to [DijkstraInto].
+//
+//nolint:gocyclo // SPFA with SLF + negative-cycle counter and ctx-yield path
 func bellmanFordCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -101,50 +113,68 @@ func bellmanFordCore[W Weight](
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
 
-	for round := uint64(0); round < maxID-1; round++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !relaxOnceBuf(dist, parent, found, verts, edges, weights, maxID) {
-			break
-		}
+	// SPFA with SLF on a circular deque. The buffer holds at most
+	// maxID elements at any time (each NodeID can appear once);
+	// power-of-two sizing lets the modular index arithmetic compile
+	// to a bit-mask.
+	bufSize := 1
+	for bufSize < int(maxID)+1 {
+		bufSize <<= 1
 	}
-
-	if relaxOnceBuf(dist, parent, found, verts, edges, weights, maxID) {
-		return ErrNegativeCycle
+	if bufSize < 8 {
+		bufSize = 8
 	}
-	return nil
-}
-
-// relaxOnceBuf performs one Bellman-Ford relaxation sweep over every
-// edge whose source is already reachable, operating on caller buffers.
-// Returns true if any distance was improved.
-func relaxOnceBuf[W Weight](
-	dist []W,
-	parent []graph.NodeID,
-	found []bool,
-	verts []uint64,
-	edges []graph.NodeID,
-	weights []W,
-	maxID uint64,
-) bool {
-	changed := false
-	for from := uint64(0); from < maxID; from++ {
-		if !found[from] {
-			continue
+	dq := make([]graph.NodeID, bufSize)
+	mask := bufSize - 1
+	head := 0
+	tail := 0
+	dq[tail] = src
+	tail = (tail + 1) & mask
+	inQueue := make([]bool, maxID)
+	inQueue[uint64(src)] = true
+	relaxes := make([]uint32, maxID)
+	relaxes[uint64(src)] = 1
+	yieldCtr := 0
+	for head != tail {
+		yieldCtr++
+		if yieldCtr&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
-		start := verts[from]
-		end := verts[from+1]
+		v := dq[head]
+		head = (head + 1) & mask
+		inQueue[uint64(v)] = false
+		dv := dist[uint64(v)]
+		start := verts[uint64(v)]
+		end := verts[uint64(v)+1]
 		for k := start; k < end; k++ {
 			nb := uint64(edges[k])
-			cand := dist[from] + weights[k]
+			cand := dv + weights[k]
 			if !found[nb] || cand < dist[nb] {
 				dist[nb] = cand
-				parent[nb] = graph.NodeID(from)
+				parent[nb] = v
 				found[nb] = true
-				changed = true
+				if !inQueue[nb] {
+					relaxes[nb]++
+					if uint64(relaxes[nb]) > maxID {
+						return ErrNegativeCycle
+					}
+					// SLF (Smallest Label First): when the new tentative
+					// distance is smaller than the front element's,
+					// push to the front so the cheapest is dequeued
+					// next. Otherwise push to the back.
+					if head != tail && cand < dist[uint64(dq[head])] {
+						head = (head - 1) & mask
+						dq[head] = graph.NodeID(nb)
+					} else {
+						dq[tail] = graph.NodeID(nb)
+						tail = (tail + 1) & mask
+					}
+					inQueue[nb] = true
+				}
 			}
 		}
 	}
-	return changed
+	return nil
 }
