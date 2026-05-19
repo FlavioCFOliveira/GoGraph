@@ -54,6 +54,47 @@ Tier 2 details: see [docs/tier2.md](docs/tier2.md).
 I/O formats: see [docs/io.md](docs/io.md).
 Algorithms catalogue: see [docs/algorithms.md](docs/algorithms.md).
 
+## Examples
+
+The `examples/` directory contains 20 runnable demonstrations:
+
+### Basics
+
+- **01_basic** — Dijkstra on a small European routing graph.
+- **02_property_graph** — labels + typed properties + indexed query.
+- **03_advanced_algorithms** — BFS, Dijkstra, PageRank composed.
+
+### Persistence and out-of-core
+
+- **04_persistence** — WAL transactions + recovery.
+- **05_out_of_core** — Tier 2 csrfile + mmap + semi-external PageRank.
+- **17_transactional_log** — WAL + background checkpointer + crash-recovery walk-through.
+- **18_oocore_pipeline** — CSV → CSR → csrfile → mmap → semi-external BFS + PageRank.
+
+### Interchange
+
+- **06_csv_import** — CSV read / write + JSON Lines.
+- **07_graphml_roundtrip** — GraphML read / write + DOT.
+
+### Algorithms
+
+- **08_pagerank** — PageRank on a directed cycle.
+- **09_leiden** — community detection on two cliques + bridge.
+- **10_dimacs9_routing** — DIMACS 9 SSSP harness.
+- **14_routing_alternatives** — Dijkstra, Yen k-shortest, A\* on the same graph.
+- **15_task_assignment** — Hungarian (cost-minimising) + Hopcroft-Karp (cardinality).
+- **16_centrality_analytics** — Brandes betweenness + label propagation.
+
+### Real-world recipes
+
+- **11_social_network** — labels + PageRank + Leiden + friend-of-friend recommendations.
+- **12_build_dependency** — topological sort + Tarjan SCC for circular-dependency detection.
+- **13_network_reliability** — Hopcroft-Tarjan SPOF analysis + Dinic max-flow.
+- **19_pattern_query** — multi-hop MATCH-style queries combining labels and property predicates.
+- **20_concurrent_reads** — multiple algorithms run concurrently over a shared immutable CSR.
+
+Run any example with `go run ./examples/<NAME>/`.
+
 ## Getting Started
 
 ```go
