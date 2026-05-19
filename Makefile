@@ -73,6 +73,23 @@ soak: ## Run the 4-hour mixed-workload soak harness (use SOAK_FLAGS to override)
 soak-smoke: ## 60-second smoke run of the soak harness — exercises the harness without the full 4h
 	$(GO) run ./bench/soak -duration=60s -sample-interval=15s
 
+# Default Python interpreter for the cross-library comparison harness.
+# Override with PYTHON=/path/to/venv/bin/python3 to point at a venv that
+# has python-graphblas and graphblas-algorithms installed.
+PYTHON ?= python3
+
+.PHONY: comparison-graphblas
+comparison-graphblas: ## Run the SuiteSparse:GraphBLAS comparison baseline (via python-graphblas)
+	@command -v $(PYTHON) >/dev/null 2>&1 || { echo "$(PYTHON) not on PATH; set PYTHON=..."; exit 1; }
+	@$(PYTHON) -c "import graphblas_algorithms" >/dev/null 2>&1 || { \
+	  echo "graphblas-algorithms not installed. To install in a venv:"; \
+	  echo "  python3 -m venv /tmp/graphblas_venv"; \
+	  echo "  /tmp/graphblas_venv/bin/pip install --upgrade pip"; \
+	  echo "  /tmp/graphblas_venv/bin/pip install 'numpy<2' scipy networkx python-graphblas graphblas-algorithms"; \
+	  echo "  make comparison-graphblas PYTHON=/tmp/graphblas_venv/bin/python3"; \
+	  exit 1; }
+	$(PYTHON) bench/comparison/lagraph_baseline.py
+
 .PHONY: release-check
 release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, no publish)
 	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed; install: brew install goreleaser or see https://goreleaser.com/install/"; exit 1; }
