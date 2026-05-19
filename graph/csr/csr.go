@@ -160,3 +160,70 @@ func (c *CSR[W]) VerticesSlice() []uint64 { return c.vertices }
 // WeightsSlice returns the underlying weights array, or nil if the
 // snapshot is unweighted. The slice must be treated as immutable.
 func (c *CSR[W]) WeightsSlice() []W { return c.weights }
+
+// LiveMask returns a NodeID-indexed bitmap of length MaxNodeID() where
+// mask[i] is true iff NodeID i participates in at least one edge as
+// source or destination.
+//
+// On graphs constructed via a sharded Mapper, the NodeID space is
+// sparse: MaxNodeID() rounds up to multiples driven by the shard
+// count, so many indices are ghost slots with no incident edge.
+// Algorithms that iterate the full [0, MaxNodeID()) range and treat
+// every slot as a real vertex must filter through LiveMask to avoid
+// O(MaxNodeID()) blow-up on small graphs.
+//
+// Complexity: O(V + E). The returned slice is freshly allocated; the
+// CSR's own state is not retained or cached.
+func (c *CSR[W]) LiveMask() []bool {
+	maxID := uint64(c.MaxNodeID())
+	if maxID == 0 {
+		return nil
+	}
+	mask := make([]bool, maxID)
+	for from := uint64(0); from < maxID; from++ {
+		start := c.vertices[from]
+		end := c.vertices[from+1]
+		if end > start {
+			mask[from] = true
+			for k := start; k < end; k++ {
+				mask[uint64(c.edges[k])] = true
+			}
+		}
+	}
+	return mask
+}
+
+// LiveNodes returns the sorted slice of NodeIDs with at least one
+// incident edge. The companion to [CSR.LiveMask] when callers need a
+// compact enumeration rather than a bitmap.
+//
+// Complexity: O(V + E). The returned slice is freshly allocated.
+func (c *CSR[W]) LiveNodes() []graph.NodeID {
+	mask := c.LiveMask()
+	if len(mask) == 0 {
+		return nil
+	}
+	out := make([]graph.NodeID, 0, len(mask))
+	for i, ok := range mask {
+		if ok {
+			out = append(out, graph.NodeID(i))
+		}
+	}
+	return out
+}
+
+// LiveCount returns the number of NodeIDs with at least one incident
+// edge. Equivalent to len(c.LiveNodes()) but cheaper when the caller
+// only needs the cardinality.
+//
+// Complexity: O(V + E).
+func (c *CSR[W]) LiveCount() int {
+	mask := c.LiveMask()
+	var n int
+	for _, ok := range mask {
+		if ok {
+			n++
+		}
+	}
+	return n
+}

@@ -74,5 +74,13 @@ bob,dave,1
 	fmt.Printf("  visited %d nodes.\n", visited)
 
 	ranks, iters := extern.PageRank(r, extern.DefaultPageRankOptions())
-	fmt.Printf("Semi-external PageRank converged in %d iterations (%d ranks).\n", iters, len(ranks))
+	// Count live ranks (non-zero) so the report matches the actual
+	// graph size, not the sharded MaxNodeID-rounded slice length.
+	var live int
+	for _, x := range ranks {
+		if x > 0 {
+			live++
+		}
+	}
+	fmt.Printf("Semi-external PageRank converged in %d iterations (%d live ranks).\n", iters, live)
 }

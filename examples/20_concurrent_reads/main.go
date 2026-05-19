@@ -63,8 +63,14 @@ func main() {
 	go func() {
 		defer wg.Done()
 		ranks, iters := centrality.PageRank(c, centrality.DefaultPageRankOptions())
+		var live int
+		for _, r := range ranks {
+			if r > 0 {
+				live++
+			}
+		}
 		mu.Lock()
-		results["pagerank"] = fmt.Sprintf("PageRank %d iters, %d ranks", iters, len(ranks))
+		results["pagerank"] = fmt.Sprintf("PageRank %d iters, %d live ranks", iters, live)
 		mu.Unlock()
 	}()
 

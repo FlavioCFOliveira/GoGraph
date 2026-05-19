@@ -229,3 +229,77 @@ func BenchmarkCSR_Build_TenMillion(b *testing.B) {
 		_ = BuildFromAdjList(a)
 	}
 }
+
+func TestCSR_LiveMask_LiveNodes_LiveCount(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a.AddEdge(1, 2, struct{}{})
+	a.AddEdge(2, 3, struct{}{})
+	a.AddEdge(3, 1, struct{}{})
+	c := BuildFromAdjList(a)
+
+	mask := c.LiveMask()
+	if mask == nil {
+		t.Fatal("LiveMask returned nil for non-empty CSR")
+	}
+	ids := c.LiveNodes()
+	if got := c.LiveCount(); got != 3 {
+		t.Fatalf("LiveCount = %d, want 3", got)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("len(LiveNodes) = %d, want 3", len(ids))
+	}
+	for _, id := range ids {
+		if !mask[id] {
+			t.Fatalf("LiveNodes returned %d but mask says not live", id)
+		}
+	}
+	// Sorted property.
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
+			t.Fatalf("LiveNodes not sorted: %v", ids)
+		}
+	}
+	// Total mask trues equals LiveCount.
+	var liveTrue int
+	for _, m := range mask {
+		if m {
+			liveTrue++
+		}
+	}
+	if liveTrue != c.LiveCount() {
+		t.Fatalf("mask trues = %d, LiveCount = %d", liveTrue, c.LiveCount())
+	}
+}
+
+func TestCSR_LiveMask_Empty(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	c := BuildFromAdjList(a)
+	if mask := c.LiveMask(); mask != nil {
+		t.Fatalf("LiveMask on empty CSR = %v, want nil", mask)
+	}
+	if got := c.LiveCount(); got != 0 {
+		t.Fatalf("LiveCount = %d, want 0", got)
+	}
+	if ids := c.LiveNodes(); ids != nil {
+		t.Fatalf("LiveNodes on empty CSR = %v, want nil", ids)
+	}
+}
+
+func TestCSR_LiveMask_DanglingSink(t *testing.T) {
+	t.Parallel()
+	// Sink node (only destination) must be flagged as live.
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a.AddEdge(1, 0, struct{}{})
+	c := BuildFromAdjList(a)
+	mask := c.LiveMask()
+	id0, _ := a.Mapper().Lookup(0)
+	id1, _ := a.Mapper().Lookup(1)
+	if !mask[id0] || !mask[id1] {
+		t.Fatalf("sink %d or source %d not flagged live: mask=%v", id0, id1, mask)
+	}
+	if got := c.LiveCount(); got != 2 {
+		t.Fatalf("LiveCount = %d, want 2", got)
+	}
+}

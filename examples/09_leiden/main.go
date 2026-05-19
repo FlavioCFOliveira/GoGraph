@@ -26,8 +26,11 @@ func main() {
 
 	c := csr.BuildFromAdjList(a)
 	p := community.Leiden(c, community.DefaultLeidenOptions())
-	fmt.Printf("Found %d communities\n", p.NumCommunities)
-	for i, cid := range p.Community {
-		fmt.Printf("  node %d -> community %d\n", i, cid)
+	fmt.Printf("Found %d communities across 8 live nodes\n", p.NumCommunities)
+	// Print only the 8 live nodes' community IDs; ghost slots in the
+	// Community slice carry the sentinel -1.
+	for v := 0; v < 8; v++ {
+		id, _ := a.Mapper().Lookup(v)
+		fmt.Printf("  node %d -> community %d\n", v, p.Community[id])
 	}
 }

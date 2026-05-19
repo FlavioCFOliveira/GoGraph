@@ -17,8 +17,12 @@ func main() {
 	}
 	c := csr.BuildFromAdjList(a)
 	ranks, iters := centrality.PageRank(c, centrality.DefaultPageRankOptions())
-	fmt.Printf("Converged in %d iterations\n", iters)
-	for i, r := range ranks {
-		fmt.Printf("  node %d: %.6f\n", i, r)
+	// Resolve the NodeIDs of the 5 user-facing nodes so we only print
+	// the live ranks (the rank slice is indexed by NodeID and rounds
+	// up to MaxNodeID across the 256-shard Mapper space).
+	fmt.Printf("Converged in %d iterations (5 live ranks)\n", iters)
+	for v := 0; v < 5; v++ {
+		id, _ := a.Mapper().Lookup(v)
+		fmt.Printf("  node %d: %.6f\n", v, ranks[id])
 	}
 }
