@@ -90,4 +90,3 @@ func TestHungarian_RejectsMismatchedLength(t *testing.T) {
 		t.Fatal("expected length-mismatch error")
 	}
 }
-
