@@ -1,0 +1,59 @@
+# GoGraph Write-Ahead Log Format
+
+This document specifies the on-disk binary format of a GoGraph
+Write-Ahead Log (WAL) file. The format is **versioned**: each frame
+declares its version, and readers refuse versions newer than they
+know how to parse.
+
+## File-level layout
+
+A WAL file is a sequence of frames written back-to-back. There is no
+file-level header beyond the first frame's header (every frame is
+self-describing).
+
+## Frame layout
+
+Each frame has the following byte layout:
+
+| Field   | Size  | Description                                                |
+|---------|-------|------------------------------------------------------------|
+| magic   |  4 B  | ASCII `GGWA` (`0x47 0x47 0x57 0x41`)                       |
+| version |  2 B  | uint16, little-endian. The current format version is `1`.  |
+| length  |  4 B  | uint32, little-endian. Length of the payload in bytes.     |
+| crc32c  |  4 B  | uint32, little-endian. CRC32C of magic+version+length+payload using the Castagnoli polynomial (`0x1EDC6F41`). |
+| payload | N B   | `length` bytes of opaque payload supplied by the caller.   |
+
+Total frame size: `14 + length` bytes.
+
+## Versioning
+
+Version `1` carries the format described above. Future versions must
+either reuse this header (preserving magic+version+length+crc32c) or
+introduce a new magic. Readers that encounter a version higher than
+their highest supported version return `ErrUnsupportedVersion`.
+
+## Integrity
+
+The CRC32C field covers the magic bytes, the version, the length,
+and the payload. Any single-bit flip in any of these fields is
+detected with the probability guaranteed by CRC32C (effectively
+2⁻³² for unrelated bit flips).
+
+Torn writes — partial last frames — are detected by the length /
+CRC mismatch and reported as `ErrTornFrame`. Readers stop cleanly
+at the last fully-readable frame; recovery resumes from there.
+
+## Concurrency
+
+The format itself imposes no concurrency model. The `wal.Writer`
+implementation is single-writer; multiple goroutines must serialise
+their writes externally. The `wal.Reader` is read-only and may be
+shared by multiple goroutines provided each holds its own offset.
+
+## Forward compatibility
+
+- New top-level fields may be added by bumping the version.
+- The payload structure is opaque to the WAL; higher-level callers
+  (transaction codec, snapshot consolidator) may freely evolve the
+  payload encoding without bumping the frame version, provided the
+  payload remains a self-describing byte sequence.

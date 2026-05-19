@@ -1,0 +1,118 @@
+// Package wal implements a versioned, length-prefixed,
+// CRC32C-checksummed Write-Ahead Log for the gograph durability
+// stack.
+//
+// The on-disk format is documented in FORMAT.md alongside this
+// package. Each frame is self-describing; readers stop cleanly at
+// the first torn or corrupted frame and report the byte offset
+// where the cut occurred, leaving the file otherwise untouched.
+package wal
+
+import (
+	"encoding/binary"
+	"errors"
+	"hash/crc32"
+	"io"
+)
+
+// Magic is the 4-byte identifier prefix of every WAL frame: ASCII
+// "GGWA".
+var Magic = [4]byte{'G', 'G', 'W', 'A'}
+
+// CurrentVersion is the WAL format version this package writes.
+// Readers must accept all versions <= CurrentVersion; older versions
+// are intentionally permitted so a fresh build can replay archives
+// produced by previous releases.
+const CurrentVersion uint16 = 1
+
+// HeaderSize is the fixed number of bytes occupying the frame header
+// (magic + version + length + crc32c).
+const HeaderSize = 4 + 2 + 4 + 4
+
+// Errors returned by the reader.
+var (
+	// ErrBadMagic indicates the next four bytes did not match Magic.
+	ErrBadMagic = errors.New("wal: bad frame magic")
+	// ErrUnsupportedVersion indicates the frame version is newer
+	// than this build knows how to parse.
+	ErrUnsupportedVersion = errors.New("wal: unsupported frame version")
+	// ErrCRCMismatch indicates the frame's CRC32C did not match the
+	// re-computed value.
+	ErrCRCMismatch = errors.New("wal: crc32c mismatch")
+	// ErrTornFrame indicates the underlying reader returned EOF
+	// before the frame was fully read.
+	ErrTornFrame = errors.New("wal: torn frame at end of input")
+)
+
+// castagnoli holds the precomputed CRC32C table used by every
+// encode and decode. The polynomial is 0x1EDC6F41.
+var castagnoli = crc32.MakeTable(crc32.Castagnoli)
+
+// Frame is the in-memory representation of one WAL frame.
+type Frame struct {
+	Version uint16
+	Payload []byte
+}
+
+// Encode writes f to w as a single binary frame. It returns the
+// number of bytes written and any underlying writer error.
+func Encode(w io.Writer, f Frame) (int, error) {
+	if f.Version == 0 {
+		f.Version = CurrentVersion
+	}
+	plen := uint32(len(f.Payload))
+
+	header := make([]byte, HeaderSize+len(f.Payload))
+	copy(header[0:4], Magic[:])
+	binary.LittleEndian.PutUint16(header[4:6], f.Version)
+	binary.LittleEndian.PutUint32(header[6:10], plen)
+	// CRC is over magic+version+length+payload. Reserve crc field
+	// (zeroed) while computing.
+	copy(header[14:], f.Payload)
+	crc := crc32.Update(0, castagnoli, header[0:10])
+	crc = crc32.Update(crc, castagnoli, header[14:])
+	binary.LittleEndian.PutUint32(header[10:14], crc)
+
+	n, err := w.Write(header)
+	return n, err
+}
+
+// Decode reads the next frame from r. It returns ErrTornFrame when
+// the reader ends mid-frame (clean tail truncation), ErrBadMagic on
+// a missing magic, ErrUnsupportedVersion on a newer-than-supported
+// version, and ErrCRCMismatch on integrity failure. Any other error
+// is propagated from the underlying reader.
+func Decode(r io.Reader) (Frame, error) {
+	var head [HeaderSize]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return Frame{}, ErrTornFrame
+		}
+		return Frame{}, err
+	}
+	if head[0] != Magic[0] || head[1] != Magic[1] || head[2] != Magic[2] || head[3] != Magic[3] {
+		return Frame{}, ErrBadMagic
+	}
+	version := binary.LittleEndian.Uint16(head[4:6])
+	if version > CurrentVersion {
+		return Frame{}, ErrUnsupportedVersion
+	}
+	plen := binary.LittleEndian.Uint32(head[6:10])
+	expectCRC := binary.LittleEndian.Uint32(head[10:14])
+
+	payload := make([]byte, plen)
+	if plen > 0 {
+		if _, err := io.ReadFull(r, payload); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return Frame{}, ErrTornFrame
+			}
+			return Frame{}, err
+		}
+	}
+	gotCRC := crc32.Update(0, castagnoli, head[0:10])
+	gotCRC = crc32.Update(gotCRC, castagnoli, payload)
+	if gotCRC != expectCRC {
+		return Frame{}, ErrCRCMismatch
+	}
+	return Frame{Version: version, Payload: payload}, nil
+}
