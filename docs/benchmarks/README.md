@@ -23,8 +23,13 @@ contains:
   concurrency levels (1, 8, 64, 256, 1024 goroutines via
   `b.RunParallel` + GOMAXPROCS overrides).
 
-## v1.0.0 snapshot
+## Releases
 
-See [v1.0.0.md](v1.0.0.md) for the headline numbers shipped with the
-v1.0.0 tag. v1.0.1 / v1.1.0 numbers land here as they are produced
-in Sprint 13 (release tasks #160, #163, #166).
+- [v1.0.0.md](v1.0.0.md) — headline benchmark numbers for the v1.0.0
+  tag.
+- [v1.1.0.md](v1.1.0.md) — 30-minute reliability soak run for the
+  v1.1.0 tag (canonical 4-hour run tracked for the next release).
+- [SOAK.md](SOAK.md) — procedure and acceptance gate for the
+  mixed-workload reliability soak.
+- [comparison.md](comparison.md) — cross-library performance
+  comparison vs NetworkX.
