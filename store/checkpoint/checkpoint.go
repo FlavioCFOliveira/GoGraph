@@ -12,6 +12,7 @@ package checkpoint
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -114,14 +115,34 @@ func (c *Checkpointer[N, W]) Stop() {
 }
 
 // Trigger requests a checkpoint and blocks until it completes,
-// returning its error.
+// returning its error. Equivalent to TriggerCtx(context.Background()).
+//
+// On a saturated trigger buffer (rare, but possible if many Trigger
+// calls race ahead of the loop) Trigger can block indefinitely;
+// prefer TriggerCtx in production code to bound the latency.
 func (c *Checkpointer[N, W]) Trigger() error {
+	return c.TriggerCtx(context.Background())
+}
+
+// TriggerCtx requests a checkpoint and blocks until it completes,
+// honouring ctx cancellation on every wait edge: queue-submit,
+// in-flight, and stop-signal. Returns ctx.Err() wrapped on
+// cancellation or deadline expiry.
+func (c *Checkpointer[N, W]) TriggerCtx(ctx context.Context) error {
 	done := make(chan error, 1)
 	select {
 	case c.triggerCh <- done:
-		return <-done
+		// Submitted; now wait for the result.
 	case <-c.stopCh:
 		return errors.New("checkpoint: checkpointer stopped")
+	case <-ctx.Done():
+		return fmt.Errorf("checkpoint: trigger submit cancelled: %w", ctx.Err())
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("checkpoint: trigger wait cancelled: %w", ctx.Err())
 	}
 }
 

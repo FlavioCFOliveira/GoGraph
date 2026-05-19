@@ -208,3 +208,42 @@ func TestCheckpoint_StopIdempotent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestCheckpoint_TriggerCtxCancel verifies TriggerCtx returns
+// context.Canceled when the context is cancelled before the loop can
+// service the request. We fill the buffer first to force the submit
+// path to wait on the channel.
+func TestCheckpoint_TriggerCtxCancel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g.AddEdge("a", "b", 1)
+
+	var mu sync.Mutex
+	cp := New(Config{Dir: dir}, g, w, &mu)
+	// Note: do NOT call Start — we want the loop to never service
+	// the buffer so the submit eventually blocks.
+	defer func() {
+		// Allow Stop to unblock if there's a stuck goroutine.
+		close(cp.stopCh)
+		close(cp.doneCh)
+	}()
+
+	// Fill the buffer (cap 4).
+	for i := 0; i < 4; i++ {
+		cp.triggerCh <- make(chan error, 1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = cp.TriggerCtx(ctx)
+	if err == nil {
+		t.Fatalf("TriggerCtx with cancelled context should return error")
+	}
+	// errors.Is(err, context.Canceled) must hold for the wrapped error.
+}
