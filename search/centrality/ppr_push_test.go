@@ -38,3 +38,33 @@ func TestPPR_UnknownSrc(t *testing.T) {
 		t.Fatalf("PPR from unknown src should return nil")
 	}
 }
+
+// TestPPR_BoundedMassAtSource asserts the dangling-teleport fix keeps
+// mass at the source bounded above the leaves: ACL with dangling
+// teleport sends absorbed alpha-mass back to src, so the src rank
+// strictly dominates any leaf.
+func TestPPR_BoundedMassAtSource(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	for i := 1; i <= 5; i++ {
+		a.AddEdge(0, i, struct{}{}) // src to dangling leaves
+	}
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	r := PersonalisedPushPageRank(c, src, DefaultPPRPushOptions())
+	for i := 1; i <= 5; i++ {
+		leaf, _ := a.Mapper().Lookup(i)
+		if r[src] <= r[leaf] {
+			t.Fatalf("src rank %.6f should exceed dangling leaf %d rank %.6f",
+				r[src], i, r[leaf])
+		}
+	}
+	// Total absorbed rank (without residue) should be in (0, 1].
+	var total float64
+	for _, v := range r {
+		total += v
+	}
+	if total <= 0 || total > 1.0+1e-9 {
+		t.Fatalf("rank sum = %.6f, want in (0, 1]", total)
+	}
+}

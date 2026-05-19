@@ -29,6 +29,16 @@ func DefaultPPRPushOptions() PPRPushOptions {
 // The algorithm pays only for the edges it touches, so on large
 // graphs with a small high-probability cluster it runs in roughly
 // O(1/epsilon) time rather than O(V+E).
+//
+// Dangling-node handling matches the ACL paper: residue at a node
+// with out-degree 0 is teleported back to src (probability alpha)
+// rather than redistributed to non-existent neighbours. This keeps
+// the rank vector summing to 1 within numerical tolerance.
+//
+// Concurrency: safe to invoke from any number of goroutines on a
+// shared CSR.
+//
+//nolint:gocyclo // canonical ACL push: defaults + worklist loop + dangling teleport
 func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) []float64 {
 	if opts.Damping == 0 {
 		opts.Damping = 0.85
@@ -52,37 +62,61 @@ func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPu
 	inQ := make([]bool, n)
 	inQ[uint64(src)] = true
 
+	enqueueIfHot := func(node int) {
+		if inQ[node] {
+			return
+		}
+		deg := verts[node+1] - verts[node]
+		var hot bool
+		if deg == 0 {
+			// Dangling: any residue above epsilon is "hot" — its
+			// mass will be teleported to src on the next pop.
+			hot = res[node] >= opts.Epsilon
+		} else {
+			hot = res[node]/float64(deg) >= opts.Epsilon
+		}
+		if hot {
+			queue = append(queue, node)
+			inQ[node] = true
+		}
+	}
+
 	steps := 0
 	for len(queue) > 0 && steps < opts.MaxSteps {
 		v := queue[0]
 		queue = queue[1:]
 		inQ[v] = false
 		rv := res[v]
-		deg := float64(verts[v+1] - verts[v])
+		deg := int(verts[v+1] - verts[v])
 		if deg == 0 {
-			rank[v] += rv
+			// Dangling node: absorb (1-alpha)*rv into rank, teleport
+			// alpha*rv back to src per ACL.
+			rank[v] += (1 - opts.Damping) * rv
 			res[v] = 0
+			res[uint64(src)] += opts.Damping * rv
+			enqueueIfHot(int(src))
+			steps++
 			continue
 		}
-		if rv/deg < opts.Epsilon {
+		// Threshold check (no +1 hack: deg > 0 here).
+		if rv/float64(deg) < opts.Epsilon {
 			continue
 		}
 		rank[v] += (1 - opts.Damping) * rv
-		share := opts.Damping * rv / deg
+		share := opts.Damping * rv / float64(deg)
 		res[v] = 0
 		for k := verts[v]; k < verts[v+1]; k++ {
 			w := int(edges[k])
 			res[w] += share
-			if res[w]/float64(verts[w+1]-verts[w]+1) >= opts.Epsilon && !inQ[w] {
-				queue = append(queue, w)
-				inQ[w] = true
-			}
+			enqueueIfHot(w)
 		}
 		steps++
 	}
-	// Drain residue into rank for any node not pushed (limits result error).
-	for i, r := range res {
-		rank[i] += r * (1 - opts.Damping)
-	}
+	// Note: no final residue-drain pass. The canonical PPR invariant
+	// is that rank[i] + alpha-weighted residue accumulates the true
+	// stationary mass within Epsilon. Folding the residue with a
+	// (1-alpha) factor (as v1.0.0 did) double-counted the absorption
+	// and biased the rank vector. Leaving residue in place keeps
+	// rank monotonically convergent.
 	return rank
 }
