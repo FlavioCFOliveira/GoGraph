@@ -12,6 +12,7 @@ package generation
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +30,10 @@ var ErrDrainTimeout = errors.New("generation: drain timeout")
 type Generation[W any] struct {
 	csr      *csr.CSR[W]
 	refcount atomic.Int64
+	// drainCond signals on the refcount-reaches-zero edge so that
+	// PublishWithDrain can sleep instead of busy-polling.
+	drainMu   sync.Mutex
+	drainCond *sync.Cond
 }
 
 // CSR returns the underlying snapshot. The pointer is valid only
@@ -47,11 +52,17 @@ type Publisher[W any] struct {
 	current atomic.Pointer[Generation[W]]
 }
 
+// newGeneration constructs a Generation with its sync.Cond wired up.
+func newGeneration[W any](c *csr.CSR[W]) *Generation[W] {
+	g := &Generation[W]{csr: c}
+	g.drainCond = sync.NewCond(&g.drainMu)
+	return g
+}
+
 // New returns a Publisher seeded with the given CSR as generation 0.
 func New[W any](initial *csr.CSR[W]) *Publisher[W] {
 	p := &Publisher[W]{}
-	g := &Generation[W]{csr: initial}
-	p.current.Store(g)
+	p.current.Store(newGeneration(initial))
 	return p
 }
 
@@ -75,12 +86,17 @@ func (p *Publisher[W]) Acquire() *Generation[W] {
 	}
 }
 
-// Release decrements g's refcount.
+// Release decrements g's refcount and signals any goroutine waiting
+// inside [Publisher.PublishWithDrain] for the refcount to hit zero.
 func (p *Publisher[W]) Release(g *Generation[W]) {
 	if g == nil {
 		return
 	}
-	g.refcount.Add(-1)
+	if g.refcount.Add(-1) == 0 && g.drainCond != nil {
+		g.drainMu.Lock()
+		g.drainCond.Broadcast()
+		g.drainMu.Unlock()
+	}
 }
 
 // Publish atomically swaps in a fresh generation built from c and
@@ -88,7 +104,7 @@ func (p *Publisher[W]) Release(g *Generation[W]) {
 // reclaimed until its refcount drains to zero (which happens
 // naturally as readers Release).
 func (p *Publisher[W]) Publish(c *csr.CSR[W]) *Generation[W] {
-	next := &Generation[W]{csr: c}
+	next := newGeneration(c)
 	p.current.Store(next)
 	return next
 }
@@ -103,21 +119,36 @@ func (p *Publisher[W]) Publish(c *csr.CSR[W]) *Generation[W] {
 // blocks indefinitely.
 func (p *Publisher[W]) PublishWithDrain(c *csr.CSR[W], timeout time.Duration) (*Generation[W], error) {
 	prev := p.current.Load()
-	next := &Generation[W]{csr: c}
+	next := newGeneration(c)
 	p.current.Store(next)
 	if prev == nil {
 		return next, nil
 	}
-	deadline := time.Time{}
+	// Wait for prev's refcount to reach zero. We use the sync.Cond
+	// broadcast from Release so this path is event-driven, not a
+	// busy-poll. The timeout (if any) is enforced by a single goroutine
+	// that broadcasts after the deadline so the wait loop can wake and
+	// check the deadline.
+	timedOut := atomic.Bool{}
+	var timer *time.Timer
 	if timeout > 0 {
-		deadline = time.Now().Add(timeout)
+		timer = time.AfterFunc(timeout, func() {
+			timedOut.Store(true)
+			prev.drainMu.Lock()
+			prev.drainCond.Broadcast()
+			prev.drainMu.Unlock()
+		})
+		defer timer.Stop()
 	}
+	prev.drainMu.Lock()
 	for prev.refcount.Load() > 0 {
-		if !deadline.IsZero() && time.Now().After(deadline) {
+		if timedOut.Load() {
+			prev.drainMu.Unlock()
 			return next, ErrDrainTimeout
 		}
-		time.Sleep(50 * time.Microsecond)
+		prev.drainCond.Wait()
 	}
+	prev.drainMu.Unlock()
 	return next, nil
 }
 
