@@ -107,7 +107,12 @@ func mustWriteSnapshotFixture() {
 	}
 
 	m := snapshot.Manifest{
-		Version:   snapshot.ManifestVersion,
+		// Pin to manifest version 1 explicitly: this fixture is the
+		// canonical v1 sample used by store/snapshot's compat tests.
+		// snapshot.ManifestVersion bumps over time as new components
+		// are added (v2 added labels.bin); the v1 fixture must stay
+		// v1 forever to preserve the forward-compat guarantee.
+		Version:   1,
 		CreatedAt: FixedTime,
 		Order:     c.Order(),
 		Size:      c.Size(),

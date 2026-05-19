@@ -48,6 +48,7 @@ on the read path, while writes serialise.
   snapshot/
     manifest.json    — versioned index of files + CRC32C per file
     csr.bin          — serialised CSR (vertices / edges / weights)
+    labels.bin       — serialised LPG labels (v2 manifests only)
 ```
 
 ## WAL payload schema
@@ -239,13 +240,30 @@ No on-disk migration of existing `OpAddEdge` frames is required —
 post-T8 readers continue to walk them with `W=zero`, exactly as
 pre-T8 readers did.
 
-Future revisions will add `snapshot/labels.bin`,
-`snapshot/properties.bin`, and `snapshot/indexes/*.bin` to extend
-the snapshot to the full LPG state.
+Future revisions will add `snapshot/properties.bin` and
+`snapshot/indexes/*.bin` to extend the snapshot to the full LPG
+state. `snapshot/labels.bin` is shipped as of manifest **v2** (see
+below).
 
 ## Snapshot file format
 
-`snapshot/manifest.json`:
+The manifest schema is versioned. The build understands two versions
+transparently:
+
+- **v1** — `csr.bin` only. Written by the legacy
+  `snapshot.WriteSnapshotCSR` / `WriteSnapshotCSRCtx` helpers and by
+  the current `store/checkpoint.Checkpointer`. The on-disk shape is
+  identical to v1.0.0 so existing fixtures keep loading bit-for-bit.
+- **v2** — `csr.bin` + `labels.bin`. Written by
+  `snapshot.WriteSnapshotFull` / `WriteSnapshotFullCtx`. Adds durable
+  LPG label state to the snapshot.
+
+`snapshot.LoadManifest` accepts both versions; a future version 3+
+manifest surfaces `snapshot.ErrManifestUnsupported`. The high-level
+`snapshot.LoadSnapshotFull` reads both shapes and returns an empty
+`LabelsReadback` for v1 directories.
+
+### `snapshot/manifest.json` (v1)
 
 ```json
 {
@@ -259,7 +277,22 @@ the snapshot to the full LPG state.
 }
 ```
 
-`snapshot/csr.bin` (binary):
+### `snapshot/manifest.json` (v2)
+
+```json
+{
+  "version": 2,
+  "created_at": "2026-05-19T14:00:00Z",
+  "order": 1000,
+  "size": 5000,
+  "files": [
+    {"name": "csr.bin",    "size": 24014, "crc32c": 305419896},
+    {"name": "labels.bin", "size":   312, "crc32c":  47119123}
+  ]
+}
+```
+
+### `snapshot/csr.bin` (binary, identical across v1 and v2)
 
 | Offset  | Field            | Type                          |
 |---------|------------------|-------------------------------|
@@ -270,6 +303,60 @@ the snapshot to the full LPG state.
 | 18      | vertices         | uint64[nVertices]             |
 | ...     | edges            | uint64[nEdges]                |
 | ...     | weights          | raw[weightSize·nEdges] (opt.) |
+
+### `snapshot/labels.bin` (binary, v2 only)
+
+Little-endian throughout. The whole file is covered by the CRC32C
+stored in the manifest entry, including the magic header.
+
+| Offset  | Field             | Type                                  |
+|---------|-------------------|---------------------------------------|
+| 0       | magic             | uint32 LE = `0x4C424C53` (`'SLBL'`)   |
+| 4       | formatVersion     | uint32 LE (currently 1)               |
+| 8       | stringTableLen    | uint64 LE                             |
+| ...     | strings           | stringTableLen × (uint32 utf8Len, [utf8Len]byte) |
+| ...     | nodeEntries       | uint64 LE                             |
+| ...     | node records      | nodeEntries × (uint64 NodeID, uint32 labelStringIdx) |
+| ...     | edgeEntries       | uint64 LE                             |
+| ...     | edge records      | edgeEntries × (uint64 src, uint64 dst, uint32 labelStringIdx) |
+
+The string table is the deduplicated set of label names, written in
+the order the writer interns them from `lpg.LabelRegistry`. Each
+record's `labelStringIdx` indexes into that table. A reader rebuilds
+the registry by re-interning each string in order; because
+`lpg.LabelID` is assigned in interning order, the resulting LabelIDs
+match the IDs that were live when the snapshot was taken, with no
+extra remap step.
+
+`labels.bin` is independent of the manifest version: a future change
+to the labels layout (e.g., parallel-edge labels) bumps the
+`formatVersion` byte without forcing a `manifest.json` schema bump.
+
+#### Recovery semantics
+
+`snapshot.ApplyLabelsToGraph` re-attaches the readback to a live
+`*lpg.Graph`. Its pre-condition is that the underlying
+`graph.Mapper` is already populated with every NodeID the labels
+reference. In the standard durability path that pre-condition is
+met by the WAL replay performed earlier in `recovery.OpenString` /
+`OpenWithCodec` / `OpenWithOptions`. Label records whose NodeID
+cannot be resolved by the mapper are skipped and counted via
+`store.snapshot.ApplyLabels.unresolved` so observability surfaces
+the loss instead of failing recovery.
+
+Edge label records whose endpoints resolve but whose edge is absent
+from the adjacency list (for example, when the CSR has not been
+applied) are skipped and counted via
+`store.snapshot.ApplyLabels.edgeMissing`. This matches
+`lpg.Graph.SetEdgeLabel`'s own no-op-on-missing-edge contract.
+
+#### Migrating a v1 snapshot directory
+
+Existing v1 directories keep loading under all current `snapshot`
+APIs: `Open`, `LoadSnapshotFull`, and `LoadManifest`. There is no
+on-disk migration step — the next call to
+`snapshot.WriteSnapshotFull` simply emits a fresh v2 directory at
+the same path under the atomic `.tmp` + `os.Rename` protocol.
 
 ## Checkpoint policy
 

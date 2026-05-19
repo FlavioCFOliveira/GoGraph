@@ -29,8 +29,13 @@ import (
 type Result[N comparable, W any] struct {
 	Graph       *lpg.Graph[N, W]
 	SnapshotHit bool
-	WALOps      int
-	TailErr     error
+	// SnapshotLabels reports how many label records the snapshot
+	// contributed back into the graph after WAL replay. v1
+	// snapshots (CSR-only) leave this at 0; v2 snapshots (CSR +
+	// labels.bin) populate it.
+	SnapshotLabels int
+	WALOps         int
+	TailErr        error
 }
 
 // Op is the decoded form of a transaction-encoded WAL payload,
@@ -178,7 +183,7 @@ func OpenString(dir string) (Result[string, int64], error) {
 // frames replayed; on cancellation returns the partially-recovered
 // Result paired with the wrapped ctx.Err.
 //
-//nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
+//nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
 func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], error) {
 	defer metrics.Time("store.recovery.OpenStringCtx")()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
@@ -189,44 +194,66 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 		return res, err
 	}
 	snapDir := filepath.Join(dir, "snapshot")
+	var snapLabels snapshot.LabelsReadback
+	var haveSnapLabels bool
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
-		if _, err := snapshot.Open(snapDir); err != nil {
+		loaded, err := snapshot.LoadSnapshotFull(snapDir)
+		if err != nil {
 			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
 			return res, fmt.Errorf("recovery: snapshot open: %w", err)
 		}
 		res.SnapshotHit = true
+		snapLabels = loaded.Labels
+		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 	}
 
 	walPath := filepath.Join(dir, "wal")
+	walMissing := false
 	if _, err := os.Stat(walPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return res, nil
+		if !errors.Is(err, os.ErrNotExist) {
+			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
+			return res, err
 		}
-		metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-		return res, err
+		walMissing = true
 	}
-	r, err := wal.OpenReader(walPath)
-	if err != nil {
-		metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-		return res, err
-	}
-	defer func() { _ = r.Close() }()
-	for f := range r.Frames() {
-		if res.WALOps&0xFFF == 0 {
-			if err := ctx.Err(); err != nil {
-				metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-				return res, err
+	if !walMissing {
+		r, err := wal.OpenReader(walPath)
+		if err != nil {
+			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
+			return res, err
+		}
+		defer func() { _ = r.Close() }()
+		for f := range r.Frames() {
+			if res.WALOps&0xFFF == 0 {
+				if err := ctx.Err(); err != nil {
+					metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
+					return res, err
+				}
 			}
+			op, derr := Decode(f.Payload)
+			if derr != nil {
+				res.TailErr = derr
+				break
+			}
+			applyOpString(g, &op)
+			res.WALOps++
 		}
-		op, derr := Decode(f.Payload)
-		if derr != nil {
-			res.TailErr = derr
-			break
-		}
-		applyOpString(g, &op)
-		res.WALOps++
+		res.TailErr = r.TailError()
 	}
-	res.TailErr = r.TailError()
+
+	// Replay any snapshot-side labels after the WAL is fully applied
+	// so the mapper has every node interned that the WAL referenced.
+	// Snapshot label records whose NodeIDs the mapper cannot resolve
+	// are dropped (with metric) by ApplyLabelsToGraph, not surfaced
+	// as an error: this keeps recovery resilient against future
+	// snapshot-without-WAL flows.
+	if haveSnapLabels {
+		if err := snapshot.ApplyLabelsToGraph(g, snapLabels); err != nil {
+			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
+			return res, fmt.Errorf("recovery: apply snapshot labels: %w", err)
+		}
+		res.SnapshotLabels = len(snapLabels.NodeLabels) + len(snapLabels.EdgeLabels)
+	}
 	return res, nil
 }
 
@@ -370,6 +397,8 @@ func OpenWithOptionsCtx[N comparable, W any](ctx context.Context, dir string, op
 // [OpenWithOptionsCtx]. wcodec is nil for the codec-only path; when
 // non-nil the function honours [txn.OpAddEdgeWeighted] records by
 // decoding the typed weight payload before applying.
+//
+//nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
 func openCodec[N comparable, W any](
 	ctx context.Context,
 	dir string,
@@ -384,49 +413,68 @@ func openCodec[N comparable, W any](
 		return res, err
 	}
 	snapDir := filepath.Join(dir, "snapshot")
+	var snapLabels snapshot.LabelsReadback
+	var haveSnapLabels bool
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
-		if _, err := snapshot.Open(snapDir); err != nil {
+		loaded, err := snapshot.LoadSnapshotFull(snapDir)
+		if err != nil {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			return res, fmt.Errorf("recovery: snapshot open: %w", err)
 		}
 		res.SnapshotHit = true
+		snapLabels = loaded.Labels
+		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 	}
 
 	walPath := filepath.Join(dir, "wal")
+	walMissing := false
 	if _, err := os.Stat(walPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return res, nil
+		if !errors.Is(err, os.ErrNotExist) {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, err
 		}
-		metrics.IncCounter("store.recovery.openCodec.errors", 1)
-		return res, err
+		walMissing = true
 	}
-	r, err := wal.OpenReader(walPath)
-	if err != nil {
-		metrics.IncCounter("store.recovery.openCodec.errors", 1)
-		return res, err
-	}
-	defer func() { _ = r.Close() }()
-	for f := range r.Frames() {
-		if res.WALOps&0xFFF == 0 {
-			if err := ctx.Err(); err != nil {
-				metrics.IncCounter("store.recovery.openCodec.errors", 1)
-				return res, err
+	if !walMissing {
+		r, err := wal.OpenReader(walPath)
+		if err != nil {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, err
+		}
+		defer func() { _ = r.Close() }()
+		for f := range r.Frames() {
+			if res.WALOps&0xFFF == 0 {
+				if err := ctx.Err(); err != nil {
+					metrics.IncCounter("store.recovery.openCodec.errors", 1)
+					return res, err
+				}
 			}
+			op, derr := Decode(f.Payload)
+			if derr != nil {
+				res.TailErr = derr
+				break
+			}
+			if !applyOpCodec(g, &op, codec, wcodec) {
+				// A v1 frame met an instantiation with no inverse; stop
+				// replay so callers see the cut-off boundary deterministically.
+				res.TailErr = errors.New("recovery: v1 frame is not decodable through the supplied codec")
+				break
+			}
+			res.WALOps++
 		}
-		op, derr := Decode(f.Payload)
-		if derr != nil {
-			res.TailErr = derr
-			break
-		}
-		if !applyOpCodec(g, &op, codec, wcodec) {
-			// A v1 frame met an instantiation with no inverse; stop
-			// replay so callers see the cut-off boundary deterministically.
-			res.TailErr = errors.New("recovery: v1 frame is not decodable through the supplied codec")
-			break
-		}
-		res.WALOps++
+		res.TailErr = r.TailError()
 	}
-	res.TailErr = r.TailError()
+
+	// Apply snapshot-side labels after WAL replay — see the matching
+	// block in OpenStringCtx for the rationale on ordering and the
+	// resilient skip-on-unresolved semantics.
+	if haveSnapLabels {
+		if err := snapshot.ApplyLabelsToGraph(g, snapLabels); err != nil {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, fmt.Errorf("recovery: apply snapshot labels: %w", err)
+		}
+		res.SnapshotLabels = len(snapLabels.NodeLabels) + len(snapLabels.EdgeLabels)
+	}
 	return res, nil
 }
 

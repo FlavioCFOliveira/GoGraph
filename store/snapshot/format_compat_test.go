@@ -22,8 +22,13 @@ func TestCompat_V1FixtureLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", dir, err)
 	}
-	if loaded.Manifest.Version != ManifestVersion {
-		t.Fatalf("Manifest.Version = %d, want %d", loaded.Manifest.Version, ManifestVersion)
+	// The fixture is the frozen v1 sample committed at
+	// testdata/v1/sample; its on-disk manifest carries version 1
+	// verbatim. The build's ManifestVersion has since advanced to 2
+	// (current shipped highest), and LoadManifest accepts both
+	// transparently: a v1 directory loaded here returns Version=1.
+	if loaded.Manifest.Version != 1 {
+		t.Fatalf("Manifest.Version = %d, want 1 (v1 fixture)", loaded.Manifest.Version)
 	}
 	if len(loaded.Manifest.Files) != 1 || loaded.Manifest.Files[0].Name != CSRFile {
 		t.Fatalf("Files = %v, want exactly one entry for %q", loaded.Manifest.Files, CSRFile)

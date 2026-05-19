@@ -21,8 +21,18 @@ import (
 	"gograph/internal/metrics"
 )
 
-// ManifestVersion is the on-disk schema version this build writes.
-const ManifestVersion = 1
+// ManifestVersion is the highest on-disk schema version this build
+// understands. The current build writes version 2 manifests via
+// [WriteSnapshotFull] and version 1 manifests via the legacy
+// [WriteSnapshotCSR] code path (CSR-only snapshots, kept for backward
+// compatibility). The loader transparently accepts both.
+const ManifestVersion = 2
+
+// manifestVersionLegacy is the schema version emitted by
+// [WriteSnapshotCSR] and [WriteSnapshotCSRCtx]. Those writers retain
+// the v1 shape on disk so existing readers and the v1 fixture
+// continue to load bit-for-bit unchanged.
+const manifestVersionLegacy = 1
 
 // ErrManifestUnsupported is returned by [LoadManifest] when the
 // manifest version is newer than this build understands.

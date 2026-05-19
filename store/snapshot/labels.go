@@ -1,0 +1,494 @@
+package snapshot
+
+import (
+	"bufio"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"hash/crc32"
+	"io"
+
+	"gograph/graph"
+	"gograph/graph/lpg"
+	"gograph/internal/metrics"
+)
+
+// LabelsFile is the conventional file name carrying the durable LPG
+// label state inside a v2 snapshot directory. It is a sibling of
+// [CSRFile] and is referenced by an additional entry in the
+// [Manifest.Files] slice.
+const LabelsFile = "labels.bin"
+
+// labelsMagic is the four-byte magic ('S','L','B','L') that prefixes
+// every labels.bin file. Stored as a uint32 in little-endian; spelled
+// out as 0x4C424C53 because the magic bytes appear on disk as 'SLBL'.
+const labelsMagic uint32 = 0x4C424C53
+
+// labelsFormatVersion is the labels.bin internal format version. It
+// is independent of [ManifestVersion]: a future labels.bin layout
+// change bumps this byte without forcing a manifest schema bump.
+const labelsFormatVersion uint32 = 1
+
+// ErrLabelsCorrupted is returned by [ReadLabels] when the labels.bin
+// file is structurally malformed (bad magic, truncated record, or a
+// label-string index that points beyond the embedded string table).
+var ErrLabelsCorrupted = errors.New("snapshot: labels.bin corrupted")
+
+// NodeLabelEntry pairs a NodeID with the string-table index of one
+// label name attached to that node. A node carrying N labels yields
+// N entries.
+type NodeLabelEntry struct {
+	NodeID    uint64
+	StringIdx uint32
+}
+
+// EdgeLabelEntry pairs an (src, dst) NodeID couple with the
+// string-table index of one label name attached to that edge. An
+// edge carrying N labels yields N entries; parallel edges between
+// the same endpoints fold into the same edgeKey on disk just as they
+// do in [lpg.Graph]'s in-memory edgeBag.
+type EdgeLabelEntry struct {
+	Src       uint64
+	Dst       uint64
+	StringIdx uint32
+}
+
+// LabelsReadback is the structural parse of a labels.bin file. The
+// caller materialises it back into a live [lpg.Graph] via
+// [ApplyLabelsToGraph] once the underlying mapper is populated.
+type LabelsReadback struct {
+	Strings    []string
+	NodeLabels []NodeLabelEntry
+	EdgeLabels []EdgeLabelEntry
+}
+
+// WriteLabels serialises every node and edge label attached to g into
+// w in the labels.bin format documented at the top of this file. It
+// returns the number of bytes written and the CRC32C of the
+// serialised payload — both stored in the manifest's [FileEntry] for
+// the labels.bin component so [Open] / [LoadSnapshotFull] can verify
+// integrity at load time.
+//
+// The CRC32C covers the entire on-disk file, including the magic
+// header. This lets the manifest's CRC field validate every byte of
+// labels.bin end-to-end without a separate inner-payload checksum.
+//
+// The on-disk string table is populated by walking g's
+// [lpg.LabelRegistry] in interning order; the labelStringIdx written
+// for each (node | edge) record indexes into that table. Because
+// LabelID is itself assigned in interning order, this preserves the
+// registry's identity across save and load: the reader interns each
+// name back in the same order and observes the same LabelID values
+// without an extra remap step.
+//
+// The walk holds the registry's RLock for the duration of the string
+// table emission; node/edge enumeration uses the same lock-free /
+// RLock-only primitives the public LPG accessors expose.
+//
+//nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
+func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
+	defer metrics.Time("store.snapshot.WriteLabels")()
+
+	bw := bufio.NewWriterSize(w, 1<<20)
+	hasher := crc32.New(castagnoli)
+	tee := io.MultiWriter(bw, hasher)
+
+	if err := binary.Write(tee, binary.LittleEndian, labelsMagic); err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+	if err := binary.Write(tee, binary.LittleEndian, labelsFormatVersion); err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+
+	// Snapshot the label name table in registry order. Walking the
+	// registry under its own RLock means a concurrent SetNodeLabel /
+	// SetEdgeLabel that adds a brand-new name is serialised against
+	// the snapshot writer — the writer either observes the new name
+	// (and the matching node/edge entry below) or it does not, but
+	// never observes a name with no entry or an entry with no name.
+	reg := g.Registry()
+	names := snapshotRegistry(reg)
+	if err := binary.Write(tee, binary.LittleEndian, uint64(len(names))); err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+	for _, name := range names {
+		if uint64(len(name)) > uint64(^uint32(0)) {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, fmt.Errorf("snapshot: label name too long: %d bytes", len(name))
+		}
+		if err := binary.Write(tee, binary.LittleEndian, uint32(len(name))); err != nil {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, err
+		}
+		if _, err := tee.Write([]byte(name)); err != nil {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, err
+		}
+	}
+
+	// Collect node-label records by walking the underlying mapper:
+	// every interned (NodeID, N) pair contributes one record per
+	// label attached to N. The mapper Walk holds each shard's RLock
+	// only across its own slice — concurrent label mutations on
+	// other shards run in parallel.
+	nodeRecs, err := collectNodeLabelRecords(g, names)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+	if err := binary.Write(tee, binary.LittleEndian, uint64(len(nodeRecs))); err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+	for i := range nodeRecs {
+		if err := binary.Write(tee, binary.LittleEndian, nodeRecs[i].NodeID); err != nil {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, err
+		}
+		if err := binary.Write(tee, binary.LittleEndian, nodeRecs[i].StringIdx); err != nil {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, err
+		}
+	}
+
+	edgeRecs, err := collectEdgeLabelRecords(g, names)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+	if err := binary.Write(tee, binary.LittleEndian, uint64(len(edgeRecs))); err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+	for i := range edgeRecs {
+		if err := binary.Write(tee, binary.LittleEndian, edgeRecs[i].Src); err != nil {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, err
+		}
+		if err := binary.Write(tee, binary.LittleEndian, edgeRecs[i].Dst); err != nil {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, err
+		}
+		if err := binary.Write(tee, binary.LittleEndian, edgeRecs[i].StringIdx); err != nil {
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, err
+		}
+	}
+
+	if err := bw.Flush(); err != nil {
+		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+		return 0, 0, err
+	}
+
+	// Total bytes: 4 (magic) + 4 (formatVersion) + 8 (stringCount) +
+	// for each name: 4 (utf8Len) + utf8Len bytes;
+	// + 8 (nodeCount) + nodeCount * (8 + 4);
+	// + 8 (edgeCount) + edgeCount * (8 + 8 + 4).
+	total := int64(4 + 4 + 8)
+	for _, name := range names {
+		total += 4 + int64(len(name))
+	}
+	total += 8 + int64(len(nodeRecs))*int64(8+4)
+	total += 8 + int64(len(edgeRecs))*int64(8+8+4)
+	return total, hasher.Sum32(), nil
+}
+
+// snapshotRegistry returns the label-name table in interning order.
+// We rely on [lpg.LabelRegistry.Resolve] which honours the registry's
+// own RWMutex; iterating by id from 0 upwards is well-defined
+// because LabelID is dense and assigned monotonically by
+// [lpg.LabelRegistry.Intern].
+func snapshotRegistry(reg *lpg.LabelRegistry) []string {
+	out := make([]string, 0, 16)
+	for i := uint32(0); ; i++ {
+		name, ok := reg.Resolve(lpg.LabelID(i))
+		if !ok {
+			break
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// collectNodeLabelRecords walks every interned node and emits one
+// [NodeLabelEntry] per (node, label) pair. names is the registry
+// snapshot taken by [snapshotRegistry]; we re-intern each label name
+// to translate the LPG's runtime LabelID back into the snapshot's
+// string-table index. The two indexes are equal in practice (both
+// follow interning order), but the explicit lookup keeps the writer
+// robust against a future divergence.
+func collectNodeLabelRecords[N comparable, W any](
+	g *lpg.Graph[N, W],
+	names []string,
+) ([]NodeLabelEntry, error) {
+	idx := buildNameIndex(names)
+	out := make([]NodeLabelEntry, 0, 32)
+	var walkErr error
+	g.AdjList().Mapper().Walk(func(id graph.NodeID, n N) bool {
+		labs := g.NodeLabels(n)
+		for _, name := range labs {
+			si, ok := idx[name]
+			if !ok {
+				walkErr = fmt.Errorf("snapshot: node label %q not in registry snapshot", name)
+				return false
+			}
+			out = append(out, NodeLabelEntry{NodeID: uint64(id), StringIdx: si})
+		}
+		return true
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return out, nil
+}
+
+// collectEdgeLabelRecords walks every interned source node, snapshots
+// its adjacency via the lock-free [adjlist.AdjList.LoadEntry], and
+// emits one [EdgeLabelEntry] per (src, dst, label) triple. Each
+// (src, dst) pair is visited once even when the graph is a
+// multigraph: edge labels in v1 are keyed by endpoints only, mirroring
+// the LPG's in-memory edgeBag semantics.
+func collectEdgeLabelRecords[N comparable, W any](
+	g *lpg.Graph[N, W],
+	names []string,
+) ([]EdgeLabelEntry, error) {
+	idx := buildNameIndex(names)
+	out := make([]EdgeLabelEntry, 0, 32)
+	var walkErr error
+	adj := g.AdjList()
+	adj.Mapper().Walk(func(srcID graph.NodeID, srcN N) bool {
+		neighbours, _ := adj.LoadEntry(srcID)
+		if len(neighbours) == 0 {
+			return true
+		}
+		// De-duplicate parallel edges: emit each (src, dst) endpoint
+		// pair once. v1 edge-label semantics already collapse parallel
+		// edges into a single edgeBag entry, so the on-disk format
+		// preserves that semantic by visiting each pair exactly once.
+		seen := make(map[graph.NodeID]struct{}, len(neighbours))
+		for _, dstID := range neighbours {
+			if _, dup := seen[dstID]; dup {
+				continue
+			}
+			seen[dstID] = struct{}{}
+			dstN, ok := adj.Mapper().Resolve(dstID)
+			if !ok {
+				continue
+			}
+			labs := g.EdgeLabels(srcN, dstN)
+			for _, name := range labs {
+				si, ok := idx[name]
+				if !ok {
+					walkErr = fmt.Errorf("snapshot: edge label %q not in registry snapshot", name)
+					return false
+				}
+				out = append(out, EdgeLabelEntry{
+					Src:       uint64(srcID),
+					Dst:       uint64(dstID),
+					StringIdx: si,
+				})
+			}
+		}
+		return true
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return out, nil
+}
+
+// buildNameIndex returns name -> stringTableIndex.
+func buildNameIndex(names []string) map[string]uint32 {
+	m := make(map[string]uint32, len(names))
+	for i, n := range names {
+		m[n] = uint32(i)
+	}
+	return m
+}
+
+// ReadLabels parses a labels.bin payload produced by [WriteLabels]. It
+// performs strict structural validation: a missing or wrong magic, a
+// future format-version byte, a truncated record, or an out-of-range
+// string-table index all surface as [ErrLabelsCorrupted].
+//
+// The caller is responsible for verifying the surrounding manifest
+// CRC matches the file bytes (the [Open] / [LoadSnapshotFull]
+// helpers do this); this function only enforces the structural
+// contract.
+//
+//nolint:gocyclo // labels read: header + string table + node records + edge records, each bounds-checked
+func ReadLabels(r io.Reader) (LabelsReadback, error) {
+	defer metrics.Time("store.snapshot.ReadLabels")()
+	br := bufio.NewReader(r)
+
+	var magic uint32
+	if err := binary.Read(br, binary.LittleEndian, &magic); err != nil {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+	}
+	if magic != labelsMagic {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: bad magic %#x", ErrLabelsCorrupted, magic)
+	}
+	var version uint32
+	if err := binary.Read(br, binary.LittleEndian, &version); err != nil {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+	}
+	if version != labelsFormatVersion {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: unsupported labels format version %d",
+			ErrLabelsCorrupted, version)
+	}
+
+	var stringCount uint64
+	if err := binary.Read(br, binary.LittleEndian, &stringCount); err != nil {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+	}
+	if stringCount > 1<<30 {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: implausible string count %d",
+			ErrLabelsCorrupted, stringCount)
+	}
+	strings := make([]string, stringCount)
+	for i := uint64(0); i < stringCount; i++ {
+		var n uint32
+		if err := binary.Read(br, binary.LittleEndian, &n); err != nil {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		}
+		if n > 1<<20 {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: implausible string len %d",
+				ErrLabelsCorrupted, n)
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(br, buf); err != nil {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		}
+		strings[i] = string(buf)
+	}
+
+	var nodeCount uint64
+	if err := binary.Read(br, binary.LittleEndian, &nodeCount); err != nil {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+	}
+	if nodeCount > 1<<40 {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: implausible node-label count %d",
+			ErrLabelsCorrupted, nodeCount)
+	}
+	nodes := make([]NodeLabelEntry, nodeCount)
+	for i := uint64(0); i < nodeCount; i++ {
+		if err := binary.Read(br, binary.LittleEndian, &nodes[i].NodeID); err != nil {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		}
+		if err := binary.Read(br, binary.LittleEndian, &nodes[i].StringIdx); err != nil {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		}
+		if uint64(nodes[i].StringIdx) >= stringCount {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: node string idx %d >= %d",
+				ErrLabelsCorrupted, nodes[i].StringIdx, stringCount)
+		}
+	}
+
+	var edgeCount uint64
+	if err := binary.Read(br, binary.LittleEndian, &edgeCount); err != nil {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+	}
+	if edgeCount > 1<<40 {
+		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+		return LabelsReadback{}, fmt.Errorf("%w: implausible edge-label count %d",
+			ErrLabelsCorrupted, edgeCount)
+	}
+	edges := make([]EdgeLabelEntry, edgeCount)
+	for i := uint64(0); i < edgeCount; i++ {
+		if err := binary.Read(br, binary.LittleEndian, &edges[i].Src); err != nil {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		}
+		if err := binary.Read(br, binary.LittleEndian, &edges[i].Dst); err != nil {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		}
+		if err := binary.Read(br, binary.LittleEndian, &edges[i].StringIdx); err != nil {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		}
+		if uint64(edges[i].StringIdx) >= stringCount {
+			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+			return LabelsReadback{}, fmt.Errorf("%w: edge string idx %d >= %d",
+				ErrLabelsCorrupted, edges[i].StringIdx, stringCount)
+		}
+	}
+
+	return LabelsReadback{
+		Strings:    strings,
+		NodeLabels: nodes,
+		EdgeLabels: edges,
+	}, nil
+}
+
+// ApplyLabelsToGraph replays rb into a live g. The pre-condition is
+// that g's underlying mapper has already been populated with every
+// NodeID referenced by rb — typically by replaying the WAL prefix
+// covered by the snapshot, or by re-issuing the original AddNode /
+// AddEdge calls. Records whose NodeID cannot be resolved by the
+// mapper are skipped and counted via the
+// `store.snapshot.ApplyLabels.unresolved` metric counter; the
+// function does not return an error for them so a partial mapper
+// degrades cleanly rather than aborting recovery mid-way.
+//
+// Edge label records whose endpoints are resolvable but whose edge
+// is absent from the adjacency list (e.g., the CSR was not yet
+// applied) are likewise skipped and counted under
+// `store.snapshot.ApplyLabels.edgeMissing`; this matches
+// [lpg.Graph.SetEdgeLabel]'s own no-op-on-missing-edge contract.
+func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadback) error {
+	defer metrics.Time("store.snapshot.ApplyLabelsToGraph")()
+	adj := g.AdjList()
+	for _, nl := range rb.NodeLabels {
+		if uint64(nl.StringIdx) >= uint64(len(rb.Strings)) {
+			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
+			continue
+		}
+		n, ok := adj.Mapper().Resolve(graph.NodeID(nl.NodeID))
+		if !ok {
+			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
+			continue
+		}
+		g.SetNodeLabel(n, rb.Strings[nl.StringIdx])
+	}
+	for _, el := range rb.EdgeLabels {
+		if uint64(el.StringIdx) >= uint64(len(rb.Strings)) {
+			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
+			continue
+		}
+		srcN, ok := adj.Mapper().Resolve(graph.NodeID(el.Src))
+		if !ok {
+			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
+			continue
+		}
+		dstN, ok := adj.Mapper().Resolve(graph.NodeID(el.Dst))
+		if !ok {
+			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
+			continue
+		}
+		if !adj.HasEdge(srcN, dstN) {
+			metrics.IncCounter("store.snapshot.ApplyLabels.edgeMissing", 1)
+			continue
+		}
+		g.SetEdgeLabel(srcN, dstN, rb.Strings[el.StringIdx])
+	}
+	return nil
+}

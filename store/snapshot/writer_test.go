@@ -56,8 +56,11 @@ func TestWriteSnapshotCSR_AtomicPublish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadManifestFile: %v", err)
 	}
-	if m.Version != ManifestVersion {
-		t.Fatalf("Version = %d, want %d", m.Version, ManifestVersion)
+	// WriteSnapshotCSR is the legacy v1 path: it always emits
+	// version=1 on disk so existing v1 readers and the v1 fixture
+	// continue to load bit-for-bit unchanged.
+	if m.Version != 1 {
+		t.Fatalf("Version = %d, want 1 (legacy v1 writer)", m.Version)
 	}
 	if len(m.Files) != 1 || m.Files[0].Name != CSRFile {
 		t.Fatalf("Files = %v", m.Files)

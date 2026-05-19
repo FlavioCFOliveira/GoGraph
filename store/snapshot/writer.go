@@ -174,9 +174,12 @@ func ReadCSR(r io.Reader) (CSRReadback, error) {
 	}, nil
 }
 
-// WriteSnapshotCSR is the high-level helper that lays a snapshot
-// directory containing a manifest plus the CSR. Atomic publication
-// is achieved by assembling the snapshot under dir + ".tmp" and
+// WriteSnapshotCSR is the legacy high-level helper that lays a
+// snapshot directory containing a v1 manifest plus the CSR. It is
+// retained for backward compatibility: callers that also need LPG
+// label durability must use [WriteSnapshotFull] which writes a v2
+// manifest with both csr.bin and labels.bin. Atomic publication is
+// achieved by assembling the snapshot under dir + ".tmp" and
 // renaming it to dir on success.
 func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotCSR")()
@@ -236,7 +239,7 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 	}
 
 	m := Manifest{
-		Version:   ManifestVersion,
+		Version:   manifestVersionLegacy,
 		CreatedAt: time.Now().UTC(),
 		Order:     c.Order(),
 		Size:      c.Size(),

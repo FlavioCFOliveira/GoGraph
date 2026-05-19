@@ -43,8 +43,12 @@ func TestCheckpoint_TriggerProducesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot.Open: %v", err)
 	}
-	if loaded.Manifest.Version != snapshot.ManifestVersion {
-		t.Fatalf("manifest version %d, want %d", loaded.Manifest.Version, snapshot.ManifestVersion)
+	// The checkpointer calls snapshot.WriteSnapshotCSR (the legacy
+	// v1 CSR-only writer), so the manifest carries version 1
+	// regardless of the build's ManifestVersion constant. A later
+	// sprint extends the checkpointer to write v2 (CSR + labels).
+	if loaded.Manifest.Version != 1 {
+		t.Fatalf("manifest version %d, want 1 (legacy CSR-only checkpoint)", loaded.Manifest.Version)
 	}
 
 	stats := cp.Stats()
