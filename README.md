@@ -153,7 +153,7 @@ Benchmarks (Apple M4, Go 1.26.3):
 |---|---|
 | `Mapper.Intern` (hot key) | 17 ns/op, 0 allocs |
 | `adjlist.HasEdge` (hot cache) | 49 ns/op, 0 allocs |
-| `csr.NeighboursByID` | 11 ns/op, 0 allocs |
+| `csr.NeighboursByID` | 10.6 ns/op, 0 allocs |
 | `csr.BuildFromAdjList` of 10^7 edges | 51 ms |
 | `search.BFS` on 10^7-node chain | 38 ms, 1.25 MB peak, 0 allocs/call after warmup |
 | `search.Dijkstra` on 1M-node / 4M-edge random graph | 320 ms |

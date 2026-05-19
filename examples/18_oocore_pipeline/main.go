@@ -23,7 +23,9 @@ func main() {
 	defer func() { _ = os.RemoveAll(dir) }()
 	outPath := filepath.Join(dir, "graph.csr")
 
-	// Step 1 — read an edge-list CSV into the bulk loader.
+	// Step 1 — read an edge-list CSV via the in-memory CSV reader
+	// (csv.ReadInto returns an adjlist; for very large inputs the
+	// streaming store/bulk Loader would be a better fit).
 	const input = `# a tiny social graph
 alice,bob,1
 bob,carol,1

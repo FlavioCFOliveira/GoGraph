@@ -123,7 +123,17 @@ func (c *CSR[W]) MaxNodeID() graph.NodeID {
 
 // NeighboursByID returns an iterator over the out-neighbours of src
 // and the weight (if any) of each connecting edge. The iterator is
-// backed by a slice owned by the CSR and performs no allocation.
+// backed by a slice owned by the CSR.
+//
+// Allocation contract: the returned iter.Seq2 is allocation-free
+// when used as a direct range expression at the call site
+// ("for x, y := range g.NeighboursByID(src) { }"); the Go compiler
+// inlines the closure in that case. Storing the iterator in a
+// variable or passing it across function boundaries triggers
+// closure heap-escape and one allocation per call. Hot paths in
+// search/ deliberately bypass this method and read VerticesSlice()
+// / EdgesSlice() directly to keep the inner loop allocation-free
+// regardless of compiler decisions.
 //
 // If src is outside the snapshot's NodeID range the iterator yields
 // no values. The zero value of W is yielded for unweighted snapshots.
