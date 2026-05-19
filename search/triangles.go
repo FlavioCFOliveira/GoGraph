@@ -1,0 +1,112 @@
+package search
+
+import (
+	"context"
+	"slices"
+	"sort"
+
+	"gograph/graph"
+	"gograph/graph/csr"
+)
+
+// CountTriangles returns the total number of triangles in the
+// undirected graph c, plus a per-NodeID count of how many triangles
+// each vertex participates in. c is expected to be a symmetric
+// directed CSR (each undirected edge appears as both (u, v) and
+// (v, u)) — typical of [adjlist.AdjList] with Directed=false.
+//
+// The implementation is the node-iterator algorithm with degree
+// ordering: at every vertex v we examine pairs of neighbours
+// (u, w) only when both have a strictly higher canonical rank than
+// v. Canonical rank breaks ties on raw NodeID, so each triangle is
+// counted exactly once. Total time is O(sum over v of deg(v)^2 in
+// the degree-ordered subgraph) — bounded by O(E * sqrt(E)) per
+// Chiba & Nishizeki 1985.
+//
+// Concurrency: CountTriangles is safe to invoke concurrently on a
+// shared CSR.
+func CountTriangles[W any](c *csr.CSR[W]) (total int64, perNode []int64) {
+	total, perNode, _ = CountTrianglesCtx(context.Background(), c)
+	return total, perNode
+}
+
+// CountTrianglesCtx is the context-aware variant of [CountTriangles].
+// ctx.Err() is checked every 4096 outer-loop iterations; on
+// cancellation returns (0, nil, wrapped ctx.Err()).
+//
+//nolint:gocyclo // canonical degree-ordered node-iterator triangle count
+func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, perNode []int64, err error) {
+	if cerr := ctx.Err(); cerr != nil {
+		return 0, nil, cerr
+	}
+	n := int(c.MaxNodeID())
+	if n == 0 {
+		return 0, nil, nil
+	}
+	verts := c.VerticesSlice()
+	edges := c.EdgesSlice()
+	// Sort each adjacency list ascending so the per-vertex inner
+	// "is u-v an edge?" check is O(log deg) via binary search.
+	// Allocate a fresh edges copy; we must not mutate c.
+	adjBuf := make([]graph.NodeID, len(edges))
+	copy(adjBuf, edges)
+	for v := 0; v < n; v++ {
+		slices.Sort(adjBuf[verts[v]:verts[v+1]])
+	}
+	deg := make([]int, n)
+	for v := 0; v < n; v++ {
+		deg[v] = int(verts[v+1] - verts[v])
+	}
+	// Canonical rank: degree-asc, ties broken by NodeID-asc. We
+	// store the rank explicitly so the pair test below is
+	// constant-time.
+	rank := make([]int, n)
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if deg[order[i]] != deg[order[j]] {
+			return deg[order[i]] < deg[order[j]]
+		}
+		return order[i] < order[j]
+	})
+	for r, v := range order {
+		rank[v] = r
+	}
+	perNode = make([]int64, n)
+	loops := 0
+	for v := 0; v < n; v++ {
+		loops++
+		if loops&0xFFF == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return 0, nil, cerr
+			}
+		}
+		// Collect the higher-ranked neighbours of v.
+		nb := adjBuf[verts[v]:verts[v+1]]
+		// For each pair (u, w) where rank[u] > rank[v] and rank[w] > rank[v]
+		// and u < w (in NodeID order to dedupe), check if u-w is an edge.
+		for i := 0; i < len(nb); i++ {
+			u := nb[i]
+			if rank[u] <= rank[v] {
+				continue
+			}
+			uAdj := adjBuf[verts[u]:verts[u+1]]
+			for j := i + 1; j < len(nb); j++ {
+				w := nb[j]
+				if rank[w] <= rank[v] {
+					continue
+				}
+				idx := sort.Search(len(uAdj), func(k int) bool { return uAdj[k] >= w })
+				if idx < len(uAdj) && uAdj[idx] == w {
+					total++
+					perNode[v]++
+					perNode[uint64(u)]++
+					perNode[uint64(w)]++
+				}
+			}
+		}
+	}
+	return total, perNode, nil
+}
