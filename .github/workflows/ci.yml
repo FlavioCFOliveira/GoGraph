@@ -92,3 +92,48 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Run govulncheck
         run: govulncheck ./...
+
+  benchstat:
+    name: benchstat regression gate
+    # Only runs on pull-requests targeting main — the regression gate
+    # compares the PR head against a baseline run of the merge base.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (PR head with merge base)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+      - name: Bench (baseline = merge base)
+        run: |
+          base_sha="$(git merge-base origin/${{ github.base_ref }} HEAD)"
+          git checkout "$base_sha"
+          ./scripts/run_headline_bench.sh > /tmp/bench-base.txt
+      - name: Bench (PR head)
+        run: |
+          git checkout ${{ github.event.pull_request.head.sha }}
+          ./scripts/run_headline_bench.sh > /tmp/bench-head.txt
+      - name: Compare
+        run: |
+          benchstat /tmp/bench-base.txt /tmp/bench-head.txt | tee /tmp/bench-diff.txt
+          if grep -E "^[A-Za-z_/].* +[0-9]+\.[0-9]+(µs|ms|ns)/op .* +([6-9]\.[0-9]+|[1-9][0-9]+(\.[0-9]+)?)%" /tmp/bench-diff.txt; then
+            echo "::error::Headline benchmark regressed by more than 5%"
+            exit 1
+          fi
+      - name: Upload diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchstat
+          path: |
+            /tmp/bench-base.txt
+            /tmp/bench-head.txt
+            /tmp/bench-diff.txt
