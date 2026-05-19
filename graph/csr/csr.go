@@ -227,3 +227,32 @@ func (c *CSR[W]) LiveCount() int {
 	}
 	return n
 }
+
+// IsSymmetric reports whether the CSR is symmetric — that is, whether
+// every directed edge (u, v) has a matching reverse edge (v, u). A
+// symmetric CSR is the canonical representation of an undirected
+// graph built via [adjlist.AdjList] with Directed: false.
+//
+// Algorithms that conceptually operate on undirected graphs ([BiBFS],
+// connected components, undirected Eulerian circuits) use this check
+// to reject directed input early with a typed error rather than
+// returning silently-wrong results.
+//
+// Complexity: O(V + E) time, O(E) space (hash set of edge pairs).
+func (c *CSR[W]) IsSymmetric() bool {
+	verts := c.vertices
+	edges := c.edges
+	set := make(map[[2]graph.NodeID]struct{}, len(edges))
+	for u := uint64(0); u+1 < uint64(len(verts)); u++ {
+		for k := verts[u]; k < verts[u+1]; k++ {
+			v := edges[k]
+			set[[2]graph.NodeID{graph.NodeID(u), v}] = struct{}{}
+		}
+	}
+	for pair := range set {
+		if _, ok := set[[2]graph.NodeID{pair[1], pair[0]}]; !ok {
+			return false
+		}
+	}
+	return true
+}

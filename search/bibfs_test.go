@@ -51,3 +51,19 @@ func TestBiBFS_NoPath(t *testing.T) {
 		t.Fatalf("expected ErrNoPath, got %v", err)
 	}
 }
+
+// TestBiBFS_DirectedReturnsErrNotUndirected verifies BiBFS surfaces
+// the asymmetry of a directed graph as a typed sentinel rather than
+// silently producing wrong results.
+func TestBiBFS_DirectedReturnsErrNotUndirected(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a.AddEdge(0, 1, struct{}{})
+	a.AddEdge(1, 2, struct{}{})
+	c := csr.BuildFromAdjList(a)
+	src, _ := a.Mapper().Lookup(0)
+	dst, _ := a.Mapper().Lookup(2)
+	if _, err := BiBFS(c, src, dst); !errors.Is(err, ErrNotUndirected) {
+		t.Fatalf("BiBFS on directed graph: err=%v want ErrNotUndirected", err)
+	}
+}

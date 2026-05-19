@@ -1,14 +1,27 @@
 package search
 
 import (
+	"errors"
+
 	"gograph/graph"
 	"gograph/graph/csr"
 )
 
+// ErrNotUndirected is returned by [BiBFS] (and any other algorithm
+// that operates on an undirected interpretation of its input) when
+// the supplied CSR is not symmetric — i.e. some directed edge (u, v)
+// has no matching (v, u) entry. Callers wishing to use BiBFS on a
+// directed graph must first materialise the reverse CSR (planned in
+// a later sprint) and merge it with the forward.
+var ErrNotUndirected = errors.New("search: BiBFS requires an undirected (symmetric) CSR")
+
 // BiBFS performs bidirectional breadth-first search from src to dst on
-// the unweighted, undirected graph captured by c. The graph's reverse
-// adjacency is assumed to be reachable via the same forward CSR (a
-// property held by graphs built from an undirected [adjlist.AdjList]).
+// the unweighted, undirected graph captured by c. The CSR must be
+// symmetric (built via [adjlist.AdjList] with Directed: false); on a
+// directed CSR BiBFS returns [ErrNotUndirected]. The symmetry check
+// runs once at the start of every call (O(V+E)) — callers running
+// BiBFS many times on the same CSR can pre-check via
+// [csr.CSR.IsSymmetric].
 //
 // Returns the shortest path from src to dst inclusive, or [ErrNoPath]
 // when the two endpoints are in different connected components.
@@ -21,6 +34,9 @@ func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) 
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) ||
 		uint64(dst)+1 >= uint64(len(c.VerticesSlice())) {
 		return nil, ErrNoPath
+	}
+	if !c.IsSymmetric() {
+		return nil, ErrNotUndirected
 	}
 	if src == dst {
 		return []graph.NodeID{src}, nil
