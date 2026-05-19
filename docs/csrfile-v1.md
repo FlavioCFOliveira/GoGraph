@@ -1,0 +1,59 @@
+# CSR File Format (v1)
+
+This document specifies the binary, mmap-friendly on-disk format
+used by GoGraph's Tier 2 (out-of-core) CSR storage. The format is
+versioned and stable.
+
+## Design goals
+
+- Direct mmap into typed `[]uint64` slices without parsing.
+- 64-byte alignment for every section so SIMD loads and cache-line
+  reads are well-aligned.
+- Single fsync point at the file tail (CRC32C) so partial writes
+  are detected on open.
+- Read-only after creation: the format does not accommodate
+  in-place updates; new generations land in new files.
+
+## Header (64 bytes total, all little-endian)
+
+| Offset | Size | Field           | Description                              |
+|--------|------|-----------------|------------------------------------------|
+| 0      | 4 B  | magic           | ASCII `GGCS`                             |
+| 4      | 2 B  | version         | uint16 — currently 1                     |
+| 6      | 1 B  | byteOrder       | 0 = little-endian (only supported value) |
+| 7      | 1 B  | alignment       | uint8 — section alignment in bytes (64) |
+| 8      | 8 B  | nVertices       | uint64                                   |
+| 16     | 8 B  | nEdges          | uint64                                   |
+| 24     | 1 B  | weightKind      | 0 = absent, 1 = u32, 2 = u64, 3 = f32, 4 = f64 |
+| 25     | 7 B  | reserved        | must be zero                             |
+| 32     | 8 B  | verticesOffset  | uint64, multiple of alignment            |
+| 40     | 8 B  | edgesOffset     | uint64, multiple of alignment            |
+| 48     | 8 B  | weightsOffset   | uint64, multiple of alignment (0 if absent) |
+| 56     | 8 B  | tailCRCOffset   | uint64 — location of the file-tail CRC  |
+
+## Sections
+
+Each section is 64-byte aligned. Padding bytes between sections are
+zero.
+
+| Section  | Size                       |
+|----------|----------------------------|
+| vertices | 8 × nVertices bytes        |
+| edges    | 8 × nEdges bytes           |
+| weights  | weightSize × nEdges bytes  |
+
+`weightSize` is 0 for `weightKind=0`, 4 for u32/f32, 8 for u64/f64.
+
+## Trailer
+
+The last 4 bytes of the file are a uint32 LE CRC32C (Castagnoli)
+covering every byte from offset 0 up to but not including the
+CRC. Readers verify on open; mismatch returns `ErrFileCorrupted`.
+
+## Versioning
+
+Version is bumped when any header field is removed, repurposed, or
+when a new section is added that cannot be skipped by an older
+reader. Backwards-compatible additions (new optional sections
+described by additional header fields) keep the same version when
+the new fields default cleanly to 0 / absent.
