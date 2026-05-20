@@ -133,28 +133,14 @@ func (t *translator) readingClause(rc ast.ReadingClause, child LogicalPlan) (Log
 	}
 }
 
-// matchClause translates MATCH / OPTIONAL MATCH.
+// matchClause translates MATCH. Delegates to translateMatch in match.go.
 // optional=true produces OptionalExpand instead of Expand on relationships.
-func (t *translator) matchClause(m *ast.Match, child LogicalPlan, _ bool) (LogicalPlan, error) {
-	plan, err := t.pattern(m.Pattern, child, false)
-	if err != nil {
-		return nil, err
-	}
-	if m.Where != nil {
-		plan = NewSelection(m.Where.Predicate.String(), plan)
-	}
-	return plan, nil
+func (t *translator) matchClause(m *ast.Match, child LogicalPlan, optional bool) (LogicalPlan, error) {
+	return t.translateMatch(m, child, optional)
 }
 
 func (t *translator) optionalMatchClause(m *ast.OptionalMatch, child LogicalPlan) (LogicalPlan, error) {
-	plan, err := t.pattern(m.Pattern, child, true)
-	if err != nil {
-		return nil, err
-	}
-	if m.Where != nil {
-		plan = NewSelection(m.Where.Predicate.String(), plan)
-	}
-	return plan, nil
+	return t.translateOptionalMatch(m, child)
 }
 
 func (t *translator) unwindClause(u *ast.Unwind, child LogicalPlan) (LogicalPlan, error) {
@@ -175,146 +161,6 @@ func (t *translator) callClause(c *ast.Call, child LogicalPlan) (LogicalPlan, er
 		yieldVars = append(yieldVars, name)
 	}
 	return NewProcedureCall(c.Namespace, c.Procedure, args, yieldVars, child), nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Pattern translation
-// ─────────────────────────────────────────────────────────────────────────────
-
-// pattern translates a MATCH/CREATE Pattern (comma-separated path list) into
-// a plan. Multiple paths produce a cartesian cross-product by stacking scans.
-// optional controls whether relationship steps use OptionalExpand.
-func (t *translator) pattern(pat *ast.Pattern, child LogicalPlan, optional bool) (LogicalPlan, error) {
-	if pat == nil || len(pat.Paths) == 0 {
-		return child, nil
-	}
-	plan := child
-	for _, pp := range pat.Paths {
-		var err error
-		plan, err = t.pathPattern(pp, plan, optional)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return plan, nil
-}
-
-// pathPattern translates a single PathPattern (a linked list of node/rel steps).
-func (t *translator) pathPattern(pp *ast.PathPattern, child LogicalPlan, optional bool) (LogicalPlan, error) {
-	if pp == nil || pp.Head == nil {
-		return child, nil
-	}
-
-	plan := child
-	el := pp.Head
-
-	// The first element is always a node; translate it as a scan.
-	if el.Node != nil {
-		plan = t.nodeScan(el.Node, plan)
-	}
-
-	// Walk remaining (rel, node) pairs.
-	el = el.Next
-	for el != nil {
-		if el.Relationship != nil && el.Node != nil {
-			plan = t.expandStep(el.Relationship, el.Node, plan, optional)
-		}
-		el = el.Next
-	}
-	return plan, nil
-}
-
-// nodeScan produces AllNodesScan or NodeByLabelScan for a NodePattern.
-// The incoming child is threaded as-is (cross-join semantics when non-nil).
-func (t *translator) nodeScan(np *ast.NodePattern, child LogicalPlan) LogicalPlan {
-	nodeVar := ""
-	if np.Variable != nil {
-		nodeVar = *np.Variable
-	}
-
-	if len(np.Labels) == 0 {
-		scan := NewAllNodesScan(nodeVar)
-		if child == nil {
-			return scan
-		}
-		// Cross-join: wrap as an Apply so the outer bindings are available.
-		// For simple queries this is just the scan itself when child is nil.
-		return scan
-	}
-
-	// Use the first label for the scan; additional labels become a selection.
-	scan := NewNodeByLabelScan(nodeVar, np.Labels[0])
-	var plan LogicalPlan = scan
-
-	// Extra labels: AND-filter (label predicates become Selection).
-	for _, lbl := range np.Labels[1:] {
-		pred := fmt.Sprintf("%s:%s", nodeVar, lbl)
-		plan = NewSelection(pred, plan)
-	}
-
-	// Inline property predicates from the node pattern.
-	if np.Properties != nil {
-		plan = NewSelection(nodePropertiesPredicate(nodeVar, np.Properties), plan)
-	}
-
-	return plan
-}
-
-// expandStep translates a single (rel, node) hop into Expand or OptionalExpand.
-func (t *translator) expandStep(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan, optional bool) LogicalPlan {
-	// Determine the source variable from the child plan's first var.
-	fromVar := firstVar(child)
-
-	relVar := ""
-	if rp.Variable != nil {
-		relVar = *rp.Variable
-	}
-
-	toVar := ""
-	if to.Variable != nil {
-		toVar = *to.Variable
-	}
-
-	dir := relDirection(rp.Direction)
-	relTypes := make([]string, len(rp.Types))
-	copy(relTypes, rp.Types)
-
-	// Variable-length expansion (e.g. -[r*1..3]->).
-	if rp.Range != nil {
-		minDepth := 1
-		maxDepth := 0 // 0 means unbounded
-		if rp.Range.Min != nil {
-			minDepth = int(*rp.Range.Min)
-		}
-		if rp.Range.Max != nil {
-			maxDepth = int(*rp.Range.Max)
-		}
-		plan := NewVarLengthExpand(fromVar, relVar, relTypes, dir, toVar, minDepth, maxDepth, child)
-		return t.applyNodeFilter(to, toVar, plan)
-	}
-
-	var plan LogicalPlan
-	if optional {
-		plan = NewOptionalExpand(fromVar, relVar, relTypes, dir, toVar, child)
-	} else {
-		plan = NewExpand(fromVar, relVar, relTypes, dir, toVar, child)
-	}
-
-	// Inline destination-node predicates.
-	return t.applyNodeFilter(to, toVar, plan)
-}
-
-// applyNodeFilter wraps plan with Selection operators for label and property
-// constraints declared on the destination node pattern.
-func (t *translator) applyNodeFilter(np *ast.NodePattern, nodeVar string, plan LogicalPlan) LogicalPlan {
-	for _, lbl := range np.Labels {
-		pred := fmt.Sprintf("%s:%s", nodeVar, lbl)
-		plan = NewSelection(pred, plan)
-	}
-	if np.Properties != nil {
-		plan = NewSelection(nodePropertiesPredicate(nodeVar, np.Properties), plan)
-	}
-	return plan
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

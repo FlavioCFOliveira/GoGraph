@@ -1193,7 +1193,7 @@ func TestTranslate_UnionAll(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestTranslate_MultiPathMatch(t *testing.T) {
-	// MATCH (n:Person), (m:Movie)
+	// MATCH (n:Person), (m:Movie) — two comma-separated patterns produce Apply.
 	q := &ast.SingleQuery{
 		ReadingClauses: []ast.ReadingClause{
 			&ast.Match{
@@ -1207,13 +1207,24 @@ func TestTranslate_MultiPathMatch(t *testing.T) {
 		},
 	}
 	plan := mustFromAST(t, q)
-	// The second path scan (m:Movie) is the outermost node.
-	scan, ok := plan.(*ir.NodeByLabelScan)
+	// Multi-pattern MATCH produces Apply(outer=Person scan, inner=Movie scan).
+	app, ok := plan.(*ir.Apply)
 	if !ok {
-		t.Fatalf("expected *ir.NodeByLabelScan for second path, got %T", plan)
+		t.Fatalf("expected *ir.Apply for multi-pattern MATCH, got %T", plan)
 	}
-	if scan.Label != "Movie" {
-		t.Errorf("Label = %q, want Movie", scan.Label)
+	outer, ok := app.Outer.(*ir.NodeByLabelScan)
+	if !ok {
+		t.Fatalf("Apply.Outer expected *ir.NodeByLabelScan, got %T", app.Outer)
+	}
+	if outer.Label != "Person" {
+		t.Errorf("outer Label = %q, want Person", outer.Label)
+	}
+	inner, ok := app.Inner.(*ir.NodeByLabelScan)
+	if !ok {
+		t.Fatalf("Apply.Inner expected *ir.NodeByLabelScan, got %T", app.Inner)
+	}
+	if inner.Label != "Movie" {
+		t.Errorf("inner Label = %q, want Movie", inner.Label)
 	}
 }
 
@@ -1598,7 +1609,8 @@ func TestTranslate_ThreeWayUnionAll(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestTranslate_TwoMatchClauses(t *testing.T) {
-	// MATCH (n:Person) MATCH (m:Movie)
+	// MATCH (n:Person) MATCH (m:Movie) — two sequential MATCH clauses.
+	// The second MATCH chains the first plan as outer, producing Apply.
 	q := &ast.SingleQuery{
 		ReadingClauses: []ast.ReadingClause{
 			&ast.Match{Pattern: &ast.Pattern{Paths: []*ast.PathPattern{
@@ -1610,13 +1622,24 @@ func TestTranslate_TwoMatchClauses(t *testing.T) {
 		},
 	}
 	plan := mustFromAST(t, q)
-	// Second MATCH produces a NodeByLabelScan with the first as child context.
-	scan, ok := plan.(*ir.NodeByLabelScan)
+	// The second MATCH wraps the first plan as outer in an Apply.
+	app, ok := plan.(*ir.Apply)
 	if !ok {
-		t.Fatalf("expected *ir.NodeByLabelScan for second MATCH, got %T", plan)
+		t.Fatalf("expected *ir.Apply for chained MATCH clauses, got %T", plan)
 	}
-	if scan.Label != "Movie" {
-		t.Errorf("Label = %q, want Movie", scan.Label)
+	outer, ok := app.Outer.(*ir.NodeByLabelScan)
+	if !ok {
+		t.Fatalf("Apply.Outer expected *ir.NodeByLabelScan (Person), got %T", app.Outer)
+	}
+	if outer.Label != "Person" {
+		t.Errorf("outer Label = %q, want Person", outer.Label)
+	}
+	inner, ok := app.Inner.(*ir.NodeByLabelScan)
+	if !ok {
+		t.Fatalf("Apply.Inner expected *ir.NodeByLabelScan (Movie), got %T", app.Inner)
+	}
+	if inner.Label != "Movie" {
+		t.Errorf("inner Label = %q, want Movie", inner.Label)
 	}
 }
 
