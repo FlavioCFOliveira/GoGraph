@@ -40,6 +40,7 @@ import (
 	"gograph/cypher/funcs"
 	"gograph/cypher/ir"
 	"gograph/cypher/parser"
+	"gograph/cypher/sema"
 	"gograph/graph"
 	"gograph/graph/index"
 	"gograph/graph/lpg"
@@ -88,10 +89,17 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		return nil, err
 	}
 
+	// ── 1b. Parameter type check ─────────────────────────────────────────────
+	if len(params) > 0 {
+		if err := sema.CheckParams(sema.InferParamTypes(plan), params); err != nil {
+			return nil, err
+		}
+	}
+
 	// ── 2. Build physical operator tree ─────────────────────────────────────
 	walker := &lpgNodeWalker{g: e.g}
 	labelSrc := &lpgLabelResolver{g: e.g}
-	op, cols, err := BuildPlan(plan, walker, labelSrc, e.reg, params)
+	op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager())
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
@@ -526,7 +534,7 @@ func buildOperatorWrite(
 
 	default:
 		// Fall through to the read-operator builder.
-		return buildOperator(plan, walker, labelSrc, reg, params, schema)
+		return buildOperator(plan, walker, labelSrc, reg, params, schema, nil)
 	}
 }
 
@@ -605,7 +613,7 @@ func BuildPlan(
 
 	// schema maps variable name → column index in the current row.
 	schema := make(map[string]int)
-	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema)
+	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -639,9 +647,57 @@ func BuildPlan(
 	return proj, cols, nil
 }
 
+// buildPlanEngine is the Engine-internal variant of BuildPlan that threads the
+// index manager through so that NodeByIndexSeek IR nodes can be resolved at
+// build time. idxMgr may be nil (no index support).
+func buildPlanEngine(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	idxMgr *index.Manager,
+) (op exec.Operator, cols []string, err error) {
+	pr, ok := plan.(*ir.ProduceResults)
+	if !ok {
+		return nil, nil, fmt.Errorf("cypher: plan root must be ProduceResults, got %T", plan)
+	}
+	cols = pr.Columns
+	schema := make(map[string]int)
+	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, idxMgr)
+	if err != nil {
+		return nil, nil, err
+	}
+	items := make([]exec.ProjectionItem, len(cols))
+	for i, col := range cols {
+		if colIdx, exists := schema[col]; exists {
+			idx := colIdx
+			items[i] = exec.ProjectionItem{
+				Alias: col,
+				Eval: func(row exec.Row) (expr.Value, error) {
+					if idx < len(row) {
+						return row[idx], nil
+					}
+					return expr.Null, nil
+				},
+			}
+		} else {
+			items[i] = exec.ProjectionItem{
+				Alias: col,
+				Eval:  func(_ exec.Row) (expr.Value, error) { return expr.Null, nil },
+			}
+		}
+	}
+	proj, err := exec.NewProject(child, items)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cypher: build final projection: %w", err)
+	}
+	return proj, cols, nil
+}
+
 // buildOperator recursively converts an IR plan node to a physical operator.
 // schema accumulates variable→column-index bindings as operators are visited
-// top-down (left-to-right for children).
+// top-down (left-to-right for children). idxMgr may be nil.
 func buildOperator(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -649,6 +705,7 @@ func buildOperator(
 	reg expr.FunctionRegistry,
 	params map[string]expr.Value,
 	schema map[string]int,
+	idxMgr *index.Manager,
 ) (exec.Operator, error) {
 	switch p := plan.(type) {
 
@@ -663,8 +720,21 @@ func buildOperator(
 		src := &execLabelAdapter{labelSrc: labelSrc}
 		return exec.NewNodeByLabelScan(p.Label, src), nil
 
+	case *ir.NodeByIndexSeek:
+		return buildIndexSeekOperator(p, params, schema, idxMgr)
+
 	case *ir.Selection:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema)
+		// Opportunistic index-seek rewrite: if the predicate is a simple equality
+		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
+		// directly without first building the scan child.
+		if idxMgr != nil {
+			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr); err != nil {
+				return nil, err
+			} else if ok {
+				return op, nil
+			}
+		}
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -675,14 +745,14 @@ func buildOperator(
 		}), nil
 
 	case *ir.Projection:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr)
 		if err != nil {
 			return nil, err
 		}
 		return buildIRProjection(p.Items, child, schema)
 
 	case *ir.Expand:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -697,7 +767,7 @@ func buildOperator(
 
 	case *ir.Apply:
 		// Build the outer plan first so its vars enter the schema.
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema)
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -705,7 +775,7 @@ func buildOperator(
 		// outer row so correlated inner scans can consume it. For non-correlated
 		// inner plans (independent scans) the arg is inert but required.
 		arg := exec.NewArgument()
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema)
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -714,6 +784,162 @@ func buildOperator(
 	default:
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
 	}
+}
+
+// buildIndexSeekOperator builds an exec.NodeByIndexSeek from an IR NodeByIndexSeek node.
+// The Value field may be a parameter reference ($name) or a literal string/integer.
+func buildIndexSeekOperator(
+	p *ir.NodeByIndexSeek,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+) (exec.Operator, error) {
+	seekVal, err := resolveSeekValue(p.Value, params)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: NodeByIndexSeek %q: %w", p.NodeVar, err)
+	}
+	if idxMgr == nil {
+		return nil, fmt.Errorf("cypher: NodeByIndexSeek requires an index manager")
+	}
+	names := idxMgr.ListIndexes()
+	for _, name := range names {
+		sub, err := idxMgr.GetIndex(name)
+		if err != nil || sub.Kind() != "hash" {
+			continue
+		}
+		if op, ok := tryNewHashSeek(sub, seekVal); ok {
+			schema[p.NodeVar] = len(schema)
+			return op, nil
+		}
+	}
+	return nil, fmt.Errorf("cypher: no hash index found for NodeByIndexSeek on %q.%q", p.Label, p.Property)
+}
+
+// tryBuildIndexSeekFromSelection inspects a Selection predicate for the pattern
+// "n.prop = $name" or "$name = n.prop" over an AllNodesScan or NodeByLabelScan
+// child, and when a hash index is available returns a NodeByIndexSeek operator.
+// ok is false when the rewrite does not apply.
+func tryBuildIndexSeekFromSelection(
+	sel *ir.Selection,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+) (exec.Operator, bool, error) {
+	// Only rewrite when the child is a bare scan leaf.
+	var nodeVar string
+	switch child := sel.Child.(type) {
+	case *ir.AllNodesScan:
+		nodeVar = child.NodeVar
+	case *ir.NodeByLabelScan:
+		nodeVar = child.NodeVar
+	default:
+		return nil, false, nil
+	}
+
+	paramName, propKey := extractEqParamFromPredicate(sel.Predicate, nodeVar)
+	if paramName == "" || propKey == "" {
+		return nil, false, nil
+	}
+
+	seekVal, err := resolveSeekValue("$"+paramName, params)
+	if err != nil {
+		return nil, false, err
+	}
+	_ = propKey // used for future property-specific index matching
+
+	names := idxMgr.ListIndexes()
+	for _, name := range names {
+		sub, err2 := idxMgr.GetIndex(name)
+		if err2 != nil || sub.Kind() != "hash" {
+			continue
+		}
+		if op, ok := tryNewHashSeek(sub, seekVal); ok {
+			schema[nodeVar] = len(schema)
+			return op, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// extractEqParamFromPredicate parses the opaque predicate string to extract
+// the parameter name and property key from an equality of form
+// "(nodeVar.prop = $name)" or "($name = nodeVar.prop)".
+// Returns ("", "") when the predicate does not match.
+func extractEqParamFromPredicate(pred, nodeVar string) (paramName, propKey string) {
+	pred = strings.TrimSpace(pred)
+	if strings.HasPrefix(pred, "(") && strings.HasSuffix(pred, ")") {
+		pred = pred[1 : len(pred)-1]
+	}
+	idx := strings.Index(pred, " = ")
+	if idx < 0 {
+		return "", ""
+	}
+	left := strings.TrimSpace(pred[:idx])
+	right := strings.TrimSpace(pred[idx+3:])
+
+	prefix := nodeVar + "."
+	if strings.HasPrefix(left, prefix) && strings.HasPrefix(right, "$") {
+		return right[1:], left[len(prefix):]
+	}
+	if strings.HasPrefix(right, prefix) && strings.HasPrefix(left, "$") {
+		return left[1:], right[len(prefix):]
+	}
+	return "", ""
+}
+
+// resolveSeekValue resolves p.Value to an expr.Value. If value starts with "$",
+// it is a parameter reference looked up in params. Otherwise it is parsed as a
+// literal (string in single or double quotes, boolean, integer).
+func resolveSeekValue(value string, params map[string]expr.Value) (expr.Value, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "$") {
+		name := value[1:]
+		if params != nil {
+			if v, ok := params[name]; ok {
+				return v, nil
+			}
+		}
+		return expr.Null, nil // unbound parameter resolves to NULL
+	}
+	// Parse literal: delegate to exec's existing literal parser via a minimal
+	// inline implementation (string, bool, integer).
+	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') {
+		return expr.StringValue(value[1 : len(value)-1]), nil
+	}
+	if value == "true" {
+		return expr.BoolValue(true), nil
+	}
+	if value == "false" {
+		return expr.BoolValue(false), nil
+	}
+	// Try integer.
+	var n int64
+	if _, err := fmt.Sscan(value, &n); err == nil {
+		return expr.IntegerValue(n), nil
+	}
+	return nil, fmt.Errorf("unsupported seek value %q", value)
+}
+
+// hashStringLookup is satisfied by hash.Index[string].
+type hashStringLookup interface {
+	Lookup(value string) *roaring64.Bitmap
+}
+
+// hashInt64Lookup is satisfied by hash.Index[int64].
+type hashInt64Lookup interface {
+	Lookup(value int64) *roaring64.Bitmap
+}
+
+// tryNewHashSeek attempts to build a NodeByIndexSeek operator using sub as the
+// hash index. It returns (nil, false) when sub is not a supported hash type.
+func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndexSeek, bool) {
+	if sl, ok := sub.(hashStringLookup); ok {
+		return exec.NewNodeByIndexSeek(exec.NewStringHashIndex(sl), seekVal), true
+	}
+	if il, ok := sub.(hashInt64Lookup); ok {
+		return exec.NewNodeByIndexSeek(exec.NewInt64HashIndex(il), seekVal), true
+	}
+	return nil, false
 }
 
 // buildIRProjection converts IR ProjectionItems to a physical Project operator.
@@ -793,6 +1019,12 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	plan, err := e.planFor(query)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(params) > 0 {
+		if err := sema.CheckParams(sema.InferParamTypes(plan), params); err != nil {
+			return nil, err
+		}
 	}
 
 	walker := &lpgNodeWalker{g: e.g}

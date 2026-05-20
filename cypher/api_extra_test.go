@@ -6,11 +6,13 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"gograph/cypher"
 	"gograph/cypher/expr"
 	"gograph/cypher/funcs"
+	"gograph/cypher/sema"
 	"gograph/graph/adjlist"
 	"gograph/graph/lpg"
 )
@@ -422,5 +424,24 @@ func TestRunInTxAny_Basic(t *testing.T) {
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("iteration error: %v", err)
+	}
+}
+
+func TestRun_ParamTypeMismatch_Error(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+
+	// WHERE n.id = $p infers $p as KindString; supplying an integer should fail.
+	params := map[string]expr.Value{"p": expr.IntegerValue(42)}
+	_, err := eng.Run(context.Background(), "MATCH (n) WHERE n.id = $p RETURN n", params)
+	if err == nil {
+		t.Fatal("expected type mismatch error for integer param where string expected")
+	}
+	var pte *sema.ParamTypeError
+	if !errors.As(err, &pte) {
+		t.Fatalf("expected *sema.ParamTypeError, got %T: %v", err, err)
+	}
+	if pte.Name != "p" {
+		t.Errorf("ParamTypeError.Name = %q, want %q", pte.Name, "p")
 	}
 }
