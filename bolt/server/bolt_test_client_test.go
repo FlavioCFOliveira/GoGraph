@@ -225,8 +225,9 @@ func (c *boltTestClient) recvSuccess(t *testing.T) *proto.Success {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // startTestServer starts a Server on a random port with the given options.
-// It registers a t.Cleanup that shuts the server down and drains the Serve
-// goroutine. goleak checks must be registered separately by each test.
+// It registers a t.Cleanup that cancels the server context and drains the
+// Serve goroutine. Goroutine leak checking is handled by goleak.Find in
+// TestMain after all servers have been shut down.
 func startTestServer(t *testing.T, opts server.Options) string {
 	t.Helper()
 	eng := newEngine(t)
@@ -247,8 +248,6 @@ func startTestServer(t *testing.T, opts server.Options) string {
 		serveErr <- srv.Serve(ctx, ln)
 	}()
 
-	// Cleanup: cancel + drain Serve goroutine. LIFO: callers register goleak
-	// first so it runs last (after Serve exits).
 	t.Cleanup(func() {
 		cancel()
 		select {

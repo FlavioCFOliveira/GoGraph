@@ -181,6 +181,12 @@ func boltDial(ctx context.Context, addr, query string) error {
 	if err != nil {
 		return fmt.Errorf("boltDial dial: %w", err)
 	}
+	// Set SO_LINGER(0) so Close sends RST instead of entering TIME_WAIT.
+	// This prevents ephemeral port exhaustion on macOS when the soak runs
+	// many short-lived connections concurrently alongside other test packages.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0) //nolint:errcheck // best-effort; not fatal if unsupported
+	}
 	defer func() { _ = conn.Close() }() //nolint:errcheck // close on teardown path
 
 	// Propagate context deadline to connection I/O.

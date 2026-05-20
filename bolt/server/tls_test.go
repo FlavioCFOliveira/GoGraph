@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/goleak"
-
 	"gograph/bolt/server"
 )
 
@@ -72,8 +70,6 @@ func generateSelfSigned(t *testing.T) *tls.Config {
 // a TLS dialer using InsecureSkipVerify=true, performs the Bolt handshake, sends
 // HELLO, and verifies the SUCCESS response.
 func TestServer_TLS(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
 	eng := newEngine(t)
 	tlsCfg := generateSelfSigned(t)
 
@@ -95,6 +91,8 @@ func TestServer_TLS(t *testing.T) {
 		serveErr <- srv.Serve(ctx, ln)
 	}()
 
+	// Drain the Serve goroutine on cleanup. Goroutine leak checking is handled
+	// by goleak.Find in TestMain after all servers have been shut down.
 	t.Cleanup(func() {
 		cancel()
 		select {

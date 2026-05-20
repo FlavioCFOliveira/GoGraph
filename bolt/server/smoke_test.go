@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"go.uber.org/goleak"
-
 	"gograph/bolt/proto"
 	"gograph/bolt/server"
 )
@@ -25,17 +23,11 @@ func createNodeTx(t *testing.T, c *boltTestClient, query string) {
 
 // TestBoltSmokeTest_CreateMatchReturn tests the full CREATE / MATCH / RETURN
 // cycle over the raw Bolt wire protocol:
-//  1. Start server on a random port.
+//  1. Connect to the shared test server.
 //  2. CREATE two Person nodes (via explicit transactions).
 //  3. MATCH (n:Person) RETURN n — verify 2 rows returned.
-//  4. Verify no goroutine leaks after shutdown.
 func TestBoltSmokeTest_CreateMatchReturn(t *testing.T) {
-	// goleak registered first so it runs last (LIFO cleanup).
-	t.Cleanup(func() { goleak.VerifyNone(t) })
-
-	addr := startTestServer(t, server.Options{})
-
-	c := newBoltTestClient(t, addr)
+	c := newBoltTestClient(t, sharedServerAddr)
 	defer c.close(t)
 
 	c.negotiate(t)
@@ -72,11 +64,7 @@ func TestBoltSmokeTest_CreateMatchReturn(t *testing.T) {
 //  4. COMMIT.
 //  5. MATCH (p:Product) RETURN p — verify 1 row.
 func TestBoltSmokeTest_ExplicitTx(t *testing.T) {
-	t.Cleanup(func() { goleak.VerifyNone(t) })
-
-	addr := startTestServer(t, server.Options{})
-
-	c := newBoltTestClient(t, addr)
+	c := newBoltTestClient(t, sharedServerAddr)
 	defer c.close(t)
 
 	c.negotiate(t)
@@ -111,12 +99,10 @@ func TestBoltSmokeTest_ExplicitTx(t *testing.T) {
 
 // TestBoltSmokeTest_TLSSmoke tests that TLS connections work:
 //  1. Create ephemeral self-signed cert.
-//  2. Start server with TLS.
+//  2. Start a dedicated TLS server (TLS config differs from shared server).
 //  3. Connect with raw tls.Conn (InsecureSkipVerify).
 //  4. Negotiate, send HELLO, receive SUCCESS.
 func TestBoltSmokeTest_TLSSmoke(t *testing.T) {
-	t.Cleanup(func() { goleak.VerifyNone(t) })
-
 	tlsCfg := generateSelfSigned(t)
 	addr := startTestServer(t, server.Options{TLSConfig: tlsCfg})
 
@@ -146,15 +132,11 @@ func TestBoltSmokeTest_TLSSmoke(t *testing.T) {
 
 // TestBoltSmokeTest_ErrorMapping tests that a syntax error produces FAILURE
 // with code Neo.ClientError.Statement.SyntaxError:
-//  1. Start server.
+//  1. Connect to shared test server.
 //  2. Send RUN with invalid Cypher.
 //  3. Expect FAILURE with the right code.
 func TestBoltSmokeTest_ErrorMapping(t *testing.T) {
-	t.Cleanup(func() { goleak.VerifyNone(t) })
-
-	addr := startTestServer(t, server.Options{})
-
-	c := newBoltTestClient(t, addr)
+	c := newBoltTestClient(t, sharedServerAddr)
 	defer c.close(t)
 
 	c.negotiate(t)
@@ -178,11 +160,7 @@ func TestBoltSmokeTest_ErrorMapping(t *testing.T) {
 //  1. BEGIN → RUN CREATE → ROLLBACK.
 //  2. MATCH — verify no rows (or same count as before rollback).
 func TestBoltSmokeTest_Rollback(t *testing.T) {
-	t.Cleanup(func() { goleak.VerifyNone(t) })
-
-	addr := startTestServer(t, server.Options{})
-
-	c := newBoltTestClient(t, addr)
+	c := newBoltTestClient(t, sharedServerAddr)
 	defer c.close(t)
 
 	c.negotiate(t)
@@ -201,15 +179,11 @@ func TestBoltSmokeTest_Rollback(t *testing.T) {
 }
 
 // TestBoltSmokeTest_Routing tests the ROUTE response:
-//  1. Connect to server.
+//  1. Connect to shared test server.
 //  2. Send HELLO then ROUTE.
 //  3. Verify SUCCESS with "rt" routing table containing server entries.
 func TestBoltSmokeTest_Routing(t *testing.T) {
-	t.Cleanup(func() { goleak.VerifyNone(t) })
-
-	addr := startTestServer(t, server.Options{})
-
-	c := newBoltTestClient(t, addr)
+	c := newBoltTestClient(t, sharedServerAddr)
 	defer c.close(t)
 
 	c.negotiate(t)

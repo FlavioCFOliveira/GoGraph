@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/goleak"
-
 	"gograph/bolt/packstream"
 	"gograph/bolt/proto"
 	"gograph/bolt/server"
@@ -101,7 +99,8 @@ func sendHello(t *testing.T, conn net.Conn) *proto.Success {
 
 // TestServe_HandshakeHello starts a server on a random port, connects with a
 // raw TCP connection, performs the Bolt handshake and HELLO exchange, and
-// verifies the SUCCESS response. It also checks for goroutine leaks via goleak.
+// verifies the SUCCESS response. Goroutine leak checking is handled by
+// goleak.Find in TestMain after all servers have been shut down.
 func TestServe_HandshakeHello(t *testing.T) {
 	eng := newEngine(t)
 	srv := server.NewServer(eng, server.Options{
@@ -121,14 +120,10 @@ func TestServe_HandshakeHello(t *testing.T) {
 		serveErr <- srv.Serve(ctx, ln)
 	}()
 
-	// Cleanups run LIFO: goleak registered first (runs last), server cleanup
-	// registered second (runs first). This ensures the Serve goroutine has
-	// exited before goleak inspects live goroutines.
-	t.Cleanup(func() {
-		goleak.VerifyNone(t)
-	})
 	// Cancel the context to ensure Serve exits even if the test body fails
 	// before reaching Shutdown, then wait for Serve to confirm exit.
+	// Goroutine leak checking is handled by goleak.Find() in TestMain after
+	// all servers (including the shared server) have been shut down.
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -192,10 +187,7 @@ func TestServe_MaxConnections(t *testing.T) {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ctx, ln) }()
 
-	// Cleanups run LIFO: goleak registered first (runs last).
-	t.Cleanup(func() {
-		goleak.VerifyNone(t)
-	})
+	// Goroutine leak checking is handled by goleak.Find() in TestMain.
 	t.Cleanup(func() {
 		cancel()
 		select {
