@@ -6,6 +6,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-05-20
+
 Seven post-v1.1.0 sprints (14–20) of documentation accuracy,
 reliability evidence, coverage uplift, observability wire-up,
 algorithmic completeness, transactional generality, durable LPG, and
