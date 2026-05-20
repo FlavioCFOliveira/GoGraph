@@ -6,8 +6,56 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — Sprint 20 (Audit Correctness Closeout)
+
+The 2026-05-20 deep audit identified five algorithmic correctness
+defects in v1.1.0. Sprint 20 closes them all under
+`Specify → Implement → Test → Document`.
+
+- `search.KShortestPathsLoopless` / `KShortestPathsLooplessCtx`:
+  honest name for what was previously called `EppsteinKShortest`.
+  The shipped implementation is best-first enumeration over the
+  loopless-path tree, NOT the heap-of-heaps sidetrack construction
+  of Eppstein 1998; the rename is documented and the deprecated
+  alias preserves backwards compatibility (closes #183).
+- `flow.MinCostMaxFlow`: replaced the silent `if rc<0 { rc=0 }`
+  clamp with a Bellman-Ford bootstrap that initialises the node
+  potentials when the input network has negative-cost arcs, so the
+  invariant `rc >= 0` holds entering every Dijkstra round. A
+  negative cycle reachable from the source surfaces via the new
+  sentinel `flow.ErrNegativeCycle`; the clamp is replaced by an
+  internal invariant assert (panic indicates a programmer error in
+  the algorithm, never input) (closes #184).
+- `search.Diameter` / `DiameterCtx`: separated the BFS scratch
+  slices so the iFUB refinement's level filter `distFromU[v]==k`
+  is no longer corrupted by the inner-loop sweep. Rapid-based
+  regression test `Diameter_ExactVsBruteVBFS` covers the
+  invariant against a brute V-BFS oracle (closes #185).
+- `search.HopcroftTarjanBCC`: the articulation-point root test now
+  uses `p != start` (DFS-root identity) instead of `disc[p] != 0`
+  (timer-derived, fragile in forests). Roots of components 2+ are
+  no longer mis-classified as articulation points. Rapid property
+  test compares the algorithm against a remove-vertex brute-force
+  oracle on random multi-component forests (closes #186).
+- `search.BellmanFord` and `centrality.WeightedBetweenness`: NaN
+  / +/-Inf edge weights now fail fast with `search.ErrInvalidInput`
+  rather than silently dropping every relaxation. Integer Weight
+  types skip the validation pass entirely (zero-value type-switch
+  short-circuits). BREAKING: `centrality.WeightedBetweenness`
+  signature changed from `([]float64)` to `([]float64, error)` for
+  consistency with `centrality.PageRank` and
+  `centrality.PersonalisedPushPageRank`; it also rejects strictly
+  negative weights via `search.ErrNegativeWeight` (closes #187).
+
 ### Fixed (documentation)
 
+- `docs/algorithms.md`: replaced the stale "Eppstein deferred" and
+  "Leiden simplified" caveats; added rows for the renamed
+  `KShortestPathsLoopless` and for the input contracts on
+  `BellmanFord` and `WeightedBetweenness`.
+- `docs/metrics.md`: added the new `search.KShortestPathsLoopless`
+  / `*Ctx` metric rows; the deprecated `search.EppsteinKShortest`
+  / `*Ctx` rows are preserved so existing dashboards keep working.
 - The Sprint 10 observability entry below and the matching paragraph
   in `release-notes/v1.1.0.md` previously stated that the
   `internal/metrics` Prometheus-style histogram hook was wired into
