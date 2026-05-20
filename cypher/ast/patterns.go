@@ -150,7 +150,8 @@ type PathPattern struct {
 	Head     *PathElement // linked list of alternating node/rel steps
 }
 
-func (*PathPattern) astNode() {}
+func (*PathPattern) astNode()  {}
+func (*PathPattern) exprNode() {}
 
 // String returns the Cypher path pattern.
 func (p *PathPattern) String() string {

@@ -1,0 +1,2241 @@
+package parser
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/antlr4-go/antlr/v4"
+
+	"gograph/cypher/ast"
+	"gograph/cypher/parser/gen"
+)
+
+// visitor converts an antlr parse tree into the typed AST defined in
+// gograph/cypher/ast.  It embeds gen.BaseCypherParserVisitor for default
+// no-op implementations of any Visit* method not explicitly overridden.
+//
+// All Visit* methods return interface{}; callers use the as* helpers to
+// unwrap the typed values.  Errors are propagated by returning a *SemaError.
+type visitor struct {
+	gen.BaseCypherParserVisitor
+}
+
+// newVisitor allocates a zero-value visitor ready to use.
+func newVisitor() *visitor { return &visitor{} }
+
+// positionOf extracts the source position from any parse-tree node.
+func positionOf(ctx antlr.ParserRuleContext) ast.Position {
+	if ctx == nil {
+		return ast.Position{}
+	}
+	start := ctx.GetStart()
+	if start == nil {
+		return ast.Position{}
+	}
+	return ast.Position{
+		Line:   uint32(start.GetLine()),
+		Column: uint32(start.GetColumn()),
+		Offset: uint32(start.GetStart()),
+	}
+}
+
+// visit dispatches to the concrete Accept method of the tree node.
+func (v *visitor) visit(tree antlr.ParseTree) interface{} {
+	if tree == nil {
+		return nil
+	}
+	return tree.Accept(v)
+}
+
+// asExpr casts a visitor result to ast.Expression. Returns *SemaError on type
+// mismatch.
+func asExpr(val interface{}) (ast.Expression, error) {
+	if val == nil {
+		return nil, nil
+	}
+	if err, ok := val.(*SemaError); ok {
+		return nil, err
+	}
+	if e, ok := val.(ast.Expression); ok {
+		return e, nil
+	}
+	return nil, fmt.Errorf("internal: expected Expression, got %T", val)
+}
+
+// firstError returns the first *SemaError found in results, or nil.
+func firstError(results ...interface{}) *SemaError {
+	for _, r := range results {
+		if e, ok := r.(*SemaError); ok {
+			return e
+		}
+	}
+	return nil
+}
+
+// unsupported returns a *SemaError for grammar rules that are intentionally
+// out of scope.
+func unsupported(ctx antlr.ParserRuleContext, rule, msg string) *SemaError {
+	return &SemaError{Rule: rule, Pos: positionOf(ctx), Message: msg}
+}
+
+// projItems is the package-level transfer type returned by VisitProjectionItems.
+// Using a package-level type ensures that the type assertion in visitProjectionBody
+// resolves correctly regardless of the call site.
+type projItems struct {
+	all   bool
+	items []*ast.ProjectionItem
+}
+
+// mergeAction is the package-level transfer type returned by VisitMergeAction.
+type mergeAction struct {
+	onCreate bool
+	items    []*ast.SetItem
+}
+
+// -------------------------------------------------------------------------
+// Script / Query dispatch
+// -------------------------------------------------------------------------
+
+// VisitScript is the entry point. The script rule wraps a single query.
+func (v *visitor) VisitScript(ctx *gen.ScriptContext) interface{} {
+	return v.visit(ctx.Query())
+}
+
+// VisitQuery dispatches to regularQuery or standaloneCall.
+func (v *visitor) VisitQuery(ctx *gen.QueryContext) interface{} {
+	if rq := ctx.RegularQuery(); rq != nil {
+		return v.visit(rq)
+	}
+	if sc := ctx.StandaloneCall(); sc != nil {
+		return v.visit(sc)
+	}
+	return unsupported(ctx, "query", "empty query")
+}
+
+// VisitRegularQuery handles UNION of singleQuery.
+func (v *visitor) VisitRegularQuery(ctx *gen.RegularQueryContext) interface{} {
+	sq := ctx.SingleQuery()
+	first, ok := v.visit(sq).(*ast.SingleQuery)
+	if !ok {
+		return v.visit(sq)
+	}
+
+	unions := ctx.AllUnionSt()
+	if len(unions) == 0 {
+		return first
+	}
+
+	parts := []*ast.SingleQuery{first}
+	allFlag := false
+	for _, u := range unions {
+		ur := v.visit(u)
+		union, ok := ur.(*ast.Union)
+		if !ok {
+			return ur // propagate error
+		}
+		if union.All {
+			allFlag = true
+		}
+		parts = append(parts, union.Query)
+	}
+	return &ast.MultiQuery{Pos: positionOf(ctx), Parts: parts, All: allFlag}
+}
+
+// VisitUnionSt handles a UNION [ALL] singleQuery clause.
+func (v *visitor) VisitUnionSt(ctx *gen.UnionStContext) interface{} {
+	sq := ctx.SingleQuery()
+	if sq == nil {
+		return unsupported(ctx, "unionSt", "missing single query in UNION")
+	}
+	sqResult := v.visit(sq)
+	part, ok := sqResult.(*ast.SingleQuery)
+	if !ok {
+		return sqResult
+	}
+	return &ast.Union{
+		Pos:   positionOf(ctx),
+		All:   ctx.ALL() != nil,
+		Query: part,
+	}
+}
+
+// VisitSingleQuery selects singlePartQ or multiPartQ.
+func (v *visitor) VisitSingleQuery(ctx *gen.SingleQueryContext) interface{} {
+	if spq := ctx.SinglePartQ(); spq != nil {
+		return v.visit(spq)
+	}
+	if mpq := ctx.MultiPartQ(); mpq != nil {
+		return v.visit(mpq)
+	}
+	return unsupported(ctx, "singleQuery", "empty single query")
+}
+
+// VisitSinglePartQ handles the simple (no WITH) query form.
+func (v *visitor) VisitSinglePartQ(ctx *gen.SinglePartQContext) interface{} {
+	q := &ast.SingleQuery{Pos: positionOf(ctx)}
+
+	for _, rs := range ctx.AllReadingStatement() {
+		r := v.visit(rs)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if c, ok := r.(ast.ReadingClause); ok {
+			q.ReadingClauses = append(q.ReadingClauses, c)
+		}
+	}
+	for _, us := range ctx.AllUpdatingStatement() {
+		u := v.visit(us)
+		if err := firstError(u); err != nil {
+			return err
+		}
+		if c, ok := u.(ast.UpdatingClause); ok {
+			q.UpdatingClauses = append(q.UpdatingClauses, c)
+		}
+	}
+	if ret := ctx.ReturnSt(); ret != nil {
+		r := v.visit(ret)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if rv, ok := r.(*ast.Return); ok {
+			q.Return = rv
+		}
+	}
+	return q
+}
+
+// VisitMultiPartQ handles queries with one or more WITH-prefixed parts.
+func (v *visitor) VisitMultiPartQ(ctx *gen.MultiPartQContext) interface{} {
+	q := &ast.SingleQuery{Pos: positionOf(ctx)}
+
+	// Leading reading clauses before the first WITH.
+	for _, rs := range ctx.AllReadingStatement() {
+		r := v.visit(rs)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if c, ok := r.(ast.ReadingClause); ok {
+			q.ReadingClauses = append(q.ReadingClauses, c)
+		}
+	}
+
+	// WITH clauses.
+	for _, ws := range ctx.AllWithSt() {
+		w := v.visit(ws)
+		if err := firstError(w); err != nil {
+			return err
+		}
+		if wv, ok := w.(*ast.With); ok {
+			q.With = append(q.With, wv)
+		}
+	}
+
+	// Updating clauses (after each WITH segment).
+	for _, us := range ctx.AllUpdatingStatement() {
+		u := v.visit(us)
+		if err := firstError(u); err != nil {
+			return err
+		}
+		if c, ok := u.(ast.UpdatingClause); ok {
+			q.UpdatingClauses = append(q.UpdatingClauses, c)
+		}
+	}
+
+	// Terminal singlePartQ carries the final RETURN and its own reading/updating.
+	if spq := ctx.SinglePartQ(); spq != nil {
+		spqResult := v.visit(spq)
+		if err := firstError(spqResult); err != nil {
+			return err
+		}
+		if inner, ok := spqResult.(*ast.SingleQuery); ok {
+			q.ReadingClauses = append(q.ReadingClauses, inner.ReadingClauses...)
+			q.UpdatingClauses = append(q.UpdatingClauses, inner.UpdatingClauses...)
+			q.With = append(q.With, inner.With...)
+			q.Return = inner.Return
+		}
+	}
+	return q
+}
+
+// -------------------------------------------------------------------------
+// Standalone CALL
+// -------------------------------------------------------------------------
+
+// VisitStandaloneCall handles CALL proc(args) YIELD items.
+func (v *visitor) VisitStandaloneCall(ctx *gen.StandaloneCallContext) interface{} {
+	c := v.buildCallFromInvocationName(ctx, ctx.InvocationName())
+
+	// Optional argument list.
+	if pec := ctx.ParenExpressionChain(); pec != nil {
+		args, err := v.visitExpressionChain(pec.ExpressionChain())
+		if err != nil {
+			return err
+		}
+		c.Args = args
+	} else {
+		c.Args = nil // no parens → no arg list
+	}
+
+	// YIELD clause. YIELD * is signalled by MULT token on this context.
+	if ctx.YIELD() != nil {
+		if ctx.MULT() != nil {
+			c.Yield = []*ast.YieldItem{} // YIELD * → empty slice
+		} else if yi := ctx.YieldItems(); yi != nil {
+			yield, err := v.visitYieldItems(yi)
+			if err != nil {
+				return err
+			}
+			c.Yield = yield
+		}
+	}
+
+	// CALL at top level wraps inside a SingleQuery with no RETURN.
+	return &ast.SingleQuery{
+		Pos:            positionOf(ctx),
+		ReadingClauses: []ast.ReadingClause{c},
+	}
+}
+
+func (v *visitor) buildCallFromInvocationName(ctx antlr.ParserRuleContext, inCtx gen.IInvocationNameContext) *ast.Call {
+	c := &ast.Call{Pos: positionOf(ctx)}
+	if inCtx != nil {
+		syms := inCtx.AllSymbol()
+		for i, s := range syms {
+			name := symbolText(s)
+			if i < len(syms)-1 {
+				c.Namespace = append(c.Namespace, name)
+			} else {
+				c.Procedure = name
+			}
+		}
+	}
+	return c
+}
+
+// -------------------------------------------------------------------------
+// Reading statements
+// -------------------------------------------------------------------------
+
+func (v *visitor) VisitReadingStatement(ctx *gen.ReadingStatementContext) interface{} {
+	if m := ctx.MatchSt(); m != nil {
+		return v.visit(m)
+	}
+	if u := ctx.UnwindSt(); u != nil {
+		return v.visit(u)
+	}
+	if c := ctx.QueryCallSt(); c != nil {
+		return v.visit(c)
+	}
+	return unsupported(ctx, "readingStatement", "unknown reading statement variant")
+}
+
+// VisitMatchSt handles MATCH and OPTIONAL MATCH.
+func (v *visitor) VisitMatchSt(ctx *gen.MatchStContext) interface{} {
+	pw := ctx.PatternWhere()
+	if pw == nil {
+		return unsupported(ctx, "matchSt", "missing patternWhere")
+	}
+	pat, err := v.visitPatternWhere(pw)
+	if err != nil {
+		return err
+	}
+
+	if ctx.OPTIONAL() != nil {
+		return &ast.OptionalMatch{
+			Pos:     positionOf(ctx),
+			Pattern: pat.Pattern,
+			Where:   pat.Where,
+		}
+	}
+	return &ast.Match{
+		Pos:     positionOf(ctx),
+		Pattern: pat.Pattern,
+		Where:   pat.Where,
+	}
+}
+
+// VisitUnwindSt handles UNWIND expr AS var.
+func (v *visitor) VisitUnwindSt(ctx *gen.UnwindStContext) interface{} {
+	expr, err := asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		return &SemaError{Rule: "unwindSt", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	varName := symbolText(ctx.Symbol())
+	return &ast.Unwind{
+		Pos:      positionOf(ctx),
+		Expr:     expr,
+		Variable: varName,
+	}
+}
+
+// VisitQueryCallSt handles an in-query CALL statement.
+func (v *visitor) VisitQueryCallSt(ctx *gen.QueryCallStContext) interface{} {
+	c := v.buildCallFromInvocationName(ctx, ctx.InvocationName())
+
+	if pec := ctx.ParenExpressionChain(); pec != nil {
+		args, err := v.visitExpressionChain(pec.ExpressionChain())
+		if err != nil {
+			return err
+		}
+		c.Args = args
+	}
+	if yi := ctx.YieldItems(); yi != nil {
+		yield, err := v.visitYieldItems(yi)
+		if err != nil {
+			return err
+		}
+		c.Yield = yield
+	}
+	return c
+}
+
+// -------------------------------------------------------------------------
+// Updating statements
+// -------------------------------------------------------------------------
+
+func (v *visitor) VisitUpdatingStatement(ctx *gen.UpdatingStatementContext) interface{} {
+	if c := ctx.CreateSt(); c != nil {
+		return v.visit(c)
+	}
+	if m := ctx.MergeSt(); m != nil {
+		return v.visit(m)
+	}
+	if s := ctx.SetSt(); s != nil {
+		return v.visit(s)
+	}
+	if r := ctx.RemoveSt(); r != nil {
+		return v.visit(r)
+	}
+	if d := ctx.DeleteSt(); d != nil {
+		return v.visit(d)
+	}
+	return unsupported(ctx, "updatingStatement", "unknown updating statement variant")
+}
+
+// VisitCreateSt handles CREATE pattern.
+func (v *visitor) VisitCreateSt(ctx *gen.CreateStContext) interface{} {
+	pat, err := v.visitPattern(ctx.Pattern())
+	if err != nil {
+		return err
+	}
+	return &ast.Create{Pos: positionOf(ctx), Pattern: pat}
+}
+
+// VisitMergeSt handles MERGE path ON CREATE SET … ON MATCH SET ….
+func (v *visitor) VisitMergeSt(ctx *gen.MergeStContext) interface{} {
+	pp, err := v.visitPatternPart(ctx.PatternPart())
+	if err != nil {
+		return err
+	}
+	m := &ast.Merge{Pos: positionOf(ctx), Pattern: pp}
+
+	for _, ma := range ctx.AllMergeAction() {
+		maResult := v.visit(ma)
+		if e := firstError(maResult); e != nil {
+			return e
+		}
+		if mv, ok := maResult.(*mergeAction); ok {
+			if mv.onCreate {
+				m.OnCreate = append(m.OnCreate, mv.items...)
+			} else {
+				m.OnMatch = append(m.OnMatch, mv.items...)
+			}
+		}
+	}
+	return m
+}
+
+// VisitMergeAction handles ON CREATE SET / ON MATCH SET.
+func (v *visitor) VisitMergeAction(ctx *gen.MergeActionContext) interface{} {
+	ss := ctx.SetSt()
+	if ss == nil {
+		return unsupported(ctx, "mergeAction", "missing SET in merge action")
+	}
+	setResult := v.visit(ss)
+	if err := firstError(setResult); err != nil {
+		return err
+	}
+	set, ok := setResult.(*ast.Set)
+	if !ok {
+		return unsupported(ctx, "mergeAction", "expected SET")
+	}
+	// ON keyword is at position 0, then CREATE or MATCH token.
+	// ctx.CREATE() returns the CREATE terminal, ctx.MATCH() returns MATCH.
+	onCreate := ctx.CREATE() != nil
+	return &mergeAction{onCreate: onCreate, items: set.Items}
+}
+
+// VisitSetSt handles SET item, item, ….
+func (v *visitor) VisitSetSt(ctx *gen.SetStContext) interface{} {
+	set := &ast.Set{Pos: positionOf(ctx)}
+	for _, si := range ctx.AllSetItem() {
+		siResult := v.visit(si)
+		if err := firstError(siResult); err != nil {
+			return err
+		}
+		if item, ok := siResult.(*ast.SetItem); ok {
+			set.Items = append(set.Items, item)
+		}
+	}
+	return set
+}
+
+// VisitSetItem handles one SET assignment.
+//
+// Three forms:
+//  1. propertyExpr = expr          (property assignment)
+//  2. variable = expr / variable += expr (variable assignment)
+//  3. variable :Label1:Label2      (label assignment)
+func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
+	item := &ast.SetItem{Pos: positionOf(ctx)}
+
+	// Form 1: property = expr  (propertyExpression ASSIGN expression)
+	if pe := ctx.PropertyExpression(); pe != nil {
+		tgt, err := v.visitPropertyExpression(pe)
+		if err != nil {
+			return err
+		}
+		expr, err := asExpr(v.visit(ctx.Expression()))
+		if err != nil {
+			return &SemaError{Rule: "setItem", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		item.Target = tgt
+		item.Value = expr
+		item.Operator = "="
+		return item
+	}
+
+	// Forms 2 & 3: variable-based (grammar uses Symbol, not Name)
+	if symCtx := ctx.Symbol(); symCtx != nil {
+		varName := symbolText(symCtx)
+		item.Target = &ast.Variable{Pos: positionOf(ctx), Name: varName}
+
+		// ASSIGN ('=') or ADD_ASSIGN ('+=') token?
+		if ctx.ASSIGN() != nil {
+			item.Operator = "="
+			expr, err := asExpr(v.visit(ctx.Expression()))
+			if err != nil {
+				return &SemaError{Rule: "setItem", Pos: positionOf(ctx), Message: err.Error()}
+			}
+			item.Value = expr
+			return item
+		}
+		if ctx.ADD_ASSIGN() != nil {
+			item.Operator = "+="
+			expr, err := asExpr(v.visit(ctx.Expression()))
+			if err != nil {
+				return &SemaError{Rule: "setItem", Pos: positionOf(ctx), Message: err.Error()}
+			}
+			item.Value = expr
+			return item
+		}
+
+		// Label assignment: variable :Label1:Label2
+		if nl := ctx.NodeLabels(); nl != nil {
+			item.Labels = nodeLabels(nl)
+			return item
+		}
+	}
+	return unsupported(ctx, "setItem", "unrecognised set-item form")
+}
+
+// VisitRemoveSt handles REMOVE item, item, ….
+func (v *visitor) VisitRemoveSt(ctx *gen.RemoveStContext) interface{} {
+	rem := &ast.Remove{Pos: positionOf(ctx)}
+	for _, ri := range ctx.AllRemoveItem() {
+		riResult := v.visit(ri)
+		if err := firstError(riResult); err != nil {
+			return err
+		}
+		if item, ok := riResult.(*ast.RemoveItem); ok {
+			rem.Items = append(rem.Items, item)
+		}
+	}
+	return rem
+}
+
+// VisitRemoveItem handles one REMOVE item.
+func (v *visitor) VisitRemoveItem(ctx *gen.RemoveItemContext) interface{} {
+	item := &ast.RemoveItem{Pos: positionOf(ctx)}
+
+	// Property removal: propertyExpression
+	if pe := ctx.PropertyExpression(); pe != nil {
+		tgt, err := v.visitPropertyExpression(pe)
+		if err != nil {
+			return err
+		}
+		item.Target = tgt
+		return item
+	}
+
+	// Label removal: variable :Label1:Label2 (grammar uses Symbol)
+	if symCtx := ctx.Symbol(); symCtx != nil {
+		varName := symbolText(symCtx)
+		item.Target = &ast.Variable{Pos: positionOf(ctx), Name: varName}
+		if nl := ctx.NodeLabels(); nl != nil {
+			item.Labels = nodeLabels(nl)
+		}
+		return item
+	}
+	return unsupported(ctx, "removeItem", "unrecognised remove-item form")
+}
+
+// VisitDeleteSt handles [DETACH] DELETE expr, expr, ….
+func (v *visitor) VisitDeleteSt(ctx *gen.DeleteStContext) interface{} {
+	var exprs []ast.Expression
+	if ec := ctx.ExpressionChain(); ec != nil {
+		args, err := v.visitExpressionChain(ec)
+		if err != nil {
+			return err
+		}
+		exprs = args
+	}
+	if ctx.DETACH() != nil {
+		return &ast.DetachDelete{Pos: positionOf(ctx), Expressions: exprs}
+	}
+	return &ast.Delete{Pos: positionOf(ctx), Expressions: exprs}
+}
+
+// -------------------------------------------------------------------------
+// RETURN / WITH / projections
+// -------------------------------------------------------------------------
+
+// VisitReturnSt handles RETURN projectionBody.
+func (v *visitor) VisitReturnSt(ctx *gen.ReturnStContext) interface{} {
+	proj, err := v.visitProjectionBody(ctx.ProjectionBody())
+	if err != nil {
+		return err
+	}
+	return &ast.Return{Pos: positionOf(ctx), Projection: proj}
+}
+
+// VisitWithSt handles WITH projectionBody [WHERE expr].
+func (v *visitor) VisitWithSt(ctx *gen.WithStContext) interface{} {
+	proj, err := v.visitProjectionBody(ctx.ProjectionBody())
+	if err != nil {
+		return err
+	}
+	w := &ast.With{Pos: positionOf(ctx), Projection: proj}
+	if wh := ctx.Where(); wh != nil {
+		where, err := v.visitWhere(wh)
+		if err != nil {
+			return err
+		}
+		w.Where = where
+	}
+	return w
+}
+
+func (v *visitor) visitProjectionBody(ctx gen.IProjectionBodyContext) (*ast.Projection, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("missing projectionBody")
+	}
+	proj := &ast.Projection{Pos: positionOf(ctx)}
+	proj.Distinct = ctx.DISTINCT() != nil
+
+	items := ctx.ProjectionItems()
+	if items == nil {
+		return nil, fmt.Errorf("missing projectionItems")
+	}
+	res := v.visit(items)
+	if err := firstError(res); err != nil {
+		return nil, err
+	}
+	if pi, ok := res.(*projItems); ok {
+		proj.All = pi.all
+		proj.Items = pi.items
+	}
+
+	if ord := ctx.OrderSt(); ord != nil {
+		orderResult := v.visit(ord)
+		if err := firstError(orderResult); err != nil {
+			return nil, err
+		}
+		if sortItems, ok := orderResult.([]*ast.SortItem); ok {
+			proj.OrderBy = sortItems
+		}
+	}
+	if sk := ctx.SkipSt(); sk != nil {
+		expr, err := asExpr(v.visit(sk.Expression()))
+		if err != nil {
+			return nil, err
+		}
+		proj.Skip = expr
+	}
+	if lm := ctx.LimitSt(); lm != nil {
+		expr, err := asExpr(v.visit(lm.Expression()))
+		if err != nil {
+			return nil, err
+		}
+		proj.Limit = expr
+	}
+	return proj, nil
+}
+
+// VisitProjectionItems handles * or item, item, ….
+func (v *visitor) VisitProjectionItems(ctx *gen.ProjectionItemsContext) interface{} {
+	if ctx.MULT() != nil {
+		return &projItems{all: true}
+	}
+	pi := &projItems{}
+	for _, item := range ctx.AllProjectionItem() {
+		r := v.visit(item)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if pitem, ok := r.(*ast.ProjectionItem); ok {
+			pi.items = append(pi.items, pitem)
+		}
+	}
+	return pi
+}
+
+// VisitProjectionItem handles expr [AS alias].
+func (v *visitor) VisitProjectionItem(ctx *gen.ProjectionItemContext) interface{} {
+	expr, err := asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		return &SemaError{Rule: "projectionItem", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	item := &ast.ProjectionItem{Pos: positionOf(ctx), Expr: expr}
+	if symCtx := ctx.Symbol(); symCtx != nil {
+		s := symbolText(symCtx)
+		item.Alias = &s
+	}
+	return item
+}
+
+// VisitOrderSt handles ORDER BY items.
+func (v *visitor) VisitOrderSt(ctx *gen.OrderStContext) interface{} {
+	var items []*ast.SortItem
+	for _, oi := range ctx.AllOrderItem() {
+		r := v.visit(oi)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if si, ok := r.(*ast.SortItem); ok {
+			items = append(items, si)
+		}
+	}
+	return items
+}
+
+// VisitOrderItem handles expr [ASC|DESC].
+func (v *visitor) VisitOrderItem(ctx *gen.OrderItemContext) interface{} {
+	expr, err := asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		return &SemaError{Rule: "orderItem", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	// DESC or DESCENDING means descending; everything else is ascending.
+	desc := ctx.DESC() != nil || ctx.DESCENDING() != nil
+	return &ast.SortItem{Pos: positionOf(ctx), Expr: expr, Descending: desc}
+}
+
+// VisitSkipSt / VisitLimitSt — the expression is pulled by the parent.
+func (v *visitor) VisitSkipSt(ctx *gen.SkipStContext) interface{}   { return v.visit(ctx.Expression()) }
+func (v *visitor) VisitLimitSt(ctx *gen.LimitStContext) interface{} { return v.visit(ctx.Expression()) }
+
+// -------------------------------------------------------------------------
+// WHERE
+// -------------------------------------------------------------------------
+
+// VisitWhere handles WHERE expr.
+func (v *visitor) VisitWhere(ctx *gen.WhereContext) interface{} {
+	expr, err := asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		return &SemaError{Rule: "where", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	return &ast.Where{Pos: positionOf(ctx), Predicate: expr}
+}
+
+func (v *visitor) visitWhere(ctx gen.IWhereContext) (*ast.Where, error) {
+	if ctx == nil {
+		return nil, nil
+	}
+	r := v.visit(ctx)
+	if err := firstError(r); err != nil {
+		return nil, err
+	}
+	if w, ok := r.(*ast.Where); ok {
+		return w, nil
+	}
+	return nil, nil
+}
+
+// -------------------------------------------------------------------------
+// Pattern helpers
+// -------------------------------------------------------------------------
+
+type patternWhereResult struct {
+	Pattern *ast.Pattern
+	Where   *ast.Where
+}
+
+func (v *visitor) visitPatternWhere(ctx gen.IPatternWhereContext) (*patternWhereResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil patternWhere")
+	}
+	pat, err := v.visitPattern(ctx.Pattern())
+	if err != nil {
+		return nil, err
+	}
+	where, err := v.visitWhere(ctx.Where())
+	if err != nil {
+		return nil, err
+	}
+	return &patternWhereResult{Pattern: pat, Where: where}, nil
+}
+
+// VisitPatternWhere is the visitor entry for patternWhere rule.
+func (v *visitor) VisitPatternWhere(ctx *gen.PatternWhereContext) interface{} {
+	r, err := v.visitPatternWhere(ctx)
+	if err != nil {
+		return &SemaError{Rule: "patternWhere", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	return r
+}
+
+// VisitPattern handles comma-separated patternParts.
+func (v *visitor) VisitPattern(ctx *gen.PatternContext) interface{} {
+	pat := &ast.Pattern{Pos: positionOf(ctx)}
+	for _, pp := range ctx.AllPatternPart() {
+		r := v.visit(pp)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if path, ok := r.(*ast.PathPattern); ok {
+			pat.Paths = append(pat.Paths, path)
+		}
+	}
+	return pat
+}
+
+func (v *visitor) visitPattern(ctx gen.IPatternContext) (*ast.Pattern, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil pattern")
+	}
+	r := v.visit(ctx)
+	if err := firstError(r); err != nil {
+		return nil, err
+	}
+	if pat, ok := r.(*ast.Pattern); ok {
+		return pat, nil
+	}
+	return nil, fmt.Errorf("expected *ast.Pattern, got %T", r)
+}
+
+// VisitPatternPart handles [variable =] patternElem.
+func (v *visitor) VisitPatternPart(ctx *gen.PatternPartContext) interface{} {
+	pp := &ast.PathPattern{Pos: positionOf(ctx)}
+	if sym := ctx.Symbol(); sym != nil {
+		s := symbolText(sym)
+		pp.Variable = &s
+	}
+	r := v.visit(ctx.PatternElem())
+	if err := firstError(r); err != nil {
+		return err
+	}
+	if head, ok := r.(*ast.PathElement); ok {
+		pp.Head = head
+	}
+	return pp
+}
+
+func (v *visitor) visitPatternPart(ctx gen.IPatternPartContext) (*ast.PathPattern, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil patternPart")
+	}
+	r := v.visit(ctx)
+	if err := firstError(r); err != nil {
+		return nil, err
+	}
+	if pp, ok := r.(*ast.PathPattern); ok {
+		return pp, nil
+	}
+	return nil, fmt.Errorf("expected *ast.PathPattern, got %T", r)
+}
+
+// VisitPatternElem builds a linked list of PathElement nodes.
+//
+// Grammar: patternElem = nodePattern (patternElemChain)*
+//
+//	| '(' patternElem ')'
+func (v *visitor) VisitPatternElem(ctx *gen.PatternElemContext) interface{} {
+	// Parenthesised form: recurse.
+	if inner := ctx.PatternElem(); inner != nil {
+		return v.visit(inner)
+	}
+
+	np := ctx.NodePattern()
+	if np == nil {
+		return unsupported(ctx, "patternElem", "missing node pattern")
+	}
+	nodeR := v.visit(np)
+	if err := firstError(nodeR); err != nil {
+		return err
+	}
+	nodePat, ok := nodeR.(*ast.NodePattern)
+	if !ok {
+		return unsupported(ctx, "patternElem", "expected NodePattern")
+	}
+
+	head := &ast.PathElement{Node: nodePat}
+	cur := head
+
+	for _, chain := range ctx.AllPatternElemChain() {
+		cr := v.visit(chain)
+		if err := firstError(cr); err != nil {
+			return err
+		}
+		chainElem, ok := cr.(*ast.PathElement)
+		if !ok {
+			continue
+		}
+		cur.Next = chainElem
+		cur = chainElem
+	}
+	return head
+}
+
+// VisitPatternElemChain handles relPattern nodePattern.
+func (v *visitor) VisitPatternElemChain(ctx *gen.PatternElemChainContext) interface{} {
+	relR := v.visit(ctx.RelationshipPattern())
+	if err := firstError(relR); err != nil {
+		return err
+	}
+	rel, ok := relR.(*ast.RelationshipPattern)
+	if !ok {
+		return unsupported(ctx, "patternElemChain", "expected RelationshipPattern")
+	}
+
+	nodeR := v.visit(ctx.NodePattern())
+	if err := firstError(nodeR); err != nil {
+		return err
+	}
+	node, ok := nodeR.(*ast.NodePattern)
+	if !ok {
+		return unsupported(ctx, "patternElemChain", "expected NodePattern")
+	}
+	return &ast.PathElement{Relationship: rel, Node: node}
+}
+
+// VisitNodePattern handles (variable? labels? properties?).
+func (v *visitor) VisitNodePattern(ctx *gen.NodePatternContext) interface{} {
+	np := &ast.NodePattern{Pos: positionOf(ctx)}
+	if sym := ctx.Symbol(); sym != nil {
+		s := symbolText(sym)
+		np.Variable = &s
+	}
+	if nl := ctx.NodeLabels(); nl != nil {
+		np.Labels = nodeLabels(nl)
+	}
+	if props := ctx.Properties(); props != nil {
+		propR := v.visit(props)
+		if err := firstError(propR); err != nil {
+			return err
+		}
+		if e, ok := propR.(ast.Expression); ok {
+			np.Properties = e
+		}
+	}
+	return np
+}
+
+// VisitRelationshipPattern handles -[relDetail]-> or <-[relDetail]- or -[relDetail]-.
+func (v *visitor) VisitRelationshipPattern(ctx *gen.RelationshipPatternContext) interface{} {
+	rp := &ast.RelationshipPattern{Pos: positionOf(ctx)}
+
+	// Direction: LT present before SUB = incoming; GT present = outgoing.
+	if ctx.LT() != nil {
+		rp.Direction = ast.RelDirectionIncoming
+	} else if ctx.GT() != nil {
+		rp.Direction = ast.RelDirectionOutgoing
+	} else {
+		rp.Direction = ast.RelDirectionNone
+	}
+
+	if rd := ctx.RelationDetail(); rd != nil {
+		r := v.visit(rd)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if detail, ok := r.(*relDetail); ok {
+			rp.Variable = detail.variable
+			rp.Types = detail.types
+			rp.Range = detail.rangeQ
+			rp.Properties = detail.properties
+		}
+	}
+	return rp
+}
+
+// relDetail is an internal transfer object for VisitRelationDetail.
+type relDetail struct {
+	variable   *string
+	types      []string
+	rangeQ     *ast.RangeQuantifier
+	properties ast.Expression
+}
+
+// VisitRelationDetail parses [variable? :types? range? properties?].
+func (v *visitor) VisitRelationDetail(ctx *gen.RelationDetailContext) interface{} {
+	d := &relDetail{}
+	if sym := ctx.Symbol(); sym != nil {
+		s := symbolText(sym)
+		d.variable = &s
+	}
+	if rt := ctx.RelationshipTypes(); rt != nil {
+		d.types = relationshipTypes(rt)
+	}
+	if rl := ctx.RangeLit(); rl != nil {
+		rq, err := v.visitRangeLit(rl)
+		if err != nil {
+			return err
+		}
+		d.rangeQ = rq
+	}
+	if props := ctx.Properties(); props != nil {
+		propR := v.visit(props)
+		if err := firstError(propR); err != nil {
+			return err
+		}
+		if e, ok := propR.(ast.Expression); ok {
+			d.properties = e
+		}
+	}
+	return d
+}
+
+// VisitRelationshipTypes returns the type list.
+func (v *visitor) VisitRelationshipTypes(ctx *gen.RelationshipTypesContext) interface{} {
+	return relationshipTypes(ctx)
+}
+
+// VisitProperties dispatches to mapLit or parameter.
+func (v *visitor) VisitProperties(ctx *gen.PropertiesContext) interface{} {
+	if ml := ctx.MapLit(); ml != nil {
+		return v.visit(ml)
+	}
+	if p := ctx.Parameter(); p != nil {
+		return v.visit(p)
+	}
+	return unsupported(ctx, "properties", "expected map literal or parameter")
+}
+
+// VisitNodeLabels returns the label list. Internal helper: see nodeLabels().
+func (v *visitor) VisitNodeLabels(ctx *gen.NodeLabelsContext) interface{} {
+	return nodeLabels(ctx)
+}
+
+// VisitRangeLit handles *min?..max?.
+func (v *visitor) VisitRangeLit(ctx *gen.RangeLitContext) interface{} {
+	rq, err := v.visitRangeLit(ctx)
+	if err != nil {
+		return err
+	}
+	return rq
+}
+
+func (v *visitor) visitRangeLit(ctx gen.IRangeLitContext) (*ast.RangeQuantifier, error) {
+	if ctx == nil {
+		return nil, nil
+	}
+	rq := &ast.RangeQuantifier{Pos: positionOf(ctx)}
+	nums := ctx.AllNumLit()
+
+	hasRange := ctx.RANGE() != nil // ".." token present
+
+	if !hasRange {
+		// *n  — fixed length
+		if len(nums) == 1 {
+			n, err := parseInt(nums[0].GetText())
+			if err != nil {
+				return nil, &SemaError{Rule: "rangeLit", Pos: rq.Pos, Message: err.Error()}
+			}
+			rq.Min = &n
+			rq.Max = &n
+		}
+		// bare * — unbounded
+		return rq, nil
+	}
+
+	// *min?..max?
+	// We detect position: num before RANGE token is min, num after is max.
+	// Since AllNumLit returns children in order, we check the raw text.
+	text := ctx.GetText() // e.g. "*1..3", "*..3", "*1..", "*.."
+	// Strip leading '*'
+	inner := strings.TrimPrefix(text, "*")
+	parts := strings.SplitN(inner, "..", 2)
+	if len(parts) == 2 {
+		if parts[0] != "" {
+			n, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil {
+				return nil, &SemaError{Rule: "rangeLit", Pos: rq.Pos, Message: "invalid range min: " + parts[0]}
+			}
+			rq.Min = &n
+		}
+		if parts[1] != "" {
+			n, err := strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				return nil, &SemaError{Rule: "rangeLit", Pos: rq.Pos, Message: "invalid range max: " + parts[1]}
+			}
+			rq.Max = &n
+		}
+	}
+	return rq, nil
+}
+
+// -------------------------------------------------------------------------
+// Expression rules
+// -------------------------------------------------------------------------
+
+// VisitExpression handles expr (OR xorExpr)*.
+func (v *visitor) VisitExpression(ctx *gen.ExpressionContext) interface{} {
+	xors := ctx.AllXorExpression()
+	if len(xors) == 0 {
+		return unsupported(ctx, "expression", "empty expression")
+	}
+	left, err := asExpr(v.visit(xors[0]))
+	if err != nil {
+		return &SemaError{Rule: "expression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	for i := 1; i < len(xors); i++ {
+		right, err := asExpr(v.visit(xors[i]))
+		if err != nil {
+			return &SemaError{Rule: "expression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "OR", Right: right}
+	}
+	return left
+}
+
+// VisitXorExpression handles xorExpr (XOR andExpr)*.
+func (v *visitor) VisitXorExpression(ctx *gen.XorExpressionContext) interface{} {
+	ands := ctx.AllAndExpression()
+	if len(ands) == 0 {
+		return unsupported(ctx, "xorExpression", "empty xorExpression")
+	}
+	left, err := asExpr(v.visit(ands[0]))
+	if err != nil {
+		return &SemaError{Rule: "xorExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	for i := 1; i < len(ands); i++ {
+		right, err := asExpr(v.visit(ands[i]))
+		if err != nil {
+			return &SemaError{Rule: "xorExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "XOR", Right: right}
+	}
+	return left
+}
+
+// VisitAndExpression handles andExpr (AND notExpr)*.
+func (v *visitor) VisitAndExpression(ctx *gen.AndExpressionContext) interface{} {
+	nots := ctx.AllNotExpression()
+	if len(nots) == 0 {
+		return unsupported(ctx, "andExpression", "empty andExpression")
+	}
+	left, err := asExpr(v.visit(nots[0]))
+	if err != nil {
+		return &SemaError{Rule: "andExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	for i := 1; i < len(nots); i++ {
+		right, err := asExpr(v.visit(nots[i]))
+		if err != nil {
+			return &SemaError{Rule: "andExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "AND", Right: right}
+	}
+	return left
+}
+
+// VisitNotExpression handles NOT* comparisonExpression.
+func (v *visitor) VisitNotExpression(ctx *gen.NotExpressionContext) interface{} {
+	inner, err := asExpr(v.visit(ctx.ComparisonExpression()))
+	if err != nil {
+		return &SemaError{Rule: "notExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	if ctx.NOT() != nil {
+		return &ast.UnaryOp{Pos: positionOf(ctx), Operator: "NOT", Operand: inner}
+	}
+	return inner
+}
+
+// VisitComparisonExpression handles addSub (cmpSign addSub)*.
+func (v *visitor) VisitComparisonExpression(ctx *gen.ComparisonExpressionContext) interface{} {
+	adds := ctx.AllAddSubExpression()
+	cmps := ctx.AllComparisonSigns()
+	if len(adds) == 0 {
+		return unsupported(ctx, "comparisonExpression", "empty")
+	}
+	left, err := asExpr(v.visit(adds[0]))
+	if err != nil {
+		return &SemaError{Rule: "comparisonExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	for i, cs := range cmps {
+		op := comparisonOp(cs)
+		right, err := asExpr(v.visit(adds[i+1]))
+		if err != nil {
+			return &SemaError{Rule: "comparisonExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: op, Right: right}
+	}
+	return left
+}
+
+// VisitComparisonSigns returns the operator string (used by parent).
+func (v *visitor) VisitComparisonSigns(ctx *gen.ComparisonSignsContext) interface{} {
+	return comparisonOp(ctx)
+}
+
+// VisitAddSubExpression handles multDiv ([+-] multDiv)*.
+func (v *visitor) VisitAddSubExpression(ctx *gen.AddSubExpressionContext) interface{} {
+	mults := ctx.AllMultDivExpression()
+	if len(mults) == 0 {
+		return unsupported(ctx, "addSubExpression", "empty")
+	}
+	left, err := asExpr(v.visit(mults[0]))
+	if err != nil {
+		return &SemaError{Rule: "addSubExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	// Operators are interleaved as children; ANTLR provides AllPLUS / AllSUB
+	// but their indices don't directly correspond to pairs. We reconstruct by
+	// walking children in order.
+	opIdx := 0
+	operators := addSubOperators(ctx)
+	for i := 1; i < len(mults); i++ {
+		right, err := asExpr(v.visit(mults[i]))
+		if err != nil {
+			return &SemaError{Rule: "addSubExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		op := "+"
+		if opIdx < len(operators) {
+			op = operators[opIdx]
+		}
+		opIdx++
+		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: op, Right: right}
+	}
+	return left
+}
+
+// VisitMultDivExpression handles power ([*/%] power)*.
+func (v *visitor) VisitMultDivExpression(ctx *gen.MultDivExpressionContext) interface{} {
+	powers := ctx.AllPowerExpression()
+	if len(powers) == 0 {
+		return unsupported(ctx, "multDivExpression", "empty")
+	}
+	left, err := asExpr(v.visit(powers[0]))
+	if err != nil {
+		return &SemaError{Rule: "multDivExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	operators := multDivOperators(ctx)
+	for i := 1; i < len(powers); i++ {
+		right, err := asExpr(v.visit(powers[i]))
+		if err != nil {
+			return &SemaError{Rule: "multDivExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		op := "*"
+		if i-1 < len(operators) {
+			op = operators[i-1]
+		}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: op, Right: right}
+	}
+	return left
+}
+
+// VisitPowerExpression handles unary (^ unary)*.
+func (v *visitor) VisitPowerExpression(ctx *gen.PowerExpressionContext) interface{} {
+	unaries := ctx.AllUnaryAddSubExpression()
+	if len(unaries) == 0 {
+		return unsupported(ctx, "powerExpression", "empty")
+	}
+	left, err := asExpr(v.visit(unaries[0]))
+	if err != nil {
+		return &SemaError{Rule: "powerExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	for i := 1; i < len(unaries); i++ {
+		right, err := asExpr(v.visit(unaries[i]))
+		if err != nil {
+			return &SemaError{Rule: "powerExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "^", Right: right}
+	}
+	return left
+}
+
+// VisitUnaryAddSubExpression handles [+-] atomicExpression.
+func (v *visitor) VisitUnaryAddSubExpression(ctx *gen.UnaryAddSubExpressionContext) interface{} {
+	inner, err := asExpr(v.visit(ctx.AtomicExpression()))
+	if err != nil {
+		return &SemaError{Rule: "unaryAddSubExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	if ctx.SUB() != nil {
+		return &ast.UnaryOp{Pos: positionOf(ctx), Operator: "-", Operand: inner}
+	}
+	// Unary + is a no-op; omit the wrapper.
+	return inner
+}
+
+// VisitAtomicExpression handles propertyOrLabelExpr (stringExpr | listExpr | nullExpr)*.
+func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interface{} {
+	base, err := asExpr(v.visit(ctx.PropertyOrLabelExpression()))
+	if err != nil {
+		return &SemaError{Rule: "atomicExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+
+	// Apply postfix string predicates (STARTS WITH, ENDS WITH, CONTAINS).
+	for _, se := range ctx.AllStringExpression() {
+		r := v.visit(se)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		// stringExpression returns a partial BinaryOp with nil Left; fill it in.
+		if partial, ok := r.(*ast.BinaryOp); ok {
+			partial.Left = base
+			base = partial
+		}
+	}
+
+	// Apply IN / subscript / slice.
+	for _, le := range ctx.AllListExpression() {
+		r := v.visit(le)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		switch e := r.(type) {
+		case *listInExpr:
+			base = &ast.BinaryOp{Pos: positionOf(ctx), Left: base, Operator: "IN", Right: e.list}
+		case *subscriptOrSlice:
+			if e.isSlice {
+				base = &ast.SliceExpr{Pos: positionOf(ctx), Expr: base, From: e.from, To: e.to}
+			} else {
+				base = &ast.SubscriptExpr{Pos: positionOf(ctx), Expr: base, Index: e.index}
+			}
+		}
+	}
+
+	// Apply IS NULL / IS NOT NULL.
+	for _, ne := range ctx.AllNullExpression() {
+		r := v.visit(ne)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if op, ok := r.(string); ok {
+			base = &ast.UnaryOp{Pos: positionOf(ctx), Operator: op, Operand: base}
+		}
+	}
+
+	return base
+}
+
+// VisitListExpression handles IN expr | [expr?..expr?] | [expr].
+func (v *visitor) VisitListExpression(ctx *gen.ListExpressionContext) interface{} {
+	if ctx.IN() != nil {
+		// IN propertyOrLabelExpression
+		right, err := asExpr(v.visit(ctx.PropertyOrLabelExpression()))
+		if err != nil {
+			return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		return &listInExpr{list: right}
+	}
+	// [ … ] form: slice or subscript
+	exprs := ctx.AllExpression()
+	if ctx.RANGE() != nil {
+		// Slice: [from?..to?]
+		var from, to ast.Expression
+		// Determine from / to by position: text before ".." is from, after is to.
+		text := ctx.GetText()
+		// Strip surrounding brackets
+		inner := strings.TrimPrefix(strings.TrimSuffix(text, "]"), "[")
+		idx := strings.Index(inner, "..")
+		hasBefore := idx > 0
+		hasAfter := idx >= 0 && idx < len(inner)-2
+
+		if hasBefore && len(exprs) > 0 {
+			var err error
+			from, err = asExpr(v.visit(exprs[0]))
+			if err != nil {
+				return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
+			}
+		}
+		if hasAfter {
+			exprIdx := 0
+			if hasBefore {
+				exprIdx = 1
+			}
+			if exprIdx < len(exprs) {
+				var err error
+				to, err = asExpr(v.visit(exprs[exprIdx]))
+				if err != nil {
+					return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
+				}
+			}
+		}
+		return &subscriptOrSlice{isSlice: true, from: from, to: to}
+	}
+	// Subscript: [expr]
+	if len(exprs) == 1 {
+		idx, err := asExpr(v.visit(exprs[0]))
+		if err != nil {
+			return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		return &subscriptOrSlice{isSlice: false, index: idx}
+	}
+	return unsupported(ctx, "listExpression", "unexpected form")
+}
+
+// listInExpr is an internal transfer type for the IN rhs.
+type listInExpr struct{ list ast.Expression }
+
+// subscriptOrSlice is an internal transfer type.
+type subscriptOrSlice struct {
+	isSlice bool
+	from    ast.Expression
+	to      ast.Expression
+	index   ast.Expression
+}
+
+// VisitStringExpression returns a partial *BinaryOp with nil Left (filled by parent).
+func (v *visitor) VisitStringExpression(ctx *gen.StringExpressionContext) interface{} {
+	pfx := ctx.StringExpPrefix()
+	if pfx == nil {
+		return unsupported(ctx, "stringExpression", "missing prefix")
+	}
+	op := stringPrefixOp(pfx)
+	right, err := asExpr(v.visit(ctx.PropertyOrLabelExpression()))
+	if err != nil {
+		return &SemaError{Rule: "stringExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	return &ast.BinaryOp{Pos: positionOf(ctx), Operator: op, Right: right}
+}
+
+// VisitStringExpPrefix returns the operator string.
+func (v *visitor) VisitStringExpPrefix(ctx *gen.StringExpPrefixContext) interface{} {
+	return stringPrefixOp(ctx)
+}
+
+// VisitNullExpression returns "IS NULL" or "IS NOT NULL".
+func (v *visitor) VisitNullExpression(ctx *gen.NullExpressionContext) interface{} {
+	if ctx.NOT() != nil {
+		return "IS NOT NULL"
+	}
+	return "IS NULL"
+}
+
+// VisitPropertyOrLabelExpression handles atom (labelFilter | propertyAccess)*.
+func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpressionContext) interface{} {
+	// propertyExpression carries the atom + dot-access chain.
+	if pe := ctx.PropertyExpression(); pe != nil {
+		e, err := v.visitPropertyExpression(pe)
+		if err != nil {
+			return &SemaError{Rule: "propertyOrLabelExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		return e
+	}
+	return unsupported(ctx, "propertyOrLabelExpression", "missing propertyExpression")
+}
+
+func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (ast.Expression, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil propertyExpression")
+	}
+	r := v.visit(ctx.Atom())
+	if err := firstError(r); err != nil {
+		return nil, err
+	}
+	base, err := asExpr(r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Chain of .name accessors.
+	names := ctx.AllName()
+	for _, n := range names {
+		key := nameText(n)
+		base = &ast.Property{Pos: positionOf(ctx), Receiver: base, Key: key}
+	}
+	return base, nil
+}
+
+// VisitPropertyExpression is the Visit method required by the interface.
+func (v *visitor) VisitPropertyExpression(ctx *gen.PropertyExpressionContext) interface{} {
+	e, err := v.visitPropertyExpression(ctx)
+	if err != nil {
+		return &SemaError{Rule: "propertyExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	return e
+}
+
+// -------------------------------------------------------------------------
+// Atom
+// -------------------------------------------------------------------------
+
+// VisitAtom dispatches to the concrete atom variant.
+func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
+	if l := ctx.Literal(); l != nil {
+		return v.visit(l)
+	}
+	if p := ctx.Parameter(); p != nil {
+		return v.visit(p)
+	}
+	if ce := ctx.CaseExpression(); ce != nil {
+		return v.visit(ce)
+	}
+	if ca := ctx.CountAll(); ca != nil {
+		return v.visit(ca)
+	}
+	if lc := ctx.ListComprehension(); lc != nil {
+		return v.visit(lc)
+	}
+	if pc := ctx.PatternComprehension(); pc != nil {
+		return v.visit(pc)
+	}
+	if fw := ctx.FilterWith(); fw != nil {
+		return v.visit(fw)
+	}
+	if rcp := ctx.RelationshipsChainPattern(); rcp != nil {
+		return v.visit(rcp)
+	}
+	if pe := ctx.ParenthesizedExpression(); pe != nil {
+		return v.visit(pe)
+	}
+	if fi := ctx.FunctionInvocation(); fi != nil {
+		return v.visit(fi)
+	}
+	if sym := ctx.Symbol(); sym != nil {
+		return &ast.Variable{Pos: positionOf(ctx), Name: symbolText(sym)}
+	}
+	if se := ctx.SubqueryExist(); se != nil {
+		return v.visit(se)
+	}
+	return unsupported(ctx, "atom", "unknown atom variant")
+}
+
+// VisitLhs handles the left-hand side of a pattern comprehension.
+// The name VisitLhs (not VisitLHS) is mandated by the generated CypherParserVisitor interface.
+//
+//nolint:revive // method name matches generated interface: gen.CypherParserVisitor.VisitLhs
+func (v *visitor) VisitLhs(ctx *gen.LhsContext) interface{} {
+	if sym := ctx.Symbol(); sym != nil {
+		return symbolText(sym)
+	}
+	return ""
+}
+
+// VisitParenthesizedExpression returns the inner expression (no wrapper node).
+func (v *visitor) VisitParenthesizedExpression(ctx *gen.ParenthesizedExpressionContext) interface{} {
+	return v.visit(ctx.Expression())
+}
+
+// VisitCountAll returns a FunctionInvocation for COUNT(*).
+func (v *visitor) VisitCountAll(ctx *gen.CountAllContext) interface{} {
+	return &ast.FunctionInvocation{
+		Pos:  positionOf(ctx),
+		Name: "count",
+		Args: nil,
+	}
+}
+
+// VisitFunctionInvocation handles namespace.func(DISTINCT? args).
+func (v *visitor) VisitFunctionInvocation(ctx *gen.FunctionInvocationContext) interface{} {
+	fi := &ast.FunctionInvocation{Pos: positionOf(ctx)}
+	if in := ctx.InvocationName(); in != nil {
+		syms := in.AllSymbol()
+		for i, s := range syms {
+			name := symbolText(s)
+			if i < len(syms)-1 {
+				fi.Namespace = append(fi.Namespace, name)
+			} else {
+				fi.Name = name
+			}
+		}
+	}
+	fi.Distinct = ctx.DISTINCT() != nil
+	if ec := ctx.ExpressionChain(); ec != nil {
+		args, err := v.visitExpressionChain(ec)
+		if err != nil {
+			return err
+		}
+		fi.Args = args
+	}
+	return fi
+}
+
+// VisitInvocationName is only called transitively; handled inline above.
+func (v *visitor) VisitInvocationName(ctx *gen.InvocationNameContext) interface{} {
+	// Return the symbol texts as []string; callers use AllSymbol directly.
+	var parts []string
+	for _, s := range ctx.AllSymbol() {
+		parts = append(parts, symbolText(s))
+	}
+	return parts
+}
+
+// -------------------------------------------------------------------------
+// Subquery forms
+// -------------------------------------------------------------------------
+
+// VisitSubqueryExist handles EXISTS { … }.
+func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} {
+	if rq := ctx.RegularQuery(); rq != nil {
+		qr := v.visit(rq)
+		if err := firstError(qr); err != nil {
+			return err
+		}
+		// EXISTS { fullQuery } — convert to ExistsSubquery with Query field.
+		switch q := qr.(type) {
+		case *ast.SingleQuery:
+			return &ast.ExistsSubquery{Pos: positionOf(ctx), Query: q}
+		case *ast.MultiQuery:
+			// Wrap first part for simplicity; multi-union inside EXISTS is unusual.
+			if len(q.Parts) > 0 {
+				return &ast.ExistsSubquery{Pos: positionOf(ctx), Query: q.Parts[0]}
+			}
+		}
+	}
+	if pw := ctx.PatternWhere(); pw != nil {
+		pat, err := v.visitPatternWhere(pw)
+		if err != nil {
+			return err
+		}
+		// Build a minimal single-match query for the pattern form.
+		return &ast.ExistsSubquery{
+			Pos:     positionOf(ctx),
+			Pattern: pat.Pattern,
+		}
+	}
+	return unsupported(ctx, "subqueryExist", "unrecognised EXISTS form")
+}
+
+// -------------------------------------------------------------------------
+// CASE expression
+// -------------------------------------------------------------------------
+
+// VisitCaseExpression handles CASE [subject] (WHEN cond THEN expr)+ [ELSE e] END.
+//
+// The grammar stores all expressions in AllExpression(); their mapping to
+// WHEN/THEN/ELSE positions requires walking tokens by count.
+func (v *visitor) VisitCaseExpression(ctx *gen.CaseExpressionContext) interface{} {
+	ce := &ast.CaseExpression{Pos: positionOf(ctx)}
+	exprs := ctx.AllExpression()
+	whenCount := len(ctx.AllWHEN())
+	thenCount := len(ctx.AllTHEN())
+	hasElse := ctx.ELSE() != nil
+
+	// expr count = [subject?] + whenCount + thenCount + [else?]
+	// subject present when: len(exprs) > whenCount + thenCount + (1 if hasElse)
+	expectedMin := whenCount + thenCount
+	if hasElse {
+		expectedMin++
+	}
+	hasSubject := len(exprs) > expectedMin
+
+	idx := 0
+	if hasSubject {
+		subj, err := asExpr(v.visit(exprs[idx]))
+		if err != nil {
+			return &SemaError{Rule: "caseExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		ce.Subject = subj
+		idx++
+	}
+
+	for i := 0; i < whenCount && i < thenCount; i++ {
+		cond, err := asExpr(v.visit(exprs[idx]))
+		if err != nil {
+			return &SemaError{Rule: "caseExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		idx++
+		cons, err := asExpr(v.visit(exprs[idx]))
+		if err != nil {
+			return &SemaError{Rule: "caseExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		idx++
+		ce.Alternatives = append(ce.Alternatives, &ast.CaseAlternative{
+			Pos:        positionOf(ctx),
+			Condition:  cond,
+			Consequent: cons,
+		})
+	}
+
+	if hasElse && idx < len(exprs) {
+		el, err := asExpr(v.visit(exprs[idx]))
+		if err != nil {
+			return &SemaError{Rule: "caseExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		ce.ElseExpr = el
+	}
+	return ce
+}
+
+// -------------------------------------------------------------------------
+// List / Pattern comprehensions
+// -------------------------------------------------------------------------
+
+// VisitListComprehension handles [filterExpr | projection?].
+func (v *visitor) VisitListComprehension(ctx *gen.ListComprehensionContext) interface{} {
+	fe := ctx.FilterExpression()
+	if fe == nil {
+		return unsupported(ctx, "listComprehension", "missing filterExpression")
+	}
+	varName, src, pred, err := v.visitFilterExpression(fe)
+	if err != nil {
+		return err
+	}
+	lc := &ast.ListComprehension{
+		Pos:       positionOf(ctx),
+		Variable:  varName,
+		Source:    src,
+		Predicate: pred,
+	}
+	if ctx.STICK() != nil {
+		proj, err := asExpr(v.visit(ctx.Expression()))
+		if err != nil {
+			return &SemaError{Rule: "listComprehension", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		lc.Projection = proj
+	}
+	return lc
+}
+
+// VisitFilterExpression is the visitor entry; internal logic in visitFilterExpression.
+func (v *visitor) VisitFilterExpression(ctx *gen.FilterExpressionContext) interface{} {
+	varName, src, pred, err := v.visitFilterExpression(ctx)
+	if err != nil {
+		return err
+	}
+	// FilterExpression itself is only used by callers; return a struct.
+	type filterExprResult struct {
+		varName string
+		src     ast.Expression
+		pred    ast.Expression
+	}
+	return &filterExprResult{varName: varName, src: src, pred: pred}
+}
+
+func (v *visitor) visitFilterExpression(ctx gen.IFilterExpressionContext) (varName string, src, pred ast.Expression, outErr *SemaError) {
+	varName = symbolText(ctx.Symbol())
+	var err error
+	src, err = asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		outErr = &SemaError{Rule: "filterExpression", Pos: positionOf(ctx), Message: err.Error()}
+		return
+	}
+	if wh := ctx.Where(); wh != nil {
+		where, werr := v.visitWhere(wh)
+		if werr != nil {
+			outErr = &SemaError{Rule: "filterExpression", Pos: positionOf(ctx), Message: werr.Error()}
+			return
+		}
+		if where != nil {
+			pred = where.Predicate
+		}
+	}
+	return
+}
+
+// VisitFilterWith handles ALL/ANY/NONE/SINGLE(filterExpr).
+func (v *visitor) VisitFilterWith(ctx *gen.FilterWithContext) interface{} {
+	fe := ctx.FilterExpression()
+	if fe == nil {
+		return unsupported(ctx, "filterWith", "missing filterExpression")
+	}
+	varName, src, pred, err := v.visitFilterExpression(fe)
+	if err != nil {
+		return err
+	}
+
+	var funcName string
+	switch {
+	case ctx.ALL() != nil:
+		funcName = "all"
+	case ctx.ANY() != nil:
+		funcName = "any"
+	case ctx.NONE() != nil:
+		funcName = "none"
+	case ctx.SINGLE() != nil:
+		funcName = "single"
+	default:
+		return unsupported(ctx, "filterWith", "unknown quantifier")
+	}
+
+	// Reconstruct as: funcName(var IN src WHERE pred)
+	// We represent this as a FunctionInvocation whose sole arg is a
+	// ListComprehension with no projection (consistent with Cypher semantics).
+	lc := &ast.ListComprehension{
+		Pos:       positionOf(ctx),
+		Variable:  varName,
+		Source:    src,
+		Predicate: pred,
+	}
+	return &ast.FunctionInvocation{
+		Pos:  positionOf(ctx),
+		Name: funcName,
+		Args: []ast.Expression{lc},
+	}
+}
+
+// VisitPatternComprehension handles [[lhs =] relChain [WHERE pred] | expr].
+func (v *visitor) VisitPatternComprehension(ctx *gen.PatternComprehensionContext) interface{} {
+	rcp := ctx.RelationshipsChainPattern()
+	if rcp == nil {
+		return unsupported(ctx, "patternComprehension", "missing relationshipsChainPattern")
+	}
+	pathR := v.visit(rcp)
+	if err := firstError(pathR); err != nil {
+		return err
+	}
+	pp, ok := pathR.(*ast.PathPattern)
+	if !ok {
+		return unsupported(ctx, "patternComprehension", "expected PathPattern")
+	}
+
+	pc := &ast.PatternComprehension{
+		Pos:     positionOf(ctx),
+		Pattern: pp,
+	}
+
+	// Optional path variable on the lhs.
+	if lhs := ctx.Lhs(); lhs != nil {
+		lhsR := v.visit(lhs)
+		if s, ok := lhsR.(string); ok && s != "" {
+			pc.Variable = &s
+		}
+	}
+
+	if wh := ctx.Where(); wh != nil {
+		where, err := v.visitWhere(wh)
+		if err != nil {
+			return err
+		}
+		pc.Predicate = where.Predicate
+	}
+
+	proj, err := asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		return &SemaError{Rule: "patternComprehension", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	pc.Projection = proj
+	return pc
+}
+
+// VisitRelationshipsChainPattern handles a bare relationships-chain atom:
+// nodePattern (relPattern nodePattern)*.
+func (v *visitor) VisitRelationshipsChainPattern(ctx *gen.RelationshipsChainPatternContext) interface{} {
+	// RelationshipsChainPattern has the same structure as PatternElem.
+	// Re-use the PatternElem logic: it expects AllPatternElemChain.
+	// The context doesn't extend PatternElemContext directly, so we build
+	// the linked list manually.
+	nodeR := v.visit(ctx.NodePattern())
+	if err := firstError(nodeR); err != nil {
+		return err
+	}
+	nodePat, ok := nodeR.(*ast.NodePattern)
+	if !ok {
+		return unsupported(ctx, "relationshipsChainPattern", "expected NodePattern")
+	}
+
+	head := &ast.PathElement{Node: nodePat}
+	cur := head
+	for _, chain := range ctx.AllPatternElemChain() {
+		cr := v.visit(chain)
+		if err := firstError(cr); err != nil {
+			return err
+		}
+		chainElem, ok := cr.(*ast.PathElement)
+		if !ok {
+			continue
+		}
+		cur.Next = chainElem
+		cur = chainElem
+	}
+
+	pp := &ast.PathPattern{Pos: positionOf(ctx), Head: head}
+	return pp
+}
+
+// -------------------------------------------------------------------------
+// Parameter / literals
+// -------------------------------------------------------------------------
+
+// VisitParameter handles $name or $0.
+func (v *visitor) VisitParameter(ctx *gen.ParameterContext) interface{} {
+	var name string
+	if sym := ctx.Symbol(); sym != nil {
+		name = symbolText(sym)
+	} else if nl := ctx.NumLit(); nl != nil {
+		name = nl.GetText()
+	}
+	return &ast.Parameter{Pos: positionOf(ctx), Name: name}
+}
+
+// VisitLiteral dispatches to a specific literal type.
+func (v *visitor) VisitLiteral(ctx *gen.LiteralContext) interface{} {
+	if bl := ctx.BoolLit(); bl != nil {
+		return v.visit(bl)
+	}
+	if nl := ctx.NumLit(); nl != nil {
+		return v.visit(nl)
+	}
+	if ctx.NULL_W() != nil {
+		return &ast.NullLiteral{Pos: positionOf(ctx)}
+	}
+	if sl := ctx.StringLit(); sl != nil {
+		return v.visit(sl)
+	}
+	if cl := ctx.CharLit(); cl != nil {
+		return v.visit(cl)
+	}
+	if ll := ctx.ListLit(); ll != nil {
+		return v.visit(ll)
+	}
+	if ml := ctx.MapLit(); ml != nil {
+		return v.visit(ml)
+	}
+	return unsupported(ctx, "literal", "unknown literal type")
+}
+
+// VisitBoolLit handles TRUE / FALSE.
+func (v *visitor) VisitBoolLit(ctx *gen.BoolLitContext) interface{} {
+	return &ast.BoolLiteral{Pos: positionOf(ctx), Value: ctx.TRUE() != nil}
+}
+
+// VisitNumLit handles integer literals via the DIGIT token.
+// The DIGIT lexer rule covers decimal integers; floats appear via FLOAT token
+// which is handled by the unary expression wrapping in context.
+func (v *visitor) VisitNumLit(ctx *gen.NumLitContext) interface{} {
+	text := ctx.DIGIT().GetText()
+	// Try float first (handles scientific notation / decimals in the DIGIT token).
+	if strings.ContainsAny(text, ".eEfFdD") {
+		f, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: "invalid number: " + text}
+		}
+		return &ast.FloatLiteral{Pos: positionOf(ctx), Value: f}
+	}
+	// Hex / octal / decimal integer.
+	n, err := parseInt(text)
+	if err != nil {
+		return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	return &ast.IntLiteral{Pos: positionOf(ctx), Value: n}
+}
+
+// VisitStringLit handles "string" or 'string' tokens.
+func (v *visitor) VisitStringLit(ctx *gen.StringLitContext) interface{} {
+	raw := ctx.STRING_LITERAL().GetText()
+	s := unquoteString(raw)
+	return &ast.StringLiteral{Pos: positionOf(ctx), Value: s}
+}
+
+// VisitCharLit handles char literals (treated as strings in Cypher).
+func (v *visitor) VisitCharLit(ctx *gen.CharLitContext) interface{} {
+	raw := ctx.CHAR_LITERAL().GetText()
+	s := unquoteString(raw)
+	return &ast.StringLiteral{Pos: positionOf(ctx), Value: s}
+}
+
+// VisitListLit handles [expr, expr, …].
+func (v *visitor) VisitListLit(ctx *gen.ListLitContext) interface{} {
+	ll := &ast.ListLiteral{Pos: positionOf(ctx)}
+	if ec := ctx.ExpressionChain(); ec != nil {
+		args, err := v.visitExpressionChain(ec)
+		if err != nil {
+			return err
+		}
+		ll.Elements = args
+	}
+	return ll
+}
+
+// VisitMapLit handles {key: expr, …}.
+func (v *visitor) VisitMapLit(ctx *gen.MapLitContext) interface{} {
+	ml := &ast.MapLiteral{Pos: positionOf(ctx)}
+	for _, mp := range ctx.AllMapPair() {
+		r := v.visit(mp)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		if pair, ok := r.(*mapPair); ok {
+			ml.Keys = append(ml.Keys, pair.key)
+			ml.Values = append(ml.Values, pair.value)
+		}
+	}
+	return ml
+}
+
+// mapPair is an internal transfer type.
+type mapPair struct {
+	key   string
+	value ast.Expression
+}
+
+// VisitMapPair handles name: expr.
+func (v *visitor) VisitMapPair(ctx *gen.MapPairContext) interface{} {
+	key := nameText(ctx.Name())
+	val, err := asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		return &SemaError{Rule: "mapPair", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	return &mapPair{key: key, value: val}
+}
+
+// -------------------------------------------------------------------------
+// Name / Symbol helpers
+// -------------------------------------------------------------------------
+
+// VisitName returns the name string.
+func (v *visitor) VisitName(ctx *gen.NameContext) interface{} {
+	return nameText(ctx)
+}
+
+// VisitSymbol returns the symbol string.
+func (v *visitor) VisitSymbol(ctx *gen.SymbolContext) interface{} {
+	return symbolText(ctx)
+}
+
+// VisitReservedWord returns the reserved word string.
+func (v *visitor) VisitReservedWord(ctx *gen.ReservedWordContext) interface{} {
+	return ctx.GetText()
+}
+
+// -------------------------------------------------------------------------
+// YIELD helpers
+// -------------------------------------------------------------------------
+
+// VisitYieldItems handles the YIELD clause items.
+func (v *visitor) VisitYieldItems(ctx *gen.YieldItemsContext) interface{} {
+	yield, err := v.visitYieldItems(ctx)
+	if err != nil {
+		return err
+	}
+	return yield
+}
+
+func (v *visitor) visitYieldItems(ctx gen.IYieldItemsContext) ([]*ast.YieldItem, *SemaError) {
+	if ctx == nil {
+		return nil, nil
+	}
+	// YIELD * — empty slice signals "yield all"
+	if len(ctx.AllYieldItem()) == 0 {
+		return []*ast.YieldItem{}, nil
+	}
+	var items []*ast.YieldItem
+	for _, yi := range ctx.AllYieldItem() {
+		r := v.visit(yi)
+		if err := firstError(r); err != nil {
+			return nil, err
+		}
+		if item, ok := r.(*ast.YieldItem); ok {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+// VisitYieldItem handles symbol [AS alias].
+func (v *visitor) VisitYieldItem(ctx *gen.YieldItemContext) interface{} {
+	syms := ctx.AllSymbol()
+	if len(syms) == 0 {
+		return unsupported(ctx, "yieldItem", "missing symbol")
+	}
+	item := &ast.YieldItem{Pos: positionOf(ctx), Name: symbolText(syms[0])}
+	if len(syms) >= 2 {
+		alias := symbolText(syms[1])
+		item.Alias = &alias
+	}
+	return item
+}
+
+// VisitParenExpressionChain handles (expr, expr, …).
+func (v *visitor) VisitParenExpressionChain(ctx *gen.ParenExpressionChainContext) interface{} {
+	if ec := ctx.ExpressionChain(); ec != nil {
+		exprs, err := v.visitExpressionChain(ec)
+		if err != nil {
+			return err
+		}
+		return exprs
+	}
+	return []ast.Expression(nil)
+}
+
+// -------------------------------------------------------------------------
+// ExpressionChain helper
+// -------------------------------------------------------------------------
+
+func (v *visitor) visitExpressionChain(ctx gen.IExpressionChainContext) ([]ast.Expression, *SemaError) {
+	if ctx == nil {
+		return nil, nil
+	}
+	var exprs []ast.Expression
+	for _, e := range ctx.AllExpression() {
+		expr, err := asExpr(v.visit(e))
+		if err != nil {
+			return nil, &SemaError{Rule: "expressionChain", Message: err.Error()}
+		}
+		exprs = append(exprs, expr)
+	}
+	return exprs, nil
+}
+
+// VisitExpressionChain is the visitor entry.
+func (v *visitor) VisitExpressionChain(ctx *gen.ExpressionChainContext) interface{} {
+	exprs, err := v.visitExpressionChain(ctx)
+	if err != nil {
+		return err
+	}
+	return exprs
+}
+
+// -------------------------------------------------------------------------
+// Pure helper functions (no visitor state needed)
+// -------------------------------------------------------------------------
+
+// symbolText returns the text of a symbol context, stripping backtick escaping.
+func symbolText(ctx gen.ISymbolContext) string {
+	if ctx == nil {
+		return ""
+	}
+	t := ctx.GetText()
+	if strings.HasPrefix(t, "`") && strings.HasSuffix(t, "`") {
+		return t[1 : len(t)-1]
+	}
+	return t
+}
+
+// nameText returns the text of a name context (symbol or reserved word).
+func nameText(ctx gen.INameContext) string {
+	if ctx == nil {
+		return ""
+	}
+	if sym := ctx.Symbol(); sym != nil {
+		return symbolText(sym)
+	}
+	return ctx.GetText()
+}
+
+// nodeLabels extracts label strings from a NodeLabels context.
+func nodeLabels(ctx gen.INodeLabelsContext) []string {
+	if ctx == nil {
+		return nil
+	}
+	var labels []string
+	for _, n := range ctx.AllName() {
+		labels = append(labels, nameText(n))
+	}
+	return labels
+}
+
+// relationshipTypes extracts the type list from a RelationshipTypes context.
+func relationshipTypes(ctx gen.IRelationshipTypesContext) []string {
+	if ctx == nil {
+		return nil
+	}
+	var types []string
+	for _, n := range ctx.AllName() {
+		types = append(types, nameText(n))
+	}
+	return types
+}
+
+// comparisonOp returns the operator string for a ComparisonSigns node.
+func comparisonOp(ctx gen.IComparisonSignsContext) string {
+	if ctx.ASSIGN() != nil {
+		return "="
+	}
+	if ctx.LE() != nil {
+		return "<="
+	}
+	if ctx.GE() != nil {
+		return ">="
+	}
+	if ctx.GT() != nil {
+		return ">"
+	}
+	if ctx.LT() != nil {
+		return "<"
+	}
+	if ctx.NOT_EQUAL() != nil {
+		return "<>"
+	}
+	return "="
+}
+
+// stringPrefixOp maps StringExpPrefix alternatives to Cypher operators.
+func stringPrefixOp(ctx gen.IStringExpPrefixContext) string {
+	if ctx.STARTS() != nil {
+		return "STARTS WITH"
+	}
+	if ctx.ENDS() != nil {
+		return "ENDS WITH"
+	}
+	if ctx.CONTAINS() != nil {
+		return "CONTAINS"
+	}
+	return "STARTS WITH"
+}
+
+// addSubOperators returns the ordered list of + / - tokens in an
+// addSubExpression by walking all children and recording operator tokens.
+func addSubOperators(ctx *gen.AddSubExpressionContext) []string {
+	var ops []string
+	for _, child := range ctx.GetChildren() {
+		if t, ok := child.(antlr.TerminalNode); ok {
+			switch t.GetSymbol().GetTokenType() {
+			case gen.CypherParserPLUS:
+				ops = append(ops, "+")
+			case gen.CypherParserSUB:
+				ops = append(ops, "-")
+			}
+		}
+	}
+	return ops
+}
+
+// multDivOperators returns the ordered operator list for a multDivExpression.
+func multDivOperators(ctx *gen.MultDivExpressionContext) []string {
+	var ops []string
+	for _, child := range ctx.GetChildren() {
+		if t, ok := child.(antlr.TerminalNode); ok {
+			switch t.GetSymbol().GetTokenType() {
+			case gen.CypherParserMULT:
+				ops = append(ops, "*")
+			case gen.CypherParserDIV:
+				ops = append(ops, "/")
+			case gen.CypherParserMOD:
+				ops = append(ops, "%")
+			}
+		}
+	}
+	return ops
+}
+
+// parseInt parses decimal, hex (0x…), and octal (0…) integer strings.
+func parseInt(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		return strconv.ParseInt(s[2:], 16, 64)
+	}
+	return strconv.ParseInt(s, 10, 64)
+}
+
+// unquoteString strips surrounding quotes from a string/char literal token
+// and processes common escape sequences.
+func unquoteString(raw string) string {
+	if len(raw) < 2 {
+		return raw
+	}
+	q := raw[0]
+	if q != '\'' && q != '"' {
+		return raw
+	}
+	inner := raw[1 : len(raw)-1]
+	// Process escape sequences.
+	inner = strings.ReplaceAll(inner, "\\'", "'")
+	inner = strings.ReplaceAll(inner, "\\\"", "\"")
+	inner = strings.ReplaceAll(inner, "\\n", "\n")
+	inner = strings.ReplaceAll(inner, "\\t", "\t")
+	inner = strings.ReplaceAll(inner, "\\r", "\r")
+	inner = strings.ReplaceAll(inner, "\\\\", "\\")
+	return inner
+}
