@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"gograph/bolt/packstream"
 	"gograph/bolt/proto"
 	"gograph/cypher"
 	"gograph/graph/adjlist"
@@ -35,7 +36,7 @@ func helloMsg() *proto.Hello {
 func TestSession_HelloReady(t *testing.T) {
 	t.Parallel()
 	eng := newTestEngine(t)
-	sess := newSession(eng, NoAuthHandler{})
+	sess := newSession(eng, NoAuthHandler{}, "")
 
 	if sess.state != StateNegotiation {
 		t.Fatalf("initial state: got %v, want NEGOTIATION", sess.state)
@@ -68,7 +69,7 @@ func TestSession_HelloReady(t *testing.T) {
 func TestSession_RunPullReady(t *testing.T) {
 	t.Parallel()
 	eng := newTestEngine(t)
-	sess := newSession(eng, NoAuthHandler{})
+	sess := newSession(eng, NoAuthHandler{}, "")
 
 	// HELLO → READY
 	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
@@ -130,7 +131,7 @@ func TestSession_RunPullReady(t *testing.T) {
 func TestSession_ResetDrainsStreaming(t *testing.T) {
 	t.Parallel()
 	eng := newTestEngine(t)
-	sess := newSession(eng, NoAuthHandler{})
+	sess := newSession(eng, NoAuthHandler{}, "")
 
 	// HELLO → READY
 	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
@@ -175,7 +176,7 @@ func TestSession_ResetDrainsStreaming(t *testing.T) {
 func TestSession_StatementTimeout(t *testing.T) {
 	t.Parallel()
 	eng := newTestEngine(t)
-	sess := newSession(eng, NoAuthHandler{})
+	sess := newSession(eng, NoAuthHandler{}, "")
 
 	// HELLO → READY
 	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
@@ -213,7 +214,7 @@ func TestSession_AuthFailure(t *testing.T) {
 	auth := BasicAuthHandler{
 		Validate: func(_, _ string) error { return ErrAuthFailed },
 	}
-	sess := newSession(eng, auth)
+	sess := newSession(eng, auth, "")
 
 	msgs, err := sess.HandleMessage(context.Background(), helloMsg())
 	if err != nil {
@@ -235,7 +236,7 @@ func TestSession_AuthFailure(t *testing.T) {
 func TestSession_IllegalTransition(t *testing.T) {
 	t.Parallel()
 	eng := newTestEngine(t)
-	sess := newSession(eng, NoAuthHandler{})
+	sess := newSession(eng, NoAuthHandler{}, "")
 	// State is NEGOTIATION; sending PULL is illegal.
 	msgs, err := sess.HandleMessage(context.Background(), &proto.Pull{N: -1})
 	if err != nil {
@@ -249,5 +250,227 @@ func TestSession_IllegalTransition(t *testing.T) {
 	}
 	if sess.state != StateFailed {
 		t.Fatalf("state after illegal message: got %v, want FAILED", sess.state)
+	}
+}
+
+// newReadySession is a test helper that creates a Session in READY state by
+// sending a HELLO message.
+func newReadySession(t *testing.T) *Session {
+	t.Helper()
+	sess := newSession(newTestEngine(t), NoAuthHandler{}, "")
+	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
+		t.Fatalf("HELLO: %v", err)
+	}
+	if sess.state != StateReady {
+		t.Fatalf("state after HELLO: got %v, want READY", sess.state)
+	}
+	return sess
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 311: RUN / PULL / DISCARD streaming tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestSession_Run_Pull_All verifies a full RUN → PULL(-1) cycle on a non-empty
+// graph, checking that all RECORD messages are emitted and the final SUCCESS
+// has has_more=false.
+func TestSession_Run_Pull_All(t *testing.T) {
+	t.Parallel()
+
+	// Build a graph with two nodes so MATCH (n) RETURN n yields 2 rows.
+	g := lpg.New[string, float64](adjlist.Config{})
+	g.AddNode("alice")
+	g.AddNode("bob")
+	eng := cypher.NewEngine(g)
+	sess := newSession(eng, NoAuthHandler{}, "")
+
+	// HELLO → READY.
+	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
+		t.Fatalf("HELLO: %v", err)
+	}
+
+	// RUN.
+	runMsgs, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query:      "MATCH (n) RETURN n",
+		Parameters: nil,
+		Extra:      map[string]interface{}{},
+	})
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	if len(runMsgs) != 1 {
+		t.Fatalf("RUN response count: %d", len(runMsgs))
+	}
+	runSuccess, ok := runMsgs[0].(*proto.Success)
+	if !ok {
+		t.Fatalf("RUN response type: %T", runMsgs[0])
+	}
+	fields, ok := runSuccess.Metadata["fields"]
+	if !ok {
+		t.Fatal("RUN SUCCESS missing 'fields'")
+	}
+	fieldList, ok := fields.([]packstream.Value)
+	if !ok {
+		t.Fatalf("RUN SUCCESS 'fields' type: %T", fields)
+	}
+	if len(fieldList) == 0 {
+		t.Fatal("RUN SUCCESS 'fields' is empty")
+	}
+
+	// PULL all.
+	pullMsgs, err := sess.HandleMessage(context.Background(), &proto.Pull{N: -1, QID: -1})
+	if err != nil {
+		t.Fatalf("PULL: %v", err)
+	}
+	if len(pullMsgs) < 1 {
+		t.Fatal("PULL returned no messages")
+	}
+
+	// Count RECORDs.
+	var records int
+	for _, msg := range pullMsgs[:len(pullMsgs)-1] {
+		if _, ok := msg.(*proto.Record); ok {
+			records++
+		}
+	}
+	if records != 2 {
+		t.Fatalf("expected 2 RECORD messages, got %d", records)
+	}
+
+	// Last message must be SUCCESS with has_more=false.
+	last, ok := pullMsgs[len(pullMsgs)-1].(*proto.Success)
+	if !ok {
+		t.Fatalf("last PULL message: got %T, want *proto.Success", pullMsgs[len(pullMsgs)-1])
+	}
+	hasMore, ok := last.Metadata["has_more"]
+	if !ok {
+		t.Fatal("PULL SUCCESS missing 'has_more'")
+	}
+	if hasMore != false {
+		t.Fatalf("has_more: got %v, want false", hasMore)
+	}
+
+	if sess.state != StateReady {
+		t.Fatalf("state after PULL all: got %v, want READY", sess.state)
+	}
+}
+
+// TestSession_Pull_Paginated verifies that PULL with n=1 on a 2-row result
+// produces has_more=true on the first pull and has_more=false on the second.
+func TestSession_Pull_Paginated(t *testing.T) {
+	t.Parallel()
+
+	g := lpg.New[string, float64](adjlist.Config{})
+	g.AddNode("alice")
+	g.AddNode("bob")
+	eng := cypher.NewEngine(g)
+	sess := newSession(eng, NoAuthHandler{}, "")
+
+	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
+		t.Fatalf("HELLO: %v", err)
+	}
+
+	// RUN.
+	if _, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query:      "MATCH (n) RETURN n",
+		Parameters: nil,
+		Extra:      map[string]interface{}{},
+	}); err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+
+	// First PULL: n=1 → should yield 1 RECORD and has_more=true.
+	msgs1, err := sess.HandleMessage(context.Background(), &proto.Pull{N: 1, QID: -1})
+	if err != nil {
+		t.Fatalf("PULL 1: %v", err)
+	}
+	last1, ok := msgs1[len(msgs1)-1].(*proto.Success)
+	if !ok {
+		t.Fatalf("first PULL last message: %T", msgs1[len(msgs1)-1])
+	}
+	hasMore1, ok := last1.Metadata["has_more"]
+	if !ok {
+		t.Fatal("first PULL SUCCESS missing 'has_more'")
+	}
+	if hasMore1 != true {
+		t.Fatalf("first PULL has_more: got %v, want true", hasMore1)
+	}
+	if sess.state != StateStreaming {
+		t.Fatalf("state after partial PULL: got %v, want STREAMING", sess.state)
+	}
+
+	// Second PULL: n=1 → last row, has_more=false.
+	msgs2, err := sess.HandleMessage(context.Background(), &proto.Pull{N: 1, QID: -1})
+	if err != nil {
+		t.Fatalf("PULL 2: %v", err)
+	}
+	last2, ok := msgs2[len(msgs2)-1].(*proto.Success)
+	if !ok {
+		t.Fatalf("second PULL last message: %T", msgs2[len(msgs2)-1])
+	}
+	hasMore2, ok := last2.Metadata["has_more"]
+	if !ok {
+		t.Fatal("second PULL SUCCESS missing 'has_more'")
+	}
+	if hasMore2 != false {
+		t.Fatalf("second PULL has_more: got %v, want false", hasMore2)
+	}
+	if sess.state != StateReady {
+		t.Fatalf("state after final PULL: got %v, want READY", sess.state)
+	}
+}
+
+// TestSession_Discard verifies that DISCARD produces no RECORD messages and
+// returns SUCCESS with has_more=false.
+func TestSession_Discard(t *testing.T) {
+	t.Parallel()
+
+	g := lpg.New[string, float64](adjlist.Config{})
+	g.AddNode("alice")
+	g.AddNode("bob")
+	eng := cypher.NewEngine(g)
+	sess := newSession(eng, NoAuthHandler{}, "")
+
+	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
+		t.Fatalf("HELLO: %v", err)
+	}
+
+	// RUN.
+	if _, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query:      "MATCH (n) RETURN n",
+		Parameters: nil,
+		Extra:      map[string]interface{}{},
+	}); err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+
+	// DISCARD.
+	discardMsgs, err := sess.HandleMessage(context.Background(), &proto.Discard{N: -1, QID: -1})
+	if err != nil {
+		t.Fatalf("DISCARD: %v", err)
+	}
+
+	// Must have exactly one message (SUCCESS) and no RECORDs.
+	for _, msg := range discardMsgs {
+		if _, ok := msg.(*proto.Record); ok {
+			t.Fatal("DISCARD emitted a RECORD message")
+		}
+	}
+	if len(discardMsgs) != 1 {
+		t.Fatalf("DISCARD response count: %d, want 1", len(discardMsgs))
+	}
+	success, ok := discardMsgs[0].(*proto.Success)
+	if !ok {
+		t.Fatalf("DISCARD response: %T, want *proto.Success", discardMsgs[0])
+	}
+	hasMore, ok := success.Metadata["has_more"]
+	if !ok {
+		t.Fatal("DISCARD SUCCESS missing 'has_more'")
+	}
+	if hasMore != false {
+		t.Fatalf("DISCARD has_more: got %v, want false", hasMore)
+	}
+	if sess.state != StateReady {
+		t.Fatalf("state after DISCARD: got %v, want READY", sess.state)
 	}
 }

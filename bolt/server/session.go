@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"gograph/bolt/packstream"
@@ -46,10 +47,16 @@ type Session struct {
 	// result.Columns() at the time RUN was processed.
 	columns []string
 
+	// peeked, when non-nil, holds a pre-fetched row from the cursor that has
+	// been read ahead to determine has_more. It must be emitted before the next
+	// result.Next() call.
+	peeked *[]packstream.Value
+
 	// txActive indicates that an explicit transaction is open (BEGIN called).
-	// For this sprint only auto-commit is implemented; explicit TX support is
-	// task 312. This field is reserved for that extension.
 	txActive bool
+
+	// tx is the active explicit transaction, non-nil when txActive is true.
+	tx *Tx
 
 	// stmtTimeout is extracted from RUN extra metadata ("timeout" key, ms).
 	stmtTimeout time.Duration
@@ -57,17 +64,28 @@ type Session struct {
 	// bookmark holds the last committed transaction bookmark (server-generated
 	// placeholder for this sprint).
 	bookmark string
+
+	// localAddr is the listener address of the server that accepted this
+	// connection; used to populate the routing table in ROUTE responses.
+	localAddr string
+
+	// log is the session-scoped structured logger.
+	log *slog.Logger
 }
 
 // newSession constructs an idle Session backed by eng, starting in
 // StateNegotiation (version negotiation has already succeeded by the time
-// newSession is called).
-func newSession(eng *cypher.Engine, auth AuthHandler) *Session {
+// newSession is called). localAddr is the listener address reported in ROUTE
+// responses; it may be empty for sessions created without a listening address
+// (e.g. unit tests).
+func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session {
 	return &Session{
-		id:    randomID(),
-		eng:   eng,
-		auth:  auth,
-		state: StateNegotiation,
+		id:        randomID(),
+		eng:       eng,
+		auth:      auth,
+		state:     StateNegotiation,
+		localAddr: localAddr,
+		log:       slog.Default(),
 	}
 }
 
@@ -114,6 +132,8 @@ func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
 		return s.handleCommit()
 	case *proto.Rollback:
 		return s.handleRollback()
+	case *proto.Route:
+		return s.handleRoute(m)
 	default:
 		return s.failWith("Neo.ClientError.Request.Invalid",
 			fmt.Sprintf("unrecognised message type %T", msg)), nil
@@ -205,6 +225,12 @@ func (s *Session) handleReset() ([]any, error) {
 	// Drain any open result cursor.
 	s.drainResult()
 
+	// Roll back and discard any active explicit transaction.
+	if s.tx != nil {
+		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on reset
+		s.tx = nil
+	}
+
 	next, err := Transition(s.state, &proto.Reset{}, true)
 	if err != nil {
 		return s.failTransition(&proto.Reset{})
@@ -217,6 +243,10 @@ func (s *Session) handleReset() ([]any, error) {
 
 func (s *Session) handleGoodbye() ([]any, error) {
 	s.drainResult()
+	if s.tx != nil {
+		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on goodbye
+		s.tx = nil
+	}
 	s.state = StateDefunct
 	// No response is sent for GOODBYE.
 	return nil, nil
@@ -225,6 +255,14 @@ func (s *Session) handleGoodbye() ([]any, error) {
 func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	if s.state != StateReady && s.state != StateTxReady {
 		return s.failTransition(m)
+	}
+
+	// Log any incoming bookmarks for observability; single-host server ignores
+	// them for causal consistency but they should not be silently dropped.
+	if bms := ExtractBookmarks(m.Extra); len(bms) > 0 {
+		s.log.Debug("bolt: RUN bookmarks received",
+			slog.String("session", s.id),
+			slog.Any("bookmarks", bms))
 	}
 
 	// Extract optional statement timeout from extra metadata.
@@ -242,7 +280,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		defer cancel()
 	}
 
-	// Convert proto params to map[string]any for RunAny.
+	// Convert proto params to map[string]any for RunAny / tx.Run.
 	params := make(map[string]any, len(m.Parameters))
 	for k, v := range m.Parameters {
 		params[k] = v
@@ -252,7 +290,12 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		result *cypher.Result
 		runErr error
 	)
-	if s.state == StateTxReady {
+	if s.txActive && s.tx != nil {
+		// Run inside the explicit transaction so that index-buffer writes are
+		// scoped to the transaction lifecycle (commit/rollback in tx.go).
+		result, runErr = s.tx.Run(m.Query, params)
+	} else if s.state == StateTxReady {
+		// Fallback: txActive should be true here, but guard defensively.
 		result, runErr = s.eng.RunInTxAny(runCtx, m.Query, params)
 	} else {
 		result, runErr = s.eng.RunAny(runCtx, m.Query, params)
@@ -269,7 +312,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 
 	if runErr != nil {
 		return []any{&proto.Failure{
-			Code:    "Neo.DatabaseError.General.UnknownError",
+			Code:    FailureCode(runErr),
 			Message: runErr.Error(),
 		}}, nil
 	}
@@ -285,7 +328,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	}}, nil
 }
 
-//nolint:gocyclo // pull loop has context cancellation, cursor error, has_more, and state transition branches; complexity is irreducible.
+//nolint:gocyclo // pull loop has context cancellation, cursor error, has_more peek, and state transition branches; complexity is irreducible.
 func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) {
 	if s.state != StateStreaming && s.state != StateTxStreaming {
 		return s.failTransition(m)
@@ -299,9 +342,17 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	var responses []any
 	fetched := int64(0)
 
+	// Emit the pre-fetched row from a previous partial PULL, if any.
+	if s.peeked != nil {
+		responses = append(responses, &proto.Record{Data: *s.peeked})
+		s.peeked = nil
+		fetched++
+	}
+
 	for n <= 0 || fetched < n {
 		if ctx.Err() != nil {
 			s.drainResult()
+			s.peeked = nil
 			s.state = StateFailed
 			return []any{&proto.Failure{
 				Code:    "Neo.TransientError.General.RequestInterrupted",
@@ -322,17 +373,31 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 
 	if err := s.result.Err(); err != nil {
 		s.drainResult()
+		s.peeked = nil
 		s.state = StateFailed
 		return []any{&proto.Failure{
-			Code:    "Neo.DatabaseError.General.UnknownError",
+			Code:    FailureCode(err),
 			Message: err.Error(),
 		}}, nil
 	}
 
-	// Determine has_more: true only when n > 0 and we hit the n-row limit.
-	// If n ≤ 0 (pull-all) or we fetched fewer rows than requested, the cursor
-	// is exhausted.
-	hasMore := n > 0 && fetched == n && fetched > 0
+	// Peek ahead to determine has_more: attempt to read one more row from the
+	// cursor. If the peek succeeds, we store it for the next PULL call and
+	// report has_more=true. This is the approach specified in the Bolt v5 spec.
+	var hasMore bool
+	if n > 0 && fetched == n {
+		// Only peek when we might have hit the n-row limit; pull-all (n≤0) or
+		// early-termination (fetched < n) are always exhausted.
+		if s.result.Next() {
+			rec := s.result.Record()
+			row := make([]packstream.Value, len(s.columns))
+			for i, col := range s.columns {
+				row[i] = exprToPackstream(rec[col])
+			}
+			s.peeked = &row
+			hasMore = true
+		}
+	}
 
 	// Transition state based on has_more.
 	next, transErr := StreamingTransition(s.state, hasMore)
@@ -341,6 +406,7 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	}
 	if !hasMore {
 		s.drainResult() // close and nil the cursor
+		s.peeked = nil
 	}
 	s.state = next
 
@@ -377,12 +443,45 @@ func (s *Session) handleBegin(m *proto.Begin) ([]any, error) {
 	if s.state != StateReady {
 		return s.failTransition(m)
 	}
+	// Nested BEGIN (txActive already true) must be rejected.
+	if s.txActive {
+		return []any{&proto.Failure{
+			Code:    "Neo.ClientError.Statement.SemanticError",
+			Message: "nested transactions are not supported",
+		}}, nil
+	}
+
 	next, err := Transition(s.state, m, true)
 	if err != nil {
 		return s.failTransition(m)
 	}
 	s.state = next
+
+	// Log incoming bookmarks for observability.
+	if bms := ExtractBookmarks(m.Extra); len(bms) > 0 {
+		s.log.Debug("bolt: BEGIN bookmarks received",
+			slog.String("session", s.id),
+			slog.Any("bookmarks", bms))
+	}
+
+	// Extract optional transaction timeout from extra metadata.
+	var txTimeout time.Duration
+	if v, ok := m.Extra["tx_timeout"]; ok {
+		if ms, ok := v.(int64); ok && ms > 0 {
+			txTimeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+
+	// Determine transaction mode (default: "w").
+	mode := "w"
+	if v, ok := m.Extra["mode"]; ok {
+		if modeStr, ok := v.(string); ok && modeStr == "r" {
+			mode = "r"
+		}
+	}
+
 	s.txActive = true
+	s.tx = newTx(context.Background(), s.eng, mode, txTimeout)
 	return []any{&proto.Success{Metadata: map[string]packstream.Value{}}}, nil
 }
 
@@ -391,12 +490,26 @@ func (s *Session) handleCommit() ([]any, error) {
 	if s.state != StateTxReady {
 		return s.failTransition(m)
 	}
+
+	// Commit the transaction if one is active.
+	if s.tx != nil {
+		if err := s.tx.Commit(); err != nil {
+			s.state = StateFailed
+			return []any{&proto.Failure{
+				Code:    FailureCode(err),
+				Message: err.Error(),
+			}}, nil
+		}
+		s.tx = nil
+	}
+
 	next, err := Transition(s.state, m, true)
 	if err != nil {
 		return s.failTransition(m)
 	}
 	s.state = next
 	s.txActive = false
+	s.bookmark = NextBookmark()
 	return []any{&proto.Success{Metadata: map[string]packstream.Value{
 		"bookmark": s.bookmark,
 	}}}, nil
@@ -407,6 +520,13 @@ func (s *Session) handleRollback() ([]any, error) {
 	if s.state != StateTxReady {
 		return s.failTransition(m)
 	}
+
+	// Roll back the transaction if one is active.
+	if s.tx != nil {
+		_ = s.tx.Rollback() //nolint:errcheck // rollback errors are not actionable; best-effort cleanup
+		s.tx = nil
+	}
+
 	next, err := Transition(s.state, m, true)
 	if err != nil {
 		return s.failTransition(m)
@@ -416,12 +536,23 @@ func (s *Session) handleRollback() ([]any, error) {
 	return []any{&proto.Success{Metadata: map[string]packstream.Value{}}}, nil
 }
 
+func (s *Session) handleRoute(m *proto.Route) ([]any, error) {
+	// ROUTE is valid from READY or TX_READY states (some drivers send it early).
+	if s.state != StateReady && s.state != StateTxReady && s.state != StateNegotiation {
+		return s.failTransition(m)
+	}
+	rt := RoutingTable(s.localAddr)
+	return []any{&proto.Success{Metadata: rt}}, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// drainResult closes and nils the current result cursor if one is open.
+// drainResult closes and nils the current result cursor if one is open. It
+// also discards any pre-fetched peek row.
 func (s *Session) drainResult() {
+	s.peeked = nil
 	if s.result != nil {
 		_ = s.result.Close() //nolint:errcheck // best-effort drain; error is not actionable here
 		s.result = nil

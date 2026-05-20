@@ -245,7 +245,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// ── 2. Set up framing and session ────────────────────────────────────
 	cr := proto.NewChunkedReader(conn)
 	cw := proto.NewChunkedWriter(conn)
-	sess := newSession(s.eng, s.opts.Auth)
+	// Pass the listener address so ROUTE responses can populate the routing table.
+	localAddr := ""
+	s.mu.Lock()
+	if s.ln != nil {
+		localAddr = s.ln.Addr().String()
+	}
+	s.mu.Unlock()
+	sess := newSession(s.eng, s.opts.Auth, localAddr)
 
 	// ── 3. Message loop ──────────────────────────────────────────────────
 	for {
