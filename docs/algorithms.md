@@ -22,6 +22,7 @@ algorithm has unit tests under the same package.
 | Bellman-Ford             | negative weights; negative cycles detected       | `search/bellman_ford.go`   |
 | A*                       | admissible heuristic                             | `search/astar.go`          |
 | Yen's k-shortest         | sorted by total cost                             | `search/yen.go`            |
+| KShortestPathsLoopless   | best-first loopless enumeration (former `EppsteinKShortest`) | `search/kshortest_loopless.go` |
 | Floyd-Warshall           | O(V^3) APSP                                      | `search/floyd_warshall.go` |
 | Johnson                  | O(V * (V + E) log V) APSP, mixed-sign weights; negative cycles detected | `search/johnson.go`        |
 
@@ -77,8 +78,12 @@ The semi-external variants live under `search/extern/`:
 
 ## Caveats and v1 limits
 
-- Yen's k-shortest is O(k * (V + E) log V); Eppstein's
-  algorithm (better k > 1000) is deferred.
+- `KShortestPathsLoopless` (previously named `EppsteinKShortest`)
+  is a best-first enumeration over the loopless-path tree, not
+  the heap-of-heaps construction of Eppstein 1998. The true
+  Eppstein algorithm — `O(m + n log n + k)` via the D(G) sidetrack
+  graph — is deferred. For sparse graphs with few alternative
+  routes `YenKShortest` is typically faster in practice.
 - Leiden in v1 is simplified to local moving + connected-
   community split; the refinement and aggregation phases of
   the full paper are deferred.

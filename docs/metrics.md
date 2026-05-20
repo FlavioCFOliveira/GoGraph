@@ -107,8 +107,10 @@ with no return value).
 | `search.DijkstraAPSPCtx`                   | All-pairs Dijkstra with context.                                     |
 | `search.JohnsonAPSP`                       | Johnson APSP (Bellman-Ford reweight + per-source Dijkstra).          |
 | `search.JohnsonAPSPCtx`                    | Johnson APSP with context.                                           |
-| `search.EppsteinKShortest`                 | Eppstein k-shortest paths.                                           |
-| `search.EppsteinKShortestCtx`              | Eppstein k-shortest paths with context.                              |
+| `search.KShortestPathsLoopless`            | Best-first loopless k-shortest paths.                                |
+| `search.KShortestPathsLooplessCtx`         | Best-first loopless k-shortest paths with context.                   |
+| `search.EppsteinKShortest`                 | Deprecated alias for `search.KShortestPathsLoopless`.                |
+| `search.EppsteinKShortestCtx`              | Deprecated alias for `search.KShortestPathsLooplessCtx`.             |
 | `search.FloydWarshall`                     | All-pairs shortest paths (O(V^3)).                                   |
 | `search.FloydWarshallCtx`                  | Floyd-Warshall with context.                                         |
 | `search.Hierholzer`                        | Directed Eulerian circuit/path.                                      |
