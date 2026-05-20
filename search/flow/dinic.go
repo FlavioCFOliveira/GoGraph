@@ -59,8 +59,11 @@ func MaxFlow(g *Network, src, sink int) int {
 }
 
 // MaxFlowCtx is the context-aware variant of [MaxFlow]. ctx.Err() is
-// checked at every BFS-level rebuild (the outer Dinic phase boundary);
-// on cancellation returns (totalSoFar, wrapped ctx.Err()).
+// checked at every BFS-level rebuild (the outer Dinic phase boundary)
+// AND inside the inner DFS augment at a 1<<12-step granularity, so
+// cancellation latency stays bounded even on a dense network whose
+// phases dominate the wall time. On cancellation returns
+// (totalSoFar, wrapped ctx.Err()).
 func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.MaxFlowCtx")()
 	level := make([]int, g.N())
@@ -80,7 +83,12 @@ func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 		}
 		for {
 			var f int
-			f, stack = augmentFlow(g, src, sink, 1<<62, level, iter, stack)
+			var aerr error
+			f, stack, aerr = augmentFlow(ctx, g, src, sink, 1<<62, level, iter, stack)
+			if aerr != nil {
+				metrics.IncCounter("search.flow.MaxFlowCtx.errors", 1)
+				return total, aerr
+			}
 			if f == 0 {
 				break
 			}
@@ -115,9 +123,21 @@ func buildLevel(g *Network, src, sink int, level []int) bool {
 //
 // Iterative by design — recursion would blow up on deep layered
 // residual graphs at LDBC-SF10 scale (CLAUDE.md mandate).
-func augmentFlow(g *Network, src, sink, pushLim int, level, iter, stack []int) (pushed int, stackOut []int) {
+//
+// ctx cancellation is checked at a 1<<12-iteration granularity to
+// keep latency bounded on dense phases while not adding measurable
+// overhead to the inner loop (one and-mask + one ctx.Err() call per
+// 4096 stack ops).
+func augmentFlow(ctx context.Context, g *Network, src, sink, pushLim int, level, iter, stack []int) (pushed int, stackOut []int, err error) {
 	stack = append(stack[:0], src)
+	tick := 0
 	for len(stack) > 0 {
+		tick++
+		if tick&0xFFF == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return 0, stack, cerr
+			}
+		}
 		v := stack[len(stack)-1]
 		if v == sink {
 			// Compute the bottleneck capacity along the stack.
@@ -136,7 +156,7 @@ func augmentFlow(g *Network, src, sink, pushLim int, level, iter, stack []int) (
 				g.cap[e] -= push
 				g.cap[e^1] += push
 			}
-			return push, stack
+			return push, stack, nil
 		}
 		descended := false
 		for ; iter[v] < len(g.heads[v]); iter[v]++ {
@@ -157,5 +177,5 @@ func augmentFlow(g *Network, src, sink, pushLim int, level, iter, stack []int) (
 			}
 		}
 	}
-	return 0, stack
+	return 0, stack, nil
 }
