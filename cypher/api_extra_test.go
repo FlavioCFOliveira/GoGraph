@@ -258,3 +258,169 @@ func TestEngine_WithParams_NoError(t *testing.T) {
 	for res.Next() {
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BindParams — type conversion coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestBindParams_TypeConversions(t *testing.T) {
+	t.Run("nil map", func(t *testing.T) {
+		out, err := cypher.BindParams(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != nil {
+			t.Fatalf("expected nil, got %v", out)
+		}
+	})
+
+	t.Run("integer types", func(t *testing.T) {
+		in := map[string]any{
+			"i":   int(1),
+			"i8":  int8(2),
+			"i16": int16(3),
+			"i32": int32(4),
+			"i64": int64(5),
+		}
+		out, err := cypher.BindParams(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, want := range map[string]int64{"i": 1, "i8": 2, "i16": 3, "i32": 4, "i64": 5} {
+			got, ok := out[k].(expr.IntegerValue)
+			if !ok || int64(got) != want {
+				t.Errorf("key %q: got %v, want %d", k, out[k], want)
+			}
+		}
+	})
+
+	t.Run("uint types", func(t *testing.T) {
+		in := map[string]any{"u": uint(7), "u64": uint64(99)}
+		out, err := cypher.BindParams(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if int64(out["u"].(expr.IntegerValue)) != 7 { //nolint:forcetypeassert
+			t.Errorf("uint: got %v", out["u"])
+		}
+		if int64(out["u64"].(expr.IntegerValue)) != 99 { //nolint:forcetypeassert
+			t.Errorf("uint64: got %v", out["u64"])
+		}
+	})
+
+	t.Run("float types", func(t *testing.T) {
+		in := map[string]any{"f32": float32(1.5), "f64": float64(2.5)}
+		out, err := cypher.BindParams(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if float64(out["f32"].(expr.FloatValue)) != float64(float32(1.5)) { //nolint:forcetypeassert
+			t.Errorf("float32: got %v", out["f32"])
+		}
+		if float64(out["f64"].(expr.FloatValue)) != 2.5 { //nolint:forcetypeassert
+			t.Errorf("float64: got %v", out["f64"])
+		}
+	})
+
+	t.Run("bool and string and nil", func(t *testing.T) {
+		in := map[string]any{"b": true, "s": "hello", "n": nil}
+		out, err := cypher.BindParams(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out["b"] != expr.BoolValue(true) {
+			t.Errorf("bool: got %v", out["b"])
+		}
+		if out["s"] != expr.StringValue("hello") {
+			t.Errorf("string: got %v", out["s"])
+		}
+		if out["n"] != expr.Null {
+			t.Errorf("nil: got %v", out["n"])
+		}
+	})
+
+	t.Run("passthrough expr.Value", func(t *testing.T) {
+		v := expr.IntegerValue(42)
+		out, err := cypher.BindParams(map[string]any{"x": v})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out["x"] != v {
+			t.Errorf("passthrough: got %v", out["x"])
+		}
+	})
+
+	t.Run("list recursive", func(t *testing.T) {
+		in := map[string]any{"l": []any{int(1), "two", true}}
+		out, err := cypher.BindParams(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, ok := out["l"].(expr.ListValue)
+		if !ok || len(l) != 3 {
+			t.Fatalf("list: got %v", out["l"])
+		}
+		if l[0] != expr.IntegerValue(1) || l[1] != expr.StringValue("two") || l[2] != expr.BoolValue(true) {
+			t.Errorf("list elements: %v", l)
+		}
+	})
+
+	t.Run("map recursive", func(t *testing.T) {
+		in := map[string]any{"m": map[string]any{"k": "v"}}
+		out, err := cypher.BindParams(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, ok := out["m"].(expr.MapValue)
+		if !ok {
+			t.Fatalf("map: got %T", out["m"])
+		}
+		if m["k"] != expr.StringValue("v") {
+			t.Errorf("map value: got %v", m["k"])
+		}
+	})
+
+	t.Run("unsupported type error", func(t *testing.T) {
+		in := map[string]any{"bad": struct{}{}}
+		_, err := cypher.BindParams(in)
+		if err == nil {
+			t.Fatal("expected error for unsupported type")
+		}
+	})
+}
+
+func TestRunAny_Basic(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	g.AddNode("A")
+	g.AddNode("B")
+	eng := cypher.NewEngine(g)
+
+	res, err := eng.RunAny(context.Background(), "MATCH (n) RETURN n", map[string]any{"x": int(1)})
+	if err != nil {
+		t.Fatalf("RunAny error: %v", err)
+	}
+	defer res.Close()
+	var count int
+	for res.Next() {
+		count++
+	}
+	if count != 2 {
+		t.Errorf("got %d rows, want 2", count)
+	}
+}
+
+func TestRunInTxAny_Basic(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+
+	res, err := eng.RunInTxAny(context.Background(), "CREATE (n:Test)", map[string]any{"x": "hello"})
+	if err != nil {
+		t.Fatalf("RunInTxAny error: %v", err)
+	}
+	defer res.Close()
+	for res.Next() {
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("iteration error: %v", err)
+	}
+}

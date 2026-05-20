@@ -101,6 +101,117 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	return &Result{rs: rs, cols: cols}, nil
 }
 
+// RunAny executes query with params expressed as map[string]any, automatically
+// converting Go native types to [expr.Value]. See [BindParams] for the
+// supported conversions. RunAny is equivalent to Run when params is nil.
+func (e *Engine) RunAny(ctx context.Context, query string, params map[string]any) (*Result, error) {
+	converted, err := BindParams(params)
+	if err != nil {
+		return nil, err
+	}
+	return e.Run(ctx, query, converted)
+}
+
+// RunInTxAny executes a write query with params expressed as map[string]any,
+// automatically converting Go native types to [expr.Value]. See [BindParams].
+func (e *Engine) RunInTxAny(ctx context.Context, query string, params map[string]any) (*Result, error) {
+	converted, err := BindParams(params)
+	if err != nil {
+		return nil, err
+	}
+	return e.RunInTx(ctx, query, converted)
+}
+
+// BindParams converts a map[string]any to map[string]expr.Value using the
+// following type mapping:
+//
+//   - nil                       → expr.Null
+//   - bool                      → expr.BoolValue
+//   - int, int8, int16, int32, int64 → expr.IntegerValue
+//   - uint, uint8, uint16, uint32, uint64 → expr.IntegerValue (truncated to int64)
+//   - float32, float64          → expr.FloatValue
+//   - string                    → expr.StringValue
+//   - []any                     → expr.ListValue (recursively converted)
+//   - map[string]any            → expr.MapValue (recursively converted)
+//   - expr.Value                → passed through unchanged
+//
+// Returns an error for unsupported types.
+func BindParams(params map[string]any) (map[string]expr.Value, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]expr.Value, len(params))
+	for k, v := range params {
+		converted, err := bindAny(v)
+		if err != nil {
+			return nil, fmt.Errorf("cypher: BindParams: key %q: %w", k, err)
+		}
+		out[k] = converted
+	}
+	return out, nil
+}
+
+// bindAny converts a single Go value to an expr.Value.
+func bindAny(v any) (expr.Value, error) {
+	if v == nil {
+		return expr.Null, nil
+	}
+	switch t := v.(type) {
+	case expr.Value:
+		return t, nil
+	case bool:
+		return expr.BoolValue(t), nil
+	case int:
+		return expr.IntegerValue(int64(t)), nil
+	case int8:
+		return expr.IntegerValue(int64(t)), nil
+	case int16:
+		return expr.IntegerValue(int64(t)), nil
+	case int32:
+		return expr.IntegerValue(int64(t)), nil
+	case int64:
+		return expr.IntegerValue(t), nil
+	case uint:
+		return expr.IntegerValue(int64(t)), nil //nolint:gosec // intentional truncation documented
+	case uint8:
+		return expr.IntegerValue(int64(t)), nil
+	case uint16:
+		return expr.IntegerValue(int64(t)), nil
+	case uint32:
+		return expr.IntegerValue(int64(t)), nil
+	case uint64:
+		return expr.IntegerValue(int64(t)), nil //nolint:gosec // intentional truncation documented
+	case float32:
+		return expr.FloatValue(float64(t)), nil
+	case float64:
+		return expr.FloatValue(t), nil
+	case string:
+		return expr.StringValue(t), nil
+	case []any:
+		list := make(expr.ListValue, len(t))
+		for i, elem := range t {
+			converted, err := bindAny(elem)
+			if err != nil {
+				return nil, fmt.Errorf("list[%d]: %w", i, err)
+			}
+			list[i] = converted
+		}
+		return list, nil
+	case map[string]any:
+		m := make(expr.MapValue, len(t))
+		for k, elem := range t {
+			converted, err := bindAny(elem)
+			if err != nil {
+				return nil, fmt.Errorf("map[%q]: %w", k, err)
+			}
+			m[k] = converted
+		}
+		return m, nil
+	default:
+		return nil, fmt.Errorf("unsupported parameter type %T", v)
+	}
+}
+
 // planFor returns the cached logical plan for query, or parses, translates,
 // and caches it.
 func (e *Engine) planFor(query string) (ir.LogicalPlan, error) {
