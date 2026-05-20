@@ -24,7 +24,7 @@ type visitor struct {
 // newVisitor allocates a zero-value visitor ready to use.
 func newVisitor() *visitor { return &visitor{} }
 
-// positionOf extracts the source position from any parse-tree node.
+// positionOf extracts the start source position from any parse-tree node.
 func positionOf(ctx antlr.ParserRuleContext) ast.Position {
 	if ctx == nil {
 		return ast.Position{}
@@ -37,6 +37,27 @@ func positionOf(ctx antlr.ParserRuleContext) ast.Position {
 		Line:   uint32(start.GetLine()),
 		Column: uint32(start.GetColumn()),
 		Offset: uint32(start.GetStart()),
+	}
+}
+
+// endPositionOf extracts the end source position from any parse-tree node.
+// The returned position points to the first byte past the last token's text.
+// For single-token rules the end position equals the start position plus the
+// token length (on the same line).
+func endPositionOf(ctx antlr.ParserRuleContext) ast.Position {
+	if ctx == nil {
+		return ast.Position{}
+	}
+	stop := ctx.GetStop()
+	if stop == nil {
+		// Fall back to start when stop is unavailable.
+		return positionOf(ctx)
+	}
+	tokenLen := uint32(len(stop.GetText()))
+	return ast.Position{
+		Line:   uint32(stop.GetLine()),
+		Column: uint32(stop.GetColumn()) + tokenLen,
+		Offset: uint32(stop.GetStop()) + 1,
 	}
 }
 
@@ -139,7 +160,7 @@ func (v *visitor) VisitRegularQuery(ctx *gen.RegularQueryContext) interface{} {
 		}
 		parts = append(parts, union.Query)
 	}
-	return &ast.MultiQuery{Pos: positionOf(ctx), Parts: parts, All: allFlag}
+	return &ast.MultiQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Parts: parts, All: allFlag}
 }
 
 // VisitUnionSt handles a UNION [ALL] singleQuery clause.
@@ -154,9 +175,10 @@ func (v *visitor) VisitUnionSt(ctx *gen.UnionStContext) interface{} {
 		return sqResult
 	}
 	return &ast.Union{
-		Pos:   positionOf(ctx),
-		All:   ctx.ALL() != nil,
-		Query: part,
+		Pos:    positionOf(ctx),
+		EndPos: endPositionOf(ctx),
+		All:    ctx.ALL() != nil,
+		Query:  part,
 	}
 }
 
@@ -173,7 +195,7 @@ func (v *visitor) VisitSingleQuery(ctx *gen.SingleQueryContext) interface{} {
 
 // VisitSinglePartQ handles the simple (no WITH) query form.
 func (v *visitor) VisitSinglePartQ(ctx *gen.SinglePartQContext) interface{} {
-	q := &ast.SingleQuery{Pos: positionOf(ctx)}
+	q := &ast.SingleQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 
 	for _, rs := range ctx.AllReadingStatement() {
 		r := v.visit(rs)
@@ -207,7 +229,7 @@ func (v *visitor) VisitSinglePartQ(ctx *gen.SinglePartQContext) interface{} {
 
 // VisitMultiPartQ handles queries with one or more WITH-prefixed parts.
 func (v *visitor) VisitMultiPartQ(ctx *gen.MultiPartQContext) interface{} {
-	q := &ast.SingleQuery{Pos: positionOf(ctx)}
+	q := &ast.SingleQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 
 	// Leading reading clauses before the first WITH.
 	for _, rs := range ctx.AllReadingStatement() {
@@ -293,12 +315,13 @@ func (v *visitor) VisitStandaloneCall(ctx *gen.StandaloneCallContext) interface{
 	// CALL at top level wraps inside a SingleQuery with no RETURN.
 	return &ast.SingleQuery{
 		Pos:            positionOf(ctx),
+		EndPos:         endPositionOf(ctx),
 		ReadingClauses: []ast.ReadingClause{c},
 	}
 }
 
 func (v *visitor) buildCallFromInvocationName(ctx antlr.ParserRuleContext, inCtx gen.IInvocationNameContext) *ast.Call {
-	c := &ast.Call{Pos: positionOf(ctx)}
+	c := &ast.Call{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	if inCtx != nil {
 		syms := inCtx.AllSymbol()
 		for i, s := range syms {
@@ -344,12 +367,14 @@ func (v *visitor) VisitMatchSt(ctx *gen.MatchStContext) interface{} {
 	if ctx.OPTIONAL() != nil {
 		return &ast.OptionalMatch{
 			Pos:     positionOf(ctx),
+			EndPos:  endPositionOf(ctx),
 			Pattern: pat.Pattern,
 			Where:   pat.Where,
 		}
 	}
 	return &ast.Match{
 		Pos:     positionOf(ctx),
+		EndPos:  endPositionOf(ctx),
 		Pattern: pat.Pattern,
 		Where:   pat.Where,
 	}
@@ -364,6 +389,7 @@ func (v *visitor) VisitUnwindSt(ctx *gen.UnwindStContext) interface{} {
 	varName := symbolText(ctx.Symbol())
 	return &ast.Unwind{
 		Pos:      positionOf(ctx),
+		EndPos:   endPositionOf(ctx),
 		Expr:     expr,
 		Variable: varName,
 	}
@@ -419,7 +445,7 @@ func (v *visitor) VisitCreateSt(ctx *gen.CreateStContext) interface{} {
 	if err != nil {
 		return err
 	}
-	return &ast.Create{Pos: positionOf(ctx), Pattern: pat}
+	return &ast.Create{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Pattern: pat}
 }
 
 // VisitMergeSt handles MERGE path ON CREATE SET … ON MATCH SET ….
@@ -428,7 +454,7 @@ func (v *visitor) VisitMergeSt(ctx *gen.MergeStContext) interface{} {
 	if err != nil {
 		return err
 	}
-	m := &ast.Merge{Pos: positionOf(ctx), Pattern: pp}
+	m := &ast.Merge{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Pattern: pp}
 
 	for _, ma := range ctx.AllMergeAction() {
 		maResult := v.visit(ma)
@@ -468,7 +494,7 @@ func (v *visitor) VisitMergeAction(ctx *gen.MergeActionContext) interface{} {
 
 // VisitSetSt handles SET item, item, ….
 func (v *visitor) VisitSetSt(ctx *gen.SetStContext) interface{} {
-	set := &ast.Set{Pos: positionOf(ctx)}
+	set := &ast.Set{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	for _, si := range ctx.AllSetItem() {
 		siResult := v.visit(si)
 		if err := firstError(siResult); err != nil {
@@ -488,7 +514,7 @@ func (v *visitor) VisitSetSt(ctx *gen.SetStContext) interface{} {
 //  2. variable = expr / variable += expr (variable assignment)
 //  3. variable :Label1:Label2      (label assignment)
 func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
-	item := &ast.SetItem{Pos: positionOf(ctx)}
+	item := &ast.SetItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 
 	// Form 1: property = expr  (propertyExpression ASSIGN expression)
 	if pe := ctx.PropertyExpression(); pe != nil {
@@ -509,7 +535,7 @@ func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
 	// Forms 2 & 3: variable-based (grammar uses Symbol, not Name)
 	if symCtx := ctx.Symbol(); symCtx != nil {
 		varName := symbolText(symCtx)
-		item.Target = &ast.Variable{Pos: positionOf(ctx), Name: varName}
+		item.Target = &ast.Variable{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: varName}
 
 		// ASSIGN ('=') or ADD_ASSIGN ('+=') token?
 		if ctx.ASSIGN() != nil {
@@ -542,7 +568,7 @@ func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
 
 // VisitRemoveSt handles REMOVE item, item, ….
 func (v *visitor) VisitRemoveSt(ctx *gen.RemoveStContext) interface{} {
-	rem := &ast.Remove{Pos: positionOf(ctx)}
+	rem := &ast.Remove{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	for _, ri := range ctx.AllRemoveItem() {
 		riResult := v.visit(ri)
 		if err := firstError(riResult); err != nil {
@@ -557,7 +583,7 @@ func (v *visitor) VisitRemoveSt(ctx *gen.RemoveStContext) interface{} {
 
 // VisitRemoveItem handles one REMOVE item.
 func (v *visitor) VisitRemoveItem(ctx *gen.RemoveItemContext) interface{} {
-	item := &ast.RemoveItem{Pos: positionOf(ctx)}
+	item := &ast.RemoveItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 
 	// Property removal: propertyExpression
 	if pe := ctx.PropertyExpression(); pe != nil {
@@ -572,7 +598,7 @@ func (v *visitor) VisitRemoveItem(ctx *gen.RemoveItemContext) interface{} {
 	// Label removal: variable :Label1:Label2 (grammar uses Symbol)
 	if symCtx := ctx.Symbol(); symCtx != nil {
 		varName := symbolText(symCtx)
-		item.Target = &ast.Variable{Pos: positionOf(ctx), Name: varName}
+		item.Target = &ast.Variable{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: varName}
 		if nl := ctx.NodeLabels(); nl != nil {
 			item.Labels = nodeLabels(nl)
 		}
@@ -592,9 +618,9 @@ func (v *visitor) VisitDeleteSt(ctx *gen.DeleteStContext) interface{} {
 		exprs = args
 	}
 	if ctx.DETACH() != nil {
-		return &ast.DetachDelete{Pos: positionOf(ctx), Expressions: exprs}
+		return &ast.DetachDelete{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expressions: exprs}
 	}
-	return &ast.Delete{Pos: positionOf(ctx), Expressions: exprs}
+	return &ast.Delete{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expressions: exprs}
 }
 
 // -------------------------------------------------------------------------
@@ -607,7 +633,7 @@ func (v *visitor) VisitReturnSt(ctx *gen.ReturnStContext) interface{} {
 	if err != nil {
 		return err
 	}
-	return &ast.Return{Pos: positionOf(ctx), Projection: proj}
+	return &ast.Return{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Projection: proj}
 }
 
 // VisitWithSt handles WITH projectionBody [WHERE expr].
@@ -616,7 +642,7 @@ func (v *visitor) VisitWithSt(ctx *gen.WithStContext) interface{} {
 	if err != nil {
 		return err
 	}
-	w := &ast.With{Pos: positionOf(ctx), Projection: proj}
+	w := &ast.With{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Projection: proj}
 	if wh := ctx.Where(); wh != nil {
 		where, err := v.visitWhere(wh)
 		if err != nil {
@@ -631,7 +657,7 @@ func (v *visitor) visitProjectionBody(ctx gen.IProjectionBodyContext) (*ast.Proj
 	if ctx == nil {
 		return nil, fmt.Errorf("missing projectionBody")
 	}
-	proj := &ast.Projection{Pos: positionOf(ctx)}
+	proj := &ast.Projection{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	proj.Distinct = ctx.DISTINCT() != nil
 
 	items := ctx.ProjectionItems()
@@ -697,7 +723,7 @@ func (v *visitor) VisitProjectionItem(ctx *gen.ProjectionItemContext) interface{
 	if err != nil {
 		return &SemaError{Rule: "projectionItem", Pos: positionOf(ctx), Message: err.Error()}
 	}
-	item := &ast.ProjectionItem{Pos: positionOf(ctx), Expr: expr}
+	item := &ast.ProjectionItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: expr}
 	if symCtx := ctx.Symbol(); symCtx != nil {
 		s := symbolText(symCtx)
 		item.Alias = &s
@@ -728,7 +754,7 @@ func (v *visitor) VisitOrderItem(ctx *gen.OrderItemContext) interface{} {
 	}
 	// DESC or DESCENDING means descending; everything else is ascending.
 	desc := ctx.DESC() != nil || ctx.DESCENDING() != nil
-	return &ast.SortItem{Pos: positionOf(ctx), Expr: expr, Descending: desc}
+	return &ast.SortItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: expr, Descending: desc}
 }
 
 // VisitSkipSt / VisitLimitSt — the expression is pulled by the parent.
@@ -745,7 +771,7 @@ func (v *visitor) VisitWhere(ctx *gen.WhereContext) interface{} {
 	if err != nil {
 		return &SemaError{Rule: "where", Pos: positionOf(ctx), Message: err.Error()}
 	}
-	return &ast.Where{Pos: positionOf(ctx), Predicate: expr}
+	return &ast.Where{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Predicate: expr}
 }
 
 func (v *visitor) visitWhere(ctx gen.IWhereContext) (*ast.Where, error) {
@@ -797,7 +823,7 @@ func (v *visitor) VisitPatternWhere(ctx *gen.PatternWhereContext) interface{} {
 
 // VisitPattern handles comma-separated patternParts.
 func (v *visitor) VisitPattern(ctx *gen.PatternContext) interface{} {
-	pat := &ast.Pattern{Pos: positionOf(ctx)}
+	pat := &ast.Pattern{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	for _, pp := range ctx.AllPatternPart() {
 		r := v.visit(pp)
 		if err := firstError(r); err != nil {
@@ -826,7 +852,7 @@ func (v *visitor) visitPattern(ctx gen.IPatternContext) (*ast.Pattern, error) {
 
 // VisitPatternPart handles [variable =] patternElem.
 func (v *visitor) VisitPatternPart(ctx *gen.PatternPartContext) interface{} {
-	pp := &ast.PathPattern{Pos: positionOf(ctx)}
+	pp := &ast.PathPattern{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	if sym := ctx.Symbol(); sym != nil {
 		s := symbolText(sym)
 		pp.Variable = &s
@@ -921,7 +947,7 @@ func (v *visitor) VisitPatternElemChain(ctx *gen.PatternElemChainContext) interf
 
 // VisitNodePattern handles (variable? labels? properties?).
 func (v *visitor) VisitNodePattern(ctx *gen.NodePatternContext) interface{} {
-	np := &ast.NodePattern{Pos: positionOf(ctx)}
+	np := &ast.NodePattern{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	if sym := ctx.Symbol(); sym != nil {
 		s := symbolText(sym)
 		np.Variable = &s
@@ -943,7 +969,7 @@ func (v *visitor) VisitNodePattern(ctx *gen.NodePatternContext) interface{} {
 
 // VisitRelationshipPattern handles -[relDetail]-> or <-[relDetail]- or -[relDetail]-.
 func (v *visitor) VisitRelationshipPattern(ctx *gen.RelationshipPatternContext) interface{} {
-	rp := &ast.RelationshipPattern{Pos: positionOf(ctx)}
+	rp := &ast.RelationshipPattern{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 
 	// Direction: LT present before SUB = incoming; GT present = outgoing.
 	if ctx.LT() != nil {
@@ -1040,7 +1066,7 @@ func (v *visitor) visitRangeLit(ctx gen.IRangeLitContext) (*ast.RangeQuantifier,
 	if ctx == nil {
 		return nil, nil
 	}
-	rq := &ast.RangeQuantifier{Pos: positionOf(ctx)}
+	rq := &ast.RangeQuantifier{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	nums := ctx.AllNumLit()
 
 	hasRange := ctx.RANGE() != nil // ".." token present
@@ -1104,7 +1130,7 @@ func (v *visitor) VisitExpression(ctx *gen.ExpressionContext) interface{} {
 		if err != nil {
 			return &SemaError{Rule: "expression", Pos: positionOf(ctx), Message: err.Error()}
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "OR", Right: right}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: "OR", Right: right}
 	}
 	return left
 }
@@ -1124,7 +1150,7 @@ func (v *visitor) VisitXorExpression(ctx *gen.XorExpressionContext) interface{} 
 		if err != nil {
 			return &SemaError{Rule: "xorExpression", Pos: positionOf(ctx), Message: err.Error()}
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "XOR", Right: right}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: "XOR", Right: right}
 	}
 	return left
 }
@@ -1144,7 +1170,7 @@ func (v *visitor) VisitAndExpression(ctx *gen.AndExpressionContext) interface{} 
 		if err != nil {
 			return &SemaError{Rule: "andExpression", Pos: positionOf(ctx), Message: err.Error()}
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "AND", Right: right}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: "AND", Right: right}
 	}
 	return left
 }
@@ -1156,7 +1182,7 @@ func (v *visitor) VisitNotExpression(ctx *gen.NotExpressionContext) interface{} 
 		return &SemaError{Rule: "notExpression", Pos: positionOf(ctx), Message: err.Error()}
 	}
 	if ctx.NOT() != nil {
-		return &ast.UnaryOp{Pos: positionOf(ctx), Operator: "NOT", Operand: inner}
+		return &ast.UnaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Operator: "NOT", Operand: inner}
 	}
 	return inner
 }
@@ -1178,7 +1204,7 @@ func (v *visitor) VisitComparisonExpression(ctx *gen.ComparisonExpressionContext
 		if err != nil {
 			return &SemaError{Rule: "comparisonExpression", Pos: positionOf(ctx), Message: err.Error()}
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: op, Right: right}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
 	}
 	return left
 }
@@ -1213,7 +1239,7 @@ func (v *visitor) VisitAddSubExpression(ctx *gen.AddSubExpressionContext) interf
 			op = operators[opIdx]
 		}
 		opIdx++
-		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: op, Right: right}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
 	}
 	return left
 }
@@ -1238,7 +1264,7 @@ func (v *visitor) VisitMultDivExpression(ctx *gen.MultDivExpressionContext) inte
 		if i-1 < len(operators) {
 			op = operators[i-1]
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: op, Right: right}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
 	}
 	return left
 }
@@ -1258,7 +1284,7 @@ func (v *visitor) VisitPowerExpression(ctx *gen.PowerExpressionContext) interfac
 		if err != nil {
 			return &SemaError{Rule: "powerExpression", Pos: positionOf(ctx), Message: err.Error()}
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), Left: left, Operator: "^", Right: right}
+		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: "^", Right: right}
 	}
 	return left
 }
@@ -1270,7 +1296,7 @@ func (v *visitor) VisitUnaryAddSubExpression(ctx *gen.UnaryAddSubExpressionConte
 		return &SemaError{Rule: "unaryAddSubExpression", Pos: positionOf(ctx), Message: err.Error()}
 	}
 	if ctx.SUB() != nil {
-		return &ast.UnaryOp{Pos: positionOf(ctx), Operator: "-", Operand: inner}
+		return &ast.UnaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Operator: "-", Operand: inner}
 	}
 	// Unary + is a no-op; omit the wrapper.
 	return inner
@@ -1304,12 +1330,12 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 		}
 		switch e := r.(type) {
 		case *listInExpr:
-			base = &ast.BinaryOp{Pos: positionOf(ctx), Left: base, Operator: "IN", Right: e.list}
+			base = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: base, Operator: "IN", Right: e.list}
 		case *subscriptOrSlice:
 			if e.isSlice {
-				base = &ast.SliceExpr{Pos: positionOf(ctx), Expr: base, From: e.from, To: e.to}
+				base = &ast.SliceExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, From: e.from, To: e.to}
 			} else {
-				base = &ast.SubscriptExpr{Pos: positionOf(ctx), Expr: base, Index: e.index}
+				base = &ast.SubscriptExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, Index: e.index}
 			}
 		}
 	}
@@ -1321,7 +1347,7 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 			return err
 		}
 		if op, ok := r.(string); ok {
-			base = &ast.UnaryOp{Pos: positionOf(ctx), Operator: op, Operand: base}
+			base = &ast.UnaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Operator: op, Operand: base}
 		}
 	}
 
@@ -1406,7 +1432,7 @@ func (v *visitor) VisitStringExpression(ctx *gen.StringExpressionContext) interf
 	if err != nil {
 		return &SemaError{Rule: "stringExpression", Pos: positionOf(ctx), Message: err.Error()}
 	}
-	return &ast.BinaryOp{Pos: positionOf(ctx), Operator: op, Right: right}
+	return &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Operator: op, Right: right}
 }
 
 // VisitStringExpPrefix returns the operator string.
@@ -1452,7 +1478,7 @@ func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (a
 	names := ctx.AllName()
 	for _, n := range names {
 		key := nameText(n)
-		base = &ast.Property{Pos: positionOf(ctx), Receiver: base, Key: key}
+		base = &ast.Property{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Receiver: base, Key: key}
 	}
 	return base, nil
 }
@@ -1503,7 +1529,7 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 		return v.visit(fi)
 	}
 	if sym := ctx.Symbol(); sym != nil {
-		return &ast.Variable{Pos: positionOf(ctx), Name: symbolText(sym)}
+		return &ast.Variable{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: symbolText(sym)}
 	}
 	if se := ctx.SubqueryExist(); se != nil {
 		return v.visit(se)
@@ -1530,15 +1556,16 @@ func (v *visitor) VisitParenthesizedExpression(ctx *gen.ParenthesizedExpressionC
 // VisitCountAll returns a FunctionInvocation for COUNT(*).
 func (v *visitor) VisitCountAll(ctx *gen.CountAllContext) interface{} {
 	return &ast.FunctionInvocation{
-		Pos:  positionOf(ctx),
-		Name: "count",
-		Args: nil,
+		Pos:    positionOf(ctx),
+		EndPos: endPositionOf(ctx),
+		Name:   "count",
+		Args:   nil,
 	}
 }
 
 // VisitFunctionInvocation handles namespace.func(DISTINCT? args).
 func (v *visitor) VisitFunctionInvocation(ctx *gen.FunctionInvocationContext) interface{} {
-	fi := &ast.FunctionInvocation{Pos: positionOf(ctx)}
+	fi := &ast.FunctionInvocation{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	if in := ctx.InvocationName(); in != nil {
 		syms := in.AllSymbol()
 		for i, s := range syms {
@@ -1585,11 +1612,11 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 		// EXISTS { fullQuery } — convert to ExistsSubquery with Query field.
 		switch q := qr.(type) {
 		case *ast.SingleQuery:
-			return &ast.ExistsSubquery{Pos: positionOf(ctx), Query: q}
+			return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
 			// Wrap first part for simplicity; multi-union inside EXISTS is unusual.
 			if len(q.Parts) > 0 {
-				return &ast.ExistsSubquery{Pos: positionOf(ctx), Query: q.Parts[0]}
+				return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
 			}
 		}
 	}
@@ -1601,6 +1628,7 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 		// Build a minimal single-match query for the pattern form.
 		return &ast.ExistsSubquery{
 			Pos:     positionOf(ctx),
+			EndPos:  endPositionOf(ctx),
 			Pattern: pat.Pattern,
 		}
 	}
@@ -1616,7 +1644,7 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 // The grammar stores all expressions in AllExpression(); their mapping to
 // WHEN/THEN/ELSE positions requires walking tokens by count.
 func (v *visitor) VisitCaseExpression(ctx *gen.CaseExpressionContext) interface{} {
-	ce := &ast.CaseExpression{Pos: positionOf(ctx)}
+	ce := &ast.CaseExpression{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	exprs := ctx.AllExpression()
 	whenCount := len(ctx.AllWHEN())
 	thenCount := len(ctx.AllTHEN())
@@ -1653,6 +1681,7 @@ func (v *visitor) VisitCaseExpression(ctx *gen.CaseExpressionContext) interface{
 		idx++
 		ce.Alternatives = append(ce.Alternatives, &ast.CaseAlternative{
 			Pos:        positionOf(ctx),
+			EndPos:     endPositionOf(ctx),
 			Condition:  cond,
 			Consequent: cons,
 		})
@@ -1684,6 +1713,7 @@ func (v *visitor) VisitListComprehension(ctx *gen.ListComprehensionContext) inte
 	}
 	lc := &ast.ListComprehension{
 		Pos:       positionOf(ctx),
+		EndPos:    endPositionOf(ctx),
 		Variable:  varName,
 		Source:    src,
 		Predicate: pred,
@@ -1764,14 +1794,16 @@ func (v *visitor) VisitFilterWith(ctx *gen.FilterWithContext) interface{} {
 	// ListComprehension with no projection (consistent with Cypher semantics).
 	lc := &ast.ListComprehension{
 		Pos:       positionOf(ctx),
+		EndPos:    endPositionOf(ctx),
 		Variable:  varName,
 		Source:    src,
 		Predicate: pred,
 	}
 	return &ast.FunctionInvocation{
-		Pos:  positionOf(ctx),
-		Name: funcName,
-		Args: []ast.Expression{lc},
+		Pos:    positionOf(ctx),
+		EndPos: endPositionOf(ctx),
+		Name:   funcName,
+		Args:   []ast.Expression{lc},
 	}
 }
 
@@ -1792,6 +1824,7 @@ func (v *visitor) VisitPatternComprehension(ctx *gen.PatternComprehensionContext
 
 	pc := &ast.PatternComprehension{
 		Pos:     positionOf(ctx),
+		EndPos:  endPositionOf(ctx),
 		Pattern: pp,
 	}
 
@@ -1850,7 +1883,7 @@ func (v *visitor) VisitRelationshipsChainPattern(ctx *gen.RelationshipsChainPatt
 		cur = chainElem
 	}
 
-	pp := &ast.PathPattern{Pos: positionOf(ctx), Head: head}
+	pp := &ast.PathPattern{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Head: head}
 	return pp
 }
 
@@ -1866,7 +1899,7 @@ func (v *visitor) VisitParameter(ctx *gen.ParameterContext) interface{} {
 	} else if nl := ctx.NumLit(); nl != nil {
 		name = nl.GetText()
 	}
-	return &ast.Parameter{Pos: positionOf(ctx), Name: name}
+	return &ast.Parameter{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: name}
 }
 
 // VisitLiteral dispatches to a specific literal type.
@@ -1878,7 +1911,7 @@ func (v *visitor) VisitLiteral(ctx *gen.LiteralContext) interface{} {
 		return v.visit(nl)
 	}
 	if ctx.NULL_W() != nil {
-		return &ast.NullLiteral{Pos: positionOf(ctx)}
+		return &ast.NullLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	}
 	if sl := ctx.StringLit(); sl != nil {
 		return v.visit(sl)
@@ -1897,7 +1930,7 @@ func (v *visitor) VisitLiteral(ctx *gen.LiteralContext) interface{} {
 
 // VisitBoolLit handles TRUE / FALSE.
 func (v *visitor) VisitBoolLit(ctx *gen.BoolLitContext) interface{} {
-	return &ast.BoolLiteral{Pos: positionOf(ctx), Value: ctx.TRUE() != nil}
+	return &ast.BoolLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: ctx.TRUE() != nil}
 }
 
 // VisitNumLit handles integer literals via the DIGIT token.
@@ -1911,33 +1944,33 @@ func (v *visitor) VisitNumLit(ctx *gen.NumLitContext) interface{} {
 		if err != nil {
 			return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: "invalid number: " + text}
 		}
-		return &ast.FloatLiteral{Pos: positionOf(ctx), Value: f}
+		return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
 	}
 	// Hex / octal / decimal integer.
 	n, err := parseInt(text)
 	if err != nil {
 		return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: err.Error()}
 	}
-	return &ast.IntLiteral{Pos: positionOf(ctx), Value: n}
+	return &ast.IntLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: n}
 }
 
 // VisitStringLit handles "string" or 'string' tokens.
 func (v *visitor) VisitStringLit(ctx *gen.StringLitContext) interface{} {
 	raw := ctx.STRING_LITERAL().GetText()
 	s := unquoteString(raw)
-	return &ast.StringLiteral{Pos: positionOf(ctx), Value: s}
+	return &ast.StringLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: s}
 }
 
 // VisitCharLit handles char literals (treated as strings in Cypher).
 func (v *visitor) VisitCharLit(ctx *gen.CharLitContext) interface{} {
 	raw := ctx.CHAR_LITERAL().GetText()
 	s := unquoteString(raw)
-	return &ast.StringLiteral{Pos: positionOf(ctx), Value: s}
+	return &ast.StringLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: s}
 }
 
 // VisitListLit handles [expr, expr, …].
 func (v *visitor) VisitListLit(ctx *gen.ListLitContext) interface{} {
-	ll := &ast.ListLiteral{Pos: positionOf(ctx)}
+	ll := &ast.ListLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	if ec := ctx.ExpressionChain(); ec != nil {
 		args, err := v.visitExpressionChain(ec)
 		if err != nil {
@@ -1950,7 +1983,7 @@ func (v *visitor) VisitListLit(ctx *gen.ListLitContext) interface{} {
 
 // VisitMapLit handles {key: expr, …}.
 func (v *visitor) VisitMapLit(ctx *gen.MapLitContext) interface{} {
-	ml := &ast.MapLiteral{Pos: positionOf(ctx)}
+	ml := &ast.MapLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 	for _, mp := range ctx.AllMapPair() {
 		r := v.visit(mp)
 		if err := firstError(r); err != nil {
@@ -2039,7 +2072,7 @@ func (v *visitor) VisitYieldItem(ctx *gen.YieldItemContext) interface{} {
 	if len(syms) == 0 {
 		return unsupported(ctx, "yieldItem", "missing symbol")
 	}
-	item := &ast.YieldItem{Pos: positionOf(ctx), Name: symbolText(syms[0])}
+	item := &ast.YieldItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: symbolText(syms[0])}
 	if len(syms) >= 2 {
 		alias := symbolText(syms[1])
 		item.Alias = &alias

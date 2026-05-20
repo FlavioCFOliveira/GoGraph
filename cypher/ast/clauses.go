@@ -11,6 +11,7 @@ import "strings"
 // its own position and is shared between reading and filtering clauses.
 type Where struct {
 	Pos       Position
+	EndPos    Position
 	Predicate Expression
 }
 
@@ -24,6 +25,7 @@ func (w *Where) String() string { return "WHERE " + w.Predicate.String() }
 // Match is a MATCH clause.
 type Match struct {
 	Pos     Position
+	EndPos  Position
 	Pattern *Pattern
 	Where   *Where // nil when no WHERE predicate
 }
@@ -44,6 +46,7 @@ func (m *Match) String() string {
 // OptionalMatch is an OPTIONAL MATCH clause.
 type OptionalMatch struct {
 	Pos     Position
+	EndPos  Position
 	Pattern *Pattern
 	Where   *Where // nil when no WHERE predicate
 }
@@ -64,6 +67,7 @@ func (o *OptionalMatch) String() string {
 // Create is a CREATE clause.
 type Create struct {
 	Pos     Position
+	EndPos  Position
 	Pattern *Pattern
 }
 
@@ -77,6 +81,7 @@ func (c *Create) String() string { return "CREATE " + c.Pattern.String() }
 // Merge is a MERGE clause, with optional ON CREATE and ON MATCH actions.
 type Merge struct {
 	Pos      Position
+	EndPos   Position
 	Pattern  *PathPattern
 	OnCreate []*SetItem // actions on ON CREATE SET
 	OnMatch  []*SetItem // actions on ON MATCH SET
@@ -108,8 +113,9 @@ func (m *Merge) String() string {
 
 // Set is a SET clause.
 type Set struct {
-	Pos   Position
-	Items []*SetItem
+	Pos    Position
+	EndPos Position
+	Items  []*SetItem
 }
 
 func (*Set) astNode()        {}
@@ -127,8 +133,9 @@ func (s *Set) String() string {
 
 // Remove is a REMOVE clause.
 type Remove struct {
-	Pos   Position
-	Items []*RemoveItem
+	Pos    Position
+	EndPos Position
+	Items  []*RemoveItem
 }
 
 func (*Remove) astNode()        {}
@@ -147,6 +154,7 @@ func (r *Remove) String() string {
 // Delete is a DELETE clause.
 type Delete struct {
 	Pos         Position
+	EndPos      Position
 	Expressions []Expression
 }
 
@@ -166,6 +174,7 @@ func (d *Delete) String() string {
 // DetachDelete is a DETACH DELETE clause.
 type DetachDelete struct {
 	Pos         Position
+	EndPos      Position
 	Expressions []Expression
 }
 
@@ -184,9 +193,10 @@ func (d *DetachDelete) String() string {
 
 // YieldItem represents a single item in a YIELD clause.
 type YieldItem struct {
-	Pos   Position
-	Name  string
-	Alias *string // nil when no AS alias
+	Pos    Position
+	EndPos Position
+	Name   string
+	Alias  *string // nil when no AS alias
 }
 
 // String returns the YIELD item.
@@ -202,6 +212,7 @@ func (y *YieldItem) String() string {
 //	CALL namespace.procedure(args) YIELD items WHERE predicate
 type Call struct {
 	Pos       Position
+	EndPos    Position
 	Namespace []string
 	Procedure string
 	Args      []Expression // nil or empty means no argument list

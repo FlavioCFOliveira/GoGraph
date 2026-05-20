@@ -13,8 +13,9 @@ import (
 
 // IntLiteral is an integer literal value.
 type IntLiteral struct {
-	Pos   Position
-	Value int64
+	Pos    Position
+	EndPos Position
+	Value  int64
 }
 
 func (*IntLiteral) astNode()  {}
@@ -25,8 +26,9 @@ func (n *IntLiteral) String() string { return strconv.FormatInt(n.Value, 10) }
 
 // FloatLiteral is a floating-point literal value.
 type FloatLiteral struct {
-	Pos   Position
-	Value float64
+	Pos    Position
+	EndPos Position
+	Value  float64
 }
 
 func (*FloatLiteral) astNode()  {}
@@ -37,8 +39,9 @@ func (n *FloatLiteral) String() string { return strconv.FormatFloat(n.Value, 'f'
 
 // StringLiteral is a single-quoted or double-quoted string literal.
 type StringLiteral struct {
-	Pos   Position
-	Value string
+	Pos    Position
+	EndPos Position
+	Value  string
 }
 
 func (*StringLiteral) astNode()  {}
@@ -53,8 +56,9 @@ func (n *StringLiteral) String() string {
 
 // BoolLiteral is the literal true or false.
 type BoolLiteral struct {
-	Pos   Position
-	Value bool
+	Pos    Position
+	EndPos Position
+	Value  bool
 }
 
 func (*BoolLiteral) astNode()  {}
@@ -70,7 +74,8 @@ func (n *BoolLiteral) String() string {
 
 // NullLiteral is the literal null.
 type NullLiteral struct {
-	Pos Position
+	Pos    Position
+	EndPos Position
 }
 
 func (*NullLiteral) astNode()  {}
@@ -82,6 +87,7 @@ func (n *NullLiteral) String() string { return "null" }
 // ListLiteral is a bracketed list of expressions: [e1, e2, …].
 type ListLiteral struct {
 	Pos      Position
+	EndPos   Position
 	Elements []Expression
 }
 
@@ -100,6 +106,7 @@ func (n *ListLiteral) String() string {
 // MapLiteral is a map expression: {key1: expr1, key2: expr2, …}.
 type MapLiteral struct {
 	Pos    Position
+	EndPos Position
 	Keys   []string
 	Values []Expression
 }

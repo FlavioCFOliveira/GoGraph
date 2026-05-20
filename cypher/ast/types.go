@@ -71,9 +71,10 @@ type UpdatingClause interface {
 // ProjectionItem represents a single item in a RETURN or WITH projection,
 // optionally aliased.
 type ProjectionItem struct {
-	Pos   Position
-	Expr  Expression
-	Alias *string // nil when no AS alias is present
+	Pos    Position
+	EndPos Position
+	Expr   Expression
+	Alias  *string // nil when no AS alias is present
 }
 
 // String returns the Cypher representation of a projection item.
@@ -87,6 +88,7 @@ func (p *ProjectionItem) String() string {
 // SortItem represents a single ORDER BY term.
 type SortItem struct {
 	Pos        Position
+	EndPos     Position
 	Expr       Expression
 	Descending bool
 }
@@ -102,6 +104,7 @@ func (s *SortItem) String() string {
 // Projection carries the column list shared by RETURN and WITH.
 type Projection struct {
 	Pos      Position
+	EndPos   Position
 	Distinct bool
 	All      bool // SELECT *
 	Items    []*ProjectionItem
@@ -148,6 +151,7 @@ func (p *Projection) String() string {
 // or label assignment patterns.
 type SetItem struct {
 	Pos      Position
+	EndPos   Position
 	Target   Expression // Property or Variable
 	Value    Expression // right-hand side; nil for label-set forms
 	Operator string     // "=", "+=", or "" for label operations
@@ -169,6 +173,7 @@ func (s *SetItem) String() string {
 // RemoveItem represents one item in a REMOVE clause.
 type RemoveItem struct {
 	Pos    Position
+	EndPos Position
 	Target Expression // Property or Variable
 	Labels []string   // populated for REMOVE n:Label form
 }

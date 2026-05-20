@@ -17,6 +17,7 @@ type Query interface {
 // optional RETURN.
 type SingleQuery struct {
 	Pos             Position
+	EndPos          Position
 	ReadingClauses  []ReadingClause
 	UpdatingClauses []UpdatingClause
 	Return          *Return // nil when the query has no RETURN
@@ -46,9 +47,10 @@ func (q *SingleQuery) String() string {
 
 // MultiQuery is a UNION of SingleQuery nodes.
 type MultiQuery struct {
-	Pos   Position
-	Parts []*SingleQuery
-	All   bool // true for UNION ALL; false for UNION (deduplicating)
+	Pos    Position
+	EndPos Position
+	Parts  []*SingleQuery
+	All    bool // true for UNION ALL; false for UNION (deduplicating)
 }
 
 func (*MultiQuery) astNode()   {}
@@ -73,9 +75,10 @@ func (m *MultiQuery) String() string {
 // Union is a standalone UNION clause (used as an intermediate representation
 // for some parsing strategies).  MultiQuery is preferred for the final AST.
 type Union struct {
-	Pos   Position
-	All   bool
-	Query *SingleQuery
+	Pos    Position
+	EndPos Position
+	All    bool
+	Query  *SingleQuery
 }
 
 func (*Union) astNode()       {}
@@ -93,6 +96,7 @@ func (u *Union) String() string {
 // Return is a RETURN clause.
 type Return struct {
 	Pos        Position
+	EndPos     Position
 	Projection *Projection
 }
 
@@ -106,6 +110,7 @@ func (r *Return) String() string { return "RETURN " + r.Projection.String() }
 // With is a WITH clause, used for intermediate projections and filtering.
 type With struct {
 	Pos        Position
+	EndPos     Position
 	Projection *Projection
 	Where      *Where // nil when no WHERE predicate
 }
@@ -126,6 +131,7 @@ func (w *With) String() string {
 // Unwind is an UNWIND clause: UNWIND expr AS variable.
 type Unwind struct {
 	Pos      Position
+	EndPos   Position
 	Expr     Expression
 	Variable string
 }
