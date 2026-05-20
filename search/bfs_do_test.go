@@ -161,15 +161,14 @@ func TestBFSDirectionOpt_BetaSwitchBack(t *testing.T) {
 		depth      int
 		isBottomUp bool
 	}
-	setBFSDoStepObserver(func(depth int, isBottomUp bool) {
+	obs := func(depth int, isBottomUp bool) {
 		steps = append(steps, struct {
 			depth      int
 			isBottomUp bool
 		}{depth, isBottomUp})
-	})
-	defer setBFSDoStepObserver(nil)
+	}
 
-	BFSDirectionOpt(c, src, func(_ graph.NodeID, _ int) bool { return true })
+	bfsDoCore(c, src, func(_ graph.NodeID, _ int) bool { return true }, obs)
 
 	if len(steps) < 3 {
 		t.Fatalf("expected >= 3 BFS-DO steps, got %d", len(steps))

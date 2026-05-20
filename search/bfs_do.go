@@ -29,6 +29,16 @@ import (
 // zero-allocation per call.
 func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
 	defer metrics.Time("search.BFSDirectionOpt")()
+	bfsDoCore(c, src, visit, nil)
+}
+
+// bfsDoCore is the shared body of [BFSDirectionOpt]. The obs callback
+// is invoked once per step with (depth, isBottomUp) and is the test
+// hook that validates the Beamer alpha/beta regime; production
+// callers go through [BFSDirectionOpt] which passes obs=nil, so the
+// observer branch is dead-code-eliminated by the compiler at the
+// call site.
+func bfsDoCore[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool, obs func(depth int, isBottomUp bool)) {
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	if uint64(src)+1 >= uint64(len(verts)) {
@@ -72,13 +82,13 @@ func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node gra
 		}
 		var stopped bool
 		if inBottomUp {
-			if bfsDoStepObserver != nil {
-				bfsDoStepObserver(depth, true)
+			if obs != nil {
+				obs(depth, true)
 			}
 			cur, next, stopped = bottomUpStep(verts, edges, visited, frontier, maxID, cur, next, &depth, visit)
 		} else {
-			if bfsDoStepObserver != nil {
-				bfsDoStepObserver(depth, false)
+			if obs != nil {
+				obs(depth, false)
 			}
 			cur, next, stopped = topDownStep(verts, edges, visited, cur, next, &depth, visit)
 		}
@@ -187,20 +197,6 @@ func bottomUpStep(
 	}
 	*depth++
 	return next, cur[:0], false
-}
-
-// bfsDoStepObserver is a test-only hook invoked once per BFS-DO step
-// with (depth, isBottomUp). Tests set it via [setBFSDoStepObserver]
-// to verify the Beamer alpha/beta switch behaviour from outside; it
-// is nil and a single inlined branch in production builds.
-//
-//nolint:gochecknoglobals // test-only observer hook
-var bfsDoStepObserver func(depth int, isBottomUp bool)
-
-// SetBFSDoStepObserver installs (or clears with nil) the BFS-DO step
-// observer for use by package tests. Not part of the public API.
-func setBFSDoStepObserver(f func(depth int, isBottomUp bool)) {
-	bfsDoStepObserver = f
 }
 
 // bfsDoScratch bundles the BFS-DO per-call working storage so it can
