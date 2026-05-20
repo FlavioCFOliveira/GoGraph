@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.18.0
+	github.com/antlr4-go/antlr/v4 v4.13.1
 	github.com/edsrzf/mmap-go v1.2.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.44.0
@@ -13,4 +14,5 @@ require (
 require (
 	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
+	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 )
