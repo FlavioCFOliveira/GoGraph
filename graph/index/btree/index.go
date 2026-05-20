@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -31,6 +32,13 @@ import (
 	"gograph/graph"
 	"gograph/graph/index"
 )
+
+// ErrMismatchedLengths is returned by [Index.BulkLoad] when the
+// values and nodes slices supplied to it do not share a common
+// length. Before sprint 21 this condition panicked; the error
+// returned here lets callers handle it as a recoverable input
+// validation failure.
+var ErrMismatchedLengths = errors.New("btree: values and nodes slices must have the same length")
 
 // entry is one (value, set-of-nodes) record in the sorted array.
 type entry[V cmp.Ordered] struct {
@@ -50,10 +58,10 @@ func New[V cmp.Ordered]() *Index[V] { return &Index[V]{} }
 // BulkLoad replaces the contents of the index with the given
 // (value, node) pairs in O(n log n) time. The pairs slice is left
 // untouched. Calling BulkLoad on a non-empty index discards previous
-// data.
-func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) {
+// data. Returns [ErrMismatchedLengths] when len(values) != len(nodes).
+func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 	if len(values) != len(nodes) {
-		panic("btree: values and nodes must have the same length")
+		return ErrMismatchedLengths
 	}
 	type pair struct {
 		v V
@@ -78,6 +86,7 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) {
 	i.mu.Lock()
 	i.entries = out
 	i.mu.Unlock()
+	return nil
 }
 
 // Insert records that node carries value.

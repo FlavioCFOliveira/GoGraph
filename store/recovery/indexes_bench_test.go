@@ -170,7 +170,9 @@ func BenchmarkIndexesRecoveryVsRebuild(b *testing.B) {
 				vals[k] = btKeys[k]
 				ids[k] = graph.NodeID(btNodes[k])
 			}
-			bt2.BulkLoad(vals, ids)
+			if err := bt2.BulkLoad(vals, ids); err != nil {
+				b.Fatalf("bt2.BulkLoad: %v", err)
+			}
 			_ = lab2.Count(1)
 		}
 	})

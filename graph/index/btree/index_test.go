@@ -1,6 +1,7 @@
 package btree
 
 import (
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"testing"
@@ -66,7 +67,9 @@ func TestIndex_BulkLoad(t *testing.T) {
 		nodes[i] = graph.NodeID(uint64(i))
 	}
 	idx := New[int]()
-	idx.BulkLoad(values, nodes)
+	if err := idx.BulkLoad(values, nodes); err != nil {
+		t.Fatalf("BulkLoad: %v", err)
+	}
 
 	// Compare against an ad-hoc inverted map.
 	want := map[int]uint64{}
@@ -130,7 +133,9 @@ func BenchmarkIndex_RangeFirst(b *testing.B) {
 		nodes[i] = graph.NodeID(uint64(i))
 	}
 	idx := New[int]()
-	idx.BulkLoad(values, nodes)
+	if err := idx.BulkLoad(values, nodes); err != nil {
+		b.Fatalf("BulkLoad: %v", err)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -148,7 +153,34 @@ func BenchmarkIndex_BulkLoad_10M(b *testing.B) {
 		}
 		idx := New[int]()
 		b.StartTimer()
-		idx.BulkLoad(values, nodes)
+		if err := idx.BulkLoad(values, nodes); err != nil {
+			b.Fatalf("BulkLoad: %v", err)
+		}
 		b.StopTimer()
+	}
+}
+
+// TestIndex_BulkLoad_LengthMismatch covers the new error return on
+// mismatched values/nodes slices. Before sprint 21 this was a
+// panic("btree: values and nodes must have the same length").
+func TestIndex_BulkLoad_LengthMismatch(t *testing.T) {
+	t.Parallel()
+	idx := New[int]()
+	values := []int{1, 2, 3}
+	nodes := []graph.NodeID{10, 20} // shorter
+	err := idx.BulkLoad(values, nodes)
+	if !errors.Is(err, ErrMismatchedLengths) {
+		t.Fatalf("err=%v, want ErrMismatchedLengths", err)
+	}
+
+	// Symmetric: values shorter than nodes.
+	err = idx.BulkLoad([]int{1}, []graph.NodeID{10, 20, 30})
+	if !errors.Is(err, ErrMismatchedLengths) {
+		t.Fatalf("err=%v, want ErrMismatchedLengths", err)
+	}
+
+	// Empty/empty must be a valid no-op (no error).
+	if err := idx.BulkLoad(nil, nil); err != nil {
+		t.Fatalf("nil/nil err=%v, want nil", err)
 	}
 }
