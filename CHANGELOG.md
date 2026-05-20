@@ -6,6 +6,106 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Seven post-v1.1.0 sprints (14–20) of documentation accuracy,
+reliability evidence, coverage uplift, observability wire-up,
+algorithmic completeness, transactional generality, durable LPG, and
+finally the audit-driven correctness closeout. Nothing here is yet
+tagged; the next release will be cut from this section.
+
+### Added — Sprint 14 (Documentation Accuracy & Reliability Evidence)
+
+- `README.md` Module Layout enumeration completed so every shipped
+  subpackage appears (closes #179).
+- `graph/index/label` lifted to 100% statement coverage via dedicated
+  unit, property, and concurrency tests (closes #177).
+- Error-path coverage for `store/wal`, `store/snapshot`, and
+  `store/recovery` lifted by exercising every typed error in tests
+  (closes #178).
+- First publishable reliability soak — 30-minute mixed-workload run
+  archived under `docs/benchmarks/v1.1.0.md` with heap, FD, and
+  goroutine snapshots; verdict GREEN, heap delta −36.3 % (closes
+  #181). The canonical 4-hour run is tracked as a follow-up.
+- `CHANGELOG.md` "Unreleased" entry corrected the v1.1.0
+  observability overstatement (the metrics call-site wire-up had not
+  landed when v1.1.0 was cut — see Sprint 16 below; closes #167).
+
+### Added — Sprint 15 (Coverage Uplift, GraphBLAS Baseline & Format Migration)
+
+- Rolling-upgrade compatibility harness for `store/wal`,
+  `store/snapshot`, and `store/csrfile` — committed v1 fixtures
+  under `testdata/v1/` and added `format_compat_test.go` so every
+  format change must keep loading the v1 fixture (closes #175).
+- Aggregate library coverage lifted from 79.1 % to 91.3 % with a
+  statement-weighted CI gate (`make cover-gate`, aggregate ≥ 85 %,
+  per-package ≥ 75 %) — see `scripts/cover_gate.sh` (closes #176).
+- Cross-library comparison `docs/benchmarks/comparison.md` extended
+  with a SuiteSparse:GraphBLAS column (BFS 1.700 ms, SSSP 5.438 ms,
+  PageRank 3.532 ms on M4) via `python-graphblas`, plus a bare-metal
+  C harness `bench/comparison/c/lagraph_baseline.c` (closes #180).
+
+### Added — Sprint 16 (Observability Completion & Algorithm Gap Closure)
+
+- `internal/metrics` wired into 56 non-test files spanning every
+  public blocking API in `search/`, `search/centrality/`,
+  `search/community/`, `search/flow/`, `search/extern/`,
+  `graph/io/{csv,graphml,dot,jsonl}`, and
+  `store/{wal,snapshot,txn,checkpoint,recovery,bulk}`. Every wired
+  symbol carries `metrics.Time("<pkg>.<Symbol>")()` plus a
+  `<pkg>.<Symbol>.errors` counter; the inventory is documented in
+  `docs/metrics.md`. Headline benchmark geomean +0.68 % vs the
+  pre-wire baseline. This closes the v1.1.0 deferred wire-up
+  (closes #168).
+- `search.JohnsonAPSP` rewritten with the canonical Bellman-Ford
+  reweighting via a virtual-source SPFA followed by per-source
+  reweighted Dijkstra; supports mixed-sign weights and surfaces
+  `search.ErrNegativeCycle`. The previous Johnson implementation
+  was an alias for `DijkstraAPSP` and rejected negative weights.
+  Sparse-graph win: −61.75 % vs Floyd-Warshall (closes #182).
+
+### Changed (breaking) — Sprint 17 (Transactional API Generalization)
+
+- `store/txn` now supports a typed `Codec[N]` over the node-key
+  type, with built-in codecs for `string`, `int`, `int32`, `int64`,
+  `uint64`, UUID, and any `encoding.BinaryMarshaler`. WAL v2 frames
+  carry the `OpRecordV2 = 0xFE` tag; v1 frames (raw `fmt.Sprintf`
+  bytes) remain decodable, so existing files do not break. New
+  constructor `NewStoreWithCodec` (closes #173).
+- `store/txn.Tx.AddEdge` now records the per-edge weight via a
+  `WeightCodec[W]` over `int64`, `float64`, or any
+  `encoding.BinaryMarshaler`. New opcode `OpAddEdgeWeighted = 4`
+  for v2 frames; v1 and v2-without-weight frames still replay
+  correctly. New constructor `NewStoreWithOptions` and sentinel
+  `txn.ErrNoWeightCodec` for `(N, W)` pairs whose `W` is not
+  declared in `Options` (closes #174).
+
+### Added — Sprint 18 (LPG Snapshot Completeness)
+
+- `store/snapshot` extended to persist LPG labels in `labels.bin`
+  (`SLBL` magic, packed string table + per-node and per-edge
+  records, CRC32C trailer). Manifest version bumped to 2; v1
+  manifests still load (closes #170).
+- LPG typed properties persisted in `properties.bin` (`SPRP`
+  magic, fixed-width per-kind encoding covering all six
+  `PropertyValue` kinds, 1 GiB cap). Round-trip property test via
+  `rapid` (closes #171).
+- Secondary indexes persisted in `indexes/<name>.bin`, one file
+  per registered index. Native Roaring serialisation for the
+  label index plus type-switched V codecs for the hash and B+ tree
+  indexes. Snapshot-vs-rebuild ratio 1.04x on a 10^5-node graph;
+  a CRC error or missing index file is tolerated by falling back
+  to a rebuild from the in-memory graph (closes #172).
+
+### Added — Sprint 19 (Capstone: Generic Durable LPG)
+
+- `store/recovery.Open[N, W](dir, Options[N, W])` (and
+  `OpenCtx[N, W]`) is the canonical typed-recovery entry point.
+  `recovery.Options` mirrors `txn.Options`; `Result.SnapshotSchemaVersion`
+  is populated from the snapshot manifest. The deprecated wrappers
+  `OpenString`, `OpenWithCodec`, and `OpenWithOptions` keep their
+  v1 behaviour. New example `examples/21_typed_recovery` exercises
+  (string, int64), (int64, int64), (int64, float64), and
+  (UUID, float64) combinations (closes #169).
+
 ### Fixed — Sprint 20 (Audit Correctness Closeout)
 
 The 2026-05-20 deep audit identified five algorithmic correctness
