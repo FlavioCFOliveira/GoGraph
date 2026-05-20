@@ -17,13 +17,16 @@
 // lives in a separate internal/metrics/prometheus subpackage when
 // added in v1.x.
 //
-// v1 status. This package is the API hook for CLAUDE.md's
-// "Latency histograms on every public blocking API" mandate. The
-// no-op backend is the only one shipped today; wiring the actual
-// histograms across every search/, store/, and graph/io public API
-// requires touching ~40 call sites and is sized as a Sprint 11 or
-// 12 follow-up. The hook exists so the wire-up can land
-// incrementally without further API churn.
+// Wire-up. Every public blocking API in search/, search/centrality/,
+// search/community/, search/flow/, search/extern/,
+// graph/io/{csv,graphml,dot,jsonl}, and
+// store/{wal,snapshot,txn,checkpoint,recovery,bulk} emits a
+// latency observation under the name "<package-path>.<ExportedSymbol>"
+// and increments a paired "<package-path>.<ExportedSymbol>.errors"
+// counter on the error path. The authoritative inventory of every
+// wired metric is in docs/metrics.md; the wireup smoke test in
+// internal/metrics/wireup_test.go fails loudly if a wired symbol
+// stops emitting its expected name.
 package metrics
 
 import (
