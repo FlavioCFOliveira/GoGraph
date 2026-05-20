@@ -27,6 +27,11 @@ var ErrNegativeCycle = errors.New("search: negative cycle reachable from source"
 // per-W pooled state of [Dijkstra]; the inner relaxation loop is
 // zero-alloc.
 //
+// Input contract. For floating-point Weight types the routine
+// validates that no edge weight is NaN or +/-Inf and returns
+// [ErrInvalidInput] otherwise; integer Weight types skip the
+// validation pass entirely.
+//
 // For hot loops where the caller can amortise buffer allocation,
 // prefer the zero-allocation primitive [BellmanFordInto].
 func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
@@ -109,6 +114,12 @@ func bellmanFordCore[W Weight](
 	found []bool,
 ) error {
 	maxID := uint64(c.MaxNodeID())
+	// Float Weight types: NaN / +/-Inf in an edge weight silently
+	// drops every relaxation through it (cand<dist is always false
+	// against NaN). Fail fast at the public boundary.
+	if anyFloatInvalid(c.WeightsSlice()) {
+		return ErrInvalidInput
+	}
 	var zero W
 	for i := range dist {
 		dist[i] = zero

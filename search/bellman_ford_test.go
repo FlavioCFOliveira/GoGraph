@@ -2,6 +2,7 @@ package search
 
 import (
 	"errors"
+	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -107,6 +108,64 @@ func TestBellmanFord_RandomisedAgainstDijkstra(t *testing.T) {
 				t.Fatalf("seed=%d node %d: BF=%d Dij=%d", seed, v, db, dd)
 			}
 		}
+	}
+}
+
+// TestBellmanFord_NaN asserts that a NaN edge weight surfaces
+// ErrInvalidInput rather than silently dropping every relaxation
+// through it (SPFA's `cand < dist[nb]` against NaN is always false).
+func TestBellmanFord_NaN(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a.AddEdge(0, 1, 1.0)
+	a.AddEdge(1, 2, math.NaN())
+	c := csr.BuildFromAdjList(a)
+	srcID, _ := a.Mapper().Lookup(0)
+	d, err := BellmanFord(c, srcID)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("err=%v, want ErrInvalidInput", err)
+	}
+	if d != nil {
+		t.Fatalf("d=%v, want nil on invalid input", d)
+	}
+}
+
+// TestBellmanFord_Inf asserts that +/-Inf edge weights also surface
+// ErrInvalidInput.
+func TestBellmanFord_Inf(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a.AddEdge(0, 1, math.Inf(1))
+	c := csr.BuildFromAdjList(a)
+	srcID, _ := a.Mapper().Lookup(0)
+	if _, err := BellmanFord(c, srcID); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("+Inf err=%v, want ErrInvalidInput", err)
+	}
+
+	a2 := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a2.AddEdge(0, 1, math.Inf(-1))
+	c2 := csr.BuildFromAdjList(a2)
+	srcID2, _ := a2.Mapper().Lookup(0)
+	if _, err := BellmanFord(c2, srcID2); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("-Inf err=%v, want ErrInvalidInput", err)
+	}
+}
+
+// TestBellmanFord_IntegerSkipsValidation is a behavioural test: with
+// integer Weight types the validation pass is skipped (anyFloatInvalid
+// short-circuits on the zero-value type-switch). The function must
+// return a regular result on a normal integer graph.
+func TestBellmanFord_IntegerSkipsValidation(t *testing.T) {
+	t.Parallel()
+	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 5}, {1, 2, 7}})
+	src, _ := a.Mapper().Lookup(0)
+	d, err := BellmanFord(c, src)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	id2, _ := a.Mapper().Lookup(2)
+	if got, _ := d.Distance(id2); got != 12 {
+		t.Fatalf("Distance(2) = %d, want 12", got)
 	}
 }
 

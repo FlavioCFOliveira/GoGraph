@@ -1,11 +1,13 @@
 package centrality
 
 import (
+	"errors"
 	"math"
 	"testing"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
+	"gograph/search"
 )
 
 // TestWeightedBetweenness_PathUnitWeights asserts the weighted
@@ -19,7 +21,10 @@ func TestWeightedBetweenness_PathUnitWeights(t *testing.T) {
 		a.AddEdge(i, i+1, 1.0)
 	}
 	c := csr.BuildFromAdjList(a)
-	cb := WeightedBetweenness(c)
+	cb, err := WeightedBetweenness(c)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
 	// Unweighted equivalent.
 	au := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
@@ -50,9 +55,57 @@ func TestWeightedBetweenness_WeightSensitive(t *testing.T) {
 	a.AddEdge(1, 2, 1.0)
 	a.AddEdge(0, 2, 10.0)
 	c := csr.BuildFromAdjList(a)
-	cb := WeightedBetweenness(c)
+	cb, err := WeightedBetweenness(c)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
 	id1, _ := a.Mapper().Lookup(1)
 	if cb[id1] <= 0 {
 		t.Fatalf("centre vertex betweenness = %f, want > 0 (heavy detour bypassed via 0-1-2)", cb[id1])
+	}
+}
+
+// TestWeightedBetweenness_NaN asserts that a NaN edge weight surfaces
+// ErrInvalidInput rather than silently corrupting sigma/dist.
+func TestWeightedBetweenness_NaN(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a.AddEdge(0, 1, 1.0)
+	a.AddEdge(1, 2, math.NaN())
+	c := csr.BuildFromAdjList(a)
+	got, err := WeightedBetweenness(c)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("err=%v, want ErrInvalidInput", err)
+	}
+	if got != nil {
+		t.Fatalf("got=%v, want nil on invalid input", got)
+	}
+}
+
+// TestWeightedBetweenness_Inf asserts that +/-Inf edge weights also
+// surface ErrInvalidInput.
+func TestWeightedBetweenness_Inf(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a.AddEdge(0, 1, 1.0)
+	a.AddEdge(1, 2, math.Inf(1))
+	c := csr.BuildFromAdjList(a)
+	if _, err := WeightedBetweenness(c); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("+Inf err=%v, want ErrInvalidInput", err)
+	}
+}
+
+// TestWeightedBetweenness_Negative asserts that a negative edge
+// weight surfaces search.ErrNegativeWeight; weighted Brandes uses
+// Dijkstra internally, which is undefined on negative arcs.
+func TestWeightedBetweenness_Negative(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a.AddEdge(0, 1, 1.0)
+	a.AddEdge(1, 2, -2.0)
+	c := csr.BuildFromAdjList(a)
+	_, err := WeightedBetweenness(c)
+	if !errors.Is(err, search.ErrNegativeWeight) {
+		t.Fatalf("err=%v, want search.ErrNegativeWeight", err)
 	}
 }

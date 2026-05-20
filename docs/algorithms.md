@@ -19,7 +19,7 @@ algorithm has unit tests under the same package.
 | Algorithm                | Notes                                            | File                       |
 |--------------------------|--------------------------------------------------|----------------------------|
 | Dijkstra (binary heap)   | non-negative weights                             | `search/dijkstra.go`       |
-| Bellman-Ford             | negative weights; negative cycles detected       | `search/bellman_ford.go`   |
+| Bellman-Ford             | negative weights; negative cycles detected; rejects NaN/Inf on float Weight via `ErrInvalidInput` | `search/bellman_ford.go`   |
 | A*                       | admissible heuristic                             | `search/astar.go`          |
 | Yen's k-shortest         | sorted by total cost                             | `search/yen.go`            |
 | KShortestPathsLoopless   | best-first loopless enumeration (former `EppsteinKShortest`) | `search/kshortest_loopless.go` |
@@ -49,6 +49,7 @@ algorithm has unit tests under the same package.
 | Algorithm                          | File                                  |
 |------------------------------------|---------------------------------------|
 | Brandes betweenness                | `search/centrality/brandes.go`        |
+| Weighted Brandes betweenness       | rejects NaN/Inf (`ErrInvalidInput`) and negative weights (`search.ErrNegativeWeight`); see `search/centrality/brandes_weighted.go` |
 | PageRank (in-memory power iter)    | `search/centrality/pagerank.go`       |
 | Personalised PageRank (push)       | `search/centrality/ppr_push.go`       |
 | PageRank (semi-external mmap)      | `search/extern/pagerank.go`           |

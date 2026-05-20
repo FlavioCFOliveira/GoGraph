@@ -8,22 +8,27 @@ import (
 	"gograph/graph"
 	"gograph/graph/csr"
 	"gograph/internal/metrics"
+	"gograph/search"
 )
 
 // WeightedBetweenness computes the weighted betweenness centrality
 // of every NodeID in c using Dijkstra-augmented Brandes (Brandes
-// 2001 §3, weighted variant). Edge weights must be non-negative.
+// 2001 §3, weighted variant). Edge weights must be finite and
+// non-negative.
 //
 // Complexity is O(V * (E log V)) for binary-heap-backed Dijkstra
 // per source. The result is not normalised; callers wanting the
 // classical 1 / ((n-1)(n-2)) factor can divide externally.
 //
+// Input contract. Returns [ErrInvalidInput] when any edge weight is
+// NaN or +/-Inf; returns the global sentinel [search.ErrNegativeWeight]
+// when any edge weight is strictly negative.
+//
 // Concurrency: WeightedBetweenness is safe to invoke concurrently
 // on a shared CSR.
-func WeightedBetweenness(c *csr.CSR[float64]) []float64 {
+func WeightedBetweenness(c *csr.CSR[float64]) ([]float64, error) {
 	defer metrics.Time("search.centrality.WeightedBetweenness")()
-	out, _ := WeightedBetweennessCtx(context.Background(), c)
-	return out
+	return WeightedBetweennessCtx(context.Background(), c)
 }
 
 // WeightedBetweennessCtx is the context-aware variant of
@@ -39,6 +44,19 @@ func WeightedBetweennessCtx(ctx context.Context, c *csr.CSR[float64]) ([]float64
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
+	// Input validation: NaN/Inf silently corrupt sigma and dist;
+	// negative weights break Dijkstra's correctness guarantee. Fail
+	// fast at the public-API boundary before any work is done.
+	for _, w := range weights {
+		if math.IsNaN(w) || math.IsInf(w, 0) {
+			metrics.IncCounter("search.centrality.WeightedBetweennessCtx.errors", 1)
+			return nil, ErrInvalidInput
+		}
+		if w < 0 {
+			metrics.IncCounter("search.centrality.WeightedBetweennessCtx.errors", 1)
+			return nil, search.ErrNegativeWeight
+		}
+	}
 	sigma := make([]float64, n)
 	dist := make([]float64, n)
 	delta := make([]float64, n)
