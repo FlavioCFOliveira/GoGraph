@@ -41,6 +41,7 @@ import (
 	"gograph/cypher/ir"
 	"gograph/cypher/parser"
 	"gograph/graph"
+	"gograph/graph/index"
 	"gograph/graph/lpg"
 )
 
@@ -127,8 +128,10 @@ func (e *Engine) planFor(query string) (ir.LogicalPlan, error) {
 //
 // Result is NOT safe for concurrent use.
 type Result struct {
-	rs   *exec.ResultSet
-	cols []string
+	rs     *exec.ResultSet
+	cols   []string
+	buf    *exec.IndexBuffer // non-nil only for RunInTx results
+	idxMgr *index.Manager    // non-nil only when buf != nil
 }
 
 // Next advances to the next result row. Returns true when a row is available.
@@ -145,7 +148,20 @@ func (r *Result) Err() error { return r.rs.Err() }
 func (r *Result) Columns() []string { return r.cols }
 
 // Close releases all resources held by the result set.
-func (r *Result) Close() error { return r.rs.Close() }
+// When the result was created by [Engine.RunInTx], Close also commits or
+// rolls back the buffered index changes: it commits on clean close, and
+// rolls back when either Close or iteration returned a non-nil error.
+func (r *Result) Close() error {
+	err := r.rs.Close()
+	if r.buf != nil {
+		if err != nil || r.rs.Err() != nil {
+			r.buf.Rollback()
+		} else {
+			r.buf.Commit(r.idxMgr)
+		}
+	}
+	return err
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Graph adapters
@@ -670,7 +686,8 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 
 	walker := &lpgNodeWalker{g: e.g}
 	labelSrc := &lpgLabelResolver{g: e.g}
-	mutator := &lpgMutatorAdapter{g: e.g}
+	buf := &exec.IndexBuffer{}
+	mutator := &lpgMutatorAdapter{g: e.g, buf: buf}
 
 	op, cols, err := BuildPlanWithMutator(plan, walker, labelSrc, e.reg, params, mutator)
 	if err != nil {
@@ -678,7 +695,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	}
 
 	rs := exec.Run(ctx, op, cols)
-	return &Result{rs: rs, cols: cols}, nil
+	return &Result{rs: rs, cols: cols, buf: buf, idxMgr: e.g.IndexManager()}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -687,8 +704,22 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 
 // lpgMutatorAdapter adapts *lpg.Graph[string, float64] to the
 // exec.graphMutator interface used by write operators.
+//
+// When buf is non-nil every mutation is also enqueued as an index.Change.
+// buf is nil for read-only adapter instances.
 type lpgMutatorAdapter struct {
-	g *lpg.Graph[string, float64]
+	g   *lpg.Graph[string, float64]
+	buf *exec.IndexBuffer // nil for read-only
+}
+
+// resolveID translates n to its stable NodeID, returning graph.NodeID(0)
+// when the key has not been interned yet.
+func (a *lpgMutatorAdapter) resolveID(n string) graph.NodeID {
+	id, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return graph.NodeID(0)
+	}
+	return id
 }
 
 // AddNode interns n and returns its stable NodeID.
@@ -714,21 +745,50 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 // SetNodeLabel attaches label to n.
 func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) {
 	a.g.SetNodeLabel(n, label)
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:    index.OpAddNodeLabel,
+			Node:  a.resolveID(n),
+			Label: uint32(a.g.Registry().Intern(label)),
+		})
+	}
 }
 
 // RemoveNodeLabel detaches label from n.
 func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 	a.g.RemoveNodeLabel(n, label)
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:    index.OpRemoveNodeLabel,
+			Node:  a.resolveID(n),
+			Label: uint32(a.g.Registry().Intern(label)),
+		})
+	}
 }
 
 // SetNodeProperty sets the named property on n.
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) {
 	a.g.SetNodeProperty(n, key, value)
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpSetNodeProperty,
+			Node:     a.resolveID(n),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			NewValue: value,
+		})
+	}
 }
 
 // DelNodeProperty removes the named property from n.
 func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 	a.g.DelNodeProperty(n, key)
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpDelNodeProperty,
+			Node:     a.resolveID(n),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+		})
+	}
 }
 
 // NodeProperties returns a snapshot of all properties on n.
@@ -749,16 +809,41 @@ func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
 // SetEdgeLabel attaches label to the directed edge (src, dst).
 func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	a.g.SetEdgeLabel(src, dst, label)
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:    index.OpAddEdgeLabel,
+			Node:  a.resolveID(src),
+			Dst:   a.resolveID(dst),
+			Label: uint32(a.g.Registry().Intern(label)),
+		})
+	}
 }
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
 func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) {
 	a.g.SetEdgeProperty(src, dst, key, value)
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpSetEdgeProperty,
+			Node:     a.resolveID(src),
+			Dst:      a.resolveID(dst),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			NewValue: value,
+		})
+	}
 }
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
 func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 	a.g.DelEdgeProperty(src, dst, key)
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpDelEdgeProperty,
+			Node:     a.resolveID(src),
+			Dst:      a.resolveID(dst),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+		})
+	}
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
