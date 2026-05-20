@@ -47,6 +47,15 @@ func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorker
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 
+	// Cancellation cascade: any worker that observes ctx.Err() (or
+	// fails its work) calls cancel() on the shared cancellable
+	// context, which propagates the cancellation to every sibling
+	// worker via their per-source ctx.Err() poll. Without this the
+	// surviving workers would continue iterating their source range
+	// after the parent ctx was already cancelled, wasting CPU.
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	type result struct {
 		cb  []float64
 		err error
@@ -65,8 +74,9 @@ func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorker
 			queue := make([]int, 0, n)
 			stack := make([]int, 0, n)
 			for s := w; s < n; s += numWorkers {
-				if err := ctx.Err(); err != nil {
+				if err := workCtx.Err(); err != nil {
 					results[w].err = err
+					cancel()
 					return
 				}
 				queue, stack = brandesSource(s, n, verts, edges, sigma, dist, delta, pred, localCB, queue, stack)
