@@ -4,8 +4,11 @@ import (
 	"sort"
 	"testing"
 
+	"gograph/graph"
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
+
+	"pgregory.net/rapid"
 )
 
 func TestHopcroftTarjanBCC_BridgeFixture(t *testing.T) {
@@ -100,4 +103,162 @@ func TestHopcroftTarjanBCC_MultigraphSingleEdgeStillBridge(t *testing.T) {
 	if len(res.Bridges) == 0 {
 		t.Fatalf("single bridge edge 2-3 should be detected in multigraph mode; got %v", res.Bridges)
 	}
+}
+
+// TestHopcroftTarjanBCC_TwoDisjointTriangles pins the D4 fix: two
+// disjoint triangles share no articulation point. Prior to the fix
+// the root of the second triangle was mis-classified as articulation
+// because the timer is global and disc[root2]>0.
+func TestHopcroftTarjanBCC_TwoDisjointTriangles(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	tri1 := [][2]int{{0, 1}, {1, 2}, {2, 0}}
+	tri2 := [][2]int{{3, 4}, {4, 5}, {5, 3}}
+	for _, e := range tri1 {
+		a.AddEdge(e[0], e[1], struct{}{})
+	}
+	for _, e := range tri2 {
+		a.AddEdge(e[0], e[1], struct{}{})
+	}
+	c := csr.BuildFromAdjList(a)
+	res := HopcroftTarjanBCC(c)
+	if len(res.Articulation) != 0 {
+		t.Fatalf("two disjoint triangles should have no articulation points; got %v", res.Articulation)
+	}
+	if len(res.Bridges) != 0 {
+		t.Fatalf("two disjoint triangles should have no bridges; got %v", res.Bridges)
+	}
+}
+
+// TestHopcroftTarjanBCC_TwoDisjointPaths exercises the more
+// articulation-rich case: two disjoint 5-paths each have 3 internal
+// (degree-2) vertices that are articulation points. Total = 6.
+func TestHopcroftTarjanBCC_TwoDisjointPaths(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	for i := 0; i < 4; i++ {
+		a.AddEdge(i, i+1, struct{}{}) // path 0-1-2-3-4
+	}
+	for i := 5; i < 9; i++ {
+		a.AddEdge(i, i+1, struct{}{}) // path 5-6-7-8-9
+	}
+	c := csr.BuildFromAdjList(a)
+	res := HopcroftTarjanBCC(c)
+
+	gotIDs := make(map[int]struct{}, len(res.Articulation))
+	for _, id := range res.Articulation {
+		v, _ := a.Mapper().Resolve(id)
+		gotIDs[v] = struct{}{}
+	}
+	wantIDs := []int{1, 2, 3, 6, 7, 8}
+	for _, v := range wantIDs {
+		if _, ok := gotIDs[v]; !ok {
+			t.Fatalf("missing articulation %d (got=%v)", v, gotIDs)
+		}
+	}
+	if len(gotIDs) != len(wantIDs) {
+		t.Fatalf("extra articulation points (got=%v, want=%v)", gotIDs, wantIDs)
+	}
+}
+
+// bruteArticulation computes articulation points by removing each
+// live vertex in turn and counting connected components. v is
+// articulation iff ccWithout(v) > cc(all). Leaves and isolated
+// vertices are correctly excluded by this definition.
+func bruteArticulation(c *csr.CSR[struct{}]) map[graph.NodeID]struct{} {
+	n := int(c.MaxNodeID())
+	verts := c.VerticesSlice()
+	edges := c.EdgesSlice()
+	mask := c.LiveMask()
+	base := countComponents(verts, edges, mask, -1)
+	got := map[graph.NodeID]struct{}{}
+	for v := 0; v < n; v++ {
+		if !mask[v] {
+			continue
+		}
+		without := countComponents(verts, edges, mask, v)
+		if without > base {
+			got[graph.NodeID(v)] = struct{}{}
+		}
+	}
+	return got
+}
+
+func countComponents(verts []uint64, edges []graph.NodeID, mask []bool, skip int) int {
+	n := len(mask)
+	visited := make([]bool, n)
+	cc := 0
+	for s := 0; s < n; s++ {
+		if !mask[s] || visited[s] || s == skip {
+			continue
+		}
+		cc++
+		queue := []int{s}
+		visited[s] = true
+		for len(queue) > 0 {
+			u := queue[0]
+			queue = queue[1:]
+			for k := verts[u]; k < verts[u+1]; k++ {
+				w := int(edges[k])
+				if !mask[w] || visited[w] || w == skip {
+					continue
+				}
+				visited[w] = true
+				queue = append(queue, w)
+			}
+		}
+	}
+	return cc
+}
+
+// TestHopcroftTarjanBCC_ForestPropertyVsBrute is a rapid-driven
+// property test: for random forests (multi-component undirected
+// graphs) the Hopcroft-Tarjan articulation set must match the
+// remove-vertex brute-force ground truth.
+func TestHopcroftTarjanBCC_ForestPropertyVsBrute(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(rt *rapid.T) {
+		nComps := rapid.IntRange(1, 4).Draw(rt, "nComponents")
+		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		nextID := 0
+		for c := 0; c < nComps; c++ {
+			size := rapid.IntRange(2, 8).Draw(rt, "componentSize")
+			base := nextID
+			// Spanning path inside the component so it stays connected.
+			for i := 0; i < size; i++ {
+				a.AddNode(base + i)
+			}
+			for i := 0; i < size-1; i++ {
+				a.AddEdge(base+i, base+i+1, struct{}{})
+			}
+			// A few extra random chords inside this component.
+			extra := rapid.IntRange(0, size).Draw(rt, "extraChords")
+			for k := 0; k < extra; k++ {
+				u := rapid.IntRange(0, size-1).Draw(rt, "u")
+				v := rapid.IntRange(0, size-1).Draw(rt, "v")
+				if u != v {
+					a.AddEdge(base+u, base+v, struct{}{})
+				}
+			}
+			nextID = base + size
+		}
+		c := csr.BuildFromAdjList(a)
+		res := HopcroftTarjanBCC(c)
+		got := map[graph.NodeID]struct{}{}
+		for _, id := range res.Articulation {
+			got[id] = struct{}{}
+		}
+		want := bruteArticulation(c)
+		// got and want are sets of NodeIDs; assert equality.
+		for id := range want {
+			if _, ok := got[id]; !ok {
+				rt.Fatalf("missing articulation: got=%v want=%v", got, want)
+			}
+		}
+		for id := range got {
+			if _, ok := want[id]; !ok {
+				rt.Fatalf("spurious articulation: got=%v want=%v", got, want)
+			}
+		}
+	})
 }

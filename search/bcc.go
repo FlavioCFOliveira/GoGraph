@@ -100,7 +100,21 @@ func HopcroftTarjanBCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (BCCResult,
 						low[p] = low[v]
 					}
 					if low[v] >= disc[p] {
-						if disc[p] != 0 || rootChildren > 1 {
+						// Articulation rule:
+						//   - if p is a non-root vertex of the current
+						//     DFS tree (p != start), low[v]>=disc[p]
+						//     proves p separates v's subtree from the
+						//     rest of the tree => articulation.
+						//   - the root case (start) is detected
+						//     independently via rootChildren>1 after
+						//     the outer DFS frame is popped.
+						// Historically this used `disc[p] != 0`, which
+						// is "p is not the first DFS root globally" —
+						// fine for a connected graph but wrong for
+						// forests, where roots of components 2+ have
+						// disc[start]>0 (timer is global) and got
+						// mis-classified as articulation points.
+						if p != start || rootChildren > 1 {
 							isArtic[p] = true
 						}
 						// Pop edges off edgeStack until the tree edge (p, v).
