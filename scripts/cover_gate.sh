@@ -22,7 +22,7 @@
 #   COVER_PROFILE       output path for the raw profile  (default cover.out)
 #   COVER_LIB_PROFILE   output path for the filtered profile (default cover.lib.out)
 #   COVER_EXCLUDE       extended regex of package paths to drop
-#                       (default: gograph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9))
+#                       (default: gograph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9|cypher/parser/gen))
 #   MIN_TOTAL           aggregate threshold percentage     (default 85.0)
 #   MIN_PER_PKG         per-package threshold percentage   (default 75.0)
 #   GO                  go binary                          (default go)
@@ -37,7 +37,7 @@ set -euo pipefail
 GO=${GO:-go}
 COVER_PROFILE=${COVER_PROFILE:-cover.out}
 COVER_LIB_PROFILE=${COVER_LIB_PROFILE:-cover.lib.out}
-COVER_EXCLUDE=${COVER_EXCLUDE:-'gograph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9)'}
+COVER_EXCLUDE=${COVER_EXCLUDE:-'gograph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9|cypher/parser/gen)'}
 MIN_TOTAL=${MIN_TOTAL:-85.0}
 MIN_PER_PKG=${MIN_PER_PKG:-75.0}
 
