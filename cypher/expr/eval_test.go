@@ -654,15 +654,34 @@ func TestEval_StringOps(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 18. ListComprehension (unsupported) → error
+// 18. ListComprehension — basic evaluation
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestEval_UnsupportedNode_Error(t *testing.T) {
-	// ListComprehension is a valid ast.Expression but not handled by Eval.
-	// This tests the default branch returns an EvalError.
+func TestEval_ListComprehension_Basic(t *testing.T) {
+	// [x IN [1,2,3] | x * 2] → [2,4,6]
+	row := expr.RowContext{}
 	e := &ast.ListComprehension{
-		Variable: "x",
-		Source:   intLit(1), // invalid source but we're testing the dispatch
+		Variable:   "x",
+		Source:     listLit(intLit(1), intLit(2), intLit(3)),
+		Projection: binary(varExpr("x"), "*", intLit(2)),
+	}
+	v := eval(t, e, row, nil)
+	lv, ok := v.(expr.ListValue)
+	if !ok || len(lv) != 3 {
+		t.Fatalf("got %v (%T), want list of 3", v, v)
+	}
+	for i, want := range []expr.Value{expr.IntegerValue(2), expr.IntegerValue(4), expr.IntegerValue(6)} {
+		if lv[i] != want {
+			t.Errorf("[%d] got %v, want %v", i, lv[i], want)
+		}
+	}
+}
+
+// TestEval_UnsupportedNode_Error tests the default branch with a node type that
+// is never supported (PatternComprehension — executor-level, not expression-level).
+func TestEval_UnsupportedNode_Error(t *testing.T) {
+	e := &ast.PatternComprehension{
+		Projection: intLit(1),
 	}
 	_, err := expr.Eval(e, nil, nil, noReg)
 	if err == nil {

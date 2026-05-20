@@ -161,6 +161,12 @@ func buildDefaultRegistry() *Registry {
 	r.Register("right", fnRight)
 	r.Register("reverse", fnReverse)
 
+	// ── Extended math (exp, log, trig, pi, e, rand, degrees, radians) ──────────
+	registerMathFuncs(r)
+
+	// ── Extended list (sort, extract stub, filter stub) ────────────────────────
+	registerListFuncs(r)
+
 	return r
 }
 

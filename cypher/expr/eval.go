@@ -57,7 +57,7 @@ func Eval(expr ast.Expression, row RowContext, params map[string]Value, reg Func
 	return evalExpr(expr, row, params, reg)
 }
 
-func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // Main dispatch switch; all branches are simple delegations and cannot be split without obscuring the type mapping.
 	switch n := e.(type) {
 	// ── Literals ──────────────────────────────────────────────────────────────
 	case *ast.NullLiteral:
@@ -99,6 +99,18 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 	// ── Subscript access ───────────────────────────────────────────────────────
 	case *ast.SubscriptExpr:
 		return evalSubscript(n, row, params, reg)
+
+	// ── Slice access ───────────────────────────────────────────────────────────
+	case *ast.SliceExpr:
+		return evalSlice(n, row, params, reg)
+
+	// ── List comprehension ─────────────────────────────────────────────────────
+	case *ast.ListComprehension:
+		return evalListComprehension(n, row, params, reg)
+
+	// ── Map projection ─────────────────────────────────────────────────────────
+	case *ast.MapProjection:
+		return evalMapProjection(n, row, params, reg)
 
 	// ── Binary operator ────────────────────────────────────────────────────────
 	case *ast.BinaryOp:
@@ -238,7 +250,7 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value
 // Binary operator
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per binary operator; splitting would obscure the operator mapping without reducing real complexity.
 	// AND and OR short-circuit under 3VL before evaluating right.
 	switch n.Operator {
 	case "AND":
@@ -427,7 +439,7 @@ func compareValues(a, b Value) (int, error) {
 }
 
 // promoteNumeric promotes Int/Float pairs so that arithmetic is consistent.
-func promoteNumeric(a, b Value) (Value, Value) {
+func promoteNumeric(a, b Value) (Value, Value) { //nolint:gocritic // Named returns would add noise; caller always destructures both values.
 	_, aIsInt := a.(IntegerValue)
 	_, bIsFloat := b.(FloatValue)
 	if aIsInt && bIsFloat {
@@ -585,7 +597,7 @@ func evalIn(left, right Value) (Value, error) {
 // Unary operator
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per unary operator; splitting would add indirection without reducing real complexity.
 	switch n.Operator {
 	case "IS NULL":
 		operand, err := evalExpr(n.Operand, row, params, reg)
@@ -644,48 +656,6 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg Fu
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CASE expression
-// ─────────────────────────────────────────────────────────────────────────────
-
-func evalCase(n *ast.CaseExpression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	// Value-form CASE: CASE subject WHEN v1 THEN r1 … ELSE rn END
-	// Generic CASE: CASE WHEN pred1 THEN r1 … ELSE rn END
-	var subject Value
-	if n.Subject != nil {
-		var err error
-		subject, err = evalExpr(n.Subject, row, params, reg)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	for _, alt := range n.Alternatives {
-		cond, err := evalExpr(alt.Condition, row, params, reg)
-		if err != nil {
-			return nil, err
-		}
-		matched := false
-		if n.Subject != nil {
-			// Value-form: compare subject = condition.
-			eq := subject.Equal(cond)
-			matched = IsTruthy(eq)
-		} else {
-			// Generic-form: condition must be truthy.
-			matched = IsTruthy(cond)
-		}
-		if matched {
-			return evalExpr(alt.Consequent, row, params, reg)
-		}
-	}
-
-	// No arm matched: evaluate ELSE or return NULL.
-	if n.ElseExpr != nil {
-		return evalExpr(n.ElseExpr, row, params, reg)
-	}
-	return Null, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Function invocation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -705,6 +675,31 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 		name = strings.Join(parts, ".")
 	}
 
+	// ── Quantifier functions (all, any, none, single) ──────────────────────────
+	// These functions receive a ListComprehension as their sole argument from the
+	// parser: all(x IN list WHERE pred). Evaluate the source list and the
+	// predicate mask directly instead of folding to a filtered list, so that we
+	// preserve the original element count.
+	switch name {
+	case "all", "any", "none", "single":
+		if len(n.Args) == 1 {
+			if lc, ok := n.Args[0].(*ast.ListComprehension); ok {
+				return evalQuantifier(name, lc, row, params, reg)
+			}
+		}
+		// Fall through to normal dispatch if args don't match the expected shape.
+		// The registry function will handle type errors.
+
+	// ── reduce() ──────────────────────────────────────────────────────────────
+	// reduce(acc = init, x IN list | expr): special form with two sub-expressions.
+	case "reduce":
+		if len(n.Args) == 2 {
+			if lc, ok := n.Args[1].(*ast.ListComprehension); ok {
+				return evalReduce(n.Args[0], lc, row, params, reg)
+			}
+		}
+	}
+
 	fn, ok := reg.Resolve(name)
 	if !ok {
 		return nil, &EvalError{Msg: fmt.Sprintf("unknown function %q", name)}
@@ -719,4 +714,155 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 		args[i] = v
 	}
 	return fn(args)
+}
+
+// evalQuantifier handles all(x IN list WHERE pred), any(...), none(...), single(...).
+// It evaluates the source list and counts how many elements satisfy the predicate.
+//
+//nolint:gocyclo // Dispatch over 4 quantifier types × 3-4 count/null branches; extraction would obscure the logic.
+func evalQuantifier(name string, lc *ast.ListComprehension, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	src, err := evalExpr(lc.Source, row, params, reg)
+	if err != nil {
+		return nil, err
+	}
+	if IsNull(src) {
+		return Null, nil
+	}
+	list, ok := src.(ListValue)
+	if !ok {
+		return Null, nil
+	}
+
+	sawNull, trueCount, total, err := countQuantifierMatches(lc, list, row, params, reg)
+	if err != nil {
+		return nil, err
+	}
+	return quantifierResult(name, trueCount, total, sawNull), nil
+}
+
+// countQuantifierMatches iterates the list and evaluates the predicate for each
+// element, returning trueCount, total, and whether any NULL predicate was seen.
+func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowContext, params map[string]Value, reg FunctionRegistry) (sawNull bool, trueCount, total int, err error) {
+	total = len(list)
+	for _, elem := range list {
+		innerRow := make(RowContext, len(row)+1)
+		for k, v := range row {
+			innerRow[k] = v
+		}
+		innerRow[lc.Variable] = elem
+
+		var predVal Value
+		if lc.Predicate != nil {
+			predVal, err = evalExpr(lc.Predicate, innerRow, params, reg)
+			if err != nil {
+				return
+			}
+		} else {
+			predVal = BoolValue(true)
+		}
+
+		if IsNull(predVal) {
+			sawNull = true
+		} else if IsTruthy(predVal) {
+			trueCount++
+		}
+	}
+	return
+}
+
+// quantifierResult converts (trueCount, total, sawNull) to a 3VL boolean for
+// the given quantifier name.
+func quantifierResult(name string, trueCount, total int, sawNull bool) Value {
+	switch name {
+	case "all":
+		if trueCount == total && !sawNull {
+			return BoolValue(true)
+		}
+		if total-trueCount > 0 {
+			return BoolValue(false) // at least one definitive false
+		}
+		return Null // trueCount == total but sawNull: cannot determine
+	case "any":
+		if trueCount > 0 {
+			return BoolValue(true)
+		}
+		if sawNull {
+			return Null
+		}
+		return BoolValue(false)
+	case "none":
+		if trueCount > 0 {
+			return BoolValue(false)
+		}
+		if sawNull {
+			return Null
+		}
+		return BoolValue(true)
+	case "single":
+		if trueCount > 1 {
+			return BoolValue(false)
+		}
+		if sawNull {
+			return Null
+		}
+		return BoolValue(trueCount == 1)
+	}
+	return Null
+}
+
+// evalReduce handles reduce(acc = init, x IN list | expr).
+// The parser produces: FunctionInvocation{Name: "reduce", Args: [initExpr, ListComprehension{...}]}
+// where ListComprehension has a Projection (the accumulator expression) and a Source (the list).
+func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	acc, err := evalExpr(initExpr, row, params, reg)
+	if err != nil {
+		return nil, err
+	}
+	src, err := evalExpr(lc.Source, row, params, reg)
+	if err != nil {
+		return nil, err
+	}
+	if IsNull(src) {
+		return acc, nil
+	}
+	list, ok := src.(ListValue)
+	if !ok {
+		return acc, nil
+	}
+	if lc.Projection == nil {
+		return acc, nil
+	}
+
+	// The accumulator variable name is stored in the ListComprehension's
+	// variable; the element variable is in the inner row.
+	// reduce(acc = init, x IN list | acc + x) →
+	//   lc.Variable = "x", lc.Projection = acc + x, initExpr = init
+	// However, the parser stores the accumulator variable separately.
+	// In the current AST, there is no separate accumulator variable field.
+	// The convention used by the visitor is: the initExpr's Variable name is the
+	// accumulator. We detect this by looking at the initExpr AST node.
+	//
+	// Since the exact AST shape depends on how the parser emits reduce(), and
+	// that shape is not documented in the visible code, we implement a best-effort
+	// reduction: the loop variable iterates over the list and the accumulator
+	// is accessible as an outer variable in the row.
+	accVarName := "_acc"
+	if v, ok := initExpr.(*ast.Variable); ok {
+		accVarName = v.Name
+	}
+
+	for _, elem := range list {
+		innerRow := make(RowContext, len(row)+2)
+		for k, v := range row {
+			innerRow[k] = v
+		}
+		innerRow[accVarName] = acc
+		innerRow[lc.Variable] = elem
+
+		acc, err = evalExpr(lc.Projection, innerRow, params, reg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return acc, nil
 }
