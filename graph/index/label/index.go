@@ -291,7 +291,7 @@ func (i *Index) Serialize(w io.Writer) error {
 func (i *Index) Deserialize(r io.Reader) error {
 	all, err := io.ReadAll(r)
 	if err != nil {
-		return fmt.Errorf("%w: read: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: read: %w", index.ErrIndexCorrupted, err)
 	}
 	if len(all) < 4 {
 		return fmt.Errorf("%w: short payload", index.ErrIndexCorrupted)
@@ -306,13 +306,13 @@ func (i *Index) Deserialize(r io.Reader) error {
 	br := bufio.NewReader(bytes.NewReader(body))
 	var magic, version uint32
 	if err := binary.Read(br, binary.LittleEndian, &magic); err != nil {
-		return fmt.Errorf("%w: magic: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: magic: %w", index.ErrIndexCorrupted, err)
 	}
 	if magic != labelMagic {
 		return fmt.Errorf("%w: bad magic %#x", index.ErrIndexCorrupted, magic)
 	}
 	if err := binary.Read(br, binary.LittleEndian, &version); err != nil {
-		return fmt.Errorf("%w: version: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: version: %w", index.ErrIndexCorrupted, err)
 	}
 	if version != labelFormatVersion {
 		return fmt.Errorf("%w: unsupported format version %d",
@@ -320,18 +320,18 @@ func (i *Index) Deserialize(r io.Reader) error {
 	}
 	var count uint32
 	if err := binary.Read(br, binary.LittleEndian, &count); err != nil {
-		return fmt.Errorf("%w: count: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: count: %w", index.ErrIndexCorrupted, err)
 	}
 
 	bits := make(map[uint32]*roaring64.Bitmap, int(count))
 	for k := uint32(0); k < count; k++ {
 		var labelID uint32
 		if err := binary.Read(br, binary.LittleEndian, &labelID); err != nil {
-			return fmt.Errorf("%w: labelID: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: labelID: %w", index.ErrIndexCorrupted, err)
 		}
 		var bmLen uint64
 		if err := binary.Read(br, binary.LittleEndian, &bmLen); err != nil {
-			return fmt.Errorf("%w: bitmapLen: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: bitmapLen: %w", index.ErrIndexCorrupted, err)
 		}
 		if bmLen > uint64(len(body)) {
 			return fmt.Errorf("%w: implausible bitmap length %d",
@@ -339,11 +339,11 @@ func (i *Index) Deserialize(r io.Reader) error {
 		}
 		buf := make([]byte, bmLen)
 		if _, err := io.ReadFull(br, buf); err != nil {
-			return fmt.Errorf("%w: bitmap bytes: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: bitmap bytes: %w", index.ErrIndexCorrupted, err)
 		}
 		bm := roaring64.New()
 		if _, err := bm.ReadFrom(bytes.NewReader(buf)); err != nil {
-			return fmt.Errorf("%w: bitmap parse: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: bitmap parse: %w", index.ErrIndexCorrupted, err)
 		}
 		bits[labelID] = bm
 	}

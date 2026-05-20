@@ -86,7 +86,7 @@ func LoadManifest(r io.Reader) (Manifest, error) {
 	var m Manifest
 	if err := json.NewDecoder(r).Decode(&m); err != nil {
 		metrics.IncCounter("store.snapshot.LoadManifest.errors", 1)
-		return Manifest{}, fmt.Errorf("%w: %v", ErrManifestCorrupted, err)
+		return Manifest{}, fmt.Errorf("%w: %w", ErrManifestCorrupted, err)
 	}
 	if m.Version > ManifestVersion {
 		metrics.IncCounter("store.snapshot.LoadManifest.errors", 1)

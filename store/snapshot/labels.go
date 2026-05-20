@@ -327,7 +327,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	var magic uint32
 	if err := binary.Read(br, binary.LittleEndian, &magic); err != nil {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 	}
 	if magic != labelsMagic {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
@@ -336,7 +336,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	var version uint32
 	if err := binary.Read(br, binary.LittleEndian, &version); err != nil {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 	}
 	if version != labelsFormatVersion {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
@@ -347,7 +347,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	var stringCount uint64
 	if err := binary.Read(br, binary.LittleEndian, &stringCount); err != nil {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 	}
 	if stringCount > 1<<30 {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
@@ -359,7 +359,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 		var n uint32
 		if err := binary.Read(br, binary.LittleEndian, &n); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
 		if n > 1<<20 {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
@@ -369,7 +369,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 		buf := make([]byte, n)
 		if _, err := io.ReadFull(br, buf); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
 		strings[i] = string(buf)
 	}
@@ -377,7 +377,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	var nodeCount uint64
 	if err := binary.Read(br, binary.LittleEndian, &nodeCount); err != nil {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 	}
 	if nodeCount > 1<<40 {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
@@ -388,11 +388,11 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	for i := uint64(0); i < nodeCount; i++ {
 		if err := binary.Read(br, binary.LittleEndian, &nodes[i].NodeID); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
 		if err := binary.Read(br, binary.LittleEndian, &nodes[i].StringIdx); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
 		if uint64(nodes[i].StringIdx) >= stringCount {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
@@ -404,7 +404,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	var edgeCount uint64
 	if err := binary.Read(br, binary.LittleEndian, &edgeCount); err != nil {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 	}
 	if edgeCount > 1<<40 {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
@@ -415,15 +415,15 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	for i := uint64(0); i < edgeCount; i++ {
 		if err := binary.Read(br, binary.LittleEndian, &edges[i].Src); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
 		if err := binary.Read(br, binary.LittleEndian, &edges[i].Dst); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
 		if err := binary.Read(br, binary.LittleEndian, &edges[i].StringIdx); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
-			return LabelsReadback{}, fmt.Errorf("%w: %v", ErrLabelsCorrupted, err)
+			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
 		if uint64(edges[i].StringIdx) >= stringCount {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)

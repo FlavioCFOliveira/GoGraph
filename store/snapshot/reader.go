@@ -59,13 +59,13 @@ func Open(dir string) (LoadedCSR, error) {
 	parsed, err := ReadCSR(tee)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
-		return LoadedCSR{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return LoadedCSR{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	// Drain any trailing bytes through the hasher (e.g., padding) so
 	// the CRC matches the full on-disk file.
 	if _, err := io.Copy(io.Discard, tee); err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
-		return LoadedCSR{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return LoadedCSR{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	if got := hasher.Sum32(); got != csrEntry.CRC32C {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)

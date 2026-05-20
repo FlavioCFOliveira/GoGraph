@@ -402,7 +402,7 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 func (i *Index[V]) Deserialize(r io.Reader) error {
 	all, err := io.ReadAll(r)
 	if err != nil {
-		return fmt.Errorf("%w: read: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: read: %w", index.ErrIndexCorrupted, err)
 	}
 	if len(all) < 4 {
 		return fmt.Errorf("%w: short payload", index.ErrIndexCorrupted)
@@ -417,13 +417,13 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 	br := bufio.NewReader(bytes.NewReader(body))
 	var magic, version uint32
 	if err := binary.Read(br, binary.LittleEndian, &magic); err != nil {
-		return fmt.Errorf("%w: magic: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: magic: %w", index.ErrIndexCorrupted, err)
 	}
 	if magic != hashMagic {
 		return fmt.Errorf("%w: bad magic %#x", index.ErrIndexCorrupted, magic)
 	}
 	if err := binary.Read(br, binary.LittleEndian, &version); err != nil {
-		return fmt.Errorf("%w: version: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: version: %w", index.ErrIndexCorrupted, err)
 	}
 	if version != hashFormatVersion {
 		return fmt.Errorf("%w: unsupported format version %d",
@@ -431,7 +431,7 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 	}
 	var entryCount uint64
 	if err := binary.Read(br, binary.LittleEndian, &entryCount); err != nil {
-		return fmt.Errorf("%w: entryCount: %v", index.ErrIndexCorrupted, err)
+		return fmt.Errorf("%w: entryCount: %w", index.ErrIndexCorrupted, err)
 	}
 	if entryCount > 1<<40 {
 		return fmt.Errorf("%w: implausible entryCount %d",
@@ -447,7 +447,7 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 	for e := uint64(0); e < entryCount; e++ {
 		var keyLen uint32
 		if err := binary.Read(br, binary.LittleEndian, &keyLen); err != nil {
-			return fmt.Errorf("%w: keyLen: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: keyLen: %w", index.ErrIndexCorrupted, err)
 		}
 		if uint64(keyLen) > uint64(len(body)) {
 			return fmt.Errorf("%w: implausible keyLen %d",
@@ -455,7 +455,7 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		}
 		kbuf := make([]byte, keyLen)
 		if _, err := io.ReadFull(br, kbuf); err != nil {
-			return fmt.Errorf("%w: key bytes: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: key bytes: %w", index.ErrIndexCorrupted, err)
 		}
 		v, derr := decodeValue[V](kbuf)
 		if derr != nil {
@@ -463,7 +463,7 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		}
 		var idCount uint64
 		if err := binary.Read(br, binary.LittleEndian, &idCount); err != nil {
-			return fmt.Errorf("%w: idCount: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: idCount: %w", index.ErrIndexCorrupted, err)
 		}
 		if idCount > uint64(len(body)) {
 			return fmt.Errorf("%w: implausible idCount %d",
@@ -471,7 +471,7 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		}
 		ids := make([]uint64, idCount)
 		if err := binary.Read(br, binary.LittleEndian, ids); err != nil {
-			return fmt.Errorf("%w: ids: %v", index.ErrIndexCorrupted, err)
+			return fmt.Errorf("%w: ids: %w", index.ErrIndexCorrupted, err)
 		}
 		bm := roaring64.New()
 		bm.AddMany(ids)

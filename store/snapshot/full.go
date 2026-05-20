@@ -356,10 +356,10 @@ func readVerifiedCSR(path string, expected uint32) (CSRReadback, error) {
 	tee := io.TeeReader(f, hasher)
 	parsed, err := ReadCSR(tee)
 	if err != nil {
-		return CSRReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return CSRReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	if _, err := io.Copy(io.Discard, tee); err != nil {
-		return CSRReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return CSRReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	if got := hasher.Sum32(); got != expected {
 		return CSRReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
@@ -380,10 +380,10 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 	tee := io.TeeReader(f, hasher)
 	parsed, err := ReadLabels(tee)
 	if err != nil {
-		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	if _, err := io.Copy(io.Discard, tee); err != nil {
-		return LabelsReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	if got := hasher.Sum32(); got != expected {
 		return LabelsReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
@@ -405,10 +405,10 @@ func readVerifiedProperties(path string, expected uint32) (PropertiesReadback, e
 	tee := io.TeeReader(f, hasher)
 	parsed, err := ReadProperties(tee)
 	if err != nil {
-		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	if _, err := io.Copy(io.Discard, tee); err != nil {
-		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrCorrupted, err)
+		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
 	if got := hasher.Sum32(); got != expected {
 		return PropertiesReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",

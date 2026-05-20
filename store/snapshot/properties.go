@@ -498,7 +498,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	var magic uint32
 	if err := binary.Read(br, binary.LittleEndian, &magic); err != nil {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
-		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if magic != propertiesMagic {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
@@ -507,7 +507,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	var version uint32
 	if err := binary.Read(br, binary.LittleEndian, &version); err != nil {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
-		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if version != propertiesFormatVersion {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
@@ -518,7 +518,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	var keyCount uint64
 	if err := binary.Read(br, binary.LittleEndian, &keyCount); err != nil {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
-		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if keyCount > 1<<30 {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
@@ -530,7 +530,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 		var n uint32
 		if err := binary.Read(br, binary.LittleEndian, &n); err != nil {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
-			return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+			return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 		}
 		if n > 1<<20 {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
@@ -540,7 +540,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 		buf := make([]byte, n)
 		if _, err := io.ReadFull(br, buf); err != nil {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
-			return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+			return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 		}
 		keys[i] = string(buf)
 	}
@@ -548,7 +548,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	var nodeCount uint64
 	if err := binary.Read(br, binary.LittleEndian, &nodeCount); err != nil {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
-		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if nodeCount > 1<<40 {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
@@ -566,7 +566,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	var edgeCount uint64
 	if err := binary.Read(br, binary.LittleEndian, &edgeCount); err != nil {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
-		return PropertiesReadback{}, fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if edgeCount > 1<<40 {
 		metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
@@ -593,10 +593,10 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 //nolint:gocyclo // record read: id + keyIdx + kind + length-prefixed value with bounds checks
 func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint64) error {
 	if err := binary.Read(br, binary.LittleEndian, &out.NodeID); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if err := binary.Read(br, binary.LittleEndian, &out.KeyIdx); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if uint64(out.KeyIdx) >= keyCount {
 		return fmt.Errorf("%w: node key idx %d >= %d",
@@ -604,7 +604,7 @@ func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint6
 	}
 	var kind [1]byte
 	if _, err := io.ReadFull(br, kind[:]); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	out.Kind = lpg.PropertyKind(kind[0])
 	if !validKind(out.Kind) {
@@ -612,7 +612,7 @@ func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint6
 	}
 	var valLen uint32
 	if err := binary.Read(br, binary.LittleEndian, &valLen); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if valLen > maxValueLen {
 		return fmt.Errorf("%w: node value len %d > %d", ErrPropertiesCorrupted, valLen, maxValueLen)
@@ -623,7 +623,7 @@ func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint6
 	if valLen > 0 {
 		out.ValueBytes = make([]byte, valLen)
 		if _, err := io.ReadFull(br, out.ValueBytes); err != nil {
-			return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+			return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 		}
 	}
 	return nil
@@ -634,13 +634,13 @@ func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint6
 //nolint:gocyclo // record read: src + dst + keyIdx + kind + length-prefixed value with bounds checks
 func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint64) error {
 	if err := binary.Read(br, binary.LittleEndian, &out.Src); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if err := binary.Read(br, binary.LittleEndian, &out.Dst); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if err := binary.Read(br, binary.LittleEndian, &out.KeyIdx); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if uint64(out.KeyIdx) >= keyCount {
 		return fmt.Errorf("%w: edge key idx %d >= %d",
@@ -648,7 +648,7 @@ func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint6
 	}
 	var kind [1]byte
 	if _, err := io.ReadFull(br, kind[:]); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	out.Kind = lpg.PropertyKind(kind[0])
 	if !validKind(out.Kind) {
@@ -656,7 +656,7 @@ func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint6
 	}
 	var valLen uint32
 	if err := binary.Read(br, binary.LittleEndian, &valLen); err != nil {
-		return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
 	if valLen > maxValueLen {
 		return fmt.Errorf("%w: edge value len %d > %d", ErrPropertiesCorrupted, valLen, maxValueLen)
@@ -667,7 +667,7 @@ func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint6
 	if valLen > 0 {
 		out.ValueBytes = make([]byte, valLen)
 		if _, err := io.ReadFull(br, out.ValueBytes); err != nil {
-			return fmt.Errorf("%w: %v", ErrPropertiesCorrupted, err)
+			return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 		}
 	}
 	return nil
