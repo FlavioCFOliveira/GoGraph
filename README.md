@@ -56,7 +56,7 @@ Algorithms catalogue: see [docs/algorithms.md](docs/algorithms.md).
 
 ## Examples
 
-The `examples/` directory contains 20 runnable demonstrations:
+The `examples/` directory contains 21 runnable demonstrations:
 
 ### Basics
 
@@ -70,6 +70,7 @@ The `examples/` directory contains 20 runnable demonstrations:
 - **05_out_of_core** — Tier 2 csrfile + mmap + semi-external PageRank.
 - **17_transactional_log** — WAL + background checkpointer + crash-recovery walk-through.
 - **18_oocore_pipeline** — CSV → CSR → csrfile → mmap → semi-external BFS + PageRank.
+- **21_typed_recovery** — generic `recovery.Open[N, W]` over an `(int64, float64)` graph with typed properties; round-trips through a v2 snapshot.
 
 ### Interchange
 
@@ -204,7 +205,7 @@ bench/comparison          — cross-library performance comparison vs NetworkX
 internal/metrics          — observability API hook (Backend, IncCounter, ObserveLatency, Time)
 internal/stress           — concurrency stress test suite (CI under -race)
 
-examples/                 — 20 runnable example programs (see "Examples" section)
+examples/                 — 21 runnable example programs (see "Examples" section)
 ```
 
 ## Sprint 2 Example
