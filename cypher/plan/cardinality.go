@@ -1,6 +1,13 @@
 // Package plan provides the cost-based planner for the Cypher executor.
 // This file implements selectivity estimation used by the scan-strategy
 // selection rule (task-283).
+//
+// When the underlying graph can rotate (new CSR snapshot published via
+// generation.Publisher or a Tx commit that alters graph structure), wrap
+// an IndexEstimator with a StatsManager. StatsManager provides
+// generation-aware cache invalidation so that avg-out-degree estimates
+// remain coherent with the live graph without requiring callers to manage
+// the estimator's degree cache directly.
 package plan
 
 import (
