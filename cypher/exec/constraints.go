@@ -34,8 +34,10 @@ package exec
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
+	"gograph/cypher/expr"
 	"gograph/graph/index"
 	"gograph/graph/lpg"
 )
@@ -255,6 +257,60 @@ func propertyValueToString(value lpg.PropertyValue) string {
 		return fmt.Sprintf("\x00int\x00%d", i) // namespace to avoid string/int collision
 	}
 	return ""
+}
+
+// ListConstraintRows returns a [][]expr.Value where each inner slice has four
+// elements: [name, type, label, property]. The name column uses the canonical
+// "label.prop" key; type is "UNIQUE" or "NOT_NULL". Rows are returned in
+// deterministic lexicographic order.
+//
+// ListConstraintRows is safe for concurrent use.
+func (r *ConstraintRegistry) ListConstraintRows() [][]expr.Value {
+	r.mu.RLock()
+	rows := make([][]expr.Value, 0, len(r.unique)+len(r.notNull))
+	for key := range r.unique {
+		label, prop := splitConstraintKey(key)
+		rows = append(rows, []expr.Value{
+			expr.StringValue(key),
+			expr.StringValue("UNIQUE"),
+			expr.StringValue(label),
+			expr.StringValue(prop),
+		})
+	}
+	for key := range r.notNull {
+		label, prop := splitConstraintKey(key)
+		rows = append(rows, []expr.Value{
+			expr.StringValue(key),
+			expr.StringValue("NOT_NULL"),
+			expr.StringValue(label),
+			expr.StringValue(prop),
+		})
+	}
+	r.mu.RUnlock()
+
+	// Sort for deterministic output.
+	sort.Slice(rows, func(i, j int) bool {
+		ki := rows[i][0].(expr.StringValue)
+		kj := rows[j][0].(expr.StringValue)
+		if ki != kj {
+			return string(ki) < string(kj)
+		}
+		ti := rows[i][1].(expr.StringValue)
+		tj := rows[j][1].(expr.StringValue)
+		return string(ti) < string(tj)
+	})
+	return rows
+}
+
+// splitConstraintKey splits a "label.prop" key into its two parts.
+// If there is no dot, label is the full key and prop is "".
+func splitConstraintKey(key string) (label, prop string) {
+	for i := len(key) - 1; i >= 0; i-- {
+		if key[i] == '.' {
+			return key[:i], key[i+1:]
+		}
+	}
+	return key, ""
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
