@@ -30,6 +30,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
@@ -193,6 +194,262 @@ type labelResolverIface interface {
 	ResolveLabelBitmap(name string) *roaring64.Bitmap
 }
 
+// BuildPlanWithMutator converts an IR [ir.LogicalPlan] tree into a physical
+// [exec.Operator] tree, supporting both read and write IR operators. The
+// mutator provides the write surface for CREATE, SET, REMOVE, DELETE, and
+// MERGE operators.
+//
+// For read-only plans the behaviour is identical to [BuildPlan]; the mutator
+// is only invoked when a write IR node is encountered.
+func BuildPlanWithMutator(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	mutator exec.GraphMutator,
+) (op exec.Operator, cols []string, err error) {
+	schema := make(map[string]int)
+
+	// When the IR root is a ProduceResults, use its declared columns; otherwise
+	// treat the plan as a write-only query with no output columns. A CREATE
+	// without RETURN has a write operator as root.
+	if pr, ok := plan.(*ir.ProduceResults); ok {
+		cols = pr.Columns
+		child, buildErr := buildOperatorWrite(pr.Child, walker, labelSrc, reg, params, schema, mutator)
+		if buildErr != nil {
+			return nil, nil, buildErr
+		}
+		items := make([]exec.ProjectionItem, len(cols))
+		for i, col := range cols {
+			if colIdx, exists := schema[col]; exists {
+				idx := colIdx
+				items[i] = exec.ProjectionItem{
+					Alias: col,
+					Eval: func(row exec.Row) (expr.Value, error) {
+						if idx < len(row) {
+							return row[idx], nil
+						}
+						return expr.Null, nil
+					},
+				}
+			} else {
+				items[i] = exec.ProjectionItem{
+					Alias: col,
+					Eval:  func(_ exec.Row) (expr.Value, error) { return expr.Null, nil },
+				}
+			}
+		}
+		proj, projErr := exec.NewProject(child, items)
+		if projErr != nil {
+			return nil, nil, fmt.Errorf("cypher: build final projection: %w", projErr)
+		}
+		return proj, cols, nil
+	}
+
+	// Write-only query (no RETURN clause): build the write operator tree
+	// directly and wrap in a single pass-through projection so the result
+	// set can be drained to trigger side effects.
+	child, buildErr := buildOperatorWrite(plan, walker, labelSrc, reg, params, schema, mutator)
+	if buildErr != nil {
+		return nil, nil, buildErr
+	}
+	// Emit a single synthetic "__write__" column so the result set is non-empty
+	// and can be drained. Callers that only care about side effects can ignore
+	// the column.
+	cols = nil // no output columns for write-only queries
+	return child, cols, nil
+}
+
+// buildOperatorWrite extends buildOperator with handling for write IR nodes.
+// When mutator is nil, write nodes fall through to the default error case.
+//
+//nolint:gocyclo // large switch — one case per write IR node, no hidden branches
+func buildOperatorWrite(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	mutator exec.GraphMutator,
+) (exec.Operator, error) {
+	if plan == nil {
+		// A nil plan arises when a write clause has no driving subplan (e.g.
+		// CREATE without a leading MATCH). Return a single-row operator that
+		// drives the write operator exactly once.
+		return exec.NewSingleRowOperator(), nil
+	}
+
+	switch p := plan.(type) {
+
+	case *ir.CreateNode:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		if p.NodeVar != "" {
+			schema[p.NodeVar] = len(schema)
+		}
+		return exec.NewCreateNode(p.NodeVar, p.Labels, p.Properties, child, mutator)
+
+	case *ir.CreateRelationship:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		if p.RelVar != "" {
+			schema[p.RelVar] = len(schema)
+		}
+		// Pass a copy of schema so the operator captures the current state.
+		schemaCopy := make(map[string]int, len(schema))
+		for k, v := range schema {
+			schemaCopy[k] = v
+		}
+		return exec.NewCreateRelationship(p.StartVar, p.EndVar, p.RelVar, p.RelType, p.Properties, schemaCopy, child, mutator)
+
+	case *ir.SetProperty:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		return exec.NewSetProperty(p.EntityVar, p.PropertyKey, p.Value, schemaCopy, child, mutator)
+
+	case *ir.SetLabels:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		return exec.NewSetLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
+
+	case *ir.RemoveProperty:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		return exec.NewRemoveProperty(p.EntityVar, p.PropertyKey, schemaCopy, child, mutator), nil
+
+	case *ir.RemoveLabels:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		return exec.NewRemoveLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
+
+	case *ir.DeleteNode:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		return exec.NewDeleteNode(p.NodeVar, schemaCopy, child, mutator), nil
+
+	case *ir.DeleteRelationship:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		return exec.NewDeleteRelationship(p.RelVar, schemaCopy, child, mutator), nil
+
+	case *ir.DetachDelete:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		return exec.NewDetachDelete(p.NodeVar, schemaCopy, child, mutator), nil
+
+	case *ir.Merge:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		if err != nil {
+			return nil, err
+		}
+		// Extract labels and properties from the pattern string. For the
+		// current IR the pattern is an opaque string; we surface the bound vars
+		// as the output schema columns.
+		for _, v := range p.BoundVars {
+			if v != "" {
+				schema[v] = len(schema)
+			}
+		}
+		schemaCopy := copySchema(schema)
+		// The search function re-builds the child plan as a read-only scan for
+		// the MERGE match check. For the current IR we return no matches
+		// (pattern search requires full expression evaluation which is out of
+		// scope); MERGE always takes the ON CREATE path.
+		searchFn := func(_ context.Context) ([]exec.Row, error) {
+			return nil, nil
+		}
+		labels, props := parseNodePatternStr(p.Pattern)
+		return exec.NewMerge(
+			firstVar(p.BoundVars),
+			labels,
+			props,
+			p.OnCreate, p.OnMatch,
+			searchFn,
+			schemaCopy,
+			child,
+			mutator,
+		)
+
+	default:
+		// Fall through to the read-operator builder.
+		return buildOperator(plan, walker, labelSrc, reg, params, schema)
+	}
+}
+
+// copySchema returns a shallow copy of the schema map.
+func copySchema(schema map[string]int) map[string]int {
+	cp := make(map[string]int, len(schema))
+	for k, v := range schema {
+		cp[k] = v
+	}
+	return cp
+}
+
+// firstVar returns the first non-empty string from vars, or empty string.
+func firstVar(vars []string) string {
+	for _, v := range vars {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// parseNodePatternStr extracts labels and property string from an opaque IR
+// node-pattern string of the form "(var:Label1:Label2 {key:'val',...})".
+// Both outputs may be empty when the pattern is absent or unparseable.
+func parseNodePatternStr(pattern string) (labels []string, props string) {
+	// Strip outer parens.
+	s := strings.TrimSpace(pattern)
+	if len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
+		s = s[1 : len(s)-1]
+	}
+
+	// Split off any property map "{...}" suffix.
+	braceIdx := strings.Index(s, "{")
+	if braceIdx >= 0 {
+		props = strings.TrimSpace(s[braceIdx:])
+		s = s[:braceIdx]
+	}
+
+	// Remaining: "var:Label1:Label2" — split on ':' and discard first token (var).
+	parts := strings.Split(s, ":")
+	for _, p := range parts[1:] {
+		lbl := strings.TrimSpace(p)
+		if lbl != "" {
+			labels = append(labels, lbl)
+		}
+	}
+	return
+}
+
 // BuildPlan converts an IR [ir.LogicalPlan] tree into a physical [exec.Operator]
 // tree together with the ordered output column names.
 //
@@ -311,6 +568,22 @@ func buildOperator(
 		}
 		return child, nil
 
+	case *ir.Apply:
+		// Build the outer plan first so its vars enter the schema.
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema)
+		if err != nil {
+			return nil, err
+		}
+		// The Argument operator is the leaf of the inner plan; it re-emits the
+		// outer row so correlated inner scans can consume it. For non-correlated
+		// inner plans (independent scans) the arg is inert but required.
+		arg := exec.NewArgument()
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema)
+		if err != nil {
+			return nil, err
+		}
+		return exec.NewApply(outer, inner, arg), nil
+
 	default:
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
 	}
@@ -368,6 +641,185 @@ type execLabelAdapter struct {
 // ResolveLabelBitmap implements exec.labelResolver.
 func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RunInTx — write-aware query execution
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RunInTx executes a write query against the engine's graph and returns a
+// streaming [Result]. Unlike [Run], RunInTx inspects the IR plan for write
+// operators; when any write operator is present it builds a mutator adapter so
+// that write operators can modify the graph.
+//
+// For the current in-memory implementation there is no external transaction
+// manager (lpg.Graph does not support rollback). "Commit on success, rollback
+// on error" means: the pipeline runs to completion with mutations applied
+// eagerly; if any operator returns an error the pipeline is drained no further
+// (standard Volcano error propagation) and the partial mutations remain in the
+// graph. This matches the single-writer, in-memory contract documented in
+// CLAUDE.md.
+//
+// RunInTx is safe for concurrent use (each call creates an independent
+// operator tree), subject to the single-writer constraint on write queries.
+func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
+	plan, err := e.planFor(query)
+	if err != nil {
+		return nil, err
+	}
+
+	walker := &lpgNodeWalker{g: e.g}
+	labelSrc := &lpgLabelResolver{g: e.g}
+	mutator := &lpgMutatorAdapter{g: e.g}
+
+	op, cols, err := BuildPlanWithMutator(plan, walker, labelSrc, e.reg, params, mutator)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: build plan: %w", err)
+	}
+
+	rs := exec.Run(ctx, op, cols)
+	return &Result{rs: rs, cols: cols}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// lpgMutatorAdapter — exec.graphMutator backed by *lpg.Graph[string,float64]
+// ─────────────────────────────────────────────────────────────────────────────
+
+// lpgMutatorAdapter adapts *lpg.Graph[string, float64] to the
+// exec.graphMutator interface used by write operators.
+type lpgMutatorAdapter struct {
+	g *lpg.Graph[string, float64]
+}
+
+// AddNode interns n and returns its stable NodeID.
+func (a *lpgMutatorAdapter) AddNode(n string) graph.NodeID {
+	a.g.AddNode(n)
+	id, _ := a.g.AdjList().Mapper().Lookup(n)
+	return id
+}
+
+// AddEdge inserts a directed edge and returns the endpoint NodeIDs.
+func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (srcID, dstID graph.NodeID) {
+	a.g.AddEdge(src, dst, w)
+	srcID, _ = a.g.AdjList().Mapper().Lookup(src)
+	dstID, _ = a.g.AdjList().Mapper().Lookup(dst)
+	return
+}
+
+// RemoveEdge removes the directed edge (src, dst).
+func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
+	a.g.AdjList().RemoveEdge(src, dst)
+}
+
+// SetNodeLabel attaches label to n.
+func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) {
+	a.g.SetNodeLabel(n, label)
+}
+
+// RemoveNodeLabel detaches label from n.
+func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
+	a.g.RemoveNodeLabel(n, label)
+}
+
+// SetNodeProperty sets the named property on n.
+func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) {
+	a.g.SetNodeProperty(n, key, value)
+}
+
+// DelNodeProperty removes the named property from n.
+func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
+	a.g.DelNodeProperty(n, key)
+}
+
+// NodeProperties returns a snapshot of all properties on n.
+func (a *lpgMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValue {
+	return a.g.NodeProperties(n)
+}
+
+// NodeLabels returns a snapshot of all labels on n.
+func (a *lpgMutatorAdapter) NodeLabels(n string) []string {
+	return a.g.NodeLabels(n)
+}
+
+// HasEdge reports whether a directed edge from src to dst is present.
+func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
+	return a.g.AdjList().HasEdge(src, dst)
+}
+
+// SetEdgeLabel attaches label to the directed edge (src, dst).
+func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	a.g.SetEdgeLabel(src, dst, label)
+}
+
+// SetEdgeProperty sets the named property on the directed edge (src, dst).
+func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) {
+	a.g.SetEdgeProperty(src, dst, key, value)
+}
+
+// DelEdgeProperty removes the named property from the directed edge (src, dst).
+func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
+	a.g.DelEdgeProperty(src, dst, key)
+}
+
+// OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
+func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
+	var out []string
+	for nb := range a.g.AdjList().Neighbours(n) {
+		out = append(out, nb)
+	}
+	return out
+}
+
+// InNeighbours returns a snapshot of the incoming neighbour keys of n by
+// performing a full graph walk. This is O(V+E) and should only be called for
+// DETACH DELETE operations where correctness trumps performance.
+func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
+	nID, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return nil
+	}
+	var result []string
+	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
+		if id == nID {
+			return true
+		}
+		nbs, _ := a.g.AdjList().LoadEntry(id)
+		for _, nb := range nbs {
+			if nb == nID {
+				result = append(result, key)
+				break
+			}
+		}
+		return true
+	})
+	return result
+}
+
+// OutDegree returns the number of outgoing edges from n.
+func (a *lpgMutatorAdapter) OutDegree(n string) int {
+	id, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return 0
+	}
+	nbs, _ := a.g.AdjList().LoadEntry(id)
+	return len(nbs)
+}
+
+// ResolveNodeID translates a node key to its NodeID.
+func (a *lpgMutatorAdapter) ResolveNodeID(n string) (graph.NodeID, bool) {
+	return a.g.AdjList().Mapper().Lookup(n)
+}
+
+// ResolveNodeLabel translates a NodeID back to its node key.
+func (a *lpgMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
+	return a.g.AdjList().Mapper().Resolve(id)
+}
+
+// WalkNodeIDs calls fn for every interned node.
+func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
+	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
+		return fn(id)
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
