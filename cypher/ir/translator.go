@@ -168,22 +168,38 @@ func (t *translator) callClause(c *ast.Call, child LogicalPlan) (LogicalPlan, er
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (t *translator) withClause(w *ast.With, child LogicalPlan) (LogicalPlan, error) {
-	items := projectionItems(w.Projection)
-	plan := LogicalPlan(NewProjection(items, child))
-	if w.Where != nil {
-		plan = NewSelection(w.Where.Predicate.String(), plan)
-	}
-	return plan, nil
+	return t.translateWith(w, child)
 }
 
 func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan, error) {
 	proj := r.Projection
 
-	// Build projection items.
-	items := projectionItems(proj)
+	// Handle pattern comprehensions first: each comprehension item becomes a
+	// RollUpApply layer. The remaining (non-comprehension) items are returned
+	// as regularItems.
+	planAfterComp, regularItems, err := t.projectionsWithComprehensions(proj, child)
+	if err != nil {
+		return nil, err
+	}
 
-	// Wrap in Projection.
-	var plan LogicalPlan = NewProjection(items, child)
+	// When all items were comprehensions, use an empty projection items list.
+	var items []ProjectionItem
+	if len(regularItems) > 0 {
+		items = regularItems
+	} else {
+		items = projectionItems(proj)
+	}
+
+	// Detect aggregate functions among non-comprehension items. When present,
+	// wrap in EagerAggregation first, then Projection.
+	var plan LogicalPlan
+	groupBy, aggs, hasAgg := detectAggregation(proj)
+	if hasAgg {
+		plan = NewEagerAggregation(groupBy, aggs, planAfterComp)
+		plan = NewProjection(items, plan)
+	} else {
+		plan = NewProjection(items, planAfterComp)
+	}
 
 	// DISTINCT.
 	if proj.Distinct {
@@ -250,152 +266,7 @@ func (t *translator) updatingClause(uc ast.UpdatingClause, child LogicalPlan) (L
 	default:
 		return nil, &TranslateError{UnsupportedClause: fmt.Sprintf("%T", uc)}
 	}
-}
-
-// createClause translates a CREATE pattern. Each node pattern becomes
-// CreateNode; each relationship becomes CreateRelationship.
-func (t *translator) createClause(c *ast.Create, child LogicalPlan) (LogicalPlan, error) {
-	plan := child
-	for _, pp := range c.Pattern.Paths {
-		var err error
-		plan, err = t.createPathPattern(pp, plan)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return plan, nil
-}
-
-func (t *translator) createPathPattern(pp *ast.PathPattern, child LogicalPlan) (LogicalPlan, error) {
-	if pp == nil || pp.Head == nil {
-		return child, nil
-	}
-	plan := child
-	el := pp.Head
-
-	// Translate the anchor node.
-	if el.Node != nil {
-		plan = t.createNode(el.Node, plan)
-	}
-
-	el = el.Next
-	for el != nil {
-		if el.Relationship != nil && el.Node != nil {
-			plan = t.createRelationship(el.Relationship, el.Node, plan)
-		}
-		el = el.Next
-	}
-	return plan, nil
-}
-
-func (t *translator) createNode(np *ast.NodePattern, child LogicalPlan) LogicalPlan {
-	nodeVar := ""
-	if np.Variable != nil {
-		nodeVar = *np.Variable
-	}
-	labels := make([]string, len(np.Labels))
-	copy(labels, np.Labels)
-	props := ""
-	if np.Properties != nil {
-		props = np.Properties.String()
-	}
-	return NewCreateNode(nodeVar, labels, props, child)
-}
-
-func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan) LogicalPlan {
-	startVar := firstVar(child)
-	endVar := ""
-	if to.Variable != nil {
-		endVar = *to.Variable
-	}
-	relVar := ""
-	if rp.Variable != nil {
-		relVar = *rp.Variable
-	}
-	relType := ""
-	if len(rp.Types) > 0 {
-		relType = rp.Types[0]
-	}
-	props := ""
-	if rp.Properties != nil {
-		props = rp.Properties.String()
-	}
-	// First create the destination node, then the relationship.
-	nodePlan := t.createNode(to, child)
-	return NewCreateRelationship(startVar, endVar, relVar, relType, props, nodePlan)
-}
-
-func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, error) {
-	onCreate := make([]string, len(m.OnCreate))
-	for i, si := range m.OnCreate {
-		onCreate[i] = si.String()
-	}
-	onMatch := make([]string, len(m.OnMatch))
-	for i, si := range m.OnMatch {
-		onMatch[i] = si.String()
-	}
-	boundVars := patternVars(m.Pattern)
-	return NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child), nil
-}
-
-func (t *translator) setClause(s *ast.Set, child LogicalPlan) (LogicalPlan, error) {
-	plan := child
-	for _, item := range s.Items {
-		if len(item.Labels) > 0 {
-			// SET n:Label form.
-			entityVar := item.Target.String()
-			labels := make([]string, len(item.Labels))
-			copy(labels, item.Labels)
-			plan = NewSetLabels(entityVar, labels, plan)
-			continue
-		}
-		// SET n.prop = expr  or  SET n = expr  or  SET n += expr.
-		if prop, ok := item.Target.(*ast.Property); ok {
-			plan = NewSetProperty(prop.Receiver.String(), prop.Key, item.Value.String(), plan)
-		} else {
-			// Whole-node assignment (n = {…} or n += {…}): model as SetProperty
-			// with an empty key to signal whole-entity update until expression IR
-			// is introduced.
-			plan = NewSetProperty(item.Target.String(), "", item.Value.String(), plan)
-		}
-	}
-	return plan, nil
-}
-
-func (t *translator) removeClause(r *ast.Remove, child LogicalPlan) (LogicalPlan, error) {
-	plan := child
-	for _, item := range r.Items {
-		if len(item.Labels) > 0 {
-			entityVar := item.Target.String()
-			labels := make([]string, len(item.Labels))
-			copy(labels, item.Labels)
-			plan = NewRemoveLabels(entityVar, labels, plan)
-			continue
-		}
-		// REMOVE n.prop.
-		if prop, ok := item.Target.(*ast.Property); ok {
-			plan = NewRemoveProperty(prop.Receiver.String(), prop.Key, plan)
-		} else {
-			plan = NewRemoveProperty(item.Target.String(), "", plan)
-		}
-	}
-	return plan, nil
-}
-
-func (t *translator) deleteClause(d *ast.Delete, child LogicalPlan) (LogicalPlan, error) {
-	plan := child
-	for _, expr := range d.Expressions {
-		plan = NewDeleteNode(expr.String(), plan)
-	}
-	return plan, nil
-}
-
-func (t *translator) detachDeleteClause(d *ast.DetachDelete, child LogicalPlan) (LogicalPlan, error) {
-	plan := child
-	for _, expr := range d.Expressions {
-		plan = NewDetachDelete(expr.String(), plan)
-	}
-	return plan, nil
+	// Write clause implementations are in writes.go.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

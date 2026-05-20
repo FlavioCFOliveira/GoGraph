@@ -34,7 +34,10 @@ func (t *translator) translateMatch(m *ast.Match, child LogicalPlan, optional bo
 		return nil, err
 	}
 	if m.Where != nil {
-		plan = NewSelection(m.Where.Predicate.String(), plan)
+		plan, err = t.translateExistsPredicate(m.Where.Predicate, plan)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return plan, nil
 }
@@ -46,7 +49,10 @@ func (t *translator) translateOptionalMatch(m *ast.OptionalMatch, child LogicalP
 		return nil, err
 	}
 	if m.Where != nil {
-		plan = NewSelection(m.Where.Predicate.String(), plan)
+		plan, err = t.translateExistsPredicate(m.Where.Predicate, plan)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return plan, nil
 }
