@@ -57,17 +57,25 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	}
 	// 2-sweep lower bound: BFS from seed, find farthest u; BFS from u,
 	// find farthest w. dist[w] is a lower bound on the true diameter.
-	dist := make([]int, n)
+	//
+	// Two scratch slices are kept: distFromU is the BFS layering from
+	// the 2-sweep anchor farU and MUST NOT be reused by the inner-loop
+	// BFS below — otherwise the level filter `distFromU[v]==k` would
+	// be corrupted after the first iteration. distInner is the scratch
+	// used exclusively by the per-vertex eccentricity sweeps.
+	scratch := make([]int, n)
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
-	farU, _ := bfsFarthest(verts, edges, graph.NodeID(seed), dist)
+	farU, _ := bfsFarthest(verts, edges, graph.NodeID(seed), scratch)
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
-	farW, distFromU := bfsFarthest(verts, edges, farU, dist)
+	farW, _ := bfsFarthest(verts, edges, farU, scratch)
+	distFromU := make([]int, n)
+	copy(distFromU, scratch)
 	lo = distFromU[farW]
 
 	// iFUB upper bound. From the centre-most vertex on the lo path
@@ -93,6 +101,7 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// levels strictly below k are bounded above by 2*(k-1); when
 	// that bound is no greater than the current lo, no further
 	// improvement is possible and the bounds have converged.
+	distInner := make([]int, n)
 	for k := maxLevel; k > 0; k-- {
 		if err := ctx.Err(); err != nil {
 			metrics.IncCounter("search.DiameterCtx.errors", 1)
@@ -102,7 +111,7 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 			if distFromU[v] != k {
 				continue
 			}
-			_, distV := bfsFarthest(verts, edges, graph.NodeID(v), dist)
+			_, distV := bfsFarthest(verts, edges, graph.NodeID(v), distInner)
 			ecc := 0
 			for _, d := range distV {
 				if d > ecc {
