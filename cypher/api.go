@@ -55,9 +55,10 @@ import (
 //
 // Engine is safe for concurrent use.
 type Engine struct {
-	g     *lpg.Graph[string, float64]
-	reg   expr.FunctionRegistry
-	cache sync.Map // map[string]ir.LogicalPlan
+	g             *lpg.Graph[string, float64]
+	reg           expr.FunctionRegistry
+	constraintReg *exec.ConstraintRegistry
+	cache         sync.Map // map[string]ir.LogicalPlan
 }
 
 // NewEngine creates an Engine backed by g. The default built-in function
@@ -68,8 +69,9 @@ type Engine struct {
 func NewEngine(g *lpg.Graph[string, float64]) *Engine {
 	ensureIndexManager(g)
 	return &Engine{
-		g:   g,
-		reg: funcs.DefaultRegistry,
+		g:             g,
+		reg:           funcs.DefaultRegistry,
+		constraintReg: exec.NewConstraintRegistry(),
 	}
 }
 
@@ -79,7 +81,11 @@ func NewEngine(g *lpg.Graph[string, float64]) *Engine {
 // If g has no [index.Manager] attached yet, a new empty one is installed.
 func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegistry) *Engine {
 	ensureIndexManager(g)
-	return &Engine{g: g, reg: reg}
+	return &Engine{
+		g:             g,
+		reg:           reg,
+		constraintReg: exec.NewConstraintRegistry(),
+	}
 }
 
 // ensureIndexManager installs a new empty index.Manager on g when none is
@@ -151,6 +157,24 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 		op = exec.NewCreateIndexOp(p.Name, kind, p.IfNotExists, idxMgr)
 	case *ir.DropIndex:
 		op = exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr)
+	case *ir.CreateConstraint:
+		var kind exec.ConstraintKind
+		switch p.Kind {
+		case ir.ConstraintUnique:
+			kind = exec.ConstraintUnique
+		case ir.ConstraintNotNull:
+			kind = exec.ConstraintNotNull
+		}
+		op = exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg)
+	case *ir.DropConstraint:
+		var kind exec.ConstraintKind
+		switch p.Kind {
+		case ir.ConstraintUnique:
+			kind = exec.ConstraintUnique
+		case ir.ConstraintNotNull:
+			kind = exec.ConstraintNotNull
+		}
+		op = exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg)
 	default:
 		return nil, fmt.Errorf("cypher: unsupported DDL plan %T", ddlPlan)
 	}
@@ -405,6 +429,22 @@ func BuildPlanWithMutator(
 	params map[string]expr.Value,
 	mutator exec.GraphMutator,
 ) (op exec.Operator, cols []string, err error) {
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil)
+}
+
+// buildPlanWithMutatorFull is the engine-internal variant of
+// BuildPlanWithMutator that also threads constraint enforcement through write
+// operators. constraintReg and idxMgr may both be nil (no enforcement).
+func buildPlanWithMutatorFull(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	mutator exec.GraphMutator,
+	constraintReg *exec.ConstraintRegistry,
+	idxMgr *index.Manager,
+) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 
 	// When the IR root is a ProduceResults, use its declared columns; otherwise
@@ -412,7 +452,7 @@ func BuildPlanWithMutator(
 	// without RETURN has a write operator as root.
 	if pr, ok := plan.(*ir.ProduceResults); ok {
 		cols = pr.Columns
-		child, buildErr := buildOperatorWrite(pr.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, buildErr := buildOperatorWrite(pr.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
@@ -446,7 +486,7 @@ func BuildPlanWithMutator(
 	// Write-only query (no RETURN clause): build the write operator tree
 	// directly and wrap in a single pass-through projection so the result
 	// set can be drained to trigger side effects.
-	child, buildErr := buildOperatorWrite(plan, walker, labelSrc, reg, params, schema, mutator)
+	child, buildErr := buildOperatorWrite(plan, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 	if buildErr != nil {
 		return nil, nil, buildErr
 	}
@@ -459,6 +499,7 @@ func BuildPlanWithMutator(
 
 // buildOperatorWrite extends buildOperator with handling for write IR nodes.
 // When mutator is nil, write nodes fall through to the default error case.
+// constraintReg and idxMgr are optional (nil means no enforcement).
 //
 //nolint:gocyclo // large switch — one case per write IR node, no hidden branches
 func buildOperatorWrite(
@@ -469,6 +510,8 @@ func buildOperatorWrite(
 	params map[string]expr.Value,
 	schema map[string]int,
 	mutator exec.GraphMutator,
+	constraintReg *exec.ConstraintRegistry,
+	idxMgr *index.Manager,
 ) (exec.Operator, error) {
 	if plan == nil {
 		// A nil plan arises when a write clause has no driving subplan (e.g.
@@ -480,17 +523,24 @@ func buildOperatorWrite(
 	switch p := plan.(type) {
 
 	case *ir.CreateNode:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
 		if p.NodeVar != "" {
 			schema[p.NodeVar] = len(schema)
 		}
-		return exec.NewCreateNode(p.NodeVar, p.Labels, p.Properties, child, mutator)
+		cn, buildErr := exec.NewCreateNode(p.NodeVar, p.Labels, p.Properties, child, mutator)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		if constraintReg != nil {
+			cn.WithConstraints(constraintReg, idxMgr)
+		}
+		return cn, nil
 
 	case *ir.CreateRelationship:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -505,15 +555,22 @@ func buildOperatorWrite(
 		return exec.NewCreateRelationship(p.StartVar, p.EndVar, p.RelVar, p.RelType, p.Properties, schemaCopy, child, mutator)
 
 	case *ir.SetProperty:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewSetProperty(p.EntityVar, p.PropertyKey, p.Value, schemaCopy, child, mutator)
+		sp, buildErr := exec.NewSetProperty(p.EntityVar, p.PropertyKey, p.Value, schemaCopy, child, mutator)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		if constraintReg != nil {
+			sp.WithConstraints(constraintReg, idxMgr)
+		}
+		return sp, nil
 
 	case *ir.SetLabels:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -521,7 +578,7 @@ func buildOperatorWrite(
 		return exec.NewSetLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
 
 	case *ir.RemoveProperty:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -529,7 +586,7 @@ func buildOperatorWrite(
 		return exec.NewRemoveProperty(p.EntityVar, p.PropertyKey, schemaCopy, child, mutator), nil
 
 	case *ir.RemoveLabels:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -537,7 +594,7 @@ func buildOperatorWrite(
 		return exec.NewRemoveLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
 
 	case *ir.DeleteNode:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -545,7 +602,7 @@ func buildOperatorWrite(
 		return exec.NewDeleteNode(p.NodeVar, schemaCopy, child, mutator), nil
 
 	case *ir.DeleteRelationship:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -553,7 +610,7 @@ func buildOperatorWrite(
 		return exec.NewDeleteRelationship(p.RelVar, schemaCopy, child, mutator), nil
 
 	case *ir.DetachDelete:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -561,7 +618,7 @@ func buildOperatorWrite(
 		return exec.NewDetachDelete(p.NodeVar, schemaCopy, child, mutator), nil
 
 	case *ir.Merge:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr)
 		if err != nil {
 			return nil, err
 		}
@@ -582,7 +639,7 @@ func buildOperatorWrite(
 			return nil, nil
 		}
 		labels, props := parseNodePatternStr(p.Pattern)
-		return exec.NewMerge(
+		m, buildErr := exec.NewMerge(
 			firstVar(p.BoundVars),
 			labels,
 			props,
@@ -592,6 +649,13 @@ func buildOperatorWrite(
 			child,
 			mutator,
 		)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		if constraintReg != nil {
+			m.WithConstraints(constraintReg, idxMgr)
+		}
+		return m, nil
 
 	default:
 		// Fall through to the read-operator builder.
@@ -1098,7 +1162,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	buf := &exec.IndexBuffer{}
 	mutator := &lpgMutatorAdapter{g: e.g, buf: buf}
 
-	op, cols, err := BuildPlanWithMutator(plan, walker, labelSrc, e.reg, params, mutator)
+	op, cols, err := buildPlanWithMutatorFull(plan, walker, labelSrc, e.reg, params, mutator, e.constraintReg, e.g.IndexManager())
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}

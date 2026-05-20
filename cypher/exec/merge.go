@@ -31,6 +31,7 @@ import (
 
 	"gograph/cypher/expr"
 	"gograph/graph"
+	"gograph/graph/index"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +55,9 @@ type Merge struct {
 	schema          map[string]int
 	child           Operator
 	mutator         GraphMutator
-	ctx             context.Context //nolint:containedctx // stored for per-Next ctx check
+	reg             *ConstraintRegistry // nil means no enforcement
+	mgr             *index.Manager      // nil when reg is nil
+	ctx             context.Context     //nolint:containedctx // stored for per-Next ctx check
 
 	// iteration state, reset on each Init call
 	matched    []Row
@@ -119,6 +122,15 @@ func NewMerge(
 	}, nil
 }
 
+// WithConstraints attaches a ConstraintRegistry and index.Manager for
+// pre-write enforcement in ON CREATE and ON MATCH actions. Both must be
+// non-nil. Returns op for chaining.
+func (op *Merge) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *Merge {
+	op.reg = reg
+	op.mgr = mgr
+	return op
+}
+
 // Init initialises the operator: executes the search plan, buffers matched
 // rows (ON MATCH path) or creates a new node (ON CREATE path).
 func (op *Merge) Init(ctx context.Context) error {
@@ -150,6 +162,15 @@ func (op *Merge) Init(ctx context.Context) error {
 		return nil
 	}
 
+	// ON CREATE path: constraint enforcement before any mutation.
+	if op.reg != nil {
+		for _, p := range op.props {
+			if cerr := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); cerr != nil {
+				return fmt.Errorf("exec: Merge: ON CREATE: %w", cerr)
+			}
+		}
+	}
+
 	// ON CREATE path: create the node.
 	nodeKey := op.freshNodeKey()
 	nodeID := op.mutator.AddNode(nodeKey)
@@ -158,6 +179,9 @@ func (op *Merge) Init(ctx context.Context) error {
 	}
 	for _, p := range op.props {
 		op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+		if op.reg != nil {
+			op.reg.RecordPropertySet(op.labels, p.key, p.value)
+		}
 	}
 
 	createdRow := Row{expr.IntegerValue(int64(nodeID))}
@@ -234,7 +258,18 @@ func (op *Merge) applyActions(actions []mergeAction, row Row) error {
 		}
 
 		if resolved {
+			// Constraint enforcement for ON MATCH / ON CREATE action.
+			if op.reg != nil {
+				labels := op.mutator.NodeLabels(nodeKey)
+				if cerr := op.reg.CheckSetProperty(labels, a.key, pv, op.mgr); cerr != nil {
+					return cerr
+				}
+			}
 			op.mutator.SetNodeProperty(nodeKey, a.key, pv)
+			if op.reg != nil {
+				labels := op.mutator.NodeLabels(nodeKey)
+				op.reg.RecordPropertySet(labels, a.key, pv)
+			}
 		}
 	}
 	return nil

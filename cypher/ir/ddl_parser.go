@@ -26,11 +26,14 @@ import (
 func IsDDL(query string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(query))
 	return strings.HasPrefix(upper, "CREATE INDEX") ||
-		strings.HasPrefix(upper, "DROP INDEX")
+		strings.HasPrefix(upper, "DROP INDEX") ||
+		strings.HasPrefix(upper, "CREATE CONSTRAINT") ||
+		strings.HasPrefix(upper, "DROP CONSTRAINT")
 }
 
-// ParseDDL parses a DDL query string and returns a LogicalPlan (either
-// *CreateIndex or *DropIndex). Returns an error for unrecognised DDL.
+// ParseDDL parses a DDL query string and returns a LogicalPlan (one of
+// *CreateIndex, *DropIndex, *CreateConstraint, *DropConstraint). Returns an
+// error for unrecognised DDL.
 func ParseDDL(query string) (LogicalPlan, error) {
 	upper := strings.ToUpper(strings.TrimSpace(query))
 	switch {
@@ -38,6 +41,10 @@ func ParseDDL(query string) (LogicalPlan, error) {
 		return parseCreateIndex(strings.TrimSpace(query))
 	case strings.HasPrefix(upper, "DROP INDEX"):
 		return parseDropIndex(strings.TrimSpace(query))
+	case strings.HasPrefix(upper, "CREATE CONSTRAINT"):
+		return parseCreateConstraint(strings.TrimSpace(query))
+	case strings.HasPrefix(upper, "DROP CONSTRAINT"):
+		return parseDropConstraint(strings.TrimSpace(query))
 	}
 	return nil, fmt.Errorf("ir: unrecognised DDL statement: %q", query)
 }
@@ -314,6 +321,198 @@ func parseDropIndex(query string) (*DropIndex, error) {
 		ifExists = true
 	}
 	return NewDropIndex(name, ifExists), nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CREATE CONSTRAINT parser
+// ─────────────────────────────────────────────────────────────────────────────
+
+// parseCreateConstraint parses:
+//
+//	CREATE CONSTRAINT [name] ON (n:Label) ASSERT n.prop IS UNIQUE [IF NOT EXISTS]
+//	CREATE CONSTRAINT [name] ON (n:Label) ASSERT n.prop IS NOT NULL [IF NOT EXISTS]
+//
+//nolint:gocyclo // parser function: complexity reflects DDL grammar, not hidden branching
+func parseCreateConstraint(query string) (*CreateConstraint, error) {
+	tokens := tokenise(query)
+	pos := 0
+	consume := func() string {
+		if pos >= len(tokens) {
+			return ""
+		}
+		t := tokens[pos]
+		pos++
+		return t
+	}
+	peek := func() string {
+		if pos >= len(tokens) {
+			return ""
+		}
+		return tokens[pos]
+	}
+	peekUpper := func() string { return strings.ToUpper(peek()) }
+	expectU := func(want string) error {
+		tok := strings.ToUpper(consume())
+		if tok != want {
+			return fmt.Errorf("ir: CREATE CONSTRAINT: expected %q, got %q", want, tok)
+		}
+		return nil
+	}
+
+	if err := expectU("CREATE"); err != nil {
+		return nil, err
+	}
+	if err := expectU("CONSTRAINT"); err != nil {
+		return nil, err
+	}
+
+	// Optional name (present unless next token is "ON" or "IF")
+	name := ""
+	if peekUpper() != "ON" && peekUpper() != "IF" {
+		name = consume()
+	}
+
+	// Optional IF NOT EXISTS (before ON in some dialects, but we accept it here
+	// for symmetry; the more common position is after the assertion — handled below)
+	ifNotExists := false
+	if peekUpper() == "IF" {
+		consume() // IF
+		if err := expectU("NOT"); err != nil {
+			return nil, err
+		}
+		if err := expectU("EXISTS"); err != nil {
+			return nil, err
+		}
+		ifNotExists = true
+	}
+
+	if err := expectU("ON"); err != nil {
+		return nil, err
+	}
+
+	// (n:Label)
+	label, err := parseNodePattern(tokens, &pos)
+	if err != nil {
+		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: %w", name, err)
+	}
+
+	if err := expectU("ASSERT"); err != nil {
+		return nil, err
+	}
+
+	// n.prop  (single token like "n.prop" or two tokens "n" "." "prop")
+	propKey, err := parseAssertPropAccess(tokens, &pos)
+	if err != nil {
+		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: %w", name, err)
+	}
+
+	if err := expectU("IS"); err != nil {
+		return nil, err
+	}
+
+	// UNIQUE | NOT NULL
+	var kind ConstraintKind
+	nextKw := strings.ToUpper(consume())
+	switch nextKw {
+	case "UNIQUE":
+		kind = ConstraintUnique
+	case "NOT":
+		if err := expectU("NULL"); err != nil {
+			return nil, err
+		}
+		kind = ConstraintNotNull
+	default:
+		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: expected UNIQUE or NOT NULL after IS, got %q", name, nextKw)
+	}
+
+	// Optional IF NOT EXISTS (after assertion)
+	if !ifNotExists && peekUpper() == "IF" {
+		consume() // IF
+		if err := expectU("NOT"); err != nil {
+			return nil, err
+		}
+		if err := expectU("EXISTS"); err != nil {
+			return nil, err
+		}
+		ifNotExists = true
+	}
+
+	// Auto-name when not provided.
+	if name == "" {
+		suffix := "unique"
+		if kind == ConstraintNotNull {
+			suffix = "not_null"
+		}
+		name = strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_" + suffix
+	}
+
+	return NewCreateConstraint(name, label, propKey, kind, ifNotExists), nil
+}
+
+// parseAssertPropAccess parses a property access expression of the form
+// "n.prop" in the context of an ASSERT clause. The tokeniser may split it as
+// ["n", ".", "prop"] or leave it as a single token "n.prop" (the tokeniser
+// only splits on a fixed set of punctuation that does not include ".").
+// In practice "." is not in the tokeniser's punctuation set, so "n.prop" is
+// always a single token.
+func parseAssertPropAccess(tokens []string, pos *int) (string, error) {
+	if *pos >= len(tokens) {
+		return "", fmt.Errorf("expected n.prop, got end of input")
+	}
+	tok := tokens[*pos]
+	(*pos)++
+	dotIdx := strings.LastIndex(tok, ".")
+	if dotIdx < 0 {
+		return "", fmt.Errorf("expected n.prop form, got %q", tok)
+	}
+	return tok[dotIdx+1:], nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DROP CONSTRAINT parser
+// ─────────────────────────────────────────────────────────────────────────────
+
+// parseDropConstraint parses: DROP CONSTRAINT name [IF EXISTS]
+func parseDropConstraint(query string) (*DropConstraint, error) {
+	tokens := tokenise(query)
+	pos := 0
+	consume := func() string {
+		if pos >= len(tokens) {
+			return ""
+		}
+		t := tokens[pos]
+		pos++
+		return t
+	}
+	expectU := func(want string) error {
+		tok := strings.ToUpper(consume())
+		if tok != want {
+			return fmt.Errorf("ir: DROP CONSTRAINT: expected %q, got %q", want, tok)
+		}
+		return nil
+	}
+
+	if err := expectU("DROP"); err != nil {
+		return nil, err
+	}
+	if err := expectU("CONSTRAINT"); err != nil {
+		return nil, err
+	}
+	name := consume()
+	if name == "" {
+		return nil, fmt.Errorf("ir: DROP CONSTRAINT: missing constraint name")
+	}
+
+	ifExists := false
+	if strings.ToUpper(consume()) == "IF" {
+		if strings.ToUpper(consume()) != "EXISTS" {
+			return nil, fmt.Errorf("ir: DROP CONSTRAINT: expected EXISTS after IF")
+		}
+		ifExists = true
+	}
+	// Kind is unknown when dropping by name only; default to ConstraintUnique
+	// (the executor uses the registry to resolve the actual kind on drop).
+	return NewDropConstraint(name, "", "", ConstraintUnique, ifExists), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

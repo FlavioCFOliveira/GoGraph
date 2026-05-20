@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 
 	"gograph/cypher/expr"
+	"gograph/graph/index"
 	"gograph/graph/lpg"
 )
 
@@ -56,7 +57,9 @@ type CreateNode struct {
 	props   []propLiteral // parsed once from the properties string
 	child   Operator
 	mutator GraphMutator
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	reg     *ConstraintRegistry // nil means no enforcement
+	mgr     *index.Manager      // nil when reg is nil
+	ctx     context.Context     //nolint:containedctx // stored for per-Next ctx check
 }
 
 // propLiteral is a pre-parsed key/value pair from a literal property map
@@ -95,6 +98,15 @@ func NewCreateNode(
 	}, nil
 }
 
+// WithConstraints attaches a ConstraintRegistry and index.Manager to the
+// operator for pre-write enforcement. Both must be non-nil. Returns op for
+// chaining.
+func (op *CreateNode) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *CreateNode {
+	op.reg = reg
+	op.mgr = mgr
+	return op
+}
+
 // Init initialises the operator and its child.
 func (op *CreateNode) Init(ctx context.Context) error {
 	op.ctx = ctx
@@ -118,6 +130,15 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
+	// Constraint enforcement: check before any mutation.
+	if op.reg != nil {
+		for _, p := range op.props {
+			if err := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); err != nil {
+				return false, err
+			}
+		}
+	}
+
 	nodeKey := op.freshNodeKey()
 	nodeID := op.mutator.AddNode(nodeKey)
 	for _, lbl := range op.labels {
@@ -125,6 +146,9 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 	}
 	for _, p := range op.props {
 		op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+		if op.reg != nil {
+			op.reg.RecordPropertySet(op.labels, p.key, p.value)
+		}
 	}
 
 	// Build output row: child columns + optional NodeID column.

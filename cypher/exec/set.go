@@ -28,6 +28,7 @@ import (
 
 	"gograph/cypher/expr"
 	"gograph/graph"
+	"gograph/graph/index"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,8 +48,10 @@ type SetProperty struct {
 	schema      map[string]int
 	child       Operator
 	mutator     GraphMutator
-	parsedMap   []propLiteral   // cached parse of valueExpr when it is a literal map
-	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
+	reg         *ConstraintRegistry // nil means no enforcement
+	mgr         *index.Manager      // nil when reg is nil
+	parsedMap   []propLiteral       // cached parse of valueExpr when it is a literal map
+	ctx         context.Context     //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewSetProperty creates a SetProperty operator.
@@ -93,6 +96,14 @@ func NewSetProperty(
 	}, nil
 }
 
+// WithConstraints attaches a ConstraintRegistry and index.Manager for
+// pre-write enforcement. Both must be non-nil. Returns op for chaining.
+func (op *SetProperty) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *SetProperty {
+	op.reg = reg
+	op.mgr = mgr
+	return op
+}
+
 // Init initialises the operator and its child.
 func (op *SetProperty) Init(ctx context.Context) error {
 	op.ctx = ctx
@@ -100,6 +111,8 @@ func (op *SetProperty) Init(ctx context.Context) error {
 }
 
 // Next pulls one row from the child and applies the property mutation.
+//
+//nolint:gocyclo // three assignment modes (single, merge, replace) × optional constraint enforcement
 func (op *SetProperty) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
@@ -131,20 +144,55 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 			*out = childRow
 			return true, nil
 		}
+		// Constraint enforcement for single-property assignment.
+		if op.reg != nil {
+			labels := op.mutator.NodeLabels(nodeKey)
+			if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
+				return false, cerr
+			}
+		}
 		op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv)
+		if op.reg != nil {
+			labels := op.mutator.NodeLabels(nodeKey)
+			op.reg.RecordPropertySet(labels, op.propertyKey, pv)
+		}
 	} else if op.merge {
 		// SET n += {…}: add/update without removing existing properties.
+		if op.reg != nil {
+			labels := op.mutator.NodeLabels(nodeKey)
+			for _, p := range op.parsedMap {
+				if cerr := op.reg.CheckSetProperty(labels, p.key, p.value, op.mgr); cerr != nil {
+					return false, cerr
+				}
+			}
+		}
+		labels := op.mutator.NodeLabels(nodeKey)
 		for _, p := range op.parsedMap {
 			op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+			if op.reg != nil {
+				op.reg.RecordPropertySet(labels, p.key, p.value)
+			}
 		}
 	} else {
 		// SET n = {…}: replace all properties.
+		if op.reg != nil {
+			labels := op.mutator.NodeLabels(nodeKey)
+			for _, p := range op.parsedMap {
+				if cerr := op.reg.CheckSetProperty(labels, p.key, p.value, op.mgr); cerr != nil {
+					return false, cerr
+				}
+			}
+		}
 		existing := op.mutator.NodeProperties(nodeKey)
 		for k := range existing {
 			op.mutator.DelNodeProperty(nodeKey, k)
 		}
+		labels := op.mutator.NodeLabels(nodeKey)
 		for _, p := range op.parsedMap {
 			op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+			if op.reg != nil {
+				op.reg.RecordPropertySet(labels, p.key, p.value)
+			}
 		}
 	}
 
