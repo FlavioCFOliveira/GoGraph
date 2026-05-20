@@ -37,7 +37,7 @@ set -euo pipefail
 GO=${GO:-go}
 COVER_PROFILE=${COVER_PROFILE:-cover.out}
 COVER_LIB_PROFILE=${COVER_LIB_PROFILE:-cover.lib.out}
-COVER_EXCLUDE=${COVER_EXCLUDE:-'gograph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9|cypher/parser/gen)'}
+COVER_EXCLUDE=${COVER_EXCLUDE:-'gograph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9|bench/cypher_ldbc|cypher/parser/gen)'}
 MIN_TOTAL=${MIN_TOTAL:-85.0}
 MIN_PER_PKG=${MIN_PER_PKG:-75.0}
 

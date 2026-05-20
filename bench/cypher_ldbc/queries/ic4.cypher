@@ -1,0 +1,1 @@
+MATCH (n:Person) WHERE n.name IS NOT NULL RETURN n

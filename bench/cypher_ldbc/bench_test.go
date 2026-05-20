@@ -1,0 +1,183 @@
+// Package cypher_ldbc_test contains benchmarks for the GoGraph Cypher engine
+// modelled after the LDBC SNB Interactive Complex (IC) query shapes.
+//
+// The seed graph (1000 nodes distributed across Person/City/Company labels)
+// is built once in TestMain. Each benchmark measures engine throughput for
+// a specific query shape; write benchmarks (ic5, ic6, ic8) each use a fresh
+// graph so that accumulation of created nodes does not distort later
+// iterations.
+//
+// Run with:
+//
+//	go test -bench=. -benchmem -count=3 ./bench/cypher_ldbc/...
+package cypher_ldbc_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"gograph/cypher"
+	"gograph/graph/adjlist"
+	"gograph/graph/lpg"
+)
+
+// seedSize is the number of nodes in the shared benchmark graph.
+const seedSize = 1000
+
+// benchGraph is the shared read-only graph seeded in TestMain.
+var benchGraph *lpg.Graph[string, float64]
+
+// TestMain seeds the benchmark graph and runs all tests/benchmarks.
+func TestMain(m *testing.M) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	for i := 0; i < seedSize; i++ {
+		key := fmt.Sprintf("n%d", i)
+		g.AddNode(key)
+		switch i % 3 {
+		case 0:
+			g.SetNodeLabel(key, "Person")
+		case 1:
+			g.SetNodeLabel(key, "City")
+		case 2:
+			g.SetNodeLabel(key, "Company")
+		}
+	}
+	benchGraph = g
+	os.Exit(m.Run())
+}
+
+// isWriteQuery reports whether q contains a CREATE or MERGE keyword at the
+// top level, using a case-insensitive prefix scan. This simple heuristic is
+// sufficient for the well-formed IC query set.
+func isWriteQuery(q string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(q))
+	return strings.HasPrefix(upper, "CREATE") ||
+		strings.HasPrefix(upper, "MERGE")
+}
+
+// benchmarkQuery runs the Cypher query loaded from queryFile for b.N
+// iterations. Write queries receive a fresh graph per benchmark group to
+// prevent node accumulation from skewing measurements.
+func benchmarkQuery(b *testing.B, queryFile string) {
+	b.Helper()
+
+	qBytes, err := os.ReadFile(filepath.Join("queries", queryFile)) //nolint:gosec // path is caller-controlled fixture name, not user input
+	if err != nil {
+		b.Fatalf("read %s: %v", queryFile, err)
+	}
+	query := strings.TrimSpace(string(qBytes))
+
+	write := isWriteQuery(query)
+
+	// Write benchmarks use a dedicated fresh graph so that every b.N loop
+	// starts from the same cardinality base.
+	var g *lpg.Graph[string, float64]
+	if write {
+		g = lpg.New[string, float64](adjlist.Config{Directed: true})
+	} else {
+		g = benchGraph
+	}
+	engine := cypher.NewEngine(g)
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		var (
+			res *cypher.Result
+			err error
+		)
+		if write {
+			res, err = engine.RunInTx(ctx, query, nil)
+		} else {
+			res, err = engine.Run(ctx, query, nil)
+		}
+		if err != nil {
+			b.Fatalf("Run(%s): %v", queryFile, err)
+		}
+		for res.Next() {
+		}
+		if e := res.Err(); e != nil {
+			b.Fatalf("result.Err(%s): %v", queryFile, e)
+		}
+		if err := res.Close(); err != nil {
+			b.Fatalf("result.Close(%s): %v", queryFile, err)
+		}
+	}
+}
+
+// TestCypherLDBC_AllQueriesRun is a smoke test that verifies all 8 IC query
+// files parse and execute without error. This test is always included in
+// the CI run (no -bench flag required).
+func TestCypherLDBC_AllQueriesRun(t *testing.T) {
+	queries := []struct {
+		file  string
+		write bool
+	}{
+		{"ic1.cypher", false},
+		{"ic2.cypher", false},
+		{"ic3.cypher", false},
+		{"ic4.cypher", false},
+		{"ic5.cypher", true},
+		{"ic6.cypher", true},
+		{"ic7.cypher", false},
+		{"ic8.cypher", true},
+	}
+
+	ctx := context.Background()
+
+	for _, q := range queries {
+		q := q
+		t.Run(q.file, func(t *testing.T) {
+			t.Parallel()
+
+			qBytes, err := os.ReadFile(filepath.Join("queries", q.file)) //nolint:gosec // path is a test fixture name, not user input
+			if err != nil {
+				t.Fatalf("read %s: %v", q.file, err)
+			}
+			query := strings.TrimSpace(string(qBytes))
+
+			// Each write sub-test gets its own fresh graph to avoid shared
+			// mutation across parallel tests.
+			var g *lpg.Graph[string, float64]
+			if q.write {
+				g = lpg.New[string, float64](adjlist.Config{Directed: true})
+			} else {
+				g = benchGraph
+			}
+			engine := cypher.NewEngine(g)
+
+			var res *cypher.Result
+			if q.write {
+				res, err = engine.RunInTx(ctx, query, nil)
+			} else {
+				res, err = engine.Run(ctx, query, nil)
+			}
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			for res.Next() {
+			}
+			if e := res.Err(); e != nil {
+				t.Fatalf("result.Err: %v", e)
+			}
+			if err := res.Close(); err != nil {
+				t.Fatalf("result.Close: %v", err)
+			}
+		})
+	}
+}
+
+func BenchmarkIC1(b *testing.B) { benchmarkQuery(b, "ic1.cypher") }
+func BenchmarkIC2(b *testing.B) { benchmarkQuery(b, "ic2.cypher") }
+func BenchmarkIC3(b *testing.B) { benchmarkQuery(b, "ic3.cypher") }
+func BenchmarkIC4(b *testing.B) { benchmarkQuery(b, "ic4.cypher") }
+func BenchmarkIC5(b *testing.B) { benchmarkQuery(b, "ic5.cypher") }
+func BenchmarkIC6(b *testing.B) { benchmarkQuery(b, "ic6.cypher") }
+func BenchmarkIC7(b *testing.B) { benchmarkQuery(b, "ic7.cypher") }
+func BenchmarkIC8(b *testing.B) { benchmarkQuery(b, "ic8.cypher") }

@@ -1,0 +1,102 @@
+[
+  {
+    "name": "no_label_no_index",
+    "kind": 0,
+    "index_name": ""
+  },
+  {
+    "name": "label_only",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "label_hash",
+    "kind": 2,
+    "index_name": "hash_idx"
+  },
+  {
+    "name": "label_btree",
+    "kind": 3,
+    "index_name": "btree_idx"
+  },
+  {
+    "name": "eq_no_hash",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "range_no_btree",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "hash_no_label_id",
+    "kind": 2,
+    "index_name": "hash_idx"
+  },
+  {
+    "name": "both_hash_wins",
+    "kind": 2,
+    "index_name": "hash_idx"
+  },
+  {
+    "name": "btree_only_range",
+    "kind": 3,
+    "index_name": "btree_idx"
+  },
+  {
+    "name": "empty_both_indexes",
+    "kind": 0,
+    "index_name": ""
+  },
+  {
+    "name": "label_zero_nodes",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "hash_no_label",
+    "kind": 2,
+    "index_name": "hash_idx"
+  },
+  {
+    "name": "label_hash_eq_zero",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "label_btree_range_zero",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "large_label_hash_wins",
+    "kind": 2,
+    "index_name": "hash_idx"
+  },
+  {
+    "name": "large_label_btree_wins",
+    "kind": 3,
+    "index_name": "btree_idx"
+  },
+  {
+    "name": "large_label_no_index",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "full_input_no_index",
+    "kind": 1,
+    "index_name": ""
+  },
+  {
+    "name": "btree_no_hash_full_input",
+    "kind": 3,
+    "index_name": "btree_idx"
+  },
+  {
+    "name": "hash_no_btree_full_input",
+    "kind": 2,
+    "index_name": "hash_idx"
+  }
+]
