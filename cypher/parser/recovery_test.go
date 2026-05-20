@@ -55,7 +55,7 @@ func TestCascadingKeywordFloodCapped(t *testing.T) {
 
 // TestEmptyInputNoErrors verifies that an empty string is handled gracefully
 // and does not panic.
-func TestEmptyInputNoErrors(t *testing.T) {
+func TestEmptyInputNoErrors(_ *testing.T) {
 	// Empty input produces a parse error (missing expression) but must not panic.
 	_, _ = ParseStrict("")
 }
