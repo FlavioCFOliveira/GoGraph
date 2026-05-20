@@ -143,10 +143,12 @@ var grammarGapExact = [][2]string{
 	{"features/expressions/literals/Literals3.feature", "[12] Fail on an incomplete"},
 	{"features/expressions/literals/Literals3.feature", "[13] Fail on an hexadecimal literal containing a lower"},
 	{"features/expressions/literals/Literals3.feature", "[14] Fail on an hexadecimal literal containing a upper"},
-	// Single-quoted string with escape sequences that confuse the skip
-	// heuristic (no space in the string content, but the escapes cause the
-	// grammar to mis-tokenise):
-	{"features/expressions/literals/Literals6.feature", "[5] Return a single-quoted string with escaped"},
+	// Mixed-list scenario that embeds a capital-E, integer-mantissa, negative-
+	// exponent float literal (2E-01). The ANTLR grammar tokenises "2E" as an
+	// identifier and "-01" as a separate token, causing a spurious parse error.
+	// This grammar gap was previously masked by the single-quote-string skip;
+	// it is now explicit (resolved single-quote gap exposed it in v1.3.0).
+	{"features/expressions/literals/Literals7.feature", "[16] Return a list containing multiple mixed values"},
 }
 
 // reAngleBracket matches Scenario Outline placeholder tokens such as
@@ -156,6 +158,12 @@ var reAngleBracket = regexp.MustCompile(`<[a-zA-Z][a-zA-Z0-9_]*>`)
 // reSingleQuoteSpace matches a single-quoted string whose content contains at
 // least one space, e.g. 'The Matrix'. These confuse the grammar because the
 // lexer treats the first word as a char literal and the rest as identifiers.
+//
+// As of v1.3.0 the parser pre-processes single-quoted strings via
+// normalizeSingleQuotes so these scenarios are no longer skipped. The regex is
+// retained here for reference and in case the pre-processor is ever removed.
+//
+//nolint:unused // retained for documentation; normalizeSingleQuotes resolves the gap in v1.3.0
 var reSingleQuoteSpace = regexp.MustCompile(`'[^']*\s+[^']*'`)
 
 // reSingleQuoteTemporalArg matches a temporal function call (date, time,
@@ -170,6 +178,12 @@ var reSingleQuoteSpace = regexp.MustCompile(`'[^']*\s+[^']*'`)
 // The grammar tokenises the temporal string as a char literal followed by
 // arithmetic operators, causing a spurious parse error.  This is the same root
 // cause as [reSingleQuoteSpace] but without spaces in the string content.
+//
+// As of v1.3.0 the parser pre-processes single-quoted strings via
+// normalizeSingleQuotes so these scenarios are no longer skipped. Retained for
+// reference in case the pre-processor is ever removed.
+//
+//nolint:unused // retained for documentation; normalizeSingleQuotes resolves the gap in v1.3.0
 var reSingleQuoteTemporalArg = regexp.MustCompile(`(?i)(?:date|time|localtime|datetime|localdatetime|duration)(?:\.[a-zA-Z]+)?\s*\('[^']*(?:\d[-:]\d|\d\.\d)`)
 
 // reVarlenBound matches variable-length relationship patterns with explicit
@@ -221,10 +235,6 @@ func classifySkipByQuery(q string) SkipReason {
 	switch {
 	case reAngleBracket.MatchString(q):
 		return SkipPlaceholder
-	case reSingleQuoteSpace.MatchString(q):
-		return SkipSingleQuoteString
-	case reSingleQuoteTemporalArg.MatchString(q):
-		return SkipSingleQuoteString
 	case reVarlenBound.MatchString(q):
 		return SkipVarlenExplicitBound
 	case reVarlenDotDot.MatchString(q):

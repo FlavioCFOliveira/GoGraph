@@ -132,6 +132,8 @@ func tokenName(t int, litNames, symNames []string) string {
 //   - [*ParseError] — syntax error from the ANTLR lexer/parser.
 //   - [*SemaError]  — unsupported grammar rule encountered during tree walking.
 func Parse(query string) (ast.Query, error) {
+	query = normalizeSingleQuotes(query)
+
 	// Lex.
 	lexErrListener := &errorListener{}
 	input := antlr.NewInputStream(query)
@@ -189,6 +191,8 @@ func Parse(query string) (ast.Query, error) {
 //   - One or more [*ParseError] — syntax errors from lexer/parser.
 //   - A single [*SemaError] — unsupported grammar rule or structural violation.
 func ParseStrict(query string) (ast.Query, []error) {
+	query = normalizeSingleQuotes(query)
+
 	// Lex.
 	lexErrListener := &errorListener{}
 	input := antlr.NewInputStream(query)
