@@ -5,13 +5,16 @@
 //
 // # Scope
 //
-// The runner covers all 220 feature files (1 615 scenarios total) from the
-// openCypher TCK corpus (opencypher/openCypher@main, retrieved 2026-05-20).
-// Of these, 523 scenarios are excluded from the pass-rate gate because they
-// exercise grammar features not yet supported by the antlr/grammars-v4 grammar
-// pinned at commit 284602b. See [skipReason] for the full taxonomy.
+// The runner covers all 220 feature files from the openCypher TCK corpus
+// (opencypher/openCypher@main, retrieved 2026-05-20). Raw scenario count
+// before expansion is 1 615. After [parseFeatureFile] expands Scenario
+// Outline blocks by substituting each Examples table row, the effective
+// corpus grows to 3 897 scenarios. Of these, 914 are excluded from the
+// pass-rate gate because they exercise grammar features not yet supported
+// by the antlr/grammars-v4 grammar pinned at commit 284602b. See
+// [SkipReason] for the full taxonomy.
 //
-// The 1 092 remaining scenarios must pass at 100 %. A regression drops the
+// The 2 983 remaining scenarios must pass at 100 %. A regression drops the
 // pass rate below 100 % and causes [TestTCKParserOnly] to fail, blocking CI.
 //
 // # Concurrency

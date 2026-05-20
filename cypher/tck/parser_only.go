@@ -158,6 +158,20 @@ var reAngleBracket = regexp.MustCompile(`<[a-zA-Z][a-zA-Z0-9_]*>`)
 // lexer treats the first word as a char literal and the rest as identifiers.
 var reSingleQuoteSpace = regexp.MustCompile(`'[^']*\s+[^']*'`)
 
+// reSingleQuoteTemporalArg matches a temporal function call (date, time,
+// localtime, datetime, localdatetime, duration) whose first argument is a
+// single-quoted string containing a digit–hyphen–digit, digit–colon–digit, or
+// digit–dot–digit sequence. These patterns arise after Scenario Outline
+// expansion from rows like:
+//
+//	| '2015-07-21' |    →   RETURN date('2015-07-21') AS result
+//	| 'P5M1.5D'   |    →   RETURN duration('P5M1.5D') AS result
+//
+// The grammar tokenises the temporal string as a char literal followed by
+// arithmetic operators, causing a spurious parse error.  This is the same root
+// cause as [reSingleQuoteSpace] but without spaces in the string content.
+var reSingleQuoteTemporalArg = regexp.MustCompile(`(?i)(?:date|time|localtime|datetime|localdatetime|duration)(?:\.[a-zA-Z]+)?\s*\('[^']*(?:\d[-:]\d|\d\.\d)`)
+
 // reVarlenBound matches variable-length relationship patterns with explicit
 // numeric bounds: -[:T*2]-> or -[:T*1..3]-> or -[*2]->.
 var reVarlenBound = regexp.MustCompile(`\[[\w:]*\*(?:\d|\.\.\d)`)
@@ -209,6 +223,8 @@ func classifySkipByQuery(q string) SkipReason {
 		return SkipPlaceholder
 	case reSingleQuoteSpace.MatchString(q):
 		return SkipSingleQuoteString
+	case reSingleQuoteTemporalArg.MatchString(q):
+		return SkipSingleQuoteString
 	case reVarlenBound.MatchString(q):
 		return SkipVarlenExplicitBound
 	case reVarlenDotDot.MatchString(q):
@@ -250,7 +266,8 @@ func classifySkipByErrorType(s *Scenario) SkipReason {
 		if strings.Contains(n, "map containing key starting") ||
 			strings.Contains(n, "pattern in RETURN") ||
 			strings.Contains(n, "pattern in WITH") ||
-			strings.Contains(n, "pattern in right") {
+			strings.Contains(n, "pattern in right") ||
+			strings.Contains(n, "pattern predicates") {
 			return SkipGrammarGapLiteral
 		}
 	case "":
@@ -305,7 +322,7 @@ func LoadScenarios() ([]*Scenario, error) {
 //
 // All other lines are treated as scenario body prose and are consumed but
 // not interpreted.
-func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, error) { //nolint:gocyclo // Gherkin state machine: complexity is inherent to dispatching over four states × multiple line prefixes.
+func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, error) { //nolint:gocyclo // Gherkin state machine: complexity is inherent to dispatching over five states × multiple line prefixes, plus Scenario Outline expansion.
 	var out []*Scenario
 	var featureName string
 
@@ -315,6 +332,7 @@ func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, err
 		parserStateScenario                     // inside a scenario body
 		parserStateQueryOpen                    // seen "When executing query:", waiting for opening """
 		parserStateQuery                        // inside the triple-quoted query block
+		parserStateExamples                     // inside an Examples: table (Scenario Outline expansion)
 	)
 
 	cur := &Scenario{File: filePath}
@@ -322,12 +340,26 @@ func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, err
 	var queryBuf strings.Builder
 	var pendingTags []string
 
+	// Scenario Outline expansion state.
+	var isOutline bool            // true when cur belongs to a Scenario Outline block
+	var outlineTemplate *Scenario // non-nil while we are consuming an Examples table
+	var exampleHeaders []string   // column names from the Examples header row
+
+	// flush emits cur to out (for regular Scenario) or buffers it as outlineTemplate
+	// (for Scenario Outline).  It then resets cur and clears Outline state.
 	flush := func() {
 		if cur.Query != "" {
-			cur.SkipReason = classifySkip(cur)
-			out = append(out, cur)
+			if isOutline {
+				// Buffer the template for upcoming Examples: expansion.
+				outlineTemplate = cur
+			} else {
+				cur.SkipReason = classifySkip(cur)
+				out = append(out, cur)
+			}
 		}
 		cur = &Scenario{File: filePath, Feature: featureName}
+		isOutline = false
+		exampleHeaders = nil
 	}
 
 	for scanner.Scan() {
@@ -356,6 +388,55 @@ func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, err
 			// Strip the standard 6-space indentation used in TCK feature files.
 			queryBuf.WriteString(strings.TrimPrefix(raw, "      "))
 
+		case parserStateExamples:
+			switch {
+			case strings.HasPrefix(line, "|"):
+				// Table row — first row is the header, subsequent rows are data.
+				row := parseTableRow(line)
+				if exampleHeaders == nil {
+					exampleHeaders = row
+				} else if outlineTemplate != nil {
+					// Expand: substitute <column> placeholders and emit a concrete scenario.
+					q := substituteOutlineRow(outlineTemplate.Query, exampleHeaders, row)
+					sc := &Scenario{
+						File:            outlineTemplate.File,
+						Feature:         outlineTemplate.Feature,
+						Name:            outlineTemplate.Name,
+						Tags:            outlineTemplate.Tags,
+						SyntaxErrorType: outlineTemplate.SyntaxErrorType,
+						Query:           q,
+					}
+					sc.SkipReason = classifySkip(sc)
+					out = append(out, sc)
+				}
+
+			case strings.HasPrefix(line, "Scenario"):
+				// New scenario starts — flush outline template (already buffered) and
+				// transition to parserStateScenario.
+				outlineTemplate = nil
+				exampleHeaders = nil
+				// Reset cur for the new scenario.
+				cur = &Scenario{File: filePath, Feature: featureName}
+				isOutline = strings.HasPrefix(line, "Scenario Outline")
+				idx := strings.Index(line, ":")
+				if idx >= 0 {
+					cur.Name = strings.TrimSpace(line[idx+1:])
+				}
+				cur.Tags = pendingTags
+				pendingTags = nil
+				st = parserStateScenario
+
+			case line == "" || strings.HasPrefix(line, "#"):
+				// Blank lines and comments are allowed between table rows.
+
+			default:
+				// Any non-table, non-scenario line ends the Examples section.
+				// This handles a second Examples: block or other Gherkin keywords.
+				outlineTemplate = nil
+				exampleHeaders = nil
+				st = parserStateScenario
+			}
+
 		case parserStateTop, parserStateScenario:
 			switch {
 			case strings.HasPrefix(line, "Feature:"):
@@ -371,8 +452,9 @@ func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, err
 			case strings.HasPrefix(line, "Scenario"):
 				// Flush the previous scenario if any.
 				flush()
+				isOutline = strings.HasPrefix(line, "Scenario Outline")
 				st = parserStateScenario
-				// Extract scenario name: "Scenario: [N] …" or "Scenario Outline: …"
+				// Extract scenario name: "Scenario: [N] …" or "Scenario Outline: [N] …"
 				idx := strings.Index(line, ":")
 				if idx >= 0 {
 					cur.Name = strings.TrimSpace(line[idx+1:])
@@ -397,6 +479,13 @@ func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, err
 				if idx >= 0 {
 					cur.SyntaxErrorType = strings.TrimSpace(line[idx+1:])
 				}
+
+			case st == parserStateScenario && (line == "Examples:" || strings.HasPrefix(line, "Examples:")):
+				// Transition to Examples table parsing.  flush() buffers cur as the
+				// outline template (if isOutline) or discards it (if not).
+				flush()
+				st = parserStateExamples
+				exampleHeaders = nil
 			}
 		}
 	}
@@ -407,4 +496,34 @@ func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, err
 		return nil, errors.New("scanning " + filePath + ": " + err.Error())
 	}
 	return out, nil
+}
+
+// parseTableRow parses a Gherkin pipe-delimited table row into a slice of
+// trimmed cell strings.  Leading and trailing pipe characters are ignored.
+//
+// Example: "|  a.bool, a.num  |  b  |" → ["a.bool, a.num", "b"]
+func parseTableRow(line string) []string {
+	parts := strings.Split(line, "|")
+	// parts[0] is before the first pipe (whitespace), parts[len-1] after the last.
+	if len(parts) < 2 {
+		return nil
+	}
+	cells := make([]string, 0, len(parts)-2)
+	for _, p := range parts[1 : len(parts)-1] {
+		cells = append(cells, strings.TrimSpace(p))
+	}
+	return cells
+}
+
+// substituteOutlineRow replaces every <column> placeholder in query with the
+// corresponding value from the data row.  Columns and values are matched by
+// position; excess columns or values are silently ignored.
+func substituteOutlineRow(query string, headers, values []string) string {
+	q := query
+	for i, h := range headers {
+		if i < len(values) {
+			q = strings.ReplaceAll(q, "<"+h+">", values[i])
+		}
+	}
+	return q
 }
