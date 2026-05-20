@@ -103,6 +103,33 @@ release: ## Run goreleaser to publish a release for the current tag — requires
 	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed"; exit 1; }
 	GOVERSION=$$($(GO) version | awk '{print $$3}') goreleaser release --clean
 
+ANTLR_VERSION ?= 4.13.1
+ANTLR_JAR     ?= $(HOME)/.antlr/antlr-$(ANTLR_VERSION)-complete.jar
+JAVA          ?= java
+CYPHER_GRAMMAR_DIR := cypher/parser/grammar
+CYPHER_GEN_DIR     := cypher/parser/gen
+
+.PHONY: install-antlr
+install-antlr: ## Download the ANTLR $(ANTLR_VERSION) jar to ~/.antlr/ (requires curl + java)
+	bash scripts/install-antlr.sh $(ANTLR_VERSION)
+
+.PHONY: generate-cypher-parser
+generate-cypher-parser: ## Regenerate cypher/parser/gen/ from ANTLR grammar (requires java + ~/.antlr jar)
+	@test -f "$(ANTLR_JAR)" || { \
+	  echo "ANTLR jar not found at $(ANTLR_JAR)."; \
+	  echo "Run 'make install-antlr' first."; \
+	  exit 1; \
+	}
+	$(JAVA) -jar "$(ANTLR_JAR)" \
+	  -Dlanguage=Go \
+	  -package gen \
+	  -visitor \
+	  -o "$$(pwd)/$(CYPHER_GEN_DIR)" \
+	  "$$(pwd)/$(CYPHER_GRAMMAR_DIR)/CypherLexer.g4" \
+	  "$$(pwd)/$(CYPHER_GRAMMAR_DIR)/CypherParser.g4"
+	python3 scripts/fix-antlr-gen.py "$(CYPHER_GEN_DIR)/cypher_parser.go"
+	$(GO) vet ./$(CYPHER_GEN_DIR)/...
+
 .PHONY: clean
 clean: ## Remove build artefacts
 	rm -f $(COVER_PROFILE) coverage.html cover.out cover.lib.out
