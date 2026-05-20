@@ -83,7 +83,8 @@ type Expand struct {
 	// labels.  nil = no type filtering.
 	edgeTypeFilter map[uint64]string
 
-	inputCol int // column in the input row that carries the source NodeID
+	inputCol int   // column in the input row that carries the source NodeID
+	relCols  []int // input-row columns holding existing edge IDs; nil = no check
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -162,11 +163,20 @@ func (op *Expand) Next(out *Row) (bool, error) {
 		if err := op.ctx.Err(); err != nil {
 			return false, err
 		}
+		// tryFwdEdge returns (true, true) = emitted; (false, true) = skipped
+		// (filtered/morphism), retry; (_, false) = no more forward edges.
 		if emitted, ok := op.tryFwdEdge(out); ok {
-			return emitted, nil
+			if emitted {
+				return true, nil
+			}
+			continue // skip (filtered or morphism-rejected), try next edge
 		}
+		// tryRevEdge follows the same convention.
 		if emitted, ok := op.tryRevEdge(out); ok {
-			return emitted, nil
+			if emitted {
+				return true, nil
+			}
+			continue // skip reverse edge
 		}
 		done, err := op.advanceInput()
 		if err != nil {
@@ -196,6 +206,9 @@ func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
 	if !op.passesFilter(pos) {
 		return false, true // filtered out; caller retries
 	}
+	if !op.passesRelMorphism(int64(pos)) {
+		return false, true // cyphermorphism: duplicate edge; caller retries
+	}
 	op.buildRow(out, op.srcID, int64(pos), int64(dst))
 	op.incEmitCount()
 	return true, true
@@ -221,6 +234,9 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 		return false, true // skip; caller retries
 	}
 	syntheticID := int64(uint64(len(op.fwdEdges)) + pos)
+	if !op.passesRelMorphism(syntheticID) {
+		return false, true // cyphermorphism: duplicate edge; caller retries
+	}
 	op.buildRow(out, op.srcID, syntheticID, int64(dst))
 	op.incEmitCount()
 	return true, true
@@ -268,6 +284,26 @@ func (op *Expand) loadAdjacency(uid uint64) {
 	} else {
 		op.revStart, op.revEnd = 0, 0
 	}
+}
+
+// passesRelMorphism reports whether edgeID is absent from all cyphermorphism
+// columns of the current input row.  It returns true when relCols is nil
+// (no enforcement) or when edgeID does not match any existing column value.
+//
+// The check is O(len(relCols)) with no allocations.
+func (op *Expand) passesRelMorphism(edgeID int64) bool {
+	if len(op.relCols) == 0 {
+		return true
+	}
+	for _, col := range op.relCols {
+		if col < 0 || col >= len(op.inputRow) {
+			continue
+		}
+		if iv, ok := op.inputRow[col].(expr.IntegerValue); ok && int64(iv) == edgeID {
+			return false
+		}
+	}
+	return true
 }
 
 // passesFilter reports whether the edge at absolute position pos (in the
