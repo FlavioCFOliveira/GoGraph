@@ -1,0 +1,165 @@
+package packstream
+
+import "fmt"
+
+// Value is a sum type over all PackStream value kinds:
+//
+//	nil          → NULL
+//	bool         → Boolean
+//	int64        → Integer
+//	float64      → Float
+//	[]byte       → Bytes
+//	string       → String
+//	[]Value      → List
+//	map[string]Value → Map
+//	Struct       → Structure
+type Value = any
+
+// Struct represents a PackStream Structure with its tag byte and ordered fields.
+type Struct struct {
+	// Tag is the single-byte structure signature.
+	Tag byte
+	// Fields contains the structure's fields in declaration order.
+	Fields []Value
+}
+
+// WriteValue encodes v into the stream using the Encoder.
+// It dispatches on the concrete type of v.
+//
+//nolint:gocyclo // switch over PackStream's nine value kinds; complexity is irreducible.
+func (e *Encoder) WriteValue(v Value) error {
+	switch x := v.(type) {
+	case nil:
+		return e.WriteNull()
+	case bool:
+		return e.WriteBool(x)
+	case int64:
+		return e.WriteInt(x)
+	case int:
+		return e.WriteInt(int64(x))
+	case int32:
+		return e.WriteInt(int64(x))
+	case float64:
+		return e.WriteFloat(x)
+	case []byte:
+		return e.WriteBytes(x)
+	case string:
+		return e.WriteString(x)
+	case []Value:
+		if err := e.WriteListHeader(len(x)); err != nil {
+			return err
+		}
+		for _, item := range x {
+			if err := e.WriteValue(item); err != nil {
+				return err
+			}
+		}
+		return nil
+	case map[string]Value:
+		if err := e.WriteMapHeader(len(x)); err != nil {
+			return err
+		}
+		for k, val := range x {
+			if err := e.WriteString(k); err != nil {
+				return err
+			}
+			if err := e.WriteValue(val); err != nil {
+				return err
+			}
+		}
+		return nil
+	case Struct:
+		if err := e.WriteStructHeader(x.Tag, len(x.Fields)); err != nil {
+			return err
+		}
+		for _, f := range x.Fields {
+			if err := e.WriteValue(f); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("packstream: unsupported value type %T", v)
+	}
+}
+
+// ReadValue reads a single PackStream value from the stream, returning it as a
+// Go value. The concrete types returned are:
+//
+//	nil          → NULL
+//	bool         → Boolean
+//	int64        → Integer
+//	float64      → Float
+//	[]byte       → Bytes
+//	string       → String
+//	[]Value      → List
+//	map[string]Value → Map
+//	Struct       → Structure
+//
+//nolint:gocyclo // switch over PackStream's nine value kinds; complexity is irreducible.
+func (d *Decoder) ReadValue() (Value, error) {
+	t, err := d.PeekType()
+	if err != nil {
+		return nil, err
+	}
+	switch t {
+	case TypeNull:
+		return nil, d.ReadNull()
+	case TypeBool:
+		return d.ReadBool()
+	case TypeInt:
+		return d.ReadInt()
+	case TypeFloat:
+		return d.ReadFloat()
+	case TypeBytes:
+		return d.ReadBytes()
+	case TypeString:
+		return d.ReadString()
+	case TypeList:
+		n, err := d.ReadListHeader()
+		if err != nil {
+			return nil, err
+		}
+		items := make([]Value, n)
+		for i := range items {
+			items[i], err = d.ReadValue()
+			if err != nil {
+				return nil, err
+			}
+		}
+		return items, nil
+	case TypeMap:
+		n, err := d.ReadMapHeader()
+		if err != nil {
+			return nil, err
+		}
+		m := make(map[string]Value, n)
+		for range n {
+			k, err := d.ReadString()
+			if err != nil {
+				return nil, err
+			}
+			val, err := d.ReadValue()
+			if err != nil {
+				return nil, err
+			}
+			m[k] = val
+		}
+		return m, nil
+	case TypeStruct:
+		tag, n, err := d.ReadStructHeader()
+		if err != nil {
+			return nil, err
+		}
+		fields := make([]Value, n)
+		for i := range fields {
+			fields[i], err = d.ReadValue()
+			if err != nil {
+				return nil, err
+			}
+		}
+		return Struct{Tag: tag, Fields: fields}, nil
+	default:
+		return nil, fmt.Errorf("packstream: unknown type %v", t)
+	}
+}
