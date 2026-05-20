@@ -40,6 +40,7 @@ import (
 	"gograph/cypher/funcs"
 	"gograph/cypher/ir"
 	"gograph/cypher/parser"
+	"gograph/cypher/procs"
 	"gograph/cypher/sema"
 	"gograph/graph"
 	"gograph/graph/index"
@@ -58,6 +59,7 @@ type Engine struct {
 	g             *lpg.Graph[string, float64]
 	reg           expr.FunctionRegistry
 	constraintReg *exec.ConstraintRegistry
+	procReg       *procs.Registry
 	cache         sync.Map // map[string]ir.LogicalPlan
 }
 
@@ -68,11 +70,16 @@ type Engine struct {
 // so that DDL statements (CREATE INDEX / DROP INDEX) work out of the box.
 func NewEngine(g *lpg.Graph[string, float64]) *Engine {
 	ensureIndexManager(g)
-	return &Engine{
+	e := &Engine{
 		g:             g,
 		reg:           funcs.DefaultRegistry,
 		constraintReg: exec.NewConstraintRegistry(),
+		procReg:       procs.NewRegistry(),
 	}
+	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
+		return e.constraintReg.ListConstraintRows()
+	})
+	return e
 }
 
 // NewEngineWithRegistry creates an Engine backed by g using a custom function
@@ -81,11 +88,16 @@ func NewEngine(g *lpg.Graph[string, float64]) *Engine {
 // If g has no [index.Manager] attached yet, a new empty one is installed.
 func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegistry) *Engine {
 	ensureIndexManager(g)
-	return &Engine{
+	e := &Engine{
 		g:             g,
 		reg:           reg,
 		constraintReg: exec.NewConstraintRegistry(),
+		procReg:       procs.NewRegistry(),
 	}
+	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
+		return e.constraintReg.ListConstraintRows()
+	})
+	return e
 }
 
 // ensureIndexManager installs a new empty index.Manager on g when none is
@@ -125,7 +137,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// ── 2. Build physical operator tree ─────────────────────────────────────
 	walker := &lpgNodeWalker{g: e.g}
 	labelSrc := &lpgLabelResolver{g: e.g}
-	op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager())
+	op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager(), e.procReg)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
@@ -659,7 +671,9 @@ func buildOperatorWrite(
 
 	default:
 		// Fall through to the read-operator builder.
-		return buildOperator(plan, walker, labelSrc, reg, params, schema, nil)
+		// procReg is nil here because buildOperatorWrite is only called from the
+		// write path (buildPlanWithMutatorFull) which does not thread procReg.
+		return buildOperator(plan, walker, labelSrc, reg, params, schema, idxMgr, nil)
 	}
 }
 
@@ -738,7 +752,7 @@ func BuildPlan(
 
 	// schema maps variable name → column index in the current row.
 	schema := make(map[string]int)
-	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, nil)
+	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -773,8 +787,9 @@ func BuildPlan(
 }
 
 // buildPlanEngine is the Engine-internal variant of BuildPlan that threads the
-// index manager through so that NodeByIndexSeek IR nodes can be resolved at
-// build time. idxMgr may be nil (no index support).
+// index manager and procedure registry through so that NodeByIndexSeek and
+// ProcedureCall IR nodes can be resolved at build time. idxMgr and procReg
+// may both be nil.
 func buildPlanEngine(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -782,14 +797,25 @@ func buildPlanEngine(
 	reg expr.FunctionRegistry,
 	params map[string]expr.Value,
 	idxMgr *index.Manager,
+	procReg *procs.Registry,
 ) (op exec.Operator, cols []string, err error) {
+	// Standalone CALL (root is *ir.ProcedureCall): treat YieldVars as columns.
+	if p, ok := plan.(*ir.ProcedureCall); ok {
+		schema := make(map[string]int)
+		child, buildErr := buildOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if buildErr != nil {
+			return nil, nil, buildErr
+		}
+		return child, p.YieldVars, nil
+	}
+
 	pr, ok := plan.(*ir.ProduceResults)
 	if !ok {
 		return nil, nil, fmt.Errorf("cypher: plan root must be ProduceResults, got %T", plan)
 	}
 	cols = pr.Columns
 	schema := make(map[string]int)
-	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, idxMgr)
+	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -822,7 +848,9 @@ func buildPlanEngine(
 
 // buildOperator recursively converts an IR plan node to a physical operator.
 // schema accumulates variable→column-index bindings as operators are visited
-// top-down (left-to-right for children). idxMgr may be nil.
+// top-down (left-to-right for children). idxMgr and procReg may both be nil.
+//
+//nolint:gocyclo // large switch — one case per read IR node type; no hidden branches
 func buildOperator(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -831,6 +859,7 @@ func buildOperator(
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
+	procReg *procs.Registry,
 ) (exec.Operator, error) {
 	switch p := plan.(type) {
 
@@ -859,7 +888,7 @@ func buildOperator(
 				return op, nil
 			}
 		}
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 		if err != nil {
 			return nil, err
 		}
@@ -870,14 +899,14 @@ func buildOperator(
 		}), nil
 
 	case *ir.Projection:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 		if err != nil {
 			return nil, err
 		}
 		return buildIRProjection(p.Items, child, schema)
 
 	case *ir.Expand:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 		if err != nil {
 			return nil, err
 		}
@@ -892,7 +921,7 @@ func buildOperator(
 
 	case *ir.Apply:
 		// Build the outer plan first so its vars enter the schema.
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr)
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 		if err != nil {
 			return nil, err
 		}
@@ -900,15 +929,87 @@ func buildOperator(
 		// outer row so correlated inner scans can consume it. For non-correlated
 		// inner plans (independent scans) the arg is inert but required.
 		arg := exec.NewArgument()
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr)
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 		if err != nil {
 			return nil, err
 		}
 		return exec.NewApply(outer, inner, arg), nil
 
+	case *ir.ProcedureCall:
+		return buildProcedureCallOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+
 	default:
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
 	}
+}
+
+// buildProcedureCallOperator builds a ProcedureCallOp from an *ir.ProcedureCall node.
+// When procReg is nil, it falls back to an empty registry which will return
+// ErrProcNotFound at runtime.
+func buildProcedureCallOperator(
+	p *ir.ProcedureCall,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+) (exec.Operator, error) {
+	// Build child if present.
+	var child exec.Operator
+	if p.Child != nil {
+		var err error
+		child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Build argument evaluators from the schema. Argument strings are opaque
+	// variable references resolved via the current schema.
+	argEvals := make([]func(exec.Row) (expr.Value, error), len(p.Arguments))
+	for i, argStr := range p.Arguments {
+		if colIdx, ok := schema[argStr]; ok {
+			idx := colIdx
+			argEvals[i] = func(row exec.Row) (expr.Value, error) {
+				if idx < len(row) {
+					return row[idx], nil
+				}
+				return expr.Null, nil
+			}
+		} else {
+			argEvals[i] = func(_ exec.Row) (expr.Value, error) { return expr.Null, nil }
+		}
+	}
+
+	// Resolve effective registry (never nil at runtime to avoid nil deref).
+	effectiveProcReg := procReg
+	if effectiveProcReg == nil {
+		effectiveProcReg = procs.NewRegistry()
+	}
+
+	// Look up the procedure signature to determine YIELD columns.
+	entry, err := effectiveProcReg.Lookup(p.Namespace, p.Name)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: ProcedureCall %q: %w", p.Name, err)
+	}
+
+	// Determine yield variables: explicit YIELD wins; otherwise emit all output columns.
+	yieldVars := p.YieldVars
+	if len(yieldVars) == 0 {
+		yieldVars = make([]string, len(entry.Sig.Outputs))
+		for i, out := range entry.Sig.Outputs {
+			yieldVars[i] = out.Name
+		}
+	}
+
+	// Register output columns in the schema.
+	for _, v := range yieldVars {
+		schema[v] = len(schema)
+	}
+
+	return exec.NewProcedureCallOp(p.Namespace, p.Name, argEvals, yieldVars, child, effectiveProcReg), nil
 }
 
 // buildIndexSeekOperator builds an exec.NodeByIndexSeek from an IR NodeByIndexSeek node.
