@@ -46,11 +46,16 @@ func main() {
 	if err := os.MkdirAll(*flagOutDir, 0o750); err != nil { //nolint:gosec // owner-visible profile dir
 		log.Fatalf("mkdir out: %v", err)
 	}
-	log.Printf("soak: duration=%v readers=%d size=%d sample-interval=%v out=%s",
-		*flagDuration, *flagConcurrent, *flagSize, *flagSampleN, *flagOutDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), *flagDuration)
 	defer cancel()
+
+	if *flagCypherMode {
+		runCypherRW(ctx, *flagOutDir)
+		return
+	}
+	log.Printf("soak: duration=%v readers=%d size=%d sample-interval=%v out=%s",
+		*flagDuration, *flagConcurrent, *flagSize, *flagSampleN, *flagOutDir)
 
 	a := buildSeedGraph(*flagSize)
 	var snap atomic.Pointer[csr.CSR[int64]]
