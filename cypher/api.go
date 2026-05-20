@@ -62,7 +62,11 @@ type Engine struct {
 
 // NewEngine creates an Engine backed by g. The default built-in function
 // registry ([funcs.DefaultRegistry]) is used.
+//
+// If g has no [index.Manager] attached yet, NewEngine installs a new empty one
+// so that DDL statements (CREATE INDEX / DROP INDEX) work out of the box.
 func NewEngine(g *lpg.Graph[string, float64]) *Engine {
+	ensureIndexManager(g)
 	return &Engine{
 		g:   g,
 		reg: funcs.DefaultRegistry,
@@ -71,8 +75,19 @@ func NewEngine(g *lpg.Graph[string, float64]) *Engine {
 
 // NewEngineWithRegistry creates an Engine backed by g using a custom function
 // registry.
+//
+// If g has no [index.Manager] attached yet, a new empty one is installed.
 func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegistry) *Engine {
+	ensureIndexManager(g)
 	return &Engine{g: g, reg: reg}
+}
+
+// ensureIndexManager installs a new empty index.Manager on g when none is
+// present, so that DDL operators have a non-nil manager to work with.
+func ensureIndexManager(g *lpg.Graph[string, float64]) {
+	if g.IndexManager() == nil {
+		g.SetIndexManager(index.NewManager())
+	}
 }
 
 // Run executes query against the engine's graph and returns a streaming
@@ -83,6 +98,11 @@ func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegis
 //
 // Sprint 25 support: MATCH (full scan or label scan) + RETURN.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
+	// ── 0. DDL fast-path ─────────────────────────────────────────────────────
+	if ir.IsDDL(query) {
+		return e.runDDL(ctx, query)
+	}
+
 	// ── 1. Parse or retrieve from plan cache ─────────────────────────────────
 	plan, err := e.planFor(query)
 	if err != nil {
@@ -107,6 +127,47 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// ── 3. Wrap in streaming Result ──────────────────────────────────────────
 	rs := exec.Run(ctx, op, cols)
 	return &Result{rs: rs, cols: cols}, nil
+}
+
+// runDDL executes a DDL statement (CREATE INDEX / DROP INDEX / …) eagerly.
+// DDL operators emit no rows and are fully executed during runDDL — callers
+// receive errors immediately rather than lazily during Result.Next.
+func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
+	ddlPlan, err := ir.ParseDDL(query)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: DDL parse: %w", err)
+	}
+	idxMgr := e.g.IndexManager()
+	var op exec.Operator
+	switch p := ddlPlan.(type) {
+	case *ir.CreateIndex:
+		var kind exec.IndexKindExec
+		switch p.Type {
+		case ir.IndexTypeHash:
+			kind = exec.ExecIndexHash
+		case ir.IndexTypeBTree:
+			kind = exec.ExecIndexBTree
+		}
+		op = exec.NewCreateIndexOp(p.Name, kind, p.IfNotExists, idxMgr)
+	case *ir.DropIndex:
+		op = exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr)
+	default:
+		return nil, fmt.Errorf("cypher: unsupported DDL plan %T", ddlPlan)
+	}
+	// DDL operators emit zero rows; execute synchronously so errors surface at
+	// Run time rather than lazily during Result.Next.
+	if err := op.Init(ctx); err != nil {
+		return nil, fmt.Errorf("cypher: DDL init: %w", err)
+	}
+	var dummy exec.Row
+	if _, err := op.Next(&dummy); err != nil {
+		_ = op.Close()
+		return nil, err
+	}
+	if err := op.Close(); err != nil {
+		return nil, fmt.Errorf("cypher: DDL close: %w", err)
+	}
+	return &Result{rs: exec.Run(ctx, exec.NewArgument(), nil), cols: nil}, nil
 }
 
 // RunAny executes query with params expressed as map[string]any, automatically
@@ -1016,6 +1077,11 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 // RunInTx is safe for concurrent use (each call creates an independent
 // operator tree), subject to the single-writer constraint on write queries.
 func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
+	// DDL queries don't require a write transaction.
+	if ir.IsDDL(query) {
+		return e.runDDL(ctx, query)
+	}
+
 	plan, err := e.planFor(query)
 	if err != nil {
 		return nil, err

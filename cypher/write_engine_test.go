@@ -372,3 +372,150 @@ func TestRunInTx_CreateRelationship(t *testing.T) {
 		t.Errorf("expected at least 2 nodes, got %d", g.AdjList().Order())
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 294/295: CREATE INDEX / DROP INDEX DDL via Engine.Run
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCreateIndex_HashViaEngine(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+
+	res, err := eng.Run(context.Background(), "CREATE INDEX person_name FOR (n:Person) ON (n.name)", nil)
+	if err != nil {
+		t.Fatalf("CREATE INDEX error: %v", err)
+	}
+	defer res.Close()
+	for res.Next() {
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("iteration error: %v", err)
+	}
+
+	// Verify the index was registered in the manager.
+	mgr := g.IndexManager()
+	if mgr == nil {
+		t.Skip("graph has no index manager — skipping verification")
+	}
+	if _, err := mgr.GetIndex("person_name_hash"); err != nil {
+		// Try the auto-name fallback.
+		names := mgr.ListIndexes()
+		if len(names) == 0 {
+			t.Errorf("expected at least one index after CREATE INDEX, got none")
+		}
+	}
+}
+
+func TestCreateIndex_BTreeViaEngine(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+
+	q := `CREATE INDEX city_zip FOR (n:City) ON (n.zip) OPTIONS {indexType: 'btree'}`
+	res, err := eng.Run(context.Background(), q, nil)
+	if err != nil {
+		t.Fatalf("CREATE INDEX btree error: %v", err)
+	}
+	defer res.Close()
+	for res.Next() {
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("iteration error: %v", err)
+	}
+
+	mgr := g.IndexManager()
+	if mgr == nil {
+		t.Skip("no index manager")
+	}
+	sub, err := mgr.GetIndex("city_zip")
+	if err != nil {
+		t.Fatalf("index not found: %v", err)
+	}
+	if sub.Kind() != "btree" {
+		t.Errorf("expected btree, got %q", sub.Kind())
+	}
+}
+
+func TestCreateIndex_IfNotExists_Idempotent(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+
+	q := "CREATE INDEX my_idx FOR (n:T) ON (n.p)"
+	res, err := eng.Run(ctx, q, nil)
+	if err != nil {
+		t.Fatalf("first CREATE: %v", err)
+	}
+	drainResult(t, res)
+
+	// Second CREATE without IF NOT EXISTS should error.
+	_, err = eng.Run(ctx, q, nil)
+	if err == nil {
+		t.Fatal("expected error on duplicate CREATE INDEX without IF NOT EXISTS")
+	}
+
+	// With IF NOT EXISTS should succeed.
+	qIne := "CREATE INDEX IF NOT EXISTS my_idx FOR (n:T) ON (n.p)"
+	res2, err := eng.Run(ctx, qIne, nil)
+	if err != nil {
+		t.Fatalf("CREATE INDEX IF NOT EXISTS error: %v", err)
+	}
+	drainResult(t, res2)
+}
+
+func TestDropIndex_ViaEngine(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+
+	// Create first.
+	res, err := eng.Run(ctx, "CREATE INDEX drop_target FOR (n:T) ON (n.x)", nil)
+	if err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+	drainResult(t, res)
+
+	// Drop.
+	res2, err := eng.Run(ctx, "DROP INDEX drop_target", nil)
+	if err != nil {
+		t.Fatalf("DROP: %v", err)
+	}
+	drainResult(t, res2)
+
+	// Should be gone.
+	mgr := g.IndexManager()
+	if mgr != nil {
+		if _, err := mgr.GetIndex("drop_target"); err == nil {
+			t.Error("index still present after DROP INDEX")
+		}
+	}
+}
+
+func TestDropIndex_IfExists_Idempotent(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+
+	// Drop non-existent without IF EXISTS → error.
+	_, err := eng.Run(ctx, "DROP INDEX no_such", nil)
+	if err == nil {
+		t.Fatal("expected error for non-existent index without IF EXISTS")
+	}
+
+	// Drop non-existent with IF EXISTS → success.
+	res, err := eng.Run(ctx, "DROP INDEX no_such IF EXISTS", nil)
+	if err != nil {
+		t.Fatalf("DROP INDEX IF EXISTS error: %v", err)
+	}
+	drainResult(t, res)
+}
+
+// drainResult drains and closes a result, failing on error.
+func drainResult(t *testing.T, res *cypher.Result) {
+	t.Helper()
+	defer res.Close()
+	for res.Next() {
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("result error: %v", err)
+	}
+}
