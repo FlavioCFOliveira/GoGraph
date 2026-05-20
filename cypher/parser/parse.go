@@ -9,6 +9,12 @@ import (
 	"gograph/cypher/parser/gen"
 )
 
+// maxParseErrors is the maximum number of syntax errors collected per parse.
+// Once this cap is reached, additional errors are silently dropped. This
+// prevents cascading error floods on pathological input while still surfacing
+// the first meaningful errors to callers. See [errorListener.SyntaxError].
+const maxParseErrors = 5
+
 // errorListener collects ANTLR syntax errors and converts them to [ParseError]
 // values with enriched diagnostics: offending token text and the set of tokens
 // that were valid at the error position.
@@ -61,6 +67,12 @@ func (l *errorListener) SyntaxError(
 		}
 	}
 
+	// Drop errors beyond the cap to prevent cascading error floods on
+	// pathological input. The cap is intentionally low: callers rarely
+	// benefit from more than a handful of simultaneous syntax errors.
+	if len(l.errs) >= maxParseErrors {
+		return
+	}
 	l.errs = append(l.errs, pe)
 }
 
