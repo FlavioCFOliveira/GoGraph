@@ -45,6 +45,11 @@ jobs:
         run: go test ./...
       - name: Race
         run: go test -race ./...
+      - name: TCK conformance report
+        run: |
+          go test ./cypher/tck/... -run TestTCKReport -v -count=1 -timeout 60s 2>&1 | tee tck-report.txt
+          echo "## TCK Conformance Report" >> $GITHUB_STEP_SUMMARY
+          grep -E "total=|pass-rate|overall-rate" tck-report.txt >> $GITHUB_STEP_SUMMARY || true
 
   lint:
     name: golangci-lint

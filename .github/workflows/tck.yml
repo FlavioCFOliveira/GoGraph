@@ -1,0 +1,34 @@
+name: TCK Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * 1'  # weekly Monday 4am UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tck:
+    name: openCypher TCK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Parser-level conformance
+        run: go test ./cypher/tck/... -run 'TestTCKReport|TestTCKParserOnly' -v -count=1 -timeout 60s
+      - name: Conformance gate (≥90%)
+        run: |
+          RATE=$(go test ./cypher/tck/... -run TestTCKReport -v -count=1 2>&1 | grep -oP 'overall-rate=\K[0-9.]+')
+          echo "Overall pass rate: ${RATE}%"
+          python3 -c "import sys; rate=float('${RATE}'); sys.exit(0 if rate >= 90.0 else 1)"
