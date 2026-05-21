@@ -67,13 +67,20 @@ const (
 	//nolint:unused // retained for documentation; normalizeVarlenBounds resolves the gap in v1.4.0
 	SkipVarlenExplicitBound SkipReason = "varlen-explicit-bound"
 
-	// SkipVarlenDotDot excludes patterns that use the .. range syntax on a
-	// relationship type without the * operator, e.g. -[:T..]-> (missing *).
+	// SkipVarlenDotDot is retained for documentation. The skip condition was
+	// removed because normalizeVarlenDotDot in cypher/parser/normalize.go
+	// pre-processes [..], [N..], [..M], [N..M] patterns (without *) to their
+	// equivalent [*..], [*N..], [*..M], [*N..M] forms before lexing.
+	//
+	//nolint:unused // retained for documentation; normalizeVarlenDotDot resolves the gap
 	SkipVarlenDotDot SkipReason = "varlen-dotdot"
 
-	// SkipChainedWith excludes queries with two or more WITH clauses, e.g.
-	// MATCH (n) WITH n MATCH (m) WITH n, m RETURN n, m. The grammar only
-	// supports a single WITH per query chain.
+	// SkipChainedWith is retained for documentation. The skip condition was
+	// removed because MultiPartQ() in the generated parser was modified to
+	// consume readingStatement* segments interleaved with each WITH clause,
+	// enabling unlimited chaining of WITH clauses in a query.
+	//
+	//nolint:unused // retained for documentation; MultiPartQ modification resolves the gap
 	SkipChainedWith SkipReason = "chained-with"
 
 	// SkipNegHexOct excludes queries with negative hexadecimal or octal
@@ -81,13 +88,19 @@ const (
 	// minus applied directly to a hex/octal literal.
 	SkipNegHexOct SkipReason = "neg-hex-oct"
 
-	// SkipLeadingDotFloat excludes queries with floating-point literals whose
-	// integer part is absent, e.g. .5 or -.5.
+	// SkipLeadingDotFloat is retained for documentation. The skip condition was
+	// removed because .5, -.5, and similar leading-dot floats already parse
+	// correctly via the ANTLR grammar without preprocessing. The skip was
+	// overly conservative.
+	//
+	//nolint:unused // retained for documentation; leading-dot floats parse correctly without a skip
 	SkipLeadingDotFloat SkipReason = "leading-dot-float"
 
-	// SkipZeroDotFloat excludes queries with floating-point literals whose
-	// integer part is zero, e.g. 0.5. The lexer tokenises the leading 0 as an
-	// integer literal and the remaining .NNN as a separate (invalid) token.
+	// SkipZeroDotFloat is retained for documentation. The skip condition was
+	// removed because normalizeZeroDotFloat in cypher/parser/normalize.go
+	// pre-processes 0.NNN literals to .NNN before lexing, resolving the gap.
+	//
+	//nolint:unused // retained for documentation; normalizeZeroDotFloat resolves the gap
 	SkipZeroDotFloat SkipReason = "zero-dot-float"
 
 	// SkipDoubleNot excludes queries with double logical negation (NOT NOT …).
@@ -196,23 +209,29 @@ var reSingleQuoteTemporalArg = regexp.MustCompile(`(?i)(?:date|time|localtime|da
 //nolint:unused // retained for documentation
 var reVarlenBound = regexp.MustCompile(`\[[\w:]*\*(?:\d|\.\.\d)`)
 
-// reVarlenDotDot matches relationship patterns that use .. without the *
-// operator, e.g. -[:T..]-> (the * is missing).
+// reVarlenDotDot matched relationship patterns that use .. without the *
+// operator, e.g. -[:T..]-> (the * is missing). Retained for documentation;
+// normalizeVarlenDotDot resolves the gap.
+//
+//nolint:unused // retained for documentation
 var reVarlenDotDot = regexp.MustCompile(`\[[\w:]*\.\.[^\]]*\]`)
 
 // reNegHexOct matches a unary minus applied to a hex or octal literal,
 // e.g. -0x1A2B or -0o777.
 var reNegHexOct = regexp.MustCompile(`-0[xXoO]`)
 
-// reLeadingDotFloat matches a floating-point literal with no integer digits
-// before the decimal point, e.g. .5 or -.5. The negated class [^\w\]] avoids
-// matching a subscript-style ".5" inside a bracket expression such as n[.5] —
-// not a valid Cypher construct, but prevents false positives in heuristic
-// detection.  0-9 is omitted from the class because \w already covers it.
+// reLeadingDotFloat matched a floating-point literal with no integer digits
+// before the decimal point, e.g. .5 or -.5. Retained for documentation; the
+// skip case that used it was removed because the grammar handles leading-dot
+// floats correctly without preprocessing.
+//
+//nolint:unused // retained for documentation
 var reLeadingDotFloat = regexp.MustCompile(`(?:[^\w\]])\.\d`)
 
-// reZeroDotFloat matches a floating-point literal whose integer part is zero,
-// e.g. 0.5.
+// reZeroDotFloat matched a floating-point literal whose integer part is zero,
+// e.g. 0.5. Retained for documentation; normalizeZeroDotFloat resolves the gap.
+//
+//nolint:unused // retained for documentation
 var reZeroDotFloat = regexp.MustCompile(`\b0\.\d`)
 
 // reDoubleNot matches the double-negation pattern NOT NOT.
@@ -241,16 +260,8 @@ func classifySkipByQuery(q string) SkipReason {
 	switch {
 	case reAngleBracket.MatchString(q):
 		return SkipPlaceholder
-	case reVarlenDotDot.MatchString(q):
-		return SkipVarlenDotDot
-	case strings.Count(strings.ToUpper(q), "WITH") > 1:
-		return SkipChainedWith
 	case reNegHexOct.MatchString(q):
 		return SkipNegHexOct
-	case reLeadingDotFloat.MatchString(q):
-		return SkipLeadingDotFloat
-	case reZeroDotFloat.MatchString(q):
-		return SkipZeroDotFloat
 	case reDoubleNot.MatchString(q):
 		return SkipDoubleNot
 	case reCallNoParen.MatchString(q):
