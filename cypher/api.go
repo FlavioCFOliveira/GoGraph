@@ -257,6 +257,7 @@ func BindParams(params map[string]any) (map[string]expr.Value, error) {
 }
 
 // bindAny converts a single Go value to an expr.Value.
+// Numeric types (int*, uint*, float*) are handled by bindNumeric.
 func bindAny(v any) (expr.Value, error) {
 	if v == nil {
 		return expr.Null, nil
@@ -266,30 +267,6 @@ func bindAny(v any) (expr.Value, error) {
 		return t, nil
 	case bool:
 		return expr.BoolValue(t), nil
-	case int:
-		return expr.IntegerValue(int64(t)), nil
-	case int8:
-		return expr.IntegerValue(int64(t)), nil
-	case int16:
-		return expr.IntegerValue(int64(t)), nil
-	case int32:
-		return expr.IntegerValue(int64(t)), nil
-	case int64:
-		return expr.IntegerValue(t), nil
-	case uint:
-		return expr.IntegerValue(int64(t)), nil //nolint:gosec // intentional truncation documented
-	case uint8:
-		return expr.IntegerValue(int64(t)), nil
-	case uint16:
-		return expr.IntegerValue(int64(t)), nil
-	case uint32:
-		return expr.IntegerValue(int64(t)), nil
-	case uint64:
-		return expr.IntegerValue(int64(t)), nil //nolint:gosec // intentional truncation documented
-	case float32:
-		return expr.FloatValue(float64(t)), nil
-	case float64:
-		return expr.FloatValue(t), nil
 	case string:
 		return expr.StringValue(t), nil
 	case []any:
@@ -313,7 +290,43 @@ func bindAny(v any) (expr.Value, error) {
 		}
 		return m, nil
 	default:
+		if num, ok := bindNumeric(v); ok {
+			return num, nil
+		}
 		return nil, fmt.Errorf("unsupported parameter type %T", v)
+	}
+}
+
+// bindNumeric converts Go numeric primitives to expr.Value.
+// Returns (value, true) on match, (nil, false) if v is not a numeric type.
+func bindNumeric(v any) (expr.Value, bool) {
+	switch t := v.(type) {
+	case int:
+		return expr.IntegerValue(int64(t)), true
+	case int8:
+		return expr.IntegerValue(int64(t)), true
+	case int16:
+		return expr.IntegerValue(int64(t)), true
+	case int32:
+		return expr.IntegerValue(int64(t)), true
+	case int64:
+		return expr.IntegerValue(t), true
+	case uint:
+		return expr.IntegerValue(int64(t)), true //nolint:gosec // intentional truncation documented
+	case uint8:
+		return expr.IntegerValue(int64(t)), true
+	case uint16:
+		return expr.IntegerValue(int64(t)), true
+	case uint32:
+		return expr.IntegerValue(int64(t)), true
+	case uint64:
+		return expr.IntegerValue(int64(t)), true //nolint:gosec // intentional truncation documented
+	case float32:
+		return expr.FloatValue(float64(t)), true
+	case float64:
+		return expr.FloatValue(t), true
+	default:
+		return nil, false
 	}
 }
 
