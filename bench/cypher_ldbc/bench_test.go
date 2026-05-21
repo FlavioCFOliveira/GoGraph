@@ -22,6 +22,7 @@ import (
 
 	"gograph/cypher"
 	"gograph/graph/adjlist"
+	"gograph/graph/index"
 	"gograph/graph/lpg"
 )
 
@@ -46,6 +47,9 @@ func TestMain(m *testing.M) {
 			g.SetNodeLabel(key, "Company")
 		}
 	}
+	// Pre-install an index.Manager so that concurrent NewEngine calls in
+	// parallel sub-tests do not race on the first-time SetIndexManager write.
+	g.SetIndexManager(index.NewManager())
 	benchGraph = g
 	os.Exit(m.Run())
 }

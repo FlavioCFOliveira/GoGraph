@@ -235,11 +235,15 @@ func writeSoakArtefact(t *testing.T, dir string, snaps []soakSnapshot, baselineH
 		}
 	}()
 
-	fmt.Fprintf(f, "bolt soak 1024-conn / %v  successes=%d failures=%d baseline_heap=%d\n",
-		duration, successes, failures, baselineHeap)
+	if _, err := fmt.Fprintf(f, "bolt soak 1024-conn / %v  successes=%d failures=%d baseline_heap=%d\n",
+		duration, successes, failures, baselineHeap); err != nil {
+		t.Logf("soak_1024_4h: artefact write: %v", err)
+	}
 	for _, s := range snaps {
-		fmt.Fprintf(f, "  t=%-12v heap=%-12d goroutines=%d\n",
-			s.elapsed.Truncate(time.Second), s.heapAlloc, s.goroutines)
+		if _, err := fmt.Fprintf(f, "  t=%-12v heap=%-12d goroutines=%d\n",
+			s.elapsed.Truncate(time.Second), s.heapAlloc, s.goroutines); err != nil {
+			t.Logf("soak_1024_4h: artefact write snapshot: %v", err)
+		}
 	}
 	t.Logf("soak_1024_4h: artefact written to %s", path)
 }
