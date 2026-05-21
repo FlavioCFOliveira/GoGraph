@@ -531,10 +531,10 @@ func tokenise(s string) []string {
 		}
 	}
 	for _, r := range s {
-		switch {
-		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+		switch r {
+		case ' ', '\t', '\n', '\r':
 			flush()
-		case r == '(' || r == ')' || r == '{' || r == '}' || r == ':' || r == ',' || r == ';':
+		case '(', ')', '{', '}', ':', ',', ';':
 			flush()
 			tokens = append(tokens, string(r))
 		default:
