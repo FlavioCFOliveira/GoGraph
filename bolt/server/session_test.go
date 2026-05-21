@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"gograph/bolt/packstream"
 	"gograph/bolt/proto"
 	"gograph/cypher"
+	"gograph/cypher/expr"
 	"gograph/graph/adjlist"
 	"gograph/graph/lpg"
 )
@@ -472,5 +474,374 @@ func TestSession_Discard(t *testing.T) {
 	}
 	if sess.state != StateReady {
 		t.Fatalf("state after DISCARD: got %v, want READY", sess.state)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleLogon / handleLogoff
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSession_Logon_Success(t *testing.T) {
+	t.Parallel()
+	sess := newReadySession(t)
+
+	logon := &proto.Logon{
+		Auth: map[string]packstream.Value{
+			"scheme":      "none",
+			"principal":   "user",
+			"credentials": "",
+		},
+	}
+	msgs, err := sess.HandleMessage(context.Background(), logon)
+	if err != nil {
+		t.Fatalf("Logon: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Logon response count: %d", len(msgs))
+	}
+	if _, ok := msgs[0].(*proto.Success); !ok {
+		t.Fatalf("Logon response: %T, want *proto.Success", msgs[0])
+	}
+	if sess.state != StateReady {
+		t.Fatalf("state after Logon: %v, want READY", sess.state)
+	}
+}
+
+func TestSession_Logon_WrongState(t *testing.T) {
+	t.Parallel()
+	eng := newTestEngine(t)
+	sess := newSession(eng, NoAuthHandler{}, "")
+	// NEGOTIATION state — LOGON is illegal here.
+	logon := &proto.Logon{
+		Auth: map[string]packstream.Value{"scheme": "none"},
+	}
+	msgs, err := sess.HandleMessage(context.Background(), logon)
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	if _, ok := msgs[0].(*proto.Failure); !ok {
+		t.Fatalf("expected FAILURE, got %T", msgs[0])
+	}
+	if sess.state != StateFailed {
+		t.Fatalf("state: got %v, want FAILED", sess.state)
+	}
+}
+
+func TestSession_Logoff_Success(t *testing.T) {
+	t.Parallel()
+	sess := newReadySession(t)
+
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Logoff{})
+	if err != nil {
+		t.Fatalf("Logoff: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Logoff response count: %d", len(msgs))
+	}
+	if _, ok := msgs[0].(*proto.Success); !ok {
+		t.Fatalf("Logoff response: %T, want *proto.Success", msgs[0])
+	}
+	if sess.state != StateReady {
+		t.Fatalf("state after Logoff: %v, want READY", sess.state)
+	}
+}
+
+func TestSession_Logoff_WrongState(t *testing.T) {
+	t.Parallel()
+	eng := newTestEngine(t)
+	sess := newSession(eng, NoAuthHandler{}, "")
+	// NEGOTIATION — LOGOFF is illegal.
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Logoff{})
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	if _, ok := msgs[0].(*proto.Failure); !ok {
+		t.Fatalf("expected FAILURE, got %T", msgs[0])
+	}
+	if sess.state != StateFailed {
+		t.Fatalf("state: got %v, want FAILED", sess.state)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleGoodbye with active transaction
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSession_GoodbyeWithActiveTx(t *testing.T) {
+	t.Parallel()
+	sess := newReadySession(t)
+
+	// BEGIN to open a transaction.
+	if _, err := sess.HandleMessage(context.Background(), &proto.Begin{
+		Extra: map[string]interface{}{},
+	}); err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	if sess.state != StateTxReady {
+		t.Fatalf("state after BEGIN: %v", sess.state)
+	}
+
+	// GOODBYE — must rollback the tx and move to DEFUNCT.
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Goodbye{})
+	if err != nil {
+		t.Fatalf("GOODBYE: %v", err)
+	}
+	if msgs != nil {
+		t.Fatalf("GOODBYE should return nil, got %v", msgs)
+	}
+	if sess.state != StateDefunct {
+		t.Fatalf("state after GOODBYE: %v, want DEFUNCT", sess.state)
+	}
+	if sess.tx != nil {
+		t.Fatal("tx should be nil after GOODBYE")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleReset from DEFUNCT state
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSession_ResetFromDefunct(t *testing.T) {
+	t.Parallel()
+	eng := newTestEngine(t)
+	sess := newSession(eng, NoAuthHandler{}, "")
+	sess.state = StateDefunct
+
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Reset{})
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	if _, ok := msgs[0].(*proto.Failure); !ok {
+		t.Fatalf("expected FAILURE, got %T", msgs[0])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleRun from illegal state
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSession_RunFromStreaming(t *testing.T) {
+	t.Parallel()
+	sess := newReadySession(t)
+
+	// RUN → STREAMING
+	if _, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query: "MATCH (n) RETURN n",
+		Extra: map[string]interface{}{},
+	}); err != nil {
+		t.Fatalf("first RUN: %v", err)
+	}
+	if sess.state != StateStreaming {
+		t.Fatalf("state after RUN: %v", sess.state)
+	}
+
+	// Second RUN from STREAMING — illegal.
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query: "MATCH (n) RETURN n",
+		Extra: map[string]interface{}{},
+	})
+	if err != nil {
+		t.Fatalf("second RUN: %v", err)
+	}
+	if _, ok := msgs[0].(*proto.Failure); !ok {
+		t.Fatalf("expected FAILURE, got %T", msgs[0])
+	}
+	if sess.state != StateFailed {
+		t.Fatalf("state: got %v, want FAILED", sess.state)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleRun with statement timeout metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSession_RunWithTimeout(t *testing.T) {
+	t.Parallel()
+	sess := newReadySession(t)
+
+	// Set a 10-second timeout in RUN Extra metadata.
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query: "MATCH (n) RETURN n",
+		Extra: map[string]interface{}{"timeout": int64(10000)},
+	})
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("RUN response count: %d", len(msgs))
+	}
+	if _, ok := msgs[0].(*proto.Success); !ok {
+		t.Fatalf("expected SUCCESS, got %T", msgs[0])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handleBegin from non-READY state
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSession_BeginFromStreaming(t *testing.T) {
+	t.Parallel()
+	sess := newReadySession(t)
+
+	// RUN → STREAMING
+	if _, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query: "MATCH (n) RETURN n",
+		Extra: map[string]interface{}{},
+	}); err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+
+	// BEGIN from STREAMING — illegal.
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Begin{
+		Extra: map[string]interface{}{},
+	})
+	if err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	if _, ok := msgs[0].(*proto.Failure); !ok {
+		t.Fatalf("expected FAILURE, got %T", msgs[0])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// authErrorCode
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestAuthErrorCode_SchemeUnknown(t *testing.T) {
+	code := authErrorCode(ErrSchemeUnknown)
+	if code != "Neo.ClientError.Security.AuthProviderFailed" {
+		t.Errorf("got %q, want Neo.ClientError.Security.AuthProviderFailed", code)
+	}
+}
+
+func TestAuthErrorCode_Default(t *testing.T) {
+	code := authErrorCode(errors.New("some auth error"))
+	if code != "Neo.ClientError.Security.Unauthorized" {
+		t.Errorf("got %q, want Neo.ClientError.Security.Unauthorized", code)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// exprToPackstream and exprValueToPackstream
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestExprToPackstream_Primitives(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want packstream.Value
+	}{
+		{"nil", nil, nil},
+		{"int64", int64(42), int64(42)},
+		{"float64", float64(3.14), float64(3.14)},
+		{"bool", true, true},
+		{"string", "hello", "hello"},
+		{"default", struct{}{}, "{}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exprToPackstream(tc.in)
+			if tc.name == "default" {
+				// Default case converts to fmt.Sprintf("%v", v).
+				if _, ok := got.(string); !ok {
+					t.Fatalf("expected string, got %T", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("want %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestExprValueToPackstream_NodeValue(t *testing.T) {
+	nv := expr.NodeValue{
+		ID:     42,
+		Labels: []string{"Person"},
+		Properties: expr.MapValue{
+			"name": expr.StringValue("Alice"),
+		},
+	}
+	got := exprValueToPackstream(nv)
+	m, ok := got.(map[string]packstream.Value)
+	if !ok {
+		t.Fatalf("expected map, got %T", got)
+	}
+	if m["id"] != int64(42) {
+		t.Errorf("id: got %v", m["id"])
+	}
+	labels, ok := m["labels"].([]packstream.Value)
+	if !ok || len(labels) != 1 {
+		t.Errorf("labels: got %v", m["labels"])
+	}
+}
+
+func TestExprValueToPackstream_RelationshipValue(t *testing.T) {
+	rv := expr.RelationshipValue{
+		ID:      10,
+		StartID: 1,
+		EndID:   2,
+		Type:    "KNOWS",
+		Properties: expr.MapValue{
+			"since": expr.IntegerValue(2020),
+		},
+	}
+	got := exprValueToPackstream(rv)
+	m, ok := got.(map[string]packstream.Value)
+	if !ok {
+		t.Fatalf("expected map, got %T", got)
+	}
+	if m["id"] != int64(10) {
+		t.Errorf("id: got %v", m["id"])
+	}
+	if m["type"] != "KNOWS" {
+		t.Errorf("type: got %v", m["type"])
+	}
+}
+
+func TestExprValueToPackstream_PathValue(t *testing.T) {
+	n1 := expr.NodeValue{ID: 1, Labels: []string{"A"}, Properties: expr.MapValue{}}
+	n2 := expr.NodeValue{ID: 2, Labels: []string{"B"}, Properties: expr.MapValue{}}
+	r1 := expr.RelationshipValue{ID: 5, StartID: 1, EndID: 2, Type: "REL", Properties: expr.MapValue{}}
+	pv := expr.PathValue{
+		Nodes:         []expr.NodeValue{n1, n2},
+		Relationships: []expr.RelationshipValue{r1},
+	}
+	got := exprValueToPackstream(pv)
+	m, ok := got.(map[string]packstream.Value)
+	if !ok {
+		t.Fatalf("expected map, got %T", got)
+	}
+	nodes, ok := m["nodes"].([]packstream.Value)
+	if !ok || len(nodes) != 2 {
+		t.Errorf("nodes: got %v", m["nodes"])
+	}
+	rels, ok := m["relationships"].([]packstream.Value)
+	if !ok || len(rels) != 1 {
+		t.Errorf("relationships: got %v", m["relationships"])
+	}
+}
+
+func TestExprValueToPackstream_MapValue(t *testing.T) {
+	mv := expr.MapValue{
+		"x": expr.IntegerValue(99),
+		"y": expr.StringValue("z"),
+	}
+	got := exprValueToPackstream(mv)
+	m, ok := got.(map[string]packstream.Value)
+	if !ok {
+		t.Fatalf("expected map, got %T", got)
+	}
+	if len(m) != 2 {
+		t.Errorf("map len: got %d, want 2", len(m))
+	}
+}
+
+func TestExprValueToPackstream_Null(t *testing.T) {
+	// Passing the typed nil expr.Null value should return nil.
+	got := exprValueToPackstream(nil)
+	if got != nil {
+		t.Errorf("expected nil, got %v", got)
 	}
 }
