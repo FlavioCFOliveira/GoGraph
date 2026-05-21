@@ -1,0 +1,1 @@
+MATCH (n) WHERE n.active = true RETURN n

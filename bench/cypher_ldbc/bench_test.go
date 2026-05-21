@@ -111,7 +111,7 @@ func benchmarkQuery(b *testing.B, queryFile string) {
 	}
 }
 
-// TestCypherLDBC_AllQueriesRun is a smoke test that verifies all 8 IC query
+// TestCypherLDBC_AllQueriesRun is a smoke test that verifies all 14 IC query
 // files parse and execute without error. This test is always included in
 // the CI run (no -bench flag required).
 func TestCypherLDBC_AllQueriesRun(t *testing.T) {
@@ -127,6 +127,12 @@ func TestCypherLDBC_AllQueriesRun(t *testing.T) {
 		{"ic6.cypher", true},
 		{"ic7.cypher", false},
 		{"ic8.cypher", true},
+		{"ic9.cypher", false},
+		{"ic10.cypher", false},
+		{"ic11.cypher", false},
+		{"ic12.cypher", true},
+		{"ic13.cypher", true},
+		{"ic14.cypher", false},
 	}
 
 	ctx := context.Background()
@@ -173,11 +179,87 @@ func TestCypherLDBC_AllQueriesRun(t *testing.T) {
 	}
 }
 
-func BenchmarkIC1(b *testing.B) { benchmarkQuery(b, "ic1.cypher") }
-func BenchmarkIC2(b *testing.B) { benchmarkQuery(b, "ic2.cypher") }
-func BenchmarkIC3(b *testing.B) { benchmarkQuery(b, "ic3.cypher") }
-func BenchmarkIC4(b *testing.B) { benchmarkQuery(b, "ic4.cypher") }
-func BenchmarkIC5(b *testing.B) { benchmarkQuery(b, "ic5.cypher") }
-func BenchmarkIC6(b *testing.B) { benchmarkQuery(b, "ic6.cypher") }
-func BenchmarkIC7(b *testing.B) { benchmarkQuery(b, "ic7.cypher") }
-func BenchmarkIC8(b *testing.B) { benchmarkQuery(b, "ic8.cypher") }
+func BenchmarkIC1(b *testing.B)  { benchmarkQuery(b, "ic1.cypher") }
+func BenchmarkIC2(b *testing.B)  { benchmarkQuery(b, "ic2.cypher") }
+func BenchmarkIC3(b *testing.B)  { benchmarkQuery(b, "ic3.cypher") }
+func BenchmarkIC4(b *testing.B)  { benchmarkQuery(b, "ic4.cypher") }
+func BenchmarkIC5(b *testing.B)  { benchmarkQuery(b, "ic5.cypher") }
+func BenchmarkIC6(b *testing.B)  { benchmarkQuery(b, "ic6.cypher") }
+func BenchmarkIC7(b *testing.B)  { benchmarkQuery(b, "ic7.cypher") }
+func BenchmarkIC8(b *testing.B)  { benchmarkQuery(b, "ic8.cypher") }
+func BenchmarkIC9(b *testing.B)  { benchmarkQuery(b, "ic9.cypher") }
+func BenchmarkIC10(b *testing.B) { benchmarkQuery(b, "ic10.cypher") }
+func BenchmarkIC11(b *testing.B) { benchmarkQuery(b, "ic11.cypher") }
+func BenchmarkIC12(b *testing.B) { benchmarkQuery(b, "ic12.cypher") }
+func BenchmarkIC13(b *testing.B) { benchmarkQuery(b, "ic13.cypher") }
+func BenchmarkIC14(b *testing.B) { benchmarkQuery(b, "ic14.cypher") }
+
+// BenchmarkIC1_Parallel measures IC1 throughput across GOMAXPROCS goroutines.
+// IC1 is the broadest read query (all nodes); it exercises the full scan path
+// under concurrent load.
+func BenchmarkIC1_Parallel(b *testing.B) {
+	engine := cypher.NewEngine(benchGraph)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			res, err := engine.Run(ctx, "MATCH (n) RETURN n", nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for res.Next() {
+			}
+			if e := res.Err(); e != nil {
+				b.Fatal(e)
+			}
+			_ = res.Close()
+		}
+	})
+}
+
+// BenchmarkIC2_Parallel measures IC2 throughput (Person label scan) under
+// concurrent load. IC2 exercises label-filtered node iteration.
+func BenchmarkIC2_Parallel(b *testing.B) {
+	engine := cypher.NewEngine(benchGraph)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			res, err := engine.Run(ctx, "MATCH (n:Person) RETURN n", nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for res.Next() {
+			}
+			if e := res.Err(); e != nil {
+				b.Fatal(e)
+			}
+			_ = res.Close()
+		}
+	})
+}
+
+// BenchmarkIC9_Parallel measures IC9 throughput (Person nodes with IS NOT NULL
+// property filter) under concurrent load.
+func BenchmarkIC9_Parallel(b *testing.B) {
+	engine := cypher.NewEngine(benchGraph)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			res, err := engine.Run(ctx, "MATCH (n:Person) WHERE n.age IS NOT NULL RETURN n", nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for res.Next() {
+			}
+			if e := res.Err(); e != nil {
+				b.Fatal(e)
+			}
+			_ = res.Close()
+		}
+	})
+}

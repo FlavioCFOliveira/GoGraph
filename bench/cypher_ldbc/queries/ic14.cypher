@@ -1,0 +1,1 @@
+MATCH (n:Company) RETURN n

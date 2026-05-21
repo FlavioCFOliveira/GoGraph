@@ -1,0 +1,1 @@
+MERGE (n:Person {name: 'Bob'})
