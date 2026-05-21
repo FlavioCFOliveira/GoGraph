@@ -62,10 +62,17 @@ func (t *translator) createPathPattern(pp *ast.PathPattern, child LogicalPlan) (
 }
 
 // createNode emits a CreateNode operator for the given NodePattern.
+//
+// Anonymous nodes (no variable in the pattern) receive a synthetic internal
+// variable name of the form "__anon_N" so that downstream CreateRelationship
+// operators can resolve their endpoint columns from the schema.
 func (t *translator) createNode(np *ast.NodePattern, child LogicalPlan) LogicalPlan {
 	nodeVar := ""
 	if np.Variable != nil {
 		nodeVar = *np.Variable
+	}
+	if nodeVar == "" {
+		nodeVar = t.freshAnonVar()
 	}
 	labels := make([]string, len(np.Labels))
 	copy(labels, np.Labels)
@@ -79,12 +86,13 @@ func (t *translator) createNode(np *ast.NodePattern, child LogicalPlan) LogicalP
 // createRelationship emits CreateNode(destination) then CreateRelationship
 // linking the start-node variable (taken from the driving plan) to the new
 // destination node.
+//
+// Anonymous endpoints (no variable in the pattern) receive synthetic internal
+// names from [translator.createNode] so the executor can resolve them from the
+// schema. The end-var is read from the destination node plan after construction
+// to ensure the synthetic name is consistent.
 func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan) LogicalPlan {
 	startVar := firstVar(child)
-	endVar := ""
-	if to.Variable != nil {
-		endVar = *to.Variable
-	}
 	relVar := ""
 	if rp.Variable != nil {
 		relVar = *rp.Variable
@@ -97,8 +105,9 @@ func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.Nod
 	if rp.Properties != nil {
 		props = rp.Properties.String()
 	}
-	// Create destination node first, then the relationship.
+	// Create destination node first; its var (real or synthetic) becomes endVar.
 	nodePlan := t.createNode(to, child)
+	endVar := firstVar(nodePlan) // picks up synthetic __anon_N for anonymous nodes
 	return NewCreateRelationship(startVar, endVar, relVar, relType, props, nodePlan)
 }
 

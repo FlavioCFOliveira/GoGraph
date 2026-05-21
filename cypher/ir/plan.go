@@ -796,6 +796,10 @@ func (e *Eager) Vars() []string { return e.Child.Vars() }
 type Unwind struct {
 	// ListExpression is the opaque string representation of the list expression.
 	ListExpression string
+	// ListExpr is the parsed AST for the list expression, when available. Nil
+	// means the expression could not be parsed; callers must fall back to a
+	// static empty list. The executor uses ListExpr when non-nil.
+	ListExpr ast.Expression
 	// ElementVar is the variable name bound to each list element.
 	ElementVar string
 	// Child is the subplan that provides the context rows. May be nil when
@@ -803,9 +807,15 @@ type Unwind struct {
 	Child LogicalPlan
 }
 
-// NewUnwind creates an Unwind operator.
+// NewUnwind creates an Unwind operator with a string-only list expression.
 func NewUnwind(listExpression, elementVar string, child LogicalPlan) *Unwind {
 	return &Unwind{ListExpression: listExpression, ElementVar: elementVar, Child: child}
+}
+
+// NewUnwindExpr creates an Unwind operator with both the string and its parsed
+// AST. The executor uses ListExpr when non-nil, falling back to an empty list.
+func NewUnwindExpr(listExpression string, listExpr ast.Expression, elementVar string, child LogicalPlan) *Unwind {
+	return &Unwind{ListExpression: listExpression, ListExpr: listExpr, ElementVar: elementVar, Child: child}
 }
 
 // Children implements LogicalPlan. Returns [Child] when Child is non-nil,

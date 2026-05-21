@@ -21,9 +21,20 @@ func FromAST(q ast.Query) (LogicalPlan, error) {
 }
 
 // translator is an internal, single-use helper that threads the bottom-up plan
-// construction. It carries no mutable state; it exists only as a method receiver
-// for organisational clarity.
-type translator struct{}
+// construction. It carries an anonCounter for generating unique internal variable
+// names for anonymous nodes in CREATE patterns (e.g. CREATE ()-[:R]->()).
+type translator struct {
+	anonCounter int // monotonic counter for synthetic anonymous-node vars
+}
+
+// freshAnonVar returns a unique internal variable name for an anonymous node
+// created in a CREATE clause. The name is prefixed with "__anon_" to avoid
+// collisions with user-visible variable names.
+func (t *translator) freshAnonVar() string {
+	n := t.anonCounter
+	t.anonCounter++
+	return "__anon_" + strconv.Itoa(n)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Top-level query dispatch
@@ -145,7 +156,7 @@ func (t *translator) optionalMatchClause(m *ast.OptionalMatch, child LogicalPlan
 }
 
 func (t *translator) unwindClause(u *ast.Unwind, child LogicalPlan) (LogicalPlan, error) {
-	return NewUnwind(u.Expr.String(), u.Variable, child), nil
+	return NewUnwindExpr(u.Expr.String(), u.Expr, u.Variable, child), nil
 }
 
 func (t *translator) callClause(c *ast.Call, child LogicalPlan) (LogicalPlan, error) {
