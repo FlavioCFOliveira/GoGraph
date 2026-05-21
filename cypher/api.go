@@ -30,6 +30,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 
@@ -44,6 +45,7 @@ import (
 	"gograph/cypher/procs"
 	"gograph/cypher/sema"
 	"gograph/graph"
+	"gograph/graph/csr"
 	"gograph/graph/index"
 	"gograph/graph/lpg"
 	"gograph/store/txn"
@@ -990,6 +992,11 @@ func buildOperator(
 	idxMgr *index.Manager,
 	procReg *procs.Registry,
 ) (exec.Operator, error) {
+	if plan == nil {
+		// A nil read plan drives a single-row empty operator (e.g. bare RETURN
+		// without a preceding MATCH).
+		return exec.NewSingleRowOperator(), nil
+	}
 	switch p := plan.(type) {
 
 	case *ir.AllNodesScan:
@@ -1059,14 +1066,52 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		// Sprint 25 stub: add rel/destination vars as NULL-producing columns.
+
+		// Record the column index of the source var BEFORE we add new columns so
+		// that inputCol correctly points at the source node in the child row.
+		fromCol := 0
+		if col, ok := schema[p.FromVar]; ok {
+			fromCol = col
+		}
+
+		// Expand.buildRow emits: inputRow... || srcID || edgeID || dstID
+		// The srcID duplicate occupies one slot with no variable bound (the source
+		// is already in the schema via FromVar); RelVar maps to the edgeID slot;
+		// ToVar maps to the dstID slot.
+		//
+		// We advance the schema counter by 1 for the anonymous srcID slot, then
+		// assign RelVar and ToVar to the next two slots.
+		schemaBase := len(schema)
+		schema[p.FromVar+"__dup"] = schemaBase // srcID dup — anonymous internal slot
 		if p.RelVar != "" {
-			schema[p.RelVar] = len(schema)
+			schema[p.RelVar] = schemaBase + 1
 		}
 		if p.ToVar != "" {
-			schema[p.ToVar] = len(schema)
+			schema[p.ToVar] = schemaBase + 2
 		}
-		return child, nil
+
+		var g *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			g = lw.g
+		}
+		if g == nil {
+			// No graph available (e.g. schema-only planning) — return child with
+			// NULL columns so downstream projections can reference the vars.
+			return child, nil
+		}
+
+		fwd, rev := csrPairFromGraph(g)
+		dir := irDirToExec(p.Direction)
+
+		cfg := exec.ExpandConfig{
+			Direction: dir,
+			InputCol:  fromCol,
+		}
+		if len(p.RelTypes) > 0 {
+			cfg.EdgeType = p.RelTypes[0]
+			cfg.EdgeTypeFilter = buildEdgeTypeFilter(g, p.RelTypes)
+		}
+		return exec.NewExpand(child, fwd, rev, cfg), nil
 
 	case *ir.Apply:
 		// Build the outer plan first so its vars enter the schema.
@@ -1166,6 +1211,14 @@ func buildOperator(
 		}
 		return exec.NewSkip(child, p.Count)
 
+	case *ir.Unwind:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		schema[p.ElementVar] = len(schema)
+		return buildUnwindOperator(p, child, schema, walker, params, reg)
+
 	case *ir.Distinct:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 		if err != nil {
@@ -1174,22 +1227,101 @@ func buildOperator(
 		return exec.NewDistinct(child, 0), nil
 
 	case *ir.OptionalExpand:
-		// OptionalExpand requires CSR adjacency which is not threaded through
-		// buildOperator. Like *ir.Expand, we register the output variables and
-		// return the child operator with NULL-extended schema columns. A genuine
-		// NULL-padded implementation requires CSR access; this stub produces the
-		// correct output schema so downstream projections can reference the vars.
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 		if err != nil {
 			return nil, err
 		}
+
+		fromCol := 0
+		if col, ok := schema[p.FromVar]; ok {
+			fromCol = col
+		}
+
+		// Same output layout as Expand: inputRow... || srcID || edgeID || dstID
+		schemaBase := len(schema)
+		schema[p.FromVar+"__opt_dup"] = schemaBase // srcID dup — anonymous internal slot
+		if p.RelVar != "" {
+			schema[p.RelVar] = schemaBase + 1
+		}
+		if p.ToVar != "" {
+			schema[p.ToVar] = schemaBase + 2
+		}
+
+		var g *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			g = lw.g
+		}
+		if g == nil {
+			return child, nil
+		}
+
+		fwd, rev := csrPairFromGraph(g)
+		dir := irDirToExec(p.Direction)
+
+		cfg := exec.ExpandConfig{
+			Direction: dir,
+			InputCol:  fromCol,
+		}
+		if len(p.RelTypes) > 0 {
+			cfg.EdgeType = p.RelTypes[0]
+			cfg.EdgeTypeFilter = buildEdgeTypeFilter(g, p.RelTypes)
+		}
+		return exec.NewOptionalExpand(child, fwd, rev, cfg), nil
+
+	case *ir.VarLengthExpand:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+
+		fromCol := 0
+		if col, ok := schema[p.FromVar]; ok {
+			fromCol = col
+		}
+
+		// VarLengthExpand emits: inputRow... || pathEdgeList || dstNodeID
 		if p.RelVar != "" {
 			schema[p.RelVar] = len(schema)
 		}
 		if p.ToVar != "" {
 			schema[p.ToVar] = len(schema)
 		}
-		return child, nil
+
+		var g *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			g = lw.g
+		}
+		if g == nil {
+			return child, nil
+		}
+
+		fwd, rev := csrPairFromGraph(g)
+		dir := irDirToExec(p.Direction)
+		minHops := p.MinDepth
+		maxHops := p.MaxDepth
+		if maxHops == 0 {
+			// ir.VarLengthExpand.MaxDepth == 0 means "unbounded".
+			// exec.VarLengthConfig.MaxHops == 0 means "no expansion";
+			// use math.MaxInt as the practical unbounded sentinel.
+			maxHops = math.MaxInt
+		}
+
+		var etFilter map[uint64]string
+		edgeType := ""
+		if len(p.RelTypes) > 0 {
+			edgeType = p.RelTypes[0]
+			etFilter = buildEdgeTypeFilter(g, p.RelTypes)
+		}
+
+		cfg := exec.VarLengthConfig{
+			Direction:      dir,
+			EdgeType:       edgeType,
+			EdgeTypeFilter: etFilter,
+			InputCol:       fromCol,
+			MinHops:        minHops,
+			MaxHops:        maxHops,
+		}
+		return exec.NewVarLengthExpand(child, fwd, rev, cfg), nil
 
 	case *ir.ProcedureCall:
 		return buildProcedureCallOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg)
@@ -1676,6 +1808,58 @@ func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
 		}
 	}
 	return expr.Null
+}
+
+// buildUnwindOperator builds the physical Unwind operator from the IR node.
+//
+// When the IR carries a parsed AST expression (p.ListExpr != nil), it is
+// evaluated via [expr.Eval] against a row context derived from the current
+// schema snapshot. When the evaluated value is a [expr.ListValue] the
+// elements are expanded; when it is NULL or any non-list type no rows are
+// emitted (openCypher semantics). When p.ListExpr is nil (expression could not
+// be parsed), the operator always emits an empty expansion.
+func buildUnwindOperator(
+	p *ir.Unwind,
+	child exec.Operator,
+	schema map[string]int,
+	walker nodeWalkerIface,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+) (exec.Operator, error) {
+	if p.ListExpr == nil {
+		// No AST available — emit nothing for every input row.
+		return exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+			return nil, nil
+		}), nil
+	}
+
+	var g *lpg.Graph[string, float64]
+	if lw, ok := walker.(*lpgNodeWalker); ok {
+		g = lw.g
+	}
+
+	schemaSnap := copySchema(schema)
+	listExpr := p.ListExpr
+	capturedParams := params
+	capturedReg := reg
+	capturedG := g
+
+	return exec.NewUnwind(child, func(row exec.Row) (expr.ListValue, error) {
+		rowCtx := buildRowCtx(row, schemaSnap, capturedG)
+		v, err := expr.Eval(listExpr, rowCtx, capturedParams, capturedReg)
+		if err != nil {
+			return nil, err
+		}
+		if v == expr.Null || v == nil {
+			return nil, nil
+		}
+		lv, ok := v.(expr.ListValue)
+		if !ok {
+			// Per openCypher: UNWIND on a non-list scalar wraps it in a single-element list.
+			return expr.ListValue{v}, nil
+		}
+		return lv, nil
+	}), nil
 }
 
 // buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,
@@ -2297,6 +2481,85 @@ func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
 		return fn(id)
 	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CSR helpers for expand operators
+// ─────────────────────────────────────────────────────────────────────────────
+
+// csrPairFromGraph builds a forward and a reverse CSR snapshot from the LPG
+// adjacency list.  Both snapshots are constructed in O(V+E) time and are safe
+// for lock-free concurrent reads after construction.
+func csrPairFromGraph(g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]) {
+	adj := g.AdjList()
+	fwd = csr.BuildFromAdjList(adj)
+	rev = fwd.BuildReverse()
+	return
+}
+
+// buildEdgeTypeFilter constructs an edge-type filter map for the forward CSR
+// of g.  The map key is the edge's absolute position in the CSR's EdgesSlice;
+// the value is the first label attached to that edge in the LPG.
+//
+// When relTypes is non-empty only edges whose first label matches one of the
+// listed types are included; all others are omitted from the map.  An empty
+// relTypes slice means "accept all edge types" — the returned map still lists
+// every typed edge so callers can perform label-keyed filtering.
+//
+// O(V+E) time; allocates one map entry per labelled edge.
+func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[uint64]string {
+	adj := g.AdjList()
+	fwdCSR := csr.BuildFromAdjList(adj)
+	verts := fwdCSR.VerticesSlice()
+	edges := fwdCSR.EdgesSlice()
+	mapper := adj.Mapper()
+
+	// Pre-build a set of accepted types for O(1) lookup.
+	acceptAll := len(relTypes) == 0
+	accept := make(map[string]struct{}, len(relTypes))
+	for _, t := range relTypes {
+		accept[t] = struct{}{}
+	}
+
+	filter := make(map[uint64]string)
+	maxID := uint64(adj.MaxNodeID())
+	for srcID := uint64(0); srcID < maxID; srcID++ {
+		start := verts[srcID]
+		end := verts[srcID+1]
+		srcStr, ok := mapper.Resolve(graph.NodeID(srcID))
+		if !ok {
+			continue
+		}
+		for pos := start; pos < end; pos++ {
+			dstStr, ok := mapper.Resolve(edges[pos])
+			if !ok {
+				continue
+			}
+			labels := g.EdgeLabels(srcStr, dstStr)
+			if len(labels) == 0 {
+				continue
+			}
+			typ := labels[0]
+			if acceptAll {
+				filter[pos] = typ
+			} else if _, ok := accept[typ]; ok {
+				filter[pos] = typ
+			}
+		}
+	}
+	return filter
+}
+
+// irDirToExec converts an IR Direction to the corresponding exec Direction.
+func irDirToExec(d ir.Direction) exec.Direction {
+	switch d {
+	case ir.DirectionIncoming:
+		return exec.DirIn
+	case ir.DirectionBoth:
+		return exec.DirBoth
+	default:
+		return exec.DirOut
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

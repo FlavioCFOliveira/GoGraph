@@ -7,6 +7,7 @@ package cypher_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"gograph/cypher"
@@ -171,12 +172,12 @@ func TestEngine_Selection_PropertyFilter(t *testing.T) {
 // Expand — MATCH (n)-[r]->(m) RETURN n  (stub: row count == node count)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestEngine_Expand_Stub(t *testing.T) {
+func TestEngine_Expand_NoEdges(t *testing.T) {
+	// Graph with 3 nodes but no edges: MATCH (n)-[r]->(m) must return 0 rows.
 	const n = 3
 	g := newGraph(n)
 	eng := cypher.NewEngine(g)
 
-	// Sprint 25 Expand stub: passes through child rows unchanged.
 	res, err := eng.Run(context.Background(), "MATCH (n)-[r]->(m) RETURN n", nil)
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -190,9 +191,40 @@ func TestEngine_Expand_Stub(t *testing.T) {
 	if err := res.Err(); err != nil {
 		t.Fatalf("result error: %v", err)
 	}
-	// Stub passes all n rows through.
-	if count != n {
-		t.Errorf("expected %d rows (expand stub), got %d", n, count)
+	if count != 0 {
+		t.Errorf("expected 0 rows (no edges), got %d", count)
+	}
+}
+
+func TestEngine_Expand_WithEdges(t *testing.T) {
+	// Directed graph: A→B, A→C — MATCH (n)-[r]->(m) RETURN n,m must return 2 rows.
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g.AddEdge("A", "B", 1.0)
+	g.AddEdge("A", "C", 1.0)
+	eng := cypher.NewEngine(g)
+
+	res, err := eng.Run(context.Background(), "MATCH (n)-[r]->(m) RETURN n, m", nil)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	defer res.Close()
+
+	type pair struct{ n, m string }
+	var rows []pair
+	for res.Next() {
+		rec := res.Record()
+		nv := rec["n"]
+		mv := rec["m"]
+		rows = append(rows, pair{
+			n: fmt.Sprintf("%v", nv),
+			m: fmt.Sprintf("%v", mv),
+		})
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("result error: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 rows, got %d: %v", len(rows), rows)
 	}
 }
 
