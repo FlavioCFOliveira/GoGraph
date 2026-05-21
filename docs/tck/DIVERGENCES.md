@@ -68,7 +68,7 @@ scenarios to the 100 % parser gate.
 |---|---|---|---|
 | `single-quote-string` | **0** | **RESOLVED in v1.3.0** — single-quoted strings pre-processed by `normalizeSingleQuotes` in `cypher/parser/parse.go` before ANTLR lexing | — |
 | `chained-with` | 188 | Multiple `WITH` clauses in one query chain | Extend `singleQuery` rule to allow `WITH … MATCH … WITH …` |
-| `varlen-explicit-bound` | 58 | `-[:T*2]->`, `-[:T*1..3]->` | Extend relationship pattern rule for `*N`, `*N..M` |
+| `varlen-explicit-bound` | **0** | **RESOLVED in v1.4.0** — `normalizeVarlenBounds` in `cypher/parser/parse.go` rewrites `*N` / `*N..M` to `*-N` / `*-N..-M` before ANTLR lexing, bypassing the DIGIT/ID ambiguity; `visitRangeLit` reads bounds via `ctx.GetText()` | — |
 | `grammar-gap-literal` | 19 | Malformed hex/integer literals accepted as two tokens; map keys starting with digit; pattern expressions in `RETURN`/`WITH`/`SET`; `size(<pattern>)` on pattern predicates; capital-E integer-mantissa negative-exponent float (`2E-01`) | Grammar-level validation |
 | `zero-dot-float` | 21 | `0.5` — lexer splits `0` and `.5` into separate tokens | Fix lexer tokenisation of zero-prefixed floats |
 | `leading-dot-float` | 15 | `.5`, `-.5` — float with no integer part | Add `LEADING_DOT_FLOAT` token to lexer |
@@ -110,7 +110,7 @@ write-clause scenarios now run and pass). The remaining 12 skipped are:
 | Skip reason | Count |
 |---|---|
 | `chained-with` | 10 |
-| `varlen-explicit-bound` | 2 |
+| `varlen-explicit-bound` | **0** |
 
 All runnable write-clause scenarios parse correctly (100 % parser pass rate).
 
@@ -126,7 +126,8 @@ The godog execution runner was added in Sprint 31 (`cypher/tck/runner_test.go`,
 `cypher/tck/world_test.go`). It wires up `cypher/exec/` against the TCK harness
 and reports execution conformance. The Sprint 31 baseline is:
 
-- **407 / 3 897 scenarios passing (10.4 %)** at execution level.
+- **407 / 3 897 scenarios passing (10.4 %)** at execution level (Sprint 31 baseline).
+- **968 / 3 897 scenarios passing (24.8 %)** as of Sprint 37 (task #375).
 
 The execution engine (`cypher/exec/`) can evaluate `MATCH … WHERE … RETURN`
 queries against an in-memory graph (`graph/lpg`). The following areas are not yet
@@ -134,13 +135,13 @@ fully wired up or implemented:
 
 | Feature area | Reason for low pass rate |
 |---|---|
-| `clauses/match` | Property access on graph nodes returns null; pattern binding incomplete |
-| `clauses/create` / `clauses/merge` | Write-back to graph not wired in execution TCK harness |
-| `clauses/delete` / `clauses/set` / `clauses/remove` | Write operations |
+| `clauses/match` | Multi-hop patterns, label predicates, cyclic patterns |
+| `clauses/create` / `clauses/merge` | Merge operator not yet wired |
+| `clauses/delete` / `clauses/set` / `clauses/remove` | Some write operator root-plan wiring missing |
 | `expressions/temporal` | Temporal types (Date, DateTime, Duration) not yet implemented |
-| `useCases/triadicSelection` | Requires path-pattern matching and variable-length traversal |
-| All aggregation scenarios | `EagerAggregation` operator exists but is not exercised by the TCK runner |
-| Subquery (`EXISTS`, `COUNT { }`) | Subquery operators not yet wired in the execution path |
+| `useCases/triadicSelection` | Requires path-pattern matching |
+| Semantic validation | VariableTypeConflict, InvalidArgumentType, UndefinedVariable not yet checked |
+| `UNWIND` | Wired (Sprint 37) but some list-expression evaluation edge cases remain |
 
 See Category 5 below for the full execution-engine gap taxonomy with scenario
 counts and remediation priority.
