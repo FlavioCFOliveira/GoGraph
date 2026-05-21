@@ -56,7 +56,7 @@ Algorithms catalogue: see [docs/algorithms.md](docs/algorithms.md).
 
 ## Examples
 
-The `examples/` directory contains 21 runnable demonstrations:
+The `examples/` directory contains 23 runnable demonstrations:
 
 ### Basics
 
@@ -71,6 +71,11 @@ The `examples/` directory contains 21 runnable demonstrations:
 - **17_transactional_log** — WAL + background checkpointer + crash-recovery walk-through.
 - **18_oocore_pipeline** — CSV → CSR → csrfile → mmap → semi-external BFS + PageRank.
 - **21_typed_recovery** — generic `recovery.Open[N, W]` over an `(int64, float64)` graph with typed properties; round-trips through a v2 snapshot.
+
+### Cypher and Bolt
+
+- **22_cypher** — Cypher execution engine social-graph demo: CREATE, MATCH, RETURN, WHERE.
+- **23_bolt_server** — Bolt v5 TCP server start + graceful shutdown demo; compatible with `neo4j-go-driver` v5.
 
 ### Interchange
 
@@ -205,7 +210,7 @@ bench/comparison          — cross-library performance comparison vs NetworkX
 internal/metrics          — observability API hook (Backend, IncCounter, ObserveLatency, Time)
 internal/stress           — concurrency stress test suite (CI under -race)
 
-examples/                 — 21 runnable example programs (see "Examples" section)
+examples/                 — 23 runnable example programs (see "Examples" section)
 ```
 
 ## Sprint 2 Example
