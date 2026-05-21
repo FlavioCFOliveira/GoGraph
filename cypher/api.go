@@ -148,6 +148,81 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	return &Result{rs: rs, cols: cols}, nil
 }
 
+// Explain returns a textual representation of the physical plan that would be
+// chosen to execute query with the given params. The plan reflects current index
+// availability: a hash index on the relevant (label, property) pair causes the
+// relevant Selection+LabelScan subtree to appear as NodeByIndexSeek. No rows
+// are produced; the graph is not modified.
+//
+// The format mirrors [ir.Explain] but annotates Selection→LabelScan pairs that
+// would be rewritten to index seeks at execution time.
+func (e *Engine) Explain(query string, params map[string]expr.Value) (string, error) {
+	if ir.IsDDL(query) {
+		return "(DDL — no query plan)", nil
+	}
+	plan, err := e.planFor(query)
+	if err != nil {
+		return "", err
+	}
+	return explainWithIndexes(plan, e.g.IndexManager(), params), nil
+}
+
+// explainWithIndexes walks plan and renders operator names, substituting
+// Selection→{AllNodesScan|NodeByLabelScan} pairs with "NodeByIndexSeek" when
+// tryBuildIndexSeekFromSelection would succeed given idxMgr and params.
+func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value) string {
+	var b strings.Builder
+	explainWithIndexesNode(&b, plan, idxMgr, params, "", true, true)
+	return b.String()
+}
+
+func explainWithIndexesNode(
+	b *strings.Builder,
+	plan ir.LogicalPlan,
+	idxMgr *index.Manager,
+	params map[string]expr.Value,
+	prefix string,
+	isRoot, isLast bool,
+) {
+	var connector, childCont string
+	if isRoot {
+		connector = ""
+		childCont = ""
+	} else if isLast {
+		connector = "└─ "
+		childCont = "   "
+	} else {
+		connector = "├─ "
+		childCont = "│  "
+	}
+
+	// Check whether a Selection→scan rewrite would fire.
+	opName := ir.OperatorName(plan)
+	if sel, ok := plan.(*ir.Selection); ok && idxMgr != nil {
+		schema := make(map[string]int)
+		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr); err == nil && fired && op != nil {
+			opName = "NodeByIndexSeek"
+		}
+	}
+
+	b.WriteString(prefix)
+	b.WriteString(connector)
+	b.WriteString(opName)
+	b.WriteByte('\n')
+
+	// When a Selection was rewritten to an index seek, skip its scan child
+	// (the child would be NodeByLabelScan which is subsumed by the seek).
+	if opName == "NodeByIndexSeek" {
+		return
+	}
+
+	children := plan.Children()
+	nextPrefix := prefix + childCont
+	for i, child := range children {
+		explainWithIndexesNode(b, child, idxMgr, params, nextPrefix, false, i == len(children)-1)
+	}
+}
+
 // runDDL executes a DDL statement (CREATE INDEX / DROP INDEX / …) eagerly.
 // DDL operators emit no rows and are fully executed during runDDL — callers
 // receive errors immediately rather than lazily during Result.Next.
@@ -1086,27 +1161,55 @@ func tryBuildIndexSeekFromSelection(
 	idxMgr *index.Manager,
 ) (exec.Operator, bool, error) {
 	// Only rewrite when the child is a bare scan leaf.
-	var nodeVar string
+	var nodeVar, label string
 	switch child := sel.Child.(type) {
 	case *ir.AllNodesScan:
 		nodeVar = child.NodeVar
 	case *ir.NodeByLabelScan:
 		nodeVar = child.NodeVar
+		label = child.Label
 	default:
 		return nil, false, nil
 	}
 
-	paramName, propKey := extractEqParamFromPredicate(sel.Predicate, nodeVar)
-	if paramName == "" || propKey == "" {
+	// ── Path 1: parameterised equality  n.prop = $param ─────────────────────
+	var seekVal expr.Value
+	var propKey string
+	paramName, pk1 := extractEqParamFromPredicate(sel.Predicate, nodeVar)
+	if paramName != "" && pk1 != "" {
+		sv, err := resolveSeekValue("$"+paramName, params)
+		if err != nil {
+			return nil, false, err
+		}
+		seekVal = sv
+		propKey = pk1
+	}
+
+	// ── Path 2: AST-based extraction (inline literal or parameter) ──────────
+	if seekVal == nil && sel.PredicateExpr != nil {
+		pk2, sv, ok := extractEqFromAST(sel.PredicateExpr, nodeVar, params)
+		if ok {
+			seekVal = sv
+			propKey = pk2
+		}
+	}
+
+	if seekVal == nil {
 		return nil, false, nil
 	}
 
-	seekVal, err := resolveSeekValue("$"+paramName, params)
-	if err != nil {
-		return nil, false, err
+	// ── Prefer the auto-named index for this (label, propKey) pair ───────────
+	if label != "" && propKey != "" {
+		wantName := strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_hash"
+		if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" {
+			if op, ok := tryNewHashSeek(sub, seekVal); ok {
+				schema[nodeVar] = len(schema)
+				return op, true, nil
+			}
+		}
 	}
-	_ = propKey // used for future property-specific index matching
 
+	// ── Fall back: iterate all hash indexes ──────────────────────────────────
 	names := idxMgr.ListIndexes()
 	for _, name := range names {
 		sub, err2 := idxMgr.GetIndex(name)
@@ -1119,6 +1222,61 @@ func tryBuildIndexSeekFromSelection(
 		}
 	}
 	return nil, false, nil
+}
+
+// extractEqFromAST extracts (propKey, seekVal, true) from a
+// BinaryOp{=, Property{nodeVar, key}, literal/param} or its mirror form.
+// params may be nil.
+func extractEqFromAST(
+	predExpr ast.Expression,
+	nodeVar string,
+	params map[string]expr.Value,
+) (propKey string, seekVal expr.Value, ok bool) {
+	binOp, ok2 := predExpr.(*ast.BinaryOp)
+	if !ok2 || binOp.Operator != "=" {
+		return "", nil, false
+	}
+	// Try left=Property, right=value.
+	if prop, isP := binOp.Left.(*ast.Property); isP {
+		if varNode, isV := prop.Receiver.(*ast.Variable); isV && varNode.Name == nodeVar {
+			if v, err := astLiteralToValue(binOp.Right, params); err == nil {
+				return prop.Key, v, true
+			}
+		}
+	}
+	// Try right=Property, left=value (mirror form).
+	if prop, isP := binOp.Right.(*ast.Property); isP {
+		if varNode, isV := prop.Receiver.(*ast.Variable); isV && varNode.Name == nodeVar {
+			if v, err := astLiteralToValue(binOp.Left, params); err == nil {
+				return prop.Key, v, true
+			}
+		}
+	}
+	return "", nil, false
+}
+
+// astLiteralToValue converts an AST leaf (string/int/float/bool literal or
+// parameter reference) to an expr.Value. Returns a non-nil error for any other
+// expression type.
+func astLiteralToValue(e ast.Expression, params map[string]expr.Value) (expr.Value, error) {
+	switch v := e.(type) {
+	case *ast.StringLiteral:
+		return expr.StringValue(v.Value), nil
+	case *ast.IntLiteral:
+		return expr.IntegerValue(v.Value), nil
+	case *ast.FloatLiteral:
+		return expr.FloatValue(v.Value), nil
+	case *ast.BoolLiteral:
+		return expr.BoolValue(v.Value), nil
+	case *ast.Parameter:
+		if params != nil {
+			if pv, ok := params[v.Name]; ok {
+				return pv, nil
+			}
+		}
+		return expr.Null, nil
+	}
+	return nil, fmt.Errorf("not a literal: %T", e)
 }
 
 // extractEqParamFromPredicate parses the opaque predicate string to extract

@@ -6,6 +6,41 @@ import (
 	"gograph/cypher/ast"
 )
 
+// buildPropertySelection wraps child with Selection operator(s) for inline node
+// property predicates. When props is a *ast.MapLiteral the individual key-value
+// pairs are converted to BinaryOp equality expressions so that the downstream
+// physical builder can pattern-match them for index-seek rewrites.
+//
+// Single key:
+//
+//	{name: 'Alice'}  →  NewSelectionExpr("(n.name = 'Alice')", BinaryOp{…}, child)
+//
+// Multiple keys produce a chain of SelectionExpr nodes, innermost first.
+// Non-MapLiteral expressions fall back to the opaque-string Selection.
+func buildPropertySelection(nodeVar string, props ast.Expression, child LogicalPlan) LogicalPlan {
+	ml, ok := props.(*ast.MapLiteral)
+	if !ok || len(ml.Keys) == 0 {
+		// Unknown expression type — fall back to opaque predicate.
+		return NewSelection(nodeVar+" "+props.String(), child)
+	}
+
+	plan := child
+	// Apply innermost first (first key closest to the scan leaf), so that when
+	// the physical builder walks Selection→child it sees the scan directly.
+	for i := 0; i < len(ml.Keys); i++ {
+		binOp := &ast.BinaryOp{
+			Operator: "=",
+			Left: &ast.Property{
+				Receiver: &ast.Variable{Name: nodeVar},
+				Key:      ml.Keys[i],
+			},
+			Right: ml.Values[i],
+		}
+		plan = NewSelectionExpr(binOp.String(), binOp, plan)
+	}
+	return plan
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MATCH / OPTIONAL MATCH translation
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +166,7 @@ func (t *translator) matchNodeScan(np *ast.NodePattern) LogicalPlan {
 	if len(np.Labels) == 0 {
 		scan := NewAllNodesScan(nodeVar)
 		if np.Properties != nil {
-			return NewSelection(nodePropertiesPredicate(nodeVar, np.Properties), scan)
+			return buildPropertySelection(nodeVar, np.Properties, scan)
 		}
 		return scan
 	}
@@ -149,7 +184,7 @@ func (t *translator) matchNodeScan(np *ast.NodePattern) LogicalPlan {
 	// Inline property predicates sit above label selections, still below any
 	// WHERE predicate — the lowest legal position.
 	if np.Properties != nil {
-		plan = NewSelection(nodePropertiesPredicate(nodeVar, np.Properties), plan)
+		plan = buildPropertySelection(nodeVar, np.Properties, plan)
 	}
 
 	return plan
@@ -207,7 +242,7 @@ func (t *translator) matchApplyNodeFilter(np *ast.NodePattern, nodeVar string, p
 		plan = NewSelection(pred, plan)
 	}
 	if np.Properties != nil {
-		plan = NewSelection(nodePropertiesPredicate(nodeVar, np.Properties), plan)
+		plan = buildPropertySelection(nodeVar, np.Properties, plan)
 	}
 	return plan
 }

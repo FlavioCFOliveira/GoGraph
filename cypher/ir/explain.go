@@ -61,6 +61,12 @@ func explainNode(b *strings.Builder, plan LogicalPlan, prefix string, isRoot, is
 	}
 }
 
+// OperatorName returns the canonical display name for the logical plan operator.
+// It is the exported counterpart of the internal operatorName helper used by
+// Explain, exposed so callers outside this package can render individual nodes
+// (e.g. the Engine's physical-plan explain renderer).
+func OperatorName(plan LogicalPlan) string { return operatorName(plan) }
+
 // operatorName returns the canonical display name for each logical plan operator.
 func operatorName(plan LogicalPlan) string {
 	switch plan.(type) {
