@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strconv"
 
 	"gograph/cypher/ast"
 )
@@ -206,6 +207,14 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 		plan = NewDistinct(plan)
 	}
 
+	// SKIP must be applied before LIMIT so that the offset is taken from the
+	// full result stream, not from an already-truncated one. The IR is built
+	// bottom-up, so we apply SKIP first (inner) and LIMIT on top (outer).
+	if proj.Skip != nil {
+		sk, _ := intExpr(proj.Skip)
+		plan = NewSkip(sk, plan)
+	}
+
 	// ORDER BY (with LIMIT → fused Top; without LIMIT → Sort).
 	if len(proj.OrderBy) > 0 {
 		sortItems := make([]SortItem, len(proj.OrderBy))
@@ -227,12 +236,6 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	} else if proj.Limit != nil {
 		lim, _ := intExpr(proj.Limit)
 		plan = NewLimit(lim, plan)
-	}
-
-	// SKIP.
-	if proj.Skip != nil {
-		sk, _ := intExpr(proj.Skip)
-		plan = NewSkip(sk, plan)
 	}
 
 	// Collect output column names for ProduceResults.
@@ -345,9 +348,23 @@ func patternVars(pp *ast.PathPattern) []string {
 
 // intExpr attempts to extract a constant int64 from a literal expression.
 // Returns 0 and an error when the expression is not an integer literal.
+//
+// The parser emits *ast.IntLiteral for integer literals that appear inside
+// arithmetic expressions, but emits *ast.Variable when the integer appears
+// directly in a LIMIT or SKIP position (where the grammar funnels the token
+// through the general Symbol rule). Both representations are handled here.
 func intExpr(e ast.Expression) (int64, error) {
 	if il, ok := e.(*ast.IntLiteral); ok {
 		return il.Value, nil
+	}
+	// The Cypher grammar routes integer literals in LIMIT/SKIP through the
+	// Symbol → Variable path when they are the sole atom of the expression.
+	// Parse the variable name as an integer in that case.
+	if v, ok := e.(*ast.Variable); ok {
+		n, err := strconv.ParseInt(v.Name, 10, 64)
+		if err == nil {
+			return n, nil
+		}
 	}
 	return 0, fmt.Errorf("not a literal int: %T", e)
 }

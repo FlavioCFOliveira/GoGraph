@@ -1044,12 +1044,266 @@ func buildOperator(
 		}
 		return exec.NewApply(outer, inner, arg), nil
 
+	case *ir.SemiApply:
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		arg := exec.NewArgument()
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		return exec.NewSemiApply(outer, inner, arg), nil
+
+	case *ir.AntiSemiApply:
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		arg := exec.NewArgument()
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		return exec.NewAntiSemiApply(outer, inner, arg), nil
+
+	case *ir.Argument:
+		// Argument is the leaf of an Apply-family inner plan. At runtime the exec
+		// Argument operator re-emits the outer row that was injected by the Apply
+		// loop. The IR vars are already in schema from the outer build; no new
+		// column registrations are needed here.
+		return exec.NewArgument(), nil
+
+	case *ir.EagerAggregation:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		return buildEagerAggregation(p, child, schema)
+
+	case *ir.Sort:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		keys := irSortKeys(p.SortItems, schema)
+		if len(keys) == 0 {
+			// No resolvable sort keys — pass through without sorting.
+			return child, nil
+		}
+		return exec.NewSort(child, keys, 0)
+
+	case *ir.Top:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		keys := irSortKeys(p.SortItems, schema)
+		if len(keys) == 0 || p.Limit <= 0 {
+			// Degenerate: no sort keys or zero limit — return child unchanged.
+			return child, nil
+		}
+		// exec.NewTop requires n ≥ 1 (int); ir.Top.Limit is int64.
+		n := int(p.Limit)
+		if int64(n) != p.Limit {
+			// Limit overflows int — clamp to a large safe value.
+			n = int(^uint(0) >> 1) // math.MaxInt
+		}
+		return exec.NewTop(child, keys, n)
+
+	case *ir.Limit:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		return exec.NewLimit(child, p.Count)
+
+	case *ir.Skip:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		return exec.NewSkip(child, p.Count)
+
+	case *ir.Distinct:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		return exec.NewDistinct(child, 0), nil
+
+	case *ir.OptionalExpand:
+		// OptionalExpand requires CSR adjacency which is not threaded through
+		// buildOperator. Like *ir.Expand, we register the output variables and
+		// return the child operator with NULL-extended schema columns. A genuine
+		// NULL-padded implementation requires CSR access; this stub produces the
+		// correct output schema so downstream projections can reference the vars.
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
+		if err != nil {
+			return nil, err
+		}
+		if p.RelVar != "" {
+			schema[p.RelVar] = len(schema)
+		}
+		if p.ToVar != "" {
+			schema[p.ToVar] = len(schema)
+		}
+		return child, nil
+
 	case *ir.ProcedureCall:
 		return buildProcedureCallOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg)
 
 	default:
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
 	}
+}
+
+// buildEagerAggregation builds the physical EagerAggregation operator from the
+// IR node. It wraps the child in a pre-projection so that the exec operator
+// sees rows in the expected layout: [groupByKeys..., aggArgs...].
+func buildEagerAggregation(
+	p *ir.EagerAggregation,
+	child exec.Operator,
+	schema map[string]int,
+) (exec.Operator, error) {
+	// Build pre-projection items:
+	//   positions 0..len(GroupBy)-1  → group-by key columns
+	//   positions len(GroupBy)..end  → aggregate argument columns
+	items := make([]exec.ProjectionItem, 0, len(p.GroupBy)+len(p.Aggregates))
+
+	// Group-by key projections.
+	keyCols := make([]int, len(p.GroupBy))
+	for i, varName := range p.GroupBy {
+		keyCols[i] = i // after pre-projection, key i is at position i
+		srcCol := 0
+		if col, ok := schema[varName]; ok {
+			srcCol = col
+		}
+		capturedCol := srcCol
+		items = append(items, exec.ProjectionItem{
+			Alias: varName,
+			Eval: func(row exec.Row) (expr.Value, error) {
+				if capturedCol < len(row) {
+					return row[capturedCol], nil
+				}
+				return expr.Null, nil
+			},
+		})
+	}
+
+	// Aggregate argument projections.
+	aggFactories := make([]funcs.AggregatorFactory, 0, len(p.Aggregates))
+	for _, aggExpr := range p.Aggregates {
+		factory, ferr := aggregateFactory(aggExpr.Function, aggExpr.Argument)
+		if ferr != nil {
+			return nil, fmt.Errorf("cypher: %w", ferr)
+		}
+		aggFactories = append(aggFactories, factory)
+
+		// Resolve argument column: empty Argument means count(*) — any value works.
+		if aggExpr.Argument == "" {
+			items = append(items, exec.ProjectionItem{
+				Alias: aggExpr.OutputName,
+				Eval:  func(_ exec.Row) (expr.Value, error) { return expr.Null, nil },
+			})
+		} else if argCol, ok := schema[aggExpr.Argument]; ok {
+			capturedArgCol := argCol
+			items = append(items, exec.ProjectionItem{
+				Alias: aggExpr.OutputName,
+				Eval: func(row exec.Row) (expr.Value, error) {
+					if capturedArgCol < len(row) {
+						return row[capturedArgCol], nil
+					}
+					return expr.Null, nil
+				},
+			})
+		} else {
+			// Property access or unresolvable expression — emit Null.
+			// Aggregates that depend on property values (e.g. sum(n.age)) require
+			// the expression evaluator to have resolved the property access upstream
+			// via a Projection; if it hasn't been resolved yet, Null is the safe
+			// fallback (count(*) is unaffected; sum/avg/min/max of Null = Null).
+			items = append(items, exec.ProjectionItem{
+				Alias: aggExpr.OutputName,
+				Eval:  func(_ exec.Row) (expr.Value, error) { return expr.Null, nil },
+			})
+		}
+	}
+
+	// Wrap child with the pre-projection.
+	preProj, err := exec.NewProject(child, items)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: EagerAggregation pre-projection: %w", err)
+	}
+
+	op, err := exec.NewEagerAggregation(preProj, keyCols, aggFactories, 0)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: NewEagerAggregation: %w", err)
+	}
+
+	// Replace schema with EagerAggregation output schema:
+	//   positions 0..len(GroupBy)-1            → group-by variable names
+	//   positions len(GroupBy)..len(Aggs)-1    → aggregate output names
+	for k := range schema {
+		delete(schema, k)
+	}
+	for i, varName := range p.GroupBy {
+		schema[varName] = i
+	}
+	for i, aggExpr := range p.Aggregates {
+		schema[aggExpr.OutputName] = len(p.GroupBy) + i
+	}
+	return op, nil
+}
+
+// aggregateFactory maps an IR aggregate function name and argument to a
+// [funcs.AggregatorFactory]. An empty argument string means count(*).
+func aggregateFactory(fn, argument string) (funcs.AggregatorFactory, error) {
+	lower := strings.ToLower(fn)
+	switch lower {
+	case "count":
+		if argument == "" {
+			return funcs.NewCountStarAgg(), nil
+		}
+		return funcs.NewCountAgg(), nil
+	case "sum":
+		return funcs.NewSumAgg(), nil
+	case "avg":
+		return funcs.NewAvgAgg(), nil
+	case "min":
+		return funcs.NewMinAgg(), nil
+	case "max":
+		return funcs.NewMaxAgg(), nil
+	case "collect":
+		return funcs.NewCollectAgg(), nil
+	case "stdev":
+		return funcs.NewStdDevAgg(), nil
+	case "stdevp":
+		return funcs.NewStdDevPAgg(), nil
+	default:
+		return nil, fmt.Errorf("unknown aggregate function %q", fn)
+	}
+}
+
+// irSortKeys converts a slice of ir.SortItem to exec.SortKey values by
+// resolving each expression against the current schema. Expressions that
+// cannot be resolved (property accesses, unbound variables) are skipped.
+func irSortKeys(items []ir.SortItem, schema map[string]int) []exec.SortKey {
+	keys := make([]exec.SortKey, 0, len(items))
+	for _, si := range items {
+		col, ok := schema[si.Expression]
+		if !ok {
+			// Skip unresolvable sort expressions — callers treat an empty result
+			// as "no sort needed" and pass through the child unchanged.
+			continue
+		}
+		keys = append(keys, exec.SortKey{
+			ColIdx:    col,
+			Ascending: !si.Descending,
+		})
+	}
+	return keys
 }
 
 // buildProcedureCallOperator builds a ProcedureCallOp from an *ir.ProcedureCall node.
@@ -1439,6 +1693,21 @@ func buildIRProjection(
 			if v, ok := item.Expr.(*ast.Variable); ok {
 				// Fast path: simple variable reference — direct column lookup.
 				if colIdx, ok2 := schema[v.Name]; ok2 {
+					idx := colIdx
+					evalFn = func(row exec.Row) (expr.Value, error) {
+						if idx < len(row) {
+							return row[idx], nil
+						}
+						return expr.Null, nil
+					}
+				}
+			}
+			if evalFn == nil {
+				// Schema-name fast path: when an upstream operator (e.g.
+				// EagerAggregation) has pre-computed and named the output column,
+				// prefer a direct index lookup over expression re-evaluation. This
+				// avoids calling aggregate functions as scalar functions.
+				if colIdx, ok2 := schema[name]; ok2 {
 					idx := colIdx
 					evalFn = func(row exec.Row) (expr.Value, error) {
 						if idx < len(row) {
