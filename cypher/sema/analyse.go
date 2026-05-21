@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"sort"
+
 	"gograph/cypher/ast"
 )
 
@@ -69,38 +71,111 @@ func (a *analyser) multiQuery(mq *ast.MultiQuery) {
 	}
 }
 
-// singleQuery processes the clauses of a SingleQuery in semantic order:
-// reading clauses → WITH clauses → updating clauses → RETURN.
+// singleQuery processes the clauses of a SingleQuery in semantic order.
 //
-// NOTE: The AST stores reading, WITH, and updating clauses in separate slices.
-// The actual interleaving order depends on how the parser filled them.  We walk
-// the three slices in their canonical order; this matches the openCypher spec
-// for the common case of: MATCH … [WITH …] [CREATE/SET/…] [RETURN …].
+// The AST stores reading, WITH, and updating clauses in three separate
+// slices and does not preserve source-level interleaving. The openCypher
+// scope rules (WITH boundaries, UNWIND introduction, UpdatingClause
+// references) depend on lexical order, so we recover ordering by sorting
+// every clause by its [ast.Position]. Clauses with equal positions (e.g.
+// programmatically constructed test ASTs that leave Pos zero) preserve
+// their original slice order via [sort.SliceStable].
+//
+// The sorted walk gives correct results for queries such as
+//
+//	MATCH (n) WITH n CREATE (m) WITH m RETURN m
+//
+// where MATCH (ReadingClauses), the two WITHs (With), and CREATE
+// (UpdatingClauses) interleave at the source level. Without sorting the
+// analyser would walk every ReadingClause before any WITH, then every
+// UpdatingClause, which silently drops variables that a later WITH would
+// otherwise carry into scope.
 func (a *analyser) singleQuery(q *ast.SingleQuery) {
 	if a.scope == nil {
 		a.scope = newScope()
 	}
 
-	for _, rc := range q.ReadingClauses {
-		a.readingClause(rc)
-	}
-	for _, w := range q.With {
-		a.withClause(w)
-	}
-	for _, uc := range q.UpdatingClauses {
-		a.updatingClause(uc)
+	clauses := orderClauses(q)
+	for _, c := range clauses {
+		a.dispatchClause(c)
 	}
 	if q.Return != nil {
 		a.returnClause(q.Return)
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Reading clauses
-// ─────────────────────────────────────────────────────────────────────────────
+// orderClauses concatenates the three clause slices of q and returns them in
+// source order, defined as ascending [ast.Position.Offset]. The sort is
+// stable, so clauses with equal Offset (notably zero-Pos test fixtures)
+// retain their slice insertion order.
+//
+// The returned slice's element type is the union interface [ast.Node]
+// because Go does not allow a single concrete slice to mix
+// [ast.ReadingClause], [ast.UpdatingClause], and *ast.With (each is a
+// distinct sealed interface).
+func orderClauses(q *ast.SingleQuery) []ast.Node {
+	total := len(q.ReadingClauses) + len(q.With) + len(q.UpdatingClauses)
+	if total == 0 {
+		return nil
+	}
+	out := make([]ast.Node, 0, total)
+	for _, c := range q.ReadingClauses {
+		out = append(out, c)
+	}
+	for _, c := range q.With {
+		out = append(out, c)
+	}
+	for _, c := range q.UpdatingClauses {
+		out = append(out, c)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return clausePos(out[i]).Offset < clausePos(out[j]).Offset
+	})
+	return out
+}
 
-func (a *analyser) readingClause(rc ast.ReadingClause) {
-	switch v := rc.(type) {
+// clausePos returns the [ast.Position] of a clause node, using a type
+// switch over every concrete clause that may appear in
+// [ast.SingleQuery.ReadingClauses], [ast.SingleQuery.UpdatingClauses], or
+// [ast.SingleQuery.With]. Unknown nodes return the zero Position so they
+// sort first; this is a defensive default that should never trigger in
+// well-formed ASTs.
+func clausePos(n ast.Node) ast.Position {
+	switch v := n.(type) {
+	case *ast.Match:
+		return v.Pos
+	case *ast.OptionalMatch:
+		return v.Pos
+	case *ast.Unwind:
+		return v.Pos
+	case *ast.With:
+		return v.Pos
+	case *ast.Call:
+		return v.Pos
+	case *ast.Return:
+		return v.Pos
+	case *ast.Create:
+		return v.Pos
+	case *ast.Merge:
+		return v.Pos
+	case *ast.Set:
+		return v.Pos
+	case *ast.Remove:
+		return v.Pos
+	case *ast.Delete:
+		return v.Pos
+	case *ast.DetachDelete:
+		return v.Pos
+	}
+	return ast.Position{}
+}
+
+// dispatchClause routes a clause node from the source-ordered walk produced
+// by [orderClauses] to the appropriate handler. The three clause families
+// (reading / updating / WITH) are dispatched by concrete type rather than
+// by interface so the existing handlers are reused verbatim.
+func (a *analyser) dispatchClause(n ast.Node) {
+	switch v := n.(type) {
 	case *ast.Match:
 		a.matchClause(v)
 	case *ast.OptionalMatch:
@@ -111,10 +186,27 @@ func (a *analyser) readingClause(rc ast.ReadingClause) {
 		a.withClause(v)
 	case *ast.Call:
 		a.callClause(v)
-	case *ast.Return:
-		a.returnClause(v)
+	case *ast.Create:
+		a.createClause(v)
+	case *ast.Merge:
+		a.mergeClause(v)
+	case *ast.Set:
+		a.setClause(v)
+	case *ast.Remove:
+		a.removeClause(v)
+	case *ast.Delete:
+		a.deleteClause(v)
+	case *ast.DetachDelete:
+		a.detachDeleteClause(v)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reading clauses
+// ─────────────────────────────────────────────────────────────────────────────
+// Individual reading-clause handlers (matchClause, optionalMatchClause,
+// unwindClause, callClause, withClause) are invoked by [analyser.dispatchClause]
+// after [orderClauses] sorts every clause by source position.
 
 func (a *analyser) matchClause(m *ast.Match) {
 	a.patternIntroduce(m.Pattern)
@@ -138,6 +230,22 @@ func (a *analyser) unwindClause(u *ast.Unwind) {
 }
 
 func (a *analyser) withClause(w *ast.With) {
+	// `WITH *` (Projection.All) preserves every binding currently in scope
+	// — it is a pass-through projection. We must not reset the scope, only
+	// validate the WHERE predicate (and any explicitly listed Items).
+	// The openCypher grammar does not allow mixing `*` and explicit items,
+	// but we tolerate it defensively so a future grammar widening would not
+	// silently drop bindings.
+	if w.Projection.All {
+		for _, item := range w.Projection.Items {
+			a.checkExprForWith(item.Expr)
+		}
+		if w.Where != nil {
+			a.whereClause(w.Where)
+		}
+		return
+	}
+
 	// 1. Evaluate each projected expression against the pre-WITH scope.
 	//    (AS aliases are not yet in scope.)
 	type projection struct {
@@ -151,10 +259,35 @@ func (a *analyser) withClause(w *ast.With) {
 		projs = append(projs, projection{item.Expr, item.Alias, item.Pos})
 	}
 
-	// 2. WHERE on WITH is also evaluated in the pre-WITH scope, but after
-	//    the projections are determined (and their aliases are visible).
-	//    openCypher spec: WHERE after WITH sees the projected names.
-	//    We build the new scope first, then check WHERE.
+	// 2. WHERE on WITH is evaluated in a scope that includes BOTH the
+	//    pre-WITH names AND the projection aliases. openCypher allows
+	//    patterns such as
+	//
+	//        OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+	//        WITH c WHERE r IS NULL
+	//
+	//    where the WHERE filters by a pre-WITH variable. We therefore
+	//    introduce the new (alias) names BEFORE the scope reset and validate
+	//    WHERE against the merged scope. The reset that follows then drops
+	//    the pre-WITH names so subsequent clauses only see projected ones.
+	for _, p := range projs {
+		name := projectedName(p.expr, p.alias)
+		if name == "" {
+			continue
+		}
+		if _, exists := a.scope.LookupLocal(name); exists {
+			// Alias collides with a pre-existing name (e.g. WITH n AS n):
+			// no introduction is needed; the symbol is still in scope.
+			continue
+		}
+		// We intentionally ignore redeclaration here — the post-reset block
+		// below records the canonical introduction (and its error, if any).
+		_ = a.scope.Define(name, p.pos, "any")
+	}
+
+	if w.Where != nil {
+		a.whereClause(w.Where)
+	}
 
 	// 3. Reset scope: only projected names survive.
 	a.scope.reset()
@@ -166,10 +299,6 @@ func (a *analyser) withClause(w *ast.With) {
 			continue
 		}
 		a.error(a.scope.Define(name, p.pos, "any"))
-	}
-
-	if w.Where != nil {
-		a.whereClause(w.Where)
 	}
 }
 
@@ -209,25 +338,8 @@ func (a *analyser) callClause(c *ast.Call) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Updating clauses
 // ─────────────────────────────────────────────────────────────────────────────
-
-func (a *analyser) updatingClause(uc ast.UpdatingClause) {
-	switch v := uc.(type) {
-	case *ast.Create:
-		a.createClause(v)
-	case *ast.Merge:
-		a.mergeClause(v)
-	case *ast.Set:
-		a.setClause(v)
-	case *ast.Remove:
-		a.removeClause(v)
-	case *ast.Delete:
-		a.deleteClause(v)
-	case *ast.DetachDelete:
-		a.detachDeleteClause(v)
-	case *ast.Call:
-		a.callClause(v)
-	}
-}
+// Individual updating-clause handlers are invoked by [analyser.dispatchClause]
+// after [orderClauses] sorts every clause by source position.
 
 func (a *analyser) createClause(c *ast.Create) {
 	// CREATE introduces new variables from the pattern.
@@ -314,8 +426,12 @@ func (a *analyser) pathPatternIntroduce(pp *ast.PathPattern) {
 	if pp == nil {
 		return
 	}
-	// Path variable (p = (a)-[r]->(b)) — introduce into scope.
+	// Path variable (p = (a)-[r]->(b)) — introduce into scope. Re-using a
+	// previously-bound name as a path raises VariableTypeConflict unless the
+	// existing binding is also a path (which it cannot be in practice — path
+	// vars are unique per query — but the check is symmetric for safety).
 	if pp.Variable != nil {
+		a.checkTypeConflict(*pp.Variable, "path", pp.Pos)
 		a.error(a.scope.Define(*pp.Variable, pp.Pos, "path"))
 	}
 	el := pp.Head
@@ -335,8 +451,13 @@ func (a *analyser) nodePatternIntroduce(np *ast.NodePattern) {
 		return
 	}
 	name := *np.Variable
-	// If already defined, it is a re-use (bound node), not a redeclaration.
-	if _, ok := a.scope.Lookup(name); ok {
+	// If already defined, it is a re-use (bound node) — provided the
+	// existing binding is also a node. Re-using a relationship or path
+	// variable as a node is a VariableTypeConflict.
+	if sym, ok := a.scope.Lookup(name); ok {
+		if conflictsWith(sym.Type, "node") {
+			a.error(redeclarationError(name, np.Pos))
+		}
 		return
 	}
 	a.error(a.scope.Define(name, np.Pos, "node"))
@@ -347,11 +468,37 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 		return
 	}
 	name := *rp.Variable
-	// If already defined, it is a re-use (bound relationship), not a redeclaration.
-	if _, ok := a.scope.Lookup(name); ok {
+	// Re-using an existing name as a relationship: must be a relationship
+	// already, otherwise VariableTypeConflict.
+	if sym, ok := a.scope.Lookup(name); ok {
+		if conflictsWith(sym.Type, "relationship") {
+			a.error(redeclarationError(name, rp.Pos))
+		}
 		return
 	}
 	a.error(a.scope.Define(name, rp.Pos, "relationship"))
+}
+
+// conflictsWith reports whether an existing symbol of kind have can be
+// safely bound a second time as kind want. "any" tolerates either side
+// (used for projection aliases and YIELD items where the static type is
+// unknown). Identical kinds never conflict.
+func conflictsWith(have, want string) bool {
+	if have == want || have == "" || have == "any" || want == "any" {
+		return false
+	}
+	return true
+}
+
+// checkTypeConflict records a redeclaration error when name is already in
+// scope with a static type incompatible with kind. Used by introducers that
+// otherwise unconditionally call [Scope.Define] (notably path patterns).
+func (a *analyser) checkTypeConflict(name, kind string, pos ast.Position) {
+	if sym, ok := a.scope.Lookup(name); ok {
+		if conflictsWith(sym.Type, kind) {
+			a.error(redeclarationError(name, pos))
+		}
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,12 +507,32 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 
 // projectionCheck validates that all expressions in a RETURN projection
 // reference only variables that are in scope.
+//
+// ORDER BY, SKIP, and LIMIT see the projected aliases in addition to every
+// pre-projection binding, so the alias names are introduced into the
+// current scope before those clauses are validated. The scope mutation
+// stays local to projectionCheck — it does not leak to subsequent clauses
+// because RETURN is the terminal clause of a single query.
 func (a *analyser) projectionCheck(proj *ast.Projection) {
 	if proj.All {
 		return // RETURN * — accept everything that is in scope
 	}
 	for _, item := range proj.Items {
 		a.checkExpr(item.Expr)
+	}
+	// Introduce projected aliases (and bare-Variable projections) so that
+	// ORDER BY / SKIP / LIMIT references resolve. Redeclaration errors are
+	// suppressed here because the alias often shadows a pre-existing name
+	// (e.g. `RETURN n.id AS n`).
+	for _, item := range proj.Items {
+		name := projectedName(item.Expr, item.Alias)
+		if name == "" {
+			continue
+		}
+		if _, exists := a.scope.LookupLocal(name); exists {
+			continue
+		}
+		_ = a.scope.Define(name, item.Pos, "any")
 	}
 	for _, s := range proj.OrderBy {
 		a.checkExpr(s.Expr)

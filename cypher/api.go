@@ -17,9 +17,12 @@
 //
 // # Plan cache
 //
-// Engine caches parsed and translated logical plans in a [sync.Map] keyed by
-// the query string. The cached entry is the IR [ir.LogicalPlan]; the physical
-// build step runs per Engine.Run call so that per-call executor state is fresh.
+// Engine caches parsed and translated logical plans together with the
+// semantic-analysis verdict in a [sync.Map] keyed by the query string. The
+// cached entry is a *planCacheEntry; the physical build step runs per
+// Engine.Run call so that per-call executor state is fresh. Semantically
+// invalid queries are also cached (with the typed error) so that repeated
+// runs of the same bad query short-circuit without re-parsing.
 //
 // # Concurrency
 //
@@ -144,6 +147,12 @@ func ensureIndexManager(g *lpg.Graph[string, float64]) {
 // A wrapped [*parser.ParseError] is returned when the query has a syntax
 // error; the error includes line and column information.
 //
+// Semantic violations detected by the scope analyser (undefined variables,
+// variable-type conflicts, scope leaks) are returned as a [*sema.SemanticError]
+// before plan execution begins — see [sema.MapToBolt] for the
+// ErrorKind→Bolt mapping used. Callers may use [errors.As] to recover the
+// typed error and inspect Category / SubType.
+//
 // Sprint 25 support: MATCH (full scan or label scan) + RETURN.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
 	// ── 0. DDL fast-path ─────────────────────────────────────────────────────
@@ -151,11 +160,17 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		return e.runDDL(ctx, query)
 	}
 
-	// ── 1. Parse or retrieve from plan cache ─────────────────────────────────
-	plan, err := e.planFor(query)
+	// ── 1. Parse, analyse, and retrieve from plan cache ──────────────────────
+	entry, err := e.parseAndAnalyse(query)
 	if err != nil {
 		return nil, err
 	}
+
+	// ── 1a. Sema fast-path: skip planning when scope violations were found ───
+	if entry.semaErr != nil {
+		return nil, entry.semaErr
+	}
+	plan := entry.plan
 
 	// ── 1b. Parameter type check ─────────────────────────────────────────────
 	if len(params) > 0 {
@@ -435,22 +450,58 @@ func bindNumeric(v any) (expr.Value, bool) {
 	}
 }
 
+// planCacheEntry is the value stored in [Engine.cache] for a successfully
+// parsed query. It bundles the translated logical plan with the semantic
+// analyser's verdict so that both lookups (planFor, semaCheckCached) hit a
+// single cache slot.
+//
+// The semaErr field is non-nil when [sema.Analyse] reported violations;
+// callers consult it before plan execution to short-circuit with a typed
+// [*sema.SemanticError]. The logical plan is still cached even when semaErr
+// is non-nil so that [Engine.Explain] can render the plan tree for
+// diagnostic purposes without re-parsing.
+type planCacheEntry struct {
+	plan    ir.LogicalPlan
+	semaErr *sema.SemanticError
+}
+
 // planFor returns the cached logical plan for query, or parses, translates,
-// and caches it.
+// and caches it. Semantic-analysis failures are NOT surfaced from planFor:
+// callers should invoke [Engine.semaCheckCached] separately so they can
+// decide whether to fast-fail before plan execution (Run/RunInTx) or to
+// still render an Explain tree.
 func (e *Engine) planFor(query string) (ir.LogicalPlan, error) {
+	entry, err := e.parseAndAnalyse(query)
+	if err != nil {
+		return nil, err
+	}
+	return entry.plan, nil
+}
+
+// parseAndAnalyse parses, runs the scope analyser, and translates query into
+// a logical plan. The full result (plan + sema verdict) is cached so that
+// subsequent calls with the same query string skip every stage above plan
+// execution.
+//
+// A non-nil error is returned only for parse or translation failures; a
+// semantically invalid (but parseable) query yields a cache entry whose
+// semaErr field is set, and parseAndAnalyse returns (entry, nil).
+func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	if v, ok := e.cache.Load(query); ok {
-		return v.(ir.LogicalPlan), nil //nolint:forcetypeassert // cache invariant
+		return v.(*planCacheEntry), nil //nolint:forcetypeassert // cache invariant
 	}
 	astNode, err := parser.Parse(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
 	}
+	semaErr := sema.MapToBolt(sema.Analyse(astNode))
 	plan, err := ir.FromAST(astNode)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: translate: %w", err)
 	}
-	actual, _ := e.cache.LoadOrStore(query, plan)
-	return actual.(ir.LogicalPlan), nil //nolint:forcetypeassert // cache invariant
+	entry := &planCacheEntry{plan: plan, semaErr: semaErr}
+	actual, _ := e.cache.LoadOrStore(query, entry)
+	return actual.(*planCacheEntry), nil //nolint:forcetypeassert // cache invariant
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2235,10 +2286,15 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		return e.runDDL(ctx, query)
 	}
 
-	plan, err := e.planFor(query)
+	entry, err := e.parseAndAnalyse(query)
 	if err != nil {
 		return nil, err
 	}
+	// Sema fast-path: short-circuit scope violations before opening a tx.
+	if entry.semaErr != nil {
+		return nil, entry.semaErr
+	}
+	plan := entry.plan
 
 	if len(params) > 0 {
 		if err := sema.CheckParams(sema.InferParamTypes(plan), params); err != nil {

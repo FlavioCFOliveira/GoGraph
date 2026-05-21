@@ -41,11 +41,24 @@ import (
 //     bridge that round-trips temporal property values through snapshot+WAL
 //     replay. Observed 1374 across a 3-run sample; the gate is set
 //     conservatively at 1370 to absorb run-to-run variance.
+//   - 1520: raised after task #395 wired the cypher/sema scope analyser
+//     into Engine.Run and Engine.RunInTx as a pre-execution gate that
+//     short-circuits with a typed *sema.SemanticError before plan build.
+//     The wiring required three companion sema enrichments to keep the
+//     existing valid-query suite regression-free: (a) clauses are now
+//     walked in [ast.Position] order so interleaved WITH / UpdatingClauses
+//     respect the openCypher scope rules; (b) WITH * preserves every
+//     in-scope binding; (c) ORDER BY / SKIP / LIMIT and WHERE-on-WITH see
+//     projection aliases AND the pre-WITH names. The introducer helpers
+//     also detect node↔relationship↔path type conflicts on variable
+//     reuse and surface them as SyntaxError.VariableTypeConflict.
+//     Observed 1527-1528 across a 3-run sample; the gate is set
+//     conservatively at 1520 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1370
+const tckExecutionBaseline = 1520
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
