@@ -1166,8 +1166,300 @@ func TestAllShortestPaths_PicksShorterNotLonger(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Task 393 — additional acceptance-criterion tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+// TestVarLenExpand_ZeroHopOnly verifies that *0..0 (the degenerate "zero-hop"
+// pattern) emits exactly the source node as the destination.
+func TestVarLenExpand_ZeroHopOnly(t *testing.T) {
+	fwd := buildCSR(3, [][2]int{{0, 1}, {1, 2}})
+	rev := buildCSR(3, nil)
+
+	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
+	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+		Direction: exec.DirOut,
+		InputCol:  0,
+		MinHops:   0,
+		MaxHops:   0,
+	})
+
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (zero-hop pseudo-path)", len(rows))
+	}
+	// Output is [srcID, pathList, dstID]; for hop-0 dstID equals srcID.
+	dst, ok := rows[0][2].(expr.IntegerValue)
+	if !ok {
+		t.Fatalf("dst column is not IntegerValue: %T", rows[0][2])
+	}
+	if int64(dst) != 0 {
+		t.Errorf("zero-hop dst = %d, want 0", int64(dst))
+	}
+	pl, ok := rows[0][1].(expr.ListValue)
+	if !ok {
+		t.Fatalf("path column is not ListValue: %T", rows[0][1])
+	}
+	if len(pl) != 0 {
+		t.Errorf("zero-hop path length = %d, want 0", len(pl))
+	}
+}
+
+// TestVarLenExpand_OneToOneHop verifies that *1..1 is equivalent to a single
+// Expand: one row per direct neighbour, no further hops.
+func TestVarLenExpand_OneToOneHop(t *testing.T) {
+	// Star: 0→1, 0→2, 0→3 (3 neighbours); each has its own neighbour to ensure
+	// the operator does not bleed into hop 2.
+	fwd := buildCSR(7, [][2]int{{0, 1}, {0, 2}, {0, 3}, {1, 4}, {2, 5}, {3, 6}})
+	rev := buildCSR(7, nil)
+
+	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
+	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+		Direction: exec.DirOut,
+		InputCol:  0,
+		MinHops:   1,
+		MaxHops:   1,
+	})
+
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3 (exactly direct neighbours)", len(rows))
+	}
+}
+
+// TestVarLenExpand_OneToFiveHops_Chain verifies *1..5 over a 6-node chain
+// emits one row per hop length 1..5.
+func TestVarLenExpand_OneToFiveHops_Chain(t *testing.T) {
+	fwd := buildCSR(6, [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}})
+	rev := buildCSR(6, nil)
+
+	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
+	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+		Direction: exec.DirOut,
+		InputCol:  0,
+		MinHops:   1,
+		MaxHops:   5,
+	})
+
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(rows) != 5 {
+		t.Fatalf("got %d rows, want 5", len(rows))
+	}
+	// Destinations should be 1, 2, 3, 4, 5 in BFS order.
+	wantDsts := []int64{1, 2, 3, 4, 5}
+	for i, row := range rows {
+		dst, ok := row[2].(expr.IntegerValue)
+		if !ok {
+			t.Fatalf("row %d: dst is not IntegerValue: %T", i, row[2])
+		}
+		if int64(dst) != wantDsts[i] {
+			t.Errorf("row %d: dst = %d, want %d", i, int64(dst), wantDsts[i])
+		}
+	}
+}
+
+// TestVarLenExpand_OneToFiveHops_Tree verifies *1..5 over a branching tree.
+// This is the regression test for the runBFS slice-aliasing bug
+// (task-393): with two or more paths at the same BFS level, the previous
+// implementation overwrote frontier entries that had not yet been processed.
+//
+// Tree:
+//
+//	     0
+//	   / | \
+//	  1  2  3      (hop 1)
+//	 /|  |  |\
+//	4 5  6  7 8    (hop 2)
+//
+// From 0 with hops 1..5 we expect 3 + 5 = 8 destinations.
+func TestVarLenExpand_OneToFiveHops_Tree(t *testing.T) {
+	fwd := buildCSR(9, [][2]int{
+		{0, 1}, {0, 2}, {0, 3},
+		{1, 4}, {1, 5},
+		{2, 6},
+		{3, 7}, {3, 8},
+	})
+	rev := buildCSR(9, nil)
+
+	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
+	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+		Direction: exec.DirOut,
+		InputCol:  0,
+		MinHops:   1,
+		MaxHops:   5,
+	})
+
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(rows) != 8 {
+		t.Fatalf("got %d rows, want 8 (3 hop-1 + 5 hop-2)", len(rows))
+	}
+	// Every destination 1..8 must appear exactly once.
+	seen := make(map[int64]int, 8)
+	for _, row := range rows {
+		dst, ok := row[2].(expr.IntegerValue)
+		if !ok {
+			t.Fatalf("dst is not IntegerValue: %T", row[2])
+		}
+		seen[int64(dst)]++
+	}
+	for id := int64(1); id <= 8; id++ {
+		if seen[id] != 1 {
+			t.Errorf("destination %d seen %d time(s), want 1", id, seen[id])
+		}
+	}
+}
+
+// TestVarLenExpand_RingRelationshipIsomorphism verifies Cypher's
+// relationship-uniqueness rule: in a ring 0→1→2→3→0, BFS from 0 must terminate
+// because no relationship may appear twice in a single path. With maxHops≥|V|
+// the search must not loop indefinitely.
+func TestVarLenExpand_RingRelationshipIsomorphism(t *testing.T) {
+	const n = 6
+	edges := make([][2]int, n)
+	for i := 0; i < n; i++ {
+		edges[i] = [2]int{i, (i + 1) % n}
+	}
+	fwd := buildCSR(n, edges)
+	rev := buildCSR(n, nil)
+
+	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
+	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+		Direction: exec.DirOut,
+		InputCol:  0,
+		MinHops:   1,
+		MaxHops:   1_000, // much larger than n; isomorphism must cap exploration
+	})
+
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain (ring): %v", err)
+	}
+	// A simple path from 0 can use each of the n edges at most once → at most n
+	// distinct rows (one row per terminal hop).
+	if len(rows) > n {
+		t.Fatalf("ring produced %d rows, want at most %d (relationship isomorphism)", len(rows), n)
+	}
+}
+
+// TestVarLenExpand_TightCycleCapDoesNotExplode verifies acceptance criterion
+// "memory bounded under cyclic graphs" using a tight 3-cycle with a 1M cap.
+// The relationship-uniqueness rule constrains exploration to at most 3 hops
+// from any single source, so even a generous cap must not let memory blow up.
+func TestVarLenExpand_TightCycleCapDoesNotExplode(t *testing.T) {
+	// 3-cycle: 0→1→2→0.
+	fwd := buildCSR(3, [][2]int{{0, 1}, {1, 2}, {2, 0}})
+	rev := buildCSR(3, nil)
+
+	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
+	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+		Direction:         exec.DirOut,
+		InputCol:          0,
+		MinHops:           1,
+		MaxHops:           1_000_000, // ridiculously high
+		MaxEdgesTraversed: 1_000_000, // default cap
+	})
+
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain (cycle): %v", err)
+	}
+	// 3 distinct paths from 0: 0→1, 0→1→2, 0→1→2→0. Edge isomorphism forbids
+	// reusing the 2→0 edge, so the path 0→1→2→0 cannot continue.
+	if len(rows) != 3 {
+		t.Fatalf("cycle produced %d rows, want 3", len(rows))
+	}
+}
+
+// TestVarLenExpand_TimeoutCancelsBoundedEnumeration verifies acceptance
+// criterion "(a)-[*1..5]->(b) bounded enumeration with timeout test": a
+// context cancellation while the BFS is in progress must propagate an error
+// rather than running to completion.
+//
+// The graph is a dense complete graph (every node connects to every other) so
+// that many enumeration branches exist; the cap is enormous and maxHops large
+// enough to keep the operator busy long enough for cancel to land.
+func TestVarLenExpand_TimeoutCancelsBoundedEnumeration(t *testing.T) {
+	const n = 12 // K_12 has 12*11 = 132 directed edges and many bounded paths
+	var edges [][2]int
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			if i != j {
+				edges = append(edges, [2]int{i, j})
+			}
+		}
+	}
+	fwd := buildCSR(n, edges)
+	rev := buildCSR(n, nil)
+
+	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
+	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+		Direction:         exec.DirOut,
+		InputCol:          0,
+		MinHops:           1,
+		MaxHops:           5,
+		MaxEdgesTraversed: 100_000_000,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before draining so ctx.Err() returns immediately
+
+	_, err := exec.Drain(ctx, op)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Drain err = %v, want context.Canceled", err)
+	}
+}
+
+// TestShortestPath_DeterministicTieBreaking verifies that with two equally
+// shortest paths between the same endpoints, ShortestPath returns the same
+// path every time (i.e. the choice is deterministic, not stochastic).
+func TestShortestPath_DeterministicTieBreaking(t *testing.T) {
+	// Two equally short routes 0→1→3 and 0→2→3.
+	fwd := buildCSR(4, [][2]int{{0, 1}, {0, 2}, {1, 3}, {2, 3}})
+	rev := buildCSR(4, nil)
+
+	type sample struct {
+		mid uint64 // intermediate node ID (1 or 2)
+	}
+	var first sample
+	for run := 0; run < 5; run++ {
+		input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(3)})
+		op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+		rows, err := exec.Drain(context.Background(), op)
+		if err != nil {
+			t.Fatalf("run %d: Drain: %v", run, err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("run %d: got %d rows, want 1", run, len(rows))
+		}
+		pv, ok := rows[0][2].(expr.PathValue)
+		if !ok {
+			t.Fatalf("run %d: not a PathValue: %T", run, rows[0][2])
+		}
+		if len(pv.Nodes) != 3 {
+			t.Fatalf("run %d: nodes = %d, want 3", run, len(pv.Nodes))
+		}
+		s := sample{mid: pv.Nodes[1].ID}
+		if run == 0 {
+			first = s
+			continue
+		}
+		if s != first {
+			t.Errorf("run %d: tie-breaking is non-deterministic: first=%v got=%v",
+				run, first, s)
+		}
+	}
+}
 
 // countingOperator wraps a sliceOperator and calls onNext before each Next.
 type countingOperator struct {

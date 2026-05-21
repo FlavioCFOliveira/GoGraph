@@ -30,11 +30,16 @@ import (
 //     OptionalApply, destination-rebinding equi-join in matchExpandStepBound,
 //     and explicit fromVar threading in matchPathPattern (observed ≈1233
 //     over a 3-run sample).
+//   - 1230: raised after task #393 fixed the VarLengthExpand BFS slice-
+//     aliasing hazard (the read frontier and the write target shared a
+//     backing slice, silently overwriting unprocessed entries). Observed
+//     1234 across a 5-run sample; the gate is set conservatively at 1230
+//     to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1225
+const tckExecutionBaseline = 1230
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

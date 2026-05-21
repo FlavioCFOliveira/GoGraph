@@ -1,10 +1,33 @@
 package exec
 
-// varlen_expand.go — VarLengthExpand operator (task-261).
+// varlen_expand.go — VarLengthExpand operator (task-261, task-393).
 //
-// VarLengthExpand performs BFS from each input source node, bounded by
-// [minHops..maxHops], and emits one row per path whose hop count is in
-// [minHops..maxHops].
+// VarLengthExpand performs level-synchronous BFS from each input source node,
+// bounded by [minHops..maxHops], and emits one row per path whose hop count is
+// in [minHops..maxHops].
+//
+// # Algorithm choice (why BFS, not DFS)
+//
+// For bounded variable-length expansion in Cypher (-[*minHops..maxHops]->) the
+// task is to enumerate every simple path (under relationship-isomorphism) whose
+// length falls in the requested window. The candidate algorithms are:
+//
+//   - DFS with a per-path edge bitset. Same worst-case asymptotic complexity
+//     O(b^d) where b is the average branching factor and d is maxHops, but
+//     emission order is depth-first and harder to bound by depth.
+//   - BFS level-synchronous expansion. Same asymptotic complexity, but emission
+//     follows BFS order — natural fit for a maxHops cap, and enables clean
+//     pre-emption between levels (cancellation check at each frontier).
+//   - Bidirectional BFS. Only useful when both endpoints are fixed (i.e. for
+//     shortestPath); variable-length expansion has an unbound destination, so
+//     no bidirectional variant applies.
+//
+// BFS is chosen because (a) cancellation/observability are simpler at frontier
+// boundaries, (b) the level-synchronous frontier has a smooth memory profile
+// proportional to the branching at a single level rather than the full
+// depth-first stack, and (c) it matches how graph DBs typically document
+// variable-length matching (see Neo4j ExpandInto / ExpandIntoVarLength and
+// Robinson/Webber/Eifrem, "Graph Databases", 2nd ed., chapter on traversal).
 //
 // # Path representation
 //
@@ -17,7 +40,16 @@ package exec
 // Cypher relationship-uniqueness: no edge may appear more than once in a
 // single path. Each pathState carries a compact []uint64 bitset that tracks
 // which edge IDs are already on that path. Two uint64 words cover 128 edge
-// positions; for larger CSRs the bitset grows dynamically.
+// positions; for larger CSRs the bitset grows dynamically. The bitset is
+// copied per branch (copy-on-write) so distinct path suffixes never alias.
+//
+// # Read/write separation in the BFS loop
+//
+// runBFS reads the current frontier (op.queue) while expansion appends new
+// path states to a separate slice (op.nextQueue). The two are swapped at the
+// end of the level. This is mandatory: writing into the same backing array
+// that drives the read loop would silently overwrite already-staged frontier
+// entries — a slice-aliasing hazard fixed in task-393.
 //
 // # Safety cap
 //
@@ -27,8 +59,8 @@ package exec
 //
 // # Cancellation
 //
-// ctx.Err() is checked at the top of every Next call and inside the BFS inner
-// loop every 4096 steps.
+// ctx.Err() is checked at the top of every Next call and at the top of each
+// runBFS iteration over the current frontier.
 //
 // # Concurrency
 //
@@ -88,8 +120,13 @@ type VarLengthExpand struct {
 	revVerts []uint64
 	revEdges []graph.NodeID
 
-	// BFS state for the current input row.
-	queue        []pathState // BFS frontier
+	// BFS state for the current input row. Two slices are kept and ping-ponged
+	// per BFS level: `queue` is read by runBFS while extensions are appended to
+	// `nextQueue`. After each level the two are swapped. This avoids the
+	// slice-aliasing hazard that arises if the same backing array is both read
+	// and written in the same call.
+	queue        []pathState // current BFS frontier (read)
+	nextQueue    []pathState // next BFS frontier (write target during expansion)
 	inputRow     Row         // current outer input row (stable copy)
 	inputEOS     bool        // true after input plan exhausted
 	edgesVisited int         // traversal counter for safety cap (reset per input row)
@@ -157,6 +194,7 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 		op.revEdges = op.rev.EdgesSlice()
 	}
 	op.queue = op.queue[:0]
+	op.nextQueue = op.nextQueue[:0]
 	op.results = op.results[:0]
 	op.resultIdx = 0
 	op.inputRow = nil
@@ -228,6 +266,7 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 
 		// Reset per-source state.
 		op.queue = op.queue[:0]
+		op.nextQueue = op.nextQueue[:0]
 		op.results = op.results[:0]
 		op.resultIdx = 0
 		op.edgesVisited = 0
@@ -251,18 +290,19 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 	}
 }
 
-// seedQueue enqueues all one-hop neighbours of srcID into the BFS queue.
-// It returns an error if the safety cap is exceeded during seeding.
+// seedQueue enqueues all one-hop neighbours of srcID into the BFS frontier
+// (op.queue), which at this point is empty. It returns an error if the safety
+// cap is exceeded during seeding.
 func (op *VarLengthExpand) seedQueue(srcID uint64) error {
 	// Forward edges.
 	if op.dir != DirIn {
-		if err := op.enqueueEdges(srcID, true, nil); err != nil {
+		if err := op.enqueueEdges(srcID, true, nil, &op.queue); err != nil {
 			return err
 		}
 	}
 	// Reverse edges.
 	if op.dir != DirOut && op.revVerts != nil {
-		if err := op.enqueueEdges(srcID, false, nil); err != nil {
+		if err := op.enqueueEdges(srcID, false, nil, &op.queue); err != nil {
 			return err
 		}
 	}
@@ -270,23 +310,31 @@ func (op *VarLengthExpand) seedQueue(srcID uint64) error {
 }
 
 // runBFS pops items from op.queue, expands them, and collects results in
-// op.results. It processes one frontier level at a time (returning after the
-// first result is collected, or when the frontier is empty).
-// For simplicity (and to respect cancellation), we process the full queue in
-// one call, populating op.results, and return.
+// op.results. It processes one frontier level at a time and returns after the
+// frontier is fully consumed; the caller decides whether to drain more results
+// or to invoke runBFS again to consume the next level.
+//
+// Read/write separation. The current frontier (`op.queue`) is iterated in this
+// call while new extensions are appended to `op.nextQueue`. At the end of the
+// call the two slices are swapped, so on the next call `op.queue` carries the
+// new frontier and `op.nextQueue` is reset to length 0 for the level that
+// follows. This split is mandatory: writing into the same backing array that
+// drives the loop would cause already-staged items to be silently overwritten
+// by appends from later iterations (slice-aliasing hazard).
 func (op *VarLengthExpand) runBFS() error {
-	// Swap queue into a local snapshot and clear op.queue for the next level.
-	work := op.queue
-	op.queue = op.queue[:0]
+	// Ensure nextQueue starts empty for this level.
+	op.nextQueue = op.nextQueue[:0]
 
-	for i := range work {
+	for i := range op.queue {
 		if err := op.ctx.Err(); err != nil {
 			return err
 		}
-		ps := work[i]
+		ps := op.queue[i]
 		// If this path is within the emit window, record it.
 		if ps.hops >= op.minHops && ps.hops <= op.maxHops {
-			// Copy pathState for the result (path slice is already stable).
+			// pathState shares its backing path slice with the queue entry; the
+			// slice is read-only after construction in enqueueEdges, so the copy
+			// is safe.
 			op.results = append(op.results, ps)
 		}
 		// Expand further if we can go deeper.
@@ -296,27 +344,34 @@ func (op *VarLengthExpand) runBFS() error {
 			}
 		}
 	}
+
+	// Swap: nextQueue (writes from this level) becomes the new frontier; the old
+	// frontier slice is reused as the write target for the next level.
+	op.queue, op.nextQueue = op.nextQueue, op.queue[:0]
 	return nil
 }
 
-// expandPath enqueues all one-hop extensions of ps into op.queue.
+// expandPath enqueues all one-hop extensions of ps into op.nextQueue (the
+// write-target for the level following the current one).
 func (op *VarLengthExpand) expandPath(ps pathState) error {
 	if op.dir != DirIn {
-		if err := op.enqueueEdges(ps.srcNode, true, &ps); err != nil {
+		if err := op.enqueueEdges(ps.srcNode, true, &ps, &op.nextQueue); err != nil {
 			return err
 		}
 	}
 	if op.dir != DirOut && op.revVerts != nil {
-		if err := op.enqueueEdges(ps.srcNode, false, &ps); err != nil {
+		if err := op.enqueueEdges(ps.srcNode, false, &ps, &op.nextQueue); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// enqueueEdges enqueues all qualifying edges from node uid into op.queue.
+// enqueueEdges appends all qualifying edges from node uid into *target.
 // isFwd selects forward vs reverse edges. parent is nil only for the seed call.
-func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathState) error {
+// The caller chooses the write target so that the BFS read frontier (op.queue)
+// is never aliased with the write target during a runBFS pass.
+func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathState, target *[]pathState) error {
 	var (
 		verts []uint64
 		edges []graph.NodeID
@@ -374,7 +429,7 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 			newVisited = bitsetAdd(nil, absPos)
 		}
 
-		op.queue = append(op.queue, pathState{
+		*target = append(*target, pathState{
 			hops:    hops,
 			srcNode: dst,
 			path:    newPath,
@@ -420,6 +475,7 @@ func (op *VarLengthExpand) buildRow(out *Row, inputRow Row, ps pathState) {
 // Close releases resources.
 func (op *VarLengthExpand) Close() error {
 	op.queue = nil
+	op.nextQueue = nil
 	op.results = nil
 	op.outBuf = nil
 	op.inputRow = nil

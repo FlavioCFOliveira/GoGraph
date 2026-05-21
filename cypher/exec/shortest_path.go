@@ -1,6 +1,7 @@
 package exec
 
-// shortest_path.go — ShortestPath and AllShortestPaths operators (task-262).
+// shortest_path.go — ShortestPath and AllShortestPaths operators
+// (task-262, doc refresh in task-393).
 //
 // ShortestPath uses BFS to find a single shortest path between a source and
 // destination node. It emits one row containing a [expr.PathValue] (or
@@ -13,6 +14,27 @@ package exec
 // Both operators enforce relationship-uniqueness within each path (no edge
 // repeated). BFS naturally avoids revisiting nodes, ensuring each node appears
 // at most once per path in the shortest-path case.
+//
+// # Algorithm choice (why single-direction BFS, not bidirectional or Dijkstra)
+//
+// Cypher's shortestPath() / allShortestPaths() operates on the unweighted edge
+// count (semantically: fewest hops), so the optimal algorithm is BFS. The
+// alternatives considered were:
+//
+//   - Bidirectional BFS — halves the expected exploration cost when both
+//     endpoints are fixed and the graph is reasonably regular, but doubles
+//     implementation and test surface and confers no asymptotic improvement.
+//     Forward-only BFS is kept until a measured benchmark shows the doubling
+//     pays off in this codebase.
+//   - Dijkstra / A* — only beneficial for weighted shortest paths or with an
+//     admissible heuristic; neither applies to unweighted Cypher semantics.
+//
+// For the all-shortest-paths variant, the standard solution is level-
+// synchronous BFS with a multi-predecessor map: at each BFS level we record
+// every predecessor edge that reaches a node at the current distance; once dst
+// is first found, the predecessor DAG is traversed in reverse to enumerate
+// every shortest path. This is the textbook approach (see e.g. CLRS chap. 22
+// and graph-DB documentation on allShortestPaths).
 //
 // # Input schema
 //
