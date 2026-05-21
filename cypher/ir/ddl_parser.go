@@ -53,98 +53,86 @@ func ParseDDL(query string) (LogicalPlan, error) {
 // CREATE INDEX parser
 // ─────────────────────────────────────────────────────────────────────────────
 
+// tokenReader is a simple cursor over a token slice used by the DDL parsers.
+type tokenReader struct {
+	tokens []string
+	pos    int
+}
+
+func newTokenReader(query string) *tokenReader { return &tokenReader{tokens: tokenise(query)} }
+
+func (r *tokenReader) peek() string {
+	if r.pos >= len(r.tokens) {
+		return ""
+	}
+	return r.tokens[r.pos]
+}
+
+func (r *tokenReader) peekUpper() string { return strings.ToUpper(r.peek()) }
+
+func (r *tokenReader) consume() string {
+	if r.pos >= len(r.tokens) {
+		return ""
+	}
+	t := r.tokens[r.pos]
+	r.pos++
+	return t
+}
+
+func (r *tokenReader) expectU(want string) error {
+	tok := strings.ToUpper(r.consume())
+	if tok != want {
+		return fmt.Errorf("ir: DDL parser: expected %q, got %q", want, tok)
+	}
+	return nil
+}
+
 // parseCreateIndex parses:
 //
 //	CREATE INDEX [IF NOT EXISTS] [name] FOR (n:Label) ON (n.prop) [OPTIONS {indexType:'hash'|'btree'}]
 func parseCreateIndex(query string) (*CreateIndex, error) {
-	// Tokenise preserving original case except for keyword detection.
-	tokens := tokenise(query)
-	pos := 0
-	consume := func() string {
-		if pos >= len(tokens) {
-			return ""
-		}
-		t := tokens[pos]
-		pos++
-		return t
-	}
-	peek := func() string {
-		if pos >= len(tokens) {
-			return ""
-		}
-		return tokens[pos]
-	}
-	peekUpper := func() string { return strings.ToUpper(peek()) }
-	expectU := func(want string) error {
-		tok := strings.ToUpper(consume())
-		if tok != want {
-			return fmt.Errorf("ir: CREATE INDEX: expected %q, got %q", want, tok)
-		}
-		return nil
-	}
+	r := newTokenReader(query)
 
-	// "CREATE"
-	if err := expectU("CREATE"); err != nil {
+	if err := r.expectU("CREATE"); err != nil {
 		return nil, err
 	}
-	// "INDEX"
-	if err := expectU("INDEX"); err != nil {
+	if err := r.expectU("INDEX"); err != nil {
 		return nil, err
 	}
 
-	// Optional IF NOT EXISTS
-	ifNotExists := false
-	if peekUpper() == "IF" {
-		consume() // IF
-		if err := expectU("NOT"); err != nil {
-			return nil, err
-		}
-		if err := expectU("EXISTS"); err != nil {
-			return nil, err
-		}
-		ifNotExists = true
+	ifNotExists, err := parseIfNotExists(r)
+	if err != nil {
+		return nil, err
 	}
 
-	// Optional name (present unless next token is "FOR")
 	name := ""
-	if peekUpper() != "FOR" {
-		name = consume()
+	if r.peekUpper() != "FOR" {
+		name = r.consume()
 	}
 
-	// "FOR"
-	if err := expectU("FOR"); err != nil {
+	if err := r.expectU("FOR"); err != nil {
 		return nil, err
 	}
 
-	// (n:Label)
-	label, err := parseNodePattern(tokens, &pos)
+	label, err := parseNodePattern(r.tokens, &r.pos)
 	if err != nil {
 		return nil, fmt.Errorf("ir: CREATE INDEX %q: %w", name, err)
 	}
 
-	// "ON"
-	if err := expectU("ON"); err != nil {
+	if err := r.expectU("ON"); err != nil {
 		return nil, err
 	}
 
-	// (n.prop)
-	propKey, err := parsePropAccess(tokens, &pos)
+	propKey, err := parsePropAccess(r.tokens, &r.pos)
 	if err != nil {
 		return nil, fmt.Errorf("ir: CREATE INDEX %q: %w", name, err)
 	}
 
-	// Optional OPTIONS {indexType: 'hash'|'btree'}
-	idxType := IndexTypeHash
-	if peekUpper() == "OPTIONS" {
-		consume() // OPTIONS
-		t, err2 := parseIndexOptions(tokens, &pos)
-		if err2 != nil {
-			return nil, fmt.Errorf("ir: CREATE INDEX %q options: %w", name, err2)
-		}
-		idxType = t
+	idxType, err := parseOptionalIndexOptions(r, name)
+	if err != nil {
+		return nil, err
 	}
 
-	// Auto-name: label_prop_type
 	if name == "" {
 		suffix := "hash"
 		if idxType == IndexTypeBTree {
@@ -154,6 +142,34 @@ func parseCreateIndex(query string) (*CreateIndex, error) {
 	}
 
 	return NewCreateIndex(name, label, propKey, idxType, ifNotExists), nil
+}
+
+// parseIfNotExists consumes "IF NOT EXISTS" when present and returns true.
+func parseIfNotExists(r *tokenReader) (bool, error) {
+	if r.peekUpper() != "IF" {
+		return false, nil
+	}
+	r.consume() // IF
+	if err := r.expectU("NOT"); err != nil {
+		return false, err
+	}
+	if err := r.expectU("EXISTS"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// parseOptionalIndexOptions consumes the OPTIONS clause when present.
+func parseOptionalIndexOptions(r *tokenReader, name string) (IndexType, error) {
+	if r.peekUpper() != "OPTIONS" {
+		return IndexTypeHash, nil
+	}
+	r.consume() // OPTIONS
+	t, err := parseIndexOptions(r.tokens, &r.pos)
+	if err != nil {
+		return IndexTypeHash, fmt.Errorf("ir: CREATE INDEX %q options: %w", name, err)
+	}
+	return t, nil
 }
 
 // parseNodePattern parses "(n:Label)" at tokens[*pos] and advances *pos past
