@@ -1067,30 +1067,36 @@ func (v *visitor) visitRangeLit(ctx gen.IRangeLitContext) (*ast.RangeQuantifier,
 		return nil, nil
 	}
 	rq := &ast.RangeQuantifier{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
-	nums := ctx.AllNumLit()
 
-	hasRange := ctx.RANGE() != nil // ".." token present
+	// normalizeVarlenBounds pre-processes unsigned integer bounds to their
+	// negated form (e.g. "*1..3" → "*-1..-3") so that the lexer emits DIGIT
+	// tokens instead of ID tokens. ctx.GetText() therefore returns strings like
+	// "*-2", "*-1..-3", "*..-3", "*-1..", "*.." — always starting with "*".
+	// We parse bounds from the raw text and take abs() to recover the original
+	// positive hop count.
+	text := ctx.GetText() // e.g. "*-2", "*-1..-3", "*..-3", "*-1..", "*.."
+	inner := strings.TrimPrefix(text, "*")
 
+	hasRange := strings.Contains(inner, "..")
 	if !hasRange {
-		// *n  — fixed length
-		if len(nums) == 1 {
-			n, err := parseInt(nums[0].GetText())
-			if err != nil {
-				return nil, &SemaError{Rule: "rangeLit", Pos: rq.Pos, Message: err.Error()}
-			}
-			rq.Min = &n
-			rq.Max = &n
+		// *n  — fixed length or bare *.
+		if inner == "" {
+			// bare *  — unbounded in both directions
+			return rq, nil
 		}
-		// bare * — unbounded
+		n, err := strconv.ParseInt(inner, 10, 64)
+		if err != nil {
+			return nil, &SemaError{Rule: "rangeLit", Pos: rq.Pos, Message: "invalid range bound: " + inner}
+		}
+		if n < 0 {
+			n = -n
+		}
+		rq.Min = &n
+		rq.Max = &n
 		return rq, nil
 	}
 
 	// *min?..max?
-	// We detect position: num before RANGE token is min, num after is max.
-	// Since AllNumLit returns children in order, we check the raw text.
-	text := ctx.GetText() // e.g. "*1..3", "*..3", "*1..", "*.."
-	// Strip leading '*'
-	inner := strings.TrimPrefix(text, "*")
 	parts := strings.SplitN(inner, "..", 2)
 	if len(parts) == 2 {
 		if parts[0] != "" {
@@ -1098,12 +1104,18 @@ func (v *visitor) visitRangeLit(ctx gen.IRangeLitContext) (*ast.RangeQuantifier,
 			if err != nil {
 				return nil, &SemaError{Rule: "rangeLit", Pos: rq.Pos, Message: "invalid range min: " + parts[0]}
 			}
+			if n < 0 {
+				n = -n
+			}
 			rq.Min = &n
 		}
 		if parts[1] != "" {
 			n, err := strconv.ParseInt(parts[1], 10, 64)
 			if err != nil {
 				return nil, &SemaError{Rule: "rangeLit", Pos: rq.Pos, Message: "invalid range max: " + parts[1]}
+			}
+			if n < 0 {
+				n = -n
 			}
 			rq.Max = &n
 		}
@@ -1933,11 +1945,24 @@ func (v *visitor) VisitBoolLit(ctx *gen.BoolLitContext) interface{} {
 	return &ast.BoolLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: ctx.TRUE() != nil}
 }
 
-// VisitNumLit handles integer literals via the DIGIT token.
-// The DIGIT lexer rule covers decimal integers; floats appear via FLOAT token
-// which is handled by the unary expression wrapping in context.
+// VisitNumLit handles integer and float literals.
+//
+// Positive integers are tokenised as ID rather than DIGIT due to lexer-rule
+// ordering (ID : LetterOrDigit+ appears before DIGIT : SUB? ... in the grammar).
+// The parser's numeric-ID fixes ensure that purely-numeric ID tokens reach this
+// visitor via the numLit rule; ctx.GetText() is used instead of
+// ctx.DIGIT().GetText() to support both token types transparently.
 func (v *visitor) VisitNumLit(ctx *gen.NumLitContext) interface{} {
-	text := ctx.DIGIT().GetText()
+	text := ctx.GetText()
+	if text == "" {
+		// Fallback: try the DIGIT terminal if GetText is somehow empty.
+		if d := ctx.DIGIT(); d != nil {
+			text = d.GetText()
+		}
+	}
+	if text == "" {
+		return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: "empty number literal"}
+	}
 	// Try float first (handles scientific notation / decimals in the DIGIT token).
 	if strings.ContainsAny(text, ".eEfFdD") {
 		f, err := strconv.ParseFloat(text, 64)
@@ -1947,9 +1972,16 @@ func (v *visitor) VisitNumLit(ctx *gen.NumLitContext) interface{} {
 		return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
 	}
 	// Hex / octal / decimal integer.
-	n, err := parseInt(text)
-	if err != nil {
-		return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: err.Error()}
+	n, intErr := parseInt(text)
+	if intErr != nil {
+		// Very long decimal integers (e.g. 300+ digit literals) overflow int64.
+		// Fall back to float64 to support the openCypher behaviour where such
+		// values are rounded to the nearest IEEE-754 double.
+		f, floatErr := strconv.ParseFloat(text, 64)
+		if floatErr != nil {
+			return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: intErr.Error()}
+		}
+		return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
 	}
 	return &ast.IntLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: n}
 }

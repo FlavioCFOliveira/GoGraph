@@ -11343,11 +11343,24 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
 	p.EnterRule(localctx, 116, CypherParserRULE_atom)
 	p.SetState(610)
 	p.GetErrorHandler().Sync(p)
+	// atomNumericIDFix: when the next token is a purely-numeric ID (e.g. "3",
+	// "42"), force alt 1 (Literal) instead of alt 11 (Symbol). Positive integers
+	// tokenise as ID rather than DIGIT due to lexer-rule ordering, so
+	// AdaptivePredict predicts Symbol for them. This targeted fix intercepts that
+	// case so that integer literals are correctly parsed as literals.
+	//
+	// Note: atomAlt is declared here (before the goto) to avoid "goto jumps over
+	// declaration" compile errors.
+	var atomAlt int
 	if p.HasError() {
 		goto errorExit
 	}
+	atomAlt = p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 67, p.GetParserRuleContext())
+	if atomAlt == 11 && isNumericIDToken(p.GetTokenStream().LT(1)) {
+		atomAlt = 1
+	}
 
-	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 67, p.GetParserRuleContext()) {
+	switch atomAlt {
 	case 1:
 		p.EnterOuterAlt(localctx, 1)
 		{
@@ -15029,9 +15042,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
 	localctx = NewLiteralContext(p, p.GetParserRuleContext(), p.GetState())
 	p.EnterRule(localctx, 154, CypherParserRULE_literal)
 	p.SetState(778)
-	p.GetErrorHandler().Sync(p)
-	if p.HasError() {
-		goto errorExit
+	// literalSyncFix: skip the ATN Sync when the next token is a purely-numeric
+	// ID (e.g. "3", "42"). The ATN prediction set for state 778 does not include
+	// ID, so Sync would report a spurious syntax error. We know the token is
+	// valid for the numLit alternative (handled below), so the Sync is safe to
+	// skip in this targeted case.
+	if !isNumericIDToken(p.GetTokenStream().LT(1)) {
+		p.GetErrorHandler().Sync(p)
+		if p.HasError() {
+			goto errorExit
+		}
 	}
 
 	switch p.GetTokenStream().LA(1) {
@@ -15047,6 +15067,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
 		{
 			p.SetState(772)
 			p.NumLit()
+		}
+
+	case CypherParserID:
+		// literalNumericIDFix: a purely-numeric token was lexed as ID instead of
+		// DIGIT due to lexer-rule ordering. Treat it as a numLit so that integer
+		// literals are correctly parsed in expressions (e.g. 3 IN [1, 2, 3]).
+		if isNumericIDToken(p.GetTokenStream().LT(1)) {
+			p.EnterOuterAlt(localctx, 2)
+			{
+				p.SetState(772)
+				p.NumLit()
+			}
+		} else {
+			p.SetError(antlr.NewNoViableAltException(p, nil, nil, nil, nil, nil))
+			goto errorExit
 		}
 
 	case CypherParserNULL_W:
@@ -15233,10 +15268,57 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
 	}
 }
 
+// isNumericIDToken reports whether tok is an ID token whose text consists
+// entirely of ASCII decimal digits (e.g. "3", "42", "100"). This is the
+// canonical check used by the numeric-ID workarounds throughout this file.
+func isNumericIDToken(tok antlr.Token) bool {
+	if tok == nil {
+		return false
+	}
+	if tok.GetTokenType() != CypherParserID {
+		return false
+	}
+	text := tok.GetText()
+	if len(text) == 0 {
+		return false
+	}
+	for _, ch := range text {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// rangeNumBound consumes a DIGIT or a purely-numeric ID token and adds it as a
+// child terminal of the current rule context. This is a targeted workaround for
+// the ANTLR lexer ambiguity where single- or multi-digit integers inside a
+// range-literal (e.g. [r*1..3]) are tokenised as ID instead of DIGIT because
+// the ID rule (LetterOrDigit+) appears before DIGIT in the lexer grammar.
+//
+// The approach:
+//  1. Peek at the next token. Accept it if it is DIGIT, or if it is ID and its
+//     text consists entirely of ASCII digits.
+//  2. Consume the token so that the token-stream cursor advances past it.
+//  3. Wrap the consumed token in a TerminalNode and add it to the current rule
+//     context so that ctx.GetText() returns the expected concatenated text (e.g.
+//     "*1..3").
+//
+// If the next token is neither DIGIT nor a numeric ID, this is a no-op.
+func (p *CypherParser) rangeNumBound() {
+	tok := p.GetTokenStream().LT(1)
+	if tok == nil {
+		return
+	}
+	if tok.GetTokenType() == CypherParserDIGIT || isNumericIDToken(tok) {
+		p.GetTokenStream().Consume()
+		p.GetParserRuleContext().AddTokenNode(tok) //nolint:staticcheck // generated-parser pattern
+	}
+}
+
 func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
 	localctx = NewRangeLitContext(p, p.GetParserRuleContext(), p.GetState())
 	p.EnterRule(localctx, 156, CypherParserRULE_rangeLit)
-	var _la int
 
 	p.EnterOuterAlt(localctx, 1)
 	{
@@ -15247,28 +15329,18 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
 			goto errorExit
 		}
 	}
+	// Consume an optional lower bound (DIGIT or purely-numeric ID such as "1" or
+	// "10") BEFORE the ATN Sync at state 782 so that the error-recovery logic
+	// does not fire on a valid numeric ID token. The visitor extracts the bounds
+	// via ctx.GetText(), so consuming the token here is sufficient.
+	p.rangeNumBound()
 	p.SetState(782)
 	p.GetErrorHandler().Sync(p)
 	if p.HasError() {
 		goto errorExit
 	}
-	_la = p.GetTokenStream().LA(1)
 
-	if _la == CypherParserDIGIT {
-		{
-			p.SetState(781)
-			p.NumLit()
-		}
-
-	}
-	p.SetState(788)
-	p.GetErrorHandler().Sync(p)
-	if p.HasError() {
-		goto errorExit
-	}
-	_la = p.GetTokenStream().LA(1)
-
-	if _la == CypherParserRANGE {
+	if p.GetTokenStream().LA(1) == CypherParserRANGE {
 		{
 			p.SetState(784)
 			p.Match(CypherParserRANGE)
@@ -15277,19 +15349,12 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
 				goto errorExit
 			}
 		}
+		// Consume an optional upper bound with the same ID-aware helper.
+		p.rangeNumBound()
 		p.SetState(786)
 		p.GetErrorHandler().Sync(p)
 		if p.HasError() {
 			goto errorExit
-		}
-		_la = p.GetTokenStream().LA(1)
-
-		if _la == CypherParserDIGIT {
-			{
-				p.SetState(785)
-				p.NumLit()
-			}
-
 		}
 
 	}
@@ -15504,7 +15569,17 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
 	localctx = NewNumLitContext(p, p.GetParserRuleContext(), p.GetState())
 	p.EnterRule(localctx, 160, CypherParserRULE_numLit)
 	p.EnterOuterAlt(localctx, 1)
-	{
+
+	// numLitNumericIDFix: accept a purely-numeric ID token in addition to DIGIT,
+	// since positive integers tokenise as ID due to lexer-rule ordering. When the
+	// next token is a numeric ID, consume it and attach it to the rule context so
+	// that ctx.GetText() returns the integer text (e.g. "3", "42"). The DIGIT()
+	// accessor will still return nil, but VisitNumLit reads GetText() instead.
+	if isNumericIDToken(p.GetTokenStream().LT(1)) {
+		tok := p.GetTokenStream().LT(1)
+		p.GetTokenStream().Consume()
+		localctx.AddTokenNode(tok) //nolint:staticcheck // generated-parser pattern
+	} else {
 		p.SetState(792)
 		p.Match(CypherParserDIGIT)
 		if p.HasError() {

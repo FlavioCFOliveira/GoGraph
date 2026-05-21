@@ -12,10 +12,10 @@
 | Metric | Value |
 |---|---|
 | Total TCK scenarios with `When executing query:` | 3897 |
-| Scenarios run against `parser.Parse` | **3534** |
-| Scenarios skipped (grammar gaps, see below) | 363 |
+| Scenarios run against `parser.Parse` | **3558** |
+| Scenarios skipped (grammar gaps, see below) | 339 |
 | Pass rate on run scenarios | **100.0 %** |
-| Overall pass rate (run / total) | **90.7 %** |
+| Overall pass rate (run / total) | **91.3 %** |
 
 ---
 
@@ -24,11 +24,11 @@
 | Feature area | Total | Run | Pass | Skip | Pass% |
 |---|---|---|---|---|---|
 | clauses/call | 52 | 51 | 51 | 1 | 100.0% |
-| clauses/create | 78 | 74 | 74 | 4 | 100.0% |
+| clauses/create | 78 | 75 | 75 | 3 | 100.0% |
 | clauses/delete | 41 | 37 | 37 | 4 | 100.0% |
-| clauses/match | 381 | 338 | 338 | 43 | 100.0% |
+| clauses/match | 381 | 358 | 358 | 23 | 100.0% |
 | clauses/match-where | 34 | 34 | 34 | 0 | 100.0% |
-| clauses/merge | 75 | 70 | 70 | 5 | 100.0% |
+| clauses/merge | 75 | 71 | 71 | 4 | 100.0% |
 | clauses/remove | 33 | 33 | 33 | 0 | 100.0% |
 | clauses/return | 63 | 62 | 62 | 1 | 100.0% |
 | clauses/return-orderby | 35 | 32 | 32 | 3 | 100.0% |
@@ -52,7 +52,7 @@
 | expressions/mathematical | 6 | 5 | 5 | 1 | 100.0% |
 | expressions/null | 44 | 44 | 44 | 0 | 100.0% |
 | expressions/path | 7 | 4 | 4 | 3 | 100.0% |
-| expressions/pattern | 50 | 44 | 44 | 6 | 100.0% |
+| expressions/pattern | 50 | 46 | 46 | 4 | 100.0% |
 | expressions/precedence | 121 | 119 | 119 | 2 | 100.0% |
 | expressions/quantifier | 604 | 532 | 532 | 72 | 100.0% |
 | expressions/string | 32 | 27 | 27 | 5 | 100.0% |

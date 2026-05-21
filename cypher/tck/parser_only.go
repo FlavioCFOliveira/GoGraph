@@ -59,9 +59,12 @@ const (
 	// char literal followed by an identifier, producing a spurious parse error.
 	SkipSingleQuoteString SkipReason = "single-quote-string"
 
-	// SkipVarlenExplicitBound excludes variable-length relationship patterns
-	// with numeric bounds, e.g. -[:T*2]-> or -[:T*1..3]->. The grammar only
-	// supports unbounded * (Kleene star).
+	// SkipVarlenExplicitBound is retained for reference. The skip condition was
+	// resolved in v1.4.0 via normalizeVarlenBounds in cypher/parser/normalize.go,
+	// which pre-processes unsigned integer range bounds into their negated form so
+	// that the ANTLR lexer emits DIGIT tokens instead of ID tokens.
+	//
+	//nolint:unused // retained for documentation; normalizeVarlenBounds resolves the gap in v1.4.0
 	SkipVarlenExplicitBound SkipReason = "varlen-explicit-bound"
 
 	// SkipVarlenDotDot excludes patterns that use the .. range syntax on a
@@ -186,8 +189,11 @@ var reSingleQuoteSpace = regexp.MustCompile(`'[^']*\s+[^']*'`)
 //nolint:unused // retained for documentation; normalizeSingleQuotes resolves the gap in v1.3.0
 var reSingleQuoteTemporalArg = regexp.MustCompile(`(?i)(?:date|time|localtime|datetime|localdatetime|duration)(?:\.[a-zA-Z]+)?\s*\('[^']*(?:\d[-:]\d|\d\.\d)`)
 
-// reVarlenBound matches variable-length relationship patterns with explicit
-// numeric bounds: -[:T*2]-> or -[:T*1..3]-> or -[*2]->.
+// reVarlenBound matched variable-length relationship patterns with explicit
+// numeric bounds: -[:T*2]-> or -[:T*1..3]-> or -[*2]->.  Retained for
+// reference; normalizeVarlenBounds resolves the gap in v1.4.0.
+//
+//nolint:unused // retained for documentation
 var reVarlenBound = regexp.MustCompile(`\[[\w:]*\*(?:\d|\.\.\d)`)
 
 // reVarlenDotDot matches relationship patterns that use .. without the *
@@ -235,8 +241,6 @@ func classifySkipByQuery(q string) SkipReason {
 	switch {
 	case reAngleBracket.MatchString(q):
 		return SkipPlaceholder
-	case reVarlenBound.MatchString(q):
-		return SkipVarlenExplicitBound
 	case reVarlenDotDot.MatchString(q):
 		return SkipVarlenDotDot
 	case strings.Count(strings.ToUpper(q), "WITH") > 1:
