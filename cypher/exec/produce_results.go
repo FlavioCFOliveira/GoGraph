@@ -94,11 +94,14 @@ type ResultSet struct {
 // must call [ResultSet.Close] when done.
 //
 // Run does not pull any rows; all work happens lazily in [ResultSet.Next].
+// The Record map is pre-allocated once here and reused across every Next call
+// to eliminate the per-row allocation that previously dominated heap usage.
 func Run(ctx context.Context, plan Operator, cols []string) *ResultSet {
 	rs := &ResultSet{
-		plan: plan,
-		cols: cols,
-		ctx:  ctx,
+		plan:    plan,
+		cols:    cols,
+		ctx:     ctx,
+		current: make(Record, len(cols)), // pre-allocated; reused by each Next call
 	}
 	if err := plan.Init(ctx); err != nil {
 		rs.err = fmt.Errorf("exec: plan init: %w", err)
@@ -128,16 +131,16 @@ func (rs *ResultSet) Next() bool {
 		return false
 	}
 
-	// Build Record: copy values to avoid aliasing the operator's row buffer.
-	rec := make(Record, len(rs.cols))
+	// Update the pre-allocated Record in place. The godoc contract on Record
+	// states that the map is owned by the ResultSet and callers must copy any
+	// value they need to retain beyond the next Next call, so reuse is safe.
 	for i, col := range rs.cols {
 		if i < len(row) {
-			rec[col] = row[i]
+			rs.current[col] = row[i]
 		} else {
-			rec[col] = nil
+			rs.current[col] = nil
 		}
 	}
-	rs.current = rec
 	return true
 }
 

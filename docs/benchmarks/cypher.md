@@ -153,3 +153,73 @@ property filters without an index.
 GOMAXPROCS=10. Sub-linear scaling indicates contention on shared read paths
 (likely the graph's RWMutex). Each query allocates the same amount as the
 sequential path — concurrent execution does not introduce extra allocations.
+
+---
+
+## Profiling
+
+### Hotspot Analysis (IC1 heap profile)
+
+Profile captured with `go test -bench=^BenchmarkIC1$ -memprofile -count=1 ./bench/cypher_ldbc/...`
+then inspected with `go tool pprof -top`. IC1 = `MATCH (n) RETURN n` over 1 000 nodes.
+
+| Rank | Function | alloc_space share |
+|-----:|----------|------------------:|
+| 1 | `exec.(*ResultSet).Next` | 74.27% (~21 GB cumulative) |
+| 2 | `exec.(*Project).Next` | 9.88% (~2.8 GB) |
+| 3 | `exec.(*AllNodesScan).Init.func1` | 3.44% |
+| 4 | `exec.(*Filter).Next` | 2.11% |
+| 5 | `runtime.mallocgc` (residual) | 1.87% |
+
+The dominant hotspot was `ResultSet.Next` allocating a fresh `Record` (a `map[string]interface{}`)
+on every row — 1 000 maps per IC1 execution.
+
+### Fix: ResultSet.Next map reuse
+
+**Before:** `Run()` left `rs.current` as nil; `Next()` called `make(Record, len(rs.cols))` on
+every row, producing one heap-allocated map per result row.
+
+**After:** `Run()` pre-allocates `rs.current` once with `make(Record, len(cols))`. `Next()` now
+updates the map entries in place. The fix is safe because the existing godoc contract on `Record`
+already states: _"The underlying map is owned by the ResultSet; callers must copy values they need
+to retain beyond the next ResultSet.Next call."_ No caller contract changes.
+
+```go
+// Run — after fix (produce_results.go)
+rs := &ResultSet{
+    plan:    plan,
+    cols:    cols,
+    ctx:     ctx,
+    current: make(Record, len(cols)), // pre-allocated; reused by each Next call
+}
+
+// Next — after fix
+for i, col := range rs.cols {
+    if i < len(row) {
+        rs.current[col] = row[i]
+    } else {
+        rs.current[col] = nil
+    }
+}
+return true
+```
+
+### Before / After (BenchmarkIC1)
+
+Measured with `go test -bench=BenchmarkIC1 -benchmem -count=5 ./bench/cypher_ldbc/...`
+and compared with `benchstat`.
+
+| Metric | Before | After | Delta |
+|--------|-------:|------:|------:|
+| ns/op | 149,113 | 74,055 | **−50%** |
+| B/op | 439,910 | 104,209 | **−76%** |
+| allocs/op | 5,784 | 3,782 | **−35%** |
+
+The remaining 3 782 allocs/op come from `exec.(*Project).Next` (expression value boxing per row)
+and `exec.(*AllNodesScan).Init.func1` (iterator closure state). These require a deeper refactoring
+of the expression evaluation pipeline to eliminate `interface{}` boxing on the hot path.
+<!-- TODO(perf): eliminate per-row allocs in Project.Next and AllNodesScan.Init.func1 —
+     requires zero-alloc expr.Value representation (tagged union / arena) -->
+
+The fix also benefits all label-scan queries that return rows (IC2, IC3, IC4, IC7, IC9, IC10,
+IC11, IC14) and the IC1_Parallel variant (−67% ns/op, −76% B/op, −35% allocs/op).
