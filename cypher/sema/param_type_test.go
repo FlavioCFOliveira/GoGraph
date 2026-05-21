@@ -1,6 +1,7 @@
 package sema_test
 
 import (
+	"errors"
 	"testing"
 
 	"gograph/cypher/expr"
@@ -67,8 +68,8 @@ func TestCheckParams_TypeMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected type mismatch error")
 	}
-	pte, ok := err.(*sema.ParamTypeError)
-	if !ok {
+	var pte *sema.ParamTypeError
+	if !errors.As(err, &pte) {
 		t.Fatalf("expected *sema.ParamTypeError, got %T: %v", err, err)
 	}
 	if pte.Name != "pid" {
