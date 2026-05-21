@@ -362,6 +362,211 @@ func TestDecodePool(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Wrong-marker error paths for all primitive decoders
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestReadNullWrongMarker(t *testing.T) {
+	// 0xC3 = markerTrue, not markerNull (0xC0)
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC3}))
+	if err := dec.ReadNull(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadBoolWrongMarker(t *testing.T) {
+	// 0xC0 = markerNull, not a bool marker
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC0}))
+	if _, err := dec.ReadBool(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadFloatWrongMarker(t *testing.T) {
+	// 0xC0 = markerNull, not markerFloat64 (0xC1)
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC0}))
+	if _, err := dec.ReadFloat(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadIntWrongMarker(t *testing.T) {
+	// 0x80 = TinyStr base — not in TinyInt range and not an Int8/16/32/64 marker
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0x80}))
+	if _, err := dec.ReadInt(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadBytesWrongMarker(t *testing.T) {
+	// 0xC0 = markerNull, not a bytes marker
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC0}))
+	if _, err := dec.ReadBytes(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadStringWrongMarker(t *testing.T) {
+	// 0xC0 = markerNull, not a string marker
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC0}))
+	if _, err := dec.ReadString(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadListHeaderWrongMarker(t *testing.T) {
+	// 0xC0 = markerNull, not a list marker
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC0}))
+	if _, err := dec.ReadListHeader(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadMapHeaderWrongMarker(t *testing.T) {
+	// 0xC0 = markerNull, not a map marker
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC0}))
+	if _, err := dec.ReadMapHeader(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+func TestReadStructHeaderWrongMarker(t *testing.T) {
+	// 0xC0 = markerNull, not a struct marker (0xB0..0xBF)
+	dec := packstream.NewDecoder(bytes.NewReader([]byte{0xC0}))
+	if _, _, err := dec.ReadStructHeader(); err == nil {
+		t.Fatal("expected error for wrong marker")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Large-size variants: List32, Map32, Str32 (n > 65535)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestWriteListHeaderNegative(t *testing.T) {
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	if err := enc.WriteListHeader(-1); err == nil {
+		t.Fatal("expected error for negative list length")
+	}
+}
+
+func TestWriteMapHeaderNegative(t *testing.T) {
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	if err := enc.WriteMapHeader(-1); err == nil {
+		t.Fatal("expected error for negative map length")
+	}
+}
+
+// TestListHeaderList32 exercises the List32 encoder/decoder (n > 65535).
+// Only the 5-byte header is encoded; no items are serialised.
+func TestListHeaderList32(t *testing.T) {
+	const n = 65536
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	if err := enc.WriteListHeader(n); err != nil {
+		t.Fatalf("WriteListHeader(%d): %v", n, err)
+	}
+	if err := enc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	dec := packstream.NewDecoder(&buf)
+	got, err := dec.ReadListHeader()
+	if err != nil {
+		t.Fatalf("ReadListHeader: %v", err)
+	}
+	if got != n {
+		t.Errorf("want %d, got %d", n, got)
+	}
+}
+
+// TestMapHeaderMap32 exercises the Map32 encoder/decoder (n > 65535).
+func TestMapHeaderMap32(t *testing.T) {
+	const n = 65536
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	if err := enc.WriteMapHeader(n); err != nil {
+		t.Fatalf("WriteMapHeader(%d): %v", n, err)
+	}
+	if err := enc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	dec := packstream.NewDecoder(&buf)
+	got, err := dec.ReadMapHeader()
+	if err != nil {
+		t.Fatalf("ReadMapHeader: %v", err)
+	}
+	if got != n {
+		t.Errorf("want %d, got %d", n, got)
+	}
+}
+
+// TestStringStr32 round-trips a string that requires the Str32 marker (n > 65535).
+func TestStringStr32(t *testing.T) {
+	const n = 65536
+	v := strings.Repeat("z", n)
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	if err := enc.WriteString(v); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	if err := enc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	dec := packstream.NewDecoder(&buf)
+	got, err := dec.ReadString()
+	if err != nil {
+		t.Fatalf("ReadString: %v", err)
+	}
+	if len(got) != n {
+		t.Errorf("length want %d, got %d", n, len(got))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WriteValue: int, int32 native types and unsupported type error
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestWriteValueIntTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		v    packstream.Value
+		want int64
+	}{
+		{"int", int(42), 42},
+		{"int32", int32(100), 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			enc := packstream.NewEncoder(&buf)
+			if err := enc.WriteValue(tc.v); err != nil {
+				t.Fatalf("WriteValue: %v", err)
+			}
+			if err := enc.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			dec := packstream.NewDecoder(&buf)
+			got, err := dec.ReadInt()
+			if err != nil {
+				t.Fatalf("ReadInt: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("want %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestWriteValueUnsupportedType(t *testing.T) {
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	// complex128 is not a PackStream value type
+	if err := enc.WriteValue(complex(1.0, 2.0)); err == nil {
+		t.Fatal("expected error for unsupported type, got nil")
+	}
+}
+
 // TestLowLevelPrimitives tests the low-level Encoder/Decoder methods directly
 // (not via WriteValue/ReadValue) to ensure they work independently.
 func TestLowLevelPrimitives(t *testing.T) {
