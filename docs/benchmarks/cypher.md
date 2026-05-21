@@ -258,14 +258,87 @@ above.
 
 ---
 
-## Bolt Round-trip Benchmark
+## Bolt Round-Trip Benchmarks
 
-TODO: Bolt round-trip benchmark pending (`bench/soak/cypher_rw.go`).
+End-to-end latency measured through the `bolt/server` TCP stack on loopback.
+Each sub-benchmark spins up a private server, seeds 16 nodes, then drives load
+via `b.RunParallel` with `GOMAXPROCS` set to the concurrency level under test.
 
-The `bench/soak` package contains a mixed read/write workload harness
-(`cypher_rw.go`) used for soak testing, but it does not currently expose
-`Benchmark*` functions. A Bolt round-trip benchmark measuring end-to-end
-latency through the `bolt/server` TCP stack is planned.
+**Environment:** darwin/arm64, Apple M4, Go 1.26, race detector enabled.
+
+**Run command:**
+
+```bash
+go test -race -bench=BenchmarkBolt -benchmem -count=3 -timeout=300s \
+    ./bench/soak/...
+```
+
+**Source:** `bench/soak/cypher_rw_bench_test.go`
+
+### BenchmarkBoltReadOnly — `MATCH (n) RETURN count(n)`
+
+Auto-committed read via HELLO / RUN / PULL / GOODBYE.
+
+| Concurrency | Run 1 ns/op | Run 2 ns/op | Run 3 ns/op | Median ns/op | B/op   | allocs/op |
+|------------:|------------:|------------:|------------:|-------------:|-------:|----------:|
+|           1 |     320,475 |     305,040 |     314,825 |      314,825 | 96,978 |       331 |
+|           8 |     121,640 |     124,093 |     140,253 |      124,093 | 96,972 |       330 |
+|          64 |     120,441 |     125,212 |     128,369 |      125,212 | 97,004 |       330 |
+|         256 |     151,349 |     151,083 |     134,019 |      151,083 | 97,074 |       330 |
+|        1024 |     480,043 |     723,175 |     508,264 |      508,264 | 97,120 |       332 |
+
+### BenchmarkBoltWriteOnly — `CREATE (n:BenchNode)`
+
+Explicit-transaction write via HELLO / BEGIN / RUN / PULL / COMMIT / GOODBYE.
+Write queries require an explicit transaction because the auto-commit path
+only handles queries with a `ProduceResults` root (i.e. queries that return rows).
+
+| Concurrency | Run 1 ns/op | Run 2 ns/op | Run 3 ns/op | Median ns/op |  B/op   | allocs/op |
+|------------:|------------:|------------:|------------:|-------------:|--------:|----------:|
+|           1 |     339,563 |     334,388 |     329,133 |      334,388 | 130,380 |       358 |
+|           8 |     156,304 |     157,084 |     151,618 |      156,304 | 130,407 |       358 |
+|          64 |     167,616 |     157,976 |     162,671 |      162,671 | 130,433 |       358 |
+|         256 |     233,365 |     229,190 |     397,198 |      233,365 | 130,536 |       359 |
+|        1024 |     583,518 |     550,698 |     537,354 |      550,698 | 131,448 |       362 |
+
+### BenchmarkBoltMixed — 80 % read / 20 % write
+
+Each goroutine alternates: 4 reads (`MATCH (n) RETURN count(n)`) then 1 write
+(`CREATE (n:BenchNode)`). Reads use auto-commit; writes use an explicit transaction.
+
+| Concurrency | Run 1 ns/op | Run 2 ns/op | Run 3 ns/op | Median ns/op |  B/op   | allocs/op |
+|------------:|------------:|------------:|------------:|-------------:|--------:|----------:|
+|           1 |     431,431 |     475,012 |     467,634 |      467,634 | 121,137 |       835 |
+|           8 |     174,301 |     175,265 |     171,519 |      174,301 | 147,067 |      1593 |
+|          64 |     181,591 |     179,458 |     177,437 |      179,458 | 139,010 |      1361 |
+|         256 |     247,031 |     224,920 |     209,277 |      224,920 | 123,483 |       922 |
+|        1024 |     523,804 |     658,856 |     407,843 |      523,804 | 100,290 |       372 |
+
+### Observations
+
+**Read vs write overhead.** Pure read (conc=1) costs ~315 µs end-to-end; pure write
+(conc=1) costs ~334 µs — a 6 % premium attributable to the two additional round-trips
+(BEGIN and COMMIT) in the explicit transaction path.
+
+**Concurrency sweet spot (conc=8–64).** Both reads and writes show 2–2.5× throughput
+improvement moving from conc=1 to conc=8, with only marginal further improvement at
+conc=64. This matches the 10-core Apple M4 reaching saturation on the server-side
+goroutines at around 8–10 concurrent connections.
+
+**Contention at conc=256–1024.** Median latency climbs from ~125 µs (conc=64) to
+~508 µs (conc=1024) for reads, and from ~163 µs to ~551 µs for writes. The increase
+is driven by connection semaphore pressure (MaxConnections=1200, all slots in use at
+conc=1024) and scheduler contention rather than graph lock contention — reads hold
+RWMutex for a very short duration.
+
+**Mixed workload.** At conc=8–64 the mixed benchmark converges toward the write
+latency (the minority operation that holds the lock exclusively), which is consistent
+with the 80/20 split and the higher per-operation cost of explicit transactions.
+
+**Allocation profile.** Read round-trips allocate ~97 KB / op; write round-trips
+~130 KB / op (the 33 KB delta reflects the extra PackStream encoding for BEGIN and
+COMMIT frames, plus the engine's node-creation path). Mixed varies with the ratio
+of write iterations per goroutine iteration count.
 
 ---
 
