@@ -6,6 +6,113 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-05-21
+
+Twelve sprints of work (21–32) delivering a full Cypher execution engine, a
+Bolt v5 server, 90.7 % TCK conformance at the parser level, a comprehensive
+benchmark harness, and a 4-hour soak-tested persistence layer. This is the
+first major release that exposes a query language interface.
+
+### Added — Sprint 21–26 (Cypher Execution Engine)
+
+- `cypher/exec`: Volcano/iterator operator tree — `AllNodesScan`, `LabelScan`,
+  `IndexSeekHash`, `IndexSeekBTree`, `Filter`, `Project`, `Limit`, `Skip`,
+  `Distinct`, `Union`, `Sort`, `Top`, `EagerAggregation`, `Apply`,
+  `SemiApply`, `RollUpApply`, `OptionalExpand`, `VarLengthExpand`,
+  `ShortestPath`, `Argument`, `SingleRow`, and `ProduceResults` (closes
+  #241–#262).
+- `cypher/expr`: expression evaluator with full built-in function library
+  (string, math, aggregation, list, map, temporal); morsel-parallel evaluation
+  path (closes #247–#250).
+- `cypher/exec`: write operators — `CreateNode`, `CreateRelationship`, `Set`,
+  `Remove`, `Delete`, `DetachDelete`, `Merge`, `WriteGraph`, `IndexBuffer`
+  transactional index writeback (closes #268–#275).
+- `cypher/exec`: `EagerAggregation` with COUNT, SUM, AVG, MIN, MAX, COLLECT,
+  PERCENTILE_CONT, PERCENTILE_DISC, ST_DEV (closes #251).
+- `cypher/plan`: LRU plan cache, cardinality estimator, stats maintenance with
+  snapshot-rotation invalidation, index-registry introspection, scan-strategy
+  selection, greedy join enumeration (closes #280–#285).
+- `cypher/plan`: EXPLAIN / PROFILE with tree-formatted text output and
+  `db_hits` accounting (closes #286–#289).
+- `cypher/exec`: DDL operators — `CreateIndex`, `DropIndex`,
+  `CreateConstraint`, `DropConstraint`; pre-write UNIQUE and NOT NULL
+  enforcement via `ConstraintRegistry` (closes #294–#298).
+- `cypher/procs`: thread-safe procedure registry; built-in procedures
+  `db.indexes`, `db.constraints`, `db.labels`, `db.relationshipTypes`,
+  `db.propertyKeys`, `db.schema.visualization`; `ProcedureCallOp` exec
+  operator (closes #299–#305).
+- `cypher/api`: `Engine.Run`, `Engine.RunInTx`, `Engine.RunAny`,
+  `Engine.RunInTxAny` public API; plan caching and DDL pass-through (closes
+  #247).
+- `cypher/parser`: single-quote string pre-processor normalises `'…'` to
+  `"…"` before ANTLR, resolving 579 previously skipped TCK scenarios (closes
+  #306).
+- `bench/cypher_ldbc`: LDBC IC1–IC14 benchmark suite with parallel variants
+  and `docs/benchmarks/cypher.md` baseline (closes #290, #327).
+- `bench/cypher_alloc`: per-operator zero-alloc gate tests using
+  `testing.AllocsPerRun` (closes #329).
+- `internal/stress`: write-conflict stress test for MERGE / SET / DELETE under
+  `-race` (closes #277).
+
+### Added — Sprint 27–31 (Bolt v5 Server + TCK Harness)
+
+- `bolt/packstream`: full PackStream v2 encoder / decoder with zero-alloc
+  primitive path, `sync.Pool`-backed instances (closes #307–#308).
+- `bolt/proto`: Bolt v5 message types (12 request + 4 response), magic/version
+  handshake supporting Bolt 5.0–5.6 and 4.4 fallback, chunked framing
+  (closes #309–#310).
+- `bolt/server`: Bolt v5 TCP server — state machine, `AuthHandler`
+  (`NoAuth`, `BasicAuth`), TLS support, `Session` message dispatcher,
+  explicit-transaction (`BEGIN`/`COMMIT`/`ROLLBACK`), peek-ahead `PULL`,
+  bookmarks, routing table, structured error codes, graceful `Shutdown`
+  (closes #311–#316).
+- `bolt/server`: soak test (32 goroutines × 10 s CI; 1 024 goroutines × 4 h
+  full), end-to-end smoke tests with `boltTestClient` harness, `docs/bolt.md`
+  (closes #317–#318, #330).
+- `cypher/tck`: godog-based execution-level TCK runner; 3 534 scenarios run,
+  100 % pass on run, 90.7 % overall (363 grammar-gap skips); dedicated
+  `.github/workflows/tck.yml` CI gate (≥ 90 % required); sprint-by-sprint
+  conformance history in `cypher/tck/conformance_history.go` (closes
+  #319–#326).
+
+### Added — Sprint 32 (Performance + Hardening + Release)
+
+- `perf(exec)`: `ResultSet.Next` now pre-allocates the `Record` map once and
+  reuses it across iterations — IC1 benchmark: −50 % ns/op, −76 % B/op,
+  −35 % allocs/op (closes #328).
+- `bench/soak`: 1 024-connection 4-hour Bolt soak test gated on `SOAK_FULL=1`;
+  CI soak report committed to `soak-artefacts/` (closes #330).
+- `cypher/tck`: three persistence round-trip tests — 50-node label survival,
+  multi-label (3 × 10), empty graph — via WAL + `WriteSnapshotFull` + recovery
+  (closes #331).
+- `docs/cypher.md`: comprehensive Cypher language reference (closes #332).
+- `docs/bolt.md`: expanded with deployment, observability, and troubleshooting
+  sections (closes #333).
+- `docs/benchmarks/cypher.md`: cross-concurrency table, Bolt round-trip
+  placeholder, reproducibility methodology (closes #334).
+- `examples/22_cypher`: runnable social-graph demo using the Cypher engine
+  (closes #335).
+- `examples/23_bolt_server`: runnable Bolt v5 server start + graceful shutdown
+  demo (closes #336).
+- `scripts/profile-cypher.sh`: one-shot CPU + heap profiling script for IC
+  benchmarks (closes #328).
+
+### Changed
+
+- `cypher/exec.ResultSet.Next`: Record map is now reused across calls;
+  callers must not retain a `Record` pointer beyond the next `Next()` call
+  (this was already the documented contract — no behaviour change for correct
+  callers).
+
+### Known limitations (v2.0.0)
+
+- Execution-level TCK conformance is 10.4 % (parser-level: 90.7 %). The
+  remaining execution gaps are documented in `docs/tck/DIVERGENCES.md`.
+- Properties set via Cypher `CREATE`/`SET` bypass the WAL; a bridging step
+  is required before snapshotting (see `cypher/tck/persistence_test.go`).
+- Bolt round-trip benchmark is pending (`bench/soak/cypher_rw.go` scaffold
+  exists).
+
 ## [1.2.0] — 2026-05-20
 
 Seven post-v1.1.0 sprints (14–20) of documentation accuracy,
