@@ -159,7 +159,7 @@ func parseCreateIndex(query string) (*CreateIndex, error) {
 // parseNodePattern parses "(n:Label)" at tokens[*pos] and advances *pos past
 // the closing paren. Returns the Label string.
 func parseNodePattern(tokens []string, pos *int) (string, error) {
-	if strings.ToUpper(tokens[*pos]) != "(" {
+	if !strings.EqualFold(tokens[*pos], "(") {
 		// Tokens may have included the parenthesis as part of a single token
 		// if the query had no spaces. Try a fallback approach.
 		return parseNodePatternCompact(tokens, pos)
@@ -203,7 +203,7 @@ func parseNodePatternCompact(tokens []string, pos *int) (string, error) {
 
 // parsePropAccess parses "(n.prop)" and returns the property key.
 func parsePropAccess(tokens []string, pos *int) (string, error) {
-	if strings.ToUpper(tokens[*pos]) != "(" {
+	if !strings.EqualFold(tokens[*pos], "(") {
 		return parsePropAccessCompact(tokens, pos)
 	}
 	(*pos)++ // (
