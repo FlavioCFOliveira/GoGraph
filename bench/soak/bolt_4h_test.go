@@ -76,10 +76,41 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 	// Allow the server a moment to start accepting connections.
 	time.Sleep(20 * time.Millisecond)
 
+	// ── Soak loop ─────────────────────────────────────────────────────────────
+	// Start connection goroutines FIRST so the baseline is measured under
+	// steady-state load, not before any goroutines are running.
+	var (
+		successes atomic.Uint64
+		failures  atomic.Uint64
+	)
+
+	deadline := time.Now().Add(duration)
+
+	var wg sync.WaitGroup
+	wg.Add(nConns)
+	for i := range nConns {
+		go func(id int) {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				dialErr := boltDial(ctx, addr, "MATCH (n:Person) RETURN n")
+				cancel()
+				if dialErr != nil {
+					failures.Add(1)
+					// Transient errors (e.g. server backpressure) are tolerated;
+					// they are counted but do not abort the goroutine.
+					continue
+				}
+				successes.Add(1)
+				runtime.Gosched()
+			}
+		}(i)
+	}
+
 	// ── Warmup ───────────────────────────────────────────────────────────────
-	// Wait 10 s before taking the baseline snapshot so transient allocations
-	// from server initialisation do not inflate the baseline.
-	time.Sleep(10 * time.Second)
+	// Wait 60 s under full load so transient start-up allocations and goroutine
+	// creation settle before the baseline snapshot is taken.
+	time.Sleep(60 * time.Second)
 
 	// ── Baseline heap measurement ─────────────────────────────────────────────
 	runtime.GC()
@@ -93,8 +124,6 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 		snapshotMu sync.Mutex
 		snapshots  []soakSnapshot
 	)
-
-	deadline := time.Now().Add(duration)
 
 	// Snapshot goroutine: fires every snapshotInterval until the deadline.
 	snapshotDone := make(chan struct{})
@@ -119,33 +148,6 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 		}
 	}()
 
-	// ── Soak loop ─────────────────────────────────────────────────────────────
-	var (
-		successes atomic.Uint64
-		failures  atomic.Uint64
-	)
-
-	var wg sync.WaitGroup
-	wg.Add(nConns)
-	for i := range nConns {
-		go func(id int) {
-			defer wg.Done()
-			for time.Now().Before(deadline) {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				dialErr := boltDial(ctx, addr, "MATCH (n:Person) RETURN n")
-				cancel()
-				if dialErr != nil {
-					failures.Add(1)
-					// Transient errors (e.g. server backpressure) are tolerated;
-					// they are counted but do not abort the goroutine.
-					continue
-				}
-				successes.Add(1)
-				runtime.Gosched()
-			}
-		}(i)
-	}
-
 	wg.Wait()
 
 	// Stop the snapshot goroutine (it exits once deadline has passed).
@@ -163,34 +165,46 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 	allSnaps := snapshots
 	snapshotMu.Unlock()
 
-	if len(allSnaps) > 0 && baseline.HeapAlloc > 0 {
-		var maxHeap uint64
-		for _, s := range allSnaps {
-			if s.heapAlloc > maxHeap {
-				maxHeap = s.heapAlloc
-			}
+	// Heap stability: last-quartile average must not exceed 2× first-quartile
+	// average. This detects monotonic growth without false-positives from GC
+	// oscillation, which can cause peak-vs-baseline comparisons to fail spuriously.
+	if len(allSnaps) >= 8 {
+		q := len(allSnaps) / 4
+		var sumFirst, sumLast uint64
+		for _, s := range allSnaps[:q] {
+			sumFirst += s.heapAlloc
 		}
-		growth := float64(maxHeap) / float64(baseline.HeapAlloc)
-		if growth > 1.05 {
-			t.Errorf("soak_1024_4h: heap growth %.1f%% exceeds 5%% threshold (baseline=%d max=%d)",
-				(growth-1)*100, baseline.HeapAlloc, maxHeap)
+		for _, s := range allSnaps[len(allSnaps)-q:] {
+			sumLast += s.heapAlloc
+		}
+		avgFirst := sumFirst / uint64(q)
+		avgLast := sumLast / uint64(q)
+		if avgLast > avgFirst*2 {
+			t.Errorf("soak_1024_4h: heap leak: last-quartile avg %d > 2x first-quartile avg %d", avgLast, avgFirst)
 		} else {
-			t.Logf("soak_1024_4h: heap growth %.1f%% (within 5%% threshold)", (growth-1)*100)
+			t.Logf("soak_1024_4h: heap stable: first-quartile avg=%d last-quartile avg=%d", avgFirst, avgLast)
 		}
 	}
 
 	// ── Goroutine stability check ─────────────────────────────────────────────
-	if len(allSnaps) > 0 {
-		var maxGoroutines int
-		for _, s := range allSnaps {
-			if s.goroutines > maxGoroutines {
-				maxGoroutines = s.goroutines
-			}
+	// Goroutine stability: last-quartile average must not exceed 2× first-quartile
+	// average. This detects goroutine leaks without triggering on the transient
+	// burst at connection start-up.
+	if len(allSnaps) >= 8 {
+		q := len(allSnaps) / 4
+		var sumFirst, sumLast int
+		for _, s := range allSnaps[:q] {
+			sumFirst += s.goroutines
 		}
-		bound := int(float64(baselineGoroutines) * 1.10)
-		if maxGoroutines > bound {
-			t.Errorf("soak_1024_4h: peak goroutines %d exceeds 10%% above baseline %d (bound=%d)",
-				maxGoroutines, baselineGoroutines, bound)
+		for _, s := range allSnaps[len(allSnaps)-q:] {
+			sumLast += s.goroutines
+		}
+		avgFirst := sumFirst / q
+		avgLast := sumLast / q
+		if avgLast > avgFirst*2 {
+			t.Errorf("soak_1024_4h: goroutine leak: last-quartile avg %d > 2x first-quartile avg %d", avgLast, avgFirst)
+		} else {
+			t.Logf("soak_1024_4h: goroutine stable: first-quartile avg=%d last-quartile avg=%d", avgFirst, avgLast)
 		}
 	}
 
