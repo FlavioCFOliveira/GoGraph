@@ -159,6 +159,41 @@ func TestRowSlab_Reset(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 2b. RowSlab variable-width methods (AllocRaw / SetRow / GetRow / Cap)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestRowSlab_VarWidth(t *testing.T) {
+	t.Parallel()
+	s := exec.NewRowSlab(0, 4) // width=0 → variable-width slab
+	if s.Cap() != 4 {
+		t.Errorf("Cap() = %d, want 4", s.Cap())
+	}
+
+	idx, err := s.AllocRaw()
+	if err != nil {
+		t.Fatalf("AllocRaw: %v", err)
+	}
+	r := exec.Row{expr.StringValue("hello"), expr.IntegerValue(42)}
+	s.SetRow(idx, r)
+
+	got := s.GetRow(idx)
+	if len(got) != 2 || got[0] != expr.StringValue("hello") {
+		t.Errorf("GetRow = %v, want [hello 42]", got)
+	}
+
+	// AllocRaw overflow
+	for range 3 {
+		if _, err := s.AllocRaw(); err != nil {
+			t.Fatalf("unexpected AllocRaw error: %v", err)
+		}
+	}
+	_, err = s.AllocRaw()
+	if !errors.Is(err, exec.ErrSlabOverflow) {
+		t.Errorf("expected ErrSlabOverflow after cap reached, got %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 3. ErrSlabOverflow sentinel
 // ─────────────────────────────────────────────────────────────────────────────
 
