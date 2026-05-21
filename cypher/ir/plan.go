@@ -62,6 +62,11 @@ type AggregateExpr struct {
 	// Argument is the expression argument to the aggregate function. An empty
 	// string corresponds to count(*).
 	Argument string
+	// ArgumentExpr is the parsed AST for the aggregate argument, when available.
+	// Non-nil when the argument is a non-trivial expression (property access,
+	// function call, …); when nil, callers fall back to schema lookup keyed on
+	// Argument or supply the constant Null. count(*) keeps ArgumentExpr == nil.
+	ArgumentExpr ast.Expression
 	// Distinct indicates whether the DISTINCT qualifier is applied inside the
 	// aggregate (e.g. count(DISTINCT n)).
 	Distinct bool
@@ -458,6 +463,11 @@ func (p *Projection) Vars() []string {
 type EagerAggregation struct {
 	// GroupBy is the ordered list of grouping key variable names.
 	GroupBy []string
+	// GroupByExprs holds the parsed AST expression for each grouping key, in
+	// the same order as GroupBy. Entries may be nil for legacy callers that
+	// only supplied string keys; non-nil entries enable property-access and
+	// complex expression evaluation at execution time.
+	GroupByExprs []ast.Expression
 	// Aggregates is the list of aggregate expressions computed per group.
 	Aggregates []AggregateExpr
 	// Child is the subplan whose rows are aggregated.
@@ -471,6 +481,25 @@ func NewEagerAggregation(groupBy []string, aggregates []AggregateExpr, child Log
 	agg := make([]AggregateExpr, len(aggregates))
 	copy(agg, aggregates)
 	return &EagerAggregation{GroupBy: gb, Aggregates: agg, Child: child}
+}
+
+// NewEagerAggregationWithExprs creates an EagerAggregation operator with parsed
+// AST expressions for the grouping keys. groupBy and groupByExprs must have the
+// same length; entries in groupByExprs may be nil (the executor falls back to a
+// schema lookup keyed on the corresponding groupBy string in that case).
+func NewEagerAggregationWithExprs(
+	groupBy []string,
+	groupByExprs []ast.Expression,
+	aggregates []AggregateExpr,
+	child LogicalPlan,
+) *EagerAggregation {
+	gb := make([]string, len(groupBy))
+	copy(gb, groupBy)
+	exprs := make([]ast.Expression, len(groupByExprs))
+	copy(exprs, groupByExprs)
+	agg := make([]AggregateExpr, len(aggregates))
+	copy(agg, aggregates)
+	return &EagerAggregation{GroupBy: gb, GroupByExprs: exprs, Aggregates: agg, Child: child}
 }
 
 // Children implements LogicalPlan.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -347,6 +349,18 @@ func valueToString(v any) string {
 	}
 }
 
+// exprValueToString formats v in the textual form used by the openCypher TCK
+// expected tables. The mapping intentionally diverges from the default Go
+// formatting for several types:
+//
+//   - String values are wrapped in single quotes (TCK: `| 'a' |`).
+//   - Float values always carry a fractional part (`1.0`, not `1`) so that
+//     scenarios that distinguish integer from float results match cleanly.
+//   - Nodes render as `()` (or `(:Label)` when a single label is present).
+//   - Relationships render as `[:TYPE]`.
+//   - Lists and maps render with TCK whitespace.
+//
+// Any unknown kind falls back to the Value's own String() method.
 func exprValueToString(v expr.Value) string {
 	if v == nil || expr.IsNull(v) {
 		return "null"
@@ -360,12 +374,11 @@ func exprValueToString(v expr.Value) string {
 	case expr.IntegerValue:
 		return fmt.Sprintf("%d", int64(val))
 	case expr.FloatValue:
-		// %g strips trailing zeros: 1.5 → "1.5", 1.0 → "1".
-		return fmt.Sprintf("%g", float64(val))
+		return formatFloatTCK(float64(val))
 	case expr.StringValue:
-		return string(val)
+		return "'" + string(val) + "'"
 	case expr.NodeValue:
-		return "()"
+		return formatNodeTCK(val)
 	case expr.RelationshipValue:
 		return fmt.Sprintf("[:%s]", val.Type)
 	case expr.ListValue:
@@ -388,4 +401,40 @@ func exprValueToString(v expr.Value) string {
 	default:
 		return v.String()
 	}
+}
+
+// formatFloatTCK formats f in the form expected by TCK tables:
+//
+//   - NaN / ±Inf render as "NaN", "Infinity", "-Infinity".
+//   - Finite floats with no fractional part render as "N.0" (e.g. 2 → "2.0").
+//   - All other finite floats use Go's %g, which produces the shortest
+//     representation that round-trips back to the same float64 (e.g. 1.5,
+//     1.23e-07).
+func formatFloatTCK(f float64) string {
+	switch {
+	case math.IsNaN(f):
+		return "NaN"
+	case math.IsInf(f, 1):
+		return "Infinity"
+	case math.IsInf(f, -1):
+		return "-Infinity"
+	}
+	if f == math.Trunc(f) && !math.IsInf(f, 0) {
+		// Integer-valued finite float: render with explicit ".0" so the TCK
+		// table cell `| 2.0 |` matches.
+		return strconv.FormatFloat(f, 'f', 1, 64)
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// formatNodeTCK renders a node value in the TCK textual form. The TCK uses
+// `()` for a bare node, `(:Label)` when a single label is present, and
+// `(:LabelA:LabelB)` for multiple labels. Properties are omitted in this
+// minimal form because the TCK expected cells rarely include them; scenarios
+// that compare full node payloads use side-effect tables instead.
+func formatNodeTCK(n expr.NodeValue) string {
+	if len(n.Labels) == 0 {
+		return "()"
+	}
+	return "(:" + strings.Join(n.Labels, ":") + ")"
 }

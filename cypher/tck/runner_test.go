@@ -17,13 +17,19 @@ import (
 
 // tckExecutionBaseline is the minimum number of passing scenarios the godog
 // execution suite must report. Set just below the most recent observed pass
-// count (≈1005) so that legitimate ±5-scenario run-to-run variance does not
-// flap the gate, but any real regression in execution support fails CI.
+// count so that legitimate ±5-scenario run-to-run variance does not flap the
+// gate, but any real regression in execution support fails CI.
+//
+// History:
+//   - 1000: initial gate.
+//   - 1145: raised after task #391 wired EagerAggregation argument/group-by
+//     AST expressions and TCK value formatting (observed ≈1152±2 over a
+//     5-run sample).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1000
+const tckExecutionBaseline = 1145
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -205,9 +205,9 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	// Detect aggregate functions among non-comprehension items. When present,
 	// wrap in EagerAggregation first, then Projection.
 	var plan LogicalPlan
-	groupBy, aggs, hasAgg := detectAggregation(proj)
+	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(proj)
 	if hasAgg {
-		plan = NewEagerAggregation(groupBy, aggs, planAfterComp)
+		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, planAfterComp)
 		plan = NewProjection(items, plan)
 	} else {
 		plan = NewProjection(items, planAfterComp)

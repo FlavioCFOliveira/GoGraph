@@ -1165,7 +1165,11 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		return buildEagerAggregation(p, child, schema)
+		var aggG *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			aggG = lw.g
+		}
+		return buildEagerAggregation(p, child, schema, aggG, params, reg)
 
 	case *ir.Sort:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
@@ -1334,11 +1338,38 @@ func buildOperator(
 // buildEagerAggregation builds the physical EagerAggregation operator from the
 // IR node. It wraps the child in a pre-projection so that the exec operator
 // sees rows in the expected layout: [groupByKeys..., aggArgs...].
+//
+// Each pre-projection slot resolves its source value with the following
+// priority order:
+//
+//  1. Parsed AST expression (when carried by the IR via GroupByExprs /
+//     AggregateExpr.ArgumentExpr) — evaluated through [expr.Eval] against a
+//     loaded RowContext so property accesses (n.prop), function calls, and
+//     parameter references resolve correctly.
+//  2. Schema lookup keyed on the textual group-by variable name or aggregate
+//     argument string — preserves the legacy fast path for bare-variable
+//     groupings (e.g. WITH n, count(*)).
+//  3. Constant NULL — last-resort fallback so the pipeline keeps emitting
+//     rows for malformed but non-fatal inputs.
+//
+// The Null fallback is openCypher-safe: count(NULL) does not increment,
+// sum/avg/min/max ignore NULL, and collect skips NULL.
 func buildEagerAggregation(
 	p *ir.EagerAggregation,
 	child exec.Operator,
 	schema map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
 ) (exec.Operator, error) {
+	// Snapshot the inbound schema once: every pre-projection eval needs the
+	// pre-aggregation column layout, not the post-aggregation one (which we
+	// overwrite below).
+	schemaSnap := copySchema(schema)
+	capturedG := g
+	capturedParams := params
+	capturedReg := reg
+
 	// Build pre-projection items:
 	//   positions 0..len(GroupBy)-1  → group-by key columns
 	//   positions len(GroupBy)..end  → aggregate argument columns
@@ -1348,19 +1379,14 @@ func buildEagerAggregation(
 	keyCols := make([]int, len(p.GroupBy))
 	for i, varName := range p.GroupBy {
 		keyCols[i] = i // after pre-projection, key i is at position i
-		srcCol := 0
-		if col, ok := schema[varName]; ok {
-			srcCol = col
+
+		var astExpr ast.Expression
+		if i < len(p.GroupByExprs) {
+			astExpr = p.GroupByExprs[i]
 		}
-		capturedCol := srcCol
 		items = append(items, exec.ProjectionItem{
 			Alias: varName,
-			Eval: func(row exec.Row) (expr.Value, error) {
-				if capturedCol < len(row) {
-					return row[capturedCol], nil
-				}
-				return expr.Null, nil
-			},
+			Eval:  newAggregationEval(astExpr, varName, schemaSnap, capturedG, capturedParams, capturedReg),
 		})
 	}
 
@@ -1373,34 +1399,24 @@ func buildEagerAggregation(
 		}
 		aggFactories = append(aggFactories, factory)
 
-		// Resolve argument column: empty Argument means count(*) — any value works.
+		// count(*) — argument is irrelevant; emit a constant non-null sentinel so
+		// the aggregator's Step always increments. exec.NewCountStarAgg treats any
+		// non-null value as a tick.
 		if aggExpr.Argument == "" {
 			items = append(items, exec.ProjectionItem{
 				Alias: aggExpr.OutputName,
-				Eval:  func(_ exec.Row) (expr.Value, error) { return expr.Null, nil },
+				Eval:  func(_ exec.Row) (expr.Value, error) { return expr.BoolValue(true), nil },
 			})
-		} else if argCol, ok := schema[aggExpr.Argument]; ok {
-			capturedArgCol := argCol
-			items = append(items, exec.ProjectionItem{
-				Alias: aggExpr.OutputName,
-				Eval: func(row exec.Row) (expr.Value, error) {
-					if capturedArgCol < len(row) {
-						return row[capturedArgCol], nil
-					}
-					return expr.Null, nil
-				},
-			})
-		} else {
-			// Property access or unresolvable expression — emit Null.
-			// Aggregates that depend on property values (e.g. sum(n.age)) require
-			// the expression evaluator to have resolved the property access upstream
-			// via a Projection; if it hasn't been resolved yet, Null is the safe
-			// fallback (count(*) is unaffected; sum/avg/min/max of Null = Null).
-			items = append(items, exec.ProjectionItem{
-				Alias: aggExpr.OutputName,
-				Eval:  func(_ exec.Row) (expr.Value, error) { return expr.Null, nil },
-			})
+			continue
 		}
+
+		items = append(items, exec.ProjectionItem{
+			Alias: aggExpr.OutputName,
+			Eval: newAggregationEval(
+				aggExpr.ArgumentExpr, aggExpr.Argument,
+				schemaSnap, capturedG, capturedParams, capturedReg,
+			),
+		})
 	}
 
 	// Wrap child with the pre-projection.
@@ -1412,6 +1428,19 @@ func buildEagerAggregation(
 	op, err := exec.NewEagerAggregation(preProj, keyCols, aggFactories, 0)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: NewEagerAggregation: %w", err)
+	}
+
+	// When there are no group-by keys, openCypher semantics require a single
+	// output row even when the input is empty — e.g.
+	//
+	//	MATCH (n:NeverExists) RETURN count(*)   --> 0
+	//
+	// EagerAggregation as a multiset operator emits zero rows in that case, so
+	// wrap it in an adapter that synthesises the "empty-input → one-row of
+	// neutral results" row.
+	var topOp exec.Operator = op
+	if len(p.GroupBy) == 0 {
+		topOp = exec.NewGlobalAggregateAdapter(op, aggFactories)
 	}
 
 	// Replace schema with EagerAggregation output schema:
@@ -1426,7 +1455,43 @@ func buildEagerAggregation(
 	for i, aggExpr := range p.Aggregates {
 		schema[aggExpr.OutputName] = len(p.GroupBy) + i
 	}
-	return op, nil
+	return topOp, nil
+}
+
+// newAggregationEval returns a row-evaluator function suitable for an
+// EagerAggregation pre-projection slot. The evaluator's resolution order is:
+//
+//  1. When astExpr is non-nil, evaluate it via [expr.Eval] against a RowContext
+//     built from schemaSnap (which always reflects the pre-aggregation column
+//     layout).
+//  2. Otherwise, attempt a direct schema lookup keyed on varName.
+//  3. Otherwise return [expr.Null].
+func newAggregationEval(
+	astExpr ast.Expression,
+	varName string,
+	schemaSnap map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+) func(exec.Row) (expr.Value, error) {
+	// AST path — always preferred when present.
+	if astExpr != nil {
+		return func(row exec.Row) (expr.Value, error) {
+			rowCtx := buildRowCtx(row, schemaSnap, g)
+			return expr.Eval(astExpr, rowCtx, params, reg)
+		}
+	}
+	// Legacy schema-lookup path.
+	if col, ok := schemaSnap[varName]; ok {
+		capturedCol := col
+		return func(row exec.Row) (expr.Value, error) {
+			if capturedCol < len(row) {
+				return row[capturedCol], nil
+			}
+			return expr.Null, nil
+		}
+	}
+	return func(_ exec.Row) (expr.Value, error) { return expr.Null, nil }
 }
 
 // aggregateFactory maps an IR aggregate function name and argument to a

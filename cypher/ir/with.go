@@ -20,11 +20,11 @@ import "gograph/cypher/ast"
 
 // translateWith converts a WITH clause into a logical plan subtree.
 func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan, error) {
-	groupBy, aggs, hasAgg := detectAggregation(w.Projection)
+	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(w.Projection)
 
 	var plan LogicalPlan
 	if hasAgg {
-		plan = NewEagerAggregation(groupBy, aggs, child)
+		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, child)
 		// Emit a covering Projection only when there are non-aggregate items that
 		// need renaming (alias not equal to the expression string). In practice the
 		// EagerAggregation already exposes the correct output names, so the

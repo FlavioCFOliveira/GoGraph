@@ -21,7 +21,9 @@ progress.
 | Parser (grammar + AST round-trip) | 3 534 | 3 534 | 100.0 % |
 | Skipped (grammar gaps) | 363 | — | — |
 | **Overall (pass / total)** | **3 897** | **3 534** | **90.7 %** |
-| Execution (godog runner, Sprint 31) | 3 897 | 407 | **10.4 %** |
+| Execution (godog runner, Sprint 31 baseline) | 3 897 | 407 | **10.4 %** |
+| Execution (godog runner, Sprint 37 — task #375) | 3 897 | 968 | **24.8 %** |
+| Execution (godog runner, Sprint 42 — task #391) | 3 897 | 1 152 | **29.6 %** |
 
 The parser-level target gate is ≥ 90 %. This target is now achieved. The remaining
 grammar gap is entirely accounted for by documented limitations; no scenario is
@@ -128,6 +130,17 @@ and reports execution conformance. The Sprint 31 baseline is:
 
 - **407 / 3 897 scenarios passing (10.4 %)** at execution level (Sprint 31 baseline).
 - **968 / 3 897 scenarios passing (24.8 %)** as of Sprint 37 (task #375).
+- **1 152 / 3 897 scenarios passing (29.6 %)** as of Sprint 42 (task #391 —
+  aggregation runner→engine→aggregator wiring). The net uplift over Sprint 37
+  is ~184 scenarios, driven by (a) propagating group-by and aggregate-argument
+  AST expressions into the EagerAggregation pre-projection so property
+  accesses such as `n.name` and `n.num` resolve correctly; (b) the new
+  `GlobalAggregateAdapter` that synthesises one row of neutral aggregate
+  results when a group-by-less query runs over zero input rows; (c) TCK
+  value formatting fixes in the godog comparator (single-quoted strings,
+  `N.0`-form floats, node labels); (d) `stDev` / `stDevp` added to the
+  aggregate-function detection set so the planner emits an EagerAggregation
+  for them.
 
 The execution engine (`cypher/exec/`) can evaluate `MATCH … WHERE … RETURN`
 queries against an in-memory graph (`graph/lpg`). The following areas are not yet
@@ -173,7 +186,7 @@ categorisation and godog progress output from Sprint 31.
 |---|---|---|
 | Property access on nodes/relationships | ~1 200 | `n.name`, `r.weight`, etc. evaluate to `null` in the execution engine instead of the node's property value. Affects nearly every `MATCH … RETURN n.prop` scenario. |
 | MATCH with multiple patterns / OPTIONAL MATCH | ~800 | Multi-pattern MATCH and OPTIONAL MATCH are parsed correctly but the execution engine does not bind all pattern components to graph elements. |
-| Aggregation functions | ~600 | `count(*)`, `count(n)`, `sum(x)`, `avg(x)`, `collect(x)` are not executed in the TCK harness; the `EagerAggregation` operator exists but is not connected to the runner's result pipeline. |
+| Aggregation functions | ~150 remaining (task #391 wired property-based group-by / aggregate-arg through the runner; the remaining failures depend on adjacent gaps — `0.5`/`1.0` float-literal tokenisation, OPTIONAL MATCH property load, `WITH … LIMIT` ordering, percentileCont/percentileDisc two-argument support) | `count(*)`, `count(n)`, `count(n.prop)`, `sum(n.prop)`, `avg(n.prop)`, `min(n.prop)`, `max(n.prop)`, `collect(n.prop)`, `stDev(n.prop)`, `stDevp(n.prop)` are now fully wired end-to-end through the godog runner; group-by keys built from property accesses (e.g. `MATCH (n) RETURN n.name, count(n.num)`) resolve correctly. |
 | Path expressions and variable-length patterns | ~400 | `(a)-[*1..3]->(b)`, `shortestPath(…)`, and path variable assignment (`p = …`) require a path-expansion executor that is not yet implemented. |
 | ORDER BY, SKIP, LIMIT execution | ~300 | The Sort, Skip, and Limit physical operators exist in `cypher/exec/` but are not wired to the godog execution harness result pipeline, so ordering and pagination tests fail. |
 
@@ -233,3 +246,16 @@ The following tasks will close the remaining conformance gap, listed by priority
   `normalizeSingleQuotes` pre-processor; 579 scenarios unblocked.
 - **Execution-level TCK runner (godog)** — **IMPLEMENTED in Sprint 31**;
   baseline execution pass rate 10.4 % (407/3897 scenarios) established.
+- **Aggregation wiring through the godog runner** — **RESOLVED in Sprint 42
+  (task #391)**. The `EagerAggregation` operator now receives parsed AST
+  expressions for both grouping keys (`ir.EagerAggregation.GroupByExprs`)
+  and aggregate-function arguments (`ir.AggregateExpr.ArgumentExpr`); the
+  pre-projection evaluates them via `expr.Eval` against the
+  pre-aggregation row context, so property accesses such as `n.name` and
+  `n.num` produce the actual property values rather than the raw node id.
+  A new `cypher/exec/global_aggregate_adapter.go` operator synthesises the
+  single neutral-result row required by openCypher when a group-by-less
+  aggregation runs over zero input rows (`count(*) → 0`, others → NULL).
+  The runner's value-to-string formatter in `cypher/tck/compare_test.go`
+  now quotes strings, preserves the `.0` suffix on integer-valued floats,
+  and renders nodes as `(:Label)`.
