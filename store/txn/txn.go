@@ -33,8 +33,10 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"math"
 	"reflect"
 	"sync"
+	"time"
 
 	"gograph/graph/lpg"
 	"gograph/internal/metrics"
@@ -72,6 +74,29 @@ const (
 	// weight payload via the registered [WeightCodec] before reading
 	// the trailing label.
 	OpAddEdgeWeighted
+
+	// OpAddNode buffers an AddNode(key) mutation.
+	OpAddNode
+	// OpRemoveNode buffers a logical node removal (strips labels and
+	// properties; the mapper entry is permanent).
+	OpRemoveNode
+	// OpRemoveNodeLabel buffers a RemoveNodeLabel(node, label) mutation.
+	// The label is carried in the Label field of the Op.
+	OpRemoveNodeLabel
+	// OpSetNodeProperty buffers a SetNodeProperty(node, key, value) mutation.
+	// Key is the property key; Value is the typed property value.
+	OpSetNodeProperty
+	// OpDelNodeProperty buffers a DelNodeProperty(node, key) mutation.
+	// Key is the property key.
+	OpDelNodeProperty
+	// OpRemoveEdge buffers a RemoveEdge(src, dst) mutation.
+	OpRemoveEdge
+	// OpSetEdgeProperty buffers a SetEdgeProperty(src, dst, key, value) mutation.
+	// Key is the property key; Value is the typed property value.
+	OpSetEdgeProperty
+	// OpDelEdgeProperty buffers a DelEdgeProperty(src, dst, key) mutation.
+	// Key is the property key.
+	OpDelEdgeProperty
 )
 
 // Op-record version markers. The marker is a single byte written at
@@ -253,15 +278,20 @@ func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
 
 // Op is a single buffered mutation.
 //
-// The type carries both the endpoint identifiers (Src, Dst) and the
-// edge weight (Weight). Weight is only meaningful for [OpAddEdgeWeighted]
-// records; for every other kind it is the zero value of W and is not
-// written to the WAL.
+// The type carries the endpoint identifiers (Src, Dst), the edge weight
+// (Weight), a string Label used by label ops, and Key / Value used by
+// property ops. Fields are zero-valued for op kinds that do not require them.
 type Op[N comparable, W any] struct {
 	Kind     OpKind
 	Src, Dst N
 	Weight   W
 	Label    string
+	// Key is the property key for SetNodeProperty, DelNodeProperty,
+	// SetEdgeProperty, and DelEdgeProperty ops.
+	Key string
+	// Value is the typed property value for SetNodeProperty and SetEdgeProperty
+	// ops. It is the zero PropertyValue for all other op kinds.
+	Value lpg.PropertyValue
 }
 
 // Tx is an in-progress transaction.
@@ -315,6 +345,80 @@ func (t *Tx[N, W]) SetEdgeLabel(src, dst N, label string) error {
 	return nil
 }
 
+// AddNode buffers an AddNode(key) operation that interns key into the graph.
+func (t *Tx[N, W]) AddNode(key N) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpAddNode, Src: key})
+	return nil
+}
+
+// RemoveNode buffers a logical node removal: strips all labels and properties
+// from key. The mapper entry is permanent; this op records the intent so WAL
+// replay can reproduce the stripped state.
+func (t *Tx[N, W]) RemoveNode(key N) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveNode, Src: key})
+	return nil
+}
+
+// RemoveNodeLabel buffers a RemoveNodeLabel(node, label) operation.
+func (t *Tx[N, W]) RemoveNodeLabel(node N, label string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveNodeLabel, Src: node, Label: label})
+	return nil
+}
+
+// SetNodeProperty buffers a SetNodeProperty(node, propKey, value) operation.
+func (t *Tx[N, W]) SetNodeProperty(node N, propKey string, value lpg.PropertyValue) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpSetNodeProperty, Src: node, Key: propKey, Value: value})
+	return nil
+}
+
+// DelNodeProperty buffers a DelNodeProperty(node, propKey) operation.
+func (t *Tx[N, W]) DelNodeProperty(node N, propKey string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpDelNodeProperty, Src: node, Key: propKey})
+	return nil
+}
+
+// RemoveEdge buffers a RemoveEdge(src, dst) operation.
+func (t *Tx[N, W]) RemoveEdge(src, dst N) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveEdge, Src: src, Dst: dst})
+	return nil
+}
+
+// SetEdgeProperty buffers a SetEdgeProperty(src, dst, propKey, value) operation.
+func (t *Tx[N, W]) SetEdgeProperty(src, dst N, propKey string, value lpg.PropertyValue) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeProperty, Src: src, Dst: dst, Key: propKey, Value: value})
+	return nil
+}
+
+// DelEdgeProperty buffers a DelEdgeProperty(src, dst, propKey) operation.
+func (t *Tx[N, W]) DelEdgeProperty(src, dst N, propKey string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpDelEdgeProperty, Src: src, Dst: dst, Key: propKey})
+	return nil
+}
+
 // Commit fsync-appends every buffered op to the WAL and only then
 // applies it to the in-memory graph.
 func (t *Tx[N, W]) Commit() error {
@@ -347,6 +451,37 @@ func (t *Tx[N, W]) Commit() error {
 	// Apply to the in-memory graph after durability is secured.
 	for _, op := range t.ops {
 		applyOp(t.store.g, op)
+	}
+	return nil
+}
+
+// CommitWALOnly fsync-appends every buffered op to the WAL but does NOT
+// apply the ops to the in-memory graph. Use this when the caller has
+// already applied mutations eagerly (e.g. [walMutatorAdapter]) and only
+// needs WAL durability without a second in-memory pass.
+func (t *Tx[N, W]) CommitWALOnly() error {
+	defer metrics.Time("store.txn.CommitWALOnly")()
+	if t.finished {
+		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+		return ErrTxFinished
+	}
+	defer t.release()
+
+	for _, op := range t.ops {
+		var payload []byte
+		if t.store.legacy {
+			payload = encodeOpLegacy(op)
+		} else {
+			payload = encodeOpTyped(op, t.store.codec, t.store.wcodec)
+		}
+		if err := t.store.wal.Append(payload); err != nil {
+			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+			return err
+		}
+	}
+	if err := t.store.wal.Sync(); err != nil {
+		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+		return err
 	}
 	return nil
 }
@@ -407,46 +542,214 @@ func encodeOpLegacy[N comparable, W any](op Op[N, W]) []byte {
 }
 
 // encodeOpTyped serialises one op to a v2 (tagged) WAL payload using
-// the supplied codecs. Layout for [OpAddEdge], [OpSetNodeLabel] and
-// [OpSetEdgeLabel]:
+// the supplied codecs.
+//
+// Layout for [OpAddEdge], [OpSetNodeLabel], [OpSetEdgeLabel]:
 //
 //	uint8  version  (always [OpRecordV2])
 //	uint8  kind
-//	codec  src      (codec-encoded, self-delimiting)
-//	codec  dst      (codec-encoded, self-delimiting)
+//	codec  src
+//	codec  dst
 //	uint16 labelLen
 //	[labelLen]byte label
 //
-// Layout for [OpAddEdgeWeighted] (only when wcodec is non-nil and the
-// op carries a weight):
+// Layout for [OpAddEdgeWeighted]:
 //
-//	uint8  version  (always [OpRecordV2])
+//	uint8  version  ([OpRecordV2])
 //	uint8  kind     ([OpAddEdgeWeighted])
 //	codec  src
 //	codec  dst
 //	wcodec w
-//	uint16 labelLen (always 0 for AddEdge; reserved for future use)
-//	[labelLen]byte label
+//	uint16 labelLen (always 0 for AddEdge)
 //
-// The codec is responsible for the framing of src, dst and w, so the
-// payload has no per-field length prefix at this level. The label
-// trailer is identical to the v1 trailer for symmetry.
+// Layout for single-endpoint node ops ([OpAddNode], [OpRemoveNode],
+// [OpRemoveNodeLabel]):
+//
+//	uint8  version  ([OpRecordV2])
+//	uint8  kind
+//	codec  src        (the node key)
+//	codec  dst-zero   (zero value; included so the recovery decoder
+//	                   can walk both endpoint slots uniformly)
+//	uint16 labelLen
+//	[labelLen]byte label   (empty for OpAddNode/OpRemoveNode; the label
+//	                        for OpRemoveNodeLabel)
+//
+// Layout for property ops ([OpSetNodeProperty], [OpDelNodeProperty],
+// [OpSetEdgeProperty], [OpDelEdgeProperty]):
+//
+//	uint8  version  ([OpRecordV2])
+//	uint8  kind
+//	codec  src
+//	codec  dst        (zero for node ops; dst key for edge ops)
+//	uint16 keyLen
+//	[keyLen]byte key
+//	[propValue]       (only for Set ops: uint8 kind tag + value bytes)
+//
+// Layout for [OpRemoveEdge]:
+//
+//	uint8  version  ([OpRecordV2])
+//	uint8  kind
+//	codec  src
+//	codec  dst
+//	uint16 = 0      (empty label)
 func encodeOpTyped[N comparable, W any](op Op[N, W], codec Codec[N], wcodec WeightCodec[W]) []byte {
-	// Allocate with a conservative head room: header + label trailer
-	// plus a few bytes per endpoint. The codec may extend beyond this
-	// estimate; append handles the regrowth.
 	const headroom = 2 + 2 // version + kind + uint16 labelLen
 	buf := make([]byte, 0, headroom+len(op.Label)+32)
 	buf = append(buf, OpRecordV2, byte(op.Kind))
-	buf = codec.Encode(buf, op.Src)
-	buf = codec.Encode(buf, op.Dst)
-	if op.Kind == OpAddEdgeWeighted {
-		// wcodec is guaranteed non-nil here: Tx.AddEdge only buffers
-		// OpAddEdgeWeighted when t.store.wcodec is non-nil.
-		buf = wcodec.Encode(buf, op.Weight)
+
+	switch op.Kind {
+	case OpAddNode, OpRemoveNode, OpRemoveNodeLabel:
+		var zero N
+		buf = codec.Encode(buf, op.Src)
+		buf = codec.Encode(buf, zero)
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
+		buf = append(buf, op.Label...)
+
+	case OpSetNodeProperty, OpDelNodeProperty:
+		var zero N
+		buf = codec.Encode(buf, op.Src)
+		buf = codec.Encode(buf, zero)
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
+		buf = append(buf, op.Key...)
+		if op.Kind == OpSetNodeProperty {
+			buf = encodePropertyValue(buf, op.Value)
+		}
+
+	case OpRemoveEdge:
+		buf = codec.Encode(buf, op.Src)
+		buf = codec.Encode(buf, op.Dst)
+		buf = binary.LittleEndian.AppendUint16(buf, 0)
+
+	case OpSetEdgeProperty, OpDelEdgeProperty:
+		buf = codec.Encode(buf, op.Src)
+		buf = codec.Encode(buf, op.Dst)
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
+		buf = append(buf, op.Key...)
+		if op.Kind == OpSetEdgeProperty {
+			buf = encodePropertyValue(buf, op.Value)
+		}
+
+	case OpAddEdgeWeighted:
+		buf = codec.Encode(buf, op.Src)
+		buf = codec.Encode(buf, op.Dst)
+		if wcodec != nil {
+			buf = wcodec.Encode(buf, op.Weight)
+		}
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
+		buf = append(buf, op.Label...)
+
+	default: // OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel
+		buf = codec.Encode(buf, op.Src)
+		buf = codec.Encode(buf, op.Dst)
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
+		buf = append(buf, op.Label...)
 	}
-	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
-	return append(buf, op.Label...)
+	return buf
+}
+
+// encodePropertyValue appends the wire encoding of a [lpg.PropertyValue] to buf.
+//
+// Format:
+//
+//	uint8  kind tag  ([lpg.PropertyKind])
+//	...value bytes...
+//
+// Kind tags map 1:1 to [lpg.PropString], [lpg.PropInt64], [lpg.PropFloat64],
+// [lpg.PropBool], [lpg.PropTime], [lpg.PropBytes]. For [lpg.PropString] and
+// [lpg.PropBytes] the value is prefixed with a uint32 LE length. For
+// [lpg.PropInt64] the value is a signed varint. For [lpg.PropFloat64] the value
+// is a uint64 LE IEEE-754 bit pattern. For [lpg.PropBool] the value is a
+// single byte (0 or 1). For [lpg.PropTime] the value is the UTC Unix nanoseconds
+// as a signed varint.
+func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
+	buf = append(buf, byte(v.Kind()))
+	switch v.Kind() {
+	case lpg.PropString:
+		s, _ := v.String()
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(s)))
+		buf = append(buf, s...)
+	case lpg.PropInt64:
+		i, _ := v.Int64()
+		buf = binary.AppendVarint(buf, i)
+	case lpg.PropFloat64:
+		f, _ := v.Float64()
+		buf = binary.LittleEndian.AppendUint64(buf, math.Float64bits(f))
+	case lpg.PropBool:
+		b, _ := v.Bool()
+		if b {
+			buf = append(buf, 1)
+		} else {
+			buf = append(buf, 0)
+		}
+	case lpg.PropTime:
+		t, _ := v.Time()
+		buf = binary.AppendVarint(buf, t.UnixNano())
+	case lpg.PropBytes:
+		bs, _ := v.Bytes()
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(bs)))
+		buf = append(buf, bs...)
+	}
+	return buf
+}
+
+// decodePropertyValue parses a [lpg.PropertyValue] from the head of buf.
+// Returns the decoded value, the remaining bytes, and any error.
+func decodePropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) {
+	if len(buf) < 1 {
+		return lpg.PropertyValue{}, buf, errors.New("txn: short property value (missing kind)")
+	}
+	kind := lpg.PropertyKind(buf[0])
+	buf = buf[1:]
+	switch kind {
+	case lpg.PropString:
+		if len(buf) < 4 {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short string property (missing length)")
+		}
+		n := binary.LittleEndian.Uint32(buf)
+		buf = buf[4:]
+		if uint64(len(buf)) < uint64(n) {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short string property body")
+		}
+		return lpg.StringValue(string(buf[:n])), buf[n:], nil
+	case lpg.PropInt64:
+		x, n := binary.Varint(buf)
+		if n <= 0 {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short int64 property")
+		}
+		return lpg.Int64Value(x), buf[n:], nil
+	case lpg.PropFloat64:
+		if len(buf) < 8 {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short float64 property")
+		}
+		bits := binary.LittleEndian.Uint64(buf[:8])
+		return lpg.Float64Value(math.Float64frombits(bits)), buf[8:], nil
+	case lpg.PropBool:
+		if len(buf) < 1 {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short bool property")
+		}
+		return lpg.BoolValue(buf[0] != 0), buf[1:], nil
+	case lpg.PropTime:
+		nanos, n := binary.Varint(buf)
+		if n <= 0 {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short time property")
+		}
+		t := time.Unix(0, nanos).UTC()
+		return lpg.TimeValue(t), buf[n:], nil
+	case lpg.PropBytes:
+		if len(buf) < 4 {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short bytes property (missing length)")
+		}
+		n := binary.LittleEndian.Uint32(buf)
+		buf = buf[4:]
+		if uint64(len(buf)) < uint64(n) {
+			return lpg.PropertyValue{}, buf, errors.New("txn: short bytes property body")
+		}
+		bs := make([]byte, n)
+		copy(bs, buf[:n])
+		return lpg.BytesValue(bs), buf[n:], nil
+	default:
+		return lpg.PropertyValue{}, buf, errors.New("txn: unknown property kind")
+	}
 }
 
 func encodeAny[N comparable](v N) []byte {
@@ -464,6 +767,29 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) {
 		g.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:
 		g.SetEdgeLabel(op.Src, op.Dst, op.Label)
+	case OpAddNode:
+		g.AddNode(op.Src)
+	case OpRemoveNode:
+		// Logical removal: mapper entry is permanent; remove all labels and
+		// properties so the node is unreachable via label/property queries.
+		for _, lbl := range g.NodeLabels(op.Src) {
+			g.RemoveNodeLabel(op.Src, lbl)
+		}
+		for k := range g.NodeProperties(op.Src) {
+			g.DelNodeProperty(op.Src, k)
+		}
+	case OpRemoveNodeLabel:
+		g.RemoveNodeLabel(op.Src, op.Label)
+	case OpSetNodeProperty:
+		g.SetNodeProperty(op.Src, op.Key, op.Value)
+	case OpDelNodeProperty:
+		g.DelNodeProperty(op.Src, op.Key)
+	case OpRemoveEdge:
+		g.AdjList().RemoveEdge(op.Src, op.Dst)
+	case OpSetEdgeProperty:
+		g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
+	case OpDelEdgeProperty:
+		g.DelEdgeProperty(op.Src, op.Dst, op.Key)
 	}
 }
 

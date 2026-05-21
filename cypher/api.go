@@ -46,6 +46,7 @@ import (
 	"gograph/graph"
 	"gograph/graph/index"
 	"gograph/graph/lpg"
+	"gograph/store/txn"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +59,7 @@ import (
 // Engine is safe for concurrent use.
 type Engine struct {
 	g             *lpg.Graph[string, float64]
+	store         *txn.Store[string, float64] // non-nil when WAL-backed
 	reg           expr.FunctionRegistry
 	constraintReg *exec.ConstraintRegistry
 	procReg       *procs.Registry
@@ -92,6 +94,31 @@ func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegis
 	e := &Engine{
 		g:             g,
 		reg:           reg,
+		constraintReg: exec.NewConstraintRegistry(),
+		procReg:       procs.NewRegistry(),
+	}
+	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
+		return e.constraintReg.ListConstraintRows()
+	})
+	return e
+}
+
+// NewEngineWithStore creates an Engine backed by a WAL-enabled [txn.Store].
+//
+// All write queries routed through [Engine.RunInTx] use a single [txn.Tx] for
+// atomicity and WAL durability: mutations are applied eagerly to the in-memory
+// graph (so reads within the same transaction see the writes) and the WAL is
+// fsynced on [Result.Close] when no pipeline error occurred.
+//
+// The underlying graph is taken from store.Graph(). If the graph has no
+// [index.Manager] attached yet, a new empty one is installed.
+func NewEngineWithStore(store *txn.Store[string, float64]) *Engine {
+	g := store.Graph()
+	ensureIndexManager(g)
+	e := &Engine{
+		g:             g,
+		store:         store,
+		reg:           funcs.DefaultRegistry,
 		constraintReg: exec.NewConstraintRegistry(),
 		procReg:       procs.NewRegistry(),
 	}
@@ -435,8 +462,9 @@ func (e *Engine) planFor(query string) (ir.LogicalPlan, error) {
 type Result struct {
 	rs     *exec.ResultSet
 	cols   []string
-	buf    *exec.IndexBuffer // non-nil only for RunInTx results
-	idxMgr *index.Manager    // non-nil only when buf != nil
+	buf    *exec.IndexBuffer        // non-nil only for RunInTx results
+	idxMgr *index.Manager           // non-nil only when buf != nil
+	tx     *txn.Tx[string, float64] // non-nil only for WAL-backed RunInTx results
 }
 
 // Next advances to the next result row. Returns true when a row is available.
@@ -453,9 +481,12 @@ func (r *Result) Err() error { return r.rs.Err() }
 func (r *Result) Columns() []string { return r.cols }
 
 // Close releases all resources held by the result set.
-// When the result was created by [Engine.RunInTx], Close also commits or
-// rolls back the buffered index changes: it commits on clean close, and
-// rolls back when either Close or iteration returned a non-nil error.
+// When the result was created by [Engine.RunInTx], Close also:
+//  1. Commits or rolls back buffered index changes (always).
+//  2. When the engine is WAL-backed ([NewEngineWithStore]), WAL-syncs the
+//     buffered ops via [txn.Tx.CommitWALOnly] on success, or calls
+//     [txn.Tx.Rollback] on error. Mutations have already been applied to the
+//     in-memory graph eagerly; CommitWALOnly only persists them to the WAL.
 func (r *Result) Close() error {
 	err := r.rs.Close()
 	if r.buf != nil {
@@ -463,6 +494,15 @@ func (r *Result) Close() error {
 			r.buf.Rollback()
 		} else {
 			r.buf.Commit(r.idxMgr)
+		}
+	}
+	if r.tx != nil {
+		if err != nil || r.rs.Err() != nil {
+			_ = r.tx.Rollback() // release store mutex; in-memory state already dirty
+		} else {
+			if werr := r.tx.CommitWALOnly(); werr != nil {
+				err = werr
+			}
 		}
 	}
 	return err
@@ -1808,15 +1848,26 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	walker := &lpgNodeWalker{g: e.g}
 	labelSrc := &lpgLabelResolver{g: e.g}
 	buf := &exec.IndexBuffer{}
-	mutator := &lpgMutatorAdapter{g: e.g, buf: buf}
+
+	var mutator exec.GraphMutator
+	var walTx *txn.Tx[string, float64]
+	if e.store != nil {
+		walTx = e.store.Begin()
+		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf}
+	} else {
+		mutator = &lpgMutatorAdapter{g: e.g, buf: buf}
+	}
 
 	op, cols, err := buildPlanWithMutatorFull(plan, walker, labelSrc, e.reg, params, mutator, e.constraintReg, e.g.IndexManager())
 	if err != nil {
+		if walTx != nil {
+			_ = walTx.Rollback()
+		}
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
 
 	rs := exec.Run(ctx, op, cols)
-	return &Result{rs: rs, cols: cols, buf: buf, idxMgr: e.g.IndexManager()}, nil
+	return &Result{rs: rs, cols: cols, buf: buf, idxMgr: e.g.IndexManager(), tx: walTx}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2029,8 +2080,229 @@ func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// walMutatorAdapter — exec.GraphMutator backed by txn.Tx + *lpg.Graph
+// ─────────────────────────────────────────────────────────────────────────────
+
+// walMutatorAdapter applies every mutation to the in-memory graph eagerly (so
+// reads within the same transaction see writes immediately) and also buffers
+// the op in the txn.Tx so that [txn.Tx.CommitWALOnly] can fsync it to the WAL
+// on [Result.Close].
+//
+// walMutatorAdapter is NOT safe for concurrent use. The store mutex is held
+// from [txn.Store.Begin] (in RunInTx) until [txn.Tx.CommitWALOnly] or
+// [txn.Tx.Rollback] (in Result.Close).
+type walMutatorAdapter struct {
+	g   *lpg.Graph[string, float64]
+	tx  *txn.Tx[string, float64]
+	buf *exec.IndexBuffer // nil for read-only (never reached via RunInTx)
+}
+
+func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
+	id, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return graph.NodeID(0)
+	}
+	return id
+}
+
+// AddNode interns n and returns its stable NodeID.
+func (a *walMutatorAdapter) AddNode(n string) graph.NodeID {
+	a.g.AddNode(n)
+	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
+	id, _ := a.g.AdjList().Mapper().Lookup(n)
+	return id
+}
+
+// AddEdge inserts a directed edge and returns the endpoint NodeIDs.
+func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (srcID, dstID graph.NodeID) {
+	a.g.AddEdge(src, dst, w)
+	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	srcID, _ = a.g.AdjList().Mapper().Lookup(src)
+	dstID, _ = a.g.AdjList().Mapper().Lookup(dst)
+	return
+}
+
+// RemoveEdge removes the directed edge (src, dst).
+func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
+	a.g.AdjList().RemoveEdge(src, dst)
+	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
+}
+
+// SetNodeLabel attaches label to n.
+func (a *walMutatorAdapter) SetNodeLabel(n, label string) {
+	a.g.SetNodeLabel(n, label)
+	_ = a.tx.SetNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:    index.OpAddNodeLabel,
+			Node:  a.resolveID(n),
+			Label: uint32(a.g.Registry().Intern(label)),
+		})
+	}
+}
+
+// RemoveNodeLabel detaches label from n.
+func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
+	a.g.RemoveNodeLabel(n, label)
+	_ = a.tx.RemoveNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:    index.OpRemoveNodeLabel,
+			Node:  a.resolveID(n),
+			Label: uint32(a.g.Registry().Intern(label)),
+		})
+	}
+}
+
+// SetNodeProperty sets the named property on n.
+func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) {
+	a.g.SetNodeProperty(n, key, value)
+	_ = a.tx.SetNodeProperty(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpSetNodeProperty,
+			Node:     a.resolveID(n),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			NewValue: value,
+		})
+	}
+}
+
+// DelNodeProperty removes the named property from n.
+func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
+	a.g.DelNodeProperty(n, key)
+	_ = a.tx.DelNodeProperty(n, key) //nolint:errcheck // ErrTxFinished impossible here
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpDelNodeProperty,
+			Node:     a.resolveID(n),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+		})
+	}
+}
+
+// NodeProperties returns a snapshot of all properties on n.
+func (a *walMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValue {
+	return a.g.NodeProperties(n)
+}
+
+// NodeLabels returns a snapshot of all labels on n.
+func (a *walMutatorAdapter) NodeLabels(n string) []string {
+	return a.g.NodeLabels(n)
+}
+
+// HasEdge reports whether a directed edge from src to dst is present.
+func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
+	return a.g.AdjList().HasEdge(src, dst)
+}
+
+// SetEdgeLabel attaches label to the directed edge (src, dst).
+func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	a.g.SetEdgeLabel(src, dst, label)
+	_ = a.tx.SetEdgeLabel(src, dst, label) //nolint:errcheck // ErrTxFinished impossible here
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:    index.OpAddEdgeLabel,
+			Node:  a.resolveID(src),
+			Dst:   a.resolveID(dst),
+			Label: uint32(a.g.Registry().Intern(label)),
+		})
+	}
+}
+
+// SetEdgeProperty sets the named property on the directed edge (src, dst).
+func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) {
+	a.g.SetEdgeProperty(src, dst, key, value)
+	_ = a.tx.SetEdgeProperty(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpSetEdgeProperty,
+			Node:     a.resolveID(src),
+			Dst:      a.resolveID(dst),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			NewValue: value,
+		})
+	}
+}
+
+// DelEdgeProperty removes the named property from the directed edge (src, dst).
+func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
+	a.g.DelEdgeProperty(src, dst, key)
+	_ = a.tx.DelEdgeProperty(src, dst, key) //nolint:errcheck // ErrTxFinished impossible here
+	if a.buf != nil {
+		a.buf.Enqueue(index.Change{
+			Op:       index.OpDelEdgeProperty,
+			Node:     a.resolveID(src),
+			Dst:      a.resolveID(dst),
+			Property: uint32(a.g.PropertyKeys().Intern(key)),
+		})
+	}
+}
+
+// OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
+func (a *walMutatorAdapter) OutNeighbours(n string) []string {
+	var out []string
+	for nb := range a.g.AdjList().Neighbours(n) {
+		out = append(out, nb)
+	}
+	return out
+}
+
+// InNeighbours returns a snapshot of the incoming neighbour keys of n by
+// performing a full graph walk.
+func (a *walMutatorAdapter) InNeighbours(n string) []string {
+	nID, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return nil
+	}
+	var result []string
+	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
+		if id == nID {
+			return true
+		}
+		nbs, _ := a.g.AdjList().LoadEntry(id)
+		for _, nb := range nbs {
+			if nb == nID {
+				result = append(result, key)
+				break
+			}
+		}
+		return true
+	})
+	return result
+}
+
+// OutDegree returns the number of outgoing edges from n.
+func (a *walMutatorAdapter) OutDegree(n string) int {
+	id, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return 0
+	}
+	nbs, _ := a.g.AdjList().LoadEntry(id)
+	return len(nbs)
+}
+
+// ResolveNodeID translates a node key to its NodeID.
+func (a *walMutatorAdapter) ResolveNodeID(n string) (graph.NodeID, bool) {
+	return a.g.AdjList().Mapper().Lookup(n)
+}
+
+// ResolveNodeLabel translates a NodeID back to its node key.
+func (a *walMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
+	return a.g.AdjList().Mapper().Resolve(id)
+}
+
+// WalkNodeIDs calls fn for every interned node.
+func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
+	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
+		return fn(id)
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Compile-time assertions
 // ─────────────────────────────────────────────────────────────────────────────
 
 var _ nodeWalkerIface = (*lpgNodeWalker)(nil)
 var _ labelResolverIface = (*lpgLabelResolver)(nil)
+var _ exec.GraphMutator = (*walMutatorAdapter)(nil)

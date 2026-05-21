@@ -16,8 +16,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/index"
@@ -439,52 +441,21 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 }
 
 func applyOpString(g *lpg.Graph[string, int64], op *Op) {
-	var src, dst, label string
-	switch op.Version {
-	case txn.OpRecordV2:
-		// v2 string records are encoded with the canonical StringCodec:
-		// uint32 LE length prefix + utf-8 bytes. Walk it twice to peel
-		// src and dst, then parse the trailing uint16 label length and
-		// label bytes from what remains.
-		//
-		// OpAddEdgeWeighted frames cannot be parsed here because
-		// OpenString has no WeightCodec wired in, and the weight
-		// payload's length is encoding-dependent (varint vs fixed).
-		// We drop them and meter the loss; callers needing typed
-		// weights must use OpenWithOptions.
+	// Delegate v2 records to the typed codec path (string codec, nil wcodec).
+	// v1 records use the legacy byte-copy fallback below.
+	if op.Version == txn.OpRecordV2 {
 		if op.Kind == txn.OpAddEdgeWeighted {
+			// OpenString has no WeightCodec; cannot decode weight payload.
 			metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
 			return
 		}
-		codec := txn.NewStringCodec()
-		var rest []byte
-		var err error
-		src, rest, err = codec.Decode(op.Body)
-		if err != nil {
-			metrics.IncCounter("store.recovery.applyOpString.errors", 1)
-			return
-		}
-		dst, rest, err = codec.Decode(rest)
-		if err != nil {
-			metrics.IncCounter("store.recovery.applyOpString.errors", 1)
-			return
-		}
-		if len(rest) < 2 {
-			metrics.IncCounter("store.recovery.applyOpString.errors", 1)
-			return
-		}
-		n := binary.LittleEndian.Uint16(rest)
-		rest = rest[2:]
-		if uint64(len(rest)) < uint64(n) {
-			metrics.IncCounter("store.recovery.applyOpString.errors", 1)
-			return
-		}
-		label = string(rest[:n])
-	default:
-		src = string(op.SrcBytes)
-		dst = string(op.DstBytes)
-		label = op.Label
+		applyOpCodec(g, op, txn.NewStringCodec(), txn.WeightCodec[int64](nil))
+		return
 	}
+	// v1 legacy path: src/dst/label already decoded into SrcBytes/DstBytes/Label.
+	src := string(op.SrcBytes)
+	dst := string(op.DstBytes)
+	label := op.Label
 	switch op.Kind {
 	case txn.OpAddEdge:
 		g.AddEdge(src, dst, 0)
@@ -718,7 +689,7 @@ func openCodec[N comparable, W any](
 // The Op is taken by pointer to keep the inner recovery loop
 // allocation-free; the function does not mutate op.
 //
-//nolint:gocyclo // recovery: per-frame walk through codec, optional weight codec, and trailing label
+//nolint:gocyclo // recovery: per-frame walk through codec, optional weight codec, trailing label/key, and property value
 func applyOpCodec[N comparable, W any](
 	g *lpg.Graph[N, W],
 	op *Op,
@@ -736,42 +707,163 @@ func applyOpCodec[N comparable, W any](
 	if err != nil {
 		return false
 	}
-	var weight W
-	weighted := op.Kind == txn.OpAddEdgeWeighted
-	if weighted {
+
+	switch op.Kind {
+	case txn.OpAddEdgeWeighted:
+		var weight W
 		if wcodec != nil {
 			weight, rest, err = wcodec.Decode(rest)
 			if err != nil {
 				return false
 			}
 		} else {
-			// No weight codec wired; we cannot decode the payload, so
-			// we must drop the frame to avoid corrupting the label
-			// trailer. Surface the loss via a metric counter so
-			// observability picks it up.
 			metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
 			return false
 		}
-	}
-	if len(rest) < 2 {
-		return false
-	}
-	n := binary.LittleEndian.Uint16(rest)
-	rest = rest[2:]
-	if uint64(len(rest)) < uint64(n) {
-		return false
-	}
-	label := string(rest[:n])
-	switch op.Kind {
+		// consume trailing uint16 label (always 0 for AddEdge)
+		if len(rest) < 2 {
+			return false
+		}
+		g.AddEdge(src, dst, weight)
+
 	case txn.OpAddEdge:
+		// Validate the trailing uint16 label-length prefix. AddEdge does not
+		// use the label, but a malformed length (claiming more bytes than remain)
+		// indicates a corrupted frame and must not be applied.
+		if len(rest) < 2 {
+			return false
+		}
+		n := binary.LittleEndian.Uint16(rest)
+		rest = rest[2:]
+		if uint64(len(rest)) < uint64(n) {
+			return false
+		}
 		var zero W
 		g.AddEdge(src, dst, zero)
-	case txn.OpAddEdgeWeighted:
-		g.AddEdge(src, dst, weight)
-	case txn.OpSetNodeLabel:
-		g.SetNodeLabel(src, label)
-	case txn.OpSetEdgeLabel:
-		g.SetEdgeLabel(src, dst, label)
+
+	case txn.OpSetNodeLabel, txn.OpRemoveNodeLabel, txn.OpSetEdgeLabel,
+		txn.OpAddNode, txn.OpRemoveNode, txn.OpRemoveEdge:
+		// All of these have uint16 label length + label bytes at this point.
+		if len(rest) < 2 {
+			return false
+		}
+		n := binary.LittleEndian.Uint16(rest)
+		rest = rest[2:]
+		if uint64(len(rest)) < uint64(n) {
+			return false
+		}
+		label := string(rest[:n])
+		switch op.Kind {
+		case txn.OpAddNode:
+			g.AddNode(src)
+		case txn.OpRemoveNode:
+			for _, lbl := range g.NodeLabels(src) {
+				g.RemoveNodeLabel(src, lbl)
+			}
+			for k := range g.NodeProperties(src) {
+				g.DelNodeProperty(src, k)
+			}
+		case txn.OpRemoveNodeLabel:
+			g.RemoveNodeLabel(src, label)
+		case txn.OpSetNodeLabel:
+			g.SetNodeLabel(src, label)
+		case txn.OpSetEdgeLabel:
+			g.SetEdgeLabel(src, dst, label)
+		case txn.OpRemoveEdge:
+			g.AdjList().RemoveEdge(src, dst)
+		}
+
+	case txn.OpSetNodeProperty, txn.OpDelNodeProperty,
+		txn.OpSetEdgeProperty, txn.OpDelEdgeProperty:
+		// uint16 key length + key bytes [+ property value for Set ops]
+		if len(rest) < 2 {
+			return false
+		}
+		kLen := binary.LittleEndian.Uint16(rest)
+		rest = rest[2:]
+		if uint64(len(rest)) < uint64(kLen) {
+			return false
+		}
+		key := string(rest[:kLen])
+		rest = rest[kLen:]
+		switch op.Kind {
+		case txn.OpSetNodeProperty:
+			val, _, verr := decodeRecoveryPropertyValue(rest)
+			if verr != nil {
+				return false
+			}
+			g.SetNodeProperty(src, key, val)
+		case txn.OpDelNodeProperty:
+			g.DelNodeProperty(src, key)
+		case txn.OpSetEdgeProperty:
+			val, _, verr := decodeRecoveryPropertyValue(rest)
+			if verr != nil {
+				return false
+			}
+			g.SetEdgeProperty(src, dst, key, val)
+		case txn.OpDelEdgeProperty:
+			g.DelEdgeProperty(src, dst, key)
+		}
 	}
 	return true
+}
+
+// decodeRecoveryPropertyValue parses a [lpg.PropertyValue] from the head of
+// buf using the same encoding written by txn.encodePropertyValue.
+func decodeRecoveryPropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) {
+	if len(buf) < 1 {
+		return lpg.PropertyValue{}, buf, errors.New("recovery: short property value (missing kind)")
+	}
+	kind := lpg.PropertyKind(buf[0])
+	buf = buf[1:]
+	switch kind {
+	case lpg.PropString:
+		if len(buf) < 4 {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short string property (missing length)")
+		}
+		n := binary.LittleEndian.Uint32(buf)
+		buf = buf[4:]
+		if uint64(len(buf)) < uint64(n) {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short string property body")
+		}
+		return lpg.StringValue(string(buf[:n])), buf[n:], nil
+	case lpg.PropInt64:
+		x, n := binary.Varint(buf)
+		if n <= 0 {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short int64 property")
+		}
+		return lpg.Int64Value(x), buf[n:], nil
+	case lpg.PropFloat64:
+		if len(buf) < 8 {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short float64 property")
+		}
+		bits := binary.LittleEndian.Uint64(buf[:8])
+		return lpg.Float64Value(math.Float64frombits(bits)), buf[8:], nil
+	case lpg.PropBool:
+		if len(buf) < 1 {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short bool property")
+		}
+		return lpg.BoolValue(buf[0] != 0), buf[1:], nil
+	case lpg.PropTime:
+		nanos, n := binary.Varint(buf)
+		if n <= 0 {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short time property")
+		}
+		t := time.Unix(0, nanos).UTC()
+		return lpg.TimeValue(t), buf[n:], nil
+	case lpg.PropBytes:
+		if len(buf) < 4 {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short bytes property (missing length)")
+		}
+		n := binary.LittleEndian.Uint32(buf)
+		buf = buf[4:]
+		if uint64(len(buf)) < uint64(n) {
+			return lpg.PropertyValue{}, buf, errors.New("recovery: short bytes property body")
+		}
+		bs := make([]byte, n)
+		copy(bs, buf[:n])
+		return lpg.BytesValue(bs), buf[n:], nil
+	default:
+		return lpg.PropertyValue{}, buf, errors.New("recovery: unknown property kind")
+	}
 }

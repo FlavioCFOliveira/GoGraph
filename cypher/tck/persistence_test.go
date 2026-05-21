@@ -198,3 +198,110 @@ func TestTCKPersistence_EmptyGraphSurvivesRestart(t *testing.T) {
 		t.Errorf("MATCH (n) on empty recovered graph: got %d rows, want 0", got)
 	}
 }
+
+// newWALEngine opens a fresh WAL at dir/wal and returns a WAL-backed
+// cypher.Engine. The caller owns the returned wal.Writer and must Close it
+// when done.
+func newWALEngine(t *testing.T, dir string) (*cypher.Engine, *wal.Writer) {
+	t.Helper()
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	return cypher.NewEngineWithStore(store), w
+}
+
+// recoverEngineFromWAL opens the same WAL path via recovery.Open and returns a
+// plain cypher.Engine backed by the recovered graph.
+func recoverEngineFromWAL(t *testing.T, dir string) *cypher.Engine {
+	t.Helper()
+	res, err := recovery.Open[string, float64](dir, recovery.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	if err != nil {
+		t.Fatalf("recovery.Open: %v", err)
+	}
+	return cypher.NewEngine(res.Graph)
+}
+
+// TestTCKPersistence_WALDurability_NodeLabel verifies that nodes and labels
+// written via RunInTx on a WAL-backed engine survive a close + recovery
+// round-trip without any snapshot — pure WAL replay.
+func TestTCKPersistence_WALDurability_NodeLabel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	eng, w := newWALEngine(t, dir)
+
+	// Write 10 Person nodes via Cypher.
+	for i := range 10 {
+		runCreate(t, eng, fmt.Sprintf(`CREATE (n:Person {name: "Bob%d"})`, i))
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	// Recover into a fresh graph from WAL only (no snapshot).
+	recEng := recoverEngineFromWAL(t, dir)
+
+	got := runMatch(t, recEng, `MATCH (n:Person) RETURN n`)
+	if got != 10 {
+		t.Errorf("MATCH (n:Person) after WAL recovery: got %d, want 10", got)
+	}
+}
+
+// TestTCKPersistence_WALDurability_CrashSimulation simulates a kill -9 by
+// writing data via RunInTx, closing the WAL, then recovering into a fresh empty
+// graph solely through WAL replay. If the WAL-backed path is wired correctly,
+// the freshly recovered graph must contain all written nodes and relationships.
+func TestTCKPersistence_WALDurability_CrashSimulation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	eng, w := newWALEngine(t, dir)
+
+	// 5 City nodes, 5 Company nodes.
+	for _, lbl := range []string{"City", "Company"} {
+		for i := range 5 {
+			runCreate(t, eng, fmt.Sprintf(`CREATE (n:%s {name: "%s%d"})`, lbl, lbl, i))
+		}
+	}
+	// 2 Person nodes connected by a KNOWS relationship.
+	runCreate(t, eng, `CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Charlie"})`)
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	// Simulate crash + restart: build a completely fresh in-memory graph from
+	// the WAL alone — no snapshot, no reference to the old graph.
+	recEng := recoverEngineFromWAL(t, dir)
+
+	for _, tc := range []struct {
+		label string
+		want  int
+	}{
+		{"City", 5},
+		{"Company", 5},
+		{"Person", 2},
+	} {
+		q := fmt.Sprintf(`MATCH (n:%s) RETURN n`, tc.label)
+		got := runMatch(t, recEng, q)
+		if got != tc.want {
+			t.Errorf("MATCH (n:%s) after crash recovery: got %d, want %d", tc.label, got, tc.want)
+		}
+	}
+	// Verify the relationship survived.
+	gotRel := runMatch(t, recEng, `MATCH (a:Person {name: "Alice"})-[:KNOWS]->(b) RETURN b`)
+	if gotRel != 1 {
+		t.Errorf("MATCH relationship after crash recovery: got %d, want 1", gotRel)
+	}
+}
