@@ -156,13 +156,17 @@ func BenchmarkInstrumentedScan_Instrumented(b *testing.B) {
 	}
 }
 
-// TestInstrumentedScan_OverheadBelow5Pct verifies at runtime that instrumented
-// scan overhead is under 5% relative to the raw scan on 10k rows.
+// overheadRows is larger than benchRows so raw scan duration exceeds 1 ms,
+// keeping relative OS jitter well below the 25 % threshold.
+const overheadRows = 200_000
+
+// TestInstrumentedScan_OverheadBelow25Pct verifies at runtime that instrumented
+// scan overhead stays under 25 % relative to the raw scan on 200k rows.
 //
-// This test is intentionally skipped when the race detector is active because
-// atomic ops carry significant extra cost under -race, distorting the
-// measurement. Run without -race to evaluate real overhead.
-func TestInstrumentedScan_OverheadBelow5Pct(t *testing.T) {
+// Using 200k rows ensures the raw scan lasts ≥1 ms, making OS scheduling jitter
+// negligible relative to the 25 % budget. The test is skipped under -race (atomic
+// ops carry extra cost) and in -short mode.
+func TestInstrumentedScan_OverheadBelow25Pct(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping overhead test in short mode")
 	}
@@ -170,24 +174,24 @@ func TestInstrumentedScan_OverheadBelow5Pct(t *testing.T) {
 		t.Skip("skipping overhead test under race detector (-race inflates atomic costs)")
 	}
 
-	const trials = 10
+	// Warmup: one unmetered pass to prime caches.
+	measureOverheadRaw()
+	measureOverheadInstrumented()
+
+	const trials = 20
 	var rawTotal, instTotal time.Duration
 	for range trials {
-		rawTotal += measureRaw()
-		instTotal += measureInstrumented()
+		rawTotal += measureOverheadRaw()
+		instTotal += measureOverheadInstrumented()
 	}
 	rawAvg := rawTotal / trials
 	instAvg := instTotal / trials
 
-	if rawAvg == 0 {
-		t.Skip("raw scan took 0 ns — clock resolution too coarse for this test")
+	if rawAvg < time.Millisecond {
+		t.Skip("raw scan < 1 ms — clock resolution too coarse for this platform")
 	}
 
 	overhead := float64(instAvg-rawAvg) / float64(rawAvg) * 100
-	// Threshold is 25% to accommodate variance on low-clock-resolution
-	// environments (e.g., Apple Silicon under thermal pressure). The atomic
-	// counter adds a single atomic.Add per row; any overhead above 25% on
-	// 10k rows indicates a structural regression, not OS jitter.
 	if overhead > 25.0 {
 		t.Fatalf("instrumented scan overhead %.1f%% exceeds 25%% (raw=%v inst=%v)",
 			overhead, rawAvg, instAvg)
@@ -195,8 +199,8 @@ func TestInstrumentedScan_OverheadBelow5Pct(t *testing.T) {
 	t.Logf("dbHits overhead: %.2f%% (raw=%v inst=%v)", overhead, rawAvg, instAvg)
 }
 
-func measureRaw() time.Duration {
-	src := &sliceSource{total: benchRows}
+func measureOverheadRaw() time.Duration {
+	src := &sliceSource{total: overheadRows}
 	_ = src.Init(context.Background())
 	var row exec.Row
 	start := time.Now()
@@ -211,8 +215,8 @@ func measureRaw() time.Duration {
 	return d
 }
 
-func measureInstrumented() time.Duration {
-	src := &sliceSource{total: benchRows}
+func measureOverheadInstrumented() time.Duration {
+	src := &sliceSource{total: overheadRows}
 	var counter DbHitsCounter
 	is := NewInstrumentedScan(src, &counter)
 	_ = is.Init(context.Background())
@@ -228,6 +232,7 @@ func measureInstrumented() time.Duration {
 	_ = is.Close()
 	return d
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compile-time interface checks
