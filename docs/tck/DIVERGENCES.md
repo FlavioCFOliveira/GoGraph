@@ -1,8 +1,8 @@
 # TCK Non-Conformances and Divergences
 
-**Date:** 2026-05-20  
+**Date:** 2026-05-21  
 **Corpus:** openCypher TCK — opencypher/openCypher@main  
-**Module version:** gograph v1.3.0  
+**Module version:** gograph v2.0.0-dev  
 
 ---
 
@@ -21,10 +21,12 @@ progress.
 | Parser (grammar + AST round-trip) | 3 534 | 3 534 | 100.0 % |
 | Skipped (grammar gaps) | 363 | — | — |
 | **Overall (pass / total)** | **3 897** | **3 534** | **90.7 %** |
+| Execution (godog runner, Sprint 31) | 3 897 | 407 | **10.4 %** |
 
-The target gate is ≥ 90 %. This target is now achieved. The remaining gap is
-entirely accounted for by documented grammar limitations; no scenario is silently
-failing.
+The parser-level target gate is ≥ 90 %. This target is now achieved. The remaining
+grammar gap is entirely accounted for by documented limitations; no scenario is
+silently failing. Execution-level conformance is at an early baseline of 10.4 %
+(Sprint 31); see Category 5 for the full gap taxonomy and remediation roadmap.
 
 ---
 
@@ -114,35 +116,34 @@ All runnable write-clause scenarios parse correctly (100 % parser pass rate).
 
 ---
 
-## Category 3 — Execution Scenarios (deferred)
+## Category 3 — Execution Scenarios (baseline established Sprint 31)
 
 All 3 897 TCK scenarios that contain `When executing query:` steps also specify
 an expected result (`Then the result should be`, `Then a SyntaxError should be
-raised`, etc.). The current runner only validates **parser correctness** — it does
-not execute the query against a graph and compare rows.
+raised`, etc.). The parser-level runner validates grammar correctness only.
 
-Execution conformance is deferred to a subsequent sprint. The execution engine
-(`cypher/exec/`) can evaluate `MATCH … WHERE … RETURN` queries against an in-memory
-graph (`graph/lpg`), but the following features are not yet wired up in the TCK runner:
+The godog execution runner was added in Sprint 31 (`cypher/tck/runner_test.go`,
+`cypher/tck/world_test.go`). It wires up `cypher/exec/` against the TCK harness
+and reports execution conformance. The Sprint 31 baseline is:
 
-| Feature area | Reason for deferral |
+- **407 / 3 897 scenarios passing (10.4 %)** at execution level.
+
+The execution engine (`cypher/exec/`) can evaluate `MATCH … WHERE … RETURN`
+queries against an in-memory graph (`graph/lpg`). The following areas are not yet
+fully wired up or implemented:
+
+| Feature area | Reason for low pass rate |
 |---|---|
-| `clauses/match` | Full pattern matching requires graph bindings not set up in the TCK harness |
-| `clauses/create` / `clauses/merge` | Write operations require mutable graph handle |
+| `clauses/match` | Property access on graph nodes returns null; pattern binding incomplete |
+| `clauses/create` / `clauses/merge` | Write-back to graph not wired in execution TCK harness |
 | `clauses/delete` / `clauses/set` / `clauses/remove` | Write operations |
 | `expressions/temporal` | Temporal types (Date, DateTime, Duration) not yet implemented |
 | `useCases/triadicSelection` | Requires path-pattern matching and variable-length traversal |
 | All aggregation scenarios | `EagerAggregation` operator exists but is not exercised by the TCK runner |
 | Subquery (`EXISTS`, `COUNT { }`) | Subquery operators not yet wired in the execution path |
 
-### Execution Gap Summary
-
-- **Scenarios with execution result expectations:** ≈ 3 800 (estimated; exact count
-  pending execution runner instrumentation; corpus grew with Scenario Outline expansion).
-- **Scenarios currently executable with no code change:** ≈ 0 (the TCK runner does
-  not call the execution engine).
-- **Planned:** Add an execution stage to the TCK runner in the next sprint; target
-  full execution coverage for `expressions/*` and `clauses/return`.
+See Category 5 below for the full execution-engine gap taxonomy with scenario
+counts and remediation priority.
 
 ---
 
@@ -161,16 +162,73 @@ carries an explanation and the planned remediation.
 
 ---
 
+## Category 5 — Execution Engine Gaps (Sprint 31 baseline)
+
+The following gaps account for the bulk of the 3 490 failing execution scenarios
+(89.6 % of the corpus). Counts are approximate; they are derived from feature-file
+categorisation and godog progress output from Sprint 31.
+
+| Gap | Affected scenarios (approx.) | Description |
+|---|---|---|
+| Property access on nodes/relationships | ~1 200 | `n.name`, `r.weight`, etc. evaluate to `null` in the execution engine instead of the node's property value. Affects nearly every `MATCH … RETURN n.prop` scenario. |
+| MATCH with multiple patterns / OPTIONAL MATCH | ~800 | Multi-pattern MATCH and OPTIONAL MATCH are parsed correctly but the execution engine does not bind all pattern components to graph elements. |
+| Aggregation functions | ~600 | `count(*)`, `count(n)`, `sum(x)`, `avg(x)`, `collect(x)` are not executed in the TCK harness; the `EagerAggregation` operator exists but is not connected to the runner's result pipeline. |
+| Path expressions and variable-length patterns | ~400 | `(a)-[*1..3]->(b)`, `shortestPath(…)`, and path variable assignment (`p = …`) require a path-expansion executor that is not yet implemented. |
+| ORDER BY, SKIP, LIMIT execution | ~300 | The Sort, Skip, and Limit physical operators exist in `cypher/exec/` but are not wired to the godog execution harness result pipeline, so ordering and pagination tests fail. |
+
+### Why the execution rate is 10.4 % and not 0 %
+
+The 407 passing scenarios are ones where:
+
+- The query has no `MATCH` clause and evaluates pure expressions (`RETURN 1 + 2`,
+  `RETURN toUpper('hello')`).
+- Error-expectation scenarios where GoGraph correctly raises a `SyntaxError` or
+  `SemaError` for malformed queries.
+- Simple `RETURN` with literal values and basic arithmetic that the expression
+  evaluator already handles.
+
+---
+
 ## Roadmap
 
-The following tasks will close the remaining gap towards full TCK conformance:
+The following tasks will close the remaining conformance gap, listed by priority:
+
+### Parser level (grammar gaps — ~312 scenarios)
 
 1. **Grammar fixes** (zero-dot-float, chained WITH, varlen bounds, leading-dot-float,
-   neg-hex-oct) — resolves ~312 additional skip scenarios.
-2. **TCK execution runner** — wire up the existing engine to execute queries and
-   compare results against the TCK `Then` steps.
-3. **Temporal types** — implement Date, DateTime, LocalDateTime, Duration values
-   and their built-in functions.
-4. **Subquery support** — EXISTS { } and COUNT { } subqueries.
+   neg-hex-oct) — resolves ~312 additional skip scenarios and promotes them into the
+   parser gate.
 
-The ≥ 90 % overall conformance target has been achieved in v1.3.0.
+### Execution level (engine enhancements — ~3 490 scenarios)
+
+2. **Property access on nodes and relationships** — wire property reads (`n.name`) in
+   the MATCH result-binding stage; highest impact item (~1 200 scenarios).
+3. **Multi-pattern MATCH and OPTIONAL MATCH** — complete pattern binding for queries
+   with multiple comma-separated patterns and optional paths (~800 scenarios).
+4. **Aggregation execution** — connect `EagerAggregation` operator to the TCK runner's
+   result pipeline; implement `count`, `sum`, `avg`, `collect`, `min`, `max` (~600 scenarios).
+5. **Path expressions and variable-length patterns** — implement path-expansion executor
+   for `-[*N..M]->`, `shortestPath`, `allShortestPaths`, and path variable binding
+   (~400 scenarios).
+6. **ORDER BY / SKIP / LIMIT** — connect Sort, Skip, Limit physical operators to the
+   godog result pipeline (~300 scenarios).
+7. **Temporal types** — implement Date, DateTime, LocalDateTime, Duration values and
+   their built-in functions (affects temporal expression scenarios).
+8. **Subquery support** — EXISTS { } and COUNT { } subqueries.
+
+### Milestones
+
+| Milestone | Target pass rate | Key items |
+|---|---|---|
+| Sprint 32 | ~25 % execution | Property access + simple MATCH binding |
+| Sprint 33 | ~45 % execution | OPTIONAL MATCH + multi-pattern |
+| Sprint 34 | ~60 % execution | Aggregation functions |
+| Sprint 35 | ~75 % execution | Path expressions + ORDER BY/SKIP/LIMIT |
+| v2.0.0 | ≥ 90 % execution | Temporal types + subqueries + remaining grammar fixes |
+
+### Resolved items
+
+- **Grammar fixes (single-quoted strings)** — **RESOLVED in v1.3.0** via
+  `normalizeSingleQuotes` pre-processor; 579 scenarios unblocked.
+- **Execution-level TCK runner (godog)** — **IMPLEMENTED in Sprint 31**;
+  baseline execution pass rate 10.4 % (407/3897 scenarios) established.
