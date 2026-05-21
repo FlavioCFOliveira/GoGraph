@@ -223,3 +223,104 @@ of the expression evaluation pipeline to eliminate `interface{}` boxing on the h
 
 The fix also benefits all label-scan queries that return rows (IC2, IC3, IC4, IC7, IC9, IC10,
 IC11, IC14) and the IC1_Parallel variant (−67% ns/op, −76% B/op, −35% allocs/op).
+
+---
+
+## Cross-Concurrency Results
+
+Parallel benchmarks use `b.RunParallel`, which distributes iterations across
+`GOMAXPROCS` goroutines. The machine is an Apple M4 with 10 performance cores;
+`GOMAXPROCS=10` at test time (shown in the `-10` suffix in the raw output).
+Sequential baselines are taken from the median of the three sequential runs
+above.
+
+| Benchmark | Mode | GOMAXPROCS | Median ns/op | B/op | allocs/op | Speedup vs sequential |
+|---|---|---:|---:|---:|---:|---:|
+| IC1 | Sequential | 1 | 150,178 | 439,877 | 5,780 | 1.00× |
+| IC1_Parallel | Parallel | 10 | 110,428 | 439,897 | 5,780 | **1.36×** |
+| IC2 | Sequential | 1 | 49,562 | 140,121 | 1,946 | 1.00× |
+| IC2_Parallel | Parallel | 10 | 34,452 | 140,127 | 1,946 | **1.44×** |
+| IC9 | Sequential | 1 | 51,273 | 140,202 | 1,947 | 1.00× |
+| IC9_Parallel | Parallel | 10 | 34,337 | 140,208 | 1,947 | **1.49×** |
+
+**Notes:**
+
+- Speedup is computed as `sequential_ns / parallel_ns`.
+- Memory per operation is unchanged across modes: concurrent execution does not
+  introduce additional allocations.
+- Sub-linear scaling (maximum theoretical speedup at GOMAXPROCS=10 is 10×)
+  reflects contention on the shared graph `RWMutex` during read operations.
+  Each concurrent query acquires a read lock for the full duration of its node
+  scan, which limits parallelism when multiple scans are in flight simultaneously.
+- IC1 shows the lowest speedup (1.36×) because it scans all 1 000 nodes,
+  holding the read lock longer per query. IC9 shows the highest speedup (1.49×)
+  on its ~334-node filtered scan.
+
+---
+
+## Bolt Round-trip Benchmark
+
+TODO: Bolt round-trip benchmark pending (`bench/soak/cypher_rw.go`).
+
+The `bench/soak` package contains a mixed read/write workload harness
+(`cypher_rw.go`) used for soak testing, but it does not currently expose
+`Benchmark*` functions. A Bolt round-trip benchmark measuring end-to-end
+latency through the `bolt/server` TCP stack is planned.
+
+---
+
+## Methodology
+
+### Reproducing the sequential results
+
+```bash
+cd /path/to/gograph
+go test -bench='BenchmarkIC[0-9]+$' -benchmem -count=3 \
+    ./bench/cypher_ldbc/... 2>&1 | tee new.txt
+```
+
+To compare against a baseline captured previously:
+
+```bash
+benchstat old.txt new.txt
+```
+
+### Reproducing the parallel results
+
+```bash
+go test -bench='BenchmarkIC[0-9]+_Parallel' -benchmem -count=3 \
+    ./bench/cypher_ldbc/... 2>&1
+```
+
+### Seed graph
+
+The benchmark seed is 1 000 nodes across three labels (Person, City, Company)
+in a 1:1:1 ratio. No edges. No pre-existing properties. Each `CREATE`/`MERGE`
+benchmark runs against a freshly initialised graph to avoid write accumulation
+between iterations.
+
+### Environment
+
+Benchmarks are pinned to a quiet machine (no other load). On shared CI
+infrastructure, expect ±10–15% variance in ns/op. Use `benchstat` with
+`-count=10` for statistical confidence.
+
+### Profiling
+
+To capture a heap profile for a single benchmark:
+
+```bash
+go test -bench='^BenchmarkIC1$' -benchmem -count=1 \
+    -memprofile mem.out ./bench/cypher_ldbc/...
+go tool pprof -top mem.out
+```
+
+For CPU:
+
+```bash
+go test -bench='^BenchmarkIC1$' -count=1 \
+    -cpuprofile cpu.out ./bench/cypher_ldbc/...
+go tool pprof -top cpu.out
+```
+
+See [docs/profiling.md](../profiling.md) for the full profiling guide.
