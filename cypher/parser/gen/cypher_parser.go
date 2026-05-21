@@ -3532,84 +3532,125 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
 	}
 }
 
+// peekHasWithBeforeReturn performs a bounded lookahead to determine whether the
+// remaining token stream contains a WITH token at depth 0 before a RETURN token
+// or EOF.  This is used by MultiPartQ to decide whether another WITH-prefixed
+// segment follows the current position in a chained-WITH query such as:
+//
+//	MATCH (a) WITH a MATCH (b) WITH b RETURN b
+//
+// The scan respects parenthesis and bracket nesting so that WITH tokens inside
+// nested expressions (e.g. CASE…WHEN clauses) are not mistaken for top-level
+// WITH clauses.  The lookahead is bounded to 4096 tokens to prevent quadratic
+// behaviour on pathological input.
+func (p *CypherParser) peekHasWithBeforeReturn() bool {
+	const maxLook = 4096
+	depth := 0
+	for i := 1; i <= maxLook; i++ {
+		tok := p.GetTokenStream().LT(i).GetTokenType()
+		switch tok {
+		case antlr.TokenEOF, CypherParserRETURN:
+			return false
+		case CypherParserWITH:
+			if depth == 0 {
+				return true
+			}
+		case CypherParserLPAREN, CypherParserLBRACK:
+			depth++
+		case CypherParserRPAREN, CypherParserRBRACK:
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
+}
+
 func (p *CypherParser) MultiPartQ() (localctx IMultiPartQContext) {
 	localctx = NewMultiPartQContext(p, p.GetParserRuleContext(), p.GetState())
 	p.EnterRule(localctx, 30, CypherParserRULE_multiPartQ)
 	var _la int
 
-	var _alt int
-
 	p.EnterOuterAlt(localctx, 1)
-	p.SetState(288)
-	p.GetErrorHandler().Sync(p)
-	if p.HasError() {
-		goto errorExit
+
+	// readingStatementMask is the set of token types that can start a
+	// readingStatement: MATCH, OPTIONAL MATCH, UNWIND, and in-query CALL.
+	// Bits: MATCH=47, OPTIONAL=50, UNWIND=59, CALL=28.
+	const readingStatementMask = (int64(1) << CypherParserMATCH) |
+		(int64(1) << CypherParserOPTIONAL) |
+		(int64(1) << CypherParserUNWIND) |
+		(int64(1) << CypherParserCALL)
+
+	// isReadingStart reports whether token type _la can start a readingStatement.
+	isReadingStart := func(la int) bool {
+		return (int64(la) & ^0x3f) == 0 && (int64(1)<<la)&readingStatementMask != 0
 	}
+
+	// updatingStatementMask: CREATE=40, DELETE=41, DETACH=44, MERGE=48, REMOVE=52, SET=54.
+	const updatingStatementMask = (int64(1) << CypherParserCREATE) |
+		(int64(1) << CypherParserDELETE) |
+		(int64(1) << CypherParserDETACH) |
+		(int64(1) << CypherParserMERGE) |
+		(int64(1) << CypherParserREMOVE) |
+		(int64(1) << CypherParserSET)
+
+	isUpdatingStart := func(la int) bool {
+		return (int64(la) & ^0x3f) == 0 && (int64(1)<<la)&updatingStatementMask != 0
+	}
+
+	// Consume the initial readingStatement* before the first WITH.
 	_la = p.GetTokenStream().LA(1)
-
-	for (int64(_la) & ^0x3f) == 0 && ((int64(1)<<_la)&577727389967056896) != 0 {
-		{
-			p.SetState(285)
-			p.ReadingStatement()
-		}
-
-		p.SetState(290)
-		p.GetErrorHandler().Sync(p)
+	for isReadingStart(_la) {
+		p.ReadingStatement()
 		if p.HasError() {
 			goto errorExit
 		}
 		_la = p.GetTokenStream().LA(1)
 	}
-	p.SetState(298)
-	p.GetErrorHandler().Sync(p)
-	if p.HasError() {
-		goto errorExit
-	}
-	_alt = 1
-	for ok := true; ok; ok = _alt != 2 && _alt != antlr.ATNInvalidAltNumber {
-		switch _alt {
-		case 1:
-			p.SetState(294)
-			p.GetErrorHandler().Sync(p)
+
+	// Main loop: (readingStatement* updatingStatement* withSt)+
+	// We continue looping as long as there is another WITH clause ahead in the
+	// token stream before RETURN/EOF (peekHasWithBeforeReturn).  The first
+	// iteration is always taken (the grammar guarantees at least one WITH in a
+	// multiPartQ), so we use a do-while style.
+	for {
+		// updatingStatement*
+		_la = p.GetTokenStream().LA(1)
+		for isUpdatingStart(_la) {
+			p.UpdatingStatement()
 			if p.HasError() {
 				goto errorExit
 			}
 			_la = p.GetTokenStream().LA(1)
-
-			for (int64(_la) & ^0x3f) == 0 && ((int64(1)<<_la)&22820363834490880) != 0 {
-				{
-					p.SetState(291)
-					p.UpdatingStatement()
-				}
-
-				p.SetState(296)
-				p.GetErrorHandler().Sync(p)
-				if p.HasError() {
-					goto errorExit
-				}
-				_la = p.GetTokenStream().LA(1)
-			}
-			{
-				p.SetState(297)
-				p.WithSt()
-			}
-
-		default:
-			p.SetError(antlr.NewNoViableAltException(p, nil, nil, nil, nil, nil))
-			goto errorExit
 		}
 
-		p.SetState(300)
-		p.GetErrorHandler().Sync(p)
-		_alt = p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 23, p.GetParserRuleContext())
+		// withSt (required)
+		p.WithSt()
 		if p.HasError() {
 			goto errorExit
 		}
+
+		// After the WITH, decide whether to loop: loop only if there is another
+		// WITH before the next RETURN/EOF.
+		if !p.peekHasWithBeforeReturn() {
+			break
+		}
+
+		// More WITH clauses ahead — consume the readingStatement* segment that
+		// precedes the next updatingStatement*/withSt group.
+		_la = p.GetTokenStream().LA(1)
+		for isReadingStart(_la) {
+			p.ReadingStatement()
+			if p.HasError() {
+				goto errorExit
+			}
+			_la = p.GetTokenStream().LA(1)
+		}
 	}
-	{
-		p.SetState(302)
-		p.SinglePartQ()
-	}
+
+	// Terminal singlePartQ handles the final RETURN and any reading/updating
+	// clauses that follow the last WITH.
+	p.SinglePartQ()
 
 errorExit:
 	if p.HasError() {
