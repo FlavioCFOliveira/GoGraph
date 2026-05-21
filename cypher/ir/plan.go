@@ -1,6 +1,22 @@
 package ir
 
-import "gograph/cypher/ast"
+import (
+	"sync/atomic"
+
+	"gograph/cypher/ast"
+)
+
+// argTagSeq generates monotonic [Argument] tags. Tags are stable for the
+// lifetime of an Argument node and let physical builders thread the matching
+// [exec.Argument] instance from an enclosing Apply-family operator down to
+// the inner-side leaf.
+var argTagSeq atomic.Uint32
+
+// nextArgTag returns a fresh tag distinct from all previously issued tags
+// across the lifetime of the process.
+func nextArgTag() uint32 {
+	return argTagSeq.Add(1)
+}
 
 // LogicalPlan is the root interface implemented by every logical-plan operator.
 // Children returns the operator's child plans in evaluation order (left to right
@@ -98,13 +114,28 @@ type SortItem struct {
 type Argument struct {
 	// Variables holds the variable names that are injected from the outer scope.
 	Variables []string
+	// Tag uniquely identifies this Argument node so the physical builder can
+	// route the matching [exec.Argument] instance from an enclosing
+	// [CorrelatedApply] or [OptionalApply]. Tags are assigned at construction
+	// time and are stable for the lifetime of the node.
+	Tag uint32
 }
 
-// NewArgument creates an Argument operator with the given injected variables.
+// NewArgument creates an Argument operator with the given injected variables
+// and a freshly allocated [Argument.Tag].
 func NewArgument(vars []string) *Argument {
 	cp := make([]string, len(vars))
 	copy(cp, vars)
-	return &Argument{Variables: cp}
+	return &Argument{Variables: cp, Tag: nextArgTag()}
+}
+
+// NewArgumentWithTag creates an Argument operator with the given variables and
+// an explicit tag. It is used by IR-building helpers that need the inner-side
+// Argument to share a tag with an enclosing Apply-family operator.
+func NewArgumentWithTag(vars []string, tag uint32) *Argument {
+	cp := make([]string, len(vars))
+	copy(cp, vars)
+	return &Argument{Variables: cp, Tag: tag}
 }
 
 // Children implements LogicalPlan. Argument is a leaf; it returns nil.
@@ -707,6 +738,117 @@ func (a *Apply) Vars() []string {
 		}
 	}
 	for _, v := range a.Inner.Vars() {
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CorrelatedApply is a dependent join in which the inner subplan starts with
+// an [Argument] leaf re-emitting the outer row. Unlike [Apply], the physical
+// executor for CorrelatedApply forwards the inner row verbatim and does not
+// concatenate it with the outer row — the outer columns are already present
+// in the inner row's leading positions.
+//
+// CorrelatedApply is used for multi-pattern MATCH where subsequent patterns
+// share at least one variable with a previously bound pattern: the shared
+// variable acts as a join key implicit in the dataflow.
+type CorrelatedApply struct {
+	// Outer is the driving (left) subplan.
+	Outer LogicalPlan
+	// Inner is the correlated (right) subplan; its leftmost leaf must be an
+	// [Argument] whose Tag equals [CorrelatedApply.ArgTag].
+	Inner LogicalPlan
+	// ArgTag is the tag shared with the inner-side Argument leaf so that the
+	// physical builder can route the matching exec.Argument instance.
+	ArgTag uint32
+}
+
+// NewCorrelatedApply creates a CorrelatedApply operator with a freshly issued
+// [Argument] tag. The caller is responsible for placing an [Argument] node
+// carrying the same tag at the leftmost leaf of inner.
+func NewCorrelatedApply(outer, inner LogicalPlan) *CorrelatedApply {
+	return &CorrelatedApply{Outer: outer, Inner: inner, ArgTag: nextArgTag()}
+}
+
+// NewCorrelatedApplyWithTag creates a CorrelatedApply with an explicit tag.
+// Use when constructing the IR top-down and threading the tag into the inner
+// subplan's Argument leaf at the same time.
+func NewCorrelatedApplyWithTag(outer, inner LogicalPlan, tag uint32) *CorrelatedApply {
+	return &CorrelatedApply{Outer: outer, Inner: inner, ArgTag: tag}
+}
+
+// Children implements LogicalPlan. Returns [Outer, Inner].
+func (c *CorrelatedApply) Children() []LogicalPlan { return []LogicalPlan{c.Outer, c.Inner} }
+
+// Vars implements LogicalPlan. The outer variables come first; inner variables
+// not already present are appended.
+func (c *CorrelatedApply) Vars() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, v := range c.Outer.Vars() {
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	for _, v := range c.Inner.Vars() {
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// OptionalApply is the left-outer variant of [CorrelatedApply]. When the inner
+// subplan produces zero rows for an outer row, the physical executor emits a
+// single NULL-extended row consisting of the outer columns followed by NULL
+// placeholders for every column the inner pipeline would have introduced.
+//
+// OptionalApply is used for OPTIONAL MATCH when a non-empty driving subplan
+// already provides the outer bindings (e.g. a preceding MATCH clause).
+type OptionalApply struct {
+	// Outer is the driving (left) subplan.
+	Outer LogicalPlan
+	// Inner is the optional correlated subplan.
+	Inner LogicalPlan
+	// ArgTag is the tag shared with the inner-side Argument leaf.
+	ArgTag uint32
+}
+
+// NewOptionalApply creates an OptionalApply operator with a freshly issued
+// [Argument] tag.
+func NewOptionalApply(outer, inner LogicalPlan) *OptionalApply {
+	return &OptionalApply{Outer: outer, Inner: inner, ArgTag: nextArgTag()}
+}
+
+// NewOptionalApplyWithTag creates an OptionalApply with an explicit tag.
+func NewOptionalApplyWithTag(outer, inner LogicalPlan, tag uint32) *OptionalApply {
+	return &OptionalApply{Outer: outer, Inner: inner, ArgTag: tag}
+}
+
+// Children implements LogicalPlan. Returns [Outer, Inner].
+func (o *OptionalApply) Children() []LogicalPlan { return []LogicalPlan{o.Outer, o.Inner} }
+
+// Vars implements LogicalPlan. The outer variables come first; inner variables
+// not already present are appended.
+func (o *OptionalApply) Vars() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, v := range o.Outer.Vars() {
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	for _, v := range o.Inner.Vars() {
 		if _, ok := seen[v]; !ok {
 			seen[v] = struct{}{}
 			out = append(out, v)

@@ -191,19 +191,28 @@ func Test_OptionalMatch_ChainsAfterMatch(t *testing.T) {
 	}
 	plan := mustFromAST(t, q)
 
-	// The OPTIONAL MATCH chains the MATCH plan as outer → Apply(MATCH, OPTIONAL MATCH path)
-	// because matchPattern wraps child in Apply.
-	app, ok := plan.(*ir.Apply)
+	// Since task-392, OPTIONAL MATCH chained after a non-empty driving plan
+	// produces an OptionalApply node: the outer side is the driving plan
+	// (here AllNodesScan(n)); the inner side starts with an Argument leaf
+	// that re-emits the outer row, followed by a regular Expand for the
+	// (n)-[:KNOWS]->(m) hop. The OptionalApply itself handles the
+	// full-pattern NULL emission semantics, so OptionalExpand is NOT used
+	// inside the inner subtree.
+	opt, ok := plan.(*ir.OptionalApply)
 	if !ok {
-		t.Fatalf("expected *ir.Apply, got %T", plan)
+		t.Fatalf("expected *ir.OptionalApply, got %T", plan)
 	}
-	// Outer: AllNodesScan("n") from first MATCH.
-	if _, ok := app.Outer.(*ir.AllNodesScan); !ok {
-		t.Fatalf("Apply.Outer expected *ir.AllNodesScan, got %T", app.Outer)
+	// Outer: AllNodesScan("n") from the first MATCH.
+	if _, ok := opt.Outer.(*ir.AllNodesScan); !ok {
+		t.Fatalf("OptionalApply.Outer expected *ir.AllNodesScan, got %T", opt.Outer)
 	}
-	// Inner: OptionalExpand.
-	if _, ok := app.Inner.(*ir.OptionalExpand); !ok {
-		t.Fatalf("Apply.Inner expected *ir.OptionalExpand, got %T", app.Inner)
+	// Inner: Expand wrapping an Argument leaf.
+	exp, ok := opt.Inner.(*ir.Expand)
+	if !ok {
+		t.Fatalf("OptionalApply.Inner expected *ir.Expand, got %T", opt.Inner)
+	}
+	if _, ok := exp.Child.(*ir.Argument); !ok {
+		t.Fatalf("Expand.Child expected *ir.Argument, got %T", exp.Child)
 	}
 }
 

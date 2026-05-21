@@ -25,11 +25,16 @@ import (
 //   - 1145: raised after task #391 wired EagerAggregation argument/group-by
 //     AST expressions and TCK value formatting (observed ≈1152±2 over a
 //     5-run sample).
+//   - 1225: raised after task #392 wired multi-pattern MATCH binding via
+//     CorrelatedApply, OPTIONAL MATCH whole-pattern NULL emission via
+//     OptionalApply, destination-rebinding equi-join in matchExpandStepBound,
+//     and explicit fromVar threading in matchPathPattern (observed ≈1233
+//     over a 3-run sample).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1145
+const tckExecutionBaseline = 1225
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -381,6 +381,24 @@ func replaceChildren(plan ir.LogicalPlan, fn func(ir.LogicalPlan) (ir.LogicalPla
 		}
 		return ir.NewApply(outer, inner), true
 
+	case *ir.CorrelatedApply:
+		outer, oc := WalkAndReplace(p.Outer, fn)
+		inner, ic := WalkAndReplace(p.Inner, fn)
+		if !oc && !ic {
+			return plan, false
+		}
+		// Preserve the original ArgTag so the inner Argument leaf still resolves
+		// to the same exec.Argument instance under physical build.
+		return ir.NewCorrelatedApplyWithTag(outer, inner, p.ArgTag), true
+
+	case *ir.OptionalApply:
+		outer, oc := WalkAndReplace(p.Outer, fn)
+		inner, ic := WalkAndReplace(p.Inner, fn)
+		if !oc && !ic {
+			return plan, false
+		}
+		return ir.NewOptionalApplyWithTag(outer, inner, p.ArgTag), true
+
 	case *ir.SemiApply:
 		outer, oc := WalkAndReplace(p.Outer, fn)
 		inner, ic := WalkAndReplace(p.Inner, fn)

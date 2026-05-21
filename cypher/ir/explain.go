@@ -121,6 +121,10 @@ func operatorName(plan LogicalPlan) string {
 	// Apply-family operators
 	case *Apply:
 		return "Apply"
+	case *CorrelatedApply:
+		return "CorrelatedApply"
+	case *OptionalApply:
+		return "OptionalApply"
 	case *SemiApply:
 		return "SemiApply"
 	case *AntiSemiApply:

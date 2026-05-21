@@ -686,7 +686,7 @@ func TestBuildOperator_NodeByIndexSeekCase(t *testing.T) {
 	seek := ir.NewNodeByIndexSeek("n", "Person", "name", "'Alice'")
 	schema := make(map[string]int)
 
-	op, err := buildOperator(seek, walker, labelSrc, funcs.DefaultRegistry, nil, schema, mgr, nil)
+	op, err := buildOperator(seek, walker, labelSrc, funcs.DefaultRegistry, nil, schema, mgr, nil, nil)
 	if err != nil {
 		t.Fatalf("buildOperator with NodeByIndexSeek: %v", err)
 	}

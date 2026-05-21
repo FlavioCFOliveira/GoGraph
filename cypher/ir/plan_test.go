@@ -81,8 +81,11 @@ func TestArgument(t *testing.T) {
 		assertVars(t, a, []string{"n", "r"})
 	})
 	t.Run("deep equal round-trip", func(t *testing.T) {
-		want := ir.NewArgument([]string{"x"})
-		got := ir.NewArgument([]string{"x"})
+		// Tags are auto-assigned by NewArgument and are unique per call, so two
+		// Arguments built with the same variable list are intentionally NOT
+		// DeepEqual. Use NewArgumentWithTag for a deterministic comparison.
+		want := ir.NewArgumentWithTag([]string{"x"}, 42)
+		got := ir.NewArgumentWithTag([]string{"x"}, 42)
 		if !reflect.DeepEqual(want, got) {
 			t.Errorf("DeepEqual mismatch: %v vs %v", want, got)
 		}
