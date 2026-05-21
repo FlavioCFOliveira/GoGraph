@@ -286,7 +286,7 @@ func projectionItems(proj *ast.Projection) []ProjectionItem {
 		} else if v, ok := it.Expr.(*ast.Variable); ok {
 			name = v.Name
 		}
-		items[i] = ProjectionItem{Name: name, Expression: it.Expr.String()}
+		items[i] = ProjectionItem{Name: name, Expression: it.Expr.String(), Expr: it.Expr}
 	}
 	return items
 }

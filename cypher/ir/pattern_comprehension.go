@@ -98,7 +98,7 @@ func (t *translator) projectionsWithComprehensions(
 	for _, item := range proj.Items {
 		pc, ok := item.Expr.(*ast.PatternComprehension)
 		if !ok {
-			// Regular item — pass through.
+			// Regular item — pass through, preserving the parsed AST.
 			name := item.Expr.String()
 			if item.Alias != nil {
 				name = *item.Alias
@@ -108,6 +108,7 @@ func (t *translator) projectionsWithComprehensions(
 			regularItems = append(regularItems, ProjectionItem{
 				Name:       name,
 				Expression: item.Expr.String(),
+				Expr:       item.Expr,
 			})
 			continue
 		}

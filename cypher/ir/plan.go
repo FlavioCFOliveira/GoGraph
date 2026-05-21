@@ -1,5 +1,7 @@
 package ir
 
+import "gograph/cypher/ast"
+
 // LogicalPlan is the root interface implemented by every logical-plan operator.
 // Children returns the operator's child plans in evaluation order (left to right
 // for binary operators). Vars returns the set of variable names produced or
@@ -43,9 +45,12 @@ type ProjectionItem struct {
 	// Name is the output variable name (the AS alias, or the expression's
 	// canonical string representation when no alias is given).
 	Name string
-	// Expression is an opaque string representation of the expression. A
-	// dedicated expression IR is introduced in a later task.
+	// Expression is an opaque string representation of the expression.
 	Expression string
+	// Expr is the parsed AST for the expression, when available. Nil for
+	// legacy or string-only callers. When non-nil, the executor evaluates it
+	// via expr.Eval rather than falling back to a schema-key lookup.
+	Expr ast.Expression
 }
 
 // AggregateExpr is a named aggregate function in an EagerAggregation operator.
@@ -389,13 +394,24 @@ func (p *ProjectEndpoints) Vars() []string {
 type Selection struct {
 	// Predicate is the opaque string representation of the filter expression.
 	Predicate string
+	// PredicateExpr is the parsed AST for the predicate, when available. Nil
+	// for legacy or string-only callers. When non-nil, the executor evaluates
+	// it via expr.Eval rather than the pass-through stub.
+	PredicateExpr ast.Expression
 	// Child is the subplan whose rows are filtered.
 	Child LogicalPlan
 }
 
-// NewSelection creates a Selection operator.
+// NewSelection creates a Selection operator with a string-only predicate.
 func NewSelection(predicate string, child LogicalPlan) *Selection {
 	return &Selection{Predicate: predicate, Child: child}
+}
+
+// NewSelectionExpr creates a Selection with both the string predicate and its
+// parsed AST. The executor uses PredicateExpr when non-nil, falling back to
+// the pass-through stub otherwise.
+func NewSelectionExpr(predicate string, predExpr ast.Expression, child LogicalPlan) *Selection {
+	return &Selection{Predicate: predicate, PredicateExpr: predExpr, Child: child}
 }
 
 // Children implements LogicalPlan.

@@ -53,8 +53,8 @@ func (t *translator) translateExistsPredicate(predExpr ast.Expression, outer Log
 		}
 	}
 
-	// Case 3: plain predicate → Selection.
-	return NewSelection(predExpr.String(), outer), nil
+	// Case 3: plain predicate → Selection (with AST preserved for execution).
+	return NewSelectionExpr(predExpr.String(), predExpr, outer), nil
 }
 
 // existsSubPlan builds the inner plan for a SemiApply / AntiSemiApply.

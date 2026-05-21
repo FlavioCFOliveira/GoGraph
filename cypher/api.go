@@ -35,6 +35,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
+	"gograph/cypher/ast"
 	"gograph/cypher/exec"
 	"gograph/cypher/expr"
 	"gograph/cypher/funcs"
@@ -905,8 +906,24 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		// Sprint 25: predicate string is the opaque AST string from the IR.
-		// Full expression re-evaluation is not in scope; emit a pass-through filter.
+		if p.PredicateExpr != nil {
+			var selG *lpg.Graph[string, float64]
+			if lw, ok := walker.(*lpgNodeWalker); ok {
+				selG = lw.g
+			}
+			if selG != nil {
+				schemaSnap := copySchema(schema)
+				predExpr := p.PredicateExpr
+				capturedG := selG
+				capturedParams := params
+				capturedReg := reg
+				return exec.NewFilter(child, func(row exec.Row) (expr.Value, error) {
+					rowCtx := buildRowCtx(row, schemaSnap, capturedG)
+					return expr.Eval(predExpr, rowCtx, capturedParams, capturedReg)
+				}), nil
+			}
+		}
+		// Fallback: no AST or no graph available — pass-through filter.
 		return exec.NewFilter(child, func(_ exec.Row) (expr.Value, error) {
 			return expr.BoolValue(true), nil
 		}), nil
@@ -916,7 +933,11 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		return buildIRProjection(p.Items, child, schema)
+		var projG *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			projG = lw.g
+		}
+		return buildIRProjection(p.Items, child, schema, projG, params, reg)
 
 	case *ir.Expand:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg)
@@ -1181,13 +1202,74 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndex
 	return nil, false
 }
 
+// lpgPropToExpr converts an lpg.PropertyValue to its expr.Value counterpart.
+// Unsupported kinds (PropTime, PropBytes) fall through to expr.Null.
+func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
+	switch pv.Kind() {
+	case lpg.PropString:
+		if s, ok := pv.String(); ok {
+			return expr.StringValue(s)
+		}
+	case lpg.PropInt64:
+		if i, ok := pv.Int64(); ok {
+			return expr.IntegerValue(i)
+		}
+	case lpg.PropFloat64:
+		if f, ok := pv.Float64(); ok {
+			return expr.FloatValue(f)
+		}
+	case lpg.PropBool:
+		if b, ok := pv.Bool(); ok {
+			return expr.BoolValue(b)
+		}
+	}
+	return expr.Null
+}
+
+// buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,
+// upgrading IntegerValue(nodeID) entries to NodeValue with properties loaded
+// from the graph. g may be nil when no graph is available (upgrade is skipped).
+func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64]) expr.RowContext {
+	ctx := make(expr.RowContext, len(schema))
+	for varName, colIdx := range schema {
+		if colIdx >= len(row) || row[colIdx] == nil {
+			continue
+		}
+		v := row[colIdx]
+		// Upgrade IntegerValue(NodeID) → NodeValue when graph is available.
+		if g != nil {
+			if iv, ok := v.(expr.IntegerValue); ok {
+				id := graph.NodeID(iv)
+				if name, resolved := g.AdjList().Mapper().Resolve(id); resolved {
+					rawProps := g.NodeProperties(name)
+					props := make(expr.MapValue, len(rawProps))
+					for k, pv := range rawProps {
+						props[k] = lpgPropToExpr(pv)
+					}
+					labels := g.NodeLabels(name)
+					ctx[varName] = expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
+					continue
+				}
+			}
+		}
+		ctx[varName] = v
+	}
+	return ctx
+}
+
 // buildIRProjection converts IR ProjectionItems to a physical Project operator.
-// For Sprint 25 each item expression is treated as a variable reference looked
-// up in schema, falling back to NULL for unresolvable expressions.
+// When an item carries a parsed AST expression (item.Expr != nil), the
+// executor evaluates it via expr.Eval against a full RowContext — enabling
+// property access (n.prop), function calls, and other non-trivial expressions.
+// For simple variable references and string-only items the fast schema-lookup
+// path is used.
 func buildIRProjection(
 	items []ir.ProjectionItem,
 	child exec.Operator,
 	schema map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
 ) (*exec.Project, error) {
 	projItems := make([]exec.ProjectionItem, len(items))
 	for i, item := range items {
@@ -1195,7 +1277,32 @@ func buildIRProjection(
 		exprStr := item.Expression
 
 		var evalFn func(exec.Row) (expr.Value, error)
-		if colIdx, ok := schema[exprStr]; ok {
+		if item.Expr != nil {
+			if v, ok := item.Expr.(*ast.Variable); ok {
+				// Fast path: simple variable reference — direct column lookup.
+				if colIdx, ok2 := schema[v.Name]; ok2 {
+					idx := colIdx
+					evalFn = func(row exec.Row) (expr.Value, error) {
+						if idx < len(row) {
+							return row[idx], nil
+						}
+						return expr.Null, nil
+					}
+				}
+			}
+			if evalFn == nil {
+				// General path: evaluate full AST expression with loaded RowContext.
+				schemaSnap := copySchema(schema)
+				capturedExpr := item.Expr
+				capturedG := g
+				capturedParams := params
+				capturedReg := reg
+				evalFn = func(row exec.Row) (expr.Value, error) {
+					rowCtx := buildRowCtx(row, schemaSnap, capturedG)
+					return expr.Eval(capturedExpr, rowCtx, capturedParams, capturedReg)
+				}
+			}
+		} else if colIdx, ok := schema[exprStr]; ok {
 			idx := colIdx
 			evalFn = func(row exec.Row) (expr.Value, error) {
 				if idx < len(row) {
@@ -1204,7 +1311,7 @@ func buildIRProjection(
 				return expr.Null, nil
 			}
 		} else if colIdx, ok := schema[name]; ok {
-			// Try using the alias as a variable reference.
+			// Fall back to the alias as a variable reference.
 			idx := colIdx
 			evalFn = func(row exec.Row) (expr.Value, error) {
 				if idx < len(row) {

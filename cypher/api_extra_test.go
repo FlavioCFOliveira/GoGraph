@@ -134,16 +134,21 @@ func TestEngine_LabelScan_UnknownLabel(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Selection — MATCH (n) WHERE n.age > 5 RETURN n  (pass-through stub)
+// Selection — MATCH (n) WHERE n.name = $v RETURN n  (real property filter)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestEngine_Selection_PassThrough(t *testing.T) {
-	const n = 3
-	g := newGraph(n)
+func TestEngine_Selection_PropertyFilter(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	// Three nodes: two matching, one not.
+	g.SetNodeProperty("n1", "name", lpg.StringValue("match"))
+	g.SetNodeProperty("n2", "name", lpg.StringValue("match"))
+	g.SetNodeProperty("n3", "name", lpg.StringValue("skip"))
+
 	eng := cypher.NewEngine(g)
 
-	// The Selection stub always passes; all n rows should come through.
-	res, err := eng.Run(context.Background(), "MATCH (n) WHERE n.age > 5 RETURN n", nil)
+	// WHERE predicate uses a parameter to avoid the integer-literal grammar gap.
+	params := map[string]expr.Value{"v": expr.StringValue("match")}
+	res, err := eng.Run(context.Background(), "MATCH (n) WHERE n.name = $v RETURN n", params)
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -156,8 +161,9 @@ func TestEngine_Selection_PassThrough(t *testing.T) {
 	if err := res.Err(); err != nil {
 		t.Fatalf("result error: %v", err)
 	}
-	if count != n {
-		t.Errorf("expected %d rows (selection stub is pass-through), got %d", n, count)
+	const want = 2
+	if count != want {
+		t.Errorf("expected %d rows after property filter, got %d", want, count)
 	}
 }
 
