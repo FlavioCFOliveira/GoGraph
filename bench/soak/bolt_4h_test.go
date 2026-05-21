@@ -165,9 +165,11 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 	allSnaps := snapshots
 	snapshotMu.Unlock()
 
-	// Heap stability: last-quartile average must not exceed 2× first-quartile
+	// Heap stability: last-quartile average must not exceed 1.5× first-quartile
 	// average. This detects monotonic growth without false-positives from GC
 	// oscillation, which can cause peak-vs-baseline comparisons to fail spuriously.
+	// The 1.5× threshold (tightened from 2×) catches slower leaks; the most recent
+	// 4-hour run showed a ratio of 0.90× for heap, well within the tighter band.
 	if len(allSnaps) >= 8 {
 		q := len(allSnaps) / 4
 		var sumFirst, sumLast uint64
@@ -179,17 +181,20 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 		}
 		avgFirst := sumFirst / uint64(q)
 		avgLast := sumLast / uint64(q)
-		if avgLast > avgFirst*2 {
-			t.Errorf("soak_1024_4h: heap leak: last-quartile avg %d > 2x first-quartile avg %d", avgLast, avgFirst)
+		// Compare avgLast*2 > avgFirst*3 to express the 1.5× threshold without
+		// floating-point arithmetic (avgLast > avgFirst*1.5 ⇔ avgLast*2 > avgFirst*3).
+		if avgLast*2 > avgFirst*3 {
+			t.Errorf("soak_1024_4h: heap leak: last-quartile avg %d > 1.5x first-quartile avg %d", avgLast, avgFirst)
 		} else {
 			t.Logf("soak_1024_4h: heap stable: first-quartile avg=%d last-quartile avg=%d", avgFirst, avgLast)
 		}
 	}
 
 	// ── Goroutine stability check ─────────────────────────────────────────────
-	// Goroutine stability: last-quartile average must not exceed 2× first-quartile
+	// Goroutine stability: last-quartile average must not exceed 1.5× first-quartile
 	// average. This detects goroutine leaks without triggering on the transient
-	// burst at connection start-up.
+	// burst at connection start-up. The most recent 4-hour run showed a ratio of
+	// 0.98× for goroutines, well within the tighter band.
 	if len(allSnaps) >= 8 {
 		q := len(allSnaps) / 4
 		var sumFirst, sumLast int
@@ -201,8 +206,8 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 		}
 		avgFirst := sumFirst / q
 		avgLast := sumLast / q
-		if avgLast > avgFirst*2 {
-			t.Errorf("soak_1024_4h: goroutine leak: last-quartile avg %d > 2x first-quartile avg %d", avgLast, avgFirst)
+		if avgLast*2 > avgFirst*3 {
+			t.Errorf("soak_1024_4h: goroutine leak: last-quartile avg %d > 1.5x first-quartile avg %d", avgLast, avgFirst)
 		} else {
 			t.Logf("soak_1024_4h: goroutine stable: first-quartile avg=%d last-quartile avg=%d", avgFirst, avgLast)
 		}
@@ -231,32 +236,37 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 
 // writeSoakArtefact writes a plain-text snapshot log to dir/bolt-soak-1024-4h.txt.
 // Called only when SOAK_ARTEFACTS env var is set.
+//
+// Every failure path uses t.Errorf rather than t.Logf so a soak that completes
+// the workload but cannot persist its evidence does not silently report PASS.
+// When SOAK_ARTEFACTS is set, the caller is asking for archived evidence; if
+// we cannot produce it, the run is not acceptable.
 func writeSoakArtefact(t *testing.T, dir string, snaps []soakSnapshot, baselineHeap, successes, failures uint64, duration time.Duration) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o750); err != nil { //nolint:gosec // user-supplied output dir
-		t.Logf("soak_1024_4h: cannot create artefact dir %s: %v", dir, err)
+		t.Errorf("soak_1024_4h: cannot create artefact dir %s: %v", dir, err)
 		return
 	}
 	path := dir + "/bolt-soak-1024-4h.txt"
 	f, err := os.Create(path) //nolint:gosec // path from env + fixed filename
 	if err != nil {
-		t.Logf("soak_1024_4h: cannot create artefact file: %v", err)
+		t.Errorf("soak_1024_4h: cannot create artefact file: %v", err)
 		return
 	}
 	defer func() {
 		if err := f.Close(); err != nil {
-			t.Logf("soak_1024_4h: artefact close: %v", err)
+			t.Errorf("soak_1024_4h: artefact close: %v", err)
 		}
 	}()
 
 	if _, err := fmt.Fprintf(f, "bolt soak 1024-conn / %v  successes=%d failures=%d baseline_heap=%d\n",
 		duration, successes, failures, baselineHeap); err != nil {
-		t.Logf("soak_1024_4h: artefact write: %v", err)
+		t.Errorf("soak_1024_4h: artefact write: %v", err)
 	}
 	for _, s := range snaps {
 		if _, err := fmt.Fprintf(f, "  t=%-12v heap=%-12d goroutines=%d\n",
 			s.elapsed.Truncate(time.Second), s.heapAlloc, s.goroutines); err != nil {
-			t.Logf("soak_1024_4h: artefact write snapshot: %v", err)
+			t.Errorf("soak_1024_4h: artefact write snapshot: %v", err)
 		}
 	}
 	t.Logf("soak_1024_4h: artefact written to %s", path)

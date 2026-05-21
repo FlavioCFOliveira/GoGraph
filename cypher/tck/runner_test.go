@@ -1,8 +1,13 @@
 package tck_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"math"
+	"os"
+	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/cucumber/godog"
@@ -10,16 +15,46 @@ import (
 	"gograph/cypher/tck"
 )
 
+// tckExecutionBaseline is the minimum number of passing scenarios the godog
+// execution suite must report. Set just below the most recent observed pass
+// count (≈1005) so that legitimate ±5-scenario run-to-run variance does not
+// flap the gate, but any real regression in execution support fails CI.
+//
+// To raise the baseline after a deliberate uplift in execution support, run
+// the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
+// this constant in a dedicated commit.
+const tckExecutionBaseline = 1000
+
+// scenarioSummaryRE matches the godog summary line emitted by the progress
+// formatter:
+//
+//	"1234 scenarios (1005 passed, 229 failed)"
+//
+// Sub-groups: 1 = total scenarios, 2 = passed scenarios.
+var scenarioSummaryRE = regexp.MustCompile(`(\d+)\s+scenarios?\s+\((\d+)\s+passed`)
+
 // TestTCKExecution runs the openCypher TCK feature files through the execution engine.
 // It uses godog to parse Gherkin and dispatch step implementations.
-// Pass rate is reported at the end.
 //
-// The test does not fail the suite when scenarios fail — it is a reporting
-// test, not a CI gate. Use -short to run a randomised sample of scenarios.
+// The test fails when the number of passing scenarios drops below
+// tckExecutionBaseline — locking in the current execution coverage. The
+// summary line is captured from the progress formatter so the count is
+// observable in source rather than relying on godog's exit status (which
+// only encodes pass/fail, not magnitude).
+//
+// Use -short to run a randomised sample of scenarios; the baseline gate is
+// disabled in short mode because the sample is non-deterministic.
 func TestTCKExecution(t *testing.T) {
 	if testing.Short() {
 		t.Log("TCK execution: short mode — running randomised scenario sample")
 	}
+
+	// Capture the formatter's stdout so we can parse the summary line for the
+	// passing-scenario count after suite.Run returns. NoColors=true is required
+	// so the captured text has no ANSI escape sequences inside the digit groups
+	// the summary regex looks for.
+	var buf bytes.Buffer
+	out := io.MultiWriter(os.Stdout, &buf)
 
 	opts := &godog.Options{
 		Format:        "progress",
@@ -27,9 +62,11 @@ func TestTCKExecution(t *testing.T) {
 		FS:            tck.FeatureFiles(),
 		Strict:        false,
 		StopOnFailure: false,
+		Output:        out,
+		NoColors:      true,
 		// TestingT is intentionally not set: setting it causes godog to call
-		// t.Fail() for every scenario failure, which would make this test fail
-		// the CI suite. This test is a pass-rate reporter, not a strict gate.
+		// t.Fail() for every scenario failure. The regression gate below is
+		// based on the aggregate passing-scenario count, not per-scenario fail.
 	}
 
 	if testing.Short() {
@@ -45,8 +82,42 @@ func TestTCKExecution(t *testing.T) {
 	status := suite.Run()
 	if status != 0 {
 		t.Logf("TCK execution: some scenarios failed or were pending (status=%d); see progress output above", status)
-		// Do not t.Fatal — this is a pass-rate reporter, not a strict gate.
 	}
+
+	// Skip the gate in short mode: the randomised sample is a different
+	// population and its pass count is not comparable to the baseline.
+	if testing.Short() {
+		return
+	}
+
+	total, passed, ok := parseScenarioSummary(buf.Bytes())
+	if !ok {
+		t.Fatalf("TCK execution: could not locate scenario summary line in formatter output (looked for %q)",
+			scenarioSummaryRE.String())
+	}
+	t.Logf("TCK execution: %d scenarios, %d passed (baseline=%d)", total, passed, tckExecutionBaseline)
+	if passed < tckExecutionBaseline {
+		t.Errorf("TCK execution regression: %d scenarios passed, baseline=%d", passed, tckExecutionBaseline)
+	}
+}
+
+// parseScenarioSummary extracts (total, passed, ok) from the formatter output
+// emitted by godog's Base.Summary(). Returns ok=false if no summary line is
+// present in raw.
+func parseScenarioSummary(raw []byte) (total, passed int, ok bool) {
+	m := scenarioSummaryRE.FindSubmatch(raw)
+	if m == nil {
+		return 0, 0, false
+	}
+	t, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return 0, 0, false
+	}
+	p, err := strconv.Atoi(string(m[2]))
+	if err != nil {
+		return 0, 0, false
+	}
+	return t, p, true
 }
 
 // initScenario creates a fresh world per scenario and registers all step

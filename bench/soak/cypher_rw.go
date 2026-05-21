@@ -83,6 +83,8 @@ func runCypherRW(ctx context.Context, outDir string) {
 	wg.Wait()
 	log.Printf("cypher-rw: complete reads=%d writes=%d cancels=%d elapsed=%v",
 		reads.Load(), writes.Load(), cancels.Load(), time.Since(startTime).Truncate(time.Second))
+	// invalidHeapSnapshots is inspected by main.run after this function returns
+	// so deferred cleanup (context cancel) runs before the process exits.
 }
 
 // cypherReader repeatedly executes MATCH (n) RETURN n, drains the result,
@@ -236,34 +238,84 @@ func cypherSampler(ctx context.Context, wg *sync.WaitGroup, reads, writes, cance
 }
 
 // countFDs returns the number of open file descriptors for the current
-// process by counting entries in /proc/self/fd. On platforms where /proc
-// is unavailable (e.g. macOS) it returns -1.
+// process. It tries the Linux-style /proc/self/fd first, then falls back to
+// /dev/fd on darwin and other BSD-derived systems where /dev/fd is backed by
+// the fdesc filesystem and lists every open descriptor of the calling
+// process. Returns -1 only when neither path is readable.
+//
+// Implementation note: os.ReadDir on darwin's /dev/fd issues an fstatat per
+// entry and the entry pointing back at the directory handle itself fails the
+// stat, returning a (partial, error) pair. Readdirnames(-1) only reads names
+// and avoids the spurious error, so we use it for both platforms.
+//
+// The directory handle is itself an open FD while we read, so the returned
+// count includes one transient descriptor; this is consistent across both
+// implementations and produces stable deltas over time.
 func countFDs() int {
-	entries, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		return -1 // not available on macOS / non-Linux
+	// Linux exposes per-process FDs under /proc/self/fd.
+	if n, ok := readdirCount("/proc/self/fd"); ok {
+		return n
 	}
-	return len(entries)
+	// Darwin / BSD: /dev/fd is mounted as fdesc and lists FDs for the caller.
+	if n, ok := readdirCount("/dev/fd"); ok {
+		return n
+	}
+	return -1
+}
+
+// readdirCount opens path and returns the number of entries via Readdirnames.
+// Readdirnames only enumerates entry names (no stat per entry) and so works
+// cleanly on darwin's /dev/fd where the back-pointer to the directory handle
+// would otherwise produce a partial-error from os.ReadDir.
+func readdirCount(path string) (int, bool) {
+	dir, err := os.Open(path) //nolint:gosec // path is a system-managed FD directory
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = dir.Close() }() //nolint:errcheck // close on read-only handle
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		return 0, false
+	}
+	return len(names), true
 }
 
 // dumpCypherHeap writes a heap profile snapshot to outDir, following the
-// same naming convention as the BFS/Dijkstra soak's dumpHeap.
+// same naming convention as the BFS/Dijkstra soak's dumpHeap. The closed
+// file is stat'd; any snapshot smaller than minHeapProfileBytes is treated
+// as truncated and counted in invalidHeapSnapshots so the soak binary exits
+// non-zero rather than silently producing a useless artefact.
 func dumpCypherHeap(idx int, startTime time.Time, outDir string) {
 	path := fmt.Sprintf("%s/cypher-heap-%03d.pb.gz", outDir, idx)
 	f, err := os.Create(path) //nolint:gosec // path constructed from -out flag + numeric index
 	if err != nil {
 		log.Printf("cypher-rw: cannot create heap profile: %v", err)
+		invalidHeapSnapshots.Add(1)
 		return
 	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			log.Printf("cypher-rw: heap profile close: %v", err)
-		}
-	}()
 	runtime.GC()
 	if err := pprof.Lookup("heap").WriteTo(f, 0); err != nil {
 		log.Printf("cypher-rw: heap profile write: %v", err)
+		_ = f.Close()
+		invalidHeapSnapshots.Add(1)
 		return
 	}
-	log.Printf("cypher-rw: heap snapshot %s @ t=%v", path, time.Since(startTime).Truncate(time.Second))
+	if err := f.Close(); err != nil {
+		log.Printf("cypher-rw: heap profile close: %v", err)
+		invalidHeapSnapshots.Add(1)
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		log.Printf("cypher-rw: INVALID HEAP SNAPSHOT %s: stat failed: %v", path, err)
+		invalidHeapSnapshots.Add(1)
+		return
+	}
+	if fi.Size() < minHeapProfileBytes {
+		log.Printf("cypher-rw: INVALID HEAP SNAPSHOT %s: size=%d bytes (< %d) — truncated profile",
+			path, fi.Size(), minHeapProfileBytes)
+		invalidHeapSnapshots.Add(1)
+		return
+	}
+	log.Printf("cypher-rw: heap snapshot %s @ t=%v size=%d", path, time.Since(startTime).Truncate(time.Second), fi.Size())
 }

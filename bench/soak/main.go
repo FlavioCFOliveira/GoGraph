@@ -41,10 +41,31 @@ var (
 	flagOutDir     = flag.String("out", "soak-artefacts", "directory for heap-profile snapshots")
 )
 
+// minHeapProfileBytes is the minimum acceptable size for a heap snapshot
+// written by pprof.Lookup("heap").WriteTo. A real heap profile (gzipped pprof
+// protobuf) is at least a few KiB; anything below this threshold indicates
+// truncation, a write error swallowed by the runtime, or an empty profile —
+// none of which is acceptable for archived soak evidence.
+const minHeapProfileBytes = 1024
+
+// invalidHeapSnapshots counts truncated/empty heap profile writes during the
+// soak. The soak binary exits non-zero if any invalid snapshot is detected so
+// the operator and CI cannot mistake a corrupted run for a clean one.
+var invalidHeapSnapshots atomic.Uint64
+
 func main() {
+	os.Exit(run())
+}
+
+// run executes the soak harness and returns the process exit code so that
+// deferred cleanup (context cancel, timer stops) runs before the process
+// terminates. Returns 1 if any heap snapshot was below the minimum size
+// threshold; 0 otherwise.
+func run() int {
 	flag.Parse()
 	if err := os.MkdirAll(*flagOutDir, 0o750); err != nil { //nolint:gosec // owner-visible profile dir
-		log.Fatalf("mkdir out: %v", err)
+		log.Printf("mkdir out: %v", err)
+		return 1
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *flagDuration)
@@ -52,7 +73,11 @@ func main() {
 
 	if *flagCypherMode {
 		runCypherRW(ctx, *flagOutDir)
-		return
+		if n := invalidHeapSnapshots.Load(); n > 0 {
+			log.Printf("cypher-rw: %d invalid heap snapshot(s) detected — see INVALID HEAP SNAPSHOT log lines above", n)
+			return 1
+		}
+		return 0
 	}
 	log.Printf("soak: duration=%v readers=%d size=%d sample-interval=%v out=%s",
 		*flagDuration, *flagConcurrent, *flagSize, *flagSampleN, *flagOutDir)
@@ -81,6 +106,11 @@ func main() {
 	wg.Wait()
 	log.Printf("soak: complete reads=%d writes=%d rebuilds=%d elapsed=%v",
 		reads.Load(), writes.Load(), rebuilds.Load(), time.Since(startTime))
+	if n := invalidHeapSnapshots.Load(); n > 0 {
+		log.Printf("soak: %d invalid heap snapshot(s) detected — see INVALID HEAP SNAPSHOT log lines above", n)
+		return 1
+	}
+	return 0
 }
 
 func buildSeedGraph(n int) *adjlist.AdjList[int, int64] {
@@ -169,17 +199,34 @@ func dumpHeap(idx int, startTime time.Time) {
 	f, err := os.Create(path) //nolint:gosec // path is constructed from -out plus a numeric index
 	if err != nil {
 		log.Printf("soak: cannot create heap profile: %v", err)
+		invalidHeapSnapshots.Add(1)
 		return
 	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			log.Printf("soak: heap profile close: %v", err)
-		}
-	}()
 	runtime.GC()
 	if err := pprof.Lookup("heap").WriteTo(f, 0); err != nil {
 		log.Printf("soak: heap profile write: %v", err)
+		_ = f.Close()
+		invalidHeapSnapshots.Add(1)
 		return
 	}
-	log.Printf("soak: heap snapshot %s @ t=%v", path, time.Since(startTime).Truncate(time.Second))
+	if err := f.Close(); err != nil {
+		log.Printf("soak: heap profile close: %v", err)
+		invalidHeapSnapshots.Add(1)
+		return
+	}
+	// Integrity check: the closed file must be at least minHeapProfileBytes.
+	// Stat AFTER Close so all kernel buffers have been flushed.
+	fi, err := os.Stat(path)
+	if err != nil {
+		log.Printf("soak: INVALID HEAP SNAPSHOT %s: stat failed: %v", path, err)
+		invalidHeapSnapshots.Add(1)
+		return
+	}
+	if fi.Size() < minHeapProfileBytes {
+		log.Printf("soak: INVALID HEAP SNAPSHOT %s: size=%d bytes (< %d) — truncated profile",
+			path, fi.Size(), minHeapProfileBytes)
+		invalidHeapSnapshots.Add(1)
+		return
+	}
+	log.Printf("soak: heap snapshot %s @ t=%v size=%d", path, time.Since(startTime).Truncate(time.Second), fi.Size())
 }

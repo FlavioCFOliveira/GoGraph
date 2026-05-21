@@ -148,9 +148,7 @@ func TestTCKPersistence_LabelSurvivesRestart(t *testing.T) {
 	// The first-created node's property must also survive via properties.bin.
 	gotProp := runMatch(t, recEng, `MATCH (n:Person {name: "Alice0"}) RETURN n`)
 	if gotProp != 1 {
-		// Document as a warning rather than a hard failure: label survival is the
-		// primary acceptance criterion; property survival is a bonus from v2 snapshots.
-		t.Logf("MATCH (n:Person {name: 'Alice0'}): got %d rows (want 1) — property round-trip not supported", gotProp)
+		t.Errorf("MATCH (n:Person {name: 'Alice0'}): got %d rows, want 1 — property round-trip broken", gotProp)
 	}
 }
 

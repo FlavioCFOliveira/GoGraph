@@ -127,8 +127,13 @@ func TestBoltSoak_60s(t *testing.T) {
 		if growth > 1.05 {
 			t.Logf("soak: heap growth %.1f%% (baseline=%d after=%d)",
 				(growth-1)*100, baseline.HeapAlloc, after.HeapAlloc)
-			// Log only — heap growth in a short soak can be noisy; we do not
-			// fail the test to avoid false positives in CI.
+			// Small-to-moderate growth in a short soak is noisy and logged only,
+			// but a >100 % increase (a doubled heap) in a 5–10 second run is a
+			// real leak signal and must fail the test rather than be ignored.
+			if growth > 2.0 {
+				t.Errorf("soak: heap growth %.1f%% exceeds 100%% (baseline=%d after=%d) — leak signal",
+					(growth-1)*100, baseline.HeapAlloc, after.HeapAlloc)
+			}
 		}
 	}
 
