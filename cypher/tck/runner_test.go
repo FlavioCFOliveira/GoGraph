@@ -35,11 +35,17 @@ import (
 //     backing slice, silently overwriting unprocessed entries). Observed
 //     1234 across a 5-run sample; the gate is set conservatively at 1230
 //     to absorb run-to-run variance.
+//   - 1370: raised after task #394 added the temporal value kinds (Date,
+//     DateTime, LocalDateTime, LocalTime, Time, Duration), their string and
+//     map constructors, ISO-8601 arithmetic, and the SOH-tagged PropString
+//     bridge that round-trips temporal property values through snapshot+WAL
+//     replay. Observed 1374 across a 3-run sample; the gate is set
+//     conservatively at 1370 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1230
+const tckExecutionBaseline = 1370
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

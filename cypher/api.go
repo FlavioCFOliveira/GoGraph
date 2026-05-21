@@ -1950,10 +1950,28 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndex
 
 // lpgPropToExpr converts an lpg.PropertyValue to its expr.Value counterpart.
 // Unsupported kinds (PropTime, PropBytes) fall through to expr.Null.
+//
+// PropString values that begin with a SOH-range byte (0x01..0x06) are decoded
+// as temporal values, mirroring the encoding performed by
+// [cypher/exec.parseTemporalLiteral]. The tag→kind mapping is:
+//
+//	0x01 → DateValue
+//	0x02 → LocalDateTimeValue
+//	0x03 → DateTimeValue
+//	0x04 → LocalTimeValue
+//	0x05 → TimeValue
+//	0x06 → DurationValue
+//
+// When the body is malformed the value falls back to a plain StringValue
+// carrying the raw bytes; this keeps reads forward-safe in the unlikely event
+// that a legacy WAL contains a byte-collision payload.
 func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
 	switch pv.Kind() {
 	case lpg.PropString:
 		if s, ok := pv.String(); ok {
+			if v, decoded := decodeTemporalString(s); decoded {
+				return v
+			}
 			return expr.StringValue(s)
 		}
 	case lpg.PropInt64:
@@ -1970,6 +1988,43 @@ func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
 		}
 	}
 	return expr.Null
+}
+
+// decodeTemporalString recognises the SOH-range tag introduced by
+// cypher/exec/temporal_literal.go and returns the matching temporal Value.
+// Returns (nil, false) when s does not start with a recognised tag byte.
+func decodeTemporalString(s string) (expr.Value, bool) {
+	if len(s) < 2 {
+		return nil, false
+	}
+	body := s[1:]
+	switch s[0] {
+	case 0x01:
+		if v, err := expr.ParseDate(body); err == nil {
+			return v, true
+		}
+	case 0x02:
+		if v, err := expr.ParseLocalDateTime(body); err == nil {
+			return v, true
+		}
+	case 0x03:
+		if v, err := expr.ParseDateTime(body); err == nil {
+			return v, true
+		}
+	case 0x04:
+		if v, err := expr.ParseLocalTime(body); err == nil {
+			return v, true
+		}
+	case 0x05:
+		if v, err := expr.ParseTime(body); err == nil {
+			return v, true
+		}
+	case 0x06:
+		if v, err := expr.ParseDuration(body); err == nil {
+			return v, true
+		}
+	}
+	return nil, false
 }
 
 // buildUnwindOperator builds the physical Unwind operator from the IR node.

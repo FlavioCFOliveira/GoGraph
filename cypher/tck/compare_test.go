@@ -398,6 +398,10 @@ func exprValueToString(v expr.Value) string {
 			parts = append(parts, k+": "+exprValueToString(val[k]))
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
+	case expr.DateValue, expr.LocalDateTimeValue, expr.DateTimeValue, expr.LocalTimeValue, expr.TimeValue, expr.DurationValue:
+		// Temporal values render as quoted strings to match the TCK table cells:
+		// e.g. | '2015-07-21' | for a Date, | 'PT2H' | for a Duration.
+		return "'" + val.String() + "'"
 	default:
 		return v.String()
 	}

@@ -303,3 +303,70 @@ func TestTCKPersistence_WALDurability_CrashSimulation(t *testing.T) {
 		t.Errorf("MATCH relationship after crash recovery: got %d, want 1", gotRel)
 	}
 }
+
+// TestTCKPersistence_TemporalValuesSurviveSnapshotAndWAL verifies that Date
+// and DateTime property values survive a snapshot + WAL replay round-trip.
+//
+// Temporal values are encoded as PropString with a SOH-range tag byte
+// identifying the originating kind (see cypher/exec/temporal_literal.go and
+// cypher/api.go:decodeTemporalString). The acceptance criterion for task-394
+// requires that the encoding is round-trip safe; this test asserts that the
+// MATCH path returns nodes whose property values render in their canonical
+// openCypher textual form ('2020-05-15') after recovery.
+func TestTCKPersistence_TemporalValuesSurviveSnapshotAndWAL(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	eng := cypher.NewEngine(g)
+
+	// Create one node carrying a Date property and one carrying a DateTime.
+	runCreate(t, eng, `CREATE (:Event {when: date('2020-05-15')})`)
+	runCreate(t, eng, `CREATE (:Event {at: datetime('2020-05-15T12:30:45+01:00')})`)
+
+	recEng := persistAndRecover(t, dir, g)
+
+	// Both Event nodes must be present after recovery (label survives).
+	gotAll := runMatch(t, recEng, `MATCH (n:Event) RETURN n`)
+	if gotAll != 2 {
+		t.Errorf("MATCH (n:Event) after recovery: got %d rows, want 2", gotAll)
+	}
+
+	// The Date property value must survive (string-form equality on the
+	// canonical openCypher textual form).
+	gotDate := runMatch(t, recEng, `MATCH (n:Event) WHERE n.when = date('2020-05-15') RETURN n`)
+	if gotDate != 1 {
+		t.Errorf("MATCH date property after recovery: got %d, want 1 — date round-trip broken", gotDate)
+	}
+
+	// The DateTime property value must survive with its zone.
+	gotDT := runMatch(t, recEng, `MATCH (n:Event) WHERE n.at = datetime('2020-05-15T12:30:45+01:00') RETURN n`)
+	if gotDT != 1 {
+		t.Errorf("MATCH datetime property after recovery: got %d, want 1 — datetime round-trip broken", gotDT)
+	}
+}
+
+// TestTCKPersistence_TemporalValuesSurviveWALOnly verifies that the temporal
+// encoding survives a pure WAL replay (no snapshot). This is the kill -9
+// scenario from CLAUDE.md.
+func TestTCKPersistence_TemporalValuesSurviveWALOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	eng, w := newWALEngine(t, dir)
+	runCreate(t, eng, `CREATE (:Event {when: date('2020-05-15')})`)
+	runCreate(t, eng, `CREATE (:Event {at: datetime('2020-05-15T12:30:45+01:00')})`)
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	recEng := recoverEngineFromWAL(t, dir)
+	gotDate := runMatch(t, recEng, `MATCH (n:Event) WHERE n.when = date('2020-05-15') RETURN n`)
+	if gotDate != 1 {
+		t.Errorf("WAL-only Date round-trip: got %d, want 1", gotDate)
+	}
+	gotDT := runMatch(t, recEng, `MATCH (n:Event) WHERE n.at = datetime('2020-05-15T12:30:45+01:00') RETURN n`)
+	if gotDT != 1 {
+		t.Errorf("WAL-only DateTime round-trip: got %d, want 1", gotDT)
+	}
+}

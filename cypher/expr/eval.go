@@ -193,6 +193,11 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 			return v, nil
 		}
 		return Null, nil
+	case DateValue, LocalDateTimeValue, DateTimeValue, LocalTimeValue, TimeValue, DurationValue:
+		if v, ok := temporalAccessor(recv, n.Key); ok {
+			return v, nil
+		}
+		return Null, nil
 	default:
 		// Property access on a non-map/node/rel returns NULL per openCypher.
 		return Null, nil
@@ -475,6 +480,11 @@ func evalArith(op string, left, right Value) (Value, error) {
 			}
 		}
 	}
+	// Temporal arithmetic (Date/DateTime/Time/Duration/...): dispatched
+	// before numeric promotion to keep typed combinations precise.
+	if v, ok := evalTemporalArith(op, left, right); ok {
+		return v, nil
+	}
 	left, right = promoteNumeric(left, right)
 	switch lv := left.(type) {
 	case IntegerValue:
@@ -491,6 +501,134 @@ func evalArith(op string, left, right Value) (Value, error) {
 		return evalFloatArith(op, float64(lv), float64(rv))
 	}
 	return Null, nil
+}
+
+// evalTemporalArith handles temporal × temporal and temporal × number
+// arithmetic dispatched from [evalArith]. It returns (value, true) when at
+// least one operand is a temporal kind and the operation has a defined
+// outcome; otherwise (Null, false) leaves dispatch to the numeric path.
+//
+//nolint:gocyclo // One branch per (kind, op) pair; splitting hides the pattern.
+func evalTemporalArith(op string, left, right Value) (Value, bool) {
+	// Duration ± Duration, Duration * scalar, Duration / scalar.
+	if ld, lok := left.(DurationValue); lok {
+		if rd, rok := right.(DurationValue); rok {
+			switch op {
+			case "+":
+				return AddDurations(ld, rd), true
+			case "-":
+				return SubDurations(ld, rd), true
+			}
+		}
+		if op == "*" {
+			if ri, ok := right.(IntegerValue); ok {
+				return MulDuration(ld, int64(ri)), true
+			}
+			if rf, ok := right.(FloatValue); ok {
+				return MulDurationFloat(ld, float64(rf)), true
+			}
+		}
+		if op == "/" {
+			if ri, ok := right.(IntegerValue); ok {
+				return DivDurationFloat(ld, float64(int64(ri))), true
+			}
+			if rf, ok := right.(FloatValue); ok {
+				return DivDurationFloat(ld, float64(rf)), true
+			}
+		}
+	}
+	// scalar * Duration.
+	if op == "*" {
+		if rd, ok := right.(DurationValue); ok {
+			if li, ok2 := left.(IntegerValue); ok2 {
+				return MulDuration(rd, int64(li)), true
+			}
+			if lf, ok2 := left.(FloatValue); ok2 {
+				return MulDurationFloat(rd, float64(lf)), true
+			}
+		}
+	}
+	// Temporal ± Duration → Temporal.
+	if rd, rok := right.(DurationValue); rok {
+		switch lv := left.(type) {
+		case DateValue:
+			if op == "+" {
+				return AddDurationToDate(lv, rd), true
+			}
+			if op == "-" {
+				return SubDurationFromDate(lv, rd), true
+			}
+		case LocalDateTimeValue:
+			if op == "+" {
+				return AddDurationToLocalDateTime(lv, rd), true
+			}
+			if op == "-" {
+				return SubDurationFromLocalDateTime(lv, rd), true
+			}
+		case DateTimeValue:
+			if op == "+" {
+				return AddDurationToDateTime(lv, rd), true
+			}
+			if op == "-" {
+				return SubDurationFromDateTime(lv, rd), true
+			}
+		case LocalTimeValue:
+			if op == "+" {
+				return AddDurationToLocalTime(lv, rd), true
+			}
+			if op == "-" {
+				return SubDurationFromLocalTime(lv, rd), true
+			}
+		case TimeValue:
+			if op == "+" {
+				return AddDurationToTime(lv, rd), true
+			}
+			if op == "-" {
+				return SubDurationFromTime(lv, rd), true
+			}
+		}
+	}
+	// Duration + Temporal (commutative add only).
+	if ld, lok := left.(DurationValue); lok && op == "+" {
+		switch rv := right.(type) {
+		case DateValue:
+			return AddDurationToDate(rv, ld), true
+		case LocalDateTimeValue:
+			return AddDurationToLocalDateTime(rv, ld), true
+		case DateTimeValue:
+			return AddDurationToDateTime(rv, ld), true
+		case LocalTimeValue:
+			return AddDurationToLocalTime(rv, ld), true
+		case TimeValue:
+			return AddDurationToTime(rv, ld), true
+		}
+	}
+	// Temporal - Temporal → Duration (same kind only).
+	if op == "-" {
+		switch lv := left.(type) {
+		case DateValue:
+			if rv, ok := right.(DateValue); ok {
+				return SubDates(lv, rv), true
+			}
+		case LocalDateTimeValue:
+			if rv, ok := right.(LocalDateTimeValue); ok {
+				return SubLocalDateTimes(lv, rv), true
+			}
+		case DateTimeValue:
+			if rv, ok := right.(DateTimeValue); ok {
+				return SubDateTimes(lv, rv), true
+			}
+		case LocalTimeValue:
+			if rv, ok := right.(LocalTimeValue); ok {
+				return SubLocalTimes(lv, rv), true
+			}
+		case TimeValue:
+			if rv, ok := right.(TimeValue); ok {
+				return SubTimes(lv, rv), true
+			}
+		}
+	}
+	return Null, false
 }
 
 func evalIntArith(op string, a, b int64) (Value, error) {

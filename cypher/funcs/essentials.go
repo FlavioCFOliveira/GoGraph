@@ -167,6 +167,9 @@ func buildDefaultRegistry() *Registry {
 	// ── Extended list (sort, extract stub, filter stub) ────────────────────────
 	registerListFuncs(r)
 
+	// ── Temporal constructors (date, datetime, duration, ...) ──────────────────
+	registerTemporal(r)
+
 	return r
 }
 

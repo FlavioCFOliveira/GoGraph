@@ -264,10 +264,31 @@ func splitMapItems(s string) []string {
 
 // parsePropValue parses a single Cypher literal value string into a
 // lpg.PropertyValue.
+//
+// In addition to the primitive literals (string, boolean, integer, float) the
+// parser recognises temporal function calls expressed as their source-text
+// representation:
+//
+//	date('YYYY-MM-DD')                       → encoded PropString with magic prefix
+//	localdatetime('YYYY-MM-DDTHH:MM:SS')     → encoded PropString
+//	datetime('YYYY-MM-DDTHH:MM:SS±HH:MM')    → encoded PropString
+//	localtime('HH:MM:SS')                    → encoded PropString
+//	time('HH:MM:SS±HH:MM')                   → encoded PropString
+//	duration('P...')                         → encoded PropString
+//
+// Temporal values are persisted as [lpg.PropString] with a leading
+// SOH-byte tag (0x01..0x06) followed by the canonical openCypher textual
+// form. This keeps the WAL backward-compatible (existing PropString payloads
+// do not start with a SOH byte) while allowing temporal values to round-trip
+// snapshot+WAL replay without introducing a new property kind.
 func parsePropValue(s string) (lpg.PropertyValue, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return lpg.PropertyValue{}, fmt.Errorf("empty value")
+	}
+	// Temporal function calls (string-form constructors).
+	if pv, ok, err := parseTemporalLiteral(s); ok {
+		return pv, err
 	}
 	// String literal.
 	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') {

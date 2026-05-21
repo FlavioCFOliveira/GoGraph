@@ -84,6 +84,8 @@ func (k Kind) String() string {
 		return "Relationship"
 	case KindPath:
 		return "Path"
+	case KindDate, KindLocalDateTime, KindDateTime, KindLocalTime, KindTime, KindDuration:
+		return temporalKindLabel(k)
 	default:
 		return fmt.Sprintf("Kind(%d)", uint8(k))
 	}
@@ -565,7 +567,15 @@ func (v PathValue) Equal(other Value) Value {
 // Within a type the canonical order is:
 //
 //	Path(0) < Node(1) < Relationship(2) < Map(3) < List(4) <
-//	String(5) < Boolean(6) < Float(7) < Integer(8) < Null(9)
+//	String(5) < Boolean(6) < Float(7) < Integer(8) <
+//	Duration(20) < Date(21) < LocalTime(22) < Time(23) <
+//	LocalDateTime(24) < DateTime(25) < Null(99)
+//
+// Temporal kinds occupy a range above the numeric kinds to keep the existing
+// cross-type ordering stable; relative order among temporal kinds follows the
+// openCypher 9 §3.4 total order.
+//
+//nolint:gocyclo // Flat lookup over every known kind; splitting hides the order table.
 func kindOrder(k Kind) int {
 	switch k {
 	case KindPath:
@@ -586,10 +596,22 @@ func kindOrder(k Kind) int {
 		return 7
 	case KindInteger:
 		return 8
+	case KindDuration:
+		return 20
+	case KindDate:
+		return 21
+	case KindLocalTime:
+		return 22
+	case KindTime:
+		return 23
+	case KindLocalDateTime:
+		return 24
+	case KindDateTime:
+		return 25
 	case KindNull:
-		return 9
+		return 99
 	default:
-		return 10
+		return 100
 	}
 }
 
@@ -662,6 +684,8 @@ func cmpUint64(a, b uint64) int {
 // compareSameKind compares two non-null values that are already known to share
 // the same Kind. Extracted from [Compare] to keep cyclomatic complexity within
 // the project's gocyclo limit (≤15).
+//
+//nolint:gocyclo // One branch per kind; the table is the entire point of the function — extraction would obscure the per-kind comparator wiring.
 func compareSameKind(k Kind, a, b Value) int {
 	switch k {
 	case KindInteger:
@@ -690,6 +714,43 @@ func compareSameKind(k Kind, a, b Value) int {
 	case KindMap:
 		// Maps have no total natural order; use hash as a stable tiebreaker.
 		return cmpUint64(a.Hash(), b.Hash())
+	case KindDate:
+		da, db := a.(DateValue), b.(DateValue) //nolint:forcetypeassert // kind pre-checked
+		if c := cmpInt64(int64(da.Year), int64(db.Year)); c != 0 {
+			return c
+		}
+		if c := cmpInt64(int64(da.Month), int64(db.Month)); c != 0 {
+			return c
+		}
+		return cmpInt64(int64(da.Day), int64(db.Day))
+	case KindLocalDateTime:
+		la, lb := a.(LocalDateTimeValue), b.(LocalDateTimeValue) //nolint:forcetypeassert // kind pre-checked
+		return cmpInt64(la.T.UnixNano(), lb.T.UnixNano())
+	case KindDateTime:
+		da, db := a.(DateTimeValue), b.(DateTimeValue) //nolint:forcetypeassert // kind pre-checked
+		return cmpInt64(da.T.UnixNano(), db.T.UnixNano())
+	case KindLocalTime:
+		la, lb := a.(LocalTimeValue), b.(LocalTimeValue) //nolint:forcetypeassert // kind pre-checked
+		return cmpInt64(la.Nanos, lb.Nanos)
+	case KindTime:
+		ta, tb := a.(TimeValue), b.(TimeValue) //nolint:forcetypeassert // kind pre-checked
+		if c := cmpInt64(ta.Nanos, tb.Nanos); c != 0 {
+			return c
+		}
+		return cmpInt64(int64(ta.OffsetSec), int64(tb.OffsetSec))
+	case KindDuration:
+		// Durations have no natural total ordering; use component-wise lex.
+		da, db := a.(DurationValue), b.(DurationValue) //nolint:forcetypeassert // kind pre-checked
+		if c := cmpInt64(da.Months, db.Months); c != 0 {
+			return c
+		}
+		if c := cmpInt64(da.Days, db.Days); c != 0 {
+			return c
+		}
+		if c := cmpInt64(da.Seconds, db.Seconds); c != 0 {
+			return c
+		}
+		return cmpInt64(int64(da.Nanos), int64(db.Nanos))
 	}
 	return 0
 }
