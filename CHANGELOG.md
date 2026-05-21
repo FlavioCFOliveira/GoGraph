@@ -6,12 +6,99 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [2.0.0] — 2026-05-21
+v2.0.0 stable is pending. Gate requirement: execution-level TCK ≥ 80 %,
+all CI checks green, and all T-series tasks in `docs/tck/DIVERGENCES.md`
+closed. Current status: 25.8 % execution TCK (as of v2.0.0-rc2). See
+`docs/semver.md` for the full release-gate specification.
+
+## [2.0.0-rc2] — 2026-05-21
+
+Sprint 37–40 improvements over rc1: WAL durability bridging for all Cypher
+write operators, parser conformance raised to 99.5 %, execution-level TCK
+raised from 10.4 % to 25.8 %, UNWIND and variable-length expand wired,
+Bolt benchmark suite, and a confirmed 1 024-connection 4-hour soak.
+
+### Added — Sprint 37 (WAL Durability Bridge)
+
+- `cypher/exec`: `walMutatorAdapter` wires every Cypher write operator
+  (`CreateNode`, `CreateRelationship`, `Set`, `Remove`, `Delete`,
+  `DetachDelete`, `Merge`) through the WAL on commit. Closes the
+  "Cypher ↔ WAL integration" known limitation listed in rc1 (closes #370).
+- `cypher/api`: `NewEngineWithStore` constructor accepts a `store.Store`
+  so the engine owns its WAL-backed persistence lifecycle.
+- `cypher/tck`: 4 new persistence tests — WAL round-trip (label survival,
+  property survival), crash simulation (recovery after mid-write `kill -9`
+  equivalent), and multi-snapshot accumulation (closes #370).
+
+### Added — Sprint 38 (Parser Conformance Batch 1)
+
+- `cypher/parser`: varlen dotdot (`[*1..5]`), zero-dot-float (`.5`),
+  leading-dot-float (`.123e4`), neg-hex-oct (`-0xFF`), double-not
+  (`NOT NOT x`), call-no-paren (`CALL db.labels` without `()`), and
+  long-float (`1.23e-45`) literal forms now parse correctly (closes #375).
+- `cypher/parser`: chained `WITH` clauses across multiple query parts
+  supported via `MultiPartQ` rewrite — enables patterns like
+  `MATCH … WITH … MATCH … RETURN …` (closes #376).
+- Parser conformance: 90.7 % → 99.5 % overall TCK scenarios.
+
+### Added — Sprint 39 (Parser Conformance Batch 2 + Execution Wiring)
+
+- `cypher/parser`: integer tokenisation fix — bare integer literals
+  previously mis-tokenised as identifiers in certain positions, causing
+  380 TCK scenarios to fail at parse time; now parsed correctly (closes
+  #381).
+- `cypher/exec`: `Unwind` operator fully implemented and wired;
+  `UNWIND list AS var` now executes end-to-end (closes #382).
+- `cypher/exec`: variable-length path expand (`VarLengthExpand`) wired
+  through the planner and execution engine; `MATCH (a)-[*1..n]->(b)`
+  patterns now execute (closes #383).
+- `cypher/api`: IR → exec operator mapping extended to cover all
+  aggregation functions, `ORDER BY` expressions, and `SemiApply` /
+  `RollUpApply` operators (closes #384).
+- Execution-level TCK: 10.4 % → 24.8 % (closes #381–#384).
+
+### Added — Sprint 40 (Bolt Benchmark Suite + Soak Confirmation)
+
+- `bench/soak`: Bolt round-trip benchmark suite — 3 benchmark types
+  (`BoltPingPong`, `BoltReadQuery`, `BoltWriteQuery`) × 5 concurrency
+  levels (1, 8, 64, 256, 1 024 goroutines); results published to
+  `docs/benchmarks/cypher.md` (closes #387).
+- `bench/soak`: Cypher RW 30-minute soak test PASS — zero goroutine
+  leaks, zero race conditions, heap delta within bounds (closes #388).
+- `bench/soak`: Bolt 1 024-connection 4-hour soak PASS — gate threshold
+  corrected (`MaxConnections` sentinel updated to match `1024`-connection
+  burst); CI soak report updated in `soak-artefacts/` (closes #389).
+
+### Fixed — Sprint 39
+
+- `cypher/exec`: property access expressions (`n.prop`, `r.prop`) now
+  correctly resolve against the in-scope row record during plan execution.
+
+### Fixed — Sprint 40
+
+- `bolt/server`: 4-hour soak gate threshold was set to the short-CI
+  connection count rather than the full-run value; corrected to prevent
+  false gate failures under `SOAK_FULL=1`.
+
+### Performance — Sprint 39
+
+- `cypher/plan`: `MATCH (n:L {prop: val})` now performs a hash-index seek
+  instead of a full label scan, reducing per-lookup cost from O(|L|) to
+  O(1) amortised.
+
+### Known limitations (v2.0.0-rc2)
+
+- Execution-level TCK conformance is 25.8 % (parser-level: 99.5 %). The
+  remaining execution gaps are documented in `docs/tck/DIVERGENCES.md`.
+- v2.0.0 stable is not yet cut; see the `[Unreleased]` section above for
+  the gate requirements.
+
+## [2.0.0-rc1] — 2026-05-21
 
 Twelve sprints of work (21–32) delivering a full Cypher execution engine, a
 Bolt v5 server, 90.7 % TCK conformance at the parser level, a comprehensive
 benchmark harness, and a 4-hour soak-tested persistence layer. This is the
-first major release that exposes a query language interface.
+first major pre-release that exposes a query language interface.
 
 ### Added — Sprint 21–26 (Cypher Execution Engine)
 
@@ -104,7 +191,7 @@ first major release that exposes a query language interface.
   (this was already the documented contract — no behaviour change for correct
   callers).
 
-### Known limitations (v2.0.0)
+### Known limitations (v2.0.0-rc1)
 
 - Execution-level TCK conformance is 10.4 % (parser-level: 90.7 %). The
   remaining execution gaps are documented in `docs/tck/DIVERGENCES.md`.

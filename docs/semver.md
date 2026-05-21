@@ -82,3 +82,38 @@ Deprecated APIs are kept for at least one MINOR release before
 removal. Each deprecated identifier carries a godoc comment
 mentioning the replacement and the version where removal is
 expected.
+
+## Release gates
+
+### v2.0.0 stable
+
+v2.0.0 stable will be cut when **all** of the following conditions are met:
+
+1. **Execution-level TCK ≥ 80 %.** The openCypher TCK execution runner
+   (`cypher/tck`) must pass at least 80 % of the scenarios it runs. The
+   CI gate in `.github/workflows/tck.yml` must be green at this threshold.
+   Current status as of v2.0.0-rc2: **25.8 %**.
+
+2. **All CI checks green.** Every job in the CI pipeline must pass on the
+   release commit: build, test, race detector, lint (`golangci-lint`),
+   vet, TCK, soak (short variant), and govulncheck.
+
+3. **All T-series tasks closed.** Every task prefixed `T-` in
+   `docs/tck/DIVERGENCES.md` must be marked resolved. T-series tasks
+   track known execution-engine gaps that block execution TCK scenarios.
+
+4. **Soak test green.** The full soak test (`SOAK_FULL=1`,
+   1 024 connections, 4 hours) must pass with zero goroutine leaks and
+   zero race conditions. The soak report in `soak-artefacts/` must reflect
+   a run against the release commit.
+
+### Pre-release candidates
+
+Pre-release candidate tags (`v2.0.0-rc1`, `v2.0.0-rc2`, …) are tagged as
+significant improvements become available, without waiting for all stable
+gates to be met. Each candidate documents its own conformance numbers and
+known limitations in the corresponding `release-notes/v<version>.md` file.
+
+Production deployments should pin a stable tag. Candidates are suitable for
+integration testing and early adoption, with the understanding that execution
+conformance is still being improved.
