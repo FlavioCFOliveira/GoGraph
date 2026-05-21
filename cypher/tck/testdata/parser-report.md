@@ -12,10 +12,10 @@
 | Metric | Value |
 |---|---|
 | Total TCK scenarios with `When executing query:` | 3897 |
-| Scenarios run against `parser.Parse` | **3558** |
-| Scenarios skipped (grammar gaps, see below) | 339 |
+| Scenarios run against `parser.Parse` | **3858** |
+| Scenarios skipped (grammar gaps, see below) | 39 |
 | Pass rate on run scenarios | **100.0 %** |
-| Overall pass rate (run / total) | **91.3 %** |
+| Overall pass rate (run / total) | **99.0 %** |
 
 ---
 
@@ -24,39 +24,39 @@
 | Feature area | Total | Run | Pass | Skip | Pass% |
 |---|---|---|---|---|---|
 | clauses/call | 52 | 51 | 51 | 1 | 100.0% |
-| clauses/create | 78 | 75 | 75 | 3 | 100.0% |
-| clauses/delete | 41 | 37 | 37 | 4 | 100.0% |
-| clauses/match | 381 | 358 | 358 | 23 | 100.0% |
+| clauses/create | 78 | 78 | 78 | 0 | 100.0% |
+| clauses/delete | 41 | 41 | 41 | 0 | 100.0% |
+| clauses/match | 381 | 381 | 381 | 0 | 100.0% |
 | clauses/match-where | 34 | 34 | 34 | 0 | 100.0% |
-| clauses/merge | 75 | 71 | 71 | 4 | 100.0% |
+| clauses/merge | 75 | 75 | 75 | 0 | 100.0% |
 | clauses/remove | 33 | 33 | 33 | 0 | 100.0% |
-| clauses/return | 63 | 62 | 62 | 1 | 100.0% |
-| clauses/return-orderby | 35 | 32 | 32 | 3 | 100.0% |
-| clauses/return-skip-limit | 31 | 30 | 30 | 1 | 100.0% |
+| clauses/return | 63 | 63 | 63 | 0 | 100.0% |
+| clauses/return-orderby | 35 | 35 | 35 | 0 | 100.0% |
+| clauses/return-skip-limit | 31 | 31 | 31 | 0 | 100.0% |
 | clauses/set | 53 | 53 | 53 | 0 | 100.0% |
 | clauses/union | 12 | 12 | 12 | 0 | 100.0% |
 | clauses/unwind | 14 | 14 | 14 | 0 | 100.0% |
-| clauses/with | 29 | 24 | 24 | 5 | 100.0% |
-| clauses/with-orderBy | 292 | 185 | 185 | 107 | 100.0% |
+| clauses/with | 29 | 29 | 29 | 0 | 100.0% |
+| clauses/with-orderBy | 292 | 292 | 292 | 0 | 100.0% |
 | clauses/with-skip-limit | 9 | 9 | 9 | 0 | 100.0% |
 | clauses/with-where | 19 | 19 | 19 | 0 | 100.0% |
-| expressions/aggregation | 35 | 28 | 28 | 7 | 100.0% |
-| expressions/boolean | 150 | 146 | 146 | 4 | 100.0% |
-| expressions/comparison | 72 | 57 | 57 | 15 | 100.0% |
+| expressions/aggregation | 35 | 35 | 35 | 0 | 100.0% |
+| expressions/boolean | 150 | 149 | 149 | 1 | 100.0% |
+| expressions/comparison | 72 | 72 | 72 | 0 | 100.0% |
 | expressions/conditional | 13 | 13 | 13 | 0 | 100.0% |
 | expressions/existentialSubqueries | 10 | 10 | 10 | 0 | 100.0% |
 | expressions/graph | 61 | 61 | 61 | 0 | 100.0% |
-| expressions/list | 185 | 156 | 156 | 29 | 100.0% |
-| expressions/literals | 131 | 88 | 88 | 43 | 100.0% |
+| expressions/list | 185 | 177 | 177 | 8 | 100.0% |
+| expressions/literals | 131 | 106 | 106 | 25 | 100.0% |
 | expressions/map | 44 | 44 | 44 | 0 | 100.0% |
 | expressions/mathematical | 6 | 5 | 5 | 1 | 100.0% |
 | expressions/null | 44 | 44 | 44 | 0 | 100.0% |
-| expressions/path | 7 | 4 | 4 | 3 | 100.0% |
-| expressions/pattern | 50 | 46 | 46 | 4 | 100.0% |
-| expressions/precedence | 121 | 119 | 119 | 2 | 100.0% |
-| expressions/quantifier | 604 | 532 | 532 | 72 | 100.0% |
-| expressions/string | 32 | 27 | 27 | 5 | 100.0% |
-| expressions/temporal | 1004 | 1002 | 1002 | 2 | 100.0% |
+| expressions/path | 7 | 7 | 7 | 0 | 100.0% |
+| expressions/pattern | 50 | 47 | 47 | 3 | 100.0% |
+| expressions/precedence | 121 | 121 | 121 | 0 | 100.0% |
+| expressions/quantifier | 604 | 604 | 604 | 0 | 100.0% |
+| expressions/string | 32 | 32 | 32 | 0 | 100.0% |
+| expressions/temporal | 1004 | 1004 | 1004 | 0 | 100.0% |
 | expressions/typeConversion | 47 | 47 | 47 | 0 | 100.0% |
 | useCases/countingSubgraphMatches | 11 | 11 | 11 | 0 | 100.0% |
 | useCases/triadicSelection | 19 | 19 | 19 | 0 | 100.0% |
