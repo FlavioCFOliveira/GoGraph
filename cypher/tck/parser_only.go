@@ -83,9 +83,12 @@ const (
 	//nolint:unused // retained for documentation; MultiPartQ modification resolves the gap
 	SkipChainedWith SkipReason = "chained-with"
 
-	// SkipNegHexOct excludes queries with negative hexadecimal or octal
-	// literals, e.g. -0x1A2B or -0o777. The grammar does not support a unary
-	// minus applied directly to a hex/octal literal.
+	// SkipNegHexOct is retained for documentation. The skip condition was
+	// removed because normalizeNegHexOct in cypher/parser/normalize.go
+	// rewrites -0x… and -0o… literals to (0-0x…) / (0-0o…) before lexing,
+	// which the grammar accepts as a binary subtraction expression.
+	//
+	//nolint:unused // retained for documentation; normalizeNegHexOct resolves the gap
 	SkipNegHexOct SkipReason = "neg-hex-oct"
 
 	// SkipLeadingDotFloat is retained for documentation. The skip condition was
@@ -103,19 +106,28 @@ const (
 	//nolint:unused // retained for documentation; normalizeZeroDotFloat resolves the gap
 	SkipZeroDotFloat SkipReason = "zero-dot-float"
 
-	// SkipDoubleNot excludes queries with double logical negation (NOT NOT …).
-	// The grammar does not allow a NOT expression as the operand of NOT.
+	// SkipDoubleNot is retained for documentation. The skip condition was
+	// removed because normalizeDoubleNot in cypher/parser/normalize.go
+	// applies double-negation elimination (NOT NOT expr → expr, NOT NOT NOT expr
+	// → NOT expr) before lexing, resolving the grammar gap.
+	//
+	//nolint:unused // retained for documentation; normalizeDoubleNot resolves the gap
 	SkipDoubleNot SkipReason = "double-not"
 
-	// SkipCallNoParen excludes in-query CALL without parentheses followed by
-	// YIELD, e.g. CALL proc YIELD out. The grammar requires parentheses for
-	// in-query procedure calls.
+	// SkipCallNoParen is retained for documentation. The skip condition was
+	// removed because QueryCallSt() in the generated parser was modified to
+	// make the argument parentheses optional for in-query CALL, matching the
+	// behaviour of StandaloneCall.
+	//
+	//nolint:unused // retained for documentation; QueryCallSt modification resolves the gap
 	SkipCallNoParen SkipReason = "call-no-paren"
 
-	// SkipOverflowAsSema excludes scenarios where the TCK expects a SyntaxError
-	// for integer or floating-point overflow (IntegerOverflow,
-	// FloatingPointOverflow) but the grammar reports the overflow as a SemaError
-	// from the visitor's numeric literal handler.
+	// SkipOverflowAsSema is retained for documentation. The skip condition was
+	// removed because IntegerOverflow and FloatingPointOverflow are now listed in
+	// parseTimeErrors: the visitor returns a non-nil error for overflow, which
+	// satisfies the TCK expectation of a compile-time SyntaxError.
+	//
+	//nolint:unused // retained for documentation; overflow scenarios now handled via parseTimeErrors
 	SkipOverflowAsSema SkipReason = "overflow-as-sema"
 
 	// SkipGrammarGapLiteral excludes specific literal scenarios where the
@@ -132,9 +144,12 @@ const (
 	//     grammar accepts them; the restriction is semantic.
 	SkipGrammarGapLiteral SkipReason = "grammar-gap-literal"
 
-	// SkipLongFloatSema excludes valid queries containing very long floating-
-	// point literal strings whose decimal-to-float64 conversion overflows.  The
-	// visitor raises a SemaError, while the TCK expects a successful result.
+	// SkipLongFloatSema is retained for documentation. The skip condition was
+	// removed because strconv.ParseFloat handles very long but finite decimal
+	// float literals correctly, rounding to the nearest IEEE-754 double without
+	// error; the visitor no longer raises a SemaError for such literals.
+	//
+	//nolint:unused // retained for documentation; long valid floats parse correctly without a skip
 	SkipLongFloatSema SkipReason = "long-float-sema"
 )
 
@@ -148,6 +163,10 @@ var parseTimeErrors = map[string]bool{
 	"InvalidNumberLiteral":  true,
 	"InvalidUnicodeLiteral": true,
 	"InvalidStringLiteral":  true,
+	// The visitor returns a non-nil error (SemaError) for integer and
+	// floating-point overflow, matching TCK expectations for a compile-time error.
+	"IntegerOverflow":       true,
+	"FloatingPointOverflow": true,
 }
 
 // grammarGapExact lists (file, scenarioNamePrefix) pairs for scenarios that
@@ -216,8 +235,11 @@ var reVarlenBound = regexp.MustCompile(`\[[\w:]*\*(?:\d|\.\.\d)`)
 //nolint:unused // retained for documentation
 var reVarlenDotDot = regexp.MustCompile(`\[[\w:]*\.\.[^\]]*\]`)
 
-// reNegHexOct matches a unary minus applied to a hex or octal literal,
-// e.g. -0x1A2B or -0o777.
+// reNegHexOct matched a unary minus applied to a hex or octal literal,
+// e.g. -0x1A2B or -0o777. Retained for documentation; normalizeNegHexOct
+// resolves the gap.
+//
+//nolint:unused // retained for documentation
 var reNegHexOct = regexp.MustCompile(`-0[xXoO]`)
 
 // reLeadingDotFloat matched a floating-point literal with no integer digits
@@ -234,15 +256,24 @@ var reLeadingDotFloat = regexp.MustCompile(`(?:[^\w\]])\.\d`)
 //nolint:unused // retained for documentation
 var reZeroDotFloat = regexp.MustCompile(`\b0\.\d`)
 
-// reDoubleNot matches the double-negation pattern NOT NOT.
+// reDoubleNot matched the double-negation pattern NOT NOT. Retained for
+// documentation; normalizeDoubleNot resolves the gap.
+//
+//nolint:unused // retained for documentation
 var reDoubleNot = regexp.MustCompile(`(?i)\bNOT\s+NOT\b`)
 
-// reCallNoParen matches an in-query CALL without parentheses followed by YIELD,
-// e.g. CALL proc YIELD out.
+// reCallNoParen matched an in-query CALL without parentheses followed by
+// YIELD, e.g. CALL proc YIELD out. Retained for documentation; the
+// QueryCallSt modification in the generated parser resolves the gap.
+//
+//nolint:unused // retained for documentation
 var reCallNoParen = regexp.MustCompile(`(?i)\bCALL\s+[\w.]+\s+YIELD\b`)
 
-// reLongFloat matches a very long numeric literal (>50 digits) that may cause
-// visitor overflow.
+// reLongFloat matched a very long numeric literal (>50 digits). Retained for
+// documentation; SkipLongFloatSema was removed because very long float literals
+// are handled correctly by strconv.ParseFloat without overflow.
+//
+//nolint:unused // retained for documentation
 var reLongFloat = regexp.MustCompile(`-\d{50,}`)
 
 // classifySkip returns the reason why a scenario should be excluded from the
@@ -257,15 +288,8 @@ func classifySkip(s *Scenario) SkipReason {
 // classifySkipByQuery returns a SkipReason based solely on the query text, or
 // SkipNone if no query-level skip condition matches.
 func classifySkipByQuery(q string) SkipReason {
-	switch {
-	case reAngleBracket.MatchString(q):
+	if reAngleBracket.MatchString(q) {
 		return SkipPlaceholder
-	case reNegHexOct.MatchString(q):
-		return SkipNegHexOct
-	case reDoubleNot.MatchString(q):
-		return SkipDoubleNot
-	case reCallNoParen.MatchString(q):
-		return SkipCallNoParen
 	}
 	return SkipNone
 }
@@ -282,8 +306,6 @@ func classifySkipByErrorType(s *Scenario) SkipReason {
 	}
 
 	switch s.SyntaxErrorType {
-	case "IntegerOverflow", "FloatingPointOverflow":
-		return SkipOverflowAsSema
 	case "InvalidUnicodeLiteral", "InvalidUnicodeCharacter":
 		return SkipGrammarGapLiteral
 	case "UnexpectedSyntax":
@@ -294,11 +316,6 @@ func classifySkipByErrorType(s *Scenario) SkipReason {
 			strings.Contains(n, "pattern in right") ||
 			strings.Contains(n, "pattern predicates") {
 			return SkipGrammarGapLiteral
-		}
-	case "":
-		// Valid queries whose visitor raises a SemaError on very long floats.
-		if reLongFloat.MatchString(s.Query) {
-			return SkipLongFloatSema
 		}
 	}
 

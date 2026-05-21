@@ -1,5 +1,10 @@
 package parser
 
+import (
+	"fmt"
+	"strconv"
+)
+
 // normalizeArithmeticMinus inserts a space before a '-' that immediately
 // follows an identifier character (a-z, A-Z, 0-9, _) and is itself
 // immediately followed by a decimal digit.
@@ -789,6 +794,688 @@ func normalizeLeadingDotFloat(q string) string {
 		// Copy the digit run.
 		for i < n && q[i] >= '0' && q[i] <= '9' {
 			buf = append(buf, q[i])
+			i++
+		}
+	}
+
+	return string(buf)
+}
+
+// normalizeDoubleNot eliminates consecutive NOT pairs in a Cypher query by
+// applying double-negation elimination: each pair of adjacent NOT tokens
+// cancels out.  The result has zero or one NOT prepended to the operand
+// expression, depending on the parity of the original NOT run.
+//
+// Background: the grammar for the NOT production (notExpression) uses
+// NOT? comparisonExpression, which does not allow recursive NOT nesting.
+// Double (or higher even-count) negation produces a parse error. Eliminating
+// pairs before lexing resolves the grammar gap without any semantic change.
+//
+// Algorithm: locate runs of NOTs separated only by whitespace, count them,
+// and emit either nothing (even count) or "NOT " (odd count) followed by the
+// original content between the last NOT and the next non-NOT token.  The
+// scanner is case-insensitive for NOT and skips over string literals, backtick
+// identifiers, and comments so that "NOT" inside a string is not rewritten.
+//
+// Fast path: return early unless the input contains at least two consecutive
+// NOT tokens (detected by the reDoubleNot-equivalent check on the raw string).
+//
+//nolint:gocyclo // state-machine scanner with per-state branches; complexity is inherent
+func normalizeDoubleNot(q string) string {
+	// Fast path: no double-NOT present.
+	if !containsDoubleNot(q) {
+		return q
+	}
+
+	buf := make([]byte, 0, len(q))
+	i := 0
+	n := len(q)
+
+	// skipStringOrComment advances i past a string, backtick identifier, or
+	// comment while copying all bytes verbatim into buf.
+	skipStringOrComment := func() {
+		ch := q[i]
+		switch ch {
+		case '"':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\\' && i < n {
+					buf = append(buf, q[i])
+					i++
+				} else if c == '"' {
+					break
+				}
+			}
+		case '\'':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\'' {
+					break
+				}
+			}
+		case '`':
+			buf = append(buf, ch)
+			i++
+			for i < n && q[i] != '`' {
+				buf = append(buf, q[i])
+				i++
+			}
+			if i < n {
+				buf = append(buf, '`')
+				i++
+			}
+		case '/':
+			if i+1 < n && q[i+1] == '/' {
+				for i < n && q[i] != '\n' {
+					buf = append(buf, q[i])
+					i++
+				}
+			} else if i+1 < n && q[i+1] == '*' {
+				buf = append(buf, q[i], q[i+1])
+				i += 2
+				for i < n {
+					if q[i] == '*' && i+1 < n && q[i+1] == '/' {
+						buf = append(buf, '*', '/')
+						i += 2
+						break
+					}
+					buf = append(buf, q[i])
+					i++
+				}
+			}
+		}
+	}
+
+	// tryNOT checks whether q[i:] starts with a case-insensitive "NOT" token
+	// that is not immediately followed by an identifier character. Returns the
+	// index past the "NOT" text, or -1 if no match.
+	tryNOT := func(pos int) int {
+		if pos+3 > n {
+			return -1
+		}
+		if (q[pos] != 'N' && q[pos] != 'n') ||
+			(q[pos+1] != 'O' && q[pos+1] != 'o') ||
+			(q[pos+2] != 'T' && q[pos+2] != 't') {
+			return -1
+		}
+		// "NOT" must be followed by a non-identifier character (word boundary).
+		if pos+3 < n {
+			next := q[pos+3]
+			if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') ||
+				(next >= '0' && next <= '9') || next == '_' {
+				return -1
+			}
+		}
+		return pos + 3
+	}
+
+	for i < n {
+		ch := q[i]
+
+		// Guard: skip over lexical atoms that must not be rewritten.
+		if ch == '"' || ch == '\'' || ch == '`' ||
+			(ch == '/' && i+1 < n && (q[i+1] == '/' || q[i+1] == '*')) {
+			skipStringOrComment()
+			continue
+		}
+
+		// Try to match a run of NOTs separated by whitespace.
+		end := tryNOT(i)
+		if end < 0 {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
+		// Found a NOT at position i. Count consecutive NOTs (whitespace-separated).
+		count := 1
+		// ws holds the whitespace after each NOT that we may need to preserve.
+		// We record each NOT's end position and the whitespace following it.
+		type notEntry struct {
+			afterNot int // index just past "NOT"
+			afterWS  int // index just past whitespace following NOT
+		}
+		entries := []notEntry{{afterNot: end}}
+
+		j := end
+		// Skip whitespace after the first NOT.
+		for j < n && (q[j] == ' ' || q[j] == '\t' || q[j] == '\r' || q[j] == '\n') {
+			j++
+		}
+		entries[0] = notEntry{afterNot: end, afterWS: j}
+
+		for {
+			nextEnd := tryNOT(j)
+			if nextEnd < 0 {
+				break
+			}
+			count++
+			wsS := nextEnd
+			for wsS < n && (q[wsS] == ' ' || q[wsS] == '\t' || q[wsS] == '\r' || q[wsS] == '\n') {
+				wsS++
+			}
+			entries = append(entries, notEntry{afterNot: nextEnd, afterWS: wsS})
+			j = wsS
+		}
+
+		if count == 1 {
+			// Single NOT — emit as-is including the original text and whitespace.
+			buf = append(buf, q[i:entries[0].afterWS]...)
+			i = entries[0].afterWS
+			continue
+		}
+
+		// Multiple NOTs: apply double-negation elimination.
+		// Emit "NOT " if odd count, nothing if even count.
+		// Then continue from j (past all NOTs and their trailing whitespace).
+		if count%2 == 1 {
+			// Preserve the original capitalisation from the first NOT.
+			buf = append(buf, q[i:entries[0].afterNot]...)
+			buf = append(buf, ' ')
+		}
+		i = j
+	}
+
+	return string(buf)
+}
+
+// containsDoubleNot reports whether q contains at least two consecutive NOT
+// tokens (case-insensitive). Used as a fast path guard for normalizeDoubleNot.
+//
+//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeDoubleNot
+func containsDoubleNot(q string) bool {
+	n := len(q)
+	for i := 0; i < n; {
+		// Skip non-N/n characters quickly.
+		if q[i] != 'N' && q[i] != 'n' {
+			i++
+			continue
+		}
+		// Try to match "NOT".
+		if i+3 > n {
+			break
+		}
+		if (q[i+1] != 'O' && q[i+1] != 'o') || (q[i+2] != 'T' && q[i+2] != 't') {
+			i++
+			continue
+		}
+		// Word-boundary check after "NOT".
+		if i+3 < n {
+			next := q[i+3]
+			if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') ||
+				(next >= '0' && next <= '9') || next == '_' {
+				i++
+				continue
+			}
+		}
+		// Found a NOT at i. Skip past it and any whitespace, then look for another.
+		j := i + 3
+		for j < n && (q[j] == ' ' || q[j] == '\t' || q[j] == '\r' || q[j] == '\n') {
+			j++
+		}
+		// Check for another NOT.
+		if j+3 <= n &&
+			(q[j] == 'N' || q[j] == 'n') &&
+			(q[j+1] == 'O' || q[j+1] == 'o') &&
+			(q[j+2] == 'T' || q[j+2] == 't') {
+			// Boundary after second NOT.
+			if j+3 >= n {
+				return true // end-of-string is a valid boundary
+			}
+			next := q[j+3]
+			if (next < 'a' || next > 'z') && (next < 'A' || next > 'Z') &&
+				(next < '0' || next > '9') && next != '_' {
+				return true
+			}
+		}
+		i = j
+	}
+	return false
+}
+
+// normalizeCallNoParen rewrites in-query CALL statements that omit the
+// argument parentheses — e.g. "CALL proc YIELD out" — to the equivalent form
+// with an explicit empty argument list: "CALL proc() YIELD out".
+//
+// Background: the generated ANTLR grammar requires parentheses for in-query
+// CALL (queryCallSt : CALL invocationName parenExpressionChain …), whereas
+// the standalone CALL allows them to be omitted.  Inserting "()" before YIELD
+// makes both forms syntactically equivalent without changing semantics.
+//
+// The rewrite fires when ALL of the following hold:
+//  1. The keyword CALL (case-insensitive) appears as a whole word.
+//  2. It is followed by a dotted identifier (the procedure name).
+//  3. The dotted identifier is immediately followed by whitespace then YIELD
+//     (case-insensitive) — i.e. there is no '(' already present.
+//
+// The scanner respects double-quoted strings, single-quoted strings (after
+// [normalizeSingleQuotes] has run), backtick identifiers, and both line (//)
+// and block (/* */) comments.
+//
+// Fast path: return early if q contains no 'C' or 'c' byte (no CALL possible).
+//
+//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeArithmeticMinus
+func normalizeCallNoParen(q string) string {
+	if !hasByte(q, 'C') && !hasByte(q, 'c') {
+		return q
+	}
+
+	buf := make([]byte, 0, len(q)+4)
+	i := 0
+	n := len(q)
+
+	skipStringOrComment := func() {
+		ch := q[i]
+		switch ch {
+		case '"':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\\' && i < n {
+					buf = append(buf, q[i])
+					i++
+				} else if c == '"' {
+					break
+				}
+			}
+		case '\'':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\'' {
+					break
+				}
+			}
+		case '`':
+			buf = append(buf, ch)
+			i++
+			for i < n && q[i] != '`' {
+				buf = append(buf, q[i])
+				i++
+			}
+			if i < n {
+				buf = append(buf, '`')
+				i++
+			}
+		case '/':
+			if i+1 < n && q[i+1] == '/' {
+				for i < n && q[i] != '\n' {
+					buf = append(buf, q[i])
+					i++
+				}
+			} else if i+1 < n && q[i+1] == '*' {
+				buf = append(buf, q[i], q[i+1])
+				i += 2
+				for i < n {
+					if q[i] == '*' && i+1 < n && q[i+1] == '/' {
+						buf = append(buf, '*', '/')
+						i += 2
+						break
+					}
+					buf = append(buf, q[i])
+					i++
+				}
+			}
+		}
+	}
+
+	isIdentChar := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '_'
+	}
+
+	isWS := func(b byte) bool {
+		return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+	}
+
+	// tryCALL checks whether q[pos:] starts with a case-insensitive "CALL" keyword
+	// (not followed by an identifier character). Returns the index past CALL or -1.
+	tryCALL := func(pos int) int {
+		if pos+4 > n {
+			return -1
+		}
+		if (q[pos] != 'C' && q[pos] != 'c') ||
+			(q[pos+1] != 'A' && q[pos+1] != 'a') ||
+			(q[pos+2] != 'L' && q[pos+2] != 'l') ||
+			(q[pos+3] != 'L' && q[pos+3] != 'l') {
+			return -1
+		}
+		if pos+4 < n && isIdentChar(q[pos+4]) {
+			return -1
+		}
+		return pos + 4
+	}
+
+	// tryYIELD checks whether q[pos:] starts with a case-insensitive "YIELD"
+	// keyword (not preceded by ident char check not needed — caller ensures it).
+	tryYIELD := func(pos int) bool {
+		if pos+5 > n {
+			return false
+		}
+		return (q[pos] == 'Y' || q[pos] == 'y') &&
+			(q[pos+1] == 'I' || q[pos+1] == 'i') &&
+			(q[pos+2] == 'E' || q[pos+2] == 'e') &&
+			(q[pos+3] == 'L' || q[pos+3] == 'l') &&
+			(q[pos+4] == 'D' || q[pos+4] == 'd') &&
+			(pos+5 >= n || !isIdentChar(q[pos+5]))
+	}
+
+	for i < n {
+		ch := q[i]
+
+		// Guard: skip over lexical atoms that must not be rewritten.
+		if ch == '"' || ch == '\'' || ch == '`' ||
+			(ch == '/' && i+1 < n && (q[i+1] == '/' || q[i+1] == '*')) {
+			skipStringOrComment()
+			continue
+		}
+
+		// Try to match CALL keyword.
+		callEnd := tryCALL(i)
+		if callEnd < 0 {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
+		// Found CALL. Check that it is preceded by a word boundary (not ident char).
+		if len(buf) > 0 && isIdentChar(buf[len(buf)-1]) {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
+		// Emit CALL.
+		buf = append(buf, q[i:callEnd]...)
+		i = callEnd
+
+		// Skip mandatory whitespace after CALL.
+		if i >= n || !isWS(q[i]) {
+			// No whitespace — not a valid CALL statement; continue.
+			continue
+		}
+		// Emit whitespace.
+		wsStart := i
+		for i < n && isWS(q[i]) {
+			i++
+		}
+		buf = append(buf, q[wsStart:i]...)
+
+		// Consume the procedure invocation name (identifier.identifier.…).
+		// Also handle backtick-quoted components.
+		if i >= n {
+			continue
+		}
+		nameStart := i
+		for i < n {
+			if q[i] == '`' {
+				// Backtick-quoted name component.
+				i++
+				for i < n && q[i] != '`' {
+					i++
+				}
+				if i < n {
+					i++ // closing backtick
+				}
+			} else if isIdentChar(q[i]) {
+				// Consume the full run of identifier characters.
+				for i < n && isIdentChar(q[i]) {
+					i++
+				}
+			} else {
+				break
+			}
+			// After a name component, allow DOT to continue to next component.
+			if i < n && q[i] == '.' {
+				i++ // consume the dot
+			} else {
+				break
+			}
+		}
+		if i == nameStart {
+			// Nothing consumed — not a valid CALL.
+			continue
+		}
+		buf = append(buf, q[nameStart:i]...)
+
+		// Peek at what follows: skip whitespace.
+		j := i
+		for j < n && isWS(q[j]) {
+			j++
+		}
+
+		// If the next non-whitespace char is '(' there are already parens.
+		if j < n && q[j] == '(' {
+			// Already has parentheses; continue without rewriting.
+			buf = append(buf, q[i:j]...)
+			i = j
+			continue
+		}
+
+		// If the next non-whitespace token is YIELD, insert "()".
+		if tryYIELD(j) {
+			buf = append(buf, '(', ')')
+			// Emit the whitespace between name and YIELD.
+			buf = append(buf, q[i:j]...)
+			i = j
+			continue
+		}
+
+		// Otherwise no rewrite needed.
+	}
+
+	return string(buf)
+}
+
+// normalizeNegHexOct rewrites negated hexadecimal and octal literals to their
+// signed decimal representation so the ANTLR parser can accept them.
+//
+// Background: the grammar does not support a unary minus applied directly to a
+// hex (0x…) or octal (0o…) literal.  Converting the value to its signed decimal
+// form (e.g. -0x1A → -26) is the safest approach: the ANTLR DIGIT rule accepts
+// negative decimal integers (SUB? Digits), and the decimal form avoids the
+// ambiguity around 0x8000000000000000 (= INT64_MIN when negated).
+//
+// For literals that overflow int64, the rewrite is not performed (the original
+// text is kept as-is so that the visitor can detect and report the overflow).
+//
+// The rewrite fires only when the '-' is NOT preceded by an identifier
+// character (a–z, A–Z, 0–9, _), which would indicate binary subtraction
+// (already handled by [normalizeArithmeticMinus]).
+//
+// The scanner respects double-quoted strings, single-quoted strings (after
+// [normalizeSingleQuotes] has run), backtick identifiers, and both line (//)
+// and block (/* */) comments.
+//
+// Fast path: return early if q contains no '-' byte.
+//
+//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeArithmeticMinus
+func normalizeNegHexOct(q string) string {
+	if !hasByte(q, '-') {
+		return q
+	}
+
+	buf := make([]byte, 0, len(q)+8)
+	i := 0
+	n := len(q)
+
+	skipStringOrComment := func() {
+		ch := q[i]
+		switch ch {
+		case '"':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\\' && i < n {
+					buf = append(buf, q[i])
+					i++
+				} else if c == '"' {
+					break
+				}
+			}
+		case '\'':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\'' {
+					break
+				}
+			}
+		case '`':
+			buf = append(buf, ch)
+			i++
+			for i < n && q[i] != '`' {
+				buf = append(buf, q[i])
+				i++
+			}
+			if i < n {
+				buf = append(buf, '`')
+				i++
+			}
+		case '/':
+			if i+1 < n && q[i+1] == '/' {
+				for i < n && q[i] != '\n' {
+					buf = append(buf, q[i])
+					i++
+				}
+			} else if i+1 < n && q[i+1] == '*' {
+				buf = append(buf, q[i], q[i+1])
+				i += 2
+				for i < n {
+					if q[i] == '*' && i+1 < n && q[i+1] == '/' {
+						buf = append(buf, '*', '/')
+						i += 2
+						break
+					}
+					buf = append(buf, q[i])
+					i++
+				}
+			}
+		}
+	}
+
+	isIdentChar := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '_'
+	}
+
+	isHexDigit := func(b byte) bool {
+		return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+	}
+
+	isOctDigit := func(b byte) bool {
+		return b >= '0' && b <= '7'
+	}
+
+	for i < n {
+		ch := q[i]
+
+		// Guard: skip over lexical atoms that must not be rewritten.
+		if ch == '"' || ch == '\'' || ch == '`' ||
+			(ch == '/' && i+1 < n && (q[i+1] == '/' || q[i+1] == '*')) {
+			skipStringOrComment()
+			continue
+		}
+
+		if ch != '-' {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
+		// ch == '-': check if this is a unary minus before a hex/octal literal.
+		// Skip if preceded by an identifier character (binary subtraction).
+		if len(buf) > 0 && isIdentChar(buf[len(buf)-1]) {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
+		// Look ahead for 0x<hexdigit> or 0o<octdigit>.
+		// Require at least one valid digit after the prefix.
+		j := i + 1 // position of '0'
+		if j >= n || q[j] != '0' {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
+		switch {
+		case j+2 < n && (q[j+1] == 'x' || q[j+1] == 'X') && isHexDigit(q[j+2]):
+			// -0x<hexdigits> → decimal representation of the negated value.
+			k := j + 2
+			for k < n && isHexDigit(q[k]) {
+				k++
+			}
+			digits := q[j+2 : k]
+			// Attempt signed parse first; for exactly 0x8000000000000000 (INT64_MIN
+			// bit pattern) also accept via unsigned parse.
+			val, parseErr := strconv.ParseInt(digits, 16, 64)
+			if parseErr != nil {
+				u, uerr := strconv.ParseUint(digits, 16, 64)
+				if uerr == nil && u == 1<<63 {
+					val = int64(u) //nolint:gosec // INT64_MIN: int64(1<<63) = -9223372036854775808
+					parseErr = nil
+				}
+			}
+			if parseErr != nil {
+				// Overflow: emit the original text unchanged; the visitor will
+				// detect and report the overflow.
+				buf = append(buf, ch) // '-'
+				buf = append(buf, q[j:k]...)
+			} else {
+				buf = append(buf, []byte(fmt.Sprintf("(%d)", -val))...)
+			}
+			i = k
+
+		case j+2 < n && (q[j+1] == 'o' || q[j+1] == 'O') && isOctDigit(q[j+2]):
+			// -0o<octdigits> → decimal representation of the negated value.
+			k := j + 2
+			for k < n && isOctDigit(q[k]) {
+				k++
+			}
+			digits := q[j+2 : k]
+			val, parseErr := strconv.ParseInt(digits, 8, 64)
+			if parseErr != nil {
+				// For exactly 0o1000000000000000000000 (= 2^63 = INT64_MIN when
+				// negated) allow the unsigned value and reinterpret as INT64_MIN.
+				u, uerr := strconv.ParseUint(digits, 8, 64)
+				if uerr == nil && u == 1<<63 {
+					val = int64(u) //nolint:gosec // INT64_MIN: int64(1<<63) = -9223372036854775808
+					parseErr = nil
+				}
+			}
+			if parseErr != nil {
+				// Overflow: emit the original text unchanged.
+				buf = append(buf, ch) // '-'
+				buf = append(buf, q[j:k]...)
+			} else {
+				buf = append(buf, []byte(fmt.Sprintf("(%d)", -val))...)
+			}
+			i = k
+
+		default:
+			buf = append(buf, ch)
 			i++
 		}
 	}

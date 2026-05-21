@@ -133,6 +133,9 @@ func tokenName(t int, litNames, symNames []string) string {
 //   - [*SemaError]  — unsupported grammar rule encountered during tree walking.
 func Parse(query string) (ast.Query, error) {
 	query = normalizeSingleQuotes(query)
+	query = normalizeDoubleNot(query)
+	query = normalizeCallNoParen(query)
+	query = normalizeNegHexOct(query)
 	query = normalizeArithmeticMinus(query)
 	query = normalizeVarlenDotDot(query)
 	query = normalizeVarlenBounds(query)
@@ -197,6 +200,9 @@ func Parse(query string) (ast.Query, error) {
 //   - A single [*SemaError] — unsupported grammar rule or structural violation.
 func ParseStrict(query string) (ast.Query, []error) {
 	query = normalizeSingleQuotes(query)
+	query = normalizeDoubleNot(query)
+	query = normalizeCallNoParen(query)
+	query = normalizeNegHexOct(query)
 	query = normalizeVarlenBounds(query)
 
 	// Lex.

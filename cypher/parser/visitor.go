@@ -1509,6 +1509,8 @@ func (v *visitor) VisitPropertyExpression(ctx *gen.PropertyExpressionContext) in
 // -------------------------------------------------------------------------
 
 // VisitAtom dispatches to the concrete atom variant.
+//
+//nolint:gocyclo // dispatch over all atom alternatives; complexity is inherent
 func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 	if l := ctx.Literal(); l != nil {
 		return v.visit(l)
@@ -1541,7 +1543,21 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 		return v.visit(fi)
 	}
 	if sym := ctx.Symbol(); sym != nil {
-		return &ast.Variable{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: symbolText(sym)}
+		name := symbolText(sym)
+		// Detect hex (0x…/0X…) and octal (0o…/0O…) integer literals that overflow
+		// int64. The ANTLR lexer tokenises these as ID rather than DIGIT, so they
+		// reach VisitAtom as symbol tokens. When the literal is valid and fits in
+		// int64, return an IntLiteral; when it overflows, return a SemaError so
+		// that the caller reports a compile-time IntegerOverflow.
+		if strings.HasPrefix(name, "0x") || strings.HasPrefix(name, "0X") ||
+			strings.HasPrefix(name, "0o") || strings.HasPrefix(name, "0O") {
+			n, err := parseInt(name)
+			if err != nil {
+				return &SemaError{Rule: "atom", Pos: positionOf(ctx), Message: "integer literal out of range: " + name}
+			}
+			return &ast.IntLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: n}
+		}
+		return &ast.Variable{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: name}
 	}
 	if se := ctx.SubqueryExist(); se != nil {
 		return v.visit(se)
@@ -1974,14 +1990,29 @@ func (v *visitor) VisitNumLit(ctx *gen.NumLitContext) interface{} {
 	// Hex / octal / decimal integer.
 	n, intErr := parseInt(text)
 	if intErr != nil {
-		// Very long decimal integers (e.g. 300+ digit literals) overflow int64.
-		// Fall back to float64 to support the openCypher behaviour where such
-		// values are rounded to the nearest IEEE-754 double.
-		f, floatErr := strconv.ParseFloat(text, 64)
-		if floatErr != nil {
-			return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: intErr.Error()}
+		// Integer literals that overflow int64 are a compile-time IntegerOverflow
+		// error per the openCypher TCK.  However, very long decimal literals
+		// (more than 19 ASCII digits, optionally preceded by '-') are a special
+		// case: the ANTLR DIGIT rule tokenises the integer part of a long float
+		// literal such as "126354…09218.0" as a standalone token, leaving ".0"
+		// as a separate DOT+ID pair.  The openCypher TCK expects these long-float
+		// queries to succeed, producing a rounded IEEE-754 double.  We fall back
+		// to float64 only for this case: when the digit run exceeds 19 characters
+		// (longer than any valid int64).  Exactly-19-digit overflowing integers
+		// (e.g. 9223372036854775808) are an error.
+		digitLen := len(text)
+		if text != "" && (text[0] == '-' || text[0] == '+') {
+			digitLen = len(text) - 1
 		}
-		return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
+		if digitLen > 19 {
+			// Treat as a float literal (the query author likely wrote NNN.0 but
+			// the lexer consumed only the integer part).
+			f, floatErr := strconv.ParseFloat(text, 64)
+			if floatErr == nil {
+				return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
+			}
+		}
+		return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: "integer literal out of range: " + text}
 	}
 	return &ast.IntLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: n}
 }
@@ -2275,13 +2306,23 @@ func multDivOperators(ctx *gen.MultDivExpressionContext) []string {
 	return ops
 }
 
-// parseInt parses decimal, hex (0x…), and octal (0…) integer strings.
+// parseInt parses decimal, hex (0x…/0X…), and octal (0o…/0O…) integer strings.
+//
+// For hexadecimal literals, it first tries signed parsing (base 16, 64-bit);
+// if that overflows, it retries with unsigned 64-bit parsing and reinterprets
+// the bits as a signed int64.  This handles the two's-complement minimum value
+// 0x8000000000000000 (= INT64_MIN = -9223372036854775808) which cannot be
+// represented as a signed positive hex literal but is valid when negated.
 func parseInt(s string) (int64, error) {
 	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+	switch {
+	case strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X"):
 		return strconv.ParseInt(s[2:], 16, 64)
+	case strings.HasPrefix(s, "0o") || strings.HasPrefix(s, "0O"):
+		return strconv.ParseInt(s[2:], 8, 64)
+	default:
+		return strconv.ParseInt(s, 10, 64)
 	}
-	return strconv.ParseInt(s, 10, 64)
 }
 
 // unquoteString strips surrounding quotes from a string/char literal token
