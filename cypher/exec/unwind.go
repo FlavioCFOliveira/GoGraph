@@ -34,7 +34,6 @@ type Unwind struct {
 	curRow  Row             // current input row being expanded
 	curList expr.ListValue  // list being expanded
 	listIdx int             // index into curList
-	started bool            // false until first pull from child
 }
 
 // NewUnwind creates an Unwind operator.
@@ -51,7 +50,6 @@ func (op *Unwind) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.curList = nil
 	op.listIdx = 0
-	op.started = false
 	return op.child.Init(ctx)
 }
 
