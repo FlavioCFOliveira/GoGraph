@@ -286,5 +286,13 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish rename: %w", err)
 	}
+	// Make the rename durable: fsync the parent directory so the
+	// new directory entry survives a crash within the journal
+	// writeback window. No-op on platforms that lack a directory
+	// fsync primitive (Windows).
+	if err := parentDirFsync(dir); err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
+		return fmt.Errorf("snapshot: publish parent fsync: %w", err)
+	}
 	return nil
 }
