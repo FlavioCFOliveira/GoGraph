@@ -202,6 +202,9 @@ type CypherParserVisitor interface {
 	// Visit a parse tree produced by CypherParser#subqueryExist.
 	VisitSubqueryExist(ctx *SubqueryExistContext) interface{}
 
+	// Visit a parse tree produced by CypherParser#subqueryCount.
+	VisitSubqueryCount(ctx *SubqueryCountContext) interface{}
+
 	// Visit a parse tree produced by CypherParser#invocationName.
 	VisitInvocationName(ctx *InvocationNameContext) interface{}
 

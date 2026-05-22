@@ -202,6 +202,9 @@ type CypherParserListener interface {
 	// EnterSubqueryExist is called when entering the subqueryExist production.
 	EnterSubqueryExist(c *SubqueryExistContext)
 
+	// EnterSubqueryCount is called when entering the subqueryCount production.
+	EnterSubqueryCount(c *SubqueryCountContext)
+
 	// EnterInvocationName is called when entering the invocationName production.
 	EnterInvocationName(c *InvocationNameContext)
 
@@ -468,6 +471,9 @@ type CypherParserListener interface {
 
 	// ExitSubqueryExist is called when exiting the subqueryExist production.
 	ExitSubqueryExist(c *SubqueryExistContext)
+
+	// ExitSubqueryCount is called when exiting the subqueryCount production.
+	ExitSubqueryCount(c *SubqueryCountContext)
 
 	// ExitInvocationName is called when exiting the invocationName production.
 	ExitInvocationName(c *InvocationNameContext)

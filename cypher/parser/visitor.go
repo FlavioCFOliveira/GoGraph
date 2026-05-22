@@ -1562,6 +1562,9 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 	if se := ctx.SubqueryExist(); se != nil {
 		return v.visit(se)
 	}
+	if sc := ctx.SubqueryCount(); sc != nil {
+		return v.visit(sc)
+	}
 	return unsupported(ctx, "atom", "unknown atom variant")
 }
 
@@ -1661,6 +1664,40 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 		}
 	}
 	return unsupported(ctx, "subqueryExist", "unrecognised EXISTS form")
+}
+
+// VisitSubqueryCount handles COUNT { … }. The shape mirrors EXISTS { … }
+// exactly — both subquery forms accept either a regularQuery or a
+// patternWhere body — but the resulting AST node is [ast.CountSubquery]
+// instead of [ast.ExistsSubquery] so the IR/executor can dispatch the
+// row-count semantics rather than the existence-check semantics.
+func (v *visitor) VisitSubqueryCount(ctx *gen.SubqueryCountContext) interface{} {
+	if rq := ctx.RegularQuery(); rq != nil {
+		qr := v.visit(rq)
+		if err := firstError(qr); err != nil {
+			return err
+		}
+		switch q := qr.(type) {
+		case *ast.SingleQuery:
+			return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
+		case *ast.MultiQuery:
+			if len(q.Parts) > 0 {
+				return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
+			}
+		}
+	}
+	if pw := ctx.PatternWhere(); pw != nil {
+		pat, err := v.visitPatternWhere(pw)
+		if err != nil {
+			return err
+		}
+		return &ast.CountSubquery{
+			Pos:     positionOf(ctx),
+			EndPos:  endPositionOf(ctx),
+			Pattern: pat.Pattern,
+		}
+	}
+	return unsupported(ctx, "subqueryCount", "unrecognised COUNT form")
 }
 
 // -------------------------------------------------------------------------

@@ -228,7 +228,32 @@ The following tasks will close the remaining conformance gap, listed by priority
    godog result pipeline (~300 scenarios).
 7. **Temporal types** — implement Date, DateTime, LocalDateTime, Duration values and
    their built-in functions (affects temporal expression scenarios).
-8. **Subquery support** — EXISTS { } and COUNT { } subqueries.
+8. **Subquery support** — EXISTS { } and COUNT { } subqueries. **PARTIALLY
+   RESOLVED in task #396 (Sprint 42).** EXISTS{...} and COUNT{...} now compile
+   and evaluate end-to-end:
+   - `EXISTS{...}` works both as a top-level WHERE predicate (via the existing
+     `SemiApply` / `AntiSemiApply` operators, now correctly wired to thread the
+     `Argument` tag through the IR-to-exec build so the inner pipeline
+     observes the outer row per iteration) and as a sub-expression inside
+     arbitrary boolean predicates and RETURN items (via a new
+     `expr.SubqueryEvaluator` interface that drives a compiled inner pipeline
+     per outer row).
+   - `COUNT{...}` is a new construct: the ANTLR grammar has been extended
+     with a `subqueryCount` rule (mirroring `subqueryExist`), the visitor
+     emits `*ast.CountSubquery`, and the expression evaluator drives the
+     inner plan to completion, reporting the row count as `IntegerValue`.
+   - New IR containers `ir.SubqueryExists` and `ir.SubqueryCount` were added
+     for future plan-tree-pull rewrites; for now the expression evaluator is
+     the canonical evaluation path.
+   - Per openCypher semantics: EXISTS over empty match → `false`; COUNT over
+     empty match → `0`. Outer-scope bindings are visible inside the subquery;
+     inner-scope variables do not leak outwards.
+   - The `cypher/tck/features/expressions/existentialSubqueries/` feature
+     scenarios still fail in the godog runner because of an unrelated
+     multi-pattern CREATE bug (the `CREATE (a:A)..., (a)-[:R]->...` syntax
+     produces duplicate `a` nodes); this is tracked separately. Unit-level
+     correctness of EXISTS/COUNT is asserted in
+     `cypher/subquery_eval_test.go`.
 
 ### Milestones
 

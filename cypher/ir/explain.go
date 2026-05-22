@@ -131,6 +131,10 @@ func operatorName(plan LogicalPlan) string {
 		return "AntiSemiApply"
 	case *RollUpApply:
 		return "RollUpApply"
+	case *SubqueryExists:
+		return "SubqueryExists"
+	case *SubqueryCount:
+		return "SubqueryCount"
 
 	// Pipeline operators
 	case *Eager:

@@ -18,6 +18,12 @@ func nextArgTag() uint32 {
 	return argTagSeq.Add(1)
 }
 
+// NextArgTag is the exported wrapper around [nextArgTag]. It is used by the
+// outer cypher package's subquery evaluator (cypher/subquery_eval.go) when it
+// needs to mint a fresh Argument tag while compiling an EXISTS / COUNT
+// subquery's inner plan outside the regular IR-translator path.
+func NextArgTag() uint32 { return nextArgTag() }
+
 // LogicalPlan is the root interface implemented by every logical-plan operator.
 // Children returns the operator's child plans in evaluation order (left to right
 // for binary operators). Vars returns the set of variable names produced or
@@ -865,13 +871,26 @@ func (o *OptionalApply) Vars() []string {
 type SemiApply struct {
 	// Outer is the driving subplan.
 	Outer LogicalPlan
-	// Inner is the correlated existence-check subplan.
+	// Inner is the correlated existence-check subplan; its leftmost leaf must
+	// be an [Argument] whose Tag equals [SemiApply.ArgTag].
 	Inner LogicalPlan
+	// ArgTag is the tag shared with the inner-side Argument leaf so that the
+	// physical builder can route the matching exec.Argument instance.
+	ArgTag uint32
 }
 
-// NewSemiApply creates a SemiApply operator.
+// NewSemiApply creates a SemiApply operator with a freshly issued [Argument]
+// tag. The caller is responsible for placing an [Argument] node carrying the
+// same tag at the leftmost leaf of inner.
 func NewSemiApply(outer, inner LogicalPlan) *SemiApply {
-	return &SemiApply{Outer: outer, Inner: inner}
+	return &SemiApply{Outer: outer, Inner: inner, ArgTag: nextArgTag()}
+}
+
+// NewSemiApplyWithTag creates a SemiApply with an explicit tag. Use when
+// constructing the IR top-down and threading the tag into the inner subplan's
+// Argument leaf at the same time.
+func NewSemiApplyWithTag(outer, inner LogicalPlan, tag uint32) *SemiApply {
+	return &SemiApply{Outer: outer, Inner: inner, ArgTag: tag}
 }
 
 // Children implements LogicalPlan. Returns [Outer, Inner].
@@ -887,13 +906,23 @@ func (s *SemiApply) Vars() []string { return s.Outer.Vars() }
 type AntiSemiApply struct {
 	// Outer is the driving subplan.
 	Outer LogicalPlan
-	// Inner is the correlated non-existence-check subplan.
+	// Inner is the correlated non-existence-check subplan; its leftmost leaf
+	// must be an [Argument] whose Tag equals [AntiSemiApply.ArgTag].
 	Inner LogicalPlan
+	// ArgTag is the tag shared with the inner-side Argument leaf so that the
+	// physical builder can route the matching exec.Argument instance.
+	ArgTag uint32
 }
 
-// NewAntiSemiApply creates an AntiSemiApply operator.
+// NewAntiSemiApply creates an AntiSemiApply operator with a freshly issued
+// [Argument] tag.
 func NewAntiSemiApply(outer, inner LogicalPlan) *AntiSemiApply {
-	return &AntiSemiApply{Outer: outer, Inner: inner}
+	return &AntiSemiApply{Outer: outer, Inner: inner, ArgTag: nextArgTag()}
+}
+
+// NewAntiSemiApplyWithTag creates an AntiSemiApply with an explicit tag.
+func NewAntiSemiApplyWithTag(outer, inner LogicalPlan, tag uint32) *AntiSemiApply {
+	return &AntiSemiApply{Outer: outer, Inner: inner, ArgTag: tag}
 }
 
 // Children implements LogicalPlan. Returns [Outer, Inner].
@@ -901,6 +930,109 @@ func (a *AntiSemiApply) Children() []LogicalPlan { return []LogicalPlan{a.Outer,
 
 // Vars implements LogicalPlan. Only outer variables are visible downstream.
 func (a *AntiSemiApply) Vars() []string { return a.Outer.Vars() }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SubqueryExists is a self-contained IR container for an EXISTS { … } subquery
+// that appears inside an arbitrary expression (e.g. nested in a BinaryOp, a
+// CASE branch, or a RETURN projection item). The node holds the inner logical
+// plan plus the variables the subquery correlates from its lexical outer
+// scope; the expression evaluator drives the inner plan per outer row at
+// evaluation time and yields a BoolValue per openCypher semantics:
+//
+//   - true when the inner plan produces at least one row for the seeded
+//     correlation bindings;
+//   - false when the inner plan produces zero rows.
+//
+// Unlike [SemiApply], which is a top-level plan operator that filters its
+// outer pipeline by row-count, SubqueryExists is an expression-embedded form
+// used wherever an EXISTS { … } occurs as a sub-expression. The two paths are
+// complementary: the IR translator emits [SemiApply] whenever an EXISTS is the
+// entire WHERE predicate (so the existence check can short-circuit at the
+// plan level), and emits SubqueryExists for every other occurrence.
+//
+// SubqueryExists is a logical-plan node only by virtue of holding an Inner
+// plan tree; it is not itself wired into the operator pipeline. The physical
+// builder reaches it through the expression evaluator, not through
+// [buildOperator].
+type SubqueryExists struct {
+	// Inner is the subplan whose row-count drives the existence check. Its
+	// leftmost leaf must be an [Argument] whose Tag equals
+	// [SubqueryExists.ArgTag].
+	Inner LogicalPlan
+	// CorrelationVars is the snapshot of outer-scope variable names that the
+	// inner plan may reference at evaluation time. The expression evaluator
+	// projects the outer row onto these names before seeding the Argument.
+	CorrelationVars []string
+	// ArgTag is the tag shared with the inner-side Argument leaf so the
+	// physical builder routes the matching exec.Argument instance per outer
+	// row.
+	ArgTag uint32
+}
+
+// NewSubqueryExists creates a SubqueryExists node with a freshly issued
+// [Argument] tag. The caller is responsible for placing an [Argument] node
+// carrying the same tag at the leftmost leaf of inner.
+func NewSubqueryExists(inner LogicalPlan, correlationVars []string) *SubqueryExists {
+	cp := make([]string, len(correlationVars))
+	copy(cp, correlationVars)
+	return &SubqueryExists{Inner: inner, CorrelationVars: cp, ArgTag: nextArgTag()}
+}
+
+// NewSubqueryExistsWithTag creates a SubqueryExists with an explicit tag.
+func NewSubqueryExistsWithTag(inner LogicalPlan, correlationVars []string, tag uint32) *SubqueryExists {
+	cp := make([]string, len(correlationVars))
+	copy(cp, correlationVars)
+	return &SubqueryExists{Inner: inner, CorrelationVars: cp, ArgTag: tag}
+}
+
+// Children implements LogicalPlan. Returns [Inner].
+func (s *SubqueryExists) Children() []LogicalPlan { return []LogicalPlan{s.Inner} }
+
+// Vars implements LogicalPlan. SubqueryExists itself introduces no new
+// variables in the outer scope: it yields a boolean value at evaluation time.
+func (s *SubqueryExists) Vars() []string { return nil }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SubqueryCount is the COUNT { … } counterpart of [SubqueryExists]. The
+// expression evaluator drives the inner plan per outer row and yields an
+// IntegerValue equal to the exact number of rows the inner plan produced for
+// the seeded correlation bindings (0 when the inner plan is empty).
+//
+// SubqueryCount is a logical-plan node only by virtue of holding an Inner
+// plan tree; it is not itself wired into the operator pipeline.
+type SubqueryCount struct {
+	// Inner is the subplan whose row-count is reported by the count.
+	Inner LogicalPlan
+	// CorrelationVars is the snapshot of outer-scope variable names visible
+	// inside the subquery.
+	CorrelationVars []string
+	// ArgTag is the tag shared with the inner-side Argument leaf.
+	ArgTag uint32
+}
+
+// NewSubqueryCount creates a SubqueryCount node with a freshly issued
+// [Argument] tag.
+func NewSubqueryCount(inner LogicalPlan, correlationVars []string) *SubqueryCount {
+	cp := make([]string, len(correlationVars))
+	copy(cp, correlationVars)
+	return &SubqueryCount{Inner: inner, CorrelationVars: cp, ArgTag: nextArgTag()}
+}
+
+// NewSubqueryCountWithTag creates a SubqueryCount with an explicit tag.
+func NewSubqueryCountWithTag(inner LogicalPlan, correlationVars []string, tag uint32) *SubqueryCount {
+	cp := make([]string, len(correlationVars))
+	copy(cp, correlationVars)
+	return &SubqueryCount{Inner: inner, CorrelationVars: cp, ArgTag: tag}
+}
+
+// Children implements LogicalPlan. Returns [Inner].
+func (s *SubqueryCount) Children() []LogicalPlan { return []LogicalPlan{s.Inner} }
+
+// Vars implements LogicalPlan. SubqueryCount itself introduces no new
+// variables in the outer scope: it yields an integer value at evaluation time.
+func (s *SubqueryCount) Vars() []string { return nil }
 
 // ─────────────────────────────────────────────────────────────────────────────
 

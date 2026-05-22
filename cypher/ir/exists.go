@@ -35,21 +35,23 @@ import (
 func (t *translator) translateExistsPredicate(predExpr ast.Expression, outer LogicalPlan) (LogicalPlan, error) {
 	// Case 1: EXISTS { … }
 	if exists, ok := predExpr.(*ast.ExistsSubquery); ok {
-		inner, err := t.existsSubPlan(exists, outer)
+		tag := nextArgTag()
+		inner, err := t.existsSubPlan(exists, outer, tag)
 		if err != nil {
 			return nil, err
 		}
-		return NewSemiApply(outer, inner), nil
+		return NewSemiApplyWithTag(outer, inner, tag), nil
 	}
 
 	// Case 2: NOT EXISTS { … } — represented as UnaryOp{"NOT", ExistsSubquery}
 	if notOp, ok := predExpr.(*ast.UnaryOp); ok && notOp.Operator == "NOT" {
 		if exists, ok := notOp.Operand.(*ast.ExistsSubquery); ok {
-			inner, err := t.existsSubPlan(exists, outer)
+			tag := nextArgTag()
+			inner, err := t.existsSubPlan(exists, outer, tag)
 			if err != nil {
 				return nil, err
 			}
-			return NewAntiSemiApply(outer, inner), nil
+			return NewAntiSemiApplyWithTag(outer, inner, tag), nil
 		}
 	}
 
@@ -61,14 +63,16 @@ func (t *translator) translateExistsPredicate(predExpr ast.Expression, outer Log
 //
 // The inner plan uses Argument(correlationVars) as its leaf, which injects the
 // outer bindings into the inner evaluation. The correlation variables are the
-// variables produced by the outer plan.
-func (t *translator) existsSubPlan(exists *ast.ExistsSubquery, outer LogicalPlan) (LogicalPlan, error) {
+// variables produced by the outer plan, and the Argument's Tag is shared with
+// the enclosing SemiApply/AntiSemiApply via outerArgTag so the exec layer can
+// route the matching exec.Argument instance per outer row.
+func (t *translator) existsSubPlan(exists *ast.ExistsSubquery, outer LogicalPlan, outerArgTag uint32) (LogicalPlan, error) {
 	// Collect correlation variables from the outer plan.
 	var corrVars []string
 	if outer != nil {
 		corrVars = outer.Vars()
 	}
-	arg := NewArgument(corrVars)
+	arg := NewArgumentWithTag(corrVars, outerArgTag)
 
 	// EXISTS { pattern } — translate the pattern with the Argument as base.
 	if exists.Pattern != nil {

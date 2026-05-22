@@ -405,7 +405,9 @@ func replaceChildren(plan ir.LogicalPlan, fn func(ir.LogicalPlan) (ir.LogicalPla
 		if !oc && !ic {
 			return plan, false
 		}
-		return ir.NewSemiApply(outer, inner), true
+		// Preserve the original ArgTag so the inner Argument leaf still resolves
+		// to the same exec.Argument instance under physical build.
+		return ir.NewSemiApplyWithTag(outer, inner, p.ArgTag), true
 
 	case *ir.AntiSemiApply:
 		outer, oc := WalkAndReplace(p.Outer, fn)
@@ -413,7 +415,7 @@ func replaceChildren(plan ir.LogicalPlan, fn func(ir.LogicalPlan) (ir.LogicalPla
 		if !oc && !ic {
 			return plan, false
 		}
-		return ir.NewAntiSemiApply(outer, inner), true
+		return ir.NewAntiSemiApplyWithTag(outer, inner, p.ArgTag), true
 
 	case *ir.RollUpApply:
 		outer, oc := WalkAndReplace(p.Outer, fn)

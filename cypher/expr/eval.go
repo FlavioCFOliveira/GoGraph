@@ -15,6 +15,7 @@ package expr
 // Eval is stateless and safe for concurrent use.
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"regexp"
@@ -39,6 +40,31 @@ type FunctionRegistry interface {
 // BuiltinFn is the signature of a built-in Cypher function.
 type BuiltinFn func(args []Value) (Value, error)
 
+// SubqueryEvaluator drives [ast.ExistsSubquery] and [ast.CountSubquery]
+// expressions at evaluation time. The expression evaluator dispatches every
+// subquery occurrence to one of these methods, passing the current outer row
+// so that correlated bindings are visible inside the subquery.
+//
+// Implementations must:
+//   - return BoolValue(true) when the inner plan produces ≥1 row, BoolValue(false)
+//     otherwise (EvalExists);
+//   - return IntegerValue equal to the exact row count produced by the inner
+//     plan, 0 when empty (EvalCount);
+//   - honour the context (used for cancellation and deadlines);
+//   - propagate any error from the inner plan unchanged.
+//
+// Implementations are expected to compile the subquery's AST once per outer
+// query and reuse the compiled operator across outer rows; per-row state is
+// reset by re-seeding the inner [Argument] leaf via the IR's ArgTag wiring.
+type SubqueryEvaluator interface {
+	// EvalExists evaluates an EXISTS { … } subquery against row and returns
+	// BoolValue(true) iff the inner plan emits at least one row.
+	EvalExists(ctx context.Context, sub *ast.ExistsSubquery, row RowContext, params map[string]Value) (Value, error)
+	// EvalCount evaluates a COUNT { … } subquery against row and returns an
+	// IntegerValue equal to the number of rows the inner plan emits.
+	EvalCount(ctx context.Context, sub *ast.CountSubquery, row RowContext, params map[string]Value) (Value, error)
+}
+
 // EvalError is returned when Eval encounters a type or semantic error that
 // is not representable as a NULL (e.g. unknown operator, unsupported AST node).
 type EvalError struct {
@@ -53,8 +79,89 @@ func (e *EvalError) Error() string { return "eval: " + e.Msg }
 // function registry.
 //
 // If reg is nil, function invocations return an EvalError.
+//
+// Eval does not support subquery expressions ([ast.ExistsSubquery],
+// [ast.CountSubquery]); these return an [EvalError]. Use [EvalWith] with a
+// non-nil [SubqueryEvaluator] to enable subquery evaluation.
 func Eval(expr ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	return evalExpr(expr, row, params, reg)
+}
+
+// EvalWith evaluates expr just like [Eval], but threads a [context.Context]
+// and an optional [SubqueryEvaluator] through the evaluation. The context is
+// used for cancellation and deadlines when subquery evaluation is involved;
+// the evaluator handles [ast.ExistsSubquery] and [ast.CountSubquery]
+// occurrences nested anywhere inside expr.
+//
+// When subEval is nil, EvalWith behaves exactly like [Eval]: subquery
+// expressions produce an [EvalError].
+//
+// EvalWith is safe for concurrent use: each call carries its own context and
+// evaluator on the call stack; there is no shared mutable state.
+func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry, subEval SubqueryEvaluator) (Value, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The subquery context is carried alongside the per-row evaluator state via
+	// a small holder so it threads through every recursive call automatically.
+	// We attach it to a context-augmented RowContext using a sentinel reserved
+	// key that cannot collide with any valid Cypher identifier (NUL bytes are
+	// not legal in identifiers per the openCypher 9 grammar §A.1).
+	augmented := make(RowContext, len(row)+1)
+	for k, v := range row {
+		augmented[k] = v
+	}
+	augmented[subqueryContextKey] = &subqueryContextValue{ctx: ctx, sub: subEval}
+	return evalExpr(expr, augmented, params, reg)
+}
+
+// subqueryContextKey is the sentinel RowContext key used by [EvalWith] to
+// smuggle the [context.Context] and [SubqueryEvaluator] down through the
+// recursive evaluator without touching every helper's signature. The key
+// contains NUL bytes that are not legal in Cypher identifiers per the
+// openCypher 9 grammar §A.1, so no user variable can ever collide with it.
+const subqueryContextKey = "\x00subquery-context\x00"
+
+// subqueryContextValue is the holder stored under [subqueryContextKey]. It
+// implements [Value] so it can live inside a [RowContext] map alongside real
+// runtime values. The smuggled fields are accessed via
+// [extractSubqueryContext]; user code never sees this value.
+type subqueryContextValue struct {
+	ctx context.Context //nolint:containedctx // smuggled through RowContext, see EvalWith
+	sub SubqueryEvaluator
+}
+
+// Kind implements [Value]. Returns [KindNull] because subqueryContextValue
+// must never appear in arithmetic or comparison contexts; if it does, the
+// 3-valued logic will propagate Null and surface the bug as a Null result.
+func (*subqueryContextValue) Kind() Kind { return KindNull }
+
+// Equal implements [Value]. Always returns Null — subqueryContextValue must
+// never be compared for equality.
+func (*subqueryContextValue) Equal(_ Value) Value { return Null }
+
+// Hash implements [Value]. Returns a fixed sentinel so accidental map
+// insertion is deterministic.
+func (*subqueryContextValue) Hash() uint64 { return 0 }
+
+// String implements [Value]. Returns a fixed sentinel string for debugging.
+func (*subqueryContextValue) String() string { return "<subquery-context>" }
+
+// extractSubqueryContext returns the smuggled context and evaluator from row,
+// or (context.Background(), nil) when none is present.
+func extractSubqueryContext(row RowContext) (context.Context, SubqueryEvaluator) {
+	if row == nil {
+		return context.Background(), nil
+	}
+	v, ok := row[subqueryContextKey]
+	if !ok {
+		return context.Background(), nil
+	}
+	scv, ok := v.(*subqueryContextValue)
+	if !ok {
+		return context.Background(), nil
+	}
+	return scv.ctx, scv.sub
 }
 
 func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // Main dispatch switch; all branches are simple delegations and cannot be split without obscuring the type mapping.
@@ -127,6 +234,22 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 	// ── Function call ──────────────────────────────────────────────────────────
 	case *ast.FunctionInvocation:
 		return evalFunction(n, row, params, reg)
+
+	// ── EXISTS { … } subquery ──────────────────────────────────────────────────
+	case *ast.ExistsSubquery:
+		ctx, subEval := extractSubqueryContext(row)
+		if subEval == nil {
+			return nil, &EvalError{Msg: "EXISTS { … } subquery is not supported in this evaluation context (no SubqueryEvaluator wired)"}
+		}
+		return subEval.EvalExists(ctx, n, row, params)
+
+	// ── COUNT { … } subquery ───────────────────────────────────────────────────
+	case *ast.CountSubquery:
+		ctx, subEval := extractSubqueryContext(row)
+		if subEval == nil {
+			return nil, &EvalError{Msg: "COUNT { … } subquery is not supported in this evaluation context (no SubqueryEvaluator wired)"}
+		}
+		return subEval.EvalCount(ctx, n, row, params)
 
 	default:
 		return nil, &EvalError{Msg: fmt.Sprintf("unsupported expression type %T", e)}

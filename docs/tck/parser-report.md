@@ -128,3 +128,42 @@ go test -v -run TestTCKParserOnlySkipCoverage ./cypher/tck/...
 # Run with race detector (required in CI):
 go test -race -run TestTCKParserOnly ./cypher/tck/...
 ```
+
+---
+
+## Post-generation parser patches
+
+Two classes of surgical edits are applied to the ANTLR-generated parser
+after each regeneration. They are **not** captured by the grammar
+(`.g4`) files — they live directly in `cypher/parser/gen/cypher_parser.go`
+and must be re-applied after every `make generate-cypher-parser` run.
+
+### A. Numeric-ID workarounds (task #375, refreshed in task #396)
+
+The vendored lexer orders `ID: LetterOrDigit+` before `DIGIT`, so positive
+integers like `3`, `42` lex as `ID` rather than `DIGIT`. The
+`isNumericIDToken` helper and call-site edits in `Atom()`, `Literal()`,
+`NumLit()`, and `RangeLit()` accept numeric `ID` tokens wherever the
+grammar expects `DIGIT`. The helper functions live at the **end** of
+`cypher_parser.go`, below all generated code, so the generator never
+overwrites them.
+
+When you regenerate, you must:
+1. Restore the `isNumericIDToken` and `(p *CypherParser) rangeNumBound()`
+   functions at the bottom of `cypher_parser.go`.
+2. Re-apply the `if atomAlt == 11 && isNumericIDToken(...)` short-circuit
+   inside `Atom()`.
+3. Re-apply the `case CypherParserID:` arm and the conditional `Sync` skip
+   inside `Literal()`.
+4. Re-apply the numeric-ID branch inside `NumLit()`.
+5. Re-apply the `rangeNumBound()` call sites inside `RangeLit()`.
+
+### B. COUNT { … } subquery rule (task #396)
+
+The grammar gained a `subqueryCount` rule alongside `subqueryExist` so
+expressions of the form `COUNT { (n)-->() }` and `COUNT { MATCH … }` parse
+as `*ast.CountSubquery`. The corresponding visitor method
+`VisitSubqueryCount` lives in `cypher/parser/visitor.go` and is regenerated
+into the generated visitor interface — no manual fix-up is required for
+COUNT{} itself; only the **numeric-ID workarounds above** must be
+re-applied after regeneration.

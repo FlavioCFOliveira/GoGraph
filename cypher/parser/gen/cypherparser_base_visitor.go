@@ -267,6 +267,10 @@ func (v *BaseCypherParserVisitor) VisitSubqueryExist(ctx *SubqueryExistContext) 
 	return v.VisitChildren(ctx)
 }
 
+func (v *BaseCypherParserVisitor) VisitSubqueryCount(ctx *SubqueryCountContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BaseCypherParserVisitor) VisitInvocationName(ctx *InvocationNameContext) interface{} {
 	return v.VisitChildren(ctx)
 }

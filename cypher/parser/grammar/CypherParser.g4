@@ -302,6 +302,7 @@ atom
     | functionInvocation
     | symbol
     | subqueryExist
+    | subqueryCount
     ;
 
 lhs
@@ -327,6 +328,10 @@ unionSt
 
 subqueryExist
     : EXISTS LBRACE (regularQuery | patternWhere) RBRACE
+    ;
+
+subqueryCount
+    : COUNT LBRACE (regularQuery | patternWhere) RBRACE
     ;
 
 invocationName

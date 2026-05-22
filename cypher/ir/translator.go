@@ -20,6 +20,36 @@ func FromAST(q ast.Query) (LogicalPlan, error) {
 	return t.query(q)
 }
 
+// TranslateSubquery translates a single-query AST (the body of an EXISTS / COUNT
+// subquery) into a [LogicalPlan] rooted at an [Argument] leaf carrying the
+// supplied correlation variables and ArgTag. The returned plan is suitable as
+// the inner pipeline of a per-row subquery driver.
+//
+// outerVars is the list of variable names visible from the lexical outer
+// scope at the subquery's call site; they are injected into the inner
+// pipeline through the leading Argument so correlated patterns (e.g.
+// (n)-->() where n is bound outside) observe the outer row's bindings at
+// runtime.
+//
+// argTag must equal the tag the physical builder will register the seed
+// [Argument] under in its argByTag map; the leading IR Argument carries this
+// tag so the leaf operator resolves to the same exec.Argument instance.
+//
+// Concurrency: stateless; safe to call concurrently.
+func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (LogicalPlan, error) {
+	t := &translator{}
+	arg := NewArgumentWithTag(outerVars, argTag)
+	plan := LogicalPlan(arg)
+	for _, rc := range q.ReadingClauses {
+		var err error
+		plan, err = t.readingClause(rc, plan)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return plan, nil
+}
+
 // translator is an internal, single-use helper that threads the bottom-up plan
 // construction. It carries an anonCounter for generating unique internal variable
 // names for anonymous nodes in CREATE patterns (e.g. CREATE ()-[:R]->()).

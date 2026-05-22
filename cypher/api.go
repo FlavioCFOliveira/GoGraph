@@ -54,6 +54,39 @@ import (
 	"gograph/store/txn"
 )
 
+// buildOpts carries the query-scope, optional state threaded through
+// [buildOperator] alongside the per-call positional arguments. A nil
+// *buildOpts is equivalent to the legacy build path: no SubqueryEvaluator,
+// background context. Each Engine.Run / Engine.RunInTx invocation allocates
+// its own *buildOpts so closures created during the build observe a stable
+// per-run snapshot.
+type buildOpts struct {
+	// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] expressions
+	// encountered inside Filter/Project closures. May be nil; in that case
+	// subquery expressions surface as [expr.EvalError] at runtime.
+	subEval expr.SubqueryEvaluator
+	// queryCtx is the context.Context attached to the enclosing Engine.Run
+	// call. It is threaded into [expr.EvalWith] so subquery drives observe
+	// cancellation and deadlines from the outer query.
+	queryCtx context.Context //nolint:containedctx // per-query state owned by the buildOpts holder, not a long-lived field
+}
+
+// evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
+// [expr.EvalWith]. When bopts is non-nil and carries a SubqueryEvaluator,
+// [expr.EvalWith] is used so EXISTS / COUNT subquery dispatch is enabled;
+// otherwise the call degrades to [expr.Eval], preserving exact backward
+// compatibility for callers that have not been retrofitted.
+func evalRow(bopts *buildOpts, e ast.Expression, row expr.RowContext, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
+	if bopts == nil || bopts.subEval == nil {
+		return expr.Eval(e, row, params, reg)
+	}
+	ctx := bopts.queryCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return expr.EvalWith(ctx, e, row, params, reg, bopts.subEval)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Engine
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,7 +215,12 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// ── 2. Build physical operator tree ─────────────────────────────────────
 	walker := &lpgNodeWalker{g: e.g}
 	labelSrc := &lpgLabelResolver{g: e.g}
-	op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager(), e.procReg)
+	// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
+	// expressions encountered inside Filter/Project closures can drive their
+	// inner pipelines against the current outer row (task-396).
+	subEval := newSubqueryEvaluator(walker, labelSrc, e.reg, e.g)
+	bopts := &buildOpts{subEval: subEval, queryCtx: ctx}
+	op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager(), e.procReg, bopts)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
@@ -647,7 +685,7 @@ func buildPlanWithMutatorFull(
 	// without RETURN has a write operator as root.
 	if pr, ok := plan.(*ir.ProduceResults); ok {
 		cols = pr.Columns
-		child, buildErr := buildOperatorWrite(pr.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, buildErr := buildOperatorWrite(pr.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, nil)
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
@@ -681,7 +719,7 @@ func buildPlanWithMutatorFull(
 	// Write-only query (no RETURN clause): build the write operator tree
 	// directly and wrap in a single pass-through projection so the result
 	// set can be drained to trigger side effects.
-	child, buildErr := buildOperatorWrite(plan, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+	child, buildErr := buildOperatorWrite(plan, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, nil)
 	if buildErr != nil {
 		return nil, nil, buildErr
 	}
@@ -711,6 +749,7 @@ func buildOperatorWrite(
 	constraintReg *exec.ConstraintRegistry,
 	idxMgr *index.Manager,
 	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
 ) (exec.Operator, error) {
 	if plan == nil {
 		// A nil plan arises when a write clause has no driving subplan (e.g.
@@ -722,7 +761,7 @@ func buildOperatorWrite(
 	switch p := plan.(type) {
 
 	case *ir.CreateNode:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -739,7 +778,7 @@ func buildOperatorWrite(
 		return cn, nil
 
 	case *ir.CreateRelationship:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -754,7 +793,7 @@ func buildOperatorWrite(
 		return exec.NewCreateRelationship(p.StartVar, p.EndVar, p.RelVar, p.RelType, p.Properties, schemaCopy, child, mutator)
 
 	case *ir.SetProperty:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -769,7 +808,7 @@ func buildOperatorWrite(
 		return sp, nil
 
 	case *ir.SetLabels:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -777,7 +816,7 @@ func buildOperatorWrite(
 		return exec.NewSetLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
 
 	case *ir.RemoveProperty:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -785,7 +824,7 @@ func buildOperatorWrite(
 		return exec.NewRemoveProperty(p.EntityVar, p.PropertyKey, schemaCopy, child, mutator), nil
 
 	case *ir.RemoveLabels:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -793,7 +832,7 @@ func buildOperatorWrite(
 		return exec.NewRemoveLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
 
 	case *ir.DeleteNode:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -801,7 +840,7 @@ func buildOperatorWrite(
 		return exec.NewDeleteNode(p.NodeVar, schemaCopy, child, mutator), nil
 
 	case *ir.DeleteRelationship:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -809,7 +848,7 @@ func buildOperatorWrite(
 		return exec.NewDeleteRelationship(p.RelVar, schemaCopy, child, mutator), nil
 
 	case *ir.DetachDelete:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -817,7 +856,7 @@ func buildOperatorWrite(
 		return exec.NewDetachDelete(p.NodeVar, schemaCopy, child, mutator), nil
 
 	case *ir.Merge:
-		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag)
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -860,7 +899,7 @@ func buildOperatorWrite(
 		// Fall through to the read-operator builder.
 		// procReg is nil here because buildOperatorWrite is only called from the
 		// write path (buildPlanWithMutatorFull) which does not thread procReg.
-		return buildOperator(plan, walker, labelSrc, reg, params, schema, idxMgr, nil, argByTag)
+		return buildOperator(plan, walker, labelSrc, reg, params, schema, idxMgr, nil, argByTag, bopts)
 	}
 }
 
@@ -940,7 +979,7 @@ func BuildPlan(
 	// schema maps variable name → column index in the current row.
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
-	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, nil, nil, argByTag)
+	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, nil, nil, argByTag, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -977,7 +1016,9 @@ func BuildPlan(
 // buildPlanEngine is the Engine-internal variant of BuildPlan that threads the
 // index manager and procedure registry through so that NodeByIndexSeek and
 // ProcedureCall IR nodes can be resolved at build time. idxMgr and procReg
-// may both be nil.
+// may both be nil. bopts carries the query-scope SubqueryEvaluator and
+// queryCtx for [ast.ExistsSubquery] / [ast.CountSubquery] expressions; pass
+// nil when no subquery support is needed.
 func buildPlanEngine(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -986,12 +1027,13 @@ func buildPlanEngine(
 	params map[string]expr.Value,
 	idxMgr *index.Manager,
 	procReg *procs.Registry,
+	bopts *buildOpts,
 ) (op exec.Operator, cols []string, err error) {
 	// Standalone CALL (root is *ir.ProcedureCall): treat YieldVars as columns.
 	if p, ok := plan.(*ir.ProcedureCall); ok {
 		schema := make(map[string]int)
 		argByTag := make(map[uint32]*exec.Argument)
-		child, buildErr := buildOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, buildErr := buildOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
@@ -1005,7 +1047,7 @@ func buildPlanEngine(
 	cols = pr.Columns
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
-	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1056,6 +1098,7 @@ func buildOperator(
 	idxMgr *index.Manager,
 	procReg *procs.Registry,
 	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
 ) (exec.Operator, error) {
 	if plan == nil {
 		// A nil read plan drives a single-row empty operator (e.g. bare RETURN
@@ -1089,7 +1132,7 @@ func buildOperator(
 				return op, nil
 			}
 		}
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1104,9 +1147,10 @@ func buildOperator(
 				capturedG := selG
 				capturedParams := params
 				capturedReg := reg
+				capturedBopts := bopts
 				return exec.NewFilter(child, func(row exec.Row) (expr.Value, error) {
 					rowCtx := buildRowCtx(row, schemaSnap, capturedG)
-					return expr.Eval(predExpr, rowCtx, capturedParams, capturedReg)
+					return evalRow(capturedBopts, predExpr, rowCtx, capturedParams, capturedReg)
 				}), nil
 			}
 		}
@@ -1116,7 +1160,7 @@ func buildOperator(
 		}), nil
 
 	case *ir.Projection:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1124,10 +1168,10 @@ func buildOperator(
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			projG = lw.g
 		}
-		return buildIRProjection(p.Items, child, schema, projG, params, reg)
+		return buildIRProjection(p.Items, child, schema, projG, params, reg, bopts)
 
 	case *ir.Expand:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1188,7 +1232,7 @@ func buildOperator(
 
 	case *ir.Apply:
 		// Build the outer plan first so its vars enter the schema.
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1196,7 +1240,7 @@ func buildOperator(
 		// outer row so correlated inner scans can consume it. For non-correlated
 		// inner plans (independent scans) the arg is inert but required.
 		arg := exec.NewArgument()
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1204,7 +1248,7 @@ func buildOperator(
 
 	case *ir.CorrelatedApply:
 		// Build outer first; its vars enter the schema and define the outer width.
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1215,7 +1259,7 @@ func buildOperator(
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
 		}
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1227,7 +1271,7 @@ func buildOperator(
 	case *ir.OptionalApply:
 		// Build outer first; record its width so the NULL-extension row has the
 		// correct padding when the inner pipeline emits zero rows.
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1236,7 +1280,7 @@ func buildOperator(
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
 		}
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1254,26 +1298,41 @@ func buildOperator(
 		return exec.NewOptionalApply(outer, inner, arg, paddedWidth), nil
 
 	case *ir.SemiApply:
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
+		// Pre-allocate the exec.Argument and register it under the IR
+		// SemiApply's ArgTag so the inner subtree's matching Argument leaf
+		// resolves to this instance and receives the outer row per iteration.
 		arg := exec.NewArgument()
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		if argByTag != nil {
+			argByTag[p.ArgTag] = arg
+		}
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
+		}
+		if argByTag != nil {
+			delete(argByTag, p.ArgTag)
 		}
 		return exec.NewSemiApply(outer, inner, arg), nil
 
 	case *ir.AntiSemiApply:
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
 		arg := exec.NewArgument()
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		if argByTag != nil {
+			argByTag[p.ArgTag] = arg
+		}
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
+		}
+		if argByTag != nil {
+			delete(argByTag, p.ArgTag)
 		}
 		return exec.NewAntiSemiApply(outer, inner, arg), nil
 
@@ -1295,7 +1354,7 @@ func buildOperator(
 		return exec.NewArgument(), nil
 
 	case *ir.EagerAggregation:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1303,10 +1362,10 @@ func buildOperator(
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			aggG = lw.g
 		}
-		return buildEagerAggregation(p, child, schema, aggG, params, reg)
+		return buildEagerAggregation(p, child, schema, aggG, params, reg, bopts)
 
 	case *ir.Sort:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1318,7 +1377,7 @@ func buildOperator(
 		return exec.NewSort(child, keys, 0)
 
 	case *ir.Top:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1336,36 +1395,36 @@ func buildOperator(
 		return exec.NewTop(child, keys, n)
 
 	case *ir.Limit:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
 		return exec.NewLimit(child, p.Count)
 
 	case *ir.Skip:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
 		return exec.NewSkip(child, p.Count)
 
 	case *ir.Unwind:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
 		schema[p.ElementVar] = len(schema)
-		return buildUnwindOperator(p, child, schema, walker, params, reg)
+		return buildUnwindOperator(p, child, schema, walker, params, reg, bopts)
 
 	case *ir.Distinct:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
 		return exec.NewDistinct(child, 0), nil
 
 	case *ir.OptionalExpand:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1414,7 +1473,7 @@ func buildOperator(
 		return exec.NewOptionalExpand(child, fwd, rev, cfg), nil
 
 	case *ir.VarLengthExpand:
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -1475,7 +1534,7 @@ func buildOperator(
 		return exec.NewVarLengthExpand(child, fwd, rev, cfg), nil
 
 	case *ir.ProcedureCall:
-		return buildProcedureCallOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		return buildProcedureCallOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 
 	default:
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
@@ -1508,6 +1567,7 @@ func buildEagerAggregation(
 	g *lpg.Graph[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
+	bopts *buildOpts,
 ) (exec.Operator, error) {
 	// Snapshot the inbound schema once: every pre-projection eval needs the
 	// pre-aggregation column layout, not the post-aggregation one (which we
@@ -1516,6 +1576,7 @@ func buildEagerAggregation(
 	capturedG := g
 	capturedParams := params
 	capturedReg := reg
+	capturedBopts := bopts
 
 	// Build pre-projection items:
 	//   positions 0..len(GroupBy)-1  → group-by key columns
@@ -1533,7 +1594,7 @@ func buildEagerAggregation(
 		}
 		items = append(items, exec.ProjectionItem{
 			Alias: varName,
-			Eval:  newAggregationEval(astExpr, varName, schemaSnap, capturedG, capturedParams, capturedReg),
+			Eval:  newAggregationEval(astExpr, varName, schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts),
 		})
 	}
 
@@ -1561,7 +1622,7 @@ func buildEagerAggregation(
 			Alias: aggExpr.OutputName,
 			Eval: newAggregationEval(
 				aggExpr.ArgumentExpr, aggExpr.Argument,
-				schemaSnap, capturedG, capturedParams, capturedReg,
+				schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts,
 			),
 		})
 	}
@@ -1620,12 +1681,13 @@ func newAggregationEval(
 	g *lpg.Graph[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
+	bopts *buildOpts,
 ) func(exec.Row) (expr.Value, error) {
 	// AST path — always preferred when present.
 	if astExpr != nil {
 		return func(row exec.Row) (expr.Value, error) {
 			rowCtx := buildRowCtx(row, schemaSnap, g)
-			return expr.Eval(astExpr, rowCtx, params, reg)
+			return evalRow(bopts, astExpr, rowCtx, params, reg)
 		}
 	}
 	// Legacy schema-lookup path.
@@ -1703,12 +1765,13 @@ func buildProcedureCallOperator(
 	idxMgr *index.Manager,
 	procReg *procs.Registry,
 	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
 ) (exec.Operator, error) {
 	// Build child if present.
 	var child exec.Operator
 	if p.Child != nil {
 		var err error
-		child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag)
+		child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -2093,6 +2156,7 @@ func buildUnwindOperator(
 	walker nodeWalkerIface,
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
+	bopts *buildOpts,
 ) (exec.Operator, error) {
 	if p.ListExpr == nil {
 		// No AST available — emit nothing for every input row.
@@ -2111,10 +2175,11 @@ func buildUnwindOperator(
 	capturedParams := params
 	capturedReg := reg
 	capturedG := g
+	capturedBopts := bopts
 
 	return exec.NewUnwind(child, func(row exec.Row) (expr.ListValue, error) {
 		rowCtx := buildRowCtx(row, schemaSnap, capturedG)
-		v, err := expr.Eval(listExpr, rowCtx, capturedParams, capturedReg)
+		v, err := evalRow(capturedBopts, listExpr, rowCtx, capturedParams, capturedReg)
 		if err != nil {
 			return nil, err
 		}
@@ -2174,6 +2239,7 @@ func buildIRProjection(
 	g *lpg.Graph[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
+	bopts *buildOpts,
 ) (*exec.Project, error) {
 	projItems := make([]exec.ProjectionItem, len(items))
 	for i, item := range items {
@@ -2216,9 +2282,10 @@ func buildIRProjection(
 				capturedG := g
 				capturedParams := params
 				capturedReg := reg
+				capturedBopts := bopts
 				evalFn = func(row exec.Row) (expr.Value, error) {
 					rowCtx := buildRowCtx(row, schemaSnap, capturedG)
-					return expr.Eval(capturedExpr, rowCtx, capturedParams, capturedReg)
+					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				}
 			}
 		} else if colIdx, ok := schema[exprStr]; ok {

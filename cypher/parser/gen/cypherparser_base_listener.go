@@ -412,6 +412,12 @@ func (s *BaseCypherParserListener) EnterSubqueryExist(ctx *SubqueryExistContext)
 // ExitSubqueryExist is called when production subqueryExist is exited.
 func (s *BaseCypherParserListener) ExitSubqueryExist(ctx *SubqueryExistContext) {}
 
+// EnterSubqueryCount is called when production subqueryCount is entered.
+func (s *BaseCypherParserListener) EnterSubqueryCount(ctx *SubqueryCountContext) {}
+
+// ExitSubqueryCount is called when production subqueryCount is exited.
+func (s *BaseCypherParserListener) ExitSubqueryCount(ctx *SubqueryCountContext) {}
+
 // EnterInvocationName is called when production invocationName is entered.
 func (s *BaseCypherParserListener) EnterInvocationName(ctx *InvocationNameContext) {}
 
