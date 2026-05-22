@@ -95,9 +95,29 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed; install: brew install goreleaser or see https://goreleaser.com/install/"; exit 1; }
 	goreleaser release --snapshot --clean --skip=publish
 
-.PHONY: release
-release: ## Run goreleaser to publish a release for the current tag — requires VERSION and a clean tree
+.PHONY: release-preflight
+release-preflight: ## Pre-flight checks that gate `make release` — CHANGELOG entry, release-notes file, lint, coverage, bench regression
 	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
+	@echo "release-preflight: VERSION=$$VERSION"
+	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
+	  grep -q "## \[$$v_no_prefix\]" CHANGELOG.md \
+	  || { echo "release-preflight: CHANGELOG.md is missing a '## [$$v_no_prefix]' entry — promote the Unreleased section first"; exit 1; }
+	@test -f "release-notes/$$VERSION.md" \
+	  || { echo "release-preflight: release-notes/$$VERSION.md does not exist — draft the long-form notes first"; exit 1; }
+	@echo "release-preflight: running golangci-lint…"
+	@$(MAKE) lint
+	@echo "release-preflight: running coverage gate…"
+	@$(MAKE) cover-gate
+	@if [ -x scripts/run_headline_bench.sh ]; then \
+	  echo "release-preflight: running headline bench regression gate (informational on a release tag — see docs/release.md for the canonical PR-time gate)…"; \
+	  ./scripts/run_headline_bench.sh > /tmp/release-preflight-bench.txt || { echo "release-preflight: headline bench failed; see /tmp/release-preflight-bench.txt"; exit 1; }; \
+	else \
+	  echo "release-preflight: scripts/run_headline_bench.sh not present — skipping bench gate"; \
+	fi
+	@echo "release-preflight: all checks passed"
+
+.PHONY: release
+release: release-preflight ## Run goreleaser to publish a release for the current tag — requires VERSION and a clean tree
 	@test -z "$$(git status --porcelain)" || { echo "working tree dirty"; exit 1; }
 	@git rev-parse "$$VERSION" >/dev/null 2>&1 || { echo "tag $$VERSION does not exist; create it first"; exit 1; }
 	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed"; exit 1; }

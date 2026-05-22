@@ -179,7 +179,22 @@ VERSION=vX.Y.Z make release
 ```
 
 The local `release` target requires `goreleaser` on the PATH and a
-clean working tree.
+clean working tree. It also depends on the `release-preflight` target,
+which enforces the following gates BEFORE goreleaser is invoked:
+
+1. `VERSION` is set.
+2. CHANGELOG.md contains a `## [VERSION]` entry (the Unreleased
+   section must have been promoted).
+3. release-notes/VERSION.md exists.
+4. `make lint` is clean (golangci-lint).
+5. `make cover-gate` is green (aggregate ≥ 85 %, per-package ≥ 75 %).
+6. `scripts/run_headline_bench.sh` exits zero when present (informational
+   per-tag run; the canonical comparison gate is the PR-time
+   `benchstat regression gate` in `.github/workflows/ci.yml`).
+
+Each failure exits non-zero with a one-line explanation of what is
+missing. Run `make release-preflight` on its own to dry-run the gates
+without invoking goreleaser.
 
 ## What goreleaser ships
 
