@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,7 @@ bob,dave,1
 `
 	adj, n, err := csv.ReadInto(strings.NewReader(input), csv.DefaultOptions())
 	if err != nil {
-		panic(err)
+		log.Fatalf("csv.ReadInto: %v", err)
 	}
 	fmt.Printf("CSV: %d edges ingested.\n", n)
 
@@ -47,21 +48,21 @@ bob,dave,1
 	// we need a known seed to drive the BFS below.
 	aliceID, ok := adj.Mapper().Lookup("alice")
 	if !ok {
-		panic("alice not interned")
+		log.Fatal("alice not interned")
 	}
 
 	// Step 2 — build the CSR snapshot and atomically write the
 	// Tier 2 csrfile.
 	c := csr.BuildFromAdjList(adj)
 	if _, err := csrfile.WriteToFile(outPath, c); err != nil {
-		panic(err)
+		log.Fatalf("csrfile.WriteToFile: %v", err)
 	}
 	fmt.Printf("Wrote %s (%d edges).\n", outPath, c.Size())
 
 	// Step 3 — mmap the Tier 2 file and hint sequential access.
 	r, err := csrfile.Open(outPath)
 	if err != nil {
-		panic(err)
+		log.Fatalf("csrfile.Open: %v", err)
 	}
 	defer func() { _ = r.Close() }()
 	_ = r.SetHint(csrfile.AccessSequential)

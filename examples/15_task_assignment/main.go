@@ -28,7 +28,7 @@ func main() {
 	fmt.Println("=== Minimum-cost assignment (Hungarian) ===")
 	a, err := search.Hungarian(cost, n, m)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Hungarian: %v", err)
 	}
 	for i, j := range a.RowToCol {
 		if j < 0 {

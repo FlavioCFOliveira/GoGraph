@@ -41,7 +41,7 @@ import (
 func main() {
 	dir, err := os.MkdirTemp("", "gograph-ex21-")
 	if err != nil {
-		panic(err)
+		log.Fatalf("MkdirTemp: %v", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	walPath := filepath.Join(dir, "wal")
@@ -49,7 +49,7 @@ func main() {
 	// === Phase 1: open WAL, build a typed store with int64 + float64 ===
 	w, err := wal.Open(walPath)
 	if err != nil {
-		panic(err)
+		log.Fatalf("wal.Open: %v", err)
 	}
 	g := lpg.New[int64, float64](adjlist.Config{Directed: true})
 	opts := txn.Options[int64, float64]{
@@ -76,7 +76,7 @@ func main() {
 		_ = tx.SetNodeLabel(c.src, "Hop")
 		_ = tx.SetEdgeLabel(c.src, c.dst, c.label)
 		if err := tx.Commit(); err != nil {
-			panic(err)
+			log.Fatalf("tx.Commit: %v", err)
 		}
 	}
 	_ = g.AdjList() // touch the adjacency list to materialise the mapper
@@ -94,7 +94,7 @@ func main() {
 	cs := csr.BuildFromAdjList(g.AdjList())
 	snapDir := filepath.Join(dir, "snapshot")
 	if err := snapshot.WriteSnapshotFull(snapDir, cs, g); err != nil {
-		panic(err)
+		log.Fatalf("snapshot.WriteSnapshotFull: %v", err)
 	}
 	_ = w.Close()
 	fmt.Printf("Committed %d weighted edges; snapshot persisted at %s.\n",

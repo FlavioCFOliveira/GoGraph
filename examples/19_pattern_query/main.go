@@ -22,10 +22,10 @@ func main() {
 	s.RegisterLabel("Person")
 	s.RegisterLabel("Admin")
 	if _, err := s.RegisterProperty("age", lpg.PropInt64); err != nil {
-		panic(err)
+		log.Fatalf("schema.RegisterProperty: %v", err)
 	}
 	if _, err := s.RegisterProperty("dept", lpg.PropString); err != nil {
-		panic(err)
+		log.Fatalf("schema.RegisterProperty: %v", err)
 	}
 
 	type person struct {

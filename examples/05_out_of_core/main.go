@@ -28,12 +28,12 @@ func main() {
 	}
 	c := csr.BuildFromAdjList(a)
 	if _, err := csrfile.WriteToFile(path, c); err != nil {
-		panic(err)
+		log.Fatalf("csrfile.WriteToFile: %v", err)
 	}
 
 	r, err := csrfile.Open(path)
 	if err != nil {
-		panic(err)
+		log.Fatalf("csrfile.Open: %v", err)
 	}
 	defer func() { _ = r.Close() }()
 	_ = r.SetHint(csrfile.AccessSequential)

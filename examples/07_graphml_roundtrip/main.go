@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -25,7 +26,7 @@ func main() {
 
 	g, n, err := graphml.ReadInto(strings.NewReader(doc))
 	if err != nil {
-		panic(err)
+		log.Fatalf("graphml.ReadInto: %v", err)
 	}
 	fmt.Printf("Ingested %d edges from GraphML\n\n", n)
 

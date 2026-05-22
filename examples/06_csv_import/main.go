@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -19,7 +20,7 @@ carol,alice,3
 `
 	a, n, err := csv.ReadInto(strings.NewReader(input), csv.DefaultOptions())
 	if err != nil {
-		panic(err)
+		log.Fatalf("csv.ReadInto: %v", err)
 	}
 	fmt.Printf("Ingested %d rows\n", n)
 

@@ -38,14 +38,14 @@ import (
 func main() {
 	dir, err := os.MkdirTemp("", "gograph-ex04-")
 	if err != nil {
-		panic(err)
+		log.Fatalf("MkdirTemp: %v", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	walPath := filepath.Join(dir, "wal")
 
 	w, err := wal.Open(walPath)
 	if err != nil {
-		panic(err)
+		log.Fatalf("wal.Open: %v", err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	store := txn.NewStore(g, w)

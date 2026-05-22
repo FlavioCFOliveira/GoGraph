@@ -33,7 +33,7 @@ func main() {
 
 	d, err := search.Dijkstra(c, src)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Dijkstra: %v", err)
 	}
 	for _, city := range []string{"Madrid", "Paris", "Rome"} {
 		id, _ := a.Mapper().Lookup(city)
