@@ -142,8 +142,3 @@
 // the round-trip test in T9, and re-confirmed against the final API by
 // the README and godoc pass in T10.
 package main
-
-// main is a stub replaced in T2 by the real CLI dispatcher in main.go.
-// Keeping a no-op main here lets `go build ./...` and `go vet ./...`
-// succeed during the incremental construction of this example.
-func main() {}
