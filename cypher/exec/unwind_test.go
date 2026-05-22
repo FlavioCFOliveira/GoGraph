@@ -224,6 +224,53 @@ func TestUnwind_TableDriven(t *testing.T) {
 				{expr.StringValue("keep2"), expr.IntegerValue(1)},
 			},
 		},
+		{
+			// openCypher 9 §UNWIND: UNWIND [1, null, 2] AS x emits three rows;
+			// the middle row binds x to NULL. The operator must NOT skip NULL
+			// elements (that would conflate empty-list with null-element
+			// semantics).
+			name:  "UNWIND [1, null, 2] AS x — emits three rows including a NULL element",
+			child: &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}},
+			listFn: func(_ exec.Row) (expr.ListValue, error) {
+				return litList(expr.IntegerValue(1), expr.Null, expr.IntegerValue(2)), nil
+			},
+			wantRows: [][]expr.Value{
+				{expr.StringValue("ctx"), expr.IntegerValue(1)},
+				{expr.StringValue("ctx"), expr.Null},
+				{expr.StringValue("ctx"), expr.IntegerValue(2)},
+			},
+		},
+		{
+			// openCypher 9 §UNWIND: all-null list still emits one row per
+			// element, every emitted column being NULL.
+			name:  "UNWIND [null, null, null] AS x — emits one NULL row per element",
+			child: &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}},
+			listFn: func(_ exec.Row) (expr.ListValue, error) {
+				return litList(expr.Null, expr.Null, expr.Null), nil
+			},
+			wantRows: [][]expr.Value{
+				{expr.StringValue("ctx"), expr.Null},
+				{expr.StringValue("ctx"), expr.Null},
+				{expr.StringValue("ctx"), expr.Null},
+			},
+		},
+		{
+			// openCypher 9 §UNWIND: list with mixed element kinds plus NULL.
+			// The element column may legitimately switch between types from
+			// one row to the next — this is intentional under Cypher's
+			// dynamic typing.
+			name:  "UNWIND [42, 'x', null, true] AS y — mixed types and NULL preserved",
+			child: &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}},
+			listFn: func(_ exec.Row) (expr.ListValue, error) {
+				return litList(expr.IntegerValue(42), expr.StringValue("x"), expr.Null, expr.BoolValue(true)), nil
+			},
+			wantRows: [][]expr.Value{
+				{expr.StringValue("ctx"), expr.IntegerValue(42)},
+				{expr.StringValue("ctx"), expr.StringValue("x")},
+				{expr.StringValue("ctx"), expr.Null},
+				{expr.StringValue("ctx"), expr.BoolValue(true)},
+			},
+		},
 	}
 
 	for _, tc := range tests {
