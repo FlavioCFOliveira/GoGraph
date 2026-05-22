@@ -299,8 +299,18 @@ func TestUnwind_ChildInitError(t *testing.T) {
 		t.Fatalf("NewUnwind: %v", err)
 	}
 
-	if err := op.Init(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("Init: got %v, want chain containing %v", err, wantErr)
+	if initErr := op.Init(context.Background()); !errors.Is(initErr, wantErr) {
+		t.Fatalf("Init: got %v, want chain containing %v", initErr, wantErr)
+	}
+
+	// Even after a failed Init, callers must invoke Close once — that is what
+	// Drain does on the failure path (driver.go:21). Verify Unwind.Close is
+	// safe in this state and that it still reaches the child.
+	if closeErr := op.Close(); closeErr != nil {
+		t.Errorf("Close after failed Init returned err = %v, want nil", closeErr)
+	}
+	if !child.closed {
+		t.Error("child.Close was not called by Unwind.Close after failed Init")
 	}
 }
 
