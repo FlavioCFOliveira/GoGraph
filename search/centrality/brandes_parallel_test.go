@@ -22,7 +22,9 @@ func TestBetweennessParallel_VsSerial(t *testing.T) {
 		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 		const n = 64
 		for i := 0; i < 2*n; i++ {
-			a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+			if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		serial := Betweenness(c)
@@ -50,7 +52,9 @@ func TestBetweennessParallel_CancellationCascades(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	r := rand.New(rand.NewPCG(7, 11)) //nolint:gosec // deterministic
 	for i := 0; i < 4*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 
@@ -85,7 +89,7 @@ func TestBetweennessParallel_CancellationCascades(t *testing.T) {
 }
 
 func BenchmarkBetweenness_Serial(b *testing.B) {
-	c, _ := buildSerialBrandesFixture()
+	c, _ := buildSerialBrandesFixture(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -94,7 +98,7 @@ func BenchmarkBetweenness_Serial(b *testing.B) {
 }
 
 func BenchmarkBetweenness_Parallel(b *testing.B) {
-	c, _ := buildSerialBrandesFixture()
+	c, _ := buildSerialBrandesFixture(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -102,12 +106,15 @@ func BenchmarkBetweenness_Parallel(b *testing.B) {
 	}
 }
 
-func buildSerialBrandesFixture() (c *csr.CSR[struct{}], n int) {
+func buildSerialBrandesFixture(tb testing.TB) (c *csr.CSR[struct{}], n int) {
+	tb.Helper()
 	n = 512
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	r := rand.New(rand.NewPCG(211, 223)) //nolint:gosec // deterministic
 	for i := 0; i < 3*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
+			tb.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c = csr.BuildFromAdjList(a)
 	return c, n

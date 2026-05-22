@@ -11,8 +11,12 @@ import (
 func TestWrite_Directed(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("alice", "bob", 5)
-	a.AddEdge("bob", "carol", 0)
+	if err := a.AddEdge("alice", "bob", 5); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("bob", "carol", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	if err := Write(&buf, a); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -35,7 +39,9 @@ func TestWrite_Directed(t *testing.T) {
 func TestWrite_Undirected(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: false})
-	a.AddEdge("alice", "bob", 1)
+	if err := a.AddEdge("alice", "bob", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	if err := Write(&buf, a); err != nil {
 		t.Fatal(err)
@@ -57,7 +63,9 @@ func TestWrite_Undirected(t *testing.T) {
 func TestWrite_QuotesSpecialIDs(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("ali ce", "bob", 0)
+	if err := a.AddEdge("ali ce", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	if err := Write(&buf, a); err != nil {
 		t.Fatal(err)

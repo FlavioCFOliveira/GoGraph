@@ -18,7 +18,9 @@ func BenchmarkWriteGraphML_1M(b *testing.B) {
 	const n = 1_000_000
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
 	for i := 0; i < n; i++ {
-		a.AddEdge(fmt.Sprintf("n%07d", i), fmt.Sprintf("n%07d", (i+1)%n), 1)
+		if err := a.AddEdge(fmt.Sprintf("n%07d", i), fmt.Sprintf("n%07d", (i+1)%n), 1); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -30,8 +32,12 @@ func BenchmarkWriteGraphML_1M(b *testing.B) {
 func TestWrite_Roundtrip(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("alice", "bob", 7)
-	a.AddEdge("bob", "carol", 9)
+	if err := a.AddEdge("alice", "bob", 7); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("bob", "carol", 9); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	var buf bytes.Buffer
 	if err := Write(&buf, a); err != nil {
@@ -56,7 +62,9 @@ func TestWrite_Roundtrip(t *testing.T) {
 func TestWrite_Undirected(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: false})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	if err := Write(&buf, a); err != nil {
 		t.Fatalf("Write: %v", err)

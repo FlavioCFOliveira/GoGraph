@@ -14,7 +14,9 @@ func TestPageRank_Star(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 1; i <= 5; i++ {
-		a.AddEdge(i, 0, struct{}{})
+		if err := a.AddEdge(i, 0, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "star.csr")
@@ -72,7 +74,9 @@ func TestPageRank_MassConservation_Star(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 1; i <= 5; i++ {
-		a.AddEdge(i, 0, struct{}{})
+		if err := a.AddEdge(i, 0, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "star.csr")
@@ -107,9 +111,13 @@ func TestPageRank_MatchesInMemory(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 8; i++ {
-		a.AddEdge(i, (i+1)%8, struct{}{})
+		if err := a.AddEdge(i, (i+1)%8, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 		if i%3 == 0 {
-			a.AddEdge(i, (i+3)%8, struct{}{})
+			if err := a.AddEdge(i, (i+3)%8, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	c := csr.BuildFromAdjList(a)

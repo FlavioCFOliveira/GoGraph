@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
@@ -13,7 +14,9 @@ import (
 func main() {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 5; i++ {
-		a.AddEdge(i, (i+1)%5, struct{}{})
+		if err := a.AddEdge(i, (i+1)%5, struct{}{}); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	ranks, iters, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())

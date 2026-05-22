@@ -17,7 +17,9 @@ func BenchmarkFloydWarshall_V2048(b *testing.B) {
 	const n = 2048
 	r := rand.New(rand.NewPCG(73, 79)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 4*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1))
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ReportAllocs()
@@ -29,7 +31,7 @@ func BenchmarkFloydWarshall_V2048(b *testing.B) {
 
 func TestFloydWarshall_HandBuilt(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 10}, {0, 2, 3},
 		{1, 3, 1},
 		{2, 1, 4}, {2, 3, 8}, {2, 4, 2},
@@ -61,7 +63,7 @@ func TestFloydWarshall_HandBuilt(t *testing.T) {
 
 func TestFloydWarshall_Unreachable(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 1}, {2, 3, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})
 	apsp := FloydWarshall(c)
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
@@ -76,9 +78,15 @@ func TestFloydWarshall_Unreachable(t *testing.T) {
 func TestFloydWarshall_Int32WeightsNoOverflow(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, int32](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, 5)
-	a.AddEdge(1, 2, 3)
-	a.AddEdge(0, 2, 100)
+	if err := a.AddEdge(0, 1, 5); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, 3); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(0, 2, 100); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	apsp := FloydWarshall(c)
 	id0, _ := a.Mapper().Lookup(0)
@@ -99,8 +107,12 @@ func TestFloydWarshall_Int32WeightsNoOverflow(t *testing.T) {
 func TestFloydWarshall_UnreachableReportedExplicitly(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, 1)
-	a.AddEdge(2, 3, 1)
+	if err := a.AddEdge(0, 1, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 3, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	apsp := FloydWarshall(c)
 	id0, _ := a.Mapper().Lookup(0)

@@ -68,7 +68,9 @@ func BenchmarkIndexesRecoveryVsRebuild(b *testing.B) {
 	for i := 0; i < indexesBenchN; i++ {
 		key := keyForBench(i)
 		keys[i] = key
-		g.AddNode(key)
+		if err := g.AddNode(key); err != nil {
+			b.Fatalf("AddNode: %v", err)
+		}
 	}
 	for i := uint64(0); i < indexesBenchN; i++ {
 		// Three labels per node so the label bitmaps are
@@ -220,7 +222,9 @@ func TestIndexesBenchSetupBuilds(t *testing.T) {
 	}
 	for i := 0; i < 64; i++ {
 		key := keyForBench(i)
-		g.AddNode(key)
+		if err := g.AddNode(key); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 		lab.Add(1, graph.NodeID(uint64(i)))
 		hsh.Insert(key, graph.NodeID(uint64(i)))
 		bt.Insert(key, graph.NodeID(uint64(i)))

@@ -21,8 +21,12 @@ func TestCSRFile_TruncationFuzz(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 64; i++ {
-		a.AddEdge(i, (i+1)%64, struct{}{})
-		a.AddEdge(i, (i+9)%64, struct{}{})
+		if err := a.AddEdge(i, (i+1)%64, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+		if err := a.AddEdge(i, (i+9)%64, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 

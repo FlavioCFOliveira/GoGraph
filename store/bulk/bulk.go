@@ -75,7 +75,10 @@ func (l *Loader) Add(e Edge) error {
 		metrics.IncCounter("store.bulk.Add.errors", 1)
 		return ErrTooManyRows
 	}
-	l.adj.AddEdge(e.Src, e.Dst, e.Weight)
+	if err := l.adj.AddEdge(e.Src, e.Dst, e.Weight); err != nil {
+		metrics.IncCounter("store.bulk.Add.errors", 1)
+		return err
+	}
 	l.rows++
 	return nil
 }

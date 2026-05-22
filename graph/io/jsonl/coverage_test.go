@@ -52,9 +52,13 @@ func TestWriteCtx_ContextCancelled(t *testing.T) {
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
 	const nodeCount = 4096
 	for i := range nodeCount {
-		a.AddNode(fmt.Sprintf("n%d", i))
+		if err := a.AddNode(fmt.Sprintf("n%d", i)); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
-	a.AddEdge("n0", "n1", 0) // edge loop must run for the ctx check to be reached
+	if err := a.AddEdge("n0", "n1", 0); err != nil { // edge loop must run for the ctx check to be reached
+		t.Fatalf("AddEdge: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var buf bytes.Buffer

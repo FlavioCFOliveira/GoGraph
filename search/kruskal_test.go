@@ -28,7 +28,9 @@ func TestKruskalMST_CLRS(t *testing.T) {
 		{7, 8, 7},
 	}
 	for _, e := range edges {
-		a.AddEdge(e.u, e.v, e.w)
+		if err := a.AddEdge(e.u, e.v, e.w); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	mst, total, err := KruskalMST(c)
@@ -46,8 +48,12 @@ func TestKruskalMST_CLRS(t *testing.T) {
 func TestKruskalMST_Disconnected(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
-	a.AddEdge(0, 1, 5)
-	a.AddEdge(2, 3, 7)
+	if err := a.AddEdge(0, 1, 5); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 3, 7); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	mst, total, err := KruskalMST(c)
 	if err != nil {
@@ -71,11 +77,15 @@ func TestKruskalMST_RandomCardinality(t *testing.T) {
 		a := adjlist.New[int, int64](adjlist.Config{Directed: false})
 		// Spanning chain so the graph is guaranteed connected.
 		for i := 0; i < n-1; i++ {
-			a.AddEdge(i, i+1, int64(r.IntN(100)+1))
+			if err := a.AddEdge(i, i+1, int64(r.IntN(100)+1)); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		// Plus extra random edges.
 		for i := 0; i < 4*n; i++ {
-			a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1))
+			if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		mst, _, err := KruskalMST(c)
@@ -93,7 +103,9 @@ func BenchmarkKruskalMST_RandomGraph(b *testing.B) {
 	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
 	r := rand.New(rand.NewPCG(149, 151)) //nolint:gosec // deterministic
 	for i := 0; i < 4*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1))
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ReportAllocs()

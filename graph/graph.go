@@ -58,14 +58,19 @@ type Graph[N comparable, W any] interface {
 	HasEdge(src, dst N) bool
 
 	// AddNode inserts n if not already present. It is a no-op when n is
-	// already known.
-	AddNode(n N)
+	// already known. Implementations return an error when a bounded
+	// resource (for example, a sharded slot array with an explicit
+	// upper bound) is exhausted; callers must handle that error and
+	// stop offering further work on the affected shard.
+	AddNode(n N) error
 
 	// AddEdge inserts a directed edge from src to dst with weight w,
 	// adding the endpoints if they are not yet present. Multigraph
 	// implementations accept parallel edges; simple implementations
-	// document their de-duplication policy.
-	AddEdge(src, dst N, w W)
+	// document their de-duplication policy. Implementations return an
+	// error when a bounded resource is exhausted (see [Graph.AddNode]);
+	// no edge is published in that case.
+	AddEdge(src, dst N, w W) error
 
 	// RemoveEdge removes the directed edge from src to dst if present.
 	// It is a no-op when no such edge exists. The endpoints remain in

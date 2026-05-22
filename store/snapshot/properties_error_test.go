@@ -198,7 +198,9 @@ func TestReadProperties_ValueLenTooLarge(t *testing.T) {
 func TestApplyPropertiesToGraph_UnresolvedNodeID(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	rb := PropertiesReadback{
 		Keys: []string{"k"},
 		NodeProperties: []NodePropertyEntry{
@@ -233,8 +235,12 @@ func TestApplyPropertiesToGraph_UnresolvedNodeID(t *testing.T) {
 func TestApplyPropertiesToGraph_MissingEdge(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice")
-	g.AddNode("bob")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	srcID, _ := g.AdjList().Mapper().Lookup("alice")
 	dstID, _ := g.AdjList().Mapper().Lookup("bob")
 	rb := PropertiesReadback{
@@ -263,7 +269,9 @@ func TestApplyPropertiesToGraph_MissingEdge(t *testing.T) {
 func TestApplyPropertiesToGraph_KeyIdxOutOfRange(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	srcID, _ := g.AdjList().Mapper().Lookup("alice")
 	rb := PropertiesReadback{
 		Keys: []string{"k"},
@@ -289,7 +297,9 @@ func TestApplyPropertiesToGraph_KeyIdxOutOfRange(t *testing.T) {
 func TestApplyPropertiesToGraph_BadDecodeSkipped(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	srcID, _ := g.AdjList().Mapper().Lookup("alice")
 	rb := PropertiesReadback{
 		Keys: []string{"k"},
@@ -315,8 +325,12 @@ func TestApplyPropertiesToGraph_BadDecodeSkipped(t *testing.T) {
 func TestWriteProperties_WriterFailure(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("a")
-	g.SetNodeProperty("a", "k", lpg.Int64Value(1))
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "k", lpg.Int64Value(1)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	w := errWriter{err: errors.New("write boom")}
 	_, _, err := WriteProperties(w, g)
 	if err == nil {
@@ -333,8 +347,12 @@ func TestWriteProperties_FlushFailure(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	for i := 0; i < 8; i++ {
-		g.AddNode("n")
-		g.SetNodeProperty("n", "k", lpg.Int64Value(int64(i)))
+		if err := g.AddNode("n"); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty("n", "k", lpg.Int64Value(int64(i))); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	w := &partialWriter{n: 0, err: errors.New("flush boom")}
 	_, _, err := WriteProperties(w, g)
@@ -349,11 +367,17 @@ func TestWriteProperties_FlushFailure(t *testing.T) {
 func TestWriteProperties_RoundtripBytesAndStrings(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	long := bytes.Repeat([]byte{0xAB}, 4096)
 	longStr := string(bytes.Repeat([]byte{'x'}, 4096))
-	g.SetNodeProperty("a", "blob", lpg.BytesValue(long))
-	g.SetNodeProperty("a", "tag", lpg.StringValue(longStr))
+	if err := g.SetNodeProperty("a", "blob", lpg.BytesValue(long)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "tag", lpg.StringValue(longStr)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	g.SetEdgeProperty("a", "b", "raw", lpg.BytesValue(long))
 
 	c := csr.BuildFromAdjList(g.AdjList())
@@ -366,7 +390,9 @@ func TestWriteProperties_RoundtripBytesAndStrings(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
-	restored.AddEdge("a", "b", 0)
+	if err := restored.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	if err := ApplyPropertiesToGraph(restored, loaded.Properties); err != nil {
 		t.Fatal(err)
 	}
@@ -459,8 +485,12 @@ func TestReadProperties_TruncatedKey(t *testing.T) {
 func TestWriteProperties_RoundtripEmptyKeys(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("a")
-	g.SetNodeProperty("a", "", lpg.Int64Value(7)) // empty key name
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "", lpg.Int64Value(7)); err != nil { // empty key name
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -482,8 +512,12 @@ func TestWriteProperties_RoundtripEmptyKeys(t *testing.T) {
 func TestLoadSnapshotFull_MissingPropertiesBin(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeProperty("a", "k", lpg.Int64Value(1))
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "k", lpg.Int64Value(1)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -502,8 +536,12 @@ func TestLoadSnapshotFull_MissingPropertiesBin(t *testing.T) {
 func TestWriteSnapshotFullCtx_FlakyCtxAfterProperties(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeProperty("a", "k", lpg.Int64Value(1))
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "k", lpg.Int64Value(1)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	sentinel := errors.New("ctx flakes after properties")

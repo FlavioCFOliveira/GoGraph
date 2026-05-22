@@ -23,11 +23,14 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // newLabeledGraph creates a graph with n nodes all tagged with the given label.
-func newLabeledGraph(n int, label string) *lpg.Graph[string, float64] {
+func newLabeledGraph(tb testing.TB, n int, label string) *lpg.Graph[string, float64] {
+	tb.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range n {
 		node := string(rune('A'+i%26)) + string(rune('0'+i%10))
-		g.SetNodeLabel(node, label)
+		if err := g.SetNodeLabel(node, label); err != nil {
+			tb.Fatalf("SetNodeLabel: %v", err)
+		}
 	}
 	return g
 }
@@ -37,7 +40,7 @@ func newLabeledGraph(n int, label string) *lpg.Graph[string, float64] {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_NewEngineWithRegistry(t *testing.T) {
-	g := newGraph(3)
+	g := newGraph(t, 3)
 	eng := cypher.NewEngineWithRegistry(g, funcs.DefaultRegistry)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) RETURN n", nil)
@@ -63,7 +66,7 @@ func TestEngine_NewEngineWithRegistry(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_Record(t *testing.T) {
-	g := newGraph(1)
+	g := newGraph(t, 1)
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) RETURN n", nil)
@@ -90,7 +93,7 @@ func TestEngine_Record(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_LabelScan_Match(t *testing.T) {
-	g := newLabeledGraph(4, "Person")
+	g := newLabeledGraph(t, 4, "Person")
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n:Person) RETURN n", nil)
@@ -112,7 +115,7 @@ func TestEngine_LabelScan_Match(t *testing.T) {
 }
 
 func TestEngine_LabelScan_UnknownLabel(t *testing.T) {
-	g := newGraph(3) // no labels
+	g := newGraph(t, 3) // no labels
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n:Ghost) RETURN n", nil)
@@ -141,9 +144,15 @@ func TestEngine_LabelScan_UnknownLabel(t *testing.T) {
 func TestEngine_Selection_PropertyFilter(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	// Three nodes: two matching, one not.
-	g.SetNodeProperty("n1", "name", lpg.StringValue("match"))
-	g.SetNodeProperty("n2", "name", lpg.StringValue("match"))
-	g.SetNodeProperty("n3", "name", lpg.StringValue("skip"))
+	if err := g.SetNodeProperty("n1", "name", lpg.StringValue("match")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("n2", "name", lpg.StringValue("match")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("n3", "name", lpg.StringValue("skip")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 
@@ -175,7 +184,7 @@ func TestEngine_Selection_PropertyFilter(t *testing.T) {
 func TestEngine_Expand_NoEdges(t *testing.T) {
 	// Graph with 3 nodes but no edges: MATCH (n)-[r]->(m) must return 0 rows.
 	const n = 3
-	g := newGraph(n)
+	g := newGraph(t, n)
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n)-[r]->(m) RETURN n", nil)
@@ -199,8 +208,12 @@ func TestEngine_Expand_NoEdges(t *testing.T) {
 func TestEngine_Expand_WithEdges(t *testing.T) {
 	// Directed graph: A→B, A→C — MATCH (n)-[r]->(m) RETURN n,m must return 2 rows.
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	g.AddEdge("A", "B", 1.0)
-	g.AddEdge("A", "C", 1.0)
+	if err := g.AddEdge("A", "B", 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("A", "C", 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n)-[r]->(m) RETURN n, m", nil)
@@ -233,7 +246,7 @@ func TestEngine_Expand_WithEdges(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_Projection_Alias(t *testing.T) {
-	g := newGraph(2)
+	g := newGraph(t, 2)
 	eng := cypher.NewEngine(g)
 
 	// RETURN n AS node — exercises Projection with explicit alias.
@@ -261,7 +274,7 @@ func TestEngine_Projection_Alias(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_LabelScan_PlanCacheHit(t *testing.T) {
-	g := newLabeledGraph(2, "Employee")
+	g := newLabeledGraph(t, 2, "Employee")
 	eng := cypher.NewEngine(g)
 
 	const query = "MATCH (n:Employee) RETURN n"
@@ -286,7 +299,7 @@ func TestEngine_LabelScan_PlanCacheHit(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_WithParams_NoError(t *testing.T) {
-	g := newGraph(2)
+	g := newGraph(t, 2)
 	eng := cypher.NewEngine(g)
 
 	params := map[string]expr.Value{"limit": expr.IntegerValue(10)}
@@ -431,8 +444,12 @@ func TestBindParams_TypeConversions(t *testing.T) {
 
 func TestRunAny_Basic(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("A")
-	g.AddNode("B")
+	if err := g.AddNode("A"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("B"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.RunAny(context.Background(), "MATCH (n) RETURN n", map[string]any{"x": int(1)})

@@ -20,14 +20,19 @@ const (
 	cmpE = 4 * cmpN
 )
 
-func buildComparisonGraph() (c *csr.CSR[int64], src graph.NodeID) {
+func buildComparisonGraph(tb testing.TB) (c *csr.CSR[int64], src graph.NodeID) {
+	tb.Helper()
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
 	r := rand.New(rand.NewPCG(31, 1)) //nolint:gosec // deterministic seed
 	for i := 0; i < cmpN; i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			tb.Fatalf("AddNode: %v", err)
+		}
 	}
 	for i := 0; i < cmpE; i++ {
-		a.AddEdge(r.IntN(cmpN), r.IntN(cmpN), int64(r.IntN(100)+1))
+		if err := a.AddEdge(r.IntN(cmpN), r.IntN(cmpN), int64(r.IntN(100)+1)); err != nil {
+			tb.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c = csr.BuildFromAdjList(a)
 	src, _ = a.Mapper().Lookup(0)
@@ -35,7 +40,7 @@ func buildComparisonGraph() (c *csr.CSR[int64], src graph.NodeID) {
 }
 
 func BenchmarkComparison_BFS(b *testing.B) {
-	c, src := buildComparisonGraph()
+	c, src := buildComparisonGraph(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -44,7 +49,7 @@ func BenchmarkComparison_BFS(b *testing.B) {
 }
 
 func BenchmarkComparison_Dijkstra(b *testing.B) {
-	c, src := buildComparisonGraph()
+	c, src := buildComparisonGraph(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -53,7 +58,7 @@ func BenchmarkComparison_Dijkstra(b *testing.B) {
 }
 
 func BenchmarkComparison_PageRank(b *testing.B) {
-	c, _ := buildComparisonGraph()
+	c, _ := buildComparisonGraph(b)
 	opts := centrality.PageRankOptions{Damping: 0.85, MaxIterations: 30, Tolerance: 1e-6}
 	b.ReportAllocs()
 	b.ResetTimer()

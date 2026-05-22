@@ -11,15 +11,18 @@ import (
 	"gograph/graph/csr"
 )
 
-func makeCSR(seed int) *csr.CSR[struct{}] {
+func makeCSR(tb testing.TB, seed int) *csr.CSR[struct{}] {
+	tb.Helper()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(seed, seed+1, struct{}{})
+	if err := a.AddEdge(seed, seed+1, struct{}{}); err != nil {
+		tb.Fatalf("AddEdge: %v", err)
+	}
 	return csr.BuildFromAdjList(a)
 }
 
 func TestPublisher_AcquireRelease(t *testing.T) {
 	t.Parallel()
-	p := New(makeCSR(1))
+	p := New(makeCSR(t, 1))
 	g := p.Acquire()
 	if g == nil {
 		t.Fatalf("Acquire returned nil")
@@ -35,9 +38,9 @@ func TestPublisher_AcquireRelease(t *testing.T) {
 
 func TestPublisher_Publish(t *testing.T) {
 	t.Parallel()
-	p := New(makeCSR(1))
+	p := New(makeCSR(t, 1))
 	old := p.Current()
-	next := p.Publish(makeCSR(2))
+	next := p.Publish(makeCSR(t, 2))
 	if p.Current() != next {
 		t.Fatalf("current did not swap")
 	}
@@ -48,8 +51,8 @@ func TestPublisher_Publish(t *testing.T) {
 
 func TestPublisher_PublishWithDrainNoReaders(t *testing.T) {
 	t.Parallel()
-	p := New(makeCSR(1))
-	next, err := p.PublishWithDrain(makeCSR(2), 100*time.Millisecond)
+	p := New(makeCSR(t, 1))
+	next, err := p.PublishWithDrain(makeCSR(t, 2), 100*time.Millisecond)
 	if err != nil {
 		t.Fatalf("PublishWithDrain: %v", err)
 	}
@@ -60,12 +63,12 @@ func TestPublisher_PublishWithDrainNoReaders(t *testing.T) {
 
 func TestPublisher_PublishWithDrainBlocksUntilRelease(t *testing.T) {
 	t.Parallel()
-	p := New(makeCSR(1))
+	p := New(makeCSR(t, 1))
 	g := p.Acquire()
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.PublishWithDrain(makeCSR(2), time.Second)
+		_, err := p.PublishWithDrain(makeCSR(t, 2), time.Second)
 		done <- err
 	}()
 
@@ -87,10 +90,10 @@ func TestPublisher_PublishWithDrainBlocksUntilRelease(t *testing.T) {
 
 func TestPublisher_PublishWithDrainTimeout(t *testing.T) {
 	t.Parallel()
-	p := New(makeCSR(1))
+	p := New(makeCSR(t, 1))
 	g := p.Acquire()
 	defer p.Release(g)
-	_, err := p.PublishWithDrain(makeCSR(2), 50*time.Millisecond)
+	_, err := p.PublishWithDrain(makeCSR(t, 2), 50*time.Millisecond)
 	if !errors.Is(err, ErrDrainTimeout) {
 		t.Fatalf("expected ErrDrainTimeout, got %v", err)
 	}
@@ -98,7 +101,7 @@ func TestPublisher_PublishWithDrainTimeout(t *testing.T) {
 
 func TestPublisher_ConcurrentReadersDuringPublish(t *testing.T) {
 	t.Parallel()
-	p := New(makeCSR(1))
+	p := New(makeCSR(t, 1))
 	const readers = 64
 	var wg sync.WaitGroup
 	var bad atomic.Int64
@@ -127,7 +130,7 @@ func TestPublisher_ConcurrentReadersDuringPublish(t *testing.T) {
 	}
 	// Publish a few generations while readers are running.
 	for i := 0; i < 50; i++ {
-		_ = p.Publish(makeCSR(i + 2))
+		_ = p.Publish(makeCSR(t, i+2))
 		time.Sleep(time.Millisecond)
 	}
 	close(stop)

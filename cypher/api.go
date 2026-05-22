@@ -2419,18 +2419,22 @@ func (a *lpgMutatorAdapter) resolveID(n string) graph.NodeID {
 }
 
 // AddNode interns n and returns its stable NodeID.
-func (a *lpgMutatorAdapter) AddNode(n string) graph.NodeID {
-	a.g.AddNode(n)
+func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	if err := a.g.AddNode(n); err != nil {
+		return 0, err
+	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
-	return id
+	return id, nil
 }
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
-func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (srcID, dstID graph.NodeID) {
-	a.g.AddEdge(src, dst, w)
-	srcID, _ = a.g.AdjList().Mapper().Lookup(src)
-	dstID, _ = a.g.AdjList().Mapper().Lookup(dst)
-	return
+func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	if err := a.g.AddEdge(src, dst, w); err != nil {
+		return 0, 0, err
+	}
+	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
+	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
+	return srcID, dstID, nil
 }
 
 // RemoveEdge removes the directed edge (src, dst).
@@ -2439,8 +2443,10 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 }
 
 // SetNodeLabel attaches label to n.
-func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) {
-	a.g.SetNodeLabel(n, label)
+func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
+	if err := a.g.SetNodeLabel(n, label); err != nil {
+		return err
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
@@ -2448,6 +2454,7 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) {
 			Label: uint32(a.g.Registry().Intern(label)),
 		})
 	}
+	return nil
 }
 
 // RemoveNodeLabel detaches label from n.
@@ -2463,8 +2470,10 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 }
 
 // SetNodeProperty sets the named property on n.
-func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) {
-	a.g.SetNodeProperty(n, key, value)
+func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	if err := a.g.SetNodeProperty(n, key, value); err != nil {
+		return err
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -2473,6 +2482,7 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 			NewValue: value,
 		})
 	}
+	return nil
 }
 
 // DelNodeProperty removes the named property from n.
@@ -2630,20 +2640,24 @@ func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 }
 
 // AddNode interns n and returns its stable NodeID.
-func (a *walMutatorAdapter) AddNode(n string) graph.NodeID {
-	a.g.AddNode(n)
+func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	if err := a.g.AddNode(n); err != nil {
+		return 0, err
+	}
 	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
-	return id
+	return id, nil
 }
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
-func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (srcID, dstID graph.NodeID) {
-	a.g.AddEdge(src, dst, w)
+func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	if err := a.g.AddEdge(src, dst, w); err != nil {
+		return 0, 0, err
+	}
 	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
-	srcID, _ = a.g.AdjList().Mapper().Lookup(src)
-	dstID, _ = a.g.AdjList().Mapper().Lookup(dst)
-	return
+	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
+	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
+	return srcID, dstID, nil
 }
 
 // RemoveEdge removes the directed edge (src, dst).
@@ -2653,8 +2667,10 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 }
 
 // SetNodeLabel attaches label to n.
-func (a *walMutatorAdapter) SetNodeLabel(n, label string) {
-	a.g.SetNodeLabel(n, label)
+func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
+	if err := a.g.SetNodeLabel(n, label); err != nil {
+		return err
+	}
 	_ = a.tx.SetNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -2663,6 +2679,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) {
 			Label: uint32(a.g.Registry().Intern(label)),
 		})
 	}
+	return nil
 }
 
 // RemoveNodeLabel detaches label from n.
@@ -2679,8 +2696,10 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 }
 
 // SetNodeProperty sets the named property on n.
-func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) {
-	a.g.SetNodeProperty(n, key, value)
+func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	if err := a.g.SetNodeProperty(n, key, value); err != nil {
+		return err
+	}
 	_ = a.tx.SetNodeProperty(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -2690,6 +2709,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 			NewValue: value,
 		})
 	}
+	return nil
 }
 
 // DelNodeProperty removes the named property from n.

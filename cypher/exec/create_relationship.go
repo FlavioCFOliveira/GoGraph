@@ -111,7 +111,10 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: CreateRelationship: cannot resolve dst NodeID %d", dstID)
 	}
 
-	actualSrcID, actualDstID := op.mutator.AddEdge(srcLabel, dstLabel, 0)
+	actualSrcID, actualDstID, err := op.mutator.AddEdge(srcLabel, dstLabel, 0)
+	if err != nil {
+		return false, fmt.Errorf("exec: CreateRelationship AddEdge: %w", err)
+	}
 	if op.relType != "" {
 		op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType)
 	}

@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
@@ -27,7 +28,9 @@ func main() {
 	fmt.Println("=== Build order (no cycles) ===")
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
 	for _, e := range deps {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	order, err := search.TopologicalSort(c)
@@ -44,10 +47,14 @@ func main() {
 	fmt.Println("\n=== Detecting a cycle ===")
 	a2 := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
 	for _, e := range deps {
-		a2.AddEdge(e[0], e[1], struct{}{})
+		if err := a2.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	// Introduce a circular dependency: logging -> app.
-	a2.AddEdge("logging", "app", struct{}{})
+	if err := a2.AddEdge("logging", "app", struct{}{}); err != nil {
+		log.Fatalf("AddEdge: %v", err)
+	}
 	c2 := csr.BuildFromAdjList(a2)
 	if _, err := search.TopologicalSort(c2); errors.Is(err, search.ErrCycle) {
 		fmt.Println("topological sort rejects the cycle (ErrCycle).")

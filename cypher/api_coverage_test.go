@@ -20,10 +20,13 @@ import (
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-func newDirGraph(nodes ...string) *lpg.Graph[string, float64] {
+func newDirGraph(tb testing.TB, nodes ...string) *lpg.Graph[string, float64] {
+	tb.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	for _, n := range nodes {
-		g.AddNode(n)
+		if err := g.AddNode(n); err != nil {
+			tb.Fatalf("AddNode: %v", err)
+		}
 	}
 	return g
 }
@@ -142,7 +145,9 @@ func TestBindParams_NestedMapError(t *testing.T) {
 func TestRunAny_WithParams(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"A", "B", "C"} {
-		g.AddNode(n)
+		if err := g.AddNode(n); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 	drainRun(t, eng, "MATCH (n) RETURN n", map[string]any{"x": int(1)})
@@ -184,7 +189,7 @@ func TestRunInTxAny_BindParamsError(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestRunInTx_EdgeWithProperties(t *testing.T) {
-	g := newDirGraph()
+	g := newDirGraph(t)
 	eng := cypher.NewEngine(g)
 
 	drainTx(t, eng, `CREATE (n:Alice)`)
@@ -203,7 +208,7 @@ func TestRunInTx_EdgeWithProperties(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestRunInTx_DetachDeleteWithEdges(t *testing.T) {
-	g := newDirGraph()
+	g := newDirGraph(t)
 	eng := cypher.NewEngine(g)
 
 	drainTx(t, eng, `CREATE (n:Hub)`)
@@ -304,8 +309,12 @@ func TestExplain_DDL(t *testing.T) {
 func TestAggregation_Sum(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i, name := range []string{"a", "b", "c"} {
-		g.AddNode(name)
-		g.SetNodeProperty(name, "age", lpg.Int64Value(int64((i+1)*10)))
+		if err := g.AddNode(name); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty(name, "age", lpg.Int64Value(int64((i+1)*10))); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 
@@ -324,8 +333,12 @@ func TestAggregation_Sum(t *testing.T) {
 func TestAggregation_Avg(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i, name := range []string{"x", "y"} {
-		g.AddNode(name)
-		g.SetNodeProperty(name, "score", lpg.Int64Value(int64((i+1)*5)))
+		if err := g.AddNode(name); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty(name, "score", lpg.Int64Value(int64((i+1)*5))); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 
@@ -344,8 +357,12 @@ func TestAggregation_Avg(t *testing.T) {
 func TestAggregation_Min(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i, name := range []string{"p", "q", "r"} {
-		g.AddNode(name)
-		g.SetNodeProperty(name, "val", lpg.Int64Value(int64(i+1)))
+		if err := g.AddNode(name); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty(name, "val", lpg.Int64Value(int64(i+1))); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 
@@ -364,8 +381,12 @@ func TestAggregation_Min(t *testing.T) {
 func TestAggregation_Max(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i, name := range []string{"u", "v", "w"} {
-		g.AddNode(name)
-		g.SetNodeProperty(name, "val", lpg.Int64Value(int64(i+1)))
+		if err := g.AddNode(name); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty(name, "val", lpg.Int64Value(int64(i+1))); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 
@@ -384,8 +405,12 @@ func TestAggregation_Max(t *testing.T) {
 func TestAggregation_Collect(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for _, name := range []string{"aa", "bb"} {
-		g.AddNode(name)
-		g.SetNodeProperty(name, "tag", lpg.StringValue(name))
+		if err := g.AddNode(name); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty(name, "tag", lpg.StringValue(name)); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 
@@ -409,8 +434,12 @@ func TestAggregation_Collect(t *testing.T) {
 func TestAggregation_SumCount(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i, name := range []string{"n1", "n2", "n3"} {
-		g.AddNode(name)
-		g.SetNodeProperty(name, "v", lpg.Int64Value(int64(i+1)))
+		if err := g.AddNode(name); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty(name, "v", lpg.Int64Value(int64(i+1))); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 
@@ -432,8 +461,12 @@ func TestAggregation_SumCount(t *testing.T) {
 
 func TestBuildIRProjection_PropertyAccess(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("alice")
-	g.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 
 	// RETURN n.name exercises the general AST evaluation path in buildIRProjection:

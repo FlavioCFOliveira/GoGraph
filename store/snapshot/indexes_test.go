@@ -52,7 +52,9 @@ func seedThreeIndexes(t *testing.T) seededFixture {
 
 	// Add a handful of nodes so the underlying CSR is non-trivial.
 	for i := 0; i < 16; i++ {
-		g.AddNode(string(rune('a' + i)))
+		if err := g.AddNode(string(rune('a' + i))); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 	for i := uint64(0); i < 16; i++ {
 		lab.Add(1, graph.NodeID(i))
@@ -114,9 +116,15 @@ func TestSnapshot_IndexesPersisted(t *testing.T) {
 func TestSnapshot_NoManagerNoIndexes(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("a")
-	g.AddNode("b")
-	g.AddEdge("a", "b", 0)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	dir := filepath.Join(t.TempDir(), "snap")
 	c := csr.BuildFromAdjList(g.AdjList())
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -143,7 +151,9 @@ func TestSnapshot_EmptyManagerNoIndexes(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	g.SetIndexManager(index.NewManager())
-	g.AddNode("a")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	dir := filepath.Join(t.TempDir(), "snap")
 	c := csr.BuildFromAdjList(g.AdjList())
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -270,7 +280,9 @@ func TestSnapshot_NonSerializableSubscriberSkipped(t *testing.T) {
 	if err := mgr.CreateIndex("nope", &dummySub{}); err != nil {
 		t.Fatalf("CreateIndex: %v", err)
 	}
-	g.AddNode("a")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	dir := filepath.Join(t.TempDir(), "snap")
 	c := csr.BuildFromAdjList(g.AdjList())
 	if err := WriteSnapshotFull(dir, c, g); err != nil {

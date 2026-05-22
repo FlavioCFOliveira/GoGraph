@@ -18,10 +18,13 @@ import (
 )
 
 // newDirectedGraph creates a directed lpg.Graph with the given initial string nodes.
-func newDirectedGraph(nodes ...string) *lpg.Graph[string, float64] {
+func newDirectedGraph(tb testing.TB, nodes ...string) *lpg.Graph[string, float64] {
+	tb.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	for _, n := range nodes {
-		g.AddNode(n)
+		if err := g.AddNode(n); err != nil {
+			tb.Fatalf("AddNode: %v", err)
+		}
 	}
 	return g
 }
@@ -33,7 +36,7 @@ func newDirectedGraph(nodes ...string) *lpg.Graph[string, float64] {
 // TestRunInTx_ParseError verifies that a parse error is surfaced correctly.
 func TestRunInTx_ParseError(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	_, err := eng.RunInTx(context.Background(), "THIS IS NOT CYPHER !!!!", nil)
@@ -45,7 +48,7 @@ func TestRunInTx_ParseError(t *testing.T) {
 // TestRunInTx_ReadQuery verifies that RunInTx still works for read queries.
 func TestRunInTx_ReadQuery(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph("A", "B", "C")
+	g := newDirectedGraph(t, "A", "B", "C")
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.RunInTx(context.Background(), "MATCH (n) RETURN n", nil)
@@ -73,7 +76,7 @@ func TestRunInTx_ReadQuery(t *testing.T) {
 // TestRunInTx_CreateNode creates a labelled node and verifies the label index.
 func TestRunInTx_CreateNode(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.RunInTx(context.Background(), `CREATE (n:Person {name: "Alice"})`, nil)
@@ -104,7 +107,7 @@ func TestRunInTx_CreateNode(t *testing.T) {
 // nodes than before.
 func TestRunInTx_CreateNode_Simple(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	before := g.AdjList().Order()
 	eng := cypher.NewEngine(g)
 
@@ -129,7 +132,7 @@ func TestRunInTx_CreateNode_Simple(t *testing.T) {
 // TestRunInTx_Race verifies that concurrent RunInTx read calls are race-clean.
 func TestRunInTx_Race(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph("X", "Y", "Z")
+	g := newDirectedGraph(t, "X", "Y", "Z")
 	eng := cypher.NewEngine(g)
 
 	const goroutines = 8
@@ -177,7 +180,7 @@ func drainRunInTx(t *testing.T, eng *cypher.Engine, query string) {
 // verifies the property is written to the graph.
 func TestRunInTx_SetProperty_SingleKey(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	// Create a Person node first.
@@ -206,7 +209,7 @@ func TestRunInTx_SetProperty_SingleKey(t *testing.T) {
 // TestRunInTx_SetLabels_AddsLabel verifies SET n:Label adds the label.
 func TestRunInTx_SetLabels_AddsLabel(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person)`)
@@ -226,7 +229,7 @@ func TestRunInTx_SetLabels_AddsLabel(t *testing.T) {
 // TestRunInTx_RemoveProperty removes a property from a labelled node.
 func TestRunInTx_RemoveProperty(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person {name: "Alice"})`)
@@ -250,7 +253,7 @@ func TestRunInTx_RemoveProperty(t *testing.T) {
 // TestRunInTx_RemoveLabels removes a label from a node.
 func TestRunInTx_RemoveLabels(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	// First create a Person+Employee node via two CREATE calls.
@@ -277,7 +280,7 @@ func TestRunInTx_RemoveLabels(t *testing.T) {
 // TestRunInTx_DeleteNode_Isolated deletes a node with no relationships.
 func TestRunInTx_DeleteNode_Isolated(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Isolated)`)
@@ -302,7 +305,7 @@ func TestRunInTx_DeleteNode_Isolated(t *testing.T) {
 // TestRunInTx_DetachDelete removes a node and its incident edges.
 func TestRunInTx_DetachDelete(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	// Create two nodes and connect them.
@@ -310,7 +313,9 @@ func TestRunInTx_DetachDelete(t *testing.T) {
 	drainRunInTx(t, eng, `CREATE (n:Spoke)`)
 
 	// Add an edge directly through lpg to simulate a connected node.
-	g.AddEdge("__spoke_key__", "__hub_key__", 1.0)
+	if err := g.AddEdge("__spoke_key__", "__hub_key__", 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	// Hub node created by CREATE gets a synthetic key; we just verify DETACH
 	// DELETE on the Hub label doesn't error.
 	drainRunInTx(t, eng, `MATCH (n:Hub) DETACH DELETE n`)
@@ -334,7 +339,7 @@ func TestRunInTx_DetachDelete(t *testing.T) {
 // the node (ON CREATE path).
 func TestRunInTx_Merge_CreatePath(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `MERGE (n:Company)`)
@@ -357,7 +362,7 @@ func TestRunInTx_Merge_CreatePath(t *testing.T) {
 // TestRunInTx_CreateRelationship creates two nodes then an edge between them.
 func TestRunInTx_CreateRelationship(t *testing.T) {
 	t.Parallel()
-	g := newDirectedGraph()
+	g := newDirectedGraph(t)
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:A)`)

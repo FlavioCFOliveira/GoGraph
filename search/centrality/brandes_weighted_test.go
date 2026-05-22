@@ -18,7 +18,9 @@ func TestWeightedBetweenness_PathUnitWeights(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
-		a.AddEdge(i, i+1, 1.0)
+		if err := a.AddEdge(i, i+1, 1.0); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	cb, err := WeightedBetweenness(c)
@@ -28,7 +30,9 @@ func TestWeightedBetweenness_PathUnitWeights(t *testing.T) {
 	// Unweighted equivalent.
 	au := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
-		au.AddEdge(i, i+1, struct{}{})
+		if err := au.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	cu := csr.BuildFromAdjList(au)
 	cbu := Betweenness(cu)
@@ -51,9 +55,15 @@ func TestWeightedBetweenness_WeightSensitive(t *testing.T) {
 	// has nonzero betweenness; without the heavy detour every pair
 	// is directly connected so the centre vertex would have zero.
 	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
-	a.AddEdge(0, 1, 1.0)
-	a.AddEdge(1, 2, 1.0)
-	a.AddEdge(0, 2, 10.0)
+	if err := a.AddEdge(0, 1, 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(0, 2, 10.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	cb, err := WeightedBetweenness(c)
 	if err != nil {
@@ -70,8 +80,12 @@ func TestWeightedBetweenness_WeightSensitive(t *testing.T) {
 func TestWeightedBetweenness_NaN(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
-	a.AddEdge(0, 1, 1.0)
-	a.AddEdge(1, 2, math.NaN())
+	if err := a.AddEdge(0, 1, 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, math.NaN()); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	got, err := WeightedBetweenness(c)
 	if !errors.Is(err, ErrInvalidInput) {
@@ -87,8 +101,12 @@ func TestWeightedBetweenness_NaN(t *testing.T) {
 func TestWeightedBetweenness_Inf(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
-	a.AddEdge(0, 1, 1.0)
-	a.AddEdge(1, 2, math.Inf(1))
+	if err := a.AddEdge(0, 1, 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, math.Inf(1)); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	if _, err := WeightedBetweenness(c); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("+Inf err=%v, want ErrInvalidInput", err)
@@ -101,8 +119,12 @@ func TestWeightedBetweenness_Inf(t *testing.T) {
 func TestWeightedBetweenness_Negative(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
-	a.AddEdge(0, 1, 1.0)
-	a.AddEdge(1, 2, -2.0)
+	if err := a.AddEdge(0, 1, 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, -2.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	_, err := WeightedBetweenness(c)
 	if !errors.Is(err, search.ErrNegativeWeight) {

@@ -26,24 +26,32 @@ import (
 // GraphMutator is NOT safe for concurrent use from multiple goroutines; each
 // physical operator tree owns exactly one instance.
 type GraphMutator interface {
-	// AddNode interns n and returns its stable NodeID.
-	AddNode(n string) graph.NodeID
+	// AddNode interns n and returns its stable NodeID. Returns the
+	// error from the underlying graph implementation (currently only
+	// [adjlist.ErrShardFull] is reachable, and only when the
+	// underlying [adjlist.Config.MaxShardCapacity] is set).
+	AddNode(n string) (graph.NodeID, error)
 
 	// AddEdge inserts a directed edge (src→dst) with weight w, interning
-	// endpoints as needed. Returns the stable NodeIDs of src and dst.
-	AddEdge(src, dst string, w float64) (srcID, dstID graph.NodeID)
+	// endpoints as needed. Returns the stable NodeIDs of src and dst and
+	// any error from the underlying graph implementation.
+	AddEdge(src, dst string, w float64) (srcID, dstID graph.NodeID, err error)
 
 	// RemoveEdge removes the directed edge from src to dst (no-op if absent).
 	RemoveEdge(src, dst string)
 
-	// SetNodeLabel attaches label to n (inserting n if absent).
-	SetNodeLabel(n, label string)
+	// SetNodeLabel attaches label to n (inserting n if absent). Returns
+	// any error from the underlying [adjlist.AdjList.AddNode] (see
+	// [GraphMutator.AddNode]).
+	SetNodeLabel(n, label string) error
 
 	// RemoveNodeLabel detaches label from n (no-op if absent).
 	RemoveNodeLabel(n, label string)
 
-	// SetNodeProperty sets the named property on n.
-	SetNodeProperty(n, key string, value lpg.PropertyValue)
+	// SetNodeProperty sets the named property on n. Returns any error
+	// from the underlying [adjlist.AdjList.AddNode] (see
+	// [GraphMutator.AddNode]).
+	SetNodeProperty(n, key string, value lpg.PropertyValue) error
 
 	// DelNodeProperty removes the named property from n (no-op if absent).
 	DelNodeProperty(n, key string)

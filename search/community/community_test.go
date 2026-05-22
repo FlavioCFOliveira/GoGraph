@@ -33,7 +33,9 @@ func BenchmarkLeiden_RandomGraph(b *testing.B) {
 			from = r.IntN(n)
 			to = r.IntN(n)
 		}
-		a.AddEdge(from, to, 1.0)
+		if err := a.AddEdge(from, to, 1.0); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ReportAllocs()
@@ -52,7 +54,9 @@ func BenchmarkLabelPropagation_RandomGraph(b *testing.B) {
 	const n = 4096
 	r := rand.New(rand.NewPCG(41, 43)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 8*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ReportAllocs()
@@ -68,15 +72,21 @@ func TestLeiden_TwoCliques(t *testing.T) {
 	// Two K4 cliques joined by a single bridge.
 	for i := 0; i < 4; i++ {
 		for j := i + 1; j < 4; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	for i := 4; i < 8; i++ {
 		for j := i + 1; j < 8; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
-	a.AddEdge(3, 4, struct{}{})
+	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	p := Leiden(c, DefaultLeidenOptions())
 	// Traag-Waltman Leiden separates two strongly-internally-connected
@@ -121,12 +131,16 @@ func TestLeiden_DisconnectedComponents(t *testing.T) {
 	// Two fully-disjoint K3 cliques.
 	for i := 0; i < 3; i++ {
 		for j := i + 1; j < 3; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	for i := 3; i < 6; i++ {
 		for j := i + 1; j < 6; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	c := csr.BuildFromAdjList(a)
@@ -141,15 +155,21 @@ func TestLabelPropagation_TwoCliques(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
 		for j := i + 1; j < 4; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	for i := 4; i < 8; i++ {
 		for j := i + 1; j < 8; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
-	a.AddEdge(3, 4, struct{}{})
+	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	p := LabelPropagation(c, DefaultLabelPropagationOptions())
 	if p.NumCommunities < 1 {

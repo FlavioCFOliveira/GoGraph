@@ -11,9 +11,15 @@ import (
 func TestCSR_IsSymmetric_Undirected(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 2, struct{}{})
-	a.AddEdge(2, 0, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 0, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := BuildFromAdjList(a)
 	if !c.IsSymmetric() {
 		t.Fatal("undirected AdjList must produce a symmetric CSR")
@@ -25,8 +31,12 @@ func TestCSR_IsSymmetric_Undirected(t *testing.T) {
 func TestCSR_IsSymmetric_Directed_Asymmetric(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 2, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := BuildFromAdjList(a)
 	if c.IsSymmetric() {
 		t.Fatal("directed one-way graph must not be symmetric")
@@ -40,8 +50,12 @@ func TestCSR_IsSymmetric_Directed_BothWays(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	pairs := [][2]int{{0, 1}, {1, 2}, {2, 0}}
 	for _, p := range pairs {
-		a.AddEdge(p[0], p[1], struct{}{})
-		a.AddEdge(p[1], p[0], struct{}{})
+		if err := a.AddEdge(p[0], p[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+		if err := a.AddEdge(p[1], p[0], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := BuildFromAdjList(a)
 	if !c.IsSymmetric() {
@@ -54,8 +68,12 @@ func TestCSR_IsSymmetric_Directed_BothWays(t *testing.T) {
 func TestCSR_IsSymmetric_SelfLoopsOnly(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 0, struct{}{})
-	a.AddEdge(1, 1, struct{}{})
+	if err := a.AddEdge(0, 0, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := BuildFromAdjList(a)
 	if !c.IsSymmetric() {
 		t.Fatal("self-loops only must be symmetric")
@@ -67,8 +85,12 @@ func TestCSR_IsSymmetric_SelfLoopsOnly(t *testing.T) {
 func TestCSR_IsSymmetric_Empty(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddNode(0)
-	a.AddNode(1)
+	if err := a.AddNode(0); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddNode(1); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	c := BuildFromAdjList(a)
 	if !c.IsSymmetric() {
 		t.Fatal("empty edge set must be reported symmetric")

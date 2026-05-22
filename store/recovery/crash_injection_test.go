@@ -1014,9 +1014,15 @@ func TestCrashInjection_ApplyOpCodec_AddNodeAndRemoveNode(t *testing.T) {
 		t.Fatal("AddNode did not intern alice")
 	}
 	// Seed labels and properties on alice, then exercise RemoveNode.
-	g.SetNodeLabel("alice", "A")
-	g.SetNodeLabel("alice", "B")
-	g.SetNodeProperty("alice", "k", lpg.StringValue("v"))
+	if err := g.SetNodeLabel("alice", "A"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("alice", "B"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "k", lpg.StringValue("v")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	op2, err := Decode(build(txn.OpRemoveNode, "alice", ""))
 	if err != nil {
 		t.Fatal(err)
@@ -1041,7 +1047,9 @@ func TestCrashInjection_ApplyOpCodec_RemoveEdgeRoundTrip(t *testing.T) {
 	codec := txn.NewStringCodec()
 	wcodec := txn.NewInt64WeightCodec()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AdjList().AddEdge("alice", "bob", 0)
+	if err := g.AdjList().AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	p := []byte{txn.OpRecordV2, byte(txn.OpRemoveEdge)}
 	p = codec.Encode(p, "alice")
@@ -1067,7 +1075,9 @@ func TestCrashInjection_ApplyOpCodec_RemoveNodeLabelRoundTrip(t *testing.T) {
 	codec := txn.NewStringCodec()
 	wcodec := txn.NewInt64WeightCodec()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.SetNodeLabel("alice", "Tmp")
+	if err := g.SetNodeLabel("alice", "Tmp"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 
 	p := []byte{txn.OpRecordV2, byte(txn.OpRemoveNodeLabel)}
 	p = codec.Encode(p, "alice")
@@ -1095,8 +1105,12 @@ func TestCrashInjection_ApplyOpCodec_DelPropertiesRoundTrip(t *testing.T) {
 	codec := txn.NewStringCodec()
 	wcodec := txn.NewInt64WeightCodec()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AdjList().AddEdge("a", "b", 0)
-	g.SetNodeProperty("a", "k", lpg.StringValue("v"))
+	if err := g.AdjList().AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "k", lpg.StringValue("v")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	g.SetEdgeProperty("a", "b", "k", lpg.StringValue("v"))
 
 	delNode := []byte{txn.OpRecordV2, byte(txn.OpDelNodeProperty)}
@@ -1158,7 +1172,9 @@ func TestCrashInjection_MixedSnapshotV1V2(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Add a typed property after the commit (snapshot-only path).
-	g.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
+	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	// === v1 snapshot pass ===
 	snapDir := filepath.Join(dir, "snapshot")

@@ -19,7 +19,7 @@ func TestBellmanFord_HandBuilt(t *testing.T) {
 		{3, 1, -2},
 		{4, 0, 2}, {4, 3, 7},
 	}
-	c, a := buildWeightedCSR(edges)
+	c, a := buildWeightedCSR(t, edges)
 	src, _ := a.Mapper().Lookup(0)
 	d, err := BellmanFord(c, src)
 	if err != nil {
@@ -42,7 +42,7 @@ func TestBellmanFord_HandBuilt(t *testing.T) {
 func TestBellmanFord_DetectNegativeCycle(t *testing.T) {
 	t.Parallel()
 	// Cycle 0 -> 1 -> 2 -> 0 with total weight -1.
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 1}, {1, 2, -3}, {2, 0, 1},
 	})
 	src, _ := a.Mapper().Lookup(0)
@@ -55,7 +55,7 @@ func TestBellmanFord_DetectNegativeCycle(t *testing.T) {
 func TestBellmanFord_NegativeWeightsNoCycle(t *testing.T) {
 	t.Parallel()
 	// 0 --(-1)--> 1 --2--> 2
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, -1}, {1, 2, 2}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, -1}, {1, 2, 2}})
 	src, _ := a.Mapper().Lookup(0)
 	d, err := BellmanFord(c, src)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestBellmanFord_RandomisedAgainstDijkstra(t *testing.T) {
 		for i := 0; i < e; i++ {
 			edges = append(edges, weightedEdge{r.IntN(n), r.IntN(n), int64(r.IntN(50) + 1)})
 		}
-		c, a := buildWeightedCSRCfg(edges, adjlist.Config{Directed: true, Multigraph: true})
+		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{Directed: true, Multigraph: true})
 		src := r.IntN(n)
 		srcID, _ := a.Mapper().Lookup(src)
 		gotBF, err := BellmanFord(c, srcID)
@@ -117,8 +117,12 @@ func TestBellmanFord_RandomisedAgainstDijkstra(t *testing.T) {
 func TestBellmanFord_NaN(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, 1.0)
-	a.AddEdge(1, 2, math.NaN())
+	if err := a.AddEdge(0, 1, 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, math.NaN()); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(0)
 	d, err := BellmanFord(c, srcID)
@@ -135,7 +139,9 @@ func TestBellmanFord_NaN(t *testing.T) {
 func TestBellmanFord_Inf(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, math.Inf(1))
+	if err := a.AddEdge(0, 1, math.Inf(1)); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(0)
 	if _, err := BellmanFord(c, srcID); !errors.Is(err, ErrInvalidInput) {
@@ -143,7 +149,9 @@ func TestBellmanFord_Inf(t *testing.T) {
 	}
 
 	a2 := adjlist.New[int, float64](adjlist.Config{Directed: true})
-	a2.AddEdge(0, 1, math.Inf(-1))
+	if err := a2.AddEdge(0, 1, math.Inf(-1)); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c2 := csr.BuildFromAdjList(a2)
 	srcID2, _ := a2.Mapper().Lookup(0)
 	if _, err := BellmanFord(c2, srcID2); !errors.Is(err, ErrInvalidInput) {
@@ -157,7 +165,7 @@ func TestBellmanFord_Inf(t *testing.T) {
 // return a regular result on a normal integer graph.
 func TestBellmanFord_IntegerSkipsValidation(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 5}, {1, 2, 7}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 5}, {1, 2, 7}})
 	src, _ := a.Mapper().Lookup(0)
 	d, err := BellmanFord(c, src)
 	if err != nil {
@@ -173,12 +181,16 @@ func BenchmarkBellmanFord_10kVertices(b *testing.B) {
 	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
 	const universe = 1 << 14 // 16384 nodes
 	for i := uint32(0); i < uint32(universe); i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			b.Fatalf("AddNode: %v", err)
+		}
 	}
 	r := rand.New(rand.NewPCG(31, 1)) //nolint:gosec // deterministic benchmark RNG
 	const fill = universe * 4
 	for i := 0; i < fill; i++ {
-		a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1))
+		if err := a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(uint32(0))

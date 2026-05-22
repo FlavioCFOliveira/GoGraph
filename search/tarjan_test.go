@@ -11,7 +11,9 @@ import (
 func TestTarjanSCC_SingleNode(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddNode(0)
+	if err := a.AddNode(0); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	sccs := TarjanSCC(c)
 	if len(sccs) != 0 {
@@ -29,7 +31,9 @@ func TestTarjanSCC_TwoCycles(t *testing.T) {
 	}
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for _, e := range edges {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	sccs := TarjanSCC(c)
@@ -66,8 +70,12 @@ func TestTarjanSCC_TwoCycles(t *testing.T) {
 func TestTarjanSCC_NoCycles(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 2, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	sccs := TarjanSCC(c)
 	for _, comp := range sccs {

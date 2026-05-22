@@ -75,14 +75,28 @@ func buildSmokeCSR(t *testing.T) (*csr.CSR[int64], graph.NodeID) {
 	t.Helper()
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
 	for i := 0; i < 6; i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
-	a.AddEdge(0, 1, 1)
-	a.AddEdge(1, 2, 1)
-	a.AddEdge(2, 3, 1)
-	a.AddEdge(3, 4, 1)
-	a.AddEdge(4, 5, 1)
-	a.AddEdge(5, 0, 1)
+	if err := a.AddEdge(0, 1, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 3, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(3, 4, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(4, 5, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(5, 0, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
 	return c, src
@@ -129,7 +143,9 @@ func driveCentralitySample(t *testing.T, be *countingBackend, c *csr.CSR[int64])
 func driveCSVSample(t *testing.T, be *countingBackend) {
 	t.Helper()
 	csvAdj := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	csvAdj.AddEdge("a", "b", 1)
+	if err := csvAdj.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	if _, err := csv.WriteCtx(context.Background(), &buf, csvAdj, csv.DefaultOptions()); err != nil {
 		t.Fatalf("csv.WriteCtx: %v", err)

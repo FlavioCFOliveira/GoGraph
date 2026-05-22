@@ -15,6 +15,7 @@ package cypher_ldbc_test
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,14 +38,20 @@ func TestMain(m *testing.M) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	for i := 0; i < seedSize; i++ {
 		key := fmt.Sprintf("n%d", i)
-		g.AddNode(key)
+		if err := g.AddNode(key); err != nil {
+			log.Fatalf("seed AddNode: %v", err)
+		}
+		var lbl string
 		switch i % 3 {
 		case 0:
-			g.SetNodeLabel(key, "Person")
+			lbl = "Person"
 		case 1:
-			g.SetNodeLabel(key, "City")
+			lbl = "City"
 		case 2:
-			g.SetNodeLabel(key, "Company")
+			lbl = "Company"
+		}
+		if err := g.SetNodeLabel(key, lbl); err != nil {
+			log.Fatalf("seed SetNodeLabel: %v", err)
 		}
 	}
 	// Pre-install an index.Manager so that concurrent NewEngine calls in

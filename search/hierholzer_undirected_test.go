@@ -14,7 +14,9 @@ func TestHierholzerUndirected_K4_NoEulerian(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
 		for j := i + 1; j < 4; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	c := csr.BuildFromAdjList(a)
@@ -29,7 +31,9 @@ func TestHierholzerUndirected_Cycle(t *testing.T) {
 	// 4-cycle: every vertex has even degree. Eulerian circuit exists.
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
-		a.AddEdge(i, (i+1)%4, struct{}{})
+		if err := a.AddEdge(i, (i+1)%4, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	trail, err := HierholzerUndirected(c)
@@ -50,7 +54,9 @@ func TestHierholzerUndirected_PathEndpoints(t *testing.T) {
 	// vertices 1 and 2 have degree 2 (even). Eulerian path exists.
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 3; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	trail, err := HierholzerUndirected(c)

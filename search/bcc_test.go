@@ -17,7 +17,9 @@ func TestHopcroftTarjanBCC_BridgeFixture(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	edges := [][2]int{{0, 1}, {1, 2}, {2, 0}, {2, 3}, {3, 4}, {4, 5}, {5, 3}}
 	for _, e := range edges {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	res := HopcroftTarjanBCC(c)
@@ -52,7 +54,9 @@ func TestHopcroftTarjanBCC_SingleCycle(t *testing.T) {
 	// A single cycle: no bridges, no articulation points.
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 5; i++ {
-		a.AddEdge(i, (i+1)%5, struct{}{})
+		if err := a.AddEdge(i, (i+1)%5, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	res := HopcroftTarjanBCC(c)
@@ -74,8 +78,12 @@ func TestHopcroftTarjanBCC_SingleCycle(t *testing.T) {
 func TestHopcroftTarjanBCC_MultigraphParallel(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false, Multigraph: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(0, 1, struct{}{}) // parallel
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil { // parallel
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	res := HopcroftTarjanBCC(c)
 	if len(res.Bridges) != 0 {
@@ -96,7 +104,9 @@ func TestHopcroftTarjanBCC_MultigraphSingleEdgeStillBridge(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false, Multigraph: true})
 	for _, e := range [][2]int{{0, 1}, {1, 2}, {2, 0}, {2, 3}, {3, 4}, {4, 5}, {5, 3}} {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	res := HopcroftTarjanBCC(c)
@@ -115,10 +125,14 @@ func TestHopcroftTarjanBCC_TwoDisjointTriangles(t *testing.T) {
 	tri1 := [][2]int{{0, 1}, {1, 2}, {2, 0}}
 	tri2 := [][2]int{{3, 4}, {4, 5}, {5, 3}}
 	for _, e := range tri1 {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	for _, e := range tri2 {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	res := HopcroftTarjanBCC(c)
@@ -137,10 +151,14 @@ func TestHopcroftTarjanBCC_TwoDisjointPaths(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
-		a.AddEdge(i, i+1, struct{}{}) // path 0-1-2-3-4
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil { // path 0-1-2-3-4
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	for i := 5; i < 9; i++ {
-		a.AddEdge(i, i+1, struct{}{}) // path 5-6-7-8-9
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil { // path 5-6-7-8-9
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	res := HopcroftTarjanBCC(c)
@@ -226,10 +244,14 @@ func TestHopcroftTarjanBCC_ForestPropertyVsBrute(t *testing.T) {
 			base := nextID
 			// Spanning path inside the component so it stays connected.
 			for i := 0; i < size; i++ {
-				a.AddNode(base + i)
+				if err := a.AddNode(base + i); err != nil {
+					t.Fatalf("AddNode: %v", err)
+				}
 			}
 			for i := 0; i < size-1; i++ {
-				a.AddEdge(base+i, base+i+1, struct{}{})
+				if err := a.AddEdge(base+i, base+i+1, struct{}{}); err != nil {
+					t.Fatalf("AddEdge: %v", err)
+				}
 			}
 			// A few extra random chords inside this component.
 			extra := rapid.IntRange(0, size).Draw(rt, "extraChords")
@@ -237,7 +259,9 @@ func TestHopcroftTarjanBCC_ForestPropertyVsBrute(t *testing.T) {
 				u := rapid.IntRange(0, size-1).Draw(rt, "u")
 				v := rapid.IntRange(0, size-1).Draw(rt, "v")
 				if u != v {
-					a.AddEdge(base+u, base+v, struct{}{})
+					if err := a.AddEdge(base+u, base+v, struct{}{}); err != nil {
+						t.Fatalf("AddEdge: %v", err)
+					}
 				}
 			}
 			nextID = base + size

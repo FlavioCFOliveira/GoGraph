@@ -23,18 +23,42 @@ import (
 // the row must survive with b=NULL.
 func TestMatch7_BoundNodesWithoutMatches(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	g.AddNode("s")
-	g.AddNode("a")
-	g.AddNode("b")
-	g.AddNode("c")
-	g.SetNodeLabel("s", "Single")
-	g.SetNodeLabel("a", "A")
-	g.SetNodeLabel("b", "B")
-	g.SetNodeLabel("c", "C")
-	g.AddEdge("s", "a", 0)
-	g.AddEdge("s", "b", 0)
-	g.AddEdge("a", "c", 0)
-	g.AddEdge("b", "b", 0) // self-loop on b
+	if err := g.AddNode("s"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("c"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.SetNodeLabel("s", "Single"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "A"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("b", "B"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("c", "C"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.AddEdge("s", "a", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("s", "b", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("a", "c", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("b", "b", 0); err != nil { // self-loop on b
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	res, err := eng.Run(context.Background(),

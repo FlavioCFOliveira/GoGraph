@@ -151,7 +151,9 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 				return false, cerr
 			}
 		}
-		op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv)
+		if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
+			return false, serr
+		}
 		if op.reg != nil {
 			labels := op.mutator.NodeLabels(nodeKey)
 			op.reg.RecordPropertySet(labels, op.propertyKey, pv)
@@ -168,7 +170,9 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 		}
 		labels := op.mutator.NodeLabels(nodeKey)
 		for _, p := range op.parsedMap {
-			op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+			if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
+				return false, serr
+			}
 			if op.reg != nil {
 				op.reg.RecordPropertySet(labels, p.key, p.value)
 			}
@@ -189,7 +193,9 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 		}
 		labels := op.mutator.NodeLabels(nodeKey)
 		for _, p := range op.parsedMap {
-			op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+			if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
+				return false, serr
+			}
 			if op.reg != nil {
 				op.reg.RecordPropertySet(labels, p.key, p.value)
 			}
@@ -287,7 +293,9 @@ func (op *SetLabels) Next(out *Row) (bool, error) {
 	}
 
 	for _, lbl := range op.labels {
-		op.mutator.SetNodeLabel(nodeKey, lbl)
+		if err := op.mutator.SetNodeLabel(nodeKey, lbl); err != nil {
+			return false, fmt.Errorf("exec: SetLabels SetNodeLabel: %w", err)
+		}
 	}
 
 	*out = childRow

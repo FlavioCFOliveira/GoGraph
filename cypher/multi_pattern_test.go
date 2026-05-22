@@ -41,10 +41,18 @@ func nodeID(g *lpg.Graph[string, float64], name string) int64 {
 // each variable column carrying the correct value.
 func TestMultiPattern_CartesianProduct(t *testing.T) {
 	g := newDirectedTestGraph()
-	g.AddNode("alice")
-	g.AddNode("bob")
-	g.AddNode("charlie")
-	g.AddEdge("alice", "bob", 0) // single edge alice → bob
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("charlie"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddEdge("alice", "bob", 0); err != nil { // single edge alice → bob
+		t.Fatalf("AddEdge: %v", err)
+	}
 	aliceID := nodeID(g, "alice")
 	bobID := nodeID(g, "bob")
 	charlieID := nodeID(g, "charlie")
@@ -98,11 +106,21 @@ func TestMultiPattern_CartesianProduct(t *testing.T) {
 // shared variable binds consistently.
 func TestMultiPattern_SharedVariableJoin(t *testing.T) {
 	g := newDirectedTestGraph()
-	g.AddNode("alice")
-	g.AddNode("bob")
-	g.AddNode("charlie")
-	g.AddEdge("alice", "bob", 0)   // a → b
-	g.AddEdge("bob", "charlie", 0) // b → c
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("charlie"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddEdge("alice", "bob", 0); err != nil { // a → b
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("bob", "charlie", 0); err != nil { // b → c
+		t.Fatalf("AddEdge: %v", err)
+	}
 	aliceID := nodeID(g, "alice")
 	bobID := nodeID(g, "bob")
 	charlieID := nodeID(g, "charlie")
@@ -148,8 +166,12 @@ func TestMultiPattern_SharedVariableJoin(t *testing.T) {
 // inner-only variable is bound to NULL.
 func TestOptionalMatch_NullRowEmission(t *testing.T) {
 	g := newDirectedTestGraph()
-	g.AddNode("alice")
-	g.AddNode("bob")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	// No relationships at all → the OPTIONAL MATCH (a)-[:R]->(b) must fail
 	// for every a-node, and each row must survive with b = NULL.
 	aliceID := nodeID(g, "alice")
@@ -202,9 +224,15 @@ func TestOptionalMatch_NullRowEmission(t *testing.T) {
 // emits the joined row (NOT the NULL row).
 func TestOptionalMatch_MatchedRow(t *testing.T) {
 	g := newDirectedTestGraph()
-	g.AddNode("alice")
-	g.AddNode("bob")
-	g.AddEdge("alice", "bob", 0)
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	aliceID := nodeID(g, "alice")
 	bobID := nodeID(g, "bob")

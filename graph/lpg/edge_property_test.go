@@ -9,7 +9,9 @@ import (
 func TestGraph_EdgeProperties(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("alice", "bob", 0)
+	if err := g.AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	g.SetEdgeProperty("alice", "bob", "since", Int64Value(2020))
 	g.SetEdgeProperty("alice", "bob", "weight", Float64Value(0.9))
 
@@ -45,7 +47,9 @@ func TestGraph_GetEdgeProperty_UnknownNodes(t *testing.T) {
 	if _, ok := g.GetEdgeProperty("nope", "nada", "k"); ok {
 		t.Fatalf("Get on unknown nodes must return false")
 	}
-	g.AddEdge("a", "b", 0)
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	if _, ok := g.GetEdgeProperty("a", "nada", "k"); ok {
 		t.Fatalf("Get on unknown dst must return false")
 	}

@@ -117,10 +117,14 @@ func buildSeedGraph(n int) *adjlist.AdjList[int, int64] {
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
 	r := rand.New(rand.NewPCG(53, 59)) //nolint:gosec // deterministic seed
 	for i := 0; i < n; i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			log.Fatalf("soak: seed AddNode(%d): %v", i, err)
+		}
 	}
 	for i := 0; i < 4*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1))
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
+			log.Fatalf("soak: seed AddEdge[%d]: %v", i, err)
+		}
 	}
 	return a
 }
@@ -161,7 +165,10 @@ func writer(ctx context.Context, wg *sync.WaitGroup, a *adjlist.AdjList[int, int
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1))
+			if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
+				// Soak is uncapped; an error here is a programmer bug.
+				log.Fatalf("soak: writer AddEdge: %v", err)
+			}
 			writes.Add(1)
 		case <-rebuildTicker.C:
 			snap.Store(csr.BuildFromAdjList(a))

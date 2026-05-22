@@ -26,7 +26,9 @@ func TestReadIntoCtx_ContextCancelled(t *testing.T) {
 func TestWriteCtx_ContextCancelled(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("alice", "bob", 0)
+	if err := a.AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var buf bytes.Buffer
@@ -40,7 +42,9 @@ func TestWriteCtx_ContextCancelled(t *testing.T) {
 func TestWriteCtx_HasHeader(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("alice", "bob", 42)
+	if err := a.AddEdge("alice", "bob", 42); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	n, err := WriteCtx(context.Background(), &buf, a, Options{HasHeader: true})
 	if err != nil {

@@ -15,14 +15,28 @@ func TestHopcroftKarp_PerfectMatching(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	// Pre-intern left vertices first so they get the low NodeIDs.
 	for i := 0; i < 6; i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
-	a.AddEdge(0, 3, struct{}{})
-	a.AddEdge(0, 4, struct{}{})
-	a.AddEdge(1, 4, struct{}{})
-	a.AddEdge(1, 5, struct{}{})
-	a.AddEdge(2, 3, struct{}{})
-	a.AddEdge(2, 5, struct{}{})
+	if err := a.AddEdge(0, 3, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(0, 4, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 4, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 5, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 3, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 5, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	// Determine nLeft from mapper layout: count left vertices known.
@@ -50,7 +64,9 @@ func TestHopcroftKarp_NoEdges(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 4; i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	m := HopcroftKarp(c, int(c.MaxNodeID()))
@@ -70,7 +86,9 @@ func TestHopcroftKarp_CompleteBipartite_K3x4(t *testing.T) {
 	right := []string{"R0", "R1", "R2", "R3"}
 	for _, l := range left {
 		for _, r := range right {
-			a.AddEdge(l, r, struct{}{})
+			if err := a.AddEdge(l, r, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	c := csr.BuildFromAdjList(a)
@@ -90,12 +108,24 @@ func TestHopcroftKarp_HallCounterexample(t *testing.T) {
 	// Left {L0, L1, L2}; right {R0}. Only L0 and L1 connect to R0;
 	// L2 has no neighbours. By Hall's theorem the matching has at
 	// most 1 (only R0 is reachable from any left vertex).
-	a.AddNode("L0")
-	a.AddNode("L1")
-	a.AddNode("L2")
-	a.AddNode("R0")
-	a.AddEdge("L0", "R0", struct{}{})
-	a.AddEdge("L1", "R0", struct{}{})
+	if err := a.AddNode("L0"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddNode("L1"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddNode("L2"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddNode("R0"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddEdge("L0", "R0", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("L1", "R0", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	m := HopcroftKarp(c, int(c.MaxNodeID()))
 	if m.Size != 1 {
@@ -114,17 +144,25 @@ func TestHopcroftKarp_DeepChain(t *testing.T) {
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
 	// Pre-intern lefts first to keep them in the low NodeID range.
 	for i := 0; i < n; i++ {
-		a.AddNode(fmt.Sprintf("L%05d", i))
+		if err := a.AddNode(fmt.Sprintf("L%05d", i)); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 	for i := 0; i < n; i++ {
-		a.AddNode(fmt.Sprintf("R%05d", i))
+		if err := a.AddNode(fmt.Sprintf("R%05d", i)); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 	// Edges: L_i -> R_i and L_i -> R_{i-1} (i > 0). Forces successive
 	// shortest augmenting paths that grow by 2 each phase.
 	for i := 0; i < n; i++ {
-		a.AddEdge(fmt.Sprintf("L%05d", i), fmt.Sprintf("R%05d", i), struct{}{})
+		if err := a.AddEdge(fmt.Sprintf("L%05d", i), fmt.Sprintf("R%05d", i), struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 		if i > 0 {
-			a.AddEdge(fmt.Sprintf("L%05d", i), fmt.Sprintf("R%05d", i-1), struct{}{})
+			if err := a.AddEdge(fmt.Sprintf("L%05d", i), fmt.Sprintf("R%05d", i-1), struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	c := csr.BuildFromAdjList(a)
@@ -141,14 +179,20 @@ func BenchmarkHopcroftKarp_Bipartite(b *testing.B) {
 	const n = 512
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < n; i++ {
-		a.AddNode(fmt.Sprintf("L%05d", i))
+		if err := a.AddNode(fmt.Sprintf("L%05d", i)); err != nil {
+			b.Fatalf("AddNode: %v", err)
+		}
 	}
 	for i := 0; i < n; i++ {
-		a.AddNode(fmt.Sprintf("R%05d", i))
+		if err := a.AddNode(fmt.Sprintf("R%05d", i)); err != nil {
+			b.Fatalf("AddNode: %v", err)
+		}
 	}
 	r := rand.New(rand.NewPCG(67, 71)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 4*n; i++ {
-		a.AddEdge(fmt.Sprintf("L%05d", r.IntN(n)), fmt.Sprintf("R%05d", r.IntN(n)), struct{}{})
+		if err := a.AddEdge(fmt.Sprintf("L%05d", r.IntN(n)), fmt.Sprintf("R%05d", r.IntN(n)), struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ReportAllocs()
@@ -163,7 +207,9 @@ func BenchmarkHopcroftKarp_Bipartite(b *testing.B) {
 func TestHopcroftKarp_SingleEdge(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge("L", "R", struct{}{})
+	if err := a.AddEdge("L", "R", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	m := HopcroftKarp(c, int(c.MaxNodeID()))
 	if m.Size != 1 {

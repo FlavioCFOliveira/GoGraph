@@ -15,10 +15,13 @@ import (
 
 // buildFromEdges returns a CSR over a directed graph with int nodes
 // and unweighted edges defined by the (src, dst) pairs in edges.
-func buildFromEdges(edges [][2]int) (*csr.CSR[struct{}], *adjlist.AdjList[int, struct{}]) {
+func buildFromEdges(tb testing.TB, edges [][2]int) (*csr.CSR[struct{}], *adjlist.AdjList[int, struct{}]) {
+	tb.Helper()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for _, e := range edges {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			tb.Fatalf("AddEdge: %v", err)
+		}
 	}
 	return csr.BuildFromAdjList(a), a
 }
@@ -30,7 +33,7 @@ func TestBFS_Linear(t *testing.T) {
 	for i := 0; i < n-1; i++ {
 		edges = append(edges, [2]int{i, i + 1})
 	}
-	c, a := buildFromEdges(edges)
+	c, a := buildFromEdges(t, edges)
 	m := a.Mapper()
 	srcID, _ := m.Lookup(0)
 	depths := map[int]int{}
@@ -55,7 +58,7 @@ func TestBFS_Tree(t *testing.T) {
 	//    /|     |
 	//   4 5     6
 	edges := [][2]int{{0, 1}, {0, 2}, {0, 3}, {1, 4}, {1, 5}, {3, 6}}
-	c, a := buildFromEdges(edges)
+	c, a := buildFromEdges(t, edges)
 	srcID, _ := a.Mapper().Lookup(0)
 	depths := map[int]int{}
 	BFS(c, srcID, func(node graph.NodeID, d int) bool {
@@ -77,7 +80,7 @@ func TestBFS_Tree(t *testing.T) {
 func TestBFS_Disconnected_StopsAtComponent(t *testing.T) {
 	t.Parallel()
 	edges := [][2]int{{0, 1}, {1, 2}, {3, 4}}
-	c, a := buildFromEdges(edges)
+	c, a := buildFromEdges(t, edges)
 	srcID, _ := a.Mapper().Lookup(0)
 	visited := map[int]bool{}
 	BFS(c, srcID, func(node graph.NodeID, _ int) bool {
@@ -104,7 +107,7 @@ func TestBFS_EarlyStop(t *testing.T) {
 	for i := 0; i < n-1; i++ {
 		edges = append(edges, [2]int{i, i + 1})
 	}
-	c, a := buildFromEdges(edges)
+	c, a := buildFromEdges(t, edges)
 	srcID, _ := a.Mapper().Lookup(0)
 	count := 0
 	BFS(c, srcID, func(_ graph.NodeID, _ int) bool {
@@ -118,7 +121,7 @@ func TestBFS_EarlyStop(t *testing.T) {
 
 func TestBFS_UnknownSrc(t *testing.T) {
 	t.Parallel()
-	c, _ := buildFromEdges([][2]int{{0, 1}})
+	c, _ := buildFromEdges(t, [][2]int{{0, 1}})
 	visited := 0
 	BFS(c, graph.NodeID(1<<30), func(_ graph.NodeID, _ int) bool {
 		visited++
@@ -138,7 +141,7 @@ func TestDFS_DepthOrderOnTree(t *testing.T) {
 	//      \
 	//       3
 	edges := [][2]int{{0, 1}, {0, 2}, {2, 3}}
-	c, a := buildFromEdges(edges)
+	c, a := buildFromEdges(t, edges)
 	srcID, _ := a.Mapper().Lookup(0)
 	var order []int
 	DFS(c, srcID, func(node graph.NodeID, _ int) bool {
@@ -165,7 +168,7 @@ func TestDFS_VisitsEachOnce(t *testing.T) {
 	t.Parallel()
 	// Diamond with a back-edge: 0 -> 1 -> 2 -> 0 (cycle).
 	edges := [][2]int{{0, 1}, {0, 2}, {1, 2}, {2, 0}}
-	c, a := buildFromEdges(edges)
+	c, a := buildFromEdges(t, edges)
 	srcID, _ := a.Mapper().Lookup(0)
 	counts := map[int]int{}
 	DFS(c, srcID, func(node graph.NodeID, _ int) bool {
@@ -194,7 +197,7 @@ func TestBFS_ReachabilityRandomised(t *testing.T) {
 		for i := 0; i < e; i++ {
 			edges = append(edges, [2]int{r.IntN(n), r.IntN(n)})
 		}
-		c, a := buildFromEdges(edges)
+		c, a := buildFromEdges(t, edges)
 		src := r.IntN(n)
 		srcID, _ := a.Mapper().Lookup(src)
 		if !idValid(srcID, c) {
@@ -238,7 +241,7 @@ func TestBFS_ReachabilityRandomised(t *testing.T) {
 
 func TestBFS_DFS_Concurrent(t *testing.T) {
 	t.Parallel()
-	c, a := buildFromEdges(func() [][2]int {
+	c, a := buildFromEdges(t, func() [][2]int {
 		r := rand.New(rand.NewPCG(99, 1)) //nolint:gosec // deterministic test RNG
 		const n = 256
 		const e = 1024
@@ -293,7 +296,9 @@ func BenchmarkBFS_Chain10M(b *testing.B) {
 	const n = 10_000_000
 	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
 	for i := uint32(0); i < uint32(n-1); i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(0)
@@ -308,7 +313,9 @@ func BenchmarkDFS_Chain10M(b *testing.B) {
 	const n = 10_000_000
 	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
 	for i := uint32(0); i < uint32(n-1); i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(0)
@@ -325,7 +332,9 @@ func TestBFSCtx_HonoursCancel(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 100; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)

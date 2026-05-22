@@ -13,7 +13,7 @@ import (
 
 func TestJohnson_MatchesFloydWarshall(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{
+	c, _ := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 10}, {0, 2, 3},
 		{1, 3, 1},
 		{2, 1, 4}, {2, 3, 8}, {2, 4, 2},
@@ -45,7 +45,7 @@ func TestJohnson_MatchesFloydWarshall(t *testing.T) {
 // entrypoint with a simple fixture.
 func TestDijkstraAPSP_PrimaryAPI(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{
+	c, _ := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 4}, {0, 2, 1},
 		{2, 1, 2}, {1, 3, 1},
 		{2, 3, 5},
@@ -63,7 +63,7 @@ func TestDijkstraAPSP_PrimaryAPI(t *testing.T) {
 // precondition is enforced with a typed sentinel.
 func TestDijkstraAPSP_NegativeEdgeRejected(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{
+	c, _ := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, -1},
 		{1, 2, 2},
 	})
@@ -79,7 +79,7 @@ func TestDijkstraAPSP_NegativeEdgeRejected(t *testing.T) {
 // cell-by-cell across every (i, j) pair.
 func TestJohnsonAPSP_NegativeWeights(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{
+	c, _ := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 3}, {0, 2, 8}, {0, 4, -4},
 		{1, 3, 1}, {1, 4, 7},
 		{2, 1, 4},
@@ -114,7 +114,7 @@ func TestJohnsonAPSP_NegativeWeights(t *testing.T) {
 // Bellman-Ford negative-cycle test.
 func TestJohnsonAPSP_NegativeCycleDetected(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{
+	c, _ := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 1}, {1, 2, -3}, {2, 0, 1},
 	})
 	_, err := JohnsonAPSP(c)
@@ -136,7 +136,9 @@ func TestJohnsonAPSP_RandomVsFloydWarshall_Property(t *testing.T) {
 		m := rapid.IntRange(0, 3*n).Draw(r, "m")
 		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
 		for i := 0; i < n; i++ {
-			a.AddNode(i)
+			if err := a.AddNode(i); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		for i := 0; i < m; i++ {
 			u := rapid.IntRange(0, n-1).Draw(r, "u")
@@ -144,7 +146,9 @@ func TestJohnsonAPSP_RandomVsFloydWarshall_Property(t *testing.T) {
 			// Mixed-sign weights with a strong positive bias so the
 			// random fixture rarely admits a negative cycle.
 			w := int64(rapid.IntRange(-3, 20).Draw(r, "w"))
-			a.AddEdge(u, v, w)
+			if err := a.AddEdge(u, v, w); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		apspJ, err := JohnsonAPSP(c)
@@ -183,7 +187,9 @@ func sparseRandomCSR(t testing.TB, n int, seed1, seed2 uint64, negativeFraction 
 	t.Helper()
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
 	for i := 0; i < n; i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 	r := rand.New(rand.NewPCG(seed1, seed2)) //nolint:gosec // deterministic benchmark RNG
 	edges := 2 * n
@@ -196,7 +202,9 @@ func sparseRandomCSR(t testing.TB, n int, seed1, seed2 uint64, negativeFraction 
 		} else {
 			w = int64(r.IntN(50) + 5)
 		}
-		a.AddEdge(u, v, w)
+		if err := a.AddEdge(u, v, w); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	return csr.BuildFromAdjList(a)
 }

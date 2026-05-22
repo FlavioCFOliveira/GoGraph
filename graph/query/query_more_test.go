@@ -16,7 +16,7 @@ import (
 // Pattern emits no NodeIDs and never panics.
 func TestQuery_NilPattern_NodeIDs(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	p := e.Match() // no Vertex / Out — p.bm is nil
 
@@ -33,7 +33,7 @@ func TestQuery_NilPattern_NodeIDs(t *testing.T) {
 // Cardinality when the working set has never been materialised.
 func TestQuery_NilPattern_Cardinality(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	if got := e.Match().Cardinality(); got != 0 {
 		t.Fatalf("Cardinality on un-seeded Match = %d, want 0", got)
@@ -44,7 +44,7 @@ func TestQuery_NilPattern_Cardinality(t *testing.T) {
 // Collect when the working set has never been materialised.
 func TestQuery_NilPattern_Collect(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	if got := e.Match().Collect(); got != nil {
 		t.Fatalf("Collect on un-seeded Match = %v, want nil", got)
@@ -55,7 +55,7 @@ func TestQuery_NilPattern_Collect(t *testing.T) {
 // when the working set has never been materialised.
 func TestQuery_Out_NilPattern(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	p := e.Match().Out()
 	if got := p.Cardinality(); got != 0 {
@@ -70,7 +70,7 @@ func TestQuery_Out_NilPattern(t *testing.T) {
 // on every NodeID in the working set.
 func TestQuery_SecondVertex_AppliesWithLabel(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	got := e.Match().
 		Vertex(WithLabel[string, int64]("Person")).
@@ -88,9 +88,11 @@ func TestQuery_SecondVertex_AppliesWithLabel(t *testing.T) {
 // not attached to any of the Person-seeded nodes).
 func TestQuery_SecondVertex_WithLabel_UnknownLabel(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	// Register a label that no Person carries.
-	g.SetNodeLabel("frank-the-bot", "Bot")
+	if err := g.SetNodeLabel("frank-the-bot", "Bot"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	e := New(g, c)
 	got := e.Match().
 		Vertex(WithLabel[string, int64]("Person")).
@@ -112,13 +114,27 @@ func TestQuery_EqualValue_AllKinds(t *testing.T) {
 	bytesDiffLen := []byte{0x01, 0x02}
 	bytesSameLenDiff := []byte{0x01, 0x02, 0xff}
 
-	g.SetNodeLabel("a", "T")
-	g.SetNodeProperty("a", "s", lpg.StringValue("hello"))
-	g.SetNodeProperty("a", "i", lpg.Int64Value(42))
-	g.SetNodeProperty("a", "f", lpg.Float64Value(3.14))
-	g.SetNodeProperty("a", "b", lpg.BoolValue(true))
-	g.SetNodeProperty("a", "t", lpg.TimeValue(t0))
-	g.SetNodeProperty("a", "by", lpg.BytesValue(bytesEq))
+	if err := g.SetNodeLabel("a", "T"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "s", lpg.StringValue("hello")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "i", lpg.Int64Value(42)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "f", lpg.Float64Value(3.14)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "b", lpg.BoolValue(true)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "t", lpg.TimeValue(t0)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "by", lpg.BytesValue(bytesEq)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	e := New(g, c)
@@ -189,7 +205,9 @@ func TestQuery_EqualValue_UnknownKind(t *testing.T) {
 func TestQuery_WithLabel_Match_ResolveMiss(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.SetNodeLabel("alice", "Person")
+	if err := g.SetNodeLabel("alice", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	p := withLabel[string, int64]{name: "Person"}
 	// An id far beyond MaxNodeID cannot Resolve.
 	beyond := graph.NodeID(uint64(g.AdjList().MaxNodeID()) + 1<<20)

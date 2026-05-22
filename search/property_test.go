@@ -21,13 +21,17 @@ func TestProperty_Dijkstra_TriangleInequality(t *testing.T) {
 		m := rapid.IntRange(0, 4*n).Draw(r, "m")
 		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
 		for i := 0; i < n; i++ {
-			a.AddNode(i)
+			if err := a.AddNode(i); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		for i := 0; i < m; i++ {
 			u := rapid.IntRange(0, n-1).Draw(r, "u")
 			v := rapid.IntRange(0, n-1).Draw(r, "v")
 			w := int64(rapid.IntRange(1, 20).Draw(r, "w"))
-			a.AddEdge(u, v, w)
+			if err := a.AddEdge(u, v, w); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		srcK := rapid.IntRange(0, n-1).Draw(r, "src")
@@ -77,12 +81,16 @@ func TestProperty_TopologicalSort_Precedence(t *testing.T) {
 		m := rapid.IntRange(0, 3*n).Draw(r, "m")
 		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 		for i := 0; i < n; i++ {
-			a.AddNode(i)
+			if err := a.AddNode(i); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		for i := 0; i < m; i++ {
 			u := rapid.IntRange(0, n-2).Draw(r, "u")
 			v := rapid.IntRange(u+1, n-1).Draw(r, "v")
-			a.AddEdge(u, v, struct{}{})
+			if err := a.AddEdge(u, v, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		order, err := TopologicalSort(c)
@@ -119,12 +127,16 @@ func TestProperty_TarjanSCC_Reflexive(t *testing.T) {
 		m := rapid.IntRange(0, 3*n).Draw(r, "m")
 		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true, Multigraph: true})
 		for i := 0; i < n; i++ {
-			a.AddNode(i)
+			if err := a.AddNode(i); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		for i := 0; i < m; i++ {
 			u := rapid.IntRange(0, n-1).Draw(r, "u")
 			v := rapid.IntRange(0, n-1).Draw(r, "v")
-			a.AddEdge(u, v, struct{}{})
+			if err := a.AddEdge(u, v, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		sccs := TarjanSCC(c)
@@ -152,12 +164,16 @@ func TestProperty_HopcroftKarp_Cardinality(t *testing.T) {
 		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true, Multigraph: true})
 		// Pre-intern lefts as 0..n-1, rights as n..2n-1.
 		for i := 0; i < 2*n; i++ {
-			a.AddNode(i)
+			if err := a.AddNode(i); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		for i := 0; i < m; i++ {
 			l := rapid.IntRange(0, n-1).Draw(r, "l")
 			right := rapid.IntRange(n, 2*n-1).Draw(r, "r")
-			a.AddEdge(l, right, struct{}{})
+			if err := a.AddEdge(l, right, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		match := HopcroftKarp(c, int(c.MaxNodeID()))

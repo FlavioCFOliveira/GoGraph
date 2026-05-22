@@ -450,7 +450,10 @@ func (t *Tx[N, W]) Commit() error {
 	}
 	// Apply to the in-memory graph after durability is secured.
 	for _, op := range t.ops {
-		applyOp(t.store.g, op)
+		if err := applyOp(t.store.g, op); err != nil {
+			metrics.IncCounter("store.txn.Commit.applyErrors", 1)
+			return err
+		}
 	}
 	return nil
 }
@@ -756,19 +759,26 @@ func encodeAny[N comparable](v N) []byte {
 	return []byte(goFormat(v))
 }
 
-func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) {
+// applyOp dispatches one buffered Op against the in-memory LPG.
+// Returns any error surfaced by the graph (currently only
+// [adjlist.ErrShardFull] is reachable, and only when the underlying
+// [adjlist.Config.MaxShardCapacity] is set). The WAL has already been
+// fsynced for op by the time applyOp runs, so an error here means the
+// durable log and the in-memory view are temporarily inconsistent —
+// recovery will replay the same op and surface the same error.
+func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 	switch op.Kind {
 	case OpAddEdge:
 		var zero W
-		g.AddEdge(op.Src, op.Dst, zero)
+		return g.AddEdge(op.Src, op.Dst, zero)
 	case OpAddEdgeWeighted:
-		g.AddEdge(op.Src, op.Dst, op.Weight)
+		return g.AddEdge(op.Src, op.Dst, op.Weight)
 	case OpSetNodeLabel:
-		g.SetNodeLabel(op.Src, op.Label)
+		return g.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:
 		g.SetEdgeLabel(op.Src, op.Dst, op.Label)
 	case OpAddNode:
-		g.AddNode(op.Src)
+		return g.AddNode(op.Src)
 	case OpRemoveNode:
 		// Logical removal: mapper entry is permanent; remove all labels and
 		// properties so the node is unreachable via label/property queries.
@@ -781,7 +791,7 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) {
 	case OpRemoveNodeLabel:
 		g.RemoveNodeLabel(op.Src, op.Label)
 	case OpSetNodeProperty:
-		g.SetNodeProperty(op.Src, op.Key, op.Value)
+		return g.SetNodeProperty(op.Src, op.Key, op.Value)
 	case OpDelNodeProperty:
 		g.DelNodeProperty(op.Src, op.Key)
 	case OpRemoveEdge:
@@ -791,6 +801,7 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) {
 	case OpDelEdgeProperty:
 		g.DelEdgeProperty(op.Src, op.Dst, op.Key)
 	}
+	return nil
 }
 
 // isZero reports whether w equals the zero value of W. W is not

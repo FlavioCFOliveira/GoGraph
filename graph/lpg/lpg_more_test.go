@@ -31,7 +31,9 @@ func TestGraph_Accessors(t *testing.T) {
 	}
 	// AdjList round-trip: AddNode on the LPG must register the
 	// node through the underlying mapper.
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	if _, ok := g.AdjList().Mapper().Lookup("alice"); !ok {
 		t.Fatal("AddNode did not propagate to the underlying mapper")
 	}
@@ -44,7 +46,9 @@ func TestGraph_Accessors(t *testing.T) {
 func TestGraph_EdgeIndex_TracksSetEdgeLabel(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	g.SetEdgeLabel("a", "b", "KNOWS")
 	lid, ok := g.Registry().Lookup("KNOWS")
 	if !ok {
@@ -70,7 +74,9 @@ func TestGraph_RemoveNodeLabel_UnknownNode(t *testing.T) {
 func TestGraph_RemoveNodeLabel_UnknownLabel(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	g.RemoveNodeLabel("alice", "NeverRegistered")
 }
 
@@ -85,11 +91,15 @@ func TestGraph_HasNodeLabel_NegativePaths(t *testing.T) {
 	if g.HasNodeLabel("ghost", "Anything") {
 		t.Fatal("HasNodeLabel on unknown node must return false")
 	}
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	if g.HasNodeLabel("alice", "NeverInterned") {
 		t.Fatal("HasNodeLabel with unknown label must return false")
 	}
-	g.SetNodeLabel("bob", "Person")
+	if err := g.SetNodeLabel("bob", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	if g.HasNodeLabel("alice", "Person") {
 		t.Fatal("HasNodeLabel: alice has no label bag, must return false")
 	}
@@ -104,7 +114,9 @@ func TestGraph_NodeLabels_NegativePaths(t *testing.T) {
 	if got := g.NodeLabels("ghost"); got != nil {
 		t.Fatalf("NodeLabels(ghost) = %v, want nil", got)
 	}
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	if got := g.NodeLabels("alice"); got != nil {
 		t.Fatalf("NodeLabels(alice without bag) = %v, want nil", got)
 	}
@@ -121,16 +133,22 @@ func TestGraph_HasEdgeLabel_NegativePaths(t *testing.T) {
 	if g.HasEdgeLabel("ghost-src", "alice", "X") {
 		t.Fatal("HasEdgeLabel: unknown src must return false")
 	}
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	if g.HasEdgeLabel("alice", "ghost-dst", "X") {
 		t.Fatal("HasEdgeLabel: unknown dst must return false")
 	}
-	g.AddNode("bob")
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	if g.HasEdgeLabel("alice", "bob", "NeverInterned") {
 		t.Fatal("HasEdgeLabel: unknown label must return false")
 	}
 	// Endpoints exist, label is interned, but no edge bag.
-	g.AddEdge("alice", "bob", 0)
+	if err := g.AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	g.SetEdgeLabel("alice", "bob", "KNOWS")
 	if g.HasEdgeLabel("alice", "bob", "FOLLOWS") {
 		t.Fatal("HasEdgeLabel: bag does not contain FOLLOWS, must return false")

@@ -23,10 +23,13 @@ import (
 // newNNodeGraph creates a graph with n nodes, each with a distinct string label.
 // Using a constant label (e.g. "n") for all calls would deduplicate to one node
 // because lpg.Graph[string,float64] treats the label as the node key.
-func newNNodeGraph(n int) *lpg.Graph[string, float64] {
+func newNNodeGraph(tb testing.TB, n int) *lpg.Graph[string, float64] {
+	tb.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
-		g.AddNode(fmt.Sprintf("node%d", i))
+		if err := g.AddNode(fmt.Sprintf("node%d", i)); err != nil {
+			tb.Fatalf("AddNode: %v", err)
+		}
 	}
 	return g
 }
@@ -47,7 +50,7 @@ func runQueryCount(t *testing.T, g *lpg.Graph[string, float64], query string) in
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestLimit_Basic(t *testing.T) {
-	g := newNNodeGraph(5)
+	g := newNNodeGraph(t, 5)
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n LIMIT 2")
 	if got != 2 {
@@ -57,8 +60,12 @@ func TestLimit_Basic(t *testing.T) {
 
 func TestLimit_Zero(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("a")
-	g.AddNode("b")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n LIMIT 0")
 	if got != 0 {
@@ -68,8 +75,12 @@ func TestLimit_Zero(t *testing.T) {
 
 func TestLimit_LargerThanResult(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("a")
-	g.AddNode("b")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n LIMIT 100")
 	if got != 2 {
@@ -82,7 +93,7 @@ func TestLimit_LargerThanResult(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestSkip_Basic(t *testing.T) {
-	g := newNNodeGraph(5)
+	g := newNNodeGraph(t, 5)
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n SKIP 3")
 	if got != 2 {
@@ -92,8 +103,12 @@ func TestSkip_Basic(t *testing.T) {
 
 func TestSkip_AllRows(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("a")
-	g.AddNode("b")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n SKIP 10")
 	if got != 0 {
@@ -106,7 +121,7 @@ func TestSkip_AllRows(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestSkipLimit_Combined(t *testing.T) {
-	g := newNNodeGraph(10)
+	g := newNNodeGraph(t, 10)
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n SKIP 3 LIMIT 4")
 	if got != 4 {
@@ -122,9 +137,15 @@ func TestDistinct_Basic(t *testing.T) {
 	// Build a graph whose node IDs are distinct (DISTINCT on node values should
 	// preserve all rows, since node IDs are unique per-graph).
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("a")
-	g.AddNode("b")
-	g.AddNode("c")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("c"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN DISTINCT n")
 	if got != 3 {
@@ -139,9 +160,15 @@ func TestDistinct_Basic(t *testing.T) {
 
 func TestSort_OrderBy(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("a")
-	g.AddNode("b")
-	g.AddNode("c")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("c"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n ORDER BY n")
 	if got != 3 {
@@ -150,7 +177,7 @@ func TestSort_OrderBy(t *testing.T) {
 }
 
 func TestSort_OrderByDesc(t *testing.T) {
-	g := newNNodeGraph(4)
+	g := newNNodeGraph(t, 4)
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n ORDER BY n DESC")
 	if got != 4 {
@@ -163,7 +190,7 @@ func TestSort_OrderByDesc(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestTop_OrderByLimit(t *testing.T) {
-	g := newNNodeGraph(10)
+	g := newNNodeGraph(t, 10)
 
 	got := runQueryCount(t, g, "MATCH (n) RETURN n ORDER BY n LIMIT 3")
 	if got != 3 {

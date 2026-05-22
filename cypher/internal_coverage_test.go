@@ -34,8 +34,12 @@ func indexManagerFor(g *lpg.Graph[string, float64]) *index.Manager {
 func TestBuildPlan_AllNodesScan(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("A")
-	g.AddNode("B")
+	if err := g.AddNode("A"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("B"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	walker := &lpgNodeWalker{g: g}
 	labelSrc := &lpgLabelResolver{g: g}
@@ -94,7 +98,9 @@ func TestBuildPlan_NonProduceResultsRoot(t *testing.T) {
 func TestBuildPlanWithMutator_AllNodesScan(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("X")
+	if err := g.AddNode("X"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	walker := &lpgNodeWalker{g: g}
 	labelSrc := &lpgLabelResolver{g: g}
@@ -157,9 +163,15 @@ func TestBuildPlanWithMutator_WriteOnlyRoot(t *testing.T) {
 func TestLpgMutatorAdapter_HasAndRemoveEdge(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	g.AddNode("S")
-	g.AddNode("D")
-	g.AddEdge("S", "D", 1.0)
+	if err := g.AddNode("S"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("D"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddEdge("S", "D", 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	a := &lpgMutatorAdapter{g: g}
 
@@ -179,9 +191,15 @@ func TestLpgMutatorAdapter_HasAndRemoveEdge(t *testing.T) {
 func TestLpgMutatorAdapter_DelEdgeProperty(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	g.AddNode("S")
-	g.AddNode("D")
-	g.AddEdge("S", "D", 1.0)
+	if err := g.AddNode("S"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("D"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddEdge("S", "D", 1.0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	g.SetEdgeProperty("S", "D", "weight", lpg.Int64Value(42))
 
 	a := &lpgMutatorAdapter{g: g}
@@ -191,8 +209,12 @@ func TestLpgMutatorAdapter_DelEdgeProperty(t *testing.T) {
 func TestLpgMutatorAdapter_WalkNodeIDs(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("P")
-	g.AddNode("Q")
+	if err := g.AddNode("P"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("Q"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	a := &lpgMutatorAdapter{g: g}
 	count := 0
@@ -208,7 +230,9 @@ func TestLpgMutatorAdapter_WalkNodeIDs(t *testing.T) {
 func TestLpgMutatorAdapter_ResolveNodeID(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("N")
+	if err := g.AddNode("N"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	a := &lpgMutatorAdapter{g: g}
 
@@ -577,7 +601,9 @@ func TestBuildIndexSeekOperator_StringHash(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("Alice")
+	if err := g.AddNode("Alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	id, _ := g.AdjList().Mapper().Lookup("Alice")
 
 	// Populate a string hash index named "person_name_hash".
@@ -670,7 +696,9 @@ func TestBuildOperator_NodeByIndexSeekCase(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("Alice")
+	if err := g.AddNode("Alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	id, _ := g.AdjList().Mapper().Lookup("Alice")
 
 	idx := hash.New[string]()

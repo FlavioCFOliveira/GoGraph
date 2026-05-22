@@ -7,7 +7,7 @@ import (
 
 func TestKShortestPathsLoopless_TwoPaths(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 2}, {1, 3, 2},
 		{0, 2, 1}, {2, 3, 2},
 	})
@@ -27,7 +27,7 @@ func TestKShortestPathsLoopless_TwoPaths(t *testing.T) {
 
 func TestKShortestPathsLoopless_NoPath(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 1}, {2, 3, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
 	if got := KShortestPathsLoopless(c, src, dst, 3); len(got) != 0 {
@@ -37,7 +37,7 @@ func TestKShortestPathsLoopless_NoPath(t *testing.T) {
 
 func TestKShortestPathsLoopless_VsYen(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 2}, {1, 3, 2},
 		{0, 2, 1}, {2, 3, 2},
 		{0, 3, 10},
@@ -58,7 +58,7 @@ func TestKShortestPathsLoopless_VsYen(t *testing.T) {
 
 func TestKShortestPathsLooplessCtx_Cancellation(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {0, 3, 100},
 	})
 	src, _ := a.Mapper().Lookup(0)
@@ -80,7 +80,7 @@ func TestKShortestPathsLooplessCtx_Cancellation(t *testing.T) {
 //nolint:staticcheck // intentional exercise of the deprecated API
 func TestEppsteinKShortest_DeprecatedAlias(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 2}, {1, 3, 2},
 		{0, 2, 1}, {2, 3, 2},
 	})

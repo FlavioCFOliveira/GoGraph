@@ -49,7 +49,9 @@ func TestWriteCSR_PropagatesWriterErrors(t *testing.T) {
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
 	const n = 130_000
 	for i := 0; i < n; i++ {
-		a.AddEdge(i, (i+1)%n, int64(i))
+		if err := a.AddEdge(i, (i+1)%n, int64(i)); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 
@@ -162,7 +164,9 @@ func (f *flakyCtx) Err() error {
 func TestWriteSnapshotCSR_ContextCancelledAfterFirstCheckpoint(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	sentinel := errors.New("simulated mid-publish cancellation")
@@ -188,7 +192,9 @@ func TestWriteSnapshotCSR_ContextCancelledAfterFirstCheckpoint(t *testing.T) {
 func TestWriteSnapshotCSR_ContextCancelledBeforeRename(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	sentinel := errors.New("cancel right before rename")
@@ -212,7 +218,9 @@ func TestWriteSnapshotCSR_ContextCancelledBeforeRename(t *testing.T) {
 func TestWriteSnapshotCSR_ContextPreCancelled(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -230,7 +238,9 @@ func TestWriteSnapshotCSR_ContextPreCancelled(t *testing.T) {
 func TestWriteSnapshotCSR_ParentIsRegularFile(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	// Plant a regular file where MkdirAll(filepath.Dir(dir), ...) would
@@ -250,7 +260,9 @@ func TestWriteSnapshotCSR_ParentIsRegularFile(t *testing.T) {
 func TestWriteSnapshotCSR_TmpPathPreexistsAsFile(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	parent := t.TempDir()
@@ -278,7 +290,9 @@ func TestWriteSnapshotCSR_TmpPathPreexistsAsFile(t *testing.T) {
 func TestWriteSnapshotCSR_ReplaceExistingDirectory(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -291,7 +305,9 @@ func TestWriteSnapshotCSR_ReplaceExistingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	a2 := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a2.AddEdge("c", "d", 1)
+	if err := a2.AddEdge("c", "d", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c2 := csr.BuildFromAdjList(a2)
 	if err := WriteSnapshotCSR(dir, c2); err != nil {
 		t.Fatalf("second WriteSnapshotCSR: %v", err)

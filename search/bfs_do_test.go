@@ -15,7 +15,7 @@ import (
 // switch should keep bottom-up active for the dense middle and
 // return to top-down for the sparse tail.
 func BenchmarkBFSDO_VsTopDown_PowerLaw(b *testing.B) {
-	c, srcID := powerLawCSR()
+	c, srcID := powerLawCSR(b)
 	b.Run("TopDown", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -33,7 +33,8 @@ func BenchmarkBFSDO_VsTopDown_PowerLaw(b *testing.B) {
 	})
 }
 
-func powerLawCSR() (*csr.CSR[struct{}], graph.NodeID) {
+func powerLawCSR(tb testing.TB) (*csr.CSR[struct{}], graph.NodeID) {
+	tb.Helper()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	const n = 1 << 20                  // 1M nodes
 	r := rand.New(rand.NewPCG(53, 59)) //nolint:gosec // deterministic benchmark RNG
@@ -52,7 +53,9 @@ func powerLawCSR() (*csr.CSR[struct{}], graph.NodeID) {
 		if from == to {
 			continue
 		}
-		a.AddEdge(from, to, struct{}{})
+		if err := a.AddEdge(from, to, struct{}{}); err != nil {
+			tb.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -76,7 +79,9 @@ func BenchmarkBFSDirectionOpt_PowerLaw(b *testing.B) {
 		if to >= n {
 			to = n - 1
 		}
-		a.AddEdge(from, to, struct{}{})
+		if err := a.AddEdge(from, to, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -94,7 +99,9 @@ func TestBFSDirectionOpt_Tree(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	edges := [][2]int{{0, 1}, {0, 2}, {0, 3}, {1, 4}, {1, 5}, {3, 6}}
 	for _, e := range edges {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -116,7 +123,9 @@ func TestBFSDirectionOpt_AllReachable(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 9; i++ {
-		a.AddEdge(0, i+1, struct{}{})
+		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -144,16 +153,24 @@ func TestBFSDirectionOpt_BetaSwitchBack(t *testing.T) {
 	// chain step triggers beta (|cur| collapses to 1, well under
 	// maxID/24 = 170).
 	for i := 1; i < 200; i++ {
-		a.AddEdge(0, i, struct{}{})
+		if err := a.AddEdge(0, i, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	for i := 1; i < 200; i++ {
 		for j := i + 1; j < 200; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
-	a.AddEdge(199, 200, struct{}{})
+	if err := a.AddEdge(199, 200, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	for i := 200; i < n-1; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -201,7 +218,9 @@ func TestBFSDirectionOpt_EarlyStop(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 100; i++ {
-		a.AddEdge(0, i+1, struct{}{})
+		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)

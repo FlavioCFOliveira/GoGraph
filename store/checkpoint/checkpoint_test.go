@@ -23,8 +23,12 @@ func TestCheckpoint_TriggerProducesSnapshot(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.AddEdge("b", "c", 2)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("b", "c", 2); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	var mu sync.Mutex
 	cp := New(Config{Dir: dir, MaxAge: 0}, g, w, &mu)
@@ -69,7 +73,9 @@ func TestCheckpoint_TickerFires(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	var mu sync.Mutex
 	cp := New(Config{
@@ -142,7 +148,9 @@ func TestCheckpoint_TruncatesWAL(t *testing.T) {
 	}
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var mu sync.Mutex
 	cp := New(Config{Dir: dir, MaxAge: 0}, g, w, &mu)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -226,7 +234,9 @@ func TestCheckpoint_TriggerCtxCancel(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	var mu sync.Mutex
 	cp := New(Config{Dir: dir}, g, w, &mu)

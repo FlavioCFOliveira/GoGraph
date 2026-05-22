@@ -13,7 +13,9 @@ func TestPageRank_Star(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 1; i <= 5; i++ {
-		a.AddEdge(i, 0, struct{}{})
+		if err := a.AddEdge(i, 0, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
@@ -53,7 +55,9 @@ func TestPageRank_MassConservation_Star(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 1; i <= 5; i++ {
-		a.AddEdge(i, 0, struct{}{}) // leaves -> sink
+		if err := a.AddEdge(i, 0, struct{}{}); err != nil { // leaves -> sink
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
@@ -82,7 +86,9 @@ func TestPageRank_MassConservation_Cycle(t *testing.T) {
 	const k = 7
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < k; i++ {
-		a.AddEdge(i, (i+1)%k, struct{}{})
+		if err := a.AddEdge(i, (i+1)%k, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
@@ -116,9 +122,15 @@ func TestPageRank_MassConservation_Cycle(t *testing.T) {
 func TestPageRank_MassConservation_Chain(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 2, struct{}{})
-	a.AddEdge(2, 3, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 3, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
 	var total float64
@@ -145,8 +157,12 @@ func TestPageRank_MassConservation_Chain(t *testing.T) {
 func TestPageRank_IsolatedGhostNodes(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 0, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 0, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	ranks, _, _ := PageRank(c, DefaultPageRankOptions())
 	var total float64
@@ -169,7 +185,9 @@ func BenchmarkPageRank_Cycle1K(b *testing.B) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	const k = 1024
 	for i := 0; i < k; i++ {
-		a.AddEdge(i, (i+1)%k, struct{}{})
+		if err := a.AddEdge(i, (i+1)%k, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ResetTimer()
@@ -181,7 +199,9 @@ func BenchmarkPageRank_Cycle1K(b *testing.B) {
 func TestPageRank_RejectsNaN(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	_, _, err := PageRank(c, PageRankOptions{Damping: math.NaN()})
 	if !errors.Is(err, ErrInvalidInput) {

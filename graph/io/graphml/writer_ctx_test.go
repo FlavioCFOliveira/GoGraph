@@ -27,7 +27,9 @@ func (w *errWriter) Write(p []byte) (int, error) {
 func TestWriteCtx_CancelledContext(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -42,7 +44,9 @@ func TestWriteCtx_CancelledContext(t *testing.T) {
 func TestWriteCtx_HeaderWriteFails(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddNode("a")
+	if err := a.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	sentinel := errors.New("write blew up")
 	w := &errWriter{err: sentinel}
@@ -80,7 +84,9 @@ func TestWriteCtx_NodeEncodingFails(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
 	for i := 0; i < 64; i++ {
-		a.AddNode("node-prefix-deliberately-long-" + string(rune('a'+i%26)))
+		if err := a.AddNode("node-prefix-deliberately-long-" + string(rune('a'+i%26))); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 
 	// Find a cap that consumes the header and prologue but fails

@@ -56,8 +56,12 @@ func TestOpen_EmptyManifest(t *testing.T) {
 func TestOpen_TruncatedCSRFile(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
-	a.AddEdge("a", "c", 2)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("a", "c", 2); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotCSR(dir, c); err != nil {

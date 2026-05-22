@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -21,7 +22,9 @@ func main() {
 
 	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
 	for i := uint32(0); i < 1000; i++ {
-		a.AddEdge(i, (i+1)%1000, struct{}{})
+		if err := a.AddEdge(i, (i+1)%1000, struct{}{}); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	if _, err := csrfile.WriteToFile(path, c); err != nil {

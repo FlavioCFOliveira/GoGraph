@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
@@ -14,15 +15,21 @@ func main() {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
 		for j := i + 1; j < 4; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				log.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	for i := 4; i < 8; i++ {
 		for j := i + 1; j < 8; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				log.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
-	a.AddEdge(3, 4, struct{}{})
+	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
+		log.Fatalf("AddEdge: %v", err)
+	}
 
 	c := csr.BuildFromAdjList(a)
 	p := community.Leiden(c, community.DefaultLeidenOptions())

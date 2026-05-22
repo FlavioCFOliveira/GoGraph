@@ -36,9 +36,15 @@ func TestLabelRegistry(t *testing.T) {
 func TestGraph_NodeLabels(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
-	g.SetNodeLabel("alice", "Person")
-	g.SetNodeLabel("alice", "Active")
-	g.SetNodeLabel("bob", "Person")
+	if err := g.SetNodeLabel("alice", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("alice", "Active"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("bob", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	if !g.HasNodeLabel("alice", "Person") || !g.HasNodeLabel("alice", "Active") {
 		t.Fatalf("alice should carry Person + Active")
 	}
@@ -59,7 +65,9 @@ func TestGraph_NodeLabels(t *testing.T) {
 func TestGraph_EdgeLabels(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("alice", "bob", 0)
+	if err := g.AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	g.SetEdgeLabel("alice", "bob", "KNOWS")
 	g.SetEdgeLabel("alice", "bob", "FOLLOWS")
 	if !g.HasEdgeLabel("alice", "bob", "KNOWS") {
@@ -83,10 +91,16 @@ func TestGraph_LabelIndex_Query(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
 	for _, n := range []string{"alice", "bob", "charlie"} {
-		g.SetNodeLabel(n, "Person")
+		if err := g.SetNodeLabel(n, "Person"); err != nil {
+			t.Fatalf("SetNodeLabel: %v", err)
+		}
 	}
-	g.SetNodeLabel("alice", "Active")
-	g.SetNodeLabel("charlie", "Active")
+	if err := g.SetNodeLabel("alice", "Active"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("charlie", "Active"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	personID, _ := g.Registry().Lookup("Person")
 	activeID, _ := g.Registry().Lookup("Active")
 	persons := g.NodeIndex().Intersect(uint32(personID))
@@ -111,9 +125,15 @@ func TestGraph_Concurrent(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWorker; i++ {
 				n := w*perWorker + i
-				g.SetNodeLabel(n, "Person")
+				if err := g.SetNodeLabel(n, "Person"); err != nil {
+					t.Errorf("SetNodeLabel: %v", err)
+					return
+				}
 				if (i & 1) == 0 {
-					g.SetNodeLabel(n, "Active")
+					if err := g.SetNodeLabel(n, "Active"); err != nil {
+						t.Errorf("SetNodeLabel: %v", err)
+						return
+					}
 				}
 				_ = g.HasNodeLabel(n, "Person")
 			}

@@ -18,13 +18,17 @@ func TestGraph_EdgeLabels_Coverage(t *testing.T) {
 		t.Errorf("expected nil for unknown src, got %v", got)
 	}
 
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	// Unknown dst → nil.
 	if got := g.EdgeLabels("alice", "bob"); got != nil {
 		t.Errorf("expected nil for unknown dst, got %v", got)
 	}
 
-	g.AddEdge("alice", "bob", 0)
+	if err := g.AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	// Edge exists but has no labels → empty (non-nil) or nil.
 	// Either way the function should not panic.
 	_ = g.EdgeLabels("alice", "bob")

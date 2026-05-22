@@ -140,12 +140,19 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 	}
 
 	nodeKey := op.freshNodeKey()
-	nodeID := op.mutator.AddNode(nodeKey)
+	nodeID, err := op.mutator.AddNode(nodeKey)
+	if err != nil {
+		return false, err
+	}
 	for _, lbl := range op.labels {
-		op.mutator.SetNodeLabel(nodeKey, lbl)
+		if err := op.mutator.SetNodeLabel(nodeKey, lbl); err != nil {
+			return false, err
+		}
 	}
 	for _, p := range op.props {
-		op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+		if err := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); err != nil {
+			return false, err
+		}
 		if op.reg != nil {
 			op.reg.RecordPropertySet(op.labels, p.key, p.value)
 		}

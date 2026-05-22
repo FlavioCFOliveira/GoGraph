@@ -254,8 +254,8 @@ func TestDecodeRequest_RouteNonListBookmarks(t *testing.T) {
 	enc := packstream.NewEncoder(&buf)
 	_ = enc.WriteStructHeader(proto.TagRoute, 3)
 	_ = enc.WriteValue(packstream.Value(map[string]packstream.Value{})) // routing
-	_ = enc.WriteString("notalist")                                      // bookmarks — wrong type
-	_ = enc.WriteString("neo4j")                                         // db
+	_ = enc.WriteString("notalist")                                     // bookmarks — wrong type
+	_ = enc.WriteString("neo4j")                                        // db
 	_ = enc.Flush()
 	dec := packstream.NewDecoder(bytes.NewReader(buf.Bytes()))
 	_, err := proto.DecodeRequest(dec)

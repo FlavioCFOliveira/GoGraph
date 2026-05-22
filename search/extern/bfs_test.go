@@ -14,7 +14,9 @@ func TestBFS_Chain(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 9; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "chain.csr")
@@ -46,7 +48,9 @@ func TestBFS_EarlyStop(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 100; i++ {
-		a.AddEdge(0, i+1, struct{}{})
+		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "star.csr")
@@ -73,7 +77,9 @@ func TestBFS_EarlyStop(t *testing.T) {
 func TestBFS_UnknownSrc(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "tiny.csr")
 	if _, err := csrfile.WriteToFile(path, c); err != nil {

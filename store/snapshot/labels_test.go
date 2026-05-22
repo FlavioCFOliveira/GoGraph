@@ -25,13 +25,27 @@ func TestLabels_Roundtrip(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("alice", "bob", 1)
-	g.AddEdge("bob", "carol", 2)
-	g.AddEdge("carol", "alice", 3)
-	g.SetNodeLabel("alice", "Person")
-	g.SetNodeLabel("alice", "Admin")
-	g.SetNodeLabel("bob", "Person")
-	g.SetNodeLabel("carol", "Persoa") // intentional unicode-ish glyph
+	if err := g.AddEdge("alice", "bob", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("bob", "carol", 2); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("carol", "alice", 3); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("alice", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("alice", "Admin"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("bob", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("carol", "Persoa"); err != nil { // intentional unicode-ish glyph
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	g.SetEdgeLabel("alice", "bob", "KNOWS")
 	g.SetEdgeLabel("bob", "carol", "KNOWS")
 	g.SetEdgeLabel("carol", "alice", "FOLLOWS")
@@ -61,7 +75,9 @@ func TestLabels_Roundtrip(t *testing.T) {
 	for _, e := range []struct{ s, d string }{
 		{"alice", "bob"}, {"bob", "carol"}, {"carol", "alice"},
 	} {
-		restored.AddEdge(e.s, e.d, 0)
+		if err := restored.AddEdge(e.s, e.d, 0); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	if err := ApplyLabelsToGraph(restored, loaded.Labels); err != nil {
 		t.Fatalf("ApplyLabelsToGraph: %v", err)
@@ -100,8 +116,12 @@ func TestLabels_ManifestV2_LoadsClean(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("x", "y", 7)
-	g.SetNodeLabel("x", "A")
+	if err := g.AddEdge("x", "y", 7); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("x", "A"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	g.SetEdgeLabel("x", "y", "L")
 	c := csr.BuildFromAdjList(g.AdjList())
 
@@ -151,8 +171,12 @@ func TestLabels_CorruptedFile_SurfacesErrCorrupted(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "L")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "L"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -243,11 +267,15 @@ func TestLabels_PropertyRoundtrip(t *testing.T) {
 		nodeLabels := make(map[string]map[string]bool, n)
 		edgeLabels := make(map[[2]string]map[string]bool)
 		for _, name := range nodes {
-			g.AddNode(name)
+			if err := g.AddNode(name); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 			k := rapid.IntRange(0, 4).Draw(t, "node-label-count")
 			for i := 0; i < k; i++ {
 				l := labelGen.Draw(t, "node-label")
-				g.SetNodeLabel(name, l)
+				if err := g.SetNodeLabel(name, l); err != nil {
+					t.Fatalf("SetNodeLabel: %v", err)
+				}
 				if nodeLabels[name] == nil {
 					nodeLabels[name] = make(map[string]bool)
 				}
@@ -259,7 +287,9 @@ func TestLabels_PropertyRoundtrip(t *testing.T) {
 			si := rapid.IntRange(0, n-1).Draw(t, "src")
 			di := rapid.IntRange(0, n-1).Draw(t, "dst")
 			s, d := nodes[si], nodes[di]
-			g.AddEdge(s, d, 0)
+			if err := g.AddEdge(s, d, 0); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 			k := rapid.IntRange(0, 3).Draw(t, "edge-label-count")
 			for j := 0; j < k; j++ {
 				l := labelGen.Draw(t, "edge-label")
@@ -296,12 +326,16 @@ func TestLabels_PropertyRoundtrip(t *testing.T) {
 		// slice the test already holds.
 		restored := lpg.New[string, int64](adjlist.Config{Directed: true})
 		for _, name := range nodes {
-			restored.AddNode(name)
+			if err := restored.AddNode(name); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		// Re-emit edges in the same order they were added.
 		for _, s := range nodes {
 			for nb := range g.AdjList().Neighbours(s) {
-				restored.AddEdge(s, nb, 0)
+				if err := restored.AddEdge(s, nb, 0); err != nil {
+					t.Fatalf("AddEdge: %v", err)
+				}
 			}
 		}
 		if err := ApplyLabelsToGraph(restored, loaded.Labels); err != nil {

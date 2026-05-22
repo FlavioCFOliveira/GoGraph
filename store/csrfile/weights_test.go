@@ -38,8 +38,12 @@ func TestReader_WeightsRaw_Uint64(t *testing.T) {
 func TestReader_WeightsRaw_Unweighted(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", struct{}{})
-	a.AddEdge("b", "c", struct{}{})
+	if err := a.AddEdge("a", "b", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("b", "c", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "unweighted.csr")
 	if _, err := WriteToFile(path, c); err != nil {
@@ -68,9 +72,15 @@ func TestReader_WeightsRaw_Unweighted(t *testing.T) {
 func TestReader_WeightsFloat64(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, float64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1.5)
-	a.AddEdge("a", "c", 2.5)
-	a.AddEdge("b", "c", 3.5)
+	if err := a.AddEdge("a", "b", 1.5); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("a", "c", 2.5); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("b", "c", 3.5); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "float.csr")
 	if _, err := WriteToFile(path, c); err != nil {

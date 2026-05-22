@@ -9,27 +9,46 @@ import (
 	"gograph/graph/lpg"
 )
 
-func setupSocialGraph() (*lpg.Graph[string, int64], *csr.CSR[int64]) {
+func setupSocialGraph(tb testing.TB) (*lpg.Graph[string, int64], *csr.CSR[int64]) {
+	tb.Helper()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	people := []string{"alice", "bob", "charlie", "dave", "erin"}
 	for _, p := range people {
-		g.SetNodeLabel(p, "Person")
+		if err := g.SetNodeLabel(p, "Person"); err != nil {
+			tb.Fatalf("SetNodeLabel: %v", err)
+		}
 	}
-	g.SetNodeLabel("alice", "Admin")
-	g.SetNodeLabel("dave", "Admin")
-	g.SetNodeProperty("alice", "age", lpg.Int64Value(30))
-	g.SetNodeProperty("bob", "age", lpg.Int64Value(25))
-	g.SetNodeProperty("charlie", "age", lpg.Int64Value(30))
-	g.AddEdge("alice", "bob", 1)
-	g.AddEdge("alice", "charlie", 1)
-	g.AddEdge("bob", "dave", 1)
+	if err := g.SetNodeLabel("alice", "Admin"); err != nil {
+		tb.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeLabel("dave", "Admin"); err != nil {
+		tb.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "age", lpg.Int64Value(30)); err != nil {
+		tb.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("bob", "age", lpg.Int64Value(25)); err != nil {
+		tb.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("charlie", "age", lpg.Int64Value(30)); err != nil {
+		tb.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.AddEdge("alice", "bob", 1); err != nil {
+		tb.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("alice", "charlie", 1); err != nil {
+		tb.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("bob", "dave", 1); err != nil {
+		tb.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	return g, c
 }
 
 func TestQuery_MatchByLabel(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	got := e.Match().Vertex(WithLabel[string, int64]("Admin")).Collect()
 	sort.Strings(got)
@@ -40,7 +59,7 @@ func TestQuery_MatchByLabel(t *testing.T) {
 
 func TestQuery_MatchByMultipleLabels(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	got := e.Match().Vertex(
 		WithLabel[string, int64]("Person"),
@@ -54,7 +73,7 @@ func TestQuery_MatchByMultipleLabels(t *testing.T) {
 
 func TestQuery_MatchByProperty(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	got := e.Match().Vertex(
 		WithLabel[string, int64]("Person"),
@@ -68,7 +87,7 @@ func TestQuery_MatchByProperty(t *testing.T) {
 
 func TestQuery_OneHop(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	// MATCH (a:Admin)-->(b) RETURN b
 	got := e.Match().
@@ -83,7 +102,7 @@ func TestQuery_OneHop(t *testing.T) {
 
 func TestQuery_TwoHop(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	// MATCH (alice)-->()-->(c) RETURN c
 	got := e.Match().
@@ -99,7 +118,7 @@ func TestQuery_TwoHop(t *testing.T) {
 
 func TestQuery_UnknownLabel(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	got := e.Match().Vertex(WithLabel[string, int64]("Nonexistent")).Collect()
 	if len(got) != 0 {
@@ -109,7 +128,7 @@ func TestQuery_UnknownLabel(t *testing.T) {
 
 func TestQuery_Cardinality(t *testing.T) {
 	t.Parallel()
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	if e.Match().Vertex(WithLabel[string, int64]("Person")).Cardinality() != 5 {
 		t.Fatalf("Person count must be 5")
@@ -119,7 +138,7 @@ func TestQuery_Cardinality(t *testing.T) {
 func TestQuery_FullScanFallback(t *testing.T) {
 	t.Parallel()
 	// When no label is provided, the seed scans all NodeIDs.
-	g, c := setupSocialGraph()
+	g, c := setupSocialGraph(t)
 	e := New(g, c)
 	got := e.Match().Vertex(
 		WithProperty[string, int64]("age", lpg.Int64Value(25)),

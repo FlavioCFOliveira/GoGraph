@@ -13,7 +13,9 @@ func TestKCore_Clique(t *testing.T) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 5; i++ {
 		for j := i + 1; j < 5; j++ {
-			a.AddEdge(i, j, struct{}{})
+			if err := a.AddEdge(i, j, struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 	}
 	c := csr.BuildFromAdjList(a)
@@ -33,7 +35,9 @@ func TestKCore_Path(t *testing.T) {
 	// all to coreness 1.
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	coreness := KCore(c)
@@ -52,12 +56,22 @@ func TestKCore_Mixed(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	// Triangle 0-1-2.
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 2, struct{}{})
-	a.AddEdge(0, 2, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(0, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	// Tail 2-3-4.
-	a.AddEdge(2, 3, struct{}{})
-	a.AddEdge(3, 4, struct{}{})
+	if err := a.AddEdge(2, 3, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	coreness := KCore(c)
 	m := a.Mapper()

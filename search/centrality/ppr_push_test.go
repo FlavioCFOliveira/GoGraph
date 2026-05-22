@@ -13,8 +13,12 @@ func TestPPR_SourceCarriesMostMass(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 9; i++ {
-		a.AddEdge(0, i+1, struct{}{})
-		a.AddEdge(i+1, 0, struct{}{})
+		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+		if err := a.AddEdge(i+1, 0, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -33,7 +37,9 @@ func TestPPR_SourceCarriesMostMass(t *testing.T) {
 func TestPPR_UnknownSrc(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	r, _ := PersonalisedPushPageRank(c, 9999, DefaultPPRPushOptions())
 	if r != nil {
@@ -49,7 +55,9 @@ func TestPPR_BoundedMassAtSource(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 1; i <= 5; i++ {
-		a.AddEdge(0, i, struct{}{}) // src to dangling leaves
+		if err := a.AddEdge(0, i, struct{}{}); err != nil { // src to dangling leaves
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -74,7 +82,9 @@ func TestPPR_BoundedMassAtSource(t *testing.T) {
 func TestPPR_RejectsNaN(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
 	_, err := PersonalisedPushPageRank(c, src, PPRPushOptions{Damping: math.NaN()})

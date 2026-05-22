@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sort"
 
 	"gograph/graph"
@@ -25,7 +26,9 @@ func main() {
 		// The bridge between the two clusters.
 		{"marie", "jose"},
 	} {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 

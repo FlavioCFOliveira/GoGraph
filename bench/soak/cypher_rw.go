@@ -47,7 +47,9 @@ func runCypherRW(ctx context.Context, outDir string) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	// Seed with a handful of nodes so the initial MATCH scan is non-trivial.
 	for i := range 32 {
-		g.AddNode(fmt.Sprintf("seed_%d", i))
+		if err := g.AddNode(fmt.Sprintf("seed_%d", i)); err != nil {
+			log.Fatalf("cypher-rw: seed AddNode: %v", err)
+		}
 	}
 
 	eng := cypher.NewEngine(g)

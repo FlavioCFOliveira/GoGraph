@@ -88,9 +88,14 @@ func mustWriteSnapshotFixture() {
 	}
 	// Build a deterministic 3-node graph.
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, 11)
-	a.AddEdge(0, 2, 12)
-	a.AddEdge(1, 2, 22)
+	for _, edge := range [...]struct {
+		s, d int
+		w    int64
+	}{{0, 1, 11}, {0, 2, 12}, {1, 2, 22}} {
+		if err := a.AddEdge(edge.s, edge.d, edge.w); err != nil {
+			log.Fatal(err)
+		}
+	}
 	c := csr.BuildFromAdjList(a)
 
 	csrPath := filepath.Join(dst, snapshot.CSRFile)
@@ -143,11 +148,14 @@ func mustWriteCSRFileFixture() {
 		log.Fatal(err)
 	}
 	_ = os.Remove(dst)
-	c := csrfile.BuildFixture(csrfile.FixtureSpec{
+	c, err := csrfile.BuildFixture(csrfile.FixtureSpec{
 		Vertices: 32,
 		Edges:    96,
 		Seed:     0x1337,
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 	if _, err := csrfile.WriteToFile(dst, c); err != nil {
 		log.Fatal(err)
 	}

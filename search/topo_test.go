@@ -12,7 +12,9 @@ func TestTopologicalSort_LinearDAG(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 5; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	order, err := TopologicalSort(c)
@@ -40,7 +42,9 @@ func TestTopologicalSort_DiamondDAG(t *testing.T) {
 	edges := [][2]int{{0, 1}, {0, 2}, {1, 3}, {2, 3}}
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for _, e := range edges {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	order, err := TopologicalSort(c)
@@ -62,9 +66,15 @@ func TestTopologicalSort_DiamondDAG(t *testing.T) {
 func TestTopologicalSort_DetectsCycle(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 2, struct{}{})
-	a.AddEdge(2, 0, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 0, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	_, err := TopologicalSort(c)
 	if !errors.Is(err, ErrCycle) {

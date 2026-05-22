@@ -26,7 +26,9 @@ func TestPrimMST_CLRS(t *testing.T) {
 		{7, 8, 7},
 	}
 	for _, e := range edges {
-		a.AddEdge(e.u, e.v, e.w)
+		if err := a.AddEdge(e.u, e.v, e.w); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)
@@ -51,10 +53,14 @@ func TestPrimMST_VsKruskal(t *testing.T) {
 		a := adjlist.New[int, int64](adjlist.Config{Directed: false})
 		// Spanning chain so the graph is guaranteed connected.
 		for i := 0; i < n-1; i++ {
-			a.AddEdge(i, i+1, int64(r.IntN(50)+1))
+			if err := a.AddEdge(i, i+1, int64(r.IntN(50)+1)); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		for i := 0; i < 4*n; i++ {
-			a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(50)+1))
+			if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(50)+1)); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		src, _ := a.Mapper().Lookup(0)
@@ -77,7 +83,9 @@ func BenchmarkPrimMST_RandomGraph(b *testing.B) {
 	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
 	r := rand.New(rand.NewPCG(167, 173)) //nolint:gosec // deterministic
 	for i := 0; i < 4*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1))
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup(0)

@@ -31,6 +31,7 @@
 package adjlist
 
 import (
+	"errors"
 	"iter"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,14 @@ import (
 
 	"gograph/graph"
 )
+
+// ErrShardFull is returned by [AdjList.AddNode] and [AdjList.AddEdge]
+// when the shard responsible for a new NodeID would have to grow
+// beyond [Config.MaxShardCapacity]. Callers inspect this error with
+// [errors.Is]; the AdjList state is unchanged when this error is
+// returned (no node interned, no edge published, size counter not
+// advanced).
+var ErrShardFull = errors.New("adjlist: shard capacity exhausted")
 
 // shardCount is the number of independently locked stripes used by
 // AdjList. It mirrors [graph.NodeID]'s shard encoding, so the low 8
@@ -72,9 +81,11 @@ type Config struct {
 
 	// MaxShardCapacity, when > 0, caps the number of node-slots that
 	// any individual shard may grow to. AddNode (or AddEdge that
-	// would create a new node) returns an error when the responsible
-	// shard is full. The default (0) places no upper bound — a shard
-	// doubles its slot slice indefinitely.
+	// would create a new node or store an outgoing entry in the
+	// responsible shard) returns [ErrShardFull] when growth past the
+	// cap would otherwise occur; the AdjList state is left unchanged.
+	// The default (0) places no upper bound — a shard doubles its
+	// slot slice indefinitely.
 	MaxShardCapacity int
 }
 
@@ -86,6 +97,12 @@ type Config struct {
 // writers (AddEdge, AddNode, RemoveEdge). The 256-way shard layout
 // serialises only writers landing in the same shard; readers never
 // take a mutex and observe a consistent snapshot via atomic.Pointer.
+//
+// Bounded growth: when [Config.MaxShardCapacity] is set, AddEdge and
+// AddNode return [ErrShardFull] instead of growing the affected shard
+// past the cap. Callers must propagate the error and stop offering
+// new work to the saturated shard; the AdjList state is unchanged
+// when ErrShardFull is returned.
 type AdjList[N comparable, W any] struct {
 	mapper *graph.Mapper[N]
 	cfg    Config
@@ -162,7 +179,14 @@ func (a *AdjList[N, W]) Multigraph() bool { return a.cfg.Multigraph }
 // adjacency list lazily on its first outgoing edge; AddNode only
 // interns the value with the Mapper, which is sufficient for
 // [AdjList.Order] to account for it. Implements [graph.Graph].
-func (a *AdjList[N, W]) AddNode(n N) { a.mapper.Intern(n) }
+//
+// AddNode never returns [ErrShardFull] on its own because it does not
+// touch any shard's slot array; the bounded-growth contract becomes
+// observable on the first AddEdge for which the responsible shard
+// would have to grow past [Config.MaxShardCapacity]. The error return
+// exists to satisfy the [graph.Graph] contract and to leave room for
+// future implementations that reserve shard storage eagerly.
+func (a *AdjList[N, W]) AddNode(n N) error { a.mapper.Intern(n); return nil }
 
 // HasEdge reports whether an edge from src to dst is present.
 // HasEdge is lock-free and allocation-free on the hot path.
@@ -192,27 +216,49 @@ func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 // interning the endpoints if they are not yet known. When the graph
 // is undirected, the mirrored edge (dst, src) is inserted as well.
 // Implements [graph.Graph].
-func (a *AdjList[N, W]) AddEdge(src, dst N, w W) {
+//
+// AddEdge returns [ErrShardFull] when [Config.MaxShardCapacity] is
+// set and the responsible shard would have to grow past the cap to
+// store the new entry. In that case no edge is published; the size
+// counter is not advanced. The endpoints may, however, remain
+// interned in the underlying [graph.Mapper]: callers that need
+// strict orphan-free behaviour should detect ErrShardFull and treat
+// the graph as saturated.
+func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
 	srcID := a.mapper.Intern(src)
 	dstID := a.mapper.Intern(dst)
 
-	if !a.upsertEdge(srcID, dstID, w) {
-		return
+	inserted, err := a.upsertEdge(srcID, dstID, w)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		return nil
 	}
 	a.size.Add(1)
 
 	if a.cfg.Directed || srcID == dstID {
-		return
+		return nil
 	}
-	a.upsertEdge(dstID, srcID, w)
+	if _, err := a.upsertEdge(dstID, srcID, w); err != nil {
+		// The forward edge has already been published; undo it to
+		// preserve the all-or-nothing contract of AddEdge on
+		// undirected graphs.
+		a.removeOneEdge(srcID, dstID)
+		a.size.Add(^uint64(0))
+		return err
+	}
+	return nil
 }
 
 // upsertEdge publishes a new adjacency snapshot for src that includes
-// (dst, w). Returns false when (in simple-graph mode) dst is already
-// a neighbour. The new snapshot is constructed fresh and swapped in
-// via atomic.StorePointer so concurrent readers always observe a
-// consistent immutable adjacency.
-func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W) bool {
+// (dst, w). Returns (false, nil) when (in simple-graph mode) dst is
+// already a neighbour, and (false, ErrShardFull) when the responsible
+// shard would have to grow past [Config.MaxShardCapacity]. The new
+// snapshot is constructed fresh and swapped in via atomic.StorePointer
+// so concurrent readers always observe a consistent immutable
+// adjacency.
+func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -221,16 +267,18 @@ func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W) bool {
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
-		storeEntry[W](s, intraIdx, &adjEntry[W]{
+		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{
 			neighbours: []graph.NodeID{dst},
 			weights:    []W{w},
-		})
-		return true
+		}); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if !a.cfg.Multigraph {
 		for _, n := range current.neighbours {
 			if n == dst {
-				return false
+				return false, nil
 			}
 		}
 	}
@@ -240,8 +288,10 @@ func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W) bool {
 	copy(newW, current.weights)
 	newNb[len(current.neighbours)] = dst
 	newW[len(current.weights)] = w
-	storeEntry[W](s, intraIdx, &adjEntry[W]{neighbours: newNb, weights: newW})
-	return true
+	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RemoveEdge removes the directed edge from src to dst if present. For
@@ -291,7 +341,9 @@ func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID) bool {
 		return false
 	}
 	if len(current.neighbours) == 1 {
-		storeEntry[W](s, intraIdx, &adjEntry[W]{})
+		// storeEntry cannot fail here because the slot already exists
+		// in the shard's slot array; no growth is required.
+		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{})
 		return true
 	}
 	newNb := make([]graph.NodeID, len(current.neighbours)-1)
@@ -300,7 +352,8 @@ func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID) bool {
 	copy(newW, current.weights[:idx])
 	copy(newNb[idx:], current.neighbours[idx+1:])
 	copy(newW[idx:], current.weights[idx+1:])
-	storeEntry[W](s, intraIdx, &adjEntry[W]{neighbours: newNb, weights: newW})
+	// storeEntry cannot fail here: same slot, no growth required.
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW})
 	return true
 }
 
@@ -374,19 +427,30 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 }
 
 // storeEntry publishes entry at intraIdx within s. The caller must
-// hold s.mu. The shard grows on demand to accommodate intraIdx.
-func storeEntry[W any](s *adjShard[W], intraIdx uint64, entry *adjEntry[W]) {
+// hold s.mu. The shard grows on demand to accommodate intraIdx,
+// honouring maxCap as a hard upper bound when maxCap > 0. Returns
+// [ErrShardFull] when intraIdx+1 exceeds maxCap; on that path no
+// shard mutation is performed.
+func storeEntry[W any](s *adjShard[W], intraIdx uint64, maxCap int, entry *adjEntry[W]) error {
 	ss := s.slotsRef.Load()
 	if ss == nil || intraIdx >= uint64(len(ss.slots)) {
-		growShardLocked[W](s, intraIdx+1)
+		if err := growShardLocked[W](s, intraIdx+1, maxCap); err != nil {
+			return err
+		}
 		ss = s.slotsRef.Load()
 	}
 	atomic.StorePointer(&ss.slots[intraIdx], unsafe.Pointer(entry)) //nolint:gosec // typed atomic publication of *adjEntry[W]
+	return nil
 }
 
 // growShardLocked enlarges s.slotsRef so that minLen slots are
-// available. The caller must hold s.mu.
-func growShardLocked[W any](s *adjShard[W], minLen uint64) {
+// available, capping growth at maxCap when maxCap > 0. The caller
+// must hold s.mu. Returns [ErrShardFull] when minLen exceeds maxCap;
+// in that case s.slotsRef is left unchanged.
+func growShardLocked[W any](s *adjShard[W], minLen uint64, maxCap int) error {
+	if maxCap > 0 && minLen > uint64(maxCap) {
+		return ErrShardFull
+	}
 	old := s.slotsRef.Load()
 	var oldLen uint64
 	if old != nil {
@@ -399,8 +463,11 @@ func growShardLocked[W any](s *adjShard[W], minLen uint64) {
 	for newLen < minLen {
 		newLen *= 2
 	}
+	if maxCap > 0 && newLen > uint64(maxCap) {
+		newLen = uint64(maxCap)
+	}
 	if newLen == oldLen {
-		return
+		return nil
 	}
 	next := &shardSlots{slots: make([]unsafe.Pointer, newLen)}
 	if old != nil {
@@ -414,4 +481,5 @@ func growShardLocked[W any](s *adjShard[W], minLen uint64) {
 		}
 	}
 	s.slotsRef.Store(next)
+	return nil
 }

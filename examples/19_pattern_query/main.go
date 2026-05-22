@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sort"
 
 	"gograph/graph/adjlist"
@@ -41,19 +42,29 @@ func main() {
 		{"erin", 28, "ops", false},
 	}
 	for _, p := range people {
-		g.SetNodeLabel(p.id, "Person")
-		if p.admin {
-			g.SetNodeLabel(p.id, "Admin")
+		if err := g.SetNodeLabel(p.id, "Person"); err != nil {
+			log.Fatalf("SetNodeLabel: %v", err)
 		}
-		g.SetNodeProperty(p.id, "age", lpg.Int64Value(p.age))
-		g.SetNodeProperty(p.id, "dept", lpg.StringValue(p.dept))
+		if p.admin {
+			if err := g.SetNodeLabel(p.id, "Admin"); err != nil {
+				log.Fatalf("SetNodeLabel: %v", err)
+			}
+		}
+		if err := g.SetNodeProperty(p.id, "age", lpg.Int64Value(p.age)); err != nil {
+			log.Fatalf("SetNodeProperty: %v", err)
+		}
+		if err := g.SetNodeProperty(p.id, "dept", lpg.StringValue(p.dept)); err != nil {
+			log.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	for _, e := range [][2]string{
 		{"alice", "bob"},
 		{"alice", "carol"},
 		{"dave", "erin"},
 	} {
-		g.AddEdge(e[0], e[1], 1)
+		if err := g.AddEdge(e[0], e[1], 1); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	e := query.New(g, c)

@@ -136,7 +136,9 @@ func TestReadLabels_StringIdxOutOfRange(t *testing.T) {
 func TestApplyLabelsToGraph_UnresolvedNodeID(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice") // mapper has exactly one node
+	if err := g.AddNode("alice"); err != nil { // mapper has exactly one node
+		t.Fatalf("AddNode: %v", err)
+	}
 	rb := LabelsReadback{
 		Strings: []string{"Ghost"},
 		NodeLabels: []NodeLabelEntry{
@@ -161,8 +163,12 @@ func TestApplyLabelsToGraph_UnresolvedNodeID(t *testing.T) {
 func TestApplyLabelsToGraph_MissingEdge(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice")
-	g.AddNode("bob")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	srcID, _ := g.AdjList().Mapper().Lookup("alice")
 	dstID, _ := g.AdjList().Mapper().Lookup("bob")
 	rb := LabelsReadback{
@@ -187,7 +193,9 @@ func TestApplyLabelsToGraph_MissingEdge(t *testing.T) {
 func TestApplyLabelsToGraph_StringIdxOutOfRange(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("alice")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	srcID, _ := g.AdjList().Mapper().Lookup("alice")
 	rb := LabelsReadback{
 		Strings: []string{"A"},
@@ -215,7 +223,9 @@ func TestWriteSnapshotFullCtx_CancelledContext(t *testing.T) {
 	cancel()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	err := WriteSnapshotFullCtx(ctx, dir, c, g)
@@ -237,8 +247,12 @@ func TestWriteSnapshotFullCtx_CancelledContext(t *testing.T) {
 func TestWriteSnapshotFullCtx_FlakyCtxAfterCSR(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "X")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	sentinel := errors.New("ctx flakes after csr")
@@ -264,8 +278,12 @@ func TestWriteSnapshotFullCtx_FlakyCtxAfterCSR(t *testing.T) {
 func TestWriteSnapshotFullCtx_FlakyCtxAfterLabels(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "X")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	sentinel := errors.New("ctx flakes after labels")
@@ -285,8 +303,12 @@ func TestWriteSnapshotFullCtx_FlakyCtxAfterLabels(t *testing.T) {
 func TestWriteSnapshotFullCtx_FlakyCtxBeforeRename(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "X")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	sentinel := errors.New("ctx flakes pre-rename")
@@ -309,15 +331,21 @@ func TestWriteSnapshotFullCtx_FlakyCtxBeforeRename(t *testing.T) {
 func TestWriteSnapshotFullCtx_OverwritesExisting(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "X")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFullCtx(context.Background(), dir, c, g); err != nil {
 		t.Fatal(err)
 	}
 	// Re-write with an additional label.
-	g.SetNodeLabel("b", "Y")
+	if err := g.SetNodeLabel("b", "Y"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c2 := csr.BuildFromAdjList(g.AdjList())
 	if err := WriteSnapshotFullCtx(context.Background(), dir, c2, g); err != nil {
 		t.Fatalf("second write: %v", err)
@@ -338,8 +366,12 @@ func TestWriteSnapshotFullCtx_OverwritesExisting(t *testing.T) {
 func TestWriteSnapshotFullCtx_AtomicPublish(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "X")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -405,8 +437,12 @@ func appendUint64(b []byte, v uint64) []byte {
 func TestWriteLabels_WriterFailureAtMagic(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "L")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "L"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	w := errWriter{err: errors.New("write boom")}
 	_, _, err := WriteLabels(w, g)
 	if err == nil {
@@ -426,7 +462,9 @@ func TestWriteSnapshotFull_ParentIsAFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(blocker, "snap")
 	if err := WriteSnapshotFull(dir, c, g); err == nil {
@@ -441,8 +479,12 @@ func TestWriteSnapshotFull_ParentIsAFile(t *testing.T) {
 func TestLoadSnapshotFull_MissingLabelsBin(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "X")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -465,8 +507,12 @@ func TestLoadSnapshotFull_MissingLabelsBin(t *testing.T) {
 func TestLoadSnapshotFull_CorruptedCSR(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "X")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -501,8 +547,12 @@ func TestWriteLabels_FlushFailure(t *testing.T) {
 		// it; instead the failure surfaces at the final Flush — that
 		// is the canonical bufio behaviour and exactly what the test
 		// asserts).
-		g.AddNode("n")
-		g.SetNodeLabel("n", "L")
+		if err := g.AddNode("n"); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeLabel("n", "L"); err != nil {
+			t.Fatalf("SetNodeLabel: %v", err)
+		}
 	}
 	w := &partialWriter{n: 0, err: errors.New("flush boom")}
 	_, _, err := WriteLabels(w, g)

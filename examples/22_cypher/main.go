@@ -35,10 +35,18 @@ func buildGraph(g *lpg.Graph[string, float64]) {
 	for _, p := range []person{
 		{"Alice", 30}, {"Bob", 25}, {"Carol", 35}, {"Dave", 28}, {"Eve", 22},
 	} {
-		g.AddNode(p.name)
-		g.SetNodeLabel(p.name, "Person")
-		g.SetNodeProperty(p.name, "name", lpg.StringValue(p.name))
-		g.SetNodeProperty(p.name, "age", lpg.Int64Value(p.age))
+		if err := g.AddNode(p.name); err != nil {
+			log.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeLabel(p.name, "Person"); err != nil {
+			log.Fatalf("SetNodeLabel: %v", err)
+		}
+		if err := g.SetNodeProperty(p.name, "name", lpg.StringValue(p.name)); err != nil {
+			log.Fatalf("SetNodeProperty: %v", err)
+		}
+		if err := g.SetNodeProperty(p.name, "age", lpg.Int64Value(p.age)); err != nil {
+			log.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	for _, r := range [][3]string{
 		{"Alice", "Bob", "KNOWS"},
@@ -47,7 +55,9 @@ func buildGraph(g *lpg.Graph[string, float64]) {
 		{"Dave", "Eve", "KNOWS"},
 		{"Alice", "Carol", "FRIENDS"},
 	} {
-		g.AddEdge(r[0], r[1], 1.0)
+		if err := g.AddEdge(r[0], r[1], 1.0); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 		g.SetEdgeLabel(r[0], r[1], r[2])
 	}
 }

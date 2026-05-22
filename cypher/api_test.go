@@ -21,10 +21,13 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // newGraph creates an lpg.Graph populated with n nodes.
-func newGraph(n int) *lpg.Graph[string, float64] {
+func newGraph(tb testing.TB, n int) *lpg.Graph[string, float64] {
+	tb.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
-		g.AddNode(string(rune('A'+i%26)) + string(rune('0'+i%10)))
+		if err := g.AddNode(string(rune('A'+i%26)) + string(rune('0'+i%10))); err != nil {
+			tb.Fatalf("AddNode: %v", err)
+		}
 	}
 	return g
 }
@@ -61,7 +64,7 @@ func TestEngine_EmptyGraph(t *testing.T) {
 
 func TestEngine_MatchAllNodes(t *testing.T) {
 	const n = 5
-	g := newGraph(n)
+	g := newGraph(t, n)
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) RETURN n", nil)
@@ -113,7 +116,7 @@ func TestEngine_ParseError(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_PlanCache(t *testing.T) {
-	g := newGraph(3)
+	g := newGraph(t, 3)
 	eng := cypher.NewEngine(g)
 
 	const query = "MATCH (n) RETURN n"
@@ -138,7 +141,7 @@ func TestEngine_PlanCache(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_Columns(t *testing.T) {
-	g := newGraph(1)
+	g := newGraph(t, 1)
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) RETURN n", nil)
@@ -159,7 +162,7 @@ func TestEngine_Columns(t *testing.T) {
 
 func TestEngine_Cancellation(t *testing.T) {
 	const n = 100
-	g := newGraph(n)
+	g := newGraph(t, n)
 	eng := cypher.NewEngine(g)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -183,7 +186,7 @@ func TestEngine_Cancellation(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_RaceConcurrentRun(t *testing.T) {
-	g := newGraph(10)
+	g := newGraph(t, 10)
 	eng := cypher.NewEngine(g)
 
 	const goroutines = 8
@@ -212,7 +215,7 @@ func TestEngine_RaceConcurrentRun(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestEngine_CloseIdempotent(t *testing.T) {
-	g := newGraph(1)
+	g := newGraph(t, 1)
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) RETURN n", nil)

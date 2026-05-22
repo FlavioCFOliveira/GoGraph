@@ -91,7 +91,9 @@ func TestOpenString_SnapshotPresentNoWAL(t *testing.T) {
 	// Lay down a valid empty snapshot under dir/snapshot.
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	a := g.AdjList()
-	a.AddEdge("a", "b", 1)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	if err := snapshot.WriteSnapshotCSR(filepath.Join(dir, "snapshot"), c); err != nil {
 		t.Fatal(err)

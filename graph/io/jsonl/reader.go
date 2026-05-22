@@ -76,13 +76,19 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: node missing id", rows)
 			}
-			a.AddNode(rec.ID)
+			if err := a.AddNode(rec.ID); err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: AddNode: %w", rows, err)
+			}
 		case "edge":
 			if rec.Src == "" || rec.Dst == "" {
 				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: edge missing src/dst", rows)
 			}
-			a.AddEdge(rec.Src, rec.Dst, rec.Weight)
+			if err := a.AddEdge(rec.Src, rec.Dst, rec.Weight); err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: AddEdge: %w", rows, err)
+			}
 		default:
 			metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 			return nil, rows, fmt.Errorf("jsonl row %d: unknown type %q", rows, rec.Type)

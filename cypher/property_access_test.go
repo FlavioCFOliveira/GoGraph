@@ -57,8 +57,12 @@ func collectCol(t *testing.T, result *cypher.Result, col string) map[string]int 
 // returns the stored string property for each node.
 func TestNodePropertyAccess_StringProperty(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
-	g.SetNodeProperty("bob", "name", lpg.StringValue("Bob"))
+	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("bob", "name", lpg.StringValue("Bob")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -80,8 +84,12 @@ func TestNodePropertyAccess_StringProperty(t *testing.T) {
 // TestNodePropertyAccess_IntegerProperty verifies integer property retrieval.
 func TestNodePropertyAccess_IntegerProperty(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("p1", "age", lpg.Int64Value(30))
-	g.SetNodeProperty("p2", "age", lpg.Int64Value(25))
+	if err := g.SetNodeProperty("p1", "age", lpg.Int64Value(30)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("p2", "age", lpg.Int64Value(25)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -104,9 +112,13 @@ func TestNodePropertyAccess_IntegerProperty(t *testing.T) {
 // property that does not exist on a node returns NULL — not an error.
 func TestNodePropertyAccess_MissingPropertyIsNull(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("n1", "name", lpg.StringValue("N1"))
+	if err := g.SetNodeProperty("n1", "name", lpg.StringValue("N1")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	// n2 has no "name" property.
-	g.SetNodeProperty("n2", "other", lpg.StringValue("something"))
+	if err := g.SetNodeProperty("n2", "other", lpg.StringValue("something")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -131,12 +143,22 @@ func TestNodePropertyAccess_MissingPropertyIsNull(t *testing.T) {
 // NodeByLabelScan is used.
 func TestNodePropertyAccess_LabelScan(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeLabel("carol", "Person")
-	g.SetNodeProperty("carol", "name", lpg.StringValue("Carol"))
-	g.SetNodeLabel("dave", "Person")
-	g.SetNodeProperty("dave", "name", lpg.StringValue("Dave"))
+	if err := g.SetNodeLabel("carol", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeProperty("carol", "name", lpg.StringValue("Carol")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeLabel("dave", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeProperty("dave", "name", lpg.StringValue("Dave")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	// eve has no Person label — should not appear.
-	g.SetNodeProperty("eve", "name", lpg.StringValue("Eve"))
+	if err := g.SetNodeProperty("eve", "name", lpg.StringValue("Eve")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -165,10 +187,16 @@ func TestNodePropertyAccess_LabelScan(t *testing.T) {
 // variable references (a pre-existing grammar gap; tracked separately).
 func TestNodePropertyAccess_WhereFilter(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("young", "name", lpg.StringValue("young"))
-	g.SetNodeProperty("old", "name", lpg.StringValue("old"))
+	if err := g.SetNodeProperty("young", "name", lpg.StringValue("young")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("old", "name", lpg.StringValue("old")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	// Mark the "old" node with a label to distinguish it.
-	g.SetNodeLabel("old", "Senior")
+	if err := g.SetNodeLabel("old", "Senior"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -193,9 +221,15 @@ func TestNodePropertyAccess_WhereFilter(t *testing.T) {
 // filters nodes correctly using string equality.
 func TestNodePropertyAccess_WhereFilterByName(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("n1", "name", lpg.StringValue("Alice"))
-	g.SetNodeProperty("n2", "name", lpg.StringValue("Bob"))
-	g.SetNodeProperty("n3", "name", lpg.StringValue("Alice")) // second Alice
+	if err := g.SetNodeProperty("n1", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("n2", "name", lpg.StringValue("Bob")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("n3", "name", lpg.StringValue("Alice")); err != nil { // second Alice
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -223,7 +257,9 @@ func TestNodePropertyAccess_WhereFilterByName(t *testing.T) {
 // expressions (RETURN n.name AS name).
 func TestNodePropertyAccess_Alias(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("x", "name", lpg.StringValue("Xavier"))
+	if err := g.SetNodeProperty("x", "name", lpg.StringValue("Xavier")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -243,7 +279,9 @@ func TestNodePropertyAccess_Alias(t *testing.T) {
 // TestNodePropertyAccess_FloatProperty verifies float64 property retrieval.
 func TestNodePropertyAccess_FloatProperty(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("node1", "score", lpg.Float64Value(3.14))
+	if err := g.SetNodeProperty("node1", "score", lpg.Float64Value(3.14)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -263,8 +301,12 @@ func TestNodePropertyAccess_FloatProperty(t *testing.T) {
 // TestNodePropertyAccess_BoolProperty verifies bool property retrieval.
 func TestNodePropertyAccess_BoolProperty(t *testing.T) {
 	g := newPropTestGraph()
-	g.SetNodeProperty("t", "active", lpg.BoolValue(true))
-	g.SetNodeProperty("f", "active", lpg.BoolValue(false))
+	if err := g.SetNodeProperty("t", "active", lpg.BoolValue(true)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("f", "active", lpg.BoolValue(false)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()

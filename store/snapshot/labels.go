@@ -467,7 +467,10 @@ func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadba
 			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
 			continue
 		}
-		g.SetNodeLabel(n, rb.Strings[nl.StringIdx])
+		if err := g.SetNodeLabel(n, rb.Strings[nl.StringIdx]); err != nil {
+			metrics.IncCounter("store.snapshot.ApplyLabels.setNodeLabelErrors", 1)
+			return fmt.Errorf("snapshot.ApplyLabelsToGraph: SetNodeLabel: %w", err)
+		}
 	}
 	for _, el := range rb.EdgeLabels {
 		if uint64(el.StringIdx) >= uint64(len(rb.Strings)) {

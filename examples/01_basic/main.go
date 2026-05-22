@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
@@ -12,11 +13,20 @@ import (
 
 func main() {
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("Lisbon", "Madrid", 624)
-	a.AddEdge("Lisbon", "Paris", 1737)
-	a.AddEdge("Madrid", "Paris", 1274)
-	a.AddEdge("Madrid", "Rome", 1969)
-	a.AddEdge("Paris", "Rome", 1422)
+	for _, edge := range [...]struct {
+		s, d string
+		w    int64
+	}{
+		{"Lisbon", "Madrid", 624},
+		{"Lisbon", "Paris", 1737},
+		{"Madrid", "Paris", 1274},
+		{"Madrid", "Rome", 1969},
+		{"Paris", "Rome", 1422},
+	} {
+		if err := a.AddEdge(edge.s, edge.d, edge.w); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
+	}
 
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup("Lisbon")

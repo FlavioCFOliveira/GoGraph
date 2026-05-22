@@ -13,7 +13,7 @@ import (
 func TestBidirectionalDijkstra_HandBuilt(t *testing.T) {
 	t.Parallel()
 	// CLRS-style: shortest path 0->2->4 costs 5.
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 10}, {0, 2, 3},
 		{1, 3, 1},
 		{2, 1, 4}, {2, 3, 8}, {2, 4, 2},
@@ -38,7 +38,7 @@ func TestBidirectionalDijkstra_HandBuilt(t *testing.T) {
 
 func TestBidirectionalDijkstra_SameSrcDst(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 5}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 5}})
 	src, _ := a.Mapper().Lookup(0)
 	path, cost, err := BidirectionalDijkstra(c, src, src)
 	if err != nil {
@@ -51,7 +51,7 @@ func TestBidirectionalDijkstra_SameSrcDst(t *testing.T) {
 
 func TestBidirectionalDijkstra_NoPath(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 1}, {2, 3, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
 	_, _, err := BidirectionalDijkstra(c, src, dst)
@@ -62,7 +62,7 @@ func TestBidirectionalDijkstra_NoPath(t *testing.T) {
 
 func TestBidirectionalDijkstra_NegativeWeight(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{{0, 1, -3}})
+	c, _ := buildWeightedCSR(t, []weightedEdge{{0, 1, -3}})
 	_, _, err := BidirectionalDijkstra(c, 0, 1)
 	if !errors.Is(err, ErrNegativeWeight) {
 		t.Fatalf("expected ErrNegativeWeight, got %v", err)
@@ -87,7 +87,7 @@ func TestBidirectionalDijkstra_RandomVsDijkstra(t *testing.T) {
 				w:    int64(r.IntN(40) + 1),
 			})
 		}
-		c, a := buildWeightedCSRCfg(edges, adjlist.Config{Directed: true, Multigraph: true})
+		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{Directed: true, Multigraph: true})
 		src := r.IntN(n)
 		dst := r.IntN(n)
 		srcID, ok1 := a.Mapper().Lookup(src)
@@ -126,7 +126,7 @@ func TestBidirectionalDijkstra_RandomVsDijkstra(t *testing.T) {
 // across queries. The reverse CSR is built once outside the loop.
 // Task #141 targets >2x speedup over the one-way [Dijkstra] baseline.
 func BenchmarkBidirectionalDijkstra_RoadNetwork(b *testing.B) {
-	c, _, _ := buildRoadNetwork()
+	c, _, _ := buildRoadNetwork(b)
 	rev := c.BuildReverse()
 	const side = 200
 	const queries = 64
@@ -156,17 +156,22 @@ func BenchmarkBidirectionalDijkstra_RoadNetwork(b *testing.B) {
 	})
 }
 
-func buildRoadNetwork() (c *csr.CSR[int64], src, dst graph.NodeID) {
+func buildRoadNetwork(tb testing.TB) (c *csr.CSR[int64], src, dst graph.NodeID) {
+	tb.Helper()
 	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
 	const side = 200 // 200x200 = 40k nodes
 	for r := 0; r < side; r++ {
 		for c := 0; c < side; c++ {
 			cur := r*side + c
 			if c+1 < side {
-				a.AddEdge(cur, r*side+c+1, int64(1+(r+c)%5))
+				if err := a.AddEdge(cur, r*side+c+1, int64(1+(r+c)%5)); err != nil {
+					tb.Fatalf("AddEdge: %v", err)
+				}
 			}
 			if r+1 < side {
-				a.AddEdge(cur, (r+1)*side+c, int64(1+(r+c)%5))
+				if err := a.AddEdge(cur, (r+1)*side+c, int64(1+(r+c)%5)); err != nil {
+					tb.Fatalf("AddEdge: %v", err)
+				}
 			}
 		}
 	}

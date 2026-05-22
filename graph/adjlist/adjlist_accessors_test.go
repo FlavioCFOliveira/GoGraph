@@ -24,7 +24,7 @@ func TestAdjList_Accessors(t *testing.T) {
 	if got := a.MaxNodeID(); got != 0 {
 		t.Fatalf("empty AdjList MaxNodeID = %d, want 0", got)
 	}
-	a.AddNode("alice")
+	mustAddNode(t, a, "alice")
 	if got := a.MaxNodeID(); got == 0 {
 		t.Fatal("MaxNodeID still 0 after first AddNode")
 	}
@@ -57,9 +57,9 @@ func TestAdjList_AccessorsDefault(t *testing.T) {
 func TestAdjList_LoadEntry_AllPaths(t *testing.T) {
 	t.Parallel()
 	a := New[string, int](Config{Directed: true})
-	a.AddEdge("a", "b", 7)
-	a.AddEdge("a", "c", 8)
-	a.AddNode("solitary")
+	mustAddEdge(t, a, "a", "b", 7)
+	mustAddEdge(t, a, "a", "c", 8)
+	mustAddNode(t, a, "solitary")
 
 	idA, _ := a.Mapper().Lookup("a")
 	nb, ws := a.LoadEntry(idA)
@@ -84,7 +84,7 @@ func TestAdjList_LoadEntry_AllPaths(t *testing.T) {
 func TestAdjList_Compact_NoOp(t *testing.T) {
 	t.Parallel()
 	a := New[string, int](Config{Directed: true})
-	a.AddEdge("a", "b", 1)
+	mustAddEdge(t, a, "a", "b", 1)
 	beforeOrder := a.Order()
 	beforeSize := a.Size()
 	a.Compact()

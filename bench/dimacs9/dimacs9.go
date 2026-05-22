@@ -10,6 +10,7 @@ package dimacs9
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -40,10 +41,15 @@ type Report struct {
 	Latencies  []time.Duration
 }
 
-// Run executes the benchmark and returns a Report.
+// Run executes the benchmark and returns a Report. Errors surfaced
+// by [Synthetic] cause the run to abort with an empty Report; the
+// caller is expected to surface them through its own logging.
 func Run(ctx context.Context, spec Spec) Report {
 	t0 := time.Now()
-	a := Synthetic(ctx, spec.Vertices, spec.Edges)
+	a, err := Synthetic(ctx, spec.Vertices, spec.Edges)
+	if err != nil {
+		return Report{}
+	}
 	ingest := time.Since(t0)
 
 	t1 := time.Now()
@@ -70,14 +76,18 @@ func Run(ctx context.Context, spec Spec) Report {
 // Synthetic builds a directed weighted adjacency list approximating
 // a road network: every vertex points to its two next-numbered
 // neighbours and one random shortcut, with int64 edge weights
-// derived deterministically from the endpoint indices.
-func Synthetic(ctx context.Context, v, e uint64) *adjlist.AdjList[uint32, int64] {
+// derived deterministically from the endpoint indices. Returns the
+// partially-built adjlist on any [adjlist.AdjList] error so callers
+// can observe how far ingestion progressed before failure.
+func Synthetic(ctx context.Context, v, e uint64) (*adjlist.AdjList[uint32, int64], error) {
 	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
 	if v == 0 {
-		return a
+		return a, nil
 	}
 	for i := uint64(0); i < v; i++ {
-		a.AddNode(uint32(i))
+		if err := a.AddNode(uint32(i)); err != nil {
+			return a, fmt.Errorf("dimacs9.Synthetic: AddNode(%d): %w", i, err)
+		}
 	}
 	avgDeg := e / v
 	if avgDeg < 2 {
@@ -86,16 +96,18 @@ func Synthetic(ctx context.Context, v, e uint64) *adjlist.AdjList[uint32, int64]
 	for src := uint64(0); src < v; src++ {
 		select {
 		case <-ctx.Done():
-			return a
+			return a, ctx.Err()
 		default:
 		}
 		for d := uint64(0); d < avgDeg; d++ {
 			dst := (src + 1 + d*7) % v
 			w := int64((src*19+d*37)%97 + 1)
-			a.AddEdge(uint32(src), uint32(dst), w)
+			if err := a.AddEdge(uint32(src), uint32(dst), w); err != nil {
+				return a, fmt.Errorf("dimacs9.Synthetic: AddEdge(%d->%d): %w", src, dst, err)
+			}
 		}
 	}
-	return a
+	return a, nil
 }
 
 // Percentile returns the latency at the given fractional rank

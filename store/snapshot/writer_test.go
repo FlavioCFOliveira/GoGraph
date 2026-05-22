@@ -13,9 +13,15 @@ import (
 func TestWriteReadCSR_Roundtrip(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 1)
-	a.AddEdge("a", "c", 2)
-	a.AddEdge("b", "c", 3)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("a", "c", 2); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("b", "c", 3); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 
 	var buf bytes.Buffer
@@ -42,7 +48,9 @@ func TestWriteSnapshotCSR_AtomicPublish(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
 	for i := 0; i < 32; i++ {
-		a.AddEdge("origin", string(rune('a'+i%26)), int64(i))
+		if err := a.AddEdge("origin", string(rune('a'+i%26)), int64(i)); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 

@@ -15,7 +15,7 @@ func zeroH(_ graph.NodeID) int64 { return 0 }
 
 func TestAStar_Trivial(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 2}, {1, 2, 2}, {0, 2, 10},
 	})
 	src, _ := a.Mapper().Lookup(0)
@@ -34,7 +34,7 @@ func TestAStar_Trivial(t *testing.T) {
 
 func TestAStar_SameSrcDst(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	path, cost, err := AStar(c, src, src, zeroH)
 	if err != nil {
@@ -47,7 +47,7 @@ func TestAStar_SameSrcDst(t *testing.T) {
 
 func TestAStar_Unreachable(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 1}, {2, 3, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
 	_, _, err := AStar(c, src, dst, zeroH)
@@ -58,7 +58,7 @@ func TestAStar_Unreachable(t *testing.T) {
 
 func TestAStar_NegativeWeight(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{{0, 1, -3}})
+	c, _ := buildWeightedCSR(t, []weightedEdge{{0, 1, -3}})
 	_, _, err := AStar(c, 0, 1, zeroH)
 	if !errors.Is(err, ErrNegativeWeight) {
 		t.Fatalf("expected ErrNegativeWeight, got %v", err)
@@ -75,10 +75,14 @@ func TestAStar_VsDijkstraOnGrid(t *testing.T) {
 		for col := 0; col < size; col++ {
 			cur := r*size + col
 			if col+1 < size {
-				a.AddEdge(cur, r*size+col+1, 1)
+				if err := a.AddEdge(cur, r*size+col+1, 1); err != nil {
+					t.Fatalf("AddEdge: %v", err)
+				}
 			}
 			if r+1 < size {
-				a.AddEdge(cur, (r+1)*size+col, 1)
+				if err := a.AddEdge(cur, (r+1)*size+col, 1); err != nil {
+					t.Fatalf("AddEdge: %v", err)
+				}
 			}
 		}
 	}

@@ -95,7 +95,9 @@ func TestDecodeTemporalString_AllTagBranches(t *testing.T) {
 func TestBuildUnwindOperator_NilListExpr(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("A")
+	if err := g.AddNode("A"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	walker := &lpgNodeWalker{g: g}
 
 	// Build an Unwind IR node with a single-row Argument input and ListExpr=nil.
@@ -169,13 +171,22 @@ func TestWALMutatorAdapter_AddNode_AddEdge_HasEdge(t *testing.T) {
 	t.Parallel()
 	a := newWALAdapter(t)
 
-	srcID := a.AddNode("S")
-	dstID := a.AddNode("D")
+	srcID, err := a.AddNode("S")
+	if err != nil {
+		t.Fatalf("AddNode(S): %v", err)
+	}
+	dstID, err := a.AddNode("D")
+	if err != nil {
+		t.Fatalf("AddNode(D): %v", err)
+	}
 	if srcID == 0 || dstID == 0 {
 		t.Fatalf("AddNode returned zero NodeID: src=%d dst=%d", srcID, dstID)
 	}
 
-	gotSrcID, gotDstID := a.AddEdge("S", "D", 1.5)
+	gotSrcID, gotDstID, err := a.AddEdge("S", "D", 1.5)
+	if err != nil {
+		t.Fatalf("AddEdge(S,D): %v", err)
+	}
 	if gotSrcID != srcID || gotDstID != dstID {
 		t.Fatalf("AddEdge returned (%d,%d), want (%d,%d)", gotSrcID, gotDstID, srcID, dstID)
 	}
@@ -195,16 +206,34 @@ func TestWALMutatorAdapter_OutDegree_Neighbours(t *testing.T) {
 	t.Parallel()
 	a := newWALAdapter(t)
 
-	a.AddNode("Hub")
-	a.AddNode("L1")
-	a.AddNode("L2")
-	a.AddNode("L3")
-	a.AddNode("In1")
+	if _, err := a.AddNode("Hub"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("L1"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("L2"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("L3"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("In1"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
-	a.AddEdge("Hub", "L1", 0)
-	a.AddEdge("Hub", "L2", 0)
-	a.AddEdge("Hub", "L3", 0)
-	a.AddEdge("In1", "Hub", 0)
+	if _, _, err := a.AddEdge("Hub", "L1", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if _, _, err := a.AddEdge("Hub", "L2", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if _, _, err := a.AddEdge("Hub", "L3", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if _, _, err := a.AddEdge("In1", "Hub", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	if deg := a.OutDegree("Hub"); deg != 3 {
 		t.Errorf("OutDegree(Hub) = %d, want 3", deg)
@@ -231,9 +260,15 @@ func TestWALMutatorAdapter_SetAndDelEdgeProperty(t *testing.T) {
 	t.Parallel()
 	a := newWALAdapter(t)
 
-	a.AddNode("S")
-	a.AddNode("D")
-	a.AddEdge("S", "D", 0)
+	if _, err := a.AddNode("S"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("D"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, _, err := a.AddEdge("S", "D", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	a.SetEdgeLabel("S", "D", "KNOWS")
 	a.SetEdgeProperty("S", "D", "since", lpg.Int64Value(2020))
@@ -249,9 +284,15 @@ func TestWALMutatorAdapter_NodePropertyAndLabelRoundTrip(t *testing.T) {
 	t.Parallel()
 	a := newWALAdapter(t)
 
-	a.AddNode("N")
-	a.SetNodeLabel("N", "Person")
-	a.SetNodeProperty("N", "name", lpg.StringValue("Alice"))
+	if _, err := a.AddNode("N"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.SetNodeLabel("N", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := a.SetNodeProperty("N", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	// Read back via the adapter.
 	props := a.NodeProperties("N")
@@ -281,9 +322,15 @@ func TestWALMutatorAdapter_ResolveNodeID_WalkNodeIDs(t *testing.T) {
 	t.Parallel()
 	a := newWALAdapter(t)
 
-	a.AddNode("P")
-	a.AddNode("Q")
-	a.AddNode("R")
+	if _, err := a.AddNode("P"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("Q"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("R"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 
 	id, ok := a.ResolveNodeID("Q")
 	if !ok {
@@ -324,9 +371,15 @@ func TestWALMutatorAdapter_RemoveEdge(t *testing.T) {
 	t.Parallel()
 	a := newWALAdapter(t)
 
-	a.AddNode("X")
-	a.AddNode("Y")
-	a.AddEdge("X", "Y", 0)
+	if _, err := a.AddNode("X"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, err := a.AddNode("Y"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if _, _, err := a.AddEdge("X", "Y", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	if !a.HasEdge("X", "Y") {
 		t.Fatal("setup: expected X→Y edge")
 	}
@@ -345,7 +398,9 @@ func TestWALMutatorAdapter_TimedSequence(t *testing.T) {
 	a := newWALAdapter(t)
 	deadline := time.Now().Add(2 * time.Second)
 	for i := 0; i < 100; i++ {
-		a.AddNode("N")
+		if _, err := a.AddNode("N"); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 		if time.Now().After(deadline) {
 			t.Fatalf("AddNode loop exceeded 2s at iteration %d", i)
 		}

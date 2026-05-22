@@ -459,9 +459,13 @@ func applyOpString(g *lpg.Graph[string, int64], op *Op) {
 	label := op.Label
 	switch op.Kind {
 	case txn.OpAddEdge:
-		g.AddEdge(src, dst, 0)
+		if err := g.AddEdge(src, dst, 0); err != nil {
+			metrics.IncCounter("store.recovery.applyOp.addEdgeErrors", 1)
+		}
 	case txn.OpSetNodeLabel:
-		g.SetNodeLabel(src, label)
+		if err := g.SetNodeLabel(src, label); err != nil {
+			metrics.IncCounter("store.recovery.applyOp.setNodeLabelErrors", 1)
+		}
 	case txn.OpSetEdgeLabel:
 		g.SetEdgeLabel(src, dst, label)
 	}
@@ -726,7 +730,10 @@ func applyOpCodec[N comparable, W any](
 		if len(rest) < 2 {
 			return false
 		}
-		g.AddEdge(src, dst, weight)
+		if err := g.AddEdge(src, dst, weight); err != nil {
+			metrics.IncCounter("store.recovery.applyOp.addEdgeErrors", 1)
+			return false
+		}
 
 	case txn.OpAddEdge:
 		// Validate the trailing uint16 label-length prefix. AddEdge does not
@@ -741,7 +748,10 @@ func applyOpCodec[N comparable, W any](
 			return false
 		}
 		var zero W
-		g.AddEdge(src, dst, zero)
+		if err := g.AddEdge(src, dst, zero); err != nil {
+			metrics.IncCounter("store.recovery.applyOp.addEdgeErrors", 1)
+			return false
+		}
 
 	case txn.OpSetNodeLabel, txn.OpRemoveNodeLabel, txn.OpSetEdgeLabel,
 		txn.OpAddNode, txn.OpRemoveNode, txn.OpRemoveEdge:
@@ -757,7 +767,10 @@ func applyOpCodec[N comparable, W any](
 		label := string(rest[:n])
 		switch op.Kind {
 		case txn.OpAddNode:
-			g.AddNode(src)
+			if err := g.AddNode(src); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.addNodeErrors", 1)
+				return false
+			}
 		case txn.OpRemoveNode:
 			for _, lbl := range g.NodeLabels(src) {
 				g.RemoveNodeLabel(src, lbl)
@@ -768,7 +781,10 @@ func applyOpCodec[N comparable, W any](
 		case txn.OpRemoveNodeLabel:
 			g.RemoveNodeLabel(src, label)
 		case txn.OpSetNodeLabel:
-			g.SetNodeLabel(src, label)
+			if err := g.SetNodeLabel(src, label); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.setNodeLabelErrors", 1)
+				return false
+			}
 		case txn.OpSetEdgeLabel:
 			g.SetEdgeLabel(src, dst, label)
 		case txn.OpRemoveEdge:
@@ -794,7 +810,10 @@ func applyOpCodec[N comparable, W any](
 			if verr != nil {
 				return false
 			}
-			g.SetNodeProperty(src, key, val)
+			if err := g.SetNodeProperty(src, key, val); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.setNodePropertyErrors", 1)
+				return false
+			}
 		case txn.OpDelNodeProperty:
 			g.DelNodeProperty(src, key)
 		case txn.OpSetEdgeProperty:

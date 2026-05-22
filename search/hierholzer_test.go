@@ -17,10 +17,18 @@ func BenchmarkHierholzer_LargeEulerian(b *testing.B) {
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < n; i++ {
 		base := i * 4
-		a.AddEdge(base, base+1, struct{}{})
-		a.AddEdge(base+1, base+2, struct{}{})
-		a.AddEdge(base+2, base+3, struct{}{})
-		a.AddEdge(base+3, base, struct{}{})
+		if err := a.AddEdge(base, base+1, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
+		if err := a.AddEdge(base+1, base+2, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
+		if err := a.AddEdge(base+2, base+3, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
+		if err := a.AddEdge(base+3, base, struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ReportAllocs()
@@ -34,7 +42,9 @@ func TestHierholzer_Cycle(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 4; i++ {
-		a.AddEdge(i, (i+1)%4, struct{}{})
+		if err := a.AddEdge(i, (i+1)%4, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	trail, err := Hierholzer(c)
@@ -53,8 +63,12 @@ func TestHierholzer_Cycle(t *testing.T) {
 func TestHierholzer_NoEulerianTwoSinks(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(0, 2, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(0, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	_, err := Hierholzer(c)
 	if !errors.Is(err, ErrNoEulerian) {
@@ -66,10 +80,14 @@ func TestHierholzer_Disconnected(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 3; i++ {
-		a.AddEdge(i, (i+1)%3, struct{}{})
+		if err := a.AddEdge(i, (i+1)%3, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	for i := 10; i < 13; i++ {
-		a.AddEdge(i, (i+1)%3+10, struct{}{})
+		if err := a.AddEdge(i, (i+1)%3+10, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	if _, err := Hierholzer(c); !errors.Is(err, ErrNoEulerian) {

@@ -164,9 +164,12 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 }
 
 // SetNodeProperty records the named property on n with the given
-// value, inserting n into the graph if necessary.
-func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) {
-	g.adj.AddNode(n)
+// value, inserting n into the graph if necessary. Returns the error
+// from the underlying [adjlist.AdjList.AddNode] when present.
+func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
+	if err := g.adj.AddNode(n); err != nil {
+		return err
+	}
 	id, _ := g.adj.Mapper().Lookup(n)
 	keyID := g.propKeys().Intern(key)
 	s := g.nodePropShardFor(id)
@@ -178,6 +181,7 @@ func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) {
 	}
 	bag[keyID] = value
 	s.mu.Unlock()
+	return nil
 }
 
 // GetNodeProperty returns the property value attached to n under

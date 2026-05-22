@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sort"
 
 	"gograph/graph"
@@ -37,11 +38,17 @@ func main() {
 		{"grace", false, 27},
 	}
 	for _, u := range users {
-		g.SetNodeLabel(u.name, "User")
-		if u.verified {
-			g.SetNodeLabel(u.name, "Verified")
+		if err := g.SetNodeLabel(u.name, "User"); err != nil {
+			log.Fatalf("SetNodeLabel: %v", err)
 		}
-		g.SetNodeProperty(u.name, "age", lpg.Int64Value(u.age))
+		if u.verified {
+			if err := g.SetNodeLabel(u.name, "Verified"); err != nil {
+				log.Fatalf("SetNodeLabel: %v", err)
+			}
+		}
+		if err := g.SetNodeProperty(u.name, "age", lpg.Int64Value(u.age)); err != nil {
+			log.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 
 	// Friendship edges.
@@ -50,7 +57,9 @@ func main() {
 		{"bob", "dave"}, {"carol", "erin"}, {"carol", "frank"},
 		{"dave", "grace"}, {"erin", "grace"},
 	} {
-		g.AddEdge(e[0], e[1], 1)
+		if err := g.AddEdge(e[0], e[1], 1); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 
 	c := csr.BuildFromAdjList(g.AdjList())

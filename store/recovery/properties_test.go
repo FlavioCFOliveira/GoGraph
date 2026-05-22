@@ -63,12 +63,24 @@ func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 	// WAL-logged; they survive solely via the v2 snapshot
 	// properties.bin emission below.
 	knownTime := time.Date(2026, 5, 19, 14, 0, 0, 123456789, time.UTC)
-	g.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
-	g.SetNodeProperty("alice", "age", lpg.Int64Value(30))
-	g.SetNodeProperty("alice", "score", lpg.Float64Value(99.5))
-	g.SetNodeProperty("alice", "active", lpg.BoolValue(true))
-	g.SetNodeProperty("alice", "joined", lpg.TimeValue(knownTime))
-	g.SetNodeProperty("alice", "blob", lpg.BytesValue([]byte{0x01, 0x02, 0x03}))
+	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "age", lpg.Int64Value(30)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "score", lpg.Float64Value(99.5)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "active", lpg.BoolValue(true)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "joined", lpg.TimeValue(knownTime)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "blob", lpg.BytesValue([]byte{0x01, 0x02, 0x03})); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026"))
 	g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7))
 

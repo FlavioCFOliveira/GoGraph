@@ -75,7 +75,9 @@ func TestOpen_StringInt64(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	g.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
+	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	g.SetEdgeProperty("alice", "bob", "since", lpg.Int64Value(2026))
 
 	// Populate the btree index with a known entry so we can assert

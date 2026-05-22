@@ -23,6 +23,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -83,7 +84,9 @@ func main() {
 	// Attach typed properties directly on the in-memory graph; these
 	// are flushed exclusively through the snapshot (properties are
 	// not WAL-logged today).
-	g.SetNodeProperty(int64(1001), "name", lpg.StringValue("origin"))
+	if err := g.SetNodeProperty(int64(1001), "name", lpg.StringValue("origin")); err != nil {
+		log.Fatalf("SetNodeProperty: %v", err)
+	}
 	g.SetEdgeProperty(int64(1001), int64(1002), "latency_ms", lpg.Float64Value(0.5))
 	g.SetEdgeProperty(int64(1001), int64(1002), "loss", lpg.Float64Value(0.0001))
 

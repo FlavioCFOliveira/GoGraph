@@ -89,7 +89,10 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 	g := doc.Graphs[0]
 	a := adjlist.New[string, int64](adjlist.Config{Directed: g.EdgeDefault != "undirected"})
 	for _, n := range g.Nodes {
-		a.AddNode(n.ID)
+		if err := a.AddNode(n.ID); err != nil {
+			metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
+			return a, 0, fmt.Errorf("graphml: AddNode(%q): %w", n.ID, err)
+		}
 	}
 	added := 0
 	for _, e := range g.Edges {
@@ -108,7 +111,10 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 				}
 			}
 		}
-		a.AddEdge(e.Source, e.Target, w)
+		if err := a.AddEdge(e.Source, e.Target, w); err != nil {
+			metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
+			return a, added, fmt.Errorf("graphml: AddEdge(%q, %q): %w", e.Source, e.Target, err)
+		}
 		added++
 	}
 	return a, added, nil

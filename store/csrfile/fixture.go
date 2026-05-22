@@ -1,6 +1,7 @@
 package csrfile
 
 import (
+	"fmt"
 	"math/rand/v2"
 
 	"gograph/graph/adjlist"
@@ -27,17 +28,26 @@ type FixtureSpec struct {
 // are absent (struct{}). Suitable for Tier 2 benchmarks and the
 // crash-recovery harness, where reproducibility matters more than
 // realism.
-func BuildFixture(spec FixtureSpec) *csr.CSR[struct{}] {
+//
+// BuildFixture returns any error surfaced by the underlying
+// [adjlist.AdjList]; with the default uncapped configuration the
+// only failure mode is [adjlist.ErrShardFull], which cannot be
+// reached because no [adjlist.Config.MaxShardCapacity] is set.
+func BuildFixture(spec FixtureSpec) (*csr.CSR[struct{}], error) {
 	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true, Multigraph: spec.Multigraph})
 	for i := uint64(0); i < spec.Vertices; i++ {
-		a.AddNode(uint32(i))
+		if err := a.AddNode(uint32(i)); err != nil {
+			return nil, fmt.Errorf("csrfile.BuildFixture: AddNode(%d): %w", i, err)
+		}
 	}
 	r := rand.New(rand.NewPCG(spec.Seed, 0x9E3779B97F4A7C15)) //nolint:gosec // deterministic fixture RNG
 	universe := uint32(spec.Vertices)
 	for i := uint64(0); i < spec.Edges; i++ {
 		src := uint32(r.Uint32() % universe)
 		dst := uint32(r.Uint32() % universe)
-		a.AddEdge(src, dst, struct{}{})
+		if err := a.AddEdge(src, dst, struct{}{}); err != nil {
+			return nil, fmt.Errorf("csrfile.BuildFixture: AddEdge[%d]: %w", i, err)
+		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a), nil
 }

@@ -55,8 +55,12 @@ func TestReadInto_MissingFields(t *testing.T) {
 func TestWrite_Roundtrip(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("alice", "bob", 1)
-	a.AddEdge("bob", "carol", 2)
+	if err := a.AddEdge("alice", "bob", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("bob", "carol", 2); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	if _, err := Write(&buf, a); err != nil {
 		t.Fatal(err)

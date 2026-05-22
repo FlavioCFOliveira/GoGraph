@@ -109,7 +109,10 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 			}
 			w = pw
 		}
-		a.AddEdge(rec[0], rec[1], w)
+		if err := a.AddEdge(rec[0], rec[1], w); err != nil {
+			metrics.IncCounter("graph.io.csv.ReadIntoCtx.errors", 1)
+			return nil, rows, fmt.Errorf("csv row %d: %w", rows+1, err)
+		}
 		rows++
 	}
 	return a, rows, nil

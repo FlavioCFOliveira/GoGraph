@@ -11,7 +11,7 @@ import (
 func TestYen_KShortest(t *testing.T) {
 	t.Parallel()
 	// Two-path fixture: 0->1->3 (cost 4), 0->2->3 (cost 3).
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 2}, {1, 3, 2},
 		{0, 2, 1}, {2, 3, 2},
 	})
@@ -31,7 +31,7 @@ func TestYen_KShortest(t *testing.T) {
 
 func TestYen_NoPath(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 1}, {2, 3, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
 	if got := YenKShortest(c, src, dst, 3); len(got) != 0 {
@@ -41,7 +41,7 @@ func TestYen_NoPath(t *testing.T) {
 
 func TestYen_KZero(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(1)
 	if got := YenKShortest(c, src, dst, 0); got != nil {
@@ -56,10 +56,18 @@ func TestYen_KZero(t *testing.T) {
 func TestYenKShortest_Int32WeightsNoOverflow(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, int32](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, 3)
-	a.AddEdge(1, 2, 4)
-	a.AddEdge(0, 2, 10)
-	a.AddEdge(2, 3, 1)
+	if err := a.AddEdge(0, 1, 3); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, 4); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(0, 2, 10); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 3, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	id0, _ := a.Mapper().Lookup(0)
 	id3, _ := a.Mapper().Lookup(3)
@@ -79,8 +87,12 @@ func TestYenKShortest_Int32WeightsNoOverflow(t *testing.T) {
 func TestYenKShortest_UnreachableReturnsNil(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, 1)
-	a.AddEdge(2, 3, 1) // disjoint component
+	if err := a.AddEdge(0, 1, 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 3, 1); err != nil { // disjoint component
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	id0, _ := a.Mapper().Lookup(0)
 	id3, _ := a.Mapper().Lookup(3)
@@ -99,7 +111,9 @@ func BenchmarkYen_K100(b *testing.B) {
 	const n = 256
 	r := rand.New(rand.NewPCG(7, 13)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 4*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(50)+1))
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(50)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(0)

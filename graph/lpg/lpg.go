@@ -201,16 +201,29 @@ func (g *Graph[N, W]) IndexManager() *index.Manager { return g.idxMgr }
 // re-read.
 func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr = m }
 
-// AddNode inserts n if not already present.
-func (g *Graph[N, W]) AddNode(n N) { g.adj.AddNode(n) }
+// AddNode inserts n if not already present. The error contract
+// matches the underlying [adjlist.AdjList.AddNode]: callers must
+// propagate [adjlist.ErrShardFull] when the responsible shard is at
+// [adjlist.Config.MaxShardCapacity].
+func (g *Graph[N, W]) AddNode(n N) error { return g.adj.AddNode(n) }
 
 // AddEdge inserts a directed edge (mirrored when the graph is
-// undirected) from src to dst with weight w.
-func (g *Graph[N, W]) AddEdge(src, dst N, w W) { g.adj.AddEdge(src, dst, w) }
+// undirected) from src to dst with weight w. The error contract
+// matches the underlying [adjlist.AdjList.AddEdge]: callers must
+// propagate [adjlist.ErrShardFull] when the responsible shard is at
+// [adjlist.Config.MaxShardCapacity].
+func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src, dst, w) }
 
-// SetNodeLabel attaches label to n, inserting n if needed.
-func (g *Graph[N, W]) SetNodeLabel(n N, name string) {
-	g.adj.AddNode(n)
+// SetNodeLabel attaches label to n, inserting n if needed. Returns
+// the error from the underlying [adjlist.AdjList.AddNode] (which can
+// only happen via a future bounded-growth implementation); the
+// current [adjlist.AdjList.AddNode] never fails, so callers in
+// codepaths that do not configure [adjlist.Config.MaxShardCapacity]
+// may safely ignore the return.
+func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
+	if err := g.adj.AddNode(n); err != nil {
+		return err
+	}
 	id, _ := g.adj.Mapper().Lookup(n)
 	lid := g.reg.Intern(name)
 	g.nodeMu.Lock()
@@ -222,6 +235,7 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) {
 	bag[lid] = struct{}{}
 	g.nodeMu.Unlock()
 	g.nodeIdx.Add(uint32(lid), id)
+	return nil
 }
 
 // RemoveNodeLabel detaches name from n. No-op if absent.

@@ -36,7 +36,9 @@ func TestLeiden_ModularityNonDecrease(t *testing.T) {
 		for i := 0; i < n; i++ {
 			for j := i + 1; j < n; j++ {
 				if nextRand() < p {
-					a.AddEdge(i, j, struct{}{})
+					if err := a.AddEdge(i, j, struct{}{}); err != nil {
+						t.Fatalf("AddEdge: %v", err)
+					}
 					edgesAdded++
 				}
 			}

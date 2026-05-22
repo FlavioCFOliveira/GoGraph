@@ -20,6 +20,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -68,9 +69,15 @@ func main() {
 	// through properties.bin only; the WAL records labels and edges
 	// today, not property writes.
 	joined := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
-	g.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
-	g.SetNodeProperty("alice", "age", lpg.Int64Value(30))
-	g.SetNodeProperty("alice", "joined", lpg.TimeValue(joined))
+	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
+		log.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "age", lpg.Int64Value(30)); err != nil {
+		log.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "joined", lpg.TimeValue(joined)); err != nil {
+		log.Fatalf("SetNodeProperty: %v", err)
+	}
 	g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026"))
 	g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7))
 	fmt.Println("Typed properties set on alice and edge alice->bob.")

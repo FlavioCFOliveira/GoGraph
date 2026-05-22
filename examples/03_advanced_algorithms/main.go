@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"gograph/graph"
 	"gograph/graph/adjlist"
@@ -20,7 +21,9 @@ func main() {
 		{"carol", "dave", int64(1)},
 		{"alice", "carol", int64(2)},
 	} {
-		a.AddEdge(e[0].(string), e[1].(string), e[2].(int64))
+		if err := a.AddEdge(e[0].(string), e[1].(string), e[2].(int64)); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	src, _ := a.Mapper().Lookup("alice")

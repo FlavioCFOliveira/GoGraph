@@ -13,7 +13,9 @@ func TestTransitiveClosure_Chain(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < 4; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	tc := TransitiveClosure(c)
@@ -40,10 +42,14 @@ func TestTransitiveClosure_VsBFS(t *testing.T) {
 		const n = 16
 		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 		for i := 0; i < n; i++ {
-			a.AddNode(i)
+			if err := a.AddNode(i); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		for i := 0; i < 3*n; i++ {
-			a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+			if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
 		c := csr.BuildFromAdjList(a)
 		tc := TransitiveClosure(c)

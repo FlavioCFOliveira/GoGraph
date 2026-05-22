@@ -13,7 +13,9 @@ import (
 func TestWrite_QuoteWithSpecialChars(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge(`has"quote`, `has\backslash`, 0)
+	if err := a.AddEdge(`has"quote`, `has\backslash`, 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	var buf bytes.Buffer
 	if err := Write(&buf, a); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -48,7 +50,9 @@ func TestWriteCtx_ContextCancelled(t *testing.T) {
 	for i := range 5 {
 		src := string(rune('a' + i))
 		dst := string(rune('a' + (i+1)%5))
-		a.AddEdge(src, dst, int64(i))
+		if err := a.AddEdge(src, dst, int64(i)); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately so the loop hits ctx.Err() on first iteration

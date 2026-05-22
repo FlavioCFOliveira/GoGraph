@@ -17,6 +17,28 @@ import (
 	"gograph/graph/lpg"
 )
 
+// mustAddNode wraps stubMutator.AddNode for tests that expect the
+// call to succeed (the stub never returns errors).
+func mustAddNode(t *testing.T, s *stubMutator, n string) graph.NodeID {
+	t.Helper()
+	id, err := s.AddNode(n)
+	if err != nil {
+		t.Fatalf("AddNode(%q): %v", n, err)
+	}
+	return id
+}
+
+// mustAddEdge wraps stubMutator.AddEdge for tests that expect the
+// call to succeed.
+func mustAddEdge(t *testing.T, s *stubMutator, src, dst string, w float64) (graph.NodeID, graph.NodeID) {
+	t.Helper()
+	sid, did, err := s.AddEdge(src, dst, w)
+	if err != nil {
+		t.Fatalf("AddEdge(%q,%q): %v", src, dst, err)
+	}
+	return sid, did
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // stubMutator — in-process GraphMutator for tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -41,21 +63,27 @@ func newStubMutator() *stubMutator {
 	}
 }
 
-func (s *stubMutator) AddNode(n string) graph.NodeID {
+func (s *stubMutator) AddNode(n string) (graph.NodeID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id, ok := s.nodes[n]; ok {
-		return id
+		return id, nil
 	}
 	id := s.nextID
 	s.nextID++
 	s.nodes[n] = id
-	return id
+	return id, nil
 }
 
-func (s *stubMutator) AddEdge(src, dst string, _ float64) (srcID, dstID graph.NodeID) {
-	srcID = s.AddNode(src)
-	dstID = s.AddNode(dst)
+func (s *stubMutator) AddEdge(src, dst string, _ float64) (srcID, dstID graph.NodeID, err error) {
+	srcID, err = s.AddNode(src)
+	if err != nil {
+		return 0, 0, err
+	}
+	dstID, err = s.AddNode(dst)
+	if err != nil {
+		return 0, 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.edges[src] == nil {
@@ -73,13 +101,14 @@ func (s *stubMutator) RemoveEdge(src, dst string) {
 	}
 }
 
-func (s *stubMutator) SetNodeLabel(n, label string) {
+func (s *stubMutator) SetNodeLabel(n, label string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.labels[n] == nil {
 		s.labels[n] = make(map[string]bool)
 	}
 	s.labels[n][label] = true
+	return nil
 }
 
 func (s *stubMutator) RemoveNodeLabel(n, label string) {
@@ -90,13 +119,14 @@ func (s *stubMutator) RemoveNodeLabel(n, label string) {
 	}
 }
 
-func (s *stubMutator) SetNodeProperty(n, key string, value lpg.PropertyValue) {
+func (s *stubMutator) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.props[n] == nil {
 		s.props[n] = make(map[string]lpg.PropertyValue)
 	}
 	s.props[n][key] = value
+	return nil
 }
 
 func (s *stubMutator) DelNodeProperty(n, key string) {
@@ -364,8 +394,8 @@ func TestCreateRelationship_Basic(t *testing.T) {
 	mut := newStubMutator()
 
 	// Pre-intern two nodes.
-	srcID := mut.AddNode("alice")
-	dstID := mut.AddNode("bob")
+	srcID := mustAddNode(t, mut, "alice")
+	dstID := mustAddNode(t, mut, "bob")
 
 	schema := map[string]int{"a": 0, "b": 1}
 	row := exec.Row{
@@ -407,7 +437,7 @@ func TestCreateRelationship_MissingEndpoint(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
 	// Only one column (src) in the row; dst is missing.
-	srcID := mut.AddNode("x")
+	srcID := mustAddNode(t, mut, "x")
 	schema := map[string]int{"a": 0}
 	row := exec.Row{expr.IntegerValue(int64(srcID))}
 	src := newSliceOperator(row)
@@ -429,7 +459,7 @@ func TestCreateRelationship_MissingEndpoint(t *testing.T) {
 func TestSetProperty_SingleProperty(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("alice")
+	nID := mustAddNode(t, mut, "alice")
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -455,8 +485,10 @@ func TestSetProperty_SingleProperty(t *testing.T) {
 func TestSetProperty_ReplaceAll(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("alice")
-	mut.SetNodeProperty("alice", "old", lpg.StringValue("gone"))
+	nID := mustAddNode(t, mut, "alice")
+	if err := mut.SetNodeProperty("alice", "old", lpg.StringValue("gone")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -485,8 +517,10 @@ func TestSetProperty_ReplaceAll(t *testing.T) {
 func TestSetProperty_Merge(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("alice")
-	mut.SetNodeProperty("alice", "existing", lpg.StringValue("keep"))
+	nID := mustAddNode(t, mut, "alice")
+	if err := mut.SetNodeProperty("alice", "existing", lpg.StringValue("keep")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -515,7 +549,7 @@ func TestSetProperty_Merge(t *testing.T) {
 func TestSetLabels(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("n1")
+	nID := mustAddNode(t, mut, "n1")
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -541,8 +575,10 @@ func TestSetLabels(t *testing.T) {
 func TestRemoveProperty(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("alice")
-	mut.SetNodeProperty("alice", "age", lpg.Int64Value(30))
+	nID := mustAddNode(t, mut, "alice")
+	if err := mut.SetNodeProperty("alice", "age", lpg.Int64Value(30)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -561,9 +597,13 @@ func TestRemoveProperty(t *testing.T) {
 func TestRemoveLabels(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("bob")
-	mut.SetNodeLabel("bob", "Person")
-	mut.SetNodeLabel("bob", "Employee")
+	nID := mustAddNode(t, mut, "bob")
+	if err := mut.SetNodeLabel("bob", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := mut.SetNodeLabel("bob", "Employee"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -602,9 +642,11 @@ func TestRemoveProperty_FiveScenarios(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mut := newStubMutator()
-			nID := mut.AddNode("node")
+			nID := mustAddNode(t, mut, "node")
 			for k, v := range tc.setupProp {
-				mut.SetNodeProperty("node", k, v)
+				if err := mut.SetNodeProperty("node", k, v); err != nil {
+					t.Fatalf("SetNodeProperty: %v", err)
+				}
 			}
 			schema := map[string]int{"n": 0}
 			row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -629,9 +671,9 @@ func TestRemoveProperty_FiveScenarios(t *testing.T) {
 func TestDeleteNode_Connected(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("alice")
-	mut.AddNode("bob")
-	mut.AddEdge("alice", "bob", 0)
+	nID := mustAddNode(t, mut, "alice")
+	mustAddNode(t, mut, "bob")
+	mustAddEdge(t, mut, "alice", "bob", 0)
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -648,9 +690,13 @@ func TestDeleteNode_Connected(t *testing.T) {
 func TestDeleteNode_Isolated(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	nID := mut.AddNode("alone")
-	mut.SetNodeLabel("alone", "X")
-	mut.SetNodeProperty("alone", "k", lpg.StringValue("v"))
+	nID := mustAddNode(t, mut, "alone")
+	if err := mut.SetNodeLabel("alone", "X"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := mut.SetNodeProperty("alone", "k", lpg.StringValue("v")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(nID))}
@@ -672,9 +718,9 @@ func TestDeleteNode_Isolated(t *testing.T) {
 func TestDeleteRelationship(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	aID := mut.AddNode("a")
-	bID := mut.AddNode("b")
-	mut.AddEdge("a", "b", 0)
+	aID := mustAddNode(t, mut, "a")
+	bID := mustAddNode(t, mut, "b")
+	mustAddEdge(t, mut, "a", "b", 0)
 
 	schema := map[string]int{"r": 0}
 	rel := expr.RelationshipValue{
@@ -703,13 +749,17 @@ func TestDeleteRelationship(t *testing.T) {
 func TestDetachDelete_Connected(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	aID := mut.AddNode("a")
-	mut.AddNode("b")
-	mut.AddNode("c")
-	mut.AddEdge("a", "b", 0) // outgoing
-	mut.AddEdge("c", "a", 0) // incoming
-	mut.SetNodeLabel("a", "L")
-	mut.SetNodeProperty("a", "p", lpg.StringValue("v"))
+	aID := mustAddNode(t, mut, "a")
+	mustAddNode(t, mut, "b")
+	mustAddNode(t, mut, "c")
+	mustAddEdge(t, mut, "a", "b", 0) // outgoing
+	mustAddEdge(t, mut, "c", "a", 0) // incoming
+	if err := mut.SetNodeLabel("a", "L"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := mut.SetNodeProperty("a", "p", lpg.StringValue("v")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	schema := map[string]int{"n": 0}
 	row := exec.Row{expr.IntegerValue(int64(aID))}
@@ -775,7 +825,7 @@ func TestMerge_NoMatch(t *testing.T) {
 func TestMerge_Match(t *testing.T) {
 	t.Parallel()
 	mut := newStubMutator()
-	existingID := mut.AddNode("existing")
+	existingID := mustAddNode(t, mut, "existing")
 	existingRow := exec.Row{expr.IntegerValue(int64(existingID))}
 
 	matchFn := func(_ context.Context) ([]exec.Row, error) {

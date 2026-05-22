@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
@@ -40,18 +41,32 @@ func main() {
 		{"erin", 28, false},
 	}
 	for _, p := range people {
-		g.SetNodeLabel(p.id, "Person")
-		if p.isAd {
-			g.SetNodeLabel(p.id, "Admin")
+		if err := g.SetNodeLabel(p.id, "Person"); err != nil {
+			log.Fatalf("SetNodeLabel: %v", err)
 		}
-		g.SetNodeProperty(p.id, "age", lpg.Int64Value(p.age))
-		g.SetNodeProperty(p.id, "name", lpg.StringValue(p.id))
+		if p.isAd {
+			if err := g.SetNodeLabel(p.id, "Admin"); err != nil {
+				log.Fatalf("SetNodeLabel: %v", err)
+			}
+		}
+		if err := g.SetNodeProperty(p.id, "age", lpg.Int64Value(p.age)); err != nil {
+			log.Fatalf("SetNodeProperty: %v", err)
+		}
+		if err := g.SetNodeProperty(p.id, "name", lpg.StringValue(p.id)); err != nil {
+			log.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 
 	// One edge each for the demo.
-	g.AddEdge("alice", "bob", 1)
-	g.AddEdge("alice", "charlie", 1)
-	g.AddEdge("bob", "dave", 1)
+	if err := g.AddEdge("alice", "bob", 1); err != nil {
+		log.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("alice", "charlie", 1); err != nil {
+		log.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("bob", "dave", 1); err != nil {
+		log.Fatalf("AddEdge: %v", err)
+	}
 	g.SetEdgeLabel("alice", "bob", "KNOWS")
 	g.SetEdgeLabel("alice", "charlie", "KNOWS")
 

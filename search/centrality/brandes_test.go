@@ -15,7 +15,9 @@ func TestBetweenness_Path(t *testing.T) {
 	// betweenness; nodes 0/4 are zero.
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 0; i < 4; i++ {
-		a.AddEdge(i, i+1, struct{}{})
+		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	bc := Betweenness(c)
@@ -40,7 +42,9 @@ func BenchmarkBrandes_RandomGraph(b *testing.B) {
 	const n = 512
 	r := rand.New(rand.NewPCG(19, 23)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 3*n; i++ {
-		a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	b.ReportAllocs()
@@ -56,7 +60,9 @@ func TestBetweenness_Star(t *testing.T) {
 	// every leaf has 0.
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
 	for i := 1; i <= 4; i++ {
-		a.AddEdge(0, i, struct{}{})
+		if err := a.AddEdge(0, i, struct{}{}); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	bc := Betweenness(c)

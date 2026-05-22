@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
@@ -25,7 +26,9 @@ func main() {
 		{"berlin", "amsterdam"},
 		{"amsterdam", "london"},
 	} {
-		a.AddEdge(e[0], e[1], struct{}{})
+		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 

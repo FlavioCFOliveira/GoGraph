@@ -786,7 +786,10 @@ func ApplyPropertiesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb Properti
 			metrics.IncCounter("store.snapshot.ApplyProperties.unresolved", 1)
 			continue
 		}
-		g.SetNodeProperty(n, rb.Keys[np.KeyIdx], v)
+		if err := g.SetNodeProperty(n, rb.Keys[np.KeyIdx], v); err != nil {
+			metrics.IncCounter("store.snapshot.ApplyProperties.setNodePropertyErrors", 1)
+			return fmt.Errorf("snapshot.ApplyPropertiesToGraph: SetNodeProperty: %w", err)
+		}
 	}
 	for i := range rb.EdgeProperties {
 		ep := &rb.EdgeProperties[i]

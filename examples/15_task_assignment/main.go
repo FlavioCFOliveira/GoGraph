@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"gograph/graph/adjlist"
 	"gograph/graph/csr"
@@ -43,15 +44,21 @@ func main() {
 	fmt.Println("\n=== Maximum cardinality matching (Hopcroft-Karp) ===")
 	adj := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < n; i++ {
-		adj.AddNode(i)
+		if err := adj.AddNode(i); err != nil {
+			log.Fatalf("AddNode: %v", err)
+		}
 	}
 	for j := 0; j < m; j++ {
-		adj.AddNode(n + j)
+		if err := adj.AddNode(n + j); err != nil {
+			log.Fatalf("AddNode: %v", err)
+		}
 	}
 	for i := 0; i < n; i++ {
 		for j := 0; j < m; j++ {
 			if cost[i*m+j] <= 6 {
-				adj.AddEdge(i, n+j, struct{}{})
+				if err := adj.AddEdge(i, n+j, struct{}{}); err != nil {
+					log.Fatalf("AddEdge: %v", err)
+				}
 			}
 		}
 	}

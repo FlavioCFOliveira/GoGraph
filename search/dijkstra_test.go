@@ -11,14 +11,18 @@ import (
 	"gograph/graph/csr"
 )
 
-func buildWeightedCSR(edges []weightedEdge) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
-	return buildWeightedCSRCfg(edges, adjlist.Config{Directed: true})
+func buildWeightedCSR(tb testing.TB, edges []weightedEdge) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
+	tb.Helper()
+	return buildWeightedCSRCfg(tb, edges, adjlist.Config{Directed: true})
 }
 
-func buildWeightedCSRCfg(edges []weightedEdge, cfg adjlist.Config) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
+func buildWeightedCSRCfg(tb testing.TB, edges []weightedEdge, cfg adjlist.Config) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
+	tb.Helper()
 	a := adjlist.New[int, int64](cfg)
 	for _, e := range edges {
-		a.AddEdge(e.from, e.to, e.w)
+		if err := a.AddEdge(e.from, e.to, e.w); err != nil {
+			tb.Fatalf("AddEdge: %v", err)
+		}
 	}
 	return csr.BuildFromAdjList(a), a
 }
@@ -44,7 +48,7 @@ func TestDijkstra_HandBuilt(t *testing.T) {
 		{2, 1, 4}, {2, 3, 8}, {2, 4, 2},
 		{3, 4, 7},
 	}
-	c, a := buildWeightedCSR(edges)
+	c, a := buildWeightedCSR(t, edges)
 	src, _ := a.Mapper().Lookup(0)
 	d, err := Dijkstra(c, src)
 	if err != nil {
@@ -65,7 +69,7 @@ func TestDijkstra_HandBuilt(t *testing.T) {
 
 func TestDijkstra_Unreachable(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 5}, {1, 2, 6}, {3, 4, 1}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 5}, {1, 2, 6}, {3, 4, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	d, err := Dijkstra(c, src)
 	if err != nil {
@@ -82,7 +86,7 @@ func TestDijkstra_Unreachable(t *testing.T) {
 
 func TestDijkstra_NegativeWeight(t *testing.T) {
 	t.Parallel()
-	c, _ := buildWeightedCSR([]weightedEdge{{0, 1, -3}, {1, 2, 4}})
+	c, _ := buildWeightedCSR(t, []weightedEdge{{0, 1, -3}, {1, 2, 4}})
 	_, err := Dijkstra(c, graph.NodeID(0))
 	if !errors.Is(err, ErrNegativeWeight) {
 		t.Fatalf("expected ErrNegativeWeight, got %v", err)
@@ -92,7 +96,7 @@ func TestDijkstra_NegativeWeight(t *testing.T) {
 func TestDijkstra_PathReconstruction(t *testing.T) {
 	t.Parallel()
 	// Two paths from 0 to 3: 0->1->3 cost 4, 0->2->3 cost 3 (winner).
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 2}, {1, 3, 2},
 		{0, 2, 1}, {2, 3, 2},
 	})
@@ -118,7 +122,7 @@ func TestDijkstra_PathReconstruction(t *testing.T) {
 
 func TestDijkstra_Source(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 5}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 5}})
 	src, _ := a.Mapper().Lookup(0)
 	d, err := Dijkstra(c, src)
 	if err != nil {
@@ -155,7 +159,7 @@ func TestDijkstra_RandomisedAgainstNaive(t *testing.T) {
 				w:    int64(r.IntN(50) + 1),
 			})
 		}
-		c, a := buildWeightedCSRCfg(edges, adjlist.Config{Directed: true, Multigraph: true})
+		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{Directed: true, Multigraph: true})
 		src := r.IntN(n)
 		srcID, _ := a.Mapper().Lookup(src)
 		gotDist, err := Dijkstra(c, srcID)
@@ -248,11 +252,15 @@ func BenchmarkDijkstra_Small(b *testing.B) {
 	const n = 100
 	// Build connected subgraph among nodes 1..n-1, leave 0 isolated.
 	r := rand.New(rand.NewPCG(11, 17)) //nolint:gosec // deterministic benchmark RNG
-	a.AddNode(0)
+	if err := a.AddNode(0); err != nil {
+		b.Fatalf("AddNode: %v", err)
+	}
 	for i := 0; i < 4*n; i++ {
 		from := r.IntN(n-1) + 1
 		to := r.IntN(n-1) + 1
-		a.AddEdge(from, to, int64(r.IntN(50)+1))
+		if err := a.AddEdge(from, to, int64(r.IntN(50)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(0)
@@ -270,12 +278,16 @@ func BenchmarkDijkstra_Large(b *testing.B) {
 	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
 	const universe = 1 << 16 // 64k nodes
 	for i := uint32(0); i < uint32(universe); i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			b.Fatalf("AddNode: %v", err)
+		}
 	}
 	r := rand.New(rand.NewPCG(33, 7)) //nolint:gosec // deterministic benchmark RNG
 	const fill = 1 << 18              // 256k edges
 	for i := 0; i < fill; i++ {
-		a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1))
+		if err := a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(uint32(0))
@@ -290,12 +302,16 @@ func BenchmarkDijkstra_RandomGraph(b *testing.B) {
 	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
 	const universe = 1 << 20 // 1M nodes
 	for i := uint32(0); i < uint32(universe); i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			b.Fatalf("AddNode: %v", err)
+		}
 	}
 	r := rand.New(rand.NewPCG(31, 1)) //nolint:gosec // deterministic benchmark RNG
 	const fill = 1 << 22              // 4M edges
 	for i := 0; i < fill; i++ {
-		a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1))
+		if err := a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(uint32(0))
@@ -314,12 +330,16 @@ func BenchmarkDijkstra_PostWarmup(b *testing.B) {
 	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
 	const universe = 1 << 16 // 64k nodes
 	for i := uint32(0); i < uint32(universe); i++ {
-		a.AddNode(i)
+		if err := a.AddNode(i); err != nil {
+			b.Fatalf("AddNode: %v", err)
+		}
 	}
 	r := rand.New(rand.NewPCG(31, 1)) //nolint:gosec // deterministic benchmark RNG
 	const fill = 1 << 18              // 256k edges
 	for i := 0; i < fill; i++ {
-		a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1))
+		if err := a.AddEdge(uint32(r.IntN(universe)), uint32(r.IntN(universe)), int64(r.IntN(100)+1)); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	srcID, _ := a.Mapper().Lookup(uint32(0))
@@ -348,7 +368,7 @@ func BenchmarkDijkstra_PostWarmup(b *testing.B) {
 // gate fires when any caller buffer is shorter than c.MaxNodeID().
 func TestDijkstraInto_BufferSizeValidation(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{{0, 1, 2}, {1, 2, 3}})
+	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 2}, {1, 2, 3}})
 	src, _ := a.Mapper().Lookup(0)
 	maxID := uint64(c.MaxNodeID())
 	ctx := t.Context()
@@ -376,7 +396,7 @@ func TestDijkstraInto_BufferSizeValidation(t *testing.T) {
 // the CLRS hand-built fixture.
 func TestDijkstraInto_AgreesWithDijkstra(t *testing.T) {
 	t.Parallel()
-	c, a := buildWeightedCSR([]weightedEdge{
+	c, a := buildWeightedCSR(t, []weightedEdge{
 		{0, 1, 10}, {0, 2, 3},
 		{1, 3, 1},
 		{2, 1, 4}, {2, 3, 8}, {2, 4, 2},

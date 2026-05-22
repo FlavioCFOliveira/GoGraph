@@ -37,18 +37,36 @@ func TestProperties_RoundtripAllKinds(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("alice", "bob", 1)
-	g.AddEdge("bob", "carol", 2)
+	if err := g.AddEdge("alice", "bob", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.AddEdge("bob", "carol", 2); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 
 	// Node-side property fixture: one of each kind.
-	g.SetNodeProperty("alice", "name", lpg.StringValue("Álice"))
-	g.SetNodeProperty("alice", "age", lpg.Int64Value(-42))
-	g.SetNodeProperty("alice", "score", lpg.Float64Value(3.141592653589793))
-	g.SetNodeProperty("alice", "active", lpg.BoolValue(true))
-	g.SetNodeProperty("alice", "inactive", lpg.BoolValue(false))
+	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Álice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "age", lpg.Int64Value(-42)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "score", lpg.Float64Value(3.141592653589793)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "active", lpg.BoolValue(true)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "inactive", lpg.BoolValue(false)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	tStamp := time.Date(2026, 5, 19, 12, 34, 56, 789012345, time.UTC)
-	g.SetNodeProperty("alice", "joined", lpg.TimeValue(tStamp))
-	g.SetNodeProperty("alice", "blob", lpg.BytesValue([]byte{0x00, 0xFF, 0xAB, 0xCD, 0xEF}))
+	if err := g.SetNodeProperty("alice", "joined", lpg.TimeValue(tStamp)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("alice", "blob", lpg.BytesValue([]byte{0x00, 0xFF, 0xAB, 0xCD, 0xEF})); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	// Edge-side property fixture: one of each kind on a different edge
 	// to confirm src/dst tagging is correct.
@@ -84,8 +102,12 @@ func TestProperties_RoundtripAllKinds(t *testing.T) {
 	// Materialise into a fresh graph with the same adjacency replayed,
 	// then apply the properties readback.
 	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
-	restored.AddEdge("alice", "bob", 0)
-	restored.AddEdge("bob", "carol", 0)
+	if err := restored.AddEdge("alice", "bob", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := restored.AddEdge("bob", "carol", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	if err := ApplyPropertiesToGraph(restored, loaded.Properties); err != nil {
 		t.Fatalf("ApplyPropertiesToGraph: %v", err)
 	}
@@ -114,10 +136,16 @@ func TestProperties_RoundtripAllKinds(t *testing.T) {
 func TestProperties_ManifestV2_WithBothLabelsAndProperties_Loads(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "L")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "L"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	g.SetEdgeLabel("a", "b", "E")
-	g.SetNodeProperty("a", "k", lpg.Int64Value(99))
+	if err := g.SetNodeProperty("a", "k", lpg.Int64Value(99)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	g.SetEdgeProperty("a", "b", "k", lpg.StringValue("v"))
 
 	c := csr.BuildFromAdjList(g.AdjList())
@@ -147,8 +175,12 @@ func TestProperties_ManifestV2_WithBothLabelsAndProperties_Loads(t *testing.T) {
 func TestProperties_ManifestV2_OnlyLabels_Loads(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeLabel("a", "L")
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("a", "L"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -204,7 +236,9 @@ func TestProperties_ManifestV2_OnlyLabels_Loads(t *testing.T) {
 func TestProperties_ManifestV2_NoLabelsNoProperties_Loads(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -308,8 +342,12 @@ func TestProperties_WriteEmptyGraph_RoundTrips(t *testing.T) {
 func TestProperties_CorruptedFile_SurfacesErrCorrupted(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddEdge("a", "b", 1)
-	g.SetNodeProperty("a", "k", lpg.Int64Value(42))
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeProperty("a", "k", lpg.Int64Value(42)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -372,12 +410,16 @@ func TestProperties_PropertyRoundtrip(t *testing.T) {
 
 		// Build random typed properties on each node.
 		for _, name := range nodes {
-			g.AddNode(name)
+			if err := g.AddNode(name); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 			k := rapid.IntRange(0, 4).Draw(t, "node-prop-count")
 			for i := 0; i < k; i++ {
 				key := fmt.Sprintf("k%d", rapid.IntRange(0, 5).Draw(t, "key-id"))
 				v := drawRandomPropertyValue(t)
-				g.SetNodeProperty(name, key, v)
+				if err := g.SetNodeProperty(name, key, v); err != nil {
+					t.Fatalf("SetNodeProperty: %v", err)
+				}
 				expectedNode[nodeKey{name, key}] = canonicaliseValue(v)
 			}
 		}
@@ -387,7 +429,9 @@ func TestProperties_PropertyRoundtrip(t *testing.T) {
 			si := rapid.IntRange(0, n-1).Draw(t, "src")
 			di := rapid.IntRange(0, n-1).Draw(t, "dst")
 			s, d := nodes[si], nodes[di]
-			g.AddEdge(s, d, 0)
+			if err := g.AddEdge(s, d, 0); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 			k := rapid.IntRange(0, 3).Draw(t, "edge-prop-count")
 			for j := 0; j < k; j++ {
 				key := fmt.Sprintf("ek%d", rapid.IntRange(0, 4).Draw(t, "edge-key-id"))
@@ -412,11 +456,15 @@ func TestProperties_PropertyRoundtrip(t *testing.T) {
 		// Replay against a fresh graph with the same adjacency.
 		restored := lpg.New[string, int64](adjlist.Config{Directed: true})
 		for _, name := range nodes {
-			restored.AddNode(name)
+			if err := restored.AddNode(name); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
 		}
 		for _, s := range nodes {
 			for nb := range g.AdjList().Neighbours(s) {
-				restored.AddEdge(s, nb, 0)
+				if err := restored.AddEdge(s, nb, 0); err != nil {
+					t.Fatalf("AddEdge: %v", err)
+				}
 			}
 		}
 		if err := ApplyPropertiesToGraph(restored, loaded.Properties); err != nil {
@@ -566,10 +614,18 @@ func debugProp(v lpg.PropertyValue) string {
 func TestProperties_KeyOrderIsStableAcrossSnapshots(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	g.AddNode("n")
-	g.SetNodeProperty("n", "zebra", lpg.Int64Value(1))
-	g.SetNodeProperty("n", "apple", lpg.Int64Value(2))
-	g.SetNodeProperty("n", "monkey", lpg.Int64Value(3))
+	if err := g.AddNode("n"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.SetNodeProperty("n", "zebra", lpg.Int64Value(1)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("n", "apple", lpg.Int64Value(2)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := g.SetNodeProperty("n", "monkey", lpg.Int64Value(3)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -601,12 +657,18 @@ func TestProperties_MultipleNodesEdges(t *testing.T) {
 	const N = 50
 	for i := 0; i < N; i++ {
 		name := fmt.Sprintf("n%d", i)
-		g.AddNode(name)
-		g.SetNodeProperty(name, "idx", lpg.Int64Value(int64(i)))
+		if err := g.AddNode(name); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty(name, "idx", lpg.Int64Value(int64(i))); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
 	}
 	for i := 0; i < N-1; i++ {
 		s, d := fmt.Sprintf("n%d", i), fmt.Sprintf("n%d", i+1)
-		g.AddEdge(s, d, 0)
+		if err := g.AddEdge(s, d, 0); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 		g.SetEdgeProperty(s, d, "ord", lpg.Int64Value(int64(i)))
 	}
 
@@ -628,10 +690,14 @@ func TestProperties_MultipleNodesEdges(t *testing.T) {
 
 	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
 	for i := 0; i < N; i++ {
-		restored.AddNode(fmt.Sprintf("n%d", i))
+		if err := restored.AddNode(fmt.Sprintf("n%d", i)); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
 	}
 	for i := 0; i < N-1; i++ {
-		restored.AddEdge(fmt.Sprintf("n%d", i), fmt.Sprintf("n%d", i+1), 0)
+		if err := restored.AddEdge(fmt.Sprintf("n%d", i), fmt.Sprintf("n%d", i+1), 0); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	if err := ApplyPropertiesToGraph(restored, loaded.Properties); err != nil {
 		t.Fatal(err)

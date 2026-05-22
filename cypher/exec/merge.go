@@ -173,12 +173,19 @@ func (op *Merge) Init(ctx context.Context) error {
 
 	// ON CREATE path: create the node.
 	nodeKey := op.freshNodeKey()
-	nodeID := op.mutator.AddNode(nodeKey)
+	nodeID, err := op.mutator.AddNode(nodeKey)
+	if err != nil {
+		return fmt.Errorf("exec: Merge: ON CREATE AddNode: %w", err)
+	}
 	for _, lbl := range op.labels {
-		op.mutator.SetNodeLabel(nodeKey, lbl)
+		if serr := op.mutator.SetNodeLabel(nodeKey, lbl); serr != nil {
+			return fmt.Errorf("exec: Merge: ON CREATE SetNodeLabel: %w", serr)
+		}
 	}
 	for _, p := range op.props {
-		op.mutator.SetNodeProperty(nodeKey, p.key, p.value)
+		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
+			return fmt.Errorf("exec: Merge: ON CREATE SetNodeProperty: %w", serr)
+		}
 		if op.reg != nil {
 			op.reg.RecordPropertySet(op.labels, p.key, p.value)
 		}
@@ -265,7 +272,9 @@ func (op *Merge) applyActions(actions []mergeAction, row Row) error {
 					return cerr
 				}
 			}
-			op.mutator.SetNodeProperty(nodeKey, a.key, pv)
+			if serr := op.mutator.SetNodeProperty(nodeKey, a.key, pv); serr != nil {
+				return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
+			}
 			if op.reg != nil {
 				labels := op.mutator.NodeLabels(nodeKey)
 				op.reg.RecordPropertySet(labels, a.key, pv)

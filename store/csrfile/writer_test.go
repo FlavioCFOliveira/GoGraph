@@ -16,7 +16,9 @@ func TestWriteToFile_AtomicProducesValidFile(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
 	for i := 0; i < 64; i++ {
-		a.AddEdge("hub", string(rune('a'+i%26)), int64(i))
+		if err := a.AddEdge("hub", string(rune('a'+i%26)), int64(i)); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "test.csr")
@@ -60,7 +62,9 @@ func TestWriteToFile_AtomicProducesValidFile(t *testing.T) {
 func TestWriteToFile_StructWeightDowngrades(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", struct{}{})
+	if err := a.AddEdge("a", "b", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "test.csr")
 	h, err := WriteToFile(path, c)
@@ -82,7 +86,9 @@ func TestWriteToFile_UnsupportedWeightKind(t *testing.T) {
 		Y complex128
 	}
 	a := adjlist.New[string, CustomWeight](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", CustomWeight{})
+	if err := a.AddEdge("a", "b", CustomWeight{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "test.csr")
 	_, err := WriteToFile(path, c)

@@ -70,9 +70,15 @@ func firstValue(t *testing.T, rec map[string]interface{}) (string, interface{}) 
 
 func TestAggregation_CountStar(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("a")
-	g.AddNode("b")
-	g.AddNode("c")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("c"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) RETURN count(*) AS cnt", nil)
@@ -133,8 +139,12 @@ func TestAggregation_CountStar_EmptyGraph(t *testing.T) {
 
 func TestAggregation_CountN(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("a")
-	g.AddNode("b")
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("b"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) RETURN count(n) AS cnt", nil)
@@ -161,7 +171,7 @@ func TestAggregation_CountN(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAggregation_WithCountStar(t *testing.T) {
-	g := newNNodeGraph(5)
+	g := newNNodeGraph(t, 5)
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(), "MATCH (n) WITH count(*) AS total RETURN total", nil)

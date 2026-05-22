@@ -10,9 +10,15 @@ import (
 func TestWCC_TwoComponents(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(1, 2, struct{}{})
-	a.AddEdge(3, 4, struct{}{})
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	comp, k, err := WCC(c)
 	if err != nil {
@@ -43,8 +49,12 @@ func TestWCC_TwoComponents(t *testing.T) {
 func TestWCC_SymmetricClosure(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddEdge(0, 1, struct{}{})
-	a.AddEdge(2, 0, struct{}{}) // 0 cannot reach 2, but symmetrically connected
+	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge(2, 0, struct{}{}); err != nil { // 0 cannot reach 2, but symmetrically connected
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	comp, k, err := WCC(c)
 	if err != nil {
@@ -63,9 +73,15 @@ func TestWCC_SymmetricClosure(t *testing.T) {
 func TestWCC_Isolated(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
-	a.AddNode(0)
-	a.AddNode(1)
-	a.AddNode(2)
+	if err := a.AddNode(0); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddNode(1); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddNode(2); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	_, k, err := WCC(c)
 	if err != nil {

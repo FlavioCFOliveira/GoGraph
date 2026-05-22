@@ -281,8 +281,12 @@ func TestSession_Run_Pull_All(t *testing.T) {
 
 	// Build a graph with two nodes so MATCH (n) RETURN n yields 2 rows.
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("alice")
-	g.AddNode("bob")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 	sess := newSession(eng, NoAuthHandler{}, "")
 
@@ -363,8 +367,12 @@ func TestSession_Pull_Paginated(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("alice")
-	g.AddNode("bob")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 	sess := newSession(eng, NoAuthHandler{}, "")
 
@@ -428,8 +436,12 @@ func TestSession_Discard(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, float64](adjlist.Config{})
-	g.AddNode("alice")
-	g.AddNode("bob")
+	if err := g.AddNode("alice"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
 	eng := cypher.NewEngine(g)
 	sess := newSession(eng, NoAuthHandler{}, "")
 

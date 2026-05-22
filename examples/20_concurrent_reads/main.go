@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"gograph/graph"
@@ -18,8 +19,12 @@ import (
 func main() {
 	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
 	for i := 0; i < 100; i++ {
-		a.AddEdge(i, (i+1)%100, int64(i%5+1))
-		a.AddEdge(i, (i+7)%100, int64(i%3+1))
+		if err := a.AddEdge(i, (i+1)%100, int64(i%5+1)); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
+		if err := a.AddEdge(i, (i+7)%100, int64(i%3+1)); err != nil {
+			log.Fatalf("AddEdge: %v", err)
+		}
 	}
 	c := csr.BuildFromAdjList(a)
 

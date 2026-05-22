@@ -13,9 +13,15 @@ import (
 func writeFixture(t *testing.T) (string, *csr.CSR[int64]) {
 	t.Helper()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	a.AddEdge("a", "b", 10)
-	a.AddEdge("a", "c", 20)
-	a.AddEdge("b", "c", 30)
+	if err := a.AddEdge("a", "b", 10); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("a", "c", 20); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("b", "c", 30); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "fix.csr")
 	if _, err := WriteToFile(path, c); err != nil {
