@@ -64,10 +64,11 @@
 //	    nodes with their :AUTHORED edges, 5 :Comment nodes attached
 //	    via :ON (some chained via :REPLY_OF) and 7 :LIKED edges
 //	    spanning both posts and comments. The writes go through the
-//	    direct txn.Store / txn.Tx API rather than Cypher CREATE — see
-//	    the "Engine Limitations" section below for the rationale.
-//	    Idempotent: running seed twice is a no-op when at least one
-//	    :User node is already present. The reply is:
+//	    direct txn.Store / txn.Tx API, mirroring the canonical
+//	    pattern in examples/04_persistence so the seed remains
+//	    independent of the Cypher write planner. Idempotent: running
+//	    seed twice is a no-op when at least one :User node is
+//	    already present. The reply is:
 //	        {"seeded":<bool>,"status":"ok"}
 //
 //	query -d <dir> [cypher]
@@ -153,32 +154,13 @@
 //	    'MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u.username AS from, v.username AS to'
 //	go run ./examples/24_social_network_cli snapshot -d /tmp/social
 //
-// # Engine Limitations Observed
+// # History
 //
-// Two limitations of the current WAL-backed Cypher engine shape the
-// example's implementation:
-//
-//  1. The write planner cannot lower CREATE / SET / DELETE statements
-//     that carry a RETURN clause: ProduceResults over a write IR node
-//     falls through to the read planner and errors with "unsupported
-//     IR node *ir.CreateNode". As a result, writes via `query` should
-//     omit RETURN and read-back via a separate MATCH.
-//
-//  2. A single CREATE statement that lists multiple edges between the
-//     same variables only persists the first edge, and MATCH+CREATE
-//     for relationships through the WAL-backed planner produces zero
-//     edges. The seed subcommand therefore bypasses Cypher and uses
-//     txn.Tx.AddNode / SetNodeLabel / SetNodeProperty / AddEdge /
-//     SetEdgeLabel directly, matching the canonical pattern in
-//     examples/04_persistence.
-//
-// A third, cross-process limitation affects snapshot durability: the
-// graph.Mapper uses a per-process random hash seed (maphash.MakeSeed),
-// so the NodeIDs assigned to the same natural key differ across
-// processes. The snapshot's labels.bin and properties.bin reference
-// NodeIDs from the writing process; on a future-process reopen, those
-// NodeIDs may resolve to unrelated nodes in the new mapper. The
-// round-trip test in cli_test.go runs entirely within one process
-// (where the seed is constant) so the snapshot+reopen byte stream is
-// fully deterministic.
+// The three engine constraints originally documented here — CREATE
+// with RETURN, multi-edge CREATE, and cross-process snapshot drift —
+// were fixed in Sprint 56 of the gograph roadmap (tasks #498, #499,
+// #500). The corresponding regression tests live in
+// cypher/write_with_return_test.go, cypher/multi_edge_create_test.go,
+// graph/mapper_stable_test.go and the cross-process round-trip in
+// cross_process_test.go in this package.
 package main

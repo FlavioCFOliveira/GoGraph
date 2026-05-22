@@ -150,23 +150,12 @@ stdout via `os.Pipe`, and compares the byte stream against the goldens
 under `testdata/`. `TestMain` plugs in `go.uber.org/goleak` so every
 test in the package doubles as a goroutine-leak check.
 
-## Known limitations
+## History
 
-The example exercises real engine constraints documented inline in
-`doc.go`:
-
-1. **CREATE / SET / DELETE with RETURN** is not supported by the
-   WAL-backed planner (ProduceResults over a write IR node falls
-   through to the read planner). The `query` subcommand still emits
-   one JSONL row per result; write statements should omit RETURN and
-   read-back via a separate MATCH.
-2. **Multi-edge CREATE** in a single Cypher statement only persists
-   the first edge, and `MATCH … CREATE (a)-[:R]->(b)` produces zero
-   edges through the current planner. The seed subcommand therefore
-   uses the direct `txn.Tx` API (matching `examples/04_persistence`).
-3. **Cross-process snapshot+reopen** can exhibit minor label drift:
-   `maphash.MakeSeed` is fresh per process, so the snapshot's
-   `labels.bin` NodeIDs may collide with unrelated nodes in a later
-   process's mapper. The in-process round-trip test sidesteps this
-   because the seed stays constant; the data directory is otherwise
-   robust against WAL-only recovery.
+The example originally documented three engine constraints — CREATE
+with RETURN, multi-edge CREATE / MATCH+CREATE-relationship, and
+cross-process snapshot label drift. All three were fixed in Sprint 56
+of the gograph roadmap (tasks #498, #499, #500). The seed subcommand
+still uses the direct `txn.Tx` API rather than Cypher CREATE so it
+mirrors `examples/04_persistence` and stays independent of the Cypher
+write planner.

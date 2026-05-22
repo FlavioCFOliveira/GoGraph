@@ -1,9 +1,42 @@
 package graph
 
 import (
-	"hash/maphash"
+	"fmt"
+	"hash/fnv"
 	"sync"
 )
+
+// FNV-1a 64-bit constants. Kept inline (not via hash/fnv) so the fast
+// paths in [mapperShardFor] run zero-allocation; hash/fnv.New64a
+// returns an interface and forces a heap allocation per call.
+const (
+	fnvOffset uint64 = 14695981039346656037
+	fnvPrime  uint64 = 1099511628211
+)
+
+// fnv1aString hashes s with FNV-1a, byte by byte, without copying s
+// into a temporary []byte. Suitable for the hot path of
+// [mapperShardFor] when N=string.
+func fnv1aString(s string) uint64 {
+	h := fnvOffset
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= fnvPrime
+	}
+	return h
+}
+
+// fnv1aUint64 hashes a fixed-size 8-byte little-endian encoding of v.
+// Used by the integer fast paths.
+func fnv1aUint64(v uint64) uint64 {
+	h := fnvOffset
+	for i := 0; i < 8; i++ {
+		h ^= v & 0xff
+		h *= fnvPrime
+		v >>= 8
+	}
+	return h
+}
 
 // mapperShardCount is the number of independently locked shards used by
 // every Mapper. It must be a power of two so the modulo operation on the
@@ -13,12 +46,6 @@ const (
 	mapperShardBits  = 8 // log2(mapperShardCount)
 	mapperShardMask  = mapperShardCount - 1
 )
-
-// mapperSeed is the shared maphash seed used for routing comparable
-// values to shards. A single process-wide seed is sufficient: collision
-// resistance across mapper instances is not a security property of this
-// package.
-var mapperSeed = maphash.MakeSeed()
 
 // Mapper interns user-facing identifiers of type N as compact [NodeID]
 // values. Interning is stable for the lifetime of the Mapper: a value
@@ -182,10 +209,68 @@ func (m *Mapper[N]) MaxNodeID() NodeID {
 	return packNodeID(mapperShardCount-1, maxIntra-1) + 1
 }
 
-// mapperShardFor routes a comparable value to a shard index using the
-// runtime's typehash, exposed via [hash/maphash.Comparable].
+// mapperShardFor routes a comparable value to a shard index using a
+// deterministic FNV-1a hash. The hash is stable across processes, so a
+// snapshot written by one process and reopened by another agrees on the
+// same NodeID for the same natural key — the prerequisite for
+// cross-process snapshot+recovery without label drift in
+// [snapshot.ApplyLabelsToGraph] / [snapshot.ApplyPropertiesToGraph].
+//
+// The previous implementation hashed via [hash/maphash.Comparable] with
+// a process-local seed; the seed cannot be serialised (see the
+// hash/maphash godoc), so durability of NodeID assignments required
+// either persisting the mapper or replacing the hash. The FNV path
+// here is the smaller fix and was selected after audit (Sprint 56 T3).
+//
+// Trade-off: FNV-1a does not resist hash flooding from attacker-
+// controlled keys. The GoGraph mapper is an internal interning table
+// behind a graph-level API; callers that expose natural keys to
+// untrusted input should validate / rate-limit before [Mapper.Intern].
+//
+// Common comparable types (string, ints, fixed-size byte arrays) take
+// dedicated zero-allocation fast paths driven by [fnv1aString] /
+// [fnv1aUint64]; less common comparable types fall through to a
+// [hash/fnv.New64a] + fmt.Fprintf path that handles arbitrary
+// fmt-encodable values.
 func mapperShardFor[N comparable](k N) uint64 {
-	return maphash.Comparable(mapperSeed, k) & mapperShardMask
+	switch v := any(k).(type) {
+	case string:
+		return fnv1aString(v) & mapperShardMask
+	case int:
+		return fnv1aUint64(uint64(v)) & mapperShardMask
+	case int8:
+		return fnv1aUint64(uint64(uint8(v))) & mapperShardMask
+	case int16:
+		return fnv1aUint64(uint64(uint16(v))) & mapperShardMask
+	case int32:
+		return fnv1aUint64(uint64(uint32(v))) & mapperShardMask
+	case int64:
+		return fnv1aUint64(uint64(v)) & mapperShardMask
+	case uint:
+		return fnv1aUint64(uint64(v)) & mapperShardMask
+	case uint8:
+		return fnv1aUint64(uint64(v)) & mapperShardMask
+	case uint16:
+		return fnv1aUint64(uint64(v)) & mapperShardMask
+	case uint32:
+		return fnv1aUint64(uint64(v)) & mapperShardMask
+	case uint64:
+		return fnv1aUint64(v) & mapperShardMask
+	case [16]byte: // UUID-style keys (txn.NewUUIDCodec)
+		h := fnvOffset
+		for i := 0; i < 16; i++ {
+			h ^= uint64(v[i])
+			h *= fnvPrime
+		}
+		return h & mapperShardMask
+	default:
+		// Fallback for less common comparable types (custom structs,
+		// arrays, etc.). fmt.Sprintf into a fresh hash is acceptable
+		// here because the hot-path types are covered above.
+		h := fnv.New64a()
+		_, _ = fmt.Fprintf(h, "%v", v)
+		return h.Sum64() & mapperShardMask
+	}
 }
 
 // packNodeID encodes a (shard, intra-shard index) pair into a NodeID.
