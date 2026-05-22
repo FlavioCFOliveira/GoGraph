@@ -377,6 +377,116 @@ func TestUnwind_ChildInitError(t *testing.T) {
 	}
 }
 
+// scheduledErrChild is a child Operator stub whose Next succeeds for the
+// first `successCount` calls then returns the configured nextErr. Used to
+// drive Unwind into mid-list error scenarios where some rows have already
+// been emitted before the child fails.
+type scheduledErrChild struct {
+	rows         []exec.Row
+	idx          int
+	successCount int
+	nextErr      error
+	closed       bool
+	exhausted    bool
+	ctx          context.Context //nolint:containedctx // mirrors staticChildOp
+}
+
+func (c *scheduledErrChild) Init(ctx context.Context) error {
+	c.ctx = ctx
+	return nil
+}
+
+func (c *scheduledErrChild) Next(out *exec.Row) (bool, error) {
+	if c.exhausted {
+		panic("scheduledErrChild: Next called after (false, _)")
+	}
+	if err := c.ctx.Err(); err != nil {
+		c.exhausted = true
+		return false, err
+	}
+	if c.idx >= c.successCount && c.nextErr != nil {
+		c.exhausted = true
+		return false, c.nextErr
+	}
+	if c.idx >= len(c.rows) {
+		c.exhausted = true
+		return false, nil
+	}
+	*out = c.rows[c.idx]
+	c.idx++
+	return true, nil
+}
+
+func (c *scheduledErrChild) Close() error { c.closed = true; return nil }
+
+// TestUnwind_MidListChildNextError covers the state machine path where row 1
+// has been fully expanded (multiple elements emitted) and then child.Next
+// errors when Unwind tries to fetch row 2. The error must propagate, the
+// already-emitted rows must be preserved by Drain, and Close must reach the
+// child.
+func TestUnwind_MidListChildNextError(t *testing.T) {
+	wantErr := errors.New("synthetic child.Next failure after first row")
+	child := &scheduledErrChild{
+		rows:         []exec.Row{{expr.StringValue("row1")}},
+		successCount: 1, // first Next ok, second errors
+		nextErr:      wantErr,
+	}
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+		return litList(expr.IntegerValue(10), expr.IntegerValue(20), expr.IntegerValue(30)), nil
+	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
+
+	rows, drainErr := exec.Drain(context.Background(), op)
+	if drainErr == nil {
+		t.Fatal("expected error from Drain, got nil")
+	}
+	if !errors.Is(drainErr, wantErr) {
+		t.Errorf("Drain err chain missing sentinel: %v", drainErr)
+	}
+	// Row 1's three elements must have been emitted before the failure.
+	if len(rows) != 3 {
+		t.Errorf("got %d preserved rows, want 3 (all of row1's elements)", len(rows))
+	}
+	if !child.closed {
+		t.Error("child.Close was not called after mid-list Next error")
+	}
+}
+
+// TestUnwind_MidListListFnError covers the parallel path where row 1 expanded
+// successfully and then listFn errors on row 2.
+func TestUnwind_MidListListFnError(t *testing.T) {
+	wantErr := errors.New("synthetic listFn failure on row 2")
+	child := &staticChildOp{rows: []exec.Row{
+		{expr.IntegerValue(1)},
+		{expr.IntegerValue(2)},
+	}}
+	op, err := exec.NewUnwind(child, func(row exec.Row) (expr.ListValue, error) {
+		if int64(row[0].(expr.IntegerValue)) == 2 {
+			return nil, wantErr
+		}
+		return litList(expr.StringValue("a"), expr.StringValue("b")), nil
+	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
+
+	rows, drainErr := exec.Drain(context.Background(), op)
+	if drainErr == nil {
+		t.Fatal("expected error from Drain, got nil")
+	}
+	if !errors.Is(drainErr, wantErr) {
+		t.Errorf("Drain err chain missing sentinel: %v", drainErr)
+	}
+	if len(rows) != 2 {
+		t.Errorf("got %d preserved rows, want 2 (row1's a/b)", len(rows))
+	}
+	if !child.closed {
+		t.Error("child.Close was not called after mid-list listFn error")
+	}
+}
+
 // TestUnwind_CloseError verifies that a Close-only error from the child
 // (no Next or listFn errors) is wrapped by Drain (driver.go:61-63) into the
 // "exec: operator close: %w" envelope and is recoverable via errors.Is.
