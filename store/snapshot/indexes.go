@@ -99,23 +99,23 @@ func writeAndSyncIndex(path string, ser index.Serializer) (size int64, crc uint3
 	hasher := crc32.New(castagnoli)
 	tee := io.MultiWriter(f, hasher)
 	if serr := ser.Serialize(tee); serr != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+		_ = f.Close()       // best-effort: already on error path, serialize err preserved
+		_ = os.Remove(path) // best-effort: partial file cleanup, serialize err preserved
 		return 0, 0, serr
 	}
 	st, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+		_ = f.Close()       // best-effort: already on error path, stat err preserved
+		_ = os.Remove(path) // best-effort: partial file cleanup, stat err preserved
 		return 0, 0, err
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+		_ = f.Close()       // best-effort: already on error path, sync err preserved
+		_ = os.Remove(path) // best-effort: partial file cleanup, sync err preserved
 		return 0, 0, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(path) // best-effort: partial file cleanup, close err preserved
 		return 0, 0, err
 	}
 	return st.Size(), hasher.Sum32(), nil

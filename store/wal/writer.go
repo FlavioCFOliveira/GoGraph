@@ -222,12 +222,12 @@ func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.bw.Flush(); err != nil {
-		_ = w.f.Close()
+		_ = w.f.Close() // best-effort: already on error path, flush err preserved
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
 	if err := w.f.Sync(); err != nil {
-		_ = w.f.Close()
+		_ = w.f.Close() // best-effort: already on error path, sync err preserved
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}

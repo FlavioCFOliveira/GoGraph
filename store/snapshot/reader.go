@@ -52,6 +52,7 @@ func Open(dir string) (LoadedCSR, error) {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, err
 	}
+	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)

@@ -50,31 +50,31 @@ func Open(path string) (*Reader, error) {
 	}
 	mm, err := mmap.Map(f, mmap.RDONLY, 0)
 	if err != nil {
-		_ = f.Close()
+		_ = f.Close() // best-effort: already on error path, mmap err preserved
 		return nil, fmt.Errorf("csrfile: mmap: %w", err)
 	}
 	if len(mm) < HeaderSize+4 {
-		_ = mm.Unmap()
-		_ = f.Close()
+		_ = mm.Unmap() // best-effort: already on error path, header-size err preserved
+		_ = f.Close()  // best-effort: already on error path, header-size err preserved
 		return nil, ErrHeaderTooShort
 	}
 	h, err := DecodeHeader(mm)
 	if err != nil {
-		_ = mm.Unmap()
-		_ = f.Close()
+		_ = mm.Unmap() // best-effort: already on error path, decode err preserved
+		_ = f.Close()  // best-effort: already on error path, decode err preserved
 		return nil, err
 	}
 	if uint64(len(mm)) != h.TailCRCOffset+4 {
-		_ = mm.Unmap()
-		_ = f.Close()
+		_ = mm.Unmap() // best-effort: already on error path, size-mismatch err preserved
+		_ = f.Close()  // best-effort: already on error path, size-mismatch err preserved
 		return nil, fmt.Errorf("%w: file size %d, header expects %d",
 			ErrFileCorrupted, len(mm), h.TailCRCOffset+4)
 	}
 	gotCRC := binary.LittleEndian.Uint32(mm[h.TailCRCOffset:])
 	wantCRC := crc32.Update(0, castagnoli, mm[:h.TailCRCOffset])
 	if gotCRC != wantCRC {
-		_ = mm.Unmap()
-		_ = f.Close()
+		_ = mm.Unmap() // best-effort: already on error path, CRC-mismatch err preserved
+		_ = f.Close()  // best-effort: already on error path, CRC-mismatch err preserved
 		return nil, fmt.Errorf("%w: crc32c", ErrFileCorrupted)
 	}
 

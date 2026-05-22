@@ -385,6 +385,7 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
 			return res, err
 		}
+		// best-effort: read-only WAL reader, close err is non-actionable for callers.
 		defer func() { _ = r.Close() }()
 		for f := range r.Frames() {
 			if res.WALOps&0xFFF == 0 {
@@ -617,6 +618,7 @@ func openCodec[N comparable, W any](
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			return res, err
 		}
+		// best-effort: read-only WAL reader, close err is non-actionable for callers.
 		defer func() { _ = r.Close() }()
 		for f := range r.Frames() {
 			if res.WALOps&0xFFF == 0 {

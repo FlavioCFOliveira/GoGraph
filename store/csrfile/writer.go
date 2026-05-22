@@ -44,8 +44,8 @@ func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 		return Header{}, err
 	}
 	if err := os.Truncate(tmp, int64(total)); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
+		_ = f.Close()      // best-effort: already on error path, truncate err preserved
+		_ = os.Remove(tmp) // best-effort: tmp file cleanup, truncate err preserved
 		return Header{}, err
 	}
 	bw := bufio.NewWriterSize(f, 1<<20)
@@ -53,33 +53,33 @@ func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 	tee := io.MultiWriter(bw, h)
 
 	if err := writeSections(tee, h, header, verts, edges, c.WeightsSlice()); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
+		_ = f.Close()      // best-effort: already on error path, writeSections err preserved
+		_ = os.Remove(tmp) // best-effort: tmp file cleanup, writeSections err preserved
 		return Header{}, err
 	}
 
 	// Append the trailing CRC32C over every preceding byte.
 	if err := binary.Write(bw, binary.LittleEndian, h.Sum32()); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
+		_ = f.Close()      // best-effort: already on error path, CRC write err preserved
+		_ = os.Remove(tmp) // best-effort: tmp file cleanup, CRC write err preserved
 		return Header{}, err
 	}
 	if err := bw.Flush(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
+		_ = f.Close()      // best-effort: already on error path, flush err preserved
+		_ = os.Remove(tmp) // best-effort: tmp file cleanup, flush err preserved
 		return Header{}, err
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
+		_ = f.Close()      // best-effort: already on error path, sync err preserved
+		_ = os.Remove(tmp) // best-effort: tmp file cleanup, sync err preserved
 		return Header{}, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
+		_ = os.Remove(tmp) // best-effort: tmp file cleanup, close err preserved
 		return Header{}, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+		_ = os.Remove(tmp) // best-effort: tmp file cleanup, rename err preserved
 		return Header{}, fmt.Errorf("csrfile: publish rename: %w", err)
 	}
 	return header, nil

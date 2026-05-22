@@ -224,12 +224,12 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 	}
 	size, csum, err := WriteCSR(f, c)
 	if err != nil {
-		_ = f.Close()
+		_ = f.Close() // best-effort: already on error path, WriteCSR err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
+		_ = f.Close() // best-effort: already on error path, sync err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
@@ -259,12 +259,12 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 		return err
 	}
 	if err := WriteManifest(mf, m); err != nil {
-		_ = mf.Close()
+		_ = mf.Close() // best-effort: already on error path, WriteManifest err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
 	if err := mf.Sync(); err != nil {
-		_ = mf.Close()
+		_ = mf.Close() // best-effort: already on error path, sync err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}

@@ -186,19 +186,19 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		return err
 	}
 	if err := WriteManifest(mf, m); err != nil {
-		_ = mf.Close()
-		_ = os.RemoveAll(tmp)
+		_ = mf.Close()        // best-effort: already on error path, WriteManifest err preserved
+		_ = os.RemoveAll(tmp) // best-effort: tmp dir cleanup, WriteManifest err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 	if err := mf.Sync(); err != nil {
-		_ = mf.Close()
-		_ = os.RemoveAll(tmp)
+		_ = mf.Close()        // best-effort: already on error path, sync err preserved
+		_ = os.RemoveAll(tmp) // best-effort: tmp dir cleanup, sync err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 	if err := mf.Close(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = os.RemoveAll(tmp) // best-effort: tmp dir cleanup, close err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -235,17 +235,17 @@ func writeAndSync(
 	}
 	size, crc, werr := write(f)
 	if werr != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+		_ = f.Close()       // best-effort: already on error path, write err preserved
+		_ = os.Remove(path) // best-effort: partial file cleanup, write err preserved
 		return 0, 0, werr
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+		_ = f.Close()       // best-effort: already on error path, sync err preserved
+		_ = os.Remove(path) // best-effort: partial file cleanup, sync err preserved
 		return 0, 0, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(path) // best-effort: partial file cleanup, close err preserved
 		return 0, 0, err
 	}
 	return size, crc, nil
@@ -350,6 +350,7 @@ func readVerifiedCSR(path string, expected uint32) (CSRReadback, error) {
 	if err != nil {
 		return CSRReadback{}, err
 	}
+	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
@@ -374,6 +375,7 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 	if err != nil {
 		return LabelsReadback{}, err
 	}
+	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
@@ -399,6 +401,7 @@ func readVerifiedProperties(path string, expected uint32) (PropertiesReadback, e
 	if err != nil {
 		return PropertiesReadback{}, err
 	}
+	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)

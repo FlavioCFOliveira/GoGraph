@@ -104,6 +104,7 @@ func ReadManifestFile(path string) (Manifest, error) {
 		metrics.IncCounter("store.snapshot.ReadManifestFile.errors", 1)
 		return Manifest{}, err
 	}
+	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
 	m, err := LoadManifest(f)
 	if err != nil {
