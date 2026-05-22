@@ -86,6 +86,20 @@ func (u *UnionFind[T]) Connected(a, b T) bool {
 // structure.
 func (u *UnionFind[T]) Len() int { return len(u.parent) }
 
+// Reset returns the structure to its empty state, retaining the
+// backing maps so callers that pool *UnionFind across many short
+// queries (kruskal MST, connected-components, Tarjan SCC under a
+// soak load) can avoid the per-call map allocation. The two maps
+// are cleared with Go 1.21's builtin clear() which preserves the
+// underlying bucket array — subsequent inserts reuse capacity.
+//
+// After Reset, the UnionFind behaves identically to a freshly
+// constructed instance via [New].
+func (u *UnionFind[T]) Reset() {
+	clear(u.parent)
+	clear(u.rank)
+}
+
 // UnionFindSlice is a slice-backed disjoint-set structure for a
 // bounded integer ID space [0, n). It offers the same amortised
 // O(alpha(n)) Find/Union complexity as [UnionFind] but trades the
@@ -156,3 +170,15 @@ func (u *UnionFindSlice) Connected(a, b int) bool {
 
 // Len returns the size of the universe (n at construction time).
 func (u *UnionFindSlice) Len() int { return len(u.parent) }
+
+// Reset returns every element of u to its own singleton set,
+// preserving the slice capacity for callers that pool
+// *UnionFindSlice across many short queries. The new universe size
+// stays at len(parent); use [NewSlice] when the universe size must
+// change. Rank is zeroed via a single clear() call.
+func (u *UnionFindSlice) Reset() {
+	for i := range u.parent {
+		u.parent[i] = int32(i)
+	}
+	clear(u.rank)
+}
