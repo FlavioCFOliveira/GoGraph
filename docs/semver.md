@@ -92,7 +92,10 @@ v2.0.0 stable will be cut when **all** of the following conditions are met:
 1. **Execution-level TCK ≥ 80 %.** The openCypher TCK execution runner
    (`cypher/tck`) must pass at least 80 % of the scenarios it runs. The
    CI gate in `.github/workflows/tck.yml` must be green at this threshold.
-   Current status as of v2.0.0-rc2: **25.8 %**.
+   Current status as of v2.0.0-rc2: **25.8 %**. Current status on HEAD
+   (commit `7405463`, 2026-05-22): **39.4 %** (1 536 / 3 897 scenarios).
+   See [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md) for the
+   authoritative table updated by the same workflow.
 
 2. **All CI checks green.** Every job in the CI pipeline must pass on the
    release commit: build, test, race detector, lint (`golangci-lint`),

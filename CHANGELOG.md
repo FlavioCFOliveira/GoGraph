@@ -8,8 +8,10 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 v2.0.0 stable is pending. Gate requirement: execution-level TCK ≥ 80 %,
 all CI checks green, and all T-series tasks in `docs/tck/DIVERGENCES.md`
-closed. Current status: 25.8 % execution TCK (as of v2.0.0-rc2). See
-`docs/semver.md` for the full release-gate specification.
+closed. Current status (commit `7405463`, 2026-05-22):
+**39.4 % execution TCK** (1 536 / 3 897 scenarios), up from 25.8 % at
+v2.0.0-rc2. See `docs/semver.md` for the full release-gate specification
+and `docs/tck/DIVERGENCES.md` for the authoritative pass-rate table.
 
 ## [2.0.0-rc2] — 2026-05-21
 

@@ -22,6 +22,10 @@ every scenario passes. There are zero residual grammar gaps.
 | Execution (godog runner, Sprint 31 baseline) | 3 897 | 407 | **10.4 %** |
 | Execution (godog runner, Sprint 37 — task #375) | 3 897 | 968 | **24.8 %** |
 | Execution (godog runner, Sprint 42 — task #391) | 3 897 | 1 152 | **29.6 %** |
+| Execution (godog runner, Sprint 46 — current HEAD) | 3 897 | **1 536** | **39.4 %** |
+
+> Last measured: commit `7405463` on 2026-05-22.
+> Reproduce with: `go test ./cypher/tck/... -run TestTCKExecution -count=1 -timeout 300s`.
 
 The parser-level target gate is ≥ 90 %. This target is now exceeded with
 a clean 100 % pass rate across the full corpus. Category 1 (grammar gaps)
@@ -165,6 +169,7 @@ The godog execution runner was added in Sprint 31 (`cypher/tck/runner_test.go`,
 and reports execution conformance. The Sprint 31 baseline is:
 
 - **407 / 3 897 scenarios passing (10.4 %)** at execution level (Sprint 31 baseline).
+- **1 536 / 3 897 scenarios passing (39.4 %)** at execution level (current HEAD, Sprint 46).
 - **968 / 3 897 scenarios passing (24.8 %)** as of Sprint 37 (task #375).
 - **1 152 / 3 897 scenarios passing (29.6 %)** as of Sprint 42 (task #391 —
   aggregation runner→engine→aggregator wiring). The net uplift over Sprint 37
