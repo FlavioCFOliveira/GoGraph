@@ -306,3 +306,8 @@ Drivers that negotiate Bolt 3.x or earlier are not supported.
 - [docs/cypher.md](cypher.md) — Cypher language reference
 - [docs/benchmarks/cypher.md](benchmarks/cypher.md) — IC1–IC14 benchmark results
 - [docs/metrics.md](metrics.md) — observability metrics
+
+
+---
+
+*Last reviewed: 2026-05-22 against commit `cd97f07`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

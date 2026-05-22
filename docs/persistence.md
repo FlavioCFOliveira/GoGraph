@@ -671,3 +671,8 @@ go run ./cmd/fmtfixture -pkg wal   # one package at a time
 Commit the refreshed `testdata/v1/...` files alongside any writer
 change that intentionally bumps the on-disk shape, and add a fresh
 `testdata/v2/` tree before the writer starts emitting v2 frames.
+
+
+---
+
+*Last reviewed: 2026-05-22 against commit `cd97f07`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

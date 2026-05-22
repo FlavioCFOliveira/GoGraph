@@ -467,3 +467,8 @@ For the full divergence taxonomy and pass-rate breakdown, see
 - [docs/bolt.md](bolt.md) — Bolt v5 server: connection, authentication, TLS
 - [docs/benchmarks/cypher.md](benchmarks/cypher.md) — IC1–IC14 benchmark results
 - [docs/metrics.md](metrics.md) — observability metrics exposed by the engine
+
+
+---
+
+*Last reviewed: 2026-05-22 against commit `cd97f07`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

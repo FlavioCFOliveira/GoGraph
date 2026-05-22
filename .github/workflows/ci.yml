@@ -41,6 +41,8 @@ jobs:
         run: |
           go mod download
           go mod verify
+      - name: Doc freshness (persistence, cypher, bolt)
+        run: bash scripts/check_doc_freshness.sh
       - name: Build
         run: go build ./...
       - name: Vet
