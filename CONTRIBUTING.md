@@ -3,6 +3,41 @@
 This document captures the policies that complement the runtime
 contracts already documented in `CLAUDE.md`.
 
+## Task tracking via the local rmp CLI
+
+GoGraph's planning is owned by the `rmp` CLI (the Groadmap tool),
+installed locally and available at `~/.local/bin/rmp`. It is the
+sole source of truth for sprints, tasks, dependencies, and audit
+history; no GitHub Issues, Notion pages, or spreadsheets parallel
+it. Every change that lands on `main` traces back to an `rmp` task
+identifier referenced in the commit footer (`Closes rmp task #NNN`).
+
+Common workflows:
+
+```bash
+# What's next?
+rmp task next -r gograph
+
+# Look at the current open sprint
+rmp sprint list -r gograph --status OPEN
+
+# Read a specific task before starting
+rmp task get <id> -r gograph
+
+# Move a task through its lifecycle
+rmp task stat <id> DOING     -r gograph
+rmp task stat <id> TESTING   -r gograph
+rmp task stat <id> COMPLETED -r gograph --summary "..."
+
+# Audit history (who changed what, when)
+rmp audit history TASK <id> -r gograph
+```
+
+The roadmap database for this project is `gograph` (file at
+`~/.roadmaps/gograph.db`). All `rmp` commands require `-r gograph`.
+Refer to the binary's `--help` output for the full command surface
+and to the project's `CLAUDE.md` for the planning rituals.
+
 ## Use of `unsafe`
 
 GoGraph reserves the `unsafe` package for the small set of patterns
