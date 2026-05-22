@@ -1,0 +1,110 @@
+name: Soak
+
+# The 4-hour, 1024-connection Bolt soak test is the canonical
+# reliability gate before promoting a release candidate to v2.0.0
+# stable (see docs/semver.md). It is long-running, runner-expensive,
+# and not needed on every push, so we run it weekly and on demand.
+
+on:
+  schedule:
+    # Sunday 02:00 UTC — 4 hours of runtime fits comfortably in the
+    # default 6-hour GitHub Actions job timeout window.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Soak duration (e.g. '4h', '1h', '15m')"
+        required: false
+        default: "4h"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Allow exactly one soak run at a time per ref. A new scheduled or
+  # manual run cancels any earlier one that has not finished yet so a
+  # missed week does not pile up two consecutive 4-hour jobs.
+  group: soak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bolt-soak:
+    name: Bolt soak (SOAK_FULL=1, 4h, 1024 connections)
+    runs-on: ubuntu-latest
+    # GitHub Actions caps standard runners at 6 hours; give the soak
+    # the full window so the gate also covers slower hardware.
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Module integrity (download + verify)
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Prepare soak-artefacts directory
+        run: |
+          rm -rf soak-artefacts
+          mkdir -p soak-artefacts
+
+      - name: Run 4-hour Bolt soak
+        env:
+          SOAK_FULL: "1"
+          SOAK_ARTEFACTS: soak-artefacts
+          GODEBUG: "gctrace=1"
+        run: |
+          set -euxo pipefail
+          # The test itself drives the duration; we keep -timeout one
+          # hour above the workload window so a slow shutdown does
+          # not corrupt the report.
+          go test \
+            -race \
+            -count=1 \
+            -timeout=5h \
+            -run=TestBoltSoak_1024_4h \
+            ./bench/soak/... \
+            2>&1 | tee soak-artefacts/soak.log
+          echo "## Bolt soak result" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "soak: complete|invalid heap snapshot|FAIL|PASS" soak-artefacts/soak.log \
+            >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload soak artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-artefacts-${{ github.sha }}
+          path: |
+            soak-artefacts/
+          retention-days: 30
+
+      - name: Generate ci-report.md if the harness did not
+        if: always()
+        run: |
+          if [[ ! -f soak-artefacts/bolt-soak-ci-report.md ]]; then
+            cat > soak-artefacts/bolt-soak-ci-report.md <<EOF
+          # Bolt soak — CI report
+
+          Commit: ${{ github.sha }}
+          Trigger: ${{ github.event_name }}
+          Job: ${{ github.run_id }}
+
+          See \`soak.log\` for the full transcript and the heap profile
+          snapshots emitted by the test runner.
+          EOF
+          fi
+
+      - name: Upload ci-report.md
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolt-soak-ci-report-${{ github.sha }}
+          path: soak-artefacts/bolt-soak-ci-report.md
+          retention-days: 90

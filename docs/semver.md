@@ -105,7 +105,14 @@ v2.0.0 stable will be cut when **all** of the following conditions are met:
 4. **Soak test green.** The full soak test (`SOAK_FULL=1`,
    1 024 connections, 4 hours) must pass with zero goroutine leaks and
    zero race conditions. The soak report in `soak-artefacts/` must reflect
-   a run against the release commit.
+   a run against the release commit. The canonical execution path is the
+   `Soak` GitHub Actions workflow at
+   [`.github/workflows/soak.yml`](../.github/workflows/soak.yml), which
+   runs weekly (Sunday 02:00 UTC) and on `workflow_dispatch`. Operators
+   may also run the soak locally via `SOAK_FULL=1 make soak`, but the
+   CI workflow run is what the release gate consumes — its artefacts
+   (soak.log, heap profiles, bolt-soak-ci-report.md) are retained on
+   the workflow run for 30/90 days respectively.
 
 ### Pre-release candidates
 
