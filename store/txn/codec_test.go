@@ -21,7 +21,7 @@ func TestCodec_String_Roundtrip(t *testing.T) {
 	// rapid.Check runs a generator-driven shrinking property test.
 	rapid.Check(t, func(r *rapid.T) {
 		want := rapid.String().Draw(r, "v")
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode: %v", err)
@@ -38,7 +38,7 @@ func TestCodec_String_Roundtrip(t *testing.T) {
 	// count regardless of rapid's internal budget.
 	for i := 0; i < roundTripTrials; i++ {
 		want := fmt.Sprintf("sample-%d", i)
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d: %v", i, err)
@@ -63,7 +63,7 @@ func TestCodec_String_EmbeddedNulAndUnicode(t *testing.T) {
 		" leading and trailing ",
 	}
 	for _, want := range cases {
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("%q: Decode: %v", want, err)
@@ -82,7 +82,7 @@ func TestCodec_Int_Roundtrip(t *testing.T) {
 	codec := NewIntCodec()
 	rapid.Check(t, func(r *rapid.T) {
 		want := rapid.Int().Draw(r, "v")
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode(%d): %v", want, err)
@@ -97,7 +97,7 @@ func TestCodec_Int_Roundtrip(t *testing.T) {
 	// Drive 10^4 explicit samples to satisfy the acceptance criterion.
 	for i := 0; i < roundTripTrials; i++ {
 		want := i*7 - 3
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d (%d): %v", i, want, err)
@@ -113,7 +113,7 @@ func TestCodec_Int32_Roundtrip(t *testing.T) {
 	codec := NewInt32Codec()
 	rapid.Check(t, func(r *rapid.T) {
 		want := rapid.Int32().Draw(r, "v")
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode(%d): %v", want, err)
@@ -127,7 +127,7 @@ func TestCodec_Int32_Roundtrip(t *testing.T) {
 	})
 	for i := 0; i < roundTripTrials; i++ {
 		want := int32(i) * -3
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d (%d): %v", i, want, err)
@@ -143,7 +143,7 @@ func TestCodec_Int64_Roundtrip(t *testing.T) {
 	codec := NewInt64Codec()
 	rapid.Check(t, func(r *rapid.T) {
 		want := rapid.Int64().Draw(r, "v")
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode(%d): %v", want, err)
@@ -157,7 +157,7 @@ func TestCodec_Int64_Roundtrip(t *testing.T) {
 	})
 	for i := 0; i < roundTripTrials; i++ {
 		want := int64(i*i) - 17
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d (%d): %v", i, want, err)
@@ -173,7 +173,7 @@ func TestCodec_Uint64_Roundtrip(t *testing.T) {
 	codec := NewUint64Codec()
 	rapid.Check(t, func(r *rapid.T) {
 		want := rapid.Uint64().Draw(r, "v")
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode(%d): %v", want, err)
@@ -187,7 +187,7 @@ func TestCodec_Uint64_Roundtrip(t *testing.T) {
 	})
 	for i := uint64(0); i < uint64(roundTripTrials); i++ {
 		want := i * 0x100000001
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d (%d): %v", i, want, err)
@@ -206,7 +206,7 @@ func TestCodec_UUID_Roundtrip(t *testing.T) {
 		for i := range want {
 			want[i] = byte(rapid.IntRange(0, 255).Draw(r, fmt.Sprintf("b%d", i)))
 		}
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode: %v", err)
@@ -223,7 +223,7 @@ func TestCodec_UUID_Roundtrip(t *testing.T) {
 		for k := range want {
 			want[k] = byte((i*31 + k*7) & 0xFF)
 		}
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d: %v", i, err)
@@ -274,7 +274,7 @@ func TestCodec_BinaryMarshaler_Roundtrip(t *testing.T) {
 			id:    rapid.Uint32().Draw(r, "id"),
 			label: rapid.String().Draw(r, "label"),
 		}
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode: %v", err)
@@ -288,7 +288,7 @@ func TestCodec_BinaryMarshaler_Roundtrip(t *testing.T) {
 	})
 	for i := 0; i < roundTripTrials; i++ {
 		want := labeledID{id: uint32(i * 13), label: fmt.Sprintf("L%d", i)}
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d: %v", i, err)
@@ -306,7 +306,7 @@ func TestCodec_AppendSemantics(t *testing.T) {
 	// Store.encodeOpTyped reuse a single scratch buffer per op.
 	codec := NewStringCodec()
 	prefix := []byte{0xAA, 0xBB, 0xCC}
-	buf := codec.Encode(append([]byte(nil), prefix...), "hello")
+	buf, _ := codec.Encode(append([]byte(nil), prefix...), "hello")
 	if !bytes.HasPrefix(buf, prefix) {
 		t.Fatalf("encoded buffer dropped the caller-supplied prefix")
 	}
@@ -359,7 +359,7 @@ func TestCodec_Decode_RejectsTruncated(t *testing.T) {
 			fn: func(t *testing.T) {
 				// Encode a value greater than MaxInt32 via int64 codec,
 				// then attempt to decode as int32.
-				buf := NewInt64Codec().Encode(nil, int64(1)<<40)
+				buf, _ := NewInt64Codec().Encode(nil, int64(1)<<40)
 				if _, _, err := NewInt32Codec().Decode(buf); !errors.Is(err, ErrCodecDecode) {
 					t.Fatalf("err = %v", err)
 				}

@@ -20,7 +20,7 @@ func TestWeightCodec_Int64_Roundtrip(t *testing.T) {
 	codec := NewInt64WeightCodec()
 	rapid.Check(t, func(r *rapid.T) {
 		want := rapid.Int64().Draw(r, "w")
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode(%d): %v", want, err)
@@ -34,7 +34,7 @@ func TestWeightCodec_Int64_Roundtrip(t *testing.T) {
 	})
 	for i := 0; i < weightRoundTripTrials; i++ {
 		want := int64(i*i) - 17
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode #%d (%d): %v", i, want, err)
@@ -56,7 +56,7 @@ func TestWeightCodec_Float64_Roundtrip(t *testing.T) {
 	codec := NewFloat64WeightCodec()
 	rapid.Check(t, func(r *rapid.T) {
 		want := rapid.Float64().Draw(r, "w")
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode(%v): %v", want, err)
@@ -82,7 +82,7 @@ func TestWeightCodec_Float64_Roundtrip(t *testing.T) {
 		-math.SmallestNonzeroFloat64,
 	}
 	for _, want := range edge {
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode(%v): %v", want, err)
@@ -106,7 +106,7 @@ func TestWeightCodec_Float64_GoldenBytes(t *testing.T) {
 		// 1.5 = 0x3FF8000000000000 → LE: 00 00 00 00 00 00 F8 3F
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x3F,
 	}
-	got := codec.Encode(nil, 1.5)
+	got, _ := codec.Encode(nil, 1.5)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("float64 wire form drift: got % x want % x", got, want)
 	}
@@ -160,7 +160,7 @@ func TestWeightCodec_BinaryMarshaler_Roundtrip(t *testing.T) {
 			a: rapid.Uint32().Draw(r, "a"),
 			b: rapid.Uint32().Draw(r, "b"),
 		}
-		buf := codec.Encode(nil, want)
+		buf, _ := codec.Encode(nil, want)
 		got, rest, err := codec.Decode(buf)
 		if err != nil {
 			t.Fatalf("Decode: %v", err)
@@ -195,7 +195,7 @@ func TestWeightCodec_AppendSemantics(t *testing.T) {
 	t.Parallel()
 	codec := NewFloat64WeightCodec()
 	prefix := []byte{0xAA, 0xBB, 0xCC}
-	buf := codec.Encode(append([]byte(nil), prefix...), 3.14)
+	buf, _ := codec.Encode(append([]byte(nil), prefix...), 3.14)
 	if !bytes.HasPrefix(buf, prefix) {
 		t.Fatalf("Float64 codec dropped caller-supplied prefix")
 	}

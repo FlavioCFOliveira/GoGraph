@@ -438,7 +438,12 @@ func (t *Tx[N, W]) Commit() error {
 		if t.store.legacy {
 			payload = encodeOpLegacy(op)
 		} else {
-			payload = encodeOpTyped(op, t.store.codec, t.store.wcodec)
+			var enErr error
+			payload, enErr = encodeOpTyped(op, t.store.codec, t.store.wcodec)
+			if enErr != nil {
+				metrics.IncCounter("store.txn.Commit.errors", 1)
+				return enErr
+			}
 		}
 		if err := t.store.wal.Append(payload); err != nil {
 			metrics.IncCounter("store.txn.Commit.errors", 1)
@@ -476,7 +481,12 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 		if t.store.legacy {
 			payload = encodeOpLegacy(op)
 		} else {
-			payload = encodeOpTyped(op, t.store.codec, t.store.wcodec)
+			var enErr error
+			payload, enErr = encodeOpTyped(op, t.store.codec, t.store.wcodec)
+			if enErr != nil {
+				metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+				return enErr
+			}
 		}
 		if err := t.store.wal.Append(payload); err != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
@@ -596,23 +606,32 @@ func encodeOpLegacy[N comparable, W any](op Op[N, W]) []byte {
 //	codec  src
 //	codec  dst
 //	uint16 = 0      (empty label)
-func encodeOpTyped[N comparable, W any](op Op[N, W], codec Codec[N], wcodec WeightCodec[W]) []byte {
+func encodeOpTyped[N comparable, W any](op Op[N, W], codec Codec[N], wcodec WeightCodec[W]) ([]byte, error) {
 	const headroom = 2 + 2 // version + kind + uint16 labelLen
 	buf := make([]byte, 0, headroom+len(op.Label)+32)
 	buf = append(buf, OpRecordV2, byte(op.Kind))
 
+	var err error
 	switch op.Kind {
 	case OpAddNode, OpRemoveNode, OpRemoveNodeLabel:
 		var zero N
-		buf = codec.Encode(buf, op.Src)
-		buf = codec.Encode(buf, zero)
+		if buf, err = codec.Encode(buf, op.Src); err != nil {
+			return nil, err
+		}
+		if buf, err = codec.Encode(buf, zero); err != nil {
+			return nil, err
+		}
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 		buf = append(buf, op.Label...)
 
 	case OpSetNodeProperty, OpDelNodeProperty:
 		var zero N
-		buf = codec.Encode(buf, op.Src)
-		buf = codec.Encode(buf, zero)
+		if buf, err = codec.Encode(buf, op.Src); err != nil {
+			return nil, err
+		}
+		if buf, err = codec.Encode(buf, zero); err != nil {
+			return nil, err
+		}
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 		buf = append(buf, op.Key...)
 		if op.Kind == OpSetNodeProperty {
@@ -620,13 +639,21 @@ func encodeOpTyped[N comparable, W any](op Op[N, W], codec Codec[N], wcodec Weig
 		}
 
 	case OpRemoveEdge:
-		buf = codec.Encode(buf, op.Src)
-		buf = codec.Encode(buf, op.Dst)
+		if buf, err = codec.Encode(buf, op.Src); err != nil {
+			return nil, err
+		}
+		if buf, err = codec.Encode(buf, op.Dst); err != nil {
+			return nil, err
+		}
 		buf = binary.LittleEndian.AppendUint16(buf, 0)
 
 	case OpSetEdgeProperty, OpDelEdgeProperty:
-		buf = codec.Encode(buf, op.Src)
-		buf = codec.Encode(buf, op.Dst)
+		if buf, err = codec.Encode(buf, op.Src); err != nil {
+			return nil, err
+		}
+		if buf, err = codec.Encode(buf, op.Dst); err != nil {
+			return nil, err
+		}
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 		buf = append(buf, op.Key...)
 		if op.Kind == OpSetEdgeProperty {
@@ -634,21 +661,31 @@ func encodeOpTyped[N comparable, W any](op Op[N, W], codec Codec[N], wcodec Weig
 		}
 
 	case OpAddEdgeWeighted:
-		buf = codec.Encode(buf, op.Src)
-		buf = codec.Encode(buf, op.Dst)
+		if buf, err = codec.Encode(buf, op.Src); err != nil {
+			return nil, err
+		}
+		if buf, err = codec.Encode(buf, op.Dst); err != nil {
+			return nil, err
+		}
 		if wcodec != nil {
-			buf = wcodec.Encode(buf, op.Weight)
+			if buf, err = wcodec.Encode(buf, op.Weight); err != nil {
+				return nil, err
+			}
 		}
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 		buf = append(buf, op.Label...)
 
 	default: // OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel
-		buf = codec.Encode(buf, op.Src)
-		buf = codec.Encode(buf, op.Dst)
+		if buf, err = codec.Encode(buf, op.Src); err != nil {
+			return nil, err
+		}
+		if buf, err = codec.Encode(buf, op.Dst); err != nil {
+			return nil, err
+		}
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 		buf = append(buf, op.Label...)
 	}
-	return buf
+	return buf, nil
 }
 
 // encodePropertyValue appends the wire encoding of a [lpg.PropertyValue] to buf.

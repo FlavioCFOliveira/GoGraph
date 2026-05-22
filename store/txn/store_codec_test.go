@@ -81,7 +81,7 @@ func TestNewStore_CodecIsLegacy(t *testing.T) {
 		t.Fatal("NewStore did not install the legacy codec")
 	}
 	// The legacy codec's Encode mirrors goFormat output...
-	got := c.Encode(nil, "alice")
+	got, _ := c.Encode(nil, "alice")
 	if string(got) != "alice" {
 		t.Fatalf("legacy Encode = %q, want %q", got, "alice")
 	}

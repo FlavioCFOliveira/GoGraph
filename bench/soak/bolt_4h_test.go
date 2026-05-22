@@ -1,9 +1,18 @@
+//go:build soakfull
+
 // Package main_test — 4-hour / 1024-connection Bolt soak test.
 //
 // TestBoltSoak_1024_4h is the full soak gate mandated by the reliability
-// acceptance criteria. It is excluded from normal CI runs; activate it with:
+// acceptance criteria. It is excluded from normal CI runs and only
+// compiles when the 'soakfull' build tag is set. Activate it with:
 //
-//	SOAK_FULL=1 go test -run=TestBoltSoak_1024_4h -timeout=5h ./bench/soak/...
+//	go test -tags=soakfull -run=TestBoltSoak_1024_4h -timeout=5h ./bench/soak/...
+//
+// The build-tag gate is preferable to the legacy SOAK_FULL=1 env check
+// because the test file is fully excluded from compilation in normal
+// runs — no symbol pressure, no source-level visibility from grep'ing
+// `go test` invocations, no risk of a stray invocation triggering the
+// 4-hour run via an env var inherited from a parent shell.
 //
 // CI uses TestBoltSoak_60s (32 goroutines × 10 s) instead.
 package main_test
@@ -35,14 +44,12 @@ type soakSnapshot struct {
 }
 
 // TestBoltSoak_1024_4h runs a 1024-connection, 4-hour soak test.
-// Skipped unless the SOAK_FULL=1 environment variable is set.
+// The function only compiles when the 'soakfull' build tag is set
+// (see the //go:build soakfull line at the top of this file); no
+// runtime env check is required.
 // The test emits heap/goroutine snapshots every 30 s.
 // CI uses TestBoltSoak_60s instead.
 func TestBoltSoak_1024_4h(t *testing.T) {
-	if os.Getenv("SOAK_FULL") != "1" {
-		t.Skip("set SOAK_FULL=1 to run full 4-hour soak")
-	}
-
 	const (
 		nConns           = 1024
 		duration         = 4 * time.Hour

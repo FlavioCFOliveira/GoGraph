@@ -582,7 +582,10 @@ func TestPositionalFuzzer(t *testing.T) {
 			t.Parallel()
 			q, err := Parse(query)
 			if err != nil {
-				t.Skipf("parse error (skipping positional check): %v", err)
+				// The fixture corpus is curated; a parse failure here
+				// is a regression, not a runtime variance. The previous
+				// t.Skipf masked it.
+				t.Fatalf("parse error on fixture %q: %v", query, err)
 			}
 
 			var entries []posEntry

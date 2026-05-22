@@ -21,7 +21,7 @@ import (
 type Codec[N comparable] interface {
 	// Encode appends the wire form of v to buf and returns the
 	// extended slice. The returned slice may alias buf.
-	Encode(buf []byte, v N) []byte
+	Encode(buf []byte, v N) ([]byte, error)
 	// Decode reads a value from the head of buf, returning the
 	// decoded value, the remaining unread tail, and any error. On
 	// error, value and tail are unspecified.
@@ -42,9 +42,9 @@ type stringCodec struct{}
 // uint32 little-endian length prefix followed by the utf-8 bytes.
 func NewStringCodec() Codec[string] { return stringCodec{} }
 
-func (stringCodec) Encode(buf []byte, v string) []byte {
+func (stringCodec) Encode(buf []byte, v string) ([]byte, error) {
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(v)))
-	return append(buf, v...)
+	return append(buf, v...), nil
 }
 
 func (stringCodec) Decode(buf []byte) (value string, rest []byte, err error) {
@@ -69,8 +69,8 @@ type intCodec struct{}
 // signed varint (encoding/binary's PutVarint).
 func NewIntCodec() Codec[int] { return intCodec{} }
 
-func (intCodec) Encode(buf []byte, v int) []byte {
-	return binary.AppendVarint(buf, int64(v))
+func (intCodec) Encode(buf []byte, v int) ([]byte, error) {
+	return binary.AppendVarint(buf, int64(v)), nil
 }
 
 func (intCodec) Decode(buf []byte) (value int, rest []byte, err error) {
@@ -90,8 +90,8 @@ type int32Codec struct{}
 // signed varint.
 func NewInt32Codec() Codec[int32] { return int32Codec{} }
 
-func (int32Codec) Encode(buf []byte, v int32) []byte {
-	return binary.AppendVarint(buf, int64(v))
+func (int32Codec) Encode(buf []byte, v int32) ([]byte, error) {
+	return binary.AppendVarint(buf, int64(v)), nil
 }
 
 func (int32Codec) Decode(buf []byte) (value int32, rest []byte, err error) {
@@ -111,8 +111,8 @@ type int64Codec struct{}
 // signed varint.
 func NewInt64Codec() Codec[int64] { return int64Codec{} }
 
-func (int64Codec) Encode(buf []byte, v int64) []byte {
-	return binary.AppendVarint(buf, v)
+func (int64Codec) Encode(buf []byte, v int64) ([]byte, error) {
+	return binary.AppendVarint(buf, v), nil
 }
 
 func (int64Codec) Decode(buf []byte) (value int64, rest []byte, err error) {
@@ -129,8 +129,8 @@ type uint64Codec struct{}
 // an unsigned varint.
 func NewUint64Codec() Codec[uint64] { return uint64Codec{} }
 
-func (uint64Codec) Encode(buf []byte, v uint64) []byte {
-	return binary.AppendUvarint(buf, v)
+func (uint64Codec) Encode(buf []byte, v uint64) ([]byte, error) {
+	return binary.AppendUvarint(buf, v), nil
 }
 
 func (uint64Codec) Decode(buf []byte) (value uint64, rest []byte, err error) {
@@ -150,8 +150,8 @@ type uuidCodec struct{}
 // because the size is constant.
 func NewUUIDCodec() Codec[[16]byte] { return uuidCodec{} }
 
-func (uuidCodec) Encode(buf []byte, v [16]byte) []byte {
-	return append(buf, v[:]...)
+func (uuidCodec) Encode(buf []byte, v [16]byte) ([]byte, error) {
+	return append(buf, v[:]...), nil
 }
 
 func (uuidCodec) Decode(buf []byte) (value [16]byte, rest []byte, err error) {
@@ -192,24 +192,19 @@ type binaryMarshalerCodec[N comparable, P interface {
 	encoding.BinaryUnmarshaler
 }] struct{}
 
-func (binaryMarshalerCodec[N, P]) Encode(buf []byte, v N) []byte {
+func (binaryMarshalerCodec[N, P]) Encode(buf []byte, v N) ([]byte, error) {
 	// MarshalBinary is invoked on a pointer to a local copy of v so
 	// callers see no observable mutation of their value.
 	tmp := v
 	data, err := P(&tmp).MarshalBinary()
 	if err != nil {
-		// MarshalBinary on a fresh local cannot meaningfully fail in
-		// practice; if a user type does return an error, surface it
-		// via a panic — the WAL append path has no error channel for
-		// this case and silent corruption is worse than a crash. The
-		// public API documents this contract in the codec godoc.
-		panic(fmt.Errorf("txn/codec: BinaryMarshaler returned error: %w", err))
+		return buf, fmt.Errorf("txn/codec: BinaryMarshaler returned error: %w", err)
 	}
 	if uint64(len(data)) > math.MaxUint32 {
-		panic(fmt.Errorf("txn/codec: BinaryMarshaler payload exceeds uint32 (%d bytes)", len(data)))
+		return buf, fmt.Errorf("txn/codec: BinaryMarshaler payload exceeds uint32 (%d bytes)", len(data))
 	}
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(data)))
-	return append(buf, data...)
+	return append(buf, data...), nil
 }
 
 func (binaryMarshalerCodec[N, P]) Decode(buf []byte) (value N, rest []byte, err error) {
@@ -243,11 +238,11 @@ type legacyFmtCodec[N comparable] struct{}
 // untagged frame (legacy) or a v2 tagged frame (typed codec).
 func (legacyFmtCodec[N]) isLegacy() bool { return true }
 
-func (legacyFmtCodec[N]) Encode(buf []byte, v N) []byte {
+func (legacyFmtCodec[N]) Encode(buf []byte, v N) ([]byte, error) {
 	// Mirrors the historical fmt.Sprintf("%v") payload so that any
 	// hand-crafted call site that wires the legacy codec into the
 	// typed path still produces the original bytes.
-	return append(buf, goFormat(v)...)
+	return append(buf, goFormat(v)...), nil
 }
 
 func (legacyFmtCodec[N]) Decode(buf []byte) (value N, rest []byte, err error) {

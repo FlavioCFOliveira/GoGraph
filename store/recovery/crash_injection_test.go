@@ -933,8 +933,8 @@ func TestCrashInjection_ApplyOpCodec_PropertyShortBuffers(t *testing.T) {
 
 	build := func(kind txn.OpKind, body []byte) []byte {
 		p := []byte{txn.OpRecordV2, byte(kind)}
-		p = codec.Encode(p, "alice")
-		p = codec.Encode(p, "bob")
+		p, _ = codec.Encode(p, "alice")
+		p, _ = codec.Encode(p, "bob")
 		p = append(p, body...)
 		return p
 	}
@@ -995,8 +995,8 @@ func TestCrashInjection_ApplyOpCodec_AddNodeAndRemoveNode(t *testing.T) {
 
 	build := func(kind txn.OpKind, src string, label string) []byte {
 		p := []byte{txn.OpRecordV2, byte(kind)}
-		p = codec.Encode(p, src)
-		p = codec.Encode(p, "") // zero dst
+		p, _ = codec.Encode(p, src)
+		p, _ = codec.Encode(p, "") // zero dst
 		p = binary.LittleEndian.AppendUint16(p, uint16(len(label)))
 		p = append(p, label...)
 		return p
@@ -1052,8 +1052,8 @@ func TestCrashInjection_ApplyOpCodec_RemoveEdgeRoundTrip(t *testing.T) {
 	}
 
 	p := []byte{txn.OpRecordV2, byte(txn.OpRemoveEdge)}
-	p = codec.Encode(p, "alice")
-	p = codec.Encode(p, "bob")
+	p, _ = codec.Encode(p, "alice")
+	p, _ = codec.Encode(p, "bob")
 	p = binary.LittleEndian.AppendUint16(p, 0)
 	op, err := Decode(p)
 	if err != nil {
@@ -1080,8 +1080,8 @@ func TestCrashInjection_ApplyOpCodec_RemoveNodeLabelRoundTrip(t *testing.T) {
 	}
 
 	p := []byte{txn.OpRecordV2, byte(txn.OpRemoveNodeLabel)}
-	p = codec.Encode(p, "alice")
-	p = codec.Encode(p, "")
+	p, _ = codec.Encode(p, "alice")
+	p, _ = codec.Encode(p, "")
 	p = binary.LittleEndian.AppendUint16(p, uint16(len("Tmp")))
 	p = append(p, "Tmp"...)
 	op, err := Decode(p)
@@ -1114,14 +1114,14 @@ func TestCrashInjection_ApplyOpCodec_DelPropertiesRoundTrip(t *testing.T) {
 	g.SetEdgeProperty("a", "b", "k", lpg.StringValue("v"))
 
 	delNode := []byte{txn.OpRecordV2, byte(txn.OpDelNodeProperty)}
-	delNode = codec.Encode(delNode, "a")
-	delNode = codec.Encode(delNode, "")
+	delNode, _ = codec.Encode(delNode, "a")
+	delNode, _ = codec.Encode(delNode, "")
 	delNode = binary.LittleEndian.AppendUint16(delNode, uint16(len("k")))
 	delNode = append(delNode, "k"...)
 
 	delEdge := []byte{txn.OpRecordV2, byte(txn.OpDelEdgeProperty)}
-	delEdge = codec.Encode(delEdge, "a")
-	delEdge = codec.Encode(delEdge, "b")
+	delEdge, _ = codec.Encode(delEdge, "a")
+	delEdge, _ = codec.Encode(delEdge, "b")
 	delEdge = binary.LittleEndian.AppendUint16(delEdge, uint16(len("k")))
 	delEdge = append(delEdge, "k"...)
 
@@ -1334,8 +1334,8 @@ func TestCrashInjection_OpenString_CodecErrorDuringReplay(t *testing.T) {
 	// (no WeightCodec on the OpenString path). The frame is otherwise
 	// well-formed.
 	payload := []byte{txn.OpRecordV2, byte(txn.OpAddEdgeWeighted)}
-	payload = codec.Encode(payload, "alice")
-	payload = codec.Encode(payload, "bob")
+	payload, _ = codec.Encode(payload, "alice")
+	payload, _ = codec.Encode(payload, "bob")
 	payload = binary.LittleEndian.AppendUint16(payload, 0x0102_0304%0xFFFF)
 	if err := w.Append(payload); err != nil {
 		t.Fatal(err)

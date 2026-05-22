@@ -57,15 +57,17 @@ jobs:
 
       - name: Run 4-hour Bolt soak
         env:
-          SOAK_FULL: "1"
           SOAK_ARTEFACTS: soak-artefacts
           GODEBUG: "gctrace=1"
         run: |
           set -euxo pipefail
           # The test itself drives the duration; we keep -timeout one
           # hour above the workload window so a slow shutdown does
-          # not corrupt the report.
+          # not corrupt the report. The -tags=soakfull guard
+          # excludes the 4-hour test from every normal run (it only
+          # compiles under this build tag).
           go test \
+            -tags=soakfull \
             -race \
             -count=1 \
             -timeout=5h \

@@ -66,7 +66,7 @@ func TestEncodeOpTyped_V2HeaderTag(t *testing.T) {
 	t.Parallel()
 	codec := NewStringCodec()
 	op := Op[string, int64]{Kind: OpAddEdge, Src: "alice", Dst: "bob"}
-	got := encodeOpTyped(op, codec, WeightCodec[int64](nil))
+	got, _ := encodeOpTyped(op, codec, WeightCodec[int64](nil))
 	if len(got) < 2 {
 		t.Fatalf("typed payload too short: %d", len(got))
 	}

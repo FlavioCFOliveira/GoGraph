@@ -400,7 +400,7 @@ func TestCreateIndex_HashViaEngine(t *testing.T) {
 	// Verify the index was registered in the manager.
 	mgr := g.IndexManager()
 	if mgr == nil {
-		t.Skip("graph has no index manager — skipping verification")
+		t.Fatal("cypher.NewEngine guarantees a non-nil IndexManager via ensureIndexManager; nil here is a bug")
 	}
 	if _, err := mgr.GetIndex("person_name_hash"); err != nil {
 		// Try the auto-name fallback.
@@ -429,7 +429,7 @@ func TestCreateIndex_BTreeViaEngine(t *testing.T) {
 
 	mgr := g.IndexManager()
 	if mgr == nil {
-		t.Skip("no index manager")
+		t.Fatal("cypher.NewEngine guarantees a non-nil IndexManager; nil here is a bug")
 	}
 	sub, err := mgr.GetIndex("city_zip")
 	if err != nil {
@@ -546,7 +546,7 @@ func TestEngine_CreateConstraint_Unique_DDL(t *testing.T) {
 	// The backing index must exist in the manager.
 	mgr := g.IndexManager()
 	if mgr == nil {
-		t.Skip("no index manager")
+		t.Fatal("cypher.NewEngine guarantees a non-nil IndexManager; nil here is a bug")
 	}
 	sub, err := mgr.GetIndex("__uniq__Person.email")
 	if err != nil {
@@ -573,7 +573,7 @@ func TestEngine_CreateConstraint_NotNull_DDL(t *testing.T) {
 	// No backing index for NOT NULL.
 	mgr := g.IndexManager()
 	if mgr == nil {
-		t.Skip("no index manager")
+		t.Fatal("cypher.NewEngine guarantees a non-nil IndexManager; nil here is a bug")
 	}
 	names := mgr.ListIndexes()
 	for _, n := range names {

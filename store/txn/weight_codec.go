@@ -25,7 +25,7 @@ import (
 type WeightCodec[W any] interface {
 	// Encode appends the wire form of w to buf and returns the
 	// extended slice. The returned slice may alias buf.
-	Encode(buf []byte, w W) []byte
+	Encode(buf []byte, w W) ([]byte, error)
 	// Decode reads a value from the head of buf, returning the
 	// decoded value, the remaining unread tail, and any error. On
 	// error, value and tail are unspecified.
@@ -49,8 +49,8 @@ type int64WeightCodec struct{}
 // common signed-integer instantiation.
 func NewInt64WeightCodec() WeightCodec[int64] { return int64WeightCodec{} }
 
-func (int64WeightCodec) Encode(buf []byte, w int64) []byte {
-	return binary.AppendVarint(buf, w)
+func (int64WeightCodec) Encode(buf []byte, w int64) ([]byte, error) {
+	return binary.AppendVarint(buf, w), nil
 }
 
 func (int64WeightCodec) Decode(buf []byte) (value int64, rest []byte, err error) {
@@ -75,8 +75,8 @@ type float64WeightCodec struct{}
 // rather than the equality operator.
 func NewFloat64WeightCodec() WeightCodec[float64] { return float64WeightCodec{} }
 
-func (float64WeightCodec) Encode(buf []byte, w float64) []byte {
-	return binary.LittleEndian.AppendUint64(buf, math.Float64bits(w))
+func (float64WeightCodec) Encode(buf []byte, w float64) ([]byte, error) {
+	return binary.LittleEndian.AppendUint64(buf, math.Float64bits(w)), nil
 }
 
 func (float64WeightCodec) Decode(buf []byte) (value float64, rest []byte, err error) {
@@ -117,24 +117,19 @@ type binaryMarshalerWeightCodec[W any, P interface {
 	encoding.BinaryUnmarshaler
 }] struct{}
 
-func (binaryMarshalerWeightCodec[W, P]) Encode(buf []byte, w W) []byte {
+func (binaryMarshalerWeightCodec[W, P]) Encode(buf []byte, w W) ([]byte, error) {
 	// MarshalBinary is invoked on a pointer to a local copy of w so
 	// callers see no observable mutation of their value.
 	tmp := w
 	data, err := P(&tmp).MarshalBinary()
 	if err != nil {
-		// MarshalBinary on a fresh local cannot meaningfully fail in
-		// practice; if a user type does return an error, surface it
-		// via a panic — the WAL append path has no error channel for
-		// this case and silent corruption is worse than a crash. The
-		// public API documents this contract in the codec godoc.
-		panic(fmt.Errorf("txn/weight_codec: BinaryMarshaler returned error: %w", err))
+		return buf, fmt.Errorf("txn/weight_codec: BinaryMarshaler returned error: %w", err)
 	}
 	if uint64(len(data)) > math.MaxUint32 {
-		panic(fmt.Errorf("txn/weight_codec: BinaryMarshaler payload exceeds uint32 (%d bytes)", len(data)))
+		return buf, fmt.Errorf("txn/weight_codec: BinaryMarshaler payload exceeds uint32 (%d bytes)", len(data))
 	}
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(data)))
-	return append(buf, data...)
+	return append(buf, data...), nil
 }
 
 func (binaryMarshalerWeightCodec[W, P]) Decode(buf []byte) (value W, rest []byte, err error) {

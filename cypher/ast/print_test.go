@@ -515,9 +515,12 @@ func TestPrint_RapidRoundTrip(t *testing.T) {
 		// Step 1: parse original query string.
 		original, err := parser.Parse(q)
 		if err != nil {
-			// The generator should always produce parseable queries.
-			// If it doesn't, that is a generator bug — mark as invalid so rapid skips it.
-			t.Skip()
+			// validQueryGen is documented to emit syntactically valid
+			// queries only. A parse failure here is a generator bug
+			// that must be diagnosed and fixed, not silently skipped —
+			// the previous t.Skip() masked the regression that #443
+			// asked us to surface.
+			t.Fatalf("validQueryGen produced unparseable query %q: %v", q, err)
 		}
 
 		// Step 2: print to canonical form.

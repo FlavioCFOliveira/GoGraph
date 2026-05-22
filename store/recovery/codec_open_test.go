@@ -124,7 +124,7 @@ func TestOpenString_TruncatedV2Body(t *testing.T) {
 	}
 	// Build a partial v2 frame: codec(src) ok, codec(dst) short.
 	codec := txn.NewStringCodec()
-	body := codec.Encode(nil, "alice")
+	body, _ := codec.Encode(nil, "alice")
 	body = append(body, 0x10, 0x00, 0x00, 0x00) // dst length 16 but no body
 	payload := append([]byte{txn.OpRecordV2, byte(txn.OpAddEdge)}, body...)
 	if err := w.Append(payload); err != nil {
@@ -158,8 +158,8 @@ func TestOpenString_V2MissingTrailingLabelLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	codec := txn.NewStringCodec()
-	body := codec.Encode(nil, "alice")
-	body = codec.Encode(body, "bob")
+	body, _ := codec.Encode(nil, "alice")
+	body, _ = codec.Encode(body, "bob")
 	// No uint16 labelLen trailer; applyOpString must reject and bail.
 	payload := append([]byte{txn.OpRecordV2, byte(txn.OpAddEdge)}, body...)
 	if err := w.Append(payload); err != nil {
@@ -190,8 +190,8 @@ func TestOpenString_V2LabelOverflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	codec := txn.NewStringCodec()
-	body := codec.Encode(nil, "alice")
-	body = codec.Encode(body, "bob")
+	body, _ := codec.Encode(nil, "alice")
+	body, _ = codec.Encode(body, "bob")
 	body = binary.LittleEndian.AppendUint16(body, 100) // claim 100 bytes of label
 	body = append(body, 'L', 'a', 'b')                 // but only 3 follow
 	payload := append([]byte{txn.OpRecordV2, byte(txn.OpAddEdge)}, body...)
