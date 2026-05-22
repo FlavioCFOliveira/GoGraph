@@ -34,11 +34,22 @@ type staticChildOp struct {
 	nextErr  error
 	closeErr error
 	closed   bool
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check, mirrors sliceOperator
 }
 
-func (c *staticChildOp) Init(_ context.Context) error { return c.initErr }
+// Init stores ctx for the per-Next cancellation check and returns initErr.
+// Pattern follows sliceOperator.Init (exec_test.go:35-39).
+func (c *staticChildOp) Init(ctx context.Context) error {
+	c.ctx = ctx
+	return c.initErr
+}
 
+// Next honours the Operator contract: it checks ctx.Done() at the top of every
+// call before any other work, mirroring sliceOperator.Next (exec_test.go:42).
 func (c *staticChildOp) Next(out *exec.Row) (bool, error) {
+	if err := c.ctx.Err(); err != nil {
+		return false, err
+	}
 	if c.nextErr != nil {
 		return false, c.nextErr
 	}
