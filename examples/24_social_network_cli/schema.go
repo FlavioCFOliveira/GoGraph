@@ -1,5 +1,16 @@
 package main
 
+import "gograph/graph/adjlist"
+
+// lpgConfig returns the adjacency-list configuration shared by every
+// subcommand. The social-network model is directional throughout —
+// FOLLOWS, AUTHORED, ON, REPLY_OF and LIKED all have a well-defined
+// direction — so the backend is constructed with Directed: true. The
+// helper centralises this choice so a future change is single-edit.
+func lpgConfig() adjlist.Config {
+	return adjlist.Config{Directed: true}
+}
+
 // Node labels used by the social-network fixture and by every Cypher
 // statement issued by this CLI. Kept as exported package-level constants
 // so other files in the package reference one name per concept and a
