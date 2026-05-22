@@ -388,8 +388,10 @@ func TestWriteSnapshotFullCtx_AtomicPublish(t *testing.T) {
 	if m.Version != ManifestVersion {
 		t.Fatalf("manifest version %d, want %d", m.Version, ManifestVersion)
 	}
-	if len(m.Files) != 3 {
-		t.Fatalf("manifest files = %d, want 3", len(m.Files))
+	// String-keyed graphs emit four component files in the v3 layout:
+	// csr.bin, labels.bin, properties.bin, mapper.bin.
+	if len(m.Files) != 4 {
+		t.Fatalf("manifest files = %d, want 4", len(m.Files))
 	}
 }
 

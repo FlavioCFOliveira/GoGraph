@@ -368,6 +368,20 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 		snapIndexes = loaded.Indexes
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
+
+		// v3 snapshot: restore the mapper + CSR before WAL replay so
+		// the load is self-sufficient even when the WAL is empty. See
+		// the matching block in openCodec for the rationale.
+		if len(loaded.Mapper.Pairs) > 0 {
+			if err := snapshot.ApplyMapperToGraph(g, loaded.Mapper); err != nil {
+				metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
+				return res, fmt.Errorf("recovery: apply snapshot mapper: %w", err)
+			}
+			if err := snapshot.ApplyCSRToGraph(g, &loaded.CSR); err != nil {
+				metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
+				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", err)
+			}
+		}
 	}
 
 	walPath := filepath.Join(dir, "wal")
@@ -605,6 +619,27 @@ func openCodec[N comparable, W any](
 		snapIndexes = loaded.Indexes
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
+
+		// v3 snapshot: the mapper.bin payload re-seeds the in-memory
+		// interning table BEFORE WAL replay so the rest of the load
+		// chain (CSR apply, labels apply, properties apply, WAL apply)
+		// finds every NodeID already resolved. v2 snapshots produce an
+		// empty Mapper readback here and the original WAL-replay-only
+		// reconstruction path applies.
+		if len(loaded.Mapper.Pairs) > 0 {
+			if err := snapshot.ApplyMapperToGraph(g, loaded.Mapper); err != nil {
+				metrics.IncCounter("store.recovery.openCodec.errors", 1)
+				return res, fmt.Errorf("recovery: apply snapshot mapper: %w", err)
+			}
+			// With the mapper restored, the CSR adjacency can be
+			// applied directly — no WAL prefix needed. AddEdge is
+			// idempotent against a freshly-restored mapper because each
+			// (src, dst) appears at most once in the CSR snapshot.
+			if err := snapshot.ApplyCSRToGraph(g, &loaded.CSR); err != nil {
+				metrics.IncCounter("store.recovery.openCodec.errors", 1)
+				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", err)
+			}
+		}
 	}
 
 	walPath := filepath.Join(dir, "wal")

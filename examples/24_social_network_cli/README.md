@@ -52,7 +52,7 @@ rename surfaces compilation errors in one place.
 | `init     -d <dir>` | Creates the data directory if missing and writes an empty initial snapshot. Idempotent. | `{"data_dir":"<abs>","status":"ok"}` |
 | `seed     -d <dir>` | Inserts the deterministic fixture (5 users, 8 FOLLOWS, 3 Posts, 5 Comments, 7 LIKED). | `{"seeded":<bool>,"status":"ok"}` |
 | `query    -d <dir> [cypher]` | Runs a Cypher query (read or single-node write) and emits each record as one JSONL line. The query is taken from the positional argument or, if absent, from the entire stdin stream. | one JSON object per row |
-| `snapshot -d <dir>` | Builds a CSR view of the current in-memory graph and writes a full snapshot (manifest + csr.bin + labels.bin + properties.bin) alongside the WAL. | `{"snapshot_dir":"<abs>","status":"ok"}` |
+| `snapshot -d <dir>` | Builds a CSR view of the current in-memory graph and writes a full snapshot (manifest + csr.bin + labels.bin + properties.bin + mapper.bin) alongside the WAL. The v3 manifest is self-sufficient: recovery can rebuild the graph from the snapshot alone, even when the WAL is empty or truncated. | `{"snapshot_dir":"<abs>","status":"ok"}` |
 | `stats    -d <dir>` | Runs the eight `MATCH count(*)` queries and returns one alphabetically-keyed JSON object. | `{"authored":N,"comments":N,…,"users":N}` |
 
 Exit codes:

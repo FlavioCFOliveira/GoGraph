@@ -130,10 +130,12 @@ func TestProperties_RoundtripAllKinds(t *testing.T) {
 	mustGetEdgeBytes(t, restored, "alice", "bob", "raw", []byte("\x00\x01\x02"))
 }
 
-// TestProperties_ManifestV2_WithBothLabelsAndProperties_Loads confirms
-// a v2 manifest carrying both labels.bin and properties.bin loads
-// back through the v2 helper, with both readbacks populated.
-func TestProperties_ManifestV2_WithBothLabelsAndProperties_Loads(t *testing.T) {
+// TestProperties_ManifestCurrent_WithBothLabelsAndProperties_Loads
+// confirms a manifest carrying both labels.bin and properties.bin
+// loads back through the current writer, with both readbacks
+// populated. String-keyed graphs produce a v3 manifest (with
+// mapper.bin) in current builds.
+func TestProperties_ManifestCurrent_WithBothLabelsAndProperties_Loads(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	if err := g.AddEdge("a", "b", 1); err != nil {
@@ -158,8 +160,8 @@ func TestProperties_ManifestV2_WithBothLabelsAndProperties_Loads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSnapshotFull: %v", err)
 	}
-	if loaded.Manifest.Version != 2 {
-		t.Fatalf("Manifest.Version = %d, want 2", loaded.Manifest.Version)
+	if loaded.Manifest.Version != ManifestVersion {
+		t.Fatalf("Manifest.Version = %d, want %d", loaded.Manifest.Version, ManifestVersion)
 	}
 	if len(loaded.Labels.NodeLabels) != 1 || len(loaded.Labels.EdgeLabels) != 1 {
 		t.Fatalf("labels readback wrong: %+v", loaded.Labels)

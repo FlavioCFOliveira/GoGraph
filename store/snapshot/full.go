@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"gograph/graph"
 	"gograph/graph/csr"
 	"gograph/graph/lpg"
 	"gograph/internal/metrics"
@@ -18,9 +19,10 @@ import (
 // LoadedSnapshot is the result of [LoadSnapshotFull]: the parsed CSR
 // arrays, the parsed labels readback (empty for v1 snapshots), the
 // parsed properties readback (empty when properties.bin is absent),
-// the optional per-index byte payloads (one entry per
-// indexes/<name>.bin file referenced by the manifest), and the
-// manifest that produced them.
+// the parsed mapper readback (empty when mapper.bin is absent, which
+// is the case for every v1 and v2 snapshot), the optional per-index
+// byte payloads (one entry per indexes/<name>.bin file referenced by
+// the manifest), and the manifest that produced them.
 //
 // Each [IndexReadback].Bytes may be nil even when the manifest
 // references the index — that signals the file was missing or its
@@ -32,15 +34,24 @@ type LoadedSnapshot struct {
 	CSR        CSRReadback
 	Labels     LabelsReadback
 	Properties PropertiesReadback
+	Mapper     MapperReadback
 	Indexes    []IndexReadback
 }
 
-// WriteSnapshotFull is the v2 high-level helper: it lays out a
+// WriteSnapshotFull is the v2/v3 high-level helper: it lays out a
 // snapshot directory containing csr.bin (legacy v1 component),
-// labels.bin (v2 component), properties.bin (v2 component), and a
-// v2 manifest indexing all three. Atomic publication is achieved by
-// assembling the snapshot under dir + ".tmp" and renaming it to dir
-// on success — the same protocol used by [WriteSnapshotCSR].
+// labels.bin (v2 component), properties.bin (v2 component) and a
+// manifest indexing them. When the underlying [graph.Mapper] is
+// string-keyed (N=string) the writer additionally emits mapper.bin —
+// the durable (NodeID -> natural key) interning table — and the
+// manifest is stamped at [ManifestVersion] (v3). For any other N the
+// writer falls back to the v2 layout (no mapper.bin) and the manifest
+// records [manifestVersionV2]; recovery from a v2 snapshot continues
+// to rely on WAL replay to re-intern keys.
+//
+// Atomic publication is achieved by assembling the snapshot under
+// dir + ".tmp" and renaming it to dir on success — the same protocol
+// used by [WriteSnapshotCSR].
 //
 // When g carries a non-nil [index.Manager] (set via
 // [lpg.Graph.SetIndexManager]) with at least one registered index
@@ -145,6 +156,26 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		return err
 	}
 
+	// mapper.bin — durable (NodeID -> natural key) table. Only emitted
+	// when the graph's Mapper is string-keyed: that is the only N for
+	// which the codec is implemented today and the only N exercised by
+	// production call sites (txn.NewStoreWithOptions, the social_cli
+	// example, every Cypher TCK persistence test). Non-string N falls
+	// back to the v2 layout (no mapper.bin) and recovery continues to
+	// rebuild the mapper from the WAL — the documented v2 contract.
+	mapperSize, mapperCRC, haveMapper, err := writeMapperIfStringKeyed(ctx, tmp, g)
+	if err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
 	// indexes/<name>.bin — one file per registered index that
 	// implements [index.Serializer]. Subscribers without serializer
 	// support are silently skipped (rebuild-on-restart contract).
@@ -165,17 +196,29 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		return err
 	}
 
+	// Manifest version is v3 only when mapper.bin was emitted; non-
+	// string-keyed graphs continue to produce v2 manifests so existing
+	// recovery tests (which compare Manifest.Version against the
+	// build's [ManifestVersion]) keep passing for every shape that
+	// already worked before this change.
+	manifestVersion := manifestVersionV2
+	files := []FileEntry{
+		{Name: CSRFile, Size: csrSize, CRC32C: csrCRC},
+		{Name: LabelsFile, Size: labelsSize, CRC32C: labelsCRC},
+		{Name: PropertiesFile, Size: propsSize, CRC32C: propsCRC},
+	}
+	if haveMapper {
+		manifestVersion = ManifestVersion
+		files = append(files, FileEntry{Name: MapperFile, Size: mapperSize, CRC32C: mapperCRC})
+	}
+
 	m := Manifest{
-		Version:   ManifestVersion,
+		Version:   manifestVersion,
 		CreatedAt: time.Now().UTC(),
 		Order:     c.Order(),
 		Size:      c.Size(),
-		Files: []FileEntry{
-			{Name: CSRFile, Size: csrSize, CRC32C: csrCRC},
-			{Name: LabelsFile, Size: labelsSize, CRC32C: labelsCRC},
-			{Name: PropertiesFile, Size: propsSize, CRC32C: propsCRC},
-		},
-		Indexes: idxEntries,
+		Files:     files,
+		Indexes:   idxEntries,
 	}
 
 	manifestPath := filepath.Join(tmp, "manifest.json")
@@ -225,6 +268,46 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		return fmt.Errorf("snapshot: publish parent fsync: %w", err)
 	}
 	return nil
+}
+
+// writeMapperIfStringKeyed inspects g's mapper and, when N=string,
+// serialises it to mapper.bin under tmp. Returns (size, crc, true,
+// nil) on success, (0, 0, false, nil) when N is not string (callers
+// fall back to v2), or a non-nil error on a write failure (callers
+// must clean tmp and surface the error).
+//
+// The function uses a type-switch on a sentinel pointer so the
+// compiler can prove the conversion is well-typed without resorting
+// to unsafe; it returns false for any N that is not the canonical
+// string type. The fallback to v2 is documented at the writer
+// godoc — non-string graphs keep producing the same on-disk layout as
+// before this change.
+func writeMapperIfStringKeyed[N comparable, W any](
+	ctx context.Context,
+	tmp string,
+	g *lpg.Graph[N, W],
+) (size int64, crc uint32, ok bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, false, err
+	}
+	adj := g.AdjList()
+	mapper := adj.Mapper()
+	// Reflection-free probe: the writer only knows how to serialise
+	// the string-keyed mapper. We tunnel the concrete pointer through
+	// a type assertion on any() to avoid pulling in reflect for a one-
+	// shot dispatch on the hot path.
+	stringMapper, ok := any(mapper).(*graph.Mapper[string])
+	if !ok {
+		return 0, 0, false, nil
+	}
+	mapperPath := filepath.Join(tmp, MapperFile)
+	mSize, mCRC, werr := writeAndSync(mapperPath, func(w io.Writer) (int64, uint32, error) {
+		return WriteMapperString(w, stringMapper)
+	})
+	if werr != nil {
+		return 0, 0, false, werr
+	}
+	return mSize, mCRC, true, nil
 }
 
 // writeAndSync creates path, hands the file handle to write, fsyncs
@@ -280,7 +363,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		return LoadedSnapshot{}, err
 	}
 
-	csrEntry, labelsEntry, propsEntry := findEntries(m.Files)
+	csrEntry, labelsEntry, propsEntry, mapperEntry := findEntries(m.Files)
 	if csrEntry == nil {
 		metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 		return LoadedSnapshot{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
@@ -310,6 +393,15 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		}
 	}
 
+	var mapperParsed MapperReadback
+	if mapperEntry != nil {
+		mapperParsed, err = readVerifiedMapper(filepath.Join(dir, MapperFile), mapperEntry.CRC32C)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, err
+		}
+	}
+
 	// indexes/<name>.bin — best-effort load. Corruption surfaces as
 	// nil Bytes on the IndexReadback so the recovery path can rebuild
 	// from the LPG rather than aborting.
@@ -327,15 +419,16 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		CSR:        csrParsed,
 		Labels:     labelsParsed,
 		Properties: propsParsed,
+		Mapper:     mapperParsed,
 		Indexes:    idxReadback,
 	}, nil
 }
 
-// findEntries returns pointers to the csr.bin, labels.bin, and
-// properties.bin entries in files, or nil for any that are absent.
-// The slice is walked once and pointers index into the original
-// storage so the caller can inspect them without copying.
-func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry *FileEntry) {
+// findEntries returns pointers to the csr.bin, labels.bin,
+// properties.bin and mapper.bin entries in files, or nil for any that
+// are absent. The slice is walked once and pointers index into the
+// original storage so the caller can inspect them without copying.
+func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry, mapperEntry *FileEntry) {
 	for k := range files {
 		switch files[k].Name {
 		case CSRFile:
@@ -344,9 +437,11 @@ func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry *FileEntr
 			labelsEntry = &files[k]
 		case PropertiesFile:
 			propsEntry = &files[k]
+		case MapperFile:
+			mapperEntry = &files[k]
 		}
 	}
-	return csrEntry, labelsEntry, propsEntry
+	return csrEntry, labelsEntry, propsEntry, mapperEntry
 }
 
 // readVerifiedCSR opens path, runs the file bytes through CRC32C and

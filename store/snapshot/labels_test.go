@@ -63,8 +63,10 @@ func TestLabels_Roundtrip(t *testing.T) {
 	if loaded.Manifest.Version != ManifestVersion {
 		t.Fatalf("Manifest.Version = %d, want %d", loaded.Manifest.Version, ManifestVersion)
 	}
-	if got := len(loaded.Manifest.Files); got != 3 {
-		t.Fatalf("Manifest.Files = %d, want 3 (csr.bin + labels.bin + properties.bin)", got)
+	// String-keyed graphs emit a v3 snapshot: csr.bin + labels.bin +
+	// properties.bin + mapper.bin.
+	if got := len(loaded.Manifest.Files); got != 4 {
+		t.Fatalf("Manifest.Files = %d, want 4 (csr.bin + labels.bin + properties.bin + mapper.bin)", got)
 	}
 
 	// Materialise the readback into a fresh LPG with the same
@@ -109,10 +111,11 @@ func TestLabels_Roundtrip(t *testing.T) {
 	}
 }
 
-// TestLabels_ManifestV2_LoadsClean confirms a freshly written v2
-// snapshot loads back with Version=2 and labels.bin verified
-// end-to-end through the manifest CRC.
-func TestLabels_ManifestV2_LoadsClean(t *testing.T) {
+// TestLabels_ManifestCurrent_LoadsClean confirms a freshly written
+// snapshot for a string-keyed graph loads back with the build's
+// highest [ManifestVersion] and labels.bin verified end-to-end through
+// the manifest CRC.
+func TestLabels_ManifestCurrent_LoadsClean(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
@@ -133,8 +136,8 @@ func TestLabels_ManifestV2_LoadsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSnapshotFull: %v", err)
 	}
-	if loaded.Manifest.Version != 2 {
-		t.Fatalf("Manifest.Version = %d, want 2", loaded.Manifest.Version)
+	if loaded.Manifest.Version != ManifestVersion {
+		t.Fatalf("Manifest.Version = %d, want %d", loaded.Manifest.Version, ManifestVersion)
 	}
 	if len(loaded.Labels.NodeLabels) != 1 {
 		t.Fatalf("NodeLabels len = %d, want 1", len(loaded.Labels.NodeLabels))

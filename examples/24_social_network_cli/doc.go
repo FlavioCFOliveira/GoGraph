@@ -131,13 +131,17 @@
 //
 // The data directory contains <dir>/wal (the append-only write-ahead
 // log) and <dir>/snapshot/* (manifest plus csr.bin, labels.bin,
-// properties.bin and any per-index files). On open, recovery.Open
-// (the canonical [string, float64] generic entry point — the
-// deprecated OpenString wrapper is avoided) loads the most recent
-// valid snapshot and replays the WAL tail to rebuild the in-memory
-// graph. Every write performed through Engine.RunInTx is appended to
-// the WAL with fsync at commit, so a process crash mid-write leaves
-// the data directory recoverable.
+// properties.bin, mapper.bin and any per-index files). The v3
+// manifest emitted for string-keyed graphs (every graph the CLI
+// produces) is self-sufficient: the snapshot alone carries enough
+// state to rebuild the in-memory graph without any WAL frames. On
+// open, recovery.Open (the canonical [string, float64] generic entry
+// point — the deprecated OpenString wrapper is avoided) restores the
+// natural-key interning table from mapper.bin, applies the CSR
+// adjacency, attaches labels.bin and properties.bin, then replays
+// any WAL tail on top. Every write performed through Engine.RunInTx
+// is appended to the WAL with fsync at commit, so a process crash
+// mid-write leaves the data directory recoverable.
 //
 // The CLI is one-shot: every invocation opens the data directory,
 // performs its operation, and closes the recovery handle. There is no

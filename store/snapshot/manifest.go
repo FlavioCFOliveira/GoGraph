@@ -22,11 +22,22 @@ import (
 )
 
 // ManifestVersion is the highest on-disk schema version this build
-// understands. The current build writes version 2 manifests via
-// [WriteSnapshotFull] and version 1 manifests via the legacy
-// [WriteSnapshotCSR] code path (CSR-only snapshots, kept for backward
-// compatibility). The loader transparently accepts both.
-const ManifestVersion = 2
+// understands. The current build writes version 3 manifests via
+// [WriteSnapshotFull] when N=string (CSR + labels + properties +
+// mapper, fully self-sufficient on load), version 2 manifests via the
+// same writer for non-string N (CSR + labels + properties, requires
+// WAL replay to reconstruct the natural-key mapper), and version 1
+// manifests via the legacy [WriteSnapshotCSR] code path (CSR-only
+// snapshots). The loader transparently accepts all three.
+const ManifestVersion = 3
+
+// manifestVersionV2 is the schema version emitted by [WriteSnapshotFull]
+// when the underlying [graph.Mapper] is keyed by a comparable type
+// other than string (or any future type for which the writer cannot
+// persist the interning table). v2 snapshots remain self-consistent
+// for CSR + labels + properties but require the surrounding WAL to
+// re-intern keys at recovery time.
+const manifestVersionV2 = 2
 
 // manifestVersionLegacy is the schema version emitted by
 // [WriteSnapshotCSR] and [WriteSnapshotCSRCtx]. Those writers retain

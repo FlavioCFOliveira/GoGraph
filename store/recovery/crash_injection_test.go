@@ -1223,8 +1223,11 @@ func TestCrashInjection_MixedSnapshotV1V2(t *testing.T) {
 	if !res2.SnapshotHit {
 		t.Fatal("SnapshotHit = false on v2 snapshot")
 	}
-	if res2.SnapshotSchemaVersion != 2 {
-		t.Fatalf("SnapshotSchemaVersion = %d, want 2", res2.SnapshotSchemaVersion)
+	// String-keyed graphs emit the self-sufficient v3 layout that
+	// carries mapper.bin alongside csr/labels/properties.
+	if res2.SnapshotSchemaVersion != snapshot.ManifestVersion {
+		t.Fatalf("SnapshotSchemaVersion = %d, want %d",
+			res2.SnapshotSchemaVersion, snapshot.ManifestVersion)
 	}
 	if res2.SnapshotProperties == 0 {
 		t.Fatal("v2 snapshot must contribute properties")
