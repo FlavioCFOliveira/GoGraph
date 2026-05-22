@@ -71,6 +71,14 @@ type Session struct {
 
 	// log is the session-scoped structured logger.
 	log *slog.Logger
+
+	// maxInFlight bounds the number of Result cursors this connection
+	// may hold open simultaneously. Defaults to
+	// [DefaultMaxInFlightPerConnection]. RUN is rejected with
+	// "Neo.ClientError.General.LimitExceeded" once the count of
+	// non-Close()d cursors reaches this value. See
+	// [Options.MaxInFlightPerConnection] for the rationale.
+	maxInFlight int
 }
 
 // newSession constructs an idle Session backed by eng, starting in
@@ -80,13 +88,39 @@ type Session struct {
 // (e.g. unit tests).
 func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session {
 	return &Session{
-		id:        randomID(),
-		eng:       eng,
-		auth:      auth,
-		state:     StateNegotiation,
-		localAddr: localAddr,
-		log:       slog.Default(),
+		id:          randomID(),
+		eng:         eng,
+		auth:        auth,
+		state:       StateNegotiation,
+		localAddr:   localAddr,
+		log:         slog.Default(),
+		maxInFlight: DefaultMaxInFlightPerConnection,
 	}
+}
+
+// setMaxInFlight overrides the session's per-connection in-flight
+// cursor cap. Intended for use by the server bootstrap path so the
+// operator-configured [Options.MaxInFlightPerConnection] takes
+// effect; tests may use it to exercise alternative caps. A
+// non-positive value is rejected and the cap is left unchanged.
+func (s *Session) setMaxInFlight(n int) {
+	if n > 0 {
+		s.maxInFlight = n
+	}
+}
+
+// inFlightCount returns the number of currently open (non-Close()d)
+// Result cursors held by this session. In an explicit transaction
+// the count is len(tx.results); outside a transaction it is at most
+// one (the auto-commit cursor referenced by s.result).
+func (s *Session) inFlightCount() int {
+	if s.txActive && s.tx != nil {
+		return len(s.tx.results)
+	}
+	if s.result != nil {
+		return 1
+	}
+	return 0
 }
 
 // randomID returns a 16-byte random hex string suitable for use as a session
@@ -255,6 +289,21 @@ func (s *Session) handleGoodbye() ([]any, error) {
 func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	if s.state != StateReady && s.state != StateTxReady {
 		return s.failTransition(m)
+	}
+
+	// Per-connection in-flight cursor cap. The Bolt v5 state machine
+	// already prevents two auto-commit RUNs from co-existing (a
+	// second RUN is illegal in StateStreaming), but inside an
+	// explicit transaction every RUN appends a cursor to tx.results
+	// that is not closed until COMMIT/ROLLBACK. Without the cap a
+	// long-running transaction can accumulate an unbounded number
+	// of cursors, each holding operator state.
+	if n := s.inFlightCount(); n >= s.maxInFlight {
+		s.state = StateFailed
+		return []any{&proto.Failure{
+			Code:    "Neo.ClientError.General.LimitExceeded",
+			Message: fmt.Sprintf("bolt: per-connection in-flight cursor cap reached (cap=%d, open=%d); commit/rollback or pull/discard before issuing more queries", s.maxInFlight, n),
+		}}, nil
 	}
 
 	// Log any incoming bookmarks for observability; single-host server ignores

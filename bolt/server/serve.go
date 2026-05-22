@@ -21,6 +21,18 @@ const (
 	// defaultMaxConnections is the default upper bound on concurrent connections.
 	defaultMaxConnections = 1024
 
+	// DefaultMaxInFlightPerConnection is the default value applied to
+	// Options.MaxInFlightPerConnection when the caller leaves it at
+	// zero. The very low default (1) reflects the fact that a single
+	// Result cursor at a time is sufficient for every Bolt v5 client
+	// the server is intended to serve: drivers issue RUN, drain via
+	// PULL/DISCARD, and only then issue the next RUN. Operators
+	// running a workload that legitimately needs many in-flight
+	// cursors per connection (long-running explicit transactions that
+	// accumulate cursors before COMMIT) must raise this value
+	// explicitly.
+	DefaultMaxInFlightPerConnection = 1
+
 	// shutdownDrainTimeout is the maximum time Shutdown waits for active
 	// connections to finish after stopping the accept loop.
 	shutdownDrainTimeout = 30 * time.Second
@@ -40,6 +52,19 @@ type Options struct {
 	// DoS vector in which a malicious client streams non-zero chunks
 	// indefinitely until the server OOMs.
 	MaxMessageBytes int
+
+	// MaxInFlightPerConnection caps the number of Result cursors a
+	// single connection may have open at the same time. Zero or
+	// negative values default to [DefaultMaxInFlightPerConnection]
+	// (1). Cursors are counted across both auto-commit and explicit
+	// transactions: in auto-commit mode the cap is one cursor at
+	// most (already implied by the Bolt v5 state machine), but in
+	// explicit transactions a malicious client could otherwise RUN
+	// many queries in sequence, drain each one with PULL, and let
+	// the cursors accumulate in tx.results until Commit. The cap
+	// surfaces as a typed Bolt FAILURE with code
+	// "Neo.ClientError.General.LimitExceeded".
+	MaxInFlightPerConnection int
 
 	// ConnTimeout is the per-connection idle read deadline. Each time the
 	// server is about to read the next message, the deadline is reset to
@@ -80,6 +105,9 @@ type Server struct {
 func NewServer(eng *cypher.Engine, opts Options) *Server {
 	if opts.MaxConnections <= 0 {
 		opts.MaxConnections = defaultMaxConnections
+	}
+	if opts.MaxInFlightPerConnection <= 0 {
+		opts.MaxInFlightPerConnection = DefaultMaxInFlightPerConnection
 	}
 	if opts.Auth == nil {
 		opts.Auth = NoAuthHandler{}
@@ -262,6 +290,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	s.mu.Unlock()
 	sess := newSession(s.eng, s.opts.Auth, localAddr)
+	sess.setMaxInFlight(s.opts.MaxInFlightPerConnection)
 
 	// ── 3. Message loop ──────────────────────────────────────────────────
 	for {
