@@ -555,58 +555,88 @@ func TestUnwind_NextErrorPlusCloseError(t *testing.T) {
 // 3. Cancellation — context check at the top of Next
 // ─────────────────────────────────────────────────────────────────────────────
 
+// TestUnwind_ContextCancellation covers Unwind's response to context
+// cancellation. Two distinct flows are exercised:
+//
+//  1. Mid-list-iteration cancellation. We Init with a cancellable context,
+//     drive Next twice to populate curList and emit two elements (so
+//     op.curList != nil && op.listIdx == 2 — the operator is mid-iteration of
+//     a non-empty list). Then we cancel. The next call to Next must observe
+//     the cancellation via the ctx.Err() guard at the top of the for-loop
+//     and return (false, context.Canceled) — even though there were elements
+//     remaining in curList. This is the strongest claim: ctx is honoured per
+//     element, not merely per child row fetch.
+//
+//  2. Drain with a pre-cancelled context. Drain.Init runs first (driver.go:20)
+//     against the cancelled ctx — Init does NOT itself check ctx, so it
+//     succeeds and the ctx.Err() check happens at the top of Drain's for-loop
+//     (driver.go:32). Result is wrapped as "exec: drain cancelled: %w" and
+//     errors.Is recovers context.Canceled. Close must still propagate.
 func TestUnwind_ContextCancellation(t *testing.T) {
-	// Drain itself checks ctx.Err() before calling Next, so to exercise the
-	// guard at the top of Unwind.Next we call Next directly. The flow:
-	//   1. Init with a cancellable context.
-	//   2. Cancel the context.
-	//   3. Call Next — the internal guard must return (false, context.Canceled).
-	long := make(expr.ListValue, 0, 1024)
-	for i := range 1024 {
-		long = append(long, expr.IntegerValue(int64(i)))
-	}
-	child := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
-	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
-		return long, nil
+	t.Run("mid-list-iteration cancellation honours ctx per element", func(t *testing.T) {
+		child := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
+		op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+			return litList(expr.IntegerValue(1), expr.IntegerValue(2), expr.IntegerValue(3)), nil
+		})
+		if err != nil {
+			t.Fatalf("NewUnwind: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		if initErr := op.Init(ctx); initErr != nil {
+			t.Fatalf("Init: %v", initErr)
+		}
+
+		// Consume two elements — list is now mid-iteration (listIdx == 2,
+		// curList still has element 3 pending).
+		var r1, r2 exec.Row
+		if ok, e := op.Next(&r1); !ok || e != nil {
+			t.Fatalf("first Next: ok=%v err=%v", ok, e)
+		}
+		if ok, e := op.Next(&r2); !ok || e != nil {
+			t.Fatalf("second Next: ok=%v err=%v", ok, e)
+		}
+
+		// Cancel mid-iteration; the next Next must surface context.Canceled
+		// from the top-of-loop guard at unwind.go:63, NOT continue emitting
+		// the remaining element.
+		cancel()
+
+		var r3 exec.Row
+		ok, nextErr := op.Next(&r3)
+		if ok {
+			t.Error("expected Next to return ok=false after mid-list cancellation")
+		}
+		if !errors.Is(nextErr, context.Canceled) {
+			t.Errorf("Next error = %v, want context.Canceled", nextErr)
+		}
+
+		// Close honours the post-Next contract — exactly one child.Close.
+		if closeErr := op.Close(); closeErr != nil {
+			t.Fatalf("Close: %v", closeErr)
+		}
+		if child.closeCount != 1 {
+			t.Errorf("child.closeCount = %d, want 1", child.closeCount)
+		}
 	})
-	if err != nil {
-		t.Fatalf("NewUnwind: %v", err)
-	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := op.Init(ctx); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	cancel()
+	t.Run("Drain with a pre-cancelled context surfaces context.Canceled and closes the child", func(t *testing.T) {
+		child := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
+		op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+			return litList(expr.IntegerValue(1)), nil
+		})
+		if err != nil {
+			t.Fatalf("NewUnwind: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	var row exec.Row
-	ok, nextErr := op.Next(&row)
-	if ok {
-		t.Error("expected Next to return ok=false after cancellation")
-	}
-	if !errors.Is(nextErr, context.Canceled) {
-		t.Errorf("Next error = %v, want context.Canceled", nextErr)
-	}
-	if err := op.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Drain also surfaces cancellation — assert the documented contract.
-	child2 := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
-	op2, err := exec.NewUnwind(child2, func(_ exec.Row) (expr.ListValue, error) {
-		return long, nil
+		if _, drainErr := exec.Drain(ctx, op); !errors.Is(drainErr, context.Canceled) {
+			t.Errorf("Drain error = %v, want chain containing context.Canceled", drainErr)
+		}
+		if child.closeCount != 1 {
+			t.Errorf("child.closeCount = %d, want 1 on pre-cancelled Drain", child.closeCount)
+		}
 	})
-	if err != nil {
-		t.Fatalf("NewUnwind: %v", err)
-	}
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	cancel2()
-	if _, drainErr := exec.Drain(ctx2, op2); !errors.Is(drainErr, context.Canceled) {
-		t.Errorf("Drain error = %v, want chain containing context.Canceled", drainErr)
-	}
-	if child2.closeCount != 1 {
-		t.Errorf("child2.Close call count = %d, want 1 on pre-cancelled Drain", child2.closeCount)
-	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
