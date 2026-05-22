@@ -1483,6 +1483,402 @@ func normalizeNegHexOct(q string) string {
 	return string(buf)
 }
 
+// normalizeFloatExpZeroPad strips redundant leading zeros from a signed
+// floating-point exponent. The transform rewrites tokens of the form
+//
+//	<digits>[.<digits>] (e|E) (+|-) 0+ <digits>
+//
+// to the equivalent form without the leading zero padding in the exponent:
+//
+//	2E-01      → 2E-1
+//	2E+01      → 2E+1
+//	5e-001     → 5e-1
+//	2.5E-001   → 2.5E-1
+//	7E-010     → 7E-10        (only the leading zero is stripped)
+//	1.0E+0     → 1.0E+0        (unchanged: exponent has no leading-zero pad)
+//
+// Background: the ANTLR lexer's FLOAT rule expects the exponent's digit run
+// to match the `Digits` fragment, which requires `[1-9]` as the first digit.
+// A leading zero (e.g. `01` in `2E-01`) does not match `Digits`, so the
+// tokenizer splits `2E-01` into the three tokens `ID("2E")`, `DIGIT("-0")`,
+// `ID("1")` (or, depending on the trailing digits, into other invalid
+// sequences). Stripping the leading zeros produces a single FLOAT token that
+// the parser accepts without any grammar change.
+//
+// The transform fires only when ALL of the following hold:
+//  1. The exponent has an explicit sign (`+` or `-`). Without a sign the
+//     resulting token (e.g. `2E1`) is still lexed as `ID`, leaving the latent
+//     "no-sign positive exponent" gap untouched.
+//  2. The exponent digit run has at least one leading zero AND at least one
+//     trailing non-zero digit. `2E-0`, `2E-00` are left unchanged because the
+//     resulting `2E0` would still lex as `ID`.
+//  3. The digit before `e`/`E` is part of a decimal literal — i.e. not part
+//     of a hexadecimal (`0x...`) or octal (`0o...`) literal. Hex literals are
+//     skipped entirely so that `0x2E-01` is preserved verbatim.
+//  4. The position is not inside a double-quoted string, single-quoted string,
+//     backtick identifier, or comment.
+//
+// Fast path: return unchanged if q contains no 'e' or 'E' byte.
+//
+//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeArithmeticMinus
+func normalizeFloatExpZeroPad(q string) string {
+	if !hasByte(q, 'e') && !hasByte(q, 'E') {
+		return q
+	}
+
+	buf := make([]byte, 0, len(q))
+	i := 0
+	n := len(q)
+
+	skipStringOrComment := func() {
+		ch := q[i]
+		switch ch {
+		case '"':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\\' && i < n {
+					buf = append(buf, q[i])
+					i++
+				} else if c == '"' {
+					break
+				}
+			}
+		case '\'':
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				buf = append(buf, c)
+				i++
+				if c == '\'' {
+					break
+				}
+			}
+		case '`':
+			buf = append(buf, ch)
+			i++
+			for i < n && q[i] != '`' {
+				buf = append(buf, q[i])
+				i++
+			}
+			if i < n {
+				buf = append(buf, '`')
+				i++
+			}
+		case '/':
+			if i+1 < n && q[i+1] == '/' {
+				for i < n && q[i] != '\n' {
+					buf = append(buf, q[i])
+					i++
+				}
+			} else if i+1 < n && q[i+1] == '*' {
+				buf = append(buf, q[i], q[i+1])
+				i += 2
+				for i < n {
+					if q[i] == '*' && i+1 < n && q[i+1] == '/' {
+						buf = append(buf, '*', '/')
+						i += 2
+						break
+					}
+					buf = append(buf, q[i])
+					i++
+				}
+			}
+		}
+	}
+
+	isLetterOrUnderscore := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+	}
+
+	isDigit := func(b byte) bool { return b >= '0' && b <= '9' }
+	isHexDigit := func(b byte) bool {
+		return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+	}
+
+	for i < n {
+		ch := q[i]
+
+		// Guard: skip over lexical atoms that must not be rewritten.
+		if ch == '"' || ch == '\'' || ch == '`' ||
+			(ch == '/' && i+1 < n && (q[i+1] == '/' || q[i+1] == '*')) {
+			skipStringOrComment()
+			continue
+		}
+
+		// Skip identifiers (letters or underscore followed by any LetterOrDigit
+		// sequence). This preserves variable names such as "var2E01" verbatim.
+		if isLetterOrUnderscore(ch) {
+			buf = append(buf, ch)
+			i++
+			for i < n {
+				c := q[i]
+				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+					(c >= '0' && c <= '9') || c == '_' {
+					buf = append(buf, c)
+					i++
+					continue
+				}
+				break
+			}
+			continue
+		}
+
+		// Only digits can begin a numeric literal that we may rewrite.
+		if !isDigit(ch) {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
+		// Guard: must not be preceded by an identifier character (would mean we
+		// are mid-identifier). The loop above already consumes identifiers, but
+		// a digit can also follow a `.` (property access) or `]` (subscript),
+		// in which case it is still a numeric literal — those cases are fine.
+		// However, an identifier character immediately preceding a digit can
+		// only happen if the leading-letter branch above did not run, which is
+		// impossible here.
+
+		// Hex / octal prefix: `0x`, `0X`, `0o`, `0O`. Skip the entire literal
+		// verbatim so that we do not mis-classify the `E` inside `0x2E`.
+		if ch == '0' && i+1 < n && (q[i+1] == 'x' || q[i+1] == 'X') {
+			// Hex literal: emit `0x` then consume all hex digits.
+			buf = append(buf, q[i], q[i+1])
+			i += 2
+			for i < n && isHexDigit(q[i]) {
+				buf = append(buf, q[i])
+				i++
+			}
+			continue
+		}
+		if ch == '0' && i+1 < n && (q[i+1] == 'o' || q[i+1] == 'O') {
+			// Octal literal: emit `0o` then consume octal digits.
+			buf = append(buf, q[i], q[i+1])
+			i += 2
+			for i < n && q[i] >= '0' && q[i] <= '7' {
+				buf = append(buf, q[i])
+				i++
+			}
+			continue
+		}
+
+		// Decimal literal mantissa. Emit the integer-part digit run.
+		for i < n && isDigit(q[i]) {
+			buf = append(buf, q[i])
+			i++
+		}
+		// Optional fractional part: `.` followed by digits.
+		if i+1 < n && q[i] == '.' && isDigit(q[i+1]) {
+			buf = append(buf, '.')
+			i++
+			for i < n && isDigit(q[i]) {
+				buf = append(buf, q[i])
+				i++
+			}
+		}
+		// Optional exponent: `e` or `E` followed by required sign followed by
+		// digits. We only rewrite when the sign is present.
+		if i < n && (q[i] == 'e' || q[i] == 'E') &&
+			i+1 < n && (q[i+1] == '+' || q[i+1] == '-') &&
+			i+2 < n && isDigit(q[i+2]) {
+			// Find the run of leading zeros and the trailing non-zero suffix.
+			signedExpStart := i + 2 // position of first digit after sign
+			zeroEnd := signedExpStart
+			for zeroEnd < n && q[zeroEnd] == '0' {
+				zeroEnd++
+			}
+			digEnd := zeroEnd
+			for digEnd < n && isDigit(q[digEnd]) {
+				digEnd++
+			}
+			leadingZeros := zeroEnd - signedExpStart
+			trailingDigits := digEnd - zeroEnd
+
+			// Rewrite only when there is at least one leading zero AND at least
+			// one trailing non-zero digit. Otherwise leave the source unchanged.
+			if leadingZeros > 0 && trailingDigits > 0 {
+				buf = append(buf, q[i], q[i+1]) // e|E and sign
+				buf = append(buf, q[zeroEnd:digEnd]...)
+				i = digEnd
+				continue
+			}
+			// No rewrite: emit the exponent verbatim.
+			buf = append(buf, q[i:digEnd]...)
+			i = digEnd
+		}
+	}
+
+	return string(buf)
+}
+
+// validateUnicodeEscapes scans q for malformed `\u` escape sequences inside
+// double- or single-quoted string literals. The openCypher specification
+// requires every `\u` to be followed by exactly four hexadecimal digits
+// (the grammar fragment is `'\\' 'u'+ HexDigit HexDigit HexDigit HexDigit`,
+// so additional `u` characters are also permitted). If any `\u` escape is
+// followed by fewer than four hex digits, validateUnicodeEscapes returns a
+// non-nil error pinpointing the offending position.
+//
+// This runs before the pre-processor pipeline so that
+// `normalizeSingleQuotes` does not silently rewrite a malformed escape
+// into a benign-looking double-quoted string that the ANTLR lexer would
+// otherwise accept by hiding the malformed bytes via ERRCHAR.
+//
+// Fast path: return nil if q contains no backslash byte.
+//
+//nolint:gocyclo // byte-scanner with string-state tracking; per-character branches
+func validateUnicodeEscapes(q string) error {
+	if !hasByte(q, '\\') {
+		return nil
+	}
+
+	n := len(q)
+	isHex := func(b byte) bool {
+		return (b >= '0' && b <= '9') ||
+			(b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+	}
+
+	// Track 1-based line/column for diagnostic positions.
+	line, col := 1, 1
+	advance := func(i int) {
+		if q[i] == '\n' {
+			line++
+			col = 1
+		} else {
+			col++
+		}
+	}
+
+	i := 0
+	for i < n {
+		ch := q[i]
+
+		// Skip backtick identifiers verbatim (no escape semantics inside).
+		if ch == '`' {
+			advance(i)
+			i++
+			for i < n && q[i] != '`' {
+				advance(i)
+				i++
+			}
+			if i < n {
+				advance(i)
+				i++
+			}
+			continue
+		}
+		// Skip line and block comments verbatim.
+		if ch == '/' && i+1 < n && (q[i+1] == '/' || q[i+1] == '*') {
+			if q[i+1] == '/' {
+				for i < n && q[i] != '\n' {
+					advance(i)
+					i++
+				}
+			} else {
+				advance(i)
+				i++
+				advance(i)
+				i++
+				for i < n {
+					if q[i] == '*' && i+1 < n && q[i+1] == '/' {
+						advance(i)
+						i++
+						advance(i)
+						i++
+						break
+					}
+					advance(i)
+					i++
+				}
+			}
+			continue
+		}
+		if ch != '"' && ch != '\'' {
+			advance(i)
+			i++
+			continue
+		}
+
+		// Enter a string literal. Track the opening quote so we know where
+		// the string ends. Scan until the matching unescaped quote.
+		quote := ch
+		startLine, startCol := line, col
+		advance(i)
+		i++
+		for i < n {
+			c := q[i]
+			if c == '\\' {
+				if i+1 >= n {
+					// dangling backslash at EOF — leave to ANTLR.
+					advance(i)
+					i++
+					break
+				}
+				next := q[i+1]
+				if next == 'u' {
+					// Validate the Unicode escape sequence.
+					// Pre-quoteCol points at the '\\' itself.
+					escLine, escCol := line, col
+					// Consume the '\\' and any run of 'u' characters.
+					advance(i)
+					i++ // past '\\'
+					uCount := 0
+					for i < n && q[i] == 'u' {
+						uCount++
+						advance(i)
+						i++
+					}
+					_ = uCount // grammar accepts u+ but we only require >=1.
+					// Now require exactly four hex digits.
+					if i+4 > n || !isHex(q[i]) || !isHex(q[i+1]) ||
+						!isHex(q[i+2]) || !isHex(q[i+3]) {
+						return &ParseError{
+							Line:    escLine,
+							Column:  escCol,
+							Message: "invalid unicode escape sequence: \\u must be followed by exactly four hexadecimal digits",
+						}
+					}
+					// Consume the four hex digits.
+					for k := 0; k < 4; k++ {
+						advance(i)
+						i++
+					}
+					continue
+				}
+				// Other backslash escape: skip the escaped byte verbatim.
+				advance(i)
+				i++ // past '\\'
+				advance(i)
+				i++ // past escaped char
+				continue
+			}
+			if c == quote {
+				advance(i)
+				i++
+				// Closed string.
+				break
+			}
+			if c == '\n' {
+				// Unterminated string at end of line — leave to ANTLR to
+				// surface its own error.
+				advance(i)
+				i++
+				_ = startLine
+				_ = startCol
+				break
+			}
+			advance(i)
+			i++
+		}
+	}
+
+	return nil
+}
+
 // hasByte reports whether s contains the byte b.
 func hasByte(s string, b byte) bool {
 	for i := 0; i < len(s); i++ {

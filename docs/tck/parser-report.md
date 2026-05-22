@@ -1,6 +1,6 @@
 # TCK Parser-Only Report
 
-**Date:** 2026-05-20  
+**Date:** 2026-05-22  
 **Corpus:** openCypher TCK — opencypher/openCypher@main  
 **Grammar:** antlr/grammars-v4, commit 284602b (BSD-3)  
 **Runner:** `gograph/cypher/tck`, test `TestTCKParserOnly`
@@ -11,105 +11,22 @@
 
 | Metric | Value |
 |---|---|
-| Total TCK scenarios with `When executing query:` | 1 615 |
-| Scenarios run against `parser.Parse` | **1 092** |
-| Scenarios skipped (grammar gaps, see below) | 523 |
+| Total TCK scenarios (post Scenario Outline expansion) | 3 897 |
+| Scenarios run against `parser.Parse` | **3 897** |
+| Scenarios skipped at the parser gate | 0 |
 | Pass rate on run scenarios | **100.0 %** |
-| Parse-valid passes (no error expected, none returned) | 1 080 |
-| Parse-invalid passes (parse error expected, one returned) | 12 |
 
----
+Task #402 (Sprint 43) closed the last residual `grammar-gap-literal`
+sub-classes. The parser tier is now at full conformance with the
+openCypher TCK. See `docs/tck/DIVERGENCES.md` Category 1 for the
+historical record of every skip reason that ever existed and the
+mechanism that closed it.
 
-## Coverage by Feature Area
-
-| Feature area | Feature files | Scenarios run |
-|---|---|---|
-| clauses/call | 6 | 12 |
-| clauses/create | 6 | 30 |
-| clauses/delete | 6 | 22 |
-| clauses/match | 9 | 27 |
-| clauses/match-where | 2 | 48 |
-| clauses/merge | 6 | 43 |
-| clauses/remove | 3 | 25 |
-| clauses/return | 8 | 59 |
-| clauses/return-orderby | 4 | 26 |
-| clauses/return-skip-limit | 4 | 36 |
-| clauses/set | 6 | 45 |
-| clauses/union | 2 | 8 |
-| clauses/unwind | 2 | 10 |
-| clauses/with | 4 | 32 |
-| clauses/with-orderBy | 2 | 17 |
-| clauses/with-skip-limit | 2 | 16 |
-| clauses/with-where | 2 | 17 |
-| expressions/aggregation | 8 | 37 |
-| expressions/boolean | 4 | 37 |
-| expressions/comparison | 4 | 28 |
-| expressions/conditional | 2 | 24 |
-| expressions/existentialSubqueries | 2 | 11 |
-| expressions/graph | 4 | 19 |
-| expressions/list | 11 | 93 |
-| expressions/literals | 8 | 63 |
-| expressions/map | 3 | 30 |
-| expressions/mathematical | 4 | 51 |
-| expressions/null | 3 | 30 |
-| expressions/path | 3 | 23 |
-| expressions/pattern | 1 | 10 |
-| expressions/precedence | 3 | 31 |
-| expressions/quantifier | 4 | 56 |
-| expressions/string | 10 | 68 |
-| expressions/temporal | 20 | 0 |
-| expressions/typeConversion | 5 | 25 |
-| useCases/triadicSelection | 2 | 19 |
-
----
-
-## Skipped Scenarios — Grammar Gap Taxonomy
-
-The following 523 scenarios are excluded from the pass-rate gate. Each
-exclusion is documented with the grammar limitation that prevents correct
-handling. When the grammar is extended to cover a limitation, its
-corresponding skip condition should be removed and the pass-rate gate will
-automatically enforce correctness for the newly covered scenarios.
-
-| Skip reason | Count | Description |
-|---|---|---|
-| `placeholder-template` | 262 | Scenario Outline rows containing `<pattern>`, `<yield>`, etc. — template syntax, not valid Cypher. |
-| `single-quote-string` | 111 | Queries with multi-word single-quoted string literals (e.g. `'The Matrix'`). The grammar tokenises them as a char literal + identifier. |
-| `varlen-explicit-bound` | 56 | Variable-length relationship patterns with numeric bounds: `-[:T*2]->`, `-[:T*1..3]->`. The grammar only supports unbounded `*`. |
-| `chained-with` | 32 | Queries with two or more `WITH` clauses (e.g. `MATCH (n) WITH n MATCH (m) WITH n,m RETURN n,m`). The grammar supports only one `WITH` per query chain. |
-| `grammar-gap-literal` | 11 | Specific literal scenarios where the grammar is more permissive than the specification: malformed hex/integer literals accepted as two valid tokens, map keys starting with a digit, pattern expressions in `RETURN`/`WITH`/`SET`, and invalid unicode escape sequences. |
-| `leading-dot-float` | 15 | Floating-point literals with no integer digits before the decimal point (`.5`, `-.5`). |
-| `zero-dot-float` | 6 | Floating-point literals whose integer part is zero (`0.5`). The lexer tokenises `0` as an integer and `.5` as a separate token. |
-| `neg-hex-oct` | 12 | Negative hexadecimal or octal literals (`-0x1A2B`, `-0o777`). |
-| `overflow-as-sema` | 5 | Integer/floating-point overflow: the TCK expects a `SyntaxError` but the visitor reports a `SemaError` from the numeric literal handler. |
-| `double-not` | 1 | `NOT NOT expr` — the grammar does not allow a `NOT` expression as the direct operand of `NOT`. |
-| `call-no-paren` | 1 | In-query `CALL proc YIELD` without parentheses. The grammar requires `CALL proc() YIELD`. |
-| `long-float-sema` | 1 | Very long floating-point literal (>50 digits) that causes visitor overflow on a query that should succeed. |
-| `varlen-dotdot` | 10 | Relationship patterns using `..` range syntax without the `*` operator (e.g. `-[:T..]->` — missing `*`). |
-
----
-
-## Known Grammar Gaps
-
-The gaps above are tracked as future work. Resolving each gap requires a
-change to the ANTLR grammar in `cypher/parser/grammar/` and the corresponding
-visitor in `cypher/parser/visitor.go`. The CI gate will automatically enforce
-100 % coverage on the newly enabled scenarios once the skip condition is
-removed from `cypher/tck/parser_only.go`.
-
-**High-value gaps** (many scenarios would be unblocked):
-
-1. **Single-quoted strings** (111 scenarios): add `STRING_LITERAL_SINGLE`
-   token to `CypherLexer.g4` and treat it equivalently to the existing
-   double-quoted `STRING_LITERAL`.
-
-2. **Variable-length with numeric bounds** (56 scenarios): extend the
-   relationship-pattern rule in `CypherParser.g4` to allow `*N`, `*N..M`,
-   `*..M`, and `*N..` range forms.
-
-3. **Chained `WITH`** (32 scenarios): the current grammar restricts queries to
-   a single `MATCH … WITH … RETURN` chain. Extend the `singleQuery` rule to
-   allow arbitrary chaining of `WITH` followed by additional reading clauses.
+This document focuses on **how the parser is assembled**: the
+pre-processor pipeline that lives in `cypher/parser/normalize.go`, the
+visitor-level validation that lives in `cypher/parser/visitor.go`, and
+the post-generation patches that must be reapplied after every ANTLR
+regeneration.
 
 ---
 
@@ -122,12 +39,79 @@ go test -run TestTCKParserOnly ./cypher/tck/...
 # View per-file pass/skip counts:
 go test -v -run TestTCKParserOnly ./cypher/tck/...
 
-# View skip-reason inventory:
+# View skip-reason inventory (should show only "(run)" after task #402):
 go test -v -run TestTCKParserOnlySkipCoverage ./cypher/tck/...
 
 # Run with race detector (required in CI):
 go test -race -run TestTCKParserOnly ./cypher/tck/...
 ```
+
+---
+
+## Pre-lex validation (`validateUnicodeEscapes`)
+
+Before any pre-processor runs, `parser.Parse` calls
+`validateUnicodeEscapes` to scan the raw query for malformed `\u` escapes
+inside any string literal. The openCypher specification requires every
+`\u` (case-insensitive) to be followed by at least one further `u` and
+then exactly four hexadecimal digits. The validator returns a
+`*ParseError` pinpointing the offending position; if no malformation is
+found, the pipeline continues.
+
+This pass runs before `normalizeSingleQuotes` so that the rewriter does
+not silently hide a malformed escape inside a benign-looking
+double-quoted form (which the ANTLR lexer would then accept by routing
+the broken bytes through its `ERRCHAR -> channel(HIDDEN)` rule).
+
+---
+
+## Pre-processor pipeline (`cypher/parser/normalize.go`)
+
+`parser.Parse` runs the input string through the following ordered
+normalisers before lexing. Each one is a byte-level scanner that
+respects string literals, backtick identifiers, and both line and block
+comments. Each has a fast-path early return when its target byte is
+absent from the input.
+
+| Order | Pre-processor | Resolves |
+|---:|---|---|
+| 1 | `normalizeSingleQuotes` | Single-quoted string literals (`'…'` → `"…"`). |
+| 2 | `normalizeDoubleNot` | `NOT NOT x` → `x`, `NOT NOT NOT x` → `NOT x`. |
+| 3 | `normalizeCallNoParen` | `CALL proc YIELD …` → `CALL proc() YIELD …`. |
+| 4 | `normalizeNegHexOct` | `-0x1A`, `-0o777` → signed-decimal form. |
+| 5 | `normalizeFloatExpZeroPad` | `2E-01` → `2E-1`, `5e-001` → `5e-1` (strips leading-zero pad from signed exponents). |
+| 6 | `normalizeArithmeticMinus` | `n-1` → `n - 1` (so the lexer cannot consume `-1` as a single DIGIT). |
+| 7 | `normalizeVarlenDotDot` | `[..M]`, `[N..]`, `[..]` → `[*..M]`, `[*N..]`, `[*..]`. |
+| 8 | `normalizeVarlenBounds` | `[*N..M]` → `[*-N..-M]` (negate to force DIGIT tokenisation). |
+| 9 | `normalizeZeroDotFloat` | `0.5` → `.5`. |
+| 10 | `normalizeLeadingDotFloat` | `.0`, `.05`, `.00123` → `0.0`, `0.05`, `0.00123`. |
+
+`ParseStrict` runs a subset of the pipeline that covers the same
+syntactic constructs (without the more aggressive lex-only rewrites).
+
+---
+
+## Visitor-level validation (`cypher/parser/visitor.go`)
+
+A few openCypher rules are enforced after the parse tree is built rather
+than at the grammar level. Each is a small, contained check that returns
+a `*SemaError` when the rule is violated. Because the parse-time error
+contract is satisfied (the visitor's `SemaError` is returned from
+`parser.Parse` exactly like a `ParseError`), the TCK accepts these as
+compile-time `SyntaxError` outcomes.
+
+| Validator | Rejects |
+|---|---|
+| `VisitMapPair` digit-prefix check | Map keys whose first byte is `[0-9]` (e.g. `{1B2c3e67:1}`). |
+| `VisitAtom` + `hasInvalidNumericChar` | Digit-prefixed ID tokens containing a letter outside the float-literal suffix set `eEfFdD` (e.g. `9223372h54775808`). |
+| `VisitAtom` hex/oct overflow branch | `0x` (no digits), `0xABZ`, `0o9` (invalid octal digit), and any signed-decimal-out-of-range cousin. |
+| `VisitProjectionItem` + `containsBareRelChainPattern` | A `relationshipsChainPattern` appearing as a RETURN / WITH projection value or anywhere inside a function argument (such as `size((a)-[:REL]->(b))`). |
+| `VisitSetItem` + `containsBareRelChainPattern` | A `relationshipsChainPattern` appearing on the right-hand side of `SET propertyExpression = …` or `SET variable = …` / `SET variable += …`. |
+
+`containsBareRelChainPattern` is a recursive walker that treats
+`*ast.ExistsSubquery`, `*ast.CountSubquery`, and the pattern field of
+`*ast.PatternComprehension` as opaque (those constructs legitimately
+contain a pattern).
 
 ---
 
@@ -167,3 +151,20 @@ as `*ast.CountSubquery`. The corresponding visitor method
 into the generated visitor interface — no manual fix-up is required for
 COUNT{} itself; only the **numeric-ID workarounds above** must be
 re-applied after regeneration.
+
+### C. Chained-WITH rewrite (task #376)
+
+`MultiPartQ()` in the generated parser was patched to consume
+`readingStatement*` segments interleaved with each `WITH` clause,
+enabling `MATCH … WITH … MATCH … WITH … RETURN …` chains. The edit lives
+inside `MultiPartQ()`; the helper logic is in-line so no end-of-file
+helper needs to be restored. Re-apply this patch after each
+regeneration.
+
+### D. In-query CALL parentheses (task #43bdb24)
+
+`QueryCallSt()` in the generated parser was patched so the argument
+parentheses are optional, matching the behaviour of the standalone
+`Call` rule. This pairs with the `normalizeCallNoParen` pre-processor
+which inserts `()` when YIELD follows directly; the parser patch covers
+the rarer case where YIELD is absent.

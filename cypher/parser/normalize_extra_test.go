@@ -910,3 +910,149 @@ func TestNormalizeSingleQuotesEdges(t *testing.T) {
 		})
 	}
 }
+
+// -----------------------------------------------------------------------------
+// normalizeFloatExpZeroPad
+// -----------------------------------------------------------------------------
+
+func TestNormalizeFloatExpZeroPad(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "fast path no e or E",
+			input: "RETURN 42",
+			want:  "RETURN 42",
+		},
+		{
+			name:  "negative exponent single leading zero",
+			input: "RETURN 2E-01",
+			want:  "RETURN 2E-1",
+		},
+		{
+			name:  "negative exponent lowercase e",
+			input: "RETURN 2e-01",
+			want:  "RETURN 2e-1",
+		},
+		{
+			name:  "negative exponent multiple leading zeros",
+			input: "RETURN 5E-001",
+			want:  "RETURN 5E-1",
+		},
+		{
+			name:  "positive exponent leading zero",
+			input: "RETURN 2E+01",
+			want:  "RETURN 2E+1",
+		},
+		{
+			name:  "fractional mantissa with leading-zero exponent",
+			input: "RETURN 2.5E-01",
+			want:  "RETURN 2.5E-1",
+		},
+		{
+			name:  "leading zero followed by another zero then non-zero",
+			input: "RETURN 7E-010",
+			want:  "RETURN 7E-10",
+		},
+		{
+			name:  "no leading zero unchanged",
+			input: "RETURN 7E-5",
+			want:  "RETURN 7E-5",
+		},
+		{
+			name:  "exponent normalises to zero leaves source unchanged",
+			input: "RETURN 2E-0",
+			want:  "RETURN 2E-0",
+		},
+		{
+			name:  "exponent all zeros leaves source unchanged",
+			input: "RETURN 2E-00",
+			want:  "RETURN 2E-00",
+		},
+		{
+			name:  "missing sign leaves source unchanged",
+			input: "RETURN 2E01",
+			want:  "RETURN 2E01",
+		},
+		{
+			name:  "hex literal containing E is not touched",
+			input: "RETURN 0x2E-01",
+			want:  "RETURN 0x2E-01",
+		},
+		{
+			name:  "hex with leading-zero suffix is not touched",
+			input: "RETURN 0xAB-01",
+			want:  "RETURN 0xAB-01",
+		},
+		{
+			name:  "octal literal is not touched",
+			input: "RETURN 0o7-01",
+			want:  "RETURN 0o7-01",
+		},
+		{
+			name:  "identifier containing E digits is not touched",
+			input: "RETURN var2E01",
+			want:  "RETURN var2E01",
+		},
+		{
+			name:  "string with E-form preserved",
+			input: `RETURN "2E-01"`,
+			want:  `RETURN "2E-01"`,
+		},
+		{
+			name:  "single-quoted string with E-form preserved",
+			input: "RETURN '2E-01'",
+			want:  "RETURN '2E-01'",
+		},
+		{
+			name:  "backtick identifier preserved",
+			input: "RETURN `2E-01`",
+			want:  "RETURN `2E-01`",
+		},
+		{
+			name:  "line comment preserved",
+			input: "RETURN 1 // 2E-01\n",
+			want:  "RETURN 1 // 2E-01\n",
+		},
+		{
+			name:  "block comment preserved",
+			input: "RETURN 1 /* 2E-01 */",
+			want:  "RETURN 1 /* 2E-01 */",
+		},
+		{
+			name:  "list with E-form inside",
+			input: "RETURN [2E-01, 1]",
+			want:  "RETURN [2E-1, 1]",
+		},
+		{
+			name:  "multiple E-form floats in one query",
+			input: "RETURN 2E-01, 3.5E-002, 7E+05",
+			want:  "RETURN 2E-1, 3.5E-2, 7E+5",
+		},
+		{
+			name:  "binary subtraction is not affected",
+			input: "RETURN n - 1",
+			want:  "RETURN n - 1",
+		},
+		{
+			name:  "property access not affected",
+			input: "RETURN n.prop",
+			want:  "RETURN n.prop",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeFloatExpZeroPad(tc.input)
+			if got != tc.want {
+				t.Errorf("\n  input %q\n  got   %q\n  want  %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

@@ -526,6 +526,13 @@ func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
 		if err != nil {
 			return &SemaError{Rule: "setItem", Pos: positionOf(ctx), Message: err.Error()}
 		}
+		if containsBareRelChainPattern(expr) {
+			return &SemaError{
+				Rule:    "setItem",
+				Pos:     positionOf(ctx),
+				Message: "relationship-chain pattern is not allowed as a SET right-hand side value",
+			}
+		}
 		item.Target = tgt
 		item.Value = expr
 		item.Operator = "="
@@ -544,6 +551,13 @@ func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
 			if err != nil {
 				return &SemaError{Rule: "setItem", Pos: positionOf(ctx), Message: err.Error()}
 			}
+			if containsBareRelChainPattern(expr) {
+				return &SemaError{
+					Rule:    "setItem",
+					Pos:     positionOf(ctx),
+					Message: "relationship-chain pattern is not allowed as a SET right-hand side value",
+				}
+			}
 			item.Value = expr
 			return item
 		}
@@ -552,6 +566,13 @@ func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
 			expr, err := asExpr(v.visit(ctx.Expression()))
 			if err != nil {
 				return &SemaError{Rule: "setItem", Pos: positionOf(ctx), Message: err.Error()}
+			}
+			if containsBareRelChainPattern(expr) {
+				return &SemaError{
+					Rule:    "setItem",
+					Pos:     positionOf(ctx),
+					Message: "relationship-chain pattern is not allowed as a SET right-hand side value",
+				}
 			}
 			item.Value = expr
 			return item
@@ -722,6 +743,19 @@ func (v *visitor) VisitProjectionItem(ctx *gen.ProjectionItemContext) interface{
 	expr, err := asExpr(v.visit(ctx.Expression()))
 	if err != nil {
 		return &SemaError{Rule: "projectionItem", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	// A bare relationship-chain pattern is not a valid projection value.
+	// The openCypher specification permits patterns only inside MATCH /
+	// CREATE / MERGE, pattern comprehensions, and EXISTS{…}/COUNT{…}
+	// subqueries; using one as a RETURN / WITH projection item or as a
+	// function argument (`size((…)-[…]->…)`) must raise
+	// `UnexpectedSyntax` at compile time.
+	if containsBareRelChainPattern(expr) {
+		return &SemaError{
+			Rule:    "projectionItem",
+			Pos:     positionOf(ctx),
+			Message: "relationship-chain pattern is not allowed as a projection value; use EXISTS{…}, COUNT{…}, or a pattern comprehension instead",
+		}
 	}
 	item := &ast.ProjectionItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: expr}
 	if symCtx := ctx.Symbol(); symCtx != nil {
@@ -1557,6 +1591,17 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 			}
 			return &ast.IntLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: n}
 		}
+		// Detect malformed decimal integer literals that the ANTLR lexer
+		// accepts as ID tokens because the LetterOrDigit class is broader than
+		// the openCypher integer-literal grammar. A token that begins with a
+		// decimal digit ([1-9]) but contains a non-numeric, non-float-suffix
+		// letter (anything outside e/E/f/F/d/D) is not a valid identifier
+		// (Cypher identifiers must begin with a letter or underscore) and is
+		// not a valid numeric literal. The openCypher TCK expects such input
+		// to raise an InvalidNumberLiteral compile-time error.
+		if name != "" && name[0] >= '1' && name[0] <= '9' && hasInvalidNumericChar(name) {
+			return &SemaError{Rule: "atom", Pos: positionOf(ctx), Message: "invalid number literal: " + name}
+		}
 		return &ast.Variable{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Name: name}
 	}
 	if se := ctx.SubqueryExist(); se != nil {
@@ -2104,8 +2149,25 @@ type mapPair struct {
 }
 
 // VisitMapPair handles name: expr.
+//
+// Cypher requires a map key to be a valid SymbolicName, i.e. it must begin
+// with a letter (a-z, A-Z) or underscore. The ANTLR grammar accepts any
+// ID-shaped token, which includes digit-prefixed forms like `1B2c3e67`
+// (because ID is defined as `LetterOrDigit+`). This visitor enforces the
+// SymbolicName constraint and reports `InvalidSyntax` for digit-prefixed
+// or purely-numeric keys, matching the openCypher 9 specification.
 func (v *visitor) VisitMapPair(ctx *gen.MapPairContext) interface{} {
 	key := nameText(ctx.Name())
+	if key != "" {
+		first := key[0]
+		if first >= '0' && first <= '9' {
+			return &SemaError{
+				Rule:    "mapPair",
+				Pos:     positionOf(ctx),
+				Message: "map key must start with a letter or underscore, got: " + key,
+			}
+		}
+	}
 	val, err := asExpr(v.visit(ctx.Expression()))
 	if err != nil {
 		return &SemaError{Rule: "mapPair", Pos: positionOf(ctx), Message: err.Error()}
@@ -2362,6 +2424,28 @@ func parseInt(s string) (int64, error) {
 	}
 }
 
+// hasInvalidNumericChar reports whether s contains any character that is
+// not a decimal digit and not a recognised float-literal suffix character
+// (e, E, f, F, d, D — exponent marker or type suffix). It is the inner
+// check for the digit-prefixed-but-malformed integer rejection in
+// VisitAtom: a token starting with [1-9] that contains any other letter
+// (such as `h` in "9223372h54775808") is neither a valid identifier nor a
+// valid numeric literal.
+func hasInvalidNumericChar(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		switch c {
+		case 'e', 'E', 'f', 'F', 'd', 'D', '+', '-':
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // unquoteString strips surrounding quotes from a string/char literal token
 // and processes common escape sequences.
 func unquoteString(raw string) string {
@@ -2381,4 +2465,108 @@ func unquoteString(raw string) string {
 	inner = strings.ReplaceAll(inner, "\\r", "\r")
 	inner = strings.ReplaceAll(inner, "\\\\", "\\")
 	return inner
+}
+
+// containsBareRelChainPattern reports whether expr contains an
+// [*ast.PathPattern] node that is used as a value sub-expression. The
+// openCypher specification permits relationship-chain patterns inside
+// MATCH/CREATE/MERGE clauses, [*ast.PatternComprehension] brackets, and
+// [*ast.ExistsSubquery] / [*ast.CountSubquery] braces, but rejects them as
+// projection items (RETURN/WITH), as the right-hand side of SET, and as
+// function arguments (including `size((…)-[…]->…)`). The TCK reports such
+// usage as a `UnexpectedSyntax` compile-time error.
+//
+// The walker recurses through every expression-bearing field except those
+// that introduce a new pattern-bearing context: PatternComprehension,
+// ExistsSubquery, and CountSubquery are treated as opaque (they may
+// legitimately contain a PathPattern as their root).
+//
+// Returns true on the first PathPattern found; the caller is responsible
+// for converting that into a SemaError with the appropriate position.
+//
+//nolint:gocyclo // dispatcher over every Expression concrete type; complexity is essentially the cardinality of the AST
+func containsBareRelChainPattern(expr ast.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.PathPattern:
+		return true
+	case *ast.Variable, *ast.Parameter,
+		*ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.BoolLiteral, *ast.NullLiteral:
+		return false
+	case *ast.Property:
+		return containsBareRelChainPattern(e.Receiver)
+	case *ast.FunctionInvocation:
+		for _, a := range e.Args {
+			if containsBareRelChainPattern(a) {
+				return true
+			}
+		}
+		return false
+	case *ast.BinaryOp:
+		return containsBareRelChainPattern(e.Left) || containsBareRelChainPattern(e.Right)
+	case *ast.UnaryOp:
+		return containsBareRelChainPattern(e.Operand)
+	case *ast.CaseExpression:
+		if containsBareRelChainPattern(e.Subject) {
+			return true
+		}
+		for _, alt := range e.Alternatives {
+			if containsBareRelChainPattern(alt.Condition) ||
+				containsBareRelChainPattern(alt.Consequent) {
+				return true
+			}
+		}
+		return containsBareRelChainPattern(e.ElseExpr)
+	case *ast.ListLiteral:
+		for _, el := range e.Elements {
+			if containsBareRelChainPattern(el) {
+				return true
+			}
+		}
+		return false
+	case *ast.MapLiteral:
+		for _, v := range e.Values {
+			if containsBareRelChainPattern(v) {
+				return true
+			}
+		}
+		return false
+	case *ast.ListComprehension:
+		return containsBareRelChainPattern(e.Source) ||
+			containsBareRelChainPattern(e.Predicate) ||
+			containsBareRelChainPattern(e.Projection)
+	case *ast.PatternComprehension:
+		// PatternComprehension legitimately contains a PathPattern; do not
+		// recurse into Pattern. The predicate and projection are scoped to
+		// the bindings introduced by the pattern.
+		return containsBareRelChainPattern(e.Predicate) ||
+			containsBareRelChainPattern(e.Projection)
+	case *ast.MapProjection:
+		if containsBareRelChainPattern(e.Subject) {
+			return true
+		}
+		for _, item := range e.Items {
+			if containsBareRelChainPattern(item.Value) {
+				return true
+			}
+		}
+		return false
+	case *ast.ExistsSubquery, *ast.CountSubquery:
+		// Subqueries are opaque pattern-bearing contexts.
+		return false
+	case *ast.SubscriptExpr:
+		return containsBareRelChainPattern(e.Expr) ||
+			containsBareRelChainPattern(e.Index)
+	case *ast.SliceExpr:
+		return containsBareRelChainPattern(e.Expr) ||
+			containsBareRelChainPattern(e.From) ||
+			containsBareRelChainPattern(e.To)
+	}
+	// Unknown expression type: conservatively report false so the validator
+	// does not over-reject. New expression types should be added to the
+	// switch above.
+	return false
 }

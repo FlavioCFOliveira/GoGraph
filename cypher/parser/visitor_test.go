@@ -1493,8 +1493,11 @@ func corpus() []corpusEntry {
 			query: "MATCH (a)-[r]->(b) RETURN startNode(r)"},
 		{name: "return_endnode",
 			query: "MATCH (a)-[r]->(b) RETURN endNode(r)"},
-		{name: "return_degree",
-			query: "MATCH (n) RETURN size((n)-[:KNOWS]->())"},
+		{name: "return_degree_via_count_subquery",
+			// `size((n)-[:KNOWS]->())` is rejected per the openCypher spec —
+			// `containsBareRelChainPattern` enforces this. The idiomatic
+			// alternative for node-degree counting is `COUNT { … }`.
+			query: "MATCH (n) RETURN COUNT { (n)-[:KNOWS]->() }"},
 		{name: "where_pattern_size",
 			query: "MATCH (n) WHERE size((n)-[:KNOWS]->()) > 2 RETURN n"},
 		{name: "return_list_concat",
@@ -1649,6 +1652,190 @@ func TestMapLiteralKeysAndValues(t *testing.T) {
 	il, ok := ml.Values[1].(*ast.IntLiteral)
 	if !ok || il.Value != -30 {
 		t.Fatalf("expected IntLiteral -30, got %T %v", ml.Values[1], ml.Values[1])
+	}
+}
+
+func TestMapKeyDigitPrefixRejected(t *testing.T) {
+	// Cypher requires map keys to start with a letter or underscore. The ANTLR
+	// grammar is more permissive (the `name` rule accepts any ID-shaped token,
+	// including digit-prefixed forms). VisitMapPair enforces the
+	// SymbolicName constraint and reports a SemaError.
+	cases := []string{
+		`RETURN {1B2c3e67:1}`,
+		`RETURN {1:1}`,
+		`RETURN {0abc:1}`,
+		`RETURN {a:1, 2b:2}`,
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse(q)
+			if err == nil {
+				t.Fatalf("expected parse error for digit-prefixed map key, got nil for query %q", q)
+			}
+		})
+	}
+}
+
+func TestMapKeyLetterUnderscoreAccepted(t *testing.T) {
+	// Sanity check: letter-prefixed and underscore-prefixed keys are still
+	// accepted by VisitMapPair.
+	cases := []string{
+		`RETURN {a:1}`,
+		`RETURN {_x:1}`,
+		`RETURN {a1:1}`,
+		`RETURN {x_y:1}`,
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err != nil {
+				t.Fatalf("expected query %q to parse, got error: %v", q, err)
+			}
+		})
+	}
+}
+
+func TestMalformedNumericIDRejected(t *testing.T) {
+	// Digit-prefixed ID tokens that contain non-numeric, non-float-suffix
+	// letters are not valid identifiers (Cypher identifiers must begin with
+	// a letter or underscore) and are not valid numeric literals. VisitAtom
+	// rejects them with InvalidNumberLiteral semantics.
+	cases := []string{
+		`RETURN 9223372h54775808 AS literal`,
+		`RETURN 5j10 AS literal`,
+		`RETURN 9z9 AS literal`,
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err == nil {
+				t.Fatalf("expected parse error for malformed numeric ID, got nil for %q", q)
+			}
+		})
+	}
+}
+
+func TestNumericLikeIDStillAccepted(t *testing.T) {
+	// Sanity check: tokens whose letters are limited to e/E/f/F/d/D are still
+	// treated as identifiers (although they are semantically wrong — they are
+	// unbound variable references — they must not produce a parse error,
+	// because the openCypher TCK does not expect one for these forms).
+	cases := []string{
+		`RETURN 1e9 AS literal`,
+		`RETURN 1E9 AS literal`,
+		`RETURN 5e10 AS literal`,
+		`RETURN 1e308 AS literal`,
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err != nil {
+				t.Fatalf("expected query %q to parse without error, got: %v", q, err)
+			}
+		})
+	}
+}
+
+func TestUnicodeEscapeValidation(t *testing.T) {
+	// Malformed \u escape sequences must raise a parse-time error.
+	rejected := []string{
+		`RETURN '\uH'`,
+		`RETURN '\u'`,
+		`RETURN '\u00'`,
+		`RETURN '\u00ZZ'`,
+		`RETURN "\u123"`,
+	}
+	for _, q := range rejected {
+		q := q
+		t.Run("reject_"+q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err == nil {
+				t.Fatalf("expected parse error for malformed \\u escape, got nil for %q", q)
+			}
+		})
+	}
+
+	// Valid \u escapes (and benign uses of backslash) must continue to parse.
+	accepted := []string{
+		`RETURN 'A'`,
+		`RETURN "A"`,
+		`RETURN '\uuu0041'`, // grammar allows u+
+		`RETURN '\\u41'`,    // escaped backslash; literal u41
+		`RETURN '\t\n'`,
+	}
+	for _, q := range accepted {
+		q := q
+		t.Run("accept_"+q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err != nil {
+				t.Fatalf("expected query %q to parse, got error: %v", q, err)
+			}
+		})
+	}
+}
+
+func TestRelChainPatternInProjectionRejected(t *testing.T) {
+	// Bare relationship-chain patterns are not valid projection items per the
+	// openCypher specification. The visitor rejects them in RETURN, WITH, and
+	// inside function-call arguments such as `size()`.
+	cases := []string{
+		`MATCH (n) RETURN (n)-[]->()`,
+		`MATCH (n) WITH (n)-[]->() AS x RETURN x`,
+		`MATCH (a), (b), (c) RETURN size(()--())`,
+		`MATCH (a), (b), (c) RETURN size((a)-[:REL]->(b))`,
+		`MATCH (n) RETURN [1, 2, (n)-[]->()]`,
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err == nil {
+				t.Fatalf("expected parse error for bare pattern projection, got nil for %q", q)
+			}
+		})
+	}
+}
+
+func TestRelChainPatternInSetRHSRejected(t *testing.T) {
+	// Bare relationship-chain patterns are not valid SET right-hand-side
+	// values per the openCypher specification.
+	cases := []string{
+		`MATCH (n) SET n.prop = head(nodes(head((n)-[:REL]->()))).foo`,
+		`MATCH (n) SET n = (n)-[]->()`,
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err == nil {
+				t.Fatalf("expected parse error for pattern in SET RHS, got nil for %q", q)
+			}
+		})
+	}
+}
+
+func TestRelChainPatternInSubqueriesAccepted(t *testing.T) {
+	// Patterns inside EXISTS{…}, COUNT{…}, pattern comprehensions, and the
+	// MATCH clause itself remain valid.
+	cases := []string{
+		`MATCH (n) WHERE EXISTS{(n)-[]->()} RETURN n`,
+		`MATCH (n) WHERE NOT EXISTS{(n)-[]->()} RETURN n`,
+		`MATCH (n) RETURN COUNT { (n)-[]->() } AS c`,
+		`MATCH (n) RETURN [(n)-[]->(m) | m]`,
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse(q); err != nil {
+				t.Fatalf("expected query %q to parse, got error: %v", q, err)
+			}
+		})
 	}
 }
 

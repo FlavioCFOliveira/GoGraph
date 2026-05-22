@@ -132,10 +132,18 @@ func tokenName(t int, litNames, symNames []string) string {
 //   - [*ParseError] — syntax error from the ANTLR lexer/parser.
 //   - [*SemaError]  — unsupported grammar rule encountered during tree walking.
 func Parse(query string) (ast.Query, error) {
+	// Validate string-literal escape sequences before any rewriting so that
+	// `normalizeSingleQuotes` does not silently hide a malformed `\u…`
+	// escape under a benign-looking double-quoted form.
+	if err := validateUnicodeEscapes(query); err != nil {
+		return nil, err
+	}
+
 	query = normalizeSingleQuotes(query)
 	query = normalizeDoubleNot(query)
 	query = normalizeCallNoParen(query)
 	query = normalizeNegHexOct(query)
+	query = normalizeFloatExpZeroPad(query)
 	query = normalizeArithmeticMinus(query)
 	query = normalizeVarlenDotDot(query)
 	query = normalizeVarlenBounds(query)
@@ -199,10 +207,15 @@ func Parse(query string) (ast.Query, error) {
 //   - One or more [*ParseError] — syntax errors from lexer/parser.
 //   - A single [*SemaError] — unsupported grammar rule or structural violation.
 func ParseStrict(query string) (ast.Query, []error) {
+	if err := validateUnicodeEscapes(query); err != nil {
+		return nil, []error{err}
+	}
+
 	query = normalizeSingleQuotes(query)
 	query = normalizeDoubleNot(query)
 	query = normalizeCallNoParen(query)
 	query = normalizeNegHexOct(query)
+	query = normalizeFloatExpZeroPad(query)
 	query = normalizeVarlenBounds(query)
 
 	// Lex.

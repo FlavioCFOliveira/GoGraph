@@ -158,11 +158,12 @@ const (
 // SyntaxErrorType is in this set are expected to cause parser.Parse to return
 // a non-nil error; all others are expected to parse successfully.
 var parseTimeErrors = map[string]bool{
-	"InvalidSyntax":         true,
-	"UnexpectedSyntax":      true,
-	"InvalidNumberLiteral":  true,
-	"InvalidUnicodeLiteral": true,
-	"InvalidStringLiteral":  true,
+	"InvalidSyntax":           true,
+	"UnexpectedSyntax":        true,
+	"InvalidNumberLiteral":    true,
+	"InvalidUnicodeLiteral":   true,
+	"InvalidUnicodeCharacter": true,
+	"InvalidStringLiteral":    true,
 	// The visitor returns a non-nil error (SemaError) for integer and
 	// floating-point overflow, matching TCK expectations for a compile-time error.
 	"IntegerOverflow":       true,
@@ -171,20 +172,20 @@ var parseTimeErrors = map[string]bool{
 
 // grammarGapExact lists (file, scenarioNamePrefix) pairs for scenarios that
 // cannot be detected programmatically but are known grammar-coverage gaps.
-var grammarGapExact = [][2]string{
-	// InvalidNumberLiteral cases that the grammar silently accepts by
-	// tokenising the malformed literal as two separate valid tokens:
-	{"features/expressions/literals/Literals2.feature", "[11] Fail on an integer"},
-	{"features/expressions/literals/Literals3.feature", "[12] Fail on an incomplete"},
-	{"features/expressions/literals/Literals3.feature", "[13] Fail on an hexadecimal literal containing a lower"},
-	{"features/expressions/literals/Literals3.feature", "[14] Fail on an hexadecimal literal containing a upper"},
-	// Mixed-list scenario that embeds a capital-E, integer-mantissa, negative-
-	// exponent float literal (2E-01). The ANTLR grammar tokenises "2E" as an
-	// identifier and "-01" as a separate token, causing a spurious parse error.
-	// This grammar gap was previously masked by the single-quote-string skip;
-	// it is now explicit (resolved single-quote gap exposed it in v1.3.0).
-	{"features/expressions/literals/Literals7.feature", "[16] Return a list containing multiple mixed values"},
-}
+//
+// `Literals2 [11]` and `Literals3 [12]/[13]/[14]` were previously listed here
+// because the grammar tokenised the malformed input as two adjacent valid
+// tokens. They have since been resolved:
+//   - `Literals2 [11]` (`9223372h54775808`) is now rejected by `VisitAtom`
+//     via `hasInvalidNumericChar` (digit-prefixed ID containing a non-numeric,
+//     non-float-suffix letter).
+//   - `Literals3 [12]/[13]/[14]` (incomplete/invalid hex literals) are
+//     rejected by `VisitAtom` via the existing hex/oct overflow branch:
+//     `strconv.ParseInt` fails on `0x` (no digits) and on `0x…j…`/`0x…Z…`
+//     (invalid hex characters).
+//
+// No exact-pair entries are currently active.
+var grammarGapExact = [][2]string{}
 
 // reAngleBracket matches Scenario Outline placeholder tokens such as
 // <pattern>, <yield>, <rename>.
@@ -305,19 +306,13 @@ func classifySkipByErrorType(s *Scenario) SkipReason {
 		}
 	}
 
-	switch s.SyntaxErrorType {
-	case "InvalidUnicodeLiteral", "InvalidUnicodeCharacter":
-		return SkipGrammarGapLiteral
-	case "UnexpectedSyntax":
-		n := s.Name
-		if strings.Contains(n, "map containing key starting") ||
-			strings.Contains(n, "pattern in RETURN") ||
-			strings.Contains(n, "pattern in WITH") ||
-			strings.Contains(n, "pattern in right") ||
-			strings.Contains(n, "pattern predicates") {
-			return SkipGrammarGapLiteral
-		}
-	}
+	// All previously-tracked UnexpectedSyntax skip rules were resolved in
+	// task #402:
+	//   - "map containing key starting with a number" → VisitMapPair rejects
+	//     digit-prefixed keys with a SemaError.
+	//   - "pattern in RETURN", "pattern in WITH", "pattern in right",
+	//     "pattern predicates" → VisitProjectionItem and VisitSetItem reject
+	//     bare relationship-chain patterns via containsBareRelChainPattern.
 
 	return SkipNone
 }
