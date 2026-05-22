@@ -40,24 +40,24 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 type staticChildOp struct {
-	rows      []exec.Row
-	idx       int
-	initErr   error
-	nextErr   error
-	closeErr  error
-	closed    bool
-	ctx       context.Context //nolint:containedctx // stored for per-Next ctx check, mirrors sliceOperator
-	exhausted bool            // set once Next returned (false, _); guards against contract violations
+	rows       []exec.Row
+	idx        int
+	initErr    error
+	nextErr    error
+	closeErr   error
+	closeCount int             // number of times Close has been called this cycle
+	ctx        context.Context //nolint:containedctx // stored for per-Next ctx check, mirrors sliceOperator
+	exhausted  bool            // set once Next returned (false, _); guards against contract violations
 }
 
 // Init stores ctx for the per-Next cancellation check, resets per-cycle
-// counters (idx, closed, exhausted) so the stub can be safely reused across
-// multiple Init→Close cycles, and returns initErr. Pattern follows
+// counters (idx, closeCount, exhausted) so the stub can be safely reused
+// across multiple Init→Close cycles, and returns initErr. Pattern follows
 // sliceOperator.Init (exec_test.go:35-39).
 func (c *staticChildOp) Init(ctx context.Context) error {
 	c.ctx = ctx
 	c.idx = 0
-	c.closed = false
+	c.closeCount = 0
 	c.exhausted = false
 	return c.initErr
 }
@@ -93,7 +93,7 @@ func (c *staticChildOp) Next(out *exec.Row) (bool, error) {
 }
 
 func (c *staticChildOp) Close() error {
-	c.closed = true
+	c.closeCount++
 	return c.closeErr
 }
 
@@ -283,8 +283,8 @@ func TestUnwind_TableDriven(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Drain: %v", err)
 			}
-			if !tc.child.closed {
-				t.Error("child.Close was not called by the pipeline driver")
+			if tc.child.closeCount != 1 {
+				t.Errorf("child.Close call count = %d, want 1 (Drain must close exactly once)", tc.child.closeCount)
 			}
 			if len(rows) != len(tc.wantRows) {
 				t.Fatalf("got %d rows, want %d (rows=%v)", len(rows), len(tc.wantRows), rows)
@@ -325,8 +325,8 @@ func TestUnwind_ListFnError(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Errorf("error chain does not contain synthetic error: %v", err)
 	}
-	if !child.closed {
-		t.Error("child.Close not called after Next error")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1 after Next error", child.closeCount)
 	}
 }
 
@@ -347,8 +347,8 @@ func TestUnwind_ChildNextError(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Errorf("error chain does not contain synthetic error: %v", err)
 	}
-	if !child.closed {
-		t.Error("child.Close not called after Next error")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1 after Next error", child.closeCount)
 	}
 }
 
@@ -372,8 +372,8 @@ func TestUnwind_ChildInitError(t *testing.T) {
 	if closeErr := op.Close(); closeErr != nil {
 		t.Errorf("Close after failed Init returned err = %v, want nil", closeErr)
 	}
-	if !child.closed {
-		t.Error("child.Close was not called by Unwind.Close after failed Init")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1 after Unwind.Close on failed-Init path", child.closeCount)
 	}
 }
 
@@ -386,7 +386,7 @@ type scheduledErrChild struct {
 	idx          int
 	successCount int
 	nextErr      error
-	closed       bool
+	closeCount   int
 	exhausted    bool
 	ctx          context.Context //nolint:containedctx // mirrors staticChildOp
 }
@@ -417,7 +417,7 @@ func (c *scheduledErrChild) Next(out *exec.Row) (bool, error) {
 	return true, nil
 }
 
-func (c *scheduledErrChild) Close() error { c.closed = true; return nil }
+func (c *scheduledErrChild) Close() error { c.closeCount++; return nil }
 
 // TestUnwind_MidListChildNextError covers the state machine path where row 1
 // has been fully expanded (multiple elements emitted) and then child.Next
@@ -449,8 +449,8 @@ func TestUnwind_MidListChildNextError(t *testing.T) {
 	if len(rows) != 3 {
 		t.Errorf("got %d preserved rows, want 3 (all of row1's elements)", len(rows))
 	}
-	if !child.closed {
-		t.Error("child.Close was not called after mid-list Next error")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1 after mid-list Next error", child.closeCount)
 	}
 }
 
@@ -482,8 +482,8 @@ func TestUnwind_MidListListFnError(t *testing.T) {
 	if len(rows) != 2 {
 		t.Errorf("got %d preserved rows, want 2 (row1's a/b)", len(rows))
 	}
-	if !child.closed {
-		t.Error("child.Close was not called after mid-list listFn error")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1 after mid-list listFn error", child.closeCount)
 	}
 }
 
@@ -514,8 +514,8 @@ func TestUnwind_CloseError(t *testing.T) {
 	if len(rows) != 1 {
 		t.Errorf("got %d rows, want 1", len(rows))
 	}
-	if !child.closed {
-		t.Error("child.Close was not called")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1", child.closeCount)
 	}
 }
 
@@ -546,8 +546,8 @@ func TestUnwind_NextErrorPlusCloseError(t *testing.T) {
 	if !errors.Is(drainErr, closeErr) {
 		t.Errorf("Drain error chain missing closeErr: %v", drainErr)
 	}
-	if !child.closed {
-		t.Error("child.Close was not called after Next error")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1 after Next+Close error", child.closeCount)
 	}
 }
 
@@ -604,8 +604,8 @@ func TestUnwind_ContextCancellation(t *testing.T) {
 	if _, drainErr := exec.Drain(ctx2, op2); !errors.Is(drainErr, context.Canceled) {
 		t.Errorf("Drain error = %v, want chain containing context.Canceled", drainErr)
 	}
-	if !child2.closed {
-		t.Error("child2.Close was not called by Drain on the pre-cancelled context branch")
+	if child2.closeCount != 1 {
+		t.Errorf("child2.Close call count = %d, want 1 on pre-cancelled Drain", child2.closeCount)
 	}
 }
 
@@ -629,8 +629,8 @@ func TestUnwind_CloseClosesChildEvenWithoutNext(t *testing.T) {
 	if err := op.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if !child.closed {
-		t.Error("child.Close was not called by Unwind.Close")
+	if child.closeCount != 1 {
+		t.Errorf("child.Close call count = %d, want 1 (Unwind.Close must reach the child)", child.closeCount)
 	}
 }
 
@@ -690,16 +690,16 @@ func TestStaticChildOp_InitResetsState(t *testing.T) {
 	if err := child.Close(); err != nil {
 		t.Fatalf("cycle1 Close: %v", err)
 	}
-	if !child.closed {
-		t.Fatal("cycle1: closed not set after Close")
+	if child.closeCount != 1 {
+		t.Fatalf("cycle1: closeCount = %d, want 1 after Close", child.closeCount)
 	}
 
 	// Cycle 2: re-Init the SAME stub and verify it serves the rows again.
 	if err := child.Init(context.Background()); err != nil {
 		t.Fatalf("cycle2 Init: %v", err)
 	}
-	if child.closed {
-		t.Error("cycle2: Init did not reset closed to false")
+	if child.closeCount != 0 {
+		t.Errorf("cycle2: Init did not reset closeCount, got %d want 0", child.closeCount)
 	}
 	if child.idx != 0 {
 		t.Errorf("cycle2: Init did not reset idx, got %d want 0", child.idx)

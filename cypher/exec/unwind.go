@@ -41,6 +41,7 @@ type Unwind struct {
 	curRow  Row             // current input row being expanded
 	curList expr.ListValue  // list being expanded
 	listIdx int             // index into curList
+	closed  bool            // guards Close against duplicate child.Close calls
 }
 
 // NewUnwind creates an Unwind operator.
@@ -63,13 +64,15 @@ func NewUnwind(child Operator, listFn UnwindListFn) (*Unwind, error) {
 }
 
 // Init initialises the operator and its child. It clears all per-iteration
-// state (curRow, curList, listIdx) so that Init can be the exact dual of Close,
-// allowing an operator instance to be safely re-Init'd after a previous Close.
+// state (curRow, curList, listIdx) and resets the idempotency guard (closed)
+// so that Init is the exact dual of Close, allowing an operator instance to
+// be safely re-Init'd after a previous Close.
 func (op *Unwind) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.curRow = nil
 	op.curList = nil
 	op.listIdx = 0
+	op.closed = false
 	return op.child.Init(ctx)
 }
 
@@ -123,7 +126,17 @@ func (op *Unwind) Next(out *Row) (bool, error) {
 }
 
 // Close releases resources and closes the child operator.
+//
+// Close is idempotent within a single pipeline lifecycle: calling it more than
+// once between two Init invocations returns nil from the second and later
+// calls and does NOT propagate to op.child.Close again. The idempotency guard
+// is reset by Init, so an Init→Close→Init→Close sequence still closes the
+// child twice — once per cycle, as expected.
 func (op *Unwind) Close() error {
+	if op.closed {
+		return nil
+	}
+	op.closed = true
 	op.curList = nil
 	op.curRow = nil
 	return op.child.Close()

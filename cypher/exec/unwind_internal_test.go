@@ -13,10 +13,12 @@ import (
 )
 
 // initResetChild is a minimal Operator stub for verifying Unwind.Init's reset
-// contract. It emits a fixed sequence of rows; Close is a no-op.
+// contract and Close's idempotency. It tracks the number of Close calls in
+// closeCount so the test can assert exact invocation counts.
 type initResetChild struct {
-	rows []Row
-	idx  int
+	rows       []Row
+	idx        int
+	closeCount int
 }
 
 func (c *initResetChild) Init(_ context.Context) error { return nil }
@@ -30,7 +32,7 @@ func (c *initResetChild) Next(out *Row) (bool, error) {
 	return true, nil
 }
 
-func (*initResetChild) Close() error { return nil }
+func (c *initResetChild) Close() error { c.closeCount++; return nil }
 
 // TestUnwind_InitResetsCurRow verifies that Init clears every per-iteration
 // field, mirroring Close. Without this guarantee, a re-Init pattern could
@@ -101,5 +103,54 @@ func TestNewUnwind_NilListFn(t *testing.T) {
 	}
 	if !errors.Is(err, ErrUnwindNilListFn) {
 		t.Errorf("got err = %v, want errors.Is(err, ErrUnwindNilListFn)", err)
+	}
+}
+
+// TestUnwind_CloseIsIdempotent verifies the idempotency contract: calling
+// Close more than once between two Init invocations returns nil from the
+// later calls and does NOT propagate to child.Close again. Init resets the
+// guard, so a fresh Init→Close cycle re-arms child.Close.
+func TestUnwind_CloseIsIdempotent(t *testing.T) {
+	child := &initResetChild{rows: []Row{{expr.StringValue("ctx")}}}
+	op, err := NewUnwind(child, func(_ Row) (expr.ListValue, error) {
+		return expr.ListValue{expr.IntegerValue(1)}, nil
+	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
+
+	if initErr := op.Init(context.Background()); initErr != nil {
+		t.Fatalf("Init: %v", initErr)
+	}
+
+	// First Close — propagates to child.
+	if closeErr := op.Close(); closeErr != nil {
+		t.Errorf("first Close: %v", closeErr)
+	}
+	if child.closeCount != 1 {
+		t.Errorf("after first Close: closeCount = %d, want 1", child.closeCount)
+	}
+
+	// Second & third Close — must be no-ops; closeCount stays at 1.
+	if closeErr := op.Close(); closeErr != nil {
+		t.Errorf("second Close: %v", closeErr)
+	}
+	if closeErr := op.Close(); closeErr != nil {
+		t.Errorf("third Close: %v", closeErr)
+	}
+	if child.closeCount != 1 {
+		t.Errorf("after duplicate Close calls: closeCount = %d, want 1", child.closeCount)
+	}
+
+	// Re-Init re-arms the idempotency guard; the next Close closes the child
+	// again exactly once.
+	if initErr := op.Init(context.Background()); initErr != nil {
+		t.Fatalf("re-Init: %v", initErr)
+	}
+	if closeErr := op.Close(); closeErr != nil {
+		t.Errorf("Close after re-Init: %v", closeErr)
+	}
+	if child.closeCount != 2 {
+		t.Errorf("after re-Init+Close: closeCount = %d, want 2", child.closeCount)
 	}
 }
