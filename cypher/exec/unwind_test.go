@@ -460,21 +460,92 @@ func TestStaticChildOp_InitResetsState(t *testing.T) {
 	}
 }
 
+// TestValuesEqual covers the 3VL semantics of the helper: Null vs Null is
+// equal, Null vs non-Null is unequal, lists containing Null elements are
+// compared structurally.
+func TestValuesEqual(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b expr.Value
+		want bool
+	}{
+		{"both Go-nil", nil, nil, true},
+		{"a Go-nil only", nil, expr.IntegerValue(1), false},
+		{"b Go-nil only", expr.IntegerValue(1), nil, false},
+		{"Null vs Null", expr.Null, expr.Null, true},
+		{"Null vs Integer", expr.Null, expr.IntegerValue(1), false},
+		{"Integer vs Null", expr.IntegerValue(1), expr.Null, false},
+		{"Integer eq", expr.IntegerValue(7), expr.IntegerValue(7), true},
+		{"Integer neq", expr.IntegerValue(7), expr.IntegerValue(8), false},
+		{"String eq", expr.StringValue("x"), expr.StringValue("x"), true},
+		{"list[1,null,2] vs same", litList(expr.IntegerValue(1), expr.Null, expr.IntegerValue(2)),
+			litList(expr.IntegerValue(1), expr.Null, expr.IntegerValue(2)), true},
+		{"list[1,null,2] vs [1,null,3]", litList(expr.IntegerValue(1), expr.Null, expr.IntegerValue(2)),
+			litList(expr.IntegerValue(1), expr.Null, expr.IntegerValue(3)), false},
+		{"list-with-null vs different length", litList(expr.IntegerValue(1), expr.Null),
+			litList(expr.IntegerValue(1), expr.Null, expr.Null), false},
+		{"nested list with null", litList(litList(expr.IntegerValue(1), expr.Null)),
+			litList(litList(expr.IntegerValue(1), expr.Null)), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := valuesEqual(tc.a, tc.b); got != tc.want {
+				t.Errorf("valuesEqual(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// valuesEqual compares two expr.Value instances. expr.Value supports an Equal
-// method that returns a Cypher-trivalent BoolValue/NULL; for tests we expect
-// non-NULL equality so this helper unwraps that.
+// valuesEqual compares two expr.Value instances for test assertions, with
+// faithful Cypher three-valued-logic (3VL) handling:
+//
+//   - Two Go-nil interface values compare as equal; exactly one Go-nil compares
+//     as unequal. This is a pre-3VL guard against nil-receiver panics inside
+//     Equal.
+//   - Two expr.Null values compare as equal — even though expr.Null.Equal
+//     returns expr.Null per 3VL semantics, two NULL values ARE structurally
+//     identical and must be considered equal for round-trip test assertions.
+//   - A NULL vs non-NULL pair compares as unequal.
+//   - Otherwise, Equal is invoked. If the result is BoolValue, its bool value
+//     decides; if it is expr.Null (e.g., comparing two lists that contain a
+//     NULL element), both sides are recursively walked element-by-element via
+//     this same helper, returning true iff every position matches under the
+//     same 3VL rules. This lets the test express "two equal-by-structure
+//     values" assertions even when openCypher's predicate Equal would yield
+//     NULL.
 func valuesEqual(a, b expr.Value) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	res := a.Equal(b)
-	bv, ok := res.(expr.BoolValue)
-	if !ok {
+	aNull, bNull := expr.IsNull(a), expr.IsNull(b)
+	if aNull && bNull {
+		return true
+	}
+	if aNull != bNull {
 		return false
 	}
-	return bool(bv)
+	res := a.Equal(b)
+	if bv, ok := res.(expr.BoolValue); ok {
+		return bool(bv)
+	}
+	// res is expr.Null — fall back to structural equality for the kinds that
+	// can produce a NULL Equal result (lists, maps; both contain elements).
+	la, aok := a.(expr.ListValue)
+	lb, bok := b.(expr.ListValue)
+	if aok && bok {
+		if len(la) != len(lb) {
+			return false
+		}
+		for i := range la {
+			if !valuesEqual(la[i], lb[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
