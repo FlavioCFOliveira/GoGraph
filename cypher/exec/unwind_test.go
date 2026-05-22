@@ -354,8 +354,11 @@ func TestUnwind_ContextCancellation(t *testing.T) {
 	}
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	cancel2()
-	if _, err := exec.Drain(ctx2, op2); !errors.Is(err, context.Canceled) {
-		t.Errorf("Drain error = %v, want chain containing context.Canceled", err)
+	if _, drainErr := exec.Drain(ctx2, op2); !errors.Is(drainErr, context.Canceled) {
+		t.Errorf("Drain error = %v, want chain containing context.Canceled", drainErr)
+	}
+	if !child2.closed {
+		t.Error("child2.Close was not called by Drain on the pre-cancelled context branch")
 	}
 }
 
