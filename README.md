@@ -165,6 +165,16 @@ Benchmarks (Apple M4, Go 1.26.3):
 | `search.Dijkstra` on 1M-node / 4M-edge random graph | 320 ms |
 | `search.BellmanFord` on 16K-vertex / 64K-edge | 1.8 ms |
 
+> **Measured on:** 2026-05-22 against commit `1a2f00e`, Apple M4
+> (10-core), Go 1.26.3, macOS 25.4.0 (darwin/arm64).
+> **Reproduce:** `make bench BENCH_PATTERN=. BENCH_COUNT=5`
+> (see [docs/profiling.md](docs/profiling.md) for the sample
+> workflow). Per-run variance is captured by `benchstat` and the
+> headline numbers above are the median of five runs at `-count=5`.
+> Hardware deltas should be reported in CHANGELOG.md alongside
+> any number that changes by more than the 5 % CI gate
+> (`benchstat regression gate` in `.github/workflows/ci.yml`).
+
 ## Module Layout
 
 ```
