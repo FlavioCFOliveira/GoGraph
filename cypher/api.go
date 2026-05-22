@@ -44,7 +44,9 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
@@ -52,6 +54,7 @@ import (
 	"gograph/cypher/exec"
 	"gograph/cypher/expr"
 	"gograph/cypher/funcs"
+	cmetrics "gograph/internal/metrics"
 	"gograph/cypher/ir"
 	"gograph/cypher/parser"
 	"gograph/cypher/procs"
@@ -256,7 +259,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 
 	// ── 3. Wrap in streaming Result ──────────────────────────────────────────
 	rs := exec.Run(ctx, op, cols)
-	return &Result{rs: rs, cols: cols}, nil
+	return newResult(rs, cols, nil, nil, nil), nil
 }
 
 // Explain returns a textual representation of the physical plan that would be
@@ -390,7 +393,7 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 	if err := op.Close(); err != nil {
 		return nil, fmt.Errorf("cypher: DDL close: %w", err)
 	}
-	return &Result{rs: exec.Run(ctx, exec.NewArgument(), nil), cols: nil}, nil
+	return newResult(exec.Run(ctx, exec.NewArgument(), nil), nil, nil, nil, nil), nil
 }
 
 // RunAny executes query with params expressed as map[string]any, automatically
@@ -575,8 +578,50 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 // Result
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Result is a forward-only streaming result set returned by [Engine.Run].
-// It wraps [exec.ResultSet] and exposes the same iterator contract.
+// Result is a forward-only streaming result set returned by [Engine.Run] /
+// [Engine.RunInTx]. It wraps [exec.ResultSet] and exposes the same iterator
+// contract.
+//
+// # Lifecycle contract
+//
+// Every Result returned from a successful Run/RunInTx call MUST be closed
+// by the caller via [Result.Close], even if [Result.Err] is non-nil and even
+// if the caller stops iterating before exhaustion. Close releases the
+// physical operator tree, drains any goroutines spawned by parallel operators,
+// commits or rolls back buffered index mutations for write queries, and (for
+// WAL-backed engines) fsyncs the WAL or rolls the transaction back.
+//
+// The typical pattern is:
+//
+//	res, err := engine.Run(ctx, query, params)
+//	if err != nil {
+//	    return err
+//	}
+//	defer res.Close()
+//	for res.Next() {
+//	    rec := res.Record()
+//	    // ... consume rec ...
+//	}
+//	return res.Err()
+//
+// # Safety net
+//
+// Result installs a [runtime.SetFinalizer] that detects callers who forget
+// to Close. When the garbage collector reclaims an unclosed Result, the
+// finalizer:
+//
+//  1. Increments the metric "cypher.result.leaked" so operators see the
+//     incidence count in their monitoring; and
+//  2. Best-effort closes the underlying resources to limit damage on a
+//     long-running server.
+//
+// The finalizer is a fail-stop diagnostic, NOT a substitute for an explicit
+// Close. In particular, the finalizer runs at an unpredictable time after
+// the leak (it depends on the GC schedule) and CANNOT report errors back to
+// the caller. WAL-backed write transactions held open until finalisation
+// still commit lazily — a window during which other writers may be blocked
+// on the store mutex. Callers that need predictable resource release MUST
+// call Close themselves.
 //
 // Result is NOT safe for concurrent use.
 type Result struct {
@@ -585,6 +630,8 @@ type Result struct {
 	buf    *exec.IndexBuffer        // non-nil only for RunInTx results
 	idxMgr *index.Manager           // non-nil only when buf != nil
 	tx     *txn.Tx[string, float64] // non-nil only for WAL-backed RunInTx results
+
+	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
 
 // Next advances to the next result row. Returns true when a row is available.
@@ -607,7 +654,24 @@ func (r *Result) Columns() []string { return r.cols }
 //     buffered ops via [txn.Tx.CommitWALOnly] on success, or calls
 //     [txn.Tx.Rollback] on error. Mutations have already been applied to the
 //     in-memory graph eagerly; CommitWALOnly only persists them to the WAL.
+//
+// Close is idempotent: a second invocation returns nil without re-entering
+// the underlying ResultSet. The finalizer safety net also relies on this
+// idempotence — see the type-level documentation.
 func (r *Result) Close() error {
+	if !r.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	// Disarm the finalizer: we are about to release the resources ourselves
+	// and there is no point in the GC calling us back later.
+	runtime.SetFinalizer(r, nil)
+	return r.closeLocked()
+}
+
+// closeLocked performs the actual resource release. Callers must hold the
+// closed flag (set via CompareAndSwap by [Result.Close] or by the finalizer)
+// to ensure exactly-once semantics across both call sites.
+func (r *Result) closeLocked() error {
 	err := r.rs.Close()
 	if r.buf != nil {
 		if err != nil || r.rs.Err() != nil {
@@ -626,6 +690,29 @@ func (r *Result) Close() error {
 		}
 	}
 	return err
+}
+
+// newResult wraps the construction of every Result returned by Run/RunInTx,
+// installing the leak-detection finalizer on the freshly built value. The
+// finalizer is the only safety net against callers that forget Close; it
+// emits cypher.result.leaked and performs a best-effort release.
+func newResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64]) *Result {
+	r := &Result{rs: rs, cols: cols, buf: buf, idxMgr: idxMgr, tx: tx}
+	runtime.SetFinalizer(r, finalizeResult)
+	return r
+}
+
+// finalizeResult is the runtime.SetFinalizer callback invoked by the GC
+// when an unclosed Result becomes unreachable. It increments the leak
+// counter and runs the same close path Close() would, ignoring its error
+// (the caller is no longer there to receive it). See [Result] for the full
+// contract.
+func finalizeResult(r *Result) {
+	if !r.closed.CompareAndSwap(false, true) {
+		return
+	}
+	cmetrics.IncCounter("cypher.result.leaked", 1)
+	_ = r.closeLocked()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2420,7 +2507,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	}
 
 	rs := exec.Run(ctx, op, cols)
-	return &Result{rs: rs, cols: cols, buf: buf, idxMgr: e.g.IndexManager(), tx: walTx}, nil
+	return newResult(rs, cols, buf, e.g.IndexManager(), walTx), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
