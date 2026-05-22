@@ -839,52 +839,84 @@ func decodeRecoveryPropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) 
 	buf = buf[1:]
 	switch kind {
 	case lpg.PropString:
-		if len(buf) < 4 {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short string property (missing length)")
-		}
-		n := binary.LittleEndian.Uint32(buf)
-		buf = buf[4:]
-		if uint64(len(buf)) < uint64(n) {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short string property body")
-		}
-		return lpg.StringValue(string(buf[:n])), buf[n:], nil
+		return decodeRecoveryStringProp(buf)
 	case lpg.PropInt64:
-		x, n := binary.Varint(buf)
-		if n <= 0 {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short int64 property")
-		}
-		return lpg.Int64Value(x), buf[n:], nil
+		return decodeRecoveryInt64Prop(buf)
 	case lpg.PropFloat64:
-		if len(buf) < 8 {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short float64 property")
-		}
-		bits := binary.LittleEndian.Uint64(buf[:8])
-		return lpg.Float64Value(math.Float64frombits(bits)), buf[8:], nil
+		return decodeRecoveryFloat64Prop(buf)
 	case lpg.PropBool:
-		if len(buf) < 1 {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short bool property")
-		}
-		return lpg.BoolValue(buf[0] != 0), buf[1:], nil
+		return decodeRecoveryBoolProp(buf)
 	case lpg.PropTime:
-		nanos, n := binary.Varint(buf)
-		if n <= 0 {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short time property")
-		}
-		t := time.Unix(0, nanos).UTC()
-		return lpg.TimeValue(t), buf[n:], nil
+		return decodeRecoveryTimeProp(buf)
 	case lpg.PropBytes:
-		if len(buf) < 4 {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short bytes property (missing length)")
-		}
-		n := binary.LittleEndian.Uint32(buf)
-		buf = buf[4:]
-		if uint64(len(buf)) < uint64(n) {
-			return lpg.PropertyValue{}, buf, errors.New("recovery: short bytes property body")
-		}
-		bs := make([]byte, n)
-		copy(bs, buf[:n])
-		return lpg.BytesValue(bs), buf[n:], nil
+		return decodeRecoveryBytesProp(buf)
 	default:
 		return lpg.PropertyValue{}, buf, errors.New("recovery: unknown property kind")
 	}
+}
+
+// decodeRecoveryLengthPrefixed reads a uint32 length followed by
+// length bytes; returns the body and the remainder. shared by
+// String and Bytes decoders. errTag is mixed into the diagnostic
+// (e.g. "string" or "bytes") so the caller's typed error keeps its
+// breadcrumb.
+func decodeRecoveryLengthPrefixed(buf []byte, errTag string) (body, rest []byte, err error) {
+	if len(buf) < 4 {
+		return nil, buf, fmt.Errorf("recovery: short %s property (missing length)", errTag)
+	}
+	n := binary.LittleEndian.Uint32(buf)
+	buf = buf[4:]
+	if uint64(len(buf)) < uint64(n) {
+		return nil, buf, fmt.Errorf("recovery: short %s property body", errTag)
+	}
+	return buf[:n], buf[n:], nil
+}
+
+func decodeRecoveryStringProp(buf []byte) (lpg.PropertyValue, []byte, error) {
+	body, rest, err := decodeRecoveryLengthPrefixed(buf, "string")
+	if err != nil {
+		return lpg.PropertyValue{}, rest, err
+	}
+	return lpg.StringValue(string(body)), rest, nil
+}
+
+func decodeRecoveryBytesProp(buf []byte) (lpg.PropertyValue, []byte, error) {
+	body, rest, err := decodeRecoveryLengthPrefixed(buf, "bytes")
+	if err != nil {
+		return lpg.PropertyValue{}, rest, err
+	}
+	bs := make([]byte, len(body))
+	copy(bs, body)
+	return lpg.BytesValue(bs), rest, nil
+}
+
+func decodeRecoveryInt64Prop(buf []byte) (lpg.PropertyValue, []byte, error) {
+	x, n := binary.Varint(buf)
+	if n <= 0 {
+		return lpg.PropertyValue{}, buf, errors.New("recovery: short int64 property")
+	}
+	return lpg.Int64Value(x), buf[n:], nil
+}
+
+func decodeRecoveryFloat64Prop(buf []byte) (lpg.PropertyValue, []byte, error) {
+	if len(buf) < 8 {
+		return lpg.PropertyValue{}, buf, errors.New("recovery: short float64 property")
+	}
+	bits := binary.LittleEndian.Uint64(buf[:8])
+	return lpg.Float64Value(math.Float64frombits(bits)), buf[8:], nil
+}
+
+func decodeRecoveryBoolProp(buf []byte) (lpg.PropertyValue, []byte, error) {
+	if len(buf) < 1 {
+		return lpg.PropertyValue{}, buf, errors.New("recovery: short bool property")
+	}
+	return lpg.BoolValue(buf[0] != 0), buf[1:], nil
+}
+
+func decodeRecoveryTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
+	nanos, n := binary.Varint(buf)
+	if n <= 0 {
+		return lpg.PropertyValue{}, buf, errors.New("recovery: short time property")
+	}
+	return lpg.TimeValue(time.Unix(0, nanos).UTC()), buf[n:], nil
 }
