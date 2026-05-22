@@ -53,17 +53,6 @@ func countRows(t *testing.T, res *cypher.Result) int {
 	return n
 }
 
-// firstValue returns the first value in a single-entry map record, and the key.
-// Used in tests where the query returns exactly one column.
-func firstValue(t *testing.T, rec map[string]interface{}) (string, interface{}) {
-	t.Helper()
-	for k, v := range rec {
-		return k, v
-	}
-	t.Fatal("record is empty")
-	return "", nil
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. count(*) on 3-node graph → single row with IntegerValue(3)
 // ─────────────────────────────────────────────────────────────────────────────

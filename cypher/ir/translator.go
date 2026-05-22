@@ -360,11 +360,6 @@ func firstVar(plan LogicalPlan) string {
 	return vars[0]
 }
 
-// nodePropertiesPredicate builds a string predicate for inline node properties.
-func nodePropertiesPredicate(nodeVar string, props ast.Expression) string {
-	return nodeVar + " " + props.String()
-}
-
 // patternVars collects named variables from a PathPattern.
 func patternVars(pp *ast.PathPattern) []string {
 	if pp == nil {
