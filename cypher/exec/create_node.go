@@ -14,9 +14,16 @@ package exec
 // the runtime only needs a NodeID to refer to the node downstream. We
 // generate a unique string key per created node using a monotonic counter
 // embedded in the operator. The generated key has the form
-// "__cx_<counter>" and is stored as a hidden internal key; downstream
+// "__cx_<hex>" and is stored as a hidden internal key; downstream
 // operators reference the node by the emitted NodeID (IntegerValue), not
 // by the string key.
+//
+// The counter is process-local; across process restarts it would reset to
+// zero and collide with __cx_<hex> keys interned by an earlier process and
+// reloaded via WAL / snapshot recovery. To defend against that, the first
+// CreateNode.Init in each process seeds the counter from the maximum
+// __cx_<hex> suffix present in the mapper, advancing it via a CAS loop. The
+// seed runs once per process (sync.Once) so the O(N) cost is amortised.
 //
 // # Side effects
 //
@@ -31,12 +38,20 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"gograph/cypher/expr"
+	"gograph/graph"
 	"gograph/graph/index"
 	"gograph/graph/lpg"
 )
+
+// synthKeyPrefix is the fixed prefix of every synthetic node key produced by
+// [CreateNode.freshNodeKey]. Kept as a constant so the counter-seeding scan in
+// [seedGlobalNodeCounter] and the formatter in [CreateNode.freshNodeKey] cannot
+// drift apart.
+const synthKeyPrefix = "__cx_"
 
 // globalNodeCounter provides a process-wide monotonic source for generated
 // node keys. Using an atomic counter avoids collisions if multiple Engine
@@ -44,8 +59,29 @@ import (
 // contract from CLAUDE.md prevents concurrent writes; the counter is a cheap
 // safety net).
 //
+// The counter is process-local and resets to zero in every new process. Across
+// process restarts this would produce keys that collide with previously
+// persisted ones from the same graph (Mapper.Intern of an existing key returns
+// the existing NodeID, silently overwriting the original node's properties on
+// the follow-up SetNodeProperty calls). To defend against that, every
+// [CreateNode] operator seeds the counter from the keys already interned in
+// its mutator on first [CreateNode.Init], advancing the counter past the
+// largest existing __cx_<hex> suffix via a CAS loop. The seed runs once per
+// process (gated by [globalNodeCounterSeededOnce]); subsequent CreateNode
+// operators observe the [sync.Once] as already-fired and skip the scan.
+//
 //nolint:gochecknoglobals // process-wide monotonic counter for unique key generation
 var globalNodeCounter atomic.Uint64
+
+// globalNodeCounterSeededOnce guards the one-shot seed scan triggered by the
+// first [CreateNode.Init] in the process. The seed walks the mutator's
+// interned node keys (O(N) over distinct keys) and CASes
+// [globalNodeCounter] forward to one past the maximum __cx_<hex> suffix found.
+// All later CreateNode.Init calls observe the Once as already-fired and skip
+// the scan, so the cost is amortised across the lifetime of the process.
+//
+//nolint:gochecknoglobals // paired with globalNodeCounter
+var globalNodeCounterSeededOnce sync.Once
 
 // CreateNode creates a new graph node per input row, sets its labels and
 // properties, and appends the new NodeID as a new column.
@@ -108,8 +144,18 @@ func (op *CreateNode) WithConstraints(reg *ConstraintRegistry, mgr *index.Manage
 }
 
 // Init initialises the operator and its child.
+//
+// The first CreateNode.Init in the process also seeds [globalNodeCounter]
+// past the largest synthetic key currently interned in op.mutator, so that
+// node keys generated in this process cannot collide with keys persisted by
+// an earlier process and replayed during WAL / snapshot recovery. The seed
+// is gated by [globalNodeCounterSeededOnce] so the scan runs at most once
+// per process regardless of how many CreateNode operators are created.
 func (op *CreateNode) Init(ctx context.Context) error {
 	op.ctx = ctx
+	globalNodeCounterSeededOnce.Do(func() {
+		seedGlobalNodeCounter(op.mutator)
+	})
 	return op.child.Init(ctx)
 }
 
@@ -176,7 +222,71 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 // visible to Cypher callers; only the NodeID is emitted into the row.
 func (op *CreateNode) freshNodeKey() string {
 	n := globalNodeCounter.Add(1)
-	return "__cx_" + strconv.FormatUint(n, 16)
+	return synthKeyPrefix + strconv.FormatUint(n, 16)
+}
+
+// seedGlobalNodeCounter walks every node key already interned in m and
+// advances [globalNodeCounter] past the largest __cx_<hex> suffix found.
+// The advance uses a CAS loop so concurrent advances by other goroutines (or
+// by [CreateNode.freshNodeKey] in this goroutine) never roll the counter
+// backwards.
+//
+// Cost is O(N) over the number of distinct keys in m at call time. The
+// caller guarantees seedGlobalNodeCounter runs at most once per process via
+// [globalNodeCounterSeededOnce], so the cost is amortised across the
+// lifetime of the engine. A nil mutator is tolerated (no-op) so the
+// operator stays usable in unit tests that build a CreateNode without a
+// backing mutator.
+func seedGlobalNodeCounter(m GraphMutator) {
+	if m == nil {
+		return
+	}
+	var maxSeen uint64
+	m.WalkNodeIDs(func(id graph.NodeID) bool {
+		key, ok := m.ResolveNodeLabel(id)
+		if !ok {
+			return true
+		}
+		if v, ok := parseSynthKeySuffix(key); ok && v > maxSeen {
+			maxSeen = v
+		}
+		return true
+	})
+	for {
+		cur := globalNodeCounter.Load()
+		if cur >= maxSeen {
+			return
+		}
+		if globalNodeCounter.CompareAndSwap(cur, maxSeen) {
+			return
+		}
+	}
+}
+
+// parseSynthKeySuffix returns the numeric hex suffix of a synthetic node key
+// produced by [CreateNode.freshNodeKey] (form "__cx_<hex>"). It returns
+// (0, false) when key does not match the synthetic-key pattern, when the
+// suffix is empty, or when the suffix is not a valid hexadecimal uint64.
+//
+// The parser deliberately rejects keys that share the __cx_ prefix but carry
+// a non-hex middle segment (notably the "__cx_merge_<hex>" keys produced by
+// the Merge operator). The seeding logic must not advance globalNodeCounter
+// from those keys: the Merge counter is the same global, but its key format
+// is intentionally distinct and is out of scope for the cross-process
+// counter-reset fix tracked under this change.
+func parseSynthKeySuffix(key string) (uint64, bool) {
+	if !strings.HasPrefix(key, synthKeyPrefix) {
+		return 0, false
+	}
+	suffix := key[len(synthKeyPrefix):]
+	if suffix == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(suffix, 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // Close closes the child operator.
