@@ -81,6 +81,15 @@ type buildOpts struct {
 	// call. It is threaded into [expr.EvalWith] so subquery drives observe
 	// cancellation and deadlines from the outer query.
 	queryCtx context.Context //nolint:containedctx // per-query state owned by the buildOpts holder, not a long-lived field
+	// writeFallback, when non-nil, is invoked by [buildOperator]'s default
+	// branch on encountering a write IR node ([ir.CreateNode],
+	// [ir.SetProperty], …). [buildPlanWithMutatorFull] sets it so that a
+	// read wrapper such as [ir.Projection] above a write subtree (the
+	// canonical lowering for `CREATE … RETURN`) recurses through the
+	// write-aware planner rather than failing with
+	// "unsupported IR node *ir.CreateNode". Leaving the field nil
+	// preserves the original error for read-only call sites.
+	writeFallback func(ir.LogicalPlan) (exec.Operator, error)
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -796,12 +805,24 @@ func buildPlanWithMutatorFull(
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
 
+	// bopts carries the writeFallback closure that lets read-side operator
+	// builders (Projection / Selection / Sort / Limit / EagerAggregation
+	// over a write subtree) recurse back into [buildOperatorWrite] when
+	// they encounter a write IR node. Without this, the canonical lowering
+	// of `CREATE (n) RETURN n.x` — ProduceResults → Projection → CreateNode
+	// — falls through to [buildOperator]'s default branch and errors with
+	// "unsupported IR node *ir.CreateNode".
+	bopts := &buildOpts{}
+	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
+		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
+	}
+
 	// When the IR root is a ProduceResults, use its declared columns; otherwise
 	// treat the plan as a write-only query with no output columns. A CREATE
 	// without RETURN has a write operator as root.
 	if pr, ok := plan.(*ir.ProduceResults); ok {
 		cols = pr.Columns
-		child, buildErr := buildOperatorWrite(pr.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, nil)
+		child, buildErr := buildOperatorWrite(pr.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
@@ -835,7 +856,7 @@ func buildPlanWithMutatorFull(
 	// Write-only query (no RETURN clause): build the write operator tree
 	// directly and wrap in a single pass-through projection so the result
 	// set can be drained to trigger side effects.
-	child, buildErr := buildOperatorWrite(plan, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, nil)
+	child, buildErr := buildOperatorWrite(plan, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	if buildErr != nil {
 		return nil, nil, buildErr
 	}
@@ -1653,6 +1674,17 @@ func buildOperator(
 		return buildProcedureCallOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 
 	default:
+		// When the engine is running inside a transactional write call
+		// ([Engine.RunInTx]), buildPlanWithMutatorFull installs a
+		// writeFallback closure on bopts so that write IR nodes
+		// encountered as children of read wrappers (Projection over
+		// CreateNode, Sort over SetProperty, …) recurse through the
+		// write-aware planner instead of failing here. Read-only
+		// callers leave the field nil and fall through to the original
+		// "unsupported IR node" error.
+		if bopts != nil && bopts.writeFallback != nil {
+			return bopts.writeFallback(plan)
+		}
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
 	}
 }
