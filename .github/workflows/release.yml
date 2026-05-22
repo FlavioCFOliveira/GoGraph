@@ -22,6 +22,21 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Pre-flight gate: refuse to publish a release if the release
+      # commit fails the same checks the CI workflow enforces on
+      # main. Branch protection on main (documented in
+      # docs/release.md) is the upstream guard; this is the
+      # downstream safety net.
+      - name: Module integrity (download + verify)
+        run: |
+          go mod download
+          go mod verify
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Test (with race detector)
+        run: go test -race -count=1 ./...
       - name: Run goreleaser
         uses: goreleaser/goreleaser-action@v6
         with:

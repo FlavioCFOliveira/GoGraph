@@ -41,6 +41,50 @@ Before tagging a new release:
 
    This runs goreleaser in snapshot mode without publishing.
 
+## Branch and tag protection policy
+
+The `main` branch and the `v*` tag namespace are protected on GitHub.
+The policy below is enforced via repo Settings → Branches and is
+mirrored here as the canonical reference; changes to the repo
+configuration must be reflected in this file.
+
+### `main` branch
+
+- **Require a pull request before merging.** Direct pushes are
+  rejected by GitHub regardless of the actor's role.
+- **Require at least one approving review.** A maintainer's
+  self-approval does not count.
+- **Dismiss stale approvals on push.** A force-pushed branch loses
+  its review and must be re-approved.
+- **Require status checks to pass.** The following checks from
+  `.github/workflows/ci.yml` are required:
+  - `build + test + race`
+  - `golangci-lint`
+  - `concurrency stress (race)`
+  - `govulncheck`
+  - `coverage gate`
+  - `benchstat regression gate` (PRs only)
+- **Require linear history.** Merge commits on `main` are rejected;
+  use rebase or squash.
+- **Require signed commits** for repository contributors with
+  write access. Sign with the key registered at GitHub Settings →
+  SSH and GPG keys.
+- **Restrict push for tags `v*`.** Only members of the `releasers`
+  team may push a release tag. The `Release` workflow at
+  `.github/workflows/release.yml` re-runs `go vet`, `go build`,
+  `go test -race`, and the module-integrity check on the release
+  commit before goreleaser publishes — the upstream protection
+  prevents an unreviewed tag from reaching this step in the first
+  place.
+
+### `v*` tags
+
+- **Restrict push.** Only the `releasers` team may push a tag
+  matching `v[0-9]*`. Even a maintainer's regular push is
+  rejected.
+- **Require signed tags.** All release tags are
+  `git tag -s` signed.
+
 ## Go toolchain upgrade workflow
 
 GoGraph pins both a language version (`go 1.26`) and an explicit

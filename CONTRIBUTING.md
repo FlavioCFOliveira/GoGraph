@@ -38,6 +38,16 @@ Every change must pass `make ci`:
 Benchmarks must be run for hot-path changes; the per-package
 README or task summary should record the measured numbers.
 
+## Branch and tag protection
+
+The `main` branch and the `v*` tag namespace are protected on GitHub.
+Contributors cannot push directly to `main`; every change lands via
+a pull request that must pass the required CI checks and obtain at
+least one approving review. Release tags (`v[0-9]*`) can only be
+pushed by the `releasers` team and must be signed. The full policy
+is documented in [docs/release.md](docs/release.md#branch-and-tag-protection-policy);
+any change to the repo settings must be reflected there.
+
 ## Dependency policy
 
 GoGraph treats every change to `go.mod` or `go.sum` as a deliberate
