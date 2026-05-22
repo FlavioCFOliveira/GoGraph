@@ -45,9 +45,12 @@ func NewUnwind(child Operator, listFn UnwindListFn) *Unwind {
 	return &Unwind{child: child, listFn: listFn}
 }
 
-// Init initialises the operator and its child.
+// Init initialises the operator and its child. It clears all per-iteration
+// state (curRow, curList, listIdx) so that Init can be the exact dual of Close,
+// allowing an operator instance to be safely re-Init'd after a previous Close.
 func (op *Unwind) Init(ctx context.Context) error {
 	op.ctx = ctx
+	op.curRow = nil
 	op.curList = nil
 	op.listIdx = 0
 	return op.child.Init(ctx)
