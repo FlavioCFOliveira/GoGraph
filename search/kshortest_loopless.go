@@ -16,12 +16,26 @@ import (
 // k-shortest path. The loopless guard excludes any expansion whose
 // neighbour is already present in the popped path.
 //
-// Complexity. Each pop expands one path of length up to V, so a worst-
-// case run does O(k * V * Δ) work and stores O(k * V) words in the
-// queue. For graphs where k is comparable to the number of simple
-// paths the routine matches Yen's asymptotic behaviour without paying
-// the k spur-Dijkstra rounds; on sparse graphs with few alternative
-// routes [YenKShortest] is typically faster in practice.
+// # K bounds and memory growth
+//
+// Each pop expands one path of length up to V, so a worst-case
+// run does O(k * V * Δ) work and stores O(k * V) words in the
+// priority queue. Practical guidance:
+//
+//   - k <= 100: queue stays comfortably below a megabyte even on
+//     million-edge graphs.
+//   - k <= 10 000: queue grows to roughly k * diameter * word_size
+//     bytes; budget accordingly and pre-allocate.
+//   - k unbounded (`enumerate all simple paths until exhaustion`):
+//     this implementation will exhaust because the path count can
+//     be exponential in V (think dense graphs); cap k explicitly
+//     to keep the queue bounded.
+//
+// For graphs where k is comparable to the number of simple paths
+// the routine matches Yen's asymptotic behaviour without paying
+// the k spur-Dijkstra rounds; on sparse graphs with few
+// alternative routes [YenKShortest] is typically faster in
+// practice.
 //
 // This is NOT the heap-of-heaps construction of Eppstein 1998 ("Finding
 // the k Shortest Paths", SIAM J. Comput.). That algorithm builds an

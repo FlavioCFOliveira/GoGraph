@@ -22,10 +22,27 @@ type YenPath[W Weight] struct {
 // dst on c using Yen's algorithm (1971). Returns paths sorted by
 // total cost ascending; an empty slice when src cannot reach dst.
 //
+// # K bounds and memory growth
+//
 // The implementation runs at most k * (V + E) Dijkstra calls and is
-// suitable for small-to-medium k (k <= a few hundred). For larger k
-// or implicit-path representations, prefer Eppstein's algorithm
-// (scheduled for a later task).
+// suitable for small-to-medium k. Practical guidance:
+//
+//   - k <= 16: free. Comfortable on any graph the rest of the
+//     library handles.
+//   - k <= 100: comfortable on graphs up to a few million edges.
+//   - k <= 1000: feasible but candidate-heap memory scales with
+//     the cumulative number of candidate paths considered. The
+//     paths themselves are O(diameter) each, so the working set
+//     grows as O(k * diameter) for the candidate heap plus the
+//     reusable O(V) Dijkstra scratch.
+//   - k >> 1000: prefer Eppstein's algorithm
+//     (O(E + k log k) with implicit-path representation),
+//     scheduled for a later task. Yen's spur-and-reroot pattern
+//     compounds the per-iteration cost too quickly past this
+//     point.
+//
+// Returned []YenPath retains pointers into the CSR vertex/edge
+// arrays — do NOT free the underlying CSR while iterating.
 func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
 	defer metrics.Time("search.YenKShortest")()
 	out, _ := YenKShortestCtx(context.Background(), c, src, dst, k)
