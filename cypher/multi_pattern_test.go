@@ -206,11 +206,11 @@ func TestOptionalMatch_NullRowEmission(t *testing.T) {
 	}
 	seen := make(map[int64]bool)
 	for i, row := range got {
-		aVal, ok := row["a"].(expr.IntegerValue)
-		if !ok {
-			t.Fatalf("row[%d].a is not IntegerValue: %v", i, row["a"])
+		id := valueAsInt64(row["a"])
+		if id < 0 {
+			t.Fatalf("row[%d].a is not a node value: %v", i, row["a"])
 		}
-		seen[int64(aVal)] = true
+		seen[id] = true
 		if row["b"] != expr.Null {
 			t.Errorf("row[%d].b = %v, want NULL", i, row["b"])
 		}
@@ -262,26 +262,36 @@ func TestOptionalMatch_MatchedRow(t *testing.T) {
 	}
 	var aliceRow, bobRow pair
 	for _, r := range rows {
-		if int64(r.a.(expr.IntegerValue)) == aliceID {
+		if valueAsInt64(r.a) == aliceID {
 			aliceRow = r
 		} else {
 			bobRow = r
 		}
 	}
-	if int64(aliceRow.b.(expr.IntegerValue)) != bobID {
-		t.Errorf("aliceRow.b = %v, want %d (bobID)", aliceRow.b, bobID)
+	if got := valueAsInt64(aliceRow.b); got != bobID {
+		t.Errorf("aliceRow.b id = %d, want %d (bobID)", got, bobID)
 	}
 	if bobRow.b != expr.Null {
 		t.Errorf("bobRow.b = %v, want NULL", bobRow.b)
 	}
 }
 
-// valueAsInt64 extracts an int64 from an [expr.IntegerValue] returned as the
-// generic value type by the result set. The helper makes test assertions easier
-// to read.
+// valueAsInt64 extracts the integer identity from a record cell returned by
+// the engine. Bare RETURN of a bound node variable upgrades the cell from
+// [expr.IntegerValue](NodeID) to [expr.NodeValue]{ID,Labels,Properties}, so
+// the helper accepts both shapes (and [expr.RelationshipValue], for symmetry
+// when relationships eventually flow through the same upgrade). Any other
+// shape returns -1 so an unexpected value is surfaced as an assertion failure
+// rather than a silent zero.
 func valueAsInt64(v any) int64 {
-	if iv, ok := v.(expr.IntegerValue); ok {
-		return int64(iv)
+	switch x := v.(type) {
+	case expr.IntegerValue:
+		return int64(x)
+	case expr.NodeValue:
+		return int64(x.ID)
+	case expr.RelationshipValue:
+		return int64(x.ID)
+	default:
+		return -1
 	}
-	return -1
 }

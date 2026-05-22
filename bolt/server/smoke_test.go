@@ -37,20 +37,35 @@ func TestBoltSmokeTest_CreateMatchReturn(t *testing.T) {
 	createNodeTx(t, c, `CREATE (n:Person {name: "Alice", age: 30})`)
 	createNodeTx(t, c, `CREATE (n:Person {name: "Bob", age: 25})`)
 
-	// MATCH returns node IDs (IntegerValue) in the current engine implementation.
+	// MATCH returns each bound node variable as a NodeValue (serialised as a
+	// packstream map carrying id / labels / properties), matching the
+	// neo4j-go-driver convention. The bare-variable projection fast path
+	// upgrades the engine's internal expr.IntegerValue(NodeID) cell to a full
+	// expr.NodeValue before it is handed to the bolt encoder.
 	c.run(t, "MATCH (n:Person) RETURN n", nil)
 	records, _ := c.pullAll(t)
 
 	if len(records) != 2 {
 		t.Fatalf("expected 2 rows from MATCH :Person, got %d", len(records))
 	}
-	// Each row must contain exactly one value (the node ID as int64).
+	// Each row must contain exactly one value: the node payload as a map with
+	// the documented id / labels / properties keys.
 	for i, row := range records {
 		if len(row) != 1 {
 			t.Fatalf("row %d: expected 1 field, got %d", i, len(row))
 		}
-		if _, ok := row[0].(int64); !ok {
-			t.Fatalf("row %d: expected int64 node ID, got %T", i, row[0])
+		m, ok := row[0].(map[string]any)
+		if !ok {
+			t.Fatalf("row %d: expected node map, got %T (%v)", i, row[0], row[0])
+		}
+		if _, ok := m["id"].(int64); !ok {
+			t.Errorf("row %d: node[\"id\"] = %T, want int64", i, m["id"])
+		}
+		if _, ok := m["labels"]; !ok {
+			t.Errorf("row %d: node missing \"labels\"", i)
+		}
+		if _, ok := m["properties"].(map[string]any); !ok {
+			t.Errorf("row %d: node[\"properties\"] = %T, want map[string]any", i, m["properties"])
 		}
 	}
 
@@ -79,19 +94,28 @@ func TestBoltSmokeTest_ExplicitTx(t *testing.T) {
 		t.Fatal("COMMIT returned nil")
 	}
 
-	// MATCH to verify the node was persisted (auto-commit read).
+	// MATCH to verify the node was persisted (auto-commit read). The bare
+	// variable `p` is upgraded to a NodeValue (packstream map) by the
+	// projection fast path; the bolt encoder then emits the documented
+	// id/labels/properties shape.
 	c.run(t, "MATCH (p:Product) RETURN p", nil)
 	records, _ := c.pullAll(t)
 
 	if len(records) != 1 {
 		t.Fatalf("expected 1 row from MATCH :Product, got %d", len(records))
 	}
-	// The row must contain exactly one value (the node ID as int64).
 	if len(records[0]) != 1 {
 		t.Fatalf("expected 1 field per row, got %d", len(records[0]))
 	}
-	if _, ok := records[0][0].(int64); !ok {
-		t.Fatalf("expected int64 node ID, got %T", records[0][0])
+	m, ok := records[0][0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected node map, got %T (%v)", records[0][0], records[0][0])
+	}
+	if _, ok := m["id"].(int64); !ok {
+		t.Errorf("node[\"id\"] = %T, want int64", m["id"])
+	}
+	if _, ok := m["properties"].(map[string]any); !ok {
+		t.Errorf("node[\"properties\"] = %T, want map[string]any", m["properties"])
 	}
 
 	c.goodbye(t)

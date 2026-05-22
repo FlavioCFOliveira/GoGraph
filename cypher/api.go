@@ -2371,6 +2371,41 @@ func buildUnwindOperator(
 	})
 }
 
+// upgradeNodeIDToValue upgrades a row cell from expr.IntegerValue(NodeID) to a
+// full expr.NodeValue carrying labels and properties. The upgrade fires only
+// when v is an expr.IntegerValue, g is non-nil, and the mapper resolves the
+// integer to a known natural key — i.e. only when the row cell genuinely
+// references a graph node. In every other case (nil graph, non-IntegerValue,
+// IntegerValue that is not a NodeID such as a literal-integer projection or a
+// relationship edge ID) the value is returned unchanged so callers can rely on
+// "value-passthrough unless we can prove it's a node".
+//
+// Relationships are not upgraded here. The engine emits a relationship as three
+// separate IntegerValue columns (srcID, edgeID, dstID) and the schema carries
+// no per-column kind information, so RelationshipValue construction needs
+// schema-level type metadata that this helper deliberately does not touch.
+func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Value {
+	if g == nil {
+		return v
+	}
+	iv, ok := v.(expr.IntegerValue)
+	if !ok {
+		return v
+	}
+	id := graph.NodeID(iv)
+	name, resolved := g.AdjList().Mapper().Resolve(id)
+	if !resolved {
+		return v
+	}
+	rawProps := g.NodeProperties(name)
+	props := make(expr.MapValue, len(rawProps))
+	for k, pv := range rawProps {
+		props[k] = lpgPropToExpr(pv)
+	}
+	labels := g.NodeLabels(name)
+	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
+}
+
 // buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,
 // upgrading IntegerValue(nodeID) entries to NodeValue with properties loaded
 // from the graph. g may be nil when no graph is available (upgrade is skipped).
@@ -2380,24 +2415,7 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
 		}
-		v := row[colIdx]
-		// Upgrade IntegerValue(NodeID) → NodeValue when graph is available.
-		if g != nil {
-			if iv, ok := v.(expr.IntegerValue); ok {
-				id := graph.NodeID(iv)
-				if name, resolved := g.AdjList().Mapper().Resolve(id); resolved {
-					rawProps := g.NodeProperties(name)
-					props := make(expr.MapValue, len(rawProps))
-					for k, pv := range rawProps {
-						props[k] = lpgPropToExpr(pv)
-					}
-					labels := g.NodeLabels(name)
-					ctx[varName] = expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
-					continue
-				}
-			}
-		}
-		ctx[varName] = v
+		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)
 	}
 	return ctx
 }
@@ -2425,12 +2443,18 @@ func buildIRProjection(
 		var evalFn func(exec.Row) (expr.Value, error)
 		if item.Expr != nil {
 			if v, ok := item.Expr.(*ast.Variable); ok {
-				// Fast path: simple variable reference — direct column lookup.
+				// Fast path: simple variable reference — direct column lookup,
+				// with an in-line IntegerValue(NodeID) → NodeValue upgrade so
+				// bare `RETURN u` for a bound node produces the documented
+				// {_id,_labels,_properties} shape (matching the buildRowCtx
+				// path used for complex expressions). Non-node IntegerValues
+				// (literals, edge IDs) pass through unchanged.
 				if colIdx, ok2 := schema[v.Name]; ok2 {
 					idx := colIdx
+					capturedG := g
 					evalFn = func(row exec.Row) (expr.Value, error) {
 						if idx < len(row) {
-							return row[idx], nil
+							return upgradeNodeIDToValue(row[idx], capturedG), nil
 						}
 						return expr.Null, nil
 					}
@@ -2440,7 +2464,11 @@ func buildIRProjection(
 				// Schema-name fast path: when an upstream operator (e.g.
 				// EagerAggregation) has pre-computed and named the output column,
 				// prefer a direct index lookup over expression re-evaluation. This
-				// avoids calling aggregate functions as scalar functions.
+				// avoids calling aggregate functions as scalar functions. The
+				// IntegerValue(NodeID) → NodeValue upgrade is deliberately NOT
+				// applied here: aggregate results (count(*), sum(...), etc.) are
+				// scalar integers that can numerically collide with a real NodeID
+				// and would be mis-upgraded into a node row.
 				if colIdx, ok2 := schema[name]; ok2 {
 					idx := colIdx
 					evalFn = func(row exec.Row) (expr.Value, error) {
@@ -2465,6 +2493,10 @@ func buildIRProjection(
 				}
 			}
 		} else if colIdx, ok := schema[exprStr]; ok {
+			// String-only projection (no AST expression). Aggregate aliases
+			// and pre-aggregated columns land here, so we cannot safely
+			// upgrade IntegerValue → NodeValue (a scalar count that numerically
+			// matches a NodeID would be mis-upgraded).
 			idx := colIdx
 			evalFn = func(row exec.Row) (expr.Value, error) {
 				if idx < len(row) {
@@ -2473,7 +2505,8 @@ func buildIRProjection(
 				return expr.Null, nil
 			}
 		} else if colIdx, ok := schema[name]; ok {
-			// Fall back to the alias as a variable reference.
+			// Alias fallback. Same caveat as above — no kind information, no
+			// upgrade.
 			idx := colIdx
 			evalFn = func(row exec.Row) (expr.Value, error) {
 				if idx < len(row) {
