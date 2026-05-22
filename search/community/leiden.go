@@ -69,6 +69,27 @@ type Partition struct {
 //
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR.
+//
+// # Determinism
+//
+// Leiden's local-move and refinement phases visit nodes in NodeID
+// order — the inner loops iterate over [0, MaxNodeID) without
+// randomisation. The tie-breaking rule for ΔQ comparisons is "first
+// candidate community wins": when two destination communities yield
+// equal modularity gain, the algorithm keeps the community with the
+// lower NodeID anchor. This makes Leiden bit-for-bit reproducible
+// across runs on the same input, on the same machine, with the same
+// Go toolchain, provided opts is unchanged.
+//
+// Two callers running Leiden on the same csr.CSR snapshot in
+// parallel are guaranteed to produce the same Partition (modulo
+// goroutine scheduling on the sequential algorithm — there is no
+// internal goroutine pool). Across different machines the result
+// is still deterministic as long as the floating-point
+// implementation is IEEE-754 compliant; the small floating-point
+// rounding deltas between architectures do not cross the
+// equal-modularity tie-breaking threshold for typical inputs but
+// pathological cases at exact equality may diverge.
 func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 	defer metrics.Time("search.community.Leiden")()
 	out, _ := LeidenCtx(context.Background(), c, opts)
