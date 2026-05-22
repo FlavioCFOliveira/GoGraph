@@ -1978,68 +1978,96 @@ func tryBuildIndexSeekFromSelection(
 	schema map[string]int,
 	idxMgr *index.Manager,
 ) (exec.Operator, bool, error) {
-	// Only rewrite when the child is a bare scan leaf.
-	var nodeVar, label string
-	switch child := sel.Child.(type) {
-	case *ir.AllNodesScan:
-		nodeVar = child.NodeVar
-	case *ir.NodeByLabelScan:
-		nodeVar = child.NodeVar
-		label = child.Label
-	default:
+	nodeVar, label, ok := scanLeafNodeVar(sel.Child)
+	if !ok {
 		return nil, false, nil
 	}
+	seekVal, propKey, err := extractSeekFromSelection(sel, params, nodeVar)
+	if err != nil || seekVal == nil {
+		return nil, false, err
+	}
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal); ok {
+		schema[nodeVar] = len(schema)
+		return op, true, nil
+	}
+	if op, ok := tryAnyHashSeek(idxMgr, seekVal); ok {
+		schema[nodeVar] = len(schema)
+		return op, true, nil
+	}
+	return nil, false, nil
+}
 
-	// ── Path 1: parameterised equality  n.prop = $param ─────────────────────
-	var seekVal expr.Value
-	var propKey string
-	paramName, pk1 := extractEqParamFromPredicate(sel.Predicate, nodeVar)
-	if paramName != "" && pk1 != "" {
+// scanLeafNodeVar returns (nodeVar, label, true) when child is a
+// bare scan leaf (AllNodesScan or NodeByLabelScan); (_, _, false)
+// for any other operator type. Label is "" for the unlabelled
+// AllNodesScan case.
+func scanLeafNodeVar(child ir.LogicalPlan) (nodeVar, label string, ok bool) {
+	switch c := child.(type) {
+	case *ir.AllNodesScan:
+		return c.NodeVar, "", true
+	case *ir.NodeByLabelScan:
+		return c.NodeVar, c.Label, true
+	default:
+		return "", "", false
+	}
+}
+
+// extractSeekFromSelection walks the Selection's predicate in two
+// passes — the parameterised n.prop = $param shorthand first, then
+// a general AST-based extraction — and returns (seekVal, propKey,
+// nil) on the first success. The seek value is nil when no
+// suitable equality predicate is present; the caller treats that
+// as "this Selection is not index-seekable" and falls back to the
+// child scan.
+func extractSeekFromSelection(
+	sel *ir.Selection,
+	params map[string]expr.Value,
+	nodeVar string,
+) (expr.Value, string, error) {
+	if paramName, pk := extractEqParamFromPredicate(sel.Predicate, nodeVar); paramName != "" && pk != "" {
 		sv, err := resolveSeekValue("$"+paramName, params)
 		if err != nil {
-			return nil, false, err
+			return nil, "", err
 		}
-		seekVal = sv
-		propKey = pk1
+		return sv, pk, nil
 	}
-
-	// ── Path 2: AST-based extraction (inline literal or parameter) ──────────
-	if seekVal == nil && sel.PredicateExpr != nil {
-		pk2, sv, ok := extractEqFromAST(sel.PredicateExpr, nodeVar, params)
-		if ok {
-			seekVal = sv
-			propKey = pk2
+	if sel.PredicateExpr != nil {
+		if pk, sv, ok := extractEqFromAST(sel.PredicateExpr, nodeVar, params); ok {
+			return sv, pk, nil
 		}
 	}
+	return nil, "", nil
+}
 
-	if seekVal == nil {
-		return nil, false, nil
+// tryNamedHashSeek looks up the auto-named hash index for a (label,
+// propKey) pair and returns the seek operator + true when present
+// and applicable to seekVal.
+func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value) (exec.Operator, bool) {
+	if label == "" || propKey == "" {
+		return nil, false
 	}
-
-	// ── Prefer the auto-named index for this (label, propKey) pair ───────────
-	if label != "" && propKey != "" {
-		wantName := strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_hash"
-		if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" {
-			if op, ok := tryNewHashSeek(sub, seekVal); ok {
-				schema[nodeVar] = len(schema)
-				return op, true, nil
-			}
-		}
+	wantName := strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_hash"
+	sub, err := idxMgr.GetIndex(wantName)
+	if err != nil || sub.Kind() != "hash" {
+		return nil, false
 	}
+	return tryNewHashSeek(sub, seekVal)
+}
 
-	// ── Fall back: iterate all hash indexes ──────────────────────────────────
-	names := idxMgr.ListIndexes()
-	for _, name := range names {
-		sub, err2 := idxMgr.GetIndex(name)
-		if err2 != nil || sub.Kind() != "hash" {
+// tryAnyHashSeek iterates every registered index and returns the
+// first hash index that can serve seekVal. It is the fallback when
+// the named-index lookup misses.
+func tryAnyHashSeek(idxMgr *index.Manager, seekVal expr.Value) (exec.Operator, bool) {
+	for _, name := range idxMgr.ListIndexes() {
+		sub, err := idxMgr.GetIndex(name)
+		if err != nil || sub.Kind() != "hash" {
 			continue
 		}
 		if op, ok := tryNewHashSeek(sub, seekVal); ok {
-			schema[nodeVar] = len(schema)
-			return op, true, nil
+			return op, true
 		}
 	}
-	return nil, false, nil
+	return nil, false
 }
 
 // extractEqFromAST extracts (propKey, seekVal, true) from a
