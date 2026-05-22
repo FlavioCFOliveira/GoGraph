@@ -18,16 +18,26 @@
 // # Plan cache
 //
 // Engine caches parsed and translated logical plans together with the
-// semantic-analysis verdict in a [sync.Map] keyed by the query string. The
+// semantic-analysis verdict in a bounded LRU keyed by the query string. The
 // cached entry is a *planCacheEntry; the physical build step runs per
 // Engine.Run call so that per-call executor state is fresh. Semantically
 // invalid queries are also cached (with the typed error) so that repeated
 // runs of the same bad query short-circuit without re-parsing.
 //
+// The default capacity is [DefaultPlanCacheCapacity] (1024 entries). Configure
+// a different bound via [EngineOptions.PlanCacheCapacity] and the [NewEngineWithOptions]
+// constructor. Eviction is least-recently-used and emits the
+// cypher.plan_cache.evictions counter on the global metrics surface; hits and
+// misses are reported under cypher.plan_cache.hits and
+// cypher.plan_cache.misses.
+//
 // # Concurrency
 //
 // Engine is safe for concurrent use. Each Run call creates an independent
-// physical operator tree.
+// physical operator tree. The plan cache itself serialises its structural
+// updates on a single sync.Mutex; the cached *planCacheEntry is immutable
+// once published, so callers operate on the returned pointer without further
+// synchronisation.
 package cypher
 
 import (
@@ -35,7 +45,6 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"sync"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
@@ -91,6 +100,29 @@ func evalRow(bopts *buildOpts, e ast.Expression, row expr.RowContext, params map
 // Engine
 // ─────────────────────────────────────────────────────────────────────────────
 
+// EngineOptions configures an [Engine]. The zero value is valid: it selects
+// the default function registry ([funcs.DefaultRegistry]), no WAL-backed
+// store, and the default plan cache capacity ([DefaultPlanCacheCapacity]).
+// Use [NewEngineWithOptions] to construct an Engine from this struct.
+type EngineOptions struct {
+	// Registry, when non-nil, overrides the default built-in function
+	// registry used to resolve scalar function calls.
+	Registry expr.FunctionRegistry
+
+	// Store, when non-nil, binds the Engine to a WAL-enabled
+	// [txn.Store]. The Engine's graph is taken from store.Graph()
+	// when both Store and Graph fields are set; the explicit Graph
+	// is then ignored. Run queries through [Engine.RunInTx] for
+	// atomicity and WAL durability.
+	Store *txn.Store[string, float64]
+
+	// PlanCacheCapacity bounds the number of cached plans. Zero
+	// selects [DefaultPlanCacheCapacity]; positive values override
+	// it. A negative value is treated as misconfiguration and is
+	// clamped to the default by the constructor.
+	PlanCacheCapacity int
+}
+
 // Engine is the public query engine. It binds a graph, a function registry,
 // and a plan cache, and exposes a single Run method for query execution.
 //
@@ -101,47 +133,30 @@ type Engine struct {
 	reg           expr.FunctionRegistry
 	constraintReg *exec.ConstraintRegistry
 	procReg       *procs.Registry
-	cache         sync.Map // map[string]ir.LogicalPlan
+	cache         *planCache
 }
 
 // NewEngine creates an Engine backed by g. The default built-in function
-// registry ([funcs.DefaultRegistry]) is used.
+// registry ([funcs.DefaultRegistry]) and the default plan cache capacity
+// ([DefaultPlanCacheCapacity]) are used. Use [NewEngineWithOptions] when a
+// non-default function registry or plan cache capacity is required.
 //
 // If g has no [index.Manager] attached yet, NewEngine installs a new empty one
 // so that DDL statements (CREATE INDEX / DROP INDEX) work out of the box.
 func NewEngine(g *lpg.Graph[string, float64]) *Engine {
-	ensureIndexManager(g)
-	e := &Engine{
-		g:             g,
-		reg:           funcs.DefaultRegistry,
-		constraintReg: exec.NewConstraintRegistry(),
-		procReg:       procs.NewRegistry(),
-	}
-	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
-		return e.constraintReg.ListConstraintRows()
-	})
-	return e
+	return NewEngineWithOptions(g, EngineOptions{})
 }
 
 // NewEngineWithRegistry creates an Engine backed by g using a custom function
-// registry.
+// registry and the default plan cache capacity.
 //
 // If g has no [index.Manager] attached yet, a new empty one is installed.
 func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegistry) *Engine {
-	ensureIndexManager(g)
-	e := &Engine{
-		g:             g,
-		reg:           reg,
-		constraintReg: exec.NewConstraintRegistry(),
-		procReg:       procs.NewRegistry(),
-	}
-	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
-		return e.constraintReg.ListConstraintRows()
-	})
-	return e
+	return NewEngineWithOptions(g, EngineOptions{Registry: reg})
 }
 
-// NewEngineWithStore creates an Engine backed by a WAL-enabled [txn.Store].
+// NewEngineWithStore creates an Engine backed by a WAL-enabled [txn.Store]
+// using the default plan cache capacity.
 //
 // All write queries routed through [Engine.RunInTx] use a single [txn.Tx] for
 // atomicity and WAL durability: mutations are applied eagerly to the in-memory
@@ -151,14 +166,28 @@ func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegis
 // The underlying graph is taken from store.Graph(). If the graph has no
 // [index.Manager] attached yet, a new empty one is installed.
 func NewEngineWithStore(store *txn.Store[string, float64]) *Engine {
-	g := store.Graph()
+	return NewEngineWithOptions(store.Graph(), EngineOptions{Store: store})
+}
+
+// NewEngineWithOptions creates an Engine backed by g with explicit options.
+// Zero-valued fields are filled with their documented defaults. When
+// opts.Store is non-nil, the Engine is bound to that WAL-enabled
+// [txn.Store] in addition to g.
+//
+// If g has no [index.Manager] attached yet, a new empty one is installed.
+func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *Engine {
 	ensureIndexManager(g)
+	reg := opts.Registry
+	if reg == nil {
+		reg = funcs.DefaultRegistry
+	}
 	e := &Engine{
 		g:             g,
-		store:         store,
-		reg:           funcs.DefaultRegistry,
+		store:         opts.Store,
+		reg:           reg,
 		constraintReg: exec.NewConstraintRegistry(),
 		procReg:       procs.NewRegistry(),
+		cache:         newPlanCache(opts.PlanCacheCapacity),
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
 		return e.constraintReg.ListConstraintRows()
@@ -525,8 +554,8 @@ func (e *Engine) planFor(query string) (ir.LogicalPlan, error) {
 // semantically invalid (but parseable) query yields a cache entry whose
 // semaErr field is set, and parseAndAnalyse returns (entry, nil).
 func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
-	if v, ok := e.cache.Load(query); ok {
-		return v.(*planCacheEntry), nil //nolint:forcetypeassert // cache invariant
+	if v, ok := e.cache.get(query); ok {
+		return v, nil
 	}
 	astNode, err := parser.Parse(query)
 	if err != nil {
@@ -538,8 +567,8 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 		return nil, fmt.Errorf("cypher: translate: %w", err)
 	}
 	entry := &planCacheEntry{plan: plan, semaErr: semaErr}
-	actual, _ := e.cache.LoadOrStore(query, entry)
-	return actual.(*planCacheEntry), nil //nolint:forcetypeassert // cache invariant
+	actual, _ := e.cache.loadOrStore(query, entry)
+	return actual, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
