@@ -41,6 +41,58 @@ Before tagging a new release:
 
    This runs goreleaser in snapshot mode without publishing.
 
+## Go toolchain upgrade workflow
+
+GoGraph pins both a language version (`go 1.26`) and an explicit
+toolchain version (`toolchain go1.26.3`) in `go.mod`. CI workflows
+(`.github/workflows/ci.yml`, `release.yml`, `tck.yml`) all consume
+the toolchain via `go-version-file: go.mod`, so a single edit to
+`go.mod` propagates the bump to every CI job — there is exactly one
+source of truth.
+
+To bump the toolchain to a new patch level (for example `go1.26.4`):
+
+1. Install the new toolchain locally:
+
+   ```bash
+   go install golang.org/dl/go1.26.4@latest
+   go1.26.4 download
+   ```
+
+2. Edit `go.mod` to set the new `toolchain` directive:
+
+   ```diff
+   -toolchain go1.26.3
+   +toolchain go1.26.4
+   ```
+
+   Do not change the `go` directive in the same commit unless a new
+   minor language version is also being adopted; the `go` directive
+   gates language features and triggers a semver-MAJOR consideration
+   pre-1.0.
+
+3. Re-run the full validation pipeline:
+
+   ```bash
+   make ci
+   make soak-smoke
+   ./scripts/run_headline_bench.sh
+   ```
+
+4. Commit the `go.mod` change in isolation with a `chore(toolchain):`
+   prefix so the bump is bisectable. Cite the upstream release notes
+   (https://go.dev/doc/devel/release) in the commit body.
+
+5. Cite the toolchain bump in the next CHANGELOG.md entry under
+   `Changed`. If the new toolchain fixes a CVE relevant to GoGraph,
+   also cite it under `Security`.
+
+A minor language bump (for example moving from `go 1.26` to `go 1.27`)
+follows the same workflow with two additions: a survey of new
+language features the project chooses to adopt, and a check that no
+direct or indirect dependency requires a still-newer minor that the
+project is not ready to absorb.
+
 ## Dependency-update workflow between releases
 
 Between tagged releases, dependency upgrades follow the steps in
