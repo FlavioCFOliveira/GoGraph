@@ -6,7 +6,7 @@
 //
 //  1. Graph initialisation with a labelled property graph (LPG) backend.
 //  2. Crash-safe ACID persistence via a write-ahead log plus snapshots
-//     (recovery.OpenString and snapshot.WriteSnapshotFull).
+//     (recovery.Open[string, float64] and snapshot.WriteSnapshotFull).
 //  3. CRUD via Cypher through a WAL-backed engine
 //     (cypher.NewEngineWithStore and Engine.RunInTx).
 //  4. A small CLI surface that accepts ad-hoc Cypher queries from
@@ -52,8 +52,8 @@
 //	init -d <dir>
 //	    Open or create the data directory. If the directory does not
 //	    exist it is created (mkdir -p). An empty initial snapshot is
-//	    written so that subsequent reopens via recovery.OpenString
-//	    succeed even before any writes. Idempotent: running init twice
+//	    written so that subsequent reopens via recovery.Open succeed
+//	    even before any writes. Idempotent: running init twice
 //	    on the same directory is a no-op.
 //	    On success prints one JSON object:
 //	        {"data_dir":"<absolute path>","status":"ok"}
@@ -63,10 +63,12 @@
 //	    (alice, bob, carol, dave, erin), 8 :FOLLOWS edges, 3 :Post
 //	    nodes with their :AUTHORED edges, 5 :Comment nodes attached
 //	    via :ON (some chained via :REPLY_OF) and 7 :LIKED edges
-//	    spanning both posts and comments. Idempotent: running seed
-//	    twice does not duplicate nodes or edges (achieved with MERGE).
-//	    On success prints one JSON object:
-//	        {"seeded":true,"status":"ok"}
+//	    spanning both posts and comments. The writes go through the
+//	    direct txn.Store / txn.Tx API rather than Cypher CREATE — see
+//	    the "Engine Limitations" section below for the rationale.
+//	    Idempotent: running seed twice is a no-op when at least one
+//	    :User node is already present. The reply is:
+//	        {"seeded":<bool>,"status":"ok"}
 //
 //	query -d <dir> [cypher]
 //	    Run a Cypher query (read or write) against the data directory.
@@ -99,27 +101,42 @@
 // per line, terminated by `\n`. Map keys are emitted in alphabetical
 // order so that the byte stream is reproducible.
 //
-// Value type mapping from the LPG value model to JSON:
+// Value type mapping from the Cypher runtime value model (expr.Value)
+// to JSON, performed by output.go's jsonValue / jsonExprValue helpers:
 //
-//   - lpg.StringValue   -> JSON string
-//   - lpg.Int64Value    -> JSON number (integer)
-//   - lpg.Float64Value  -> JSON number (float)
-//   - lpg.BoolValue     -> JSON boolean
-//   - graph.NodeID      -> JSON number (integer)
-//   - nil               -> JSON null
+//   - expr.IntegerValue       -> JSON integer
+//   - expr.FloatValue         -> JSON float
+//   - expr.StringValue        -> JSON string
+//   - expr.BoolValue          -> JSON boolean
+//   - expr.ListValue          -> JSON array
+//   - expr.MapValue           -> JSON object (alphabetically keyed)
+//   - expr.NodeValue          -> JSON object with the leading-underscore
+//     fields {_id, _labels, _properties}
+//     (neo4j-go-driver compatible)
+//   - expr.RelationshipValue  -> JSON object with the fields
+//     {_id, _type, _start, _end, _properties}
+//   - expr.Null               -> JSON null
+//   - graph.NodeID            -> JSON integer
+//   - native Go scalars       -> passthrough
+//   - []byte                  -> JSON string (avoids base64)
+//   - other values            -> Stringer or %v fallback
 //
-// Other LPG value kinds (bytes, time, etc.) are passed through
-// encoding/json's default representation; refer to the per-subcommand
-// godoc in cmd_query.go for the authoritative list once T5 lands.
+// A write-only Cypher statement (CREATE / SET / DELETE without RETURN)
+// produces one synthetic empty row that the engine uses to drive its
+// pipeline; query filters those rows out so the stream stays a
+// faithful "rows" view.
 //
 // # Persistence Contract
 //
-// The data directory contains the WAL plus a sequence of full snapshots
-// laid out by store/snapshot and store/wal. On open, recovery.OpenString
-// loads the most recent valid snapshot and replays the WAL tail to
-// rebuild the in-memory graph. Every write performed through
-// Engine.RunInTx is appended to the WAL with fsync at commit, so a
-// process crash mid-write leaves the data directory recoverable.
+// The data directory contains <dir>/wal (the append-only write-ahead
+// log) and <dir>/snapshot/* (manifest plus csr.bin, labels.bin,
+// properties.bin and any per-index files). On open, recovery.Open
+// (the canonical [string, float64] generic entry point — the
+// deprecated OpenString wrapper is avoided) loads the most recent
+// valid snapshot and replays the WAL tail to rebuild the in-memory
+// graph. Every write performed through Engine.RunInTx is appended to
+// the WAL with fsync at commit, so a process crash mid-write leaves
+// the data directory recoverable.
 //
 // The CLI is one-shot: every invocation opens the data directory,
 // performs its operation, and closes the recovery handle. There is no
@@ -136,9 +153,32 @@
 //	    'MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u.username AS from, v.username AS to'
 //	go run ./examples/24_social_network_cli snapshot -d /tmp/social
 //
-// The contract documented here is the design target for sprint 55 in
-// the gograph roadmap. It is implemented incrementally across tasks
-// T2 (dispatcher and schema constants) through T8 (stats), validated by
-// the round-trip test in T9, and re-confirmed against the final API by
-// the README and godoc pass in T10.
+// # Engine Limitations Observed
+//
+// Two limitations of the current WAL-backed Cypher engine shape the
+// example's implementation:
+//
+//  1. The write planner cannot lower CREATE / SET / DELETE statements
+//     that carry a RETURN clause: ProduceResults over a write IR node
+//     falls through to the read planner and errors with "unsupported
+//     IR node *ir.CreateNode". As a result, writes via `query` should
+//     omit RETURN and read-back via a separate MATCH.
+//
+//  2. A single CREATE statement that lists multiple edges between the
+//     same variables only persists the first edge, and MATCH+CREATE
+//     for relationships through the WAL-backed planner produces zero
+//     edges. The seed subcommand therefore bypasses Cypher and uses
+//     txn.Tx.AddNode / SetNodeLabel / SetNodeProperty / AddEdge /
+//     SetEdgeLabel directly, matching the canonical pattern in
+//     examples/04_persistence.
+//
+// A third, cross-process limitation affects snapshot durability: the
+// graph.Mapper uses a per-process random hash seed (maphash.MakeSeed),
+// so the NodeIDs assigned to the same natural key differ across
+// processes. The snapshot's labels.bin and properties.bin reference
+// NodeIDs from the writing process; on a future-process reopen, those
+// NodeIDs may resolve to unrelated nodes in the new mapper. The
+// round-trip test in cli_test.go runs entirely within one process
+// (where the seed is constant) so the snapshot+reopen byte stream is
+// fully deterministic.
 package main
