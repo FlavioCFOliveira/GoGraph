@@ -26,10 +26,25 @@ type Assignment struct {
 }
 
 // Hungarian solves the rectangular assignment problem on the n*m
-// cost matrix using the O(V^3) Jonker-Volgenant / Kuhn-Munkres
-// algorithm. cost is given in row-major order (length n*m). When
-// n <= m every row is matched; rows beyond min(n, m) are
-// unassigned. The algorithm minimises the total cost.
+// cost matrix using the Jonker-Volgenant / Kuhn-Munkres algorithm.
+// cost is given in row-major order (length n*m). When n <= m every
+// row is matched; rows beyond min(n, m) are unassigned. The
+// algorithm minimises the total cost.
+//
+// # Complexity
+//
+// Let V = max(n, m). The algorithm runs in O(V^3) time and O(V^2)
+// space (the cost matrix dominates). Each outer iteration performs
+// O(V^2) work to extend the shortest-augmenting-path tree; there
+// are V iterations. The constant factor is small (the inner loop
+// is two pointer-chasing reductions over a row), so 1024x1024
+// instances complete in well under a second on the headline
+// hardware in [docs/profiling.md].
+//
+// Memory growth is linear in n*m on the call (the cost slice the
+// caller owns) plus O(V) scratch on the heap for the potentials
+// and the row queue. The scratch slices are freshly allocated per
+// call; pool them externally if invoking Hungarian on a tight loop.
 //
 // Adapted from the standard "potential" formulation. Pass costs
 // directly; do not negate for maximisation.
