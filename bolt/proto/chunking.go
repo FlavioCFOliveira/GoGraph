@@ -3,6 +3,7 @@ package proto
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -10,6 +11,23 @@ import (
 // maxChunkSize is the maximum number of payload bytes per Bolt chunk.
 // Bolt's chunk length field is a uint16, so the theoretical maximum is 65535.
 const maxChunkSize = 65535
+
+// DefaultMaxMessageBytes is the default upper bound on the cumulative
+// payload size of a single reassembled Bolt message. Chosen so that a
+// Bolt message comfortably accommodates the largest realistic record
+// projection (PackStream lists of strings, large maps from APOC-style
+// procedures, multi-megabyte result rows) while keeping a single
+// malicious client from coercing the server into multi-gigabyte
+// allocations by streaming non-zero chunks indefinitely.
+const DefaultMaxMessageBytes = 16 << 20 // 16 MiB
+
+// ErrMessageTooLarge is returned by [ChunkedReader.ReadMessage] when
+// the cumulative payload size of a single Bolt message would exceed
+// the reader's MaxMessageBytes cap. Inspect with [errors.Is]. No
+// partially read message is returned; the underlying reader is left
+// positioned at the next byte after the offending chunk's payload so
+// the caller may close the connection cleanly.
+var ErrMessageTooLarge = errors.New("bolt chunk: cumulative message size exceeds MaxMessageBytes")
 
 // ChunkedReader reassembles a complete Bolt message from a sequence of
 // length-prefixed chunks read from an underlying buffered reader.
@@ -19,14 +37,41 @@ const maxChunkSize = 65535
 //	uint16 big-endian length  (0 = end-of-message sentinel)
 //	<length bytes of payload>
 //
+// Bounded growth: every ChunkedReader carries a maxMessageBytes cap
+// (configured via [NewChunkedReaderWithLimit]; defaults to
+// [DefaultMaxMessageBytes] for [NewChunkedReader]). When the
+// cumulative payload of a single message would exceed the cap,
+// ReadMessage returns [ErrMessageTooLarge] before performing the
+// would-be-oversized allocation. This closes the Slowloris-style DoS
+// vector where a single client streams non-zero chunks until the
+// server OOMs.
+//
 // ChunkedReader is NOT safe for concurrent use.
 type ChunkedReader struct {
-	r *bufio.Reader
+	r               *bufio.Reader
+	maxMessageBytes int
 }
 
-// NewChunkedReader returns a ChunkedReader that reads from r.
+// NewChunkedReader returns a ChunkedReader that reads from r with the
+// [DefaultMaxMessageBytes] cap on cumulative message size. Use
+// [NewChunkedReaderWithLimit] to set a different cap.
 func NewChunkedReader(r io.Reader) *ChunkedReader {
-	return &ChunkedReader{r: bufio.NewReader(r)}
+	return NewChunkedReaderWithLimit(r, DefaultMaxMessageBytes)
+}
+
+// NewChunkedReaderWithLimit returns a ChunkedReader whose ReadMessage
+// rejects any single Bolt message whose cumulative payload size would
+// exceed maxMessageBytes with [ErrMessageTooLarge].
+//
+// A maxMessageBytes value of 0 or negative is replaced with
+// [DefaultMaxMessageBytes]; the cap can never be disabled by an
+// accidental zero-value configuration. Callers that genuinely want a
+// very large bound should pass it explicitly.
+func NewChunkedReaderWithLimit(r io.Reader, maxMessageBytes int) *ChunkedReader {
+	if maxMessageBytes <= 0 {
+		maxMessageBytes = DefaultMaxMessageBytes
+	}
+	return &ChunkedReader{r: bufio.NewReader(r), maxMessageBytes: maxMessageBytes}
 }
 
 // ReadMessage reads and reassembles one complete Bolt message.
@@ -38,6 +83,13 @@ func NewChunkedReader(r io.Reader) *ChunkedReader {
 // Returns io.EOF when the underlying connection is closed cleanly before any
 // bytes of the next message have arrived. Any other I/O error is wrapped and
 // returned.
+//
+// Returns [ErrMessageTooLarge] when the cumulative payload of the message in
+// flight would exceed the reader's MaxMessageBytes cap. The check is performed
+// against the prospective total (current msg length + incoming chunkLen)
+// before the would-be-oversized allocation is attempted, so a malicious
+// client cannot coerce a single multi-gigabyte allocation by streaming
+// non-zero chunks indefinitely.
 func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 	var header [2]byte
 	var msg []byte
@@ -66,6 +118,20 @@ func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 		if chunkLen > maxChunkSize {
 			// This should never occur given the uint16 type, but guard defensively.
 			return nil, fmt.Errorf("bolt chunk: chunk length %d exceeds maximum %d", chunkLen, maxChunkSize)
+		}
+
+		// Bound the cumulative size before the would-be-oversized
+		// allocation. The check is len(msg)+chunkLen rather than just
+		// len(msg) so a single chunk that lands exactly on the boundary
+		// is accepted while a chunk that crosses it is rejected. Discard
+		// the offending chunk's payload from the wire (best effort) so
+		// the caller can close the connection without a half-consumed
+		// chunk lingering in the kernel buffer.
+		if len(msg)+chunkLen > cr.maxMessageBytes {
+			if _, derr := io.CopyN(io.Discard, cr.r, int64(chunkLen)); derr != nil {
+				return nil, fmt.Errorf("%w: drain offending chunk: %w", ErrMessageTooLarge, derr)
+			}
+			return nil, fmt.Errorf("%w: cap=%d, attempted=%d", ErrMessageTooLarge, cr.maxMessageBytes, len(msg)+chunkLen)
 		}
 
 		// Grow the message buffer and read exactly chunkLen bytes.

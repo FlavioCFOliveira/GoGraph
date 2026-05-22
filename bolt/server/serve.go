@@ -32,6 +32,15 @@ type Options struct {
 	// Zero or negative values default to 1024.
 	MaxConnections int
 
+	// MaxMessageBytes caps the cumulative payload size of a single Bolt
+	// message reassembled from per-chunk fragments. Zero or negative
+	// values default to [proto.DefaultMaxMessageBytes] (16 MiB).
+	// Bolt's wire format limits each chunk to 65535 bytes but the
+	// chunk count is unbounded; this cap closes the Slowloris-style
+	// DoS vector in which a malicious client streams non-zero chunks
+	// indefinitely until the server OOMs.
+	MaxMessageBytes int
+
 	// ConnTimeout is the per-connection idle read deadline. Each time the
 	// server is about to read the next message, the deadline is reset to
 	// now+ConnTimeout. Zero means no timeout.
@@ -243,7 +252,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		slog.Uint64("minor", uint64(ver.Minor)))
 
 	// ── 2. Set up framing and session ────────────────────────────────────
-	cr := proto.NewChunkedReader(conn)
+	cr := proto.NewChunkedReaderWithLimit(conn, s.opts.MaxMessageBytes)
 	cw := proto.NewChunkedWriter(conn)
 	// Pass the listener address so ROUTE responses can populate the routing table.
 	localAddr := ""
