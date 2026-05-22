@@ -128,10 +128,11 @@ func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (tota
 				// cycle case, and the potential update at the bottom
 				// of every iteration preserves the invariant.
 				if rc < 0 {
-					panic(fmt.Sprintf(
+					metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)
+					return totalFlow, totalCost, fmt.Errorf(
 						"flow: MinCostMaxFlow internal invariant violated: rc=%d (cost=%d, potU=%d, potV=%d, u=%d, v=%d)",
 						rc, g.cost[e], potential[it.node], potential[to], it.node, to,
-					))
+					)
 				}
 				cand := it.dist + rc
 				if cand < dist[to] {
