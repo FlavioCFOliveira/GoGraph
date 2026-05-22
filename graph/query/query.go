@@ -175,10 +175,12 @@ func (p *Pattern[N, W]) seedFromPreds(preds []Predicate[N, W]) *roaring64.Bitmap
 		return p.engine.g.NodeIndex().Intersect(labelIDs...)
 	}
 	// No label predicate: seed with all NodeIDs in the CSR snapshot.
+	// AddRange is O(1) amortised per container compared to the
+	// per-bit Add loop which is O(MaxNodeID) — measurable on
+	// million-node graphs.
 	bm := roaring64.New()
-	maxID := uint64(p.engine.csr.MaxNodeID())
-	for id := uint64(0); id < maxID; id++ {
-		bm.Add(id)
+	if maxID := uint64(p.engine.csr.MaxNodeID()); maxID > 0 {
+		bm.AddRange(0, maxID)
 	}
 	return bm
 }
