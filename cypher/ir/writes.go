@@ -24,11 +24,21 @@ import "gograph/cypher/ast"
 
 // createClause translates a CREATE clause. Each path pattern is translated in
 // sequence, with the output of one becoming the child of the next.
+//
+// A `bound` set tracks every variable already in scope at the start of this
+// CREATE clause (from a leading MATCH / WITH / earlier CREATE) plus the
+// variables produced by earlier patterns in the same CREATE. When a later
+// pattern re-mentions an already-bound variable, the translator references it
+// instead of emitting another CreateNode for the same name; this keeps
+// `CREATE (a:User), (b:User), (a)-[:F]->(b), (b)-[:F]->(a)` and
+// `MATCH (a),(b) CREATE (a)-[:F]->(b)` from spawning duplicate nodes or
+// corrupting the schema map.
 func (t *translator) createClause(c *ast.Create, child LogicalPlan) (LogicalPlan, error) {
 	plan := child
+	bound := collectPlanVars(child)
 	for _, pp := range c.Pattern.Paths {
 		var err error
-		plan, err = t.createPathPattern(pp, plan)
+		plan, err = t.createPathPattern(pp, plan, bound)
 		if err != nil {
 			return nil, err
 		}
@@ -38,42 +48,71 @@ func (t *translator) createClause(c *ast.Create, child LogicalPlan) (LogicalPlan
 
 // createPathPattern translates a single path pattern in a CREATE clause.
 // The anchor node is translated first, then each (relationship, node) hop is
-// translated left-to-right, stacking operators.
-func (t *translator) createPathPattern(pp *ast.PathPattern, child LogicalPlan) (LogicalPlan, error) {
+// translated left-to-right, stacking operators. `bound` is the running set of
+// variables already in scope; it is mutated as new nodes are emitted. The
+// translator threads the anchor's name forward so that re-references (where
+// no new operator is pushed) still produce a correct startVar for the next
+// CreateRelationship.
+func (t *translator) createPathPattern(pp *ast.PathPattern, child LogicalPlan, bound map[string]struct{}) (LogicalPlan, error) {
 	if pp == nil || pp.Head == nil {
 		return child, nil
 	}
 	plan := child
 	el := pp.Head
 
-	// Translate the anchor node.
+	var startVar string
 	if el.Node != nil {
-		plan = t.createNode(el.Node, plan)
+		startVar = t.ensureNodeVar(el.Node)
+		plan = t.createNode(el.Node, plan, bound)
 	}
 
 	el = el.Next
 	for el != nil {
 		if el.Relationship != nil && el.Node != nil {
-			plan = t.createRelationship(el.Relationship, el.Node, plan)
+			endVar := t.ensureNodeVar(el.Node)
+			plan = t.createRelationship(el.Relationship, el.Node, plan, bound, startVar)
+			// Subsequent hops chain from the destination of this step.
+			startVar = endVar
 		}
 		el = el.Next
 	}
 	return plan, nil
 }
 
-// createNode emits a CreateNode operator for the given NodePattern.
-//
-// Anonymous nodes (no variable in the pattern) receive a synthetic internal
-// variable name of the form "__anon_N" so that downstream CreateRelationship
-// operators can resolve their endpoint columns from the schema.
-func (t *translator) createNode(np *ast.NodePattern, child LogicalPlan) LogicalPlan {
+// ensureNodeVar returns the variable name written in np, allocating a fresh
+// synthetic "__anon_N" for anonymous patterns and storing it back into
+// np.Variable so any later read (in particular [translator.createNode]) sees
+// the same name. The translator runs on a fresh AST per query so the
+// mutation is local to this query's lowering pass.
+func (t *translator) ensureNodeVar(np *ast.NodePattern) string {
+	if np.Variable != nil {
+		return *np.Variable
+	}
+	name := t.freshAnonVar()
+	np.Variable = &name
+	return name
+}
+
+// createNode emits a CreateNode operator for the given NodePattern, unless the
+// variable is already bound in scope (in which case the pattern is a
+// re-reference and the child plan is returned unchanged). Anonymous nodes
+// have had a synthetic "__anon_N" name installed on np.Variable upstream by
+// [translator.ensureNodeVar], so every anonymous occurrence resolves to a
+// fresh creation here.
+func (t *translator) createNode(np *ast.NodePattern, child LogicalPlan, bound map[string]struct{}) LogicalPlan {
 	nodeVar := ""
 	if np.Variable != nil {
 		nodeVar = *np.Variable
 	}
 	if nodeVar == "" {
 		nodeVar = t.freshAnonVar()
+	} else if _, already := bound[nodeVar]; already {
+		// Re-reference of a variable already bound — either from a
+		// leading MATCH/WITH/CREATE, or from an earlier pattern in
+		// this same CREATE clause. Do not emit another CreateNode.
+		return child
 	}
+	bound[nodeVar] = struct{}{}
 	labels := make([]string, len(np.Labels))
 	copy(labels, np.Labels)
 	props := ""
@@ -83,16 +122,13 @@ func (t *translator) createNode(np *ast.NodePattern, child LogicalPlan) LogicalP
 	return NewCreateNode(nodeVar, labels, props, child)
 }
 
-// createRelationship emits CreateNode(destination) then CreateRelationship
-// linking the start-node variable (taken from the driving plan) to the new
-// destination node.
-//
-// Anonymous endpoints (no variable in the pattern) receive synthetic internal
-// names from [translator.createNode] so the executor can resolve them from the
-// schema. The end-var is read from the destination node plan after construction
-// to ensure the synthetic name is consistent.
-func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan) LogicalPlan {
-	startVar := firstVar(child)
+// createRelationship emits CreateRelationship linking startVar to the
+// destination node. When the destination is anonymous or not yet bound,
+// createNode appends a CreateNode for it; an already-bound destination is
+// re-referenced. startVar is supplied by the caller (the just-mentioned
+// anchor in the path pattern, or the destination of the previous hop) so the
+// pattern semantics survive re-references that do not push a new operator.
+func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan, bound map[string]struct{}, startVar string) LogicalPlan {
 	relVar := ""
 	if rp.Variable != nil {
 		relVar = *rp.Variable
@@ -105,10 +141,42 @@ func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.Nod
 	if rp.Properties != nil {
 		props = rp.Properties.String()
 	}
-	// Create destination node first; its var (real or synthetic) becomes endVar.
-	nodePlan := t.createNode(to, child)
-	endVar := firstVar(nodePlan) // picks up synthetic __anon_N for anonymous nodes
+
+	// The destination's variable name has already been installed on
+	// to.Variable by [translator.ensureNodeVar] in createPathPattern;
+	// createNode will not re-allocate it.
+	endVar := ""
+	if to.Variable != nil {
+		endVar = *to.Variable
+	}
+	nodePlan := t.createNode(to, child, bound)
 	return NewCreateRelationship(startVar, endVar, relVar, relType, props, nodePlan)
+}
+
+// collectPlanVars walks plan top-down and returns the union of every variable
+// named anywhere in the subtree. The result is a conservative
+// over-approximation of the bindings in scope at the output of plan; it is
+// suitable for "is this name already known?" lookups in [createClause] but
+// must not be used to drive correctness-sensitive scope inference, which
+// requires the operator-specific Vars() contract.
+func collectPlanVars(plan LogicalPlan) map[string]struct{} {
+	out := map[string]struct{}{}
+	var walk func(p LogicalPlan)
+	walk = func(p LogicalPlan) {
+		if p == nil {
+			return
+		}
+		for _, v := range p.Vars() {
+			if v != "" {
+				out[v] = struct{}{}
+			}
+		}
+		for _, c := range p.Children() {
+			walk(c)
+		}
+	}
+	walk(plan)
+	return out
 }
 
 // mergeClause translates a MERGE clause.
