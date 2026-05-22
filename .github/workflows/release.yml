@@ -26,17 +26,17 @@ jobs:
       # commit fails the same checks the CI workflow enforces on
       # main. Branch protection on main (documented in
       # docs/release.md) is the upstream guard; this is the
-      # downstream safety net.
-      - name: Module integrity (download + verify)
-        run: |
-          go mod download
-          go mod verify
-      - name: Vet
-        run: go vet ./...
-      - name: Build
-        run: go build ./...
-      - name: Test (with race detector)
-        run: go test -race -count=1 ./...
+      # downstream safety net. The canonical implementation lives in
+      # scripts/pre-release.sh so 'make release' and the release.yml
+      # workflow agree on what the gate actually means.
+      - name: Install golangci-lint (needed by pre-release.sh)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.5.0
+          args: --version
+          install-mode: binary
+      - name: Pre-release gate (vet + build + test -race + lint + TCK)
+        run: bash scripts/pre-release.sh "${GITHUB_REF_NAME}"
       - name: Install cyclonedx-gomod (SBOM generator)
         run: |
           # Pinned via the @latest indirection plus the lockfile in
