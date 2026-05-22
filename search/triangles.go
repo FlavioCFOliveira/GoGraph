@@ -16,13 +16,35 @@ import (
 // directed CSR (each undirected edge appears as both (u, v) and
 // (v, u)) — typical of [adjlist.AdjList] with Directed=false.
 //
+// # Algorithm
+//
 // The implementation is the node-iterator algorithm with degree
 // ordering: at every vertex v we examine pairs of neighbours
 // (u, w) only when both have a strictly higher canonical rank than
 // v. Canonical rank breaks ties on raw NodeID, so each triangle is
-// counted exactly once. Total time is O(sum over v of deg(v)^2 in
-// the degree-ordered subgraph) — bounded by O(E * sqrt(E)) per
-// Chiba & Nishizeki 1985.
+// counted exactly once.
+//
+// # Complexity
+//
+// Time:  O(sum over v of deg(v)^2 in the degree-ordered subgraph),
+//        bounded by O(E * sqrt(E)) per Chiba & Nishizeki 1985.
+//        For uniform-degree graphs this collapses to
+//        O(E * d_avg); for power-law graphs the sqrt(E) bound
+//        is tight.
+// Space: O(V) for the per-node count array plus O(d_max) scratch
+//        for the per-vertex neighbour scan (reused across
+//        vertices).
+//
+// # Streaming variant
+//
+// CountTriangles requires the full CSR in memory: the inner loop
+// random-accesses neighbour lists of arbitrary vertices. A
+// streaming variant for graphs that do not fit in RAM is not
+// provided in v2.x — the implementation cost is non-trivial
+// (reservoir sampling à la TRIEST, or a wedge-based estimator)
+// and no production caller has asked for it. If such a caller
+// surfaces, the natural seam is in search/extern/triangles.go
+// alongside the existing semi-external BFS and PageRank.
 //
 // Concurrency: CountTriangles is safe to invoke concurrently on a
 // shared CSR.
