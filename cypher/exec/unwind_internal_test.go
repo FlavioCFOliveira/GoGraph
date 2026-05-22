@@ -6,6 +6,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"gograph/cypher/expr"
@@ -36,17 +37,20 @@ func (*initResetChild) Close() error { return nil }
 // leak the previous run's curRow into the new cycle.
 func TestUnwind_InitResetsCurRow(t *testing.T) {
 	child := &initResetChild{rows: []Row{{expr.StringValue("first")}}}
-	op := NewUnwind(child, func(_ Row) (expr.ListValue, error) {
+	op, err := NewUnwind(child, func(_ Row) (expr.ListValue, error) {
 		return expr.ListValue{expr.IntegerValue(1)}, nil
 	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
 
 	// First cycle: consume one row to populate curRow.
-	if err := op.Init(context.Background()); err != nil {
-		t.Fatalf("Init: %v", err)
+	if initErr := op.Init(context.Background()); initErr != nil {
+		t.Fatalf("Init: %v", initErr)
 	}
 	var row Row
-	if ok, err := op.Next(&row); !ok || err != nil {
-		t.Fatalf("Next: ok=%v err=%v", ok, err)
+	if ok, nextErr := op.Next(&row); !ok || nextErr != nil {
+		t.Fatalf("Next: ok=%v err=%v", ok, nextErr)
 	}
 	if op.curRow == nil {
 		t.Fatal("precondition: curRow should be populated after first Next")
@@ -54,8 +58,8 @@ func TestUnwind_InitResetsCurRow(t *testing.T) {
 
 	// Init must zero every field — direct field inspection is the point of
 	// this whitebox test.
-	if err := op.Init(context.Background()); err != nil {
-		t.Fatalf("re-Init: %v", err)
+	if reinitErr := op.Init(context.Background()); reinitErr != nil {
+		t.Fatalf("re-Init: %v", reinitErr)
 	}
 	if op.curRow != nil {
 		t.Errorf("Init did not reset curRow: got %v, want nil", op.curRow)
@@ -67,7 +71,35 @@ func TestUnwind_InitResetsCurRow(t *testing.T) {
 		t.Errorf("Init did not reset listIdx: got %d, want 0", op.listIdx)
 	}
 
-	if err := op.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := op.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+}
+
+// TestNewUnwind_NilChild verifies that NewUnwind rejects a nil child Operator
+// with the typed sentinel ErrUnwindNilChild, instead of returning a zero-valued
+// struct that would panic at Init/Close time.
+func TestNewUnwind_NilChild(t *testing.T) {
+	op, err := NewUnwind(nil, func(_ Row) (expr.ListValue, error) {
+		return expr.ListValue{expr.IntegerValue(1)}, nil
+	})
+	if op != nil {
+		t.Errorf("got non-nil op for nil child: %v", op)
+	}
+	if !errors.Is(err, ErrUnwindNilChild) {
+		t.Errorf("got err = %v, want errors.Is(err, ErrUnwindNilChild)", err)
+	}
+}
+
+// TestNewUnwind_NilListFn verifies that NewUnwind rejects a nil listFn with
+// the typed sentinel ErrUnwindNilListFn.
+func TestNewUnwind_NilListFn(t *testing.T) {
+	child := &initResetChild{rows: nil}
+	op, err := NewUnwind(child, nil)
+	if op != nil {
+		t.Errorf("got non-nil op for nil listFn: %v", op)
+	}
+	if !errors.Is(err, ErrUnwindNilListFn) {
+		t.Errorf("got err = %v, want errors.Is(err, ErrUnwindNilListFn)", err)
 	}
 }

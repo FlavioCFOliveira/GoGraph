@@ -182,7 +182,10 @@ func TestUnwind_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			op := exec.NewUnwind(tc.child, tc.listFn)
+			op, err := exec.NewUnwind(tc.child, tc.listFn)
+			if err != nil {
+				t.Fatalf("NewUnwind: %v", err)
+			}
 			rows, err := exec.Drain(context.Background(), op)
 			if err != nil {
 				t.Fatalf("Drain: %v", err)
@@ -215,11 +218,14 @@ func TestUnwind_TableDriven(t *testing.T) {
 func TestUnwind_ListFnError(t *testing.T) {
 	wantErr := errors.New("synthetic listFn failure")
 	child := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
-	op := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
 		return nil, wantErr
 	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
 
-	_, err := exec.Drain(context.Background(), op)
+	_, err = exec.Drain(context.Background(), op)
 	if err == nil {
 		t.Fatal("expected error from Drain, got nil")
 	}
@@ -234,11 +240,14 @@ func TestUnwind_ListFnError(t *testing.T) {
 func TestUnwind_ChildNextError(t *testing.T) {
 	wantErr := errors.New("synthetic child Next failure")
 	child := &staticChildOp{nextErr: wantErr}
-	op := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
 		return litList(expr.IntegerValue(1)), nil
 	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
 
-	_, err := exec.Drain(context.Background(), op)
+	_, err = exec.Drain(context.Background(), op)
 	if err == nil {
 		t.Fatal("expected error from Drain, got nil")
 	}
@@ -253,9 +262,12 @@ func TestUnwind_ChildNextError(t *testing.T) {
 func TestUnwind_ChildInitError(t *testing.T) {
 	wantErr := errors.New("synthetic child Init failure")
 	child := &staticChildOp{initErr: wantErr}
-	op := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
 		return litList(expr.IntegerValue(1)), nil
 	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
 
 	if err := op.Init(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("Init: got %v, want chain containing %v", err, wantErr)
@@ -277,9 +289,12 @@ func TestUnwind_ContextCancellation(t *testing.T) {
 		long = append(long, expr.IntegerValue(int64(i)))
 	}
 	child := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
-	op := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
 		return long, nil
 	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := op.Init(ctx); err != nil {
@@ -288,12 +303,12 @@ func TestUnwind_ContextCancellation(t *testing.T) {
 	cancel()
 
 	var row exec.Row
-	ok, err := op.Next(&row)
+	ok, nextErr := op.Next(&row)
 	if ok {
 		t.Error("expected Next to return ok=false after cancellation")
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("Next error = %v, want context.Canceled", err)
+	if !errors.Is(nextErr, context.Canceled) {
+		t.Errorf("Next error = %v, want context.Canceled", nextErr)
 	}
 	if err := op.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -301,9 +316,12 @@ func TestUnwind_ContextCancellation(t *testing.T) {
 
 	// Drain also surfaces cancellation — assert the documented contract.
 	child2 := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
-	op2 := exec.NewUnwind(child2, func(_ exec.Row) (expr.ListValue, error) {
+	op2, err := exec.NewUnwind(child2, func(_ exec.Row) (expr.ListValue, error) {
 		return long, nil
 	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	cancel2()
 	if _, err := exec.Drain(ctx2, op2); !errors.Is(err, context.Canceled) {
@@ -318,9 +336,12 @@ func TestUnwind_ContextCancellation(t *testing.T) {
 
 func TestUnwind_CloseClosesChildEvenWithoutNext(t *testing.T) {
 	child := &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}}
-	op := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
 		return litList(expr.IntegerValue(1)), nil
 	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
 
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)

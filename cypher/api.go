@@ -54,7 +54,6 @@ import (
 	"gograph/cypher/exec"
 	"gograph/cypher/expr"
 	"gograph/cypher/funcs"
-	cmetrics "gograph/internal/metrics"
 	"gograph/cypher/ir"
 	"gograph/cypher/parser"
 	"gograph/cypher/procs"
@@ -63,6 +62,7 @@ import (
 	"gograph/graph/csr"
 	"gograph/graph/index"
 	"gograph/graph/lpg"
+	cmetrics "gograph/internal/metrics"
 	"gograph/store/txn"
 )
 
@@ -2306,7 +2306,7 @@ func buildUnwindOperator(
 		// No AST available — emit nothing for every input row.
 		return exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
 			return nil, nil
-		}), nil
+		})
 	}
 
 	var g *lpg.Graph[string, float64]
@@ -2336,7 +2336,7 @@ func buildUnwindOperator(
 			return expr.ListValue{v}, nil
 		}
 		return lv, nil
-	}), nil
+	})
 }
 
 // buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,

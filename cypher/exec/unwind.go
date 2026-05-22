@@ -13,9 +13,16 @@ package exec
 
 import (
 	"context"
+	"errors"
 
 	"gograph/cypher/expr"
 )
+
+// ErrUnwindNilChild is returned by [NewUnwind] when child is nil.
+var ErrUnwindNilChild = errors.New("exec: NewUnwind requires non-nil child Operator")
+
+// ErrUnwindNilListFn is returned by [NewUnwind] when listFn is nil.
+var ErrUnwindNilListFn = errors.New("exec: NewUnwind requires non-nil listFn")
 
 // UnwindListFn evaluates the list expression for one input row. It returns a
 // [expr.ListValue] when the expression evaluates to a list, or nil/empty when
@@ -41,8 +48,18 @@ type Unwind struct {
 // child provides the context rows. listFn is evaluated once per input row and
 // must return the list to expand. The caller is responsible for appending the
 // element column to the output row; Unwind handles that internally.
-func NewUnwind(child Operator, listFn UnwindListFn) *Unwind {
-	return &Unwind{child: child, listFn: listFn}
+//
+// Both child and listFn are required: a nil argument returns the typed sentinel
+// [ErrUnwindNilChild] or [ErrUnwindNilListFn] respectively, so callers can
+// distinguish the cause via [errors.Is]. NewUnwind never panics.
+func NewUnwind(child Operator, listFn UnwindListFn) (*Unwind, error) {
+	if child == nil {
+		return nil, ErrUnwindNilChild
+	}
+	if listFn == nil {
+		return nil, ErrUnwindNilListFn
+	}
+	return &Unwind{child: child, listFn: listFn}, nil
 }
 
 // Init initialises the operator and its child. It clears all per-iteration
