@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -261,6 +262,17 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 	remote := conn.RemoteAddr().String()
 	s.log.Debug("bolt: connection accepted", slog.String("remote", remote))
+
+	// Label the per-connection goroutine so pprof goroutine dumps
+	// group connections by purpose and remote endpoint. Per CLAUDE.md,
+	// every long-lived goroutine is observable; this is the cheapest
+	// way to keep that promise for the Bolt server's per-conn workers.
+	// The labels are visible in pprof's "goroutine?debug=2" output and
+	// in goroutine profile listings.
+	pprof.SetGoroutineLabels(
+		pprof.WithLabels(ctx,
+			pprof.Labels("component", "bolt-server-conn", "remote", remote)),
+	)
 
 	// ── 1. Version negotiation ───────────────────────────────────────────
 	if s.opts.ConnTimeout > 0 {

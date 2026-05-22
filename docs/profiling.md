@@ -71,3 +71,31 @@ benchstat /tmp/base.txt /tmp/exp.txt
 If a row shows a meaningful `~` or `-` delta with `p < 0.05`, the
 change is accepted; otherwise it stays in a branch until the
 benchmark gap is closed.
+
+## Goroutine labels (pprof)
+
+CLAUDE.md requires every long-lived goroutine to be observable. The
+Bolt server (`bolt/server.handleConn`) labels its per-connection
+goroutine via `pprof.SetGoroutineLabels`. In a pprof goroutine dump
+or `go tool pprof` listing, those goroutines appear under:
+
+| Label key  | Value(s)                |
+|------------|-------------------------|
+| component  | `bolt-server-conn`      |
+| remote     | the client's remote addr |
+
+Inspecting them under load:
+
+```sh
+# Live server:
+curl -s 'http://localhost:6060/debug/pprof/goroutine?debug=2' \
+  | grep -A1 'component=bolt-server-conn'
+
+# Or via go tool pprof:
+go tool pprof -labels 'component=bolt-server-conn' \
+  http://localhost:6060/debug/pprof/goroutine
+```
+
+When adding a new long-lived goroutine to the project, label it the
+same way — the key/value pair should make the source code site
+self-evident from the dump.
