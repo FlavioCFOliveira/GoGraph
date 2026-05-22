@@ -8,6 +8,18 @@ package exec_test
 // empty lists emit no rows. These tests cover the four scenarios named in
 // the task spec (literal list, function result, property collection,
 // empty list) plus the error and cancellation paths.
+//
+// # Cypher NULL vs Go nil
+//
+// UnwindListFn returns expr.ListValue (a typed slice). Its zero value is a
+// Go-nil slice with len()==0; it CANNOT carry the openCypher NULL singleton
+// (expr.Null) directly. The mapping from Cypher NULL to nil ListValue happens
+// one level higher, inside the listFn that buildUnwindOperator wires up at
+// cypher/api.go:2330 ('if v == expr.Null || v == nil { return nil, nil }').
+// Tests in this file therefore exercise the operator-level behaviour for a
+// Go-nil slice (which is what api.go hands the operator), not the api-level
+// Cypher-NULL → nil mapping. The latter belongs in tests of buildUnwindOperator
+// itself.
 
 import (
 	"context"
@@ -161,7 +173,11 @@ func TestUnwind_TableDriven(t *testing.T) {
 			wantRows: nil,
 		},
 		{
-			name:  "nil list — treated the same as empty (openCypher NULL semantics)",
+			// Operator-level test: listFn returns the Go-nil ListValue.
+			// api.go:2330 is the site that maps Cypher NULL → nil ListValue
+			// before invoking the operator; here we assert the operator
+			// itself treats a Go-nil slice the same as an empty list.
+			name:  "Go-nil ListValue (what api.go hands the operator for Cypher NULL)",
 			child: &staticChildOp{rows: []exec.Row{{expr.StringValue("ctx")}}},
 			listFn: func(_ exec.Row) (expr.ListValue, error) {
 				return nil, nil
