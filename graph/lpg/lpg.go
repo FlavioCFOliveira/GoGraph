@@ -107,6 +107,25 @@ type edgePropShard struct {
 	m  map[edgeKey]map[PropertyKeyID]PropertyValue
 }
 
+// nodeLabelShard is one stripe of the node-label bag. The mutex
+// serialises mutations on this shard only; readers hold an RLock
+// for HasNodeLabel / NodeLabels. Splitting the bag into 16 shards
+// removes the global nodeMu contention point that previously
+// serialised every Set/Remove/Has across all NodeIDs in the graph.
+type nodeLabelShard struct {
+	mu sync.RWMutex
+	m  map[graph.NodeID]map[LabelID]struct{}
+}
+
+// edgeLabelShard is the edge-label counterpart of [nodeLabelShard];
+// the shard is keyed by the src endpoint so all labels of edges
+// out of one node coalesce in the same shard (favourable for the
+// common access pattern: walk-out-of-node-then-inspect-label).
+type edgeLabelShard struct {
+	mu sync.RWMutex
+	m  map[edgeKey]map[LabelID]struct{}
+}
+
 // Graph is a labelled property graph generic over the user node type
 // N and edge weight type W. It composes an [adjlist.AdjList] with a
 // label registry and per-vertex / per-edge label storage backed by
@@ -117,10 +136,9 @@ type Graph[N comparable, W any] struct {
 	pkeys   *PropertyKeyRegistry
 	nodeIdx *label.Index
 	edgeIdx *label.Index
-	nodeMu  sync.RWMutex
-	edgeMu  sync.RWMutex
-	nodeBag map[graph.NodeID]map[LabelID]struct{}
-	edgeBag map[edgeKey]map[LabelID]struct{}
+
+	nodeLabelShards [propMapShards]nodeLabelShard
+	edgeLabelShards [propMapShards]edgeLabelShard
 
 	nodePropShards [propMapShards]nodePropShard
 	edgePropShards [propMapShards]edgePropShard
@@ -131,6 +149,18 @@ type Graph[N comparable, W any] struct {
 // nodePropShardFor returns the shard responsible for NodeID id.
 func (g *Graph[N, W]) nodePropShardFor(id graph.NodeID) *nodePropShard {
 	return &g.nodePropShards[uint64(id)&(propMapShards-1)]
+}
+
+// nodeLabelShardFor returns the label shard responsible for NodeID id.
+func (g *Graph[N, W]) nodeLabelShardFor(id graph.NodeID) *nodeLabelShard {
+	return &g.nodeLabelShards[uint64(id)&(propMapShards-1)]
+}
+
+// edgeLabelShardFor returns the label shard responsible for the
+// edgeKey k. Keyed on the src endpoint so the shard alignment
+// matches [edgePropShardFor].
+func (g *Graph[N, W]) edgeLabelShardFor(k edgeKey) *edgeLabelShard {
+	return &g.edgeLabelShards[uint64(k.src)&(propMapShards-1)]
 }
 
 // edgePropShardFor returns the shard responsible for the edgeKey k.
@@ -156,8 +186,12 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 		pkeys:   NewPropertyKeyRegistry(),
 		nodeIdx: label.NewIndex(),
 		edgeIdx: label.NewIndex(),
-		nodeBag: make(map[graph.NodeID]map[LabelID]struct{}),
-		edgeBag: make(map[edgeKey]map[LabelID]struct{}),
+	}
+	for i := range g.nodeLabelShards {
+		g.nodeLabelShards[i].m = make(map[graph.NodeID]map[LabelID]struct{})
+	}
+	for i := range g.edgeLabelShards {
+		g.edgeLabelShards[i].m = make(map[edgeKey]map[LabelID]struct{})
 	}
 	for i := range g.nodePropShards {
 		g.nodePropShards[i].m = make(map[graph.NodeID]map[PropertyKeyID]PropertyValue)
@@ -226,14 +260,15 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 	}
 	id, _ := g.adj.Mapper().Lookup(n)
 	lid := g.reg.Intern(name)
-	g.nodeMu.Lock()
-	bag, ok := g.nodeBag[id]
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.Lock()
+	bag, ok := sh.m[id]
 	if !ok {
 		bag = make(map[LabelID]struct{})
-		g.nodeBag[id] = bag
+		sh.m[id] = bag
 	}
 	bag[lid] = struct{}{}
-	g.nodeMu.Unlock()
+	sh.mu.Unlock()
 	g.nodeIdx.Add(uint32(lid), id)
 	return nil
 }
@@ -248,14 +283,15 @@ func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 	if !ok {
 		return
 	}
-	g.nodeMu.Lock()
-	if bag, ok2 := g.nodeBag[id]; ok2 {
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.Lock()
+	if bag, ok2 := sh.m[id]; ok2 {
 		delete(bag, lid)
 		if len(bag) == 0 {
-			delete(g.nodeBag, id)
+			delete(sh.m, id)
 		}
 	}
-	g.nodeMu.Unlock()
+	sh.mu.Unlock()
 	g.nodeIdx.Remove(uint32(lid), id)
 }
 
@@ -269,9 +305,10 @@ func (g *Graph[N, W]) HasNodeLabel(n N, name string) bool {
 	if !ok {
 		return false
 	}
-	g.nodeMu.RLock()
-	defer g.nodeMu.RUnlock()
-	bag, ok := g.nodeBag[id]
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	bag, ok := sh.m[id]
 	if !ok {
 		return false
 	}
@@ -286,10 +323,11 @@ func (g *Graph[N, W]) NodeLabels(n N) []string {
 	if !ok {
 		return nil
 	}
-	g.nodeMu.RLock()
-	bag, ok := g.nodeBag[id]
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	bag, ok := sh.m[id]
 	if !ok {
-		g.nodeMu.RUnlock()
+		sh.mu.RUnlock()
 		return nil
 	}
 	out := make([]string, 0, len(bag))
@@ -298,7 +336,7 @@ func (g *Graph[N, W]) NodeLabels(n N) []string {
 			out = append(out, name)
 		}
 	}
-	g.nodeMu.RUnlock()
+	sh.mu.RUnlock()
 	return out
 }
 
@@ -313,15 +351,16 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 	srcID, _ := g.adj.Mapper().Lookup(src)
 	dstID, _ := g.adj.Mapper().Lookup(dst)
 	lid := g.reg.Intern(name)
-	g.edgeMu.Lock()
 	k := edgeKey{src: srcID, dst: dstID}
-	bag, ok := g.edgeBag[k]
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.Lock()
+	bag, ok := sh.m[k]
 	if !ok {
 		bag = make(map[LabelID]struct{})
-		g.edgeBag[k] = bag
+		sh.m[k] = bag
 	}
 	bag[lid] = struct{}{}
-	g.edgeMu.Unlock()
+	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
 }
 
@@ -340,9 +379,11 @@ func (g *Graph[N, W]) HasEdgeLabel(src, dst N, name string) bool {
 	if !ok {
 		return false
 	}
-	g.edgeMu.RLock()
-	defer g.edgeMu.RUnlock()
-	bag, ok := g.edgeBag[edgeKey{src: srcID, dst: dstID}]
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	bag, ok := sh.m[k]
 	if !ok {
 		return false
 	}

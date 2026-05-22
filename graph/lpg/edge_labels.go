@@ -7,8 +7,9 @@ package lpg
 // EdgeLabels returns nil.
 //
 // EdgeLabels is the dual of [Graph.NodeLabels]. It is safe for
-// concurrent use; the snapshot is taken under the per-edge RWMutex
-// and the registry's own lock.
+// concurrent use; the snapshot is taken under the per-shard RWMutex
+// (one of 16 stripes keyed by the src endpoint) and the registry's
+// own lock.
 func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
@@ -18,10 +19,12 @@ func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
 	if !ok {
 		return nil
 	}
-	g.edgeMu.RLock()
-	bag, ok := g.edgeBag[edgeKey{src: srcID, dst: dstID}]
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.RLock()
+	bag, ok := sh.m[k]
 	if !ok {
-		g.edgeMu.RUnlock()
+		sh.mu.RUnlock()
 		return nil
 	}
 	out := make([]string, 0, len(bag))
@@ -30,6 +33,6 @@ func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
 			out = append(out, name)
 		}
 	}
-	g.edgeMu.RUnlock()
+	sh.mu.RUnlock()
 	return out
 }
