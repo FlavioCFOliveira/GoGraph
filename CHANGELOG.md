@@ -13,6 +13,12 @@ closed. Current status (commit `7405463`, 2026-05-22):
 v2.0.0-rc2. See `docs/semver.md` for the full release-gate specification
 and `docs/tck/DIVERGENCES.md` for the authoritative pass-rate table.
 
+Adopters upgrading from a 1.x release line should consult the new
+[1.x → 2.x migration guide](docs/migration-1-to-2.md), which collects
+the API and on-disk-format changes (error returns on `AddNode`/`AddEdge`,
+the bounded-resource defaults, the typed `store/txn` codecs, manifest
+version bump, toolchain pin) together with the upgrade steps.
+
 ## [2.0.0-rc2] — 2026-05-21
 
 Sprint 37–40 improvements over rc1: WAL durability bridging for all Cypher
