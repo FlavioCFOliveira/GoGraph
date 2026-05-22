@@ -2,6 +2,11 @@
 // over a shared immutable CSR. Multiple goroutines run Dijkstra,
 // BFS, and PageRank simultaneously on the same snapshot to
 // illustrate the lock-free read contract of csr.CSR.
+//
+// Sample output: run `go run ./examples/20_concurrent_reads` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

@@ -1,5 +1,10 @@
 // Example 10_dimacs9_routing — exercises the DIMACS 9 SSSP
 // harness over a small synthetic road graph.
+//
+// Sample output: run `go run ./examples/10_dimacs9_routing` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

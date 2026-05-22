@@ -1,5 +1,10 @@
 // Example 23_bolt_server demonstrates starting a GoGraph Bolt v5 server,
 // accepting a connection on a random port, and shutting down gracefully.
+//
+// Sample output: run `go run ./examples/23_bolt_server` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

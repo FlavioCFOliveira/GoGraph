@@ -344,14 +344,20 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			continue
 		}
 
-		// Dispatch to session.
+		// Dispatch to session. HandleMessage's error return is reserved
+		// for internal-only failures (currently none: every handler
+		// returns (responses, nil), even on the FAILED-state path —
+		// they surface client-visible errors via *proto.Failure inside
+		// 'responses'). The defensive branch below is kept so a future
+		// internal-failure path does not silently disappear into the
+		// success branch; if HandleMessage ever does return a non-nil
+		// error, the loop logs it and synthesises a Bolt FAILURE so
+		// the client is not left waiting on a half-completed message.
 		responses, handlerErr := sess.HandleMessage(ctx, msg)
 		if handlerErr != nil {
 			s.log.Error("bolt: handler error",
 				slog.String("remote", remote),
 				slog.String("err", handlerErr.Error()))
-			// handlerErr from HandleMessage is reserved for internal errors;
-			// the session has already set state to FAILED.
 			_ = sendResponse(cw, &proto.Failure{
 				Code:    "Neo.DatabaseError.General.UnknownError",
 				Message: handlerErr.Error(),

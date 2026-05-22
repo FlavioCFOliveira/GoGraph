@@ -65,6 +65,14 @@ lint: ## Run golangci-lint (auto-install if missing)
 .PHONY: ci
 ci: tidy fmt vet build test race lint cover-gate ## Full pipeline: tidy + fmt + vet + build + test + race + lint + cover-gate
 
+.PHONY: smoke
+smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
+	$(MAKE) tidy
+	$(MAKE) fmt
+	$(MAKE) vet
+	$(MAKE) build
+	$(GO) test -count=1 -short -timeout 60s $(PACKAGES)
+
 .PHONY: soak
 soak: ## Run the 4-hour mixed-workload soak harness (use SOAK_FLAGS to override)
 	GODEBUG=gctrace=1 $(GO) run ./bench/soak $(SOAK_FLAGS)

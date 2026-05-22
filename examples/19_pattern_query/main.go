@@ -2,6 +2,11 @@
 // a declared schema, populate it, then run several MATCH-style
 // queries combining label and property predicates plus a one-hop
 // expansion.
+//
+// Sample output: run `go run ./examples/19_pattern_query` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

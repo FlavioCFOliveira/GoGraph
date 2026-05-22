@@ -1,5 +1,10 @@
 // Example 03_advanced_algorithms — exercises BFS, Dijkstra,
 // PageRank, and Brandes betweenness on a small graph.
+//
+// Sample output: run `go run ./examples/03_advanced_algorithms` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

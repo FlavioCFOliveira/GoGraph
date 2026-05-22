@@ -1,5 +1,10 @@
 // Example 22_cypher demonstrates the GoGraph Cypher engine: building a small
 // social graph with the graph API and querying it with MATCH and label scans.
+//
+// Sample output: run `go run ./examples/22_cypher` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

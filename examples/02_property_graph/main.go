@@ -1,6 +1,11 @@
 // Example 02_property_graph — build a small labelled property graph,
 // declare a schema, attach labels and typed properties, then run a
 // MATCH-style indexed query.
+//
+// Sample output: run `go run ./examples/02_property_graph` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

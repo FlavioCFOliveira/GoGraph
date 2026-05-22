@@ -19,6 +19,11 @@
 // This is the same flow the production restart path uses; the only
 // thing that changes from one (N, W) instantiation to another is the
 // codec pair passed to `recovery.Options`.
+//
+// Sample output: run `go run ./examples/21_typed_recovery` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

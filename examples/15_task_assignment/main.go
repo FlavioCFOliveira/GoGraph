@@ -1,6 +1,11 @@
 // Example 15_task_assignment — assign workers to tasks using the
 // Hungarian algorithm to minimise total cost, and compare with the
 // unweighted Hopcroft-Karp maximum matching.
+//
+// Sample output: run `go run ./examples/15_task_assignment` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

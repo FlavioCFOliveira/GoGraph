@@ -2,6 +2,11 @@
 // shortest-path computation on the same routing graph:
 // classical Dijkstra, Yen's k-shortest for alternatives, and A*
 // with a simple coordinate-based heuristic.
+//
+// Sample output: run `go run ./examples/14_routing_alternatives` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

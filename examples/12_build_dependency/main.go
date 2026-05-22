@@ -1,6 +1,11 @@
 // Example 12_build_dependency — model a software build dependency
 // graph, derive the build order via topological sort, and detect
 // circular dependencies with Tarjan SCC.
+//
+// Sample output: run `go run ./examples/12_build_dependency` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

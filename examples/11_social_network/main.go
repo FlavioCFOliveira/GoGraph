@@ -6,6 +6,11 @@
 //   - Rank users by influence via PageRank.
 //   - Detect communities via Leiden.
 //   - Recommend friend-of-friend candidates with a 2-hop walk.
+//
+// Sample output: run `go run ./examples/11_social_network` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

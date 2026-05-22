@@ -1,5 +1,10 @@
 // Example 07_graphml_roundtrip — reads a GraphML document, prints
 // the edges, then writes the graph back to GraphML and DOT.
+//
+// Sample output: run `go run ./examples/07_graphml_roundtrip` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

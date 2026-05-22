@@ -1,6 +1,11 @@
 // Example 05_out_of_core — writes a Tier 2 csrfile, opens it via
 // mmap, applies a SEQUENTIAL madvise hint, and runs PageRank
 // directly over the mapped region.
+//
+// Sample output: run `go run ./examples/05_out_of_core` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

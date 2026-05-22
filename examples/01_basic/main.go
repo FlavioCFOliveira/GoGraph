@@ -1,5 +1,10 @@
 // Example 01_basic — build a small weighted directed graph, snapshot
 // it to a CSR view, and run a single-source shortest-paths query.
+//
+// Sample output: run `go run ./examples/01_basic` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

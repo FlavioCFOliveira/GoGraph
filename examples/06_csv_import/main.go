@@ -1,5 +1,10 @@
 // Example 06_csv_import — reads an edge-list CSV, builds the
 // adjacency list, then writes it out as both CSV and JSON Lines.
+//
+// Sample output: run `go run ./examples/06_csv_import` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

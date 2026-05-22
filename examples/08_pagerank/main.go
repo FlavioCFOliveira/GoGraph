@@ -1,5 +1,10 @@
 // Example 08_pagerank — runs PageRank on a 5-node directed cycle
 // and prints each vertex's rank.
+//
+// Sample output: run `go run ./examples/08_pagerank` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

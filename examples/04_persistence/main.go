@@ -16,6 +16,11 @@
 //     replay re-populates the mapper; labels.bin re-attaches the
 //     snapshot-time label set; properties.bin re-attaches the
 //     snapshot-time typed property set.
+//
+// Sample output: run `go run ./examples/04_persistence` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

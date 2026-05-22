@@ -2,6 +2,11 @@
 // (bridges and articulation points) in a small communication
 // network, then compute the maximum throughput between two sites
 // via Dinic's max-flow.
+//
+// Sample output: run `go run ./examples/13_network_reliability` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

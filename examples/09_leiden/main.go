@@ -1,5 +1,10 @@
 // Example 09_leiden — runs Leiden community detection on two K4
 // cliques joined by a bridge and prints the discovered communities.
+//
+// Sample output: run `go run ./examples/09_leiden` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (

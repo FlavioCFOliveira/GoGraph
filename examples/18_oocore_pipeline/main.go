@@ -3,6 +3,11 @@
 // a Tier 2 csrfile, re-opens it via mmap, applies an access-
 // pattern hint, and runs semi-external BFS plus PageRank over
 // the mapped region.
+//
+// Sample output: run `go run ./examples/18_oocore_pipeline` and capture the
+// stdout — the output is deterministic for the inputs hard-coded
+// above and serves as the regression baseline a future change should
+// preserve.
 package main
 
 import (
