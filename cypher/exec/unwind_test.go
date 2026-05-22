@@ -37,10 +37,14 @@ type staticChildOp struct {
 	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check, mirrors sliceOperator
 }
 
-// Init stores ctx for the per-Next cancellation check and returns initErr.
-// Pattern follows sliceOperator.Init (exec_test.go:35-39).
+// Init stores ctx for the per-Next cancellation check, resets per-cycle
+// counters (idx, closed) so the stub can be safely reused across multiple
+// Init→Close cycles, and returns initErr. Pattern follows sliceOperator.Init
+// (exec_test.go:35-39).
 func (c *staticChildOp) Init(ctx context.Context) error {
 	c.ctx = ctx
+	c.idx = 0
+	c.closed = false
 	return c.initErr
 }
 
@@ -362,6 +366,49 @@ func TestUnwind_CloseClosesChildEvenWithoutNext(t *testing.T) {
 	}
 	if !child.closed {
 		t.Error("child.Close was not called by Unwind.Close")
+	}
+}
+
+// TestStaticChildOp_InitResetsState verifies the stub supports Init→…→Close
+// reuse cycles by resetting idx and closed on every Init. Without this the
+// second cycle would emit zero rows and falsely report Close had run.
+func TestStaticChildOp_InitResetsState(t *testing.T) {
+	child := &staticChildOp{rows: []exec.Row{{expr.IntegerValue(1)}, {expr.IntegerValue(2)}}}
+
+	// Cycle 1: drive to completion via direct Operator API.
+	if err := child.Init(context.Background()); err != nil {
+		t.Fatalf("cycle1 Init: %v", err)
+	}
+	var r1, r2, rEnd exec.Row
+	if ok, err := child.Next(&r1); !ok || err != nil {
+		t.Fatalf("cycle1 Next1: ok=%v err=%v", ok, err)
+	}
+	if ok, err := child.Next(&r2); !ok || err != nil {
+		t.Fatalf("cycle1 Next2: ok=%v err=%v", ok, err)
+	}
+	if ok, err := child.Next(&rEnd); ok || err != nil {
+		t.Fatalf("cycle1 Next-end: ok=%v err=%v", ok, err)
+	}
+	if err := child.Close(); err != nil {
+		t.Fatalf("cycle1 Close: %v", err)
+	}
+	if !child.closed {
+		t.Fatal("cycle1: closed not set after Close")
+	}
+
+	// Cycle 2: re-Init the SAME stub and verify it serves the rows again.
+	if err := child.Init(context.Background()); err != nil {
+		t.Fatalf("cycle2 Init: %v", err)
+	}
+	if child.closed {
+		t.Error("cycle2: Init did not reset closed to false")
+	}
+	if child.idx != 0 {
+		t.Errorf("cycle2: Init did not reset idx, got %d want 0", child.idx)
+	}
+	var r3 exec.Row
+	if ok, err := child.Next(&r3); !ok || err != nil {
+		t.Fatalf("cycle2 Next1 (should re-emit first row): ok=%v err=%v", ok, err)
 	}
 }
 
