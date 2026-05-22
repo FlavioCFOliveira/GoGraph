@@ -28,36 +28,51 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 type staticChildOp struct {
-	rows     []exec.Row
-	idx      int
-	initErr  error
-	nextErr  error
-	closeErr error
-	closed   bool
-	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check, mirrors sliceOperator
+	rows      []exec.Row
+	idx       int
+	initErr   error
+	nextErr   error
+	closeErr  error
+	closed    bool
+	ctx       context.Context //nolint:containedctx // stored for per-Next ctx check, mirrors sliceOperator
+	exhausted bool            // set once Next returned (false, _); guards against contract violations
 }
 
 // Init stores ctx for the per-Next cancellation check, resets per-cycle
-// counters (idx, closed) so the stub can be safely reused across multiple
-// Init→Close cycles, and returns initErr. Pattern follows sliceOperator.Init
-// (exec_test.go:35-39).
+// counters (idx, closed, exhausted) so the stub can be safely reused across
+// multiple Init→Close cycles, and returns initErr. Pattern follows
+// sliceOperator.Init (exec_test.go:35-39).
 func (c *staticChildOp) Init(ctx context.Context) error {
 	c.ctx = ctx
 	c.idx = 0
 	c.closed = false
+	c.exhausted = false
 	return c.initErr
 }
 
 // Next honours the Operator contract: it checks ctx.Done() at the top of every
 // call before any other work, mirroring sliceOperator.Next (exec_test.go:42).
+//
+// After Next returns (false, _) for any reason — error, end-of-stream, or
+// cancellation — any subsequent call panics. The Operator contract at
+// operator.go:32-33 states "After returning (false, _), Next must not be
+// called again"; a strict stub surfaces violations immediately instead of
+// silently re-firing errors or end-of-stream markers, which would mask bugs
+// in any future operator that retries Next.
 func (c *staticChildOp) Next(out *exec.Row) (bool, error) {
+	if c.exhausted {
+		panic("staticChildOp: Next called after (false, _) — Operator contract violation")
+	}
 	if err := c.ctx.Err(); err != nil {
+		c.exhausted = true
 		return false, err
 	}
 	if c.nextErr != nil {
+		c.exhausted = true
 		return false, c.nextErr
 	}
 	if c.idx >= len(c.rows) {
+		c.exhausted = true
 		return false, nil
 	}
 	*out = c.rows[c.idx]
@@ -366,6 +381,39 @@ func TestUnwind_CloseClosesChildEvenWithoutNext(t *testing.T) {
 	}
 	if !child.closed {
 		t.Error("child.Close was not called by Unwind.Close")
+	}
+}
+
+// TestStaticChildOp_PanicAfterEndOfStream verifies that the strict stub
+// panics when Next is called after a previous Next returned (false, _),
+// surfacing any Operator contract violation immediately rather than letting
+// the caller observe silent re-emission of EOS or an error.
+func TestStaticChildOp_PanicAfterEndOfStream(t *testing.T) {
+	cases := []struct {
+		name  string
+		child *staticChildOp
+	}{
+		{"end-of-stream", &staticChildOp{rows: nil}},
+		{"after error", &staticChildOp{nextErr: errors.New("sentinel")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.child.Init(context.Background()); err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			var row exec.Row
+			// First call returns (false, _) and marks the stub exhausted.
+			if ok, _ := tc.child.Next(&row); ok {
+				t.Fatalf("expected first Next to return ok=false")
+			}
+			// Second call must panic.
+			defer func() {
+				if r := recover(); r == nil {
+					t.Error("expected panic on Next after (false, _), got none")
+				}
+			}()
+			_, _ = tc.child.Next(&row)
+		})
 	}
 }
 
