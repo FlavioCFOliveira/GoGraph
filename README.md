@@ -233,6 +233,13 @@ for _, n := range e.Match().Vertex(
 }
 ```
 
+## Security
+
+Vulnerability reports follow the process documented in
+[SECURITY.md](SECURITY.md). Use GitHub Security Advisories or the
+private email listed there — please do not open a public issue for a
+suspected vulnerability.
+
 ## License
 
 GoGraph is distributed under the [MIT License](LICENSE).
