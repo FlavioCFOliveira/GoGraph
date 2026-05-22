@@ -13,20 +13,50 @@ Before tagging a new release:
    make ci
    ```
 
-2. CHANGELOG.md has a new `## [vX.Y.Z] — YYYY-MM-DD` entry summarising
+2. Dependency integrity holds:
+
+   ```bash
+   go mod tidy
+   go mod download
+   go mod verify
+   ```
+
+   The tree must be clean afterwards (no unexpected `go.mod` /
+   `go.sum` delta). The dependency policy in
+   [CONTRIBUTING.md](../CONTRIBUTING.md#dependency-policy) governs
+   how upgrades are landed between releases.
+
+3. CHANGELOG.md has a new `## [vX.Y.Z] — YYYY-MM-DD` entry summarising
    the work landed since the previous tag. Follow the Keep-a-Changelog
    format: Added / Changed / Fixed / Removed / Performance / Security.
 
-3. Release notes — long-form narrative for the
+4. Release notes — long-form narrative for the
    `release-notes/vX.Y.Z.md` file — are drafted.
 
-4. The `.goreleaser.yaml` config is rendered cleanly:
+5. The `.goreleaser.yaml` config is rendered cleanly:
 
    ```bash
    make release-check
    ```
 
    This runs goreleaser in snapshot mode without publishing.
+
+## Dependency-update workflow between releases
+
+Between tagged releases, dependency upgrades follow the steps in
+[CONTRIBUTING.md](../CONTRIBUTING.md#dependency-policy). A
+release-blocking upgrade (CVE in a pinned dependency, breaking change
+in the standard library at the new Go toolchain) follows the same
+workflow with the additional discipline of:
+
+1. Landing the dependency bump as its own commit, separate from the
+   release prep commit, so the diff is bisectable.
+2. Re-running `make ci`, `make soak-smoke`, and the headline
+   benchmarks (`./scripts/run_headline_bench.sh`) after the bump to
+   confirm no behavioural or performance regression.
+3. Citing the upstream advisory or changelog entry in the
+   CHANGELOG.md entry for the next release under either `Security`
+   (for CVEs) or `Changed` (for behavioural deltas).
 
 ## Tag and push
 

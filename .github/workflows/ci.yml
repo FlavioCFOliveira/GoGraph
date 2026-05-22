@@ -33,10 +33,14 @@ jobs:
         run: |
           go mod tidy
           if [[ -n "$(git status --porcelain go.mod go.sum 2>/dev/null)" ]]; then
-            echo "::error::go.mod / go.sum drift; run 'make tidy' locally"
+            echo "::error::go.mod / go.sum drift; run 'make tidy' locally and commit the result, or document the intended dependency change in the PR description"
             git --no-pager diff -- go.mod go.sum
             exit 1
           fi
+      - name: Module integrity (download + verify)
+        run: |
+          go mod download
+          go mod verify
       - name: Build
         run: go build ./...
       - name: Vet

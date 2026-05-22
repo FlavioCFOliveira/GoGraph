@@ -37,3 +37,52 @@ Every change must pass `make ci`:
 
 Benchmarks must be run for hot-path changes; the per-package
 README or task summary should record the measured numbers.
+
+## Dependency policy
+
+GoGraph treats every change to `go.mod` or `go.sum` as a deliberate
+decision. The policy below applies to both direct and indirect
+dependencies:
+
+1. **Exact pinning.** Versions recorded in `go.mod` are the exact
+   minimum versions the build must use. Go modules already pin
+   minimum versions by default; this policy adds the discipline that
+   bumping a version is a discrete, reviewable change rather than an
+   incidental side-effect of `go get -u ./...`.
+
+2. **No incidental drift.** The `Tidy check` step in
+   `.github/workflows/ci.yml` runs `go mod tidy` on every PR and
+   fails when `go.mod` or `go.sum` is not already idempotent. Anyone
+   adding, removing or upgrading a dependency must commit the
+   resulting tidy delta together with their code change so reviewers
+   see the dependency move alongside the code that needs it.
+
+3. **Integrity check.** The same workflow runs `go mod download` and
+   `go mod verify` after the tidy check. Verification fails if any
+   downloaded module's content does not match its checksum in
+   `go.sum`, catching tampered proxies, mid-flight corruption, and
+   any forged `go.sum` entries.
+
+4. **Periodic CVE scan.** `govulncheck ./...` runs daily (cron
+   `13 4 * * *`) and on every PR. A new CVE against a pinned version
+   surfaces as a CI failure, prompting an explicit bump.
+
+5. **Upgrade workflow.** To upgrade a dependency:
+
+   ```bash
+   go get -u <module>@<version>     # bump just that module
+   go mod tidy                      # propagate to indirect graph
+   go mod verify                    # confirm checksums
+   make ci                          # rerun the full pipeline locally
+   ```
+
+   The PR description must cite the upstream changelog or release
+   notes covering the new version (so reviewers can see what changed
+   between the old and the new pin).
+
+6. **Indirect dependencies.** Indirect entries in `go.mod` are
+   managed by `go mod tidy`; do not edit them by hand. If an
+   indirect dependency needs a specific version (for example, to
+   pick up a security fix that has not yet been required by a
+   direct dependency), add the explicit `require` block with a
+   `// indirect` comment and document the reason in the PR.
