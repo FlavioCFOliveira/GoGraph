@@ -330,6 +330,70 @@ func TestUnwind_ChildInitError(t *testing.T) {
 	}
 }
 
+// TestUnwind_CloseError verifies that a Close-only error from the child
+// (no Next or listFn errors) is wrapped by Drain (driver.go:61-63) into the
+// "exec: operator close: %w" envelope and is recoverable via errors.Is.
+func TestUnwind_CloseError(t *testing.T) {
+	wantErr := errors.New("synthetic close failure")
+	child := &staticChildOp{
+		rows:     []exec.Row{{expr.StringValue("ctx")}},
+		closeErr: wantErr,
+	}
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+		return litList(expr.IntegerValue(1)), nil
+	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
+
+	rows, drainErr := exec.Drain(context.Background(), op)
+	if drainErr == nil {
+		t.Fatal("expected close error from Drain, got nil")
+	}
+	if !errors.Is(drainErr, wantErr) {
+		t.Errorf("Drain error chain does not contain closeErr: %v", drainErr)
+	}
+	// Drain emits the happy-path row before failing on Close.
+	if len(rows) != 1 {
+		t.Errorf("got %d rows, want 1", len(rows))
+	}
+	if !child.closed {
+		t.Error("child.Close was not called")
+	}
+}
+
+// TestUnwind_NextErrorPlusCloseError verifies Drain's dual-error wrap at
+// driver.go:46 ("exec: operator next: %w; close: %w") preserves BOTH
+// sentinels in the error chain.
+func TestUnwind_NextErrorPlusCloseError(t *testing.T) {
+	nextErr := errors.New("synthetic next failure")
+	closeErr := errors.New("synthetic close failure")
+	child := &staticChildOp{
+		nextErr:  nextErr,
+		closeErr: closeErr,
+	}
+	op, err := exec.NewUnwind(child, func(_ exec.Row) (expr.ListValue, error) {
+		return litList(expr.IntegerValue(1)), nil
+	})
+	if err != nil {
+		t.Fatalf("NewUnwind: %v", err)
+	}
+
+	_, drainErr := exec.Drain(context.Background(), op)
+	if drainErr == nil {
+		t.Fatal("expected combined error from Drain, got nil")
+	}
+	if !errors.Is(drainErr, nextErr) {
+		t.Errorf("Drain error chain missing nextErr: %v", drainErr)
+	}
+	if !errors.Is(drainErr, closeErr) {
+		t.Errorf("Drain error chain missing closeErr: %v", drainErr)
+	}
+	if !child.closed {
+		t.Error("child.Close was not called after Next error")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Cancellation — context check at the top of Next
 // ─────────────────────────────────────────────────────────────────────────────
