@@ -14,6 +14,12 @@ before:
   hooks:
     - go mod tidy
     - go vet ./...
+    # Software Bill of Materials (CycloneDX JSON, schema 1.5).
+    # Emit one document for the whole module — every archive ships
+    # the same Go module graph regardless of OS/arch, so a per-archive
+    # SBOM would duplicate the same payload. Consumers verify
+    # dependencies via this single file plus checksums.txt.
+    - cyclonedx-gomod mod -licenses -json -output gograph.cdx.json
 
 builds:
   - id: soak
@@ -37,11 +43,26 @@ archives:
       - README.md
       - CHANGELOG.md
       - LICENSE
+      - SECURITY.md
       - docs/**/*
+      - gograph.cdx.json
 
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
+
+# Software Bill of Materials (CycloneDX JSON, schema 1.5).
+#
+# The SBOM is generated as a `before:` hook (see top of this file)
+# at the repo root via cyclonedx-gomod, then embedded into each
+# archive via the `archives.files:` list (gograph.cdx.json).
+# Generating once and embedding many times avoids the working-
+# directory complications of running cyclonedx-gomod from
+# goreleaser's per-archive workdir, and is correct because the Go
+# module graph does not vary by OS/arch.
+#
+# cyclonedx-gomod must be installed before goreleaser is invoked;
+# see docs/release.md and .github/workflows/release.yml.
 
 snapshot:
   version_template: "{{ .Tag }}-next"

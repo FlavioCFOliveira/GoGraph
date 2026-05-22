@@ -37,6 +37,14 @@ jobs:
         run: go build ./...
       - name: Test (with race detector)
         run: go test -race -count=1 ./...
+      - name: Install cyclonedx-gomod (SBOM generator)
+        run: |
+          # Pinned via the @latest indirection plus the lockfile in
+          # tools/sbom (when committed). cyclonedx-gomod is invoked
+          # by goreleaser through the sboms: stanza in
+          # .goreleaser.yaml.
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          cyclonedx-gomod version
       - name: Run goreleaser
         uses: goreleaser/goreleaser-action@v6
         with:
