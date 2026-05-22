@@ -153,7 +153,9 @@ func TestBuildPlanWithMutator_WriteOnlyRoot(t *testing.T) {
 	if err := op.Init(ctx); err != nil {
 		t.Fatalf("op.Init: %v", err)
 	}
-	defer op.Close()
+	if err := op.Close(); err != nil {
+		t.Fatalf("op.Close: %v", err)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

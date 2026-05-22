@@ -51,14 +51,14 @@ func findShardKeys(t *testing.T, want int) []int {
 
 func TestAdjList_MaxShardCapacity_RejectsBeyondCap(t *testing.T) {
 	t.Parallel()
-	const cap = 4
-	keys := findShardKeys(t, cap+1)
+	const capLimit = 4
+	keys := findShardKeys(t, capLimit+1)
 
-	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: cap})
+	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: capLimit})
 
 	// First `cap` distinct nodes with edges out of them must succeed:
 	// each one allocates a slot in shard 0.
-	for i := 0; i < cap; i++ {
+	for i := 0; i < capLimit; i++ {
 		if err := a.AddEdge(keys[i], keys[i], struct{}{}); err != nil {
 			t.Fatalf("AddEdge[%d] returned err on cap-bounded path: %v", i, err)
 		}
@@ -67,7 +67,7 @@ func TestAdjList_MaxShardCapacity_RejectsBeyondCap(t *testing.T) {
 	// The (cap+1)-th distinct source must trip the cap. Its intra-shard
 	// index is exactly cap, which equals the cap limit, so growth past
 	// it must be rejected.
-	err := a.AddEdge(keys[cap], keys[cap], struct{}{})
+	err := a.AddEdge(keys[capLimit], keys[capLimit], struct{}{})
 	if err == nil {
 		t.Fatalf("AddEdge past MaxShardCapacity returned nil; want ErrShardFull")
 	}
@@ -76,8 +76,8 @@ func TestAdjList_MaxShardCapacity_RejectsBeyondCap(t *testing.T) {
 	}
 
 	// The failed call must not have mutated the size counter.
-	if got := a.Size(); got != uint64(cap) {
-		t.Fatalf("Size after rejected AddEdge = %d; want %d", got, cap)
+	if got := a.Size(); got != uint64(capLimit) {
+		t.Fatalf("Size after rejected AddEdge = %d; want %d", got, capLimit)
 	}
 }
 
@@ -108,18 +108,18 @@ func TestAdjList_MaxShardCapacity_DefaultsAreUnbounded(t *testing.T) {
 
 func TestAdjList_MaxShardCapacity_OtherShardsUnaffected(t *testing.T) {
 	t.Parallel()
-	const cap = 4
-	saturating := findShardKeys(t, cap+1)
+	const capLimit = 4
+	saturating := findShardKeys(t, capLimit+1)
 
-	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: cap})
+	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: capLimit})
 
 	// Saturate shard 0.
-	for i := 0; i < cap; i++ {
+	for i := 0; i < capLimit; i++ {
 		if err := a.AddEdge(saturating[i], saturating[i], struct{}{}); err != nil {
 			t.Fatalf("saturating shard 0 at i=%d: %v", i, err)
 		}
 	}
-	if err := a.AddEdge(saturating[cap], saturating[cap], struct{}{}); !errors.Is(err, ErrShardFull) {
+	if err := a.AddEdge(saturating[capLimit], saturating[capLimit], struct{}{}); !errors.Is(err, ErrShardFull) {
 		t.Fatalf("expected ErrShardFull on shard 0; got %v", err)
 	}
 

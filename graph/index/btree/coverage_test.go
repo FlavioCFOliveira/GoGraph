@@ -44,13 +44,13 @@ func TestDeserialize_ShortPayload(t *testing.T) {
 func TestDeserialize_BadMagic(t *testing.T) {
 	t.Parallel()
 	var body bytes.Buffer
-	binary.Write(&body, binary.LittleEndian, uint32(0xDEADBEEF)) // wrong magic
-	binary.Write(&body, binary.LittleEndian, btreeFormatVersion)
-	binary.Write(&body, binary.LittleEndian, uint64(0)) // entryCount
+	_ = binary.Write(&body, binary.LittleEndian, uint32(0xDEADBEEF)) // wrong magic
+	_ = binary.Write(&body, binary.LittleEndian, btreeFormatVersion)
+	_ = binary.Write(&body, binary.LittleEndian, uint64(0)) // entryCount
 	checksum := crc32.Checksum(body.Bytes(), castagnoli)
 	var payload bytes.Buffer
 	payload.Write(body.Bytes())
-	binary.Write(&payload, binary.LittleEndian, checksum)
+	_ = binary.Write(&payload, binary.LittleEndian, checksum)
 	idx := New[string]()
 	err := idx.Deserialize(bytes.NewReader(payload.Bytes()))
 	if !errors.Is(err, index.ErrIndexCorrupted) {
@@ -62,13 +62,13 @@ func TestDeserialize_BadMagic(t *testing.T) {
 func TestDeserialize_BadVersion(t *testing.T) {
 	t.Parallel()
 	var body bytes.Buffer
-	binary.Write(&body, binary.LittleEndian, btreeMagic)
-	binary.Write(&body, binary.LittleEndian, uint32(999)) // wrong version
-	binary.Write(&body, binary.LittleEndian, uint64(0))   // entryCount
+	_ = binary.Write(&body, binary.LittleEndian, btreeMagic)
+	_ = binary.Write(&body, binary.LittleEndian, uint32(999)) // wrong version
+	_ = binary.Write(&body, binary.LittleEndian, uint64(0))   // entryCount
 	checksum := crc32.Checksum(body.Bytes(), castagnoli)
 	var payload bytes.Buffer
 	payload.Write(body.Bytes())
-	binary.Write(&payload, binary.LittleEndian, checksum)
+	_ = binary.Write(&payload, binary.LittleEndian, checksum)
 	idx := New[string]()
 	err := idx.Deserialize(bytes.NewReader(payload.Bytes()))
 	if !errors.Is(err, index.ErrIndexCorrupted) {

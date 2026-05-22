@@ -17,8 +17,17 @@ linters:
     - unused
     - gocritic
     - gocyclo
+    - prealloc
     - revive
   exclusions:
+    # cypher/parser/gen is the ANTLR-generated Go output (CypherLexer +
+    # CypherParser). The generator emits idiomatic-Java style (unused
+    # SA4006 assignments, deep switches, repeated identifiers shadowed
+    # at scope, etc.) that the project's linters would otherwise
+    # flag noisily. Re-generating the file via `make generate-cypher-parser`
+    # would reset any hand-edit, so excluding the directory wholesale is
+    # the canonical reconciliation. Regeneration policy is documented
+    # in the install-antlr / generate-cypher-parser Makefile targets.
     paths:
       - cypher/parser/gen
     rules:
@@ -110,6 +119,16 @@ linters:
         - name: redefines-builtin-id
     gosec:
       excludes:
+        # G115: integer overflow conversion. Excluded project-wide
+        # because the canonical use cases in graphs and persistence
+        # involve converting between graph.NodeID (uint64) and the
+        # smaller types ANTLR/Roaring/CRC32C require — e.g.,
+        # uint32(nodeID) into a Roaring container, int(rune) for
+        # parser tokens, int32(slotIdx) into the union-find slice
+        # backing. Every site has a documented upper bound (NodeID
+        # cap, parser token alphabet, slice length), so the runtime
+        # truncation G115 warns about cannot occur. Re-enable if a
+        # new code site lacks the upper-bound invariant.
         - G115
     gocritic:
       enabled-tags:

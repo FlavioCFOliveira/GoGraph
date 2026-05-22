@@ -36,15 +36,15 @@ func writeChunkedMessage(out *bytes.Buffer, msg []byte) {
 
 func TestChunkedReader_OverLimit_ReturnsTypedError(t *testing.T) {
 	t.Parallel()
-	const cap = 1024
-	payload := make([]byte, cap+1) // one byte past the cap
+	const capacity = 1024
+	payload := make([]byte, capacity+1) // one byte past the cap
 	for i := range payload {
 		payload[i] = byte(i % 251)
 	}
 	var buf bytes.Buffer
 	writeChunkedMessage(&buf, payload)
 
-	cr := proto.NewChunkedReaderWithLimit(&buf, cap)
+	cr := proto.NewChunkedReaderWithLimit(&buf, capacity)
 	got, err := cr.ReadMessage()
 	if err == nil {
 		t.Fatalf("ReadMessage(over-cap) returned nil; want ErrMessageTooLarge")
@@ -59,15 +59,15 @@ func TestChunkedReader_OverLimit_ReturnsTypedError(t *testing.T) {
 
 func TestChunkedReader_ExactlyAtLimit_Succeeds(t *testing.T) {
 	t.Parallel()
-	const cap = 1024
-	payload := make([]byte, cap) // exactly at the cap
+	const capacity = 1024
+	payload := make([]byte, capacity) // exactly at the cap
 	for i := range payload {
 		payload[i] = byte(i % 251)
 	}
 	var buf bytes.Buffer
 	writeChunkedMessage(&buf, payload)
 
-	cr := proto.NewChunkedReaderWithLimit(&buf, cap)
+	cr := proto.NewChunkedReaderWithLimit(&buf, capacity)
 	got, err := cr.ReadMessage()
 	if err != nil {
 		t.Fatalf("ReadMessage(exactly at cap): %v", err)
@@ -136,7 +136,7 @@ func TestChunkedReader_OverLimit_BoundedAllocation(t *testing.T) {
 	// closure: an 8 MiB message that the reader must reject under
 	// a 4 KiB cap.
 	const (
-		cap        = 4 << 10 // 4 KiB cap
+		capacity   = 4 << 10 // 4 KiB cap
 		claim      = 8 << 20 // 8 MiB claimed payload
 		allocBound = 50.0    // allowed allocs per call — generous to absorb bufio + error wrapping
 	)
@@ -146,7 +146,7 @@ func TestChunkedReader_OverLimit_BoundedAllocation(t *testing.T) {
 	wireBytes := wire.Bytes()
 
 	got := testing.AllocsPerRun(20, func() {
-		cr := proto.NewChunkedReaderWithLimit(bytes.NewReader(wireBytes), cap)
+		cr := proto.NewChunkedReaderWithLimit(bytes.NewReader(wireBytes), capacity)
 		_, err := cr.ReadMessage()
 		if !errors.Is(err, proto.ErrMessageTooLarge) {
 			t.Fatalf("err = %v; want ErrMessageTooLarge", err)
@@ -155,7 +155,7 @@ func TestChunkedReader_OverLimit_BoundedAllocation(t *testing.T) {
 	if got > allocBound {
 		t.Fatalf("per-call allocations = %.1f; want <= %.1f (cap=%d B, claimed=%d B). "+
 			"A regression here means the reader is allocating the prospective oversized "+
-			"msg buffer before the cap check.", got, allocBound, cap, claim)
+			"msg buffer before the cap check.", got, allocBound, capacity, claim)
 	}
 }
 
@@ -167,14 +167,14 @@ func TestChunkedReader_OverLimit_BoundedAllocation(t *testing.T) {
 // caller's correct response is to close the connection.
 func TestChunkedReader_OverLimit_LegalMessageAfterDropsConnection(t *testing.T) {
 	t.Parallel()
-	const cap = 256
+	const capacity = 256
 
 	// Write: oversized message, then a small legal message after it.
 	var buf bytes.Buffer
-	writeChunkedMessage(&buf, make([]byte, cap+1))
+	writeChunkedMessage(&buf, make([]byte, capacity+1))
 	writeChunkedMessage(&buf, []byte("ok"))
 
-	cr := proto.NewChunkedReaderWithLimit(&buf, cap)
+	cr := proto.NewChunkedReaderWithLimit(&buf, capacity)
 	if _, err := cr.ReadMessage(); !errors.Is(err, proto.ErrMessageTooLarge) {
 		t.Fatalf("first read: err=%v; want ErrMessageTooLarge", err)
 	}

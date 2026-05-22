@@ -46,6 +46,11 @@ docs/_site/
 [0-9][0-9]_*
 !examples/[0-9][0-9]_*/
 
-# Soak-harness artefacts and stray go-run binary
+# Soak-harness artefacts and stray go-run binary.
+# The /-anchored entries catch the top-level directory; the un-anchored
+# pattern catches the same name in subdirectories (e.g. when 'go test'
+# is invoked from bench/soak/, the artefacts land in
+# bench/soak/soak-artefacts/).
 /soak
 /soak-artefacts/
+soak-artefacts/
