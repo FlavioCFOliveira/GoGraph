@@ -102,6 +102,12 @@ Before writing a single line of code for any non-trivial component, conduct a **
 - **Concurrency** — prefer channels for coordination between goroutines; use `sync.RWMutex` for shared graph state; document every exported type's concurrency contract.
 - **Package naming** — single-word, lowercase, no underscores; package names must not stutter with their exported identifiers (`graph.Graph` is acceptable; `graph.GraphGraph` is not).
 - **Tests** — table-driven tests with `t.Run`; property-based tests with `testing/quick` or `pgregory.net/rapid` for algorithms where invariants can be expressed generically.
+- **Test layers** — every test belongs to one of three layers:
+  - `short` — the default; runs on `go test ./...` with no tags. Every PR runs this layer; each package must stay under 60 s.
+  - `soak` — minutes-long workloads. Activated by the `soak` build tag or by setting `SOAK_FULL=1`. The pre-existing `stress` and `soakfull` build tags are considered part of the soak family.
+  - `nightly` — hours-long workloads. Activated by the `nightly` build tag or by setting `GOGRAPH_NIGHTLY=1`; implies soak.
+
+  Prefer compile-time gating with a `//go:build soak` or `//go:build nightly` header on a dedicated file; when that is impractical, call `gograph/internal/testlayers.RequireSoak(t)` or `RequireNightly(t)` at the top of the test body. The full specification, including sample invocations and the helpers' API, lives in [`docs/test-layers.md`](docs/test-layers.md).
 
 ---
 
@@ -182,8 +188,14 @@ go mod init github.com/xumiga/gograph
 # Build
 go build ./...
 
-# Test all packages
+# Test all packages (short layer only — PR-CI default)
 go test ./...
+
+# Test all packages — short + soak
+go test -tags=soak ./...
+
+# Test all packages — short + soak + nightly
+go test -tags=nightly ./...
 
 # Test a single package
 go test ./graph/...
