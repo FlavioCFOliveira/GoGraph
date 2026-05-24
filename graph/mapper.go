@@ -47,6 +47,20 @@ const (
 	mapperShardMask  = mapperShardCount - 1
 )
 
+// MapperShardCount returns the number of independently locked shards
+// every [Mapper] uses internally. Test and tooling code that needs to
+// reason about shard placement at runtime — e.g. adversarial key
+// generators that collapse many distinct keys into a single shard —
+// should call this function instead of hardcoding the constant so the
+// caller is automatically robust to future configuration changes.
+func MapperShardCount() int { return mapperShardCount }
+
+// MapperShardOf returns the shard index encoded in id. It is the
+// public counterpart of [unpackNodeID] restricted to the shard
+// component and exists so external tooling can validate placement
+// without depending on the internal [packNodeID] layout.
+func MapperShardOf(id NodeID) uint64 { return uint64(id) & mapperShardMask }
+
 // Mapper interns user-facing identifiers of type N as compact [NodeID]
 // values. Interning is stable for the lifetime of the Mapper: a value
 // always resolves to the same NodeID and a NodeID always resolves back
