@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\"><graph edgedefault=\"directed\"/></graphml>")

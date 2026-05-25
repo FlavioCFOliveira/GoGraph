@@ -1,33 +1,48 @@
 // Package jsonl reads and writes graphs in newline-delimited JSON
 // (NDJSON / JSON Lines) format.
 //
-// Records have one of two shapes:
+// Records have one of three shapes:
 //
 //	{"type": "node", "id": "alice"}
 //	{"type": "edge", "src": "alice", "dst": "bob", "weight": 7}
+//	{"type": "property", "id": "alice", "key": "age", "value": "30", "kind": "int64"}
 //
 // The 'weight' field is optional and defaults to 0.
+// Property records are produced and consumed by [WriteWithProps] / [ReadWithProps].
 package jsonl
 
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"time"
 
 	"gograph/graph/adjlist"
+	"gograph/graph/lpg"
 	"gograph/internal/metrics"
 )
+
+// ErrUnknownType is returned by [ReadInto], [ReadIntoCtx],
+// [ReadWithProps], and [ReadWithPropsCtx] when a record's "type"
+// field contains a value that is not one of the recognised literals
+// ("node", "edge", "property").
+var ErrUnknownType = errors.New("jsonl: unknown record type")
 
 // Record is the wire shape of a JSON-Lines event.
 type Record struct {
 	Type   string `json:"type"`
-	ID     string `json:"id,omitempty"`
-	Src    string `json:"src,omitempty"`
-	Dst    string `json:"dst,omitempty"`
-	Weight int64  `json:"weight,omitempty"`
+	ID     string `json:"id,omitempty"`     // node key — used by "node" and "property" records
+	Src    string `json:"src,omitempty"`    // edge source
+	Dst    string `json:"dst,omitempty"`    // edge destination
+	Weight int64  `json:"weight,omitempty"` // edge weight (defaults to 0)
+	Key    string `json:"key,omitempty"`    // property key — used by "property" records
+	Value  string `json:"value,omitempty"`  // property value serialised as a string
+	Kind   string `json:"kind,omitempty"`   // property kind: "string","int64","float64","bool","time","bytes"
 }
 
 // ReadInto consumes a JSON Lines stream from r and builds an
@@ -91,7 +106,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 			}
 		default:
 			metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
-			return nil, rows, fmt.Errorf("jsonl row %d: unknown type %q", rows, rec.Type)
+			return nil, rows, fmt.Errorf("jsonl row %d: %w %q", rows, ErrUnknownType, rec.Type)
 		}
 	}
 	if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
@@ -99,4 +114,130 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 		return nil, rows, err
 	}
 	return a, rows, nil
+}
+
+// ReadWithProps consumes a JSON Lines stream from r and builds a
+// labelled property graph. It handles "node", "edge", and "property"
+// record types. Property records must appear after the "node" record
+// for the referenced ID.
+func ReadWithProps(r io.Reader, cfg adjlist.Config) (*lpg.Graph[string, int64], int, error) {
+	defer metrics.Time("graph.io.jsonl.ReadWithProps")()
+	g, n, err := ReadWithPropsCtx(context.Background(), r, cfg)
+	if err != nil {
+		metrics.IncCounter("graph.io.jsonl.ReadWithProps.errors", 1)
+	}
+	return g, n, err
+}
+
+// ReadWithPropsCtx is the context-aware variant of [ReadWithProps].
+// ctx.Err() is checked every 4096 rows.
+//
+//nolint:gocyclo // JSONL decode + node/edge/property dispatch + kind decode + ctx tick
+func ReadWithPropsCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*lpg.Graph[string, int64], int, error) {
+	defer metrics.Time("graph.io.jsonl.ReadWithPropsCtx")()
+	g := lpg.New[string, int64](cfg)
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	rows := 0
+	for sc.Scan() {
+		if rows&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return g, rows, err
+			}
+		}
+		rows++
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec Record
+		if err := json.Unmarshal(line, &rec); err != nil {
+			metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+			return nil, rows, fmt.Errorf("jsonl row %d: %w", rows, err)
+		}
+		switch rec.Type {
+		case "node":
+			if rec.ID == "" {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: node missing id", rows)
+			}
+			if err := g.AddNode(rec.ID); err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: AddNode: %w", rows, err)
+			}
+		case "edge":
+			if rec.Src == "" || rec.Dst == "" {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: edge missing src/dst", rows)
+			}
+			if err := g.AddEdge(rec.Src, rec.Dst, rec.Weight); err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: AddEdge: %w", rows, err)
+			}
+		case "property":
+			if rec.ID == "" || rec.Key == "" {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: property missing id/key", rows)
+			}
+			pv, err := decodePropertyValue(rec.Kind, rec.Value)
+			if err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: property %q: %w", rows, rec.Key, err)
+			}
+			if err := g.SetNodeProperty(rec.ID, rec.Key, pv); err != nil {
+				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+				return nil, rows, fmt.Errorf("jsonl row %d: SetNodeProperty: %w", rows, err)
+			}
+		default:
+			metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+			return nil, rows, fmt.Errorf("jsonl row %d: %w %q", rows, ErrUnknownType, rec.Type)
+		}
+	}
+	if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
+		metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+		return nil, rows, err
+	}
+	return g, rows, nil
+}
+
+// decodePropertyValue reconstructs a [lpg.PropertyValue] from its
+// wire kind tag and value string. The encoding mirrors [encodePropertyValue].
+func decodePropertyValue(kind, value string) (lpg.PropertyValue, error) {
+	switch kind {
+	case "string":
+		return lpg.StringValue(value), nil
+	case "int64":
+		i, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("int64: %w", err)
+		}
+		return lpg.Int64Value(i), nil
+	case "float64":
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("float64: %w", err)
+		}
+		return lpg.Float64Value(f), nil
+	case "bool":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("bool: %w", err)
+		}
+		return lpg.BoolValue(b), nil
+	case "time":
+		t, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("time: %w", err)
+		}
+		return lpg.TimeValue(t), nil
+	case "bytes":
+		b, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("bytes: %w", err)
+		}
+		return lpg.BytesValue(b), nil
+	default:
+		return lpg.PropertyValue{}, fmt.Errorf("unknown property kind %q", kind)
+	}
 }

@@ -25,9 +25,11 @@ type keyDecl struct {
 	AttrType string `xml:"attr.type,attr"`
 }
 
-// nodeElement mirrors a <node> element.
+// nodeElement mirrors a <node> element. Data carries any <data> children
+// for typed-property support (see [ReadWithPropsCtx]).
 type nodeElement struct {
-	ID string `xml:"id,attr"`
+	ID   string        `xml:"id,attr"`
+	Data []dataElement `xml:"data"`
 }
 
 // dataElement mirrors a <data key="..."> with text content.
@@ -105,10 +107,12 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 		var w int64
 		for _, d := range e.Data {
 			if d.Key == weightKey && weightKey != "" {
-				v, err := strconv.ParseInt(d.Value, 10, 64)
-				if err == nil {
-					w = v
+				v, perr := strconv.ParseInt(d.Value, 10, 64)
+				if perr != nil {
+					metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
+					return a, added, fmt.Errorf("graphml: edge (%q,%q) weight %q: %w", e.Source, e.Target, d.Value, perr)
 				}
+				w = v
 			}
 		}
 		if err := a.AddEdge(e.Source, e.Target, w); err != nil {
