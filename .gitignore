@@ -54,3 +54,7 @@ docs/_site/
 /soak
 /soak-artefacts/
 soak-artefacts/
+
+# Local Claude Code session data and build artifacts
+.claude/
+crashinject-helper
