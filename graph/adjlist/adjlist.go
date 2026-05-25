@@ -103,6 +103,13 @@ type Config struct {
 // past the cap. Callers must propagate the error and stop offering
 // new work to the saturated shard; the AdjList state is unchanged
 // when ErrShardFull is returned.
+//
+// NodeID stability: NodeIDs assigned by the Mapper are monotonically
+// increasing within each shard and are never reused. Removing an edge
+// does not remove the endpoint nodes from the Mapper; their NodeIDs
+// remain valid for the lifetime of the AdjList. Code that caches
+// NodeIDs (e.g., an external CSR snapshot) may rely on them remaining
+// stable as long as the originating AdjList is live.
 type AdjList[N comparable, W any] struct {
 	mapper *graph.Mapper[N]
 	cfg    Config
