@@ -125,6 +125,18 @@ go test -tags=nightly ./... -count=1 -race
 GOGRAPH_NIGHTLY=1 go test ./... -count=1 -race
 ```
 
+## GitHub Actions workflows
+
+| Workflow file | Trigger | Layer | Target |
+|---|---|---|---|
+| `.github/workflows/ci.yml` | every PR + push to main | **short** | `make test-short` |
+| `.github/workflows/soak.yml` | weekly schedule | **soak** | dedicated soak harness |
+| `.github/workflows/nightly.yml` | daily 03:00 UTC | **nightly** | `make test-nightly` |
+
+`nightly.yml` also runs benchmarks with `-cpuprofile` and `-memprofile`
+and uploads the resulting pprof files as artefacts (30-day retention)
+so nightly regressions can be investigated with `go tool pprof`.
+
 ## Relationship to the existing `stress` tag
 
 The `internal/stress/` package is gated by `//go:build stress` and was

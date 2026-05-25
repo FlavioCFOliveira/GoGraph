@@ -1,0 +1,88 @@
+name: Nightly
+
+# Runs the nightly test layer daily at 03:00 UTC. This layer includes
+# the short layer and the soak layer, plus long-running tests guarded
+# by //go:build nightly or testlayers.RequireNightly(t).
+#
+# See docs/test-layers.md for the layer specification and Makefile
+# target reference.
+
+on:
+  schedule:
+    # Daily at 03:00 UTC — offset from the ci.yml daily run (04:13 UTC)
+    # so the two scheduled runs do not compete for runner capacity.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    # Allow manual triggering for on-demand nightly runs.
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    name: nightly layer (race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Module integrity
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (nightly layer + race)
+        # GODEBUG=gctrace=1 surfaces memory growth during long-running
+        # tests so heap leaks are visible in the uploaded logs.
+        run: GODEBUG=gctrace=1 make test-nightly 2>&1 | tee /tmp/nightly-test.log
+        # Continue so the upload step runs even when tests fail.
+        continue-on-error: true
+
+      - name: CPU profile (nightly regression workload)
+        # Run a focused benchmark with CPU profiling to detect hot-path
+        # regressions across nightly builds. The profile is uploaded as
+        # an artefact for offline flamegraph analysis.
+        run: |
+          go test -bench=. -benchmem -count=1 -tags=nightly \
+            -cpuprofile=/tmp/nightly-cpu.prof \
+            -memprofile=/tmp/nightly-mem.prof \
+            ./... > /tmp/nightly-bench.txt 2>&1 || true
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-test-logs-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            /tmp/nightly-test.log
+
+      - name: Upload pprof artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-pprof-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            /tmp/nightly-cpu.prof
+            /tmp/nightly-mem.prof
+            /tmp/nightly-bench.txt
+
+      - name: Fail if tests failed
+        # Re-surface the test failure after uploads have completed.
+        run: |
+          if grep -q "^FAIL" /tmp/nightly-test.log 2>/dev/null; then
+            echo "::error::Nightly test layer reported failures — see nightly-test-logs artefact"
+            exit 1
+          fi
