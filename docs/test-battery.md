@@ -351,4 +351,4 @@ and update the "Last reviewed" footer at the bottom of this file.
 
 ---
 
-*Last reviewed: 2026-05-25 against commit `4fcef1bdc0ff013ce99158d56917908c602e3558`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
+*Last reviewed: 2026-05-25 against commit `1e1d031e2dc34ed706de86fe55f1d8f7651ce628`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
