@@ -26,6 +26,7 @@ DOCS=(
   "docs/persistence.md"
   "docs/cypher.md"
   "docs/bolt.md"
+  "docs/test-battery.md"
 )
 
 MAX_COMMITS_BEHIND="${MAX_COMMITS_BEHIND:-200}"

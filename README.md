@@ -261,6 +261,15 @@ bench/comparison          — cross-library performance comparison vs NetworkX
 
 internal/metrics          — observability API hook (Backend, IncCounter, ObserveLatency, Time)
 internal/stress           — concurrency stress test suite (CI under -race)
+internal/shapegen         — graph shape generators (trivial, classic, random models, adversarial)
+internal/invariants       — graph invariant checkers (connected, DAG, bipartite, distance bound)
+internal/testfs           — FS fault-injection wrapper (ENOSPC, partial write, fsync delay)
+internal/crashinject      — subprocess crash-injection harness (SIGKILL breakpoints)
+internal/subproc          — cross-process test helper (re-exec, mode dispatch)
+internal/goldens          — golden-file assertion helper with -update and atomic write
+
+See [docs/test-battery.md](docs/test-battery.md) for the production-readiness
+test battery guide and the add-new-shape recipe.
 
 examples/                 — 23 runnable example programs (see "Examples" section)
 ```

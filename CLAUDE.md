@@ -109,6 +109,8 @@ Before writing a single line of code for any non-trivial component, conduct a **
 
   Prefer compile-time gating with a `//go:build soak` or `//go:build nightly` header on a dedicated file; when that is impractical, call `gograph/internal/testlayers.RequireSoak(t)` or `RequireNightly(t)` at the top of the test body. The full specification, including sample invocations and the helpers' API, lives in [`docs/test-layers.md`](docs/test-layers.md).
 
+  The production-readiness test battery — shape generators, invariant checkers, fault-injection packages, dataset loaders, and the add-new-shape recipe — is documented in [`docs/test-battery.md`](docs/test-battery.md).
+
 ---
 
 ## Reliability and Concurrency Mandates
