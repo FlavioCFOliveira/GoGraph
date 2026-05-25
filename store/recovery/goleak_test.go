@@ -4,14 +4,16 @@ import (
 	"testing"
 
 	"go.uber.org/goleak"
+
+	"gograph/internal/subproc"
 )
 
-// TestMain verifies no goroutine leaks at the end of the test run.
-// Per CLAUDE.md: every package that spawns goroutines must integrate
-// go.uber.org/goleak. The recovery package itself does not spawn
-// goroutines, but its dependencies (wal, snapshot, txn) might; this
-// guard catches any future regression where a Close path leaves a
-// goroutine running across the recovery boundary.
+// TestMain runs subproc.Dispatch first so that child processes spawned
+// by cross-process tests in this package dispatch to their registered
+// handler and exit before the test framework initialises. When running
+// as the parent, Dispatch is a no-op and the test suite proceeds
+// normally. goleak.VerifyTestMain follows to catch goroutine leaks.
 func TestMain(m *testing.M) {
+	subproc.Dispatch()
 	goleak.VerifyTestMain(m)
 }
