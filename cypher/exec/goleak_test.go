@@ -4,9 +4,18 @@ import (
 	"testing"
 
 	"go.uber.org/goleak"
+
+	"gograph/internal/subproc"
 )
 
-// TestMain verifies that no goroutine leaks at the end of the test run.
+// TestMain runs subproc.Dispatch first so that child processes spawned by
+// cross-process tests in this package dispatch to their registered handler and
+// exit before the test framework initialises. When running as the parent,
+// Dispatch is a no-op and the test suite proceeds normally.
+//
+// goleak.VerifyTestMain follows to catch goroutine leaks in any test that
+// spawns goroutines inside cypher/exec.
+//
 // Per CLAUDE.md: every package that spawns goroutines must integrate
 // go.uber.org/goleak.
 //
@@ -23,6 +32,7 @@ import (
 // the ignore list only after confirming the goroutine is genuinely
 // outside our control.
 func TestMain(m *testing.M) {
+	subproc.Dispatch()
 	goleak.VerifyTestMain(m,
 		// The test driver itself occasionally leaves a tracker goroutine
 		// blocked on a select. It is owned by stdlib/testing and is not
