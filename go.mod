@@ -9,6 +9,7 @@ require (
 	github.com/antlr4-go/antlr/v4 v4.13.1
 	github.com/cucumber/godog v0.14.1
 	github.com/edsrzf/mmap-go v1.2.0
+	github.com/klauspost/compress v1.18.6
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.44.0
 	pgregory.net/rapid v1.3.0
