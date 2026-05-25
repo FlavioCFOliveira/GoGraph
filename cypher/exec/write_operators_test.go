@@ -181,8 +181,8 @@ func (s *stubMutator) SetEdgeLabel(src, dst, label string) {
 	s.edgeLabels[k][label] = true
 }
 
-func (s *stubMutator) SetEdgeProperty(_, _, _ string, _ lpg.PropertyValue) {}
-func (s *stubMutator) DelEdgeProperty(_, _, _ string)                      {}
+func (s *stubMutator) SetEdgeProperty(_, _, _ string, _ lpg.PropertyValue) error { return nil }
+func (s *stubMutator) DelEdgeProperty(_, _, _ string)                            {}
 
 func (s *stubMutator) OutNeighbours(n string) []string {
 	s.mu.Lock()

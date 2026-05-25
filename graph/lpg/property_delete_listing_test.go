@@ -172,7 +172,9 @@ func testDelEdgeProperty(t *testing.T, shape shapegen.Shape[int, int64]) {
 
 	// Set property on every edge.
 	for i, e := range edges {
-		g.SetEdgeProperty(e.src, e.dst, propKey, lpg.Int64Value(int64(i)))
+		if err := g.SetEdgeProperty(e.src, e.dst, propKey, lpg.Int64Value(int64(i))); err != nil {
+			t.Fatalf("SetEdgeProperty: %v", err)
+		}
 	}
 
 	// Delete at even indices.

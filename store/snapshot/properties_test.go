@@ -70,12 +70,21 @@ func TestProperties_RoundtripAllKinds(t *testing.T) {
 
 	// Edge-side property fixture: one of each kind on a different edge
 	// to confirm src/dst tagging is correct.
-	g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026"))
-	g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7))
-	g.SetEdgeProperty("alice", "bob", "score", lpg.Float64Value(-0.5))
-	g.SetEdgeProperty("alice", "bob", "active", lpg.BoolValue(true))
-	g.SetEdgeProperty("alice", "bob", "first_seen", lpg.TimeValue(tStamp))
-	g.SetEdgeProperty("alice", "bob", "raw", lpg.BytesValue([]byte("\x00\x01\x02")))
+	for _, ep := range []struct {
+		key string
+		val lpg.PropertyValue
+	}{
+		{"since", lpg.StringValue("2026")},
+		{"weight", lpg.Int64Value(7)},
+		{"score", lpg.Float64Value(-0.5)},
+		{"active", lpg.BoolValue(true)},
+		{"first_seen", lpg.TimeValue(tStamp)},
+		{"raw", lpg.BytesValue([]byte("\x00\x01\x02"))},
+	} {
+		if err := g.SetEdgeProperty("alice", "bob", ep.key, ep.val); err != nil {
+			t.Fatalf("SetEdgeProperty %q: %v", ep.key, err)
+		}
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -148,7 +157,9 @@ func TestProperties_ManifestCurrent_WithBothLabelsAndProperties_Loads(t *testing
 	if err := g.SetNodeProperty("a", "k", lpg.Int64Value(99)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.SetEdgeProperty("a", "b", "k", lpg.StringValue("v"))
+	if err := g.SetEdgeProperty("a", "b", "k", lpg.StringValue("v")); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -438,7 +449,9 @@ func TestProperties_PropertyRoundtrip(t *testing.T) {
 			for j := 0; j < k; j++ {
 				key := fmt.Sprintf("ek%d", rapid.IntRange(0, 4).Draw(t, "edge-key-id"))
 				v := drawRandomPropertyValue(t)
-				g.SetEdgeProperty(s, d, key, v)
+				if err := g.SetEdgeProperty(s, d, key, v); err != nil {
+					t.Fatalf("SetEdgeProperty: %v", err)
+				}
 				expectedEdge[edgeKey{s, d, key}] = canonicaliseValue(v)
 			}
 		}
@@ -671,7 +684,9 @@ func TestProperties_MultipleNodesEdges(t *testing.T) {
 		if err := g.AddEdge(s, d, 0); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeProperty(s, d, "ord", lpg.Int64Value(int64(i)))
+		if err := g.SetEdgeProperty(s, d, "ord", lpg.Int64Value(int64(i))); err != nil {
+			t.Fatalf("SetEdgeProperty: %v", err)
+		}
 	}
 
 	c := csr.BuildFromAdjList(g.AdjList())

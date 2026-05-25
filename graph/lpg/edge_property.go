@@ -2,10 +2,17 @@ package lpg
 
 // SetEdgeProperty records the named property on the directed edge
 // (src, dst). The edge must already exist; otherwise the call is a
-// no-op (mirroring SetEdgeLabel).
-func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValue) {
+// no-op (mirroring SetEdgeLabel). Returns any error returned by the
+// installed [SchemaValidator]; when the validator rejects the write the
+// graph state is left unchanged.
+func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValue) error {
+	if v := g.validator.load(); v != nil {
+		if err := v.Validate(key, value); err != nil {
+			return err
+		}
+	}
 	if !g.adj.HasEdge(src, dst) {
-		return
+		return nil
 	}
 	srcID, _ := g.adj.Mapper().Lookup(src)
 	dstID, _ := g.adj.Mapper().Lookup(dst)
@@ -20,6 +27,7 @@ func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValu
 	}
 	bag[keyID] = value
 	s.mu.Unlock()
+	return nil
 }
 
 // GetEdgeProperty returns the property value attached to the

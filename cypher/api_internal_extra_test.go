@@ -271,7 +271,9 @@ func TestWALMutatorAdapter_SetAndDelEdgeProperty(t *testing.T) {
 	}
 
 	a.SetEdgeLabel("S", "D", "KNOWS")
-	a.SetEdgeProperty("S", "D", "since", lpg.Int64Value(2020))
+	if err := a.SetEdgeProperty("S", "D", "since", lpg.Int64Value(2020)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 	a.DelEdgeProperty("S", "D", "since")
 
 	// IndexBuffer should now hold one Set + one Del + one AddEdgeLabel change.

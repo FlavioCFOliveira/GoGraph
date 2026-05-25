@@ -202,7 +202,9 @@ func TestLpgMutatorAdapter_DelEdgeProperty(t *testing.T) {
 	if err := g.AddEdge("S", "D", 1.0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeProperty("S", "D", "weight", lpg.Int64Value(42))
+	if err := g.SetEdgeProperty("S", "D", "weight", lpg.Int64Value(42)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 
 	a := &lpgMutatorAdapter{g: g}
 	a.DelEdgeProperty("S", "D", "weight")

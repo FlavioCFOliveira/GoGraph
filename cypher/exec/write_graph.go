@@ -70,7 +70,8 @@ type GraphMutator interface {
 	SetEdgeLabel(src, dst, label string)
 
 	// SetEdgeProperty sets the named property on the directed edge (src, dst).
-	SetEdgeProperty(src, dst, key string, value lpg.PropertyValue)
+	// Returns any error from the underlying graph (e.g. schema violation).
+	SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error
 
 	// DelEdgeProperty removes the named property from the directed edge
 	// (src, dst) (no-op if absent).

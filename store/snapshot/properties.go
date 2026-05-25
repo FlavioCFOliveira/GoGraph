@@ -816,7 +816,7 @@ func ApplyPropertiesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb Properti
 			metrics.IncCounter("store.snapshot.ApplyProperties.unresolved", 1)
 			continue
 		}
-		g.SetEdgeProperty(srcN, dstN, rb.Keys[ep.KeyIdx], v)
+		_ = g.SetEdgeProperty(srcN, dstN, rb.Keys[ep.KeyIdx], v) //nolint:errcheck // no schema validator during snapshot restore
 	}
 	return nil
 }

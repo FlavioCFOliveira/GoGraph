@@ -165,8 +165,14 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 
 // SetNodeProperty records the named property on n with the given
 // value, inserting n into the graph if necessary. Returns the error
-// from the underlying [adjlist.AdjList.AddNode] when present.
+// from the underlying [adjlist.AdjList.AddNode] when present, or any
+// error returned by the installed [SchemaValidator].
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
+	if v := g.validator.load(); v != nil {
+		if err := v.Validate(key, value); err != nil {
+			return err
+		}
+	}
 	if err := g.adj.AddNode(n); err != nil {
 		return err
 	}

@@ -143,8 +143,20 @@ type Graph[N comparable, W any] struct {
 	nodePropShards [propMapShards]nodePropShard
 	edgePropShards [propMapShards]edgePropShard
 
-	idxMgr *index.Manager
+	idxMgr    *index.Manager
+	validator atomicValidator
 }
+
+// SetValidator installs v as the runtime schema validator for this graph.
+// Once set, every call to [Graph.SetNodeProperty] and [Graph.SetEdgeProperty]
+// will invoke v.Validate before applying the write; a non-nil error from
+// Validate causes the write to be rejected and the error returned to the
+// caller.
+//
+// Pass nil to remove any previously installed validator.
+//
+// SetValidator is safe for concurrent use.
+func (g *Graph[N, W]) SetValidator(v SchemaValidator) { g.validator.store(v) }
 
 // nodePropShardFor returns the shard responsible for NodeID id.
 func (g *Graph[N, W]) nodePropShardFor(id graph.NodeID) *nodePropShard {

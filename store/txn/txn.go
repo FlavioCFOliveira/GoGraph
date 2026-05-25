@@ -866,7 +866,7 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 	case OpRemoveEdge:
 		g.AdjList().RemoveEdge(op.Src, op.Dst)
 	case OpSetEdgeProperty:
-		g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
+		return g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:
 		g.DelEdgeProperty(op.Src, op.Dst, op.Key)
 	}

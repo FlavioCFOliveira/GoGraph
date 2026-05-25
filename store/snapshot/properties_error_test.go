@@ -378,7 +378,9 @@ func TestWriteProperties_RoundtripBytesAndStrings(t *testing.T) {
 	if err := g.SetNodeProperty("a", "tag", lpg.StringValue(longStr)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.SetEdgeProperty("a", "b", "raw", lpg.BytesValue(long))
+	if err := g.SetEdgeProperty("a", "b", "raw", lpg.BytesValue(long)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")

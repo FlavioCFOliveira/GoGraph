@@ -12,8 +12,12 @@ func TestGraph_EdgeProperties(t *testing.T) {
 	if err := g.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeProperty("alice", "bob", "since", Int64Value(2020))
-	g.SetEdgeProperty("alice", "bob", "weight", Float64Value(0.9))
+	if err := g.SetEdgeProperty("alice", "bob", "since", Int64Value(2020)); err != nil {
+		t.Fatalf("SetEdgeProperty since: %v", err)
+	}
+	if err := g.SetEdgeProperty("alice", "bob", "weight", Float64Value(0.9)); err != nil {
+		t.Fatalf("SetEdgeProperty weight: %v", err)
+	}
 
 	if v, ok := g.GetEdgeProperty("alice", "bob", "since"); !ok {
 		t.Fatalf("missing since")
@@ -35,7 +39,9 @@ func TestGraph_EdgeProperties(t *testing.T) {
 func TestGraph_SetEdgeProperty_NoEdge(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
-	g.SetEdgeProperty("a", "b", "k", Int64Value(1))
+	if err := g.SetEdgeProperty("a", "b", "k", Int64Value(1)); err != nil {
+		t.Fatalf("SetEdgeProperty on missing edge: %v", err)
+	}
 	if _, ok := g.GetEdgeProperty("a", "b", "k"); ok {
 		t.Fatalf("SetEdgeProperty on missing edge must be a no-op")
 	}

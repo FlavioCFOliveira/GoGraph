@@ -1111,7 +1111,9 @@ func TestCrashInjection_ApplyOpCodec_DelPropertiesRoundTrip(t *testing.T) {
 	if err := g.SetNodeProperty("a", "k", lpg.StringValue("v")); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.SetEdgeProperty("a", "b", "k", lpg.StringValue("v"))
+	if err := g.SetEdgeProperty("a", "b", "k", lpg.StringValue("v")); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 
 	delNode := []byte{txn.OpRecordV2, byte(txn.OpDelNodeProperty)}
 	delNode, _ = codec.Encode(delNode, "a")

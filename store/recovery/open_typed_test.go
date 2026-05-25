@@ -78,7 +78,9 @@ func TestOpen_StringInt64(t *testing.T) {
 	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.SetEdgeProperty("alice", "bob", "since", lpg.Int64Value(2026))
+	if err := g.SetEdgeProperty("alice", "bob", "since", lpg.Int64Value(2026)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 
 	// Populate the btree index with a known entry so we can assert
 	// it survives a round-trip through the snapshot.

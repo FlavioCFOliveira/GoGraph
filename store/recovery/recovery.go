@@ -856,7 +856,7 @@ func applyOpCodec[N comparable, W any](
 			if verr != nil {
 				return false
 			}
-			g.SetEdgeProperty(src, dst, key, val)
+			_ = g.SetEdgeProperty(src, dst, key, val) //nolint:errcheck // no schema validator during WAL replay
 		case txn.OpDelEdgeProperty:
 			g.DelEdgeProperty(src, dst, key)
 		}

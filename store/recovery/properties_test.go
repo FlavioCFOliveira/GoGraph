@@ -81,8 +81,12 @@ func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 	if err := g.SetNodeProperty("alice", "blob", lpg.BytesValue([]byte{0x01, 0x02, 0x03})); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026"))
-	g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7))
+	if err := g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026")); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
+	if err := g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 
 	// Take a v2 snapshot of the current state.
 	cs := csr.BuildFromAdjList(g.AdjList())

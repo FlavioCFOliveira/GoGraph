@@ -80,7 +80,9 @@ func TestRecovery_V3Snapshot_WALAbsent_SelfSufficient(t *testing.T) {
 	if err := g.SetNodeProperty("dave", "joined", lpg.TimeValue(knownTime)); err != nil {
 		t.Fatal(err)
 	}
-	g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2024"))
+	if err := g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2024")); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
 
 	// Snapshot + truncate WAL to 0 bytes. The truncation is exactly
 	// what the empirical proof in the bug report uses; it is the

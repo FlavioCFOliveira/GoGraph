@@ -119,7 +119,9 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType)
 	}
 	for _, p := range op.props {
-		op.mutator.SetEdgeProperty(srcLabel, dstLabel, p.key, p.value)
+		if err := op.mutator.SetEdgeProperty(srcLabel, dstLabel, p.key, p.value); err != nil {
+			return false, fmt.Errorf("exec: CreateRelationship SetEdgeProperty %q: %w", p.key, err)
+		}
 	}
 
 	if op.relVar == "" {

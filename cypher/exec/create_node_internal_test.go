@@ -83,15 +83,17 @@ func (m *seedStubMutator) DelNodeProperty(string, string) { panic("unused") }
 func (m *seedStubMutator) NodeProperties(string) map[string]lpg.PropertyValue {
 	panic("unused")
 }
-func (m *seedStubMutator) NodeLabels(string) []string                                { panic("unused") }
-func (m *seedStubMutator) HasEdge(string, string) bool                               { panic("unused") }
-func (m *seedStubMutator) SetEdgeLabel(string, string, string)                       { panic("unused") }
-func (m *seedStubMutator) SetEdgeProperty(string, string, string, lpg.PropertyValue) { panic("unused") }
-func (m *seedStubMutator) DelEdgeProperty(string, string, string)                    { panic("unused") }
-func (m *seedStubMutator) OutNeighbours(string) []string                             { panic("unused") }
-func (m *seedStubMutator) InNeighbours(string) []string                              { panic("unused") }
-func (m *seedStubMutator) OutDegree(string) int                                      { panic("unused") }
-func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool)                 { panic("unused") }
+func (m *seedStubMutator) NodeLabels(string) []string          { panic("unused") }
+func (m *seedStubMutator) HasEdge(string, string) bool         { panic("unused") }
+func (m *seedStubMutator) SetEdgeLabel(string, string, string) { panic("unused") }
+func (m *seedStubMutator) SetEdgeProperty(string, string, string, lpg.PropertyValue) error {
+	panic("unused")
+}
+func (m *seedStubMutator) DelEdgeProperty(string, string, string)    { panic("unused") }
+func (m *seedStubMutator) OutNeighbours(string) []string             { panic("unused") }
+func (m *seedStubMutator) InNeighbours(string) []string              { panic("unused") }
+func (m *seedStubMutator) OutDegree(string) int                      { panic("unused") }
+func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool) { panic("unused") }
 
 // Compile-time check: seedStubMutator must satisfy GraphMutator so the
 // production seedGlobalNodeCounter accepts it directly. If a future change

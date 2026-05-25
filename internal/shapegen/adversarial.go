@@ -254,21 +254,21 @@ func applyAdversarialEdge[N comparable, W any](
 ) {
 	bucket := srcIdx*7 + edgeIdx
 	if mix.Ints {
-		g.SetEdgeProperty(src, dst, AdvKeyInt, lpg.Int64Value(ints[bucket%len(ints)]))
+		_ = g.SetEdgeProperty(src, dst, AdvKeyInt, lpg.Int64Value(ints[bucket%len(ints)])) //nolint:errcheck // no schema validator in shapegen
 	}
 	if mix.Floats {
-		g.SetEdgeProperty(src, dst, AdvKeyFloat, lpg.Float64Value(floats[bucket%len(floats)]))
+		_ = g.SetEdgeProperty(src, dst, AdvKeyFloat, lpg.Float64Value(floats[bucket%len(floats)])) //nolint:errcheck // no schema validator in shapegen
 	}
 	if mix.Strings {
-		g.SetEdgeProperty(src, dst, AdvKeyString, lpg.StringValue(strs[bucket%len(strs)]))
+		_ = g.SetEdgeProperty(src, dst, AdvKeyString, lpg.StringValue(strs[bucket%len(strs)])) //nolint:errcheck // no schema validator in shapegen
 	}
 	if mix.Bytes {
-		g.SetEdgeProperty(src, dst, AdvKeyBytes, lpg.BytesValue(bs[bucket%len(bs)]))
+		_ = g.SetEdgeProperty(src, dst, AdvKeyBytes, lpg.BytesValue(bs[bucket%len(bs)])) //nolint:errcheck // no schema validator in shapegen
 	}
 	if mix.Times {
-		g.SetEdgeProperty(src, dst, AdvKeyTime, lpg.TimeValue(times[bucket%len(times)]))
+		_ = g.SetEdgeProperty(src, dst, AdvKeyTime, lpg.TimeValue(times[bucket%len(times)])) //nolint:errcheck // no schema validator in shapegen
 	}
 	if mix.Bools {
-		g.SetEdgeProperty(src, dst, AdvKeyBool, lpg.BoolValue(bools[bucket%len(bools)]))
+		_ = g.SetEdgeProperty(src, dst, AdvKeyBool, lpg.BoolValue(bools[bucket%len(bools)])) //nolint:errcheck // no schema validator in shapegen
 	}
 }

@@ -2735,8 +2735,10 @@ func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 }
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
-func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) {
-	a.g.SetEdgeProperty(src, dst, key, value)
+func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
+		return err
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -2746,6 +2748,7 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 			NewValue: value,
 		})
 	}
+	return nil
 }
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
@@ -2964,8 +2967,10 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 }
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
-func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) {
-	a.g.SetEdgeProperty(src, dst, key, value)
+func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
+		return err
+	}
 	_ = a.tx.SetEdgeProperty(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -2976,6 +2981,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 			NewValue: value,
 		})
 	}
+	return nil
 }
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
