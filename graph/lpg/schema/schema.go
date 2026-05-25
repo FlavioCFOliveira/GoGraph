@@ -25,6 +25,10 @@ var ErrTypeMismatch = errors.New("schema: property type mismatch")
 // is supplied for a property key that has not been registered.
 var ErrUnknownProperty = errors.New("schema: unknown property key")
 
+// ErrMissingRequired is returned by [Schema.ValidateNode] when a node
+// is missing a property that its label requires.
+var ErrMissingRequired = errors.New("schema: missing required property")
+
 // Schema is the registry of declared labels and property kinds. It
 // is safe for concurrent use.
 type Schema struct {
@@ -33,6 +37,8 @@ type Schema struct {
 	propReg    *lpg.PropertyKeyRegistry
 	labels     map[string]lpg.LabelID
 	properties map[string]propertyDecl
+	// required maps label name → set of property names that must be present.
+	required map[string]map[string]struct{}
 }
 
 type propertyDecl struct {
@@ -56,6 +62,7 @@ func New(labels *lpg.LabelRegistry, properties *lpg.PropertyKeyRegistry) *Schema
 		propReg:    properties,
 		labels:     make(map[string]lpg.LabelID),
 		properties: make(map[string]propertyDecl),
+		required:   make(map[string]map[string]struct{}),
 	}
 }
 
@@ -121,6 +128,65 @@ func (s *Schema) Validate(propertyName string, value lpg.PropertyValue) error {
 	if value.Kind() != d.kind {
 		return fmt.Errorf("%w: %q declared %d, value is %d",
 			ErrTypeMismatch, propertyName, d.kind, value.Kind())
+	}
+	return nil
+}
+
+// RequireProperty records that any node carrying labelName must have
+// propertyName set. The call is idempotent: repeating the same
+// (label, property) pair has no effect. The label and property do not
+// need to be pre-registered — the requirement is stored regardless and
+// evaluated by [Schema.ValidateNode].
+func (s *Schema) RequireProperty(labelName, propertyName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.required[labelName]
+	if !ok {
+		m = make(map[string]struct{})
+		s.required[labelName] = m
+	}
+	m[propertyName] = struct{}{}
+}
+
+// ValidateNode checks that a node described by labels and props
+// satisfies every requirement recorded in the schema:
+//
+//  1. Every property name declared as required for any of the node's
+//     labels is present in props.
+//  2. Every property present in props whose name has been registered
+//     carries a value of the declared kind.
+//
+// The first violation encountered is returned. On success, nil is returned.
+func (s *Schema) ValidateNode(labels []string, props map[string]lpg.PropertyValue) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Check required properties for each label.
+	for _, label := range labels {
+		reqs, ok := s.required[label]
+		if !ok {
+			continue
+		}
+		for propName := range reqs {
+			if _, present := props[propName]; !present {
+				return fmt.Errorf("%w: label %q requires property %q",
+					ErrMissingRequired, label, propName)
+			}
+		}
+	}
+
+	// Validate kinds of present properties.
+	for propName, value := range props {
+		d, ok := s.properties[propName]
+		if !ok {
+			// Unknown properties pass through; callers may use Validate
+			// directly if they want strict key checking.
+			continue
+		}
+		if value.Kind() != d.kind {
+			return fmt.Errorf("%w: %q declared %d, value is %d",
+				ErrTypeMismatch, propName, d.kind, value.Kind())
+		}
 	}
 	return nil
 }
