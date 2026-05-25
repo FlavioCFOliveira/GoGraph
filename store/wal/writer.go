@@ -37,7 +37,7 @@ type Stats struct {
 // Stats; all mutations serialise on an internal mutex.
 type Writer struct {
 	mu     sync.Mutex
-	f      *os.File
+	f      walFile
 	bw     *bufio.Writer
 	closed atomic.Bool
 
