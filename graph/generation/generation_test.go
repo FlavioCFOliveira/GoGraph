@@ -40,7 +40,10 @@ func TestPublisher_Publish(t *testing.T) {
 	t.Parallel()
 	p := New(makeCSR(t, 1))
 	old := p.Current()
-	next := p.Publish(makeCSR(t, 2))
+	next, err := p.Publish(makeCSR(t, 2))
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
 	if p.Current() != next {
 		t.Fatalf("current did not swap")
 	}
@@ -130,7 +133,9 @@ func TestPublisher_ConcurrentReadersDuringPublish(t *testing.T) {
 	}
 	// Publish a few generations while readers are running.
 	for i := 0; i < 50; i++ {
-		_ = p.Publish(makeCSR(t, i+2))
+		if _, err := p.Publish(makeCSR(t, i+2)); err != nil {
+			t.Errorf("Publish(%d): %v", i+2, err)
+		}
 		time.Sleep(time.Millisecond)
 	}
 	close(stop)

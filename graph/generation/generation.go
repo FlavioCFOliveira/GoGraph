@@ -24,6 +24,9 @@ import (
 // configured timeout.
 var ErrDrainTimeout = errors.New("generation: drain timeout")
 
+// ErrClosed is returned by Publish when the Publisher has been closed.
+var ErrClosed = errors.New("generation: publisher closed")
+
 // Generation wraps an immutable [csr.CSR] snapshot with a refcount.
 // Generation is safe for concurrent use; Acquire/Release on the
 // same generation can run from any number of goroutines.
@@ -50,6 +53,7 @@ func (g *Generation[W]) Refcount() int64 { return g.refcount.Load() }
 // for at most one publisher (Publish/PublishWithDrain).
 type Publisher[W any] struct {
 	current atomic.Pointer[Generation[W]]
+	closed  atomic.Bool
 }
 
 // newGeneration constructs a Generation with its sync.Cond wired up.
@@ -100,24 +104,32 @@ func (p *Publisher[W]) Release(g *Generation[W]) {
 }
 
 // Publish atomically swaps in a fresh generation built from c and
-// returns the new generation. The previous generation is not
-// reclaimed until its refcount drains to zero (which happens
-// naturally as readers Release).
-func (p *Publisher[W]) Publish(c *csr.CSR[W]) *Generation[W] {
+// returns the new generation. Returns (nil, [ErrClosed]) when the
+// Publisher has been closed. The previous generation is not reclaimed
+// until its refcount drains to zero (which happens naturally as
+// readers Release).
+func (p *Publisher[W]) Publish(c *csr.CSR[W]) (*Generation[W], error) {
+	if p.closed.Load() {
+		return nil, ErrClosed
+	}
 	next := newGeneration(c)
 	p.current.Store(next)
-	return next
+	return next, nil
 }
 
 // PublishWithDrain swaps in a fresh generation and blocks until the
 // previous generation's refcount reaches zero, or returns
-// [ErrDrainTimeout] when the timeout elapses first. Callers that
-// need to recycle the previous generation's backing storage (e.g.
-// to unmap a Tier 2 file) should prefer this variant.
+// [ErrDrainTimeout] when the timeout elapses first. Returns
+// (nil, [ErrClosed]) when the Publisher has been closed. Callers
+// that need to recycle the previous generation's backing storage
+// (e.g. to unmap a Tier 2 file) should prefer this variant.
 //
 // A timeout of zero disables the deadline; PublishWithDrain then
 // blocks indefinitely.
 func (p *Publisher[W]) PublishWithDrain(c *csr.CSR[W], timeout time.Duration) (*Generation[W], error) {
+	if p.closed.Load() {
+		return nil, ErrClosed
+	}
 	prev := p.current.Load()
 	next := newGeneration(c)
 	p.current.Store(next)
@@ -150,6 +162,40 @@ func (p *Publisher[W]) PublishWithDrain(c *csr.CSR[W], timeout time.Duration) (*
 	}
 	prev.drainMu.Unlock()
 	return next, nil
+}
+
+// Close marks the Publisher as closed, waits for all outstanding
+// acquisitions to drain (with a 30 s safety deadline), and returns.
+// After Close returns, Acquire returns nil and Publish returns
+// [ErrClosed].
+//
+// Close is safe to call from any goroutine. Calling Close more than
+// once is safe; subsequent calls are no-ops.
+func (p *Publisher[W]) Close() {
+	if !p.closed.CompareAndSwap(false, true) {
+		return // already closed
+	}
+	// Atomically replace the current generation with nil so that new
+	// Acquire calls see a closed publisher and return nil immediately.
+	prev := p.current.Swap(nil)
+	if prev == nil {
+		return
+	}
+	// Wait for any outstanding readers to Release.
+	const drainDeadline = 30 * time.Second
+	timedOut := atomic.Bool{}
+	timer := time.AfterFunc(drainDeadline, func() {
+		timedOut.Store(true)
+		prev.drainMu.Lock()
+		prev.drainCond.Broadcast()
+		prev.drainMu.Unlock()
+	})
+	defer timer.Stop()
+	prev.drainMu.Lock()
+	for prev.refcount.Load() > 0 && !timedOut.Load() {
+		prev.drainCond.Wait()
+	}
+	prev.drainMu.Unlock()
 }
 
 // Current returns the current generation without incrementing its
