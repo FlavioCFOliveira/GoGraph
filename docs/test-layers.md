@@ -88,17 +88,39 @@ a test guarded by `testlayers.RequireSoak(t)` compiles in every layer
 and is admitted at runtime when either the `soak` tag is set or the
 env var is set.
 
+## Makefile targets
+
+The three layers are wired into named `make` targets so the layering
+discipline is enforced by tooling, not folklore.
+
+| Target | Layer | Equivalent command |
+|---|---|---|
+| `make test-short` | short | `go test -race -count=1 ./...` |
+| `make test-soak` | soak | `go test -race -count=1 -tags=soak ./...` |
+| `make test-nightly` | nightly | `go test -race -count=1 -tags=nightly ./...` |
+
+Three composite CI pipeline targets wrap these:
+
+| Target | Purpose |
+|---|---|
+| `make ci` | Full PR-CI gate: tidy + fmt + vet + build + **test-short** + lint + cover-gate |
+| `make ci-soak` | Like `ci` but runs **test-soak** instead of test-short |
+| `make ci-nightly` | Like `ci` but runs **test-nightly** instead of test-short |
+
 ## Sample invocations
 
 ```bash
-# Short layer only (PR-CI default).
+# Short layer only (PR-CI default) — via make or directly.
+make test-short
 go test ./... -count=1 -race
 
 # Short + soak.
+make test-soak
 go test -tags=soak ./... -count=1 -race
 SOAK_FULL=1 go test ./... -count=1 -race
 
 # Short + soak + nightly.
+make test-nightly
 go test -tags=nightly ./... -count=1 -race
 GOGRAPH_NIGHTLY=1 go test ./... -count=1 -race
 ```

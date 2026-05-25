@@ -6,6 +6,31 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Sprint 58 (Test infrastructure & shape generators)
+
+- **Makefile**: three new layer-aligned test targets `test-short`, `test-soak`,
+  `test-nightly` (each with `-race -count=1`). Two new CI pipeline targets
+  `ci-soak` and `ci-nightly`. The existing `ci` target now delegates to
+  `test-short`. See [`docs/test-layers.md`](docs/test-layers.md) for the
+  full specification.
+- **`internal/testfs`**: `FaultFile` FS fault-injection wrapper with
+  `FailWritesAfterBytes`, `ReturnENOSPC`, `FsyncDelay`, `CorruptOnRead`.
+  `store/wal` now accepts a `walFile` interface and exposes `OpenWith` for
+  test-time fault injection.
+- **`internal/crashinject`**: subprocess crash-injection harness.
+  `Breakpoint(name)` self-kills via SIGKILL; `Run(t, scenario, Opts)`
+  spawns `cmd/crashinject-helper` and returns `Out{Killed, Signal, Dir}`.
+- **`internal/invariants`**: graph assertion helpers `AssertConnected`,
+  `AssertDAG`, `AssertBipartite`, `AssertDistanceBound`, `AssertShapeEqual`,
+  `BuildBFSDepths`.
+- **`internal/goldens`**: golden-file helper `Assert(t, path, got)` with
+  unified-diff output, `-update` flag / `GOGRAPH_UPDATE_GOLDENS=1` env,
+  and atomic write (temp + rename).
+- **`internal/subproc`**: subprocess helper `Register` + `Dispatch` +
+  `Run`/`RunCtx`/`RunWithTimeout` for deterministic cross-process tests.
+- **`internal/shapegen`**: soak-layer tests for LDBC Graphalytics reference
+  graphs (`cit-Patents`, `dota-league`, `kgs`).
+
 v2.0.0 stable is pending. Gate requirement: execution-level TCK ≥ 80 %,
 all CI checks green, and all T-series tasks in `docs/tck/DIVERGENCES.md`
 closed. Current status (commit `7405463`, 2026-05-22):

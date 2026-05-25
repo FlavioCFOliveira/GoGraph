@@ -41,6 +41,22 @@ test: ## Run unit tests
 race: ## Run unit tests with the race detector
 	$(GO) test $(GOFLAGS) $(RACE_FLAGS) $(PACKAGES)
 
+# ── Three-layer test targets ──────────────────────────────────────
+# Each target is a strict superset of the one above it.
+# See docs/test-layers.md for the full specification.
+
+.PHONY: test-short
+test-short: ## [layer: short]   PR-CI default — race detector, no build tags
+	$(GO) test $(RACE_FLAGS) -count=1 $(PACKAGES)
+
+.PHONY: test-soak
+test-soak: ## [layer: soak]    short + soak — race detector, -tags=soak
+	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak $(PACKAGES)
+
+.PHONY: test-nightly
+test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=nightly
+	$(GO) test $(RACE_FLAGS) -count=1 -tags=nightly $(PACKAGES)
+
 .PHONY: cover
 cover: ## Run tests with coverage
 	$(GO) test $(GOFLAGS) -coverprofile=$(COVER_PROFILE) -covermode=atomic $(PACKAGES)
@@ -63,7 +79,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: tidy fmt vet build test race lint cover-gate ## Full pipeline: tidy + fmt + vet + build + test + race + lint + cover-gate
+ci: tidy fmt vet build test-short lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + lint + cover-gate
+
+.PHONY: ci-soak
+ci-soak: tidy fmt vet build test-soak lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+
+.PHONY: ci-nightly
+ci-nightly: tidy fmt vet build test-nightly lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
