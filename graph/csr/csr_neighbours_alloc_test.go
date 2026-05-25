@@ -98,15 +98,21 @@ func TestCSR_NeighboursByID_ZeroAllocs(t *testing.T) {
 			// Warmup: ensure the hot path is JIT-compiled and any
 			// one-time initialisation is complete before measuring.
 			for i := 0; i < 100; i++ {
+				var n int
 				for range c.NeighboursByID(src) {
+					n++
 				}
+				_ = n
 			}
 
 			// Zero-alloc assertion.
+			var sinkN int
 			allocs := testing.AllocsPerRun(100, func() {
 				for range c.NeighboursByID(src) {
+					sinkN++
 				}
 			})
+			_ = sinkN
 			if allocs != 0 {
 				t.Errorf("NeighboursByID allocs = %v, want 0", allocs)
 			}
