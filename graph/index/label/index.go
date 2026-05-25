@@ -99,6 +99,55 @@ func (i *Index) Remove(label uint32, node graph.NodeID) {
 	i.mu.Unlock()
 }
 
+// AddRange records that all nodes in [fromNode, toNode] (inclusive) carry
+// label. It uses [roaring64.Bitmap.AddRange] which represents dense ranges in
+// O(1) space, making bulk ingestion of contiguous NodeID bands efficient.
+func (i *Index) AddRange(label uint32, fromNode, toNode graph.NodeID) {
+	i.mu.Lock()
+	bm, ok := i.bits[label]
+	if !ok {
+		bm = roaring64.New()
+		i.bits[label] = bm
+	}
+	bm.AddRange(uint64(fromNode), uint64(toNode)+1)
+	i.mu.Unlock()
+}
+
+// RemoveRange records that all nodes in [fromNode, toNode] (inclusive) no
+// longer carry label. Empty bitmaps are deleted so the map does not grow
+// unboundedly after bulk-remove operations.
+func (i *Index) RemoveRange(label uint32, fromNode, toNode graph.NodeID) {
+	i.mu.Lock()
+	if bm, ok := i.bits[label]; ok {
+		bm.RemoveRange(uint64(fromNode), uint64(toNode)+1)
+		if bm.IsEmpty() {
+			delete(i.bits, label)
+		}
+	}
+	i.mu.Unlock()
+}
+
+// Scan returns the sorted slice of NodeIDs that carry label.
+// Returns nil when label has no entries.
+func (i *Index) Scan(label uint32) []graph.NodeID {
+	i.mu.RLock()
+	bm, ok := i.bits[label]
+	if !ok {
+		i.mu.RUnlock()
+		return nil
+	}
+	raw := bm.ToArray()
+	i.mu.RUnlock()
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]graph.NodeID, len(raw))
+	for j, v := range raw {
+		out[j] = graph.NodeID(v)
+	}
+	return out
+}
+
 // Count returns the number of NodeIDs that carry label.
 func (i *Index) Count(label uint32) uint64 {
 	i.mu.RLock()

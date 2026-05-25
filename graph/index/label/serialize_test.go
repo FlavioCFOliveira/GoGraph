@@ -109,7 +109,7 @@ func TestIndexes_LabelBadMagic(t *testing.T) {
 	t.Parallel()
 	// 4 bytes wrong magic + 4 bytes version + 4 bytes count=0 + 4 bytes
 	// trailer = 16 bytes, with a recomputed CRC.
-	bad := make([]byte, 12)
+	bad := make([]byte, 12, 16)
 	// bytes are zero — magic is 0, which differs from labelMagic.
 	// Compute the trailing CRC over the first 12 bytes by serialising
 	// an empty index and copying its trailer? Simpler: synth the
