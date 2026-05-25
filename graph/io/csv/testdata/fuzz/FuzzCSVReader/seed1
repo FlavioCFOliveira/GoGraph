@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("node1,node2,42\nnode2,node3,0\n")

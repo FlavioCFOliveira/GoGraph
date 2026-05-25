@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("src,dst,weight\n# comment\na,b,7\n")

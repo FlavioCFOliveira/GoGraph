@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\"alice,jr\",bob,1\n")
