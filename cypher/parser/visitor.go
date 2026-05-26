@@ -1535,7 +1535,10 @@ func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (a
 	if len(names) == 1 {
 		if intLit, ok := base.(*ast.IntLiteral); ok {
 			key := nameText(names[0])
-			if isAllDigits(key) {
+			// The fractional-part token may carry an exponent suffix too
+			// (e.g. `1.0e9` lexes as 1 + . + 0e9), so accept either a
+			// pure-digit key or a digit-run-with-exponent shape.
+			if isAllDigits(key) || looksLikeExponentFloat(key) {
 				f, ferr := strconv.ParseFloat(fmt.Sprintf("%d.%s", intLit.Value, key), 64)
 				if ferr == nil {
 					return &ast.FloatLiteral{Pos: intLit.Pos, EndPos: endPositionOf(ctx), Value: f}, nil
@@ -1627,6 +1630,20 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 			}
 			return &ast.IntLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: n}
 		}
+		// Detect scientific-notation float literals such as `1e9`, `1E9`,
+		// `1e-3`, `2E+10`. The ANTLR lexer's FLOAT rule accepts
+		// `Digits ExponentPart` but in practice ANTLR's DIGIT/Symbol
+		// dispatch tokenises these as ID for Symbol-position atoms
+		// (e.g. RETURN 1e9 AS x), so they arrive here as a symbol that
+		// begins with a digit and matches the exponent shape.
+		// openCypher identifiers cannot begin with a digit, so the
+		// reinterpretation is unambiguous.
+		if name != "" && name[0] >= '0' && name[0] <= '9' && looksLikeExponentFloat(name) {
+			if f, ferr := strconv.ParseFloat(name, 64); ferr == nil {
+				return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
+			}
+		}
+
 		// Detect malformed decimal integer literals that the ANTLR lexer
 		// accepts as ID tokens because the LetterOrDigit class is broader than
 		// the openCypher integer-literal grammar. A token that begins with a
@@ -2459,6 +2476,50 @@ func parseInt(s string) (int64, error) {
 	default:
 		return strconv.ParseInt(s, 10, 64)
 	}
+}
+
+// looksLikeExponentFloat reports whether s has the textual shape of a
+// scientific-notation float literal: a leading digit run followed by an
+// exponent marker (e/E), an optional sign, and a trailing digit run.
+// The string is permitted to carry the optional `f`/`d` type suffix
+// declared by the openCypher FLOAT lexer rule but no other characters.
+// Examples: "1e9", "1E9", "2e-3", "10E+05".
+func looksLikeExponentFloat(s string) bool {
+	if s == "" {
+		return false
+	}
+	i := skipDigitRun(s, 0)
+	if i == 0 {
+		return false
+	}
+	if i >= len(s) || (s[i] != 'e' && s[i] != 'E') {
+		return false
+	}
+	i++
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	start := i
+	i = skipDigitRun(s, i)
+	if i == start {
+		return false
+	}
+	if i < len(s) {
+		switch s[i] {
+		case 'f', 'F', 'd', 'D':
+			i++
+		}
+	}
+	return i == len(s)
+}
+
+// skipDigitRun advances past consecutive ASCII decimal digits starting
+// at position i and returns the new index.
+func skipDigitRun(s string, i int) int {
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	return i
 }
 
 // hasInvalidNumericChar reports whether s contains any character that is

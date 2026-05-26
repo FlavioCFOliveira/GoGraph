@@ -192,11 +192,23 @@ import (
 //     item so the final RETURN includes the collected list column.
 //     Observed 1979-1983 across an 8-run sample; gate set
 //     conservatively at 1979 to absorb the wider run-to-run variance.
+//   - 1984: raised after task T937 partial closure — two parser-level
+//     fixes for scientific-notation float literals: (a) VisitAtom now
+//     reinterprets a Symbol token of shape `<digits>[eE][+-]?<digits>`
+//     as a FloatLiteral via looksLikeExponentFloat before falling
+//     through to Variable creation (`1e9`, `1E9`, `2e-3` no longer
+//     parse as undefined variables); (b) the propertyExpression float
+//     reconstruction (which already handled the `1.0 → IntLiteral{1} +
+//     Name{"0"}` split) now also accepts the `0e9`-style fractional
+//     part so `1.0e9` reconstructs correctly via fmt.Sprintf+ParseFloat.
+//     Together these unlock features/expressions/literals/Literals5
+//     scientific-notation scenarios. Observed 1986 across a 5-run
+//     sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1979
+const tckExecutionBaseline = 1984
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
