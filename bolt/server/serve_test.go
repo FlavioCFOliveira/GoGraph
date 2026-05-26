@@ -28,14 +28,16 @@ func newEngine(t *testing.T) *cypher.Engine {
 func boltHandshake(t *testing.T, conn net.Conn) {
 	t.Helper()
 
-	// 4-byte magic + 4×4-byte version slots
+	// 4-byte magic + 4×4-byte version slots.
+	// Bolt wire slot format (big-endian): [0x00, minor_range, minor, major].
+	// Bolt wire response format (big-endian): [0x00, 0x00, minor, major].
 	var buf [20]byte
 	binary.BigEndian.PutUint32(buf[:4], proto.Magic)
-	// Slot 0: version 5.0 (major=5, minor=0, range=0, pad=0)
-	buf[4] = 5
-	buf[5] = 0
-	buf[6] = 0
-	buf[7] = 0
+	// Slot 0: version 5.0 — [pad=0x00, minor_range=0, minor=0, major=5]
+	buf[4] = 0 // pad
+	buf[5] = 0 // minor_range
+	buf[6] = 0 // minor
+	buf[7] = 5 // major
 	// Slots 1-3: zero (not offered)
 	if _, err := conn.Write(buf[:]); err != nil {
 		t.Fatalf("handshake write: %v", err)
@@ -46,7 +48,8 @@ func boltHandshake(t *testing.T, conn net.Conn) {
 	if _, err := io.ReadFull(conn, resp[:]); err != nil {
 		t.Fatalf("handshake read response: %v", err)
 	}
-	if resp[0] == 0 && resp[1] == 0 {
+	// Response format: [0x00, 0x00, minor, major].
+	if resp[3] == 0 && resp[2] == 0 {
 		t.Fatal("server rejected version negotiation")
 	}
 }

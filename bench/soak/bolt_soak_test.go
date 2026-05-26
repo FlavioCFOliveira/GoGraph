@@ -317,17 +317,21 @@ func drainPull(cr *proto.ChunkedReader) error {
 	}
 }
 
-// boltHandshake performs the raw 20-byte Bolt client handshake, offering
+// boltHandshakeRaw performs the raw 20-byte Bolt client handshake, offering
 // version 5.0. Used by boltDial's version negotiation step.
+//
+// Bolt wire slot format (big-endian): [0x00, minor_range, minor, major].
+// Bolt wire response format (big-endian): [0x00, 0x00, minor, major].
 //
 // This is kept for reference; boltDial uses proto.Negotiate instead.
 func boltHandshakeRaw(conn net.Conn) error {
 	var buf [20]byte
 	binary.BigEndian.PutUint32(buf[:4], proto.Magic)
-	buf[4] = 5 // major
-	buf[5] = 0 // minor
-	buf[6] = 0 // minor_range
-	buf[7] = 0 // pad
+	// Slot 0: version 5.0 — [pad=0x00, minor_range=0, minor=0, major=5]
+	buf[4] = 0 // pad
+	buf[5] = 0 // minor_range
+	buf[6] = 0 // minor
+	buf[7] = 5 // major
 	if _, err := conn.Write(buf[:]); err != nil {
 		return err
 	}
@@ -335,7 +339,8 @@ func boltHandshakeRaw(conn net.Conn) error {
 	if _, err := io.ReadFull(conn, resp[:]); err != nil {
 		return err
 	}
-	if resp[0] == 0 && resp[1] == 0 {
+	// Response format: [0x00, 0x00, minor, major].
+	if resp[3] == 0 && resp[2] == 0 {
 		return fmt.Errorf("server rejected version negotiation")
 	}
 	return nil

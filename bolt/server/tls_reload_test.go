@@ -79,7 +79,7 @@ func TestCertReloader_ReloadSwapsCertificate(t *testing.T) {
 	// SerialNumber); the test pair generator uses time.Now's
 	// nanoseconds for the serial so two consecutive calls produce
 	// distinguishable certs.
-	time.Sleep(20 * time.Millisecond) // ensure mtime advances on coarse-grained filesystems
+	time.Sleep(20 * time.Millisecond)  // ensure mtime advances on coarse-grained filesystems
 	_, _ = writeTestPair(t, dir, "v1") // overwrites cert and key in place
 	if err := r.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
