@@ -1149,9 +1149,13 @@ func (a *analyser) checkCreateRelationshipTypes(pat *ast.Pattern) {
 }
 
 // checkPathPatternRelTypes is the per-path implementation used by both
-// CREATE and MERGE. It also reports CreatingVarLength when a
-// relationship pattern carries a variable-length range — CREATE/MERGE
-// require fixed-length relationships per the openCypher spec.
+// CREATE and MERGE. It reports:
+//   - SyntaxError(NoSingleRelationshipType) for relationships without
+//     exactly one type label (zero types or union types).
+//   - SyntaxError(CreatingVarLength) for variable-length relationships
+//     (CREATE/MERGE require fixed-length per openCypher).
+//   - SyntaxError(RequiresDirectedRelationship) for undirected
+//     relationships (CREATE/MERGE require an explicit direction).
 func (a *analyser) checkPathPatternRelTypes(pp *ast.PathPattern) {
 	if pp == nil {
 		return
@@ -1165,6 +1169,9 @@ func (a *analyser) checkPathPatternRelTypes(pp *ast.PathPattern) {
 		}
 		if len(el.Relationship.Types) != 1 {
 			a.error(invalidBooleanOperandError("relationship", "must have exactly one type", el.Relationship.Pos))
+		}
+		if el.Relationship.Direction == ast.RelDirectionNone {
+			a.error(invalidBooleanOperandError("relationship", "must be directed", el.Relationship.Pos))
 		}
 	}
 }
