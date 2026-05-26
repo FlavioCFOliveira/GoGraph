@@ -462,7 +462,10 @@ func (a *analyser) checkDeleteExpr(e ast.Expression) {
 	switch e.(type) {
 	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
 		*ast.BoolLiteral, *ast.ListLiteral, *ast.MapLiteral,
-		*ast.BinaryOp, *ast.UnaryOp:
+		*ast.BinaryOp, *ast.UnaryOp, *ast.LabelPredicate:
+		// LabelPredicate captures the `n:Foo` shape — `DELETE n:Foo` is
+		// asking the engine to delete a label, which is not a valid
+		// DELETE target. The proper form is `REMOVE n:Foo`.
 		a.error(invalidBooleanOperandError("DELETE", "non-graph", positionOf(e)))
 	}
 }
