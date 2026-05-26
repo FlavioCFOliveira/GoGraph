@@ -58,10 +58,17 @@ func TestDijkstraCtx_Cancel_PreCancelled(t *testing.T) {
 // via a goroutine after a short delay causes DijkstraCtx to return
 // context.Canceled. The graph is large enough that Dijkstra would
 // not finish before the cancellation fires.
+//
+// Sizing rationale: on Apple M-series and other fast cores, a 100 k-
+// node CSR traversal completes in well under 1 ms, racing the
+// cancel goroutine and yielding a spurious nil error (task #925).
+// One million nodes ensures the traversal runs long enough for the
+// 1 ms sleep to elapse on any supported hardware while staying
+// within the short-layer per-package budget.
 func TestDijkstraCtx_Cancel_ViaChan(t *testing.T) {
 	t.Parallel()
 
-	const n = 100_000
+	const n = 1_000_000
 	c := buildDirectedPath(n)
 
 	ctx, cancel := context.WithCancel(context.Background())
