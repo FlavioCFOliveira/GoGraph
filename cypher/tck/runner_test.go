@@ -107,11 +107,21 @@ import (
 //     an empty result iterator, matching the openCypher TCK contract.
 //     Observed 1858-1859 across a 3-run sample; the gate is set
 //     conservatively at 1856 to absorb run-to-run variance.
+//   - 1876: raised after two semantic fixes landed together:
+//     (a) the parser recognises that ANTLR tokenises a float literal
+//     such as `1.0` as the three tokens `1`, `.`, `0` and reconstructs
+//     a FloatLiteral when an integer atom is followed by a single
+//     all-digit property accessor — property keys cannot start with a
+//     digit in openCypher, so the rewrite is unambiguous; and
+//     (b) IntegerValue.Equal and FloatValue.Equal now treat 1 == 1.0
+//     as true (numeric cross-type equality), instead of false.
+//     Observed 1879-1882 across a 3-run sample; the gate is set
+//     conservatively at 1876 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1856
+const tckExecutionBaseline = 1876
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

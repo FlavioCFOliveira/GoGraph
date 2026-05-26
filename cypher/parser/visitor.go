@@ -1522,11 +1522,47 @@ func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (a
 
 	// Chain of .name accessors.
 	names := ctx.AllName()
+
+	// Special case (T937): ANTLR's lexer tokenises a float literal such as
+	// `1.0` as the three tokens `1`, `.`, `0` because the DIGIT terminal
+	// matches the integer `1` greedily and the trailing `.0` falls into the
+	// propertyExpression chain as a property access. The visitor sees
+	// Atom=IntLiteral{1} + AllName=["0"] and would otherwise emit
+	// Property{Receiver: IntLiteral{1}, Key: "0"} — a runtime null on any
+	// evaluation path. Property keys in openCypher cannot start with a
+	// digit (unless explicitly back-quoted), so a single accessor whose key
+	// is all digits unambiguously reconstructs the float literal.
+	if len(names) == 1 {
+		if intLit, ok := base.(*ast.IntLiteral); ok {
+			key := nameText(names[0])
+			if isAllDigits(key) {
+				f, ferr := strconv.ParseFloat(fmt.Sprintf("%d.%s", intLit.Value, key), 64)
+				if ferr == nil {
+					return &ast.FloatLiteral{Pos: intLit.Pos, EndPos: endPositionOf(ctx), Value: f}, nil
+				}
+			}
+		}
+	}
+
 	for _, n := range names {
 		key := nameText(n)
 		base = &ast.Property{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Receiver: base, Key: key}
 	}
 	return base, nil
+}
+
+// isAllDigits reports whether s consists exclusively of ASCII decimal
+// digits. An empty string returns false.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // VisitPropertyExpression is the Visit method required by the interface.

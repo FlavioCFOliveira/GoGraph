@@ -171,14 +171,21 @@ func (v IntegerValue) Hash() uint64 {
 // String returns the decimal representation of the integer.
 func (v IntegerValue) String() string { return fmt.Sprintf("%d", int64(v)) }
 
-// Equal returns Null if other is Null, BoolValue(true) if both are
-// IntegerValue with the same value, BoolValue(false) otherwise.
+// Equal returns Null if other is Null, BoolValue(true) when both sides
+// hold the same numeric value (cross-type Int/Float comparison treats
+// 1 == 1.0 as true, per openCypher numeric equality), BoolValue(false)
+// otherwise.
 func (v IntegerValue) Equal(other Value) Value {
 	if IsNull(other) {
 		return Null
 	}
-	o, ok := other.(IntegerValue)
-	return BoolValue(ok && v == o)
+	switch o := other.(type) {
+	case IntegerValue:
+		return BoolValue(v == o)
+	case FloatValue:
+		return BoolValue(float64(v) == float64(o))
+	}
+	return BoolValue(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -201,13 +208,19 @@ func (v FloatValue) Hash() uint64 {
 func (v FloatValue) String() string { return fmt.Sprintf("%g", float64(v)) }
 
 // Equal returns Null if other is Null, BoolValue per IEEE-754 equality
-// otherwise (NaN != NaN).
+// otherwise (NaN != NaN). Cross-type Int/Float comparison treats
+// 1.0 == 1 as true, per openCypher numeric equality.
 func (v FloatValue) Equal(other Value) Value {
 	if IsNull(other) {
 		return Null
 	}
-	o, ok := other.(FloatValue)
-	return BoolValue(ok && float64(v) == float64(o))
+	switch o := other.(type) {
+	case FloatValue:
+		return BoolValue(float64(v) == float64(o))
+	case IntegerValue:
+		return BoolValue(float64(v) == float64(o))
+	}
+	return BoolValue(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
