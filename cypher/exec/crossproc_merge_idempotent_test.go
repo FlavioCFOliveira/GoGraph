@@ -143,19 +143,10 @@ func countPersonNodes(t *testing.T, dir string) int {
 // TestCrossProc_Cypher_MergeIdempotent_Sequential verifies the sequential
 // MERGE behaviour across two OS processes.
 //
-// Current implementation status: exec.Merge.searchFn always returns nil
-// (api.go buildPlanWithMutatorFull, ~line 1013) — the search sub-plan that
-// detects existing nodes is not yet implemented. As a result, MERGE ALWAYS
-// takes the ON CREATE path, even when the recovered in-memory graph already
-// contains the node. This test documents the current behaviour: proc A
-// creates one node, proc B creates a second node (no deduplication). The
-// assertion captures the known gap so that when searchFn is implemented the
-// test will fail and prompt a fix to the expected count.
-//
-// Acceptance criterion "sequential merge yields exactly one node" is blocked
-// by the missing searchFn implementation (tracked in the MERGE operator's
-// TODO comment). The sub-test is marked skip-on-full-idempotence so it can be
-// updated without noise in the short layer.
+// Since T930 the [exec.Merge] searchFn scans the live graph for nodes
+// matching the pattern. After proc A writes Person{name:"Key"} and proc B
+// opens the same WAL directory via recovery, proc B's MERGE finds the
+// recovered node and fires ON MATCH — no duplicate is created.
 func TestCrossProc_Cypher_MergeIdempotent_Sequential(t *testing.T) {
 	t.Parallel()
 
@@ -232,13 +223,11 @@ func TestCrossProc_Cypher_MergeIdempotent_Sequential(t *testing.T) {
 		t.Fatalf("proc B final MATCH result close: %v", err)
 	}
 
-	// KNOWN LIMITATION: searchFn always returns nil (ON CREATE always fires),
-	// so proc B creates a second node. Expected count is 2 until searchFn is
-	// implemented. When this assertion flips to 1, the MERGE idempotence
-	// contract is fully satisfied.
-	const wantNodes = 2 // TODO: change to 1 when searchFn is implemented
+	// With the real searchFn, proc B finds the recovered node and fires
+	// ON MATCH; the final count is one.
+	const wantNodes = 1
 	if nodeCount != wantNodes {
-		t.Errorf("after sequential MERGE A then B: node count = %d, want %d (searchFn not implemented)",
+		t.Errorf("after sequential MERGE A then B: node count = %d, want %d",
 			nodeCount, wantNodes)
 	}
 }

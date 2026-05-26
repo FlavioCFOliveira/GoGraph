@@ -1084,14 +1084,17 @@ func buildOperatorWrite(
 			}
 		}
 		schemaCopy := copySchema(schema)
-		// The search function re-builds the child plan as a read-only scan for
-		// the MERGE match check. For the current IR we return no matches
-		// (pattern search requires full expression evaluation which is out of
-		// scope); MERGE always takes the ON CREATE path.
-		searchFn := func(_ context.Context) ([]exec.Row, error) {
-			return nil, nil
-		}
 		labels, props := parseNodePatternStr(p.Pattern)
+		// Real MERGE search (T930): scan the live graph for a node whose
+		// labels are a superset of `labels` AND whose properties equal every
+		// (key, value) parsed from `props`. When matches are found the ON
+		// MATCH branch fires; only zero matches drives the ON CREATE branch.
+		// Single-writer serialisation in the engine keeps concurrent MERGE
+		// callers from racing to a phantom zero-match result.
+		searchFn, sfErr := exec.NewMergeSearchFnFromPattern(labels, props, params, mutator)
+		if sfErr != nil {
+			return nil, sfErr
+		}
 		m, buildErr := exec.NewMerge(
 			firstVar(p.BoundVars),
 			labels,

@@ -1,10 +1,10 @@
 package cypher_test
 
-// merge_create_test.go — T809
+// merge_create_test.go — T930
 //
-// Tests for the MERGE ON CREATE path. Because the engine's searchFn is a stub
-// that always returns nil matches, every MERGE fires ON CREATE and creates a
-// new node. The tests document this current-engine behaviour explicitly.
+// Tests for the MERGE ON CREATE path. The engine's real searchFn (T930)
+// returns matches from the live graph, so a second MERGE with the same
+// pattern fires the ON MATCH branch instead of ON CREATE.
 
 import (
 	"context"
@@ -16,13 +16,11 @@ import (
 	"gograph/graph/lpg"
 )
 
-// TestMerge_CreateWhenNotPresent documents current engine behavior:
+// TestMerge_CreateWhenNotPresent verifies idempotent MERGE semantics:
 //
-//   - On an empty graph, MERGE (n:Person {name:"Alice"}) creates 1 node.
-//   - A second MERGE with the same pattern creates a second node because the
-//     engine's searchFn stub always returns zero matches (ON CREATE always fires).
-//
-// See T918 for the searchFn limitation tracking item.
+//   - On an empty graph, MERGE (n:Person {name:"Alice"}) creates one node.
+//   - A second MERGE with the same pattern matches the existing node and
+//     does NOT create a duplicate; the final count is still one.
 func TestMerge_CreateWhenNotPresent(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
@@ -34,15 +32,11 @@ func TestMerge_CreateWhenNotPresent(t *testing.T) {
 
 	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 1)
 
-	// Second MERGE with identical pattern — engine creates another node because
-	// searchFn always returns no matches (ON CREATE path fires unconditionally).
-	// This is a known limitation; the count becomes 2 rather than staying at 1.
-	t.Log("known limitation: MERGE searchFn is a stub; second call also fires ON CREATE")
+	// Second MERGE with identical pattern — searchFn finds the existing
+	// node, ON MATCH fires, and no duplicate is created.
 	drainRunInTx(t, eng, `MERGE (n:Person {name: "Alice"})`)
 
-	// Assert the ACTUAL count (2) to pin the current behaviour so regressions
-	// are detected. Update when T918 is resolved.
-	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 2)
+	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 1)
 }
 
 // TestMerge_OnCreateSet verifies that MERGE ON CREATE SET assigns a property

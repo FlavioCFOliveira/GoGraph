@@ -54,11 +54,18 @@ import (
 //     reuse and surface them as SyntaxError.VariableTypeConflict.
 //     Observed 1527-1528 across a 3-run sample; the gate is set
 //     conservatively at 1520 to absorb run-to-run variance.
+//   - 1568: raised after task T930 replaced [exec.Merge]'s stub searchFn
+//     with a real label+property scan ([exec.NewMergeSearchFnFromPattern]).
+//     MERGE on an existing pattern now fires the ON MATCH branch instead of
+//     duplicating the node, unlocking the openCypher MERGE*.feature
+//     scenarios that rely on idempotent merge semantics.
+//     Observed 1571-1573 across a 3-run sample; the gate is set
+//     conservatively at 1568 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1520
+const tckExecutionBaseline = 1568
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

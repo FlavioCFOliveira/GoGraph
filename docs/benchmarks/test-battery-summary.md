@@ -257,7 +257,7 @@ than absolute numbers.
 
 **Soak stability:** Pass (14/14 tasks race-clean).
 
-**Known limitations:** `MERGE` `searchFn` is a stub — always executes ON CREATE branch. `engine.Explain` panics on write IR (write queries excluded from explain tests). `T918` uses MATCH+SET workaround.
+**Known limitations:** `engine.Explain` panics on write IR (write queries excluded from explain tests). (T930 closed the `MERGE` `searchFn` gap: MERGE now matches existing patterns and fires ON MATCH instead of duplicating nodes.)
 
 ---
 
@@ -297,7 +297,7 @@ than absolute numbers.
 
 **Soak stability:** Not applicable (short-layer battery).
 
-**Known limitations:** `MERGE` `searchFn` is stub (always ON CREATE). `DELETE [r]` emits `DeleteNode` not `DeleteRelationship`. `DropConstraint` IR needs a backing index by name. `MATCH` same-label cross-product returns 0 rows.
+**Known limitations:** `DELETE [r]` emits `DeleteNode` not `DeleteRelationship`. `DropConstraint` IR needs a backing index by name. `MATCH` same-label cross-product returns 0 rows. (T930 closed the `MERGE` `searchFn` gap.)
 
 ---
 
@@ -453,7 +453,6 @@ than absolute numbers.
 
 - `UNION` operator not wired in `buildOperator`
 - `USING INDEX` hint not parsed
-- `MERGE` search function is a stub (always ON CREATE)
 - `ElementId` not emitted by Bolt server
 - `StreamingAggregation` not in IR
 - Temporal types not encoded in PackStream
