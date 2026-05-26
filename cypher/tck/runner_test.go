@@ -211,11 +211,18 @@ import (
 //     subscriptMap) to stay under the gocyclo:15 budget. Unlocks
 //     features/expressions/graph/Graph7 (dynamic property access).
 //     Observed 1985 stable across a 5-run sample.
+//   - 2022: raised after task T937 partial closure — formatNanosToTime
+//     now elides the seconds field when both seconds and nanoseconds
+//     are zero (`12:00` instead of `12:00:00`) — the shortest
+//     openCypher textual representation that round-trips. Unlocks
+//     features/expressions/temporal/Temporal1, Temporal3 and many
+//     temporal-projection scenarios. Observed 2024 across a 5-run
+//     sample; gate set conservatively at 2022.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1984
+const tckExecutionBaseline = 2022
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

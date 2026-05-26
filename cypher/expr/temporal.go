@@ -382,7 +382,16 @@ func formatDateTime(t time.Time) string {
 		t.Hour(), t.Minute(), t.Second(), frac, zone)
 }
 
-// formatNanosToTime renders ns (since midnight) as hh:mm:ss[.frac].
+// formatNanosToTime renders ns (since midnight) in the openCypher
+// canonical textual form:
+//
+//	hh:mm                              when seconds and nanoseconds are zero
+//	hh:mm:ss                           when only nanoseconds are zero
+//	hh:mm:ss.frac                      otherwise (trailing zeros trimmed)
+//
+// The TCK uses the shortest representation that round-trips, so a
+// time at the top of the hour or minute should not surface an
+// explicit ":00" trailer.
 func formatNanosToTime(ns int64) string {
 	if ns < 0 {
 		ns = 0
@@ -393,6 +402,9 @@ func formatNanosToTime(ns int64) string {
 	rem %= int64(time.Minute)
 	s := rem / int64(time.Second)
 	nano := int(rem % int64(time.Second))
+	if s == 0 && nano == 0 {
+		return fmt.Sprintf("%02d:%02d", h, m)
+	}
 	frac := formatFraction(nano)
 	return fmt.Sprintf("%02d:%02d:%02d%s", h, m, s, frac)
 }
