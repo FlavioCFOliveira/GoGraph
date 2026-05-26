@@ -1439,7 +1439,7 @@ func dateAccessor(d DateValue, key string) (Value, bool) {
 	case "weekYear":
 		y, _ := t.ISOWeek()
 		return IntegerValue(int64(y)), true
-	case "dayOfWeek":
+	case "dayOfWeek", "weekDay":
 		dow := int(t.Weekday())
 		if dow == 0 {
 			dow = 7
@@ -1539,7 +1539,7 @@ func timeAccessor(v TimeValue, key string) (Value, bool) {
 		return lv, true
 	}
 	switch key {
-	case "offset":
+	case "offset", "timezone":
 		return StringValue(formatOffsetSec(int(v.OffsetSec))), true
 	case "offsetSeconds":
 		return IntegerValue(int64(v.OffsetSec)), true
