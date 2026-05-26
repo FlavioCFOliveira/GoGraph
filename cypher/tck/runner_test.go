@@ -273,11 +273,22 @@ import (
 //     element would have produced FALSE. Unlocks features/expressions/
 //     list/List3 equality-with-null scenarios. Observed 2266-2269
 //     across a 5-run sample.
+//   - 2268: raised after task T937 partial closure — the list
+//     quantifiers all/any/none/single now partition predicate outcomes
+//     into a (trueCount, falseCount, nullCount) tuple instead of the
+//     binary (trueCount, sawNull) form. quantifierResult applies the
+//     canonical openCypher 3VL rule: a definitive FALSE wins over any
+//     NULLs for all/none; a definitive TRUE wins for any/single;
+//     otherwise NULL when any null was seen. Previously the all
+//     quantifier returned FALSE for an all-null predicate because the
+//     `total - trueCount > 0` test conflated falses and nulls. Unlocks
+//     features/expressions/quantifier/Quantifier4 [10] all-with-nulls
+//     scenarios. Observed 2269-2272 across a 5-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2264
+const tckExecutionBaseline = 2268
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

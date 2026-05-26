@@ -1022,17 +1022,29 @@ func evalQuantifier(name string, lc *ast.ListComprehension, row RowContext, para
 		return Null, nil
 	}
 
-	sawNull, trueCount, total, err := countQuantifierMatches(lc, list, row, params, reg)
+	counts, err := countQuantifierMatches(lc, list, row, params, reg)
 	if err != nil {
 		return nil, err
 	}
-	return quantifierResult(name, trueCount, total, sawNull), nil
+	return quantifierResult(name, counts), nil
+}
+
+// quantifierCounts records the per-element predicate outcomes for a
+// list quantifier (all/any/none/single). Each element contributes to
+// exactly one counter — true, false, or null — and the total is the
+// list length.
+type quantifierCounts struct {
+	trueCount  int
+	falseCount int
+	nullCount  int
+	total      int
 }
 
 // countQuantifierMatches iterates the list and evaluates the predicate for each
-// element, returning trueCount, total, and whether any NULL predicate was seen.
-func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowContext, params map[string]Value, reg FunctionRegistry) (sawNull bool, trueCount, total int, err error) {
-	total = len(list)
+// element, partitioning the outcomes into the (true, false, null) counters
+// of [quantifierCounts].
+func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowContext, params map[string]Value, reg FunctionRegistry) (quantifierCounts, error) {
+	c := quantifierCounts{total: len(list)}
 	for _, elem := range list {
 		innerRow := make(RowContext, len(row)+1)
 		for k, v := range row {
@@ -1041,60 +1053,74 @@ func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowCo
 		innerRow[lc.Variable] = elem
 
 		var predVal Value
+		var err error
 		if lc.Predicate != nil {
 			predVal, err = evalExpr(lc.Predicate, innerRow, params, reg)
 			if err != nil {
-				return
+				return quantifierCounts{}, err
 			}
 		} else {
 			predVal = BoolValue(true)
 		}
 
-		if IsNull(predVal) {
-			sawNull = true
-		} else if IsTruthy(predVal) {
-			trueCount++
+		switch {
+		case IsNull(predVal):
+			c.nullCount++
+		case IsTruthy(predVal):
+			c.trueCount++
+		default:
+			c.falseCount++
 		}
 	}
-	return
+	return c, nil
 }
 
-// quantifierResult converts (trueCount, total, sawNull) to a 3VL boolean for
-// the given quantifier name.
-func quantifierResult(name string, trueCount, total int, sawNull bool) Value {
+// quantifierResult converts the per-element counters to a 3VL boolean
+// for the given quantifier name. The three-valued rules are:
+//
+//   - all:    FALSE if any element is false; TRUE if every element is
+//     true with no nulls; otherwise NULL (mix of true + null,
+//     or all-null, or empty list with at least one null).
+//   - any:    TRUE if any element is true; FALSE if every element is
+//     false; otherwise NULL (any nulls with no true).
+//   - none:   TRUE if every element is false (or list is empty); FALSE
+//     if any element is true; otherwise NULL.
+//   - single: TRUE if exactly one element is true and no nulls; FALSE
+//     if more than one element is true; otherwise NULL.
+func quantifierResult(name string, c quantifierCounts) Value {
 	switch name {
 	case "all":
-		if trueCount == total && !sawNull {
-			return BoolValue(true)
+		if c.falseCount > 0 {
+			return BoolValue(false)
 		}
-		if total-trueCount > 0 {
-			return BoolValue(false) // at least one definitive false
+		if c.nullCount > 0 {
+			return Null
 		}
-		return Null // trueCount == total but sawNull: cannot determine
+		return BoolValue(true)
 	case "any":
-		if trueCount > 0 {
+		if c.trueCount > 0 {
 			return BoolValue(true)
 		}
-		if sawNull {
+		if c.nullCount > 0 {
 			return Null
 		}
 		return BoolValue(false)
 	case "none":
-		if trueCount > 0 {
+		if c.trueCount > 0 {
 			return BoolValue(false)
 		}
-		if sawNull {
+		if c.nullCount > 0 {
 			return Null
 		}
 		return BoolValue(true)
 	case "single":
-		if trueCount > 1 {
+		if c.trueCount > 1 {
 			return BoolValue(false)
 		}
-		if sawNull {
+		if c.nullCount > 0 {
 			return Null
 		}
-		return BoolValue(trueCount == 1)
+		return BoolValue(c.trueCount == 1)
 	}
 	return Null
 }
