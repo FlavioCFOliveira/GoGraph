@@ -59,7 +59,17 @@ func (w *world) genericErrorAtCompileTime(_ context.Context, errCategory, errTyp
 
 // assertSyntaxError checks that w.err is non-nil and is a *parser.ParseError
 // or *parser.SemaError (or wraps one).
+//
+// As with [assertError], we drain a pending lazy result first so per-row
+// eval errors surface against the assertion.
 func (w *world) assertSyntaxError(errType string) error {
+	if w.err == nil && w.result != nil {
+		if _, derr := drainResult(w.result); derr != nil {
+			w.err = derr
+		}
+		w.result.Close() //nolint:errcheck // drained or already-errored result; close is best-effort
+		w.result = nil
+	}
 	if w.err == nil {
 		return fmt.Errorf("expected SyntaxError(%s) but query succeeded", errType)
 	}
@@ -76,7 +86,21 @@ func (w *world) assertSyntaxError(errType string) error {
 
 // assertError checks that w.err is non-nil. It accepts any error category
 // because the engine maps TCK error categories imperfectly at this stage.
+//
+// Some evaluation errors only surface during result iteration (lazy
+// pipelines). When the query phase did not record an error but a result is
+// still pending, we drain it here so the assertion can observe any error
+// produced by per-row eval. This makes RETURN range(0, 0, 0) and other
+// expression-level runtime errors testable against TCK assertions that
+// follow the executing-query step but before the result is iterated.
 func (w *world) assertError(errType string) error {
+	if w.err == nil && w.result != nil {
+		if _, derr := drainResult(w.result); derr != nil {
+			w.err = derr
+		}
+		w.result.Close() //nolint:errcheck // drained or already-errored result; close is best-effort
+		w.result = nil
+	}
 	if w.err == nil {
 		return fmt.Errorf("expected error(%s) but query succeeded", errType)
 	}

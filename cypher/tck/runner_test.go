@@ -384,11 +384,20 @@ import (
 //     letting `datetime('2017-10-28T23:00+02:00[Europe/Stockholm]')`
 //     parse correctly. Net uplift: +126 scenarios above 2860. Observed
 //     2995 across a 3-run sample; gate set conservatively at 2985.
+//   - 3045: raised after Sprint 84 audit round 9 — the TCK error
+//     assertions (`assertError`, `assertSyntaxError`) now drain the
+//     pending lazy result when no error was recorded at execution
+//     time, so per-row eval errors surface against the assertion.
+//     This unlocks scenarios where the failure is in a row-producing
+//     expression (e.g. `RETURN range(0, 0, 0)`, list-index type
+//     mismatches, NumberOutOfRange) and the eager-eval path otherwise
+//     misses them. Net uplift: +60 scenarios above 2985. Observed
+//     3055 across a 3-run sample; gate set conservatively at 3045.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2985
+const tckExecutionBaseline = 3045
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
