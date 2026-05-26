@@ -109,7 +109,18 @@ func TestFnDurationBetween_Dates(t *testing.T) {
 	}
 }
 
-func TestFnDurationBetween_MismatchedKinds_ReturnsNull(t *testing.T) {
+// TestFnDurationBetween_DateAndLocalTime pins the mixed (Date,
+// LocalTime) contract: duration.between subtracts the time-of-day
+// components only. The date side contributes nothing (midnight, by
+// convention); the time side contributes its nanoseconds-since-midnight.
+//
+// This test used to assert NULL — the previous implementation refused
+// every mixed-kind pair. The current implementation follows the
+// openCypher rules: mixed pairs that share at least one comparable
+// axis (date+date, or time+time) produce a duration along that axis,
+// and time-only inputs paired with date-bearing inputs project to the
+// time-of-day axis.
+func TestFnDurationBetween_DateAndLocalTime(t *testing.T) {
 	t.Parallel()
 	a := expr.NewDate(2020, 1, 1)
 	b := expr.NewLocalTime(12, 0, 0, 0)
@@ -117,8 +128,13 @@ func TestFnDurationBetween_MismatchedKinds_ReturnsNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fnDurationBetween: %v", err)
 	}
-	if got != expr.Null {
-		t.Errorf("expected Null, got %v", got)
+	d, ok := got.(expr.DurationValue)
+	if !ok {
+		t.Fatalf("expected DurationValue, got %T (%v)", got, got)
+	}
+	// Date is anchored at 00:00 → diff is +12h on the time-of-day axis.
+	if d.Seconds != 12*3600 || d.Days != 0 || d.Months != 0 || d.Nanos != 0 {
+		t.Errorf("date→localtime diff: got %+v, want 12h", d)
 	}
 }
 

@@ -563,8 +563,20 @@ func durationFromMap(m expr.MapValue) expr.Value {
 	return expr.NewDuration(mInt, dInt, sInt, nanos)
 }
 
-// fnDurationBetween computes the duration from t1 to t2 for any two temporal
-// values of the same kind. Mixed-kind inputs return NULL per openCypher.
+// fnDurationBetween computes the duration from t1 to t2 for any two
+// temporal values. Same-kind inputs delegate to the dedicated Sub*
+// helpers; mixed-kind inputs are projected to a common representation
+// per the openCypher rules:
+//
+//   - DateValue / LocalDateTimeValue / DateTimeValue (date-bearing) pairs
+//     project both sides to LocalDateTime (midnight for bare dates;
+//     zone-stripped for DateTime) and subtract via the wall clock.
+//   - LocalTimeValue / TimeValue (time-only) pairs subtract on the
+//     nanosecond axis; zone offsets are ignored, matching SubTimes.
+//   - A time-only input paired with a date-bearing input subtracts the
+//     time-of-day component; the date component is dropped.
+//
+// NULL on either side propagates to NULL.
 func fnDurationBetween(args []expr.Value) (expr.Value, error) {
 	if err := requireArity("duration.between", args, 2); err != nil {
 		return nil, err
@@ -572,29 +584,130 @@ func fnDurationBetween(args []expr.Value) (expr.Value, error) {
 	if expr.IsNull(args[0]) || expr.IsNull(args[1]) {
 		return expr.Null, nil
 	}
-	switch a := args[0].(type) {
-	case expr.DateValue:
-		if b, ok := args[1].(expr.DateValue); ok {
-			return expr.SubDates(b, a), nil
-		}
-	case expr.LocalDateTimeValue:
-		if b, ok := args[1].(expr.LocalDateTimeValue); ok {
-			return expr.SubLocalDateTimes(b, a), nil
-		}
-	case expr.DateTimeValue:
-		if b, ok := args[1].(expr.DateTimeValue); ok {
-			return expr.SubDateTimes(b, a), nil
-		}
-	case expr.LocalTimeValue:
-		if b, ok := args[1].(expr.LocalTimeValue); ok {
-			return expr.SubLocalTimes(b, a), nil
-		}
-	case expr.TimeValue:
-		if b, ok := args[1].(expr.TimeValue); ok {
-			return expr.SubTimes(b, a), nil
-		}
+	if d, ok := durationBetweenSameKind(args[0], args[1]); ok {
+		return d, nil
+	}
+	if d, ok := durationBetweenDateBearing(args[0], args[1]); ok {
+		return d, nil
+	}
+	if d, ok := durationBetweenTimeOnly(args[0], args[1]); ok {
+		return d, nil
 	}
 	return expr.Null, nil
+}
+
+// durationBetweenSameKind handles the original same-kind cases: two
+// dates, two local-date-times, two date-times, two local-times, two
+// times. Returns ok=false when the two values differ in kind.
+func durationBetweenSameKind(a, b expr.Value) (expr.Value, bool) {
+	switch va := a.(type) {
+	case expr.DateValue:
+		if vb, ok := b.(expr.DateValue); ok {
+			return expr.SubDates(vb, va), true
+		}
+	case expr.LocalDateTimeValue:
+		if vb, ok := b.(expr.LocalDateTimeValue); ok {
+			return expr.SubLocalDateTimes(vb, va), true
+		}
+	case expr.DateTimeValue:
+		if vb, ok := b.(expr.DateTimeValue); ok {
+			return expr.SubDateTimes(vb, va), true
+		}
+	case expr.LocalTimeValue:
+		if vb, ok := b.(expr.LocalTimeValue); ok {
+			return expr.SubLocalTimes(vb, va), true
+		}
+	case expr.TimeValue:
+		if vb, ok := b.(expr.TimeValue); ok {
+			return expr.SubTimes(vb, va), true
+		}
+	}
+	return nil, false
+}
+
+// durationBetweenDateBearing handles mixed-kind pairs where both sides
+// carry a date component (DateValue, LocalDateTimeValue,
+// DateTimeValue). Each side is projected to LocalDateTimeValue (date
+// at midnight, datetime stripped of its zone) and subtracted.
+func durationBetweenDateBearing(a, b expr.Value) (expr.Value, bool) {
+	la, oka := toLocalDateTime(a)
+	if !oka {
+		return nil, false
+	}
+	lb, okb := toLocalDateTime(b)
+	if !okb {
+		return nil, false
+	}
+	return expr.SubLocalDateTimes(lb, la), true
+}
+
+// durationBetweenTimeOnly handles pairs where AT LEAST ONE side is a
+// time-only value (LocalTimeValue / TimeValue). Both sides are
+// projected to a nanosecond-since-midnight count via toNanosOfDay; the
+// date component, when present, is dropped — duration.between with a
+// time-only argument is defined on the time-of-day axis only.
+func durationBetweenTimeOnly(a, b expr.Value) (expr.Value, bool) {
+	na, oka := toNanosOfDay(a)
+	if !oka {
+		return nil, false
+	}
+	nb, okb := toNanosOfDay(b)
+	if !okb {
+		return nil, false
+	}
+	diff := nb - na
+	return expr.NewDuration(0, 0, diff/1_000_000_000, int32(diff%1_000_000_000)), true
+}
+
+// toLocalDateTime projects a date-bearing temporal value to
+// LocalDateTimeValue. Bare DateValues become midnight on that date;
+// DateTimeValue's zone is dropped (the difference of two date-times is
+// independent of their zone offsets — both wall-clocks are observed in
+// the same reference frame). Returns ok=false for time-only values.
+func toLocalDateTime(v expr.Value) (expr.LocalDateTimeValue, bool) {
+	switch vv := v.(type) {
+	case expr.DateValue:
+		return expr.LocalDateTimeValue{T: vv.ToTime()}, true
+	case expr.LocalDateTimeValue:
+		return vv, true
+	case expr.DateTimeValue:
+		// Strip the zone by re-anchoring the wall-clock in UTC. The
+		// resulting LocalDateTime preserves the year/month/day/hour/
+		// minute/second/nanos triple that SubLocalDateTimes uses for
+		// its wall-clock subtraction.
+		return expr.LocalDateTimeValue{T: vv.T.UTC()}, true
+	}
+	return expr.LocalDateTimeValue{}, false
+}
+
+// toNanosOfDay returns the nanoseconds-since-midnight component of any
+// temporal value. For DateValue this is zero (date with no time means
+// midnight); for date-bearing types the time component is extracted
+// from the wall clock; for time-only types the underlying Nanos field
+// is returned directly.
+func toNanosOfDay(v expr.Value) (int64, bool) {
+	switch vv := v.(type) {
+	case expr.DateValue:
+		return 0, true
+	case expr.LocalDateTimeValue:
+		return nanosOfDay(vv.T), true
+	case expr.DateTimeValue:
+		return nanosOfDay(vv.T), true
+	case expr.LocalTimeValue:
+		return vv.Nanos, true
+	case expr.TimeValue:
+		return vv.Nanos, true
+	}
+	return 0, false
+}
+
+// nanosOfDay extracts the time-of-day nanosecond count from a Go
+// [time.Time] (hour, minute, second, nanosecond components only).
+func nanosOfDay(t time.Time) int64 {
+	return int64(t.Hour())*int64(time.Hour) +
+		int64(t.Minute())*int64(time.Minute) +
+		int64(t.Second())*int64(time.Second) +
+		int64(t.Nanosecond())
 }
 
 // fnDurationInMonths supports two arities:

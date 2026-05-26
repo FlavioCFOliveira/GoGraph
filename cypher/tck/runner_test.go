@@ -227,11 +227,24 @@ import (
 //     localdatetime/datetime values at the top of the hour or minute.
 //     Observed 2181 across a 3-run sample; gate set conservatively at
 //     2179.
+//   - 2240: raised after task T937 partial closure — fnDurationBetween
+//     now accepts mixed-kind inputs. Two date-bearing values (Date,
+//     LocalDateTime, DateTime in any combination) project to
+//     LocalDateTime and subtract via the wall clock; time-only pairs
+//     subtract on the nanosecond-of-day axis; time-only ↔ date-bearing
+//     pairs project the date-bearing side to its time-of-day component
+//     (the date is dropped, matching the openCypher rule that
+//     duration.between with a time-only argument is defined on the
+//     time-of-day axis only). Same-kind delegation to the existing
+//     Sub* helpers is preserved verbatim. Unlocks
+//     features/expressions/temporal/Temporal10 mixed-kind scenarios.
+//     Observed 2242 across a 3-run sample; gate set conservatively at
+//     2240.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2179
+const tckExecutionBaseline = 2240
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
