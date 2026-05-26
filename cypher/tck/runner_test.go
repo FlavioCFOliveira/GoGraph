@@ -447,11 +447,20 @@ import (
 //     the order asserted by the WithOrderBy1 [21]/[22] "Sort distinct
 //     types" scenarios. Net uplift: +1 scenario above 3107. Observed
 //     3108 across a 3-run sample; gate set conservatively at 3100.
+//   - 3105: raised after Sprint 84 audit round 9 follow-on 6 —
+//     sema/analyse.go checkExpr now flags `RETURN <expr> IN <literal>`
+//     where the RHS is a statically-known non-list literal (Integer,
+//     Float, String, Boolean, Map) as SyntaxError(InvalidArgumentType)
+//     at compile time. Variables, parameters and ListLiteral RHS
+//     remain unchecked. The new nonListLiteralKind helper mirrors the
+//     existing nonBooleanLiteralKind classifier. Net uplift: +1
+//     scenario above 3108. Observed 3109 across a 3-run sample;
+//     gate set conservatively at 3105.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3100
+const tckExecutionBaseline = 3105
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

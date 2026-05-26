@@ -606,6 +606,13 @@ func (a *analyser) checkExpr(e ast.Expression) {
 				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
 			}
 		}
+		// The IN operator requires a List on the right; a literal of any
+		// other type is a static type error per openCypher.
+		if strings.ToUpper(v.Operator) == "IN" {
+			if kind, bad := nonListLiteralKind(v.Right); bad {
+				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
+			}
+		}
 		a.checkExpr(v.Left)
 		a.checkExpr(v.Right)
 
@@ -762,6 +769,28 @@ func nonBooleanLiteralKind(e ast.Expression) (string, bool) {
 		return "String", true
 	case *ast.ListLiteral:
 		return "List", true
+	case *ast.MapLiteral:
+		return "Map", true
+	}
+	return "", false
+}
+
+// nonListLiteralKind classifies e as a literal expression of a known
+// non-list type. It returns (kindString, true) for IntLiteral,
+// FloatLiteral, StringLiteral, BoolLiteral, and MapLiteral. Returns
+// ("", false) for ListLiteral, NullLiteral, variables, parameters,
+// function calls, and any other expression whose type is not statically
+// constrained to non-list.
+func nonListLiteralKind(e ast.Expression) (string, bool) {
+	switch e.(type) {
+	case *ast.IntLiteral:
+		return "Integer", true
+	case *ast.FloatLiteral:
+		return "Float", true
+	case *ast.StringLiteral:
+		return "String", true
+	case *ast.BoolLiteral:
+		return "Boolean", true
 	case *ast.MapLiteral:
 		return "Map", true
 	}
