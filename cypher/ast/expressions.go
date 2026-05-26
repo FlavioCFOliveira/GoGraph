@@ -142,17 +142,19 @@ type LabelPredicate struct {
 func (*LabelPredicate) astNode()  {}
 func (*LabelPredicate) exprNode() {}
 
-// String returns the Cypher predicate `receiver:Label1:Label2`. The
-// receiver is parenthesised because the operator binds tighter than
-// most arithmetic and comparison operators that may surround it in
-// projection items.
+// String returns the Cypher predicate `(receiver:Label1:Label2)`. The
+// parentheses match the canonical openCypher column-header form
+// projected by `RETURN (n:Foo)`, so RETURN columns line up with the
+// TCK comparison table.
 func (l *LabelPredicate) String() string {
 	var b strings.Builder
+	b.WriteByte('(')
 	b.WriteString(l.Receiver.String())
 	for _, lbl := range l.Labels {
 		b.WriteByte(':')
 		b.WriteString(lbl)
 	}
+	b.WriteByte(')')
 	return b.String()
 }
 
