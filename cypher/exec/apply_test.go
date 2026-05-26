@@ -1202,8 +1202,9 @@ func TestVarLenExpand_ZeroHopOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("path column is not ListValue: %T", rows[0][1])
 	}
-	if len(pl) != 0 {
-		t.Errorf("zero-hop path length = %d, want 0", len(pl))
+	// Zero-hop flat alternating encoding: [srcNodeID] — exactly 1 element.
+	if len(pl) != 1 {
+		t.Errorf("zero-hop path length = %d, want 1 (flat alternating: [srcID])", len(pl))
 	}
 }
 

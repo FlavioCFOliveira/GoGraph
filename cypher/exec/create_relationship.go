@@ -35,6 +35,7 @@ type CreateRelationship struct {
 	endVar   string
 	relVar   string
 	relType  string
+	propsRaw string
 	props    []propLiteral
 	schema   map[string]int // variable name → column index
 	child    Operator
@@ -64,11 +65,26 @@ func NewCreateRelationship(
 		endVar:   endVar,
 		relVar:   relVar,
 		relType:  relType,
+		propsRaw: properties,
 		props:    props,
 		schema:   schema,
 		child:    child,
 		mutator:  mutator,
 	}, nil
+}
+
+// WithParams re-parses the property map with the supplied query parameters for
+// $name substitution. Returns op for chaining.
+func (op *CreateRelationship) WithParams(params map[string]expr.Value) (*CreateRelationship, error) {
+	if len(params) == 0 {
+		return op, nil
+	}
+	props, err := parsePropLiteralWithParams(op.propsRaw, params)
+	if err != nil {
+		return nil, fmt.Errorf("exec: CreateRelationship: parse properties %q: %w", op.propsRaw, err)
+	}
+	op.props = props
+	return op, nil
 }
 
 // Init initialises the operator and its child.

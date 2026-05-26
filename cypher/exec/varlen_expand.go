@@ -440,23 +440,35 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 }
 
 // buildRow writes (inputRow... || pathList || dstID) into out.
-// pathList is a ListValue of IntegerValues (edge positions).
-// dstID is the terminal node ID.
+//
+// pathList is a flat alternating ListValue encoding the full path:
+//
+//	[srcNodeID, edgePos0, dstNode0, edgePos1, dstNode1, ..., dstNodeN]
+//
+// For an N-hop path the list has 1 + 2*N elements (srcNode, then N pairs of
+// (edgePos, dstNode)). For a zero-hop path the list is [srcNodeID] (1 element).
+//
+// dstID is the terminal node ID (same as the last dstNode in pathList, or
+// srcNodeID for zero-hop).
 func (op *VarLengthExpand) buildRow(out *Row, inputRow Row, ps pathState) {
-	// Encode path as a list of edge positions.
-	pathList := make(expr.ListValue, len(ps.path))
+	var srcID expr.Value
+	if op.inputCol < len(inputRow) {
+		srcID = inputRow[op.inputCol]
+	} else {
+		srcID = expr.Null
+	}
+
+	// Build flat alternating list: [srcID, edgePos0, dst0, edgePos1, dst1, ...].
+	pathList := make(expr.ListValue, 1+2*len(ps.path))
+	pathList[0] = srcID
 	for i, step := range ps.path {
-		pathList[i] = expr.IntegerValue(int64(step.edgePos))
+		pathList[1+2*i] = expr.IntegerValue(int64(step.edgePos))
+		pathList[2+2*i] = expr.IntegerValue(int64(step.dstID))
 	}
 
 	var dstID expr.Value
 	if len(ps.path) == 0 {
-		// hop-0: source is the destination.
-		if op.inputCol < len(inputRow) {
-			dstID = inputRow[op.inputCol]
-		} else {
-			dstID = expr.Null
-		}
+		dstID = srcID
 	} else {
 		dstID = expr.IntegerValue(int64(ps.path[len(ps.path)-1].dstID))
 	}

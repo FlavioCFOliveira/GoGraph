@@ -48,6 +48,7 @@ type MergeSearchFn func(ctx context.Context) ([]Row, error)
 type Merge struct {
 	nodeVar         string
 	labels          []string
+	propsRaw        string
 	props           []propLiteral
 	onCreateActions []mergeAction
 	onMatchActions  []mergeAction
@@ -112,6 +113,7 @@ func NewMerge(
 	return &Merge{
 		nodeVar:         nodeVar,
 		labels:          lb,
+		propsRaw:        properties,
 		props:           props,
 		onCreateActions: onCreate,
 		onMatchActions:  onMatch,
@@ -120,6 +122,20 @@ func NewMerge(
 		child:           child,
 		mutator:         mutator,
 	}, nil
+}
+
+// WithParams re-parses the property map with the supplied query parameters for
+// $name substitution. Returns op for chaining.
+func (op *Merge) WithParams(params map[string]expr.Value) (*Merge, error) {
+	if len(params) == 0 {
+		return op, nil
+	}
+	props, err := parsePropLiteralWithParams(op.propsRaw, params)
+	if err != nil {
+		return nil, fmt.Errorf("exec: Merge: parse properties %q: %w", op.propsRaw, err)
+	}
+	op.props = props
+	return op, nil
 }
 
 // WithConstraints attaches a ConstraintRegistry and index.Manager for

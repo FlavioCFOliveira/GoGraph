@@ -88,14 +88,16 @@ var globalNodeCounterSeededOnce sync.Once
 //
 // CreateNode is NOT safe for concurrent use.
 type CreateNode struct {
-	nodeVar string
-	labels  []string
-	props   []propLiteral // parsed once from the properties string
-	child   Operator
-	mutator GraphMutator
-	reg     *ConstraintRegistry // nil means no enforcement
-	mgr     *index.Manager      // nil when reg is nil
-	ctx     context.Context     //nolint:containedctx // stored for per-Next ctx check
+	nodeVar  string
+	labels   []string
+	propsRaw string        // original properties string, retained for re-parse with params
+	props    []propLiteral // parsed once from the properties string
+	child    Operator
+	mutator  GraphMutator
+	params   map[string]expr.Value // query parameters for $name substitution
+	reg      *ConstraintRegistry   // nil means no enforcement
+	mgr      *index.Manager        // nil when reg is nil
+	ctx      context.Context       //nolint:containedctx // stored for per-Next ctx check
 }
 
 // propLiteral is a pre-parsed key/value pair from a literal property map
@@ -126,12 +128,29 @@ func NewCreateNode(
 		return nil, fmt.Errorf("exec: CreateNode: parse properties %q: %w", properties, err)
 	}
 	return &CreateNode{
-		nodeVar: nodeVar,
-		labels:  lb,
-		props:   props,
-		child:   child,
-		mutator: mutator,
+		nodeVar:  nodeVar,
+		labels:   lb,
+		propsRaw: properties,
+		props:    props,
+		child:    child,
+		mutator:  mutator,
 	}, nil
+}
+
+// WithParams attaches query parameters for $name substitution in property
+// expressions. Re-parses the property map with the supplied params.
+// Returns op for chaining.
+func (op *CreateNode) WithParams(params map[string]expr.Value) (*CreateNode, error) {
+	if len(params) == 0 {
+		return op, nil
+	}
+	props, err := parsePropLiteralWithParams(op.propsRaw, params)
+	if err != nil {
+		return nil, fmt.Errorf("exec: CreateNode: parse properties %q: %w", op.propsRaw, err)
+	}
+	op.params = params
+	op.props = props
+	return op, nil
 }
 
 // WithConstraints attaches a ConstraintRegistry and index.Manager to the
@@ -308,6 +327,15 @@ func (op *CreateNode) Close() error {
 //
 // Returns nil (no error) for empty or absent property maps.
 func parsePropLiteral(s string) ([]propLiteral, error) {
+	return parsePropLiteralDeferred(s)
+}
+
+// parsePropLiteralDeferred is like parsePropLiteralWithParams but returns nil
+// (without error) when the value expression is a $param reference and the
+// params map does not contain that key. Used during plan construction when
+// query parameters are not yet available; callers must invoke WithParams before
+// executing the operator.
+func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil, nil
@@ -332,6 +360,10 @@ func parsePropLiteral(s string) ([]propLiteral, error) {
 		key = strings.Trim(key, "`")
 		valStr := strings.TrimSpace(part[colonIdx+1:])
 
+		if strings.HasPrefix(valStr, "$") {
+			// $param reference — deferred; skip for now.
+			continue
+		}
 		pv, err := parsePropValue(valStr)
 		if err != nil {
 			return nil, fmt.Errorf("key %q: %w", key, err)
@@ -377,6 +409,76 @@ func splitMapItems(s string) []string {
 		parts = append(parts, s[start:])
 	}
 	return parts
+}
+
+// parsePropLiteralWithParams parses a Cypher property-map literal (e.g.
+// "{key: $param, key2: 'lit'}") into a slice of propLiterals, substituting
+// parameter references of the form "$name" from the supplied params map.
+// Unrecognised parameter names yield an error.
+//
+// When params is nil the function behaves identically to parsePropLiteral.
+func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propLiteral, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+		return nil, fmt.Errorf("expected map literal enclosed in {}, got %q", s)
+	}
+	inner := strings.TrimSpace(s[1 : len(s)-1])
+	if inner == "" {
+		return nil, nil
+	}
+
+	var out []propLiteral
+	parts := splitMapItems(inner)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		colonIdx := strings.Index(part, ":")
+		if colonIdx < 0 {
+			return nil, fmt.Errorf("missing ':' in map item %q", part)
+		}
+		key := strings.TrimSpace(part[:colonIdx])
+		key = strings.Trim(key, "`")
+		valStr := strings.TrimSpace(part[colonIdx+1:])
+
+		pv, err := parsePropValueWithParams(valStr, params)
+		if err != nil {
+			return nil, fmt.Errorf("key %q: %w", key, err)
+		}
+		out = append(out, propLiteral{key: key, value: pv})
+	}
+	return out, nil
+}
+
+// parsePropValueWithParams parses a single Cypher literal value string into a
+// lpg.PropertyValue, substituting parameter references of the form "$name"
+// from the supplied params map.
+//
+// When params is nil (or empty) the function behaves identically to
+// parsePropValue.
+func parsePropValueWithParams(s string, params map[string]expr.Value) (lpg.PropertyValue, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "$") {
+		name := strings.TrimPrefix(s, "$")
+		v, ok := params[name]
+		if !ok {
+			return lpg.PropertyValue{}, fmt.Errorf("unbound parameter $%s", name)
+		}
+		switch val := v.(type) {
+		case expr.StringValue:
+			return lpg.StringValue(string(val)), nil
+		case expr.IntegerValue:
+			return lpg.Int64Value(int64(val)), nil
+		case expr.FloatValue:
+			return lpg.Float64Value(float64(val)), nil
+		case expr.BoolValue:
+			return lpg.BoolValue(bool(val)), nil
+		default:
+			return lpg.PropertyValue{}, fmt.Errorf("unsupported param type %T for $%s", v, name)
+		}
+	}
+	return parsePropValue(s)
 }
 
 // parsePropValue parses a single Cypher literal value string into a

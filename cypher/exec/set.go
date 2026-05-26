@@ -48,10 +48,11 @@ type SetProperty struct {
 	schema      map[string]int
 	child       Operator
 	mutator     GraphMutator
-	reg         *ConstraintRegistry // nil means no enforcement
-	mgr         *index.Manager      // nil when reg is nil
-	parsedMap   []propLiteral       // cached parse of valueExpr when it is a literal map
-	ctx         context.Context     //nolint:containedctx // stored for per-Next ctx check
+	params      map[string]expr.Value // query parameters for $name substitution
+	reg         *ConstraintRegistry   // nil means no enforcement
+	mgr         *index.Manager        // nil when reg is nil
+	parsedMap   []propLiteral         // cached parse of valueExpr when it is a literal map
+	ctx         context.Context       //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewSetProperty creates a SetProperty operator.
@@ -104,6 +105,13 @@ func (op *SetProperty) WithConstraints(reg *ConstraintRegistry, mgr *index.Manag
 	return op
 }
 
+// WithParams attaches query parameters for $name substitution in value
+// expressions. Returns op for chaining.
+func (op *SetProperty) WithParams(params map[string]expr.Value) *SetProperty {
+	op.params = params
+	return op
+}
+
 // Init initialises the operator and its child.
 func (op *SetProperty) Init(ctx context.Context) error {
 	op.ctx = ctx
@@ -137,8 +145,8 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 	}
 
 	if op.propertyKey != "" {
-		// Single property SET n.key = literal
-		pv, parseErr := parsePropValue(op.valueExpr)
+		// Single property SET n.key = literal (or $param).
+		pv, parseErr := parsePropValueWithParams(op.valueExpr, op.params)
 		if parseErr != nil {
 			// Non-literal expression: treat as no-op for current IR.
 			*out = childRow
