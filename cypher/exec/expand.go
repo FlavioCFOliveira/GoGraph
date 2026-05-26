@@ -228,10 +228,16 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	pos := op.revStart
 	dst := op.revEdges[pos]
 	op.revStart++
-	// Edge-type filter is not supported for reverse edges in the current model;
-	// skip if a type filter is active.
+	// Edge-type filter: locate the corresponding forward-edge position so
+	// the existing fwd-position-keyed filter map applies. The reverse edge
+	// (revEdges[pos] → src) corresponds to the forward edge
+	// (dst → src), found by scanning dst's outgoing range in the forward
+	// CSR. The scan is O(deg(dst)) per reverse edge; acceptable for typical
+	// graphs where in-degree and out-degree are bounded.
 	if op.edgeType != "" {
-		return false, true // skip; caller retries
+		if !op.reverseEdgePassesFilter(uint64(dst), uint64(op.srcID)) {
+			return false, true // filtered out; caller retries
+		}
 	}
 	syntheticID := int64(uint64(len(op.fwdEdges)) + pos)
 	if !op.passesRelMorphism(syntheticID) {
@@ -240,6 +246,32 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	op.buildRow(out, op.srcID, syntheticID, int64(dst))
 	op.incEmitCount()
 	return true, true
+}
+
+// reverseEdgePassesFilter reports whether the forward edge (dst → src),
+// corresponding to a reverse traversal from src to dst, has an
+// edge-type filter entry. It scans the forward CSR's outgoing range of
+// dst to locate the position of the (dst → src) edge, then consults the
+// edge-type filter map. Returns true on no match (edge type filter
+// declined the edge).
+func (op *Expand) reverseEdgePassesFilter(dst, src uint64) bool {
+	if op.edgeTypeFilter == nil {
+		return true // no filter declared → accept all
+	}
+	if dst+1 >= uint64(len(op.fwdVerts)) {
+		return false
+	}
+	start := op.fwdVerts[dst]
+	end := op.fwdVerts[dst+1]
+	for fwdPos := start; fwdPos < end; fwdPos++ {
+		if uint64(op.fwdEdges[fwdPos]) == src {
+			if typ, ok := op.edgeTypeFilter[fwdPos]; ok && typ == op.edgeType {
+				return true
+			}
+			return false
+		}
+	}
+	return false
 }
 
 // advanceInput pulls the next row from the child operator and loads the

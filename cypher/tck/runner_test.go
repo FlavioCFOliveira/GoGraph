@@ -117,11 +117,21 @@ import (
 //     as true (numeric cross-type equality), instead of false.
 //     Observed 1879-1882 across a 3-run sample; the gate is set
 //     conservatively at 1876 to absorb run-to-run variance.
+//   - 1882: raised after two reverse-direction relationship fixes
+//     landed together: (a) ir.createRelationship now honours
+//     ast.RelDirectionIncoming by swapping startVar/endVar so
+//     `CREATE (:A)<-[:R]-(:B)` stores the edge B→A (the openCypher
+//     semantic for the leftward arrow); and (b) exec.Expand's
+//     tryRevEdge now looks up edge types via a fwd-position lookup of
+//     the (dst → src) forward edge, instead of unconditionally
+//     skipping reverse edges when an edge-type filter is active.
+//     Observed 1885-1889 across a 3-run sample; the gate is set
+//     conservatively at 1882 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1876
+const tckExecutionBaseline = 1882
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

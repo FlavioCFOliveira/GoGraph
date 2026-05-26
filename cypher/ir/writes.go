@@ -150,6 +150,14 @@ func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.Nod
 		endVar = *to.Variable
 	}
 	nodePlan := t.createNode(to, child, bound)
+	// Honour the relationship pattern direction: `<-` swaps the endpoint
+	// order so the stored edge goes from the right-hand node back to the
+	// left-hand node. Direction `none` is treated as outgoing for CREATE
+	// (openCypher requires directed CREATE — bidirectional CREATE is a
+	// compile-time error elsewhere in the pipeline).
+	if rp.Direction == ast.RelDirectionIncoming {
+		startVar, endVar = endVar, startVar
+	}
 	return NewCreateRelationship(startVar, endVar, relVar, relType, props, nodePlan)
 }
 
