@@ -431,12 +431,29 @@ func (a *analyser) removeClause(r *ast.Remove) {
 func (a *analyser) deleteClause(d *ast.Delete) {
 	for _, e := range d.Expressions {
 		a.checkExpr(e)
+		a.checkDeleteExpr(e)
 	}
 }
 
 func (a *analyser) detachDeleteClause(d *ast.DetachDelete) {
 	for _, e := range d.Expressions {
 		a.checkExpr(e)
+		a.checkDeleteExpr(e)
+	}
+}
+
+// checkDeleteExpr verifies that a DELETE / DETACH DELETE expression is a
+// node, relationship, or path. Direct non-graph literals and arithmetic
+// expressions raise InvalidArgumentType at compile time. Variable
+// receivers are not type-narrowed at this point (their static type may
+// be "any") to avoid false positives on graph variables that came from
+// a function call or other dynamic source.
+func (a *analyser) checkDeleteExpr(e ast.Expression) {
+	switch e.(type) {
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.BoolLiteral, *ast.ListLiteral, *ast.MapLiteral,
+		*ast.BinaryOp, *ast.UnaryOp:
+		a.error(invalidBooleanOperandError("DELETE", "non-graph", positionOf(e)))
 	}
 }
 
