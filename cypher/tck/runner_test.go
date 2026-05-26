@@ -100,11 +100,18 @@ import (
 //     for WITH * patterns that bind no variables.
 //     Observed 1817-1825 across a 5-run sample; the gate is set
 //     conservatively at 1815 to absorb run-to-run variance.
+//   - 1856: raised after newResult began draining the underlying
+//     ResultSet eagerly when the query has no RETURN clause (cols=nil).
+//     Write-only queries (CREATE/SET/DELETE/MERGE/REMOVE without a
+//     trailing projection) now execute their side effects and surface
+//     an empty result iterator, matching the openCypher TCK contract.
+//     Observed 1858-1859 across a 3-run sample; the gate is set
+//     conservatively at 1856 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1815
+const tckExecutionBaseline = 1856
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

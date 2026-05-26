@@ -801,8 +801,19 @@ func (r *Result) closeLocked() error {
 // installing the leak-detection finalizer on the freshly built value. The
 // finalizer is the only safety net against callers that forget Close; it
 // emits cypher.result.leaked and performs a best-effort release.
+//
+// When cols is empty the query has no RETURN clause and the caller cares
+// only about side effects (CREATE/SET/DELETE/MERGE/REMOVE without a
+// trailing projection). In that case newResult drains the underlying
+// [exec.ResultSet] eagerly so the writes execute and the iterator becomes
+// immediately exhausted — TCK-conformant write-only semantics.
 func newResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64]) *Result {
 	r := &Result{rs: rs, cols: cols, buf: buf, idxMgr: idxMgr, tx: tx}
+	if len(cols) == 0 {
+		for rs.Next() {
+			// discard the row; write side effects execute as a side effect
+		}
+	}
 	runtime.SetFinalizer(r, finalizeResult)
 	return r
 }
