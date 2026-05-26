@@ -30,14 +30,16 @@ import (
 // be treated as a scalar — which produces wrong results because the planner
 // then refuses to emit an EagerAggregation.
 var aggFunctions = map[string]bool{
-	"count":   true,
-	"sum":     true,
-	"avg":     true,
-	"min":     true,
-	"max":     true,
-	"collect": true,
-	"stdev":   true,
-	"stdevp":  true,
+	"count":          true,
+	"sum":            true,
+	"avg":            true,
+	"min":            true,
+	"max":            true,
+	"collect":        true,
+	"stdev":          true,
+	"stdevp":         true,
+	"percentilecont": true,
+	"percentiledisc": true,
 }
 
 // isAggregateFunc reports whether name (lower-cased, no namespace) is an
@@ -87,7 +89,8 @@ func detectAggregation(proj *ast.Projection) (
 		// count(*) — detected via CountStar flag — has no args and uses Argument="".
 		argStr := ""
 		var argExpr ast.Expression
-		if !fn.CountStar && len(fn.Args) == 1 {
+		var secondArg ast.Expression
+		if !fn.CountStar && len(fn.Args) >= 1 {
 			argStr = fn.Args[0].String()
 			if argStr == "*" {
 				argStr = "" // normalise legacy count(*) → Argument=""
@@ -95,13 +98,19 @@ func detectAggregation(proj *ast.Projection) (
 				argExpr = fn.Args[0]
 			}
 		}
+		// Two-arg aggregates (percentileCont, percentileDisc): capture the
+		// percentile parameter for later evaluation at physical-build time.
+		if !fn.CountStar && len(fn.Args) >= 2 {
+			secondArg = fn.Args[1]
+		}
 
 		aggs = append(aggs, AggregateExpr{
-			OutputName:   outName,
-			Function:     strings.ToLower(fn.Name),
-			Argument:     argStr,
-			ArgumentExpr: argExpr,
-			Distinct:     fn.Distinct,
+			OutputName:    outName,
+			Function:      strings.ToLower(fn.Name),
+			Argument:      argStr,
+			ArgumentExpr:  argExpr,
+			SecondArgExpr: secondArg,
+			Distinct:      fn.Distinct,
 		})
 	}
 

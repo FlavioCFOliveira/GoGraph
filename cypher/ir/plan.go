@@ -89,6 +89,12 @@ type AggregateExpr struct {
 	// function call, …); when nil, callers fall back to schema lookup keyed on
 	// Argument or supply the constant Null. count(*) keeps ArgumentExpr == nil.
 	ArgumentExpr ast.Expression
+	// SecondArgExpr captures the second argument of two-arg aggregates
+	// (percentileCont, percentileDisc). The value is constant across the
+	// aggregation (it parameterises the factory, not the per-row Step) and
+	// is evaluated once at physical-build time, typically from a parameter
+	// or a literal.
+	SecondArgExpr ast.Expression
 	// Distinct indicates whether the DISTINCT qualifier is applied inside the
 	// aggregate (e.g. count(DISTINCT n)).
 	Distinct bool

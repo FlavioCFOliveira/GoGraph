@@ -498,8 +498,10 @@ func (a *PercentileContAgg) Result() expr.Value {
 //
 // PercentileDiscAgg is NOT safe for concurrent use.
 type PercentileDiscAgg struct {
-	p      float64
-	values []float64
+	p         float64
+	values    []float64
+	allInt    bool
+	hasValues bool
 }
 
 // NewPercentileDiscAgg returns an AggregatorFactory for PercentileDiscAgg with
@@ -509,19 +511,31 @@ func NewPercentileDiscAgg(p float64) AggregatorFactory {
 }
 
 // Init resets the accumulated values.
-func (a *PercentileDiscAgg) Init() { a.values = a.values[:0] }
+func (a *PercentileDiscAgg) Init() {
+	a.values = a.values[:0]
+	a.allInt = true
+	a.hasValues = false
+}
 
 // Step appends v to the list, skipping NULLs and non-numerics.
 func (a *PercentileDiscAgg) Step(v expr.Value) {
-	if f, ok := toFloat64(v); ok {
-		a.values = append(a.values, f)
+	switch n := v.(type) {
+	case expr.IntegerValue:
+		a.values = append(a.values, float64(int64(n)))
+		a.hasValues = true
+	case expr.FloatValue:
+		a.values = append(a.values, float64(n))
+		a.allInt = false
+		a.hasValues = true
 	}
 }
 
 // Result sorts the values and picks the element at the floor of p*(n-1).
-// Returns NULL if the list is empty.
+// Returns NULL if the list is empty. When every input was IntegerValue,
+// the result is also IntegerValue (PERCENTILE_DISC preserves the
+// representation of the chosen element).
 func (a *PercentileDiscAgg) Result() expr.Value {
-	if len(a.values) == 0 {
+	if !a.hasValues {
 		return expr.Null
 	}
 	sort.Float64s(a.values)
@@ -535,7 +549,11 @@ func (a *PercentileDiscAgg) Result() expr.Value {
 	if idx >= n {
 		idx = n - 1
 	}
-	return expr.FloatValue(a.values[idx])
+	v := a.values[idx]
+	if a.allInt {
+		return expr.IntegerValue(int64(v))
+	}
+	return expr.FloatValue(v)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

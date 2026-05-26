@@ -2267,7 +2267,18 @@ func buildEagerAggregation(
 	// Aggregate argument projections.
 	aggFactories := make([]funcs.AggregatorFactory, 0, len(p.Aggregates))
 	for _, aggExpr := range p.Aggregates {
-		factory, ferr := aggregateFactory(aggExpr.Function, aggExpr.Argument)
+		// Two-arg aggregates (percentileCont, percentileDisc) carry the
+		// percentile parameter in SecondArgExpr. Evaluate it once at
+		// build time so the factory bakes the value in. Single-arg
+		// aggregates pass expr.Null which is ignored downstream.
+		var secondArg expr.Value = expr.Null
+		if aggExpr.SecondArgExpr != nil {
+			v, evErr := expr.Eval(aggExpr.SecondArgExpr, expr.RowContext{}, params, reg)
+			if evErr == nil {
+				secondArg = v
+			}
+		}
+		factory, ferr := aggregateFactory(aggExpr.Function, aggExpr.Argument, secondArg)
 		if ferr != nil {
 			return nil, fmt.Errorf("cypher: %w", ferr)
 		}
@@ -2384,7 +2395,9 @@ func newAggregationEval(
 
 // aggregateFactory maps an IR aggregate function name and argument to a
 // [funcs.AggregatorFactory]. An empty argument string means count(*).
-func aggregateFactory(fn, argument string) (funcs.AggregatorFactory, error) {
+// secondArg is the evaluated percentile parameter for two-arg
+// aggregates; pass NULL for single-arg aggregates.
+func aggregateFactory(fn, argument string, secondArg expr.Value) (funcs.AggregatorFactory, error) {
 	lower := strings.ToLower(fn)
 	switch lower {
 	case "count":
@@ -2406,9 +2419,26 @@ func aggregateFactory(fn, argument string) (funcs.AggregatorFactory, error) {
 		return funcs.NewStdDevAgg(), nil
 	case "stdevp":
 		return funcs.NewStdDevPAgg(), nil
+	case "percentilecont":
+		return funcs.NewPercentileContAgg(percentileParam(secondArg)), nil
+	case "percentiledisc":
+		return funcs.NewPercentileDiscAgg(percentileParam(secondArg)), nil
 	default:
 		return nil, fmt.Errorf("unknown aggregate function %q", fn)
 	}
+}
+
+// percentileParam coerces the second argument of a percentile aggregate
+// to a float64 in [0, 1]. Non-numeric inputs fall back to 0.5 (the
+// median); the aggregator clamps the final value internally.
+func percentileParam(v expr.Value) float64 {
+	switch n := v.(type) {
+	case expr.FloatValue:
+		return float64(n)
+	case expr.IntegerValue:
+		return float64(int64(n))
+	}
+	return 0.5
 }
 
 // irSortKeys converts a slice of ir.SortItem to exec.SortKey values.
