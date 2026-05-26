@@ -170,16 +170,6 @@ type buildOpts struct {
 	// mis-upgrading a count result into a graph node. buildEagerAggregation
 	// populates this set for every aggregate output name it registers in the schema.
 	scalarCols map[string]struct{}
-	// aggSchemaCols is the set of schema column names produced by an upstream
-	// EagerAggregation operator (both group-by keys and aggregate output
-	// names). The downstream Projection's schema-name fast path consults this
-	// set to decide whether a `name -> column index` lookup is sound. Columns
-	// emitted by other operators (Expand, Scan, ...) must not be claimed by
-	// the fast path because the projection's expression has not yet been
-	// evaluated against the row's actual content. See buildIRProjection for
-	// the gating rationale (e.g. `RETURN type(r) AS r` must not bypass
-	// evaluation of `type(r)`).
-	aggSchemaCols map[string]struct{}
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -2549,23 +2539,6 @@ func buildEagerAggregation(
 		for _, aggExpr := range p.Aggregates {
 			bopts.scalarCols[aggExpr.OutputName] = struct{}{}
 		}
-		// Record every column the EagerAggregation registers in the schema —
-		// both group-by keys and aggregate outputs — so the downstream
-		// Projection's schema-name fast path knows the row already carries
-		// the projection's evaluated value. Without this marker the fast
-		// path would mis-fire on unrelated columns (the `RETURN type(r) AS r`
-		// regression) or, with conservative gating, miss legitimate aggregate
-		// passes through (the `RETURN n.num AS n, count(n) AS count`
-		// regression).
-		if bopts.aggSchemaCols == nil {
-			bopts.aggSchemaCols = make(map[string]struct{})
-		}
-		for _, varName := range p.GroupBy {
-			bopts.aggSchemaCols[varName] = struct{}{}
-		}
-		for _, aggExpr := range p.Aggregates {
-			bopts.aggSchemaCols[aggExpr.OutputName] = struct{}{}
-		}
 	}
 
 	return topOp, nil
@@ -3672,30 +3645,28 @@ func buildIRProjection(
 				}
 			}
 			if evalFn == nil {
-				// Schema-name fast path: when an upstream EagerAggregation
-				// has pre-computed and named the output column, prefer a
-				// direct index lookup over expression re-evaluation. This
-				// avoids calling aggregate functions as scalar functions
-				// (they are not exposed through the scalar registry). The
-				// IntegerValue(NodeID) → NodeValue upgrade is deliberately
-				// NOT applied here: aggregate results (count(*), sum(...),
-				// etc.) are scalar integers that can numerically collide
-				// with a real NodeID and would be mis-upgraded into a node
-				// row.
+				// Schema-name fast path: when an upstream operator (e.g.
+				// EagerAggregation) has pre-computed and named the output
+				// column, prefer a direct index lookup over expression
+				// re-evaluation. This avoids calling aggregate functions as
+				// scalar functions. The IntegerValue(NodeID) → NodeValue
+				// upgrade is deliberately NOT applied here: aggregate
+				// results (count(*), sum(...), etc.) are scalar integers
+				// that can numerically collide with a real NodeID and would
+				// be mis-upgraded into a node row.
 				//
-				// Gating on bopts.scalarCols: the fast path is sound only
-				// when name is the output column of an aggregator. Without
-				// this gate, a projection such as RETURN type(r) AS r
-				// would silently bypass evaluation of type(r) whenever the
-				// alias happens to match an existing schema slot — for
-				// instance the raw edge id column emitted by Expand —
-				// returning the IntegerValue edge id instead of the
-				// relationship type label.
-				isAggOut := bopts != nil && bopts.aggSchemaCols != nil
-				if isAggOut {
-					_, isAggOut = bopts.aggSchemaCols[name]
+				// Edge-variable carve-out: when the alias name maps to a
+				// bound relationship variable (i.e. the schema slot carries
+				// an Expand-emitted edge id rather than the projection's
+				// evaluated value), the fast path is unsound. Without this
+				// carve-out, `RETURN type(r) AS r` would bypass evaluation
+				// of `type(r)` and return the raw IntegerValue edge id
+				// instead of the relationship type label.
+				aliasIsBoundRel := false
+				if bopts != nil && bopts.edgeVarMeta != nil {
+					_, aliasIsBoundRel = bopts.edgeVarMeta[name]
 				}
-				if isAggOut {
+				if !aliasIsBoundRel {
 					if colIdx, ok2 := schema[name]; ok2 {
 						idx := colIdx
 						evalFn = func(row exec.Row) (expr.Value, error) {
