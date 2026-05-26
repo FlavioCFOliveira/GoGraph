@@ -581,6 +581,16 @@ func compareValues(a, b Value) (int, error) {
 			return compareBool(bool(av), bool(bv)), nil
 		}
 	}
+	// Same-kind temporal and duration values delegate to compareSameKind,
+	// which already implements the canonical openCypher ordering for
+	// dates, local/zoned times, local/zoned date-times and durations.
+	ka, kb := a.Kind(), b.Kind()
+	if ka == kb {
+		switch ka {
+		case KindDate, KindLocalDateTime, KindDateTime, KindLocalTime, KindTime, KindDuration:
+			return compareSameKind(ka, a, b), nil
+		}
+	}
 	return 0, &EvalError{Msg: fmt.Sprintf("incompatible types for comparison: %s vs %s", a.Kind(), b.Kind())}
 }
 
