@@ -493,11 +493,27 @@ import (
 //     `RETURN 1.foo` now raises InvalidArgumentType at compile time.
 //     Net uplift: +56 scenarios above 3120. Observed 3184 across a
 //     3-run sample; gate set conservatively at 3175.
+//   - 3200: raised after Sprint 85 audit round 10 follow-on 2 — two
+//     property-store fixes for temporal values. (a) cypher/api.go's
+//     exprValueToLPGProp now encodes the six temporal expr.Value kinds
+//     (Date, LocalDateTime, DateTime, LocalTime, Time, Duration) as
+//     SOH-tagged PropString matching the literal-write encoding, so
+//     `CREATE ({dates: [date({...})]})` stores the temporal element
+//     correctly instead of dropping it (the previous default branch
+//     silently skipped temporal values inside an evaluated list, so
+//     the round-trip retrieval returned an empty list). (b) The
+//     clock-source aliases `<kind>.transaction`, `<kind>.statement`,
+//     `<kind>.realtime` (for date, localtime, time, localdatetime,
+//     datetime) are now registered as aliases for the 0-arg
+//     constructor — in a single-process engine the three clock
+//     variants are indistinguishable from time.Now(). Net uplift: +24
+//     scenarios above 3184. Observed 3208 across a 3-run sample; gate
+//     set conservatively at 3200.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3175
+const tckExecutionBaseline = 3200
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

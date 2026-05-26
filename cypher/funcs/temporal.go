@@ -54,6 +54,26 @@ func registerTemporal(r *Registry) {
 	r.Register("localdatetime.truncate", fnLocalDateTimeTruncate)
 	r.Register("time.truncate", fnTimeTruncate)
 	r.Register("localtime.truncate", fnLocalTimeTruncate)
+	// Clock-source variants: per openCypher, .transaction / .statement /
+	// .realtime all return the current instant; the distinction matters
+	// in a clustered setting but not in our single-process engine. All
+	// three aliases dispatch to the same 0-arg constructor which uses
+	// time.Now().UTC().
+	for _, kind := range []struct {
+		base string
+		fn   func([]expr.Value) (expr.Value, error)
+	}{
+		{"date", fnDate},
+		{"localtime", fnLocalTime},
+		{"time", fnTime},
+		{"localdatetime", fnLocalDateTime},
+		{"datetime", fnDateTime},
+	} {
+		fn := kind.fn
+		for _, suffix := range []string{"transaction", "statement", "realtime"} {
+			r.Register(kind.base+"."+suffix, fn)
+		}
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

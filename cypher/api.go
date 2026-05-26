@@ -1349,6 +1349,12 @@ func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.Gr
 // exprValueToLPGProp converts an [expr.Value] to an [lpg.PropertyValue].
 // Returns (zero, false) when the value type has no natural property encoding
 // (e.g. NodeValue, RelationshipValue, PathValue).
+//
+// Temporal values (Date, LocalDateTime, DateTime, LocalTime, Time,
+// Duration) are encoded as PropString with a SOH-range tag byte
+// (0x01..0x06) followed by the canonical openCypher textual form, the
+// same scheme used by [cypher.exec.parseTemporalLiteral] on the
+// literal-string write path. The decoder is [decodeTemporalString].
 func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {
 	switch val := v.(type) {
 	case expr.StringValue:
@@ -1359,6 +1365,18 @@ func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {
 		return lpg.Float64Value(float64(val)), true
 	case expr.BoolValue:
 		return lpg.BoolValue(bool(val)), true
+	case expr.DateValue:
+		return lpg.StringValue("\x01" + val.String()), true
+	case expr.LocalDateTimeValue:
+		return lpg.StringValue("\x02" + val.String()), true
+	case expr.DateTimeValue:
+		return lpg.StringValue("\x03" + val.String()), true
+	case expr.LocalTimeValue:
+		return lpg.StringValue("\x04" + val.String()), true
+	case expr.TimeValue:
+		return lpg.StringValue("\x05" + val.String()), true
+	case expr.DurationValue:
+		return lpg.StringValue("\x06" + val.String()), true
 	case expr.ListValue:
 		elems := make([]lpg.PropertyValue, 0, len(val))
 		for _, el := range val {
