@@ -429,11 +429,21 @@ import (
 //     scenarios in WithOrderBy1/2 and similar features. Net uplift:
 //     +7 scenarios above 3073. Observed 3080 across a 3-run sample;
 //     gate set conservatively at 3070.
+//   - 3098: raised after Sprint 84 audit round 9 follow-on 4 —
+//     compareSameKind for KindLocalDateTime and KindDateTime now uses
+//     t.Compare() instead of t.UnixNano(). UnixNano overflows int64
+//     for year 0001 (~6.2e19 ns before epoch) and year 9999
+//     (~2.5e20 ns after epoch), producing garbage comparisons that
+//     broke ORDER BY against the TCK's extreme-year scenarios.
+//     t.Compare is documented to work across all valid time.Time
+//     values without overflow. Net uplift: +27 scenarios above 3080.
+//     Observed 3107 across a 3-run sample; gate set conservatively
+//     at 3098.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3070
+const tckExecutionBaseline = 3098
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

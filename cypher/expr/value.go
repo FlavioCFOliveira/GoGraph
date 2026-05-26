@@ -745,11 +745,13 @@ func compareSameKind(k Kind, a, b Value) int {
 		}
 		return cmpInt64(int64(da.Day), int64(db.Day))
 	case KindLocalDateTime:
+		// t.Compare avoids the int64 overflow that UnixNano hits for
+		// year 0001 or year 9999 (the TCK has scenarios at both).
 		la, lb := a.(LocalDateTimeValue), b.(LocalDateTimeValue) //nolint:forcetypeassert // kind pre-checked
-		return cmpInt64(la.T.UnixNano(), lb.T.UnixNano())
+		return la.T.Compare(lb.T)
 	case KindDateTime:
 		da, db := a.(DateTimeValue), b.(DateTimeValue) //nolint:forcetypeassert // kind pre-checked
-		return cmpInt64(da.T.UnixNano(), db.T.UnixNano())
+		return da.T.Compare(db.T)
 	case KindLocalTime:
 		la, lb := a.(LocalTimeValue), b.(LocalTimeValue) //nolint:forcetypeassert // kind pre-checked
 		return cmpInt64(la.Nanos, lb.Nanos)
