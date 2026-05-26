@@ -587,7 +587,7 @@ func (v PathValue) Equal(other Value) Value {
 //
 // Within a type the canonical order is:
 //
-//	Path(0) < Node(1) < Relationship(2) < Map(3) < List(4) <
+//	Map(0) < Node(1) < Relationship(2) < List(3) < Path(4) <
 //	String(5) < Boolean(6) < Float(7) < Integer(8) <
 //	Duration(20) < Date(21) < LocalTime(22) < Time(23) <
 //	LocalDateTime(24) < DateTime(25) < Null(99)
@@ -599,15 +599,15 @@ func (v PathValue) Equal(other Value) Value {
 //nolint:gocyclo // Flat lookup over every known kind; splitting hides the order table.
 func kindOrder(k Kind) int {
 	switch k {
-	case KindPath:
+	case KindMap:
 		return 0
 	case KindNode:
 		return 1
 	case KindRelationship:
 		return 2
-	case KindMap:
-		return 3
 	case KindList:
+		return 3
+	case KindPath:
 		return 4
 	case KindString:
 		return 5

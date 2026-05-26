@@ -439,11 +439,19 @@ import (
 //     values without overflow. Net uplift: +27 scenarios above 3080.
 //     Observed 3107 across a 3-run sample; gate set conservatively
 //     at 3098.
+//   - 3100: raised after Sprint 84 audit round 9 follow-on 5 —
+//     kindOrder re-ordered to match the openCypher 9 cross-type
+//     sort order: Map(0) < Node(1) < Relationship(2) < List(3) <
+//     Path(4) < String(5) < Boolean(6) < Float(7) < Integer(8) ...
+//     Previously Path was first and Map was fourth, which contradicted
+//     the order asserted by the WithOrderBy1 [21]/[22] "Sort distinct
+//     types" scenarios. Net uplift: +1 scenario above 3107. Observed
+//     3108 across a 3-run sample; gate set conservatively at 3100.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3098
+const tckExecutionBaseline = 3100
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -261,7 +261,9 @@ func TestCompare_CrossType_Order(t *testing.T) {
 	flt := expr.FloatValue(1.0)
 	intV := expr.IntegerValue(1)
 
-	ordered := []expr.Value{path, node, rel, mapV, list, str, boolV, flt, intV}
+	// openCypher cross-type sort order: Map < Node < Relationship <
+	// List < Path < String < Boolean < Float < Integer.
+	ordered := []expr.Value{mapV, node, rel, list, path, str, boolV, flt, intV}
 	for i := range ordered {
 		for j := i + 1; j < len(ordered); j++ {
 			if c := expr.Compare(ordered[i], ordered[j]); c >= 0 {
