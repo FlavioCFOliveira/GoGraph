@@ -233,30 +233,7 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
-	// Merge static (literal) props with dynamic (expression) props.
-	// Dynamic entries override same-keyed literals so a mixed map like
-	// {name: "Alice", age: x} sets the literal "name" and the runtime "age".
-	props := op.props
-	if op.propsExprFn != nil {
-		dynEntries := op.propsExprFn(childRow)
-		if len(dynEntries) > 0 {
-			merged := make([]propLiteral, 0, len(props)+len(dynEntries))
-			// Add literals that are not overridden by a dynamic entry.
-			dynKeys := make(map[string]struct{}, len(dynEntries))
-			for _, dp := range dynEntries {
-				dynKeys[dp.Key] = struct{}{}
-			}
-			for _, sp := range props {
-				if _, overridden := dynKeys[sp.key]; !overridden {
-					merged = append(merged, sp)
-				}
-			}
-			for _, dp := range dynEntries {
-				merged = append(merged, propLiteral{key: dp.Key, value: dp.Value})
-			}
-			props = merged
-		}
-	}
+	props := mergeProps(op.props, op.propsExprFn, childRow)
 
 	// Constraint enforcement: check before any mutation.
 	if op.reg != nil {
@@ -297,6 +274,35 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 	newRow[len(childRow)] = expr.IntegerValue(int64(nodeID))
 	*out = newRow
 	return true, nil
+}
+
+// mergeProps merges static (literal) props with dynamic (expression) props
+// evaluated against row. Dynamic entries override same-keyed literals, allowing
+// a mixed map like {name: "Alice", age: x} to set the literal "name" and the
+// runtime-evaluated "age". When fn is nil or produces no entries, static is
+// returned unchanged (no allocation).
+func mergeProps(static []propLiteral, fn PropsEvalFn, row Row) []propLiteral {
+	if fn == nil {
+		return static
+	}
+	dynEntries := fn(row)
+	if len(dynEntries) == 0 {
+		return static
+	}
+	merged := make([]propLiteral, 0, len(static)+len(dynEntries))
+	dynKeys := make(map[string]struct{}, len(dynEntries))
+	for _, dp := range dynEntries {
+		dynKeys[dp.Key] = struct{}{}
+	}
+	for _, sp := range static {
+		if _, overridden := dynKeys[sp.key]; !overridden {
+			merged = append(merged, sp)
+		}
+	}
+	for _, dp := range dynEntries {
+		merged = append(merged, propLiteral{key: dp.Key, value: dp.Value})
+	}
+	return merged
 }
 
 // freshNodeKey returns a string key that is guaranteed to be unique within the

@@ -142,27 +142,7 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType)
 	}
 
-	// Merge static and dynamic property entries.
-	props := op.props
-	if op.propsExprFn != nil {
-		dynEntries := op.propsExprFn(childRow)
-		if len(dynEntries) > 0 {
-			merged := make([]propLiteral, 0, len(props)+len(dynEntries))
-			dynKeys := make(map[string]struct{}, len(dynEntries))
-			for _, dp := range dynEntries {
-				dynKeys[dp.Key] = struct{}{}
-			}
-			for _, sp := range props {
-				if _, overridden := dynKeys[sp.key]; !overridden {
-					merged = append(merged, sp)
-				}
-			}
-			for _, dp := range dynEntries {
-				merged = append(merged, propLiteral{key: dp.Key, value: dp.Value})
-			}
-			props = merged
-		}
-	}
+	props := mergeProps(op.props, op.propsExprFn, childRow)
 
 	for _, p := range props {
 		if err := op.mutator.SetEdgeProperty(srcLabel, dstLabel, p.key, p.value); err != nil {

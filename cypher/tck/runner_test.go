@@ -303,11 +303,22 @@ import (
 //     kinds (DATE, DATETIME, LOCALDATETIME, TIME, LOCALTIME, DURATION)
 //     returning their canonical ISO-8601 string representation.
 //     Net uplift: +35 scenarios. Observed 2305-2308 across a 5-run sample.
+//   - 2311: raised after T959+T960 fixes:
+//     (a) T959: SetProperty/RemoveProperty NodeID-0 resolution — row bindings
+//     that arrive as NodeValue or RelationshipValue are now resolved to their
+//     underlying NodeID/edge key, not rejected as non-IntegerValue.
+//     (b) T960: runtime evaluation of non-literal property maps in CREATE/MERGE.
+//     Expressions like {num: x} or {val: a.id} are now evaluated per-row via a
+//     PropsEvalFn closure (buildPropsEvalFn in api.go) instead of failing at
+//     plan-construction time. parsePropLiteralDeferred silently defers non-literal
+//     values; the physical builder installs the closure when PropertiesExpr is
+//     non-nil on the ir.CreateNode/ir.CreateRelationship node.
+//     Net uplift: +6 scenarios. Observed 2311 across a 3-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2305
+const tckExecutionBaseline = 2311
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

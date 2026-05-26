@@ -1182,6 +1182,13 @@ type CreateNode struct {
 	// Properties is the opaque string representation of the property map
 	// expression (e.g. "{name: 'Alice'}").
 	Properties string
+	// PropertiesExpr is the parsed AST for the property map, when available.
+	// Non-nil when the property map contains non-literal expressions (variable
+	// references, property accesses, arithmetic) that must be evaluated at
+	// runtime against the current row. The physical builder uses PropertiesExpr
+	// when non-nil to construct a per-row evaluation closure; nil means all
+	// values were literals and Properties (the string form) is sufficient.
+	PropertiesExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
 }
@@ -1191,6 +1198,15 @@ func NewCreateNode(nodeVar string, labels []string, properties string, child Log
 	lb := make([]string, len(labels))
 	copy(lb, labels)
 	return &CreateNode{NodeVar: nodeVar, Labels: lb, Properties: properties, Child: child}
+}
+
+// NewCreateNodeExpr creates a CreateNode operator with a parsed AST for the
+// property map. Use when the property map contains non-literal expressions that
+// require runtime evaluation.
+func NewCreateNodeExpr(nodeVar string, labels []string, properties string, propertiesExpr ast.Expression, child LogicalPlan) *CreateNode {
+	lb := make([]string, len(labels))
+	copy(lb, labels)
+	return &CreateNode{NodeVar: nodeVar, Labels: lb, Properties: properties, PropertiesExpr: propertiesExpr, Child: child}
 }
 
 // Children implements LogicalPlan.
@@ -1215,6 +1231,10 @@ type CreateRelationship struct {
 	// Properties is the opaque string representation of the property map
 	// expression.
 	Properties string
+	// PropertiesExpr is the parsed AST for the property map, when available.
+	// Non-nil when the property map contains non-literal expressions that must
+	// be evaluated at runtime against the current row. See CreateNode.PropertiesExpr.
+	PropertiesExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
 }
@@ -1228,6 +1248,20 @@ func NewCreateRelationship(startVar, endVar, relVar, relType, properties string,
 		RelType:    relType,
 		Properties: properties,
 		Child:      child,
+	}
+}
+
+// NewCreateRelationshipExpr creates a CreateRelationship operator with a parsed
+// AST for the property map.
+func NewCreateRelationshipExpr(startVar, endVar, relVar, relType, properties string, propertiesExpr ast.Expression, child LogicalPlan) *CreateRelationship {
+	return &CreateRelationship{
+		StartVar:       startVar,
+		EndVar:         endVar,
+		RelVar:         relVar,
+		RelType:        relType,
+		Properties:     properties,
+		PropertiesExpr: propertiesExpr,
+		Child:          child,
 	}
 }
 

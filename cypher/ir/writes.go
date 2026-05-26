@@ -119,6 +119,15 @@ func (t *translator) createNode(np *ast.NodePattern, child LogicalPlan, bound ma
 	if np.Properties != nil {
 		props = np.Properties.String()
 	}
+	if np.Properties != nil {
+		if _, isLiteral := allMapValuesLiteral(np.Properties); !isLiteral {
+			// Property map contains non-literal expressions (variable refs,
+			// property accesses, arithmetic) that cannot be parsed at plan-
+			// construction time. Store the AST so the physical builder can
+			// construct a per-row evaluation closure.
+			return NewCreateNodeExpr(nodeVar, labels, props, np.Properties, child)
+		}
+	}
 	return NewCreateNode(nodeVar, labels, props, child)
 }
 
@@ -157,6 +166,11 @@ func (t *translator) createRelationship(rp *ast.RelationshipPattern, to *ast.Nod
 	// compile-time error elsewhere in the pipeline).
 	if rp.Direction == ast.RelDirectionIncoming {
 		startVar, endVar = endVar, startVar
+	}
+	if rp.Properties != nil {
+		if _, isLiteral := allMapValuesLiteral(rp.Properties); !isLiteral {
+			return NewCreateRelationshipExpr(startVar, endVar, relVar, relType, props, rp.Properties, nodePlan)
+		}
 	}
 	return NewCreateRelationship(startVar, endVar, relVar, relType, props, nodePlan)
 }
@@ -264,4 +278,51 @@ func (t *translator) detachDeleteClause(d *ast.DetachDelete, child LogicalPlan) 
 		plan = NewDetachDelete(expr.String(), plan)
 	}
 	return plan, nil
+}
+
+// allMapValuesLiteral reports whether every value expression in e is a
+// compile-time literal (IntLiteral, FloatLiteral, StringLiteral,
+// BoolLiteral, NullLiteral, or a nested MapLiteral/ListLiteral whose
+// elements are also all literals). When the answer is true the property
+// map can be fully parsed at plan-construction time without a row context.
+// Returns (true, true) when e is nil or not a *ast.MapLiteral.
+//
+// The second return value mirrors the first and is exposed for symmetry
+// with callers that read both values with a single declaration.
+func allMapValuesLiteral(e ast.Expression) (allLiteral, _ bool) {
+	ml, ok := e.(*ast.MapLiteral)
+	if !ok {
+		return true, true
+	}
+	for _, v := range ml.Values {
+		if !isLiteralExpr(v) {
+			return false, false
+		}
+	}
+	return true, true
+}
+
+// isLiteralExpr reports whether e is a compile-time Cypher literal.
+func isLiteralExpr(e ast.Expression) bool {
+	switch v := e.(type) {
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.BoolLiteral, *ast.NullLiteral:
+		return true
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			if !isLiteralExpr(el) {
+				return false
+			}
+		}
+		return true
+	case *ast.MapLiteral:
+		for _, mv := range v.Values {
+			if !isLiteralExpr(mv) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
