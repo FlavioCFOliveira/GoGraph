@@ -1664,6 +1664,48 @@ func buildOperator(
 		}
 		return exec.NewAntiSemiApply(outer, inner, arg), nil
 
+	case *ir.RollUpApply:
+		// Pattern-comprehension execution. Build outer first; its
+		// columns enter the schema and define the outer width that
+		// the RollUpApply output preserves.
+		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		outerWidth := len(schema)
+		// Pre-allocate the exec.Argument and register it under the IR
+		// RollUpApply's ArgTag so the inner subtree's matching
+		// Argument leaf resolves to this instance and receives the
+		// outer row per iteration.
+		arg := exec.NewArgument()
+		if argByTag != nil {
+			argByTag[p.ArgTag] = arg
+		}
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		if argByTag != nil {
+			delete(argByTag, p.ArgTag)
+		}
+		// The RollUpApply output is (outer columns…, collected list).
+		// Inner-built variables are not visible downstream — only the
+		// list bound to CollectVar is. Drop schema entries that the
+		// inner subplan added beyond outerWidth, then register
+		// CollectVar at outerWidth so the final-projection lookup
+		// resolves to the list column.
+		for name, idx := range schema {
+			if idx >= outerWidth {
+				delete(schema, name)
+			}
+		}
+		schema[p.CollectVar] = outerWidth
+		// listEval is left nil — the inner subplan ends with a
+		// Projection that puts the comprehension's projected value at
+		// the row's first column, which is the default collection
+		// extractor.
+		return exec.NewRollUpApply(outer, inner, arg, nil), nil
+
 	case *ir.Argument:
 		// Argument is the leaf of an Apply-family inner plan. At runtime the exec
 		// Argument operator re-emits the outer row that was injected by the Apply

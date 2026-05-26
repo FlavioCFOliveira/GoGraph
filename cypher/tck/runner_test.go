@@ -179,11 +179,24 @@ import (
 //     test.labels and test.my.proc fixture scenarios across
 //     features/clauses/call/Call*. Observed 1980 across a 3-run sample;
 //     gate set conservatively at 1978.
+//   - 1981: raised after task T937 partial closure — *ir.RollUpApply
+//     dispatch now wired into buildOperator: the existing
+//     exec.RollUpApply operator is allocated with the routed Argument
+//     leaf, and the comprehension's CollectVar is registered in the
+//     schema at the outer-width position (inner-only schema entries
+//     are pruned post-build because they are not visible downstream).
+//     pattern_comprehension.go now also (i) tags the inner Argument
+//     for tag-routed lookup, (ii) carries the projection AST via
+//     ProjectionItem.Expr so b.name evaluates via expr.Eval, and
+//     (iii) passes the comprehension forward as a regular projection
+//     item so the final RETURN includes the collected list column.
+//     Observed 1979-1983 across an 8-run sample; gate set
+//     conservatively at 1979 to absorb the wider run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1978
+const tckExecutionBaseline = 1979
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -1049,11 +1049,18 @@ type RollUpApply struct {
 	Inner LogicalPlan
 	// CollectVar is the variable name bound to the collected list.
 	CollectVar string
+	// ArgTag identifies the [Argument] leaf that anchors the Inner
+	// subplan. The physical builder pre-allocates the matching
+	// exec.Argument under this tag so RollUpApply's loop can seed it
+	// with each outer row before re-initialising Inner.
+	ArgTag uint32
 }
 
-// NewRollUpApply creates a RollUpApply operator.
+// NewRollUpApply creates a RollUpApply operator. The Inner subplan's
+// Argument leaf must carry the same ArgTag so the build pipeline can
+// route the exec.Argument instance.
 func NewRollUpApply(outer, inner LogicalPlan, collectVar string) *RollUpApply {
-	return &RollUpApply{Outer: outer, Inner: inner, CollectVar: collectVar}
+	return &RollUpApply{Outer: outer, Inner: inner, CollectVar: collectVar, ArgTag: nextArgTag()}
 }
 
 // Children implements LogicalPlan. Returns [Outer, Inner].

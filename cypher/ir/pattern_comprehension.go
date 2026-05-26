@@ -37,12 +37,15 @@ func (t *translator) translatePatternComprehension(
 	outer LogicalPlan,
 	outputVar string,
 ) (LogicalPlan, error) {
-	// Collect outer variables for the Argument leaf.
+	// Collect outer variables for the Argument leaf. The leaf carries an
+	// explicit tag so the physical builder routes the matching
+	// exec.Argument instance allocated by RollUpApply.
 	var corrVars []string
 	if outer != nil {
 		corrVars = outer.Vars()
 	}
-	arg := NewArgument(corrVars)
+	tag := nextArgTag()
+	arg := NewArgumentWithTag(corrVars, tag)
 
 	// Translate the path pattern using the Argument leaf as the base.
 	// PatternComprehension.Pattern is a single *PathPattern; wrap it in a
@@ -64,11 +67,15 @@ func (t *translator) translatePatternComprehension(
 		inner = NewSelection(pc.Predicate.String(), inner)
 	}
 
-	// Project the comprehension's projection expression.
+	// Project the comprehension's projection expression. The collected
+	// list contains the value of this projection at each Inner row.
+	// Pass the parsed AST via Expr so the executor evaluates the
+	// expression via expr.Eval rather than falling back to a schema-
+	// key lookup that would miss property-access shapes like b.name.
 	if pc.Projection != nil {
 		projName := pc.Projection.String()
 		inner = NewProjection([]ProjectionItem{
-			{Name: projName, Expression: projName},
+			{Name: projName, Expression: projName, Expr: pc.Projection},
 		}, inner)
 	}
 
@@ -76,7 +83,9 @@ func (t *translator) translatePatternComprehension(
 		outputVar = pc.String()
 	}
 
-	return NewRollUpApply(outer, inner, outputVar), nil
+	rua := NewRollUpApply(outer, inner, outputVar)
+	rua.ArgTag = tag
+	return rua, nil
 }
 
 // projectionsWithComprehensions scans projection items and, for any item whose
@@ -124,6 +133,15 @@ func (t *translator) projectionsWithComprehensions(
 		if err != nil {
 			return nil, nil, err
 		}
+
+		// Carry the comprehension forward in the final projection list
+		// as a plain variable reference to outputVar — the RollUpApply
+		// already deposited the collected list under this name, so the
+		// projection just needs to pass it through.
+		regularItems = append(regularItems, ProjectionItem{
+			Name:       outputVar,
+			Expression: outputVar,
+		})
 	}
 
 	return plan, regularItems, nil
