@@ -613,9 +613,17 @@ func eval3VLXOR(left, right Value) (Value, error) {
 }
 
 // evalOrdering handles <, <=, >, >= with 3VL: NULL operand → NULL.
+// Per IEEE 754 / openCypher, any comparison involving NaN yields FALSE
+// (not NULL): NaN > 1, NaN >= 1, NaN < 1, NaN <= 1 are all FALSE. We
+// detect NaN before calling compareValues so the sort-friendly
+// cmpFloat64 (which treats NaN as equal) does not surface as TRUE for
+// `>=` / `<=`.
 func evalOrdering(op string, left, right Value) (Value, error) {
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
+	}
+	if isFloatNaN(left) || isFloatNaN(right) {
+		return BoolValue(false), nil
 	}
 	cmp, err := compareValues(left, right)
 	if err != nil {
@@ -1324,4 +1332,14 @@ func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowConte
 		}
 	}
 	return acc, nil
+}
+
+// isFloatNaN reports whether v is FloatValue and a NaN. Other kinds
+// return false; the NaN check is deliberately limited to FloatValue
+// so IntegerValue / StringValue / etc. fall through to normal ordering.
+func isFloatNaN(v Value) bool {
+	if f, ok := v.(FloatValue); ok {
+		return math.IsNaN(float64(f))
+	}
+	return false
 }
