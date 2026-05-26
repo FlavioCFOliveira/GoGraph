@@ -555,11 +555,26 @@ import (
 //     Net uplift: +6-14 scenarios above 3228. Observed 3234-3243
 //     across an 8-run sample (some under -race showing the lower
 //     end); gate set conservatively at 3229 (minimum observed - 5).
+//   - 3260: raised after the undirected self-loop MATCH dedup +
+//     type(r) projection fix. The Expand operator now skips its
+//     reverse-edge pass when the edge is a self-loop on the current
+//     source node under DirBoth, so that openCypher's "each matched
+//     edge appears exactly once for an undirected pattern" rule is
+//     honoured for self-loops; the analogous skip lives in
+//     VarLengthExpand's BFS enqueue path. The downstream Projection's
+//     schema-name fast path carves out aliases that map to a bound
+//     relationship variable (carried in bopts.edgeVarMeta), so
+//     `RETURN type(r) AS r` no longer bypasses evaluation of
+//     `type(r)` and returns the relationship type label instead of
+//     the raw edge id IntegerValue. Net uplift: +45-49 scenarios
+//     above 3226. Observed 3265-3274 across a 7-run sample (one
+//     -race outlier at 3265); gate set conservatively at 3260
+//     (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3215
+const tckExecutionBaseline = 3260
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
