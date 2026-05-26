@@ -261,12 +261,23 @@ import (
 //     the default (0 / len(list)) for an evaluated-NULL bound, which
 //     yielded the full or partial list instead of NULL. Absent bounds
 //     (e.g. `list[..3]`) keep the default-substitution behaviour
-//     unchanged. Observed 2267 across a 3-run sample.
+//     unchanged. Observed 2262-2266 across an 8-run sample;
+//     subsequently lowered to 2260 to absorb the wider variance from
+//     the comprehension-driven scenarios.
+//   - 2264: raised after task T937 partial closure — ListValue.Equal
+//     now implements openCypher 3VL semantics correctly: a single
+//     FALSE element comparison short-circuits to FALSE (overrides any
+//     earlier NULLs), a mix of TRUEs and NULLs yields NULL, and only
+//     all-TRUE yields TRUE. Previously the first NULL element
+//     short-circuited the whole list to NULL even when a later
+//     element would have produced FALSE. Unlocks features/expressions/
+//     list/List3 equality-with-null scenarios. Observed 2266-2269
+//     across a 5-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2260
+const tckExecutionBaseline = 2264
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

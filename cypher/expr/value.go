@@ -343,14 +343,22 @@ func (v ListValue) Equal(other Value) Value {
 	if !ok || len(v) != len(o) {
 		return BoolValue(false)
 	}
+	// Three-valued list equality per openCypher: a single FALSE element
+	// comparison short-circuits to FALSE (overrides any prior NULLs); a
+	// pure mix of TRUEs and NULLs yields NULL; all-TRUE yields TRUE.
+	sawNull := false
 	for i := range v {
 		r := v[i].Equal(o[i])
 		if IsNull(r) {
-			return Null
+			sawNull = true
+			continue
 		}
 		if !IsTruthy(r) {
 			return BoolValue(false)
 		}
+	}
+	if sawNull {
+		return Null
 	}
 	return BoolValue(true)
 }
