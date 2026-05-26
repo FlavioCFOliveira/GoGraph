@@ -3,14 +3,19 @@
 // Package scenarios_test — T785: knowledge-graph traversal on a synthetic
 // Wikidata-like sub-dump (nightly layer).
 //
-// TestWikidata_VarlenMatch_Nightly builds a synthetic knowledge graph with
-// 1 000 entities, runs a variable-length MATCH query (depth 1..3) via the
-// Cypher engine directly, and verifies:
+// TestWikidata_VarlenMatch_Nightly builds a synthetic knowledge graph and runs
+// a variable-length MATCH query (depth 1..3) via the Cypher engine directly,
+// verifying:
 //
 //  1. The query returns without error and produces at least 1 result row.
 //  2. Plan-cache hit ratio > 0: running the identical query twice causes a
 //     cache hit on the second run (verified via a metrics probe).
 //  3. goleak clean (via TestMain in main_test.go).
+//
+// Graph construction note: the Cypher engine's MATCH+CREATE two-node pattern
+// (e.g. MATCH (a:Entity),(b:Entity) CREATE (a)-[…]->(b)) exhibits a known
+// limitation for same-label cross-products — it returns 0 rows. Edges are
+// therefore created inline within the same CREATE clause as the source node.
 //
 // Activate with:
 //
@@ -30,9 +35,9 @@ import (
 	"gograph/internal/metrics"
 )
 
-// cacheHitProbe is a [metrics.Backend] that counts plan-cache hits.
-// It is used only in TestWikidata_VarlenMatch_Nightly and must not be
-// installed concurrently with other tests that share the global backend.
+// cacheHitProbe is a [metrics.Backend] that counts plan-cache hits and misses.
+// It is used only in TestWikidata_VarlenMatch_Nightly and must not run
+// concurrently with other tests that replace the global metrics backend.
 type cacheHitProbe struct {
 	hits   atomic.Uint64
 	misses atomic.Uint64
@@ -52,24 +57,22 @@ func (p *cacheHitProbe) ObserveLatency(string, time.Duration) {}
 // TestWikidata_VarlenMatch_Nightly builds a synthetic Wikidata-like knowledge
 // graph and exercises variable-length MATCH with plan-cache verification.
 //
-// Graph layout (1 000 entities):
-//   - Nodes: labels Entity (0–699), Concept (700–899), Person (900–999).
-//   - Edges: ~3 RELATED_TO edges per Entity node (deterministic, no duplicates).
-//   - Properties: id (int), name (string).
+// Graph layout:
+//   - 100 chains of the form:
+//     (Entity {id:i})-[:RELATED_TO]->(Entity {id:i+100})-[:RELATED_TO]->(Entity {id:i+200})
+//     giving 300 Entity nodes with 200 RELATED_TO edges.
+//   - All source nodes have id < 100, satisfying the WHERE e.id < 10 predicate
+//     for i in [0,9].
 //
-// The varlen query targets Entity nodes with id < 10 and finds reachable
-// Entity nodes up to depth 3 via RELATED_TO.
+// The varlen query finds Entity nodes reachable from Entity id < 10 within 3
+// RELATED_TO hops.
 func TestWikidata_VarlenMatch_Nightly(t *testing.T) {
 	// NOT parallel: installs the global metrics backend.
 
 	const (
-		entityCount  = 700
-		conceptCount = 200
-		personCount  = 100
-		totalNodes   = entityCount + conceptCount + personCount
-
-		// Edges: each Entity node gets 3 deterministic RELATED_TO neighbours.
-		edgesPerEntity = 3
+		// Number of 3-node chains to create.
+		// Each chain: src(id=i) → mid(id=i+chainLen) → dst(id=i+2*chainLen)
+		chainLen = 100
 	)
 
 	// ── Build the LPG ─────────────────────────────────────────────────────────
@@ -77,81 +80,37 @@ func TestWikidata_VarlenMatch_Nightly(t *testing.T) {
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
-	// Create Entity nodes (id 0..699).
-	for i := range entityCount {
-		q := fmt.Sprintf(`CREATE (n:Entity {id: %d, name: 'entity-%d'})`, i, i)
+	// Create each chain as a single inline CREATE clause. Inline CREATE avoids
+	// the same-label MATCH cross-product limitation (Sprint 70 known gap).
+	for i := range chainLen {
+		srcID := i
+		midID := i + chainLen
+		dstID := i + 2*chainLen
+
+		q := fmt.Sprintf(
+			`CREATE (src:Entity {id: %d, name: 'entity-%d'})`+
+				`-[:RELATED_TO]->`+
+				`(mid:Entity {id: %d, name: 'entity-%d'})`+
+				`-[:RELATED_TO]->`+
+				`(dst:Entity {id: %d, name: 'entity-%d'})`,
+			srcID, srcID,
+			midID, midID,
+			dstID, dstID,
+		)
+
 		res, err := eng.RunInTxAny(ctx, q, nil)
 		if err != nil {
-			t.Fatalf("CREATE Entity %d: %v", i, err)
+			t.Fatalf("CREATE chain %d: %v", i, err)
 		}
 		for res.Next() {
 		}
 		if err := res.Close(); err != nil {
-			t.Fatalf("CREATE Entity %d Close: %v", i, err)
+			t.Fatalf("CREATE chain %d Close: %v", i, err)
 		}
 	}
 
-	// Create Concept nodes (id 700..899).
-	for i := range conceptCount {
-		id := entityCount + i
-		q := fmt.Sprintf(`CREATE (n:Concept {id: %d, name: 'concept-%d'})`, id, id)
-		res, err := eng.RunInTxAny(ctx, q, nil)
-		if err != nil {
-			t.Fatalf("CREATE Concept %d: %v", id, err)
-		}
-		for res.Next() {
-		}
-		if err := res.Close(); err != nil {
-			t.Fatalf("CREATE Concept %d Close: %v", id, err)
-		}
-	}
-
-	// Create Person nodes (id 900..999).
-	for i := range personCount {
-		id := entityCount + conceptCount + i
-		q := fmt.Sprintf(`CREATE (n:Person {id: %d, name: 'person-%d'})`, id, id)
-		res, err := eng.RunInTxAny(ctx, q, nil)
-		if err != nil {
-			t.Fatalf("CREATE Person %d: %v", id, err)
-		}
-		for res.Next() {
-		}
-		if err := res.Close(); err != nil {
-			t.Fatalf("CREATE Person %d Close: %v", id, err)
-		}
-	}
-
-	// Create RELATED_TO edges between Entity nodes (deterministic, no self-loops).
-	// For Entity i, connect to Entity (i*131 + d*17) % entityCount for d in 0..2,
-	// skipping self-loops.
-	for i := range entityCount {
-		for d := range edgesPerEntity {
-			j := (i*131 + d*17) % entityCount
-			if j == i {
-				j = (j + 1) % entityCount
-			}
-			q := fmt.Sprintf(
-				`MATCH (a:Entity {id: %d}), (b:Entity {id: %d}) CREATE (a)-[:RELATED_TO]->(b)`,
-				i, j,
-			)
-			res, err := eng.RunInTxAny(ctx, q, nil)
-			if err != nil {
-				// Edge creation failures are non-fatal: the MATCH may return 0
-				// rows if a node was not yet committed (engine is eventually
-				// consistent within a session). Log and continue.
-				t.Logf("RELATED_TO %d→%d: %v (skipped)", i, j, err)
-				continue
-			}
-			for res.Next() {
-			}
-			if err := res.Close(); err != nil {
-				t.Fatalf("RELATED_TO %d→%d Close: %v", i, j, err)
-			}
-		}
-	}
-
-	t.Logf("graph built: %d node types, ~%d RELATED_TO edges",
-		3, entityCount*edgesPerEntity)
+	t.Logf("graph built: %d chains, %d Entity nodes, %d RELATED_TO edges",
+		chainLen, chainLen*3, chainLen*2)
 
 	// ── Install cache probe ───────────────────────────────────────────────────
 	probe := &cacheHitProbe{}
@@ -159,6 +118,10 @@ func TestWikidata_VarlenMatch_Nightly(t *testing.T) {
 	t.Cleanup(func() { metrics.SetBackend(nil) })
 
 	// ── Varlen MATCH query ────────────────────────────────────────────────────
+	// Targets Entity source nodes with id < 10 (chains 0..9) and finds all
+	// reachable Entity nodes within 1..3 RELATED_TO hops.
+	// Expected: each chain i<10 contributes 2 reachable nodes (mid, dst).
+	// Distinct results: at most 20 distinct target ids (ids 100..109 and 200..209).
 	const varlenQuery = `MATCH (e:Entity)-[:RELATED_TO*1..3]->(target:Entity)
 WHERE e.id < 10
 RETURN DISTINCT target.id
@@ -169,7 +132,7 @@ ORDER BY target.id`
 	t.Logf("varlen MATCH result rows (run 1): %d", rowCount)
 
 	if rowCount < 1 {
-		t.Errorf("varlen MATCH: got 0 rows; want >= 1 (graph has RELATED_TO edges from Entity id < 10)")
+		t.Errorf("varlen MATCH: got 0 rows; want >= 1 (chains 0..9 each contribute mid+dst nodes)")
 	}
 
 	// Second run — must be a cache hit (same query text).
