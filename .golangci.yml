@@ -71,12 +71,6 @@ linters:
       - linters: [gocyclo]
         path: "cypher/ir/explain\\.go"
         text: "cyclomatic complexity"
-      # gocyclo: txn/txn.go encodeOpTyped — dispatch switch over OpKind with one
-      # branch per operation; the linear case-per-op layout is the canonical
-      # serialiser shape and splitting introduces parallel dispatch tables.
-      - linters: [gocyclo]
-        path: "store/txn/txn\\.go"
-        text: "encodeOpTyped"
       # gocritic: builtinShadow in essentials.go — cap/min as local variable names
       # in pre-existing non-exported helpers; renaming would obscure intent.
       - linters: [gocritic]
