@@ -92,8 +92,12 @@ func main() {
 	if err := g.SetNodeProperty(int64(1001), "name", lpg.StringValue("origin")); err != nil {
 		log.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.SetEdgeProperty(int64(1001), int64(1002), "latency_ms", lpg.Float64Value(0.5))
-	g.SetEdgeProperty(int64(1001), int64(1002), "loss", lpg.Float64Value(0.0001))
+	if err := g.SetEdgeProperty(int64(1001), int64(1002), "latency_ms", lpg.Float64Value(0.5)); err != nil {
+		log.Fatalf("SetEdgeProperty latency_ms: %v", err)
+	}
+	if err := g.SetEdgeProperty(int64(1001), int64(1002), "loss", lpg.Float64Value(0.0001)); err != nil {
+		log.Fatalf("SetEdgeProperty loss: %v", err)
+	}
 
 	// === Phase 2: persist a v2 snapshot ===
 	cs := csr.BuildFromAdjList(g.AdjList())

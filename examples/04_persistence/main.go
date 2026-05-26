@@ -83,8 +83,12 @@ func main() {
 	if err := g.SetNodeProperty("alice", "joined", lpg.TimeValue(joined)); err != nil {
 		log.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026"))
-	g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7))
+	if err := g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026")); err != nil {
+		log.Fatalf("SetEdgeProperty since: %v", err)
+	}
+	if err := g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7)); err != nil {
+		log.Fatalf("SetEdgeProperty weight: %v", err)
+	}
 	fmt.Println("Typed properties set on alice and edge alice->bob.")
 
 	// Persist a v2 snapshot (CSR + labels.bin + properties.bin)

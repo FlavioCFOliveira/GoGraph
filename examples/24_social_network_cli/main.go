@@ -21,9 +21,11 @@ func newUsageError(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
 }
 
-// usage prints the high-level help for the example CLI to w.
+// usage prints the high-level help for the example CLI to w. Errors
+// writing to w (e.g. a closed stderr pipe) are deliberately discarded —
+// the binary is about to exit anyway and there is no actionable recovery.
 func usage(w io.Writer) {
-	fmt.Fprintln(w, `Usage: 24_social_network_cli <subcommand> [flags] [args...]
+	_, _ = fmt.Fprintln(w, `Usage: 24_social_network_cli <subcommand> [flags] [args...]
 
 Subcommands:
   init       Open or create the data directory (writes an empty snapshot).
