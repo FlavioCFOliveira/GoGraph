@@ -183,11 +183,12 @@ func TestEval_Subscript_NonIntIndex_List(t *testing.T) {
 	row := expr.RowContext{
 		"lst": expr.ListValue{expr.IntegerValue(1)},
 	}
-	// String index on list → NULL.
+	// String index on list → InvalidArgumentType TypeError per
+	// openCypher; the indexer requires an Integer.
 	e := &ast.SubscriptExpr{Expr: varExpr("lst"), Index: strLit("k")}
-	v := eval(t, e, row, nil)
-	if !expr.IsNull(v) {
-		t.Errorf("string index on list should be null, got %v", v)
+	_, err := expr.Eval(e, row, nil, nil)
+	if err == nil {
+		t.Errorf("string index on list should error, got nil")
 	}
 }
 
@@ -203,12 +204,13 @@ func TestEval_Subscript_MapMissingKey(t *testing.T) {
 }
 
 func TestEval_Subscript_NonContainer_Null(t *testing.T) {
-	// Subscript on a non-container type → NULL.
+	// Subscript on a non-container scalar → InvalidArgumentType
+	// TypeError per openCypher.
 	row := expr.RowContext{"n": expr.IntegerValue(5)}
 	e := &ast.SubscriptExpr{Expr: varExpr("n"), Index: intLit(0)}
-	v := eval(t, e, row, nil)
-	if !expr.IsNull(v) {
-		t.Errorf("subscript on integer should be null, got %v", v)
+	_, err := expr.Eval(e, row, nil, nil)
+	if err == nil {
+		t.Errorf("subscript on integer should error, got nil")
 	}
 }
 

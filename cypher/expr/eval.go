@@ -431,6 +431,12 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value
 	}
 	switch c := container.(type) {
 	case ListValue:
+		// Index into a list — must be an Integer; a non-integer index
+		// (e.g. `list[1.5]`, `list["x"]`) is an InvalidArgumentType
+		// TypeError at runtime per openCypher.
+		if _, ok := idx.(IntegerValue); !ok {
+			return nil, &EvalError{Msg: fmt.Sprintf("InvalidArgumentType: list index must be Integer, got %s", idx.Kind())}
+		}
 		return subscriptList(c, idx), nil
 	case MapValue:
 		return subscriptMap(c, idx), nil
@@ -439,7 +445,10 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value
 	case RelationshipValue:
 		return subscriptMap(c.Properties, idx), nil
 	default:
-		return Null, nil
+		// Subscripting a non-list / non-map / non-graph-element value is
+		// an InvalidArgumentType TypeError per openCypher (e.g. `1[0]`,
+		// `'foo'[0]`, `true[0]`).
+		return nil, &EvalError{Msg: fmt.Sprintf("InvalidArgumentType: cannot index into %s", container.Kind())}
 	}
 }
 
