@@ -40,6 +40,7 @@ import (
 	"gograph/graph/lpg"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 )
 
 // TestNYBolt_ShortestPathCypher seeds a small road-network graph via
@@ -56,7 +57,7 @@ func TestNYBolt_ShortestPathCypher(t *testing.T) {
 	driver, err := neo4j.NewDriverWithContext(
 		"bolt://"+addr,
 		neo4j.NoAuth(),
-		func(c *neo4j.Config) {
+		func(c *config.Config) {
 			c.MaxConnectionPoolSize = 2
 			c.ConnectionAcquisitionTimeout = 5 * time.Second
 			c.SocketConnectTimeout = 5 * time.Second

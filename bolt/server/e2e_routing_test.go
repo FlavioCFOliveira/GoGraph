@@ -26,6 +26,7 @@ import (
 	"gograph/bolt/server"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 )
 
 // TestE2E_RoutingTable connects to the server using routing mode (neo4j://
@@ -48,7 +49,7 @@ func TestE2E_RoutingTable(t *testing.T) {
 	driver, err := neo4j.NewDriverWithContext(
 		"neo4j://"+addr,
 		neo4j.NoAuth(),
-		func(c *neo4j.Config) {
+		func(c *config.Config) {
 			c.MaxConnectionPoolSize = 5
 			c.ConnectionAcquisitionTimeout = 5 * time.Second
 			c.SocketConnectTimeout = 5 * time.Second

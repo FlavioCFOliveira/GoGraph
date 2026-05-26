@@ -36,6 +36,7 @@ import (
 	"gograph/bolt/server"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 )
 
 // TestE2E_IllegalState exercises the server Failure → Reset → Ready cycle:
@@ -59,7 +60,7 @@ func TestE2E_IllegalState(t *testing.T) {
 		d, err := neo4j.NewDriverWithContext(
 			"bolt://"+addr,
 			neo4j.NoAuth(),
-			func(c *neo4j.Config) {
+			func(c *config.Config) {
 				c.MaxConnectionPoolSize = 2
 				c.ConnectionAcquisitionTimeout = 5 * time.Second
 				c.SocketConnectTimeout = 5 * time.Second

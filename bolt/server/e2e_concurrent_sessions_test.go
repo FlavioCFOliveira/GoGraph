@@ -24,6 +24,7 @@ import (
 	"gograph/bolt/server"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 )
 
 // TestE2E_ConcurrentSessions100 exercises 100 concurrent sessions.
@@ -39,7 +40,7 @@ func TestE2E_ConcurrentSessions100(t *testing.T) {
 	bigDriver, err := neo4j.NewDriverWithContext(
 		"bolt://"+addr,
 		neo4j.NoAuth(),
-		func(c *neo4j.Config) {
+		func(c *config.Config) {
 			c.MaxConnectionPoolSize = sessions
 			c.ConnectionAcquisitionTimeout = 30 * time.Second
 			c.SocketConnectTimeout = 5 * time.Second

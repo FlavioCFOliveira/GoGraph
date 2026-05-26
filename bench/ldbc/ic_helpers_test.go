@@ -23,6 +23,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 
 	"gograph/bolt/server"
 	"gograph/cypher"
@@ -109,7 +110,7 @@ func startICServer(t *testing.T) (addr string, driver neo4j.DriverWithContext) {
 	driver, err = neo4j.NewDriverWithContext(
 		"bolt://"+addr,
 		neo4j.NoAuth(),
-		func(c *neo4j.Config) {
+		func(c *config.Config) {
 			c.MaxConnectionPoolSize = 4
 			c.ConnectionAcquisitionTimeout = 5 * time.Second
 			c.SocketConnectTimeout = 5 * time.Second

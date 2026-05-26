@@ -29,6 +29,7 @@ import (
 	"gograph/bolt/server"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 )
 
 // newDriverForTest starts a fresh isolated bolt/server.Server and connects a
@@ -43,7 +44,7 @@ func newDriverForTest(t *testing.T) (neo4j.DriverWithContext, string) {
 	driver, err := neo4j.NewDriverWithContext(
 		"bolt://"+addr,
 		neo4j.NoAuth(),
-		func(c *neo4j.Config) {
+		func(c *config.Config) {
 			c.MaxConnectionPoolSize = 5
 			c.ConnectionAcquisitionTimeout = 5 * time.Second
 			c.SocketConnectTimeout = 5 * time.Second
