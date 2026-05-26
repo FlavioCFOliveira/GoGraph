@@ -74,15 +74,10 @@ func evalSlice(n *ast.SliceExpr, row RowContext, params map[string]Value, reg Fu
 		if !ok {
 			return Null, nil
 		}
-		// Slice upper bound: do not offset-wrap negative values (openCypher
-		// slice upper bounds are positional, not from-end).
-		to = int(iv)
-		if to < 0 {
-			to = 0
-		}
-		if to > ln {
-			to = ln
-		}
+		// Both bounds wrap from the end when negative — `list[-3..-1]` is
+		// the openCypher equivalent of `list[len-3 .. len-1]`. The result
+		// remains a half-open interval [from, to).
+		to = resolveIndex(int(iv), ln)
 	}
 
 	if from > to {
