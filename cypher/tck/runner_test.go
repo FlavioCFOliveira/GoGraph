@@ -240,11 +240,25 @@ import (
 //     features/expressions/temporal/Temporal10 mixed-kind scenarios.
 //     Observed 2242 across a 3-run sample; gate set conservatively at
 //     2240.
+//   - 2258: raised after task T937 partial closure — two coupled fixes:
+//     (a) compareValues now falls through to compareSameKind for
+//     same-kind Date/LocalDateTime/DateTime/LocalTime/Time/Duration
+//     pairs so `<`, `<=`, `>`, `>=` no longer collapse temporal
+//     comparisons to NULL; (b) projection-item column headers are
+//     computed by a shared projectionColumnName helper used by both
+//     projectionItems and projectionsWithComprehensions — for
+//     *ast.BinaryOp the outermost parens (which BinaryOp.String()
+//     adds for unambiguous re-parsing) are stripped so `RETURN x > d`
+//     surfaces the canonical openCypher header `x > d` instead of
+//     `(x > d)`. Together these unlock features/expressions/temporal/
+//     Temporal7 comparison scenarios across all five temporal kinds.
+//     Observed 2260 across a 3-run sample; gate set conservatively at
+//     2258.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2240
+const tckExecutionBaseline = 2258
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

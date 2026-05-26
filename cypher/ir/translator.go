@@ -324,15 +324,36 @@ func projectionItems(proj *ast.Projection) []ProjectionItem {
 	}
 	items := make([]ProjectionItem, len(proj.Items))
 	for i, it := range proj.Items {
-		name := it.Expr.String()
-		if it.Alias != nil {
-			name = *it.Alias
-		} else if v, ok := it.Expr.(*ast.Variable); ok {
-			name = v.Name
+		items[i] = ProjectionItem{
+			Name:       projectionColumnName(it),
+			Expression: it.Expr.String(),
+			Expr:       it.Expr,
 		}
-		items[i] = ProjectionItem{Name: name, Expression: it.Expr.String(), Expr: it.Expr}
 	}
 	return items
+}
+
+// projectionColumnName returns the canonical openCypher column header
+// for a single projection item. Priority:
+//
+//  1. Explicit AS alias.
+//  2. Bare variable name (preserves source spelling, e.g. `n`).
+//  3. The expression's textual form — with the outer parens stripped
+//     for [*ast.BinaryOp], which BinaryOp.String() always wraps in
+//     parens for unambiguous re-parsing even when the column header
+//     should read `x > d` rather than `(x > d)`.
+func projectionColumnName(it *ast.ProjectionItem) string {
+	if it.Alias != nil {
+		return *it.Alias
+	}
+	if v, ok := it.Expr.(*ast.Variable); ok {
+		return v.Name
+	}
+	name := it.Expr.String()
+	if _, isBinOp := it.Expr.(*ast.BinaryOp); isBinOp && len(name) >= 2 && name[0] == '(' && name[len(name)-1] == ')' {
+		name = name[1 : len(name)-1]
+	}
+	return name
 }
 
 // relDirection maps an ast.RelDirection to an ir.Direction.

@@ -108,14 +108,11 @@ func (t *translator) projectionsWithComprehensions(
 		pc, ok := item.Expr.(*ast.PatternComprehension)
 		if !ok {
 			// Regular item — pass through, preserving the parsed AST.
-			name := item.Expr.String()
-			if item.Alias != nil {
-				name = *item.Alias
-			} else if v, ok2 := item.Expr.(*ast.Variable); ok2 {
-				name = v.Name
-			}
+			// Share the column-name policy with the canonical
+			// projectionItems path so BinaryOp items lose their
+			// outer parens consistently.
 			regularItems = append(regularItems, ProjectionItem{
-				Name:       name,
+				Name:       projectionColumnName(item),
 				Expression: item.Expr.String(),
 				Expr:       item.Expr,
 			})
