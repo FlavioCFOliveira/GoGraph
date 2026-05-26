@@ -221,6 +221,7 @@ func (a *analyser) matchClause(m *ast.Match) {
 	if m.Where != nil {
 		a.whereClause(m.Where)
 	}
+	a.checkPatternParameterProps(m.Pattern)
 }
 
 func (a *analyser) optionalMatchClause(m *ast.OptionalMatch) {
@@ -228,6 +229,7 @@ func (a *analyser) optionalMatchClause(m *ast.OptionalMatch) {
 	if m.Where != nil {
 		a.whereClause(m.Where)
 	}
+	a.checkPatternParameterProps(m.Pattern)
 }
 
 func (a *analyser) unwindClause(u *ast.Unwind) {
@@ -405,6 +407,7 @@ func (a *analyser) mergeClause(m *ast.Merge) {
 	// MERGE relationship-type rule: same as CREATE. A merged relationship
 	// pattern must declare exactly one type.
 	a.checkPathPatternRelTypes(m.Pattern)
+	a.checkPathPatternParameterProps(m.Pattern)
 	// ON CREATE / ON MATCH SET items reference existing variables.
 	for _, si := range m.OnCreate {
 		a.checkExpr(si.Target)
@@ -1172,6 +1175,41 @@ func (a *analyser) checkPathPatternRelTypes(pp *ast.PathPattern) {
 		}
 		if el.Relationship.Direction == ast.RelDirectionNone {
 			a.error(invalidBooleanOperandError("relationship", "must be directed", el.Relationship.Pos))
+		}
+	}
+}
+
+// checkPatternParameterProps flags every node or relationship pattern
+// in pat whose Properties expression is a *ast.Parameter — the form
+// `MATCH (n $param)` / `MATCH ()-[r $param]->()` is rejected by
+// openCypher as InvalidParameterUse. The legal alternative is to bind
+// the parameter via a literal map: `MATCH (n {key: $param})`.
+func (a *analyser) checkPatternParameterProps(pat *ast.Pattern) {
+	if pat == nil {
+		return
+	}
+	for _, pp := range pat.Paths {
+		a.checkPathPatternParameterProps(pp)
+	}
+}
+
+// checkPathPatternParameterProps is the per-path counterpart of
+// [checkPatternParameterProps]. Walks each node/relationship in the
+// path and rejects a bare *ast.Parameter receiver.
+func (a *analyser) checkPathPatternParameterProps(pp *ast.PathPattern) {
+	if pp == nil {
+		return
+	}
+	for el := pp.Head; el != nil; el = el.Next {
+		if el.Node != nil && el.Node.Properties != nil {
+			if _, isParam := el.Node.Properties.(*ast.Parameter); isParam {
+				a.error(invalidBooleanOperandError("node properties", "parameter as full predicate", el.Node.Pos))
+			}
+		}
+		if el.Relationship != nil && el.Relationship.Properties != nil {
+			if _, isParam := el.Relationship.Properties.(*ast.Parameter); isParam {
+				a.error(invalidBooleanOperandError("relationship properties", "parameter as full predicate", el.Relationship.Pos))
+			}
 		}
 	}
 }
