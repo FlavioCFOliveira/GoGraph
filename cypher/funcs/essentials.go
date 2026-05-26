@@ -297,15 +297,29 @@ func fnNodes(args []expr.Value) (expr.Value, error) {
 	if expr.IsNull(args[0]) {
 		return expr.Null, nil
 	}
-	pv, ok := args[0].(expr.PathValue)
-	if !ok {
-		return nil, &TypeError{Function: "nodes", ArgIndex: 0, Got: args[0].Kind(), Want: "Path"}
+	switch v := args[0].(type) {
+	case expr.PathValue:
+		result := make(expr.ListValue, len(v.Nodes))
+		for i, n := range v.Nodes {
+			result[i] = n
+		}
+		return result, nil
+	case expr.ListValue:
+		// VarLengthExpand encodes named paths as a flat alternating
+		// list [node, rel, node, rel, ..., node]. Extract every even
+		// index. A purely-edge or purely-node list still works:
+		// elements that are not NodeValue are silently skipped.
+		result := make(expr.ListValue, 0, (len(v)+1)/2)
+		for i, e := range v {
+			if i%2 == 0 {
+				if _, ok := e.(expr.NodeValue); ok {
+					result = append(result, e)
+				}
+			}
+		}
+		return result, nil
 	}
-	result := make(expr.ListValue, len(pv.Nodes))
-	for i, n := range pv.Nodes {
-		result[i] = n
-	}
-	return result, nil
+	return nil, &TypeError{Function: "nodes", ArgIndex: 0, Got: args[0].Kind(), Want: "Path"}
 }
 
 func fnRelationships(args []expr.Value) (expr.Value, error) {
@@ -315,15 +329,28 @@ func fnRelationships(args []expr.Value) (expr.Value, error) {
 	if expr.IsNull(args[0]) {
 		return expr.Null, nil
 	}
-	pv, ok := args[0].(expr.PathValue)
-	if !ok {
-		return nil, &TypeError{Function: "relationships", ArgIndex: 0, Got: args[0].Kind(), Want: "Path"}
+	switch v := args[0].(type) {
+	case expr.PathValue:
+		result := make(expr.ListValue, len(v.Relationships))
+		for i, r := range v.Relationships {
+			result[i] = r
+		}
+		return result, nil
+	case expr.ListValue:
+		// VarLengthExpand encodes named paths as a flat alternating
+		// list [node, rel, node, rel, ..., node]. Extract every odd
+		// index that is a relationship.
+		result := make(expr.ListValue, 0, len(v)/2)
+		for i, e := range v {
+			if i%2 == 1 {
+				if _, ok := e.(expr.RelationshipValue); ok {
+					result = append(result, e)
+				}
+			}
+		}
+		return result, nil
 	}
-	result := make(expr.ListValue, len(pv.Relationships))
-	for i, r := range pv.Relationships {
-		result[i] = r
-	}
-	return result, nil
+	return nil, &TypeError{Function: "relationships", ArgIndex: 0, Got: args[0].Kind(), Want: "Path"}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -92,6 +92,35 @@ func (t *translator) translateMatch(m *ast.Match, child LogicalPlan, optional bo
 //     outer OptionalApply already provides the full-pattern NULL emission.
 func (t *translator) translateOptionalMatch(m *ast.OptionalMatch, child LogicalPlan) (LogicalPlan, error) {
 	if child == nil {
+		// Pattern has no relationships (just a bare node like
+		// `OPTIONAL MATCH (n:DoesNotExist)`): NodeScan returns zero rows
+		// when no node matches, which would violate the openCypher
+		// guarantee that OPTIONAL MATCH always emits at least one row
+		// (NULL-extended) per driving outer row. With child==nil we
+		// synthesise a SingleRow seed via an Argument leaf and wrap the
+		// inner pattern in an OptionalApply, so the empty-result case
+		// produces a single NULL-extended row.
+		if !patternHasRelationships(m.Pattern) {
+			// Build the pattern as a standalone subtree (no outer
+			// driver) so it remains a plain NodeScan / Selection
+			// chain — no CorrelatedApply gets injected.
+			inner, err := t.matchPattern(m.Pattern, nil, false)
+			if err != nil {
+				return nil, err
+			}
+			if m.Where != nil {
+				inner, err = t.translateExistsPredicate(m.Where.Predicate, inner)
+				if err != nil {
+					return nil, err
+				}
+			}
+			// Empty-Argument seed produces one driving row; OptionalApply
+			// then emits exactly one row per outer row (NULL-extended
+			// when the inner subtree produces no rows).
+			optTag := nextArgTag()
+			seed := NewArgumentWithTag(nil, optTag)
+			return NewOptionalApplyWithTag(seed, inner, optTag), nil
+		}
 		plan, err := t.matchPattern(m.Pattern, nil, true)
 		if err != nil {
 			return nil, err
@@ -673,4 +702,22 @@ func (t *translator) matchApplyNodeFilter(np *ast.NodePattern, nodeVar string, p
 		plan = buildPropertySelection(nodeVar, np.Properties, plan)
 	}
 	return plan
+}
+
+// patternHasRelationships reports whether any path in pat contains at
+// least one relationship hop. Used by [translateOptionalMatch] to decide
+// whether a node-only OPTIONAL MATCH needs an explicit OptionalApply
+// wrapper so an empty NodeScan still emits a single NULL-extended row.
+func patternHasRelationships(pat *ast.Pattern) bool {
+	if pat == nil {
+		return false
+	}
+	for _, pp := range pat.Paths {
+		for el := pp.Head; el != nil; el = el.Next {
+			if el.Relationship != nil {
+				return true
+			}
+		}
+	}
+	return false
 }

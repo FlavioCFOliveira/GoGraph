@@ -29,9 +29,16 @@ func Test_OptionalMatch_NodeOnly_AllNodesScan(t *testing.T) {
 		},
 	}
 	plan := mustFromAST(t, q)
-	scan, ok := plan.(*ir.AllNodesScan)
+	// `OPTIONAL MATCH (n)` at the start of the query now wraps the
+	// scan in an OptionalApply over a SingleRow seed so the empty-graph
+	// case emits one NULL-extended row (openCypher 9 §3.2.4).
+	apply, ok := plan.(*ir.OptionalApply)
 	if !ok {
-		t.Fatalf("expected *ir.AllNodesScan, got %T", plan)
+		t.Fatalf("expected *ir.OptionalApply, got %T", plan)
+	}
+	scan, ok := apply.Inner.(*ir.AllNodesScan)
+	if !ok {
+		t.Fatalf("expected inner *ir.AllNodesScan, got %T", apply.Inner)
 	}
 	if scan.NodeVar != "n" {
 		t.Errorf("NodeVar = %q, want n", scan.NodeVar)
@@ -54,9 +61,24 @@ func Test_OptionalMatch_LabelScan(t *testing.T) {
 		},
 	}
 	plan := mustFromAST(t, q)
-	scan, ok := plan.(*ir.NodeByLabelScan)
+	// Node-only OPTIONAL MATCH is wrapped in OptionalApply (see Test_
+	// OptionalMatch_NodeOnly_AllNodesScan for rationale).
+	apply, ok := plan.(*ir.OptionalApply)
 	if !ok {
-		t.Fatalf("expected *ir.NodeByLabelScan, got %T", plan)
+		t.Fatalf("expected *ir.OptionalApply, got %T", plan)
+	}
+	// Selection wraps the scan for the label predicate.
+	inner := apply.Inner
+	for {
+		sel, isSel := inner.(*ir.Selection)
+		if !isSel {
+			break
+		}
+		inner = sel.Child
+	}
+	scan, ok := inner.(*ir.NodeByLabelScan)
+	if !ok {
+		t.Fatalf("expected inner *ir.NodeByLabelScan, got %T", inner)
 	}
 	if scan.Label != "Person" {
 		t.Errorf("Label = %q, want Person", scan.Label)

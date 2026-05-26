@@ -1465,8 +1465,23 @@ func TestTranslate_OptionalMatch_NodeOnly(t *testing.T) {
 		},
 	}
 	plan := mustFromAST(t, q)
-	if _, ok := plan.(*ir.NodeByLabelScan); !ok {
-		t.Fatalf("expected *ir.NodeByLabelScan for optional node-only, got %T", plan)
+	// Node-only OPTIONAL MATCH is wrapped in OptionalApply over an
+	// empty Argument seed so an empty graph emits a single NULL-extended
+	// row (openCypher 9 §3.2.4).
+	apply, ok := plan.(*ir.OptionalApply)
+	if !ok {
+		t.Fatalf("expected *ir.OptionalApply for optional node-only, got %T", plan)
+	}
+	inner := apply.Inner
+	for {
+		sel, isSel := inner.(*ir.Selection)
+		if !isSel {
+			break
+		}
+		inner = sel.Child
+	}
+	if _, ok := inner.(*ir.NodeByLabelScan); !ok {
+		t.Fatalf("expected inner *ir.NodeByLabelScan, got %T", inner)
 	}
 }
 
