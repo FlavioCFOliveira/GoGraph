@@ -6,6 +6,7 @@ package funcs_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"gograph/cypher/expr"
 	"gograph/cypher/funcs"
@@ -721,5 +722,97 @@ func TestFn_Range_TypeError(t *testing.T) {
 	var te *funcs.TypeError
 	if !errors.As(err, &te) {
 		t.Fatalf("expected TypeError, got %T: %v", err, err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// toString() — temporal types
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestFn_ToString_Temporal(t *testing.T) {
+	tests := []struct {
+		name  string
+		input expr.Value
+		want  string
+	}{
+		{
+			name:  "Date",
+			input: expr.NewDate(2020, 1, 15),
+			want:  "2020-01-15",
+		},
+		{
+			name:  "LocalDateTime",
+			input: expr.NewLocalDateTime(2020, 1, 15, 12, 30, 45, 0),
+			want:  "2020-01-15T12:30:45",
+		},
+		{
+			name:  "LocalDateTimeWithNanos",
+			input: expr.NewLocalDateTime(2020, 1, 15, 12, 30, 45, 123_000_000),
+			want:  "2020-01-15T12:30:45.123",
+		},
+		{
+			name:  "DateTimeUTC",
+			input: expr.NewDateTime(2020, 1, 15, 12, 30, 45, 0, nil),
+			want:  "2020-01-15T12:30:45Z",
+		},
+		{
+			name:  "DateTimeWithOffset",
+			input: expr.NewDateTime(2020, 1, 15, 12, 30, 45, 0, time.FixedZone("+01:00", 3600)),
+			want:  "2020-01-15T12:30:45+01:00",
+		},
+		{
+			name:  "LocalTime",
+			input: expr.NewLocalTime(12, 30, 45, 0),
+			want:  "12:30:45",
+		},
+		{
+			name:  "LocalTimeNoSeconds",
+			input: expr.NewLocalTime(9, 0, 0, 0),
+			want:  "09:00",
+		},
+		{
+			name:  "TimeUTC",
+			input: expr.NewTime(12, 30, 45, 0, 0),
+			want:  "12:30:45Z",
+		},
+		{
+			name:  "TimeWithOffset",
+			input: expr.NewTime(12, 30, 45, 0, 3600),
+			want:  "12:30:45+01:00",
+		},
+		{
+			name:  "DurationZero",
+			input: expr.NewDuration(0, 0, 0, 0),
+			want:  "PT0S",
+		},
+		{
+			name:  "DurationYearMonth",
+			input: expr.NewDuration(14, 0, 0, 0), // 1Y2M
+			want:  "P1Y2M",
+		},
+		{
+			name:  "DurationDays",
+			input: expr.NewDuration(0, 3, 0, 0),
+			want:  "P3D",
+		},
+		{
+			name:  "DurationHoursMinutesSeconds",
+			input: expr.NewDuration(0, 0, 4*3600+5*60+6, 0),
+			want:  "PT4H5M6S",
+		},
+		{
+			name:  "DurationFractionalSeconds",
+			input: expr.NewDuration(0, 0, 6, 789_000_000),
+			want:  "PT6.789S",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			v := mustCall(t, "tostring", tc.input)
+			if got, ok := v.(expr.StringValue); !ok || string(got) != tc.want {
+				t.Errorf("toString(%v) = %v, want %q", tc.input, v, tc.want)
+			}
+		})
 	}
 }

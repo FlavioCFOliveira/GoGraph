@@ -558,8 +558,21 @@ func fnToString(args []expr.Value) (expr.Value, error) {
 			return expr.StringValue("true"), nil
 		}
 		return expr.StringValue("false"), nil
+	// Temporal types — return their canonical ISO-8601 string representation.
+	case expr.DateValue:
+		return expr.StringValue(v.String()), nil
+	case expr.LocalDateTimeValue:
+		return expr.StringValue(v.String()), nil
+	case expr.DateTimeValue:
+		return expr.StringValue(v.String()), nil
+	case expr.LocalTimeValue:
+		return expr.StringValue(v.String()), nil
+	case expr.TimeValue:
+		return expr.StringValue(v.String()), nil
+	case expr.DurationValue:
+		return expr.StringValue(v.String()), nil
 	default:
-		return nil, &TypeError{Function: "toString", ArgIndex: 0, Got: args[0].Kind(), Want: "String, Integer, Float, or Boolean"}
+		return nil, &TypeError{Function: "toString", ArgIndex: 0, Got: args[0].Kind(), Want: "String, Integer, Float, Boolean, or temporal type"}
 	}
 }
 
