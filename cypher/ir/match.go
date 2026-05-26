@@ -328,6 +328,25 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 	return plan, nil
 }
 
+// setPathVarOnVLE walks the plan tree depth-first and sets PathVar on the first
+// VarLengthExpand node found, so that the physical builder can allocate a
+// schema slot and emit a PathValue. Only the first VarLengthExpand is tagged
+// (one path variable per pattern).
+func setPathVarOnVLE(plan LogicalPlan, pathVar string) {
+	if plan == nil {
+		return
+	}
+	if vle, ok := plan.(*VarLengthExpand); ok {
+		if vle.PathVar == "" {
+			vle.PathVar = pathVar
+		}
+		return
+	}
+	for _, child := range plan.Children() {
+		setPathVarOnVLE(child, pathVar)
+	}
+}
+
 // leadingNodeVar returns the variable name of the path's leading node, or ""
 // when the leading node is anonymous.
 func leadingNodeVar(pp *ast.PathPattern) string {
@@ -415,6 +434,9 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 		}
 		el = el.Next
 	}
+	if pp.Variable != nil {
+		setPathVarOnVLE(plan, *pp.Variable)
+	}
 	return plan, nil
 }
 
@@ -472,6 +494,9 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 			}
 		}
 		el = el.Next
+	}
+	if pp.Variable != nil {
+		setPathVarOnVLE(plan, *pp.Variable)
 	}
 	return plan, nil
 }

@@ -196,7 +196,9 @@ func replaceChildren(plan ir.LogicalPlan, fn func(ir.LogicalPlan) (ir.LogicalPla
 		if !changed {
 			return plan, false
 		}
-		return ir.NewVarLengthExpand(p.FromVar, p.RelVar, p.RelTypes, p.Direction, p.ToVar, p.MinDepth, p.MaxDepth, child), true
+		vle := ir.NewVarLengthExpand(p.FromVar, p.RelVar, p.RelTypes, p.Direction, p.ToVar, p.MinDepth, p.MaxDepth, child)
+		vle.PathVar = p.PathVar
+		return vle, true
 
 	case *ir.ProjectEndpoints:
 		child, changed := WalkAndReplace(p.Child, fn)

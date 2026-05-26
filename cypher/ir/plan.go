@@ -359,6 +359,10 @@ type VarLengthExpand struct {
 	MinDepth int
 	// MaxDepth is the maximum number of hops (inclusive). Zero means unbounded.
 	MaxDepth int
+	// PathVar, when non-empty, is the named path variable (`p` in
+	// `MATCH p=(a)-[*1..3]->(b)`). The physical builder allocates a schema slot
+	// for it and emits a PathValue in that column.
+	PathVar string
 	// Child is the subplan that produces FromVar.
 	Child LogicalPlan
 }
