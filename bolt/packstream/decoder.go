@@ -159,6 +159,11 @@ func (d *Decoder) ReadBool() (bool, error) {
 }
 
 // ReadInt reads and returns an Integer value, regardless of width.
+//
+// PackStream defines INT_8/INT_16/INT_32/INT_64 as fixed-width signed
+// two's-complement integers. The byte/uint→int reinterpretation casts
+// below preserve the wire bit pattern: they are the canonical decode and
+// not unchecked overflows; gosec G115 is a false positive at each site.
 func (d *Decoder) ReadInt() (int64, error) {
 	b, err := d.r.ReadByte()
 	if err != nil {
@@ -170,26 +175,26 @@ func (d *Decoder) ReadInt() (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		return int64(int8(raw)), nil
+		return int64(int8(raw)), nil //nolint:gosec // G115: two's-complement INT_8 per Bolt PackStream spec
 	case markerInt16:
 		if _, err := io.ReadFull(d.r, d.buf[:2]); err != nil {
 			return 0, err
 		}
-		return int64(int16(binary.BigEndian.Uint16(d.buf[:2]))), nil
+		return int64(int16(binary.BigEndian.Uint16(d.buf[:2]))), nil //nolint:gosec // G115: two's-complement INT_16 per Bolt PackStream spec
 	case markerInt32:
 		if _, err := io.ReadFull(d.r, d.buf[:4]); err != nil {
 			return 0, err
 		}
-		return int64(int32(binary.BigEndian.Uint32(d.buf[:4]))), nil
+		return int64(int32(binary.BigEndian.Uint32(d.buf[:4]))), nil //nolint:gosec // G115: two's-complement INT_32 per Bolt PackStream spec
 	case markerInt64:
 		if _, err := io.ReadFull(d.r, d.buf[:8]); err != nil {
 			return 0, err
 		}
-		return int64(binary.BigEndian.Uint64(d.buf[:8])), nil
+		return int64(binary.BigEndian.Uint64(d.buf[:8])), nil //nolint:gosec // G115: two's-complement INT_64 per Bolt PackStream spec (lossless bit reinterpretation)
 	default:
 		// TinyInt: high nibble 0xF (i.e., 0xF0..0xFF) → negative; 0x00..0x7F → positive.
 		if b <= 0x7F || b >= 0xF0 {
-			return int64(int8(b)), nil
+			return int64(int8(b)), nil //nolint:gosec // G115: two's-complement TinyInt per Bolt PackStream spec
 		}
 		return 0, fmt.Errorf("packstream: expected Int marker, got 0x%02X", b)
 	}

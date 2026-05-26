@@ -94,6 +94,30 @@ func (e *Encoder) writeByte(b byte) error {
 	return e.w.WriteByte(b)
 }
 
+// ErrPayloadTooLarge is returned by WriteBytes/WriteString/WriteListHeader/
+// WriteMapHeader when the supplied length exceeds the largest size the
+// PackStream wire format can encode in its 32-bit length field. Bolt
+// payloads in practice are bounded well below this limit by the server's
+// frame-size limit; the explicit check guards against silent truncation
+// when callers pass an oversize slice from upstream batching code.
+var ErrPayloadTooLarge = fmt.Errorf("packstream: payload length exceeds 32-bit length prefix (max %d)", uint64(math.MaxUint32))
+
+// checkUint32Length reports ErrPayloadTooLarge when n cannot be encoded
+// in a 32-bit unsigned length prefix. n is expected to be non-negative
+// (the calling site validates n >= 0 first via a dedicated case); a
+// hypothetical negative n is also correctly rejected here because the
+// uint64 reinterpretation lifts it well above MaxUint32.
+func checkUint32Length(n int) error {
+	// The int -> uint64 cast is deliberate bit-reinterpretation: it
+	// preserves nonnegative values exactly and turns any negative
+	// argument into a value > MaxUint32, both of which trip the guard
+	// below. gosec G115 does not model this safety property.
+	if uint64(n) > math.MaxUint32 { //nolint:gosec // G115: int->uint64 reinterpretation is the intended check; negative n correctly rejected
+		return ErrPayloadTooLarge
+	}
+	return nil
+}
+
 // WriteNull encodes the PackStream NULL value.
 func (e *Encoder) WriteNull() error {
 	return e.writeByte(markerNull)
@@ -109,35 +133,42 @@ func (e *Encoder) WriteBool(v bool) error {
 
 // WriteInt encodes a PackStream Integer value using the most compact
 // representation: TinyInt for values in [-16, 127], then INT8/16/32/64.
+//
+// The numeric reinterpretation casts below (byte(v), int8(v), int16(v),
+// int32(v), uint64(v)) are bit-pattern-preserving two's-complement
+// conversions mandated by the PackStream wire format; gosec G115 is a
+// false positive here because the enclosing switch has already bounded
+// v to the destination type's range before each cast.
 func (e *Encoder) WriteInt(v int64) error {
 	switch {
 	case v >= tinyIntLow && v <= tinyIntHigh:
 		// TinyInt: value fits in the low 7 bits (negative values use two's complement).
-		return e.writeByte(byte(v))
+		return e.writeByte(byte(v)) //nolint:gosec // G115: range pre-validated by switch [-16,127]
 	case v >= math.MinInt8 && v <= math.MaxInt8:
 		if err := e.writeByte(markerInt8); err != nil {
 			return err
 		}
-		return e.writeByte(byte(int8(v)))
+		return e.writeByte(byte(int8(v))) //nolint:gosec // G115: range pre-validated by switch [MinInt8,MaxInt8]
 	case v >= math.MinInt16 && v <= math.MaxInt16:
 		if err := e.writeByte(markerInt16); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint16(e.buf[:2], uint16(int16(v)))
+		binary.BigEndian.PutUint16(e.buf[:2], uint16(int16(v))) //nolint:gosec // G115: range pre-validated by switch [MinInt16,MaxInt16]
 		_, err := e.w.Write(e.buf[:2])
 		return err
 	case v >= math.MinInt32 && v <= math.MaxInt32:
 		if err := e.writeByte(markerInt32); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint32(e.buf[:4], uint32(int32(v)))
+		binary.BigEndian.PutUint32(e.buf[:4], uint32(int32(v))) //nolint:gosec // G115: range pre-validated by switch [MinInt32,MaxInt32]
 		_, err := e.w.Write(e.buf[:4])
 		return err
 	default:
 		if err := e.writeByte(markerInt64); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint64(e.buf[:8], uint64(v))
+		// int64 -> uint64 is a lossless bit-pattern reinterpretation.
+		binary.BigEndian.PutUint64(e.buf[:8], uint64(v)) //nolint:gosec // G115: int64 -> uint64 is lossless reinterpretation
 		_, err := e.w.Write(e.buf[:8])
 		return err
 	}
@@ -155,6 +186,7 @@ func (e *Encoder) WriteFloat(v float64) error {
 
 // WriteBytes encodes a PackStream Bytes value.
 // It selects BYTES8, BYTES16, or BYTES32 based on the slice length.
+// Returns [ErrPayloadTooLarge] when len(v) exceeds math.MaxUint32.
 func (e *Encoder) WriteBytes(v []byte) error {
 	n := len(v)
 	switch {
@@ -174,10 +206,13 @@ func (e *Encoder) WriteBytes(v []byte) error {
 			return err
 		}
 	default:
+		if err := checkUint32Length(n); err != nil {
+			return err
+		}
 		if err := e.writeByte(markerBytes32); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint32(e.buf[:4], uint32(n))
+		binary.BigEndian.PutUint32(e.buf[:4], uint32(n)) //nolint:gosec // G115: bounded by checkUint32Length above
 		if _, err := e.w.Write(e.buf[:4]); err != nil {
 			return err
 		}
@@ -188,6 +223,7 @@ func (e *Encoder) WriteBytes(v []byte) error {
 
 // WriteString encodes a PackStream String value.
 // It selects TinyString (len 0..15), STRING8, STRING16, or STRING32.
+// Returns [ErrPayloadTooLarge] when len(v) exceeds math.MaxUint32.
 func (e *Encoder) WriteString(v string) error {
 	n := len(v)
 	switch {
@@ -211,10 +247,13 @@ func (e *Encoder) WriteString(v string) error {
 			return err
 		}
 	default:
+		if err := checkUint32Length(n); err != nil {
+			return err
+		}
 		if err := e.writeByte(markerStr32); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint32(e.buf[:4], uint32(n))
+		binary.BigEndian.PutUint32(e.buf[:4], uint32(n)) //nolint:gosec // G115: bounded by checkUint32Length above
 		if _, err := e.w.Write(e.buf[:4]); err != nil {
 			return err
 		}
@@ -225,7 +264,8 @@ func (e *Encoder) WriteString(v string) error {
 
 // WriteListHeader writes the PackStream list marker for a list with n elements.
 // The caller is responsible for encoding exactly n elements after this call.
-// n must be non-negative and at most math.MaxUint32.
+// n must be non-negative and at most math.MaxUint32; otherwise the function
+// returns [ErrPayloadTooLarge].
 func (e *Encoder) WriteListHeader(n int) error {
 	switch {
 	case n < 0:
@@ -245,10 +285,13 @@ func (e *Encoder) WriteListHeader(n int) error {
 		_, err := e.w.Write(e.buf[:2])
 		return err
 	default:
+		if err := checkUint32Length(n); err != nil {
+			return err
+		}
 		if err := e.writeByte(markerList32); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint32(e.buf[:4], uint32(n))
+		binary.BigEndian.PutUint32(e.buf[:4], uint32(n)) //nolint:gosec // G115: bounded by checkUint32Length above
 		_, err := e.w.Write(e.buf[:4])
 		return err
 	}
@@ -256,6 +299,7 @@ func (e *Encoder) WriteListHeader(n int) error {
 
 // WriteMapHeader writes the PackStream map marker for a map with n key/value pairs.
 // The caller is responsible for encoding exactly 2n items (alternating keys and values).
+// Returns [ErrPayloadTooLarge] when n exceeds math.MaxUint32.
 func (e *Encoder) WriteMapHeader(n int) error {
 	switch {
 	case n < 0:
@@ -275,10 +319,13 @@ func (e *Encoder) WriteMapHeader(n int) error {
 		_, err := e.w.Write(e.buf[:2])
 		return err
 	default:
+		if err := checkUint32Length(n); err != nil {
+			return err
+		}
 		if err := e.writeByte(markerMap32); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint32(e.buf[:4], uint32(n))
+		binary.BigEndian.PutUint32(e.buf[:4], uint32(n)) //nolint:gosec // G115: bounded by checkUint32Length above
 		_, err := e.w.Write(e.buf[:4])
 		return err
 	}
