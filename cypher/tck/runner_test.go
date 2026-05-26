@@ -475,11 +475,29 @@ import (
 //     from PropertyOrLabelExpression so `RETURN (n:Foo)` evaluated as
 //     just `n`. Net uplift: +10 scenarios above 3118. Observed 3125-
 //     3129 across a 3-run sample; gate set conservatively at 3120.
+//   - 3175: raised after Sprint 85 audit round 10 follow-on 1 — four
+//     sema enhancements landed together: (a) new KindInvalidAggregation
+//     ErrorKind + checkOrderByAggregation surface SyntaxError
+//     (InvalidAggregation) when ORDER BY references aggregations and
+//     the surrounding projection does not aggregate itself; the new
+//     containsAggregation classifier covers count/sum/avg/min/max/
+//     collect/stdev/percentile{Cont,Disc}. (b) Bare WHERE pattern
+//     predicates (e.g. `WHERE (a)-[r]->(b)`) now use a pure-reference
+//     check (pathPatternRefCheck): variables that are not already
+//     bound surface UndefinedVariable instead of being silently
+//     introduced. (c) WITH/RETURN projection aliases inherit a coarse
+//     static type via inferProjectedType — non-graph literals
+//     (Int/Float/String/Bool/List/Map) produce a "value" type that
+//     conflicts with later `MATCH (n)` introductions, raising
+//     VariableTypeConflict. (d) Direct literal property access
+//     `RETURN 1.foo` now raises InvalidArgumentType at compile time.
+//     Net uplift: +56 scenarios above 3120. Observed 3184 across a
+//     3-run sample; gate set conservatively at 3175.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3120
+const tckExecutionBaseline = 3175
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

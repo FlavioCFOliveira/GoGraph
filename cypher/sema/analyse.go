@@ -312,6 +312,10 @@ func (a *analyser) withClause(w *ast.With) {
 	for _, s := range w.Projection.OrderBy {
 		a.checkExpr(s.Expr)
 	}
+	// InvalidAggregation: an ORDER BY item containing an aggregation
+	// function is only legal when the projection itself contains an
+	// aggregation. Otherwise the aggregation has no group to fold over.
+	a.checkOrderByAggregation(w.Projection)
 
 	// 3. Reset scope: only projected names survive.
 	a.scope.reset()
@@ -322,8 +326,29 @@ func (a *analyser) withClause(w *ast.With) {
 			// Non-nameable projection (e.g. a literal): skip.
 			continue
 		}
-		a.error(a.scope.Define(name, p.pos, "any"))
+		a.error(a.scope.Define(name, p.pos, inferProjectedType(p.expr)))
 	}
+}
+
+// inferProjectedType returns a coarse static type for a WITH/RETURN
+// projection expression so a subsequent pattern introduction
+// (`MATCH (n)`, `MATCH (a)-[r]->(b)`) can detect a type conflict when
+// the alias was previously bound to a non-graph-element value.
+//
+// Recognised types: "node", "relationship", "path", "value" (any
+// non-graph literal / scalar / list / map) and "any" (unknown).
+// Variable references propagate the existing scope type.
+func inferProjectedType(e ast.Expression) string {
+	switch v := e.(type) {
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.BoolLiteral, *ast.ListLiteral, *ast.MapLiteral:
+		_ = v
+		return "value"
+	case *ast.NullLiteral:
+		// NULL is a wildcard; do not constrain downstream pattern use.
+		return "any"
+	}
+	return "any"
 }
 
 // projectedName returns the variable name that a WITH/RETURN projection item
@@ -503,6 +528,33 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 	a.error(a.scope.Define(name, rp.Pos, "relationship"))
 }
 
+// pathPatternRefCheck walks a path pattern in pure-reference mode: every
+// named node and relationship variable must already be in scope, otherwise
+// KindUndefinedVar is reported. Used for bare WHERE pattern predicates
+// (existential checks) where openCypher forbids variable introduction.
+func (a *analyser) pathPatternRefCheck(pp *ast.PathPattern) {
+	if pp == nil {
+		return
+	}
+	if pp.Variable != nil {
+		if _, ok := a.scope.Lookup(*pp.Variable); !ok {
+			a.error(undefinedVarError(*pp.Variable, pp.Pos))
+		}
+	}
+	for el := pp.Head; el != nil; el = el.Next {
+		if el.Node != nil && el.Node.Variable != nil {
+			if _, ok := a.scope.Lookup(*el.Node.Variable); !ok {
+				a.error(undefinedVarError(*el.Node.Variable, el.Node.Pos))
+			}
+		}
+		if el.Relationship != nil && el.Relationship.Variable != nil {
+			if _, ok := a.scope.Lookup(*el.Relationship.Variable); !ok {
+				a.error(undefinedVarError(*el.Relationship.Variable, el.Relationship.Pos))
+			}
+		}
+	}
+}
+
 // conflictsWith reports whether an existing symbol of kind have can be
 // safely bound a second time as kind want. "any" tolerates either side
 // (used for projection aliases and YIELD items where the static type is
@@ -561,6 +613,7 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 	for _, s := range proj.OrderBy {
 		a.checkExpr(s.Expr)
 	}
+	a.checkOrderByAggregation(proj)
 	if proj.Skip != nil {
 		a.checkExpr(proj.Skip)
 	}
@@ -596,6 +649,15 @@ func (a *analyser) checkExpr(e ast.Expression) {
 
 	case *ast.Property:
 		a.checkExpr(v.Receiver)
+		// Compile-time type check: property access on a direct literal
+		// of a non-graph type is statically invalid. RETURN 1.foo,
+		// RETURN 'str'.foo etc. raise TypeError(InvalidArgumentType).
+		// Variable receivers are intentionally not type-narrowed here —
+		// they may legitimately resolve to NULL at runtime, which
+		// openCypher permits without error.
+		if _, bad := nonBooleanLiteralKind(v.Receiver); bad {
+			a.error(invalidBooleanOperandError(".", "non-graph", v.Pos))
+		}
 
 	case *ast.LabelPredicate:
 		a.checkExpr(v.Receiver)
@@ -703,9 +765,12 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		a.countSubquery(v)
 
 	case *ast.PathPattern:
-		// PathPattern in expression context (e.g. shortestPath): introduce
-		// variables but only check them — they are pattern-bound here.
-		a.pathPatternIntroduce(v)
+		// PathPattern in expression context (a bare pattern predicate in
+		// WHERE, e.g. `WHERE (a)-[r]->(b)`). Per openCypher, a bare
+		// pattern predicate may NOT introduce new variables — every node
+		// and relationship variable must already be in scope. We only
+		// check references; we never call Define.
+		a.pathPatternRefCheck(v)
 
 	// Literals and parameters carry no variable references.
 	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
@@ -798,4 +863,141 @@ func nonListLiteralKind(e ast.Expression) (string, bool) {
 		return "Map", true
 	}
 	return "", false
+}
+
+// checkOrderByAggregation flags ORDER BY items that contain aggregation
+// function calls when the surrounding projection does not aggregate
+// itself. The openCypher rule: an aggregation in ORDER BY collapses
+// rows to a group; the group must come from the projection.
+func (a *analyser) checkOrderByAggregation(proj *ast.Projection) {
+	if proj == nil || len(proj.OrderBy) == 0 {
+		return
+	}
+	// If the projection itself contains an aggregation, ORDER BY may
+	// reference aggregations freely (they fold over the same groups).
+	for _, item := range proj.Items {
+		if containsAggregation(item.Expr) {
+			return
+		}
+	}
+	for _, s := range proj.OrderBy {
+		if containsAggregation(s.Expr) {
+			a.error(invalidAggregationError(positionOf(s.Expr)))
+			// Report once per ORDER BY item; do not flood with the
+			// same error if the projection has none.
+		}
+	}
+}
+
+// positionOf returns the [ast.Position] of an expression by best effort.
+// Expressions without a Pos field fall back to the zero Position.
+func positionOf(e ast.Expression) ast.Position {
+	switch v := e.(type) {
+	case *ast.Variable:
+		return v.Pos
+	case *ast.Property:
+		return v.Pos
+	case *ast.FunctionInvocation:
+		return v.Pos
+	case *ast.BinaryOp:
+		return v.Pos
+	case *ast.UnaryOp:
+		return v.Pos
+	case *ast.IntLiteral:
+		return v.Pos
+	case *ast.FloatLiteral:
+		return v.Pos
+	case *ast.StringLiteral:
+		return v.Pos
+	case *ast.BoolLiteral:
+		return v.Pos
+	case *ast.NullLiteral:
+		return v.Pos
+	case *ast.ListLiteral:
+		return v.Pos
+	case *ast.MapLiteral:
+		return v.Pos
+	case *ast.LabelPredicate:
+		return v.Pos
+	case *ast.CaseExpression:
+		return v.Pos
+	case *ast.ListComprehension:
+		return v.Pos
+	case *ast.PatternComprehension:
+		return v.Pos
+	case *ast.MapProjection:
+		return v.Pos
+	case *ast.SubscriptExpr:
+		return v.Pos
+	case *ast.SliceExpr:
+		return v.Pos
+	case *ast.ExistsSubquery:
+		return v.Pos
+	case *ast.CountSubquery:
+		return v.Pos
+	}
+	return ast.Position{}
+}
+
+// containsAggregation reports whether e (or any sub-expression) calls one
+// of the openCypher aggregation functions. The classifier is a case-
+// insensitive name match against a small canonical set; user-defined
+// aggregations are out of scope for this static check.
+func containsAggregation(e ast.Expression) bool {
+	if e == nil {
+		return false
+	}
+	switch v := e.(type) {
+	case *ast.FunctionInvocation:
+		name := strings.ToLower(v.Name)
+		// FunctionInvocation may be namespaced (e.g. apoc.coll.sum); the
+		// canonical aggregations are unqualified.
+		if len(v.Namespace) == 0 {
+			switch name {
+			case "count", "sum", "avg", "min", "max", "collect",
+				"stdev", "stdevp", "percentilecont", "percentiledisc":
+				return true
+			}
+		}
+		for _, arg := range v.Args {
+			if containsAggregation(arg) {
+				return true
+			}
+		}
+	case *ast.BinaryOp:
+		return containsAggregation(v.Left) || containsAggregation(v.Right)
+	case *ast.UnaryOp:
+		return containsAggregation(v.Operand)
+	case *ast.Property:
+		return containsAggregation(v.Receiver)
+	case *ast.LabelPredicate:
+		return containsAggregation(v.Receiver)
+	case *ast.SubscriptExpr:
+		return containsAggregation(v.Expr) || containsAggregation(v.Index)
+	case *ast.SliceExpr:
+		return containsAggregation(v.Expr) || containsAggregation(v.From) || containsAggregation(v.To)
+	case *ast.CaseExpression:
+		if containsAggregation(v.Subject) {
+			return true
+		}
+		for _, alt := range v.Alternatives {
+			if containsAggregation(alt.Condition) || containsAggregation(alt.Consequent) {
+				return true
+			}
+		}
+		return containsAggregation(v.ElseExpr)
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			if containsAggregation(el) {
+				return true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range v.Values {
+			if containsAggregation(val) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -35,6 +35,12 @@ const (
 	// operator (AND / OR / XOR / NOT). Variables and other expressions whose
 	// type is only known at runtime are not flagged.
 	KindInvalidArgumentType ErrorKind = "INVALID_ARGUMENT_TYPE"
+
+	// KindInvalidAggregation is reported when an aggregation function call
+	// appears in an ORDER BY item but the surrounding projection does not
+	// itself contain any aggregation. Aggregations only fold over groups
+	// defined by the projection; standing alone in an ORDER BY is illegal.
+	KindInvalidAggregation ErrorKind = "INVALID_AGGREGATION"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -93,6 +99,17 @@ func invalidBooleanOperandError(op, gotKind string, pos ast.Position) *ScopeErro
 	}
 }
 
+// invalidAggregationError constructs a KindInvalidAggregation ScopeError
+// for an aggregation used in ORDER BY without a matching projection-level
+// aggregation.
+func invalidAggregationError(pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindInvalidAggregation,
+		Pos:     pos,
+		Message: "aggregation in ORDER BY requires a matching aggregation in the projection",
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bolt-compatible mapping (TCK error categories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -128,6 +145,10 @@ const (
 	// argument type mismatches detected at compile time. Reserved for
 	// [TypeError] use.
 	SubTypeInvalidArgumentType = "InvalidArgumentType"
+
+	// SubTypeInvalidAggregation is the TCK sub-type for an aggregation
+	// used in ORDER BY when the projection does not itself aggregate.
+	SubTypeInvalidAggregation = "InvalidAggregation"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -194,6 +215,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindScopeLeak, Category: CategorySyntaxError, SubType: SubTypeUndefinedVariable},
 	{Kind: KindRedeclaration, Category: CategorySyntaxError, SubType: SubTypeVariableTypeConflict},
 	{Kind: KindInvalidArgumentType, Category: CategorySyntaxError, SubType: SubTypeInvalidArgumentType},
+	{Kind: KindInvalidAggregation, Category: CategorySyntaxError, SubType: SubTypeInvalidAggregation},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]
