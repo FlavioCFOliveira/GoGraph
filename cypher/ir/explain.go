@@ -91,6 +91,8 @@ func operatorName(plan LogicalPlan) string {
 		return "VarLengthExpand"
 	case *ProjectEndpoints:
 		return "ProjectEndpoints"
+	case *NamedPath:
+		return "NamedPath"
 
 	// Filter and projection
 	case *Selection:

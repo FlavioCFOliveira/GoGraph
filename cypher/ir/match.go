@@ -419,6 +419,81 @@ func setPathVarOnVLE(plan LogicalPlan, pathVar string) {
 	}
 }
 
+// pathHasVarLength reports whether pp contains at least one variable-length
+// relationship pattern (e.g. -[r*1..3]->). When true, the legacy VLE
+// path-var pipeline is used for the named path; otherwise the new
+// [NamedPath] operator is wrapped above the plan so the physical builder
+// can reconstruct a PathValue from the alternating Expand triplets.
+func pathHasVarLength(pp *ast.PathPattern) bool {
+	if pp == nil {
+		return false
+	}
+	for el := pp.Head; el != nil; el = el.Next {
+		if el.Relationship != nil && el.Relationship.Range != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// buildPathChain extracts the alternating node/rel description of pp into a
+// canonical PathChainElement slice suitable for [NamedPath]. The first entry
+// is the leading node (IsLeading=true); each subsequent entry describes a
+// (relationship, destination-node) step in document order.
+func buildPathChain(pp *ast.PathPattern) []PathChainElement {
+	if pp == nil || pp.Head == nil {
+		return nil
+	}
+	chain := make([]PathChainElement, 0, 4)
+	head := pp.Head
+	leadVar := ""
+	if head.Node != nil && head.Node.Variable != nil {
+		leadVar = *head.Node.Variable
+	}
+	chain = append(chain, PathChainElement{NodeVar: leadVar, IsLeading: true})
+	for el := head.Next; el != nil; el = el.Next {
+		if el.Relationship == nil || el.Node == nil {
+			continue
+		}
+		nodeVar := ""
+		if el.Node.Variable != nil {
+			nodeVar = *el.Node.Variable
+		}
+		relVar := ""
+		if el.Relationship.Variable != nil {
+			relVar = *el.Relationship.Variable
+		}
+		relTypes := make([]string, len(el.Relationship.Types))
+		copy(relTypes, el.Relationship.Types)
+		chain = append(chain, PathChainElement{
+			NodeVar:   nodeVar,
+			RelVar:    relVar,
+			RelTypes:  relTypes,
+			Direction: relDirection(el.Relationship.Direction),
+		})
+	}
+	return chain
+}
+
+// applyPathVar tags the resulting plan with the named-path variable. When pp
+// contains a variable-length expansion the legacy VLE-tagging is used (the
+// physical builder reconstructs a PathValue from the flat alternating list
+// emitted by VarLengthExpand). Otherwise plan is wrapped with a [NamedPath]
+// operator carrying the explicit alternating chain so the physical builder
+// can reconstruct a PathValue from the (srcID, edgeID, dstID) triplets
+// emitted by each fixed-length Expand step.
+func applyPathVar(pp *ast.PathPattern, plan LogicalPlan) LogicalPlan {
+	if pp == nil || pp.Variable == nil || plan == nil {
+		return plan
+	}
+	if pathHasVarLength(pp) {
+		setPathVarOnVLE(plan, *pp.Variable)
+		return plan
+	}
+	chain := buildPathChain(pp)
+	return NewNamedPath(*pp.Variable, chain, plan)
+}
+
 // leadingNodeVar returns the variable name of the path's leading node, or ""
 // when the leading node is anonymous.
 func leadingNodeVar(pp *ast.PathPattern) string {
@@ -506,9 +581,7 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 		}
 		el = el.Next
 	}
-	if pp.Variable != nil {
-		setPathVarOnVLE(plan, *pp.Variable)
-	}
+	plan = applyPathVar(pp, plan)
 	return plan, nil
 }
 
@@ -567,9 +640,7 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 		}
 		el = el.Next
 	}
-	if pp.Variable != nil {
-		setPathVarOnVLE(plan, *pp.Variable)
-	}
+	plan = applyPathVar(pp, plan)
 	return plan, nil
 }
 

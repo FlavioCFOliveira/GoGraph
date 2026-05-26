@@ -445,6 +445,72 @@ func (p *ProjectEndpoints) Vars() []string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Named path
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PathChainElement is one step in a named-path chain. The leading step has
+// IsLeading=true and only NodeVar is meaningful; subsequent steps describe an
+// alternating relationship+destination-node pair: the relationship's RelVar,
+// RelTypes and Direction together with the destination NodeVar.
+//
+// Anonymous node and relationship variables are conveyed as empty strings;
+// they are not user-projectable but are still required so that the physical
+// builder can locate the matching schema slot emitted by the upstream Expand
+// operator (which always allocates a slot, even for anonymous patterns).
+type PathChainElement struct {
+	// NodeVar is the variable name of the (destination) node for this step,
+	// or "" when the node is anonymous.
+	NodeVar string
+	// RelVar is the variable name of the relationship leading into NodeVar,
+	// or "" when the relationship is anonymous. Empty when IsLeading is true.
+	RelVar string
+	// RelTypes carries the relationship type filter declared in the pattern
+	// (e.g. KNOWS in `-[:KNOWS]->`). Empty when IsLeading is true or when no
+	// type was specified. Used as a fallback edge type when the live graph
+	// lookup cannot resolve one.
+	RelTypes []string
+	// Direction is the traversal direction relative to the previous node
+	// (PreviousNode → NodeVar). Meaningful only when IsLeading is false.
+	Direction Direction
+	// IsLeading is true for the first element of the chain (the source node
+	// of the path).
+	IsLeading bool
+}
+
+// NamedPath is a pure pass-through operator that records the structure of a
+// named-path pattern (`p = (a)-[r]->(b)`). Its sole purpose is to convey the
+// alternating node/rel chain from the IR translator down to the physical
+// builder so the projection can reconstruct an [expr.PathValue] by reading
+// the rows emitted by the underlying Expand operators.
+//
+// Concurrency: immutable after construction; safe for concurrent reads.
+type NamedPath struct {
+	// PathName is the user-visible path variable name (e.g. "p").
+	PathName string
+	// Chain is the alternating node/rel description of the pattern, in
+	// document order. The first entry has IsLeading=true.
+	Chain []PathChainElement
+	// Child is the subplan that produces the chain's variables.
+	Child LogicalPlan
+}
+
+// NewNamedPath constructs a NamedPath operator wrapping child. The chain is
+// shallow-copied; element slices (RelTypes) are not deep-copied because
+// callers always pass freshly-allocated slices.
+func NewNamedPath(pathName string, chain []PathChainElement, child LogicalPlan) *NamedPath {
+	c := make([]PathChainElement, len(chain))
+	copy(c, chain)
+	return &NamedPath{PathName: pathName, Chain: c, Child: child}
+}
+
+// Children implements LogicalPlan.
+func (n *NamedPath) Children() []LogicalPlan { return []LogicalPlan{n.Child} }
+
+// Vars implements LogicalPlan. The path variable is the only new name
+// introduced by this operator.
+func (n *NamedPath) Vars() []string { return []string{n.PathName} }
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Filter and projection operators
 // ─────────────────────────────────────────────────────────────────────────────
 

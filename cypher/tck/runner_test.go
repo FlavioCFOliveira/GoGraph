@@ -522,11 +522,28 @@ import (
 //     variable bound to NULL) instead of failing. Net uplift: +2
 //     scenarios above 3208. Observed 3210 stable across runs; gate
 //     set conservatively at 3205.
+//   - 3215: raised after the named-path uplift for zero- and
+//     fixed-length patterns. The IR translator now wraps every named
+//     path that is not a variable-length expansion with a new
+//     [ir.NamedPath] pass-through operator carrying the explicit
+//     alternating node/rel chain; the physical builder consumes the
+//     chain at build time to map each step to the (srcID, edgeID,
+//     dstID) triplet emitted by the underlying Expand, and the
+//     projection fast path reconstructs an expr.PathValue from those
+//     triplets. The TCK comparator gained a formatPathTCK helper that
+//     renders a path in `<n0 r0 n1 ... >` form with the relationship
+//     direction (-[:T]-> vs <-[:T]-) inferred from each rel's storage
+//     StartID/EndID; the chain closure resolves storage direction by
+//     probing EdgeLabels in both orientations so the relationship's
+//     Type, Properties, and arrow render correctly for both directed
+//     and undirected patterns. Net uplift: +11-19 scenarios above
+//     3209. Observed 3220-3228 across a 5-run sample; gate set
+//     conservatively at 3215 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3200
+const tckExecutionBaseline = 3215
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

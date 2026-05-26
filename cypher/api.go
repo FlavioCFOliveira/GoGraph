@@ -97,6 +97,28 @@ type pathVarInfo struct {
 	edgeType string // first element of RelTypes, or empty
 }
 
+// pathChainStep describes one (relationship, destination-node) hop of a
+// fixed-length named path. The (srcCol, edgeCol, dstCol) triplet matches the
+// layout emitted by [exec.Expand]; edgeType is the relationship-type filter
+// declared in the AST and acts as a fallback when the live-graph lookup
+// cannot resolve one.
+type pathChainStep struct {
+	srcCol   int
+	edgeCol  int
+	dstCol   int
+	edgeType string
+}
+
+// pathChainInfo describes a named path bound by a zero- or fixed-length
+// (possibly chained) pattern. leadingCol is the schema column that carries
+// the IntegerValue of the path's leading node. Each step extends the path by
+// one relationship and one destination node, in document order.
+// buildIRProjection consumes this to reconstruct an [expr.PathValue].
+type pathChainInfo struct {
+	leadingCol int
+	steps      []pathChainStep
+}
+
 type buildOpts struct {
 	// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] expressions
 	// encountered inside Filter/Project closures. May be nil; in that case
@@ -128,6 +150,19 @@ type buildOpts struct {
 	// to the schema column that the VarLengthExpand operator populates with a flat
 	// alternating ListValue. Used by buildIRProjection to reconstruct a PathValue.
 	pathVarMeta map[string]pathVarInfo
+	// pathVarChain maps a named path variable bound by a zero- or
+	// fixed-length pattern (no variable-length expansion) to the explicit
+	// alternating triplet description emitted by the underlying Expand
+	// chain. Used by buildIRProjection to reconstruct an expr.PathValue
+	// without the flat ListValue encoding used by VarLengthExpand.
+	pathVarChain map[string]pathChainInfo
+	// expandTripletSeq is the ordered list of (srcCol, edgeCol, dstCol)
+	// triplets registered by each [exec.Expand] operator as its physical
+	// builder runs. A [*ir.NamedPath] wrapper above an Expand subtree
+	// captures the slice length before recursing into its child, then
+	// consumes the triplets appended during the child build to associate
+	// IR chain elements with row slots.
+	expandTripletSeq []pathChainStep
 	// scalarCols is the set of schema variable names whose row values must NOT be
 	// upgraded from IntegerValue(NodeID) to NodeValue. Aggregate output columns
 	// (e.g. the output of count(*), sum, avg) are always scalars; their integer
@@ -1774,6 +1809,22 @@ func buildOperator(
 		}
 		schema[toKey] = schemaBase + 2
 
+		// Record the triplet in chain order so a *ir.NamedPath wrapper above
+		// this subtree can map its IR chain elements to the slots emitted by
+		// this Expand. Done for both named and anonymous relationships — the
+		// chain may include either.
+		if bopts != nil {
+			step := pathChainStep{
+				srcCol:  schemaBase,
+				edgeCol: schemaBase + 1,
+				dstCol:  schemaBase + 2,
+			}
+			if len(p.RelTypes) > 0 {
+				step.edgeType = p.RelTypes[0]
+			}
+			bopts.expandTripletSeq = append(bopts.expandTripletSeq, step)
+		}
+
 		// Record edge variable metadata so buildIRProjection can reconstruct
 		// a RelationshipValue when the variable is projected directly.
 		if p.RelVar != "" && bopts != nil {
@@ -2090,6 +2141,22 @@ func buildOperator(
 		}
 		schema[toKey] = schemaBase + 2
 
+		// Mirror the Expand triplet bookkeeping so a *ir.NamedPath wrapper can
+		// reconstruct a PathValue across OPTIONAL hops as well. The PathValue
+		// closure tolerates NULL slots (returns Null when any expected column
+		// is missing).
+		if bopts != nil {
+			step := pathChainStep{
+				srcCol:  schemaBase,
+				edgeCol: schemaBase + 1,
+				dstCol:  schemaBase + 2,
+			}
+			if len(p.RelTypes) > 0 {
+				step.edgeType = p.RelTypes[0]
+			}
+			bopts.expandTripletSeq = append(bopts.expandTripletSeq, step)
+		}
+
 		var g *lpg.Graph[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			g = lw.g
@@ -2187,6 +2254,86 @@ func buildOperator(
 			MaxHops:        maxHops,
 		}
 		return exec.NewVarLengthExpand(child, fwd, rev, cfg), nil
+
+	case *ir.NamedPath:
+		// NamedPath is a pure pass-through: build the child, then register
+		// the alternating-chain metadata so that buildIRProjection can
+		// reconstruct an expr.PathValue for this path variable.
+		//
+		// Approach: each non-leading IR chain element corresponds to one
+		// Expand operator emitted by the child subtree. Expand registers its
+		// (srcCol, edgeCol, dstCol) triplet into bopts.expandTripletSeq in
+		// build order, so we capture the slice length before recursing and
+		// consume the entries appended during the child build.
+		var startIdx int
+		if bopts != nil {
+			startIdx = len(bopts.expandTripletSeq)
+		}
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		if bopts == nil || p.PathName == "" {
+			return child, nil
+		}
+
+		// Map IR chain to triplets. The leading element's NodeVar must be
+		// resolvable in the current schema (an anonymous leading node would
+		// have been registered under its synthetic key by AllNodesScan /
+		// NodeByLabelScan); when the lookup fails we fall back to column 0,
+		// which matches the legacy behaviour of the VLE pathway when the
+		// FromVar lookup fails.
+		var info pathChainInfo
+		if leadingChain := p.Chain; len(leadingChain) > 0 && leadingChain[0].IsLeading {
+			if col, ok := schema[leadingChain[0].NodeVar]; ok {
+				info.leadingCol = col
+			}
+		}
+		// Collect the triplets registered during the child build.
+		added := bopts.expandTripletSeq[startIdx:]
+		// Count non-leading IR chain elements to bound the iteration.
+		nSteps := 0
+		for i := range p.Chain {
+			if !p.Chain[i].IsLeading {
+				nSteps++
+			}
+		}
+		if nSteps > len(added) {
+			nSteps = len(added)
+		}
+		info.steps = make([]pathChainStep, 0, nSteps)
+		chainIdx := 0
+		for i := 0; i < nSteps && chainIdx < len(p.Chain); {
+			if p.Chain[chainIdx].IsLeading {
+				chainIdx++
+				continue
+			}
+			step := added[i]
+			// Prefer the AST-declared rel type when present; the live-graph
+			// lookup in buildIRProjection takes precedence at row time.
+			if len(p.Chain[chainIdx].RelTypes) > 0 && step.edgeType == "" {
+				step.edgeType = p.Chain[chainIdx].RelTypes[0]
+			}
+			info.steps = append(info.steps, step)
+			chainIdx++
+			i++
+		}
+
+		if bopts.pathVarChain == nil {
+			bopts.pathVarChain = make(map[string]pathChainInfo)
+		}
+		bopts.pathVarChain[p.PathName] = info
+		// Register the path variable in the schema so downstream operators
+		// that resolve "p" via column lookup (e.g. after a projection that
+		// emits PathValue into a slot) keep working. We map it to the
+		// leading-node column as a stable, harmless placeholder: the
+		// projection fast path keys off pathVarChain before falling back to
+		// schema, and any post-projection read of "p" looks up the slot
+		// allocated by buildIRProjection itself rather than this one.
+		if _, exists := schema[p.PathName]; !exists {
+			schema[p.PathName] = info.leadingCol
+		}
+		return child, nil
 
 	case *ir.ProcedureCall:
 		return buildProcedureCallOperator(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -3250,6 +3397,117 @@ func buildIRProjection(
 							}
 							return expr.PathValue{Nodes: nodes, Relationships: rels}, nil
 						}
+					}
+				}
+				// Named-path (chain) fast path: reconstruct PathValue from the
+				// alternating (srcID, edgeID, dstID) triplets emitted by the
+				// fixed-length Expand chain. This covers zero-length
+				// (p = (a)), fixed-length (p = (a)-[r]->(b)) and chained
+				// (p = (a)-[r1]->(b)-[r2]->(c)) named paths.
+				//
+				// The fast path is only valid for the FIRST projection above
+				// the NamedPath wrapper, while the input row still carries
+				// the chain's source columns. Once that projection emits a
+				// real PathValue into a new schema slot the entry is removed
+				// from pathVarChain so subsequent projections (e.g. RETURN
+				// after a WITH) fall through to the regular schema-lookup
+				// path.
+				if bopts != nil && evalFn == nil {
+					if cinfo, isChain := bopts.pathVarChain[v.Name]; isChain {
+						capturedInfo := cinfo
+						capturedG := g
+						evalFn = func(row exec.Row) (expr.Value, error) {
+							if capturedInfo.leadingCol >= len(row) {
+								return expr.Null, nil
+							}
+							leadVal := row[capturedInfo.leadingCol]
+							if leadVal == nil || expr.IsNull(leadVal) {
+								return expr.Null, nil
+							}
+							// The leading slot may already carry an upgraded
+							// NodeValue (when an earlier projection ran) or a
+							// raw IntegerValue (from a scan). Both shapes are
+							// accepted.
+							var leadNode expr.NodeValue
+							switch lv := leadVal.(type) {
+							case expr.NodeValue:
+								leadNode = lv
+							case expr.IntegerValue:
+								leadNode = buildNodeValueFromID(graph.NodeID(lv), capturedG)
+							default:
+								return expr.Null, nil
+							}
+							nodes := make([]expr.NodeValue, 0, len(capturedInfo.steps)+1)
+							rels := make([]expr.RelationshipValue, 0, len(capturedInfo.steps))
+							nodes = append(nodes, leadNode)
+							for _, step := range capturedInfo.steps {
+								if step.edgeCol >= len(row) || step.dstCol >= len(row) {
+									return expr.Null, nil
+								}
+								edgeIDVal, ok1 := row[step.edgeCol].(expr.IntegerValue)
+								dstIDVal, ok2 := row[step.dstCol].(expr.IntegerValue)
+								if !ok1 || !ok2 {
+									// OPTIONAL hops or otherwise-missing
+									// columns collapse the path to NULL,
+									// matching openCypher semantics.
+									return expr.Null, nil
+								}
+								dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
+								et := step.edgeType
+								var edgeProps expr.MapValue
+								// pathStart/pathEnd track the path's traversal
+								// order (preceding node → current dst). The
+								// edge's storage direction may run either way;
+								// we probe EdgeLabels in both orientations and
+								// record the real StartID/EndID so downstream
+								// renderers can choose the correct arrow.
+								pathStart := nodes[len(nodes)-1].ID
+								pathEnd := dstNode.ID
+								storageStart := pathStart
+								storageEnd := pathEnd
+								if capturedG != nil && pathStart != 0 {
+									sKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(pathStart))
+									dKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(pathEnd))
+									if sOK && dOK {
+										// Try forward (pathStart → pathEnd).
+										if ets := capturedG.EdgeLabels(sKey, dKey); len(ets) > 0 {
+											et = ets[0]
+											rawEP := capturedG.EdgeProperties(sKey, dKey)
+											edgeProps = make(expr.MapValue, len(rawEP))
+											for k, pv := range rawEP {
+												edgeProps[k] = lpgPropToExpr(pv)
+											}
+										} else if ets := capturedG.EdgeLabels(dKey, sKey); len(ets) > 0 {
+											// Reverse storage: edge actually
+											// stored pathEnd → pathStart.
+											et = ets[0]
+											rawEP := capturedG.EdgeProperties(dKey, sKey)
+											edgeProps = make(expr.MapValue, len(rawEP))
+											for k, pv := range rawEP {
+												edgeProps[k] = lpgPropToExpr(pv)
+											}
+											storageStart = pathEnd
+											storageEnd = pathStart
+										}
+									}
+								}
+								rels = append(rels, expr.RelationshipValue{
+									ID:         uint64(edgeIDVal),
+									StartID:    storageStart,
+									EndID:      storageEnd,
+									Type:       et,
+									Properties: edgeProps,
+								})
+								nodes = append(nodes, dstNode)
+							}
+							return expr.PathValue{Nodes: nodes, Relationships: rels}, nil
+						}
+						// Mark this path variable as consumed so a subsequent
+						// projection over the same name (e.g. RETURN p after a
+						// WITH p) reads the freshly-projected PathValue
+						// column directly instead of attempting to re-evaluate
+						// the chain against the post-projection row layout.
+						delete(bopts.pathVarChain, v.Name)
 					}
 				}
 				// Edge variable fast path: reconstruct RelationshipValue from

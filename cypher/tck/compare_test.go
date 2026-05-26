@@ -533,6 +533,8 @@ func exprValueToString(v expr.Value) string {
 		return formatNodeTCK(val)
 	case expr.RelationshipValue:
 		return formatRelTCK(val)
+	case expr.PathValue:
+		return formatPathTCK(val)
 	case expr.ListValue:
 		parts := make([]string, len(val))
 		for i, elem := range val {
@@ -634,6 +636,43 @@ func formatRelTCK(r expr.RelationshipValue) string {
 		b.WriteString(formatPropertyMapTCK(r.Properties))
 	}
 	b.WriteByte(']')
+	return b.String()
+}
+
+// formatPathTCK renders a path value in the TCK textual form. The shape is
+// `<n0 r0 n1 r1 n2 ...>` where each n is rendered by [formatNodeTCK] and
+// each relationship is rendered with its direction relative to the path
+// traversal (-[:T]-> when StartID matches the preceding node, <-[:T]- when
+// the relationship is traversed against its storage direction).
+//
+// Empty paths (no nodes) render as the TCK's reserved literal "<empty-path>";
+// zero-length paths (one node, no relationships) render as `<(node)>`.
+func formatPathTCK(p expr.PathValue) string {
+	if len(p.Nodes) == 0 {
+		return "<empty-path>"
+	}
+	var b strings.Builder
+	b.WriteByte('<')
+	b.WriteString(formatNodeTCK(p.Nodes[0]))
+	for i, rel := range p.Relationships {
+		if i+1 >= len(p.Nodes) {
+			break
+		}
+		// Relationship orientation in the path: the storage StartID tells us
+		// the edge's stored direction; comparing it against the preceding
+		// node's ID picks the arrow.
+		if rel.StartID == p.Nodes[i].ID {
+			b.WriteString("-")
+			b.WriteString(formatRelTCK(rel))
+			b.WriteString("->")
+		} else {
+			b.WriteString("<-")
+			b.WriteString(formatRelTCK(rel))
+			b.WriteString("-")
+		}
+		b.WriteString(formatNodeTCK(p.Nodes[i+1]))
+	}
+	b.WriteByte('>')
 	return b.String()
 }
 
