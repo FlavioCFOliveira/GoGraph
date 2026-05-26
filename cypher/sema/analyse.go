@@ -666,13 +666,18 @@ func (a *analyser) checkExpr(e ast.Expression) {
 
 	case *ast.Property:
 		a.checkExpr(v.Receiver)
-		// Compile-time type check: property access on a direct literal
-		// of a non-graph type is statically invalid. RETURN 1.foo,
-		// RETURN 'str'.foo etc. raise TypeError(InvalidArgumentType).
-		// Variable receivers are intentionally not type-narrowed here —
-		// they may legitimately resolve to NULL at runtime, which
-		// openCypher permits without error.
-		if _, bad := nonBooleanLiteralKind(v.Receiver); bad {
+		// Compile-time type check: property access on a direct
+		// StringLiteral / ListLiteral / MapLiteral receiver is
+		// statically invalid (RETURN 'str'.foo, RETURN [].foo, …).
+		// IntLiteral and FloatLiteral receivers are intentionally NOT
+		// flagged here — the parser reconstructs float literals like
+		// `1.0` from an IntLiteral atom followed by a numeric "Name"
+		// accessor, but very long floats may slip through that
+		// reconstruction and reach sema as IntLiteral.someDigits, which
+		// is a valid (round-trip-tolerant) float literal in the source
+		// rather than a property access.
+		switch v.Receiver.(type) {
+		case *ast.StringLiteral, *ast.ListLiteral, *ast.MapLiteral, *ast.BoolLiteral:
 			a.error(invalidBooleanOperandError(".", "non-graph", v.Pos))
 		}
 
@@ -1017,4 +1022,56 @@ func containsAggregation(e ast.Expression) bool {
 		}
 	}
 	return false
+}
+
+// checkFunctionArgTypes performs a coarse static type-check on a handful
+// of graph-built-in functions whose argument kind is constrained by the
+// openCypher spec. Only fires when the argument is a Variable whose scope
+// type is definitively incompatible — Variables of type "any" and complex
+// expressions (function calls, property access, etc.) remain unchecked.
+//
+// Checks:
+//   - type(x)         requires x to be a relationship
+//   - labels(x), keys(x) requires x to be a node (keys also accepts relationship)
+//   - nodes(p), relationships(p) requires p to be a path
+//
+// The first failing argument surfaces InvalidArgumentType; subsequent
+// arguments are not re-reported for the same invocation.
+func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
+	if fn == nil || len(fn.Args) == 0 || len(fn.Namespace) > 0 {
+		return
+	}
+	name := strings.ToLower(fn.Name)
+	type argTypeReq struct {
+		argIdx int
+		ok     map[string]bool
+	}
+	var req argTypeReq
+	switch name {
+	case "type":
+		req = argTypeReq{argIdx: 0, ok: map[string]bool{"relationship": true, "any": true, "": true}}
+	case "labels":
+		req = argTypeReq{argIdx: 0, ok: map[string]bool{"node": true, "any": true, "": true}}
+	case "keys":
+		req = argTypeReq{argIdx: 0, ok: map[string]bool{"node": true, "relationship": true, "any": true, "": true}}
+	case "nodes", "relationships":
+		req = argTypeReq{argIdx: 0, ok: map[string]bool{"path": true, "any": true, "": true}}
+	default:
+		return
+	}
+	if req.argIdx >= len(fn.Args) {
+		return
+	}
+	v, ok := fn.Args[req.argIdx].(*ast.Variable)
+	if !ok {
+		return
+	}
+	sym, exists := a.scope.Lookup(v.Name)
+	if !exists {
+		return
+	}
+	if req.ok[sym.Type] {
+		return
+	}
+	a.error(invalidBooleanOperandError(name, sym.Type, v.Pos))
 }

@@ -100,10 +100,13 @@ func (t *translator) translateOptionalMatch(m *ast.OptionalMatch, child LogicalP
 		// synthesise a SingleRow seed via an Argument leaf and wrap the
 		// inner pattern in an OptionalApply, so the empty-result case
 		// produces a single NULL-extended row.
+		// Node-only OPTIONAL MATCH (`OPTIONAL MATCH (n)`): NodeScan
+		// returns zero rows when no node matches, but openCypher 9
+		// §3.2.4 requires at least one NULL-extended row. Wrap the
+		// standalone pattern in an OptionalApply over an empty
+		// Argument seed so the inner subtree's empty result becomes a
+		// single NULL row.
 		if !patternHasRelationships(m.Pattern) {
-			// Build the pattern as a standalone subtree (no outer
-			// driver) so it remains a plain NodeScan / Selection
-			// chain — no CorrelatedApply gets injected.
 			inner, err := t.matchPattern(m.Pattern, nil, false)
 			if err != nil {
 				return nil, err
@@ -114,9 +117,6 @@ func (t *translator) translateOptionalMatch(m *ast.OptionalMatch, child LogicalP
 					return nil, err
 				}
 			}
-			// Empty-Argument seed produces one driving row; OptionalApply
-			// then emits exactly one row per outer row (NULL-extended
-			// when the inner subtree produces no rows).
 			optTag := nextArgTag()
 			seed := NewArgumentWithTag(nil, optTag)
 			return NewOptionalApplyWithTag(seed, inner, optTag), nil
