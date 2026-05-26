@@ -199,13 +199,8 @@ func (h *topHeap) Pop() any {
 // the given key sequence. It applies the same NULL ordering as [Sort.rowLess].
 func rowLessForKeys(a, b Row, keys []SortKey) bool {
 	for _, key := range keys {
-		av, bv := expr.Value(expr.Null), expr.Value(expr.Null)
-		if key.ColIdx < len(a) {
-			av = a[key.ColIdx]
-		}
-		if key.ColIdx < len(b) {
-			bv = b[key.ColIdx]
-		}
+		av := sortKeyValue(key, a)
+		bv := sortKeyValue(key, b)
 
 		c := expr.Compare(av, bv)
 		if !key.Ascending {

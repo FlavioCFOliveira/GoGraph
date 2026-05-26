@@ -103,6 +103,20 @@ func (n *ListLiteral) String() string {
 	return "[" + strings.Join(parts, ", ") + "]"
 }
 
+// StarLiteral represents the wildcard * used in COUNT(*) and similar
+// constructs. Its String() returns "*" so that FunctionInvocation.String()
+// produces "count(*)" rather than "count()".
+type StarLiteral struct {
+	Pos    Position
+	EndPos Position
+}
+
+func (*StarLiteral) astNode()  {}
+func (*StarLiteral) exprNode() {}
+
+// String returns "*".
+func (*StarLiteral) String() string { return "*" }
+
 // MapLiteral is a map expression: {key1: expr1, key2: expr2, …}.
 type MapLiteral struct {
 	Pos    Position

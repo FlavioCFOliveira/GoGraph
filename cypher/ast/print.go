@@ -450,6 +450,10 @@ func (p printer) functionInvocation(f *FunctionInvocation) string {
 	parts = append(parts, f.Name)
 	funcName := strings.Join(parts, ".")
 
+	if f.CountStar {
+		return funcName + "(*)"
+	}
+
 	argParts := make([]string, len(f.Args))
 	for i, a := range f.Args {
 		argParts[i] = p.expr(a)

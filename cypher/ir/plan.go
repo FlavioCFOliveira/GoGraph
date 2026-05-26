@@ -107,6 +107,13 @@ type Bound struct {
 type SortItem struct {
 	// Expression is an opaque string representation of the sort key expression.
 	Expression string
+	// Expr is the original AST expression for the sort key. It is carried
+	// alongside Expression so the physical builder can compile an expression
+	// evaluator for keys that are not directly present in the output schema
+	// (e.g. ORDER BY n.age after RETURN n — n.age is not a projected column
+	// but it can be derived by evaluating the expression against the row).
+	// May be nil for sort items constructed without access to the AST.
+	Expr ast.Expression
 	// Descending indicates DESC ordering; false means ASC.
 	Descending bool
 }

@@ -84,13 +84,13 @@ func detectAggregation(proj *ast.Projection) (
 		}
 
 		// Build the argument string and capture the parsed argument expression.
-		// count(*) has no args.
+		// count(*) — detected via CountStar flag — has no args and uses Argument="".
 		argStr := ""
 		var argExpr ast.Expression
-		if len(fn.Args) == 1 {
+		if !fn.CountStar && len(fn.Args) == 1 {
 			argStr = fn.Args[0].String()
 			if argStr == "*" {
-				argStr = "" // normalise count(*) → Argument=""
+				argStr = "" // normalise legacy count(*) → Argument=""
 			} else {
 				argExpr = fn.Args[0]
 			}

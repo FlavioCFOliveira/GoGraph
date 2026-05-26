@@ -376,10 +376,22 @@ func formatLocalDateTime(t time.Time) string {
 // (or "Z" for UTC). Like formatLocalDateTime, the seconds field is
 // elided when seconds and nanoseconds are both zero.
 func formatDateTime(t time.Time) string {
-	_, offset := t.Zone()
+	zoneName, offset := t.Zone()
 	zone := formatOffsetSec(offset)
 	dateHeader := fmt.Sprintf("%04d-%02d-%02d", t.Year(), int(t.Month()), t.Day())
 	timeTail := formatHMSNanos(t.Hour(), t.Minute(), t.Second(), t.Nanosecond())
+	// Append the IANA timezone name in square brackets when the location is a
+	// named timezone (not a raw UTC-offset zone). Named timezones can be
+	// identified by the presence of "/" in the name (IANA format) or by the
+	// location name not matching the offset abbreviation pattern (e.g.
+	// "UTC+1", "UTC", "GMT"). The openCypher TCK uses the format
+	// "yyyy-mm-ddThh:mm:ss+hh:mm[TZ/Name]" for named-timezone datetimes.
+	loc := t.Location()
+	locName := loc.String()
+	if locName != "UTC" && locName != "Local" && locName != "" &&
+		locName != zoneName && strings.Contains(locName, "/") {
+		zone = zone + "[" + locName + "]"
+	}
 	return dateHeader + "T" + timeTail + zone
 }
 

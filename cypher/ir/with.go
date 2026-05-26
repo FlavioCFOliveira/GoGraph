@@ -72,7 +72,7 @@ func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
 	if len(proj.OrderBy) > 0 {
 		sortItems := make([]SortItem, len(proj.OrderBy))
 		for i, s := range proj.OrderBy {
-			sortItems[i] = SortItem{Expression: s.Expr.String(), Descending: s.Descending}
+			sortItems[i] = SortItem{Expression: s.Expr.String(), Expr: s.Expr, Descending: s.Descending}
 		}
 		if proj.Limit != nil {
 			lim, err := intExpr(proj.Limit)

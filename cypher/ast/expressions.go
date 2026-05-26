@@ -56,6 +56,10 @@ type FunctionInvocation struct {
 	Namespace []string // e.g. ["apoc", "path"] for apoc.path.expand
 	Name      string
 	Distinct  bool
+	// CountStar is true when this is COUNT(*). String() renders it as
+	// "count(*)" and downstream aggregation detects it without needing
+	// a wildcard argument expression.
+	CountStar bool
 	Args      []Expression
 }
 
@@ -68,6 +72,10 @@ func (f *FunctionInvocation) String() string {
 	parts = append(parts, f.Namespace...)
 	parts = append(parts, f.Name)
 	funcName := strings.Join(parts, ".")
+
+	if f.CountStar {
+		return funcName + "(*)"
+	}
 
 	argParts := make([]string, len(f.Args))
 	for i, a := range f.Args {

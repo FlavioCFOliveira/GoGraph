@@ -1683,12 +1683,16 @@ func (v *visitor) VisitParenthesizedExpression(ctx *gen.ParenthesizedExpressionC
 }
 
 // VisitCountAll returns a FunctionInvocation for COUNT(*).
+// CountStar is set to true so that String() produces "count(*)" —
+// matching the TCK column-header convention — without requiring a
+// StarLiteral argument that would break downstream arg evaluation.
 func (v *visitor) VisitCountAll(ctx *gen.CountAllContext) interface{} {
 	return &ast.FunctionInvocation{
-		Pos:    positionOf(ctx),
-		EndPos: endPositionOf(ctx),
-		Name:   "count",
-		Args:   nil,
+		Pos:       positionOf(ctx),
+		EndPos:    endPositionOf(ctx),
+		Name:      "count",
+		CountStar: true,
+		Args:      nil,
 	}
 }
 

@@ -45,9 +45,15 @@ var ErrSortMemoryExceeded = errors.New("exec: sort memory cap exceeded")
 // SortKey describes a single ORDER BY column.
 type SortKey struct {
 	// ColIdx is the zero-based index of the column within each Row.
+	// Ignored when Eval is non-nil.
 	ColIdx int
 	// Ascending controls the sort direction. true = ASC, false = DESC.
 	Ascending bool
+	// Eval is an optional expression evaluator. When non-nil the sort key
+	// value is obtained by calling Eval(row) rather than reading row[ColIdx].
+	// This supports ORDER BY expressions that are not direct projection
+	// output columns (e.g. ORDER BY n.age after RETURN n).
+	Eval func(Row) (expr.Value, error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,13 +188,8 @@ func (op *Sort) collectAndSort() error {
 // negate the comparison result, which naturally puts NULL first.
 func (op *Sort) rowLess(a, b Row) bool {
 	for _, key := range op.keys {
-		av, bv := expr.Value(expr.Null), expr.Value(expr.Null)
-		if key.ColIdx < len(a) {
-			av = a[key.ColIdx]
-		}
-		if key.ColIdx < len(b) {
-			bv = b[key.ColIdx]
-		}
+		av := sortKeyValue(key, a)
+		bv := sortKeyValue(key, b)
 
 		c := expr.Compare(av, bv)
 		if !key.Ascending {
@@ -206,4 +207,22 @@ func (op *Sort) rowLess(a, b Row) bool {
 		// c == 0: tie-break with next key.
 	}
 	return false // equal
+}
+
+// sortKeyValue extracts the sort key value from a row. When key.Eval is set
+// it calls the evaluator; otherwise it reads row[key.ColIdx]. Evaluation
+// errors are treated as NULL so sort order remains defined under any runtime
+// fault.
+func sortKeyValue(key SortKey, row Row) expr.Value {
+	if key.Eval != nil {
+		v, err := key.Eval(row)
+		if err != nil {
+			return expr.Null
+		}
+		return v
+	}
+	if key.ColIdx < len(row) {
+		return row[key.ColIdx]
+	}
+	return expr.Null
 }
