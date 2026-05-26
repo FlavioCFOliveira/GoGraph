@@ -3604,21 +3604,38 @@ func buildIRProjection(
 				}
 			}
 			if evalFn == nil {
-				// Schema-name fast path: when an upstream operator (e.g.
-				// EagerAggregation) has pre-computed and named the output column,
-				// prefer a direct index lookup over expression re-evaluation. This
-				// avoids calling aggregate functions as scalar functions. The
-				// IntegerValue(NodeID) → NodeValue upgrade is deliberately NOT
-				// applied here: aggregate results (count(*), sum(...), etc.) are
-				// scalar integers that can numerically collide with a real NodeID
-				// and would be mis-upgraded into a node row.
-				if colIdx, ok2 := schema[name]; ok2 {
-					idx := colIdx
-					evalFn = func(row exec.Row) (expr.Value, error) {
-						if idx < len(row) {
-							return row[idx], nil
+				// Schema-name fast path: when an upstream EagerAggregation
+				// has pre-computed and named the output column, prefer a
+				// direct index lookup over expression re-evaluation. This
+				// avoids calling aggregate functions as scalar functions
+				// (they are not exposed through the scalar registry). The
+				// IntegerValue(NodeID) → NodeValue upgrade is deliberately
+				// NOT applied here: aggregate results (count(*), sum(...),
+				// etc.) are scalar integers that can numerically collide
+				// with a real NodeID and would be mis-upgraded into a node
+				// row.
+				//
+				// Gating on bopts.scalarCols: the fast path is sound only
+				// when name is the output column of an aggregator. Without
+				// this gate, a projection such as RETURN type(r) AS r
+				// would silently bypass evaluation of type(r) whenever the
+				// alias happens to match an existing schema slot — for
+				// instance the raw edge id column emitted by Expand —
+				// returning the IntegerValue edge id instead of the
+				// relationship type label.
+				isAggOut := bopts != nil && bopts.scalarCols != nil
+				if isAggOut {
+					_, isAggOut = bopts.scalarCols[name]
+				}
+				if isAggOut {
+					if colIdx, ok2 := schema[name]; ok2 {
+						idx := colIdx
+						evalFn = func(row exec.Row) (expr.Value, error) {
+							if idx < len(row) {
+								return row[idx], nil
+							}
+							return expr.Null, nil
 						}
-						return expr.Null, nil
 					}
 				}
 			}

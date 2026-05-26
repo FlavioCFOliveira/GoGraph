@@ -228,6 +228,17 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	pos := op.revStart
 	dst := op.revEdges[pos]
 	op.revStart++
+	// Undirected self-loop deduplication: when the pattern is undirected
+	// (DirBoth) and the reverse edge being considered is a self-loop on
+	// the current source node (dst == srcID), the same edge has already
+	// been emitted by the forward pass. Skip it to honour the openCypher
+	// rule that every matched edge appears exactly once for an undirected
+	// relationship pattern. The skip is restricted to DirBoth because a
+	// pure DirIn traversal does not perform the forward pass and therefore
+	// must still emit reverse self-loops.
+	if op.dir == DirBoth && int64(dst) == op.srcID {
+		return false, true // self-loop already emitted by forward pass
+	}
 	// Edge-type filter: locate the corresponding forward-edge position so
 	// the existing fwd-position-keyed filter map applies. The reverse edge
 	// (revEdges[pos] → src) corresponds to the forward edge

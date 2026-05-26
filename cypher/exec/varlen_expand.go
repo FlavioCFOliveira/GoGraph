@@ -401,6 +401,17 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		absPos := base + pos
 		dst := uint64(edges[pos])
 
+		// Undirected self-loop deduplication: on a DirBoth traversal a
+		// reverse self-loop at the current node has already been enqueued
+		// by the forward pass under a different absolute position
+		// (synthetic reverse positions use base = len(fwdEdges)). The
+		// relationship-uniqueness bitset cannot detect this aliasing
+		// because it keys on the absolute position. Skip reverse self-
+		// loops to keep each matched edge from spawning two BFS branches.
+		if !isFwd && op.dir == DirBoth && dst == uid {
+			continue
+		}
+
 		// Edge-type filter (forward only; reverse edges skip type filter).
 		if isFwd && op.edgeType != "" {
 			t, ok := op.edgeTypeFilter[absPos]
