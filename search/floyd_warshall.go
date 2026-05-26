@@ -51,8 +51,8 @@ func (a *APSP[W]) N() int { return a.live }
 
 // FloydWarshall computes APSP via the textbook O(V^3) DP, where V is
 // the count of live NodeIDs (not the sparse MaxNodeID). It tolerates
-// negative edge weights but assumes no negative cycle; the diagonal
-// stays at 0.
+// negative edge weights and detects negative cycles via a post-DP
+// diagonal scan; in the no-negative-cycle case the diagonal stays at 0.
 //
 // Reachability is tracked via a parallel found[] bitmap, not an
 // in-band +Inf sentinel — the v1.0.0 sentinel constructed by 60
@@ -63,6 +63,12 @@ func (a *APSP[W]) N() int { return a.live }
 // is NaN or +/-Inf; the simple entry returns nil and the Ctx variant
 // returns [ErrInvalidInput] otherwise. Integer Weight types skip
 // that pass.
+//
+// When the graph contains a negative-weight cycle, the simple entry
+// returns nil; the Ctx variant returns [ErrNegativeCycle] (the same
+// sentinel used by [BellmanFord]). The check is the canonical CLRS
+// §25.2 post-pass: any live vertex whose self-distance has been
+// relaxed below zero lies on a negative cycle.
 //
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR; allocates its own working buffers per call.
@@ -75,6 +81,10 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 // FloydWarshallCtx is the context-aware variant of [FloydWarshall].
 // ctx.Err() is checked at every k-pivot iteration (the outermost
 // loop); on cancellation returns (nil, wrapped ctx.Err()).
+//
+// Errors surfaced: [ErrInvalidInput] (NaN/Inf float weight),
+// [ErrNegativeCycle] (negative-weight cycle detected post-DP),
+// or the underlying ctx.Err() on cancellation.
 //
 //nolint:gocyclo // canonical Floyd-Warshall: NaN/Inf gate + live-mask compaction + matrix init + edge ingest + DP
 func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
@@ -185,6 +195,17 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 					out.found[idx] = true
 				}
 			}
+		}
+	}
+	// Canonical CLRS §25.2 negative-cycle detection: after the DP,
+	// any diagonal entry dist[i,i] strictly below zero proves vertex
+	// i lies on a negative-weight cycle. Without this scan the matrix
+	// would silently report finite distances polluted by the cycle.
+	var zero W
+	for i := 0; i < live; i++ {
+		if out.dist[i*live+i] < zero {
+			metrics.IncCounter("search.FloydWarshallCtx.errors", 1)
+			return nil, ErrNegativeCycle
 		}
 	}
 	return out, nil
