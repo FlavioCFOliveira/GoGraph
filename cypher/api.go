@@ -44,6 +44,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -465,14 +466,48 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 
 // RunAny executes query with params expressed as map[string]any, automatically
 // converting Go native types to [expr.Value]. See [BindParams] for the
-// supported conversions. RunAny is equivalent to Run when params is nil.
+// supported conversions.
+//
+// RunAny auto-detects whether the query contains writing clauses (CREATE,
+// MERGE, SET, REMOVE, DELETE, DETACH DELETE) and routes through
+// [Engine.RunInTx] when so, or [Engine.Run] otherwise. Callers that need
+// an explicit choice should invoke [Engine.Run] / [Engine.RunInTx]
+// directly.
 func (e *Engine) RunAny(ctx context.Context, query string, params map[string]any) (*Result, error) {
 	converted, err := BindParams(params)
 	if err != nil {
 		return nil, err
 	}
+	if queryHasWritingClause(query) {
+		return e.RunInTx(ctx, query, converted)
+	}
 	return e.Run(ctx, query, converted)
 }
+
+// queryHasWritingClause reports whether the query string contains any
+// writing keyword (CREATE, MERGE, SET, REMOVE, DELETE, DETACH) outside a
+// DDL prefix. This is a textual heuristic: it avoids triggering the
+// plan-cache machinery on a second pass, which would otherwise double-
+// count hits and misses in concurrency tests.
+//
+// The heuristic is intentionally permissive — false positives (writing
+// keywords inside string literals or backtick identifiers) merely cause a
+// read-only query to be routed through RunInTx, which executes identical
+// semantics with the same correctness guarantees, only with the cost of
+// opening and committing a write transaction.
+func queryHasWritingClause(query string) bool {
+	if ir.IsDDL(query) {
+		return false
+	}
+	return writingKeywordRE.MatchString(query)
+}
+
+// writingKeywordRE matches any writing-clause keyword as a standalone word.
+// The pattern uses a case-insensitive flag and a word boundary anchor so
+// fragments like "PRESET" or "NOMERGE" are not falsely classified.
+//
+//nolint:gochecknoglobals // singleton regex compiled once at init
+var writingKeywordRE = regexp.MustCompile(`(?i)\b(CREATE|MERGE|SET|REMOVE|DELETE|DETACH)\b`)
 
 // RunInTxAny executes a write query with params expressed as map[string]any,
 // automatically converting Go native types to [expr.Value]. See [BindParams].
