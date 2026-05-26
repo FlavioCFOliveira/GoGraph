@@ -401,12 +401,16 @@ func TestFixture_WalkerNodeCount(t *testing.T) {
 	}
 }
 
-// TestNewProject_EmptyItems checks the constructor's guard.
+// TestNewProject_EmptyItems verifies the constructor accepts an empty
+// items slice (e.g. WITH * over a pattern that binds no variables).
 func TestNewProject_EmptyItems(t *testing.T) {
 	scan := exec.NewAllNodesScan(gate10)
-	_, err := exec.NewProject(scan, nil)
-	if err == nil {
-		t.Error("expected error for empty items, got nil")
+	proj, err := exec.NewProject(scan, nil)
+	if err != nil {
+		t.Fatalf("NewProject with empty items: unexpected error %v", err)
+	}
+	if proj == nil {
+		t.Fatal("NewProject with empty items returned nil operator")
 	}
 }
 

@@ -94,3 +94,30 @@ func TestT937_PropertyAccess_RelProperty(t *testing.T) {
 		t.Errorf("row[since] = %s, want 2020", got)
 	}
 }
+
+// TestT937_PropertyAccess_RelReturnBare verifies that `RETURN r` produces
+// a full relationship value (not just the edge ID integer).
+func TestT937_PropertyAccess_RelReturnBare(t *testing.T) {
+	t.Parallel()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+
+	drainRunInTx(t, eng, `CREATE (a:Person {name: "Alice"})-[r:KNOWS {since: 2020}]->(b:Person {name: "Bob"})`)
+
+	res, err := eng.Run(ctx, `MATCH ()-[r:KNOWS]->() RETURN r`, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	defer func() { _ = res.Close() }()
+
+	rows := drainRecords(t, res)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1: %v", len(rows), rows)
+	}
+	// `r` should render as `[:KNOWS {since: 2020}]` not an integer.
+	got := fmtAny(rows[0]["r"])
+	if got == "0" || got == "1" {
+		t.Errorf("row[r] = %s, want a relationship value", got)
+	}
+}
