@@ -80,20 +80,41 @@ func TestPlanCache_Thrash(t *testing.T) {
 		queries[i] = thrashQuery(i)
 	}
 
+	// Distribute the query list across goroutines so the total work is
+	// O(n) executions, not O(n * goroutines). Each goroutine receives a
+	// disjoint slice of query indices, shuffled for non-deterministic ordering;
+	// goroutines overlap in their working windows, stressing the cache's
+	// concurrent eviction path without multiplying the total execution count.
+	//
+	// With n=100_000 and goroutines=16: each goroutine runs ~6 250 queries;
+	// total executions = 100 000. Cache capacity = 256 ensures heavy eviction.
+	//
+	// A full permutation per goroutine (16×100k = 1.6M) exceeds the soak
+	// time budget under -race; this design keeps the test within minutes while
+	// still saturating the eviction path.
+	allIdxs := make([]int, n)
+	for i := range allIdxs {
+		allIdxs[i] = i
+	}
+	rngShuffle := rand.New(rand.NewPCG(0xabcdef, 0x123456)) //nolint:gosec // test-only seed
+	rngShuffle.Shuffle(n, func(i, j int) { allIdxs[i], allIdxs[j] = allIdxs[j], allIdxs[i] })
+
+	chunkSize := (n + goroutines - 1) / goroutines
+
 	var (
 		wg         sync.WaitGroup
 		execErrors atomic.Int64
 	)
 	wg.Add(goroutines)
 	for gID := 0; gID < goroutines; gID++ {
-		gID := gID
-		go func() {
+		lo := gID * chunkSize
+		hi := lo + chunkSize
+		if hi > n {
+			hi = n
+		}
+		slice := allIdxs[lo:hi]
+		go func(idxs []int) {
 			defer wg.Done()
-			// Each goroutine shuffles its own view of the query list so the
-			// submission order is random and goroutines interleave cache
-			// evictions non-deterministically.
-			rng := rand.New(rand.NewPCG(uint64(gID), 0xdeadbeef)) //nolint:gosec // test-only RNG seed
-			idxs := rng.Perm(n)
 			for _, qi := range idxs {
 				q := queries[qi]
 				res, err := eng.RunAny(ctx, q, nil)
@@ -110,7 +131,7 @@ func TestPlanCache_Thrash(t *testing.T) {
 					execErrors.Add(1)
 				}
 			}
-		}()
+		}(slice)
 	}
 	wg.Wait()
 

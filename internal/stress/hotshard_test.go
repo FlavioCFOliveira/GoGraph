@@ -60,21 +60,22 @@ func TestHotShard_WriteStorm(t *testing.T) {
 	refCSR := csr.BuildFromAdjList(ref)
 
 	// Build the reference edge set keyed by string pair for later comparison.
+	// Use Mapper.Walk instead of a NodeID range loop — NodeIDs are sparse
+	// packed values ((intraIdx << 8) | shard), so MaxNodeID() returns a
+	// value much larger than the actual node count when keys cluster on one
+	// shard (as they do for shard-0 adversarial keys).
 	type edgeKey struct{ src, dst string }
 	refSet := make(map[edgeKey]struct{}, totalEdges)
-	for id := graph.NodeID(0); id < ref.MaxNodeID(); id++ {
-		srcStr, ok := ref.Mapper().Resolve(id)
-		if !ok {
-			continue
-		}
+	ref.Mapper().Walk(func(id graph.NodeID, srcStr string) bool {
 		for nbr := range refCSR.NeighboursByID(id) {
 			dstStr, ok2 := ref.Mapper().Resolve(nbr)
 			if !ok2 {
-				continue
+				return true
 			}
 			refSet[edgeKey{srcStr, dstStr}] = struct{}{}
 		}
-	}
+		return true
+	})
 
 	// ── Concurrent storm ──────────────────────────────────────────────────
 	storm := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
