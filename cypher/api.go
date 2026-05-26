@@ -46,6 +46,7 @@ import (
 	"math"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -272,6 +273,18 @@ func ensureIndexManager(g *lpg.Graph[string, float64]) {
 // cache's prior size.
 func (e *Engine) ClearPlanCache() {
 	e.cache.clear()
+}
+
+// Procs returns the engine's procedure registry so callers can register
+// custom procedures alongside the built-in db.* set. The returned
+// [*procs.Registry] is the live, owning registry — mutations are
+// observed immediately by every subsequent CALL <ns>.<name>() in any
+// query parsed by this engine.
+//
+// Returned registry is non-nil. Safe for concurrent use; see
+// [procs.Registry] for the concurrency contract.
+func (e *Engine) Procs() *procs.Registry {
+	return e.procReg
 }
 
 // Run executes query against the engine's graph and returns a streaming
@@ -2132,21 +2145,14 @@ func buildProcedureCallOperator(
 		}
 	}
 
-	// Build argument evaluators from the schema. Argument strings are opaque
-	// variable references resolved via the current schema.
+	// Build argument evaluators. Each argument string is either a
+	// variable reference resolved via the current schema, or a literal
+	// (quoted string, integer, float, boolean, null) materialised once
+	// at plan-build time. The latter is the common case for TCK
+	// fixtures and any hand-written CALL with explicit constants.
 	argEvals := make([]func(exec.Row) (expr.Value, error), len(p.Arguments))
 	for i, argStr := range p.Arguments {
-		if colIdx, ok := schema[argStr]; ok {
-			idx := colIdx
-			argEvals[i] = func(row exec.Row) (expr.Value, error) {
-				if idx < len(row) {
-					return row[idx], nil
-				}
-				return expr.Null, nil
-			}
-		} else {
-			argEvals[i] = func(_ exec.Row) (expr.Value, error) { return expr.Null, nil }
-		}
+		argEvals[i] = buildProcArgEvaluator(argStr, schema)
 	}
 
 	// Resolve effective registry (never nil at runtime to avoid nil deref).
@@ -2176,6 +2182,62 @@ func buildProcedureCallOperator(
 	}
 
 	return exec.NewProcedureCallOp(p.Namespace, p.Name, argEvals, yieldVars, child, effectiveProcReg), nil
+}
+
+// buildProcArgEvaluator returns a row-evaluator for a single CALL
+// argument string. Variable references that resolve in schema return
+// row[idx]; primitive literals (quoted strings, integers, floats,
+// booleans, null) are decoded once at plan-build time and the resulting
+// [expr.Value] is captured by the closure. Unrecognised forms fall
+// through to expr.Null so the procedure impl can still surface a
+// typed-error message if the value is critical.
+func buildProcArgEvaluator(argStr string, schema map[string]int) func(exec.Row) (expr.Value, error) {
+	if colIdx, ok := schema[argStr]; ok {
+		idx := colIdx
+		return func(row exec.Row) (expr.Value, error) {
+			if idx < len(row) {
+				return row[idx], nil
+			}
+			return expr.Null, nil
+		}
+	}
+	if lit, ok := parseProcArgLiteral(argStr); ok {
+		return func(_ exec.Row) (expr.Value, error) { return lit, nil }
+	}
+	return func(_ exec.Row) (expr.Value, error) { return expr.Null, nil }
+}
+
+// parseProcArgLiteral recognises the primitive Cypher literal forms
+// that may appear as a CALL argument: quoted single-/double-quoted
+// strings, decimal integers, decimal floats, the boolean keywords and
+// the null keyword. Returns (value, true) on recognition; (zero, false)
+// when the string is not a primitive literal — the caller falls back
+// to a variable lookup or a Null placeholder.
+func parseProcArgLiteral(s string) (expr.Value, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	switch s {
+	case "null", "NULL":
+		return expr.Null, true
+	case "true", "TRUE":
+		return expr.BoolValue(true), true
+	case "false", "FALSE":
+		return expr.BoolValue(false), true
+	}
+	if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') && s[len(s)-1] == s[0] {
+		return expr.StringValue(s[1 : len(s)-1]), true
+	}
+	if strings.ContainsAny(s, ".eE") {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return expr.FloatValue(f), true
+		}
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return expr.IntegerValue(n), true
+	}
+	return nil, false
 }
 
 // buildIndexSeekOperator builds an exec.NodeByIndexSeek from an IR NodeByIndexSeek node.

@@ -164,11 +164,26 @@ import (
 //     MATCH … CALL <void-proc> RETURN pattern (a side-effect-only step
 //     should not erase upstream bindings). Observed 1963 across a 3-run
 //     sample; gate set conservatively at 1962.
+//   - 1978: raised after task T937 partial closure — three CALL-pipeline
+//     enhancements landed together: (a) buildProcedureCallOperator's
+//     argEval now recognises primitive literals (quoted strings,
+//     integers, floats, booleans, null) via buildProcArgEvaluator +
+//     parseProcArgLiteral instead of treating every IR argument as a
+//     variable reference (which silently resolved to NULL); (b) the
+//     Engine exposes its procs.Registry via the new (*Engine).Procs()
+//     accessor; (c) the TCK runner's `there exists a procedure` Gherkin
+//     step now parses the signature (with a depth-aware `::` separator
+//     that no longer trips on the input-type annotations) and the
+//     accompanying table to register a table-driven impl on the
+//     scenario's engine. Together these unlock the test.doNothing,
+//     test.labels and test.my.proc fixture scenarios across
+//     features/clauses/call/Call*. Observed 1980 across a 3-run sample;
+//     gate set conservatively at 1978.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1962
+const tckExecutionBaseline = 1978
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
@@ -294,8 +309,8 @@ func initScenario(sc *godog.ScenarioContext) {
 	// Procedure existence declarations — no-op stubs (engine resolves at runtime).
 	// These steps have a trailing table body (the procedure signature table), so
 	// the step function must accept *godog.Table as the second argument.
-	sc.Step(`^there exists a procedure (.+)$`, func(ctx context.Context, sig string, _ *godog.Table) error {
-		return w.thereExistsAProcedure(ctx, sig)
+	sc.Step(`^there exists a procedure (.+)$`, func(ctx context.Context, sig string, table *godog.Table) error {
+		return w.thereExistsAProcedure(ctx, sig, table)
 	})
 
 	// ── When steps ───────────────────────────────────────────────────────────

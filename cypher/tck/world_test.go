@@ -2,12 +2,14 @@ package tck_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/cucumber/godog"
 
 	"gograph/cypher"
+	"gograph/cypher/procs"
 	"gograph/graph/adjlist"
 	"gograph/graph/lpg"
 )
@@ -194,12 +196,41 @@ func parseCypherLiteral(s string) any {
 	return s
 }
 
-// thereExistsAProcedure is a no-op stub for TCK scenarios that declare test
-// procedures (e.g. "And there exists a procedure test.my.proc(…) :: (…)").
-// The godog runner registers this step so the scenario does not fail on an
-// undefined step; the actual procedure invocation will fail at runtime if the
-// engine cannot resolve it.
-func (w *world) thereExistsAProcedure(_ context.Context, _ string) error { return nil }
+// thereExistsAProcedure parses a TCK procedure declaration and registers
+// the procedure on the world's engine so subsequent CALL invocations
+// resolve against the declared signature and result table.
+//
+// Accepted signature forms:
+//
+//	test.doNothing() :: ()
+//	test.my.proc(name :: STRING?, id :: INTEGER?) :: (city :: STRING?, country_code :: INTEGER?)
+//
+// The result table (when present) lists rows with input columns followed
+// by output columns. Calls filter on the input columns and yield the
+// matching output columns. Procedures with empty output (e.g. doNothing)
+// are registered with an impl that always returns no rows; the
+// exec.ProcedureCallOp's void-proc passthrough preserves the driver row.
+//
+// Duplicate registrations within a single scenario are tolerated as
+// idempotent: TCK backgrounds sometimes declare the same procedure on
+// multiple Given/And lines.
+func (w *world) thereExistsAProcedure(_ context.Context, sig string, table *godog.Table) error {
+	parsed, err := parseProcedureSignature(sig)
+	if err != nil {
+		return fmt.Errorf("there exists a procedure: %w", err)
+	}
+	impl, err := buildProcImplFromTable(&parsed, table)
+	if err != nil {
+		return fmt.Errorf("there exists a procedure %q: %w", parsed.fqn(), err)
+	}
+	if regErr := w.eng.Procs().Register(parsed.Signature, impl); regErr != nil {
+		if errors.Is(regErr, procs.ErrProcAlreadyExists) {
+			return nil
+		}
+		return fmt.Errorf("register %q: %w", parsed.fqn(), regErr)
+	}
+	return nil
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
