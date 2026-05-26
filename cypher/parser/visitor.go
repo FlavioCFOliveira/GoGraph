@@ -1264,25 +1264,67 @@ func (v *visitor) VisitNotExpression(ctx *gen.NotExpressionContext) interface{} 
 }
 
 // VisitComparisonExpression handles addSub (cmpSign addSub)*.
+//
+// Multiple chained comparison operators (`a < b < c`) lower to the
+// AND-joined pairwise comparisons (`a < b AND b < c`), matching the
+// openCypher 9 chained-comparison semantics. The intermediate operand
+// (`b`) is duplicated in the AST; this is safe for pure references
+// (variables, properties) which is the only legal shape for chained
+// comparisons per the spec.
 func (v *visitor) VisitComparisonExpression(ctx *gen.ComparisonExpressionContext) interface{} {
 	adds := ctx.AllAddSubExpression()
 	cmps := ctx.AllComparisonSigns()
 	if len(adds) == 0 {
 		return unsupported(ctx, "comparisonExpression", "empty")
 	}
-	left, err := asExpr(v.visit(adds[0]))
-	if err != nil {
-		return &SemaError{Rule: "comparisonExpression", Pos: positionOf(ctx), Message: err.Error()}
-	}
-	for i, cs := range cmps {
-		op := comparisonOp(cs)
-		right, err := asExpr(v.visit(adds[i+1]))
+	operands := make([]ast.Expression, len(adds))
+	for i, add := range adds {
+		e, err := asExpr(v.visit(add))
 		if err != nil {
 			return &SemaError{Rule: "comparisonExpression", Pos: positionOf(ctx), Message: err.Error()}
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
+		operands[i] = e
 	}
-	return left
+	if len(cmps) == 0 {
+		return operands[0]
+	}
+	// Single comparison: legacy fast path.
+	if len(cmps) == 1 {
+		return &ast.BinaryOp{
+			Pos:      positionOf(ctx),
+			EndPos:   endPositionOf(ctx),
+			Left:     operands[0],
+			Operator: comparisonOp(cmps[0]),
+			Right:    operands[1],
+		}
+	}
+	// Chained: build (a OP1 b) AND (b OP2 c) AND ... left-associative.
+	pos := positionOf(ctx)
+	end := endPositionOf(ctx)
+	var result ast.Expression = &ast.BinaryOp{
+		Pos:      pos,
+		EndPos:   end,
+		Left:     operands[0],
+		Operator: comparisonOp(cmps[0]),
+		Right:    operands[1],
+	}
+	for i := 1; i < len(cmps); i++ {
+		step := &ast.BinaryOp{
+			Pos:      pos,
+			EndPos:   end,
+			Left:     operands[i],
+			Operator: comparisonOp(cmps[i]),
+			Right:    operands[i+1],
+		}
+		result = &ast.BinaryOp{
+			Pos:      pos,
+			EndPos:   end,
+			Left:     result,
+			Operator: "AND",
+			Right:    step,
+		}
+	}
+	return result
 }
 
 // VisitComparisonSigns returns the operator string (used by parent).
