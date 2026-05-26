@@ -167,7 +167,13 @@ func writer(ctx context.Context, wg *sync.WaitGroup, a *adjlist.AdjList[int, int
 		case <-ticker.C:
 			if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
 				// Soak is uncapped; an error here is a programmer bug.
-				log.Fatalf("soak: writer AddEdge: %v", err)
+				// Log the cause and let the defers above (ticker.Stop /
+				// rebuildTicker.Stop) run before terminating. Using
+				// log.Fatalf here would call os.Exit and skip every
+				// defer in the goroutine — observable as ticker-leak
+				// warnings under goleak.
+				log.Printf("soak: writer AddEdge: %v (fatal — terminating)", err)
+				return
 			}
 			writes.Add(1)
 		case <-rebuildTicker.C:

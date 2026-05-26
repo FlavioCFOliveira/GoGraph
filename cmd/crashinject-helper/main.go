@@ -32,11 +32,21 @@ import (
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("crashinject-helper: ")
+	// run owns the deferred cleanup; main translates its return value
+	// into an exit code via os.Exit only after run's defers have all
+	// fired. This avoids the exitAfterDefer pitfall where os.Exit inside
+	// run would silently skip the temp-dir RemoveAll.
+	os.Exit(run())
+}
 
+// run executes the requested crash-injection scenario and returns a
+// process exit code. Any deferred cleanup registered here runs before
+// the caller invokes os.Exit.
+func run() int {
 	scenario := os.Getenv(crashinject.EnvCrashAt)
 	if scenario == "" {
 		fmt.Fprintln(os.Stderr, "crashinject-helper: GOGRAPH_CRASH_AT is not set; refusing to run")
-		os.Exit(1)
+		return 1
 	}
 
 	dir := os.Getenv(crashinject.EnvCrashDir)
@@ -44,7 +54,8 @@ func main() {
 		var err error
 		dir, err = os.MkdirTemp("", "crashinject-*")
 		if err != nil {
-			log.Fatalf("MkdirTemp: %v", err)
+			log.Printf("MkdirTemp: %v", err)
+			return 1
 		}
 		// Clean up when the helper exits normally (non-crash path).
 		defer func() { _ = os.RemoveAll(dir) }()
@@ -55,8 +66,9 @@ func main() {
 		runWALMidFrame(dir)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // runWALMidFrame writes one complete WAL frame to a file in dir,
