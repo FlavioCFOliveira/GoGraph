@@ -610,11 +610,18 @@ func TestProject_Scenarios(t *testing.T) {
 	}
 }
 
-// TestProject_NewProject_EmptyItems verifies NewProject rejects empty items.
+// TestProject_NewProject_EmptyItems verifies NewProject accepts an empty
+// items slice (e.g. WITH * over a pattern that binds no variables).
 func TestProject_NewProject_EmptyItems(t *testing.T) {
-	_, err := exec.NewProject(newSliceOperator(), nil)
-	if err == nil {
-		t.Fatal("expected error for empty items, got nil")
+	proj, err := exec.NewProject(newSliceOperator(), nil)
+	if err != nil {
+		t.Fatalf("NewProject with empty items: unexpected error %v", err)
+	}
+	if proj == nil {
+		t.Fatal("NewProject with empty items returned nil operator")
+	}
+	if cols := proj.Columns(); len(cols) != 0 {
+		t.Errorf("Columns() = %v, want empty slice", cols)
 	}
 }
 

@@ -52,12 +52,10 @@ type Project struct {
 }
 
 // NewProject creates a Project operator.  items defines the output schema;
-// each item's Eval function is applied to each input row.  items must not be
-// empty.
+// each item's Eval function is applied to each input row.  An empty items
+// slice is legal (e.g. `WITH *` over a pattern that binds no variables);
+// the resulting operator forwards an empty Row for every input row.
 func NewProject(child Operator, items []ProjectionItem) (*Project, error) {
-	if len(items) == 0 {
-		return nil, fmt.Errorf("exec: Project requires at least one projection item")
-	}
 	return &Project{
 		child:  child,
 		items:  items,
