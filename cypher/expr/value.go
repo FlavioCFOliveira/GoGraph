@@ -754,8 +754,15 @@ func compareSameKind(k Kind, a, b Value) int {
 		la, lb := a.(LocalTimeValue), b.(LocalTimeValue) //nolint:forcetypeassert // kind pre-checked
 		return cmpInt64(la.Nanos, lb.Nanos)
 	case KindTime:
+		// Per openCypher, two Time values compare on their UTC instant
+		// (Nanos − Offset). The raw offset is the tie-breaker for
+		// otherwise-equal instants, so `12:00Z` and `12:00+00:00` keep a
+		// stable order even though their absolute times are identical.
 		ta, tb := a.(TimeValue), b.(TimeValue) //nolint:forcetypeassert // kind pre-checked
-		if c := cmpInt64(ta.Nanos, tb.Nanos); c != 0 {
+		const nsPerSec = int64(1_000_000_000)
+		aUTC := ta.Nanos - int64(ta.OffsetSec)*nsPerSec
+		bUTC := tb.Nanos - int64(tb.OffsetSec)*nsPerSec
+		if c := cmpInt64(aUTC, bUTC); c != 0 {
 			return c
 		}
 		return cmpInt64(int64(ta.OffsetSec), int64(tb.OffsetSec))

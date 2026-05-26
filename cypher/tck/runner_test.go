@@ -420,11 +420,20 @@ import (
 //     ORDER-BY-then-SKIP scenarios. Net uplift: +9 scenarios above
 //     3064. Observed 3073 across a 3-run sample; gate set
 //     conservatively at 3065.
+//   - 3070: raised after Sprint 84 audit round 9 follow-on 3 — Time
+//     value comparison in compareSameKind now anchors the comparison
+//     on the UTC instant (Nanos − OffsetSec * nsPerSec) so two Time
+//     values with different fixed offsets sort by their absolute time
+//     instead of their local wall-clock. Raw OffsetSec is retained as
+//     a tie-breaker for otherwise-equal instants. Unlocks Sort-by-Time
+//     scenarios in WithOrderBy1/2 and similar features. Net uplift:
+//     +7 scenarios above 3073. Observed 3080 across a 3-run sample;
+//     gate set conservatively at 3070.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3065
+const tckExecutionBaseline = 3070
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
