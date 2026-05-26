@@ -2,6 +2,7 @@ package sema
 
 import (
 	"sort"
+	"strings"
 
 	"gograph/cypher/ast"
 )
@@ -597,10 +598,23 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		a.checkExpr(v.Receiver)
 
 	case *ast.BinaryOp:
+		if isLogicalOperator(v.Operator) {
+			if kind, bad := nonBooleanLiteralKind(v.Left); bad {
+				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
+			}
+			if kind, bad := nonBooleanLiteralKind(v.Right); bad {
+				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
+			}
+		}
 		a.checkExpr(v.Left)
 		a.checkExpr(v.Right)
 
 	case *ast.UnaryOp:
+		if isLogicalOperator(v.Operator) {
+			if kind, bad := nonBooleanLiteralKind(v.Operand); bad {
+				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
+			}
+		}
 		a.checkExpr(v.Operand)
 
 	case *ast.FunctionInvocation:
@@ -714,4 +728,42 @@ func (a *analyser) countSubquery(c *ast.CountSubquery) {
 		sub.singleQuery(c.Query)
 	}
 	a.errs = append(a.errs, sub.errs...)
+}
+
+// isLogicalOperator returns true for the openCypher logical operators whose
+// operands must be Boolean (or NULL). The comparison is case-insensitive
+// because the parser may surface either casing.
+func isLogicalOperator(op string) bool {
+	switch strings.ToUpper(op) {
+	case "AND", "OR", "XOR", "NOT":
+		return true
+	}
+	return false
+}
+
+// nonBooleanLiteralKind classifies e as a literal expression of a known
+// non-boolean type. It returns (kindString, true) for IntLiteral,
+// FloatLiteral, StringLiteral, ListLiteral, and MapLiteral; ("", false) for
+// BoolLiteral, NullLiteral, variables, parameters, function calls, and any
+// other expression whose type is not statically constrained to non-boolean.
+//
+// The classification is conservative: only direct literals are flagged so
+// that valid dynamic expressions like `x AND y` (where x/y may be booleans
+// at runtime) remain unchecked. The TCK Boolean1-4 test family asserts the
+// compile-time error only for literal operands; complex expressions like
+// `(1+2) AND true` are out of scope here.
+func nonBooleanLiteralKind(e ast.Expression) (string, bool) {
+	switch e.(type) {
+	case *ast.IntLiteral:
+		return "Integer", true
+	case *ast.FloatLiteral:
+		return "Float", true
+	case *ast.StringLiteral:
+		return "String", true
+	case *ast.ListLiteral:
+		return "List", true
+	case *ast.MapLiteral:
+		return "Map", true
+	}
+	return "", false
 }

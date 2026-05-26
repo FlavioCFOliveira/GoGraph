@@ -95,28 +95,47 @@ func fnDate(args []expr.Value) (expr.Value, error) {
 // dateFromMap builds a DateValue from a component map. Supports:
 //
 //   - Calendar:    {year, month, day}    (month/day default to 1)
-//   - Ordinal:     {year, dayOfYear}     (day-of-year override)
+//   - Ordinal:     {year, ordinalDay}    (ordinal day-of-year)
 //   - Week:        {year, week, dayOfWeek} (ISO week date, dow defaults 1)
-//   - From base:   {date: D, ...overrides...} — copies D and applies overrides.
+//   - Quarter:     {year, quarter, dayOfQuarter} (quarter→month, dayOfQuarter→day)
+//   - From base:   {date: D, ...overrides...} — D may be Date, LocalDateTime,
+//     or DateTime; the date component is extracted and overrides are applied.
+//     When week is overridden without an explicit year, the base's ISO
+//     week-year is used. When week is overridden without an explicit dayOfWeek,
+//     the base's ISO day-of-week is inherited. When quarter is overridden
+//     without an explicit month, the base's month-within-quarter offset is
+//     preserved (e.g. November is the 2nd month of Q4 → August in Q3).
 //
 //nolint:gocyclo // Sequential overlay of map fields onto a DateValue; each branch is uniform — splitting hides the field-priority logic.
 func dateFromMap(m expr.MapValue) (expr.Value, error) {
-	// Base from {date: ...} if present.
+	// Base from {date: ...} if present. The base may be any temporal kind
+	// carrying a date component (Date, LocalDateTime, DateTime).
 	base := expr.DateValue{Year: 1970, Month: 1, Day: 1}
+	hasBase := false
 	if dv, ok := m["date"]; ok {
-		if d, ok2 := dv.(expr.DateValue); ok2 {
+		switch d := dv.(type) {
+		case expr.DateValue:
 			base = d
+			hasBase = true
+		case expr.LocalDateTimeValue:
+			base = expr.DateFromTime(d.T)
+			hasBase = true
+		case expr.DateTimeValue:
+			base = expr.DateFromTime(d.T)
+			hasBase = true
 		}
 	}
 	year := base.Year
 	month := base.Month
 	day := base.Day
+	yearExplicit := false
 	if v, ok := m["year"]; ok {
 		i, ok2 := intFromValue(v)
 		if !ok2 {
 			return expr.Null, nil
 		}
 		year = int(i)
+		yearExplicit = true
 	}
 	// Week form takes priority when "week" is present.
 	if wv, hasWeek := m["week"]; hasWeek {
@@ -124,6 +143,18 @@ func dateFromMap(m expr.MapValue) (expr.Value, error) {
 		if !ok {
 			return expr.Null, nil
 		}
+		// ISO year: when base present and year is not explicitly overridden,
+		// use the base's ISO week-year (which may differ from the calendar
+		// year at year boundaries, e.g. 1816-12-30 is in ISO year 1817).
+		isoYear := year
+		if hasBase && !yearExplicit {
+			bt := time.Date(base.Year, time.Month(base.Month), base.Day, 0, 0, 0, 0, time.UTC)
+			iy, _ := bt.ISOWeek()
+			isoYear = iy
+		}
+		// dayOfWeek: when base present and dow not explicitly overridden,
+		// inherit the base date's ISO day-of-week (1=Mon..7=Sun) rather than
+		// defaulting to 1.
 		dow := 1
 		if dv, ok := m["dayOfWeek"]; ok {
 			i, ok2 := intFromValue(dv)
@@ -131,15 +162,27 @@ func dateFromMap(m expr.MapValue) (expr.Value, error) {
 				return expr.Null, nil
 			}
 			dow = int(i)
+		} else if hasBase {
+			bt := time.Date(base.Year, time.Month(base.Month), base.Day, 0, 0, 0, 0, time.UTC)
+			wd := int(bt.Weekday())
+			if wd == 0 {
+				wd = 7
+			}
+			dow = wd
 		}
-		dv, err := isoWeekDate(year, int(w), dow)
+		dv, err := isoWeekDate(isoYear, int(w), dow)
 		if err != nil {
 			return expr.Null, nil //nolint:nilerr // invalid components → NULL
 		}
 		return dv, nil
 	}
-	// Ordinal form when "dayOfYear" present without "month".
-	if doyVal, hasDoy := m["dayOfYear"]; hasDoy {
+	// Ordinal form when "ordinalDay" present (preferred per openCypher) or
+	// the legacy "dayOfYear" alias — both accepted, without "month".
+	doyVal, hasDoy := m["ordinalDay"]
+	if !hasDoy {
+		doyVal, hasDoy = m["dayOfYear"]
+	}
+	if hasDoy {
 		if _, hasMonth := m["month"]; !hasMonth {
 			doy, ok := intFromValue(doyVal)
 			if !ok {
@@ -155,7 +198,12 @@ func dateFromMap(m expr.MapValue) (expr.Value, error) {
 			return expr.Null, nil
 		}
 		month = int(i)
-		day = 1
+		// Without a base, day defaults to 1 when only month is specified.
+		// With a base, the base's day is preserved unless explicitly
+		// overridden by the day key below.
+		if !hasBase {
+			day = 1
+		}
 	}
 	if dv, ok := m["day"]; ok {
 		i, ok2 := intFromValue(dv)
@@ -169,16 +217,28 @@ func dateFromMap(m expr.MapValue) (expr.Value, error) {
 		if !ok2 {
 			return expr.Null, nil
 		}
-		// Quarter→month=1+(q-1)*3 when no explicit month was provided.
+		// Quarter→month: when no explicit month was provided, compute the
+		// new month from the quarter index. With a base date, preserve the
+		// month-within-quarter offset (0/1/2) so e.g. November (2nd month
+		// of Q4) projects to August (2nd month of Q3).
 		if _, hasMonth := m["month"]; !hasMonth {
-			month = 1 + (int(i)-1)*3
+			if hasBase {
+				offset := (base.Month - 1) % 3
+				month = (int(i)-1)*3 + 1 + offset
+			} else {
+				month = 1 + (int(i)-1)*3
+			}
 		}
 		if dq, ok := m["dayOfQuarter"]; ok {
 			ii, ok3 := intFromValue(dq)
 			if !ok3 {
 				return expr.Null, nil
 			}
-			t := time.Date(year, time.Month(month), int(ii), 0, 0, 0, 0, time.UTC)
+			// dayOfQuarter is the 1-based ordinal day within the quarter,
+			// anchored at the first month of the quarter. time.Date
+			// normalises overflow (e.g. day 92 in July becomes Sep 30).
+			qStart := (int(i)-1)*3 + 1
+			t := time.Date(year, time.Month(qStart), int(ii), 0, 0, 0, 0, time.UTC)
 			return expr.DateFromTime(t), nil
 		}
 	}

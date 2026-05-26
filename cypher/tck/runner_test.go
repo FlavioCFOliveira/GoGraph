@@ -344,11 +344,31 @@ import (
 //     and map parameter literals. Net uplift: +118 scenarios above 2440.
 //     Observed 2558 stable; baseline set conservatively at 2550 to absorb
 //     run-to-run variance.
+//   - 2860: raised after Sprint 84 audit round 7 — four execution-level
+//     fixes landed together: (a) T964 formatFloatTCK falls back to %f
+//     when %g produces scientific notation, so float properties render
+//     as 0.00002 instead of 2e-05 (matches TCK tables); (b) T965
+//     dateFromMap accepts ordinalDay (preferred per openCypher) and
+//     dayOfYear (legacy alias), inherits ISO week-year and ISO
+//     day-of-week from the base date when {date:..,week:N} omits
+//     year/dayOfWeek, preserves month-within-quarter offset from base
+//     for {date:..,quarter:N}, and accepts LocalDateTime/DateTime as
+//     base via DateFromTime extraction; (c) T966 truncateUnit splits
+//     'year' from 'weekYear' (weekYear computes Monday of ISO week 1
+//     of the source's ISO year, handling 1984-01-01 → 1983-01-03
+//     boundary), and applyOverrides handles the dayOfWeek key by
+//     adjusting the reconstructed date by (target - current) weekday
+//     difference; (d) T963 sema/analyse.go detects AND/OR/XOR/NOT on
+//     statically-typed non-boolean literals (Int/Float/String/List/Map)
+//     and emits SyntaxError(InvalidArgumentType) at compile time.
+//     Net uplift: +225 scenarios above 2638. Observed 2869 across a
+//     3-run sample; gate set conservatively at 2860 to absorb
+//     run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2638
+const tckExecutionBaseline = 2860
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

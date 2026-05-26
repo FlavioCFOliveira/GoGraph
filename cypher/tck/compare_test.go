@@ -563,9 +563,10 @@ func exprValueToString(v expr.Value) string {
 //
 //   - NaN / ±Inf render as "NaN", "Infinity", "-Infinity".
 //   - Finite floats with no fractional part render as "N.0" (e.g. 2 → "2.0").
-//   - All other finite floats use Go's %g, which produces the shortest
-//     representation that round-trips back to the same float64 (e.g. 1.5,
-//     1.23e-07).
+//   - Floats whose shortest %g representation would use scientific notation
+//     fall back to %f with precision -1 (shortest fixed-point form). The TCK
+//     tables expect "0.00002" not "2e-05" for small floats.
+//   - All other finite floats use Go's %g shortest representation.
 func formatFloatTCK(f float64) string {
 	switch {
 	case math.IsNaN(f):
@@ -580,7 +581,11 @@ func formatFloatTCK(f float64) string {
 		// table cell `| 2.0 |` matches.
 		return strconv.FormatFloat(f, 'f', 1, 64)
 	}
-	return strconv.FormatFloat(f, 'g', -1, 64)
+	s := strconv.FormatFloat(f, 'g', -1, 64)
+	if strings.ContainsAny(s, "eE") {
+		s = strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return s
 }
 
 // formatNodeTCK renders a node value in the TCK textual form. The format is:

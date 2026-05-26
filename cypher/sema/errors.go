@@ -29,6 +29,12 @@ const (
 	// KindScopeLeak is reported when a variable introduced inside a sub-scope
 	// (e.g. a list comprehension) is referenced outside that scope.
 	KindScopeLeak ErrorKind = "SCOPE_LEAK"
+
+	// KindInvalidArgumentType is reported when a literal expression of a
+	// statically known non-boolean type is used as the operand of a logical
+	// operator (AND / OR / XOR / NOT). Variables and other expressions whose
+	// type is only known at runtime are not flagged.
+	KindInvalidArgumentType ErrorKind = "INVALID_ARGUMENT_TYPE"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -74,6 +80,16 @@ func ScopeLeakError(name string, pos ast.Position) *ScopeError {
 		Kind:    KindScopeLeak,
 		Pos:     pos,
 		Message: fmt.Sprintf("variable %q is not visible outside its declaring scope", name),
+	}
+}
+
+// invalidBooleanOperandError constructs a KindInvalidArgumentType ScopeError
+// for a non-boolean literal used as the operand of a logical operator.
+func invalidBooleanOperandError(op, gotKind string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindInvalidArgumentType,
+		Pos:     pos,
+		Message: fmt.Sprintf("operator %q expects Boolean operands, got %s literal", op, gotKind),
 	}
 }
 
@@ -177,6 +193,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindUndefinedVar, Category: CategorySyntaxError, SubType: SubTypeUndefinedVariable},
 	{Kind: KindScopeLeak, Category: CategorySyntaxError, SubType: SubTypeUndefinedVariable},
 	{Kind: KindRedeclaration, Category: CategorySyntaxError, SubType: SubTypeVariableTypeConflict},
+	{Kind: KindInvalidArgumentType, Category: CategorySyntaxError, SubType: SubTypeInvalidArgumentType},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]

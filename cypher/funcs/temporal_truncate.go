@@ -44,8 +44,20 @@ func truncateUnit(t time.Time, unit string) time.Time {
 	case "decade":
 		y := (t.Year() / 10) * 10
 		return time.Date(y, 1, 1, 0, 0, 0, 0, loc)
-	case "year", "weekyear":
+	case "year":
 		return time.Date(t.Year(), 1, 1, 0, 0, 0, 0, loc)
+	case "weekyear":
+		// Truncate to the Monday of ISO week 1 of the source's ISO year.
+		// ISO year may differ from calendar year at the boundaries
+		// (e.g. 1984-01-01 is in ISO year 1983).
+		isoYear, _ := t.ISOWeek()
+		jan4 := time.Date(isoYear, 1, 4, 0, 0, 0, 0, loc)
+		wd := int(jan4.Weekday())
+		if wd == 0 {
+			wd = 7
+		}
+		monday := jan4.AddDate(0, 0, -(wd - 1))
+		return time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, loc)
 	case "quarter":
 		m := ((int(t.Month())-1)/3)*3 + 1
 		return time.Date(t.Year(), time.Month(m), 1, 0, 0, 0, 0, loc)
@@ -119,6 +131,10 @@ func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 	hour, minute, second := t.Hour(), t.Minute(), t.Second()
 	ns := t.Nanosecond()
 	loc := t.Location()
+	// dayOfWeek is applied after year/month/day so it adjusts the final date
+	// by the difference between the requested ISO weekday and the current
+	// weekday (1=Mon..7=Sun). A negative value disables the adjustment.
+	dayOfWeek := -1
 	for k, v := range fields {
 		iv, isInt := intArg(v)
 		switch strings.ToLower(k) {
@@ -133,6 +149,10 @@ func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 		case "day":
 			if isInt {
 				day = int(iv)
+			}
+		case "dayofweek":
+			if isInt {
+				dayOfWeek = int(iv)
 			}
 		case "hour":
 			if isInt {
@@ -166,7 +186,15 @@ func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 			}
 		}
 	}
-	return time.Date(year, time.Month(month), day, hour, minute, second, ns, loc)
+	out := time.Date(year, time.Month(month), day, hour, minute, second, ns, loc)
+	if dayOfWeek >= 1 && dayOfWeek <= 7 {
+		cur := int(out.Weekday())
+		if cur == 0 {
+			cur = 7
+		}
+		out = out.AddDate(0, 0, dayOfWeek-cur)
+	}
+	return out
 }
 
 // intArg coerces an expr.Value to int64, accepting both IntegerValue and
