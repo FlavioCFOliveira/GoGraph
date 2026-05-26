@@ -632,11 +632,63 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 	}
 	a.checkOrderByAggregation(proj)
 	if proj.Skip != nil {
+		errsBefore := len(a.errs)
 		a.checkExpr(proj.Skip)
+		// Only flag the non-constant error when checkExpr did not already
+		// report something for this expression (e.g. UndefinedVariable on
+		// an unbound reference): avoids double-reporting the same site.
+		if len(a.errs) == errsBefore && hasVariableReference(proj.Skip) {
+			a.error(invalidBooleanOperandError("SKIP", "non-constant", positionOf(proj.Skip)))
+		}
 	}
 	if proj.Limit != nil {
+		errsBefore := len(a.errs)
 		a.checkExpr(proj.Limit)
+		if len(a.errs) == errsBefore && hasVariableReference(proj.Limit) {
+			a.error(invalidBooleanOperandError("LIMIT", "non-constant", positionOf(proj.Limit)))
+		}
 	}
+}
+
+// hasVariableReference reports whether e (or any sub-expression) refers
+// to a variable. Used to detect non-constant SKIP / LIMIT expressions
+// per openCypher: both clauses must be constant at compile time.
+// Parameters ($x) are NOT considered variable references — they bind at
+// query-parameter time, before execution, and openCypher classifies
+// them as constants for SKIP/LIMIT purposes.
+func hasVariableReference(e ast.Expression) bool {
+	if e == nil {
+		return false
+	}
+	switch v := e.(type) {
+	case *ast.Variable:
+		return true
+	case *ast.Property:
+		return true
+	case *ast.BinaryOp:
+		return hasVariableReference(v.Left) || hasVariableReference(v.Right)
+	case *ast.UnaryOp:
+		return hasVariableReference(v.Operand)
+	case *ast.FunctionInvocation:
+		for _, a := range v.Args {
+			if hasVariableReference(a) {
+				return true
+			}
+		}
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			if hasVariableReference(el) {
+				return true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range v.Values {
+			if hasVariableReference(val) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkExprForWith validates projection source expressions in WITH.
