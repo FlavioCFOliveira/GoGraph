@@ -405,7 +405,7 @@ func extractGraphalyticsArchive(archivePath, root string) error {
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			continue
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if err := writeTarFile(dst, tr, hdr); err != nil {
 				return err
 			}

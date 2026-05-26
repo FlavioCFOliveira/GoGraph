@@ -151,7 +151,11 @@ func Run(t testing.TB, scenario string, opts Opts) (Out, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, helperPath)
+	// helperPath is the locally-built crashinject-helper binary produced
+	// by buildHelperOnce (which runs `go build` in the project tree); the
+	// path is process-local and not user-supplied. gosec G204 otherwise
+	// flags every exec.Command with a variable argument.
+	cmd := exec.CommandContext(ctx, helperPath) //nolint:gosec // G204: helperPath is buildHelperOnce output, not user input
 	cmd.Env = append(os.Environ(),
 		EnvCrashAt+"="+scenario,
 		EnvCrashDir+"="+opts.Dir,
@@ -221,7 +225,9 @@ func buildHelperOnce(t testing.TB) (string, error) {
 		}
 		binPath := filepath.Join(os.TempDir(), "gograph-crashinject-helper")
 		args := []string{"build", "-o", binPath, "./cmd/crashinject-helper"}
-		cmd := exec.Command("go", args...)
+		// args is a hard-coded build invocation; only binPath comes from
+		// os.TempDir which is process-local. Not user-tainted.
+		cmd := exec.Command("go", args...) //nolint:gosec // G204: hard-coded `go build` against project path
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
 			helperBinErr = fmt.Errorf("go build crashinject-helper: %w\n%s", err, out)

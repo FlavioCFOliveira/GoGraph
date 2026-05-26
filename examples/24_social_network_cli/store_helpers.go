@@ -117,7 +117,7 @@ func initEmpty(dir string) error {
 	if dir == "" {
 		return errors.New("init: empty data dir")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("init: mkdir %q: %w", dir, err)
 	}
 	if hasManifest(dir) {

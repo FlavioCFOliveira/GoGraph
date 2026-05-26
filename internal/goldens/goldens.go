@@ -180,7 +180,7 @@ func splitLines(b []byte) []string {
 	}
 	s := string(b)
 	// Trim trailing newline to avoid a spurious empty last line.
-	if len(s) > 0 && s[len(s)-1] == '\n' {
+	if s != "" && s[len(s)-1] == '\n' {
 		s = s[:len(s)-1]
 	}
 	var lines []string
@@ -200,11 +200,4 @@ func lineAt(lines []string, i int) string {
 		return lines[i]
 	}
 	return ""
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

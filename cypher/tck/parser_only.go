@@ -501,8 +501,9 @@ func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, err
 
 			case st == parserStateScenario && strings.HasPrefix(line, "@"):
 				// Tag line between scenarios — belongs to the next scenario.
-				pendingTags = nil
-				for _, t := range strings.Fields(line) {
+				fields := strings.Fields(line)
+				pendingTags = make([]string, 0, len(fields))
+				for _, t := range fields {
 					pendingTags = append(pendingTags, strings.TrimPrefix(t, "@"))
 				}
 

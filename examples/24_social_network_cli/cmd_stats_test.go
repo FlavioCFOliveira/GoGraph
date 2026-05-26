@@ -40,7 +40,7 @@ func TestRunStats_AfterSeedMatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	if string(buf.Bytes()) != string(golden) {
+	if !bytes.Equal(buf.Bytes(), golden) {
 		t.Fatalf("stats output mismatch:\n  got:  %s\n  want: %s", buf.String(), string(golden))
 	}
 }

@@ -132,13 +132,13 @@ func TestWrite_PropertyDurability(t *testing.T) {
 	ctx := context.Background()
 
 	// The Person node must exist.
-	assertCount(t, recEng, ctx, `MATCH (n:Person {name: "P1"}) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, recEng, `MATCH (n:Person {name: "P1"}) RETURN count(n) AS n`, 1)
 	// The inline property `name` must round-trip.
-	assertCount(t, recEng, ctx, `MATCH (n:Person {name: "P1"}) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, recEng, `MATCH (n:Person {name: "P1"}) RETURN count(n) AS n`, 1)
 	// The SET-assigned property `tag` must round-trip from WAL.
-	assertCount(t, recEng, ctx, `MATCH (n:Person {tag: "verified"}) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, recEng, `MATCH (n:Person {tag: "verified"}) RETURN count(n) AS n`, 1)
 	// The REMOVE'd property `age` must NOT appear on any node.
-	assertCount(t, recEng, ctx, `MATCH (n:Person {age: 30}) RETURN count(n) AS n`, 0)
+	assertCount(ctx, t, recEng, `MATCH (n:Person {age: 30}) RETURN count(n) AS n`, 0)
 
 	// Verify directly on the graph for kind correctness — assertCount only
 	// reads the count, so a coincidental zero would not detect a kind drift.
@@ -218,7 +218,7 @@ func init() {
 		// before this sleep elapses. A finite sleep (rather than a
 		// channel-receive that triggers the deadlock detector) keeps
 		// the runtime quiet while the parent races to the kill.
-		fmt.Fprintln(os.Stdout, "DONE")
+		_, _ = fmt.Fprintln(os.Stdout, "DONE")
 		time.Sleep(1 * time.Hour)
 		return 0
 	})
@@ -304,6 +304,6 @@ func TestWrite_PropertyDurability_SIGKILLPostCommit(t *testing.T) {
 	ctx := context.Background()
 
 	// The node and the SET property must both have survived.
-	assertCount(t, recEng, ctx, `MATCH (n:Account {id: "A1"}) RETURN count(n) AS n`, 1)
-	assertCount(t, recEng, ctx, `MATCH (n:Account {balance: 1000}) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, recEng, `MATCH (n:Account {id: "A1"}) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, recEng, `MATCH (n:Account {balance: 1000}) RETURN count(n) AS n`, 1)
 }

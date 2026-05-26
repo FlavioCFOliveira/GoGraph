@@ -59,7 +59,7 @@ func TestRunSnapshot_AfterSeed(t *testing.T) {
 		t.Fatalf("status: got %v, want ok", reply["status"])
 	}
 	got, _ := reply["snapshot_dir"].(string)
-	wantSuffix := filepath.Join("snapshot")
+	const wantSuffix = "snapshot"
 	if !strings.HasSuffix(got, wantSuffix) {
 		t.Fatalf("snapshot_dir: got %q, want suffix %q", got, wantSuffix)
 	}

@@ -58,7 +58,7 @@ func main() {
 	fmt.Println("\nYen's 3 shortest paths lisbon -> berlin:")
 	paths := search.YenKShortest(c, src, dst, 3)
 	for i, p := range paths {
-		var names []string
+		names := make([]string, 0, len(p.Nodes))
 		for _, n := range p.Nodes {
 			name, _ := a.Mapper().Resolve(n)
 			names = append(names, name)

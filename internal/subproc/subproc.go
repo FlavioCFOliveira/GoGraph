@@ -125,7 +125,11 @@ func RunCtx(ctx context.Context, t testing.TB, mode string, extra ...string) (st
 	t.Helper()
 
 	args := append([]string{}, extra...)
-	cmd := exec.CommandContext(ctx, os.Args[0], args...)
+	// os.Args[0] is the running test binary's own path — controlled by
+	// the test harness, not user input. gosec G204 otherwise flags every
+	// re-exec-self invocation that subproc relies on.
+	cmd := exec.CommandContext(ctx, os.Args[0], args...) //nolint:gosec // G204: re-exec of the test binary itself
+
 	cmd.Env = append(os.Environ(), EnvMode+"="+mode)
 	cmd.Dir = t.TempDir()
 

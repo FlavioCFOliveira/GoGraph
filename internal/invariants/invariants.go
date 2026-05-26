@@ -121,7 +121,7 @@ func AssertBipartite[N comparable, W any](t testing.TB, g graphView[N, W]) {
 	var offendingU, offendingV N
 	found := false
 
-	m.Walk(func(id graph.NodeID, n N) bool {
+	m.Walk(func(id graph.NodeID, _ N) bool {
 		if found {
 			return false
 		}

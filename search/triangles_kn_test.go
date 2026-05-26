@@ -35,7 +35,7 @@ func TestCountTriangles_Kn(t *testing.T) {
 
 			total, perNode := CountTriangles(c)
 
-			// C(n, 3) = n*(n-1)*(n-2)/6
+			// Total triangles in K_n = n choose 3 = n(n-1)(n-2)/6.
 			wantTotal := int64(n) * int64(n-1) * int64(n-2) / 6
 			if total != wantTotal {
 				t.Fatalf("K%d total triangles = %d, want %d", n, total, wantTotal)

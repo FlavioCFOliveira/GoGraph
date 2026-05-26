@@ -34,10 +34,10 @@ func TestCreate_MultiPattern_ThreePatterns(t *testing.T) {
 	_ = drainRecords(t, res)
 
 	// Exactly 2 Person nodes.
-	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 2)
+	assertCount(ctx, t, eng, `MATCH (n:Person) RETURN count(n) AS n`, 2)
 
 	// Exactly 1 KNOWS edge.
-	assertCount(t, eng, ctx, `MATCH ()-[r:KNOWS]->() RETURN count(r) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH ()-[r:KNOWS]->() RETURN count(r) AS n`, 1)
 
 	// Both Person labels in the registry.
 	lid, ok := g.Registry().Lookup("Person")
@@ -72,7 +72,7 @@ func TestCreate_MultiPattern_TenNodes(t *testing.T) {
 	}
 	_ = drainRecords(t, res)
 
-	assertCount(t, eng, ctx, `MATCH (n:Batch) RETURN count(n) AS n`, int64(n))
+	assertCount(ctx, t, eng, `MATCH (n:Batch) RETURN count(n) AS n`, int64(n))
 }
 
 // joinStrings joins a slice of strings with sep.

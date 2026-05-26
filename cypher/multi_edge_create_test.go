@@ -39,8 +39,8 @@ func TestRunInTx_MultiEdgeSingleCreate(t *testing.T) {
 	}
 	_ = drainRecords(t, res)
 
-	assertCount(t, eng, ctx, `MATCH (n:User) RETURN count(n) AS n`, 3)
-	assertCount(t, eng, ctx, `MATCH ()-[r:F]->() RETURN count(r) AS n`, 3)
+	assertCount(ctx, t, eng, `MATCH (n:User) RETURN count(n) AS n`, 3)
+	assertCount(ctx, t, eng, `MATCH ()-[r:F]->() RETURN count(r) AS n`, 3)
 }
 
 func TestRunInTx_MultiEdgeBidirectional(t *testing.T) {
@@ -54,8 +54,8 @@ func TestRunInTx_MultiEdgeBidirectional(t *testing.T) {
 	}
 	_ = drainRecords(t, res)
 
-	assertCount(t, eng, ctx, `MATCH (n:X) RETURN count(n) AS n`, 2)
-	assertCount(t, eng, ctx, `MATCH ()-[r:R]->() RETURN count(r) AS n`, 2)
+	assertCount(ctx, t, eng, `MATCH (n:X) RETURN count(n) AS n`, 2)
+	assertCount(ctx, t, eng, `MATCH ()-[r:R]->() RETURN count(r) AS n`, 2)
 }
 
 func TestRunInTx_MatchPlusCreateRelationship(t *testing.T) {
@@ -79,7 +79,7 @@ func TestRunInTx_MatchPlusCreateRelationship(t *testing.T) {
 	}
 	_ = drainRecords(t, res2)
 
-	assertCount(t, eng, ctx, `MATCH ()-[r:KNOWS]->() RETURN count(r) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH ()-[r:KNOWS]->() RETURN count(r) AS n`, 1)
 }
 
 func TestRunInTx_AnonymousEndpoint(t *testing.T) {
@@ -93,13 +93,13 @@ func TestRunInTx_AnonymousEndpoint(t *testing.T) {
 	}
 	_ = drainRecords(t, res)
 
-	assertCount(t, eng, ctx, `MATCH (n:User) RETURN count(n) AS n`, 1)
-	assertCount(t, eng, ctx, `MATCH ()-[r:OWNS]->() RETURN count(r) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:User) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH ()-[r:OWNS]->() RETURN count(r) AS n`, 1)
 }
 
 // assertCount runs a `RETURN count(*) AS n` style query and fails the
 // test when the result differs from want.
-func assertCount(t *testing.T, eng *cypher.Engine, ctx context.Context, query string, want int64) {
+func assertCount(ctx context.Context, t *testing.T, eng *cypher.Engine, query string, want int64) {
 	t.Helper()
 	res, err := eng.Run(ctx, query, nil)
 	if err != nil {

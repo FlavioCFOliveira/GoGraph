@@ -30,13 +30,13 @@ func TestMerge_CreateWhenNotPresent(t *testing.T) {
 	// First MERGE on an empty graph — node must be created.
 	drainRunInTx(t, eng, `MERGE (n:Person {name: "Alice"})`)
 
-	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:Person) RETURN count(n) AS n`, 1)
 
 	// Second MERGE with identical pattern — searchFn finds the existing
 	// node, ON MATCH fires, and no duplicate is created.
 	drainRunInTx(t, eng, `MERGE (n:Person {name: "Alice"})`)
 
-	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:Person) RETURN count(n) AS n`, 1)
 }
 
 // TestMerge_OnCreateSet verifies that MERGE ON CREATE SET assigns a property

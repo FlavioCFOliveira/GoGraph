@@ -35,7 +35,7 @@ func TestCreate_RelationshipWithProperties(t *testing.T) {
 		 CREATE (a)-[r:KNOWS {since: 2020}]->(b)`)
 
 	// Verify the edge count via the engine.
-	assertCount(t, eng, ctx, `MATCH ()-[r:KNOWS]->() RETURN count(r) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH ()-[r:KNOWS]->() RETURN count(r) AS n`, 1)
 
 	// Walk all (src, dst) pairs and look for since=2020 on the edge.
 	found := false
@@ -81,7 +81,7 @@ func TestCreate_RelationshipThenVerifyEndpoints(t *testing.T) {
 		}
 	}
 
-	assertCount(t, eng, ctx, `MATCH ()-[r:FLOWS]->() RETURN count(r) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH ()-[r:FLOWS]->() RETURN count(r) AS n`, 1)
 }
 
 // TestCreate_RelationshipType verifies the edge type label is stored on the
@@ -116,5 +116,5 @@ func TestCreate_RelationshipType(t *testing.T) {
 		t.Fatal("expected at least one CHASES edge label after CREATE relationship")
 	}
 
-	assertCount(t, eng, ctx, `MATCH ()-[r:CHASES]->() RETURN count(r) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH ()-[r:CHASES]->() RETURN count(r) AS n`, 1)
 }

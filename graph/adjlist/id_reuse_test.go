@@ -20,8 +20,8 @@ func TestAdjList_NodeID_NoReuse(t *testing.T) {
 		t.Fatalf("AddEdge A->B: %v", err)
 	}
 
-	nodeID_A, okA := a.Mapper().Lookup("A")
-	nodeID_B, okB := a.Mapper().Lookup("B")
+	nodeIDA, okA := a.Mapper().Lookup("A")
+	nodeIDB, okB := a.Mapper().Lookup("B")
 	if !okA || !okB {
 		t.Fatalf("Lookup after AddEdge: A ok=%v B ok=%v", okA, okB)
 	}
@@ -32,7 +32,7 @@ func TestAdjList_NodeID_NoReuse(t *testing.T) {
 		t.Fatalf("AddEdge A->C: %v", err)
 	}
 
-	nodeID_C, okC := a.Mapper().Lookup("C")
+	nodeIDC, okC := a.Mapper().Lookup("C")
 	if !okC {
 		t.Fatal("Lookup for C returned ok=false after AddEdge")
 	}
@@ -43,13 +43,13 @@ func TestAdjList_NodeID_NoReuse(t *testing.T) {
 	}
 
 	// C must have a strictly larger NodeID than B — no reuse of any gap.
-	if nodeID_C <= nodeID_B {
-		t.Errorf("expected nodeID_C (%d) > nodeID_B (%d); got reuse or reversal", nodeID_C, nodeID_B)
+	if nodeIDC <= nodeIDB {
+		t.Errorf("expected nodeIDC (%d) > nodeIDB (%d); got reuse or reversal", nodeIDC, nodeIDB)
 	}
 
 	// Sanity: IDs are distinct.
-	if nodeID_A == nodeID_B || nodeID_A == nodeID_C || nodeID_B == nodeID_C {
-		t.Errorf("NodeIDs are not unique: A=%d B=%d C=%d", nodeID_A, nodeID_B, nodeID_C)
+	if nodeIDA == nodeIDB || nodeIDA == nodeIDC || nodeIDB == nodeIDC {
+		t.Errorf("NodeIDs are not unique: A=%d B=%d C=%d", nodeIDA, nodeIDB, nodeIDC)
 	}
 }
 

@@ -1,6 +1,7 @@
 package goldens_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,14 +96,14 @@ func TestAssert_Update_OverwritesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "testdata", "update.golden")
 	old := []byte("old content\n")
-	new_ := []byte("new content after update\n")
+	updated := []byte("new content after update\n")
 	prepGolden(t, path, old)
 
 	// Simulate -update by setting the env variable.
 	t.Setenv("GOGRAPH_UPDATE_GOLDENS", "1")
 
 	tb := &mockTB{}
-	goldens.Assert(tb, path, new_)
+	goldens.Assert(tb, path, updated)
 
 	// The test should not have failed.
 	if failed(tb) {
@@ -114,8 +115,8 @@ func TestAssert_Update_OverwritesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read after update: %v", err)
 	}
-	if string(written) != string(new_) {
-		t.Errorf("file after update = %q, want %q", written, new_)
+	if !bytes.Equal(written, updated) {
+		t.Errorf("file after update = %q, want %q", written, updated)
 	}
 }
 
@@ -137,7 +138,7 @@ func TestAssert_Update_CreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read after create: %v", err)
 	}
-	if string(written) != string(data) {
+	if !bytes.Equal(written, data) {
 		t.Errorf("created file = %q, want %q", written, data)
 	}
 }

@@ -71,6 +71,25 @@ linters:
       - linters: [gocyclo]
         path: "cypher/ir/explain\\.go"
         text: "cyclomatic complexity"
+      # gocyclo: txn/txn.go encodeOpTyped — dispatch switch over OpKind with one
+      # branch per operation; the linear case-per-op layout is the canonical
+      # serialiser shape and splitting introduces parallel dispatch tables.
+      - linters: [gocyclo]
+        path: "store/txn/txn\\.go"
+        text: "encodeOpTyped"
+      # gocyclo: cypher/exec/merge.go (*Merge).Init — initialisation that walks
+      # the merge pattern's node and relationship descriptors with per-kind
+      # branches; refactor candidate for Sprint 81 but the linear flow is the
+      # currently-clearest expression.
+      - linters: [gocyclo]
+        path: "cypher/exec/merge\\.go"
+        text: "Init"
+      # gocyclo: cypher/ir/match.go optionalInnerPattern — pattern-translation
+      # dispatcher; same shape rationale as operatorName. Tracked for revisit
+      # in T934.2 (multi-pattern MATCH binding).
+      - linters: [gocyclo]
+        path: "cypher/ir/match\\.go"
+        text: "optionalInnerPattern"
       # gocritic: builtinShadow in essentials.go — cap/min as local variable names
       # in pre-existing non-exported helpers; renaming would obscure intent.
       - linters: [gocritic]
@@ -84,6 +103,61 @@ linters:
       - linters: [staticcheck]
         path: "cypher/exec/parallel_test\\.go"
         text: "SA9003"
+      # revive: 'cap'/'copy' as local variable names in tests — common idiom for
+      # capacity/copy fixtures; renaming obscures intent. Production code remains
+      # subject to the redefines-builtin-id rule.
+      - linters: [revive]
+        path: "_test\\.go"
+        text: "redefines-builtin-id"
+      # gocritic: builtinShadow in tests for the same reason.
+      - linters: [gocritic]
+        path: "_test\\.go"
+        text: "builtinShadow"
+      # gosec G204 / G304 / G703: subprocess and file-inclusion warnings in test
+      # code rely on trusted, in-process inputs (test temp dirs, locally built
+      # helper binaries, deterministic test paths). Production code keeps full
+      # gosec coverage.
+      - linters: [gosec]
+        path: "_test\\.go"
+        text: "G204"
+      - linters: [gosec]
+        path: "_test\\.go"
+        text: "G304"
+      - linters: [gosec]
+        path: "_test\\.go"
+        text: "G703"
+      # gosec G404: tests intentionally use math/rand or PCG for deterministic
+      # reproducibility; cryptographic randomness is not required.
+      - linters: [gosec]
+        path: "_test\\.go"
+        text: "G404"
+      # gosec G302: tests sometimes restore directory permissions to 0o750 after
+      # deliberately stripping them to probe EACCES; the executable bit is
+      # required for traversal during the test cleanup.
+      - linters: [gosec]
+        path: "_test\\.go"
+        text: "G302"
+      # gocritic: unnamedResult is a style preference, not a defect; allowed in
+      # both production and test code where the return-type signature is
+      # self-documenting.
+      - linters: [gocritic]
+        text: "unnamedResult"
+      # gocritic: hugeParam on test helpers and shape-loader functions that
+      # accept descriptor structs by value for readability; the call sites are
+      # not on hot paths.
+      - linters: [gocritic]
+        path: "internal/shapegen/graphalytics\\.go"
+        text: "hugeParam"
+      - linters: [gocritic]
+        path: "examples/24_social_network_cli/cmd_seed\\.go"
+        text: "hugeParam"
+      # gocritic: exitAfterDefer in example main programs is the conventional
+      # demo pattern; the temp-dir leak on Fatalf is bounded (per-run /tmp
+      # entry) and not worth the cost of a typed exit code in didactic code.
+      # Production binaries (cmd/) keep the rule active.
+      - linters: [gocritic]
+        path: "examples/.*\\.go"
+        text: "exitAfterDefer"
   settings:
     errorlint:
       errorf: true

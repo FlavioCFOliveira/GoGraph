@@ -1703,8 +1703,9 @@ func (v *visitor) VisitFunctionInvocation(ctx *gen.FunctionInvocationContext) in
 // VisitInvocationName is only called transitively; handled inline above.
 func (v *visitor) VisitInvocationName(ctx *gen.InvocationNameContext) interface{} {
 	// Return the symbol texts as []string; callers use AllSymbol directly.
-	var parts []string
-	for _, s := range ctx.AllSymbol() {
+	syms := ctx.AllSymbol()
+	parts := make([]string, 0, len(syms))
+	for _, s := range syms {
 		parts = append(parts, symbolText(s))
 	}
 	return parts

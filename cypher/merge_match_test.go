@@ -31,7 +31,7 @@ func TestMerge_TwiceIsIdempotent(t *testing.T) {
 	drainRunInTx(t, eng, `MERGE (n:Person {name: "Alice"})`)
 	drainRunInTx(t, eng, `MERGE (n:Person {name: "Alice"})`)
 
-	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:Person) RETURN count(n) AS n`, 1)
 }
 
 // TestMerge_OnMatchSet verifies that MERGE on an existing node fires the
@@ -51,9 +51,9 @@ func TestMerge_OnMatchSet(t *testing.T) {
 		`MERGE (n:Person {name: "Carol"}) ON MATCH SET n.matched = true`)
 
 	// No duplicate: still exactly one Person.
-	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:Person) RETURN count(n) AS n`, 1)
 	// The on-match assignment landed on the node.
-	assertCount(t, eng, ctx, `MATCH (n:Person {matched: true}) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:Person {matched: true}) RETURN count(n) AS n`, 1)
 }
 
 // TestMerge_OnCreateSetProperty verifies the ON CREATE SET path end-to-end
@@ -67,7 +67,7 @@ func TestMerge_OnCreateSetProperty(t *testing.T) {
 	drainRunInTx(t, eng, `MERGE (n:Widget {code: "W1"}) ON CREATE SET n.created = true`)
 
 	// One Widget node must exist.
-	assertCount(t, eng, ctx, `MATCH (n:Widget) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:Widget) RETURN count(n) AS n`, 1)
 }
 
 // TestMerge_PartialPropertyMatchCreatesNew verifies that MERGE on a pattern
@@ -83,5 +83,5 @@ func TestMerge_PartialPropertyMatchCreatesNew(t *testing.T) {
 	// Same name, different age → distinct pattern → new node.
 	drainRunInTx(t, eng, `MERGE (n:Person {name: "Alice", age: 31})`)
 
-	assertCount(t, eng, ctx, `MATCH (n:Person) RETURN count(n) AS n`, 2)
+	assertCount(ctx, t, eng, `MATCH (n:Person) RETURN count(n) AS n`, 2)
 }

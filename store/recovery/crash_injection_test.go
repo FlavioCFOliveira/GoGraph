@@ -932,7 +932,8 @@ func TestCrashInjection_ApplyOpCodec_PropertyShortBuffers(t *testing.T) {
 	wcodec := txn.NewInt64WeightCodec()
 
 	build := func(kind txn.OpKind, body []byte) []byte {
-		p := []byte{txn.OpRecordV2, byte(kind)}
+		p := make([]byte, 0, 2+len(body)+32) // 32 = upper bound on two codec-encoded strings
+		p = append(p, txn.OpRecordV2, byte(kind))
 		p, _ = codec.Encode(p, "alice")
 		p, _ = codec.Encode(p, "bob")
 		p = append(p, body...)
@@ -949,13 +950,11 @@ func TestCrashInjection_ApplyOpCodec_PropertyShortBuffers(t *testing.T) {
 		{"DelNodeProperty keyLen overflow", build(txn.OpDelNodeProperty, []byte{0x10, 0x00})},
 		{"DelEdgeProperty missing keyLen", build(txn.OpDelEdgeProperty, nil)},
 		{"SetNodeProperty key ok but value short", func() []byte {
-			body := []byte{0x03, 0x00, 'k', 'e', 'y'}
-			body = append(body, byte(lpg.PropString), 0x10, 0, 0, 0) // claim 16 bytes, none follow
+			body := []byte{0x03, 0x00, 'k', 'e', 'y', byte(lpg.PropString), 0x10, 0, 0, 0} // claim 16 bytes, none follow
 			return build(txn.OpSetNodeProperty, body)
 		}()},
 		{"SetEdgeProperty key ok but value unknown kind", func() []byte {
-			body := []byte{0x03, 0x00, 'k', 'e', 'y'}
-			body = append(body, 0xAA) // unknown PropertyKind
+			body := []byte{0x03, 0x00, 'k', 'e', 'y', 0xAA} // 0xAA = unknown PropertyKind
 			return build(txn.OpSetEdgeProperty, body)
 		}()},
 	}

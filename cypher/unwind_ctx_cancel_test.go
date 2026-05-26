@@ -85,11 +85,9 @@ func TestUnwind_CtxAlreadyCancelled(t *testing.T) {
 
 	res, err := eng.Run(ctx, `UNWIND range(0, 999) AS x RETURN x`, nil)
 	if err != nil {
-		// Engine rejected immediately — correct.
-		if !errors.Is(err, context.Canceled) {
-			// Some engines wrap with additional context; accept any non-nil error
-			// that arrived promptly, since the context was already done.
-		}
+		// Engine rejected immediately — correct. Either errors.Is(err,
+		// context.Canceled) holds, or the engine wrapped the cancel with
+		// extra context. Both are acceptable for a context already done.
 		return
 	}
 	defer func() { _ = res.Close() }()

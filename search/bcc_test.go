@@ -38,7 +38,7 @@ func TestHopcroftTarjanBCC_BridgeFixture(t *testing.T) {
 	}
 
 	// Articulation points should be 2 and 3.
-	articInts := []int{}
+	articInts := make([]int, 0, len(res.Articulation))
 	for _, id := range res.Articulation {
 		v, _ := a.Mapper().Resolve(id)
 		articInts = append(articInts, v)

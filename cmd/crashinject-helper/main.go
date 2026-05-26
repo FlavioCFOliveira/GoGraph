@@ -58,7 +58,10 @@ func run() int {
 			return 1
 		}
 		// Clean up when the helper exits normally (non-crash path).
-		defer func() { _ = os.RemoveAll(dir) }()
+		// dir originates from os.MkdirTemp ("" prefix forces $TMPDIR), so
+		// the path is process-local and not user-tainted; gosec G703
+		// otherwise flags every os.RemoveAll(variable) call.
+		defer func() { _ = os.RemoveAll(dir) }() //nolint:gosec // G703: dir is from MkdirTemp, not user input
 	}
 
 	switch scenario {
