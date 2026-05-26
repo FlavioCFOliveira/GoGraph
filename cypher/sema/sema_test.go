@@ -1465,3 +1465,157 @@ func TestScope_Names(t *testing.T) {
 		t.Errorf("want 2 names, got %d: %v", len(names), names)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. WITH ORDER BY scope-checking
+// ─────────────────────────────────────────────────────────────────────────────
+
+// withSortBy builds a WITH clause projecting a variable with an ORDER BY sort
+// item on the given expression.
+func withSortBy(projected string, sortExpr ast.Expression) *ast.With {
+	return &ast.With{
+		Projection: &ast.Projection{
+			Items: []*ast.ProjectionItem{
+				{Expr: varExpr(projected)},
+			},
+			OrderBy: []*ast.SortItem{
+				{Expr: sortExpr},
+			},
+		},
+	}
+}
+
+func TestClean_WithOrderBy_ProjectedVar(t *testing.T) {
+	// MATCH (a) WITH a ORDER BY a RETURN a  — a is projected, ORDER BY a is clean
+	q := singleNode(
+		[]ast.ReadingClause{matchNode("a")},
+		[]*ast.With{withSortBy("a", varExpr("a"))},
+		nil,
+		returnVar("a"),
+	)
+	assertClean(t, q)
+}
+
+func TestClean_WithOrderBy_PreWithVar(t *testing.T) {
+	// MATCH (a) WITH a AS m WITH m ORDER BY a RETURN m
+	// After first WITH, scope is {m}. Second WITH projects m; ORDER BY a checks
+	// pre-second-WITH scope which only has {m} — a is gone.
+	// But this test checks a DIFFERENT case: one WITH where ORDER BY references
+	// the pre-WITH source variable.
+	//
+	// MATCH (a) MATCH (b) WITH a ORDER BY b RETURN a
+	// Pre-WITH scope: {a, b}. b IS in pre-WITH scope → clean.
+	q := singleNode(
+		[]ast.ReadingClause{matchNode("a"), matchNode("b")},
+		[]*ast.With{withSortBy("a", varExprAt("b", pos(1, 20)))},
+		nil,
+		returnVar("a"),
+	)
+	assertClean(t, q)
+}
+
+func TestNeg_WithOrderBy_OutOfScope(t *testing.T) {
+	// MATCH (a) WITH a, b WITH a ORDER BY c
+	// After first WITH, scope is {a, b}. Second WITH projects only a;
+	// ORDER BY c — c is not in pre-second-WITH scope {a, b}.
+	q := singleNode(
+		[]ast.ReadingClause{matchNode("a"), matchNode("b")},
+		[]*ast.With{
+			// First WITH: project both a and b
+			{
+				Projection: &ast.Projection{
+					Items: []*ast.ProjectionItem{
+						{Expr: varExpr("a")},
+						{Expr: varExpr("b")},
+					},
+				},
+			},
+			// Second WITH: project only a, ORDER BY c (undefined)
+			withSortBy("a", varExprAt("c", pos(3, 10))),
+		},
+		nil,
+		returnVar("a"),
+	)
+	assertErrors(t, q, 1, sema.KindUndefinedVar)
+}
+
+func TestNeg_WithOrderBy_NeverDefined(t *testing.T) {
+	// WITH 1 AS a ORDER BY ghost — ghost never defined anywhere
+	q := singleNode(
+		nil,
+		[]*ast.With{
+			{
+				Projection: &ast.Projection{
+					Items: []*ast.ProjectionItem{
+						{Expr: &ast.IntLiteral{Value: 1}, Alias: ptr("a")},
+					},
+					OrderBy: []*ast.SortItem{
+						{Expr: varExprAt("ghost", pos(1, 22))},
+					},
+				},
+			},
+		},
+		nil,
+		returnVar("a"),
+	)
+	assertErrors(t, q, 1, sema.KindUndefinedVar)
+}
+
+func TestNeg_WithOrderBy_MultipleUndefined(t *testing.T) {
+	// WITH 1 AS a, 'b' AS b WITH a ORDER BY c, d
+	// After first WITH: {a, b}. Second WITH projects a; ORDER BY c, d — both undefined.
+	q := singleNode(
+		nil,
+		[]*ast.With{
+			{
+				Projection: &ast.Projection{
+					Items: []*ast.ProjectionItem{
+						{Expr: &ast.IntLiteral{Value: 1}, Alias: ptr("a")},
+						{Expr: &ast.StringLiteral{Value: "b"}, Alias: ptr("b")},
+					},
+				},
+			},
+			{
+				Projection: &ast.Projection{
+					Items: []*ast.ProjectionItem{
+						{Expr: varExpr("a")},
+					},
+					OrderBy: []*ast.SortItem{
+						{Expr: varExprAt("c", pos(3, 10))},
+						{Expr: varExprAt("d", pos(3, 13))},
+					},
+				},
+			},
+		},
+		nil,
+		returnVar("a"),
+	)
+	assertErrors(t, q, 2, sema.KindUndefinedVar)
+}
+
+func TestClean_WithOrderBy_AliasInOrderBy(t *testing.T) {
+	// WITH n.name AS name ORDER BY name — alias is introduced into pre-WITH scope
+	// before ORDER BY is checked, so name IS in scope.
+	q := singleNode(
+		[]ast.ReadingClause{matchNode("n")},
+		[]*ast.With{
+			{
+				Projection: &ast.Projection{
+					Items: []*ast.ProjectionItem{
+						{
+							Expr:  &ast.Property{Receiver: varExpr("n"), Key: "name"},
+							Alias: ptr("name"),
+							Pos:   pos(1, 8),
+						},
+					},
+					OrderBy: []*ast.SortItem{
+						{Expr: varExpr("name")},
+					},
+				},
+			},
+		},
+		nil,
+		returnVar("name"),
+	)
+	assertClean(t, q)
+}

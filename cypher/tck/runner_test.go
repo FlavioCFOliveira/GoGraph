@@ -315,11 +315,22 @@ import (
 //     non-nil on the ir.CreateNode/ir.CreateRelationship node.
 //     Net uplift: +6 scenarios. Observed 2308-2311 across a 6-run sample.
 //     Baseline set conservatively at 2306 to absorb run-to-run variance.
+//   - 2378: raised after task T962 — ORDER BY clauses inside WITH are now
+//     scope-checked against the merged pre-WITH scope (original names plus
+//     new projection aliases), matching the same scope that WHERE-on-WITH
+//     already used. Any variable referenced in ORDER BY that is not visible
+//     in that merged scope now raises a KindUndefinedVar error, which surfaces
+//     as SyntaxError(UndefinedVariable) to callers. The fix is a one-site
+//     addition in sema.withClause, symmetric with the existing WHERE check.
+//     Unlocks: WithOrderBy1[46] (10 examples), WithOrderBy3[8] (40+ examples)
+//     and other scenarios referencing variables dropped by a prior WITH.
+//     Net uplift: +72 scenarios. Observed 2382 stable across a 2-run sample;
+//     baseline set conservatively at 2378 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2306
+const tckExecutionBaseline = 2378
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

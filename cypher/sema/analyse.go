@@ -243,6 +243,9 @@ func (a *analyser) withClause(w *ast.With) {
 		if w.Where != nil {
 			a.whereClause(w.Where)
 		}
+		for _, s := range w.Projection.OrderBy {
+			a.checkExpr(s.Expr)
+		}
 		return
 	}
 
@@ -259,17 +262,25 @@ func (a *analyser) withClause(w *ast.With) {
 		projs = append(projs, projection{item.Expr, item.Alias, item.Pos})
 	}
 
-	// 2. WHERE on WITH is evaluated in a scope that includes BOTH the
-	//    pre-WITH names AND the projection aliases. openCypher allows
-	//    patterns such as
+	// 2. WHERE and ORDER BY on WITH are both evaluated in a scope that
+	//    includes BOTH the pre-WITH names AND the projection aliases.
+	//    openCypher allows patterns such as
 	//
 	//        OPTIONAL MATCH (a)-[r:KNOWS]->(c)
 	//        WITH c WHERE r IS NULL
 	//
-	//    where the WHERE filters by a pre-WITH variable. We therefore
-	//    introduce the new (alias) names BEFORE the scope reset and validate
-	//    WHERE against the merged scope. The reset that follows then drops
-	//    the pre-WITH names so subsequent clauses only see projected ones.
+	//    where the WHERE filters by a pre-WITH variable, and similarly
+	//
+	//        MATCH (n) WITH n.name AS name ORDER BY n.age
+	//
+	//    is invalid because n.age references n which was NOT projected.
+	//
+	//    Wait — n IS in the pre-WITH scope (MATCH introduced it). The scope
+	//    that ORDER BY sees is the same as WHERE: pre-WITH names plus the new
+	//    projection aliases. We therefore introduce the alias names BEFORE the
+	//    scope reset and validate both WHERE and ORDER BY against the merged
+	//    scope. The reset that follows drops the pre-WITH names so subsequent
+	//    clauses only see projected ones.
 	for _, p := range projs {
 		name := projectedName(p.expr, p.alias)
 		if name == "" {
@@ -287,6 +298,11 @@ func (a *analyser) withClause(w *ast.With) {
 
 	if w.Where != nil {
 		a.whereClause(w.Where)
+	}
+	// ORDER BY sees the same merged scope as WHERE (pre-WITH names + aliases).
+	// Any variable reference not present in this merged scope is undefined.
+	for _, s := range w.Projection.OrderBy {
+		a.checkExpr(s.Expr)
 	}
 
 	// 3. Reset scope: only projected names survive.
