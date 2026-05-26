@@ -14,6 +14,7 @@ import (
 func TestSession_InFlightCursorCap_FirstCursorSurvivesRejection(t *testing.T) {
 	t.Parallel()
 	sess := newReadySession(t)
+	sess.setMaxInFlight(1) // explicit cap=1 so the second RUN is rejected
 
 	// BEGIN → TX_READY.
 	if _, err := sess.HandleMessage(context.Background(), &proto.Begin{

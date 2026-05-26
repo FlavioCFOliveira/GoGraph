@@ -72,12 +72,13 @@ type Session struct {
 	// log is the session-scoped structured logger.
 	log *slog.Logger
 
-	// maxInFlight bounds the number of Result cursors this connection
-	// may hold open simultaneously. Defaults to
+	// maxInFlight bounds the total number of Result cursors that may be
+	// registered against an explicit transaction before it must be
+	// committed or rolled back. Defaults to
 	// [DefaultMaxInFlightPerConnection]. RUN is rejected with
-	// "Neo.ClientError.General.LimitExceeded" once the count of
-	// non-Close()d cursors reaches this value. See
-	// [Options.MaxInFlightPerConnection] for the rationale.
+	// "Neo.ClientError.General.LimitExceeded" once the count reaches
+	// this value. See [Options.MaxInFlightPerConnection] for the
+	// rationale.
 	maxInFlight int
 }
 
@@ -109,10 +110,21 @@ func (s *Session) setMaxInFlight(n int) {
 	}
 }
 
-// inFlightCount returns the number of currently open (non-Close()d)
-// Result cursors held by this session. In an explicit transaction
-// the count is len(tx.results); outside a transaction it is at most
-// one (the auto-commit cursor referenced by s.result).
+// inFlightCount returns the number of Result cursors registered against this
+// session that count toward the per-connection cap.
+//
+// Inside an explicit transaction the count is the total number of Result
+// cursors appended to tx.results since BEGIN, regardless of whether they have
+// been fully pulled (closed). Each RUN appends one cursor; the slice is only
+// cleared on COMMIT or ROLLBACK. This bounds the total heap footprint of a
+// transaction: a client that issues RUN+PULL in a tight loop without
+// committing would otherwise accumulate an unbounded number of (closed but
+// still referenced) Result objects.
+//
+// Outside a transaction there is at most one auto-commit cursor (s.result).
+// The Bolt state machine already prevents a second auto-commit RUN before the
+// first cursor is consumed, so the auto-commit path is not bounded by this
+// counter; instead it returns 0 once s.result has been cleared by drainResult.
 func (s *Session) inFlightCount() int {
 	if s.txActive && s.tx != nil {
 		return len(s.tx.results)
@@ -343,11 +355,12 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		// Run inside the explicit transaction so that index-buffer writes are
 		// scoped to the transaction lifecycle (commit/rollback in tx.go).
 		result, runErr = s.tx.Run(m.Query, params)
-	} else if s.state == StateTxReady {
-		// Fallback: txActive should be true here, but guard defensively.
-		result, runErr = s.eng.RunInTxAny(runCtx, m.Query, params)
 	} else {
-		result, runErr = s.eng.RunAny(runCtx, m.Query, params)
+		// Autocommit mode (or defensive fallback when txActive is unexpectedly
+		// false in StateTxReady): route through RunInTxAny so that write queries
+		// (CREATE, MERGE, SET, DELETE) are handled by the write-aware planner.
+		// Read-only queries pass through the same code path without side-effects.
+		result, runErr = s.eng.RunInTxAny(runCtx, m.Query, params)
 	}
 
 	next, transErr := Transition(s.state, m, runErr == nil)

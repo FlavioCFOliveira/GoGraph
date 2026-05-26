@@ -8,17 +8,19 @@ import (
 	"gograph/bolt/proto"
 )
 
-// TestSession_InFlightCursorCap_DefaultRejectsSecondRunInTx confirms the
-// default Options.MaxInFlightPerConnection (= 1) rejects a second RUN
-// inside an explicit transaction once the first cursor has been
-// returned to the session but not yet COMMIT'd.
+// TestSession_InFlightCursorCap_DefaultRejectsSecondRunInTx confirms that a
+// session with an explicit cap of 1 rejects a second RUN inside an explicit
+// transaction once the first cursor has been registered (even after it has
+// been fully PULL'd and drained). inFlightCount counts all Result cursors
+// appended to tx.results since BEGIN — both open and already-exhausted — so
+// the cap bounds the total number of RUN statements per transaction.
 //
-// Without the cap, an attacker could BEGIN, then loop RUN→PULL all
-// indefinitely; every Result lands in tx.results unclosed and the
-// connection's heap footprint grows linearly with the loop count.
+// Without the cap, a client could BEGIN and loop RUN→PULL indefinitely,
+// growing tx.results without bound.
 func TestSession_InFlightCursorCap_DefaultRejectsSecondRunInTx(t *testing.T) {
 	t.Parallel()
 	sess := newReadySession(t)
+	sess.setMaxInFlight(1) // explicit cap=1; does not rely on the server default
 
 	// BEGIN → TX_READY.
 	if _, err := sess.HandleMessage(context.Background(), &proto.Begin{
@@ -36,11 +38,11 @@ func TestSession_InFlightCursorCap_DefaultRejectsSecondRunInTx(t *testing.T) {
 		t.Fatalf("first RUN: %v", err)
 	}
 
-	// PULL all → drain but DO NOT close (mimics legitimate driver behaviour).
+	// PULL all → cursor is drained, but tx.results still holds the pointer.
 	if _, err := sess.HandleMessage(context.Background(), &proto.Pull{N: -1, QID: -1}); err != nil {
 		t.Fatalf("PULL: %v", err)
 	}
-	// We are back in TX_READY but tx.results still holds the cursor.
+	// tx.results has one entry (drained cursor); the cap counts it.
 	if got := sess.inFlightCount(); got != 1 {
 		t.Fatalf("inFlightCount after first PULL = %d; want 1", got)
 	}
@@ -69,9 +71,11 @@ func TestSession_InFlightCursorCap_DefaultRejectsSecondRunInTx(t *testing.T) {
 	}
 }
 
-// TestSession_InFlightCursorCap_RaisedAllowsMoreCursors verifies that
-// raising MaxInFlightPerConnection on the session lets the
-// corresponding number of cursors accumulate before the cap trips.
+// TestSession_InFlightCursorCap_RaisedAllowsMoreCursors verifies that a
+// session with cap=3 allows exactly three RUN+PULL cycles within a single
+// explicit transaction and rejects the fourth. After each PULL the cursor is
+// drained but its entry remains in tx.results, so inFlightCount increments
+// monotonically until COMMIT/ROLLBACK clears the slice.
 func TestSession_InFlightCursorCap_RaisedAllowsMoreCursors(t *testing.T) {
 	t.Parallel()
 	sess := newReadySession(t)
@@ -96,6 +100,7 @@ func TestSession_InFlightCursorCap_RaisedAllowsMoreCursors(t *testing.T) {
 			t.Fatalf("PULL %d: %v", i, err)
 		}
 	}
+	// After three RUN+PULL cycles, tx.results holds three (drained) cursors.
 	if got := sess.inFlightCount(); got != 3 {
 		t.Fatalf("inFlightCount after 3 RUN+PULL cycles = %d; want 3", got)
 	}
@@ -126,10 +131,11 @@ func TestSession_InFlightCursorCap_SetMaxInFlightIgnoresNonPositive(t *testing.T
 	}
 }
 
-// TestSession_InFlightCursorCap_AutoCommitNotAffected confirms that
-// an auto-commit RUN under the default cap still works: the state
-// machine already prevents two auto-commit RUNs from co-existing, so
-// the cap of 1 is non-restrictive in this path.
+// TestSession_InFlightCursorCap_AutoCommitNotAffected confirms that an
+// auto-commit RUN+PULL+RUN sequence succeeds. The cap only counts cursors
+// registered inside an explicit transaction (tx.results); the auto-commit
+// cursor (s.result) is cleared by drainResult after a full PULL, so
+// inFlightCount returns 0 and the second RUN is accepted.
 func TestSession_InFlightCursorCap_AutoCommitNotAffected(t *testing.T) {
 	t.Parallel()
 	sess := newReadySession(t)
@@ -147,13 +153,8 @@ func TestSession_InFlightCursorCap_AutoCommitNotAffected(t *testing.T) {
 	if sess.state != StateReady {
 		t.Fatalf("state after auto-commit PULL = %v; want READY", sess.state)
 	}
-	// A second auto-commit RUN must be accepted; the cap counts the
-	// auto-commit cursor as 0 once handlePull has cleared s.result.
-	// (handlePull behaviour: when the cursor is exhausted s.result
-	// is not yet cleared in the current implementation, but the
-	// new s.result assignment on the next RUN drops the old one.
-	// We assert the behaviour observed at the public surface: RUN
-	// after PULL returns SUCCESS in auto-commit mode.)
+	// drainResult clears s.result after exhaustion; inFlightCount = 0.
+	// The second auto-commit RUN must be accepted.
 	msgs, err := sess.HandleMessage(context.Background(), &proto.Run{
 		Query:      "MATCH (n) RETURN n",
 		Parameters: nil,

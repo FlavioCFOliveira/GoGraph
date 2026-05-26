@@ -24,15 +24,14 @@ const (
 
 	// DefaultMaxInFlightPerConnection is the default value applied to
 	// Options.MaxInFlightPerConnection when the caller leaves it at
-	// zero. The very low default (1) reflects the fact that a single
-	// Result cursor at a time is sufficient for every Bolt v5 client
-	// the server is intended to serve: drivers issue RUN, drain via
-	// PULL/DISCARD, and only then issue the next RUN. Operators
-	// running a workload that legitimately needs many in-flight
-	// cursors per connection (long-running explicit transactions that
-	// accumulate cursors before COMMIT) must raise this value
-	// explicitly.
-	DefaultMaxInFlightPerConnection = 1
+	// zero. The count tracks all Result cursors appended to the
+	// in-progress explicit transaction since BEGIN (both open and
+	// already-drained), so it bounds the total number of RUN statements
+	// a client may issue without committing. The default of 1024 allows
+	// any legitimate workload while still bounding pathological
+	// RUN-loop attacks that grow tx.results without bound. Operators
+	// that need a stricter limit may lower this value explicitly.
+	DefaultMaxInFlightPerConnection = 1024
 
 	// shutdownDrainTimeout is the maximum time Shutdown waits for active
 	// connections to finish after stopping the accept loop.
@@ -54,17 +53,15 @@ type Options struct {
 	// indefinitely until the server OOMs.
 	MaxMessageBytes int
 
-	// MaxInFlightPerConnection caps the number of Result cursors a
-	// single connection may have open at the same time. Zero or
-	// negative values default to [DefaultMaxInFlightPerConnection]
-	// (1). Cursors are counted across both auto-commit and explicit
-	// transactions: in auto-commit mode the cap is one cursor at
-	// most (already implied by the Bolt v5 state machine), but in
-	// explicit transactions a malicious client could otherwise RUN
-	// many queries in sequence, drain each one with PULL, and let
-	// the cursors accumulate in tx.results until Commit. The cap
-	// surfaces as a typed Bolt FAILURE with code
-	// "Neo.ClientError.General.LimitExceeded".
+	// MaxInFlightPerConnection caps the total number of RUN statements
+	// that may be issued within a single explicit transaction before
+	// COMMIT or ROLLBACK. Zero or negative values default to
+	// [DefaultMaxInFlightPerConnection] (1024). The count includes both
+	// open (not yet fully PULL'd) and already-drained cursors
+	// accumulated in tx.results since BEGIN; auto-commit cursors are
+	// not counted (the Bolt v5 state machine already prevents two
+	// concurrent auto-commit streams). The cap surfaces as a typed
+	// Bolt FAILURE with code "Neo.ClientError.General.LimitExceeded".
 	MaxInFlightPerConnection int
 
 	// ConnTimeout is the per-connection idle read deadline. Each time the
