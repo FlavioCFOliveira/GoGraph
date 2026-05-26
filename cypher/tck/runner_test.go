@@ -27,8 +27,9 @@ import (
 //     5-run sample).
 //   - 1225: raised after task #392 wired multi-pattern MATCH binding via
 //     CorrelatedApply, OPTIONAL MATCH whole-pattern NULL emission via
-//     OptionalApply, destination-rebinding equi-join in matchExpandStepBound,
-//     and explicit fromVar threading in matchPathPattern (observed ≈1233
+//     OptionalApply, destination-rebinding equi-join in
+//     matchExpandStepBoundWithFrom, and explicit fromVar threading in
+//     matchPathPattern (observed ≈1233
 //     over a 3-run sample).
 //   - 1230: raised after task #393 fixed the VarLengthExpand BFS slice-
 //     aliasing hazard (the read frontier and the write target shared a

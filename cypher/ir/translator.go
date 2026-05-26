@@ -347,19 +347,6 @@ func relDirection(d ast.RelDirection) Direction {
 	}
 }
 
-// firstVar returns the first variable name produced by plan, or "" when plan
-// is nil or produces no variables.
-func firstVar(plan LogicalPlan) string {
-	if plan == nil {
-		return ""
-	}
-	vars := plan.Vars()
-	if len(vars) == 0 {
-		return ""
-	}
-	return vars[0]
-}
-
 // patternVars collects named variables from a PathPattern.
 func patternVars(pp *ast.PathPattern) []string {
 	if pp == nil {

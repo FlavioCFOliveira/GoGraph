@@ -8,4 +8,5 @@ package ir
 // translator.go; the node-scan / expand helpers live in match.go.
 //
 // See match.go for the shared matchPattern / matchPathPattern / matchNodeScan /
-// matchExpandStep implementation that both MATCH and OPTIONAL MATCH share.
+// matchExpandStepBoundWithFrom implementation that both MATCH and OPTIONAL
+// MATCH share.

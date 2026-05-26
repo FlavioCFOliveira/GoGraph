@@ -537,27 +537,6 @@ func (t *translator) matchNodeScan(np *ast.NodePattern) LogicalPlan {
 	return plan
 }
 
-// matchExpandStep translates a single (rel, node) hop into Expand or
-// OptionalExpand, then wraps destination-node label/property constraints as
-// Selection operators immediately above the expand. This variant assumes the
-// destination variable is fresh (not already bound).
-func (t *translator) matchExpandStep(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan, optional bool) LogicalPlan {
-	return t.matchExpandStepBound(rp, to, child, optional, nil)
-}
-
-// matchExpandStepBound is the binding-aware variant of [matchExpandStep]. When
-// the destination variable is already in boundVars, the step expands into a
-// synthetic anonymous variable and adds a Selection equating the original
-// (already-bound) variable with the synthetic one — implementing the implicit
-// equi-join semantics of repeated variable bindings.
-//
-// Deprecated: prefer matchExpandStepBoundWithFrom which threads the previous
-// node's variable name explicitly. This shim is retained only for callers
-// that have no convenient way to track the previous node variable.
-func (t *translator) matchExpandStepBound(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan, optional bool, boundVars map[string]struct{}) LogicalPlan {
-	return t.matchExpandStepBoundWithFrom(rp, to, child, optional, boundVars, firstVar(child))
-}
-
 // matchExpandStepBoundWithFrom is the canonical Expand-translation helper. It
 // takes fromVar explicitly because relying on firstVar(child) is unreliable
 // once child is itself an Expand (whose Vars() lead with the RelVar, often
@@ -628,9 +607,9 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 
 // appendEqSelection wraps plan in a Selection comparing two variables for
 // equality. It is used to enforce the "destination already bound" join
-// semantics in matchExpandStepBound: after expanding into a synthetic variable
-// the row stream is filtered to keep only rows where the synthetic value
-// equals the previously bound value.
+// semantics in matchExpandStepBoundWithFrom: after expanding into a synthetic
+// variable the row stream is filtered to keep only rows where the synthetic
+// value equals the previously bound value.
 func (t *translator) appendEqSelection(boundVar, syntheticVar string, plan LogicalPlan) LogicalPlan {
 	eq := &ast.BinaryOp{
 		Operator: "=",

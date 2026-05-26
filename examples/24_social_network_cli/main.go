@@ -8,11 +8,6 @@ import (
 	"os"
 )
 
-// errNotImplemented is returned by subcommand stubs that have not yet
-// been implemented in a later sprint task. Production-bound subcommands
-// (T4 onward) replace this sentinel with their real behaviour.
-var errNotImplemented = errors.New("not yet implemented")
-
 // usageError signals an invocation problem (unknown subcommand, missing
 // or malformed flag, bad positional arguments) so the dispatcher can map
 // the failure to exit code 2 instead of the generic runtime exit code 1.
