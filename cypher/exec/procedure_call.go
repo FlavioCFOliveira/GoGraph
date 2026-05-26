@@ -94,6 +94,13 @@ func (op *ProcedureCallOp) Init(ctx context.Context) error {
 // It draws driving rows from the child (or a synthetic empty row when child is
 // nil), invokes the procedure for each, buffers all result rows, and emits
 // them one at a time.
+//
+// Void procedure semantics. A procedure declared with no output columns
+// (len(yieldVars) == 0) is treated as a side-effect-only step. When
+// invoked in-query (op.child != nil) it must NOT consume the driver row;
+// instead each driver row is emitted unchanged once the impl has run,
+// preserving the upstream variable bindings for any downstream RETURN.
+// Standalone CALL (op.child == nil) emits nothing.
 func (op *ProcedureCallOp) Next(out *Row) (bool, error) {
 	for {
 		if err := op.ctx.Err(); err != nil {
@@ -144,6 +151,15 @@ func (op *ProcedureCallOp) Next(out *Row) (bool, error) {
 		resultRows, err := entry.Impl(op.ctx, args)
 		if err != nil {
 			return false, fmt.Errorf("exec: ProcedureCallOp %s: %w", op.fqn(), err)
+		}
+
+		// Void-procedure passthrough. When the procedure declares no
+		// outputs and there is a child, the driver row is emitted once
+		// per call so downstream operators still see the upstream
+		// bindings. Standalone CALL (no child) emits nothing.
+		if len(op.yieldVars) == 0 && len(resultRows) == 0 && op.child != nil {
+			*out = append((*out)[:0], driverRow...)
+			return true, nil
 		}
 
 		// Buffer results and loop back to emit them.

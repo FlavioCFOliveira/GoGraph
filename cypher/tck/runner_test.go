@@ -155,11 +155,20 @@ import (
 //     ProduceResults, got *ir.Union" hard error with a proper
 //     concatenation operator (exec.NewUnion / exec.NewUnionAll).
 //     Observed 1964 across a 3-run sample.
+//   - 1962: raised after task T937 partial closure — ProcedureCallOp now
+//     implements void-procedure passthrough: when the procedure declares
+//     no output columns and the impl returns no rows, the driver row is
+//     emitted unchanged so downstream operators still see the upstream
+//     variable bindings. Previously the loop consumed the driver row
+//     silently, breaking the canonical
+//     MATCH … CALL <void-proc> RETURN pattern (a side-effect-only step
+//     should not erase upstream bindings). Observed 1963 across a 3-run
+//     sample; gate set conservatively at 1962.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1961
+const tckExecutionBaseline = 1962
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
