@@ -72,6 +72,29 @@ import (
 // background context. Each Engine.Run / Engine.RunInTx invocation allocates
 // its own *buildOpts so closures created during the build observe a stable
 // per-run snapshot.
+// edgeVarInfo records the schema columns emitted by an Expand operator for a
+// named relationship variable. The triple (srcCol, edgeCol, dstCol) allows
+// buildIRProjection to reconstruct a RelationshipValue from the raw
+// IntegerValue columns in the executor row.
+type edgeVarInfo struct {
+	srcCol   int
+	edgeCol  int
+	dstCol   int
+	edgeType string // first element of RelTypes, or empty
+}
+
+// pathVarInfo records the schema column that holds the flat alternating path
+// list emitted by a VarLengthExpand operator for a named path variable. The
+// listCol column contains an expr.ListValue of the form
+//
+//	[srcNodeID, edgePos0, dstNode0, edgePos1, dstNode1, ...]
+//
+// buildIRProjection uses this to reconstruct an expr.PathValue.
+type pathVarInfo struct {
+	listCol  int    // schema column holding the flat alternating ListValue
+	edgeType string // first element of RelTypes, or empty
+}
+
 type buildOpts struct {
 	// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] expressions
 	// encountered inside Filter/Project closures. May be nil; in that case
@@ -90,6 +113,15 @@ type buildOpts struct {
 	// "unsupported IR node *ir.CreateNode". Leaving the field nil
 	// preserves the original error for read-only call sites.
 	writeFallback func(ir.LogicalPlan) (exec.Operator, error)
+	// edgeVarMeta maps a relationship variable name (e.g. "r" from
+	// `MATCH (a)-[r:R]->(b)`) to the triplet of schema columns that the Expand
+	// operator places in each output row. Used by buildIRProjection to
+	// reconstruct a RelationshipValue when the variable is projected directly.
+	edgeVarMeta map[string]edgeVarInfo
+	// pathVarMeta maps a named path variable (e.g. "p" from `MATCH p=(a)-[*]->(b)`)
+	// to the schema column that the VarLengthExpand operator populates with a flat
+	// alternating ListValue. Used by buildIRProjection to reconstruct a PathValue.
+	pathVarMeta map[string]pathVarInfo
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -656,6 +688,9 @@ func (r *Result) Err() error { return r.rs.Err() }
 // Columns returns the ordered list of output column names.
 func (r *Result) Columns() []string { return r.cols }
 
+// IsClosed reports whether Close has been called on this Result.
+func (r *Result) IsClosed() bool { return r.closed.Load() }
+
 // Close releases all resources held by the result set.
 // When the result was created by [Engine.RunInTx], Close also:
 //  1. Commits or rolls back buffered index changes (always).
@@ -909,6 +944,11 @@ func buildOperatorWrite(
 		if buildErr != nil {
 			return nil, buildErr
 		}
+		if len(params) > 0 {
+			if cn, buildErr = cn.WithParams(params); buildErr != nil {
+				return nil, buildErr
+			}
+		}
 		if constraintReg != nil {
 			cn.WithConstraints(constraintReg, idxMgr)
 		}
@@ -927,7 +967,16 @@ func buildOperatorWrite(
 		for k, v := range schema {
 			schemaCopy[k] = v
 		}
-		return exec.NewCreateRelationship(p.StartVar, p.EndVar, p.RelVar, p.RelType, p.Properties, schemaCopy, child, mutator)
+		cr, buildErr := exec.NewCreateRelationship(p.StartVar, p.EndVar, p.RelVar, p.RelType, p.Properties, schemaCopy, child, mutator)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		if len(params) > 0 {
+			if cr, buildErr = cr.WithParams(params); buildErr != nil {
+				return nil, buildErr
+			}
+		}
+		return cr, nil
 
 	case *ir.SetProperty:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -938,6 +987,9 @@ func buildOperatorWrite(
 		sp, buildErr := exec.NewSetProperty(p.EntityVar, p.PropertyKey, p.Value, schemaCopy, child, mutator)
 		if buildErr != nil {
 			return nil, buildErr
+		}
+		if len(params) > 0 {
+			sp.WithParams(params)
 		}
 		if constraintReg != nil {
 			sp.WithConstraints(constraintReg, idxMgr)
@@ -1026,6 +1078,11 @@ func buildOperatorWrite(
 		)
 		if buildErr != nil {
 			return nil, buildErr
+		}
+		if len(params) > 0 {
+			if m, buildErr = m.WithParams(params); buildErr != nil {
+				return nil, buildErr
+			}
 		}
 		if constraintReg != nil {
 			m.WithConstraints(constraintReg, idxMgr)
@@ -1344,6 +1401,23 @@ func buildOperator(
 		}
 		schema[toKey] = schemaBase + 2
 
+		// Record edge variable metadata so buildIRProjection can reconstruct
+		// a RelationshipValue when the variable is projected directly.
+		if p.RelVar != "" && bopts != nil {
+			if bopts.edgeVarMeta == nil {
+				bopts.edgeVarMeta = make(map[string]edgeVarInfo)
+			}
+			info := edgeVarInfo{
+				srcCol:  schemaBase,     // srcID dup column
+				edgeCol: schemaBase + 1, // edgeID column (= schema[relKey])
+				dstCol:  schemaBase + 2, // dstID column  (= schema[toKey])
+			}
+			if len(p.RelTypes) > 0 {
+				info.edgeType = p.RelTypes[0]
+			}
+			bopts.edgeVarMeta[p.RelVar] = info
+		}
+
 		var g *lpg.Graph[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			g = lw.g
@@ -1620,19 +1694,35 @@ func buildOperator(
 			fromCol = col
 		}
 
-		// VarLengthExpand emits: inputRow... || pathEdgeList || dstNodeID.
+		// VarLengthExpand emits: inputRow... || pathList || dstNodeID.
+		// pathList is a flat alternating ListValue: [srcID, edgePos0, dst0, ...].
 		// Always advance schema by 2 — anonymous slots receive synthetic keys so
 		// len(schema) matches the actual row width.
+		schemaBaseVLE := len(schema)
 		relKey := p.RelVar
 		if relKey == "" {
-			relKey = fmt.Sprintf("__anon_vlrel_%d", len(schema))
+			relKey = fmt.Sprintf("__anon_vlrel_%d", schemaBaseVLE)
 		}
-		schema[relKey] = len(schema)
+		schema[relKey] = schemaBaseVLE
 		toKey := p.ToVar
 		if toKey == "" {
-			toKey = fmt.Sprintf("__anon_vlto_%d", len(schema))
+			toKey = fmt.Sprintf("__anon_vlto_%d", schemaBaseVLE+1)
 		}
-		schema[toKey] = len(schema)
+		schema[toKey] = schemaBaseVLE + 1
+
+		// Record path variable metadata for buildIRProjection.
+		if p.PathVar != "" && bopts != nil {
+			if bopts.pathVarMeta == nil {
+				bopts.pathVarMeta = make(map[string]pathVarInfo)
+			}
+			info := pathVarInfo{listCol: schemaBaseVLE}
+			if len(p.RelTypes) > 0 {
+				info.edgeType = p.RelTypes[0]
+			}
+			bopts.pathVarMeta[p.PathVar] = info
+			// Also register in schema so variable is accessible.
+			schema[p.PathVar] = schemaBaseVLE
+		}
 
 		var g *lpg.Graph[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
@@ -2406,6 +2496,26 @@ func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Valu
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }
 
+// buildNodeValueFromID constructs an expr.NodeValue for a known graph NodeID,
+// loading labels and properties from g. If the ID is not found in the mapper,
+// an empty NodeValue with only the ID set is returned.
+func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.NodeValue {
+	if g == nil {
+		return expr.NodeValue{ID: uint64(id)}
+	}
+	name, resolved := g.AdjList().Mapper().Resolve(id)
+	if !resolved {
+		return expr.NodeValue{ID: uint64(id)}
+	}
+	rawProps := g.NodeProperties(name)
+	props := make(expr.MapValue, len(rawProps))
+	for k, pv := range rawProps {
+		props[k] = lpgPropToExpr(pv)
+	}
+	labels := g.NodeLabels(name)
+	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
+}
+
 // buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,
 // upgrading IntegerValue(nodeID) entries to NodeValue with properties loaded
 // from the graph. g may be nil when no graph is available (upgrade is skipped).
@@ -2425,7 +2535,11 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 // executor evaluates it via expr.Eval against a full RowContext — enabling
 // property access (n.prop), function calls, and other non-trivial expressions.
 // For simple variable references and string-only items the fast schema-lookup
-// path is used.
+// path is used. The variable fast-path handles plain nodes, relationship
+// variables (RelationshipValue reconstruction from edge metadata), and named
+// path variables (PathValue reconstruction from flat alternating encoding).
+//
+//nolint:gocyclo,cyclop // dispatches over every projection kind and variable type; splitting would obscure the data-flow
 func buildIRProjection(
 	items []ir.ProjectionItem,
 	child exec.Operator,
@@ -2443,20 +2557,136 @@ func buildIRProjection(
 		var evalFn func(exec.Row) (expr.Value, error)
 		if item.Expr != nil {
 			if v, ok := item.Expr.(*ast.Variable); ok {
-				// Fast path: simple variable reference — direct column lookup,
-				// with an in-line IntegerValue(NodeID) → NodeValue upgrade so
-				// bare `RETURN u` for a bound node produces the documented
-				// {_id,_labels,_properties} shape (matching the buildRowCtx
-				// path used for complex expressions). Non-node IntegerValues
-				// (literals, edge IDs) pass through unchanged.
-				if colIdx, ok2 := schema[v.Name]; ok2 {
-					idx := colIdx
-					capturedG := g
-					evalFn = func(row exec.Row) (expr.Value, error) {
-						if idx < len(row) {
-							return upgradeNodeIDToValue(row[idx], capturedG), nil
+				// Path variable fast path: reconstruct PathValue from the flat
+				// alternating ListValue emitted by the VarLengthExpand operator.
+				if bopts != nil {
+					if pmeta, isPMeta := bopts.pathVarMeta[v.Name]; isPMeta {
+						capturedMeta := pmeta
+						capturedG := g
+						evalFn = func(row exec.Row) (expr.Value, error) {
+							if capturedMeta.listCol >= len(row) {
+								return expr.Null, nil
+							}
+							lv, ok := row[capturedMeta.listCol].(expr.ListValue)
+							if !ok || len(lv) == 0 {
+								return expr.Null, nil
+							}
+							// Flat alternating format: [srcID, edgePos0, dst0, edgePos1, dst1, ...]
+							// len = 1 + 2*N for N hops.
+							nHops := (len(lv) - 1) / 2
+							nodes := make([]expr.NodeValue, 0, nHops+1)
+							rels := make([]expr.RelationshipValue, 0, nHops)
+							if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
+								nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), capturedG))
+							}
+							edgeType := capturedMeta.edgeType
+							for h := 0; h < nHops; h++ {
+								edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
+								dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
+								if !ok1 || !ok2 {
+									continue
+								}
+								dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
+								nodes = append(nodes, dstNode)
+								// Resolve edge type from graph if known.
+								et := edgeType
+								var edgeProps expr.MapValue
+								if capturedG != nil && len(nodes) >= 2 {
+									srcNodeID := nodes[h].ID
+									dstNodeID := nodes[h+1].ID
+									srcKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcNodeID))
+									dstKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstNodeID))
+									if sOK && dOK {
+										if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+											et = ets[0]
+										}
+										rawEP := capturedG.EdgeProperties(srcKey, dstKey)
+										edgeProps = make(expr.MapValue, len(rawEP))
+										for k, pv := range rawEP {
+											edgeProps[k] = lpgPropToExpr(pv)
+										}
+									}
+								}
+								rels = append(rels, expr.RelationshipValue{
+									ID:         uint64(edgePos),
+									StartID:    nodes[h].ID,
+									EndID:      dstNode.ID,
+									Type:       et,
+									Properties: edgeProps,
+								})
+							}
+							return expr.PathValue{Nodes: nodes, Relationships: rels}, nil
 						}
-						return expr.Null, nil
+					}
+				}
+				// Edge variable fast path: reconstruct RelationshipValue from
+				// the three-column triplet (srcID, edgeID, dstID) emitted by
+				// the Expand operator.
+				if bopts != nil && evalFn == nil {
+					if meta, isMeta := bopts.edgeVarMeta[v.Name]; isMeta {
+						capturedMeta := meta
+						capturedG := g
+						evalFn = func(row exec.Row) (expr.Value, error) {
+							if capturedMeta.edgeCol >= len(row) {
+								return expr.Null, nil
+							}
+							edgeIDVal, ok := row[capturedMeta.edgeCol].(expr.IntegerValue)
+							if !ok {
+								return expr.Null, nil
+							}
+							edgeID := uint64(edgeIDVal)
+							var srcID, dstID uint64
+							if capturedMeta.srcCol < len(row) {
+								if iv, ok2 := row[capturedMeta.srcCol].(expr.IntegerValue); ok2 {
+									srcID = uint64(iv)
+								}
+							}
+							if capturedMeta.dstCol < len(row) {
+								if iv, ok2 := row[capturedMeta.dstCol].(expr.IntegerValue); ok2 {
+									dstID = uint64(iv)
+								}
+							}
+							// Resolve edge type from the graph if not statically known.
+							edgeType := capturedMeta.edgeType
+							var edgeProps expr.MapValue
+							if capturedG != nil && srcID != 0 {
+								srcKey, srcResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
+								dstKey, dstResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+								if srcResolved && dstResolved {
+									if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+										edgeType = ets[0]
+									}
+									rawEP := capturedG.EdgeProperties(srcKey, dstKey)
+									edgeProps = make(expr.MapValue, len(rawEP))
+									for k, pv := range rawEP {
+										edgeProps[k] = lpgPropToExpr(pv)
+									}
+								}
+							}
+							return expr.RelationshipValue{
+								ID:         edgeID,
+								StartID:    srcID,
+								EndID:      dstID,
+								Type:       edgeType,
+								Properties: edgeProps,
+							}, nil
+						}
+					}
+				}
+				if evalFn == nil {
+					// Node variable fast path: direct column lookup, with an in-line
+					// IntegerValue(NodeID) → NodeValue upgrade so bare `RETURN u` for
+					// a bound node produces the documented shape. Non-node
+					// IntegerValues (literals, edge IDs) pass through unchanged.
+					if colIdx, ok2 := schema[v.Name]; ok2 {
+						idx := colIdx
+						capturedG := g
+						evalFn = func(row exec.Row) (expr.Value, error) {
+							if idx < len(row) {
+								return upgradeNodeIDToValue(row[idx], capturedG), nil
+							}
+							return expr.Null, nil
+						}
 					}
 				}
 			}
