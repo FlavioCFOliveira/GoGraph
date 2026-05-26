@@ -665,14 +665,29 @@ func evalArith(op string, left, right Value) (Value, error) {
 				return StringValue(string(ls) + string(rs)), nil
 			}
 		}
-		// List concatenation.
+		// List concatenation and list+element / element+list append.
+		// openCypher spec §3.5 (Collections): list + list → concatenation;
+		// list + element → append element; element + list → prepend element.
 		if ll, lok := left.(ListValue); lok {
 			if rl, rok := right.(ListValue); rok {
+				// list + list
 				result := make(ListValue, len(ll)+len(rl))
 				copy(result, ll)
 				copy(result[len(ll):], rl)
 				return result, nil
 			}
+			// list + element: wrap right in a single-element list and append.
+			result := make(ListValue, len(ll)+1)
+			copy(result, ll)
+			result[len(ll)] = right
+			return result, nil
+		}
+		if rl, rok := right.(ListValue); rok {
+			// element + list: prepend left to right.
+			result := make(ListValue, 1+len(rl))
+			result[0] = left
+			copy(result[1:], rl)
+			return result, nil
 		}
 	}
 	// Temporal arithmetic (Date/DateTime/Time/Duration/...): dispatched

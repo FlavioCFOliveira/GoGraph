@@ -117,6 +117,15 @@ func (t *translator) singleQuery(q *ast.SingleQuery) (LogicalPlan, error) {
 	// Start with a nil base; the first scan clause sets it.
 	var plan LogicalPlan
 
+	// For parser-generated MultiPartQ queries, q.LeadingCountSet is true and
+	// q.ReadingClauses already contains both the reading clauses and the WITH
+	// clauses (as *ast.With nodes) in document order.  q.With is empty.
+	// Processing all q.ReadingClauses through t.readingClause — which already
+	// dispatches *ast.With via t.withClause — gives the correct evaluation order.
+	//
+	// For manually-constructed ast.SingleQuery objects (unit tests), q.LeadingCountSet
+	// is false and q.With holds the WITH clauses.  Fall back to the legacy
+	// "all ReadingClauses first, then q.With" ordering to preserve compat.
 	for _, rc := range q.ReadingClauses {
 		var err error
 		plan, err = t.readingClause(rc, plan)
@@ -124,12 +133,14 @@ func (t *translator) singleQuery(q *ast.SingleQuery) (LogicalPlan, error) {
 			return nil, err
 		}
 	}
-
-	for _, w := range q.With {
-		var err error
-		plan, err = t.withClause(w, plan)
-		if err != nil {
-			return nil, err
+	if !q.LeadingCountSet {
+		// Legacy path: WITH clauses stored in q.With (manually-constructed ASTs).
+		for _, w := range q.With {
+			var err error
+			plan, err = t.withClause(w, plan)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 

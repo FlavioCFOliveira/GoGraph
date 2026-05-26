@@ -1235,6 +1235,24 @@ func copySchema(schema map[string]int) map[string]int {
 	return cp
 }
 
+// schemaWidth returns the actual row width implied by schema: the maximum
+// column index present plus one. This is the correct "next available column
+// index" to use when appending a new column to the row.
+//
+// Using len(schema) directly is incorrect when buildIRProjection has registered
+// secondary expression-string keys (e.g. schema["[1,2,3]"] == schema["lst"] ==
+// 0 for "WITH [1,2,3] AS lst"), because those secondary entries inflate
+// len(schema) without adding real row columns.
+func schemaWidth(schema map[string]int) int {
+	max := -1
+	for _, idx := range schema {
+		if idx > max {
+			max = idx
+		}
+	}
+	return max + 1
+}
+
 // buildPropsEvalFn constructs a [exec.PropsEvalFn] closure that evaluates the
 // key→expression pairs in ml against each incoming row at runtime. It is used
 // when the property map for a CreateNode or CreateRelationship contains
@@ -2011,7 +2029,12 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		schema[p.ElementVar] = len(schema)
+		// Use schemaWidth (max column index + 1) rather than len(schema) to
+		// determine the element column index.  buildIRProjection registers
+		// secondary expression-string keys that share an existing column index
+		// (e.g. schema["[1,2,3]"] == schema["lst"] == 0), which inflates
+		// len(schema) without widening the actual row.
+		schema[p.ElementVar] = schemaWidth(schema)
 		return buildUnwindOperator(p, child, schema, walker, params, reg, bopts)
 
 	case *ir.Distinct:

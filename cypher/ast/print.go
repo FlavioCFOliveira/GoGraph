@@ -52,8 +52,13 @@ func (p printer) singleQuery(q *SingleQuery) string {
 	for _, rc := range q.ReadingClauses {
 		parts = append(parts, p.readingClause(rc))
 	}
-	for _, w := range q.With {
-		parts = append(parts, p.withClause(w))
+	// When LeadingCountSet is true (parser-generated MultiPartQ queries), WITH
+	// clauses are already embedded in ReadingClauses in document order — skip
+	// q.With to avoid printing them twice.
+	if !q.LeadingCountSet {
+		for _, w := range q.With {
+			parts = append(parts, p.withClause(w))
+		}
 	}
 	for _, uc := range q.UpdatingClauses {
 		parts = append(parts, p.updatingClause(uc))

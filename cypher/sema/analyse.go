@@ -114,7 +114,14 @@ func (a *analyser) singleQuery(q *ast.SingleQuery) {
 // [ast.ReadingClause], [ast.UpdatingClause], and *ast.With (each is a
 // distinct sealed interface).
 func orderClauses(q *ast.SingleQuery) []ast.Node {
-	total := len(q.ReadingClauses) + len(q.With) + len(q.UpdatingClauses)
+	// When LeadingCountSet is true (parser-generated MultiPartQ queries), WITH
+	// clauses are already embedded in q.ReadingClauses in document order, so
+	// q.With must be excluded to avoid processing each WITH clause twice.
+	withClauses := q.With
+	if q.LeadingCountSet {
+		withClauses = nil
+	}
+	total := len(q.ReadingClauses) + len(withClauses) + len(q.UpdatingClauses)
 	if total == 0 {
 		return nil
 	}
@@ -122,7 +129,7 @@ func orderClauses(q *ast.SingleQuery) []ast.Node {
 	for _, c := range q.ReadingClauses {
 		out = append(out, c)
 	}
-	for _, c := range q.With {
+	for _, c := range withClauses {
 		out = append(out, c)
 	}
 	for _, c := range q.UpdatingClauses {

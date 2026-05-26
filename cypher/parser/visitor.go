@@ -228,53 +228,83 @@ func (v *visitor) VisitSinglePartQ(ctx *gen.SinglePartQContext) interface{} {
 }
 
 // VisitMultiPartQ handles queries with one or more WITH-prefixed parts.
+//
+// The ANTLR grammar for multiPartQ is:
+//
+//	(ReadingStatement* UpdatingStatement* WithSt)+ SinglePartQ
+//
+// Children appear in document order: ReadingStatements and UpdatingStatements
+// from each (…WithSt) cycle, followed by the terminal SinglePartQ.
+//
+// To preserve the correct interleaving between reading clauses and WITH
+// clauses, this visitor iterates GetChildren() in document order and emits
+// each child into q.ReadingClauses (reading clauses and *ast.With nodes
+// alike) or q.UpdatingClauses.  q.With is intentionally left empty; the IR
+// translator recognises q.LeadingCountSet=true and processes all
+// ReadingClauses via t.readingClause, which already dispatches *ast.With
+// through t.withClause — giving the correct evaluation order.
+//
+// Backward compatibility: manually-constructed ast.SingleQuery objects (used
+// in unit tests) do NOT set LeadingCountSet, so the translator falls back to
+// the legacy "all ReadingClauses first, then q.With" ordering.
 func (v *visitor) VisitMultiPartQ(ctx *gen.MultiPartQContext) interface{} {
-	q := &ast.SingleQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
-
-	// Leading reading clauses before the first WITH.
-	for _, rs := range ctx.AllReadingStatement() {
-		r := v.visit(rs)
-		if err := firstError(r); err != nil {
-			return err
-		}
-		if c, ok := r.(ast.ReadingClause); ok {
-			q.ReadingClauses = append(q.ReadingClauses, c)
-		}
+	q := &ast.SingleQuery{
+		Pos:             positionOf(ctx),
+		EndPos:          endPositionOf(ctx),
+		LeadingCountSet: true, // signal to translator to use document-order processing
 	}
 
-	// WITH clauses.
-	for _, ws := range ctx.AllWithSt() {
-		w := v.visit(ws)
-		if err := firstError(w); err != nil {
-			return err
-		}
-		if wv, ok := w.(*ast.With); ok {
-			q.With = append(q.With, wv)
-		}
-	}
+	// Iterate children in document order so that reading clauses and WITH
+	// clauses are appended to q.ReadingClauses in the sequence they appear in
+	// the source query.
+	for _, child := range ctx.GetChildren() {
+		switch c := child.(type) {
+		case gen.IReadingStatementContext:
+			r := v.visit(c)
+			if err := firstError(r); err != nil {
+				return err
+			}
+			if rc, ok := r.(ast.ReadingClause); ok {
+				q.ReadingClauses = append(q.ReadingClauses, rc)
+			}
 
-	// Updating clauses (after each WITH segment).
-	for _, us := range ctx.AllUpdatingStatement() {
-		u := v.visit(us)
-		if err := firstError(u); err != nil {
-			return err
-		}
-		if c, ok := u.(ast.UpdatingClause); ok {
-			q.UpdatingClauses = append(q.UpdatingClauses, c)
-		}
-	}
+		case gen.IUpdatingStatementContext:
+			u := v.visit(c)
+			if err := firstError(u); err != nil {
+				return err
+			}
+			if uc, ok := u.(ast.UpdatingClause); ok {
+				q.UpdatingClauses = append(q.UpdatingClauses, uc)
+			}
 
-	// Terminal singlePartQ carries the final RETURN and its own reading/updating.
-	if spq := ctx.SinglePartQ(); spq != nil {
-		spqResult := v.visit(spq)
-		if err := firstError(spqResult); err != nil {
-			return err
-		}
-		if inner, ok := spqResult.(*ast.SingleQuery); ok {
-			q.ReadingClauses = append(q.ReadingClauses, inner.ReadingClauses...)
-			q.UpdatingClauses = append(q.UpdatingClauses, inner.UpdatingClauses...)
-			q.With = append(q.With, inner.With...)
-			q.Return = inner.Return
+		case gen.IWithStContext:
+			// Append the WITH clause as a reading clause (ast.With implements
+			// ast.ReadingClause) so the translator sees it in document order.
+			// Also append to q.With for backward compatibility with parser tests
+			// that inspect that field directly.
+			w := v.visit(c)
+			if err := firstError(w); err != nil {
+				return err
+			}
+			if wv, ok := w.(*ast.With); ok {
+				q.ReadingClauses = append(q.ReadingClauses, wv)
+				q.With = append(q.With, wv) // kept for external inspection; translator ignores when LeadingCountSet=true
+			}
+
+		case gen.ISinglePartQContext:
+			// Terminal singlePartQ carries the final RETURN and any trailing
+			// reading/updating clauses that follow the last WITH.
+			spqResult := v.visit(c)
+			if err := firstError(spqResult); err != nil {
+				return err
+			}
+			if inner, ok := spqResult.(*ast.SingleQuery); ok {
+				q.ReadingClauses = append(q.ReadingClauses, inner.ReadingClauses...)
+				q.UpdatingClauses = append(q.UpdatingClauses, inner.UpdatingClauses...)
+				// inner.With is always empty for parser-generated SinglePartQ nodes;
+				// do NOT merge it into q.ReadingClauses to avoid duplicates.
+				q.Return = inner.Return
+			}
 		}
 	}
 	return q
