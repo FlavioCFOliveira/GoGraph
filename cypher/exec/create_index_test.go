@@ -13,7 +13,7 @@ import (
 func TestCreateIndexOp_Hash_CreatesIndex(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr := index.NewManager()
-	op := exec.NewCreateIndexOp("my_idx", exec.ExecIndexHash, false, mgr)
+	op := exec.NewCreateIndexOp("my_idx", exec.ExecIndexHash, false, mgr, nil)
 
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestCreateIndexOp_Hash_CreatesIndex(t *testing.T) {
 func TestCreateIndexOp_BTree_CreatesIndex(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr := index.NewManager()
-	op := exec.NewCreateIndexOp("btree_idx", exec.ExecIndexBTree, false, mgr)
+	op := exec.NewCreateIndexOp("btree_idx", exec.ExecIndexBTree, false, mgr, nil)
 
 	_ = op.Init(context.Background())
 	var row exec.Row
@@ -62,7 +62,7 @@ func TestCreateIndexOp_DuplicateErrors(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr := index.NewManager()
 	createOne := func() {
-		op := exec.NewCreateIndexOp("dup_idx", exec.ExecIndexHash, false, mgr)
+		op := exec.NewCreateIndexOp("dup_idx", exec.ExecIndexHash, false, mgr, nil)
 		_ = op.Init(context.Background())
 		var row exec.Row
 		_, _ = op.Next(&row)
@@ -70,7 +70,7 @@ func TestCreateIndexOp_DuplicateErrors(t *testing.T) {
 	createOne()
 
 	// Second create without IF NOT EXISTS must error.
-	op := exec.NewCreateIndexOp("dup_idx", exec.ExecIndexHash, false, mgr)
+	op := exec.NewCreateIndexOp("dup_idx", exec.ExecIndexHash, false, mgr, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)
@@ -82,13 +82,13 @@ func TestCreateIndexOp_DuplicateErrors(t *testing.T) {
 func TestCreateIndexOp_IfNotExists_Silent(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr := index.NewManager()
-	first := exec.NewCreateIndexOp("x", exec.ExecIndexHash, false, mgr)
+	first := exec.NewCreateIndexOp("x", exec.ExecIndexHash, false, mgr, nil)
 	_ = first.Init(context.Background())
 	var row exec.Row
 	_, _ = first.Next(&row)
 
 	// Second create with IF NOT EXISTS must succeed silently.
-	second := exec.NewCreateIndexOp("x", exec.ExecIndexHash, true, mgr)
+	second := exec.NewCreateIndexOp("x", exec.ExecIndexHash, true, mgr, nil)
 	_ = second.Init(context.Background())
 	_, err := second.Next(&row)
 	if err != nil {

@@ -31,33 +31,41 @@ func uniqueIndexName(label, prop string) string {
 //
 // CreateConstraintOp is NOT safe for concurrent use.
 type CreateConstraintOp struct {
-	name        string
-	label       string
-	prop        string
-	kind        ConstraintKind
-	ifNotExists bool
-	mgr         *index.Manager
-	reg         *ConstraintRegistry
-	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
-	done        bool
+	name           string
+	label          string
+	prop           string
+	kind           ConstraintKind
+	ifNotExists    bool
+	mgr            *index.Manager
+	reg            *ConstraintRegistry
+	onSchemaChange func()
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	done           bool
 }
 
-// NewCreateConstraintOp creates a CreateConstraintOp.
+// NewCreateConstraintOp creates a CreateConstraintOp. onSchemaChange, when
+// non-nil, is invoked exactly once after the operator successfully registers
+// a new constraint — i.e. NOT when the IF NOT EXISTS branch silently absorbs
+// an already-registered constraint. The Engine wires e.ClearPlanCache as
+// onSchemaChange so cached plans are invalidated after a real schema
+// mutation.
 func NewCreateConstraintOp(
 	name, label, prop string,
 	kind ConstraintKind,
 	ifNotExists bool,
 	mgr *index.Manager,
 	reg *ConstraintRegistry,
+	onSchemaChange func(),
 ) *CreateConstraintOp {
 	return &CreateConstraintOp{
-		name:        name,
-		label:       label,
-		prop:        prop,
-		kind:        kind,
-		ifNotExists: ifNotExists,
-		mgr:         mgr,
-		reg:         reg,
+		name:           name,
+		label:          label,
+		prop:           prop,
+		kind:           kind,
+		ifNotExists:    ifNotExists,
+		mgr:            mgr,
+		reg:            reg,
+		onSchemaChange: onSchemaChange,
 	}
 }
 
@@ -86,7 +94,7 @@ func (op *CreateConstraintOp) Next(_ *Row) (bool, error) {
 		sub := indexhash.New[string]()
 		if err := op.mgr.CreateIndex(idxName, sub); err != nil {
 			if op.ifNotExists && errors.Is(err, index.ErrIndexExists) {
-				return false, nil
+				return false, nil // IF NOT EXISTS — silently succeed; no schema change
 			}
 			return false, fmt.Errorf("exec: CreateConstraint %q: create backing index: %w", op.name, err)
 		}
@@ -94,7 +102,7 @@ func (op *CreateConstraintOp) Next(_ *Row) (bool, error) {
 
 	case ConstraintNotNull:
 		if op.ifNotExists && op.reg.HasNotNull(op.label, op.prop) {
-			return false, nil
+			return false, nil // IF NOT EXISTS — silently succeed; no schema change
 		}
 		op.reg.RegisterNotNull(op.label, op.prop)
 
@@ -102,6 +110,12 @@ func (op *CreateConstraintOp) Next(_ *Row) (bool, error) {
 		return false, fmt.Errorf("exec: CreateConstraint: unknown constraint kind %d", op.kind)
 	}
 
+	// Real schema mutation: a new UNIQUE backing index was created, or a new
+	// NOT NULL entry was registered. Notify so dependent caches (e.g. the
+	// plan cache) can invalidate stale entries.
+	if op.onSchemaChange != nil {
+		op.onSchemaChange()
+	}
 	return false, nil // DDL emits no rows
 }
 

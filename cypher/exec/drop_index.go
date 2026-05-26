@@ -17,16 +17,31 @@ import (
 //
 // DropIndexOp is NOT safe for concurrent use.
 type DropIndexOp struct {
-	name     string
-	ifExists bool
-	mgr      *index.Manager
-	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
-	done     bool
+	name           string
+	ifExists       bool
+	mgr            *index.Manager
+	onSchemaChange func()
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	done           bool
 }
 
-// NewDropIndexOp creates a DropIndexOp.
-func NewDropIndexOp(name string, ifExists bool, mgr *index.Manager) *DropIndexOp {
-	return &DropIndexOp{name: name, ifExists: ifExists, mgr: mgr}
+// NewDropIndexOp creates a DropIndexOp. onSchemaChange, when non-nil, is
+// invoked exactly once after the operator successfully drops the index — i.e.
+// NOT when the IF EXISTS branch silently absorbs a missing-index error. The
+// Engine wires e.ClearPlanCache as onSchemaChange so cached plans are
+// invalidated after a real schema mutation.
+func NewDropIndexOp(
+	name string,
+	ifExists bool,
+	mgr *index.Manager,
+	onSchemaChange func(),
+) *DropIndexOp {
+	return &DropIndexOp{
+		name:           name,
+		ifExists:       ifExists,
+		mgr:            mgr,
+		onSchemaChange: onSchemaChange,
+	}
 }
 
 // Init implements Operator.
@@ -50,9 +65,14 @@ func (op *DropIndexOp) Next(_ *Row) (bool, error) {
 
 	if err := op.mgr.DropIndex(op.name); err != nil {
 		if op.ifExists && errors.Is(err, index.ErrIndexNotFound) {
-			return false, nil // IF EXISTS — silently succeed
+			return false, nil // IF EXISTS — silently succeed; no schema change
 		}
 		return false, fmt.Errorf("exec: DropIndex %q: %w", op.name, err)
+	}
+	// Real schema mutation: notify so dependent caches (e.g. the plan cache)
+	// can invalidate stale entries that referenced the now-removed index.
+	if op.onSchemaChange != nil {
+		op.onSchemaChange()
 	}
 	return false, nil // DDL emits no rows
 }

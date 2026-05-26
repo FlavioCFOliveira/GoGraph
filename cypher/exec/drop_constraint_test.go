@@ -19,7 +19,7 @@ func setupUniqueConstraint(t *testing.T, label, prop string) (*index.Manager, *e
 	t.Helper()
 	mgr := index.NewManager()
 	reg := exec.NewConstraintRegistry()
-	createOp := exec.NewCreateConstraintOp("c", label, prop, exec.ConstraintUnique, false, mgr, reg)
+	createOp := exec.NewCreateConstraintOp("c", label, prop, exec.ConstraintUnique, false, mgr, reg, nil)
 	if err := createOp.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestDropConstraintOp_Unique_DropsIndexAndRegistry(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr, reg := setupUniqueConstraint(t, "Person", "email")
 
-	op := exec.NewDropConstraintOp("c", "Person", "email", exec.ConstraintUnique, false, mgr, reg)
+	op := exec.NewDropConstraintOp("c", "Person", "email", exec.ConstraintUnique, false, mgr, reg, nil)
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestDropConstraintOp_NotNull_UnregistersOnly(t *testing.T) {
 	reg := exec.NewConstraintRegistry()
 	reg.RegisterNotNull("Person", "name")
 
-	op := exec.NewDropConstraintOp("c", "Person", "name", exec.ConstraintNotNull, false, mgr, reg)
+	op := exec.NewDropConstraintOp("c", "Person", "name", exec.ConstraintNotNull, false, mgr, reg, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)
@@ -87,7 +87,7 @@ func TestDropConstraintOp_NotNull_NotFound_Errors(t *testing.T) {
 	reg := exec.NewConstraintRegistry()
 
 	// Attempt to drop a NOT NULL constraint that was never registered.
-	op := exec.NewDropConstraintOp("c", "Person", "name", exec.ConstraintNotNull, false, mgr, reg)
+	op := exec.NewDropConstraintOp("c", "Person", "name", exec.ConstraintNotNull, false, mgr, reg, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)
@@ -102,7 +102,7 @@ func TestDropConstraintOp_NotNull_IfExists_Silent(t *testing.T) {
 	reg := exec.NewConstraintRegistry()
 
 	// IF EXISTS on an absent NOT NULL constraint must succeed silently.
-	op := exec.NewDropConstraintOp("c", "Person", "name", exec.ConstraintNotNull, true, mgr, reg)
+	op := exec.NewDropConstraintOp("c", "Person", "name", exec.ConstraintNotNull, true, mgr, reg, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)
@@ -117,7 +117,7 @@ func TestDropConstraintOp_Unique_IfExists_Silent(t *testing.T) {
 	reg := exec.NewConstraintRegistry()
 
 	// IF EXISTS on an absent UNIQUE constraint must succeed silently.
-	op := exec.NewDropConstraintOp("c", "Person", "email", exec.ConstraintUnique, true, mgr, reg)
+	op := exec.NewDropConstraintOp("c", "Person", "email", exec.ConstraintUnique, true, mgr, reg, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)

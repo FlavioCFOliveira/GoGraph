@@ -23,33 +23,41 @@ import (
 //
 // DropConstraintOp is NOT safe for concurrent use.
 type DropConstraintOp struct {
-	name     string
-	label    string
-	prop     string
-	kind     ConstraintKind
-	ifExists bool
-	mgr      *index.Manager
-	reg      *ConstraintRegistry
-	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
-	done     bool
+	name           string
+	label          string
+	prop           string
+	kind           ConstraintKind
+	ifExists       bool
+	mgr            *index.Manager
+	reg            *ConstraintRegistry
+	onSchemaChange func()
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	done           bool
 }
 
-// NewDropConstraintOp creates a DropConstraintOp.
+// NewDropConstraintOp creates a DropConstraintOp. onSchemaChange, when
+// non-nil, is invoked exactly once after the operator successfully removes a
+// constraint — i.e. NOT when the IF EXISTS branch silently absorbs an
+// absent-constraint condition. The Engine wires e.ClearPlanCache as
+// onSchemaChange so cached plans are invalidated after a real schema
+// mutation.
 func NewDropConstraintOp(
 	name, label, prop string,
 	kind ConstraintKind,
 	ifExists bool,
 	mgr *index.Manager,
 	reg *ConstraintRegistry,
+	onSchemaChange func(),
 ) *DropConstraintOp {
 	return &DropConstraintOp{
-		name:     name,
-		label:    label,
-		prop:     prop,
-		kind:     kind,
-		ifExists: ifExists,
-		mgr:      mgr,
-		reg:      reg,
+		name:           name,
+		label:          label,
+		prop:           prop,
+		kind:           kind,
+		ifExists:       ifExists,
+		mgr:            mgr,
+		reg:            reg,
+		onSchemaChange: onSchemaChange,
 	}
 }
 
@@ -82,7 +90,7 @@ func (op *DropConstraintOp) Next(_ *Row) (bool, error) {
 		}
 		if err := op.mgr.DropIndex(idxName); err != nil {
 			if op.ifExists && errors.Is(err, index.ErrIndexNotFound) {
-				return false, nil
+				return false, nil // IF EXISTS — silently succeed; no schema change
 			}
 			return false, fmt.Errorf("exec: DropConstraint %q: drop backing index: %w", op.name, err)
 		}
@@ -91,7 +99,7 @@ func (op *DropConstraintOp) Next(_ *Row) (bool, error) {
 	case ConstraintNotNull:
 		if !op.reg.HasNotNull(op.label, op.prop) {
 			if op.ifExists {
-				return false, nil
+				return false, nil // IF EXISTS — silently succeed; no schema change
 			}
 			return false, fmt.Errorf("exec: DropConstraint %q: constraint not found", op.name)
 		}
@@ -101,6 +109,12 @@ func (op *DropConstraintOp) Next(_ *Row) (bool, error) {
 		return false, fmt.Errorf("exec: DropConstraint: unknown constraint kind %d", op.kind)
 	}
 
+	// Real schema mutation: a UNIQUE backing index was dropped, or a NOT NULL
+	// entry was unregistered. Notify so dependent caches (e.g. the plan cache)
+	// can invalidate stale entries that depended on the removed constraint.
+	if op.onSchemaChange != nil {
+		op.onSchemaChange()
+	}
 	return false, nil // DDL emits no rows
 }
 

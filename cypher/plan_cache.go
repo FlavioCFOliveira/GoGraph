@@ -35,12 +35,13 @@ type planCacheNode struct {
 // itself is immutable once published, so callers operate on the
 // returned pointer without any further synchronisation.
 //
-// Hit, miss and eviction events are reported via the global
-// [metrics] surface under the names:
+// Hit, miss, eviction and invalidation events are reported via the
+// global [metrics] surface under the names:
 //
 //   - cypher.plan_cache.hits
 //   - cypher.plan_cache.misses
 //   - cypher.plan_cache.evictions
+//   - cypher.plan_cache.invalidations
 //
 // On the default no-op metrics backend the cost is two atomic loads
 // per event.
@@ -114,6 +115,29 @@ func (c *planCache) loadOrStore(key string, entry *planCacheEntry) (*planCacheEn
 	n := &planCacheNode{key: key, value: entry}
 	c.by[key] = c.ll.PushFront(n)
 	return entry, false
+}
+
+// clear removes every cached entry and resets the LRU list. It is
+// invoked by the DDL operators (CREATE/DROP INDEX, CREATE/DROP
+// CONSTRAINT) via [Engine.ClearPlanCache] whenever the schema mutates
+// so that subsequent queries re-plan against the new schema.
+//
+// clear emits cypher.plan_cache.invalidations exactly once per call —
+// even when the cache is already empty — so callers can drive the
+// metric unconditionally without first inspecting [planCache.Len].
+//
+// The mutex is held across the structural reset; concurrent get /
+// loadOrStore observers will either complete fully before the clear or
+// see a fully reset cache afterwards, consistent with the rest of the
+// LRU contract.
+func (c *planCache) clear() {
+	c.mu.Lock()
+	c.ll.Init()
+	for k := range c.by {
+		delete(c.by, k)
+	}
+	c.mu.Unlock()
+	metrics.IncCounter("cypher.plan_cache.invalidations", 1)
 }
 
 // Len returns the current number of cached entries. Intended for

@@ -254,6 +254,25 @@ func ensureIndexManager(g *lpg.Graph[string, float64]) {
 	}
 }
 
+// ClearPlanCache drops every cached plan and increments the
+// cypher.plan_cache.invalidations counter exactly once. It is the
+// operator-facing invalidation hook installed on every DDL operator
+// (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT) — successful schema
+// mutations call it so that subsequent queries re-plan against the
+// new index / constraint topology rather than reusing stale plans
+// built before the schema changed.
+//
+// ClearPlanCache is also safe to invoke directly as a user-facing
+// manual reset (e.g. from operational tooling after an out-of-band
+// index swap on the underlying graph).
+//
+// ClearPlanCache is idempotent and safe for concurrent use; each call
+// emits exactly one invalidations counter increment regardless of the
+// cache's prior size.
+func (e *Engine) ClearPlanCache() {
+	e.cache.clear()
+}
+
 // Run executes query against the engine's graph and returns a streaming
 // [Result]. The caller must call [Result.Close] when done.
 //
@@ -404,9 +423,9 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 		case ir.IndexTypeBTree:
 			kind = exec.ExecIndexBTree
 		}
-		op = exec.NewCreateIndexOp(p.Name, kind, p.IfNotExists, idxMgr)
+		op = exec.NewCreateIndexOp(p.Name, kind, p.IfNotExists, idxMgr, e.ClearPlanCache)
 	case *ir.DropIndex:
-		op = exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr)
+		op = exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache)
 	case *ir.CreateConstraint:
 		var kind exec.ConstraintKind
 		switch p.Kind {
@@ -415,7 +434,7 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 		case ir.ConstraintNotNull:
 			kind = exec.ConstraintNotNull
 		}
-		op = exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg)
+		op = exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
 	case *ir.DropConstraint:
 		var kind exec.ConstraintKind
 		switch p.Kind {
@@ -424,7 +443,7 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 		case ir.ConstraintNotNull:
 			kind = exec.ConstraintNotNull
 		}
-		op = exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg)
+		op = exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg, e.ClearPlanCache)
 	default:
 		return nil, fmt.Errorf("cypher: unsupported DDL plan %T", ddlPlan)
 	}

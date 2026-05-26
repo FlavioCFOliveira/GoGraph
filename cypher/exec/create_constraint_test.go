@@ -17,7 +17,7 @@ func TestCreateConstraintOp_Unique_CreatesIndex(t *testing.T) {
 	mgr := index.NewManager()
 	reg := exec.NewConstraintRegistry()
 	op := exec.NewCreateConstraintOp("person_email_unique", "Person", "email",
-		exec.ConstraintUnique, false, mgr, reg)
+		exec.ConstraintUnique, false, mgr, reg, nil)
 
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestCreateConstraintOp_NotNull_RegistersOnly(t *testing.T) {
 	mgr := index.NewManager()
 	reg := exec.NewConstraintRegistry()
 	op := exec.NewCreateConstraintOp("person_name_notnull", "Person", "name",
-		exec.ConstraintNotNull, false, mgr, reg)
+		exec.ConstraintNotNull, false, mgr, reg, nil)
 
 	_ = op.Init(context.Background())
 	var row exec.Row
@@ -87,7 +87,7 @@ func TestCreateConstraintOp_Unique_Duplicate_Errors(t *testing.T) {
 
 	createOne := func() {
 		op := exec.NewCreateConstraintOp("c", "Person", "email",
-			exec.ConstraintUnique, false, mgr, reg)
+			exec.ConstraintUnique, false, mgr, reg, nil)
 		_ = op.Init(context.Background())
 		var row exec.Row
 		_, _ = op.Next(&row)
@@ -97,7 +97,7 @@ func TestCreateConstraintOp_Unique_Duplicate_Errors(t *testing.T) {
 
 	// Second create without IF NOT EXISTS must error.
 	op := exec.NewCreateConstraintOp("c", "Person", "email",
-		exec.ConstraintUnique, false, mgr, reg)
+		exec.ConstraintUnique, false, mgr, reg, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)
@@ -112,7 +112,7 @@ func TestCreateConstraintOp_Unique_IfNotExists_Silent(t *testing.T) {
 	reg := exec.NewConstraintRegistry()
 
 	first := exec.NewCreateConstraintOp("c", "Person", "email",
-		exec.ConstraintUnique, false, mgr, reg)
+		exec.ConstraintUnique, false, mgr, reg, nil)
 	_ = first.Init(context.Background())
 	var row exec.Row
 	_, _ = first.Next(&row)
@@ -120,7 +120,7 @@ func TestCreateConstraintOp_Unique_IfNotExists_Silent(t *testing.T) {
 
 	// Second create with IF NOT EXISTS must succeed silently.
 	second := exec.NewCreateConstraintOp("c", "Person", "email",
-		exec.ConstraintUnique, true, mgr, reg)
+		exec.ConstraintUnique, true, mgr, reg, nil)
 	_ = second.Init(context.Background())
 	_, err := second.Next(&row)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestCreateConstraintOp_NotNull_IfNotExists_Silent(t *testing.T) {
 	reg := exec.NewConstraintRegistry()
 
 	first := exec.NewCreateConstraintOp("c", "Person", "name",
-		exec.ConstraintNotNull, false, mgr, reg)
+		exec.ConstraintNotNull, false, mgr, reg, nil)
 	_ = first.Init(context.Background())
 	var row exec.Row
 	_, _ = first.Next(&row)
@@ -142,7 +142,7 @@ func TestCreateConstraintOp_NotNull_IfNotExists_Silent(t *testing.T) {
 
 	// Second create with IF NOT EXISTS must succeed silently.
 	second := exec.NewCreateConstraintOp("c", "Person", "name",
-		exec.ConstraintNotNull, true, mgr, reg)
+		exec.ConstraintNotNull, true, mgr, reg, nil)
 	_ = second.Init(context.Background())
 	_, err := second.Next(&row)
 	if err != nil {

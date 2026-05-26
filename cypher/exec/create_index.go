@@ -36,21 +36,33 @@ const (
 //
 // CreateIndexOp is NOT safe for concurrent use.
 type CreateIndexOp struct {
-	name        string
-	idxType     IndexKindExec
-	ifNotExists bool
-	mgr         *index.Manager
-	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
-	done        bool
+	name           string
+	idxType        IndexKindExec
+	ifNotExists    bool
+	mgr            *index.Manager
+	onSchemaChange func()
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	done           bool
 }
 
-// NewCreateIndexOp creates a CreateIndexOp.
-func NewCreateIndexOp(name string, kind IndexKindExec, ifNotExists bool, mgr *index.Manager) *CreateIndexOp {
+// NewCreateIndexOp creates a CreateIndexOp. onSchemaChange, when non-nil, is
+// invoked exactly once after the operator successfully creates a new index in
+// mgr — i.e. NOT when the IF NOT EXISTS branch silently absorbs a duplicate.
+// The Engine wires e.ClearPlanCache as onSchemaChange so cached plans are
+// invalidated after a real schema mutation.
+func NewCreateIndexOp(
+	name string,
+	kind IndexKindExec,
+	ifNotExists bool,
+	mgr *index.Manager,
+	onSchemaChange func(),
+) *CreateIndexOp {
 	return &CreateIndexOp{
-		name:        name,
-		idxType:     kind,
-		ifNotExists: ifNotExists,
-		mgr:         mgr,
+		name:           name,
+		idxType:        kind,
+		ifNotExists:    ifNotExists,
+		mgr:            mgr,
+		onSchemaChange: onSchemaChange,
 	}
 }
 
@@ -86,9 +98,14 @@ func (op *CreateIndexOp) Next(_ *Row) (bool, error) {
 
 	if err := op.mgr.CreateIndex(op.name, sub); err != nil {
 		if op.ifNotExists && errors.Is(err, index.ErrIndexExists) {
-			return false, nil // IF NOT EXISTS — silently succeed
+			return false, nil // IF NOT EXISTS — silently succeed; no schema change
 		}
 		return false, fmt.Errorf("exec: CreateIndex %q: %w", op.name, err)
+	}
+	// Real schema mutation: notify so dependent caches (e.g. the plan cache)
+	// can invalidate stale entries built before the new index existed.
+	if op.onSchemaChange != nil {
+		op.onSchemaChange()
 	}
 	return false, nil // DDL emits no rows
 }

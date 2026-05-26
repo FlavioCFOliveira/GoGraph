@@ -16,7 +16,7 @@ func TestDropIndexOp_DropsIndex(t *testing.T) {
 	mgr := index.NewManager()
 	_ = mgr.CreateIndex("drop_me", indexhash.New[string]())
 
-	op := exec.NewDropIndexOp("drop_me", false, mgr)
+	op := exec.NewDropIndexOp("drop_me", false, mgr, nil)
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestDropIndexOp_DropsIndex(t *testing.T) {
 func TestDropIndexOp_NotFound_Errors(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr := index.NewManager()
-	op := exec.NewDropIndexOp("no_such_idx", false, mgr)
+	op := exec.NewDropIndexOp("no_such_idx", false, mgr, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)
@@ -52,7 +52,7 @@ func TestDropIndexOp_NotFound_Errors(t *testing.T) {
 func TestDropIndexOp_IfExists_Silent(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr := index.NewManager()
-	op := exec.NewDropIndexOp("no_such_idx", true, mgr)
+	op := exec.NewDropIndexOp("no_such_idx", true, mgr, nil)
 	_ = op.Init(context.Background())
 	var row exec.Row
 	_, err := op.Next(&row)
