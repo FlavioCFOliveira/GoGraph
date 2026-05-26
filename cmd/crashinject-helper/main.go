@@ -97,9 +97,9 @@ func runWALMidFrame(dir string) {
 		log.Fatalf("open WAL for partial write: %v", err)
 	}
 	partial := make([]byte, 10)
-	copy(partial[0:4], wal.Magic[:])                         // magic
-	binary.LittleEndian.PutUint16(partial[4:6], 1)           // version = 1
-	binary.LittleEndian.PutUint32(partial[6:10], 100)        // payload length = 100
+	copy(partial[0:4], wal.Magic[:])                  // magic
+	binary.LittleEndian.PutUint16(partial[4:6], 1)    // version = 1
+	binary.LittleEndian.PutUint32(partial[6:10], 100) // payload length = 100
 	if _, err := f.Write(partial); err != nil {
 		_ = f.Close()
 		log.Fatalf("write partial header: %v", err)

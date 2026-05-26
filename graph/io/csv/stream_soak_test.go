@@ -8,10 +8,11 @@ import (
 	"runtime"
 	"testing"
 
-	"go.uber.org/goleak"
 	"gograph/graph/adjlist"
 	csv "gograph/graph/io/csv"
 	"gograph/internal/testlayers"
+
+	"go.uber.org/goleak"
 )
 
 // TestCSVStream_1GB_Bounded writes a large path-graph edge list to a

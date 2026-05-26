@@ -24,7 +24,7 @@ type mockTB struct {
 	fataled bool
 }
 
-func (m *mockTB) Helper()                     {}
+func (m *mockTB) Helper()                   {}
 func (m *mockTB) Errorf(f string, a ...any) { m.errors = append(m.errors, f) }
 func (m *mockTB) Fatalf(f string, a ...any) { m.fataled = true; m.errors = append(m.errors, f) }
 

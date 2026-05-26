@@ -85,7 +85,7 @@ func TestPlanCache_LoadOrStore_IsIdempotent(t *testing.T) {
 func TestPlanCache_BoundedUnderChurn(t *testing.T) {
 	t.Parallel()
 	const (
-		cap     = 32
+		cap      = 32
 		distinct = 10_000
 	)
 	c := newPlanCache(cap)
@@ -101,8 +101,8 @@ func TestPlanCache_BoundedUnderChurn(t *testing.T) {
 func TestPlanCache_ConcurrentLoadOrStore(t *testing.T) {
 	t.Parallel()
 	const (
-		cap        = 64
-		goroutines = 32
+		cap         = 64
+		goroutines  = 32
 		insertsEach = 256
 	)
 	c := newPlanCache(cap)
@@ -150,8 +150,8 @@ func TestEngineOptions_PlanCacheCapacity_Applied(t *testing.T) {
 	// We do not need a populated graph for this test: NewEngineWithOptions
 	// only inspects opts to size the cache.
 	cases := []struct {
-		name   string
-		opt    int
+		name    string
+		opt     int
 		wantCap int
 	}{
 		{"zero falls back", 0, DefaultPlanCacheCapacity},

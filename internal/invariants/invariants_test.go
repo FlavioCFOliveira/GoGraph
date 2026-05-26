@@ -49,11 +49,11 @@ type mockTB struct {
 	failures []string
 }
 
-func (m *mockTB) Helper()                        {}
+func (m *mockTB) Helper()                   {}
 func (m *mockTB) Errorf(f string, a ...any) { m.failures = append(m.failures, f) }
 
-func failed(m *mockTB) bool  { return len(m.failures) > 0 }
-func passed(m *mockTB) bool  { return len(m.failures) == 0 }
+func failed(m *mockTB) bool { return len(m.failures) > 0 }
+func passed(m *mockTB) bool { return len(m.failures) == 0 }
 
 // ─── AssertConnected ──────────────────────────────────────────────
 

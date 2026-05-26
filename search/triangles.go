@@ -27,13 +27,16 @@ import (
 // # Complexity
 //
 // Time:  O(sum over v of deg(v)^2 in the degree-ordered subgraph),
-//        bounded by O(E * sqrt(E)) per Chiba & Nishizeki 1985.
-//        For uniform-degree graphs this collapses to
-//        O(E * d_avg); for power-law graphs the sqrt(E) bound
-//        is tight.
+//
+//	bounded by O(E * sqrt(E)) per Chiba & Nishizeki 1985.
+//	For uniform-degree graphs this collapses to
+//	O(E * d_avg); for power-law graphs the sqrt(E) bound
+//	is tight.
+//
 // Space: O(V) for the per-node count array plus O(d_max) scratch
-//        for the per-vertex neighbour scan (reused across
-//        vertices).
+//
+//	for the per-vertex neighbour scan (reused across
+//	vertices).
 //
 // # Streaming variant
 //
