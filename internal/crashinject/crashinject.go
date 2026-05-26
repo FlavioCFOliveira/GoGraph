@@ -38,6 +38,7 @@ package crashinject
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -188,17 +189,24 @@ func Run(t testing.TB, scenario string, opts Opts) (Out, error) {
 	return out, nil
 }
 
-// isExitError is a type-assertion helper that avoids an import of
-// "errors" at the call site.
+// isExitError unwraps err with errors.As to detect an *exec.ExitError,
+// optionally writing the discovered pointer into *target. Using errors.As
+// (rather than a direct type assertion) preserves correctness when the
+// caller wraps the os/exec error via fmt.Errorf("...: %w", err) — a
+// pattern that some recovery harness call sites use and that would
+// otherwise cause a silent fallback to the wrong code path.
 func isExitError(err error, target **exec.ExitError) bool {
 	if err == nil {
 		return false
 	}
-	ee, ok := err.(*exec.ExitError)
-	if ok && target != nil {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	if target != nil {
 		*target = ee
 	}
-	return ok
+	return true
 }
 
 // buildHelperOnce compiles cmd/crashinject-helper exactly once per
