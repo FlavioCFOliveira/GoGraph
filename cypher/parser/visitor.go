@@ -1525,16 +1525,37 @@ func (v *visitor) VisitNullExpression(ctx *gen.NullExpressionContext) interface{
 }
 
 // VisitPropertyOrLabelExpression handles atom (labelFilter | propertyAccess)*.
+//
+// The grammar rule produces either or both of:
+//
+//   - PropertyExpression: atom + dot-access chain (e.g. `n.name`, `a.b.c`).
+//   - NodeLabels: trailing label filter (`:Foo:Bar`).
+//
+// When NodeLabels are present they wrap the (possibly empty) property
+// chain in an ast.LabelPredicate so the predicate `n:Foo` evaluates to
+// the right TRUE / FALSE / NULL at run-time. A bare property chain is
+// returned verbatim.
 func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpressionContext) interface{} {
-	// propertyExpression carries the atom + dot-access chain.
-	if pe := ctx.PropertyExpression(); pe != nil {
-		e, err := v.visitPropertyExpression(pe)
-		if err != nil {
-			return &SemaError{Rule: "propertyOrLabelExpression", Pos: positionOf(ctx), Message: err.Error()}
-		}
-		return e
+	pe := ctx.PropertyExpression()
+	if pe == nil {
+		return unsupported(ctx, "propertyOrLabelExpression", "missing propertyExpression")
 	}
-	return unsupported(ctx, "propertyOrLabelExpression", "missing propertyExpression")
+	base, err := v.visitPropertyExpression(pe)
+	if err != nil {
+		return &SemaError{Rule: "propertyOrLabelExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	if nl := ctx.NodeLabels(); nl != nil {
+		labels := nodeLabels(nl)
+		if len(labels) > 0 {
+			return &ast.LabelPredicate{
+				Pos:      positionOf(ctx),
+				EndPos:   endPositionOf(ctx),
+				Receiver: base,
+				Labels:   labels,
+			}
+		}
+	}
+	return base
 }
 
 func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (ast.Expression, error) {

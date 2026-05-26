@@ -597,6 +597,9 @@ func (a *analyser) checkExpr(e ast.Expression) {
 	case *ast.Property:
 		a.checkExpr(v.Receiver)
 
+	case *ast.LabelPredicate:
+		a.checkExpr(v.Receiver)
+
 	case *ast.BinaryOp:
 		if isLogicalOperator(v.Operator) {
 			if kind, bad := nonBooleanLiteralKind(v.Left); bad {

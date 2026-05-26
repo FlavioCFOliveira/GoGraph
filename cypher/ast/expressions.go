@@ -127,6 +127,35 @@ func (u *UnaryOp) String() string {
 	return "(" + u.Operator + " " + u.Operand.String() + ")"
 }
 
+// LabelPredicate is the conjunctive-label test on a node-valued
+// expression: `n:Foo:Bar` evaluates to true when n is a node carrying
+// every named label. The form appears both in WHERE filters and as a
+// stand-alone projection (`RETURN (n:Foo)`). Receiver may be any
+// expression; at evaluation time non-Node values yield NULL.
+type LabelPredicate struct {
+	Pos      Position
+	EndPos   Position
+	Receiver Expression
+	Labels   []string
+}
+
+func (*LabelPredicate) astNode()  {}
+func (*LabelPredicate) exprNode() {}
+
+// String returns the Cypher predicate `receiver:Label1:Label2`. The
+// receiver is parenthesised because the operator binds tighter than
+// most arithmetic and comparison operators that may surround it in
+// projection items.
+func (l *LabelPredicate) String() string {
+	var b strings.Builder
+	b.WriteString(l.Receiver.String())
+	for _, lbl := range l.Labels {
+		b.WriteByte(':')
+		b.WriteString(lbl)
+	}
+	return b.String()
+}
+
 // CaseAlternative is a single WHEN … THEN … arm in a CASE expression.
 type CaseAlternative struct {
 	Pos        Position

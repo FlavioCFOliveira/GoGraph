@@ -237,6 +237,10 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 	case *ast.Property:
 		return evalProperty(n, row, params, reg)
 
+	// ── Label predicate ────────────────────────────────────────────────────────
+	case *ast.LabelPredicate:
+		return evalLabelPredicate(n, row, params, reg)
+
 	// ── Subscript access ───────────────────────────────────────────────────────
 	case *ast.SubscriptExpr:
 		return evalSubscript(n, row, params, reg)
@@ -326,6 +330,41 @@ func evalMapLiteral(n *ast.MapLiteral, row RowContext, params map[string]Value, 
 		result[k] = v
 	}
 	return result, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Label predicate
+// ─────────────────────────────────────────────────────────────────────────────
+
+// evalLabelPredicate evaluates `receiver:Label1:Label2`. The receiver
+// must be a Node; any non-Node, non-null value yields NULL (a runtime
+// type mismatch). NULL receiver propagates to NULL. Empty label list is
+// vacuously true (the parser never produces this shape).
+func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	recv, err := evalExpr(n.Receiver, row, params, reg)
+	if err != nil {
+		return nil, err
+	}
+	if IsNull(recv) {
+		return Null, nil
+	}
+	node, ok := recv.(NodeValue)
+	if !ok {
+		return Null, nil
+	}
+	for _, want := range n.Labels {
+		found := false
+		for _, have := range node.Labels {
+			if have == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return BoolValue(false), nil
+		}
+	}
+	return BoolValue(true), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

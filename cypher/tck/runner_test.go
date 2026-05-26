@@ -466,11 +466,20 @@ import (
 //     and collapses to NULL when only NULL elements differentiate the
 //     two lists. Net uplift: +7 scenarios above 3109. Observed 3116
 //     across a 3-run sample; gate set conservatively at 3110.
+//   - 3120: raised after Sprint 85 (gate raised from 80%→95%) audit
+//     round 10 — label predicate expression `(n:Foo:Bar)` now parses
+//     into a dedicated ast.LabelPredicate node and evaluates to
+//     TRUE / FALSE / NULL per openCypher 3VL semantics
+//     (NULL receiver → NULL; non-Node receiver → NULL; otherwise
+//     conjunctive label test). Previously parser dropped the labels
+//     from PropertyOrLabelExpression so `RETURN (n:Foo)` evaluated as
+//     just `n`. Net uplift: +10 scenarios above 3118. Observed 3125-
+//     3129 across a 3-run sample; gate set conservatively at 3120.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3110
+const tckExecutionBaseline = 3120
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
