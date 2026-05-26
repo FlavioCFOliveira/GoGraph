@@ -149,11 +149,17 @@ import (
 //     parsePropLiteralWithParams skip null entries entirely, matching
 //     openCypher CREATE-with-null semantics (the property is not set).
 //     Observed 1958 across a 3-run sample.
+//   - 1961: raised after task T937 partial closure — buildPlanEngine
+//     now accepts *ir.Union and *ir.UnionAll as plan roots and dispatches
+//     into each branch recursively. Replaces the "plan root must be
+//     ProduceResults, got *ir.Union" hard error with a proper
+//     concatenation operator (exec.NewUnion / exec.NewUnionAll).
+//     Observed 1964 across a 3-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1955
+const tckExecutionBaseline = 1961
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

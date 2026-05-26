@@ -1309,6 +1309,35 @@ func buildPlanEngine(
 		return child, p.YieldVars, nil
 	}
 
+	// UNION / UNION ALL: each branch is itself a top-level plan (typically
+	// a ProduceResults). Recursively build each side, then concatenate via
+	// exec.NewUnionAll (preserves duplicates) or exec.NewUnion (with a
+	// Distinct cap to deduplicate). The left branch's column names are
+	// returned as the union's output schema — openCypher requires every
+	// branch of a UNION to expose the same column names in the same order.
+	if u, ok := plan.(*ir.UnionAll); ok {
+		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		return exec.NewUnionAll(leftOp, rightOp), leftCols, nil
+	}
+	if u, ok := plan.(*ir.Union); ok {
+		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		return exec.NewUnion(leftOp, rightOp, 0), leftCols, nil
+	}
+
 	pr, ok := plan.(*ir.ProduceResults)
 	if !ok {
 		return nil, nil, fmt.Errorf("cypher: plan root must be ProduceResults, got %T", plan)
