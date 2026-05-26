@@ -45,6 +45,11 @@ import (
 // under the EppsteinKShortest name. See [EppsteinKShortest] for the
 // deprecated alias preserved for backwards compatibility.
 //
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf and returns nil through the simple entry (and
+// [ErrInvalidInput] through the Ctx variant) otherwise; integer
+// Weight types skip that pass.
+//
 // Safe for concurrent use against an immutable CSR; the call holds no
 // shared state across invocations.
 func KShortestPathsLoopless[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
@@ -57,7 +62,7 @@ func KShortestPathsLoopless[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k in
 // [KShortestPathsLoopless]. ctx.Err() is checked every 4096 heap pops;
 // on cancellation returns (nil, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical best-first k-shortest with loopless guard
+//nolint:gocyclo // canonical best-first k-shortest with NaN/Inf gate + loopless guard
 func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
 	defer metrics.Time("search.KShortestPathsLooplessCtx")()
 	if k <= 0 {
@@ -72,6 +77,12 @@ func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src
 	}
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
+	// Float Weight types: NaN / +/-Inf silently corrupts cost-ordered
+	// PQ comparisons. Fail fast; integer W short-circuits in O(1).
+	if anyFloatInvalid(weights) {
+		metrics.IncCounter("search.KShortestPathsLooplessCtx.errors", 1)
+		return nil, ErrInvalidInput
+	}
 	pq := &looplessPQ[W]{}
 	heap.Init(pq)
 	heap.Push(pq, looplessItem[W]{cost: 0, path: []graph.NodeID{src}})

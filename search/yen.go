@@ -22,6 +22,11 @@ type YenPath[W Weight] struct {
 // dst on c using Yen's algorithm (1971). Returns paths sorted by
 // total cost ascending; an empty slice when src cannot reach dst.
 //
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf and returns nil through the simple entry (and
+// [ErrInvalidInput] through the Ctx variant) otherwise; integer
+// Weight types skip that pass.
+//
 // # K bounds and memory growth
 //
 // The implementation runs at most k * (V + E) Dijkstra calls and is
@@ -58,11 +63,18 @@ func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPa
 // at entry, then reuses them across all internal Dijkstra calls.
 // The v1.0 implementation reallocated all of these per spur step.
 //
-//nolint:gocyclo // canonical Yen: initial Dijkstra + k-1 spur rounds + candidate sort
+//nolint:gocyclo // canonical Yen: NaN/Inf gate + initial Dijkstra + k-1 spur rounds + candidate sort
 func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
 	defer metrics.Time("search.YenKShortestCtx")()
 	if k <= 0 {
 		return nil, nil
+	}
+	// Float Weight types: NaN / +/-Inf in an edge weight silently
+	// corrupts every inner Dijkstra relaxation. Fail fast at the
+	// public boundary; integer W short-circuits in O(1).
+	if anyFloatInvalid(c.WeightsSlice()) {
+		metrics.IncCounter("search.YenKShortestCtx.errors", 1)
+		return nil, ErrInvalidInput
 	}
 
 	maxID := uint64(c.MaxNodeID())

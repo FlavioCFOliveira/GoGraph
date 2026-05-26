@@ -20,6 +20,10 @@ import (
 // distinct-weighted inputs, and tied inputs may yield different but
 // equally-weighted trees).
 //
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf and returns [ErrInvalidInput] otherwise; integer
+// Weight types skip that pass.
+//
 // Concurrency: PrimMST is safe to invoke concurrently on a shared
 // CSR — it allocates its own working storage.
 func PrimMST[W Weight](c *csr.CSR[W], src graph.NodeID) (parent []graph.NodeID, found []bool, totalWeight W, err error) {
@@ -39,6 +43,13 @@ func PrimMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) 
 	verts := c.VerticesSlice()
 	if uint64(src)+1 >= uint64(len(verts)) {
 		return nil, nil, totalWeight, nil
+	}
+	// Float Weight types: NaN / +/-Inf in an edge weight silently
+	// breaks the minEdge comparator. Fail fast at the public
+	// boundary; integer W short-circuits in O(1).
+	if anyFloatInvalid(c.WeightsSlice()) {
+		metrics.IncCounter("search.PrimMSTCtx.errors", 1)
+		return nil, nil, totalWeight, ErrInvalidInput
 	}
 	maxID := uint64(c.MaxNodeID())
 	parent = make([]graph.NodeID, maxID)

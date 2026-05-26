@@ -23,6 +23,9 @@ var ErrNoPath = errors.New("search: no path between endpoints")
 // Returns the path from src to dst (inclusive) with the corresponding
 // total cost, or [ErrNoPath] when dst is unreachable. Returns
 // [ErrNegativeWeight] if any edge weight in c is strictly negative.
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf and returns [ErrInvalidInput] otherwise; integer
+// Weight types skip that pass.
 //
 // For hot loops, prefer the zero-allocation primitive [AStarInto].
 func AStar[W Weight](
@@ -103,7 +106,7 @@ func AStarInto[W Weight](
 //   - *path may be non-nil; it is truncated to 0 length before use
 //     and its underlying array is reused if cap permits.
 //
-//nolint:gocyclo // canonical A*: precondition checks + heap loop + reconstruction
+//nolint:gocyclo // canonical A*: NaN/Inf gate + precondition checks + heap loop + reconstruction
 func aStarCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -117,6 +120,11 @@ func aStarCore[W Weight](
 ) (W, error) {
 	var zero W
 	weights := c.WeightsSlice()
+	// Float Weight types: NaN / +/-Inf silently breaks f-score
+	// comparisons. Fail fast; integer W short-circuits in O(1).
+	if anyFloatInvalid(weights) {
+		return zero, ErrInvalidInput
+	}
 	for _, w := range weights {
 		if w < zero {
 			return zero, ErrNegativeWeight

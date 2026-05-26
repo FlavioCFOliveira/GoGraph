@@ -152,7 +152,9 @@ type dijkstraState[W Weight] struct {
 // Dijkstra computes single-source shortest paths in c starting at src
 // over non-negative edge weights. It returns [ErrNegativeWeight]
 // (without performing any traversal) when any weight in c is strictly
-// less than the zero value of W.
+// less than the zero value of W. For floating-point Weight types it
+// validates that no edge weight is NaN or +/-Inf and returns
+// [ErrInvalidInput] otherwise; integer Weight types skip that pass.
 //
 // The implementation uses a classic binary-heap priority queue.
 // Working storage is pooled across calls so steady-state workloads
@@ -233,7 +235,7 @@ func DijkstraInto[W Weight](
 //   - len(dist), len(parent), len(found) all equal c.MaxNodeID();
 //   - heap has been reset to empty.
 //
-//nolint:gocyclo // canonical Dijkstra: negative-weight scan + heap loop + relaxation
+//nolint:gocyclo // canonical Dijkstra: NaN/Inf gate + negative-weight scan + heap loop + relaxation
 func dijkstraCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -244,6 +246,12 @@ func dijkstraCore[W Weight](
 	h *dijkHeap[W],
 ) error {
 	weights := c.WeightsSlice()
+	// Float Weight types: NaN / +/-Inf in an edge weight silently
+	// drops every relaxation (cand<dist is always false against NaN).
+	// Fail fast at the public boundary; integer W short-circuits.
+	if anyFloatInvalid(weights) {
+		return ErrInvalidInput
+	}
 	var zero W
 	for _, w := range weights {
 		if w < zero {

@@ -31,6 +31,10 @@ type MSTEdge[W Weight] struct {
 // only one direction of each pair is added to the result, chosen
 // canonically as u <= v.
 //
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf and returns [ErrInvalidInput] otherwise; integer
+// Weight types skip that pass.
+//
 // Concurrency: KruskalMST is safe to invoke from any number of
 // goroutines on a shared CSR — it allocates its own working storage.
 func KruskalMST[W Weight](c *csr.CSR[W]) (edges []MSTEdge[W], totalWeight W, err error) {
@@ -54,6 +58,13 @@ func KruskalMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (edges []MSTEdg
 	maxID := int(c.MaxNodeID())
 	if maxID <= 1 {
 		return nil, totalWeight, nil
+	}
+	// Float Weight types: NaN / +/-Inf in an edge weight silently
+	// breaks the sort comparator (every NaN comparison is false).
+	// Fail fast at the public boundary; integer W short-circuits.
+	if anyFloatInvalid(c.WeightsSlice()) {
+		metrics.IncCounter("search.KruskalMSTCtx.errors", 1)
+		return nil, totalWeight, ErrInvalidInput
 	}
 	verts := c.VerticesSlice()
 	edgeDst := c.EdgesSlice()

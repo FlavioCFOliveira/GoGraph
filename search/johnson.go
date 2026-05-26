@@ -25,6 +25,10 @@ var ErrNegativeEdgeAPSP = errors.New("search: DijkstraAPSP requires non-negative
 // runs in O(V * (V + E) * log V), or [FloydWarshall] which tolerates
 // them at the cost of O(V^3) work.
 //
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf and returns [ErrInvalidInput] otherwise; integer
+// Weight types skip that pass.
+//
 // Complexity: O(V * (V + E) * log V).
 func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.DijkstraAPSP")()
@@ -40,6 +44,14 @@ func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 // returns (nil, wrapped ctx.Err()).
 func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.DijkstraAPSPCtx")()
+	// Float Weight types: NaN / +/-Inf in any edge silently breaks
+	// every per-source Dijkstra. Fail fast at the public boundary
+	// (each inner Dijkstra would re-detect it but at higher cost);
+	// integer W short-circuits in O(1).
+	if anyFloatInvalid(c.WeightsSlice()) {
+		metrics.IncCounter("search.DijkstraAPSPCtx.errors", 1)
+		return nil, ErrInvalidInput
+	}
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)
@@ -114,6 +126,13 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 // [FloydWarshall] which is O(V^3), Johnson is O(V * (V + E) * log V)
 // — strictly better on sparse graphs (E = O(V)).
 //
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf and returns [ErrInvalidInput] otherwise; integer
+// Weight types skip that pass. The gate sits at Johnson's public
+// boundary so callers get a single point of failure (the inner
+// Bellman-Ford reweighting would otherwise re-detect it at higher
+// cost).
+//
 // Floating-point caveat: when W is a floating-point type, the
 // reweight/recover arithmetic w(u,v) + h(u) - h(v) followed by
 // d'(u,v) - h[u] + h[v] can accumulate ULP-level rounding error,
@@ -140,9 +159,17 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 // pass and at every relaxation-round boundary during the
 // Bellman-Ford pass; on cancellation returns (nil, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical Johnson: live-mask compaction + virtual-source BF + reweight + per-source Dijkstra + recover
+//nolint:gocyclo // canonical Johnson: NaN/Inf gate + live-mask compaction + virtual-source BF + reweight + per-source Dijkstra + recover
 func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.JohnsonAPSPCtx")()
+	// Float Weight types: NaN / +/-Inf in any edge silently corrupts
+	// both the BF reweighting potential h and every per-source
+	// Dijkstra. Fail fast at the public boundary so callers see a
+	// single point of failure; integer W short-circuits in O(1).
+	if anyFloatInvalid(c.WeightsSlice()) {
+		metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
+		return nil, ErrInvalidInput
+	}
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)

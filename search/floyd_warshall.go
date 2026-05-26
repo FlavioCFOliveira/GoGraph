@@ -59,6 +59,11 @@ func (a *APSP[W]) N() int { return a.live }
 // iterations of v++/v+=v wrapped on integer types and silently
 // corrupted distances. The bitmap is correct for every Weight type.
 //
+// For floating-point Weight types it validates that no edge weight
+// is NaN or +/-Inf; the simple entry returns nil and the Ctx variant
+// returns [ErrInvalidInput] otherwise. Integer Weight types skip
+// that pass.
+//
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR; allocates its own working buffers per call.
 func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
@@ -71,9 +76,16 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 // ctx.Err() is checked at every k-pivot iteration (the outermost
 // loop); on cancellation returns (nil, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical Floyd-Warshall: live-mask compaction + matrix init + edge ingest + DP
+//nolint:gocyclo // canonical Floyd-Warshall: NaN/Inf gate + live-mask compaction + matrix init + edge ingest + DP
 func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.FloydWarshallCtx")()
+	// Float Weight types: NaN / +/-Inf silently corrupts every
+	// k-pivot relaxation. Fail fast at the public boundary; integer
+	// W short-circuits in O(1).
+	if anyFloatInvalid(c.WeightsSlice()) {
+		metrics.IncCounter("search.FloydWarshallCtx.errors", 1)
+		return nil, ErrInvalidInput
+	}
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
 	compact := make([]int, maxID)
