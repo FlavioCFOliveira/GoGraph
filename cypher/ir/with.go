@@ -53,11 +53,13 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 	return plan, nil
 }
 
-// applyProjectionTail wraps plan with the DISTINCT / SKIP / ORDER BY /
-// LIMIT operators declared on proj. Matches the ordering used by the
-// RETURN-side translator (SKIP applied before LIMIT, ORDER BY fuses with
-// LIMIT into Top when both are present). Extracted so WITH and RETURN
-// share a single canonical implementation.
+// applyProjectionTail wraps plan with the DISTINCT / ORDER BY / SKIP /
+// LIMIT operators declared on proj. The canonical openCypher evaluation
+// order is DISTINCT → ORDER BY → SKIP → LIMIT, so the plan tree is built
+// from the inside out in exactly that order. ORDER BY fuses with LIMIT
+// into Top only when SKIP is absent — when SKIP and LIMIT both appear,
+// the Sort produces the full ordered stream and Skip/Limit operate on
+// it independently.
 func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
 	if proj == nil {
 		return plan
@@ -65,27 +67,32 @@ func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
 	if proj.Distinct {
 		plan = NewDistinct(plan)
 	}
-	if proj.Skip != nil {
-		sk, _ := intExpr(proj.Skip)
-		plan = NewSkip(sk, plan)
-	}
 	if len(proj.OrderBy) > 0 {
 		sortItems := make([]SortItem, len(proj.OrderBy))
 		for i, s := range proj.OrderBy {
 			sortItems[i] = SortItem{Expression: s.Expr.String(), Expr: s.Expr, Descending: s.Descending}
 		}
-		if proj.Limit != nil {
-			lim, err := intExpr(proj.Limit)
-			if err != nil {
+		// Fuse Sort+Limit into Top only when no SKIP is present; with a
+		// SKIP, Top would discard rows that the Skip should reveal.
+		if proj.Limit != nil && proj.Skip == nil {
+			if lim, err := intExpr(proj.Limit); err == nil {
+				plan = NewTop(sortItems, lim, plan)
+			} else {
 				plan = NewSort(sortItems, plan)
 				plan = NewLimit(0, plan)
-			} else {
-				plan = NewTop(sortItems, lim, plan)
 			}
 		} else {
 			plan = NewSort(sortItems, plan)
 		}
-	} else if proj.Limit != nil {
+	}
+	if proj.Skip != nil {
+		sk, _ := intExpr(proj.Skip)
+		plan = NewSkip(sk, plan)
+	}
+	// LIMIT alone (no ORDER BY) or LIMIT alongside SKIP needs an explicit
+	// Limit wrapper. When ORDER BY+LIMIT fused into Top above, proj.Skip
+	// is nil so we don't reach this branch.
+	if proj.Limit != nil && (len(proj.OrderBy) == 0 || proj.Skip != nil) {
 		lim, _ := intExpr(proj.Limit)
 		plan = NewLimit(lim, plan)
 	}

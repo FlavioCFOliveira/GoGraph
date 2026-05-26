@@ -408,11 +408,23 @@ import (
 //     hour/minute/second the duration calculation expects. Net uplift:
 //     +9 scenarios above 3055. Observed 3064 across a 3-run sample;
 //     gate set conservatively at 3055.
+//   - 3065: raised after Sprint 84 audit round 9 follow-on 2 —
+//     applyProjectionTail in cypher/ir/with.go reordered to wrap the
+//     plan in the canonical openCypher order: DISTINCT → ORDER BY →
+//     SKIP → LIMIT. Previously SKIP was applied before ORDER BY,
+//     which dropped unsorted rows from the head of the stream before
+//     the sort had a chance to order them. Sort+Limit still fuses
+//     into Top, but only when SKIP is absent (otherwise Top would
+//     discard rows that SKIP should later reveal). Unlocks
+//     ReturnSkipLimit1 [1], WithSkipLimit2 [1], and similar
+//     ORDER-BY-then-SKIP scenarios. Net uplift: +9 scenarios above
+//     3064. Observed 3073 across a 3-run sample; gate set
+//     conservatively at 3065.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3055
+const tckExecutionBaseline = 3065
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
