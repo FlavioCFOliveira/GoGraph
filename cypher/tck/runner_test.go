@@ -509,11 +509,24 @@ import (
 //     variants are indistinguishable from time.Now(). Net uplift: +24
 //     scenarios above 3184. Observed 3208 across a 3-run sample; gate
 //     set conservatively at 3200.
+//   - 3205: raised after Sprint 85 audit round 10 follow-on 3 — two
+//     execution-side fixes for variable forwarding: (a)
+//     CreateRelationship's resolveNodeID now accepts both
+//     IntegerValue (the canonical exec encoding) and NodeValue (the
+//     form a projection alias carries after `WITH n AS a`) — so
+//     `MATCH (n) MATCH (m) WITH n AS a, m AS b CREATE (a)-[:T]->(b)`
+//     no longer errors with "variable a is not an IntegerValue"; (b)
+//     null endpoint (typically from OPTIONAL MATCH that produced no
+//     binding) is signalled via a sentinel error and the operator
+//     propagates the row unchanged (with the optional relationship
+//     variable bound to NULL) instead of failing. Net uplift: +2
+//     scenarios above 3208. Observed 3210 stable across runs; gate
+//     set conservatively at 3205.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3200
+const tckExecutionBaseline = 3205
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

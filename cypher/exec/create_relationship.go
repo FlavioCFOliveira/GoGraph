@@ -118,10 +118,21 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 
 	srcID, err := op.resolveNodeID(op.startVar, childRow)
 	if err != nil {
+		if err == errNullEndpoint {
+			// Null endpoint (typically from OPTIONAL MATCH): propagate
+			// the row unchanged, leaving the relationship variable
+			// (if any) at NULL.
+			*out = nullRowWithRel(childRow, op.relVar)
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: CreateRelationship start: %w", err)
 	}
 	dstID, err := op.resolveNodeID(op.endVar, childRow)
 	if err != nil {
+		if err == errNullEndpoint {
+			*out = nullRowWithRel(childRow, op.relVar)
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: CreateRelationship end: %w", err)
 	}
 
@@ -169,6 +180,10 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 }
 
 // resolveNodeID extracts the NodeID stored at the column position of varName.
+// The bound value may be either an IntegerValue (the canonical encoding the
+// physical operators emit) or a NodeValue (the form a projection alias
+// carries after `WITH n AS a` — node values flow through unchanged). Both
+// are accepted; other kinds raise the type error.
 func (op *CreateRelationship) resolveNodeID(varName string, row Row) (graph.NodeID, error) {
 	colIdx, ok := op.schema[varName]
 	if !ok {
@@ -177,11 +192,37 @@ func (op *CreateRelationship) resolveNodeID(varName string, row Row) (graph.Node
 	if colIdx >= len(row) {
 		return 0, fmt.Errorf("variable %q column index %d out of range (row len %d)", varName, colIdx, len(row))
 	}
-	iv, ok := row[colIdx].(expr.IntegerValue)
-	if !ok {
-		return 0, fmt.Errorf("variable %q is not an IntegerValue (got %T)", varName, row[colIdx])
+	switch val := row[colIdx].(type) {
+	case expr.IntegerValue:
+		return graph.NodeID(val), nil
+	case expr.NodeValue:
+		return graph.NodeID(val.ID), nil
 	}
-	return graph.NodeID(iv), nil
+	if expr.IsNull(row[colIdx]) {
+		// OPTIONAL-MATCH-bound or otherwise null receiver: signal the
+		// caller to skip the relationship creation gracefully.
+		return 0, errNullEndpoint
+	}
+	return 0, fmt.Errorf("variable %q is not an IntegerValue (got %T)", varName, row[colIdx])
+}
+
+// errNullEndpoint signals that a CreateRelationship endpoint variable
+// resolved to NULL — callers convert this to "skip this row" rather than
+// surfacing it as a hard error, matching the openCypher semantics of
+// `CREATE (a)-[:T]->(b)` after an OPTIONAL MATCH that did not bind a/b.
+var errNullEndpoint = fmt.Errorf("create relationship: endpoint is null")
+
+// nullRowWithRel returns a copy of childRow extended by one column
+// holding NULL when the operator binds a relationship variable, or the
+// original row unchanged otherwise.
+func nullRowWithRel(childRow Row, relVar string) Row {
+	if relVar == "" {
+		return childRow
+	}
+	r := make(Row, len(childRow)+1)
+	copy(r, childRow)
+	r[len(childRow)] = expr.Null
+	return r
 }
 
 // Close closes the child operator.
