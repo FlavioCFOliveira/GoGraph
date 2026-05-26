@@ -362,24 +362,36 @@ func (v DurationValue) Equal(other Value) Value {
 // Formatting helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// formatLocalDateTime renders t as ISO-8601 yyyy-mm-ddThh:mm:ss[.frac] with no
-// zone suffix.
+// formatLocalDateTime renders t as ISO-8601 yyyy-mm-ddThh:mm[:ss[.frac]]
+// with no zone suffix. The seconds field is elided when seconds and
+// nanoseconds are both zero, matching the openCypher TCK canonical
+// shortest form.
 func formatLocalDateTime(t time.Time) string {
-	frac := formatFraction(t.Nanosecond())
-	return fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:%02d%s",
-		t.Year(), int(t.Month()), t.Day(),
-		t.Hour(), t.Minute(), t.Second(), frac)
+	dateHeader := fmt.Sprintf("%04d-%02d-%02d", t.Year(), int(t.Month()), t.Day())
+	timeTail := formatHMSNanos(t.Hour(), t.Minute(), t.Second(), t.Nanosecond())
+	return dateHeader + "T" + timeTail
 }
 
-// formatDateTime renders t as ISO-8601 yyyy-mm-ddThh:mm:ss[.frac]±HH:MM (or "Z"
-// for UTC).
+// formatDateTime renders t as ISO-8601 yyyy-mm-ddThh:mm[:ss[.frac]]±HH:MM
+// (or "Z" for UTC). Like formatLocalDateTime, the seconds field is
+// elided when seconds and nanoseconds are both zero.
 func formatDateTime(t time.Time) string {
 	_, offset := t.Zone()
 	zone := formatOffsetSec(offset)
-	frac := formatFraction(t.Nanosecond())
-	return fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:%02d%s%s",
-		t.Year(), int(t.Month()), t.Day(),
-		t.Hour(), t.Minute(), t.Second(), frac, zone)
+	dateHeader := fmt.Sprintf("%04d-%02d-%02d", t.Year(), int(t.Month()), t.Day())
+	timeTail := formatHMSNanos(t.Hour(), t.Minute(), t.Second(), t.Nanosecond())
+	return dateHeader + "T" + timeTail + zone
+}
+
+// formatHMSNanos returns hh:mm or hh:mm:ss[.frac] depending on whether
+// the seconds/nanoseconds components are observably non-zero. Shared
+// between formatLocalDateTime, formatDateTime and (indirectly via the
+// LocalTimeValue / TimeValue String methods) formatNanosToTime.
+func formatHMSNanos(h, m, s, nano int) string {
+	if s == 0 && nano == 0 {
+		return fmt.Sprintf("%02d:%02d", h, m)
+	}
+	return fmt.Sprintf("%02d:%02d:%02d%s", h, m, s, formatFraction(nano))
 }
 
 // formatNanosToTime renders ns (since midnight) in the openCypher

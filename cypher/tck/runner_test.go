@@ -218,11 +218,20 @@ import (
 //     features/expressions/temporal/Temporal1, Temporal3 and many
 //     temporal-projection scenarios. Observed 2024 across a 5-run
 //     sample; gate set conservatively at 2022.
+//   - 2179: raised after task T937 partial closure — formatLocalDateTime
+//     and formatDateTime extend the same :00-seconds elision through a
+//     shared formatHMSNanos helper. `1984-10-11T12:00` and
+//     `1984-10-11T12:00+01:00` now produce the canonical shortest form
+//     instead of the spurious `:00:00` trailer. Unlocks
+//     features/expressions/temporal/Temporal* projections that surface
+//     localdatetime/datetime values at the top of the hour or minute.
+//     Observed 2181 across a 3-run sample; gate set conservatively at
+//     2179.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2022
+const tckExecutionBaseline = 2179
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
