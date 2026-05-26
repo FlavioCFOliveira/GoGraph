@@ -338,10 +338,11 @@ func projectionItems(proj *ast.Projection) []ProjectionItem {
 //
 //  1. Explicit AS alias.
 //  2. Bare variable name (preserves source spelling, e.g. `n`).
-//  3. The expression's textual form — with the outer parens stripped
-//     for [*ast.BinaryOp], which BinaryOp.String() always wraps in
-//     parens for unambiguous re-parsing even when the column header
-//     should read `x > d` rather than `(x > d)`.
+//  3. Otherwise the precedence-aware textual form via exprToColumnName,
+//     which avoids the over-parenthesised output of
+//     [*ast.BinaryOp.String]. The TCK column-header convention is the
+//     unparenthesised source form whenever the AST shape is
+//     unambiguous from operator precedence.
 func projectionColumnName(it *ast.ProjectionItem) string {
 	if it.Alias != nil {
 		return *it.Alias
@@ -349,11 +350,86 @@ func projectionColumnName(it *ast.ProjectionItem) string {
 	if v, ok := it.Expr.(*ast.Variable); ok {
 		return v.Name
 	}
-	name := it.Expr.String()
-	if _, isBinOp := it.Expr.(*ast.BinaryOp); isBinOp && len(name) >= 2 && name[0] == '(' && name[len(name)-1] == ')' {
-		name = name[1 : len(name)-1]
+	return exprToColumnName(it.Expr)
+}
+
+// exprToColumnName renders an AST expression in the canonical TCK
+// column-header form. The implementation walks BinaryOp / UnaryOp
+// nodes with operator precedence so a child is only parenthesised
+// when its operator binds less tightly than its parent. Non-arithmetic
+// expressions fall through to their String() representation.
+func exprToColumnName(e ast.Expression) string {
+	switch n := e.(type) {
+	case *ast.BinaryOp:
+		left := exprToColumnNameWithParent(n.Left, binaryOpPrecedence(n.Operator), true)
+		right := exprToColumnNameWithParent(n.Right, binaryOpPrecedence(n.Operator), false)
+		return left + " " + n.Operator + " " + right
+	case *ast.UnaryOp:
+		// Unary operators have higher precedence than any binary; their
+		// operand only needs parens when it is a BinaryOp.
+		operand := exprToColumnName(n.Operand)
+		if _, isBin := n.Operand.(*ast.BinaryOp); isBin {
+			operand = "(" + operand + ")"
+		}
+		return n.Operator + operand
+	default:
+		return e.String()
 	}
-	return name
+}
+
+// exprToColumnNameWithParent renders a sub-expression with paren-
+// guarding driven by the enclosing parent's precedence. isLeft
+// disambiguates the right operand of a left-associative parent at
+// equal precedence (e.g. `a - (b - c)` differs from `a - b - c`).
+func exprToColumnNameWithParent(e ast.Expression, parentPrec int, isLeft bool) string {
+	if bin, ok := e.(*ast.BinaryOp); ok {
+		childPrec := binaryOpPrecedence(bin.Operator)
+		needParen := childPrec < parentPrec || (childPrec == parentPrec && !isLeft && !operatorIsAssociative(bin.Operator))
+		s := exprToColumnName(bin)
+		if needParen {
+			return "(" + s + ")"
+		}
+		return s
+	}
+	return exprToColumnName(e)
+}
+
+// binaryOpPrecedence returns the precedence level for a Cypher binary
+// operator, with lower numbers binding less tightly. The numbers do
+// not need to match any external spec — only the relative ordering
+// matters for the parenthesisation decision.
+func binaryOpPrecedence(op string) int {
+	switch op {
+	case "OR":
+		return 1
+	case "XOR":
+		return 2
+	case "AND":
+		return 3
+	case "=", "<>", "<", "<=", ">", ">=":
+		return 4
+	case "STARTS WITH", "ENDS WITH", "CONTAINS", "IN", "=~":
+		return 5
+	case "+", "-":
+		return 6
+	case "*", "/", "%":
+		return 7
+	case "^":
+		return 8
+	default:
+		return 0 // unknown — always parenthesise
+	}
+}
+
+// operatorIsAssociative reports whether op is associative — i.e. the
+// right operand can elide parens at equal precedence. + and *, AND and
+// OR are associative; -, /, ^ are not.
+func operatorIsAssociative(op string) bool {
+	switch op {
+	case "+", "*", "AND", "OR", "XOR":
+		return true
+	}
+	return false
 }
 
 // relDirection maps an ast.RelDirection to an ir.Direction.

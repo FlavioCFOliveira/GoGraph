@@ -284,11 +284,22 @@ import (
 //     `total - trueCount > 0` test conflated falses and nulls. Unlocks
 //     features/expressions/quantifier/Quantifier4 [10] all-with-nulls
 //     scenarios. Observed 2269-2272 across a 5-run sample.
+//   - 2273: raised after task T937 partial closure — precedence-aware
+//     column-header builder exprToColumnName replaces the previous
+//     "strip outermost parens only" heuristic. Nested arithmetic and
+//     boolean expressions like `12 / 4 * 3 - 2 * 4` now produce the
+//     unparenthesised canonical header instead of
+//     `((12 / 4) * 3) - (2 * 4)`. Operator precedence and
+//     left-associativity drive paren-guarding so non-associative
+//     siblings (e.g. `a - (b - c)`) still parenthesise correctly.
+//     Unlocks features/expressions/mathematical/Mathematical8 and
+//     similar precedence scenarios. Observed 2274-2275 across a 5-run
+//     sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2268
+const tckExecutionBaseline = 2273
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
