@@ -122,6 +122,13 @@ type buildOpts struct {
 	// to the schema column that the VarLengthExpand operator populates with a flat
 	// alternating ListValue. Used by buildIRProjection to reconstruct a PathValue.
 	pathVarMeta map[string]pathVarInfo
+	// scalarCols is the set of schema variable names whose row values must NOT be
+	// upgraded from IntegerValue(NodeID) to NodeValue. Aggregate output columns
+	// (e.g. the output of count(*), sum, avg) are always scalars; their integer
+	// values can coincide with real NodeIDs and must pass through as-is to prevent
+	// mis-upgrading a count result into a graph node. buildEagerAggregation
+	// populates this set for every aggregate output name it registers in the schema.
+	scalarCols map[string]struct{}
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -1901,6 +1908,19 @@ func buildEagerAggregation(
 	for i, aggExpr := range p.Aggregates {
 		schema[aggExpr.OutputName] = len(p.GroupBy) + i
 	}
+
+	// Mark every aggregate output column as scalar so that buildIRProjection's
+	// Variable fast-path does not mis-upgrade an integer count/sum/avg result into
+	// a NodeValue when the integer coincides with a real NodeID.
+	if bopts != nil {
+		if bopts.scalarCols == nil {
+			bopts.scalarCols = make(map[string]struct{})
+		}
+		for _, aggExpr := range p.Aggregates {
+			bopts.scalarCols[aggExpr.OutputName] = struct{}{}
+		}
+	}
+
 	return topOp, nil
 }
 
@@ -2678,14 +2698,36 @@ func buildIRProjection(
 					// IntegerValue(NodeID) → NodeValue upgrade so bare `RETURN u` for
 					// a bound node produces the documented shape. Non-node
 					// IntegerValues (literals, edge IDs) pass through unchanged.
+					//
+					// Exception: scalar columns (aggregate outputs such as count(*),
+					// sum, avg) must NOT be upgraded — an integer count that
+					// numerically equals a real NodeID would be mis-elevated into a
+					// full graph node. bopts.scalarCols tracks which variable names
+					// were produced by EagerAggregation and must pass through as-is.
 					if colIdx, ok2 := schema[v.Name]; ok2 {
 						idx := colIdx
 						capturedG := g
-						evalFn = func(row exec.Row) (expr.Value, error) {
-							if idx < len(row) {
-								return upgradeNodeIDToValue(row[idx], capturedG), nil
+						varIsScalar := bopts != nil && bopts.scalarCols != nil
+						if varIsScalar {
+							_, varIsScalar = bopts.scalarCols[v.Name]
+						}
+						if varIsScalar {
+							// Scalar aggregate output: return the raw value without
+							// upgrade. Integer counts/sums can numerically coincide with
+							// a real NodeID and must not be elevated to NodeValue.
+							evalFn = func(row exec.Row) (expr.Value, error) {
+								if idx < len(row) {
+									return row[idx], nil
+								}
+								return expr.Null, nil
 							}
-							return expr.Null, nil
+						} else {
+							evalFn = func(row exec.Row) (expr.Value, error) {
+								if idx < len(row) {
+									return upgradeNodeIDToValue(row[idx], capturedG), nil
+								}
+								return expr.Null, nil
+							}
 						}
 					}
 				}
