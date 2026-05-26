@@ -77,13 +77,6 @@ linters:
       - linters: [gocyclo]
         path: "store/txn/txn\\.go"
         text: "encodeOpTyped"
-      # gocyclo: cypher/exec/merge.go (*Merge).Init — initialisation that walks
-      # the merge pattern's node and relationship descriptors with per-kind
-      # branches; refactor candidate for Sprint 81 but the linear flow is the
-      # currently-clearest expression.
-      - linters: [gocyclo]
-        path: "cypher/exec/merge\\.go"
-        text: "Init"
       # gocyclo: cypher/ir/match.go optionalInnerPattern — pattern-translation
       # dispatcher; same shape rationale as operatorName. Tracked for revisit
       # in T934.2 (multi-pattern MATCH binding).

@@ -147,15 +147,11 @@ func (op *Merge) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *M
 	return op
 }
 
-// Init initialises the operator: executes the search plan, buffers matched
-// rows (ON MATCH path) or creates a new node (ON CREATE path).
+// Init initialises the operator: executes the search plan, then dispatches
+// to the ON MATCH or ON CREATE branch depending on whether the search
+// returned any rows.
 func (op *Merge) Init(ctx context.Context) error {
-	op.ctx = ctx
-	op.matched = op.matched[:0]
-	op.matchedIdx = 0
-	op.created = false
-	op.createdRow = nil
-	op.done = false
+	op.resetRunState(ctx)
 
 	if err := op.child.Init(ctx); err != nil {
 		return err
@@ -168,17 +164,38 @@ func (op *Merge) Init(ctx context.Context) error {
 	}
 
 	if len(rows) > 0 {
-		// ON MATCH path: apply on-match actions to each matched row.
-		for i := range rows {
-			if applyErr := op.applyActions(op.onMatchActions, rows[i]); applyErr != nil {
-				return fmt.Errorf("exec: Merge: ON MATCH: %w", applyErr)
-			}
-		}
-		op.matched = rows
-		return nil
+		return op.runOnMatchPath(rows)
 	}
+	return op.runOnCreatePath()
+}
 
-	// ON CREATE path: constraint enforcement before any mutation.
+// resetRunState clears the per-Init state so the operator can be re-Init'd
+// without leaking buffered matches from a previous invocation.
+func (op *Merge) resetRunState(ctx context.Context) {
+	op.ctx = ctx
+	op.matched = op.matched[:0]
+	op.matchedIdx = 0
+	op.created = false
+	op.createdRow = nil
+	op.done = false
+}
+
+// runOnMatchPath applies each ON MATCH action to every row returned by the
+// search sub-plan and buffers the rows for emission from Next.
+func (op *Merge) runOnMatchPath(rows []Row) error {
+	for i := range rows {
+		if applyErr := op.applyActions(op.onMatchActions, rows[i]); applyErr != nil {
+			return fmt.Errorf("exec: Merge: ON MATCH: %w", applyErr)
+		}
+	}
+	op.matched = rows
+	return nil
+}
+
+// runOnCreatePath enforces declared constraints, creates the merge node,
+// attaches its labels and properties, runs ON CREATE actions, and primes
+// the operator to emit the freshly created row.
+func (op *Merge) runOnCreatePath() error {
 	if op.reg != nil {
 		for _, p := range op.props {
 			if cerr := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); cerr != nil {
@@ -187,7 +204,6 @@ func (op *Merge) Init(ctx context.Context) error {
 		}
 	}
 
-	// ON CREATE path: create the node.
 	nodeKey := op.freshNodeKey()
 	nodeID, err := op.mutator.AddNode(nodeKey)
 	if err != nil {
