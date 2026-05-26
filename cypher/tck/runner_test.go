@@ -83,11 +83,19 @@ import (
 //     (component extraction from an existing Duration) was supported.
 //     Observed 1655-1658 across a 3-run sample; the gate is set
 //     conservatively at 1654 to absorb run-to-run variance.
+//   - 1766: raised after the five `X.truncate(unit, source [, fields])`
+//     functions (date / datetime / localdatetime / time / localtime)
+//     landed in cypher/funcs/temporal_truncate.go. Each function
+//     truncates the source temporal to the start of `unit`
+//     (millennium..nanosecond, including weekYear, quarter, week) and
+//     then applies the optional MapValue overrides.
+//     Observed 1769-1770 across a 3-run sample; the gate is set
+//     conservatively at 1766 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1654
+const tckExecutionBaseline = 1766
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

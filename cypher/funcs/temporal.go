@@ -48,6 +48,12 @@ func registerTemporal(r *Registry) {
 	r.Register("duration.inmonths", fnDurationInMonths)
 	r.Register("duration.indays", fnDurationInDays)
 	r.Register("duration.inseconds", fnDurationInSeconds)
+	// Truncation (T937/T941): each X.truncate(unit, source [, fields]) → X.
+	r.Register("date.truncate", fnDateTruncate)
+	r.Register("datetime.truncate", fnDateTimeTruncate)
+	r.Register("localdatetime.truncate", fnLocalDateTimeTruncate)
+	r.Register("time.truncate", fnTimeTruncate)
+	r.Register("localtime.truncate", fnLocalTimeTruncate)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
