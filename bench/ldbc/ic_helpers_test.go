@@ -40,9 +40,11 @@ import (
 //	id=4  Carol Davis
 //	id=5  Dave  Wilson
 //
-// Edges (KNOWS, bidirectional — both directions created explicitly):
+// Edges (KNOWS, single direction per pair — undirected MATCH patterns
+// traverse both forward and reverse CSR sides; storing each pair once is
+// the Neo4j-canonical model):
 //
-//	1↔2, 1↔4, 2↔3, 2↔5, 4↔5
+//	1→2, 1→4, 2→3, 2→5, 4→5
 //
 // NOTE: KNOWS edges use the WHERE-clause form (MATCH (a:P),(b:P) WHERE a.id=X
 // AND b.id=Y) rather than inline property filters ({id:X}). Inline integer
@@ -54,18 +56,16 @@ var socialGraphSeedQueries = []string{
 	`CREATE (n:Person {id: 3, firstName: 'Alice', lastName: 'Brown'})`,
 	`CREATE (n:Person {id: 4, firstName: 'Carol', lastName: 'Davis'})`,
 	`CREATE (n:Person {id: 5, firstName: 'Dave',  lastName: 'Wilson'})`,
-	// KNOWS relationships — both directions so that undirected patterns match.
-	// WHERE clause used instead of inline {id:X} filter; see NOTE above.
+	// KNOWS relationships — stored once per pair. Undirected MATCH patterns
+	// `-[:KNOWS]-` traverse both forward and reverse CSR sides correctly
+	// since 51feab7 (cypher/exec/expand.go reverseEdgePassesFilter), so the
+	// earlier two-direction workaround is no longer needed and would emit
+	// duplicate bindings under undirected single-relationship patterns.
 	`MATCH (a:Person),(b:Person) WHERE a.id = 1 AND b.id = 2 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 2 AND b.id = 1 CREATE (a)-[:KNOWS]->(b)`,
 	`MATCH (a:Person),(b:Person) WHERE a.id = 1 AND b.id = 4 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 4 AND b.id = 1 CREATE (a)-[:KNOWS]->(b)`,
 	`MATCH (a:Person),(b:Person) WHERE a.id = 2 AND b.id = 3 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 3 AND b.id = 2 CREATE (a)-[:KNOWS]->(b)`,
 	`MATCH (a:Person),(b:Person) WHERE a.id = 2 AND b.id = 5 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 5 AND b.id = 2 CREATE (a)-[:KNOWS]->(b)`,
 	`MATCH (a:Person),(b:Person) WHERE a.id = 4 AND b.id = 5 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 5 AND b.id = 4 CREATE (a)-[:KNOWS]->(b)`,
 }
 
 // startICServer starts a fresh empty Bolt server on a random loopback port
