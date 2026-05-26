@@ -348,30 +348,48 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value
 	}
 	switch c := container.(type) {
 	case ListValue:
-		i, ok := idx.(IntegerValue)
-		if !ok {
-			return Null, nil
-		}
-		pos := int(i)
-		if pos < 0 {
-			pos = len(c) + pos
-		}
-		if pos < 0 || pos >= len(c) {
-			return Null, nil
-		}
-		return c[pos], nil
+		return subscriptList(c, idx), nil
 	case MapValue:
-		k, ok := idx.(StringValue)
-		if !ok {
-			return Null, nil
-		}
-		if v, exists := c[string(k)]; exists {
-			return v, nil
-		}
-		return Null, nil
+		return subscriptMap(c, idx), nil
+	case NodeValue:
+		return subscriptMap(c.Properties, idx), nil
+	case RelationshipValue:
+		return subscriptMap(c.Properties, idx), nil
 	default:
 		return Null, nil
 	}
+}
+
+// subscriptList returns list[idx] using openCypher list-indexing semantics:
+// negative indices wrap from the end; out-of-range indices and non-integer
+// keys yield NULL.
+func subscriptList(list ListValue, idx Value) Value {
+	i, ok := idx.(IntegerValue)
+	if !ok {
+		return Null
+	}
+	pos := int(i)
+	if pos < 0 {
+		pos = len(list) + pos
+	}
+	if pos < 0 || pos >= len(list) {
+		return Null
+	}
+	return list[pos]
+}
+
+// subscriptMap returns m[idx] for any MapValue-shaped container (used for
+// MapValue itself and for the Properties of NodeValue / RelationshipValue).
+// Non-string keys and absent keys both yield NULL.
+func subscriptMap(m MapValue, idx Value) Value {
+	k, ok := idx.(StringValue)
+	if !ok {
+		return Null
+	}
+	if v, exists := m[string(k)]; exists {
+		return v
+	}
+	return Null
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

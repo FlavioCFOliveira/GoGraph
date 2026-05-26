@@ -204,6 +204,13 @@ import (
 //     Together these unlock features/expressions/literals/Literals5
 //     scientific-notation scenarios. Observed 1986 across a 5-run
 //     sample.
+//   - 1985: raised after task T937 partial closure — evalSubscript now
+//     handles NodeValue and RelationshipValue subscript access:
+//     n['name'] and r['since'] return the property value instead of
+//     NULL. Refactored into per-container helpers (subscriptList /
+//     subscriptMap) to stay under the gocyclo:15 budget. Unlocks
+//     features/expressions/graph/Graph7 (dynamic property access).
+//     Observed 1985 stable across a 5-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
