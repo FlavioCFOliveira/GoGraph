@@ -35,6 +35,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -46,6 +47,13 @@ import (
 	"gograph/graph/index"
 	"gograph/graph/lpg"
 )
+
+// ErrPropertyValueIsNull is the sentinel returned by [parsePropValue] when
+// the value is the literal "null". By openCypher semantics, assigning null
+// to a property removes it (or never sets it for a fresh node), so callers
+// that catch this sentinel must skip the property entirely rather than
+// surface a parse error.
+var ErrPropertyValueIsNull = errors.New("exec: property value is null (skip)")
 
 // synthKeyPrefix is the fixed prefix of every synthetic node key produced by
 // [CreateNode.freshNodeKey]. Kept as a constant so the counter-seeding scan in
@@ -366,6 +374,9 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 		}
 		pv, err := parsePropValue(valStr)
 		if err != nil {
+			if errors.Is(err, ErrPropertyValueIsNull) {
+				continue // null value: openCypher says do not set the property
+			}
 			return nil, fmt.Errorf("key %q: %w", key, err)
 		}
 		out = append(out, propLiteral{key: key, value: pv})
@@ -444,6 +455,9 @@ func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propL
 
 		pv, err := parsePropValueWithParams(valStr, params)
 		if err != nil {
+			if errors.Is(err, ErrPropertyValueIsNull) {
+				continue // null value: openCypher says do not set the property
+			}
 			return nil, fmt.Errorf("key %q: %w", key, err)
 		}
 		out = append(out, propLiteral{key: key, value: pv})
@@ -504,6 +518,15 @@ func parsePropValue(s string) (lpg.PropertyValue, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return lpg.PropertyValue{}, fmt.Errorf("empty value")
+	}
+	// NULL literal — by openCypher semantics, setting a property to null
+	// removes (or never sets) the property. The caller is expected to
+	// consult ErrPropertyValueIsNull and skip the SetNodeProperty /
+	// SetEdgeProperty call entirely. Returning a typed sentinel rather
+	// than the zero PropertyValue lets the caller distinguish "skip"
+	// from "encoding error".
+	if s == "null" {
+		return lpg.PropertyValue{}, ErrPropertyValueIsNull
 	}
 	// Temporal function calls (string-form constructors).
 	if pv, ok, err := parseTemporalLiteral(s); ok {

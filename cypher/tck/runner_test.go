@@ -143,11 +143,17 @@ import (
 //     pipeline. +55 scenarios across with-orderBy, with-skip-limit,
 //     pattern-comprehension and aggregation suites. Observed 1951
 //     across a 3-run sample; gate set conservatively at 1948.
+//   - 1955: raised after task T937 partial closure — parsePropValue
+//     recognises the "null" literal and returns ErrPropertyValueIsNull;
+//     the property-map iterators in parsePropLiteral and
+//     parsePropLiteralWithParams skip null entries entirely, matching
+//     openCypher CREATE-with-null semantics (the property is not set).
+//     Observed 1958 across a 3-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1948
+const tckExecutionBaseline = 1955
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
