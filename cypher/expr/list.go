@@ -21,10 +21,14 @@ import "gograph/cypher/ast"
 // evalSlice evaluates a [ast.SliceExpr]: expr[from..to].
 //
 // Semantics:
-//   - from defaults to 0 when nil or NULL.
-//   - to defaults to len(list) when nil or NULL.
-//   - Negative bounds are resolved relative to the end of the list.
-//   - Out-of-range bounds are clamped to [0, len(list)].
+//   - When the source is NULL or not a list, the result is NULL.
+//   - Bounds that are absent in the source (n.From or n.To is nil)
+//     default to 0 and len(list) respectively.
+//   - Bounds that are present but evaluate to NULL propagate to NULL
+//     for the whole slice — `list[1..null]`, `list[null..3]` and
+//     `list[null..null]` all return NULL per openCypher.
+//   - Negative lower bounds are resolved relative to the end of the
+//     list. Out-of-range bounds are clamped to [0, len(list)].
 //   - The result is the half-open slice [from, to).
 func evalSlice(n *ast.SliceExpr, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	src, err := evalExpr(n.Expr, row, params, reg)
@@ -47,13 +51,14 @@ func evalSlice(n *ast.SliceExpr, row RowContext, params map[string]Value, reg Fu
 		if err != nil {
 			return nil, err
 		}
-		if !IsNull(fv) {
-			iv, ok := fv.(IntegerValue)
-			if !ok {
-				return Null, nil
-			}
-			from = resolveIndex(int(iv), ln)
+		if IsNull(fv) {
+			return Null, nil
 		}
+		iv, ok := fv.(IntegerValue)
+		if !ok {
+			return Null, nil
+		}
+		from = resolveIndex(int(iv), ln)
 	}
 
 	to := ln
@@ -62,20 +67,21 @@ func evalSlice(n *ast.SliceExpr, row RowContext, params map[string]Value, reg Fu
 		if err != nil {
 			return nil, err
 		}
-		if !IsNull(tv) {
-			iv, ok := tv.(IntegerValue)
-			if !ok {
-				return Null, nil
-			}
-			// Slice upper bound: do not offset-wrap negative values (openCypher
-			// slice upper bounds are positional, not from-end).
-			to = int(iv)
-			if to < 0 {
-				to = 0
-			}
-			if to > ln {
-				to = ln
-			}
+		if IsNull(tv) {
+			return Null, nil
+		}
+		iv, ok := tv.(IntegerValue)
+		if !ok {
+			return Null, nil
+		}
+		// Slice upper bound: do not offset-wrap negative values (openCypher
+		// slice upper bounds are positional, not from-end).
+		to = int(iv)
+		if to < 0 {
+			to = 0
+		}
+		if to > ln {
+			to = ln
 		}
 	}
 

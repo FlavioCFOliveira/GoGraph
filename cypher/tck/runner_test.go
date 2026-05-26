@@ -254,11 +254,19 @@ import (
 //     Temporal7 comparison scenarios across all five temporal kinds.
 //     Observed 2260 across a 3-run sample; gate set conservatively at
 //     2258.
+//   - 2265: raised after task T937 partial closure — evalSlice now
+//     propagates NULL when an explicitly-written bound evaluates to
+//     NULL (`list[1..null]`, `list[null..3]`, `list[null..null]` all
+//     return NULL). The previous implementation silently substituted
+//     the default (0 / len(list)) for an evaluated-NULL bound, which
+//     yielded the full or partial list instead of NULL. Absent bounds
+//     (e.g. `list[..3]`) keep the default-substitution behaviour
+//     unchanged. Observed 2267 across a 3-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2258
+const tckExecutionBaseline = 2265
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
