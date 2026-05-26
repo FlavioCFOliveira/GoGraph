@@ -23,6 +23,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -266,6 +267,11 @@ func (op *SetProperty) applyToNode(nodeKey string) error {
 	if op.propertyKey != "" {
 		pv, parseErr := parsePropValueWithParams(op.valueExpr, op.params)
 		if parseErr != nil {
+			if errors.Is(parseErr, ErrPropertyValueIsNull) {
+				// openCypher: SET n.k = null removes the property k from n.
+				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
+				return nil
+			}
 			return nil // non-literal expression: no-op for current IR
 		}
 		if op.reg != nil {
@@ -335,6 +341,11 @@ func (op *SetProperty) applyToRelationship(srcKey, dstKey string) error {
 	if op.propertyKey != "" {
 		pv, parseErr := parsePropValueWithParams(op.valueExpr, op.params)
 		if parseErr != nil {
+			if errors.Is(parseErr, ErrPropertyValueIsNull) {
+				// openCypher: SET r.k = null removes the property k from r.
+				op.mutator.DelEdgeProperty(srcKey, dstKey, op.propertyKey)
+				return nil
+			}
 			return nil // non-literal expression: no-op for current IR
 		}
 		return op.mutator.SetEdgeProperty(srcKey, dstKey, op.propertyKey, pv)

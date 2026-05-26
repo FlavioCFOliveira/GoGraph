@@ -206,6 +206,22 @@ func (s *stubMutator) DelEdgeProperty(src, dst, key string) {
 	}
 }
 
+// EdgeProperties returns a snapshot of the property map for the directed edge
+// (src, dst). The result is a fresh map; callers may mutate it freely.
+func (s *stubMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := src + "|" + dst
+	if s.edgeProps == nil || s.edgeProps[k] == nil {
+		return map[string]lpg.PropertyValue{}
+	}
+	out := make(map[string]lpg.PropertyValue, len(s.edgeProps[k]))
+	for kk, vv := range s.edgeProps[k] {
+		out[kk] = vv
+	}
+	return out
+}
+
 // getEdgeProp returns the edge property value for edge (src,dst) under key.
 func (s *stubMutator) getEdgeProp(src, dst, key string) (lpg.PropertyValue, bool) {
 	s.mu.Lock()

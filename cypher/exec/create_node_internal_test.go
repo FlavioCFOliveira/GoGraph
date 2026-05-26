@@ -89,7 +89,10 @@ func (m *seedStubMutator) SetEdgeLabel(string, string, string) { panic("unused")
 func (m *seedStubMutator) SetEdgeProperty(string, string, string, lpg.PropertyValue) error {
 	panic("unused")
 }
-func (m *seedStubMutator) DelEdgeProperty(string, string, string)    { panic("unused") }
+func (m *seedStubMutator) DelEdgeProperty(string, string, string) { panic("unused") }
+func (m *seedStubMutator) EdgeProperties(string, string) map[string]lpg.PropertyValue {
+	panic("unused")
+}
 func (m *seedStubMutator) OutNeighbours(string) []string             { panic("unused") }
 func (m *seedStubMutator) InNeighbours(string) []string              { panic("unused") }
 func (m *seedStubMutator) OutDegree(string) int                      { panic("unused") }

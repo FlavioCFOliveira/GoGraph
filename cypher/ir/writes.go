@@ -215,9 +215,12 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 	return NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child), nil
 }
 
-// setClause translates a SET clause. Each SetItem becomes either SetLabels (for
-// the `SET n:Label` form) or SetProperty (for `SET n.prop = expr` and whole-
-// entity assignment forms).
+// setClause translates a SET clause. Each SetItem becomes one of:
+//   - [SetLabels] for the `SET n:Label` form.
+//   - [SetProperty] for the single-property form `SET n.prop = expr`.
+//   - [SetAllProperties] for the whole-entity forms `SET n = …` and
+//     `SET n += …`, where the right-hand side may be another bound entity, a
+//     literal map, or a parameter reference.
 func (t *translator) setClause(s *ast.Set, child LogicalPlan) (LogicalPlan, error) {
 	plan := child
 	for _, item := range s.Items {
@@ -230,14 +233,33 @@ func (t *translator) setClause(s *ast.Set, child LogicalPlan) (LogicalPlan, erro
 		}
 		if prop, ok := item.Target.(*ast.Property); ok {
 			plan = NewSetProperty(prop.Receiver.String(), prop.Key, item.Value.String(), plan)
-		} else {
-			// Whole-node assignment (n = {…} or n += {…}): model as SetProperty
-			// with an empty property key to signal whole-entity update until a
-			// dedicated expression IR is introduced.
-			plan = NewSetProperty(item.Target.String(), "", item.Value.String(), plan)
+			continue
 		}
+		// Whole-entity assignment: `SET n = …` (replace) or `SET n += …` (merge).
+		entityVar := item.Target.String()
+		isReplace := item.Operator == "="
+		plan = newSetAllForValue(entityVar, item.Value, isReplace, plan)
 	}
 	return plan, nil
+}
+
+// newSetAllForValue produces the correct SetAllProperties shape for the given
+// RHS expression. Variable references become entity-copy operators; map
+// literals become literal-map operators; parameter references become
+// parameter-source operators. Any other expression form is conservatively
+// encoded as a literal-map string so the exec layer's literal-map parser can
+// attempt to handle it (and silently no-op when it cannot).
+func newSetAllForValue(entityVar string, value ast.Expression, isReplace bool, child LogicalPlan) *SetAllProperties {
+	switch v := value.(type) {
+	case *ast.Variable:
+		return NewSetAllPropertiesFromEntity(entityVar, v.Name, isReplace, child)
+	case *ast.Parameter:
+		return NewSetAllPropertiesFromParam(entityVar, v.Name, isReplace, child)
+	case *ast.MapLiteral:
+		return NewSetAllPropertiesFromMap(entityVar, v.String(), isReplace, child)
+	default:
+		return NewSetAllPropertiesFromMap(entityVar, value.String(), isReplace, child)
+	}
 }
 
 // removeClause translates a REMOVE clause. Each RemoveItem becomes either

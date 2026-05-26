@@ -539,11 +539,27 @@ import (
 //     and undirected patterns. Net uplift: +11-19 scenarios above
 //     3209. Observed 3220-3228 across a 5-run sample; gate set
 //     conservatively at 3215 (minimum observed - 5).
+//   - 3235: raised after the SET entity-replace / map-merge property
+//     semantics uplift. The IR translator now emits a dedicated
+//     [ir.SetAllProperties] node for the whole-entity SET forms
+//     (`SET n = …` and `SET n += …`), capturing the source as either
+//     a bound entity reference, a literal map, or a parameter name.
+//     The exec layer's matching [exec.SetAllProperties] operator
+//     resolves the target and source bindings per row, snapshots the
+//     source's properties via GraphMutator.NodeProperties /
+//     EdgeProperties, and writes them to the target with replace or
+//     merge semantics. The GraphMutator interface gained
+//     EdgeProperties so relationship-copy can read its source. Single-
+//     property SET with a null RHS now deletes the property rather
+//     than no-op'ing, matching openCypher's null-as-deletion rule.
+//     Net uplift: +6-14 scenarios above 3228. Observed 3234-3243
+//     across an 8-run sample (some under -race showing the lower
+//     end); gate set conservatively at 3229 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3215
+const tckExecutionBaseline = 3229
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

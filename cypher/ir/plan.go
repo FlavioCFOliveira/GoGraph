@@ -1382,6 +1382,91 @@ func (s *SetProperty) Vars() []string { return []string{s.EntityVar} }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// SetAllProperties replaces or merges every property on an already-bound node
+// or relationship per input row. It implements the Cypher SET entity-replace
+// (`SET n = …`) and entity-append (`SET n += …`) forms.
+//
+// The source side may be one of:
+//   - A bound entity reference (SourceVar non-empty): copy all of the source
+//     entity's properties to the target.
+//   - A literal map (MapLiteral non-empty): write each key/value pair as
+//     parsed by the exec literal-map parser.
+//   - A query parameter (ParamName non-empty): resolve at exec time.
+//
+// IsReplace=true models `SET n = …` semantics: every existing property of the
+// target is removed before the source is applied. IsReplace=false models
+// `SET n += …` semantics: existing properties are kept unless overwritten by
+// a same-keyed entry in the source.
+//
+// In both modes, null values in the source map remove the matching property
+// from the target.
+type SetAllProperties struct {
+	// EntityVar is the already-bound node or relationship variable.
+	EntityVar string
+	// IsReplace selects `=` (true, replace) vs `+=` (false, merge) semantics.
+	IsReplace bool
+	// SourceVar names a bound node/relationship whose properties are copied.
+	// Empty when the source is a literal map or a parameter reference.
+	SourceVar string
+	// MapLiteral holds the opaque literal-map string (e.g. `{a: 1, b: "x"}`)
+	// produced by the AST printer. Empty when the source is a SourceVar or a
+	// parameter reference.
+	MapLiteral string
+	// ParamName holds the `$name` reference text (without the dollar sign)
+	// when the source is a parameter. Empty otherwise.
+	ParamName string
+	// Child is the driving subplan.
+	Child LogicalPlan
+}
+
+// NewSetAllPropertiesFromEntity creates a SetAllProperties operator copying
+// every property from sourceVar (a bound node or relationship) to entityVar.
+func NewSetAllPropertiesFromEntity(entityVar, sourceVar string, isReplace bool, child LogicalPlan) *SetAllProperties {
+	return &SetAllProperties{
+		EntityVar: entityVar,
+		IsReplace: isReplace,
+		SourceVar: sourceVar,
+		Child:     child,
+	}
+}
+
+// NewSetAllPropertiesFromMap creates a SetAllProperties operator writing every
+// key/value pair from a literal map expression to entityVar.
+func NewSetAllPropertiesFromMap(entityVar, mapLiteral string, isReplace bool, child LogicalPlan) *SetAllProperties {
+	return &SetAllProperties{
+		EntityVar:  entityVar,
+		IsReplace:  isReplace,
+		MapLiteral: mapLiteral,
+		Child:      child,
+	}
+}
+
+// NewSetAllPropertiesFromParam creates a SetAllProperties operator writing
+// every key/value pair from the named query parameter to entityVar.
+func NewSetAllPropertiesFromParam(entityVar, paramName string, isReplace bool, child LogicalPlan) *SetAllProperties {
+	return &SetAllProperties{
+		EntityVar: entityVar,
+		IsReplace: isReplace,
+		ParamName: paramName,
+		Child:     child,
+	}
+}
+
+// Children implements LogicalPlan.
+func (s *SetAllProperties) Children() []LogicalPlan { return []LogicalPlan{s.Child} }
+
+// Vars implements LogicalPlan. SetAllProperties does not introduce new
+// variables. When a SourceVar is set, it is reported so plan walkers can see
+// the dependency.
+func (s *SetAllProperties) Vars() []string {
+	if s.SourceVar != "" {
+		return []string{s.EntityVar, s.SourceVar}
+	}
+	return []string{s.EntityVar}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // SetLabels adds one or more labels to an already-bound node.
 type SetLabels struct {
 	// NodeVar is the already-bound node variable.

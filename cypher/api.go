@@ -1151,6 +1151,47 @@ func buildOperatorWrite(
 		}
 		return sp, nil
 
+	case *ir.SetAllProperties:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		schemaCopy := copySchema(schema)
+		var sap *exec.SetAllProperties
+		switch {
+		case p.SourceVar != "":
+			sap = exec.NewSetAllPropertiesFromEntity(p.EntityVar, p.SourceVar, p.IsReplace, schemaCopy, child, mutator)
+		case p.ParamName != "":
+			sap = exec.NewSetAllPropertiesFromParam(p.EntityVar, p.ParamName, p.IsReplace, schemaCopy, child, mutator)
+		default:
+			var bErr error
+			sap, bErr = exec.NewSetAllPropertiesFromMap(p.EntityVar, p.MapLiteral, p.IsReplace, schemaCopy, child, mutator)
+			if bErr != nil {
+				return nil, bErr
+			}
+		}
+		if len(params) > 0 {
+			var pErr error
+			sap, pErr = sap.WithParams(params)
+			if pErr != nil {
+				return nil, pErr
+			}
+		}
+		if constraintReg != nil {
+			sap.WithConstraints(constraintReg, idxMgr)
+		}
+		if bopts != nil {
+			if info, isRel := bopts.edgeVarMeta[p.EntityVar]; isRel {
+				sap.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+			}
+			if p.SourceVar != "" {
+				if info, isRel := bopts.edgeVarMeta[p.SourceVar]; isRel {
+					sap.WithSourceRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+				}
+			}
+		}
+		return sap, nil
+
 	case *ir.SetLabels:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 		if err != nil {
@@ -3932,6 +3973,12 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 	}
 }
 
+// EdgeProperties returns a snapshot of every property currently set on the
+// directed edge (src, dst).
+func (a *lpgMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
+	return a.g.EdgeProperties(src, dst)
+}
+
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 	var out []string
@@ -4164,6 +4211,12 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
 		})
 	}
+}
+
+// EdgeProperties returns a snapshot of every property currently set on the
+// directed edge (src, dst).
+func (a *walMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
+	return a.g.EdgeProperties(src, dst)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.

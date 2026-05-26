@@ -153,6 +153,8 @@ func operatorName(plan LogicalPlan) string {
 		return "CreateRelationship"
 	case *SetProperty:
 		return "SetProperty"
+	case *SetAllProperties:
+		return "SetAllProperties"
 	case *SetLabels:
 		return "SetLabels"
 	case *RemoveProperty:

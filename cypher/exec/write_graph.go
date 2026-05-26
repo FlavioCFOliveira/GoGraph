@@ -77,6 +77,11 @@ type GraphMutator interface {
 	// (src, dst) (no-op if absent).
 	DelEdgeProperty(src, dst, key string)
 
+	// EdgeProperties returns a snapshot of every property currently set on
+	// the directed edge (src, dst). Returns an empty map when the edge has
+	// no properties or does not exist.
+	EdgeProperties(src, dst string) map[string]lpg.PropertyValue
+
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.
 	OutNeighbours(n string) []string
