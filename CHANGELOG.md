@@ -34,9 +34,49 @@ and the project follows [Semantic Versioning](https://semver.org/).
 v2.0.0 stable is pending. Gate requirement: execution-level TCK ≥ 80 %,
 all CI checks green, and all T-series tasks in `docs/tck/DIVERGENCES.md`
 closed. Current status (commit `7405463`, 2026-05-22):
-**39.4 % execution TCK** (1 536 / 3 897 scenarios), up from 25.8 % at
-v2.0.0-rc2. See `docs/semver.md` for the full release-gate specification
-and `docs/tck/DIVERGENCES.md` for the authoritative pass-rate table.
+**parser-level TCK 100 %** (3 897 / 3 897 scenarios, up from 99.5 % at
+v2.0.0-rc2 — task #402, Sprint 43 closed the last grammar-gap-literal
+sub-class) and **39.4 % execution TCK** (1 536 / 3 897 scenarios, up
+from 25.8 % at v2.0.0-rc2). See `docs/semver.md` for the full
+release-gate specification and `docs/tck/DIVERGENCES.md` for the
+authoritative pass-rate table.
+
+### Added — Sprint 78 (Production-readiness blockers)
+
+- **`search/`**: NaN/Inf float-weight gate at the public-API boundary of
+  Dijkstra, A\*, Bidirectional Dijkstra, Yen, K-shortest loopless, Prim,
+  Kruskal, Floyd-Warshall, and Johnson APSP — returns
+  `ErrInvalidInput` (existing sentinel reused). Integer Weight kinds
+  short-circuit in O(1) via type switch (closes T926).
+- **`search/floyd_warshall.go`**: CLRS §25.2 post-DP diagonal scan
+  detects negative-weight cycles and returns `ErrNegativeCycle`
+  (reuses the BellmanFord sentinel). Previously the matrix silently
+  returned distances polluted by the cycle (closes T927).
+- **`search/bibfs.go`**: bidirectional BFS now completes the current
+  frontier-expansion level before declaring the meet point, picking
+  the minimum-total-distance intersection. Previous first-collision
+  rule could return paths strictly longer than the unweighted
+  shortest distance on asymmetric topologies (closes T928).
+- **`cypher/plan_cache.go`** + **`cypher/exec/{create,drop}_{index,constraint}.go`**:
+  plan cache is invalidated after CREATE/DROP INDEX/CONSTRAINT via a
+  per-operator `onSchemaChange` callback wired to `Engine.ClearPlanCache`.
+  `IF [NOT] EXISTS` silent-success branches do NOT invalidate. New
+  `cypher.plan_cache.invalidations` counter (closes T933).
+
+### Fixed — Sprint 78
+
+- **`search/dijkstra_ctx_cancel_test.go`**: `TestDijkstraCtx_Cancel_ViaChan`
+  bumped from 100 k to 1 M nodes so the traversal outlives the 1 ms
+  cancellation goroutine on Apple M-series and other fast hardware
+  (closes T925).
+
+### Documentation — Sprint 78
+
+- **`README.md`**, **`docs/semver.md`**, **`docs/tck/DIVERGENCES.md`**:
+  reconciled drift across parser conformance (100 % everywhere),
+  snapshot manifest version (`3` in `semver.md`, matching the writer),
+  and the v2.0.0 execution-TCK milestone target (80 % everywhere,
+  matching the release gate). Closes T936.
 
 Adopters upgrading from a 1.x release line should consult the new
 [1.x → 2.x migration guide](docs/migration-1-to-2.md), which collects

@@ -64,7 +64,7 @@ Three on-disk formats are versioned:
 | Format        | Current version | Spec                            |
 |---------------|-----------------|---------------------------------|
 | WAL frame     | 1               | `store/wal/FORMAT.md`           |
-| Snapshot manifest | 1           | embedded JSON, validated by   `store/snapshot.LoadManifest` |
+| Snapshot manifest | 3           | embedded JSON, validated by `store/snapshot.LoadManifest`; readers accept versions ≤ 3 (v1 CSR-only, v2 CSR + labels + properties, v3 adds typed mapper/indexes). |
 | csrfile       | 1               | `docs/csrfile-v1.md`            |
 
 Format-version bumps follow the bump-on-incompatible-change rule

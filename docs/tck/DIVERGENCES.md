@@ -306,7 +306,7 @@ the full closure record.
 | Sprint 33 | ~45 % execution | OPTIONAL MATCH + multi-pattern |
 | Sprint 34 | ~60 % execution | Aggregation functions |
 | Sprint 35 | ~75 % execution | Path expressions + ORDER BY/SKIP/LIMIT |
-| v2.0.0 | ≥ 90 % execution | Temporal types + subqueries + remaining grammar fixes |
+| v2.0.0 | ≥ 80 % execution | Temporal types + subqueries + remaining grammar fixes. The 80 % gate is the canonical release-gate threshold in [docs/semver.md](../semver.md#release-gates); earlier drafts of this milestone table cited 90 %, which is reconciled here. |
 
 ### Resolved items
 

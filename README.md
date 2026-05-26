@@ -77,7 +77,7 @@ deployments should pin a stable tag once cut.
   pipeline with plan-cache, EXPLAIN/PROFILE, and dbhits accounting.
 - `gograph/cypher/funcs` · `cypher/procs` — built-in functions and
   procedures.
-- `gograph/cypher/tck` — openCypher TCK harness (parser 99.5 %,
+- `gograph/cypher/tck` — openCypher TCK harness (parser 100 %,
   execution 39.4 % on HEAD; see
   [docs/tck/DIVERGENCES.md](docs/tck/DIVERGENCES.md)).
 
