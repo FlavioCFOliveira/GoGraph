@@ -295,11 +295,19 @@ import (
 //     Unlocks features/expressions/mathematical/Mathematical8 and
 //     similar precedence scenarios. Observed 2274-2275 across a 5-run
 //     sample.
+//   - 2308: raised after Audit Cycle 4 (Sprint 82) — two fixes:
+//     (a) T957: list literal support in property map parser for CREATE/MERGE
+//     ({seasons: [1,2,3,4,5,6,7]}, {list: ['A','B']}, etc.) backed by new
+//     lpg.PropList (kind 7) with snapshot/WAL/recovery encode-decode.
+//     (b) T958: toString() extended to accept all six openCypher temporal
+//     kinds (DATE, DATETIME, LOCALDATETIME, TIME, LOCALTIME, DURATION)
+//     returning their canonical ISO-8601 string representation.
+//     Net uplift: +35 scenarios. Observed 2305-2308 across a 5-run sample.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2273
+const tckExecutionBaseline = 2305
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
