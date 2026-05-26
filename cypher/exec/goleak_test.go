@@ -19,11 +19,19 @@ import (
 // Per CLAUDE.md: every package that spawns goroutines must integrate
 // go.uber.org/goleak.
 //
-// cypher/exec spawns goroutines for morsel-parallel evaluation
-// (ParallelScan, Apply, SemiApply, Sort, Top, Distinct, Union,
-// Aggregation, OptionalExpand, VarLengthExpand, …). Without this
-// guard, an operator that forgot to drain or cancel a child pipeline
-// on the error path would leak a goroutine per affected test
+// Operator goroutine catalogue (as of this sprint):
+//
+//   - ParallelScan: spawns one splitter goroutine plus N worker goroutines
+//     during Init. Workers exit when the output channel is closed or ctx is
+//     cancelled. This is the only exec operator that directly calls go func.
+//   - Apply, SemiApply, AntiSemiApply, CorrelatedApply, OptionalExpand,
+//     RollupApply: drive inner pipelines synchronously; no goroutines spawned.
+//   - EagerAggregation, GlobalAggregateAdapter, Sort, Top, Distinct, Union:
+//     accumulate or merge rows synchronously; no goroutines spawned.
+//   - VarLengthExpand: iterative BFS/DFS loop; no goroutines spawned.
+//
+// Without this guard, an operator that forgot to drain or cancel a child
+// pipeline on the error path would leak a goroutine per affected test
 // invocation, accumulating silently across the suite.
 //
 // goleak.IgnoreTopFunction is used sparingly: only for goroutines
