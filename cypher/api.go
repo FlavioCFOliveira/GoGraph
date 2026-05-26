@@ -1372,7 +1372,7 @@ func buildOperator(
 				capturedReg := reg
 				capturedBopts := bopts
 				return exec.NewFilter(child, func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaSnap, capturedG)
+					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
 					return evalRow(capturedBopts, predExpr, rowCtx, capturedParams, capturedReg)
 				}), nil
 			}
@@ -1966,7 +1966,7 @@ func newAggregationEval(
 	// AST path — always preferred when present.
 	if astExpr != nil {
 		return func(row exec.Row) (expr.Value, error) {
-			rowCtx := buildRowCtx(row, schemaSnap, g)
+			rowCtx := buildRowCtx(row, schemaSnap, g, bopts)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
 		}
 	}
@@ -2486,7 +2486,7 @@ func buildUnwindOperator(
 	capturedBopts := bopts
 
 	return exec.NewUnwind(child, func(row exec.Row) (expr.ListValue, error) {
-		rowCtx := buildRowCtx(row, schemaSnap, capturedG)
+		rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
 		v, err := evalRow(capturedBopts, listExpr, rowCtx, capturedParams, capturedReg)
 		if err != nil {
 			return nil, err
@@ -2560,16 +2560,78 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 
 // buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,
 // upgrading IntegerValue(nodeID) entries to NodeValue with properties loaded
-// from the graph. g may be nil when no graph is available (upgrade is skipped).
-func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64]) expr.RowContext {
+// from the graph. g may be nil when no graph is available (upgrade is
+// skipped). When bopts carries edgeVarMeta entries (T937) the relationship
+// variables they describe are reconstructed as full RelationshipValues with
+// their typed properties loaded from the graph, so property-access
+// expressions such as `r.since` resolve through the bound relationship.
+func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
 		}
+		if bopts != nil && bopts.edgeVarMeta != nil {
+			if meta, isEdge := bopts.edgeVarMeta[varName]; isEdge {
+				if rv, ok := buildRelationshipValueFromRow(row, meta, g); ok {
+					ctx[varName] = rv
+					continue
+				}
+			}
+		}
 		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)
 	}
 	return ctx
+}
+
+// buildRelationshipValueFromRow reconstructs a [expr.RelationshipValue] from
+// the (srcCol, edgeCol, dstCol) triplet emitted by the [exec.Expand]
+// operator. The edge type and Properties are looked up on the live graph
+// when both endpoints resolve. Returns (zero, false) when the row does not
+// contain the expected columns or when the column types are not
+// IntegerValue.
+func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[string, float64]) (expr.RelationshipValue, bool) {
+	if meta.edgeCol >= len(row) {
+		return expr.RelationshipValue{}, false
+	}
+	edgeIDVal, ok := row[meta.edgeCol].(expr.IntegerValue)
+	if !ok {
+		return expr.RelationshipValue{}, false
+	}
+	var srcID, dstID uint64
+	if meta.srcCol < len(row) {
+		if iv, ok2 := row[meta.srcCol].(expr.IntegerValue); ok2 {
+			srcID = uint64(iv)
+		}
+	}
+	if meta.dstCol < len(row) {
+		if iv, ok2 := row[meta.dstCol].(expr.IntegerValue); ok2 {
+			dstID = uint64(iv)
+		}
+	}
+	edgeType := meta.edgeType
+	var edgeProps expr.MapValue
+	if g != nil && srcID != 0 {
+		srcKey, srcResolved := g.AdjList().Mapper().Resolve(graph.NodeID(srcID))
+		dstKey, dstResolved := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+		if srcResolved && dstResolved {
+			if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+				edgeType = ets[0]
+			}
+			rawEP := g.EdgeProperties(srcKey, dstKey)
+			edgeProps = make(expr.MapValue, len(rawEP))
+			for k, pv := range rawEP {
+				edgeProps[k] = lpgPropToExpr(pv)
+			}
+		}
+	}
+	return expr.RelationshipValue{
+		ID:         uint64(edgeIDVal),
+		StartID:    srcID,
+		EndID:      dstID,
+		Type:       edgeType,
+		Properties: edgeProps,
+	}, true
 }
 
 // buildIRProjection converts IR ProjectionItems to a physical Project operator.
@@ -2782,7 +2844,7 @@ func buildIRProjection(
 				capturedReg := reg
 				capturedBopts := bopts
 				evalFn = func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaSnap, capturedG)
+					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
 					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				}
 			}

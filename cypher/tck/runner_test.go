@@ -61,11 +61,18 @@ import (
 //     scenarios that rely on idempotent merge semantics.
 //     Observed 1571-1573 across a 3-run sample; the gate is set
 //     conservatively at 1568 to absorb run-to-run variance.
+//   - 1576: raised after task T937 partial closure — buildRowCtx now
+//     reconstructs full [expr.RelationshipValue]s (with typed properties)
+//     for every variable in bopts.edgeVarMeta, so r.prop expressions in
+//     WHERE/RETURN/UNWIND/Filter resolve against the bound edge instead of
+//     evaluating to null.
+//     Observed 1578-1580 across a 3-run sample; the gate is set
+//     conservatively at 1576 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1568
+const tckExecutionBaseline = 1576
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
