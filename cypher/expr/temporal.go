@@ -453,7 +453,17 @@ func formatOffsetSec(secs int) string {
 		sign = "-"
 		secs = -secs
 	}
-	return fmt.Sprintf("%s%02d:%02d", sign, secs/3600, (secs%3600)/60)
+	// Some IANA zones carry historical sub-minute offsets (e.g.
+	// Europe/Stockholm before 1900 used +00:53:28). Append the seconds
+	// component only when it is non-zero so the common minute-aligned
+	// form `+HH:MM` is preserved for modern data.
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	s := secs % 60
+	if s != 0 {
+		return fmt.Sprintf("%s%02d:%02d:%02d", sign, h, m, s)
+	}
+	return fmt.Sprintf("%s%02d:%02d", sign, h, m)
 }
 
 // formatDuration renders a [DurationValue] in canonical ISO-8601 form.
