@@ -356,7 +356,27 @@ func dateTimeFromMap(m expr.MapValue) (expr.Value, error) {
 }
 
 // timeComponentsFromMap extracts hour/minute/second/nanosecond from m.
+//
+// When m contains a "time" key whose value is a temporal value carrying a
+// time-of-day (LocalTime, Time, LocalDateTime, DateTime), its components
+// are used as the base; explicit hour/minute/second/nanosecond/millisecond/
+// microsecond keys override the base component-by-component.
 func timeComponentsFromMap(m expr.MapValue) (h, mn, s, ns int) {
+	// Base from {time: ...} if present.
+	if tv, ok := m["time"]; ok {
+		switch t := tv.(type) {
+		case expr.LocalTimeValue:
+			hh, mm, ss, nn := splitNanos(t.Nanos)
+			h, mn, s, ns = hh, mm, ss, nn
+		case expr.TimeValue:
+			hh, mm, ss, nn := splitNanos(t.Nanos)
+			h, mn, s, ns = hh, mm, ss, nn
+		case expr.LocalDateTimeValue:
+			h, mn, s, ns = t.T.Hour(), t.T.Minute(), t.T.Second(), t.T.Nanosecond()
+		case expr.DateTimeValue:
+			h, mn, s, ns = t.T.Hour(), t.T.Minute(), t.T.Second(), t.T.Nanosecond()
+		}
+	}
 	if v, ok := m["hour"]; ok {
 		if i, ok2 := intFromValue(v); ok2 {
 			h = int(i)
@@ -372,6 +392,8 @@ func timeComponentsFromMap(m expr.MapValue) (h, mn, s, ns int) {
 			s = int(i)
 		}
 	}
+	// Sub-second overrides: explicit nanosecond wins; otherwise millisecond
+	// or microsecond overrides the base's nanosecond entirely.
 	if v, ok := m["nanosecond"]; ok {
 		if i, ok2 := intFromValue(v); ok2 {
 			ns = int(i)
@@ -388,16 +410,58 @@ func timeComponentsFromMap(m expr.MapValue) (h, mn, s, ns int) {
 	return
 }
 
+// zoneFromTemporal returns the fixed-offset location of a temporal value
+// carrying a zone (TimeValue, DateTimeValue), or nil for kinds without one.
+func zoneFromTemporal(v expr.Value) *time.Location {
+	switch t := v.(type) {
+	case expr.TimeValue:
+		return time.FixedZone("offset", int(t.OffsetSec))
+	case expr.DateTimeValue:
+		return t.T.Location()
+	}
+	return nil
+}
+
+// splitNanos converts an absolute nanosecond-of-day count into
+// (hour, minute, second, nanosecond) components.
+func splitNanos(n int64) (h, mn, s, ns int) {
+	const (
+		nsPerHour   = int64(time.Hour)
+		nsPerMinute = int64(time.Minute)
+		nsPerSecond = int64(time.Second)
+	)
+	h = int(n / nsPerHour)
+	n %= nsPerHour
+	mn = int(n / nsPerMinute)
+	n %= nsPerMinute
+	s = int(n / nsPerSecond)
+	ns = int(n % nsPerSecond)
+	return
+}
+
 // zoneFromMap resolves a "timezone" key to a *time.Location. Recognises:
 //
 //   - "Z" or "UTC"          → time.UTC
 //   - "+HH:MM" or "-HH:MM"  → time.FixedZone with that offset
 //   - Named zone string     → time.LoadLocation, falling back to UTC on error
 //
-// When no timezone key is present, returns time.UTC.
+// When no timezone key is present, the timezone is inherited from a {time:..}
+// or {datetime:..} base value when those carry a fixed offset (Time,
+// DateTime). When no base timezone is available either, returns time.UTC.
 func zoneFromMap(m expr.MapValue) *time.Location {
 	v, ok := m["timezone"]
 	if !ok {
+		// Inherit from {time:..} or {datetime:..} base if present.
+		if tv, ok := m["time"]; ok {
+			if loc := zoneFromTemporal(tv); loc != nil {
+				return loc
+			}
+		}
+		if tv, ok := m["datetime"]; ok {
+			if loc := zoneFromTemporal(tv); loc != nil {
+				return loc
+			}
+		}
 		return time.UTC
 	}
 	s, ok := v.(expr.StringValue)
@@ -517,6 +581,16 @@ func fnTime(args []expr.Value) (expr.Value, error) {
 							off = o
 						}
 					}
+				}
+			} else if tv, ok := v["time"]; ok {
+				// Inherit offset from {time: ...} base when no explicit
+				// timezone key was provided.
+				switch t := tv.(type) {
+				case expr.TimeValue:
+					off = int(t.OffsetSec)
+				case expr.DateTimeValue:
+					_, o := t.T.Zone()
+					off = o
 				}
 			}
 			return expr.NewTime(h, mn, s, ns, off), nil

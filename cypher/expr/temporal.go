@@ -871,8 +871,17 @@ func indexZoneStart(s string) int {
 }
 
 // parseOffset parses a zone offset suffix: "Z", "+HH:MM", "+HHMM", "+HH",
-// "-HH:MM", "-HHMM", or "-HH".
+// "-HH:MM", "-HHMM", or "-HH". An optional trailing bracketed IANA zone name
+// (e.g. "+02:00[Europe/Stockholm]") is stripped — the numeric offset is the
+// canonical wall-clock anchor and is preserved verbatim in the result.
 func parseOffset(s string) (int, error) {
+	// Drop a trailing bracketed IANA zone name. The named location is not
+	// preserved in [TimeValue]; the numeric offset is what later arithmetic
+	// uses, so dropping the bracket here keeps the parser tolerant of the
+	// extended Neo4j-style zone suffix accepted by openCypher tests.
+	if i := strings.IndexByte(s, '['); i >= 0 {
+		s = s[:i]
+	}
 	if s == "Z" {
 		return 0, nil
 	}
@@ -943,11 +952,21 @@ func ParseLocalDateTime(s string) (LocalDateTimeValue, error) {
 }
 
 // ParseDateTime parses ISO-8601 zoned date-time: YYYY-MM-DDTHH:MM:SS[.frac][±HH:MM|Z].
-// A zone suffix is required.
+// A zone suffix is required. An optional trailing bracketed IANA zone name
+// (e.g. "[Europe/Stockholm]") is honoured when [time.LoadLocation] resolves
+// it; otherwise the numeric offset is used to build a fixed-zone location.
 func ParseDateTime(s string) (DateTimeValue, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return DateTimeValue{}, fmt.Errorf("empty date-time")
+	}
+	// Extract an optional [Zone/Name] suffix before slicing the body —
+	// ParseTime drops the bracket section silently via parseOffset, so we
+	// need to peel it here to honour the named zone for the DateTime.
+	var zoneName string
+	if i := strings.LastIndexByte(s, '['); i >= 0 && strings.HasSuffix(s, "]") {
+		zoneName = s[i+1 : len(s)-1]
+		s = s[:i]
 	}
 	idx := strings.IndexAny(s, "Tt")
 	if idx < 0 {
@@ -962,6 +981,11 @@ func ParseDateTime(s string) (DateTimeValue, error) {
 		return DateTimeValue{}, err
 	}
 	loc := offsetLocation(int(tv.OffsetSec))
+	if zoneName != "" {
+		if l, lerr := time.LoadLocation(zoneName); lerr == nil {
+			loc = l
+		}
+	}
 	hh := int(tv.Nanos / int64(time.Hour))
 	rem := tv.Nanos % int64(time.Hour)
 	mm := int(rem / int64(time.Minute))

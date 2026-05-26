@@ -364,11 +364,31 @@ import (
 //     Net uplift: +225 scenarios above 2638. Observed 2869 across a
 //     3-run sample; gate set conservatively at 2860 to absorb
 //     run-to-run variance.
+//   - 2985: raised after Sprint 84 audit round 8 — three temporal-stack
+//     fixes landed together: (a) T967 timeComponentsFromMap now accepts
+//     a {time: <baseValue>} key (LocalTime/Time/LocalDateTime/DateTime)
+//     and inherits hour/minute/second/nanosecond before explicit
+//     overrides apply; zoneFromMap inherits the offset from a {time}
+//     or {datetime} base when no explicit timezone key is given;
+//     time()'s map branch likewise inherits the base offset. (b) The
+//     applyOverrides function in temporal_truncate.go now decomposes
+//     the source's nanosecond-of-second into hierarchical (millisecond-
+//     of-second, microsecond-of-millisecond, nanosecond-of-microsecond)
+//     components, so an override such as `{nanosecond: 2}` after
+//     truncate('millisecond', src) preserves the truncated ms value
+//     and just sets the sub-microsecond component (.645000002 instead
+//     of the previous .000000002). (c) ParseDateTime / parseOffset
+//     now silently strip an optional trailing [IANA/Zone] bracket
+//     suffix and, when present and resolvable via time.LoadLocation,
+//     honour the named zone instead of the fixed-offset fallback —
+//     letting `datetime('2017-10-28T23:00+02:00[Europe/Stockholm]')`
+//     parse correctly. Net uplift: +126 scenarios above 2860. Observed
+//     2995 across a 3-run sample; gate set conservatively at 2985.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2860
+const tckExecutionBaseline = 2985
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

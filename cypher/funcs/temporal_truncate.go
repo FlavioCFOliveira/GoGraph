@@ -129,7 +129,16 @@ func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 	}
 	year, month, day := t.Year(), int(t.Month()), t.Day()
 	hour, minute, second := t.Hour(), t.Minute(), t.Second()
-	ns := t.Nanosecond()
+	// Decompose the nanosecond-of-second into hierarchical components
+	// (millisecond-of-second, microsecond-of-millisecond, nanosecond-of-
+	// microsecond). The openCypher truncate override applies each sub-
+	// second key independently — `{nanosecond: 2}` after truncate to the
+	// millisecond keeps the truncated ms value and just sets the sub-
+	// microsecond nanoseconds, producing e.g. .645000002.
+	nsRaw := t.Nanosecond()
+	ms := nsRaw / 1_000_000
+	us := (nsRaw / 1_000) % 1_000
+	nsec := nsRaw % 1_000
 	loc := t.Location()
 	// dayOfWeek is applied after year/month/day so it adjusts the final date
 	// by the difference between the requested ISO weekday and the current
@@ -168,15 +177,15 @@ func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 			}
 		case "millisecond":
 			if isInt {
-				ns = int(iv) * 1_000_000
+				ms = int(iv)
 			}
 		case "microsecond":
 			if isInt {
-				ns = int(iv) * 1_000
+				us = int(iv)
 			}
 		case "nanosecond":
 			if isInt {
-				ns = int(iv)
+				nsec = int(iv)
 			}
 		case "timezone":
 			if s, ok := v.(expr.StringValue); ok {
@@ -186,6 +195,7 @@ func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 			}
 		}
 	}
+	ns := ms*1_000_000 + us*1_000 + nsec
 	out := time.Date(year, time.Month(month), day, hour, minute, second, ns, loc)
 	if dayOfWeek >= 1 && dayOfWeek <= 7 {
 		cur := int(out.Weekday())
