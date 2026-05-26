@@ -1207,19 +1207,22 @@ func firstVar(vars []string) string {
 // parseNodePatternStr extracts labels and property string from an opaque IR
 // node-pattern string of the form "(var:Label1:Label2 {key:'val',...})".
 // Both outputs may be empty when the pattern is absent or unparseable.
+//
+// When the source pattern is a relationship MERGE such as
+// "(a)-[r:T {k:'v'}]->(b)", the head-node prefix has no labels or
+// properties, the leading "(...)" closes before the relationship body,
+// and the embedded "{...}" belongs to the relationship — not to the
+// head node. Both cases are handled defensively: only the head "(...)"
+// segment is scanned, and the property map is extracted by a
+// brace-balanced cursor so trailing pattern syntax never bleeds into
+// the props string.
 func parseNodePatternStr(pattern string) (labels []string, props string) {
-	// Strip outer parens.
 	s := strings.TrimSpace(pattern)
+	s = leadingParenSegment(s)
 	if len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
 		s = s[1 : len(s)-1]
 	}
-
-	// Split off any property map "{...}" suffix.
-	braceIdx := strings.Index(s, "{")
-	if braceIdx >= 0 {
-		props = strings.TrimSpace(s[braceIdx:])
-		s = s[:braceIdx]
-	}
+	s, props = extractBracedSuffix(s)
 
 	// Remaining: "var:Label1:Label2" — split on ':' and discard first token (var).
 	parts := strings.Split(s, ":")
@@ -1230,6 +1233,61 @@ func parseNodePatternStr(pattern string) (labels []string, props string) {
 		}
 	}
 	return
+}
+
+// leadingParenSegment returns the leading "(...)" segment of s using
+// paren-depth tracking so a relationship pattern "(a)-[...]->(b)"
+// resolves to "(a)" instead of consuming the entire string. Strings
+// that do not start with '(' or have unbalanced parens are returned
+// unchanged.
+func leadingParenSegment(s string) string {
+	if s == "" || s[0] != '(' {
+		return s
+	}
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return s[:i+1]
+			}
+		}
+	}
+	return s
+}
+
+// extractBracedSuffix splits the first balanced "{...}" suffix out of
+// s. Returns the head (everything before the opening brace) and the
+// balanced "{...}" substring. When s contains no '{', or the braces
+// are unbalanced, the head is s unchanged and props is empty.
+func extractBracedSuffix(s string) (head, props string) {
+	braceIdx := strings.IndexByte(s, '{')
+	if braceIdx < 0 {
+		return s, ""
+	}
+	depth := 0
+	end := -1
+	for i := braceIdx; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end > braceIdx {
+		props = strings.TrimSpace(s[braceIdx : end+1])
+	}
+	return s[:braceIdx], props
 }
 
 // BuildPlan converts an IR [ir.LogicalPlan] tree into a physical [exec.Operator]
