@@ -357,7 +357,10 @@ func projectionColumnName(it *ast.ProjectionItem) string {
 // column-header form. The implementation walks BinaryOp / UnaryOp
 // nodes with operator precedence so a child is only parenthesised
 // when its operator binds less tightly than its parent. Non-arithmetic
-// expressions fall through to their String() representation.
+// expressions fall through to their String() representation, with the
+// exception of [*ast.Property] whose receiver is wrapped in parens
+// when the receiver itself is not a bare variable (matching the TCK
+// canonical form `(list[1]).existing`).
 func exprToColumnName(e ast.Expression) string {
 	switch n := e.(type) {
 	case *ast.BinaryOp:
@@ -372,6 +375,13 @@ func exprToColumnName(e ast.Expression) string {
 			operand = "(" + operand + ")"
 		}
 		return n.Operator + operand
+	case *ast.Property:
+		// `n.x` keeps the bare-receiver spelling; expressions like
+		// `(list[1]).x` or `(case … end).x` parenthesise the receiver.
+		if _, isVar := n.Receiver.(*ast.Variable); isVar {
+			return n.Receiver.String() + "." + n.Key
+		}
+		return "(" + exprToColumnName(n.Receiver) + ")." + n.Key
 	default:
 		return e.String()
 	}
