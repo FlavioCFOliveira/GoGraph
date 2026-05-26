@@ -393,11 +393,18 @@ func (a *analyser) callClause(c *ast.Call) {
 func (a *analyser) createClause(c *ast.Create) {
 	// CREATE introduces new variables from the pattern.
 	a.patternIntroduce(c.Pattern)
+	// CREATE-specific relationship checks: every relationship pattern
+	// must have exactly one type. Zero types (`()-->()` or `()-[r]->()`
+	// without a label) and union types (`()-[:A|:B]->()`) are rejected.
+	a.checkCreateRelationshipTypes(c.Pattern)
 }
 
 func (a *analyser) mergeClause(m *ast.Merge) {
 	// MERGE may introduce new variables or reuse existing ones.
 	a.pathPatternIntroduce(m.Pattern)
+	// MERGE relationship-type rule: same as CREATE. A merged relationship
+	// pattern must declare exactly one type.
+	a.checkPathPatternRelTypes(m.Pattern)
 	// ON CREATE / ON MATCH SET items reference existing variables.
 	for _, si := range m.OnCreate {
 		a.checkExpr(si.Target)
@@ -1126,4 +1133,38 @@ func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
 		return
 	}
 	a.error(invalidBooleanOperandError(name, sym.Type, v.Pos))
+}
+
+// checkCreateRelationshipTypes flags every relationship pattern in pat
+// that does NOT declare exactly one type. The openCypher rule for
+// CREATE: each relationship must have one and only one type label;
+// missing types and union types are static errors.
+func (a *analyser) checkCreateRelationshipTypes(pat *ast.Pattern) {
+	if pat == nil {
+		return
+	}
+	for _, pp := range pat.Paths {
+		a.checkPathPatternRelTypes(pp)
+	}
+}
+
+// checkPathPatternRelTypes is the per-path implementation used by both
+// CREATE and MERGE. It also reports CreatingVarLength when a
+// relationship pattern carries a variable-length range — CREATE/MERGE
+// require fixed-length relationships per the openCypher spec.
+func (a *analyser) checkPathPatternRelTypes(pp *ast.PathPattern) {
+	if pp == nil {
+		return
+	}
+	for el := pp.Head; el != nil; el = el.Next {
+		if el.Relationship == nil {
+			continue
+		}
+		if el.Relationship.Range != nil {
+			a.error(invalidBooleanOperandError("relationship", "variable-length", el.Relationship.Pos))
+		}
+		if len(el.Relationship.Types) != 1 {
+			a.error(invalidBooleanOperandError("relationship", "must have exactly one type", el.Relationship.Pos))
+		}
+	}
 }
