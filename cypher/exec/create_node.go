@@ -332,6 +332,8 @@ func (op *CreateNode) Close() error {
 //   - Integer literals: decimal digits, optionally negated
 //   - Float literals: decimal with `.`
 //   - Boolean literals: `true` / `false`
+//   - List literals: `[v1, v2, ...]` — stored as [lpg.PropList]
+//   - Temporal function calls: `date(...)`, `datetime(...)`, etc.
 //
 // Returns nil (no error) for empty or absent property maps.
 func parsePropLiteral(s string) ([]propLiteral, error) {
@@ -488,6 +490,8 @@ func parsePropValueWithParams(s string, params map[string]expr.Value) (lpg.Prope
 			return lpg.Float64Value(float64(val)), nil
 		case expr.BoolValue:
 			return lpg.BoolValue(bool(val)), nil
+		case expr.ListValue:
+			return exprListToLPGList(val)
 		default:
 			return lpg.PropertyValue{}, fmt.Errorf("unsupported param type %T for $%s", v, name)
 		}
@@ -500,7 +504,7 @@ func parsePropValueWithParams(s string, params map[string]expr.Value) (lpg.Prope
 //
 // In addition to the primitive literals (string, boolean, integer, float) the
 // parser recognises temporal function calls expressed as their source-text
-// representation:
+// representation and list literals:
 //
 //	date('YYYY-MM-DD')                       → encoded PropString with magic prefix
 //	localdatetime('YYYY-MM-DDTHH:MM:SS')     → encoded PropString
@@ -508,6 +512,7 @@ func parsePropValueWithParams(s string, params map[string]expr.Value) (lpg.Prope
 //	localtime('HH:MM:SS')                    → encoded PropString
 //	time('HH:MM:SS±HH:MM')                   → encoded PropString
 //	duration('P...')                         → encoded PropString
+//	[v1, v2, ...]                            → lpg.PropList (elements parsed recursively)
 //
 // Temporal values are persisted as [lpg.PropString] with a leading
 // SOH-byte tag (0x01..0x06) followed by the canonical openCypher textual
@@ -528,6 +533,17 @@ func parsePropValue(s string) (lpg.PropertyValue, error) {
 	if s == "null" {
 		return lpg.PropertyValue{}, ErrPropertyValueIsNull
 	}
+	// List literal: [v1, v2, ...].
+	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		return parsePropList(s[1 : len(s)-1])
+	}
+	return parsePropScalar(s)
+}
+
+// parsePropScalar parses a non-list, non-null Cypher scalar literal value
+// (temporal function call, string, boolean, float, or integer). It is
+// extracted from [parsePropValue] to keep cyclomatic complexity manageable.
+func parsePropScalar(s string) (lpg.PropertyValue, error) {
 	// Temporal function calls (string-form constructors).
 	if pv, ok, err := parseTemporalLiteral(s); ok {
 		return pv, err
@@ -555,12 +571,70 @@ func parsePropValue(s string) (lpg.PropertyValue, error) {
 		}
 		return lpg.Float64Value(f), nil
 	}
-	// Integer.
+	// Integer (decimal, may be negative).
 	i, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return lpg.PropertyValue{}, fmt.Errorf("invalid literal %q: %w", s, err)
 	}
 	return lpg.Int64Value(i), nil
+}
+
+// parsePropList parses the inner content of a Cypher list literal (the part
+// between [ and ]). It splits elements using [splitMapItems] (which respects
+// string and nested-bracket boundaries) and recursively calls [parsePropValue]
+// on each element.
+//
+// An empty list literal "[]" produces a zero-element PropList.
+// Null elements are silently dropped (openCypher: [1, null, 3] → [1, 3]).
+func parsePropList(inner string) (lpg.PropertyValue, error) {
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return lpg.ListValue(nil), nil
+	}
+	parts := splitMapItems(inner)
+	elems := make([]lpg.PropertyValue, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		pv, err := parsePropValue(part)
+		if err != nil {
+			if errors.Is(err, ErrPropertyValueIsNull) {
+				continue // null inside list: openCypher drops the element
+			}
+			return lpg.PropertyValue{}, fmt.Errorf("list element %q: %w", part, err)
+		}
+		elems = append(elems, pv)
+	}
+	return lpg.ListValue(elems), nil
+}
+
+// exprListToLPGList converts an [expr.ListValue] (a query parameter or
+// intermediate expression value) to an [lpg.PropList] property value. Each
+// element is converted individually; unsupported element types return an error.
+func exprListToLPGList(lv expr.ListValue) (lpg.PropertyValue, error) {
+	elems := make([]lpg.PropertyValue, 0, len(lv))
+	for _, v := range lv {
+		var pv lpg.PropertyValue
+		switch val := v.(type) {
+		case expr.StringValue:
+			pv = lpg.StringValue(string(val))
+		case expr.IntegerValue:
+			pv = lpg.Int64Value(int64(val))
+		case expr.FloatValue:
+			pv = lpg.Float64Value(float64(val))
+		case expr.BoolValue:
+			pv = lpg.BoolValue(bool(val))
+		case expr.ListValue:
+			nested, err := exprListToLPGList(val)
+			if err != nil {
+				return lpg.PropertyValue{}, err
+			}
+			pv = nested
+		default:
+			return lpg.PropertyValue{}, fmt.Errorf("unsupported list element type %T", v)
+		}
+		elems = append(elems, pv)
+	}
+	return lpg.ListValue(elems), nil
 }
 
 // unescapeString handles the most common escape sequences in Cypher strings.

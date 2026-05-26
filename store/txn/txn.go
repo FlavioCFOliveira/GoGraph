@@ -737,12 +737,19 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 //	...value bytes...
 //
 // Kind tags map 1:1 to [lpg.PropString], [lpg.PropInt64], [lpg.PropFloat64],
-// [lpg.PropBool], [lpg.PropTime], [lpg.PropBytes]. For [lpg.PropString] and
-// [lpg.PropBytes] the value is prefixed with a uint32 LE length. For
-// [lpg.PropInt64] the value is a signed varint. For [lpg.PropFloat64] the value
-// is a uint64 LE IEEE-754 bit pattern. For [lpg.PropBool] the value is a
-// single byte (0 or 1). For [lpg.PropTime] the value is the UTC Unix nanoseconds
-// as a signed varint.
+// [lpg.PropBool], [lpg.PropTime], [lpg.PropBytes], [lpg.PropList]. For
+// [lpg.PropString] and [lpg.PropBytes] the value is prefixed with a uint32 LE
+// length. For [lpg.PropInt64] the value is a signed varint. For [lpg.PropFloat64]
+// the value is a uint64 LE IEEE-754 bit pattern. For [lpg.PropBool] the value is
+// a single byte (0 or 1). For [lpg.PropTime] the value is the UTC Unix nanoseconds
+// as a signed varint. For [lpg.PropList] the value is a uint32 LE element-count
+// followed by element-count sub-records encoded as:
+//
+//	uint8  elem-kind
+//	uint32 elem-payload-len
+//	[elem-payload-len]byte elem-payload
+//
+// Nested PropList elements are not permitted.
 func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 	buf = append(buf, byte(v.Kind()))
 	switch v.Kind() {
@@ -770,6 +777,51 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 		bs, _ := v.Bytes()
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(bs)))
 		buf = append(buf, bs...)
+	case lpg.PropList:
+		buf = encodeTxnListProp(buf, v)
+	}
+	return buf
+}
+
+// encodeTxnListProp appends the list wire encoding to buf (without the leading
+// kind byte, which the caller already wrote). Format:
+//
+//	uint32 LE element-count
+//	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
+func encodeTxnListProp(buf []byte, v lpg.PropertyValue) []byte {
+	elems, _ := v.List()
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(elems)))
+	for _, elem := range elems {
+		// Encode the element into a temporary buffer to measure its length.
+		// The element kind byte is not included — we write it separately.
+		var payload []byte
+		switch elem.Kind() {
+		case lpg.PropString:
+			s, _ := elem.String()
+			payload = append(payload, s...)
+		case lpg.PropInt64:
+			i, _ := elem.Int64()
+			payload = binary.AppendVarint(payload, i)
+		case lpg.PropFloat64:
+			f, _ := elem.Float64()
+			payload = binary.LittleEndian.AppendUint64(payload, math.Float64bits(f))
+		case lpg.PropBool:
+			b, _ := elem.Bool()
+			if b {
+				payload = append(payload, 1)
+			} else {
+				payload = append(payload, 0)
+			}
+		case lpg.PropTime:
+			t, _ := elem.Time()
+			payload = binary.AppendVarint(payload, t.UnixNano())
+		case lpg.PropBytes:
+			bs, _ := elem.Bytes()
+			payload = append(payload, bs...)
+		}
+		buf = append(buf, byte(elem.Kind()))
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
+		buf = append(buf, payload...)
 	}
 	return buf
 }
@@ -795,8 +847,84 @@ func decodePropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) {
 		return decodeTxnTimeProp(buf)
 	case lpg.PropBytes:
 		return decodeTxnBytesProp(buf)
+	case lpg.PropList:
+		return decodeTxnListProp(buf)
 	default:
 		return lpg.PropertyValue{}, buf, errors.New("txn: unknown property kind")
+	}
+}
+
+// decodeTxnListProp parses a PropList value from buf.
+// Format (following the kind byte already consumed by the caller):
+//
+//	uint32 LE element-count
+//	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
+func decodeTxnListProp(buf []byte) (lpg.PropertyValue, []byte, error) {
+	if len(buf) < 4 {
+		return lpg.PropertyValue{}, buf, errors.New("txn: PropList: short element count")
+	}
+	count := binary.LittleEndian.Uint32(buf)
+	buf = buf[4:]
+	elems := make([]lpg.PropertyValue, 0, count)
+	for i := uint32(0); i < count; i++ {
+		if len(buf) < 5 { // kind(1) + payloadLen(4)
+			return lpg.PropertyValue{}, buf,
+				fmt.Errorf("txn: PropList: truncated element header at index %d", i)
+		}
+		elemKind := lpg.PropertyKind(buf[0])
+		payloadLen := binary.LittleEndian.Uint32(buf[1:5])
+		buf = buf[5:]
+		if uint64(len(buf)) < uint64(payloadLen) {
+			return lpg.PropertyValue{}, buf,
+				fmt.Errorf("txn: PropList: truncated element body at index %d", i)
+		}
+		payload := buf[:payloadLen]
+		buf = buf[payloadLen:]
+		elem, err := decodeTxnListElement(elemKind, payload)
+		if err != nil {
+			return lpg.PropertyValue{}, buf,
+				fmt.Errorf("txn: PropList: element %d: %w", i, err)
+		}
+		elems = append(elems, elem)
+	}
+	return lpg.ListValue(elems), buf, nil
+}
+
+// decodeTxnListElement decodes a single list element from a raw payload.
+// The element payload does not include its kind byte (already consumed by
+// [decodeTxnListProp]).
+func decodeTxnListElement(kind lpg.PropertyKind, payload []byte) (lpg.PropertyValue, error) {
+	switch kind {
+	case lpg.PropString:
+		return lpg.StringValue(string(payload)), nil
+	case lpg.PropInt64:
+		i, n := binary.Varint(payload)
+		if n <= 0 {
+			return lpg.PropertyValue{}, errors.New("txn: PropList element: varint decode failed")
+		}
+		return lpg.Int64Value(i), nil
+	case lpg.PropFloat64:
+		if len(payload) < 8 {
+			return lpg.PropertyValue{}, errors.New("txn: PropList element: short float64")
+		}
+		return lpg.Float64Value(math.Float64frombits(binary.LittleEndian.Uint64(payload))), nil
+	case lpg.PropBool:
+		if len(payload) < 1 {
+			return lpg.PropertyValue{}, errors.New("txn: PropList element: short bool")
+		}
+		return lpg.BoolValue(payload[0] != 0), nil
+	case lpg.PropTime:
+		ns, n := binary.Varint(payload)
+		if n <= 0 {
+			return lpg.PropertyValue{}, errors.New("txn: PropList element: time varint decode failed")
+		}
+		return lpg.TimeValue(time.Unix(0, ns).UTC()), nil
+	case lpg.PropBytes:
+		cp := make([]byte, len(payload))
+		copy(cp, payload)
+		return lpg.BytesValue(cp), nil
+	default:
+		return lpg.PropertyValue{}, fmt.Errorf("txn: PropList element: unknown kind %d", kind)
 	}
 }
 

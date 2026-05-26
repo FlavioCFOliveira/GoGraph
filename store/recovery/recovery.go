@@ -885,8 +885,85 @@ func decodeRecoveryPropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) 
 		return decodeRecoveryTimeProp(buf)
 	case lpg.PropBytes:
 		return decodeRecoveryBytesProp(buf)
+	case lpg.PropList:
+		return decodeRecoveryListProp(buf)
 	default:
 		return lpg.PropertyValue{}, buf, errors.New("recovery: unknown property kind")
+	}
+}
+
+// decodeRecoveryListProp parses a PropList value from buf (the kind byte has
+// already been consumed by [decodeRecoveryPropertyValue]).
+// Format matches [txn.encodeTxnListProp]:
+//
+//	uint32 LE element-count
+//	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
+func decodeRecoveryListProp(buf []byte) (lpg.PropertyValue, []byte, error) {
+	if len(buf) < 4 {
+		return lpg.PropertyValue{}, buf, errors.New("recovery: PropList: short element count")
+	}
+	count := binary.LittleEndian.Uint32(buf)
+	buf = buf[4:]
+	elems := make([]lpg.PropertyValue, 0, count)
+	for i := uint32(0); i < count; i++ {
+		if len(buf) < 5 { // kind(1) + payloadLen(4)
+			return lpg.PropertyValue{}, buf,
+				fmt.Errorf("recovery: PropList: truncated element header at index %d", i)
+		}
+		elemKind := lpg.PropertyKind(buf[0])
+		payloadLen := binary.LittleEndian.Uint32(buf[1:5])
+		buf = buf[5:]
+		if uint64(len(buf)) < uint64(payloadLen) {
+			return lpg.PropertyValue{}, buf,
+				fmt.Errorf("recovery: PropList: truncated element body at index %d", i)
+		}
+		payload := buf[:payloadLen]
+		buf = buf[payloadLen:]
+		elem, err := decodeRecoveryListElement(elemKind, payload)
+		if err != nil {
+			return lpg.PropertyValue{}, buf,
+				fmt.Errorf("recovery: PropList: element %d: %w", i, err)
+		}
+		elems = append(elems, elem)
+	}
+	return lpg.ListValue(elems), buf, nil
+}
+
+// decodeRecoveryListElement decodes a single list element from its raw payload.
+// The kind byte has already been consumed and the payload extracted by
+// [decodeRecoveryListProp].
+func decodeRecoveryListElement(kind lpg.PropertyKind, payload []byte) (lpg.PropertyValue, error) {
+	switch kind {
+	case lpg.PropString:
+		return lpg.StringValue(string(payload)), nil
+	case lpg.PropInt64:
+		i, n := binary.Varint(payload)
+		if n <= 0 {
+			return lpg.PropertyValue{}, errors.New("recovery: PropList element: varint decode failed")
+		}
+		return lpg.Int64Value(i), nil
+	case lpg.PropFloat64:
+		if len(payload) < 8 {
+			return lpg.PropertyValue{}, errors.New("recovery: PropList element: short float64")
+		}
+		return lpg.Float64Value(math.Float64frombits(binary.LittleEndian.Uint64(payload))), nil
+	case lpg.PropBool:
+		if len(payload) < 1 {
+			return lpg.PropertyValue{}, errors.New("recovery: PropList element: short bool")
+		}
+		return lpg.BoolValue(payload[0] != 0), nil
+	case lpg.PropTime:
+		ns, n := binary.Varint(payload)
+		if n <= 0 {
+			return lpg.PropertyValue{}, errors.New("recovery: PropList element: time varint decode failed")
+		}
+		return lpg.TimeValue(time.Unix(0, ns).UTC()), nil
+	case lpg.PropBytes:
+		cp := make([]byte, len(payload))
+		copy(cp, payload)
+		return lpg.BytesValue(cp), nil
+	default:
+		return lpg.PropertyValue{}, fmt.Errorf("recovery: PropList element: unknown kind %d", kind)
 	}
 }
 

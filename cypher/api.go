@@ -2645,6 +2645,14 @@ func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
 		if b, ok := pv.Bool(); ok {
 			return expr.BoolValue(b)
 		}
+	case lpg.PropList:
+		if elems, ok := pv.List(); ok {
+			lv := make(expr.ListValue, len(elems))
+			for i, elem := range elems {
+				lv[i] = lpgPropToExpr(elem)
+			}
+			return lv
+		}
 	}
 	return expr.Null
 }

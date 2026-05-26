@@ -10,7 +10,7 @@ package snapshot
 //   [node records:
 //       uint64 NodeID
 //       uint32 keyIdx       (index into the embedded key string table)
-//       uint8  kind         (lpg.PropertyKind: PropString..PropBytes)
+//       uint8  kind         (lpg.PropertyKind: PropString..PropList)
 //       uint32 valueLen
 //       [valueLen]byte value
 //   ]
@@ -35,6 +35,13 @@ package snapshot
 //                     nanoseconds-within-second. Reconstituted via
 //                     time.Unix(sec, nsec).UTC().
 //   PropBytes   (6) → raw bytes (valueLen = byte length).
+//   PropList    (7) → uint32 LE element-count followed by element-count
+//                     sub-records, each encoded as:
+//                         uint8  elem-kind
+//                         uint32 elem-valueLen
+//                         [elem-valueLen]byte elem-value
+//                     Nesting is not permitted: list elements must not be
+//                     PropList themselves.
 //
 // The whole file is covered by a single CRC32C (Castagnoli) recorded
 // in the surrounding manifest's FileEntry, including the magic
@@ -474,9 +481,36 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 		out := make([]byte, len(b))
 		copy(out, b)
 		return out, nil
+	case lpg.PropList:
+		return encodeListPropertyValue(v)
 	default:
 		return nil, fmt.Errorf("snapshot: unknown property kind %d", v.Kind())
 	}
+}
+
+// encodeListPropertyValue encodes a PropList value as:
+//
+//	uint32 LE element-count
+//	element-count × ( uint8 elem-kind | uint32 elem-valueLen | [elem-valueLen]byte elem-value )
+//
+// Nested lists are rejected: list elements must not be PropList.
+func encodeListPropertyValue(v lpg.PropertyValue) ([]byte, error) {
+	elems, _ := v.List()
+	var buf []byte
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(elems)))
+	for _, elem := range elems {
+		if elem.Kind() == lpg.PropList {
+			return nil, fmt.Errorf("snapshot: nested PropList not supported")
+		}
+		payload, err := encodePropertyValue(elem)
+		if err != nil {
+			return nil, err
+		}
+		buf = append(buf, byte(elem.Kind()))
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
+		buf = append(buf, payload...)
+	}
+	return buf, nil
 }
 
 // ReadProperties parses a properties.bin payload produced by
@@ -679,7 +713,7 @@ func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint6
 func validKind(k lpg.PropertyKind) bool {
 	switch k {
 	case lpg.PropString, lpg.PropInt64, lpg.PropFloat64,
-		lpg.PropBool, lpg.PropTime, lpg.PropBytes:
+		lpg.PropBool, lpg.PropTime, lpg.PropBytes, lpg.PropList:
 		return true
 	}
 	return false
@@ -746,8 +780,45 @@ func decodePropertyValue(kind lpg.PropertyKind, raw []byte) (lpg.PropertyValue, 
 		cp := make([]byte, len(raw))
 		copy(cp, raw)
 		return lpg.BytesValue(cp), nil
+	case lpg.PropList:
+		return decodeListPropertyValue(raw)
 	}
 	return lpg.PropertyValue{}, fmt.Errorf("%w: decode unknown kind %d", ErrPropertiesCorrupted, kind)
+}
+
+// decodeListPropertyValue decodes the PropList wire format produced by
+// [encodeListPropertyValue]:
+//
+//	uint32 LE element-count
+//	element-count × ( uint8 elem-kind | uint32 elem-valueLen | [elem-valueLen]byte elem-value )
+func decodeListPropertyValue(raw []byte) (lpg.PropertyValue, error) {
+	if len(raw) < 4 {
+		return lpg.PropertyValue{}, fmt.Errorf("%w: PropList: short element count", ErrPropertiesCorrupted)
+	}
+	count := binary.LittleEndian.Uint32(raw)
+	raw = raw[4:]
+	elems := make([]lpg.PropertyValue, 0, count)
+	for i := uint32(0); i < count; i++ {
+		if len(raw) < 5 { // kind(1) + valueLen(4)
+			return lpg.PropertyValue{}, fmt.Errorf("%w: PropList: truncated element header at index %d",
+				ErrPropertiesCorrupted, i)
+		}
+		elemKind := lpg.PropertyKind(raw[0])
+		elemLen := binary.LittleEndian.Uint32(raw[1:5])
+		raw = raw[5:]
+		if uint64(len(raw)) < uint64(elemLen) {
+			return lpg.PropertyValue{}, fmt.Errorf("%w: PropList: truncated element body at index %d",
+				ErrPropertiesCorrupted, i)
+		}
+		elem, err := decodePropertyValue(elemKind, raw[:elemLen])
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("%w: PropList: element %d: %w",
+				ErrPropertiesCorrupted, i, err)
+		}
+		elems = append(elems, elem)
+		raw = raw[elemLen:]
+	}
+	return lpg.ListValue(elems), nil
 }
 
 // ApplyPropertiesToGraph replays rb into a live g. The pre-condition

@@ -18,6 +18,7 @@ const (
 	PropBool
 	PropTime
 	PropBytes
+	PropList // ordered list of PropertyValue elements; v is []PropertyValue
 )
 
 // PropertyValue is a tagged union of typed property values. It is
@@ -89,6 +90,17 @@ func (p PropertyValue) Bytes() ([]byte, bool) {
 	return b, true
 }
 
+// List returns the []PropertyValue elements and true when v carries a
+// PropList. The returned slice aliases the value held by v; callers
+// must not modify it.
+func (p PropertyValue) List() ([]PropertyValue, bool) {
+	if p.kind != PropList {
+		return nil, false
+	}
+	elems, _ := p.v.([]PropertyValue)
+	return elems, true
+}
+
 // String constructors.
 
 // StringValue builds a PropString.
@@ -108,6 +120,12 @@ func TimeValue(t time.Time) PropertyValue { return PropertyValue{kind: PropTime,
 
 // BytesValue builds a PropBytes wrapping b (no copy).
 func BytesValue(b []byte) PropertyValue { return PropertyValue{kind: PropBytes, v: b} }
+
+// ListValue builds a PropList from elems. The slice is stored directly
+// (no copy); callers must not modify elems after calling ListValue.
+func ListValue(elems []PropertyValue) PropertyValue {
+	return PropertyValue{kind: PropList, v: elems}
+}
 
 // PropertyKeyID is the compact identifier of an interned property
 // name.

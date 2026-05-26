@@ -145,7 +145,7 @@ func nodeMatchesAllProperties(want []propLiteral, got map[string]lpg.PropertyVal
 // same kind and equal underlying value. PropString/PropInt64/PropFloat64/
 // PropBool use the language's == operator. PropTime uses [time.Time.Equal]
 // (which normalises monotonic clock readings and timezone offsets).
-// PropBytes uses [bytes.Equal].
+// PropBytes uses [bytes.Equal]. PropList compares element-wise recursively.
 func propertyValueEquals(a, b lpg.PropertyValue) bool {
 	if a.Kind() != b.Kind() {
 		return false
@@ -175,6 +175,18 @@ func propertyValueEquals(a, b lpg.PropertyValue) bool {
 		av, _ := a.Bytes()
 		bv, _ := b.Bytes()
 		return bytes.Equal(av, bv)
+	case lpg.PropList:
+		ae, _ := a.List()
+		be, _ := b.List()
+		if len(ae) != len(be) {
+			return false
+		}
+		for i := range ae {
+			if !propertyValueEquals(ae[i], be[i]) {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }
