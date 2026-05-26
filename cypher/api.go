@@ -2608,9 +2608,17 @@ func aggregateFactory(fn, argument string, secondArg expr.Value) (funcs.Aggregat
 	case "stdevp":
 		return funcs.NewStdDevPAgg(), nil
 	case "percentilecont":
-		return funcs.NewPercentileContAgg(percentileParam(secondArg)), nil
+		p, err := validPercentileParam(secondArg)
+		if err != nil {
+			return nil, err
+		}
+		return funcs.NewPercentileContAgg(p), nil
 	case "percentiledisc":
-		return funcs.NewPercentileDiscAgg(percentileParam(secondArg)), nil
+		p, err := validPercentileParam(secondArg)
+		if err != nil {
+			return nil, err
+		}
+		return funcs.NewPercentileDiscAgg(p), nil
 	default:
 		return nil, fmt.Errorf("unknown aggregate function %q", fn)
 	}
@@ -2627,6 +2635,31 @@ func percentileParam(v expr.Value) float64 {
 		return float64(int64(n))
 	}
 	return 0.5
+}
+
+// validPercentileParam coerces and validates the second argument of a
+// percentile aggregate. Per openCypher, the percentile must be a number
+// in [0.0, 1.0] (inclusive); values outside this range raise an
+// ArgumentError(NumberOutOfRange) at plan-build time so the engine can
+// surface it as a runtime error to the caller.
+func validPercentileParam(v expr.Value) (float64, error) {
+	switch n := v.(type) {
+	case expr.FloatValue:
+		f := float64(n)
+		if f < 0.0 || f > 1.0 {
+			return 0, fmt.Errorf("ArgumentError.NumberOutOfRange: percentile must be in [0.0, 1.0], got %g", f)
+		}
+		return f, nil
+	case expr.IntegerValue:
+		f := float64(int64(n))
+		if f < 0.0 || f > 1.0 {
+			return 0, fmt.Errorf("ArgumentError.NumberOutOfRange: percentile must be in [0.0, 1.0], got %g", f)
+		}
+		return f, nil
+	}
+	// Unset or non-numeric: default to median (matches percentileParam
+	// fallback for the non-failing happy paths).
+	return 0.5, nil
 }
 
 // irSortKeys converts a slice of ir.SortItem to exec.SortKey values.
