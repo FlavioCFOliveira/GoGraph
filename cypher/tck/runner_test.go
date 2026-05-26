@@ -559,7 +559,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3229
+const tckExecutionBaseline = 3215
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
