@@ -927,6 +927,20 @@ func parseOffset(s string) (int, error) {
 			return 0, err
 		}
 		return sign * (h*3600 + m*60), nil
+	case 6: // HHMMSS — historical sub-minute IANA zones (e.g. +00:53:28).
+		h, err := strconv.Atoi(rest[:2])
+		if err != nil {
+			return 0, err
+		}
+		m, err := strconv.Atoi(rest[2:4])
+		if err != nil {
+			return 0, err
+		}
+		s, err := strconv.Atoi(rest[4:])
+		if err != nil {
+			return 0, err
+		}
+		return sign * (h*3600 + m*60 + s), nil
 	default:
 		return 0, fmt.Errorf("invalid offset body: %q", rest)
 	}

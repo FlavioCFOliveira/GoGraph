@@ -531,6 +531,13 @@ func parseSignedOffset(s string) (int, error) {
 			return 0, err
 		}
 		return sign * (h*3600 + m*60), nil
+	case 6:
+		var h, m, sec int
+		_, err := fmt.Sscanf(rest, "%2d%2d%2d", &h, &m, &sec)
+		if err != nil {
+			return 0, err
+		}
+		return sign * (h*3600 + m*60 + sec), nil
 	default:
 		return 0, fmt.Errorf("offset length unexpected: %q", s)
 	}
