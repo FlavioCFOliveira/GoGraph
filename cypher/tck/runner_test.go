@@ -456,11 +456,21 @@ import (
 //     existing nonBooleanLiteralKind classifier. Net uplift: +1
 //     scenario above 3108. Observed 3109 across a 3-run sample;
 //     gate set conservatively at 3105.
+//   - 3110: raised after Sprint 84 audit round 9 follow-on 7 —
+//     compareValues in cypher/expr/eval.go now compares two ListValues
+//     lexicographically with openCypher 3-valued logic via the new
+//     compareListWith3VL helper. Previously list-vs-list ordering
+//     fell through to "incompatible types" and evalOrdering returned
+//     NULL, so `[1, 0] >= [1]` evaluated to NULL instead of TRUE.
+//     The new helper short-circuits on a definitive non-equal element
+//     and collapses to NULL when only NULL elements differentiate the
+//     two lists. Net uplift: +7 scenarios above 3109. Observed 3116
+//     across a 3-run sample; gate set conservatively at 3110.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3105
+const tckExecutionBaseline = 3110
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

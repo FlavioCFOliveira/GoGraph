@@ -625,10 +625,19 @@ func compareValues(a, b Value) (int, error) {
 			return compareBool(bool(av), bool(bv)), nil
 		}
 	}
+	// Same-kind list comparison: openCypher 9 §3.5 defines a lexicographic
+	// order on lists. NULL elements propagate per 3-valued logic but the
+	// dedicated helper [compareListWith3VL] resolves the cases where a
+	// definitive non-equality wins over NULLs.
+	ka, kb := a.Kind(), b.Kind()
+	if ka == KindList && kb == KindList {
+		al, _ := a.(ListValue) //nolint:forcetypeassert // kind pre-checked
+		bl, _ := b.(ListValue) //nolint:forcetypeassert // kind pre-checked
+		return compareListWith3VL(al, bl)
+	}
 	// Same-kind temporal and duration values delegate to compareSameKind,
 	// which already implements the canonical openCypher ordering for
 	// dates, local/zoned times, local/zoned date-times and durations.
-	ka, kb := a.Kind(), b.Kind()
 	if ka == kb {
 		switch ka {
 		case KindDate, KindLocalDateTime, KindDateTime, KindLocalTime, KindTime, KindDuration:
@@ -636,6 +645,43 @@ func compareValues(a, b Value) (int, error) {
 		}
 	}
 	return 0, &EvalError{Msg: fmt.Sprintf("incompatible types for comparison: %s vs %s", a.Kind(), b.Kind())}
+}
+
+// compareListWith3VL compares two lists lexicographically with openCypher
+// three-valued semantics: a definitive non-equal element wins; otherwise
+// any NULL element collapses the result to NULL by returning an error so
+// the surrounding ordering helper propagates NULL.
+func compareListWith3VL(al, bl ListValue) (int, error) {
+	n := len(al)
+	if len(bl) < n {
+		n = len(bl)
+	}
+	sawNull := false
+	for i := range n {
+		if IsNull(al[i]) || IsNull(bl[i]) {
+			sawNull = true
+			continue
+		}
+		c, err := compareValues(al[i], bl[i])
+		if err != nil {
+			// Element-wise type mismatch: collapse to NULL.
+			sawNull = true
+			continue
+		}
+		if c != 0 {
+			return c, nil
+		}
+	}
+	if sawNull {
+		return 0, &EvalError{Msg: "list comparison contained null"}
+	}
+	if len(al) < len(bl) {
+		return -1, nil
+	}
+	if len(al) > len(bl) {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // promoteNumeric promotes Int/Float pairs so that arithmetic is consistent.
