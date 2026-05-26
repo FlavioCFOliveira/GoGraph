@@ -77,12 +77,6 @@ linters:
       - linters: [gocyclo]
         path: "store/txn/txn\\.go"
         text: "encodeOpTyped"
-      # gocyclo: cypher/ir/match.go optionalInnerPattern — pattern-translation
-      # dispatcher; same shape rationale as operatorName. Tracked for revisit
-      # in T934.2 (multi-pattern MATCH binding).
-      - linters: [gocyclo]
-        path: "cypher/ir/match\\.go"
-        text: "optionalInnerPattern"
       # gocritic: builtinShadow in essentials.go — cap/min as local variable names
       # in pre-existing non-exported helpers; renaming would obscure intent.
       - linters: [gocritic]

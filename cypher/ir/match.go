@@ -143,88 +143,14 @@ func (t *translator) optionalInnerPattern(pat *ast.Pattern, child LogicalPlan, o
 		return NewArgumentWithTag(childVarSlice(child), outerArgTag), nil
 	}
 
-	// Collect outer-scope variables that the OPTIONAL MATCH may correlate to.
-	outerVars := map[string]struct{}{}
-	if child != nil {
-		for _, v := range child.Vars() {
-			outerVars[v] = struct{}{}
-		}
-	}
-
-	// Track variables bound by paths already translated within the OPTIONAL
-	// MATCH so that subsequent paths can also use shared-variable joins.
-	innerBound := map[string]struct{}{}
-	for k := range outerVars {
-		innerBound[k] = struct{}{}
-	}
-
-	// The first shared-leaf Argument in the inner subtree carries outerArgTag.
-	// All later shared-leaf Arguments use fresh tags routed through nested
-	// CorrelatedApply nodes.
-	outerArgConsumed := false
+	ctx := newOptionalInnerCtx(child)
 
 	var plan LogicalPlan
-
 	for _, pp := range pat.Paths {
-		leadVar := leadingNodeVar(pp)
-		_, sharedWithOuter := outerVars[leadVar]
-		_, sharedWithInner := innerBound[leadVar]
-
-		if plan == nil {
-			// First path of the OPTIONAL MATCH.
-			if sharedWithOuter && !outerArgConsumed {
-				// The leading variable is bound by the outer (child) scope; use
-				// outerArgTag as the Argument leaf's tag so OptionalApply seeds
-				// the outer row into it.
-				outerArgConsumed = true
-				p, err := t.matchPathPatternWithArg(pp, false, leadVar, outerArgTag, copyVarSet(innerBound))
-				if err != nil {
-					return nil, err
-				}
-				plan = p
-			} else {
-				p, err := t.matchPathPattern(pp, false, "", copyVarSet(innerBound))
-				if err != nil {
-					return nil, err
-				}
-				// If the first path has no shared variable with the outer, the
-				// inner subtree must still consume outerArgTag for the
-				// OptionalApply to function. Wrap the path with a
-				// CorrelatedApply over an Argument leaf so the row stream
-				// remains correlated. This corresponds to OPTIONAL MATCH whose
-				// pattern is an independent scan — a Cartesian product per
-				// outer row.
-				outerArgConsumed = true
-				outerLeaf := NewArgumentWithTag(childVarSlice(child), outerArgTag)
-				plan = NewCorrelatedApplyWithTag(outerLeaf, p, nextArgTag()) //nolint:staticcheck // inner-tag is unused by p (no Argument referencing it)
-				// The inner p has no Argument node, so the CorrelatedApply's
-				// inner-tag is effectively a no-op. The OptionalApply still
-				// drives outerLeaf via outerArgTag.
-				_ = outerLeaf
-			}
-			for _, v := range pathPatternVars(pp) {
-				innerBound[v] = struct{}{}
-			}
-			continue
-		}
-
-		// Subsequent path within the OPTIONAL MATCH.
-		if sharedWithInner {
-			tag := nextArgTag()
-			p, err := t.matchPathPatternWithArg(pp, false, leadVar, tag, copyVarSet(innerBound))
-			if err != nil {
-				return nil, err
-			}
-			plan = NewCorrelatedApplyWithTag(plan, p, tag)
-		} else {
-			p, err := t.matchPathPattern(pp, false, "", copyVarSet(innerBound))
-			if err != nil {
-				return nil, err
-			}
-			plan = NewApply(plan, p)
-		}
-		for _, v := range pathPatternVars(pp) {
-			innerBound[v] = struct{}{}
+		var err error
+		plan, err = t.appendOptionalInnerPath(plan, pp, child, outerArgTag, ctx)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -232,12 +158,129 @@ func (t *translator) optionalInnerPattern(pat *ast.Pattern, child LogicalPlan, o
 	// MATCH's leading path has no shared variable AND we never wrapped with the
 	// Argument leaf). Wrap the whole plan in a CorrelatedApply over an
 	// outerArgTag Argument so the OptionalApply has a seam to drive.
-	if !outerArgConsumed {
+	if !ctx.outerArgConsumed {
 		outerLeaf := NewArgumentWithTag(childVarSlice(child), outerArgTag)
 		plan = NewCorrelatedApplyWithTag(outerLeaf, plan, nextArgTag())
 	}
 
 	return plan, nil
+}
+
+// optionalInnerCtx threads the mutable bookkeeping that
+// optionalInnerPattern accumulates while walking pat.Paths. It is local
+// to the translator and never escapes.
+type optionalInnerCtx struct {
+	outerVars        map[string]struct{}
+	innerBound       map[string]struct{}
+	outerArgConsumed bool
+}
+
+// newOptionalInnerCtx seeds the bookkeeping with the variables bound by
+// the outer (child) scope; innerBound starts identical to outerVars
+// because any name visible to the outer is also visible to the first
+// inner path.
+func newOptionalInnerCtx(child LogicalPlan) *optionalInnerCtx {
+	outerVars := map[string]struct{}{}
+	if child != nil {
+		for _, v := range child.Vars() {
+			outerVars[v] = struct{}{}
+		}
+	}
+	innerBound := make(map[string]struct{}, len(outerVars))
+	for k := range outerVars {
+		innerBound[k] = struct{}{}
+	}
+	return &optionalInnerCtx{outerVars: outerVars, innerBound: innerBound}
+}
+
+// appendOptionalInnerPath translates one pp from the OPTIONAL MATCH and
+// fuses it into the running plan. The dispatch over first-vs-subsequent
+// and shared-with-outer-vs-inner now lives in dedicated helpers.
+func (t *translator) appendOptionalInnerPath(
+	plan LogicalPlan,
+	pp *ast.PathPattern,
+	child LogicalPlan,
+	outerArgTag uint32,
+	ctx *optionalInnerCtx,
+) (LogicalPlan, error) {
+	leadVar := leadingNodeVar(pp)
+	_, sharedWithOuter := ctx.outerVars[leadVar]
+	_, sharedWithInner := ctx.innerBound[leadVar]
+
+	if plan == nil {
+		out, err := t.firstOptionalPath(pp, child, outerArgTag, leadVar, sharedWithOuter, ctx)
+		if err != nil {
+			return nil, err
+		}
+		plan = out
+	} else {
+		out, err := t.subsequentOptionalPath(plan, pp, leadVar, sharedWithInner, ctx)
+		if err != nil {
+			return nil, err
+		}
+		plan = out
+	}
+
+	for _, v := range pathPatternVars(pp) {
+		ctx.innerBound[v] = struct{}{}
+	}
+	return plan, nil
+}
+
+// firstOptionalPath handles the first path of the OPTIONAL MATCH.
+// When the leading variable is bound by the outer scope, the
+// Argument leaf carries outerArgTag directly; otherwise a
+// CorrelatedApply over an outerArgTag Argument leaf wraps the path so
+// the surrounding OptionalApply still has a seam to drive.
+func (t *translator) firstOptionalPath(
+	pp *ast.PathPattern,
+	child LogicalPlan,
+	outerArgTag uint32,
+	leadVar string,
+	sharedWithOuter bool,
+	ctx *optionalInnerCtx,
+) (LogicalPlan, error) {
+	if sharedWithOuter && !ctx.outerArgConsumed {
+		ctx.outerArgConsumed = true
+		return t.matchPathPatternWithArg(pp, false, leadVar, outerArgTag, copyVarSet(ctx.innerBound))
+	}
+	p, err := t.matchPathPattern(pp, false, "", copyVarSet(ctx.innerBound))
+	if err != nil {
+		return nil, err
+	}
+	// The first path has no shared variable with the outer; wrap the path
+	// with a CorrelatedApply over an outerArgTag Argument leaf so the row
+	// stream remains correlated (Cartesian product per outer row).
+	ctx.outerArgConsumed = true
+	outerLeaf := NewArgumentWithTag(childVarSlice(child), outerArgTag)
+	//nolint:staticcheck // inner-tag is unused by p (no Argument referencing it)
+	return NewCorrelatedApplyWithTag(outerLeaf, p, nextArgTag()), nil
+}
+
+// subsequentOptionalPath handles the n-th (n>0) path of the OPTIONAL
+// MATCH. A path that shares its leading variable with the inner-bound
+// set joins via CorrelatedApply with a fresh tag; an independent path
+// joins via a plain Apply (Cartesian product).
+func (t *translator) subsequentOptionalPath(
+	plan LogicalPlan,
+	pp *ast.PathPattern,
+	leadVar string,
+	sharedWithInner bool,
+	ctx *optionalInnerCtx,
+) (LogicalPlan, error) {
+	if sharedWithInner {
+		tag := nextArgTag()
+		p, err := t.matchPathPatternWithArg(pp, false, leadVar, tag, copyVarSet(ctx.innerBound))
+		if err != nil {
+			return nil, err
+		}
+		return NewCorrelatedApplyWithTag(plan, p, tag), nil
+	}
+	p, err := t.matchPathPattern(pp, false, "", copyVarSet(ctx.innerBound))
+	if err != nil {
+		return nil, err
+	}
+	return NewApply(plan, p), nil
 }
 
 // copyVarSet returns a defensive copy of a variable set.
