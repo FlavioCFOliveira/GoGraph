@@ -145,12 +145,13 @@ func TestEval_Property_RelationshipMissingKey(t *testing.T) {
 }
 
 func TestEval_Property_NonMap_Null(t *testing.T) {
-	// Property access on an integer returns NULL.
+	// Property access on a scalar (non-map / non-graph / non-temporal)
+	// is an InvalidArgumentType TypeError per openCypher.
 	row := expr.RowContext{"n": expr.IntegerValue(42)}
 	e := &ast.Property{Receiver: varExpr("n"), Key: "x"}
-	v := eval(t, e, row, nil)
-	if !expr.IsNull(v) {
-		t.Errorf("property on integer should be null, got %v", v)
+	_, err := expr.Eval(e, row, nil, nil)
+	if err == nil {
+		t.Errorf("property on integer should error, got nil")
 	}
 }
 

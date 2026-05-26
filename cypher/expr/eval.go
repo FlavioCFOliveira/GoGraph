@@ -404,10 +404,11 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 			return v, nil
 		}
 		return Null, nil
-	default:
-		// Property access on a non-map/node/rel returns NULL per openCypher.
-		return Null, nil
 	}
+	// Property access on a non-map/non-graph/non-temporal value is an
+	// InvalidArgumentType TypeError per openCypher (e.g. `123.foo`,
+	// `'string'.foo`, `[1, 2].foo`).
+	return nil, &EvalError{Msg: fmt.Sprintf("InvalidArgumentType: property access requires Map, Node, or Relationship, got %s", recv.Kind())}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
