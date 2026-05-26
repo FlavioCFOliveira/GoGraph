@@ -166,6 +166,7 @@ func (w *world) parametersAre(_ context.Context, table *godog.Table) error {
 // parseCypherLiteral converts a raw Gherkin cell value to a Go primitive
 // suitable for passing to [cypher.Engine.RunAny].
 func parseCypherLiteral(s string) any {
+	s = strings.TrimSpace(s)
 	// Boolean
 	switch s {
 	case "true":
@@ -187,13 +188,137 @@ func parseCypherLiteral(s string) any {
 	}
 	// Single-quoted string → strip quotes
 	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
-		return s[1 : len(s)-1]
+		return unescapeCypherString(s[1 : len(s)-1])
 	}
 	// Double-quoted string → strip quotes
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
+		return unescapeCypherString(s[1 : len(s)-1])
+	}
+	// List literal: [e1, e2, …]
+	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		return parseCypherList(s[1 : len(s)-1])
+	}
+	// Map literal: {k1: v1, k2: v2, …}
+	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
+		return parseCypherMap(s[1 : len(s)-1])
 	}
 	return s
+}
+
+// unescapeCypherString handles common Cypher string escape sequences.
+func unescapeCypherString(s string) string {
+	return strings.NewReplacer(`\'`, `'`, `\"`, `"`, `\\`, `\`).Replace(s)
+}
+
+// parseCypherList parses the inner content of a Cypher list literal
+// (everything between the outer brackets) into a []any.
+func parseCypherList(inner string) []any {
+	parts := splitTopLevelCypherCommas(inner)
+	result := make([]any, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			result = append(result, parseCypherLiteral(p))
+		}
+	}
+	return result
+}
+
+// parseCypherMap parses the inner content of a Cypher map literal
+// (everything between the outer braces) into a map[string]any.
+func parseCypherMap(inner string) map[string]any {
+	parts := splitTopLevelCypherCommas(inner)
+	result := make(map[string]any, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// Split on the first top-level colon.
+		colonIdx := topLevelColonIdx(p)
+		if colonIdx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(p[:colonIdx])
+		val := strings.TrimSpace(p[colonIdx+1:])
+		result[key] = parseCypherLiteral(val)
+	}
+	return result
+}
+
+// splitTopLevelCypherCommas splits s on commas not nested inside brackets or
+// braces, returning trimmed tokens.
+func splitTopLevelCypherCommas(s string) []string {
+	var parts []string
+	depth := 0
+	inStr := false
+	strChar := byte(0)
+	start := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inStr {
+			if ch == '\\' {
+				i++ // skip escaped char
+				continue
+			}
+			if ch == strChar {
+				inStr = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'', '"':
+			inStr = true
+			strChar = ch
+		case '[', '{':
+			depth++
+		case ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if tail := strings.TrimSpace(s[start:]); tail != "" {
+		parts = append(parts, tail)
+	}
+	return parts
+}
+
+// topLevelColonIdx returns the index of the first colon in s that is not
+// inside brackets, braces, or a quoted string. Returns -1 if not found.
+func topLevelColonIdx(s string) int {
+	depth := 0
+	inStr := false
+	strChar := byte(0)
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inStr {
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == strChar {
+				inStr = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'', '"':
+			inStr = true
+			strChar = ch
+		case '[', '{':
+			depth++
+		case ']', '}':
+			depth--
+		case ':':
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // thereExistsAProcedure parses a TCK procedure declaration and registers

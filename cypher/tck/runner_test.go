@@ -335,11 +335,20 @@ import (
 //     1-9, 12-21), clauses/match-where, and other WHERE-predicate scenarios.
 //     Net uplift: +69 scenarios above 2378. Observed 2447-2485 across a 4-run
 //     sample; baseline set conservatively at 2440 to absorb run-to-run variance.
+//   - 2550: raised after task T940 — ORDER BY / SKIP / LIMIT result-pipeline
+//     wiring. Fixes: (1) irSortKeys schema resolution (expr string + AST eval
+//     closure fallback), (2) count(*) column name (FunctionInvocation.CountStar
+//     flag → "count(*)" instead of "count()"), (3) TCK property-map key
+//     normalisation (spaces around colons), (4) TCK column whitespace collapse
+//     for headers like "cOuNt( * )", (5) parseCypherLiteral now handles list
+//     and map parameter literals. Net uplift: +118 scenarios above 2440.
+//     Observed 2558 stable; baseline set conservatively at 2550 to absorb
+//     run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2440
+const tckExecutionBaseline = 2550
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

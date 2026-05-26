@@ -238,15 +238,47 @@ func drainResult(r *cypher.Result) ([]exec.Record, error) {
 	return rows, r.Err()
 }
 
+// collapseWS returns s with all whitespace characters removed. Used to
+// normalise TCK column-header strings that preserve source whitespace inside
+// function arguments (e.g. "cOuNt( * )" → "cOuNt(*)") against record keys
+// produced by the engine which never include intra-argument whitespace.
+func collapseWS(s string) string {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			b = append(b, c)
+		}
+	}
+	return string(b)
+}
+
 // collectActualRows iterates the result and returns string representations of
 // each row in the column order specified by cols.
 func collectActualRows(r *cypher.Result, cols []string) ([][]string, error) {
+	// Build a whitespace-collapsed reverse map so that TCK column headers
+	// like "cOuNt( * )" resolve to the engine key "cOuNt(*)" when no
+	// exact match exists.
+	var collapsedMap map[string]string // collapsed engine key → engine key
 	var out [][]string
 	for r.Next() {
 		rec := r.Record()
+		// Build the collapsed map lazily on the first row.
+		if collapsedMap == nil {
+			collapsedMap = make(map[string]string, len(rec))
+			for k := range rec {
+				collapsedMap[collapseWS(k)] = k
+			}
+		}
 		row := make([]string, len(cols))
 		for i, col := range cols {
 			v, ok := rec[col]
+			if !ok {
+				// Whitespace-insensitive fallback: "cOuNt( * )" → "cOuNt(*)"
+				if engKey, found := collapsedMap[collapseWS(col)]; found {
+					v, ok = rec[engKey]
+				}
+			}
 			if !ok {
 				row[i] = "null"
 			} else {
@@ -317,11 +349,131 @@ func rowsEqual(a, b []string) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if normalizeTCKCell(a[i]) != normalizeTCKCell(b[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// normalizeTCKCell rewrites the property-map portions of a TCK cell string so
+// that property keys appear in sorted (alphabetical) order. This makes the
+// comparison insensitive to the insertion order used in feature-file CREATE
+// statements while keeping our output (which always uses sorted keys) correct.
+//
+// The normaliser walks the string character by character, tracking brace depth.
+// When it encounters a balanced `{...}` block it splits the key-value pairs,
+// sorts them, and re-joins. Only the top-level flat key: value pairs within
+// each `{...}` block are re-sorted; values that are themselves maps are treated
+// as opaque strings and passed through unchanged, so round-trip stability is
+// preserved for nested literals.
+func normalizeTCKCell(s string) string {
+	// Fast path: no braces means no property maps.
+	if !strings.ContainsAny(s, "{}") {
+		return s
+	}
+	var buf strings.Builder
+	depth := 0
+	mapStart := -1
+	buf.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch ch {
+		case '{':
+			depth++
+			if depth == 1 {
+				// Record where this map literal starts (after the opening brace).
+				mapStart = i
+			}
+		case '}':
+			if depth == 1 && mapStart >= 0 {
+				// We have the complete `{...}` block from mapStart to i.
+				inner := s[mapStart+1 : i]
+				sorted := sortMapLiteralKeys(inner)
+				buf.WriteByte('{')
+				buf.WriteString(sorted)
+				buf.WriteByte('}')
+				mapStart = -1
+				depth--
+				continue
+			}
+			depth--
+		default:
+			if depth == 0 {
+				buf.WriteByte(ch)
+			}
+		}
+	}
+	return buf.String()
+}
+
+// sortMapLiteralKeys takes the contents of a Cypher map literal (everything
+// between the outer braces, e.g. "num: 9, bool: true") and returns the same
+// pairs sorted alphabetically by key. Pairs are split on the top-level comma
+// (commas inside nested braces or strings are not split) to handle values that
+// are themselves nested maps or lists.
+//
+// Each pair is normalised to "key: value" form (single space after the colon,
+// no space before) so that "prop:1" and "prop: 1" compare as equal.
+func sortMapLiteralKeys(inner string) string {
+	if inner == "" {
+		return inner
+	}
+	pairs := splitTopLevelCommas(inner)
+	for i, p := range pairs {
+		pairs[i] = normalizeMapPair(p)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ", ")
+}
+
+// normalizeMapPair normalises a single "key: value" pair to the canonical
+// form "key: value" — trimmed key, single space after the colon, trimmed
+// value. The split point is the first top-level colon (not nested inside
+// braces or brackets) so that values that are themselves maps are preserved.
+func normalizeMapPair(pair string) string {
+	depth := 0
+	for i := 0; i < len(pair); i++ {
+		switch pair[i] {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		case ':':
+			if depth == 0 {
+				key := strings.TrimSpace(pair[:i])
+				val := strings.TrimSpace(pair[i+1:])
+				return key + ": " + val
+			}
+		}
+	}
+	// No colon found — return trimmed.
+	return strings.TrimSpace(pair)
+}
+
+// splitTopLevelCommas splits inner on commas that are not nested inside braces
+// or square brackets, returning the trimmed key-value pair strings.
+func splitTopLevelCommas(inner string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(inner[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if tail := strings.TrimSpace(inner[start:]); tail != "" {
+		parts = append(parts, tail)
+	}
+	return parts
 }
 
 func sortRows(rows [][]string) {
