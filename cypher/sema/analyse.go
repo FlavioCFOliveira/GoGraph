@@ -396,17 +396,19 @@ func (a *analyser) createClause(c *ast.Create) {
 	// CREATE introduces new variables from the pattern.
 	a.patternIntroduce(c.Pattern)
 	// CREATE-specific relationship checks: every relationship pattern
-	// must have exactly one type. Zero types (`()-->()` or `()-[r]->()`
-	// without a label) and union types (`()-[:A|:B]->()`) are rejected.
-	a.checkCreateRelationshipTypes(c.Pattern)
+	// must have exactly one type and an explicit direction. Zero types,
+	// union types, variable-length and undirected relationships are all
+	// rejected.
+	a.checkCreateRelationshipTypes(c.Pattern, true)
 }
 
 func (a *analyser) mergeClause(m *ast.Merge) {
 	// MERGE may introduce new variables or reuse existing ones.
 	a.pathPatternIntroduce(m.Pattern)
-	// MERGE relationship-type rule: same as CREATE. A merged relationship
-	// pattern must declare exactly one type.
-	a.checkPathPatternRelTypes(m.Pattern)
+	// MERGE relationship-type rule: similar to CREATE but undirected
+	// relationships are allowed (MERGE matches either direction, and
+	// creates outgoing when no match exists).
+	a.checkPathPatternRelTypes(m.Pattern, false)
 	a.checkPathPatternParameterProps(m.Pattern)
 	// ON CREATE / ON MATCH SET items reference existing variables.
 	for _, si := range m.OnCreate {
@@ -1142,15 +1144,17 @@ func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
 }
 
 // checkCreateRelationshipTypes flags every relationship pattern in pat
-// that does NOT declare exactly one type. The openCypher rule for
-// CREATE: each relationship must have one and only one type label;
-// missing types and union types are static errors.
-func (a *analyser) checkCreateRelationshipTypes(pat *ast.Pattern) {
+// that does NOT declare exactly one type and an explicit direction
+// (CREATE) or that violates the simpler MERGE rules. requireDirection
+// is true for CREATE (which forbids undirected relationships) and
+// false for MERGE (which accepts them, matching either direction at
+// runtime).
+func (a *analyser) checkCreateRelationshipTypes(pat *ast.Pattern, requireDirection bool) {
 	if pat == nil {
 		return
 	}
 	for _, pp := range pat.Paths {
-		a.checkPathPatternRelTypes(pp)
+		a.checkPathPatternRelTypes(pp, requireDirection)
 	}
 }
 
@@ -1161,8 +1165,8 @@ func (a *analyser) checkCreateRelationshipTypes(pat *ast.Pattern) {
 //   - SyntaxError(CreatingVarLength) for variable-length relationships
 //     (CREATE/MERGE require fixed-length per openCypher).
 //   - SyntaxError(RequiresDirectedRelationship) for undirected
-//     relationships (CREATE/MERGE require an explicit direction).
-func (a *analyser) checkPathPatternRelTypes(pp *ast.PathPattern) {
+//     relationships when requireDirection is true (CREATE only).
+func (a *analyser) checkPathPatternRelTypes(pp *ast.PathPattern, requireDirection bool) {
 	if pp == nil {
 		return
 	}
@@ -1176,7 +1180,7 @@ func (a *analyser) checkPathPatternRelTypes(pp *ast.PathPattern) {
 		if len(el.Relationship.Types) != 1 {
 			a.error(invalidBooleanOperandError("relationship", "must have exactly one type", el.Relationship.Pos))
 		}
-		if el.Relationship.Direction == ast.RelDirectionNone {
+		if requireDirection && el.Relationship.Direction == ast.RelDirectionNone {
 			a.error(invalidBooleanOperandError("relationship", "must be directed", el.Relationship.Pos))
 		}
 	}
