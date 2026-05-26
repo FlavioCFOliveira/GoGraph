@@ -68,11 +68,18 @@ import (
 //     evaluating to null.
 //     Observed 1578-1580 across a 3-run sample; the gate is set
 //     conservatively at 1576 to absorb run-to-run variance.
+//   - 1628: raised after task T937 partial closure — formatNodeTCK and
+//     formatRelTCK now include the property map in the TCK textual form
+//     (`({name: 'bar'})`, `[:KNOWS {since: 2020}]`), matching the format
+//     the openCypher TCK feature tables expect for full-node and
+//     full-relationship comparisons.
+//     Observed 1631-1633 across a 3-run sample; the gate is set
+//     conservatively at 1628 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1576
+const tckExecutionBaseline = 1628
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

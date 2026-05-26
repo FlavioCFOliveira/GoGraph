@@ -380,7 +380,7 @@ func exprValueToString(v expr.Value) string {
 	case expr.NodeValue:
 		return formatNodeTCK(val)
 	case expr.RelationshipValue:
-		return fmt.Sprintf("[:%s]", val.Type)
+		return formatRelTCK(val)
 	case expr.ListValue:
 		parts := make([]string, len(val))
 		for i, elem := range val {
@@ -431,14 +431,69 @@ func formatFloatTCK(f float64) string {
 	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
-// formatNodeTCK renders a node value in the TCK textual form. The TCK uses
-// `()` for a bare node, `(:Label)` when a single label is present, and
-// `(:LabelA:LabelB)` for multiple labels. Properties are omitted in this
-// minimal form because the TCK expected cells rarely include them; scenarios
-// that compare full node payloads use side-effect tables instead.
+// formatNodeTCK renders a node value in the TCK textual form. The format is:
+//
+//	()                      — bare node
+//	(:Label)                — single label, no properties
+//	(:LabelA:LabelB)        — multiple labels, no properties
+//	({key: value})          — no label, with properties
+//	(:Label {key: value})   — label plus properties
+//
+// Keys in the property map are emitted in sorted order so the rendered
+// representation is deterministic across runs.
 func formatNodeTCK(n expr.NodeValue) string {
-	if len(n.Labels) == 0 {
-		return "()"
+	var b strings.Builder
+	b.WriteByte('(')
+	for _, lbl := range n.Labels {
+		b.WriteByte(':')
+		b.WriteString(lbl)
 	}
-	return "(:" + strings.Join(n.Labels, ":") + ")"
+	if len(n.Properties) > 0 {
+		if len(n.Labels) > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(formatPropertyMapTCK(n.Properties))
+	}
+	b.WriteByte(')')
+	return b.String()
+}
+
+// formatRelTCK renders a relationship value in the TCK textual form. The
+// format is:
+//
+//	[:Type]                  — relationship with type, no properties
+//	[:Type {key: value}]     — relationship with type and properties
+//
+// Keys in the property map are emitted in sorted order.
+func formatRelTCK(r expr.RelationshipValue) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	if r.Type != "" {
+		b.WriteByte(':')
+		b.WriteString(r.Type)
+	}
+	if len(r.Properties) > 0 {
+		b.WriteByte(' ')
+		b.WriteString(formatPropertyMapTCK(r.Properties))
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// formatPropertyMapTCK renders a MapValue as a Cypher map literal, with
+// keys in sorted order so the output is deterministic.
+func formatPropertyMapTCK(m expr.MapValue) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(m))
+	for _, k := range keys {
+		parts = append(parts, k+": "+exprValueToString(m[k]))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
 }
