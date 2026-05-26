@@ -254,9 +254,10 @@ func TestTimeValue_All(t *testing.T) {
 	if r := v.Equal(other); r != BoolValue(false) {
 		t.Errorf("Equal(other-offset) = %v; want false", r)
 	}
-	// UTC: "Z" suffix.
+	// UTC: "Z" suffix. The canonical form elides :00 seconds when
+	// seconds and nanos are both zero, matching the openCypher TCK.
 	utc := NewTime(0, 0, 0, 0, 0)
-	if got := utc.String(); got != "00:00:00Z" {
+	if got := utc.String(); got != "00:00Z" {
 		t.Errorf("utc String()=%q", got)
 	}
 }
@@ -349,17 +350,22 @@ func TestFormatDuration_VariousShapes(t *testing.T) {
 
 func TestFormatNanosToTime_NegativeClamps(t *testing.T) {
 	t.Parallel()
-	// Negative input is clamped to 0 before formatting.
-	if got := formatNanosToTime(-1); got != "00:00:00" {
-		t.Errorf("formatNanosToTime(-1)=%q; want 00:00:00", got)
+	// Negative input is clamped to 0 before formatting. The canonical
+	// shortest form elides :00 seconds when seconds and nanos are zero.
+	if got := formatNanosToTime(-1); got != "00:00" {
+		t.Errorf("formatNanosToTime(-1)=%q; want 00:00", got)
 	}
 	// Zero output.
-	if got := formatNanosToTime(0); got != "00:00:00" {
-		t.Errorf("formatNanosToTime(0)=%q", got)
+	if got := formatNanosToTime(0); got != "00:00" {
+		t.Errorf("formatNanosToTime(0)=%q; want 00:00", got)
 	}
-	// Non-zero nanos render fraction.
+	// Non-zero seconds keep the seconds field.
 	if got := formatNanosToTime(int64(time.Second) + int64(time.Hour)); got != "01:00:01" {
 		t.Errorf("formatNanosToTime(1h1s)=%q", got)
+	}
+	// Non-zero nanos keep both seconds and fraction.
+	if got := formatNanosToTime(int64(time.Second) + 500_000_000); got != "00:00:01.5" {
+		t.Errorf("formatNanosToTime(1.5s)=%q", got)
 	}
 }
 

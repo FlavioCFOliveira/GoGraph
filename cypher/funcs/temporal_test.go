@@ -148,7 +148,9 @@ func TestFnLocalTime_Map(t *testing.T) {
 		t.Fatalf("fnLocalTime: %v", err)
 	}
 	lt := got.(expr.LocalTimeValue)
-	if lt.String() != "13:45:00" {
+	// Canonical openCypher textual form elides :00 seconds when both
+	// seconds and nanos are zero.
+	if lt.String() != "13:45" {
 		t.Errorf("lt: %q", lt.String())
 	}
 }
