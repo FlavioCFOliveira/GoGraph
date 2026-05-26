@@ -102,6 +102,10 @@ type buildOpts struct {
 	// encountered inside Filter/Project closures. May be nil; in that case
 	// subquery expressions surface as [expr.EvalError] at runtime.
 	subEval expr.SubqueryEvaluator
+	// patEval handles [ast.PathPattern] existential predicates inside WHERE
+	// clauses. May be nil; in that case pattern predicates surface as
+	// [expr.EvalError] at runtime.
+	patEval expr.PatternEvaluator
 	// queryCtx is the context.Context attached to the enclosing Engine.Run
 	// call. It is threaded into [expr.EvalWith] so subquery drives observe
 	// cancellation and deadlines from the outer query.
@@ -134,19 +138,19 @@ type buildOpts struct {
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
-// [expr.EvalWith]. When bopts is non-nil and carries a SubqueryEvaluator,
-// [expr.EvalWith] is used so EXISTS / COUNT subquery dispatch is enabled;
-// otherwise the call degrades to [expr.Eval], preserving exact backward
-// compatibility for callers that have not been retrofitted.
+// [expr.EvalWith]. When bopts is non-nil and carries a SubqueryEvaluator or
+// PatternEvaluator, [expr.EvalWith] is used so EXISTS/COUNT subquery dispatch
+// and pattern predicate dispatch are enabled; otherwise the call degrades to
+// [expr.Eval], preserving exact backward compatibility.
 func evalRow(bopts *buildOpts, e ast.Expression, row expr.RowContext, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
-	if bopts == nil || bopts.subEval == nil {
+	if bopts == nil || (bopts.subEval == nil && bopts.patEval == nil) {
 		return expr.Eval(e, row, params, reg)
 	}
 	ctx := bopts.queryCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return expr.EvalWith(ctx, e, row, params, reg, bopts.subEval)
+	return expr.EvalWith(ctx, e, row, params, reg, bopts.subEval, bopts.patEval)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,7 +336,10 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// expressions encountered inside Filter/Project closures can drive their
 	// inner pipelines against the current outer row (task-396).
 	subEval := newSubqueryEvaluator(walker, labelSrc, e.reg, e.g)
-	bopts := &buildOpts{subEval: subEval, queryCtx: ctx}
+	// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
+	// predicates can be evaluated against the live graph (task-961).
+	patEval := newPatternEvaluator(e.g)
+	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx}
 	op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager(), e.procReg, bopts)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
@@ -1952,7 +1959,11 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		keys := irSortKeys(p.SortItems, schema)
+		var sortG *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			sortG = lw.g
+		}
+		keys := irSortKeys(p.SortItems, schema, sortG, params, reg, bopts)
 		if len(keys) == 0 {
 			// No resolvable sort keys — pass through without sorting.
 			return child, nil
@@ -1964,7 +1975,11 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		keys := irSortKeys(p.SortItems, schema)
+		var topG *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			topG = lw.g
+		}
+		keys := irSortKeys(p.SortItems, schema, topG, params, reg, bopts)
 		if len(keys) == 0 || p.Limit <= 0 {
 			// Degenerate: no sort keys or zero limit — return child unchanged.
 			return child, nil
@@ -2355,22 +2370,65 @@ func aggregateFactory(fn, argument string) (funcs.AggregatorFactory, error) {
 	}
 }
 
-// irSortKeys converts a slice of ir.SortItem to exec.SortKey values by
-// resolving each expression against the current schema. Expressions that
-// cannot be resolved (property accesses, unbound variables) are skipped.
-func irSortKeys(items []ir.SortItem, schema map[string]int) []exec.SortKey {
+// irSortKeys converts a slice of ir.SortItem to exec.SortKey values.
+//
+// Resolution strategy (per item):
+//  1. Direct schema lookup by expression string — covers the common case where
+//     the sort key is a projected column (name or alias matches).
+//  2. If (1) fails and the item carries an AST expression (si.Expr != nil),
+//     compile an expression evaluator that derives the sort value from the row
+//     context at runtime. This handles ORDER BY on expressions that are not
+//     direct projection outputs (e.g. ORDER BY n.age after RETURN n).
+//  3. If both fail, the item is skipped (callers treat empty result as
+//     "no sort needed").
+//
+// The g, params, reg, and bopts arguments are used only when compiling an
+// expression evaluator (case 2). Pass nil/zero values when the caller does
+// not have access to them; in that case only direct schema lookups succeed.
+func irSortKeys(
+	items []ir.SortItem,
+	schema map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+) []exec.SortKey {
 	keys := make([]exec.SortKey, 0, len(items))
 	for _, si := range items {
-		col, ok := schema[si.Expression]
-		if !ok {
-			// Skip unresolvable sort expressions — callers treat an empty result
-			// as "no sort needed" and pass through the child unchanged.
+		// Case 1: direct lookup by expression string.
+		if col, ok := schema[si.Expression]; ok {
+			keys = append(keys, exec.SortKey{
+				ColIdx:    col,
+				Ascending: !si.Descending,
+			})
 			continue
 		}
-		keys = append(keys, exec.SortKey{
-			ColIdx:    col,
-			Ascending: !si.Descending,
-		})
+
+		// Case 2: compile an expression evaluator from the stored AST node.
+		if si.Expr != nil {
+			// Snapshot the schema and capture all dependencies so the closure
+			// evaluates correctly against the row layout produced by the child.
+			schemaCopy := make(map[string]int, len(schema))
+			for k, v := range schema {
+				schemaCopy[k] = v
+			}
+			capturedExpr := si.Expr
+			capturedG := g
+			capturedParams := params
+			capturedReg := reg
+			capturedBopts := bopts
+			ascending := !si.Descending
+			keys = append(keys, exec.SortKey{
+				Ascending: ascending,
+				Eval: func(row exec.Row) (expr.Value, error) {
+					rowCtx := buildRowCtx(row, schemaCopy, capturedG, capturedBopts)
+					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+				},
+			})
+			continue
+		}
+
+		// Case 3: unresolvable — skip.
 	}
 	return keys
 }
@@ -3276,6 +3334,14 @@ func buildIRProjection(
 
 		// Update schema: output variable maps to index i.
 		schema[name] = i
+		// Also register the expression string as a secondary key so that ORDER BY
+		// clauses that reference the un-aliased expression (e.g. ORDER BY n.num
+		// after RETURN n.num AS prop) can still resolve the correct column via
+		// irSortKeys. Only added when exprStr differs from name to avoid redundant
+		// writes; the primary alias always wins on any read.
+		if exprStr != "" && exprStr != name {
+			schema[exprStr] = i
+		}
 		projItems[i] = exec.ProjectionItem{Alias: name, Eval: evalFn}
 	}
 	return exec.NewProject(child, projItems)

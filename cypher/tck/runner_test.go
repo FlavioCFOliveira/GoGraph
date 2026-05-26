@@ -326,11 +326,20 @@ import (
 //     and other scenarios referencing variables dropped by a prior WITH.
 //     Net uplift: +72 scenarios. Observed 2382 stable across a 2-run sample;
 //     baseline set conservatively at 2378 to absorb run-to-run variance.
+//   - 2440: raised after task T961 — pattern predicates in WHERE clauses are
+//     now evaluated as existential checks against the live graph. Adds a
+//     PatternEvaluator interface and patternEvaluator implementation that walks
+//     the LPG adjacency list per row. Supports single-hop directed/undirected/
+//     typed patterns (WHERE (a)-[:T]->(b)) and variable-length BFS patterns
+//     (WHERE (a)-[:T*]->(b)). Unlocks: expressions/pattern/Pattern1 (scenarios
+//     1-9, 12-21), clauses/match-where, and other WHERE-predicate scenarios.
+//     Net uplift: +69 scenarios above 2378. Observed 2447-2485 across a 4-run
+//     sample; baseline set conservatively at 2440 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 2378
+const tckExecutionBaseline = 2440
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

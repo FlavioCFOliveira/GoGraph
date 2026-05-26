@@ -50,7 +50,7 @@ func TestEvalWith_ExistsAndCount(t *testing.T) {
 
 	sub := &fakeSubEval{existsResult: true, countResult: 7}
 
-	v, err := EvalWith(ctx, exists, RowContext{"x": IntegerValue(1)}, nil, nopReg{}, sub)
+	v, err := EvalWith(ctx, exists, RowContext{"x": IntegerValue(1)}, nil, nopReg{}, sub, nil)
 	if err != nil {
 		t.Fatalf("EvalWith EXISTS: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestEvalWith_ExistsAndCount(t *testing.T) {
 		t.Errorf("context not propagated")
 	}
 
-	v, err = EvalWith(ctx, count, nil, nil, nopReg{}, sub)
+	v, err = EvalWith(ctx, count, nil, nil, nopReg{}, sub, nil)
 	if err != nil {
 		t.Fatalf("EvalWith COUNT: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestEvalWith_NilCtx(t *testing.T) {
 	exists := &ast.ExistsSubquery{}
 	sub := &fakeSubEval{existsResult: false}
 	var nilCtx context.Context // explicit nil typed value
-	v, err := EvalWith(nilCtx, exists, nil, nil, nopReg{}, sub)
+	v, err := EvalWith(nilCtx, exists, nil, nil, nopReg{}, sub, nil)
 	if err != nil {
 		t.Fatalf("EvalWith nil ctx: %v", err)
 	}
@@ -99,10 +99,10 @@ func TestEvalWith_NilCtx(t *testing.T) {
 func TestEvalWith_NilSubEvalErrors(t *testing.T) {
 	t.Parallel()
 	pos := ast.Position{}
-	if _, err := EvalWith(context.Background(), &ast.ExistsSubquery{Pos: pos}, nil, nil, nopReg{}, nil); err == nil {
+	if _, err := EvalWith(context.Background(), &ast.ExistsSubquery{Pos: pos}, nil, nil, nopReg{}, nil, nil); err == nil {
 		t.Errorf("EXISTS with nil sub should error")
 	}
-	if _, err := EvalWith(context.Background(), &ast.CountSubquery{Pos: pos}, nil, nil, nopReg{}, nil); err == nil {
+	if _, err := EvalWith(context.Background(), &ast.CountSubquery{Pos: pos}, nil, nil, nopReg{}, nil, nil); err == nil {
 		t.Errorf("COUNT with nil sub should error")
 	}
 }

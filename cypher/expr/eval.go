@@ -65,6 +65,21 @@ type SubqueryEvaluator interface {
 	EvalCount(ctx context.Context, sub *ast.CountSubquery, row RowContext, params map[string]Value) (Value, error)
 }
 
+// PatternEvaluator evaluates [ast.PathPattern] expressions used as existential
+// predicates inside WHERE clauses (e.g. WHERE (a)-[:T]->(b)). The evaluator
+// receives the current row context so that bound variables are visible and can
+// be used as anchors for the graph traversal.
+//
+// EvalPattern must return BoolValue(true) when at least one match for the
+// pattern exists in the graph given the bindings in row, BoolValue(false) when
+// no match exists, or Null when the result is undefined. It must honour the
+// supplied context for cancellation and propagate errors unchanged.
+type PatternEvaluator interface {
+	// EvalPattern evaluates pp as an existential predicate and returns a boolean
+	// Value indicating whether the pattern matches at least one path in the graph.
+	EvalPattern(ctx context.Context, pp *ast.PathPattern, row RowContext, params map[string]Value) (Value, error)
+}
+
 // EvalError is returned when Eval encounters a type or semantic error that
 // is not representable as a NULL (e.g. unknown operator, unsupported AST node).
 type EvalError struct {
@@ -88,30 +103,30 @@ func Eval(expr ast.Expression, row RowContext, params map[string]Value, reg Func
 }
 
 // EvalWith evaluates expr just like [Eval], but threads a [context.Context]
-// and an optional [SubqueryEvaluator] through the evaluation. The context is
-// used for cancellation and deadlines when subquery evaluation is involved;
-// the evaluator handles [ast.ExistsSubquery] and [ast.CountSubquery]
-// occurrences nested anywhere inside expr.
+// and optional evaluators through the evaluation. The context is used for
+// cancellation and deadlines when subquery or pattern evaluation is involved.
+// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] occurrences;
+// patEval handles [ast.PathPattern] existential predicates in WHERE clauses.
 //
-// When subEval is nil, EvalWith behaves exactly like [Eval]: subquery
-// expressions produce an [EvalError].
+// When subEval is nil, subquery expressions produce an [EvalError].
+// When patEval is nil, pattern predicate expressions produce an [EvalError].
 //
 // EvalWith is safe for concurrent use: each call carries its own context and
-// evaluator on the call stack; there is no shared mutable state.
-func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry, subEval SubqueryEvaluator) (Value, error) {
+// evaluators on the call stack; there is no shared mutable state.
+func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry, subEval SubqueryEvaluator, patEval PatternEvaluator) (Value, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// The subquery context is carried alongside the per-row evaluator state via
-	// a small holder so it threads through every recursive call automatically.
-	// We attach it to a context-augmented RowContext using a sentinel reserved
-	// key that cannot collide with any valid Cypher identifier (NUL bytes are
-	// not legal in identifiers per the openCypher 9 grammar §A.1).
+	// The subquery/pattern context is carried alongside the per-row evaluator
+	// state via a small holder so it threads through every recursive call
+	// automatically. We attach it to a context-augmented RowContext using a
+	// sentinel reserved key that cannot collide with any valid Cypher identifier
+	// (NUL bytes are not legal in identifiers per the openCypher 9 grammar §A.1).
 	augmented := make(RowContext, len(row)+1)
 	for k, v := range row {
 		augmented[k] = v
 	}
-	augmented[subqueryContextKey] = &subqueryContextValue{ctx: ctx, sub: subEval}
+	augmented[subqueryContextKey] = &subqueryContextValue{ctx: ctx, sub: subEval, pat: patEval}
 	return evalExpr(expr, augmented, params, reg)
 }
 
@@ -125,10 +140,12 @@ const subqueryContextKey = "\x00subquery-context\x00"
 // subqueryContextValue is the holder stored under [subqueryContextKey]. It
 // implements [Value] so it can live inside a [RowContext] map alongside real
 // runtime values. The smuggled fields are accessed via
-// [extractSubqueryContext]; user code never sees this value.
+// [extractSubqueryContext] and [extractPatternEvaluator]; user code never
+// sees this value.
 type subqueryContextValue struct {
 	ctx context.Context //nolint:containedctx // smuggled through RowContext, see EvalWith
 	sub SubqueryEvaluator
+	pat PatternEvaluator
 }
 
 // Kind implements [Value]. Returns [KindNull] because subqueryContextValue
@@ -147,8 +164,8 @@ func (*subqueryContextValue) Hash() uint64 { return 0 }
 // String implements [Value]. Returns a fixed sentinel string for debugging.
 func (*subqueryContextValue) String() string { return "<subquery-context>" }
 
-// extractSubqueryContext returns the smuggled context and evaluator from row,
-// or (context.Background(), nil) when none is present.
+// extractSubqueryContext returns the smuggled context and SubqueryEvaluator
+// from row, or (context.Background(), nil) when none is present.
 func extractSubqueryContext(row RowContext) (context.Context, SubqueryEvaluator) {
 	if row == nil {
 		return context.Background(), nil
@@ -162,6 +179,23 @@ func extractSubqueryContext(row RowContext) (context.Context, SubqueryEvaluator)
 		return context.Background(), nil
 	}
 	return scv.ctx, scv.sub
+}
+
+// extractPatternEvaluator returns the smuggled context and PatternEvaluator
+// from row, or (context.Background(), nil) when none is present.
+func extractPatternEvaluator(row RowContext) (context.Context, PatternEvaluator) {
+	if row == nil {
+		return context.Background(), nil
+	}
+	v, ok := row[subqueryContextKey]
+	if !ok {
+		return context.Background(), nil
+	}
+	scv, ok := v.(*subqueryContextValue)
+	if !ok {
+		return context.Background(), nil
+	}
+	return scv.ctx, scv.pat
 }
 
 func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // Main dispatch switch; all branches are simple delegations and cannot be split without obscuring the type mapping.
@@ -250,6 +284,16 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 			return nil, &EvalError{Msg: "COUNT { … } subquery is not supported in this evaluation context (no SubqueryEvaluator wired)"}
 		}
 		return subEval.EvalCount(ctx, n, row, params)
+
+	// ── Pattern predicate (existential check) ─────────────────────────────────
+	// WHERE (a)-[:T]->(b) is an existential check: true iff at least one path
+	// matching the pattern exists in the graph given the bindings in row.
+	case *ast.PathPattern:
+		ctx, patEval := extractPatternEvaluator(row)
+		if patEval == nil {
+			return nil, &EvalError{Msg: "pattern predicate is not supported in this evaluation context (no PatternEvaluator wired)"}
+		}
+		return patEval.EvalPattern(ctx, n, row, params)
 
 	default:
 		return nil, &EvalError{Msg: fmt.Sprintf("unsupported expression type %T", e)}
