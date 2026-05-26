@@ -4,13 +4,16 @@ package proto_test
 //
 // The existing TestNegotiateV54 covers a single exact point. This file adds
 // four representative offer vectors to fully satisfy the AC:
-//   1. Range offer spanning several v5 minors: server must pick the highest.
-//   2. Multiple slots: server must pick the highest mutual across all slots.
-//   3. Single exact v5.0 offer: no range, no alternatives.
-//   4. Exact v5.6 offer: highest server-supported minor today.
+//  1. Range offer spanning several v5 minors: server must pick the highest.
+//  2. Multiple slots: server must pick the highest mutual across all slots.
+//  3. Single exact v5.0 offer: no range, no alternatives.
+//  4. Exact v5.6 offer: highest server-supported minor today.
 //
 // Each subtest also verifies the exact wire format of the four-byte response
-// (AC #2: server returns [major, minor, 0, 0] in big-endian order).
+// (AC #2: server returns [0x00, 0x00, minor, major] in big-endian order).
+//
+// Bolt wire slot format (big-endian, 4 bytes): [0x00, minor_range, minor, major].
+// Bolt wire response format (big-endian, 4 bytes): [0x00, 0x00, minor, major].
 
 import (
 	"context"
@@ -61,28 +64,30 @@ func runNegotiate(t *testing.T, offerSlots [][4]byte) (v proto.Version, rawResp 
 }
 
 // TestNegotiateV5HighestMutualRangeOffer covers offer vector #1:
-// client sends [5, 6, 6, 0] meaning "I support v5.0 through v5.6".
+// client sends a slot meaning "I support v5.0 through v5.6".
 // The server must select its highest supported v5 version (currently v5.6).
+//
+// Slot wire bytes: [0x00, minor_range=6, minor=6, major=5] → accepts v5.0–v5.6.
 func TestNegotiateV5HighestMutualRangeOffer(t *testing.T) {
 	t.Parallel()
 
-	// Slot: [major=5, minor=6, minor_range=6, 0] → accepts [5.0, 5.6].
-	v, rawResp := runNegotiate(t, [][4]byte{{5, 6, 6, 0}})
+	// [pad=0x00, minor_range=6, minor=6, major=5]: client accepts v5.0–v5.6.
+	v, rawResp := runNegotiate(t, [][4]byte{{0, 6, 6, 5}})
 
 	// Server must choose the highest mutual version — v5.6 in this case.
 	if v.Major != 5 || v.Minor != 6 {
 		t.Errorf("want v5.6, got v%d.%d", v.Major, v.Minor)
 	}
 
-	// AC #2: wire response must be [5, 6, 0, 0].
-	want := [4]byte{5, 6, 0, 0}
+	// AC #2: wire response must be [0x00, 0x00, minor=6, major=5].
+	want := [4]byte{0, 0, 6, 5}
 	if rawResp != want {
 		t.Errorf("wire response: want %v, got %v", want, rawResp)
 	}
 
-	// Validate that the four bytes are big-endian: bytes 2 and 3 must be zero.
-	if binary.BigEndian.Uint16(rawResp[2:]) != 0 {
-		t.Errorf("response bytes [2:4] must be zero, got 0x%04X", binary.BigEndian.Uint16(rawResp[2:]))
+	// Validate that the leading two bytes are zero (padding).
+	if binary.BigEndian.Uint16(rawResp[:2]) != 0 {
+		t.Errorf("response bytes [0:2] must be zero, got 0x%04X", binary.BigEndian.Uint16(rawResp[:2]))
 	}
 }
 
@@ -91,55 +96,61 @@ func TestNegotiateV5HighestMutualRangeOffer(t *testing.T) {
 // across both slots, not just the first match.
 //
 // Slots:
-//   - [5, 0, 0, 0] — only v5.0
-//   - [5, 6, 2, 0] — v5.4 through v5.6
+//   - [0x00, 0x00, 0x00, 0x05] — only v5.0
+//   - [0x00, 0x02, 0x06, 0x05] — v5.4 through v5.6
 //
 // Server should pick v5.6 (higher than v5.0 from the first slot).
 func TestNegotiateV5MultipleSlotsBestPick(t *testing.T) {
 	t.Parallel()
 
 	v, rawResp := runNegotiate(t, [][4]byte{
-		{5, 0, 0, 0}, // slot 1: v5.0 only
-		{5, 6, 2, 0}, // slot 2: v5.4–v5.6
+		{0, 0, 0, 5}, // [pad, range=0, minor=0, major=5]: v5.0 only
+		{0, 2, 6, 5}, // [pad, range=2, minor=6, major=5]: v5.4–v5.6
 	})
 
 	if v.Major != 5 || v.Minor != 6 {
 		t.Errorf("want v5.6 (best from slot 2), got v%d.%d", v.Major, v.Minor)
 	}
-	if rawResp != ([4]byte{5, 6, 0, 0}) {
-		t.Errorf("wire response: want [5 6 0 0], got %v", rawResp)
+	if rawResp != ([4]byte{0, 0, 6, 5}) {
+		t.Errorf("wire response: want [0 0 6 5], got %v", rawResp)
 	}
 }
 
 // TestNegotiateV5ExactSinglePoint covers offer vector #3:
 // client offers exactly v5.0 with no range. Server must agree on v5.0.
+//
+// Slot wire bytes: [0x00, 0x00, 0x00, 0x05].
 func TestNegotiateV5ExactSinglePoint(t *testing.T) {
 	t.Parallel()
 
-	v, rawResp := runNegotiate(t, [][4]byte{{5, 0, 0, 0}})
+	// [pad=0x00, range=0, minor=0, major=5]: exactly v5.0.
+	v, rawResp := runNegotiate(t, [][4]byte{{0, 0, 0, 5}})
 
 	if v.Major != 5 || v.Minor != 0 {
 		t.Errorf("want v5.0, got v%d.%d", v.Major, v.Minor)
 	}
-	if rawResp != ([4]byte{5, 0, 0, 0}) {
-		t.Errorf("wire response: want [5 0 0 0], got %v", rawResp)
+	if rawResp != ([4]byte{0, 0, 0, 5}) {
+		t.Errorf("wire response: want [0 0 0 5], got %v", rawResp)
 	}
 }
 
 // TestNegotiateV5HighestServerMinor covers offer vector #4:
 // client offers exactly v5.6 (highest server-supported minor today).
 // Server must agree on v5.6 and return the exact wire bytes.
+//
+// Slot wire bytes: [0x00, 0x00, 0x06, 0x05].
 func TestNegotiateV5HighestServerMinor(t *testing.T) {
 	t.Parallel()
 
-	v, rawResp := runNegotiate(t, [][4]byte{{5, 6, 0, 0}})
+	// [pad=0x00, range=0, minor=6, major=5]: exactly v5.6.
+	v, rawResp := runNegotiate(t, [][4]byte{{0, 0, 6, 5}})
 
 	if v.Major != 5 || v.Minor != 6 {
 		t.Errorf("want v5.6, got v%d.%d", v.Major, v.Minor)
 	}
 
-	// AC #2: wire format is [major, minor, 0, 0].
-	want := [4]byte{5, 6, 0, 0}
+	// AC #2: wire format is [0x00, 0x00, minor, major].
+	want := [4]byte{0, 0, 6, 5}
 	if rawResp != want {
 		t.Errorf("wire response: want %v, got %v", want, rawResp)
 	}

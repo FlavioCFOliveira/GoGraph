@@ -34,16 +34,19 @@ var SupportedVersions = []Version{
 	{4, 4},
 }
 
-// Negotiate performs the Bolt v5 handshake on conn.
+// Negotiate performs the Bolt handshake on conn.
 //
 // The client sends a 20-byte payload: 4-byte magic followed by four 4-byte
-// version slots. Each slot encodes [major, minor, minor_range, 0] in big-endian
-// order. minor_range > 0 means the client accepts versions in the range
+// version slots. Each slot is big-endian and laid out as:
+//
+//	[0x00, minor_range, minor, major]
+//
+// minor_range > 0 means the client accepts versions in the range
 // [minor-minor_range, minor], allowing a range offer in a single slot.
 //
 // Negotiate selects the highest version from SupportedVersions that falls
-// within any offered range, writes back 4 bytes ([major, minor, 0, 0]), and
-// returns the agreed Version. The context deadline, if set, governs I/O
+// within any offered range, writes back 4 bytes ([0x00, 0x00, minor, major]),
+// and returns the agreed Version. The context deadline, if set, governs I/O
 // timeouts via conn.SetDeadline.
 //
 // Returns ErrBadMagic if the magic preamble is wrong, ErrNoCommonVersion if no
@@ -77,8 +80,15 @@ func Negotiate(ctx context.Context, conn net.Conn) (Version, error) {
 	}
 
 	// Parse four version slots.
-	// Bolt wire format per slot: [major, minor, minor_range, 0] big-endian.
+	//
+	// Bolt wire format per slot (big-endian, 4 bytes):
+	//   [0x00, minor_range, minor, major]
+	//
+	// That is: slot[3] = major, slot[2] = minor, slot[1] = minor_range,
+	// slot[0] = padding (always 0x00).
+	//
 	// minor_range: the client accepts [minor - minor_range, minor].
+	// A slot where major == 0 && minor == 0 is a padding (empty) slot.
 	type versionOffer struct {
 		major      uint8
 		minor      uint8
@@ -87,9 +97,9 @@ func Negotiate(ctx context.Context, conn net.Conn) (Version, error) {
 	offers := make([]versionOffer, 0, 4)
 	for i := 0; i < 4; i++ {
 		slot := buf[4+i*4 : 4+i*4+4]
-		major := slot[0]
-		minor := slot[1]
-		minorRange := slot[2]
+		major := slot[3]
+		minor := slot[2]
+		minorRange := slot[1]
 		if major == 0 && minor == 0 {
 			continue // zero slot = not offered
 		}
@@ -109,10 +119,10 @@ func Negotiate(ctx context.Context, conn net.Conn) (Version, error) {
 				minMinor = o.minor - o.minorRange
 			}
 			if sv.Minor >= minMinor && sv.Minor <= o.minor {
-				// Write back the agreed version: [major, minor, 0, 0].
+				// Write back the agreed version: [0x00, 0x00, minor, major].
 				var resp [4]byte
-				resp[0] = sv.Major
-				resp[1] = sv.Minor
+				resp[3] = sv.Major
+				resp[2] = sv.Minor
 				if _, err := conn.Write(resp[:]); err != nil {
 					return Version{}, fmt.Errorf("bolt: write version: %w", err)
 				}

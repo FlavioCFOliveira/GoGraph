@@ -306,8 +306,9 @@ func TestNegotiateV54(t *testing.T) {
 
 	go func() {
 		// Client sends magic + v5.4 offer.
+		// Bolt wire slot format (big-endian): [0x00, minor_range, minor, major].
 		payload := buildHandshake(proto.Magic, [][4]byte{
-			{5, 4, 0, 0},
+			{0, 0, 4, 5}, // [pad, range=0, minor=4, major=5]
 		})
 		_, _ = client.Write(payload)
 		// Read back 4-byte response.
@@ -332,8 +333,9 @@ func TestNegotiateV44(t *testing.T) {
 
 	go func() {
 		// Client offers v4.4 only.
+		// Bolt wire slot format (big-endian): [0x00, minor_range, minor, major].
 		payload := buildHandshake(proto.Magic, [][4]byte{
-			{4, 4, 0, 0},
+			{0, 0, 4, 4}, // [pad, range=0, minor=4, major=4]
 		})
 		_, _ = client.Write(payload)
 		resp := make([]byte, 4)
@@ -357,8 +359,9 @@ func TestNegotiateNoMatch(t *testing.T) {
 
 	go func() {
 		// Client offers v3.0 only — not supported.
+		// Bolt wire slot format (big-endian): [0x00, minor_range, minor, major].
 		payload := buildHandshake(proto.Magic, [][4]byte{
-			{3, 0, 0, 0},
+			{0, 0, 0, 3}, // [pad, range=0, minor=0, major=3]
 		})
 		_, _ = client.Write(payload)
 		resp := make([]byte, 4)
@@ -378,7 +381,8 @@ func TestNegotiateBadMagic(t *testing.T) {
 	defer server.Close()
 
 	go func() {
-		payload := buildHandshake(0xDEADBEEF, [][4]byte{{5, 4, 0, 0}})
+		// Bolt wire slot format (big-endian): [0x00, minor_range, minor, major].
+		payload := buildHandshake(0xDEADBEEF, [][4]byte{{0, 0, 4, 5}}) // v5.4
 		_, _ = client.Write(payload)
 		// The server closes without writing a response on bad magic — drain anyway.
 		buf := make([]byte, 4)
