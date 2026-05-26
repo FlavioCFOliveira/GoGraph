@@ -187,6 +187,64 @@ func TestCheckpoint_TruncatesWAL(t *testing.T) {
 	}
 }
 
+// TestCheckpoint_TruncationMetric_Emits verifies that
+// store.checkpoint.wal_truncated_bytes is incremented on the metrics
+// backend (not just on the in-process atomic counter) after a
+// successful checkpoint reclaims a non-zero WAL prefix (task T932).
+func TestCheckpoint_TruncationMetric_Emits(t *testing.T) {
+	// NOTE: not parallel because it installs and restores a global
+	// metrics backend; concurrent runs would race on the global.
+	cap := newCountingBackend()
+	prev := setMetricsBackend(cap)
+	t.Cleanup(func() { setMetricsBackend(prev) })
+
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+
+	payload := make([]byte, 64)
+	for i := 0; i < 50; i++ {
+		if err := w.Append(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	preInfo, _ := os.Stat(walPath)
+	if preInfo.Size() == 0 {
+		t.Fatal("WAL did not grow")
+	}
+
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	var mu sync.Mutex
+	cp := New(Config{Dir: dir, MaxAge: 0}, g, w, &mu)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cp.Start(ctx)
+	defer cp.Stop()
+
+	if err := cp.Trigger(); err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+
+	emitted := cap.count("store.checkpoint.wal_truncated_bytes")
+	if emitted == 0 {
+		t.Fatalf("store.checkpoint.wal_truncated_bytes not emitted: counters=%v", cap.snapshot())
+	}
+	if uint64(emitted) < uint64(preInfo.Size())/2 {
+		t.Fatalf("store.checkpoint.wal_truncated_bytes = %d, expected approximately the truncated prefix (%d bytes)",
+			emitted, preInfo.Size())
+	}
+}
+
 // TestCheckpoint_StopIdempotent asserts Stop is safe under serial
 // and concurrent re-entry. The v1.0.0 implementation called
 // close(stopCh) directly and panicked on the second call.

@@ -591,17 +591,29 @@ moment a serialisable index is registered with the graph.
 
 `store/checkpoint.Checkpointer` runs a goroutine that takes a
 snapshot every `MaxAge` interval (or on `Trigger()`). Each
-checkpoint:
+checkpoint runs under the store mutex so no transaction commits
+new WAL frames between snapshot capture and WAL truncation:
 
-1. Acquires the store mutex.
-2. Builds a CSR from the current adjacency list.
-3. Releases the mutex.
-4. Writes `snapshot/` atomically via the `.tmp` + `os.Rename`
+1. Acquire the store mutex.
+2. Build a CSR from the current adjacency list.
+3. Write `snapshot/` atomically via the `.tmp` + `os.Rename`
    protocol documented above.
-5. Calls `wal.Writer.Sync` so the WAL is in a defined state.
+4. Call `wal.Writer.Sync` so the WAL is in a defined state.
+5. Call `wal.Writer.Truncate` to reclaim the WAL prefix now
+   covered by the snapshot. The reclaimed byte count is recorded
+   on the lifetime counter `Stats.WALTruncBytes` and emitted via
+   the observability metric
+   `store.checkpoint.wal_truncated_bytes`.
+6. Release the store mutex.
 
-A future revision will additionally truncate the WAL prefix once
-the snapshot covers the corresponding ops.
+The lock-during-IO trade-off is acknowledged in
+`checkpoint.go:223-230`: for very large graphs this can stall
+writers and may be reworked later to a position-tracked truncate
+(capture LSN under lock, write snapshot lock-free, truncate
+up-to-LSN under lock). For v1 the simple correctness-first path
+is preferred and produces a strictly bounded WAL: at most one
+checkpoint interval of frames live on disk between successful
+runs.
 
 ## Recovery procedure
 

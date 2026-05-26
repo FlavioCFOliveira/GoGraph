@@ -251,10 +251,11 @@ with no return value).
 
 ### `store/checkpoint`
 
-| Metric                              | Description                                                       |
-| ----------------------------------- | ----------------------------------------------------------------- |
-| `store.checkpoint.Trigger`          | Request a checkpoint (synchronous wrapper).                       |
-| `store.checkpoint.TriggerCtx`       | Request a checkpoint with context.                                |
+| Metric                                       | Description                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------------ |
+| `store.checkpoint.Trigger`                   | Request a checkpoint (synchronous wrapper).                              |
+| `store.checkpoint.TriggerCtx`                | Request a checkpoint with context.                                       |
+| `store.checkpoint.wal_truncated_bytes`       | Counter: bytes reclaimed from the WAL prefix on each successful checkpoint. Emitted post-snapshot, post-truncate; the lifetime aggregate is also surfaced as `Stats.WALTruncBytes`. |
 
 ### `store/recovery`
 

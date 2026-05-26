@@ -248,6 +248,13 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 	}
 	if truncated > 0 {
 		c.walTrunc.Add(uint64(truncated))
+		// Surface the bytes reclaimed through the metrics backend so
+		// operators monitoring long-running stores can plot WAL-prefix
+		// reclamation cadence without polling Stats(). The atomic
+		// lifetime counter [c.walTrunc] remains the test-friendly
+		// in-process aggregate; this counter is the observability
+		// surface.
+		metrics.IncCounter("store.checkpoint.wal_truncated_bytes", uint64(truncated))
 	}
 	c.checkpoints.Add(1)
 	c.setErr(nil)
