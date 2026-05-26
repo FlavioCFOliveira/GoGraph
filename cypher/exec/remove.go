@@ -28,14 +28,15 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // RemoveProperty removes a single named property from an already-bound node
-// per input row. The node is identified by entityVar, whose column value must
-// be an IntegerValue-encoded NodeID.
+// or relationship per input row. For relationships, call WithRelCols to supply
+// the endpoint column indices.
 //
 // RemoveProperty is NOT safe for concurrent use.
 type RemoveProperty struct {
 	entityVar   string
 	propertyKey string
 	schema      map[string]int
+	relCols     *RelCols // non-nil when entityVar is a relationship
 	child       Operator
 	mutator     GraphMutator
 	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
@@ -55,6 +56,14 @@ func NewRemoveProperty(
 		child:       child,
 		mutator:     mutator,
 	}
+}
+
+// WithRelCols marks entityVar as a relationship variable and records the row
+// columns that hold the src and dst NodeIDs. Must be called before the first
+// Next invocation. Returns op for chaining.
+func (op *RemoveProperty) WithRelCols(rc RelCols) *RemoveProperty {
+	op.relCols = &rc
+	return op
 }
 
 // Init initialises the operator and its child.
@@ -78,17 +87,17 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
-	nodeID, err := resolveNodeIDFromRow(op.entityVar, op.schema, childRow)
-	if err != nil {
-		return false, fmt.Errorf("exec: RemoveProperty %q: %w", op.entityVar, err)
-	}
-	nodeKey, resolved := op.mutator.ResolveNodeLabel(nodeID)
-	if !resolved {
-		return false, fmt.Errorf("exec: RemoveProperty: cannot resolve NodeID %d", nodeID)
+	ent, entErr := resolveEntityMaybeRel(op.entityVar, op.schema, op.relCols, childRow, op.mutator)
+	if entErr != nil {
+		return false, fmt.Errorf("exec: RemoveProperty %q: %w", op.entityVar, entErr)
 	}
 
 	if op.propertyKey != "" {
-		op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
+		if ent.isRel {
+			op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey)
+		} else {
+			op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey)
+		}
 	}
 	// Empty propertyKey is treated as a no-op (whole-entity remove is not a
 	// valid Cypher operation; the IR translator emits this only for malformed
@@ -183,12 +192,113 @@ func (op *RemoveLabels) Close() error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared helper
+// Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// resolvedEntity holds the mutator-facing identity of a node or relationship.
+// Exactly one of nodeKey or (relSrcKey, relDstKey) is populated, selected by
+// isRel.
+type resolvedEntity struct {
+	isRel     bool
+	nodeKey   string // valid when !isRel
+	relSrcKey string // valid when isRel
+	relDstKey string // valid when isRel
+}
+
+// resolveEntityFromRow extracts the node or relationship identity from the
+// column at varName using the provided schema map and translates internal IDs
+// to mutator-facing string keys. It accepts IntegerValue, NodeValue, and
+// RelationshipValue column values.
+func resolveEntityFromRow(varName string, schema map[string]int, row Row, mut GraphMutator) (resolvedEntity, error) {
+	colIdx, ok := schema[varName]
+	if !ok {
+		return resolvedEntity{}, fmt.Errorf("variable %q not in schema", varName)
+	}
+	if colIdx >= len(row) {
+		return resolvedEntity{}, fmt.Errorf("column %d out of range (row len %d)", colIdx, len(row))
+	}
+	switch v := row[colIdx].(type) {
+	case expr.IntegerValue:
+		nodeKey, resolved := mut.ResolveNodeLabel(graph.NodeID(v))
+		if !resolved {
+			return resolvedEntity{}, fmt.Errorf("cannot resolve NodeID %d", graph.NodeID(v))
+		}
+		return resolvedEntity{nodeKey: nodeKey}, nil
+	case expr.NodeValue:
+		nodeKey, resolved := mut.ResolveNodeLabel(graph.NodeID(v.ID))
+		if !resolved {
+			return resolvedEntity{}, fmt.Errorf("cannot resolve NodeID %d", graph.NodeID(v.ID))
+		}
+		return resolvedEntity{nodeKey: nodeKey}, nil
+	case expr.RelationshipValue:
+		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
+		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
+		if !srcOK || !dstOK {
+			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
+		}
+		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+	default:
+		return resolvedEntity{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
+	}
+}
+
+// resolveEntityMaybeRel resolves the entity at varName. When rc is non-nil
+// the variable is known to be a relationship: if the schema column holds an
+// IntegerValue (raw Expand output), endpoint IDs are read from rc.SrcCol /
+// rc.DstCol; if it holds a RelationshipValue (post-projection), StartID /
+// EndID are used directly. For node variables (rc == nil) it delegates to
+// resolveEntityFromRow.
+func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, row Row, mut GraphMutator) (resolvedEntity, error) {
+	if rc == nil {
+		return resolveEntityFromRow(varName, schema, row, mut)
+	}
+	colIdx, ok := schema[varName]
+	if !ok {
+		return resolvedEntity{}, fmt.Errorf("variable %q not in schema", varName)
+	}
+	if colIdx >= len(row) {
+		return resolvedEntity{}, fmt.Errorf("column %d out of range (row len %d)", colIdx, len(row))
+	}
+	switch v := row[colIdx].(type) {
+	case expr.IntegerValue:
+		_ = v // edge-position counter; use endpoint columns
+		return resolveRelBindingFromRow(rc.SrcCol, rc.DstCol, row, mut)
+	case expr.RelationshipValue:
+		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
+		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
+		if !srcOK || !dstOK {
+			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
+		}
+		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+	default:
+		return resolvedEntity{}, fmt.Errorf("variable %q is not IntegerValue/RelationshipValue for relationship entity (got %T)", varName, row[colIdx])
+	}
+}
+
+// resolveRelBindingFromRow resolves a relationship entity from the (srcCol,
+// dstCol) pair of row columns that hold endpoint NodeIDs as IntegerValue.
+// Mirrors resolveRelBinding in set.go but returns resolvedEntity.
+func resolveRelBindingFromRow(srcCol, dstCol int, row Row, mut GraphMutator) (resolvedEntity, error) {
+	if srcCol >= len(row) || dstCol >= len(row) {
+		return resolvedEntity{}, fmt.Errorf("relationship endpoint columns (%d, %d) out of range (row len %d)", srcCol, dstCol, len(row))
+	}
+	srcIV, srcOK := row[srcCol].(expr.IntegerValue)
+	dstIV, dstOK := row[dstCol].(expr.IntegerValue)
+	if !srcOK || !dstOK {
+		return resolvedEntity{}, fmt.Errorf("relationship endpoint columns hold non-IntegerValue (%T, %T)", row[srcCol], row[dstCol])
+	}
+	srcKey, srcResolved := mut.ResolveNodeLabel(graph.NodeID(srcIV))
+	dstKey, dstResolved := mut.ResolveNodeLabel(graph.NodeID(dstIV))
+	if !srcResolved || !dstResolved {
+		return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoint NodeIDs (%d, %d)", graph.NodeID(srcIV), graph.NodeID(dstIV))
+	}
+	return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+}
 
 // resolveNodeIDFromRow extracts the NodeID stored at the column position of
 // varName using the provided schema map. It accepts both IntegerValue (NodeID
 // emitted by scan/create operators) and NodeValue (full node value).
+// Used by RemoveLabels which operates on nodes only.
 func resolveNodeIDFromRow(varName string, schema map[string]int, row Row) (graph.NodeID, error) {
 	colIdx, ok := schema[varName]
 	if !ok {

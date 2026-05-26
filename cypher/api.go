@@ -1022,6 +1022,9 @@ func buildOperatorWrite(
 		if err != nil {
 			return nil, err
 		}
+		// Snapshot schema before adding NodeVar: the propsExprFn must see the
+		// input row layout (which does not include the newly created node).
+		propsSchema := copySchema(schema)
 		if p.NodeVar != "" {
 			schema[p.NodeVar] = len(schema)
 		}
@@ -1032,6 +1035,13 @@ func buildOperatorWrite(
 		if len(params) > 0 {
 			if cn, buildErr = cn.WithParams(params); buildErr != nil {
 				return nil, buildErr
+			}
+		}
+		if p.PropertiesExpr != nil {
+			if ml, ok := p.PropertiesExpr.(*ast.MapLiteral); ok {
+				if fn := buildPropsEvalFn(ml, propsSchema, params, reg, mutator); fn != nil {
+					cn.WithPropsEvalFn(fn)
+				}
 			}
 		}
 		if constraintReg != nil {
@@ -1061,6 +1071,19 @@ func buildOperatorWrite(
 				return nil, buildErr
 			}
 		}
+		if p.PropertiesExpr != nil {
+			if ml, ok := p.PropertiesExpr.(*ast.MapLiteral); ok {
+				// Use schemaCopy (which captures relationship endpoints) for
+				// property expression evaluation.
+				relPropsSchema := copySchema(schemaCopy)
+				if p.RelVar != "" {
+					delete(relPropsSchema, p.RelVar)
+				}
+				if fn := buildPropsEvalFn(ml, relPropsSchema, params, reg, mutator); fn != nil {
+					cr.WithPropsEvalFn(fn)
+				}
+			}
+		}
 		return cr, nil
 
 	case *ir.SetProperty:
@@ -1079,6 +1102,11 @@ func buildOperatorWrite(
 		if constraintReg != nil {
 			sp.WithConstraints(constraintReg, idxMgr)
 		}
+		if bopts != nil {
+			if info, isRel := bopts.edgeVarMeta[p.EntityVar]; isRel {
+				sp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+			}
+		}
 		return sp, nil
 
 	case *ir.SetLabels:
@@ -1095,7 +1123,13 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewRemoveProperty(p.EntityVar, p.PropertyKey, schemaCopy, child, mutator), nil
+		rp := exec.NewRemoveProperty(p.EntityVar, p.PropertyKey, schemaCopy, child, mutator)
+		if bopts != nil {
+			if info, isRel := bopts.edgeVarMeta[p.EntityVar]; isRel {
+				rp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+			}
+		}
+		return rp, nil
 
 	case *ir.RemoveLabels:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -1192,6 +1226,127 @@ func copySchema(schema map[string]int) map[string]int {
 		cp[k] = v
 	}
 	return cp
+}
+
+// buildPropsEvalFn constructs a [exec.PropsEvalFn] closure that evaluates the
+// key→expression pairs in ml against each incoming row at runtime. It is used
+// when the property map for a CreateNode or CreateRelationship contains
+// non-literal values (variable references, property accesses, arithmetic) that
+// cannot be resolved at plan-construction time.
+//
+// The closure:
+//  1. Builds an [expr.RowContext] from the current row using the captured schema
+//     and mutator (for upgrading IntegerValue(NodeID) → NodeValue with properties).
+//  2. Calls [expr.Eval] on each value expression in ml.
+//  3. Converts the resulting [expr.Value] to [lpg.PropertyValue]; entries that
+//     evaluate to Null or to an unsupported type are silently omitted.
+//
+// A nil ml produces a nil closure (no-op).
+func buildPropsEvalFn(
+	ml *ast.MapLiteral,
+	schemaCopy map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	mutator exec.GraphMutator,
+) exec.PropsEvalFn {
+	if ml == nil {
+		return nil
+	}
+	// Snapshot keys and value expressions so the closure is self-contained.
+	keys := make([]string, len(ml.Keys))
+	copy(keys, ml.Keys)
+	vals := make([]ast.Expression, len(ml.Values))
+	copy(vals, ml.Values)
+
+	return func(row exec.Row) []exec.PropEntry {
+		// Build a RowContext that can resolve variable bindings and node
+		// property accesses from the current row.
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator)
+
+		var out []exec.PropEntry
+		for i, k := range keys {
+			v, evalErr := expr.Eval(vals[i], rowCtx, params, reg)
+			if evalErr != nil || v == nil {
+				continue // expression error or nil: skip
+			}
+			if expr.IsNull(v) {
+				continue // openCypher: assigning null to a property is a no-op
+			}
+			pv, ok := exprValueToLPGProp(v)
+			if !ok {
+				continue // unsupported type (e.g. NodeValue): skip
+			}
+			out = append(out, exec.PropEntry{Key: k, Value: pv})
+		}
+		return out
+	}
+}
+
+// buildRowCtxFromMutator builds an [expr.RowContext] from a row using the
+// captured schema. For each column that holds an IntegerValue, it attempts to
+// resolve the corresponding node from the mutator and upgrade it to a NodeValue
+// carrying properties — enabling property-access expressions like `a.id` when
+// `a` is a bound node variable in the row.
+//
+// When no mutator is available, or when the integer cannot be resolved to a
+// node, the raw IntegerValue is kept.
+func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator) expr.RowContext {
+	ctx := make(expr.RowContext, len(schema))
+	for varName, colIdx := range schema {
+		if colIdx >= len(row) || row[colIdx] == nil {
+			continue
+		}
+		v := row[colIdx]
+		if mutator != nil {
+			if iv, ok := v.(expr.IntegerValue); ok {
+				nodeID := graph.NodeID(iv)
+				if key, resolved := mutator.ResolveNodeLabel(nodeID); resolved {
+					rawProps := mutator.NodeProperties(key)
+					props := make(expr.MapValue, len(rawProps))
+					for k, pv := range rawProps {
+						props[k] = lpgPropToExpr(pv)
+					}
+					labels := mutator.NodeLabels(key)
+					ctx[varName] = expr.NodeValue{
+						ID:         uint64(nodeID),
+						Labels:     labels,
+						Properties: props,
+					}
+					continue
+				}
+			}
+		}
+		ctx[varName] = v
+	}
+	return ctx
+}
+
+// exprValueToLPGProp converts an [expr.Value] to an [lpg.PropertyValue].
+// Returns (zero, false) when the value type has no natural property encoding
+// (e.g. NodeValue, RelationshipValue, PathValue).
+func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {
+	switch val := v.(type) {
+	case expr.StringValue:
+		return lpg.StringValue(string(val)), true
+	case expr.IntegerValue:
+		return lpg.Int64Value(int64(val)), true
+	case expr.FloatValue:
+		return lpg.Float64Value(float64(val)), true
+	case expr.BoolValue:
+		return lpg.BoolValue(bool(val)), true
+	case expr.ListValue:
+		elems := make([]lpg.PropertyValue, 0, len(val))
+		for _, el := range val {
+			pv, ok := exprValueToLPGProp(el)
+			if !ok {
+				continue
+			}
+			elems = append(elems, pv)
+		}
+		return lpg.ListValue(elems), true
+	default:
+		return lpg.PropertyValue{}, false
+	}
 }
 
 // firstVar returns the first non-empty string from vars, or empty string.

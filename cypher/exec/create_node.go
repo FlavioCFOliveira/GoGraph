@@ -96,16 +96,17 @@ var globalNodeCounterSeededOnce sync.Once
 //
 // CreateNode is NOT safe for concurrent use.
 type CreateNode struct {
-	nodeVar  string
-	labels   []string
-	propsRaw string        // original properties string, retained for re-parse with params
-	props    []propLiteral // parsed once from the properties string
-	child    Operator
-	mutator  GraphMutator
-	params   map[string]expr.Value // query parameters for $name substitution
-	reg      *ConstraintRegistry   // nil means no enforcement
-	mgr      *index.Manager        // nil when reg is nil
-	ctx      context.Context       //nolint:containedctx // stored for per-Next ctx check
+	nodeVar     string
+	labels      []string
+	propsRaw    string        // original properties string, retained for re-parse with params
+	props       []propLiteral // parsed once from the properties string
+	propsExprFn PropsEvalFn   // nil when all properties are literals; evaluated per row otherwise
+	child       Operator
+	mutator     GraphMutator
+	params      map[string]expr.Value // query parameters for $name substitution
+	reg         *ConstraintRegistry   // nil means no enforcement
+	mgr         *index.Manager        // nil when reg is nil
+	ctx         context.Context       //nolint:containedctx // stored for per-Next ctx check
 }
 
 // propLiteral is a pre-parsed key/value pair from a literal property map
@@ -114,6 +115,25 @@ type propLiteral struct {
 	key   string
 	value lpg.PropertyValue
 }
+
+// PropEntry is an exported key/value pair for use by external plan builders
+// (api.go) that construct dynamic property evaluators. It mirrors propLiteral
+// but carries exported fields so the physical builder can return values from
+// a PropsEvalFn without requiring propLiteral to be exported.
+type PropEntry struct {
+	Key   string
+	Value lpg.PropertyValue
+}
+
+// PropsEvalFn is a per-row property evaluator closure. It receives the current
+// row and returns a slice of (key, value) pairs produced by evaluating the
+// property-map AST expressions against the row's bound variables. Any entry
+// whose evaluation yields Null is omitted (openCypher: assigning null to a
+// property is a no-op on a fresh node).
+//
+// The closure is constructed once by the physical plan builder and captures
+// the schema, function registry, and query parameters.
+type PropsEvalFn func(row Row) []PropEntry
 
 // NewCreateNode creates a CreateNode operator.
 //
@@ -170,6 +190,16 @@ func (op *CreateNode) WithConstraints(reg *ConstraintRegistry, mgr *index.Manage
 	return op
 }
 
+// WithPropsEvalFn attaches a per-row property evaluator. When fn is non-nil it
+// is called on every Next invocation and its results are merged with the
+// statically parsed props (literal values). Dynamic results take precedence
+// over same-keyed literal values, allowing the property map to contain a mix
+// of literals and expression-valued entries.
+func (op *CreateNode) WithPropsEvalFn(fn PropsEvalFn) *CreateNode {
+	op.propsExprFn = fn
+	return op
+}
+
 // Init initialises the operator and its child.
 //
 // The first CreateNode.Init in the process also seeds [globalNodeCounter]
@@ -203,9 +233,34 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
+	// Merge static (literal) props with dynamic (expression) props.
+	// Dynamic entries override same-keyed literals so a mixed map like
+	// {name: "Alice", age: x} sets the literal "name" and the runtime "age".
+	props := op.props
+	if op.propsExprFn != nil {
+		dynEntries := op.propsExprFn(childRow)
+		if len(dynEntries) > 0 {
+			merged := make([]propLiteral, 0, len(props)+len(dynEntries))
+			// Add literals that are not overridden by a dynamic entry.
+			dynKeys := make(map[string]struct{}, len(dynEntries))
+			for _, dp := range dynEntries {
+				dynKeys[dp.Key] = struct{}{}
+			}
+			for _, sp := range props {
+				if _, overridden := dynKeys[sp.key]; !overridden {
+					merged = append(merged, sp)
+				}
+			}
+			for _, dp := range dynEntries {
+				merged = append(merged, propLiteral{key: dp.Key, value: dp.Value})
+			}
+			props = merged
+		}
+	}
+
 	// Constraint enforcement: check before any mutation.
 	if op.reg != nil {
-		for _, p := range op.props {
+		for _, p := range props {
 			if err := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); err != nil {
 				return false, err
 			}
@@ -222,7 +277,7 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 			return false, err
 		}
 	}
-	for _, p := range op.props {
+	for _, p := range props {
 		if err := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); err != nil {
 			return false, err
 		}
@@ -340,10 +395,15 @@ func parsePropLiteral(s string) ([]propLiteral, error) {
 	return parsePropLiteralDeferred(s)
 }
 
-// parsePropLiteralDeferred is like parsePropLiteralWithParams but returns nil
-// (without error) when the value expression is a $param reference and the
-// params map does not contain that key. Used during plan construction when
-// query parameters are not yet available; callers must invoke WithParams before
+// parsePropLiteralDeferred is like parsePropLiteralWithParams but silently
+// skips non-literal values (variable references, property accesses, arithmetic
+// expressions) and $param references for which no binding is available. These
+// are deferred: when the physical builder detects non-literal property values
+// it installs a [PropsEvalFn] on the operator that evaluates them at runtime
+// against the current row.
+//
+// Used during plan construction when query parameters are not yet available;
+// callers that deal with expressions must invoke [WithPropsEvalFn] before
 // executing the operator.
 func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 	s = strings.TrimSpace(s)
@@ -379,7 +439,10 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 			if errors.Is(err, ErrPropertyValueIsNull) {
 				continue // null value: openCypher says do not set the property
 			}
-			return nil, fmt.Errorf("key %q: %w", key, err)
+			// Non-literal expression (variable ref, property access, arithmetic):
+			// silently defer. The physical builder is responsible for installing a
+			// PropsEvalFn that evaluates these at runtime.
+			continue //nolint:nilerr // intentional: non-literal values are deferred, not an error
 		}
 		out = append(out, propLiteral{key: key, value: pv})
 	}
@@ -460,7 +523,9 @@ func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propL
 			if errors.Is(err, ErrPropertyValueIsNull) {
 				continue // null value: openCypher says do not set the property
 			}
-			return nil, fmt.Errorf("key %q: %w", key, err)
+			// Non-literal expression or unresolvable param: silently defer.
+			// A PropsEvalFn is responsible for evaluating these at runtime.
+			continue //nolint:nilerr // intentional: non-literal values are deferred
 		}
 		out = append(out, propLiteral{key: key, value: pv})
 	}

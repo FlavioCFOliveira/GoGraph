@@ -31,16 +31,17 @@ import (
 //
 // CreateRelationship is NOT safe for concurrent use.
 type CreateRelationship struct {
-	startVar string
-	endVar   string
-	relVar   string
-	relType  string
-	propsRaw string
-	props    []propLiteral
-	schema   map[string]int // variable name → column index
-	child    Operator
-	mutator  GraphMutator
-	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
+	startVar    string
+	endVar      string
+	relVar      string
+	relType     string
+	propsRaw    string
+	props       []propLiteral
+	propsExprFn PropsEvalFn    // nil when all properties are literals
+	schema      map[string]int // variable name → column index
+	child       Operator
+	mutator     GraphMutator
+	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewCreateRelationship creates a CreateRelationship operator.
@@ -71,6 +72,12 @@ func NewCreateRelationship(
 		child:    child,
 		mutator:  mutator,
 	}, nil
+}
+
+// WithPropsEvalFn attaches a per-row property evaluator. See [CreateNode.WithPropsEvalFn].
+func (op *CreateRelationship) WithPropsEvalFn(fn PropsEvalFn) *CreateRelationship {
+	op.propsExprFn = fn
+	return op
 }
 
 // WithParams re-parses the property map with the supplied query parameters for
@@ -134,7 +141,30 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	if op.relType != "" {
 		op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType)
 	}
-	for _, p := range op.props {
+
+	// Merge static and dynamic property entries.
+	props := op.props
+	if op.propsExprFn != nil {
+		dynEntries := op.propsExprFn(childRow)
+		if len(dynEntries) > 0 {
+			merged := make([]propLiteral, 0, len(props)+len(dynEntries))
+			dynKeys := make(map[string]struct{}, len(dynEntries))
+			for _, dp := range dynEntries {
+				dynKeys[dp.Key] = struct{}{}
+			}
+			for _, sp := range props {
+				if _, overridden := dynKeys[sp.key]; !overridden {
+					merged = append(merged, sp)
+				}
+			}
+			for _, dp := range dynEntries {
+				merged = append(merged, propLiteral{key: dp.Key, value: dp.Value})
+			}
+			props = merged
+		}
+	}
+
+	for _, p := range props {
 		if err := op.mutator.SetEdgeProperty(srcLabel, dstLabel, p.key, p.value); err != nil {
 			return false, fmt.Errorf("exec: CreateRelationship SetEdgeProperty %q: %w", p.key, err)
 		}

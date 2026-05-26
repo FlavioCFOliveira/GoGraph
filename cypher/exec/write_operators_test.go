@@ -49,8 +49,9 @@ type stubMutator struct {
 	nextID     graph.NodeID
 	labels     map[string]map[string]bool // key → label set
 	props      map[string]map[string]lpg.PropertyValue
-	edges      map[string]map[string]bool // src → dst set (directed)
-	edgeLabels map[string]map[string]bool // "src|dst" → label set
+	edges      map[string]map[string]bool              // src → dst set (directed)
+	edgeLabels map[string]map[string]bool              // "src|dst" → label set
+	edgeProps  map[string]map[string]lpg.PropertyValue // "src|dst" → prop map
 }
 
 func newStubMutator() *stubMutator {
@@ -60,6 +61,7 @@ func newStubMutator() *stubMutator {
 		props:      make(map[string]map[string]lpg.PropertyValue),
 		edges:      make(map[string]map[string]bool),
 		edgeLabels: make(map[string]map[string]bool),
+		edgeProps:  make(map[string]map[string]lpg.PropertyValue),
 	}
 }
 
@@ -181,8 +183,40 @@ func (s *stubMutator) SetEdgeLabel(src, dst, label string) {
 	s.edgeLabels[k][label] = true
 }
 
-func (s *stubMutator) SetEdgeProperty(_, _, _ string, _ lpg.PropertyValue) error { return nil }
-func (s *stubMutator) DelEdgeProperty(_, _, _ string)                            {}
+func (s *stubMutator) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := src + "|" + dst
+	if s.edgeProps == nil {
+		s.edgeProps = make(map[string]map[string]lpg.PropertyValue)
+	}
+	if s.edgeProps[k] == nil {
+		s.edgeProps[k] = make(map[string]lpg.PropertyValue)
+	}
+	s.edgeProps[k][key] = value
+	return nil
+}
+
+func (s *stubMutator) DelEdgeProperty(src, dst, key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := src + "|" + dst
+	if s.edgeProps != nil && s.edgeProps[k] != nil {
+		delete(s.edgeProps[k], key)
+	}
+}
+
+// getEdgeProp returns the edge property value for edge (src,dst) under key.
+func (s *stubMutator) getEdgeProp(src, dst, key string) (lpg.PropertyValue, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := src + "|" + dst
+	if s.edgeProps == nil || s.edgeProps[k] == nil {
+		return lpg.PropertyValue{}, false
+	}
+	v, ok := s.edgeProps[k][key]
+	return v, ok
+}
 
 func (s *stubMutator) OutNeighbours(n string) []string {
 	s.mu.Lock()
@@ -898,5 +932,124 @@ func TestMerge_NoMatchOnceUnderConcurrency(t *testing.T) {
 		if m.nodeCount() != 1 {
 			t.Errorf("goroutine %d: expected 1 node, got %d", i, m.nodeCount())
 		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T959 regression — SetProperty / RemoveProperty with NodeValue and
+// RelationshipValue column bindings
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestSetProperty_NodeValueBinding verifies that SetProperty resolves a node
+// when the row carries an expr.NodeValue (as emitted by MATCH scan operators)
+// rather than a bare IntegerValue. This is the root cause of T959.
+func TestSetProperty_NodeValueBinding(t *testing.T) {
+	t.Parallel()
+	mut := newStubMutator()
+	nID := mustAddNode(t, mut, "alice")
+
+	// Simulate a MATCH scan row: column holds NodeValue, not IntegerValue.
+	schema := map[string]int{"n": 0}
+	row := exec.Row{expr.NodeValue{ID: uint64(nID)}}
+	src := newSliceOperator(row)
+	op, err := exec.NewSetProperty("n", "status", `"active"`, schema, src, mut)
+	if err != nil {
+		t.Fatalf("NewSetProperty: %v", err)
+	}
+
+	if _, err := exec.Drain(context.Background(), op); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	pv, ok := mut.getProp("alice", "status")
+	if !ok {
+		t.Fatal("property 'status' not set")
+	}
+	s, ok := pv.String()
+	if !ok || s != "active" {
+		t.Errorf("property 'status' = %v, want 'active'", pv)
+	}
+}
+
+// TestSetProperty_RelationshipBinding verifies that SetProperty dispatches to
+// SetEdgeProperty when the row carries an expr.RelationshipValue.
+func TestSetProperty_RelationshipBinding(t *testing.T) {
+	t.Parallel()
+	mut := newStubMutator()
+	srcID, dstID := mustAddEdge(t, mut, "a", "b", 1.0)
+
+	schema := map[string]int{"r": 0}
+	row := exec.Row{expr.RelationshipValue{
+		ID:      1,
+		StartID: uint64(srcID),
+		EndID:   uint64(dstID),
+		Type:    "KNOWS",
+	}}
+	src := newSliceOperator(row)
+	op, err := exec.NewSetProperty("r", "since", `2024`, schema, src, mut)
+	if err != nil {
+		t.Fatalf("NewSetProperty: %v", err)
+	}
+
+	if _, err := exec.Drain(context.Background(), op); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	pv, ok := mut.getEdgeProp("a", "b", "since")
+	if !ok {
+		t.Fatal("edge property 'since' not set")
+	}
+	n, ok := pv.Int64()
+	if !ok || n != 2024 {
+		t.Errorf("edge property 'since' = %v, want 2024", pv)
+	}
+}
+
+// TestRemoveProperty_NodeValueBinding verifies that RemoveProperty resolves a
+// node when the row carries an expr.NodeValue.
+func TestRemoveProperty_NodeValueBinding(t *testing.T) {
+	t.Parallel()
+	mut := newStubMutator()
+	nID := mustAddNode(t, mut, "bob")
+	if err := mut.SetNodeProperty("bob", "age", lpg.Int64Value(30)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+
+	schema := map[string]int{"n": 0}
+	row := exec.Row{expr.NodeValue{ID: uint64(nID)}}
+	src := newSliceOperator(row)
+	op := exec.NewRemoveProperty("n", "age", schema, src, mut)
+
+	if _, err := exec.Drain(context.Background(), op); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if _, ok := mut.getProp("bob", "age"); ok {
+		t.Error("property 'age' should have been removed")
+	}
+}
+
+// TestRemoveProperty_RelationshipBinding verifies that RemoveProperty dispatches
+// to DelEdgeProperty when the row carries an expr.RelationshipValue.
+func TestRemoveProperty_RelationshipBinding(t *testing.T) {
+	t.Parallel()
+	mut := newStubMutator()
+	srcID, dstID := mustAddEdge(t, mut, "x", "y", 0)
+	if err := mut.SetEdgeProperty("x", "y", "weight", lpg.Float64Value(3.14)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
+
+	schema := map[string]int{"r": 0}
+	row := exec.Row{expr.RelationshipValue{
+		ID:      2,
+		StartID: uint64(srcID),
+		EndID:   uint64(dstID),
+		Type:    "LINK",
+	}}
+	src := newSliceOperator(row)
+	op := exec.NewRemoveProperty("r", "weight", schema, src, mut)
+
+	if _, err := exec.Drain(context.Background(), op); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if _, ok := mut.getEdgeProp("x", "y", "weight"); ok {
+		t.Error("edge property 'weight' should have been removed")
 	}
 }
