@@ -1272,28 +1272,98 @@ func DivDurationFloat(d DurationValue, k float64) DurationValue {
 	return MulDurationFloat(d, 1.0/k)
 }
 
-// SubDates returns the duration from b to a (a - b) measured in days.
-// Month-level normalisation is not attempted; the result is purely Days-based.
+// SubDates returns the duration from b to a (a - b) using calendar-based
+// decomposition into (months, days). Per openCypher,
+// duration.between(date('1984-10-11'), date('2015-06-24')) yields
+// P30Y8M13D — a calendar-anchored count of whole months between the
+// boundaries, with the leftover days projected onto the closing month.
 func SubDates(a, b DateValue) DurationValue {
-	at := a.ToTime()
-	bt := b.ToTime()
-	diffNs := at.Sub(bt).Nanoseconds()
-	const dayNs = int64(86_400) * 1_000_000_000
-	days := diffNs / dayNs
-	return NewDuration(0, days, 0, 0)
+	months, days := calendarDateDiff(a, b)
+	return NewDuration(months, days, 0, 0)
 }
 
-// SubLocalDateTimes returns a-b as a duration in (Days, Seconds, Nanos).
+// calendarDateDiff computes the calendar-based difference (a - b) as
+// (months, days). The day count is the residual after the whole-month
+// stride; it may be negative when b is after a.
+func calendarDateDiff(a, b DateValue) (months, days int64) {
+	years := a.Year - b.Year
+	mo := a.Month - b.Month
+	dy := a.Day - b.Day
+	// Borrow days from the prior month of a when dy is negative.
+	if dy < 0 {
+		// Last day of the month preceding a.Month in a.Year.
+		prev := time.Date(a.Year, time.Month(a.Month), 0, 0, 0, 0, 0, time.UTC)
+		dy += prev.Day()
+		mo--
+	}
+	// Borrow months from years when mo is negative after the day borrow.
+	if mo < 0 {
+		mo += 12
+		years--
+	}
+	return int64(years*12 + mo), int64(dy)
+}
+
+// SubLocalDateTimes returns a-b as a duration with calendar-based
+// (months, days) plus the wall-clock (hours, minutes, seconds, nanos)
+// remainder. Per openCypher, duration.between of two date-bearing
+// temporals decomposes into the canonical PnYnMnDTnHnMnS form.
 func SubLocalDateTimes(a, b LocalDateTimeValue) DurationValue {
-	diff := a.T.Sub(b.T)
-	return durationFromGoDuration(diff)
+	return calendarDateTimeDiff(a.T, b.T)
 }
 
-// SubDateTimes returns a-b as a duration in (Seconds, Nanos). Days are
-// computed from the wall-clock difference.
+// SubDateTimes returns a-b as a duration with the same calendar-based
+// decomposition as SubLocalDateTimes. Wall-clock semantics: both sides
+// are observed in their own zone but the result captures the elapsed
+// instant.
 func SubDateTimes(a, b DateTimeValue) DurationValue {
-	diff := a.T.Sub(b.T)
-	return durationFromGoDuration(diff)
+	return calendarDateTimeDiff(a.T, b.T)
+}
+
+// calendarDateTimeDiff computes a-b as (months, days, seconds, nanos)
+// where months and days are calendar-anchored on a's reference frame and
+// the time-of-day remainder is the residual wall-clock difference after
+// the day stride. Negative durations (b after a) are emitted with all
+// components carrying the negative sign.
+func calendarDateTimeDiff(a, b time.Time) DurationValue {
+	const nsPerSec = int64(1_000_000_000)
+	const nsPerHour = int64(time.Hour)
+	const nsPerMinute = int64(time.Minute)
+	// Sign-normalise: compute as |a-b| then negate at the end.
+	neg := a.Before(b)
+	lo, hi := a, b
+	if !neg {
+		lo, hi = b, a
+	}
+	years := hi.Year() - lo.Year()
+	months := int(hi.Month()) - int(lo.Month())
+	days := hi.Day() - lo.Day()
+	// Time-of-day remainder: hi.tod - lo.tod (may be negative; borrow a day).
+	hiTod := int64(hi.Hour())*nsPerHour + int64(hi.Minute())*nsPerMinute +
+		int64(hi.Second())*nsPerSec + int64(hi.Nanosecond())
+	loTod := int64(lo.Hour())*nsPerHour + int64(lo.Minute())*nsPerMinute +
+		int64(lo.Second())*nsPerSec + int64(lo.Nanosecond())
+	tod := hiTod - loTod
+	if tod < 0 {
+		tod += 86_400 * nsPerSec
+		days--
+	}
+	if days < 0 {
+		prev := time.Date(hi.Year(), hi.Month(), 0, 0, 0, 0, 0, time.UTC)
+		days += prev.Day()
+		months--
+	}
+	if months < 0 {
+		months += 12
+		years--
+	}
+	totalMonths := int64(years*12 + months)
+	seconds := tod / nsPerSec
+	nanos := int32(tod % nsPerSec)
+	if neg {
+		return NewDuration(-totalMonths, -int64(days), -seconds, -nanos)
+	}
+	return NewDuration(totalMonths, int64(days), seconds, nanos)
 }
 
 // SubLocalTimes returns a-b as a duration in (Seconds, Nanos).
@@ -1302,12 +1372,17 @@ func SubLocalTimes(a, b LocalTimeValue) DurationValue {
 	return NewDuration(0, 0, diffNs/1_000_000_000, int32(diffNs%1_000_000_000))
 }
 
-// SubTimes returns a-b as a duration in (Seconds, Nanos), ignoring zone offset
-// differences. Per openCypher, time-of-day subtraction does not normalise
-// across zones.
+// SubTimes returns a-b as a duration in (Seconds, Nanos), normalising both
+// sides to UTC before subtracting. Per openCypher,
+// duration.between(time('14:30'), time('16:30+0100')) yields PT1H — the
+// +01:00 zone shifts the second value's UTC equivalent to 15:30, so the
+// difference is one hour, not two.
 func SubTimes(a, b TimeValue) DurationValue {
-	diffNs := a.Nanos - b.Nanos
-	return NewDuration(0, 0, diffNs/1_000_000_000, int32(diffNs%1_000_000_000))
+	const nsPerSec = int64(1_000_000_000)
+	aUTC := a.Nanos - int64(a.OffsetSec)*nsPerSec
+	bUTC := b.Nanos - int64(b.OffsetSec)*nsPerSec
+	diffNs := aUTC - bUTC
+	return NewDuration(0, 0, diffNs/nsPerSec, int32(diffNs%nsPerSec))
 }
 
 // temporalAccessor implements the openCypher component accessors (.year,

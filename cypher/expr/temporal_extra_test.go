@@ -794,14 +794,17 @@ func TestDivDurationFloat(t *testing.T) {
 
 func TestSubTemporalsToDuration(t *testing.T) {
 	t.Parallel()
-	// LocalDateTime - LocalDateTime
+	// LocalDateTime - LocalDateTime: one calendar day spans midnight to
+	// midnight on the next day, so the openCypher-compliant decomposition
+	// is Days=1, Seconds=0 (not Seconds=86400).
 	a := NewLocalDateTime(2020, 1, 2, 0, 0, 0, 0)
 	b := NewLocalDateTime(2020, 1, 1, 0, 0, 0, 0)
 	d := SubLocalDateTimes(a, b)
-	if d.Seconds != 86400 {
-		t.Errorf("SubLocalDateTimes seconds=%d; want 86400", d.Seconds)
+	if d.Days != 1 || d.Seconds != 0 {
+		t.Errorf("SubLocalDateTimes days=%d seconds=%d; want days=1 seconds=0", d.Days, d.Seconds)
 	}
-	// DateTime - DateTime
+	// DateTime - DateTime: two-hour gap on the same date stays within the
+	// time-of-day remainder of the calendar-anchored decomposition.
 	loc := time.FixedZone("+02:00", 2*3600)
 	at := DateTimeValue{T: time.Date(2020, 1, 1, 12, 0, 0, 0, loc)}
 	bt := DateTimeValue{T: time.Date(2020, 1, 1, 10, 0, 0, 0, loc)}

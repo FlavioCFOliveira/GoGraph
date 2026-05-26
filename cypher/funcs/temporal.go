@@ -805,11 +805,15 @@ func toLocalDateTime(v expr.Value) (expr.LocalDateTimeValue, bool) {
 	case expr.LocalDateTimeValue:
 		return vv, true
 	case expr.DateTimeValue:
-		// Strip the zone by re-anchoring the wall-clock in UTC. The
-		// resulting LocalDateTime preserves the year/month/day/hour/
-		// minute/second/nanos triple that SubLocalDateTimes uses for
-		// its wall-clock subtraction.
-		return expr.LocalDateTimeValue{T: vv.T.UTC()}, true
+		// Strip the zone by re-anchoring the wall-clock components in
+		// UTC without shifting. vv.T.UTC() would *convert* the instant,
+		// changing the hour for any non-UTC zone (so the +01:00 reading
+		// 21:40:32.142 becomes 20:40:32.142). The duration calculation
+		// uses the local wall-clock, so we copy the calendar fields
+		// verbatim.
+		y, mo, d := vv.T.Date()
+		h, mn, s := vv.T.Clock()
+		return expr.LocalDateTimeValue{T: time.Date(y, mo, d, h, mn, s, vv.T.Nanosecond(), time.UTC)}, true
 	}
 	return expr.LocalDateTimeValue{}, false
 }

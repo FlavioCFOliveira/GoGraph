@@ -393,11 +393,26 @@ import (
 //     mismatches, NumberOutOfRange) and the eager-eval path otherwise
 //     misses them. Net uplift: +60 scenarios above 2985. Observed
 //     3055 across a 3-run sample; gate set conservatively at 3045.
+//   - 3055: raised after Sprint 84 audit round 9 follow-on — three
+//     coordinated fixes: (a) toInteger("1.7") now falls back to a
+//     ParseFloat → math.Trunc path when the integer parse fails, so
+//     toInteger of a float-formatted string yields 1 instead of NULL;
+//     (b) SubTimes normalises both operands to UTC by subtracting the
+//     fixed offset before comparing, so duration.between(time('14:30'),
+//     time('16:30+0100')) yields PT1H instead of PT2H; (c) SubDates,
+//     SubLocalDateTimes, SubDateTimes decompose their result into
+//     calendar-anchored (months, days) plus the wall-clock remainder,
+//     producing canonical PnYnMnDTnHnMnS strings; (d) toLocalDateTime
+//     for DateTime now re-anchors the wall-clock components in UTC
+//     without converting the instant, preserving the local
+//     hour/minute/second the duration calculation expects. Net uplift:
+//     +9 scenarios above 3055. Observed 3064 across a 3-run sample;
+//     gate set conservatively at 3055.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3045
+const tckExecutionBaseline = 3055
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -589,11 +589,17 @@ func fnToInteger(args []expr.Value) (expr.Value, error) {
 	case expr.FloatValue:
 		return expr.IntegerValue(int64(math.Trunc(float64(v)))), nil
 	case expr.StringValue:
-		n, err := strconv.ParseInt(strings.TrimSpace(string(v)), 10, 64)
-		if err != nil {
-			return expr.Null, nil // non-parseable → NULL
+		s := strings.TrimSpace(string(v))
+		// Direct integer parse first — the common case for "42", "-7", etc.
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return expr.IntegerValue(n), nil
 		}
-		return expr.IntegerValue(n), nil
+		// Fall back to float parse so "2.9" → 2 (truncate toward zero), per
+		// openCypher: toInteger(<floatString>) drops the fractional part.
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return expr.IntegerValue(int64(math.Trunc(f))), nil
+		}
+		return expr.Null, nil // non-parseable → NULL
 	case expr.BoolValue:
 		if bool(v) {
 			return expr.IntegerValue(1), nil
