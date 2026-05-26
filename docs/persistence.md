@@ -495,15 +495,25 @@ absent from the adjacency list are skipped and counted via
 `store.snapshot.ApplyProperties.edgeMissing`. This matches
 `lpg.Graph.SetEdgeProperty`'s own no-op-on-missing-edge contract.
 
-#### Today's WAL coverage
+#### WAL coverage for properties (T931)
 
-Typed property writes are not currently part of the WAL surface
-(`txn.Tx` records edge and label ops only). Properties survive
-exclusively via the snapshot's `properties.bin`. A crash between
-two snapshots therefore loses any property changes that were not
-captured in the prior snapshot. Closing this gap by extending the
-WAL with typed-property ops is tracked under the LPG durability
-sub-roadmap.
+Typed property writes are part of the WAL surface. `txn.Tx` carries
+`OpSetNodeProperty`, `OpDelNodeProperty`, `OpSetEdgeProperty` and
+`OpDelEdgeProperty` ops; each is encoded as a v2 OpRecord with the
+property key (uint16-length prefix) followed by the
+`encodePropertyValue` payload (a single byte kind tag plus the
+typed value bytes). Recovery walks the same encoding in
+`decodeRecoveryPropertyValue` and re-applies the property to the
+recovered graph via `Graph.SetNodeProperty` / `SetEdgeProperty`
+(or `DelNodeProperty` / `DelEdgeProperty` for the Del variants).
+
+A crash between two snapshots no longer loses property changes:
+every `SET n.prop = ...` or `REMOVE n.prop` issued through the
+Cypher engine's WAL-backed adapter is fsynced to the WAL on
+transaction commit and replayed on restart. The snapshot's
+`properties.bin` remains the authoritative source for the
+historical baseline; the WAL contributes the delta since the
+prior snapshot.
 
 ### `snapshot/indexes/<name>.bin` (binary, v2 only)
 

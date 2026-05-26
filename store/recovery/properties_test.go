@@ -23,11 +23,12 @@ import (
 // recovered graph must carry every typed property attached before
 // the snapshot.
 //
-// Note: the WAL today only records label and edge ops — typed
-// property writes are kept in memory and flushed exclusively to the
-// snapshot's properties.bin. Recovery therefore depends on the
-// snapshot apply path producing the same typed value as the
-// pre-snapshot in-memory state.
+// Note: this test exercises the snapshot apply path. As of T931 the
+// WAL also records typed property ops (OpSetNodeProperty et al.) so
+// property writes are durable even without a snapshot; see
+// TestWrite_PropertyDurability in package cypher for the WAL-only
+// path. This test continues to validate the snapshot path in
+// isolation.
 //
 //nolint:gocyclo // test: per-property kind assertions across node and edge
 func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
