@@ -75,11 +75,19 @@ import (
 //     full-relationship comparisons.
 //     Observed 1631-1633 across a 3-run sample; the gate is set
 //     conservatively at 1628 to absorb run-to-run variance.
+//   - 1654: raised after the temporal duration projection functions
+//     ([fnDurationInMonths], [fnDurationInDays], [fnDurationInSeconds])
+//     accepted a 2-argument form computing the difference between two
+//     temporals (delegating to [fnDurationBetween]) and projecting the
+//     result to the requested unit. Previously only the 1-argument form
+//     (component extraction from an existing Duration) was supported.
+//     Observed 1655-1658 across a 3-run sample; the gate is set
+//     conservatively at 1654 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1628
+const tckExecutionBaseline = 1654
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

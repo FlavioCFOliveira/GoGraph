@@ -591,48 +591,96 @@ func fnDurationBetween(args []expr.Value) (expr.Value, error) {
 	return expr.Null, nil
 }
 
+// fnDurationInMonths supports two arities:
+//
+//	duration.inMonths(d)                — 1-arg: extract the months component
+//	                                      of an existing Duration, dropping
+//	                                      days/seconds/nanos.
+//	duration.inMonths(t1, t2)           — 2-arg: compute the duration from
+//	                                      t1 to t2 (as duration.between) and
+//	                                      project it to months.
 func fnDurationInMonths(args []expr.Value) (expr.Value, error) {
-	if err := requireArity("duration.inMonths", args, 1); err != nil {
-		return nil, err
+	switch len(args) {
+	case 1:
+		if expr.IsNull(args[0]) {
+			return expr.Null, nil
+		}
+		d, ok := args[0].(expr.DurationValue)
+		if !ok {
+			return nil, &TypeError{Function: "duration.inMonths", ArgIndex: 0, Got: args[0].Kind(), Want: "Duration"}
+		}
+		return expr.NewDuration(d.Months, 0, 0, 0), nil
+	case 2:
+		between, err := fnDurationBetween(args)
+		if err != nil {
+			return nil, err
+		}
+		if expr.IsNull(between) {
+			return expr.Null, nil
+		}
+		d, _ := between.(expr.DurationValue)
+		return expr.NewDuration(d.Months, 0, 0, 0), nil
+	default:
+		return nil, &ArityError{Function: "duration.inMonths", Got: len(args), Want: "1..2"}
 	}
-	if expr.IsNull(args[0]) {
-		return expr.Null, nil
-	}
-	d, ok := args[0].(expr.DurationValue)
-	if !ok {
-		return nil, &TypeError{Function: "duration.inMonths", ArgIndex: 0, Got: args[0].Kind(), Want: "Duration"}
-	}
-	return expr.NewDuration(d.Months, 0, 0, 0), nil
 }
 
+// fnDurationInDays supports two arities mirroring [fnDurationInMonths].
 func fnDurationInDays(args []expr.Value) (expr.Value, error) {
-	if err := requireArity("duration.inDays", args, 1); err != nil {
-		return nil, err
+	switch len(args) {
+	case 1:
+		if expr.IsNull(args[0]) {
+			return expr.Null, nil
+		}
+		d, ok := args[0].(expr.DurationValue)
+		if !ok {
+			return nil, &TypeError{Function: "duration.inDays", ArgIndex: 0, Got: args[0].Kind(), Want: "Duration"}
+		}
+		totalDays := d.Days + (d.Seconds / 86400)
+		return expr.NewDuration(0, totalDays, 0, 0), nil
+	case 2:
+		between, err := fnDurationBetween(args)
+		if err != nil {
+			return nil, err
+		}
+		if expr.IsNull(between) {
+			return expr.Null, nil
+		}
+		d, _ := between.(expr.DurationValue)
+		totalDays := d.Days + (d.Seconds / 86400)
+		return expr.NewDuration(0, totalDays, 0, 0), nil
+	default:
+		return nil, &ArityError{Function: "duration.inDays", Got: len(args), Want: "1..2"}
 	}
-	if expr.IsNull(args[0]) {
-		return expr.Null, nil
-	}
-	d, ok := args[0].(expr.DurationValue)
-	if !ok {
-		return nil, &TypeError{Function: "duration.inDays", ArgIndex: 0, Got: args[0].Kind(), Want: "Duration"}
-	}
-	totalDays := d.Days + (d.Seconds / 86400)
-	return expr.NewDuration(0, totalDays, 0, 0), nil
 }
 
+// fnDurationInSeconds supports two arities mirroring [fnDurationInMonths].
 func fnDurationInSeconds(args []expr.Value) (expr.Value, error) {
-	if err := requireArity("duration.inSeconds", args, 1); err != nil {
-		return nil, err
+	switch len(args) {
+	case 1:
+		if expr.IsNull(args[0]) {
+			return expr.Null, nil
+		}
+		d, ok := args[0].(expr.DurationValue)
+		if !ok {
+			return nil, &TypeError{Function: "duration.inSeconds", ArgIndex: 0, Got: args[0].Kind(), Want: "Duration"}
+		}
+		totalSecs := d.Days*86400 + d.Seconds
+		return expr.NewDuration(0, 0, totalSecs, d.Nanos), nil
+	case 2:
+		between, err := fnDurationBetween(args)
+		if err != nil {
+			return nil, err
+		}
+		if expr.IsNull(between) {
+			return expr.Null, nil
+		}
+		d, _ := between.(expr.DurationValue)
+		totalSecs := d.Days*86400 + d.Seconds
+		return expr.NewDuration(0, 0, totalSecs, d.Nanos), nil
+	default:
+		return nil, &ArityError{Function: "duration.inSeconds", Got: len(args), Want: "1..2"}
 	}
-	if expr.IsNull(args[0]) {
-		return expr.Null, nil
-	}
-	d, ok := args[0].(expr.DurationValue)
-	if !ok {
-		return nil, &TypeError{Function: "duration.inSeconds", ArgIndex: 0, Got: args[0].Kind(), Want: "Duration"}
-	}
-	totalSecs := d.Days*86400 + d.Seconds
-	return expr.NewDuration(0, 0, totalSecs, d.Nanos), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
