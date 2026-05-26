@@ -20,6 +20,7 @@
 package exec
 
 import (
+	"fmt"
 	"strings"
 
 	"gograph/cypher/expr"
@@ -154,13 +155,21 @@ type strErr string
 func (e strErr) Error() string { return string(e) }
 
 // parseDateArg parses the inner argument of date(...). Accepts a quoted
-// string literal.
+// string literal or a map literal with year/month/day keys.
 func parseDateArg(s string) (expr.Value, error) {
 	if isQuotedString(s) {
 		return expr.ParseDate(unquote(s))
 	}
 	if isMapLiteral(s) {
-		return nil, strErr("date(map) literals are evaluated at query time, not persisted")
+		fields, err := parseTemporalMapLiteral(s)
+		if err != nil {
+			return nil, err
+		}
+		canon, err := mapFieldsToDateString(fields)
+		if err != nil {
+			return nil, err
+		}
+		return expr.ParseDate(canon)
 	}
 	return nil, strErr("date(...): unsupported argument form")
 }
@@ -171,7 +180,15 @@ func parseLocalDateTimeArg(s string) (expr.Value, error) {
 		return expr.ParseLocalDateTime(unquote(s))
 	}
 	if isMapLiteral(s) {
-		return nil, strErr("localdatetime(map) literals are evaluated at query time, not persisted")
+		fields, err := parseTemporalMapLiteral(s)
+		if err != nil {
+			return nil, err
+		}
+		canon, err := mapFieldsToLocalDateTimeString(fields)
+		if err != nil {
+			return nil, err
+		}
+		return expr.ParseLocalDateTime(canon)
 	}
 	return nil, strErr("localdatetime(...): unsupported argument form")
 }
@@ -182,7 +199,15 @@ func parseDateTimeArg(s string) (expr.Value, error) {
 		return expr.ParseDateTime(unquote(s))
 	}
 	if isMapLiteral(s) {
-		return nil, strErr("datetime(map) literals are evaluated at query time, not persisted")
+		fields, err := parseTemporalMapLiteral(s)
+		if err != nil {
+			return nil, err
+		}
+		canon, err := mapFieldsToDateTimeString(fields)
+		if err != nil {
+			return nil, err
+		}
+		return expr.ParseDateTime(canon)
 	}
 	return nil, strErr("datetime(...): unsupported argument form")
 }
@@ -193,7 +218,15 @@ func parseLocalTimeArg(s string) (expr.Value, error) {
 		return expr.ParseLocalTime(unquote(s))
 	}
 	if isMapLiteral(s) {
-		return nil, strErr("localtime(map) literals are evaluated at query time, not persisted")
+		fields, err := parseTemporalMapLiteral(s)
+		if err != nil {
+			return nil, err
+		}
+		canon, err := mapFieldsToLocalTimeString(fields)
+		if err != nil {
+			return nil, err
+		}
+		return expr.ParseLocalTime(canon)
 	}
 	return nil, strErr("localtime(...): unsupported argument form")
 }
@@ -204,7 +237,15 @@ func parseTimeArg(s string) (expr.Value, error) {
 		return expr.ParseTime(unquote(s))
 	}
 	if isMapLiteral(s) {
-		return nil, strErr("time(map) literals are evaluated at query time, not persisted")
+		fields, err := parseTemporalMapLiteral(s)
+		if err != nil {
+			return nil, err
+		}
+		canon, err := mapFieldsToTimeString(fields)
+		if err != nil {
+			return nil, err
+		}
+		return expr.ParseTime(canon)
 	}
 	return nil, strErr("time(...): unsupported argument form")
 }
@@ -215,9 +256,303 @@ func parseDurationArg(s string) (expr.Value, error) {
 		return expr.ParseDuration(unquote(s))
 	}
 	if isMapLiteral(s) {
-		return nil, strErr("duration(map) literals are evaluated at query time, not persisted")
+		fields, err := parseTemporalMapLiteral(s)
+		if err != nil {
+			return nil, err
+		}
+		canon, err := mapFieldsToDurationString(fields)
+		if err != nil {
+			return nil, err
+		}
+		return expr.ParseDuration(canon)
 	}
 	return nil, strErr("duration(...): unsupported argument form")
+}
+
+// parseTemporalMapLiteral splits a top-level map literal "{k1: v1, k2: v2}"
+// into a key→value-string map. Values are returned with their surrounding
+// whitespace trimmed but with their quotes (if any) intact, so callers can
+// distinguish quoted strings from bare numbers.
+//
+// Limitations: only flat single-level maps with primitive scalar values
+// (numbers, quoted strings) are supported, which is sufficient for the
+// temporal constructors that motivate this helper. Nested maps and
+// expression values yield an error.
+func parseTemporalMapLiteral(s string) (map[string]string, error) {
+	if !isMapLiteral(s) {
+		return nil, strErr("temporal map literal: not a map literal")
+	}
+	inner := strings.TrimSpace(s[1 : len(s)-1])
+	if inner == "" {
+		return map[string]string{}, nil
+	}
+	parts, err := splitTopLevelCommas(inner)
+	if err != nil {
+		return nil, err
+	}
+	fields := make(map[string]string, len(parts))
+	for _, p := range parts {
+		colon := strings.IndexByte(p, ':')
+		if colon < 0 {
+			return nil, strErr("temporal map literal: missing ':' in entry")
+		}
+		key := strings.TrimSpace(p[:colon])
+		val := strings.TrimSpace(p[colon+1:])
+		if key == "" || val == "" {
+			return nil, strErr("temporal map literal: empty key or value")
+		}
+		fields[key] = val
+	}
+	return fields, nil
+}
+
+// splitTopLevelCommas splits s on commas that sit at brace-depth zero.
+// This avoids breaking nested map/list literals (rare for temporals but
+// retained for forward-compat).
+func splitTopLevelCommas(s string) ([]string, error) {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			depth--
+			if depth < 0 {
+				return nil, strErr("temporal map literal: unbalanced closing bracket")
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		case '\'', '"':
+			// Skip the entire quoted segment so quoted commas don't split.
+			q := s[i]
+			j := i + 1
+			for j < len(s) && s[j] != q {
+				if s[j] == '\\' && j+1 < len(s) {
+					j += 2
+					continue
+				}
+				j++
+			}
+			if j >= len(s) {
+				return nil, strErr("temporal map literal: unterminated string")
+			}
+			i = j
+		}
+	}
+	if depth != 0 {
+		return nil, strErr("temporal map literal: unbalanced opening bracket")
+	}
+	tail := strings.TrimSpace(s[start:])
+	if tail != "" {
+		parts = append(parts, tail)
+	}
+	return parts, nil
+}
+
+// readIntField returns the integer value of key, or def when the key is
+// absent. Returns an error when the key is present but the value is not
+// an integer.
+func readIntField(fields map[string]string, key string, def int) (int, error) {
+	v, ok := fields[key]
+	if !ok {
+		return def, nil
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		return 0, fmt.Errorf("temporal map literal: %q: not an integer (%q)", key, v)
+	}
+	return n, nil
+}
+
+// readStringField returns the unquoted string value of key, or def when
+// the key is absent. Quotes (single or double) are stripped if present.
+func readStringField(fields map[string]string, key, def string) string {
+	v, ok := fields[key]
+	if !ok {
+		return def
+	}
+	if isQuotedString(v) {
+		return unquote(v)
+	}
+	return v
+}
+
+// mapFieldsToDateString converts {year, month, day} to "YYYY-MM-DD".
+func mapFieldsToDateString(fields map[string]string) (string, error) {
+	year, err := readIntField(fields, "year", 0)
+	if err != nil {
+		return "", err
+	}
+	month, err := readIntField(fields, "month", 1)
+	if err != nil {
+		return "", err
+	}
+	day, err := readIntField(fields, "day", 1)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%04d-%02d-%02d", year, month, day), nil
+}
+
+// mapFieldsToLocalTimeString converts {hour, minute, second, nanosecond}
+// to "HH:MM:SS[.fff]".
+func mapFieldsToLocalTimeString(fields map[string]string) (string, error) {
+	hour, err := readIntField(fields, "hour", 0)
+	if err != nil {
+		return "", err
+	}
+	minute, err := readIntField(fields, "minute", 0)
+	if err != nil {
+		return "", err
+	}
+	second, err := readIntField(fields, "second", 0)
+	if err != nil {
+		return "", err
+	}
+	nano, err := readIntField(fields, "nanosecond", 0)
+	if err != nil {
+		return "", err
+	}
+	base := fmt.Sprintf("%02d:%02d:%02d", hour, minute, second)
+	if nano != 0 {
+		base += fmt.Sprintf(".%09d", nano)
+	}
+	return base, nil
+}
+
+// mapFieldsToTimeString converts {hour, minute, second, nanosecond,
+// timezone} to "HH:MM:SS[.fff]±HH:MM" (or "Z" for "UTC" / "+00:00").
+func mapFieldsToTimeString(fields map[string]string) (string, error) {
+	local, err := mapFieldsToLocalTimeString(fields)
+	if err != nil {
+		return "", err
+	}
+	tz := readStringField(fields, "timezone", "")
+	if tz == "" {
+		return local + "Z", nil
+	}
+	return local + tz, nil
+}
+
+// mapFieldsToLocalDateTimeString converts {year, month, day, hour,
+// minute, second, nanosecond} to "YYYY-MM-DDTHH:MM:SS[.fff]".
+func mapFieldsToLocalDateTimeString(fields map[string]string) (string, error) {
+	d, err := mapFieldsToDateString(fields)
+	if err != nil {
+		return "", err
+	}
+	t, err := mapFieldsToLocalTimeString(fields)
+	if err != nil {
+		return "", err
+	}
+	return d + "T" + t, nil
+}
+
+// mapFieldsToDateTimeString converts the full zoned variant to
+// "YYYY-MM-DDTHH:MM:SS[.fff]±HH:MM".
+func mapFieldsToDateTimeString(fields map[string]string) (string, error) {
+	d, err := mapFieldsToDateString(fields)
+	if err != nil {
+		return "", err
+	}
+	t, err := mapFieldsToTimeString(fields)
+	if err != nil {
+		return "", err
+	}
+	return d + "T" + t, nil
+}
+
+// durationComponents captures the eight integer fields recognised by the
+// duration({…}) map constructor. Each field is 0 when absent.
+type durationComponents struct {
+	years, months, days     int
+	hours, minutes, seconds int
+	nanoseconds             int
+}
+
+// readDurationComponents extracts the eight recognised keys from fields.
+func readDurationComponents(fields map[string]string) (durationComponents, error) {
+	var c durationComponents
+	for _, spec := range []struct {
+		key string
+		out *int
+	}{
+		{"years", &c.years},
+		{"months", &c.months},
+		{"days", &c.days},
+		{"hours", &c.hours},
+		{"minutes", &c.minutes},
+		{"seconds", &c.seconds},
+		{"nanoseconds", &c.nanoseconds},
+	} {
+		v, err := readIntField(fields, spec.key, 0)
+		if err != nil {
+			return durationComponents{}, err
+		}
+		*spec.out = v
+	}
+	return c, nil
+}
+
+// mapFieldsToDurationString converts {years, months, days, hours,
+// minutes, seconds, nanoseconds} to the ISO-8601 PnYnMnDTnHnMnS form
+// accepted by [expr.ParseDuration].
+func mapFieldsToDurationString(fields map[string]string) (string, error) {
+	c, err := readDurationComponents(fields)
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+	sb.WriteByte('P')
+	writeDurationDateSegment(&sb, c)
+	writeDurationTimeSegment(&sb, c)
+	if sb.Len() == 1 { // bare "P" — empty duration
+		sb.WriteString("T0S")
+	}
+	return sb.String(), nil
+}
+
+// writeDurationDateSegment emits the years/months/days portion of an
+// ISO-8601 duration. Zero components are elided.
+func writeDurationDateSegment(sb *strings.Builder, c durationComponents) {
+	if c.years != 0 {
+		fmt.Fprintf(sb, "%dY", c.years)
+	}
+	if c.months != 0 {
+		fmt.Fprintf(sb, "%dM", c.months)
+	}
+	if c.days != 0 {
+		fmt.Fprintf(sb, "%dD", c.days)
+	}
+}
+
+// writeDurationTimeSegment emits the T-prefixed hours/minutes/seconds/
+// fractional-seconds portion when at least one time component is non-
+// zero. Otherwise nothing is written.
+func writeDurationTimeSegment(sb *strings.Builder, c durationComponents) {
+	if c.hours == 0 && c.minutes == 0 && c.seconds == 0 && c.nanoseconds == 0 {
+		return
+	}
+	sb.WriteByte('T')
+	if c.hours != 0 {
+		fmt.Fprintf(sb, "%dH", c.hours)
+	}
+	if c.minutes != 0 {
+		fmt.Fprintf(sb, "%dM", c.minutes)
+	}
+	if c.seconds != 0 || c.nanoseconds != 0 {
+		if c.nanoseconds != 0 {
+			fmt.Fprintf(sb, "%d.%09dS", c.seconds, c.nanoseconds)
+		} else {
+			fmt.Fprintf(sb, "%dS", c.seconds)
+		}
+	}
 }
 
 // isQuotedString reports whether s is enclosed in matching quotes.

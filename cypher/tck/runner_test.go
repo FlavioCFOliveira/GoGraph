@@ -128,11 +128,19 @@ import (
 //     skipping reverse edges when an edge-type filter is active.
 //     Observed 1885-1889 across a 3-run sample; the gate is set
 //     conservatively at 1882 to absorb run-to-run variance.
+//   - 1893: raised after task T937 partial closure — temporal map-literal
+//     constructors date({year:…}), localdate/time/datetime/datetime({...}),
+//     duration({…}) are now evaluated at CreateNode/Relationship time
+//     instead of returning a hard error. Each constructor compiles its
+//     map literal to the canonical ISO-8601 string via
+//     mapFieldsTo<Kind>String and delegates to the existing expr.ParseX.
+//     Observed 1896-1897 across a 3-run sample; gate set conservatively
+//     at 1893 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1882
+const tckExecutionBaseline = 1893
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
