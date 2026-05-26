@@ -38,6 +38,11 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		plan = NewProjection(items, child)
 	}
 
+	// DISTINCT, SKIP, ORDER BY, LIMIT — mirror the RETURN translator at
+	// translator.go so that `WITH x ORDER BY x LIMIT k` produces an actual
+	// Sort+Limit pipeline rather than silently passing the full row stream.
+	plan = applyProjectionTail(plan, w.Projection)
+
 	if w.Where != nil {
 		var err error
 		plan, err = t.translateExistsPredicate(w.Where.Predicate, plan)
@@ -46,4 +51,43 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		}
 	}
 	return plan, nil
+}
+
+// applyProjectionTail wraps plan with the DISTINCT / SKIP / ORDER BY /
+// LIMIT operators declared on proj. Matches the ordering used by the
+// RETURN-side translator (SKIP applied before LIMIT, ORDER BY fuses with
+// LIMIT into Top when both are present). Extracted so WITH and RETURN
+// share a single canonical implementation.
+func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
+	if proj == nil {
+		return plan
+	}
+	if proj.Distinct {
+		plan = NewDistinct(plan)
+	}
+	if proj.Skip != nil {
+		sk, _ := intExpr(proj.Skip)
+		plan = NewSkip(sk, plan)
+	}
+	if len(proj.OrderBy) > 0 {
+		sortItems := make([]SortItem, len(proj.OrderBy))
+		for i, s := range proj.OrderBy {
+			sortItems[i] = SortItem{Expression: s.Expr.String(), Descending: s.Descending}
+		}
+		if proj.Limit != nil {
+			lim, err := intExpr(proj.Limit)
+			if err != nil {
+				plan = NewSort(sortItems, plan)
+				plan = NewLimit(0, plan)
+			} else {
+				plan = NewTop(sortItems, lim, plan)
+			}
+		} else {
+			plan = NewSort(sortItems, plan)
+		}
+	} else if proj.Limit != nil {
+		lim, _ := intExpr(proj.Limit)
+		plan = NewLimit(lim, plan)
+	}
+	return plan
 }

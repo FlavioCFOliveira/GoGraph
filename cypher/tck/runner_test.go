@@ -136,11 +136,18 @@ import (
 //     mapFieldsTo<Kind>String and delegates to the existing expr.ParseX.
 //     Observed 1896-1897 across a 3-run sample; gate set conservatively
 //     at 1893 to absorb run-to-run variance.
+//   - 1948: raised after task T937 partial closure — WITH-clause
+//     OrderBy/Skip/Limit/Distinct were silently dropped by translateWith
+//     (the tail applied only to RETURN). applyProjectionTail now wraps
+//     both WITH and RETURN with the same Sort/Top/Skip/Limit/Distinct
+//     pipeline. +55 scenarios across with-orderBy, with-skip-limit,
+//     pattern-comprehension and aggregation suites. Observed 1951
+//     across a 3-run sample; gate set conservatively at 1948.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 1893
+const tckExecutionBaseline = 1948
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
