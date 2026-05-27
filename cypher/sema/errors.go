@@ -48,6 +48,13 @@ const (
 	// the pattern can describe edges around it) but cannot have its labels
 	// or properties augmented.
 	KindVariableAlreadyBound ErrorKind = "VARIABLE_ALREADY_BOUND"
+
+	// KindColumnNameConflict is reported when a RETURN or WITH projection
+	// declares two columns with the same output name (e.g.
+	// `RETURN 1 AS a, 2 AS a`). openCypher 9 §3.3.3 rejects this at
+	// compile time because the downstream consumer cannot disambiguate
+	// the columns.
+	KindColumnNameConflict ErrorKind = "COLUMN_NAME_CONFLICT"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -128,6 +135,16 @@ func variableAlreadyBoundError(name string, pos ast.Position) *ScopeError {
 	}
 }
 
+// columnNameConflictError constructs a KindColumnNameConflict ScopeError
+// for a RETURN/WITH projection that declares duplicate output column names.
+func columnNameConflictError(name string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindColumnNameConflict,
+		Pos:     pos,
+		Message: fmt.Sprintf("duplicate column name %q in projection", name),
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bolt-compatible mapping (TCK error categories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +188,10 @@ const (
 	// SubTypeVariableAlreadyBound is the TCK sub-type for CREATE on a
 	// previously bound variable with new labels or properties.
 	SubTypeVariableAlreadyBound = "VariableAlreadyBound"
+
+	// SubTypeColumnNameConflict is the TCK sub-type for a RETURN/WITH
+	// projection that declares duplicate output column names.
+	SubTypeColumnNameConflict = "ColumnNameConflict"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -239,6 +260,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindInvalidArgumentType, Category: CategorySyntaxError, SubType: SubTypeInvalidArgumentType},
 	{Kind: KindInvalidAggregation, Category: CategorySyntaxError, SubType: SubTypeInvalidAggregation},
 	{Kind: KindVariableAlreadyBound, Category: CategorySyntaxError, SubType: SubTypeVariableAlreadyBound},
+	{Kind: KindColumnNameConflict, Category: CategorySyntaxError, SubType: SubTypeColumnNameConflict},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]

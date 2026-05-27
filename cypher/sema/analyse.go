@@ -706,6 +706,20 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 	if proj.All {
 		return // RETURN * — accept everything that is in scope
 	}
+	// Reject duplicate output column names (e.g. RETURN 1 AS a, 2 AS a).
+	// openCypher 9 §3.3.3 raises ColumnNameConflict at compile time for
+	// any projection whose output column list is not unique.
+	seenCols := map[string]struct{}{}
+	for _, item := range proj.Items {
+		name := projectedName(item.Expr, item.Alias)
+		if name == "" {
+			continue
+		}
+		if _, dup := seenCols[name]; dup {
+			a.error(columnNameConflictError(name, item.Pos))
+		}
+		seenCols[name] = struct{}{}
+	}
 	for _, item := range proj.Items {
 		a.checkExpr(item.Expr)
 	}
