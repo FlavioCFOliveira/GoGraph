@@ -417,10 +417,19 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 			return v, nil
 		}
 		return Null, nil
+	case IntegerValue, FloatValue:
+		// The parser reconstructs float literals like `1.0` from an
+		// IntLiteral atom followed by a numeric Name accessor; very
+		// long floats may slip through that reconstruction and reach
+		// the evaluator as Property{Receiver: IntLiteral, Key: digits}.
+		// Returning NULL here keeps those queries running instead of
+		// surfacing a type error on a literal float that just happens
+		// to lose its FloatLiteral reconstruction.
+		return Null, nil
 	}
 	// Property access on a non-map/non-graph/non-temporal value is an
-	// InvalidArgumentType TypeError per openCypher (e.g. `123.foo`,
-	// `'string'.foo`, `[1, 2].foo`).
+	// InvalidArgumentType TypeError per openCypher (e.g. `'string'.foo`,
+	// `true.foo`, `[1, 2].foo`).
 	return nil, &EvalError{Msg: fmt.Sprintf("InvalidArgumentType: property access requires Map, Node, or Relationship, got %s", recv.Kind())}
 }
 
