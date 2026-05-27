@@ -1290,14 +1290,17 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		}
 		// Transitive check: when the receiver is a Variable whose
 		// scope symbol carries a static type that cannot have
-		// properties (scalar / list), reject the access at compile
-		// time. Map / node / relationship / path / any all admit
-		// property access (or might at runtime, for "any"), so they
-		// pass through.
+		// properties (scalar / list / path), reject the access at
+		// compile time. Path variables (`p = (a)-[*]->(b)`) carry the
+		// path itself, not a map; openCypher requires `p.prop` to
+		// raise InvalidArgumentType at compile time (MatchWhere1
+		// [14]). Map / node / relationship / any all admit property
+		// access (or might at runtime, for "any"), so they pass
+		// through.
 		if vref, isVar := v.Receiver.(*ast.Variable); isVar {
 			if sym, ok := a.scope.Lookup(vref.Name); ok {
 				switch sym.Type {
-				case "scalar", "list":
+				case "scalar", "list", "path":
 					a.error(invalidBooleanOperandError(".", "non-graph", v.Pos))
 				}
 			}
