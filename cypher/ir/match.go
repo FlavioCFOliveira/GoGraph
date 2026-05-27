@@ -278,16 +278,69 @@ func (t *translator) firstOptionalPath(
 	if err != nil {
 		return nil, err
 	}
-	// The first path has no shared variable with the outer. Wrap p with a
-	// plain Apply over an Argument leaf carrying the outer vars. The
-	// physical builder detects the Argument outer and keeps the inner on
-	// the shared schema so destRebinding equality selections that
-	// reference outer-bound variables (e.g. OPTIONAL MATCH (x)-->(b)
-	// where b is bound by the surrounding MATCH) can resolve their
-	// column indices.
+	// destRebinding equality selections inside p reference outer-bound
+	// variables (e.g. synthetic == b where b is bound by the surrounding
+	// MATCH). Inside the inner pipeline those references resolve against
+	// inner-only rows that lack outer columns — the equality always
+	// returns NULL and the inner emits zero rows. Hoist these Selections
+	// OUT of p and re-apply them ON TOP of the plain-Apply concat, where
+	// the combined row carries both outer and inner columns and the
+	// equality can resolve.
+	outerVars := ctx.outerVars
+	body, hoisted := peelOuterDestRebinding(p, outerVars)
+	// The first path has no shared variable with the outer. Wrap the body
+	// with a plain Apply over an Argument leaf carrying the outer vars.
 	ctx.outerArgConsumed = true
 	argLeaf := NewArgumentWithTag(childVarSlice(child), outerArgTag)
-	return NewApply(argLeaf, p), nil
+	var plan LogicalPlan = NewApply(argLeaf, body)
+	// Re-apply the hoisted Selections on top of the combined row.
+	for _, sel := range hoisted {
+		plan = NewSelectionExpr(sel.Predicate, sel.PredicateExpr, plan)
+	}
+	return plan, nil
+}
+
+// peelOuterDestRebinding strips Selection nodes from the top of p whose
+// PredicateExpr is an equality comparing an inner-only synthetic variable
+// with an outer-bound variable (the canonical destRebinding equality).
+// The returned body is p with those Selections removed; hoisted carries
+// the removed nodes in top-to-bottom order so the caller can re-apply
+// them on the outer plan.
+//
+// The walker stops at the first non-Selection (or non-matching-Selection)
+// node so destRebinding equalities deeper in the tree — added at an
+// inner Expand step — are not mis-peeled.
+func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (LogicalPlan, []*Selection) {
+	var hoisted []*Selection
+	for {
+		sel, ok := p.(*Selection)
+		if !ok || sel.PredicateExpr == nil {
+			break
+		}
+		bin, ok := sel.PredicateExpr.(*ast.BinaryOp)
+		if !ok || bin.Operator != "=" {
+			break
+		}
+		if !referencesOuterVar(bin.Left, outerVars) && !referencesOuterVar(bin.Right, outerVars) {
+			break
+		}
+		hoisted = append(hoisted, sel)
+		p = sel.Child
+	}
+	return p, hoisted
+}
+
+// referencesOuterVar reports whether e is a Variable whose name is in
+// outerVars. The check is intentionally narrow: only the immediate
+// Variable form qualifies, mirroring the shape emitted by
+// matchExpandStepBoundWithFrom when destRebinding fires.
+func referencesOuterVar(e ast.Expression, outerVars map[string]struct{}) bool {
+	v, ok := e.(*ast.Variable)
+	if !ok {
+		return false
+	}
+	_, isOuter := outerVars[v.Name]
+	return isOuter
 }
 
 // subsequentOptionalPath handles the n-th (n>0) path of the OPTIONAL
@@ -391,11 +444,23 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			plan = NewCorrelatedApplyWithTag(plan, innerPlan, tag)
 		} else {
 			// No shared variable — fall back to plain Apply (Cartesian product).
+			// destRebinding equality selections inside p that reference
+			// outer-bound variables would, after the fresh-schema isolation
+			// applied by buildOperator's plain-Apply branch, fail to
+			// resolve the outer reference (the inner row has only inner
+			// columns). Hoist those Selections OUT of p and re-apply them
+			// on top of the Apply, where the combined outer||inner row
+			// makes the outer reference reachable.
 			p, err := t.matchPathPattern(pp, optional, "", copyVarSet(boundVars))
 			if err != nil {
 				return nil, err
 			}
-			plan = NewApply(plan, p)
+			body, hoisted := peelOuterDestRebinding(p, boundVars)
+			var combined LogicalPlan = NewApply(plan, body)
+			for _, sel := range hoisted {
+				combined = NewSelectionExpr(sel.Predicate, sel.PredicateExpr, combined)
+			}
+			plan = combined
 		}
 		for _, v := range pathPatternVars(pp) {
 			boundVars[v] = struct{}{}
