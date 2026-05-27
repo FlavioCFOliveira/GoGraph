@@ -278,13 +278,16 @@ func (t *translator) firstOptionalPath(
 	if err != nil {
 		return nil, err
 	}
-	// The first path has no shared variable with the outer; wrap the path
-	// with a CorrelatedApply over an outerArgTag Argument leaf so the row
-	// stream remains correlated (Cartesian product per outer row).
+	// The first path has no shared variable with the outer. Wrap p with a
+	// plain Apply over an Argument leaf carrying the outer vars. The
+	// physical builder detects the Argument outer and keeps the inner on
+	// the shared schema so destRebinding equality selections that
+	// reference outer-bound variables (e.g. OPTIONAL MATCH (x)-->(b)
+	// where b is bound by the surrounding MATCH) can resolve their
+	// column indices.
 	ctx.outerArgConsumed = true
-	outerLeaf := NewArgumentWithTag(childVarSlice(child), outerArgTag)
-	//nolint:staticcheck // inner-tag is unused by p (no Argument referencing it)
-	return NewCorrelatedApplyWithTag(outerLeaf, p, nextArgTag()), nil
+	argLeaf := NewArgumentWithTag(childVarSlice(child), outerArgTag)
+	return NewApply(argLeaf, p), nil
 }
 
 // subsequentOptionalPath handles the n-th (n>0) path of the OPTIONAL

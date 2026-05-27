@@ -1960,6 +1960,23 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
+		// When the outer side is an Argument leaf, the inner pipeline is
+		// implicitly correlated (the Argument re-emits the surrounding
+		// driver's row each invocation, so the inner's first row carries
+		// outer columns). The inner's Selection / Expand / etc. operators
+		// then need the SHARED schema view so destRebinding equality
+		// selections on outer-bound variables can resolve their column
+		// indices. Plain non-Argument outers run their inner in isolation
+		// and get the fresh-schema isolation that prevents shared-schema
+		// over-indexing.
+		if _, outerIsArg := p.Outer.(*ir.Argument); outerIsArg {
+			arg := exec.NewArgument()
+			inner, ierr := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+			if ierr != nil {
+				return nil, ierr
+			}
+			return exec.NewApply(outer, inner, arg), nil
+		}
 		// The inner subtree of a plain (non-correlated) Apply runs in
 		// isolation — it does not consume the outer row, so inner rows are
 		// inner-columns-only. Build the inner with a FRESH schema so its
