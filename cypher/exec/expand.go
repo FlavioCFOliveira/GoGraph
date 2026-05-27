@@ -308,11 +308,20 @@ func (op *Expand) advanceInput() (done bool, err error) {
 	if op.inputCol >= len(inputRow) {
 		return false, nil // row too narrow; skip silently
 	}
-	iv, ok := inputRow[op.inputCol].(expr.IntegerValue)
-	if !ok {
-		return false, nil // not an integer; skip silently
+	// The source column may carry either the raw NodeID (the canonical
+	// in-pipeline encoding emitted by NodeScan/Expand) or a full
+	// NodeValue produced by a projection alias (e.g. `WITH a` followed
+	// by `MATCH (a)-->(b)`). Accept either form so cross-clause forwarding
+	// of node variables through a projection does not silently drop the
+	// expansion.
+	switch v := inputRow[op.inputCol].(type) {
+	case expr.IntegerValue:
+		op.srcID = int64(v)
+	case expr.NodeValue:
+		op.srcID = int64(v.ID)
+	default:
+		return false, nil // not a node-typed value; skip silently
 	}
-	op.srcID = int64(iv)
 	op.inputRow = inputRow
 	op.loadAdjacency(uint64(op.srcID))
 	return false, nil

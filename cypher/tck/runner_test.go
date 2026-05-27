@@ -650,11 +650,21 @@ import (
 //     on pre-WITH scope visibility. Observed 3520-3524 across a 5-run
 //     sample (median 3523); gate set conservatively at 3515 (minimum
 //     observed - 5).
+//   - 3520: raised after exec.Expand.advanceInput now accepts a
+//     NodeValue (in addition to the canonical IntegerValue) as the
+//     source-column value, so a projected node variable forwarded
+//     through a WITH (`MATCH (a:A) WITH a MATCH (a)-->(b)`) seeds the
+//     adjacency walk correctly. Pre-fix the projection-output NodeValue
+//     failed the input-col type assertion and the Expand silently
+//     emitted zero rows. Unlocks With1 [1]/[2] and the broader WITH-
+//     forwarding family. Observed 3525-3530 across a 5-run sample
+//     (median 3529); gate set conservatively at 3520 (minimum
+//     observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3515
+const tckExecutionBaseline = 3520
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
