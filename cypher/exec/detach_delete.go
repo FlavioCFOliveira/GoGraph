@@ -23,6 +23,9 @@ package exec
 import (
 	"context"
 	"fmt"
+
+	"gograph/cypher/expr"
+	"gograph/graph"
 )
 
 // DetachDelete removes all incident edges from a node and then strips the
@@ -30,11 +33,12 @@ import (
 //
 // DetachDelete is NOT safe for concurrent use.
 type DetachDelete struct {
-	nodeVar string
-	schema  map[string]int
-	child   Operator
-	mutator GraphMutator
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	nodeVar      string
+	schema       map[string]int
+	child        Operator
+	mutator      GraphMutator
+	targetEvalFn TargetEvalFn
+	ctx          context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewDetachDelete creates a DetachDelete operator.
@@ -50,6 +54,13 @@ func NewDetachDelete(
 		child:   child,
 		mutator: mutator,
 	}
+}
+
+// WithTargetEvalFn attaches a per-row evaluator for non-variable DETACH
+// DELETE targets (subscripts, property access, …).
+func (op *DetachDelete) WithTargetEvalFn(fn TargetEvalFn) *DetachDelete {
+	op.targetEvalFn = fn
+	return op
 }
 
 // Init initialises the operator and its child.
@@ -74,13 +85,43 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
-	nodeID, err := resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
-	if err != nil {
-		if err == errNullTarget {
+	var nodeID graph.NodeID
+	if op.targetEvalFn != nil {
+		v, evalErr := op.targetEvalFn(childRow)
+		if evalErr != nil {
+			return false, fmt.Errorf("exec: DetachDelete %q: %w", op.nodeVar, evalErr)
+		}
+		if v == nil || expr.IsNull(v) {
 			*out = childRow
 			return true, nil
 		}
-		return false, fmt.Errorf("exec: DetachDelete %q: %w", op.nodeVar, err)
+		switch tv := v.(type) {
+		case expr.NodeValue:
+			nodeID = graph.NodeID(tv.ID)
+		case expr.IntegerValue:
+			nodeID = graph.NodeID(tv)
+		case expr.RelationshipValue:
+			srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
+			dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
+			if srcOK && dstOK {
+				op.mutator.RemoveEdge(srcKey, dstKey)
+			}
+			*out = childRow
+			return true, nil
+		default:
+			*out = childRow
+			return true, nil
+		}
+	} else {
+		var err error
+		nodeID, err = resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
+		if err != nil {
+			if err == errNullTarget {
+				*out = childRow
+				return true, nil
+			}
+			return false, fmt.Errorf("exec: DetachDelete %q: %w", op.nodeVar, err)
+		}
 	}
 	nodeKey, resolved := op.mutator.ResolveNodeLabel(nodeID)
 	if !resolved {

@@ -1565,8 +1565,22 @@ func (r *RemoveLabels) Vars() []string { return []string{r.NodeVar} }
 type DeleteNode struct {
 	// NodeVar is the already-bound node variable to delete.
 	NodeVar string
+	// TargetExpr is the parsed AST for the delete target when the target
+	// is not a bare variable (e.g. `DELETE friends[$i]`, `DELETE map.key`,
+	// `DELETE coll[0]`). When non-nil the exec builder uses it to evaluate
+	// the target per row; the resulting NodeValue / IntegerValue identifies
+	// the node to delete.
+	TargetExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
+}
+
+// NewDeleteNodeExpr creates a DeleteNode operator carrying the parsed AST
+// for the delete target. The exec builder evaluates the expression per row
+// when the target is not a bare variable (e.g. `DELETE friends[$i]`,
+// `DELETE map.key`).
+func NewDeleteNodeExpr(nodeVar string, targetExpr ast.Expression, child LogicalPlan) *DeleteNode {
+	return &DeleteNode{NodeVar: nodeVar, TargetExpr: targetExpr, Child: child}
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -1607,6 +1621,10 @@ func (d *DeleteRelationship) Vars() []string { return []string{d.RelVar} }
 type DetachDelete struct {
 	// NodeVar is the already-bound node variable to delete.
 	NodeVar string
+	// TargetExpr is the parsed AST for the delete target when the target
+	// is not a bare variable (e.g. `DETACH DELETE friends[$i]`,
+	// `DETACH DELETE map.key`). Same role as DeleteNode.TargetExpr.
+	TargetExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
 }
@@ -1614,6 +1632,12 @@ type DetachDelete struct {
 // NewDetachDelete creates a DetachDelete operator.
 func NewDetachDelete(nodeVar string, child LogicalPlan) *DetachDelete {
 	return &DetachDelete{NodeVar: nodeVar, Child: child}
+}
+
+// NewDetachDeleteExpr creates a DetachDelete operator carrying the parsed
+// AST for the delete target.
+func NewDetachDeleteExpr(nodeVar string, targetExpr ast.Expression, child LogicalPlan) *DetachDelete {
+	return &DetachDelete{NodeVar: nodeVar, TargetExpr: targetExpr, Child: child}
 }
 
 // Children implements LogicalPlan.

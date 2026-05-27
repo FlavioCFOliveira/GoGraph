@@ -1276,7 +1276,25 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewDeleteNode(p.NodeVar, schemaCopy, child, mutator), nil
+		dn := exec.NewDeleteNode(p.NodeVar, schemaCopy, child, mutator)
+		if p.TargetExpr != nil {
+			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
+				schemaSnap := schemaCopy
+				capturedExpr := p.TargetExpr
+				capturedParams := params
+				capturedReg := reg
+				capturedBopts := bopts
+				var capturedG *lpg.Graph[string, float64]
+				if lw, ok := walker.(*lpgNodeWalker); ok {
+					capturedG = lw.g
+				}
+				dn.WithTargetEvalFn(func(row exec.Row) (expr.Value, error) {
+					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+				})
+			}
+		}
+		return dn, nil
 
 	case *ir.DeleteRelationship:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -1292,7 +1310,25 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewDetachDelete(p.NodeVar, schemaCopy, child, mutator), nil
+		dd := exec.NewDetachDelete(p.NodeVar, schemaCopy, child, mutator)
+		if p.TargetExpr != nil {
+			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
+				schemaSnap := schemaCopy
+				capturedExpr := p.TargetExpr
+				capturedParams := params
+				capturedReg := reg
+				capturedBopts := bopts
+				var capturedG *lpg.Graph[string, float64]
+				if lw, ok := walker.(*lpgNodeWalker); ok {
+					capturedG = lw.g
+				}
+				dd.WithTargetEvalFn(func(row exec.Row) (expr.Value, error) {
+					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+				})
+			}
+		}
+		return dd, nil
 
 	case *ir.Merge:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)

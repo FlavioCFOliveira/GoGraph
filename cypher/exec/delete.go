@@ -48,12 +48,20 @@ var ErrDeleteNodeHasRelationships = errors.New("exec: cannot delete node with ex
 // the graph, provided it has no incident relationships.
 //
 // DeleteNode is NOT safe for concurrent use.
+// TargetEvalFn evaluates a DELETE / DETACH DELETE target expression
+// against the current input row and returns the resolved value. The exec
+// operator inspects the value: NodeValue / IntegerValue selects the
+// node by ID; RelationshipValue selects the relationship; null is a
+// row-passthrough no-op (matches openCypher 9 §3.5.8).
+type TargetEvalFn func(row Row) (expr.Value, error)
+
 type DeleteNode struct {
-	nodeVar string
-	schema  map[string]int
-	child   Operator
-	mutator GraphMutator
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	nodeVar       string
+	schema        map[string]int
+	child         Operator
+	mutator       GraphMutator
+	targetEvalFn  TargetEvalFn
+	ctx           context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -69,6 +77,15 @@ func NewDeleteNode(
 		child:   child,
 		mutator: mutator,
 	}
+}
+
+// WithTargetEvalFn attaches a per-row evaluator for non-variable DELETE
+// targets (subscripts, property access, …). When set, the operator
+// resolves the target value via the evaluator instead of the schema
+// lookup keyed by nodeVar.
+func (op *DeleteNode) WithTargetEvalFn(fn TargetEvalFn) *DeleteNode {
+	op.targetEvalFn = fn
+	return op
 }
 
 // Init initialises the operator and its child.
@@ -92,15 +109,50 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
-	nodeID, err := resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
-	if err != nil {
-		if err == errNullTarget {
-			// OPTIONAL-MATCH-bound or otherwise NULL target: DELETE
-			// is a no-op per openCypher; propagate the row unchanged.
+	var nodeID graph.NodeID
+	if op.targetEvalFn != nil {
+		v, evalErr := op.targetEvalFn(childRow)
+		if evalErr != nil {
+			return false, fmt.Errorf("exec: DeleteNode %q: %w", op.nodeVar, evalErr)
+		}
+		if v == nil || expr.IsNull(v) {
 			*out = childRow
 			return true, nil
 		}
-		return false, fmt.Errorf("exec: DeleteNode %q: %w", op.nodeVar, err)
+		switch tv := v.(type) {
+		case expr.NodeValue:
+			nodeID = graph.NodeID(tv.ID)
+		case expr.IntegerValue:
+			nodeID = graph.NodeID(tv)
+		case expr.RelationshipValue:
+			// DELETE on a relationship: dispatch to the mutator's edge
+			// removal path. The startup/endpoint IDs already identify the
+			// edge; bypass the node-deletion guard.
+			srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
+			dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
+			if srcOK && dstOK {
+				op.mutator.RemoveEdge(srcKey, dstKey)
+			}
+			*out = childRow
+			return true, nil
+		default:
+			// Unsupported target value type: pass through as no-op so the
+			// pipeline survives instead of aborting.
+			*out = childRow
+			return true, nil
+		}
+	} else {
+		var err error
+		nodeID, err = resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
+		if err != nil {
+			if err == errNullTarget {
+				// OPTIONAL-MATCH-bound or otherwise NULL target: DELETE
+				// is a no-op per openCypher; propagate the row unchanged.
+				*out = childRow
+				return true, nil
+			}
+			return false, fmt.Errorf("exec: DeleteNode %q: %w", op.nodeVar, err)
+		}
 	}
 	nodeKey, resolved := op.mutator.ResolveNodeLabel(nodeID)
 	if !resolved {

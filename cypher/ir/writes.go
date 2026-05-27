@@ -284,11 +284,13 @@ func (t *translator) removeClause(r *ast.Remove, child LogicalPlan) (LogicalPlan
 }
 
 // deleteClause translates a DELETE clause. Each expression becomes a DeleteNode
-// operator stacked on top of the previous plan.
+// operator stacked on top of the previous plan. The parsed AST is carried
+// forward so the exec layer can evaluate non-variable targets (subscripts,
+// property access, etc.) per row.
 func (t *translator) deleteClause(d *ast.Delete, child LogicalPlan) (LogicalPlan, error) {
 	plan := child
-	for _, expr := range d.Expressions {
-		plan = NewDeleteNode(expr.String(), plan)
+	for _, e := range d.Expressions {
+		plan = NewDeleteNodeExpr(e.String(), e, plan)
 	}
 	return plan, nil
 }
@@ -296,8 +298,8 @@ func (t *translator) deleteClause(d *ast.Delete, child LogicalPlan) (LogicalPlan
 // detachDeleteClause translates a DETACH DELETE clause.
 func (t *translator) detachDeleteClause(d *ast.DetachDelete, child LogicalPlan) (LogicalPlan, error) {
 	plan := child
-	for _, expr := range d.Expressions {
-		plan = NewDetachDelete(expr.String(), plan)
+	for _, e := range d.Expressions {
+		plan = NewDetachDeleteExpr(e.String(), e, plan)
 	}
 	return plan, nil
 }
