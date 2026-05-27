@@ -148,7 +148,7 @@ func (v *visitor) VisitRegularQuery(ctx *gen.RegularQueryContext) interface{} {
 	}
 
 	parts := []*ast.SingleQuery{first}
-	allFlag := false
+	var sawAll, sawDistinct bool
 	for _, u := range unions {
 		ur := v.visit(u)
 		union, ok := ur.(*ast.Union)
@@ -156,11 +156,100 @@ func (v *visitor) VisitRegularQuery(ctx *gen.RegularQueryContext) interface{} {
 			return ur // propagate error
 		}
 		if union.All {
-			allFlag = true
+			sawAll = true
+		} else {
+			sawDistinct = true
 		}
 		parts = append(parts, union.Query)
 	}
-	return &ast.MultiQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Parts: parts, All: allFlag}
+	if sawAll && sawDistinct {
+		// openCypher 9 §3.3.2 forbids mixing UNION and UNION ALL in the
+		// same query — the deduplication semantics are incompatible.
+		return &SemaError{
+			Rule:    "regularQuery",
+			Pos:     positionOf(ctx),
+			Message: "InvalidClauseComposition: cannot mix UNION and UNION ALL in the same query",
+		}
+	}
+	// Cross-branch column-name agreement: every branch of a UNION must
+	// project the same number of columns with the same names (order
+	// matters). Mismatches must surface as a compile-time SyntaxError
+	// (DifferentColumnsInUnion).
+	if err := checkUnionColumns(parts, ctx); err != nil {
+		return err
+	}
+	return &ast.MultiQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Parts: parts, All: sawAll}
+}
+
+// checkUnionColumns enforces that every branch of a UNION projects the
+// same explicit aliases in the same order. Only aliases (item.Alias != nil)
+// participate in the check: anonymous projection items keep their
+// expression text as the column name, and openCypher implementations
+// vary on whether two anonymous columns with different expression text
+// can UNION. The TCK only exercises the aliased / column-count
+// mismatch cases, which we cover with this conservative rule.
+func checkUnionColumns(parts []*ast.SingleQuery, ctx antlr.ParserRuleContext) error {
+	if len(parts) < 2 {
+		return nil
+	}
+	first, firstHasAlias := unionBranchColumns(parts[0])
+	for i := 1; i < len(parts); i++ {
+		cols, hasAlias := unionBranchColumns(parts[i])
+		// Column count must always match.
+		if len(cols) != len(first) {
+			return &SemaError{
+				Rule:    "regularQuery",
+				Pos:     positionOf(ctx),
+				Message: "DifferentColumnsInUnion: all UNION branches must project the same number of columns",
+			}
+		}
+		// Alias-name agreement only when both sides have explicit aliases.
+		if firstHasAlias && hasAlias && !sameColumnList(first, cols) {
+			return &SemaError{
+				Rule:    "regularQuery",
+				Pos:     positionOf(ctx),
+				Message: "DifferentColumnsInUnion: all UNION branches must project the same columns in the same order",
+			}
+		}
+	}
+	return nil
+}
+
+// unionBranchColumns returns (column names, hasAlias) for the trailing
+// RETURN of a UNION branch. hasAlias is true iff every projection item
+// carries an explicit AS alias.
+func unionBranchColumns(sq *ast.SingleQuery) ([]string, bool) {
+	if sq == nil || sq.Return == nil || sq.Return.Projection == nil {
+		return nil, false
+	}
+	items := sq.Return.Projection.Items
+	out := make([]string, 0, len(items))
+	allAliased := len(items) > 0
+	for _, item := range items {
+		if item.Alias != nil {
+			out = append(out, *item.Alias)
+			continue
+		}
+		allAliased = false
+		if item.Expr != nil {
+			out = append(out, item.Expr.String())
+		}
+	}
+	return out, allAliased
+}
+
+// sameColumnList reports whether a and b have identical names in identical
+// positions.
+func sameColumnList(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // VisitUnionSt handles a UNION [ALL] singleQuery clause.
