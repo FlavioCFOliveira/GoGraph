@@ -683,11 +683,23 @@ import (
 //     +5 to +7 scenarios. Observed 3549-3555 across a 5-run sample
 //     (median 3553); gate set conservatively at 3544 (minimum
 //     observed - 5).
+//   - 3549: raised after exec.Expand.passesFilter (and the symmetric
+//     reverseEdgePassesFilter) now decide acceptance by membership in
+//     the EdgeTypeFilter map rather than by comparing the looked-up
+//     type label against a single op.edgeType. The filter map is
+//     populated by api.go::buildEdgeTypeFilter to contain only edges
+//     of accepted types, so membership is the correct criterion for
+//     both single-type (`[r:KNOWS]`) and multi-type (`[r:KNOWS|HATES]`)
+//     patterns. Pre-fix the predicate silently excluded edges of every
+//     accepted type other than the first (api.go records relTypes[0]
+//     as edgeType), so multi-type relationship patterns only returned
+//     matches for the first type. Observed 3554-3559 across a 5-run
+//     sample (median 3556); gate set conservatively at 3549.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3544
+const tckExecutionBaseline = 3549
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

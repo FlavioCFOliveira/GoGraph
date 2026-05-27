@@ -200,8 +200,12 @@ func TestExpand_EdgeTypeFilter(t *testing.T) {
 	fwd := buildCSR(3, [][2]int{{0, 1}, {0, 2}})
 	rev := buildCSR(3, [][2]int{{1, 0}, {2, 0}})
 
-	// fwd edges: position 0 → KNOWS, position 1 → OTHER
-	filter := map[uint64]string{0: "KNOWS", 1: "OTHER"}
+	// fwd edges: position 0 → KNOWS, position 1 → OTHER.
+	// buildEdgeTypeFilter in cypher/api.go populates the filter map only
+	// with edges of accepted types, so position 1 (OTHER) is intentionally
+	// absent here — Expand decides membership by presence in the map, not
+	// by comparing the recorded type label against op.EdgeType.
+	filter := map[uint64]string{0: "KNOWS"}
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
 	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{

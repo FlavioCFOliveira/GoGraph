@@ -283,7 +283,9 @@ func (op *Expand) reverseEdgePassesFilter(dst, src uint64) bool {
 	end := op.fwdVerts[dst+1]
 	for fwdPos := start; fwdPos < end; fwdPos++ {
 		if uint64(op.fwdEdges[fwdPos]) == src {
-			if typ, ok := op.edgeTypeFilter[fwdPos]; ok && typ == op.edgeType {
+			// Membership in the filter map is sufficient — the map only
+			// contains edges of accepted types (multi-type [r:A|B] support).
+			if _, ok := op.edgeTypeFilter[fwdPos]; ok {
 				return true
 			}
 			return false
@@ -367,6 +369,16 @@ func (op *Expand) passesRelMorphism(edgeID int64) bool {
 
 // passesFilter reports whether the edge at absolute position pos (in the
 // forward edges array) satisfies the optional edge-type filter.
+//
+// The filter map is built by api.go::buildEdgeTypeFilter to contain only
+// edge positions whose type is in the accepted set, so membership in the
+// map is sufficient: when EdgeType is non-empty (any filter was requested),
+// pos must appear in the filter; otherwise everything passes.
+//
+// This is correct for both single-type (`[r:KNOWS]`) and multi-type
+// (`[r:KNOWS|HATES]`) patterns. Pre-fix the predicate compared the
+// looked-up type against a single op.edgeType label, which silently
+// excluded edges of every accepted type other than the first.
 func (op *Expand) passesFilter(pos uint64) bool {
 	if op.edgeType == "" {
 		return true
@@ -374,8 +386,8 @@ func (op *Expand) passesFilter(pos uint64) bool {
 	if op.edgeTypeFilter == nil {
 		return false
 	}
-	t, ok := op.edgeTypeFilter[pos]
-	return ok && t == op.edgeType
+	_, ok := op.edgeTypeFilter[pos]
+	return ok
 }
 
 // buildRow writes (inputRow... || srcID || edgeID || dstID) into out.
