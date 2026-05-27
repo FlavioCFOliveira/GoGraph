@@ -214,8 +214,12 @@ func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
 			if lim, err := intExpr(proj.Limit); err == nil {
 				plan = NewTop(sortItems, lim, plan)
 			} else {
+				// LIMIT is a parameter or another expression: defer
+				// resolution to the physical builder via LimitExpr
+				// so a float-typed parameter surfaces as the
+				// documented InvalidArgumentType at runtime.
 				plan = NewSort(sortItems, plan)
-				plan = NewLimit(0, plan)
+				plan = NewLimitExpr(proj.Limit, plan)
 			}
 		} else {
 			plan = NewSort(sortItems, plan)
