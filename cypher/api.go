@@ -1067,7 +1067,7 @@ func buildOperatorWrite(
 		// input row layout (which does not include the newly created node).
 		propsSchema := copySchema(schema)
 		if p.NodeVar != "" {
-			schema[p.NodeVar] = len(schema)
+			schema[p.NodeVar] = schemaWidth(schema)
 		}
 		cn, buildErr := exec.NewCreateNode(p.NodeVar, p.Labels, p.Properties, child, mutator)
 		if buildErr != nil {
@@ -1096,7 +1096,7 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		if p.RelVar != "" {
-			schema[p.RelVar] = len(schema)
+			schema[p.RelVar] = schemaWidth(schema)
 		}
 		// Pass a copy of schema so the operator captures the current state.
 		schemaCopy := make(map[string]int, len(schema))
@@ -1255,7 +1255,7 @@ func buildOperatorWrite(
 		// as the output schema columns.
 		for _, v := range p.BoundVars {
 			if v != "" {
-				schema[v] = len(schema)
+				schema[v] = schemaWidth(schema)
 			}
 		}
 		schemaCopy := copySchema(schema)
@@ -1832,11 +1832,11 @@ func buildOperator(
 		//
 		// We advance the schema counter by 3 for the (srcID, edgeID, dstID)
 		// triplet emitted by Expand. Each slot gets a stable key in the schema
-		// map even when no user-visible variable is bound, so len(schema)
+		// map even when no user-visible variable is bound, so schemaWidth(schema)
 		// matches the actual row width — critical for downstream operators (e.g.
 		// a sibling AllNodesScan inside an Apply) that allocate schema slots
-		// based on len(schema).
-		schemaBase := len(schema)
+		// based on the row width.
+		schemaBase := schemaWidth(schema)
 		schema[p.FromVar+"__dup"] = schemaBase // srcID dup — anonymous internal slot
 		relKey := p.RelVar
 		if relKey == "" {
@@ -1950,7 +1950,7 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		outerWidth := len(schema)
+		outerWidth := schemaWidth(schema)
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -1962,11 +1962,11 @@ func buildOperator(
 		if argByTag != nil {
 			delete(argByTag, p.ArgTag)
 		}
-		// paddedWidth = outerWidth + (inner-added columns). The inner build
-		// advances schema only by the columns it adds (Argument itself does not
-		// advance schema), so len(schema) after inner build minus outerWidth is
-		// exactly the number of inner-added columns.
-		paddedWidth := len(schema)
+		// paddedWidth = outerWidth + (inner-added columns). schemaWidth captures
+		// the real row width (max index + 1) so secondary expression-string keys
+		// (e.g. schema["date({…})"] sharing schema["x"]'s slot) do not inflate
+		// the count.
+		paddedWidth := schemaWidth(schema)
 		if paddedWidth < outerWidth {
 			paddedWidth = outerWidth
 		}
@@ -2019,7 +2019,7 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		outerWidth := len(schema)
+		outerWidth := schemaWidth(schema)
 		// Pre-allocate the exec.Argument and register it under the IR
 		// RollUpApply's ArgTag so the inner subtree's matching
 		// Argument leaf resolves to this instance and receives the
@@ -2166,9 +2166,9 @@ func buildOperator(
 
 		// Same output layout as Expand: inputRow... || srcID || edgeID || dstID.
 		// Always advance the schema by 3 (including anonymous slots) so that
-		// len(schema) tracks the actual row width — see the Expand case for
-		// rationale.
-		schemaBase := len(schema)
+		// schemaWidth(schema) tracks the actual row width — see the Expand case
+		// for rationale.
+		schemaBase := schemaWidth(schema)
 		schema[p.FromVar+"__opt_dup"] = schemaBase
 		relKey := p.RelVar
 		if relKey == "" {
@@ -2232,8 +2232,8 @@ func buildOperator(
 		// VarLengthExpand emits: inputRow... || pathList || dstNodeID.
 		// pathList is a flat alternating ListValue: [srcID, edgePos0, dst0, ...].
 		// Always advance schema by 2 — anonymous slots receive synthetic keys so
-		// len(schema) matches the actual row width.
-		schemaBaseVLE := len(schema)
+		// schemaWidth(schema) matches the actual row width.
+		schemaBaseVLE := schemaWidth(schema)
 		relKey := p.RelVar
 		if relKey == "" {
 			relKey = fmt.Sprintf("__anon_vlrel_%d", schemaBaseVLE)
@@ -2781,7 +2781,7 @@ func buildProcedureCallOperator(
 
 	// Register output columns in the schema.
 	for _, v := range yieldVars {
-		schema[v] = len(schema)
+		schema[v] = schemaWidth(schema)
 	}
 
 	return exec.NewProcedureCallOp(p.Namespace, p.Name, argEvals, yieldVars, child, effectiveProcReg), nil
@@ -2865,7 +2865,7 @@ func buildIndexSeekOperator(
 			continue
 		}
 		if op, ok := tryNewHashSeek(sub, seekVal); ok {
-			schema[p.NodeVar] = len(schema)
+			schema[p.NodeVar] = schemaWidth(schema)
 			return op, nil
 		}
 	}
@@ -2891,11 +2891,11 @@ func tryBuildIndexSeekFromSelection(
 		return nil, false, err
 	}
 	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal); ok {
-		schema[nodeVar] = len(schema)
+		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
 	if op, ok := tryAnyHashSeek(idxMgr, seekVal); ok {
-		schema[nodeVar] = len(schema)
+		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
 	return nil, false, nil
