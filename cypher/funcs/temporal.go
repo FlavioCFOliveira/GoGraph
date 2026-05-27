@@ -1166,13 +1166,11 @@ func fnDurationInDays(args []expr.Value) (expr.Value, error) {
 		if expr.IsNull(args[0]) || expr.IsNull(args[1]) {
 			return expr.Null, nil
 		}
-		elapsedNs, ok := elapsedNanos(args[0], args[1])
+		secs, _, ok := elapsedSecsAndNanos(args[0], args[1])
 		if !ok {
 			return expr.Null, nil
 		}
-		const nsPerDay = int64(86_400) * int64(1_000_000_000)
-		days := elapsedNs / nsPerDay
-		return expr.NewDuration(0, days, 0, 0), nil
+		return expr.NewDuration(0, secs/86_400, 0, 0), nil
 	default:
 		return nil, &ArityError{Function: "duration.inDays", Got: len(args), Want: "1..2"}
 	}
@@ -1199,13 +1197,10 @@ func fnDurationInSeconds(args []expr.Value) (expr.Value, error) {
 		if expr.IsNull(args[0]) || expr.IsNull(args[1]) {
 			return expr.Null, nil
 		}
-		elapsedNs, ok := elapsedNanos(args[0], args[1])
+		secs, nanos, ok := elapsedSecsAndNanos(args[0], args[1])
 		if !ok {
 			return expr.Null, nil
 		}
-		const nsPerSec = int64(1_000_000_000)
-		secs := elapsedNs / nsPerSec
-		nanos := int32(elapsedNs % nsPerSec)
 		return expr.NewDuration(0, 0, secs, nanos), nil
 	default:
 		return nil, &ArityError{Function: "duration.inSeconds", Got: len(args), Want: "1..2"}
@@ -1360,6 +1355,115 @@ func projectLocalIntoZone(local expr.Value, anchor expr.DateTimeValue) (time.Tim
 		return time.Date(y, mo, d, h, mn, s, int(ns), loc), true
 	}
 	return time.Time{}, false
+}
+
+// elapsedSecsAndNanos returns (b - a) decomposed into (whole seconds,
+// residual nanoseconds in [0, 1e9)). Designed to survive extreme date
+// ranges (±999999999 years) where time.Time.Sub would saturate at
+// time.Duration's int64-nanosecond cap (~292 years). Used by the
+// 2-arg duration.inDays / duration.inSeconds projections, which need
+// elapsed magnitudes that can exceed int64-nanos but still fit in
+// int64-seconds (6.3e16 for the TCK's ±999999999-year span).
+//
+// Dispatch mirrors [elapsedNanos]: time-only paths via the nanos-of-day
+// axis (small magnitudes, no overflow risk); DST-aware projection for
+// zoned+local date-bearing pairs; both-local date-bearing via a
+// time.Time.Sub fast path when the year delta is moderate, falling
+// through to the Julian-Day-Number arithmetic in [subSecsAndNanos] for
+// extreme spans.
+func elapsedSecsAndNanos(a, b expr.Value) (int64, int32, bool) {
+	if _, aTO := isTimeOnly(a); aTO {
+		ns, ok := elapsedNanosTimeOnly(a, b)
+		if !ok {
+			return 0, 0, false
+		}
+		s, n := secsNanosFromNanos(ns)
+		return s, n, true
+	}
+	if _, bTO := isTimeOnly(b); bTO {
+		ns, ok := elapsedNanosTimeOnly(a, b)
+		if !ok {
+			return 0, 0, false
+		}
+		s, n := secsNanosFromNanos(ns)
+		return s, n, true
+	}
+	if ta, tb, ok := dstAwareInstants(a, b); ok {
+		s, n := subSecsAndNanos(ta, tb)
+		return s, n, true
+	}
+	la, oka := toLocalDateTime(a)
+	if !oka {
+		return 0, 0, false
+	}
+	lb, okb := toLocalDateTime(b)
+	if !okb {
+		return 0, 0, false
+	}
+	s, n := subSecsAndNanos(la.T, lb.T)
+	return s, n, true
+}
+
+// secsNanosFromNanos splits a signed nanosecond count into (whole
+// seconds, residual nanoseconds in [0, 1e9)). Negative inputs are
+// normalised so the residual stays in [0, 1e9) and the seconds
+// component absorbs the borrow.
+func secsNanosFromNanos(ns int64) (int64, int32) {
+	const nsPerSec = int64(1_000_000_000)
+	s := ns / nsPerSec
+	n := ns % nsPerSec
+	if n < 0 {
+		n += nsPerSec
+		s--
+	}
+	return s, int32(n)
+}
+
+// subSecsAndNanos computes (b - a) as (seconds, residual-nanos)
+// without losing precision when the span exceeds time.Duration's
+// ±292-year cap. For inputs within ±200 years of each other the
+// time.Time.Sub fast path is used (saturation cannot occur there);
+// for wider spans the day count is taken from the Julian Day Number
+// formula on the calendar dates and the time-of-day diff is added
+// separately.
+func subSecsAndNanos(a, b time.Time) (int64, int32) {
+	const nsPerSec = int64(1_000_000_000)
+	if d := int64(b.Year()) - int64(a.Year()); d > -200 && d < 200 {
+		ns := b.Sub(a).Nanoseconds()
+		return secsNanosFromNanos(ns)
+	}
+	days := julianDayGregorian(b.Year(), int(b.Month()), b.Day()) -
+		julianDayGregorian(a.Year(), int(a.Month()), a.Day())
+	secs := days * 86_400
+	todA := int64(a.Hour())*3600 + int64(a.Minute())*60 + int64(a.Second())
+	todB := int64(b.Hour())*3600 + int64(b.Minute())*60 + int64(b.Second())
+	secs += todB - todA
+	nanos := int64(b.Nanosecond()) - int64(a.Nanosecond())
+	if nanos < 0 {
+		nanos += nsPerSec
+		secs--
+	}
+	return secs, int32(nanos)
+}
+
+// julianDayGregorian returns the Julian Day Number for the given
+// proleptic Gregorian date. Uses the Fliegel–Van Flandern formula
+// with int64 arithmetic throughout so years on the order of ±10^9
+// are representable without overflow (largest intermediate, 365*y, is
+// ~3.65e11 — comfortably within int64).
+//
+// The formula assumes integer division truncates toward zero. The
+// initial year shift (y = year + 4800 - a) keeps y comfortably
+// positive for all astronomically-relevant inputs (a is 0 or 1, so y
+// is at least year + 4799), but for the openCypher extreme of
+// year=-999999999 the shifted y still lands at -999995200 — a
+// negative value cleanly divisible by 4, 100 and 400, so truncation
+// and flooring coincide. No additional bias is required.
+func julianDayGregorian(year, month, day int) int64 {
+	a := int64((14 - month) / 12)
+	y := int64(year) + 4800 - a
+	m := int64(month) + 12*a - 3
+	return int64(day) + (153*m+2)/5 + 365*y + y/4 - y/100 + y/400 - 32045
 }
 
 // isTimeOnly reports whether v is a LocalTimeValue or TimeValue.

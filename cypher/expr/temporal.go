@@ -499,23 +499,34 @@ func formatDuration(d DurationValue) string {
 	}
 	if d.Seconds != 0 || d.Nanos != 0 {
 		b.WriteByte('T')
-		// Normalise (Seconds, Nanos) for splitting into H/M/S. Canonical
-		// form has Nanos in [0,1e9); when Seconds is negative we keep the
-		// sign in the magnitude.
+		// Decompose (Seconds, Nanos) into H/M/S/nanos without forming an
+		// intermediate total-nanoseconds value: that would overflow int64
+		// for spans larger than ±292 years (durations beyond ~9.2e18 ns),
+		// even though the canonical (Seconds, Nanos) representation can
+		// hold the full ±10^9-year range exercised by openCypher's
+		// extreme-duration scenarios.
 		secs := d.Seconds
 		nanos := int64(d.Nanos)
-		// Effective signed nanoseconds.
-		totalNs := secs*1_000_000_000 + nanos
-		negative := totalNs < 0
+		negative := secs < 0 || (secs == 0 && nanos < 0)
 		if negative {
-			totalNs = -totalNs
+			// Form the magnitude on the seconds axis and re-borrow nanos
+			// so the residual nanos stays in [0, 1e9). Canonical input
+			// already has nanos in [0, 1e9) for non-negative values; for
+			// negative seconds we mirror that constraint on the magnitude.
+			secs = -secs
+			if nanos > 0 {
+				secs--
+				nanos = 1_000_000_000 - nanos
+			} else {
+				nanos = -nanos
+			}
 		}
-		hours := totalNs / int64(time.Hour)
-		totalNs -= hours * int64(time.Hour)
-		minutes := totalNs / int64(time.Minute)
-		totalNs -= minutes * int64(time.Minute)
-		sWhole := totalNs / int64(time.Second)
-		sFrac := totalNs - sWhole*int64(time.Second)
+		hours := secs / 3600
+		secs -= hours * 3600
+		minutes := secs / 60
+		secs -= minutes * 60
+		sWhole := secs
+		sFrac := nanos
 		sign := ""
 		if negative {
 			sign = "-"
@@ -563,6 +574,14 @@ func ParseDate(s string) (DateValue, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return DateValue{}, fmt.Errorf("empty date string")
+	}
+
+	// Extended ISO 8601 with explicit year sign: [+-]Y+(-MM(-DD)?)?.
+	// Supports years outside the four-digit range (e.g. ±999999999),
+	// which the openCypher TCK exercises in duration.between's
+	// large-range scenarios.
+	if s[0] == '+' || s[0] == '-' {
+		return parseExtendedDate(s)
 	}
 
 	// Ordinal: YYYY-DDD or YYYYDDD (length 8 with no dash).
@@ -646,6 +665,54 @@ func dateFromOrdinal(year, doy int) (DateValue, error) {
 	}
 	t := time.Date(year, 1, doy, 0, 0, 0, 0, time.UTC)
 	return DateFromTime(t), nil
+}
+
+// parseExtendedDate parses an extended ISO 8601 date with an explicit
+// year sign and arbitrary digit count: [+-]Y+(-MM(-DD)?)?. Missing
+// month and day default to January 1. Used for years outside the
+// 0000–9999 range (e.g. ±999999999) which the openCypher TCK exercises
+// for large-range duration scenarios.
+func parseExtendedDate(s string) (DateValue, error) {
+	sign := 1
+	if s[0] == '-' {
+		sign = -1
+	}
+	body := s[1:]
+	if body == "" {
+		return DateValue{}, fmt.Errorf("invalid extended date: %q", s)
+	}
+	yearStr := body
+	monthStr, dayStr := "", ""
+	if di := strings.IndexByte(body, '-'); di >= 0 {
+		yearStr = body[:di]
+		after := body[di+1:]
+		monthStr = after
+		if di2 := strings.IndexByte(after, '-'); di2 >= 0 {
+			monthStr = after[:di2]
+			dayStr = after[di2+1:]
+		}
+	}
+	yu, ok := parseUint(yearStr)
+	if !ok {
+		return DateValue{}, fmt.Errorf("invalid extended year: %q", s)
+	}
+	year := sign * int(yu)
+	month, day := 1, 1
+	if monthStr != "" {
+		mu, ok := parseUint(monthStr)
+		if !ok {
+			return DateValue{}, fmt.Errorf("invalid month: %q", s)
+		}
+		month = int(mu)
+	}
+	if dayStr != "" {
+		du, ok := parseUint(dayStr)
+		if !ok {
+			return DateValue{}, fmt.Errorf("invalid day: %q", s)
+		}
+		day = int(du)
+	}
+	return NewDate(year, month, day), nil
 }
 
 // parseWeekDate parses ISO-8601 week dates: YYYY-Www-D, YYYYWwwD,
@@ -948,16 +1015,29 @@ func parseOffset(s string) (int, error) {
 
 // ParseLocalDateTime parses ISO-8601 local date-time: YYYY-MM-DDTHH:MM:SS[.frac]
 // with no zone suffix. Both extended (with separators) and compact forms are
-// accepted; the 'T' separator may be lowercase.
+// accepted; the 'T' separator may be lowercase. A bare date with no time
+// component is accepted as midnight (00:00:00.000000000).
 func ParseLocalDateTime(s string) (LocalDateTimeValue, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return LocalDateTimeValue{}, fmt.Errorf("empty local date-time")
 	}
-	idx := strings.IndexAny(s, "Tt")
-	if idx < 0 {
-		return LocalDateTimeValue{}, fmt.Errorf("missing T separator: %q", s)
+	// Skip a leading sign before scanning for the date/time separator —
+	// extended ISO year syntax ([+-]Y+…) reuses the same character.
+	scan := s
+	if scan[0] == '+' || scan[0] == '-' {
+		scan = scan[1:]
 	}
+	rel := strings.IndexAny(scan, "Tt")
+	if rel < 0 {
+		// Bare date: time defaults to 00:00:00.
+		dv, err := ParseDate(s)
+		if err != nil {
+			return LocalDateTimeValue{}, err
+		}
+		return NewLocalDateTime(dv.Year, dv.Month, dv.Day, 0, 0, 0, 0), nil
+	}
+	idx := rel + (len(s) - len(scan))
 	dv, err := ParseDate(s[:idx])
 	if err != nil {
 		return LocalDateTimeValue{}, err
