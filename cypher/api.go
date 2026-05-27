@@ -3363,10 +3363,22 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 		srcKey, srcResolved := g.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 		dstKey, dstResolved := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 		if srcResolved && dstResolved {
-			if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+			// Forward direction first: covers the common case of a directed
+			// expansion or the forward pass of an undirected expansion.
+			ets := g.EdgeLabels(srcKey, dstKey)
+			rawEP := g.EdgeProperties(srcKey, dstKey)
+			if len(ets) == 0 && len(rawEP) == 0 {
+				// Reverse-edge pass of an undirected expansion: storage
+				// holds the edge as (dstKey -> srcKey); look it up there
+				// so the relationship's type and properties survive
+				// reverse traversal (e.g. the b→a row of MATCH (a)-[r]-(b)
+				// over a single (:A)-[:T]->(:B) edge).
+				ets = g.EdgeLabels(dstKey, srcKey)
+				rawEP = g.EdgeProperties(dstKey, srcKey)
+			}
+			if len(ets) > 0 {
 				edgeType = ets[0]
 			}
-			rawEP := g.EdgeProperties(srcKey, dstKey)
 			edgeProps = make(expr.MapValue, len(rawEP))
 			for k, pv := range rawEP {
 				edgeProps[k] = lpgPropToExpr(pv)
