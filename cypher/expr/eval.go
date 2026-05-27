@@ -1039,14 +1039,22 @@ func evalStringOp(op string, left, right Value) (Value, error) {
 
 // evalIn evaluates value IN list.
 func evalIn(left, right Value) (Value, error) {
-	if IsNull(left) {
-		return Null, nil
-	}
 	if IsNull(right) {
 		return Null, nil
 	}
 	list, ok := right.(ListValue)
 	if !ok {
+		return Null, nil
+	}
+	// Empty-list short-circuit: nothing can be IN [], so the answer
+	// is unambiguously false — even for a NULL left operand. Without
+	// this short-circuit, `null IN []` would fall through the
+	// IsNull(left) branch below and return null, which contradicts
+	// openCypher 9 §6.1 (Null3 [4] row 4).
+	if len(list) == 0 {
+		return BoolValue(false), nil
+	}
+	if IsNull(left) {
 		return Null, nil
 	}
 	// Scan the list. Track whether we encountered any NULL to decide final result.
