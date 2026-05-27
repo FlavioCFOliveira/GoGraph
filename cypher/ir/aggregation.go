@@ -251,6 +251,16 @@ func containsAggregate(e ast.Expression) bool { //nolint:gocyclo // per-AST-node
 				return true
 			}
 		}
+	case *ast.ListComprehension:
+		// The Source expression sits in the outer scope — its
+		// aggregates DO count toward the surrounding projection. The
+		// Predicate/Projection run per element with v.Variable in
+		// scope and are not eligible to introduce outer aggregates,
+		// but a stray aggregate inside still surfaces the same
+		// outer-scope rules; descend conservatively.
+		if containsAggregate(n.Source) || containsAggregate(n.Predicate) || containsAggregate(n.Projection) {
+			return true
+		}
 	}
 	return false
 }
@@ -319,6 +329,16 @@ func extractAggregatesFromExpr(e ast.Expression, aggs *[]AggregateExpr, counter 
 		for i, a := range n.Args {
 			cp.Args[i] = extractAggregatesFromExpr(a, aggs, counter)
 		}
+		return &cp
+	case *ast.ListComprehension:
+		cp := *n
+		cp.Source = extractAggregatesFromExpr(n.Source, aggs, counter)
+		// Predicate/Projection run per-element after the Source has
+		// been collected; we still pass through the walker so any
+		// (uncommon) aggregate is registered. The same conservative
+		// stance as containsAggregate.
+		cp.Predicate = extractAggregatesFromExpr(n.Predicate, aggs, counter)
+		cp.Projection = extractAggregatesFromExpr(n.Projection, aggs, counter)
 		return &cp
 	}
 	return e
