@@ -30,8 +30,17 @@ import "gograph/cypher/ast"
 // already-filtered rows. The DISTINCT / ORDER BY / SKIP / LIMIT tail
 // applies AFTER the projection because openCypher evaluates them on the
 // projected stream.
+//
+// Exception — aggregation: when the projection contains aggregates, the
+// WHERE behaves as SQL HAVING and must run AFTER the EagerAggregation
+// because it filters aggregated groups (`WITH a, count(*) AS c WHERE
+// c > 1`). The aggregate-rewrite pass would substitute c with `count(*)`,
+// which has no row-by-row evaluation upstream of the aggregator. In
+// that case the Selection is wrapped on top of the projection instead.
 func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan, error) {
-	if w.Where != nil {
+	_, _, _, hasAgg := detectAggregation(w.Projection)
+
+	if w.Where != nil && !hasAgg {
 		pred := rewriteWithProjectionAliases(w.Where.Predicate, w.Projection)
 		var err error
 		child, err = t.translateExistsPredicate(pred, child)
@@ -40,7 +49,7 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		}
 	}
 
-	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(w.Projection)
+	groupBy, groupByExprs, aggs, _ := detectAggregation(w.Projection)
 
 	var plan LogicalPlan
 	if hasAgg {
@@ -68,6 +77,17 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 	// translator.go so that `WITH x ORDER BY x LIMIT k` produces an actual
 	// Sort+Limit pipeline rather than silently passing the full row stream.
 	plan = applyProjectionTail(plan, w.Projection)
+
+	// Aggregation HAVING-style filter: WHERE applies AFTER the
+	// EagerAggregation+Projection because it filters aggregated groups
+	// rather than pre-aggregation rows.
+	if w.Where != nil && hasAgg {
+		var err error
+		plan, err = t.translateExistsPredicate(w.Where.Predicate, plan)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	return plan, nil
 }

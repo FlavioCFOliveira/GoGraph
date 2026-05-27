@@ -695,6 +695,18 @@ import (
 //     as edgeType), so multi-type relationship patterns only returned
 //     matches for the first type. Observed 3554-3559 across a 5-run
 //     sample (median 3556); gate set conservatively at 3549.
+//   - 3549 (kept): translateWith now distinguishes the two WHERE-on-WITH
+//     positions per openCypher semantics: when the projection contains
+//     NO aggregates, WHERE filters pre-projection so it can reference
+//     pre-WITH variables (5.1.5 — unchanged from the earlier fix); when
+//     the projection DOES contain aggregates, WHERE behaves as SQL
+//     HAVING and applies AFTER the EagerAggregation+Projection so it
+//     can reference aggregate aliases. Pre-fix the unconditional
+//     pre-projection move broke `WITH a, count(*) AS c WHERE c > 1`
+//     because the alias-rewrite pass substituted c with count(*), which
+//     cannot evaluate row-by-row upstream of the aggregator. Observed
+//     3554-3561 across a 5-run sample (median 3559); baseline kept at
+//     3549 since the min observed only moved by zero.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
