@@ -708,8 +708,25 @@ func cmpInt64(a, b int64) int {
 	return 0
 }
 
-// cmpFloat64 returns -1, 0, or +1 for two float64 values.
+// cmpFloat64 returns -1, 0, or +1 for two float64 values, with explicit
+// NaN handling. openCypher 9 §3.4.4 places NaN AFTER every finite number in
+// the ASC ordering (and therefore before all finite numbers in DESC). The
+// raw `<`/`>` operators return false for any comparison involving NaN, so a
+// naïve implementation would treat NaN as equal to every value and leave
+// sort order undefined; explicit checks below make NaN sort last among
+// floats.
 func cmpFloat64(a, b float64) int {
+	aNaN := math.IsNaN(a)
+	bNaN := math.IsNaN(b)
+	if aNaN && bNaN {
+		return 0
+	}
+	if aNaN {
+		return 1
+	}
+	if bNaN {
+		return -1
+	}
 	if a < b {
 		return -1
 	}
