@@ -460,7 +460,19 @@ func exprToColumnName(e ast.Expression) string {
 		if _, isBin := n.Operand.(*ast.BinaryOp); isBin {
 			operand = "(" + operand + ")"
 		}
-		return n.Operator + operand
+		// IS NULL / IS NOT NULL are postfix; every other unary operator
+		// (NOT, unary -, unary +) is prefix. Postfix operators render as
+		// `<operand> <op>`; prefix as `<op><operand>` (NOT requires a
+		// space, the arithmetic unaries do not — match the canonical
+		// TCK header form).
+		op := n.Operator
+		if op == "IS NULL" || op == "IS NOT NULL" {
+			return operand + " " + op
+		}
+		if op == "NOT" {
+			return op + " " + operand
+		}
+		return op + operand
 	case *ast.Property:
 		// `n.x` keeps the bare-receiver spelling; expressions like
 		// `(list[1]).x` or `(case … end).x` parenthesise the receiver.

@@ -620,11 +620,23 @@ import (
 //     relationship (Path3 [3]), size() on path (List6 [5]) — +5
 //     deterministic scenarios. Observed 3499-3503 across a 5-run sample
 //     (median 3501); gate set conservatively at 3494 (minimum observed - 5).
+//   - 3503: raised after exprToColumnName postfix-unary fix —
+//     `IS NULL` / `IS NOT NULL` render as `<operand> <op>` (postfix)
+//     instead of `<op><operand>` (prefix), and `NOT` keeps a separating
+//     space; previously every UnaryOp prepended the operator to the
+//     operand, producing column headers like `IS NULLn.missing` instead
+//     of `n.missing IS NULL`. The values themselves were computed
+//     correctly, but the TCK comparator matched expected vs actual rows
+//     by column header, so the header mismatch surfaced as `[null …]`
+//     entries for every expected column. Unlocks the Null1/Null2 family
+//     and the broader set of scenarios projecting `<x> IS [NOT] NULL`.
+//     Observed 3508-3510 across a 5-run sample (median 3509); gate set
+//     conservatively at 3503 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3494
+const tckExecutionBaseline = 3503
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
