@@ -337,13 +337,14 @@ func (a *analyser) withClause(w *ast.With) {
 		}
 		for _, s := range w.Projection.OrderBy {
 			// Skip the UndefinedVariable check when the ORDER BY
-			// expression matches a projected expression text — that
-			// usage is legal because the row already carries the
-			// computed column under the projected alias.
-			if s.Expr != nil {
-				if _, projOK := projectedExprs[s.Expr.String()]; projOK {
-					continue
-				}
+			// expression OR any of its sub-expressions matches a
+			// projected expression text. The row carries the computed
+			// column under the projected alias, so the ORDER BY can
+			// legally compose new values from it (e.g.
+			// `ORDER BY a.name + 'C'` over a projection of
+			// `a.name AS name`).
+			if s.Expr != nil && exprMatchesAnyProjection(s.Expr, projectedExprs) {
+				continue
 			}
 			for _, v := range collectVariables(s.Expr) {
 				if _, ok := projected[v]; ok {
@@ -1209,6 +1210,64 @@ func positionOf(e ast.Expression) ast.Position {
 		return v.Pos
 	}
 	return ast.Position{}
+}
+
+// exprMatchesAnyProjection reports whether e or any of its sub-expressions
+// (Property receivers, BinaryOp operands, FunctionInvocation arguments, …)
+// has a String() that appears in the projected set. Used by the
+// aggregating-WITH ORDER BY check to allow expressions that compose new
+// values from projected sub-expressions.
+func exprMatchesAnyProjection(e ast.Expression, projected map[string]struct{}) bool {
+	if e == nil {
+		return false
+	}
+	if _, ok := projected[e.String()]; ok {
+		return true
+	}
+	switch v := e.(type) {
+	case *ast.Property:
+		return exprMatchesAnyProjection(v.Receiver, projected)
+	case *ast.BinaryOp:
+		return exprMatchesAnyProjection(v.Left, projected) || exprMatchesAnyProjection(v.Right, projected)
+	case *ast.UnaryOp:
+		return exprMatchesAnyProjection(v.Operand, projected)
+	case *ast.SubscriptExpr:
+		return exprMatchesAnyProjection(v.Expr, projected) || exprMatchesAnyProjection(v.Index, projected)
+	case *ast.SliceExpr:
+		return exprMatchesAnyProjection(v.Expr, projected) ||
+			exprMatchesAnyProjection(v.From, projected) ||
+			exprMatchesAnyProjection(v.To, projected)
+	case *ast.FunctionInvocation:
+		for _, arg := range v.Args {
+			if exprMatchesAnyProjection(arg, projected) {
+				return true
+			}
+		}
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			if exprMatchesAnyProjection(el, projected) {
+				return true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range v.Values {
+			if exprMatchesAnyProjection(val, projected) {
+				return true
+			}
+		}
+	case *ast.CaseExpression:
+		if exprMatchesAnyProjection(v.Subject, projected) {
+			return true
+		}
+		for _, alt := range v.Alternatives {
+			if exprMatchesAnyProjection(alt.Condition, projected) ||
+				exprMatchesAnyProjection(alt.Consequent, projected) {
+				return true
+			}
+		}
+		return exprMatchesAnyProjection(v.ElseExpr, projected)
+	}
+	return false
 }
 
 // collectVariables walks e and returns every Variable name referenced,
