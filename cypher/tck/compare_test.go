@@ -623,9 +623,13 @@ func exprValueToString(v expr.Value) string {
 //
 //   - NaN / ±Inf render as "NaN", "Infinity", "-Infinity".
 //   - Finite floats with no fractional part render as "N.0" (e.g. 2 → "2.0").
-//   - Floats whose shortest %g representation would use scientific notation
-//     fall back to %f with precision -1 (shortest fixed-point form). The TCK
-//     tables expect "0.00002" not "2e-05" for small floats.
+//   - Floats whose magnitude is in [1e-7, 1e21) and whose shortest %g
+//     representation would use scientific notation fall back to %f with
+//     precision -1 (shortest fixed-point form). The TCK tables expect
+//     "0.00002" not "2e-05" for small floats in that range.
+//   - Floats outside that magnitude window keep their %g scientific form
+//     (so 1e-305, 1e308, 1.23456789e308 round-trip as written instead of
+//     producing huge zero-padded strings or losing precision).
 //   - All other finite floats use Go's %g shortest representation.
 func formatFloatTCK(f float64) string {
 	switch {
@@ -638,12 +642,29 @@ func formatFloatTCK(f float64) string {
 	}
 	if f == math.Trunc(f) && !math.IsInf(f, 0) {
 		// Integer-valued finite float: render with explicit ".0" so the TCK
-		// table cell `| 2.0 |` matches.
-		return strconv.FormatFloat(f, 'f', 1, 64)
+		// table cell `| 2.0 |` matches — but only when the magnitude is
+		// human-readable. Beyond ±1e21 the fixed-point form is an enormous
+		// digit string that bears no resemblance to the round-tripped %g
+		// scientific form expected by the TCK.
+		abs := math.Abs(f)
+		if abs < 1e21 || abs == 0 {
+			return strconv.FormatFloat(f, 'f', 1, 64)
+		}
 	}
 	s := strconv.FormatFloat(f, 'g', -1, 64)
 	if strings.ContainsAny(s, "eE") {
-		s = strconv.FormatFloat(f, 'f', -1, 64)
+		// Only switch to fixed-point when the magnitude is human-readable.
+		// Outside the [1e-7, 1e21) window the fixed-point form is either
+		// astronomically long or pure zeros, neither of which round-trips
+		// against the TCK feature-file expectations.
+		abs := math.Abs(f)
+		if abs >= 1e-7 && abs < 1e21 {
+			s = strconv.FormatFloat(f, 'f', -1, 64)
+		} else {
+			// Drop the explicit '+' in positive exponents — the TCK
+			// expectation is "1e308" not Go's default "1e+308".
+			s = strings.Replace(s, "e+", "e", 1)
+		}
 	}
 	return s
 }
