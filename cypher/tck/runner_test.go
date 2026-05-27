@@ -895,11 +895,21 @@ import (
 //         comparisons elsewhere).
 //     Observed 3702 stable across five-run samples; gate set at
 //     3697 to absorb run-to-run variance.
+//   - 3700: raised after two further uplifts:
+//     (a) cmpFloat64 sorts NaN after every finite number, so ORDER BY
+//         DESC produces the documented null > NaN > finite ordering
+//         (ReturnOrderBy1 #12 and related).
+//     (b) procs.Signature gained InputNames, populated by the TCK
+//         proc-decl parser; CALL with no argument list now binds each
+//         declared input from the matching query parameter
+//         (Call2 #3).
+//     Observed 3705 stable across five-run samples; gate set at
+//     3700 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3697
+const tckExecutionBaseline = 3700
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
