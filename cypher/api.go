@@ -2977,6 +2977,17 @@ func buildProcedureCallOperator(
 		return nil, fmt.Errorf("cypher: ProcedureCall %q: %w", p.Name, err)
 	}
 
+	// Compile-time arity validation. The procedure declares N inputs;
+	// the call must supply exactly N arguments (no default values,
+	// no varargs). Surfaces SyntaxError(InvalidNumberOfArguments) per
+	// openCypher CALL semantics.
+	if len(p.Arguments) != len(entry.Sig.Inputs) {
+		return nil, fmt.Errorf(
+			"cypher: SyntaxError.InvalidNumberOfArguments: procedure %q expects %d argument(s), got %d",
+			p.Name, len(entry.Sig.Inputs), len(p.Arguments),
+		)
+	}
+
 	// Compile-time argument-type validation. For every positional
 	// argument that is a known primitive literal (string, integer,
 	// float, boolean, null), check it against the declared input kind
