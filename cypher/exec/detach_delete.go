@@ -108,22 +108,37 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 			}
 			*out = childRow
 			return true, nil
+		case expr.PathValue:
+			// DETACH DELETE on a path: detach-delete every node in
+			// the path. Relationships are removed implicitly via the
+			// per-node incident-edge sweep. Per-node delete uses the
+			// helper below.
+			if err := op.detachDeletePath(tv); err != nil {
+				return false, err
+			}
+			*out = childRow
+			return true, nil
 		default:
 			*out = childRow
 			return true, nil
 		}
 	} else {
-		// Schema-direct path: peek for RelationshipValue before
-		// delegating to resolveNodeIDFromRow (which only handles
-		// node IDs). DETACH DELETE on a relationship is equivalent
-		// to plain DELETE on it — there are no attached edges to
-		// strip from a single edge.
+		// Schema-direct path: peek for RelationshipValue / PathValue
+		// before delegating to resolveNodeIDFromRow (which only
+		// handles node IDs).
 		if colIdx, ok := op.schema[op.nodeVar]; ok && colIdx < len(childRow) {
-			if relVal, isRel := childRow[colIdx].(expr.RelationshipValue); isRel {
-				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.StartID))
-				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.EndID))
+			switch tv := childRow[colIdx].(type) {
+			case expr.RelationshipValue:
+				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
+				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
 				if srcOK && dstOK {
 					op.mutator.RemoveEdge(srcKey, dstKey)
+				}
+				*out = childRow
+				return true, nil
+			case expr.PathValue:
+				if err := op.detachDeletePath(tv); err != nil {
+					return false, err
 				}
 				*out = childRow
 				return true, nil
@@ -174,4 +189,32 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 // Close closes the child operator.
 func (op *DetachDelete) Close() error {
 	return op.child.Close()
+}
+
+// detachDeletePath performs DETACH DELETE on every node in p. Each node
+// has its incident edges removed and its labels and properties stripped.
+// Relationships are deleted implicitly via the incident-edge sweep, so
+// duplicate or path-internal edges are handled automatically.
+func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
+	for _, n := range p.Nodes {
+		nodeKey, resolved := op.mutator.ResolveNodeLabel(graph.NodeID(n.ID))
+		if !resolved {
+			continue
+		}
+		outgoing := op.mutator.OutNeighbours(nodeKey)
+		incoming := op.mutator.InNeighbours(nodeKey)
+		for _, dst := range outgoing {
+			op.mutator.RemoveEdge(nodeKey, dst)
+		}
+		for _, src := range incoming {
+			op.mutator.RemoveEdge(src, nodeKey)
+		}
+		for _, lbl := range op.mutator.NodeLabels(nodeKey) {
+			op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		}
+		for k := range op.mutator.NodeProperties(nodeKey) {
+			op.mutator.DelNodeProperty(nodeKey, k)
+		}
+	}
+	return nil
 }

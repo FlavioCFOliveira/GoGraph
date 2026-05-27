@@ -1322,22 +1322,38 @@ func buildOperatorWrite(
 		}
 		schemaCopy := copySchema(schema)
 		dd := exec.NewDetachDelete(p.NodeVar, schemaCopy, child, mutator)
+		needTargetEval := false
 		if p.TargetExpr != nil {
 			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
-				schemaSnap := schemaCopy
-				capturedExpr := p.TargetExpr
-				capturedParams := params
-				capturedReg := reg
-				capturedBopts := bopts
-				var capturedG *lpg.Graph[string, float64]
-				if lw, ok := walker.(*lpgNodeWalker); ok {
-					capturedG = lw.g
+				needTargetEval = true
+			} else if bopts != nil {
+				// Bare-Variable target that names a path: the row slot
+				// carries the leading node id, not a PathValue, so the
+				// schema-direct branch in DetachDelete would only
+				// delete the leading node. Route through buildRowCtx
+				// instead so the evaluator returns a reconstructed
+				// PathValue that the operator walks node-by-node.
+				if _, isChainPath := bopts.pathVarChain[p.NodeVar]; isChainPath {
+					needTargetEval = true
+				} else if _, isVLEPath := bopts.pathVarMeta[p.NodeVar]; isVLEPath {
+					needTargetEval = true
 				}
-				dd.WithTargetEvalFn(func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
-					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
-				})
 			}
+		}
+		if needTargetEval {
+			schemaSnap := schemaCopy
+			capturedExpr := p.TargetExpr
+			capturedParams := params
+			capturedReg := reg
+			capturedBopts := bopts
+			var capturedG *lpg.Graph[string, float64]
+			if lw, ok := walker.(*lpgNodeWalker); ok {
+				capturedG = lw.g
+			}
+			dd.WithTargetEvalFn(func(row exec.Row) (expr.Value, error) {
+				rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+				return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+			})
 		}
 		return dd, nil
 
