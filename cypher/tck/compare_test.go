@@ -368,6 +368,13 @@ func rowsEqual(a, b []string) bool {
 // as opaque strings and passed through unchanged, so round-trip stability is
 // preserved for nested literals.
 func normalizeTCKCell(s string) string {
+	// Always normalise node label ordering — openCypher treats a node's
+	// labels as a set, so any permutation is semantically equivalent. The
+	// TCK comparator is string-based, so we canonicalise both expected
+	// and actual cells to alphabetical label order before comparing.
+	if strings.Contains(s, "(:") {
+		s = sortNodeLabels(s)
+	}
 	// Fast path: no braces means no property maps.
 	if !strings.ContainsAny(s, "{}") {
 		return s
@@ -403,6 +410,57 @@ func normalizeTCKCell(s string) string {
 				buf.WriteByte(ch)
 			}
 		}
+	}
+	return buf.String()
+}
+
+// sortNodeLabels walks s and rewrites every node rendering of the form
+// `(:LabelA:LabelB:…)` or `(:LabelA:LabelB:… {…})` so that the label list
+// appears in alphabetical order. openCypher treats node labels as an
+// unordered set, so the rendering is implementation-defined; canonicalising
+// both sides of the comparison to alphabetical order keeps the string-based
+// TCK comparator semantically correct.
+//
+// Brace-depth tracking ensures that colons inside `{…}` property maps (which
+// separate keys from values, not labels) are not treated as label delimiters.
+func sortNodeLabels(s string) string {
+	var buf strings.Builder
+	buf.Grow(len(s))
+	depth := 0
+	for i := 0; i < len(s); {
+		ch := s[i]
+		if depth == 0 && ch == '(' && i+1 < len(s) && s[i+1] == ':' {
+			// Collect labels starting at i+2 until we hit a space, ')',
+			// '{', or any character that cannot appear in a label.
+			j := i + 2
+			for j < len(s) {
+				c := s[j]
+				if c == ' ' || c == ')' || c == '{' {
+					break
+				}
+				j++
+			}
+			labelRun := s[i+2 : j]
+			parts := strings.Split(labelRun, ":")
+			sort.Strings(parts)
+			buf.WriteByte('(')
+			for _, lbl := range parts {
+				buf.WriteByte(':')
+				buf.WriteString(lbl)
+			}
+			i = j
+			continue
+		}
+		switch ch {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+		buf.WriteByte(ch)
+		i++
 	}
 	return buf.String()
 }
