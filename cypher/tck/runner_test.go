@@ -932,6 +932,16 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3756: raised after durationFromMap stopped truncating sub-
+//     second components via the bare int32(sFrac * 1e9) cast.
+//     For nanoseconds:1 the intermediate sFrac is 1e-9; the product
+//     with 1e9 is 0.99999999… in float64 and the truncating cast
+//     dropped the lone nanosecond. math.Round around the same
+//     product preserves it without affecting larger components.
+//     Closes 8 Temporal8 [6]/[7] add-subtract / multiply-divide
+//     duration scenarios where the answer differed only in the
+//     sub-second tail.
+//     Observed 3757-3764 across a 5-run sample; gate set at 3756.
 //   - 3748: raised after ast.FloatLiteral.String() learnt to keep
 //     the float discriminator. strconv.FormatFloat with precision -1
 //     strips the trailing ".0" for whole-number values, so a CREATE
@@ -973,7 +983,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3748
+const tckExecutionBaseline = 3756
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

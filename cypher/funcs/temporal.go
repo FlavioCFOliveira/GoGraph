@@ -28,6 +28,7 @@ package funcs
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -899,7 +900,11 @@ func durationFromMap(m expr.MapValue) expr.Value {
 	seconds += dFrac * 86400
 	sInt := int64(seconds)
 	sFrac := seconds - float64(sInt)
-	nanos := int32(sFrac * 1_000_000_000)
+	// math.Round defends against float64 precision drift — e.g.
+	// nanoseconds:1 produces sFrac ≈ 1e-9 whose product with 1e9 is
+	// 0.999999..., and a bare int32 cast would truncate the lone
+	// nanosecond away.
+	nanos := int32(math.Round(sFrac * 1_000_000_000))
 	return expr.NewDuration(mInt, dInt, sInt, nanos)
 }
 
