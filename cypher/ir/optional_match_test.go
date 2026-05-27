@@ -322,6 +322,49 @@ func Test_OptionalMatch_Vars(t *testing.T) {
 	}
 }
 
+// Test_Match_RelInlineProperty verifies that inline relationship property
+// predicates (e.g. -[r:KNOWS {name:'monkey'}]->) become a Selection wrapping
+// the Expand. Pre-fix the IR translator silently dropped
+// RelationshipPattern.Properties, so the plan accepted every KNOWS edge
+// regardless of the inline property — breaking Match2 [5] and similar
+// scenarios where the inline property is the only discriminator.
+func Test_Match_RelInlineProperty(t *testing.T) {
+	q := &ast.SingleQuery{
+		ReadingClauses: []ast.ReadingClause{
+			// MATCH (a)-[r:KNOWS {k: 1}]->(b)
+			&ast.Match{
+				Pattern: &ast.Pattern{Paths: []*ast.PathPattern{
+					{Head: &ast.PathElement{
+						Node: &ast.NodePattern{Variable: strPtr("a")},
+						Next: &ast.PathElement{
+							Relationship: &ast.RelationshipPattern{
+								Variable:  strPtr("r"),
+								Types:     []string{"KNOWS"},
+								Direction: ast.RelDirectionOutgoing,
+								Properties: &ast.MapLiteral{
+									Keys:   []string{"k"},
+									Values: []ast.Expression{&ast.IntLiteral{Value: 1}},
+								},
+							},
+							Node: &ast.NodePattern{Variable: strPtr("b")},
+						},
+					}},
+				}},
+			},
+		},
+	}
+	plan := mustFromAST(t, q)
+
+	// Topmost operator must be a Selection enforcing r.k = 1 over the Expand.
+	sel, ok := plan.(*ir.Selection)
+	if !ok {
+		t.Fatalf("expected *ir.Selection on top, got %T", plan)
+	}
+	if _, ok := sel.Child.(*ir.Expand); !ok {
+		t.Fatalf("Selection.Child expected *ir.Expand, got %T", sel.Child)
+	}
+}
+
 // Test_OptionalMatch_ExpandIntoBothBound covers the openCypher pattern
 //
 //	MATCH (a)-[:T]->(b)-->(c)

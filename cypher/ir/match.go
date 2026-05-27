@@ -909,6 +909,7 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 			maxDepth = int(*rp.Range.Max)
 		}
 		var plan LogicalPlan = NewVarLengthExpand(fromVar, relVar, relTypes, dir, expandTo, minDepth, maxDepth, child)
+		plan = t.matchApplyRelFilter(rp, relVar, plan)
 		plan = t.matchApplyNodeFilter(to, expandTo, plan)
 		if destRebinding {
 			plan = t.appendEqSelection(toVar, syntheticTo, plan)
@@ -923,11 +924,25 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 		plan = NewExpand(fromVar, relVar, relTypes, dir, expandTo, child)
 	}
 
+	plan = t.matchApplyRelFilter(rp, relVar, plan)
 	plan = t.matchApplyNodeFilter(to, expandTo, plan)
 	if destRebinding {
 		plan = t.appendEqSelection(toVar, syntheticTo, plan)
 	}
 	return plan
+}
+
+// matchApplyRelFilter wraps plan with Selection operators for property
+// constraints declared inline on the relationship pattern (e.g. -[r:KNOWS
+// {name: 'monkey'}]->). When the relationship variable is anonymous the
+// caller in [matchPathPattern]/[matchPathPatternWithArg] has already
+// assigned a synthetic name, so relVar is non-empty here whenever
+// Properties is non-nil.
+func (t *translator) matchApplyRelFilter(rp *ast.RelationshipPattern, relVar string, plan LogicalPlan) LogicalPlan {
+	if rp.Properties == nil || relVar == "" {
+		return plan
+	}
+	return buildPropertySelection(relVar, rp.Properties, plan)
 }
 
 // appendEqSelection wraps plan in a Selection comparing two variables for
