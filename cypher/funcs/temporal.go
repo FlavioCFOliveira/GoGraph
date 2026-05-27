@@ -590,21 +590,33 @@ func zoneFromMap(m expr.MapValue) *time.Location {
 	if !ok {
 		return time.UTC
 	}
-	str := strings.TrimSpace(string(s))
-	if str == "" || str == "Z" || strings.EqualFold(str, "UTC") {
-		return time.UTC
-	}
-	if strings.HasPrefix(str, "+") || strings.HasPrefix(str, "-") {
-		// Numeric offset.
-		if off, err := parseSignedOffset(str); err == nil {
-			return time.FixedZone(str, off)
-		}
-		return time.UTC
-	}
-	if loc, err := time.LoadLocation(str); err == nil {
+	if loc, ok := parseTimezoneString(string(s)); ok {
 		return loc
 	}
 	return time.UTC
+}
+
+// parseTimezoneString resolves an openCypher timezone literal to a
+// [*time.Location]. Accepts the same forms as [zoneFromMap]: "Z" / "UTC" /
+// "" → time.UTC; "+HH[:MM]" / "-HH[:MM]" → time.FixedZone; otherwise an IANA
+// zone name passed through time.LoadLocation. Returns (nil, false) when the
+// string is non-empty but unparseable so callers can leave the prior zone in
+// place (truncate field overrides) or fall back to UTC.
+func parseTimezoneString(raw string) (*time.Location, bool) {
+	str := strings.TrimSpace(raw)
+	if str == "" || str == "Z" || strings.EqualFold(str, "UTC") {
+		return time.UTC, true
+	}
+	if strings.HasPrefix(str, "+") || strings.HasPrefix(str, "-") {
+		if off, err := parseSignedOffset(str); err == nil {
+			return time.FixedZone(str, off), true
+		}
+		return nil, false
+	}
+	if loc, err := time.LoadLocation(str); err == nil {
+		return loc, true
+	}
+	return nil, false
 }
 
 // parseSignedOffset parses "+HH:MM" or "-HHMM" into seconds east of UTC.

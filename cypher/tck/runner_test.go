@@ -932,11 +932,26 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3735: raised after two surgical temporal-truncate fixes that
+//     together close every Temporal9 [4]/[5] failure (≈24 scenarios):
+//     (a) sourceToTime() for TimeValue/LocalTimeValue rebuilds the
+//         internal time.Time from wall-clock components in the
+//         destination FixedZone instead of treating Nanos as a UTC
+//         instant and shifting via .In(loc), so
+//         localtime.truncate('hour', time(+01:00)) returns 12:00 not
+//         13:00 and the symmetric -01:00 source returns 12:00 not
+//         11:00.
+//     (b) applyOverrides() timezone branch now parses '+HH:MM'/'-HH:MM'/
+//         'Z'/'UTC' via a shared parseTimezoneString helper alongside
+//         time.LoadLocation, so {timezone: '+01:00'} overrides actually
+//         take effect instead of silently keeping the source zone.
+//     Observed 3737-3740 across a 4-run sample; gate set at 3735 to
+//     absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3712
+const tckExecutionBaseline = 3735
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

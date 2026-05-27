@@ -96,6 +96,13 @@ func truncateUnit(t time.Time, unit string) time.Time {
 // (TimeValue, LocalTimeValue) project their nanoseconds onto a synthetic
 // 1970-01-01 epoch date so the same time.Time-based truncation machinery
 // applies uniformly.
+//
+// TimeValue.Nanos is a wall-clock count (nanoseconds since midnight in the
+// value's own offset zone), not a UTC instant — so we decompose it into
+// h/m/s/ns and place those components directly in the FixedZone, otherwise
+// time.Unix(0, nanos).In(loc) would shift the wall clock by the offset and
+// localtime/time.truncate('hour', time(...timezone:+01:00), {}) would return
+// 13:00 instead of 12:00 (Temporal9 [4]/[5]).
 func sourceToTime(v expr.Value) (time.Time, bool) {
 	switch s := v.(type) {
 	case expr.DateValue:
@@ -105,10 +112,12 @@ func sourceToTime(v expr.Value) (time.Time, bool) {
 	case expr.DateTimeValue:
 		return s.T, true
 	case expr.LocalTimeValue:
-		return time.Unix(0, s.Nanos).UTC(), true
+		h, mn, sec, ns := splitNanos(s.Nanos)
+		return time.Date(1970, 1, 1, h, mn, sec, ns, time.UTC), true
 	case expr.TimeValue:
 		loc := time.FixedZone("offset", int(s.OffsetSec))
-		return time.Unix(0, s.Nanos).In(loc), true
+		h, mn, sec, ns := splitNanos(s.Nanos)
+		return time.Date(1970, 1, 1, h, mn, sec, ns, loc), true
 	}
 	return time.Time{}, false
 }
@@ -189,7 +198,13 @@ func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 			}
 		case "timezone":
 			if s, ok := v.(expr.StringValue); ok {
-				if l, err := time.LoadLocation(string(s)); err == nil {
+				// openCypher accepts named zones ("Europe/Stockholm"),
+				// fixed offsets ("+01:00") and the "Z"/"UTC" aliases —
+				// time.LoadLocation handles only the first. parseTimezone
+				// String covers all three; on parse failure we keep the
+				// source's existing location rather than silently
+				// substituting UTC, mirroring zoneFromMap.
+				if l, ok2 := parseTimezoneString(string(s)); ok2 {
 					loc = l
 				}
 			}
