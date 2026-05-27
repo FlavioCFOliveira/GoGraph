@@ -179,6 +179,14 @@ func (op *RemoveLabels) Next(out *Row) (bool, error) {
 
 	nodeID, err := resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
 	if err != nil {
+		// OPTIONAL MATCH (a) … REMOVE a:L on an unmatched outer row: the
+		// target is null per openCypher, so the REMOVE is a no-op and
+		// the row passes through unchanged. Mirrors the RemoveProperty
+		// branch above.
+		if errors.Is(err, errNullTarget) {
+			*out = childRow
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: RemoveLabels %q: %w", op.nodeVar, err)
 	}
 	nodeKey, resolved := op.mutator.ResolveNodeLabel(nodeID)
