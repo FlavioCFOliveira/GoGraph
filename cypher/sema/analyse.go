@@ -369,6 +369,14 @@ func projectedName(expr ast.Expression, alias *string) string {
 }
 
 func (a *analyser) callClause(c *ast.Call) {
+	// openCypher 9 §3.7: aggregation function calls inside procedure CALL
+	// argument expressions are illegal — the procedure dispatcher has no
+	// row group over which to fold the aggregator.
+	for _, arg := range c.Args {
+		if containsAggregation(arg) {
+			a.error(invalidAggregationError(positionOf(arg)))
+		}
+	}
 	// Arguments are evaluated in the current scope.
 	for _, arg := range c.Args {
 		a.checkExpr(arg)
@@ -748,6 +756,13 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 		seenCols[name] = struct{}{}
 	}
 	for _, item := range proj.Items {
+		// An aggregation function used inside a list / pattern comprehension's
+		// projection or predicate has no group to fold over (the comprehension
+		// iterates elements lazily) — reject at compile time per openCypher 9
+		// §3.7.7 InvalidAggregation.
+		if aggInsideComprehension(item.Expr) {
+			a.error(invalidAggregationError(positionOf(item.Expr)))
+		}
 		a.checkExpr(item.Expr)
 	}
 	// Introduce projected aliases (and bare-Variable projections) so that
@@ -1156,6 +1171,67 @@ func positionOf(e ast.Expression) ast.Position {
 	return ast.Position{}
 }
 
+// aggInsideComprehension reports whether e contains a list or pattern
+// comprehension whose projection or predicate calls an aggregation
+// function. The aggregation has no group to fold over inside a
+// comprehension, so the situation is rejected as InvalidAggregation.
+func aggInsideComprehension(e ast.Expression) bool {
+	if e == nil {
+		return false
+	}
+	switch v := e.(type) {
+	case *ast.ListComprehension:
+		if containsAggregation(v.Projection) || containsAggregation(v.Predicate) {
+			return true
+		}
+		return aggInsideComprehension(v.Source)
+	case *ast.PatternComprehension:
+		if containsAggregation(v.Projection) || containsAggregation(v.Predicate) {
+			return true
+		}
+		return false
+	case *ast.BinaryOp:
+		return aggInsideComprehension(v.Left) || aggInsideComprehension(v.Right)
+	case *ast.UnaryOp:
+		return aggInsideComprehension(v.Operand)
+	case *ast.Property:
+		return aggInsideComprehension(v.Receiver)
+	case *ast.SubscriptExpr:
+		return aggInsideComprehension(v.Expr) || aggInsideComprehension(v.Index)
+	case *ast.SliceExpr:
+		return aggInsideComprehension(v.Expr) || aggInsideComprehension(v.From) || aggInsideComprehension(v.To)
+	case *ast.FunctionInvocation:
+		for _, arg := range v.Args {
+			if aggInsideComprehension(arg) {
+				return true
+			}
+		}
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			if aggInsideComprehension(el) {
+				return true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range v.Values {
+			if aggInsideComprehension(val) {
+				return true
+			}
+		}
+	case *ast.CaseExpression:
+		if aggInsideComprehension(v.Subject) {
+			return true
+		}
+		for _, alt := range v.Alternatives {
+			if aggInsideComprehension(alt.Condition) || aggInsideComprehension(alt.Consequent) {
+				return true
+			}
+		}
+		return aggInsideComprehension(v.ElseExpr)
+	}
+	return false
+}
+
 // containsAggregation reports whether e (or any sub-expression) calls one
 // of the openCypher aggregation functions. The classifier is a case-
 // insensitive name match against a small canonical set; user-defined
@@ -1215,6 +1291,13 @@ func containsAggregation(e ast.Expression) bool {
 				return true
 			}
 		}
+	case *ast.ListComprehension:
+		return containsAggregation(v.Source) ||
+			containsAggregation(v.Predicate) ||
+			containsAggregation(v.Projection)
+	case *ast.PatternComprehension:
+		return containsAggregation(v.Predicate) ||
+			containsAggregation(v.Projection)
 	}
 	return false
 }
