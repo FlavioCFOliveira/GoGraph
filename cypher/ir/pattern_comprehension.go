@@ -1,6 +1,8 @@
 package ir
 
 import (
+	"fmt"
+
 	"gograph/cypher/ast"
 )
 
@@ -88,10 +90,22 @@ func (t *translator) translatePatternComprehension(
 	return rua, nil
 }
 
-// projectionsWithComprehensions scans projection items and, for any item whose
-// expression is a PatternComprehension, replaces it with a RollUpApply sub-tree
-// layered on top of plan. Non-comprehension items are collected into a
-// Projection that wraps the final plan.
+// projectionsWithComprehensions scans projection items and, for any item that
+// contains a PatternComprehension at the top level OR nested inside a larger
+// expression, replaces each comprehension with a RollUpApply sub-tree layered
+// on top of plan and substitutes a Variable reference to the synthetic
+// collected-list column. Non-comprehension items pass through unchanged.
+//
+// Top-level form (`RETURN [(n)-->(b) | b.name] AS list`): the surrounding
+// projection item collapses into a bare Variable reference to the
+// RollUpApply's output variable, mirroring the historical behaviour.
+//
+// Nested form (`RETURN size([(n)-->(b) | 1]) AS deg`): the comprehension is
+// extracted into a synthetic `__pc_<n>` column via RollUpApply and the
+// surrounding expression (size(...)) is rewritten so the Variable reference
+// points at that column. The wrapping expression is preserved on the
+// projection item's Expr field so the physical projection still evaluates
+// the outer call (size, length, head, ...) against the row.
 //
 // This is called from translateReturn / translateWith after basic aggregation
 // detection, so the comprehension items are processed last.
@@ -104,42 +118,176 @@ func (t *translator) projectionsWithComprehensions(
 	}
 
 	var regularItems []ProjectionItem
+	pcCounter := 0
 	for _, item := range proj.Items {
-		pc, ok := item.Expr.(*ast.PatternComprehension)
-		if !ok {
-			// Regular item — pass through, preserving the parsed AST.
-			// Share the column-name policy with the canonical
-			// projectionItems path so BinaryOp items lose their
-			// outer parens consistently.
+		// Top-level PatternComprehension: keep the historical fast-path
+		// that collapses the projection item to a bare Variable.
+		if pc, ok := item.Expr.(*ast.PatternComprehension); ok {
+			outputVar := pc.String()
+			if item.Alias != nil {
+				outputVar = *item.Alias
+			}
+			var err error
+			plan, err = t.translatePatternComprehension(pc, plan, outputVar)
+			if err != nil {
+				return nil, nil, err
+			}
 			regularItems = append(regularItems, ProjectionItem{
-				Name:       projectionColumnName(item),
-				Expression: item.Expr.String(),
-				Expr:       item.Expr,
+				Name:       outputVar,
+				Expression: outputVar,
 			})
 			continue
 		}
 
-		// Determine the output variable name.
-		outputVar := pc.String()
-		if item.Alias != nil {
-			outputVar = *item.Alias
-		}
-
-		var err error
-		plan, err = t.translatePatternComprehension(pc, plan, outputVar)
+		// Walk the item expression for nested PatternComprehensions. Each
+		// occurrence is hoisted into its own RollUpApply layer; the
+		// expression tree is rewritten to reference the synthetic
+		// column. The original expression survives only in the rewritten
+		// form — the physical projection evaluates size/length/...
+		// against the row, where the synthetic column now lives.
+		rewritten, newPlan, err := t.extractNestedPatternComprehensions(item.Expr, plan, &pcCounter)
 		if err != nil {
 			return nil, nil, err
 		}
-
-		// Carry the comprehension forward in the final projection list
-		// as a plain variable reference to outputVar — the RollUpApply
-		// already deposited the collected list under this name, so the
-		// projection just needs to pass it through.
+		plan = newPlan
 		regularItems = append(regularItems, ProjectionItem{
-			Name:       outputVar,
-			Expression: outputVar,
+			Name:       projectionColumnName(item),
+			Expression: rewritten.String(),
+			Expr:       rewritten,
 		})
 	}
 
 	return plan, regularItems, nil
+}
+
+// extractNestedPatternComprehensions walks e and replaces every
+// *ast.PatternComprehension found inside (but not at the top level —
+// callers handle the top-level case separately) with an
+// *ast.Variable reference to a synthetic `__pc_<n>` column produced by a
+// fresh RollUpApply layer over plan. counter is incremented per
+// extraction to keep synthetic names unique across an entire projection.
+// The returned (rewritten, plan) pair is suitable for direct use as the
+// item's Expr and the carrying plan node.
+func (t *translator) extractNestedPatternComprehensions(
+	e ast.Expression,
+	plan LogicalPlan,
+	counter *int,
+) (ast.Expression, LogicalPlan, error) {
+	if e == nil {
+		return nil, plan, nil
+	}
+	if pc, ok := e.(*ast.PatternComprehension); ok {
+		name := fmt.Sprintf("__pc_%d", *counter)
+		*counter++
+		newPlan, err := t.translatePatternComprehension(pc, plan, name)
+		if err != nil {
+			return nil, plan, err
+		}
+		return &ast.Variable{Name: name}, newPlan, nil
+	}
+	switch n := e.(type) {
+	case *ast.BinaryOp:
+		left, plan2, err := t.extractNestedPatternComprehensions(n.Left, plan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		right, plan3, err := t.extractNestedPatternComprehensions(n.Right, plan2, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Left = left
+		cp.Right = right
+		return &cp, plan3, nil
+	case *ast.UnaryOp:
+		op, plan2, err := t.extractNestedPatternComprehensions(n.Operand, plan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Operand = op
+		return &cp, plan2, nil
+	case *ast.Property:
+		rec, plan2, err := t.extractNestedPatternComprehensions(n.Receiver, plan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Receiver = rec
+		return &cp, plan2, nil
+	case *ast.FunctionInvocation:
+		newArgs := make([]ast.Expression, len(n.Args))
+		curPlan := plan
+		for i, arg := range n.Args {
+			a2, p2, err := t.extractNestedPatternComprehensions(arg, curPlan, counter)
+			if err != nil {
+				return nil, plan, err
+			}
+			newArgs[i] = a2
+			curPlan = p2
+		}
+		cp := *n
+		cp.Args = newArgs
+		return &cp, curPlan, nil
+	case *ast.SubscriptExpr:
+		ex, plan2, err := t.extractNestedPatternComprehensions(n.Expr, plan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		ix, plan3, err := t.extractNestedPatternComprehensions(n.Index, plan2, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Expr = ex
+		cp.Index = ix
+		return &cp, plan3, nil
+	case *ast.SliceExpr:
+		ex, plan2, err := t.extractNestedPatternComprehensions(n.Expr, plan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		fr, plan3, err := t.extractNestedPatternComprehensions(n.From, plan2, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		to, plan4, err := t.extractNestedPatternComprehensions(n.To, plan3, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Expr = ex
+		cp.From = fr
+		cp.To = to
+		return &cp, plan4, nil
+	case *ast.ListLiteral:
+		newElems := make([]ast.Expression, len(n.Elements))
+		curPlan := plan
+		for i, el := range n.Elements {
+			e2, p2, err := t.extractNestedPatternComprehensions(el, curPlan, counter)
+			if err != nil {
+				return nil, plan, err
+			}
+			newElems[i] = e2
+			curPlan = p2
+		}
+		cp := *n
+		cp.Elements = newElems
+		return &cp, curPlan, nil
+	case *ast.MapLiteral:
+		newVals := make([]ast.Expression, len(n.Values))
+		curPlan := plan
+		for i, val := range n.Values {
+			v2, p2, err := t.extractNestedPatternComprehensions(val, curPlan, counter)
+			if err != nil {
+				return nil, plan, err
+			}
+			newVals[i] = v2
+			curPlan = p2
+		}
+		cp := *n
+		cp.Values = newVals
+		return &cp, curPlan, nil
+	}
+	return e, plan, nil
 }
