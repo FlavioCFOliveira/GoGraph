@@ -695,16 +695,33 @@ func (t *Top) Vars() []string { return t.Child.Vars() }
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Limit truncates the row stream from its child to at most Count rows.
+// When CountExpr is non-nil it overrides Count and the limit is evaluated
+// at physical-build time against the query parameters; this defers
+// parameter resolution so the same cached plan works across calls with
+// different parameter values.
 type Limit struct {
-	// Count is the maximum number of rows to pass through.
+	// Count is the maximum number of rows to pass through. Ignored when
+	// CountExpr is non-nil.
 	Count int64
+	// CountExpr is the parsed AST for the LIMIT expression when it is
+	// not a literal integer (typically a parameter reference like
+	// $limit). Nil when Count is the authoritative value.
+	CountExpr ast.Expression
 	// Child is the subplan whose output is truncated.
 	Child LogicalPlan
 }
 
-// NewLimit creates a Limit operator.
+// NewLimit creates a Limit operator with a literal count.
 func NewLimit(count int64, child LogicalPlan) *Limit {
 	return &Limit{Count: count, Child: child}
+}
+
+// NewLimitExpr creates a Limit operator whose count is resolved at
+// physical-build time from the given AST expression. countExpr must be a
+// parameter reference or another expression whose evaluation yields an
+// integer.
+func NewLimitExpr(countExpr ast.Expression, child LogicalPlan) *Limit {
+	return &Limit{CountExpr: countExpr, Child: child}
 }
 
 // Children implements LogicalPlan.
@@ -715,17 +732,28 @@ func (l *Limit) Vars() []string { return l.Child.Vars() }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Skip discards the first Count rows from its child's output.
+// Skip discards the first Count rows from its child's output. See [Limit]
+// for the CountExpr deferred-resolution contract.
 type Skip struct {
-	// Count is the number of leading rows to skip.
+	// Count is the number of leading rows to skip. Ignored when
+	// CountExpr is non-nil.
 	Count int64
+	// CountExpr is the parsed AST for the SKIP expression when it is
+	// not a literal integer. Nil when Count is the authoritative value.
+	CountExpr ast.Expression
 	// Child is the subplan whose leading rows are discarded.
 	Child LogicalPlan
 }
 
-// NewSkip creates a Skip operator.
+// NewSkip creates a Skip operator with a literal count.
 func NewSkip(count int64, child LogicalPlan) *Skip {
 	return &Skip{Count: count, Child: child}
+}
+
+// NewSkipExpr creates a Skip operator whose count is resolved at
+// physical-build time from the given AST expression.
+func NewSkipExpr(countExpr ast.Expression, child LogicalPlan) *Skip {
+	return &Skip{CountExpr: countExpr, Child: child}
 }
 
 // Children implements LogicalPlan.

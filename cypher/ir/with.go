@@ -222,15 +222,21 @@ func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
 		}
 	}
 	if proj.Skip != nil {
-		sk, _ := intExpr(proj.Skip)
-		plan = NewSkip(sk, plan)
+		if sk, err := intExpr(proj.Skip); err == nil {
+			plan = NewSkip(sk, plan)
+		} else {
+			plan = NewSkipExpr(proj.Skip, plan)
+		}
 	}
 	// LIMIT alone (no ORDER BY) or LIMIT alongside SKIP needs an explicit
 	// Limit wrapper. When ORDER BY+LIMIT fused into Top above, proj.Skip
 	// is nil so we don't reach this branch.
 	if proj.Limit != nil && (len(proj.OrderBy) == 0 || proj.Skip != nil) {
-		lim, _ := intExpr(proj.Limit)
-		plan = NewLimit(lim, plan)
+		if lim, err := intExpr(proj.Limit); err == nil {
+			plan = NewLimit(lim, plan)
+		} else {
+			plan = NewLimitExpr(proj.Limit, plan)
+		}
 	}
 	return plan
 }

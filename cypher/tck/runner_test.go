@@ -734,11 +734,25 @@ import (
 //     additional uplift. Observed 3569-3572 across a 5-run sample
 //     (median 3571); gate set conservatively at 3564 (minimum
 //     observed - 5).
+//   - 3575: raised after SKIP/LIMIT parameter resolution deferred to
+//     physical-build time. ir.Skip and ir.Limit now carry an optional
+//     CountExpr AST that the physical builder evaluates via expr.Eval
+//     against the query parameters; resolveCountExpr applies the
+//     openCypher type-and-range rules and surfaces
+//     SyntaxError(InvalidArgumentType) for non-integer values and
+//     SyntaxError(NegativeIntegerArgument) for negative integers.
+//     Pre-fix intExpr silently returned 0 for any non-literal-integer
+//     expression, so `SKIP $p` / `LIMIT $p` collapsed to 0 rows
+//     regardless of the parameter value. Unlocks ReturnSkipLimit3 [2],
+//     WithSkipLimit3 [2] and the broader SKIP/LIMIT-by-parameter family
+//     plus the InvalidArgumentType / NegativeIntegerArgument compile
+//     expectations. Observed 3580-3582 across a 5-run sample (median
+//     3581); gate set conservatively at 3575 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3564
+const tckExecutionBaseline = 3575
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

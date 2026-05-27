@@ -2251,14 +2251,30 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		return exec.NewLimit(child, p.Count)
+		count := p.Count
+		if p.CountExpr != nil {
+			n, rerr := resolveCountExpr(p.CountExpr, params, reg, "LIMIT")
+			if rerr != nil {
+				return nil, rerr
+			}
+			count = n
+		}
+		return exec.NewLimit(child, count)
 
 	case *ir.Skip:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
-		return exec.NewSkip(child, p.Count)
+		count := p.Count
+		if p.CountExpr != nil {
+			n, rerr := resolveCountExpr(p.CountExpr, params, reg, "SKIP")
+			if rerr != nil {
+				return nil, rerr
+			}
+			count = n
+		}
+		return exec.NewSkip(child, count)
 
 	case *ir.Unwind:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -3280,6 +3296,34 @@ func extractEqParamFromPredicate(pred, nodeVar string) (paramName, propKey strin
 		return left[1:], right[len(prefix):]
 	}
 	return "", ""
+}
+
+// resolveCountExpr evaluates a SKIP/LIMIT expression at physical-build
+// time, applying the openCypher type-and-range rules:
+//
+//   - The evaluated value must be an integer; a float surfaces a
+//     SyntaxError(InvalidArgumentType) typed error.
+//   - The value must be non-negative; negative integers surface a
+//     SyntaxError(NegativeIntegerArgument).
+//
+// kind is "SKIP" or "LIMIT" and is used in the error message. The
+// returned int64 is safe to pass to exec.NewSkip / exec.NewLimit.
+func resolveCountExpr(e ast.Expression, params map[string]expr.Value, reg expr.FunctionRegistry, kind string) (int64, error) {
+	v, err := expr.Eval(e, expr.RowContext{}, params, reg)
+	if err != nil {
+		return 0, fmt.Errorf("cypher: %s evaluation: %w", kind, err)
+	}
+	switch n := v.(type) {
+	case expr.IntegerValue:
+		i := int64(n)
+		if i < 0 {
+			return 0, fmt.Errorf("cypher: SyntaxError.NegativeIntegerArgument: %s requires a non-negative integer, got %d", kind, i)
+		}
+		return i, nil
+	case expr.FloatValue:
+		return 0, fmt.Errorf("cypher: SyntaxError.InvalidArgumentType: %s requires an integer, got float", kind)
+	}
+	return 0, fmt.Errorf("cypher: SyntaxError.InvalidArgumentType: %s requires an integer, got %T", kind, v)
 }
 
 // resolveSeekValue resolves p.Value to an expr.Value. If value starts with "$",

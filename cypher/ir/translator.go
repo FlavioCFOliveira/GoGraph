@@ -345,8 +345,11 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	// full result stream, not from an already-truncated one. The IR is built
 	// bottom-up, so we apply SKIP first (inner) and LIMIT on top (outer).
 	if proj.Skip != nil {
-		sk, _ := intExpr(proj.Skip)
-		plan = NewSkip(sk, plan)
+		if sk, err := intExpr(proj.Skip); err == nil {
+			plan = NewSkip(sk, plan)
+		} else {
+			plan = NewSkipExpr(proj.Skip, plan)
+		}
 	}
 
 	// ORDER BY (with LIMIT → fused Top; without LIMIT → Sort).
@@ -358,9 +361,11 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 		if proj.Limit != nil {
 			lim, err := intExpr(proj.Limit)
 			if err != nil {
-				// Fall back to Sort + Limit when the limit is not a literal.
+				// Fall back to Sort + (deferred Limit) when the limit
+				// is a parameter; the deferred path resolves the count
+				// at physical-build time against the query params.
 				plan = NewSort(sortItems, plan)
-				plan = NewLimit(0, plan) // opaque limit; expression stored via string repr
+				plan = NewLimitExpr(proj.Limit, plan)
 			} else {
 				plan = NewTop(sortItems, lim, plan)
 			}
@@ -368,8 +373,11 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 			plan = NewSort(sortItems, plan)
 		}
 	} else if proj.Limit != nil {
-		lim, _ := intExpr(proj.Limit)
-		plan = NewLimit(lim, plan)
+		if lim, err := intExpr(proj.Limit); err == nil {
+			plan = NewLimit(lim, plan)
+		} else {
+			plan = NewLimitExpr(proj.Limit, plan)
+		}
 	}
 
 	// Collect output column names for ProduceResults.
