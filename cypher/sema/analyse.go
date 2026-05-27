@@ -422,6 +422,7 @@ func (a *analyser) withClause(w *ast.With) {
 	// function is only legal when the projection itself contains an
 	// aggregation. Otherwise the aggregation has no group to fold over.
 	a.checkOrderByAggregation(w.Projection)
+	a.checkAmbiguousAggregation(w.Projection)
 
 	// 3. Reset scope: only projected names survive.
 	a.scope.reset()
