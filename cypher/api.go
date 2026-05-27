@@ -3760,16 +3760,27 @@ func buildIRProjection(
 								}
 							}
 							// Resolve edge type from the graph if not statically known.
+							// For the reverse-edge pass of an undirected expansion
+							// the row carries srcID=patternEndpoint and
+							// dstID=patternSource; storage holds the edge in the
+							// opposite direction. Probe both directions so the
+							// reverse pass still carries the relationship's Type
+							// and Properties.
 							edgeType := capturedMeta.edgeType
 							var edgeProps expr.MapValue
 							if capturedG != nil && srcID != 0 {
 								srcKey, srcResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 								dstKey, dstResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 								if srcResolved && dstResolved {
-									if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+									ets := capturedG.EdgeLabels(srcKey, dstKey)
+									rawEP := capturedG.EdgeProperties(srcKey, dstKey)
+									if len(ets) == 0 && len(rawEP) == 0 {
+										ets = capturedG.EdgeLabels(dstKey, srcKey)
+										rawEP = capturedG.EdgeProperties(dstKey, srcKey)
+									}
+									if len(ets) > 0 {
 										edgeType = ets[0]
 									}
-									rawEP := capturedG.EdgeProperties(srcKey, dstKey)
 									edgeProps = make(expr.MapValue, len(rawEP))
 									for k, pv := range rawEP {
 										edgeProps[k] = lpgPropToExpr(pv)
