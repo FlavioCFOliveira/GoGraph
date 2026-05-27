@@ -54,6 +54,9 @@ func registerTemporal(r *Registry) {
 	r.Register("localdatetime.truncate", fnLocalDateTimeTruncate)
 	r.Register("time.truncate", fnTimeTruncate)
 	r.Register("localtime.truncate", fnLocalTimeTruncate)
+	// Epoch-based constructors (Temporal1 [11]).
+	r.Register("datetime.fromepoch", fnDateTimeFromEpoch)
+	r.Register("datetime.fromepochmillis", fnDateTimeFromEpochMillis)
 	// Clock-source variants: per openCypher, .transaction / .statement /
 	// .realtime all return the current instant; the distinction matters
 	// in a clustered setting but not in our single-process engine. All
@@ -343,6 +346,49 @@ func fnDateTime(args []expr.Value) (expr.Value, error) {
 		}
 	}
 	return nil, &ArityError{Function: "datetime", Got: len(args), Want: "0..1"}
+}
+
+// fnDateTimeFromEpoch constructs a UTC DateTimeValue from a (seconds,
+// nanos) pair of integer offsets relative to the Unix epoch. openCypher
+// (Temporal1 [11]):
+//
+//	datetime.fromepoch(seconds :: INTEGER, nanoseconds :: INTEGER) :: DATETIME
+//
+// NULL on either argument propagates to NULL.
+func fnDateTimeFromEpoch(args []expr.Value) (expr.Value, error) {
+	if err := requireArity("datetime.fromepoch", args, 2); err != nil {
+		return nil, err
+	}
+	if expr.IsNull(args[0]) || expr.IsNull(args[1]) {
+		return expr.Null, nil
+	}
+	secs, ok := intFromValue(args[0])
+	if !ok {
+		return nil, &TypeError{Function: "datetime.fromepoch", ArgIndex: 0, Got: args[0].Kind(), Want: "Integer"}
+	}
+	nanos, ok := intFromValue(args[1])
+	if !ok {
+		return nil, &TypeError{Function: "datetime.fromepoch", ArgIndex: 1, Got: args[1].Kind(), Want: "Integer"}
+	}
+	return expr.DateTimeValue{T: time.Unix(secs, nanos).UTC()}, nil
+}
+
+// fnDateTimeFromEpochMillis constructs a UTC DateTimeValue from a
+// millisecond offset relative to the Unix epoch. The whole-second part
+// goes into time.Unix and the residual milliseconds carry into the
+// nanosecond component (× 1,000,000).
+func fnDateTimeFromEpochMillis(args []expr.Value) (expr.Value, error) {
+	if err := requireArity("datetime.fromepochmillis", args, 1); err != nil {
+		return nil, err
+	}
+	if expr.IsNull(args[0]) {
+		return expr.Null, nil
+	}
+	ms, ok := intFromValue(args[0])
+	if !ok {
+		return nil, &TypeError{Function: "datetime.fromepochmillis", ArgIndex: 0, Got: args[0].Kind(), Want: "Integer"}
+	}
+	return expr.DateTimeValue{T: time.UnixMilli(ms).UTC()}, nil
 }
 
 // localDateTimeFromMap builds a LocalDateTimeValue from a component map.
