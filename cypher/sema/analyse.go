@@ -411,6 +411,29 @@ func (a *analyser) createClause(c *ast.Create) {
 	a.checkPatternPropertyExprs(c.Pattern)
 }
 
+// checkMergeNoRebind is the MERGE counterpart of checkCreateNoRebind. The
+// rule is narrower: MERGE may augment a bound node's labels/properties (the
+// pattern is matched first, then created on miss), but it may NOT take a
+// standalone bound node as its whole pattern (MERGE (a) where a is already
+// bound is a no-op that openCypher 9 §3.5.2 rejects as VariableAlreadyBound).
+func (a *analyser) checkMergeNoRebind(pp *ast.PathPattern) {
+	if pp == nil {
+		return
+	}
+	standalone := pp.Head != nil && pp.Head.Next == nil && pp.Head.Node != nil
+	if !standalone {
+		return
+	}
+	np := pp.Head.Node
+	if np.Variable == nil {
+		return
+	}
+	name := *np.Variable
+	if _, alreadyInScope := a.scope.Lookup(name); alreadyInScope {
+		a.error(variableAlreadyBoundError(name, np.Pos))
+	}
+}
+
 // checkPatternPropertyExprs walks every node and relationship pattern in pat
 // and runs the standard expression checker over any inline property map. The
 // pattern-variable scope is unchanged — this only surfaces UndefinedVariable
@@ -477,6 +500,10 @@ func (a *analyser) checkCreateNoRebind(pat *ast.Pattern) {
 }
 
 func (a *analyser) mergeClause(m *ast.Merge) {
+	// MERGE follows the same bound-node-augmentation rule as CREATE: a
+	// standalone bound node in the MERGE pattern is illegal (openCypher 9
+	// §3.5.2 forbids MERGE on a variable that is already bound).
+	a.checkMergeNoRebind(m.Pattern)
 	// MERGE may introduce new variables or reuse existing ones.
 	a.pathPatternIntroduce(m.Pattern)
 	// MERGE relationship-type rule: similar to CREATE but undirected
