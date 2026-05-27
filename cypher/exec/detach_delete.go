@@ -113,6 +113,22 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 			return true, nil
 		}
 	} else {
+		// Schema-direct path: peek for RelationshipValue before
+		// delegating to resolveNodeIDFromRow (which only handles
+		// node IDs). DETACH DELETE on a relationship is equivalent
+		// to plain DELETE on it — there are no attached edges to
+		// strip from a single edge.
+		if colIdx, ok := op.schema[op.nodeVar]; ok && colIdx < len(childRow) {
+			if relVal, isRel := childRow[colIdx].(expr.RelationshipValue); isRel {
+				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.StartID))
+				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.EndID))
+				if srcOK && dstOK {
+					op.mutator.RemoveEdge(srcKey, dstKey)
+				}
+				*out = childRow
+				return true, nil
+			}
+		}
 		var err error
 		nodeID, err = resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
 		if err != nil {

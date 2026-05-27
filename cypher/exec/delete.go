@@ -142,6 +142,20 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			return true, nil
 		}
 	} else {
+		// Schema-direct path: peek at the bound value before delegating
+		// to resolveNodeIDFromRow, so a RelationshipValue can dispatch
+		// to the edge-removal path instead of failing the type check.
+		if colIdx, ok := op.schema[op.nodeVar]; ok && colIdx < len(childRow) {
+			if relVal, isRel := childRow[colIdx].(expr.RelationshipValue); isRel {
+				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.StartID))
+				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.EndID))
+				if srcOK && dstOK {
+					op.mutator.RemoveEdge(srcKey, dstKey)
+				}
+				*out = childRow
+				return true, nil
+			}
+		}
 		var err error
 		nodeID, err = resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
 		if err != nil {
