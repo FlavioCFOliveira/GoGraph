@@ -2269,6 +2269,14 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
+		// Snapshot the outer schema verbatim so we can restore it after
+		// the inner build. The inner subplan ends with a Projection that
+		// wipes-and-rewrites the shared schema map (buildIRProjection's
+		// post-projection schema reset) — any outer entry at idx < outerWidth
+		// would otherwise be lost or overwritten by an inner-only column
+		// name. Without this snapshot, downstream lookups for outer
+		// variables (n, b, …) miss the schema and return NULL.
+		outerSchemaSnap := copySchema(schema)
 		outerWidth := schemaWidth(schema)
 		// Pre-allocate the exec.Argument and register it under the IR
 		// RollUpApply's ArgTag so the inner subtree's matching
@@ -2286,15 +2294,16 @@ func buildOperator(
 			delete(argByTag, p.ArgTag)
 		}
 		// The RollUpApply output is (outer columns…, collected list).
-		// Inner-built variables are not visible downstream — only the
-		// list bound to CollectVar is. Drop schema entries that the
-		// inner subplan added beyond outerWidth, then register
-		// CollectVar at outerWidth so the final-projection lookup
-		// resolves to the list column.
-		for name, idx := range schema {
-			if idx >= outerWidth {
-				delete(schema, name)
-			}
+		// Restore the outer schema verbatim, then register CollectVar at
+		// outerWidth so the final-projection lookup resolves to the list
+		// column. Inner-built variables (and any names the inner Projection
+		// rebound to outer slots) are dropped — only outer columns and the
+		// collected list survive downstream.
+		for k := range schema {
+			delete(schema, k)
+		}
+		for k, v := range outerSchemaSnap {
+			schema[k] = v
 		}
 		schema[p.CollectVar] = outerWidth
 		// listEval is left nil — the inner subplan ends with a

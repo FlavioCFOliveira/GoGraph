@@ -158,3 +158,139 @@ func findSelection(p ir.LogicalPlan) bool {
 	}
 	return false
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Pattern comprehension in WITH projection — translateWith must hoist the
+//    comprehension into a RollUpApply on the input side just like translateReturn.
+//    Regression for Pattern2 [8]:
+//        MATCH (n)-->(b) WITH [p = (n)-->() | p] AS ps, count(b) AS c RETURN ps, c
+// ─────────────────────────────────────────────────────────────────────────────
+
+func Test_Comprehension_InWith_HoistedAsRollUpApply(t *testing.T) {
+	pc := &ast.PatternComprehension{
+		Variable: strPtr("p"),
+		Pattern: &ast.PathPattern{
+			Head: &ast.PathElement{
+				Node: &ast.NodePattern{Variable: strPtr("n")},
+				Next: &ast.PathElement{
+					Relationship: &ast.RelationshipPattern{Direction: ast.RelDirectionOutgoing},
+					Node:         &ast.NodePattern{},
+				},
+			},
+		},
+		Projection: &ast.Variable{Name: "p"},
+	}
+	q := &ast.SingleQuery{
+		ReadingClauses: []ast.ReadingClause{
+			&ast.Match{Pattern: &ast.Pattern{Paths: []*ast.PathPattern{{
+				Head: &ast.PathElement{
+					Node: &ast.NodePattern{Variable: strPtr("n")},
+					Next: &ast.PathElement{
+						Relationship: &ast.RelationshipPattern{Direction: ast.RelDirectionOutgoing},
+						Node:         &ast.NodePattern{Variable: strPtr("b")},
+					},
+				},
+			}}}},
+			&ast.With{Projection: &ast.Projection{Items: []*ast.ProjectionItem{
+				{Expr: pc, Alias: strPtr("ps")},
+				{Expr: &ast.FunctionInvocation{
+					Name: "count",
+					Args: []ast.Expression{&ast.Variable{Name: "b"}},
+				}, Alias: strPtr("c")},
+			}}},
+		},
+		Return: &ast.Return{Projection: &ast.Projection{Items: []*ast.ProjectionItem{
+			{Expr: &ast.Variable{Name: "ps"}},
+			{Expr: &ast.Variable{Name: "c"}},
+		}}},
+	}
+	plan := mustFromAST(t, q)
+
+	// The plan must contain a RollUpApply that sits BELOW the EagerAggregation
+	// produced by the WITH, so the aggregate sees the synthetic ps column.
+	if !findRollUpApply(plan) {
+		t.Fatalf("WITH pattern comprehension should hoist into a RollUpApply, but none found in plan tree")
+	}
+	if !findEagerAggregation(plan) {
+		t.Fatalf("WITH with count(b) should produce an EagerAggregation, but none found in plan tree")
+	}
+}
+
+// findRollUpApply reports whether any node in the plan tree is a *ir.RollUpApply.
+func findRollUpApply(p ir.LogicalPlan) bool {
+	if p == nil {
+		return false
+	}
+	if _, ok := p.(*ir.RollUpApply); ok {
+		return true
+	}
+	for _, ch := range p.Children() {
+		if findRollUpApply(ch) {
+			return true
+		}
+	}
+	return false
+}
+
+// findEagerAggregation reports whether any node is an EagerAggregation.
+func findEagerAggregation(p ir.LogicalPlan) bool {
+	if p == nil {
+		return false
+	}
+	if _, ok := p.(*ir.EagerAggregation); ok {
+		return true
+	}
+	for _, ch := range p.Children() {
+		if findEagerAggregation(ch) {
+			return true
+		}
+	}
+	return false
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. Pattern comprehension nested inside aggregate function argument —
+//    `count([p = (n)-->() | p])` must be hoisted into a RollUpApply so the
+//    aggregate sees the synthetic __pc_N column rather than the raw AST node.
+//    Regression for Pattern2 [6].
+// ─────────────────────────────────────────────────────────────────────────────
+
+func Test_Comprehension_InAggregateArgument_Hoisted(t *testing.T) {
+	pc := &ast.PatternComprehension{
+		Variable: strPtr("p"),
+		Pattern: &ast.PathPattern{
+			Head: &ast.PathElement{
+				Node: &ast.NodePattern{Variable: strPtr("n")},
+				Next: &ast.PathElement{
+					Relationship: &ast.RelationshipPattern{Direction: ast.RelDirectionOutgoing, Types: []string{"HAS"}},
+					Node:         &ast.NodePattern{},
+				},
+			},
+		},
+		Projection: &ast.Variable{Name: "p"},
+	}
+	q := &ast.SingleQuery{
+		ReadingClauses: []ast.ReadingClause{
+			&ast.Match{Pattern: &ast.Pattern{Paths: []*ast.PathPattern{{
+				Head: &ast.PathElement{Node: &ast.NodePattern{
+					Variable: strPtr("n"),
+					Labels:   []string{"A"},
+				}},
+			}}}},
+		},
+		Return: &ast.Return{Projection: &ast.Projection{Items: []*ast.ProjectionItem{
+			{Expr: &ast.FunctionInvocation{
+				Name: "count",
+				Args: []ast.Expression{pc},
+			}, Alias: strPtr("c")},
+		}}},
+	}
+	plan := mustFromAST(t, q)
+
+	if !findRollUpApply(plan) {
+		t.Fatalf("count(pattern-comprehension) should hoist the comprehension into a RollUpApply")
+	}
+	if !findEagerAggregation(plan) {
+		t.Fatalf("count(pattern-comprehension) should produce an EagerAggregation")
+	}
+}

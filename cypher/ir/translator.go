@@ -303,11 +303,17 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	proj := r.Projection
 
 	// Handle pattern comprehensions first: each comprehension item becomes a
-	// RollUpApply layer. The remaining (non-comprehension) items are returned
-	// as regularItems.
-	planAfterComp, regularItems, err := t.projectionsWithComprehensions(proj, child)
+	// RollUpApply layer. rewrittenProj carries the same items with any
+	// PatternComprehension nodes replaced by Variable references to the
+	// synthetic __pc_N columns, so detectAggregation downstream sees the
+	// hoisted form (count(__pc_0)) instead of the raw comprehension.
+	planAfterComp, regularItems, rewrittenProj, err := t.projectionsWithComprehensions(proj, child)
 	if err != nil {
 		return nil, err
+	}
+	aggProj := proj
+	if rewrittenProj != nil {
+		aggProj = rewrittenProj
 	}
 
 	// When all items were comprehensions, use an empty projection items list.
@@ -321,14 +327,14 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	// Detect aggregate functions among non-comprehension items. When present,
 	// wrap in EagerAggregation first, then Projection.
 	var plan LogicalPlan
-	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(proj)
+	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(aggProj)
 	if hasAgg {
 		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, planAfterComp)
 		// When the projection contains aggregates nested inside larger
 		// expressions (e.g. `$age + avg(x) - 1000`), rewrite those items so
 		// they reference the synthetic __agg_N columns the EagerAggregation
 		// emits. Pure bare-aggregate items are returned unchanged.
-		if rewritten := rewriteProjectionForAggregation(proj); rewritten != nil {
+		if rewritten := rewriteProjectionForAggregation(aggProj); rewritten != nil {
 			items = rewritten
 		}
 		plan = NewProjection(items, plan)

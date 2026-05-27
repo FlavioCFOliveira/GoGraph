@@ -49,28 +49,51 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		}
 	}
 
-	groupBy, groupByExprs, aggs, _ := detectAggregation(w.Projection)
+	// Hoist any PatternComprehension into its own RollUpApply layer so the
+	// downstream aggregation / projection sees only synthetic __pc_N
+	// variables — mirrors the RETURN path. rewrittenProj carries the same
+	// substitution so detectAggregation classifies count(__pc_N) correctly.
+	planAfterComp, regularItems, rewrittenProj, err := t.projectionsWithComprehensions(w.Projection, child)
+	if err != nil {
+		return nil, err
+	}
+	aggProj := w.Projection
+	if rewrittenProj != nil {
+		aggProj = rewrittenProj
+	}
+
+	groupBy, groupByExprs, aggs, _ := detectAggregation(aggProj)
 
 	var plan LogicalPlan
 	if hasAgg {
-		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, child)
+		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, planAfterComp)
 		// Emit a covering Projection only when there are non-aggregate items that
 		// need renaming (alias not equal to the expression string). In practice the
 		// EagerAggregation already exposes the correct output names, so the
 		// Projection is needed only to preserve ordering and aliasing.
-		items := projectionItems(w.Projection, collectAllVars(child))
+		var items []ProjectionItem
+		if len(regularItems) > 0 {
+			items = regularItems
+		} else {
+			items = projectionItems(w.Projection, collectAllVars(planAfterComp))
+		}
 		// When the projection contains aggregates nested inside larger
 		// expressions, rewrite the items so they reference the synthetic
 		// __agg_N columns the EagerAggregation emits.
-		if rewritten := rewriteProjectionForAggregation(w.Projection); rewritten != nil {
+		if rewritten := rewriteProjectionForAggregation(aggProj); rewritten != nil {
 			items = rewritten
 		}
 		if len(items) > 0 {
 			plan = NewProjection(items, plan)
 		}
 	} else {
-		items := projectionItems(w.Projection, collectAllVars(child))
-		plan = NewProjection(items, child)
+		var items []ProjectionItem
+		if len(regularItems) > 0 {
+			items = regularItems
+		} else {
+			items = projectionItems(w.Projection, collectAllVars(planAfterComp))
+		}
+		plan = NewProjection(items, planAfterComp)
 	}
 
 	// DISTINCT, SKIP, ORDER BY, LIMIT — mirror the RETURN translator at

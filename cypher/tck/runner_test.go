@@ -932,6 +932,38 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3780: raised after the PatternComprehension extraction reached
+//     translateWith, the IR ListComprehension walker, and the aggregate-
+//     argument hoist. Two structural fixes landed together:
+//     (a) projectionsWithComprehensions now also returns a rewritten
+//         *ast.Projection (synthetic __pc_N variables in place of the
+//         hoisted PatternComprehension) that translateReturn and
+//         translateWith feed to detectAggregation. Without this, an
+//         aggregate over a comprehension — `count([p = (n)-->() | p])`
+//         in Pattern2 [6] — kept the raw PatternComprehension as the
+//         agg argument and the executor failed with "unsupported
+//         expression type".
+//     (b) translatePatternComprehension now collects correlation
+//         variables via collectAllVars(outer) instead of outer.Vars().
+//         Expand.Vars() omits its FromVar, so a comprehension whose
+//         leading node sat in the outer's MATCH (n)-->(b) chain saw
+//         n as unbound, fell into matchPattern's unshared-Cartesian
+//         branch, and scanned every node in the graph for each outer
+//         row. The first symptom was 2× duplicates in the collected
+//         list (each outer row's edge plus the down-stream edge that
+//         shared a node ID); the deeper symptom was a count(b) over
+//         the comprehension returning 0 because the GroupBy collapsed
+//         every row into a single group keyed by the corrupted list.
+//     The RollUpApply builder also restores the outer schema verbatim
+//     after the inner build so the inner Projection's schema reset
+//     can no longer overwrite outer column entries (n and b were
+//     surfacing as NULL after the comprehension when the outer width
+//     exceeded 1).
+//     Closes Pattern2 [6]/[8]/[9] and List6 [7]; Pattern2 [7] still
+//     fails (a nested pattern comprehension inside a list
+//     comprehension's projection cannot be safely hoisted because
+//     the iteration variable is not in the outer scope).
+//     Observed 3780-3783 across a 5-run sample; gate set at 3780.
 //   - 3774: raised after sema.checkExpr's transitive-type guard added
 //     "path" to its rejected-types switch alongside "scalar" and
 //     "list". A named path variable (e.g. `p = (a)-[*]->(b)`) carries
@@ -1075,7 +1107,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3774
+const tckExecutionBaseline = 3780
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

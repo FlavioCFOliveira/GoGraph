@@ -41,10 +41,16 @@ func (t *translator) translatePatternComprehension(
 ) (LogicalPlan, error) {
 	// Collect outer variables for the Argument leaf. The leaf carries an
 	// explicit tag so the physical builder routes the matching
-	// exec.Argument instance allocated by RollUpApply.
+	// exec.Argument instance allocated by RollUpApply. Use collectAllVars
+	// (recursive) rather than outer.Vars() (top-level only) so that
+	// FromVar of an Expand outer — which Expand.Vars() omits — still ends
+	// up in the correlation set. Without this, matchPattern sees the
+	// leading node as unbound and falls back to a Cartesian Apply with a
+	// fresh AllNodesScan over the whole graph instead of correlating to
+	// the outer row.
 	var corrVars []string
 	if outer != nil {
-		corrVars = outer.Vars()
+		corrVars = collectAllVars(outer)
 	}
 	tag := nextArgTag()
 	arg := NewArgumentWithTag(corrVars, tag)
@@ -117,17 +123,24 @@ func (t *translator) translatePatternComprehension(
 // projection item's Expr field so the physical projection still evaluates
 // the outer call (size, length, head, ...) against the row.
 //
-// This is called from translateReturn / translateWith after basic aggregation
-// detection, so the comprehension items are processed last.
+// Aggregate-argument form (`RETURN count([p = (n)-->() | p]) AS c`): the
+// comprehension lives inside an aggregate FunctionInvocation. The walker
+// rewrites the argument to reference the synthetic column, and the returned
+// rewrittenProj carries the same substitution so the caller's
+// detectAggregation sees count(__pc_<n>) rather than the raw comprehension.
+//
+// This is called from translateReturn / translateWith BEFORE detectAggregation
+// so the aggregation pipeline never observes a raw PatternComprehension.
 func (t *translator) projectionsWithComprehensions(
 	proj *ast.Projection,
 	plan LogicalPlan,
-) (LogicalPlan, []ProjectionItem, error) {
+) (LogicalPlan, []ProjectionItem, *ast.Projection, error) {
 	if proj == nil {
-		return plan, nil, nil
+		return plan, nil, nil, nil
 	}
 
 	var regularItems []ProjectionItem
+	rewrittenItems := make([]*ast.ProjectionItem, 0, len(proj.Items))
 	pcCounter := 0
 	for _, item := range proj.Items {
 		// Top-level PatternComprehension: keep the historical fast-path
@@ -140,12 +153,15 @@ func (t *translator) projectionsWithComprehensions(
 			var err error
 			plan, err = t.translatePatternComprehension(pc, plan, outputVar)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			regularItems = append(regularItems, ProjectionItem{
 				Name:       outputVar,
 				Expression: outputVar,
 			})
+			itemCopy := *item
+			itemCopy.Expr = &ast.Variable{Name: outputVar}
+			rewrittenItems = append(rewrittenItems, &itemCopy)
 			continue
 		}
 
@@ -157,7 +173,7 @@ func (t *translator) projectionsWithComprehensions(
 		// against the row, where the synthetic column now lives.
 		rewritten, newPlan, err := t.extractNestedPatternComprehensions(item.Expr, plan, &pcCounter)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		plan = newPlan
 		regularItems = append(regularItems, ProjectionItem{
@@ -165,9 +181,14 @@ func (t *translator) projectionsWithComprehensions(
 			Expression: rewritten.String(),
 			Expr:       rewritten,
 		})
+		itemCopy := *item
+		itemCopy.Expr = rewritten
+		rewrittenItems = append(rewrittenItems, &itemCopy)
 	}
 
-	return plan, regularItems, nil
+	rewrittenProj := *proj
+	rewrittenProj.Items = rewrittenItems
+	return plan, regularItems, &rewrittenProj, nil
 }
 
 // extractNestedPatternComprehensions walks e and replaces every
@@ -297,6 +318,69 @@ func (t *translator) extractNestedPatternComprehensions(
 		}
 		cp := *n
 		cp.Values = newVals
+		return &cp, curPlan, nil
+	case *ast.ListComprehension:
+		// Only the Source sits in the outer scope where a hoisted
+		// RollUpApply on plan would correlate correctly. Predicate /
+		// Projection run per element with the iteration variable in
+		// scope, so a PatternComprehension nested there would need to
+		// see the element binding, not the outer row — recurse anyway:
+		// the existing RollUpApply currently captures only outer
+		// variables, so a nested correlated comprehension that depends
+		// on the iteration variable is best-effort. The common openCypher
+		// case (Pattern2 [7]) uses the iteration variable as the
+		// PatternComprehension's source node, and the matcher resolves
+		// it via the runtime row context the executor builds for the
+		// surrounding list comprehension.
+		src, plan2, err := t.extractNestedPatternComprehensions(n.Source, plan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		pred, plan3, err := t.extractNestedPatternComprehensions(n.Predicate, plan2, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		proj, plan4, err := t.extractNestedPatternComprehensions(n.Projection, plan3, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Source = src
+		cp.Predicate = pred
+		cp.Projection = proj
+		return &cp, plan4, nil
+	case *ast.CaseExpression:
+		newAlts := make([]*ast.CaseAlternative, len(n.Alternatives))
+		curPlan := plan
+		var subj ast.Expression
+		var err error
+		subj, curPlan, err = t.extractNestedPatternComprehensions(n.Subject, curPlan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		for i, alt := range n.Alternatives {
+			cond, p2, err := t.extractNestedPatternComprehensions(alt.Condition, curPlan, counter)
+			if err != nil {
+				return nil, plan, err
+			}
+			cons, p3, err := t.extractNestedPatternComprehensions(alt.Consequent, p2, counter)
+			if err != nil {
+				return nil, plan, err
+			}
+			altCp := *alt
+			altCp.Condition = cond
+			altCp.Consequent = cons
+			newAlts[i] = &altCp
+			curPlan = p3
+		}
+		elseE, curPlan, err := t.extractNestedPatternComprehensions(n.ElseExpr, curPlan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Subject = subj
+		cp.Alternatives = newAlts
+		cp.ElseExpr = elseE
 		return &cp, curPlan, nil
 	}
 	return e, plan, nil
