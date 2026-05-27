@@ -932,6 +932,18 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3766: raised after MergeRelationship.applyRelActions learnt
+//     to silently skip null property values. The parsePropValue
+//     helper already flags null via the typed
+//     ErrPropertyValueIsNull sentinel; the merge fast-path now
+//     ignores actions that return it instead of bubbling the error
+//     up as "exec: MergeRelationship: parse value \"null\":
+//     property value is null (skip)". MERGE … ON CREATE SET
+//     r.name = null is the openCypher contract for "create a
+//     relationship with no name property" — the relationship is
+//     created and the SET is a no-op. Closes Merge6 [4] and lifts
+//     the floor of the run-to-run band by a few scenarios.
+//     Observed 3766-3770 across a 7-run sample; gate set at 3766.
 //   - 3760 holds: SubDates now sign-normalises (compute |a-b| with
 //     positive arithmetic, negate the result) before the day/month
 //     borrow logic kicks in. The previous calendarDateDiff ran the
@@ -1026,7 +1038,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3760
+const tckExecutionBaseline = 3766
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

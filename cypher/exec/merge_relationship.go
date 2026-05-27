@@ -33,6 +33,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"gograph/cypher/expr"
@@ -327,11 +328,19 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 // applyRelActions sets every action's property on the (src, dst) edge
 // via the graph mutator. value parsing reuses parsePropValue (the same
 // helper the literal-property paths use) so the formats accepted are
-// consistent across MERGE / CREATE / SET.
+// consistent across MERGE / CREATE / SET. A null property value is
+// silently skipped — openCypher SET name = null on a missing property
+// is a no-op (and on an existing property the parsing path already
+// flags ErrPropertyValueIsNull which the SET-clause translator routes
+// to DelEdgeProperty; the merge fast-path simply skips since the
+// edge was just created with no such property).
 func (op *MergeRelationship) applyRelActions(srcKey, dstKey string, actions []MergeRelAction) error {
 	for _, act := range actions {
 		v, err := parsePropValue(act.value)
 		if err != nil {
+			if errors.Is(err, ErrPropertyValueIsNull) {
+				continue
+			}
 			return fmt.Errorf("exec: MergeRelationship: parse value %q: %w", act.value, err)
 		}
 		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, act.key, v); setErr != nil {
