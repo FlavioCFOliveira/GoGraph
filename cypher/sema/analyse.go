@@ -1436,6 +1436,14 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		// and relationship variable must already be in scope. We only
 		// check references; we never call Define.
 		a.pathPatternRefCheck(v)
+		// A bare node pattern such as `WHERE (n)` is not a valid
+		// predicate — openCypher requires at least one relationship in
+		// an expression-position path pattern (existential check). Flag
+		// it as InvalidArgumentType so Pattern1 [11] surfaces the
+		// canonical compile-time error.
+		if v.Head != nil && v.Head.Next == nil && v.Head.Relationship == nil {
+			a.error(invalidBooleanOperandError("WHERE", "bare-node-pattern", v.Pos))
+		}
 
 	// Literals and parameters carry no variable references.
 	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
