@@ -769,10 +769,20 @@ func (t *translator) appendEqSelection(boundVar, syntheticVar string, plan Logic
 
 // matchApplyNodeFilter wraps plan with Selection operators for label and
 // property constraints declared on the destination node pattern.
+//
+// Label predicates are expressed as a typed AST LabelPredicate so the
+// physical builder evaluates them via expr.Eval rather than treating
+// them as an opaque pass-through string (which would silently always
+// match, defeating predicates like `OPTIONAL MATCH (n)-[r]-(m:NonExistent)`).
 func (t *translator) matchApplyNodeFilter(np *ast.NodePattern, nodeVar string, plan LogicalPlan) LogicalPlan {
-	for _, lbl := range np.Labels {
-		pred := fmt.Sprintf("%s:%s", nodeVar, lbl)
-		plan = NewSelection(pred, plan)
+	if len(np.Labels) > 0 {
+		labels := make([]string, len(np.Labels))
+		copy(labels, np.Labels)
+		lp := &ast.LabelPredicate{
+			Receiver: &ast.Variable{Name: nodeVar},
+			Labels:   labels,
+		}
+		plan = NewSelectionExpr(lp.String(), lp, plan)
 	}
 	if np.Properties != nil {
 		plan = buildPropertySelection(nodeVar, np.Properties, plan)

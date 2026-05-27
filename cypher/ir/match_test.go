@@ -401,8 +401,8 @@ func Test_Match_Expand_WithDestLabelAndWhere(t *testing.T) {
 	if !ok {
 		t.Fatalf("whereSel.Child expected *ir.Selection (label), got %T", whereSel.Child)
 	}
-	if labelSel.Predicate != "c:Company" {
-		t.Errorf("label Selection.Predicate = %q, want c:Company", labelSel.Predicate)
+	if labelSel.Predicate != "(c:Company)" {
+		t.Errorf("label Selection.Predicate = %q, want (c:Company)", labelSel.Predicate)
 	}
 
 	// Child of label filter: Expand.
