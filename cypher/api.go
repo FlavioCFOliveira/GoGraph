@@ -1739,6 +1739,8 @@ func buildPlanEngine(
 	bopts *buildOpts,
 ) (op exec.Operator, cols []string, err error) {
 	// Standalone CALL (root is *ir.ProcedureCall): treat YieldVars as columns.
+	// When YieldVars is empty (no explicit YIELD), openCypher specifies the
+	// procedure's declared output columns become the result columns.
 	if p, ok := plan.(*ir.ProcedureCall); ok {
 		schema := make(map[string]int)
 		argByTag := make(map[uint32]*exec.Argument)
@@ -1746,7 +1748,16 @@ func buildPlanEngine(
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
-		return child, p.YieldVars, nil
+		outCols := p.YieldVars
+		if len(outCols) == 0 && procReg != nil {
+			if entry, lookupErr := procReg.Lookup(p.Namespace, p.Name); lookupErr == nil {
+				outCols = make([]string, len(entry.Sig.Outputs))
+				for i, out := range entry.Sig.Outputs {
+					outCols[i] = out.Name
+				}
+			}
+		}
+		return child, outCols, nil
 	}
 
 	// UNION / UNION ALL: each branch is itself a top-level plan (typically

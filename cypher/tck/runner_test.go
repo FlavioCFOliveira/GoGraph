@@ -707,11 +707,25 @@ import (
 //     cannot evaluate row-by-row upstream of the aggregator. Observed
 //     3554-3561 across a 5-run sample (median 3559); baseline kept at
 //     3549 since the min observed only moved by zero.
+//   - 3555: raised after standalone-CALL output-column auto-yield fix —
+//     when a `CALL ns.name(args)` query has no explicit YIELD, the
+//     buildPlanEngine standalone-CALL branch now looks up the
+//     procedure's declared output column names from procReg and uses
+//     them as the result columns. Pre-fix it returned p.YieldVars
+//     verbatim (always [] for no-YIELD), so standalone CALLs produced
+//     zero columns and the TCK row-count check saw the result as
+//     empty. The buildProcedureCallOperator branch already had the
+//     same auto-yield logic for the in-query CALL path; the standalone
+//     path simply did not consult the registry. Cross-type identity
+//     equality (Node/Relationship/Integer) on top of this yielded the
+//     net +4-7 deterministic uplift. Observed 3560-3566 across a 5-run
+//     sample (median 3564); gate set conservatively at 3555 (minimum
+//     observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3549
+const tckExecutionBaseline = 3555
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
