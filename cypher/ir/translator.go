@@ -324,6 +324,13 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(proj)
 	if hasAgg {
 		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, planAfterComp)
+		// When the projection contains aggregates nested inside larger
+		// expressions (e.g. `$age + avg(x) - 1000`), rewrite those items so
+		// they reference the synthetic __agg_N columns the EagerAggregation
+		// emits. Pure bare-aggregate items are returned unchanged.
+		if rewritten := rewriteProjectionForAggregation(proj); rewritten != nil {
+			items = rewritten
+		}
 		plan = NewProjection(items, plan)
 	} else {
 		plan = NewProjection(items, planAfterComp)

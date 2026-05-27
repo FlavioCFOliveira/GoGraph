@@ -670,11 +670,24 @@ import (
 //     broader RETURN * / WITH * forwarding family. Observed 3544-3548
 //     across a 5-run sample (median 3546); gate set conservatively at
 //     3539 (minimum observed - 5).
+//   - 3544: raised after EagerAggregation now emits one row for an
+//     empty pure aggregation (openCypher 9 §3.6: `RETURN count(x)` over
+//     empty input returns 0, not zero rows) and after detectAggregation
+//     learned to recurse into expression wrappers via the new
+//     [containsAggregate] / [extractAggregatesFromExpr] helpers. Items
+//     like `$age + avg(x.age) - 1000` now register the nested avg() as
+//     a synthetic __agg_N column on the EagerAggregation output and
+//     the projection re-evaluates the wrapping arithmetic against the
+//     produced row. Pre-fix any aggregate nested inside arithmetic
+//     skipped EagerAggregation entirely and produced zero rows. Net
+//     +5 to +7 scenarios. Observed 3549-3555 across a 5-run sample
+//     (median 3553); gate set conservatively at 3544 (minimum
+//     observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3539
+const tckExecutionBaseline = 3544
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

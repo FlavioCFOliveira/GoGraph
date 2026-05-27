@@ -50,6 +50,12 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		// EagerAggregation already exposes the correct output names, so the
 		// Projection is needed only to preserve ordering and aliasing.
 		items := projectionItems(w.Projection, collectAllVars(child))
+		// When the projection contains aggregates nested inside larger
+		// expressions, rewrite the items so they reference the synthetic
+		// __agg_N columns the EagerAggregation emits.
+		if rewritten := rewriteProjectionForAggregation(w.Projection); rewritten != nil {
+			items = rewritten
+		}
 		if len(items) > 0 {
 			plan = NewProjection(items, plan)
 		}
