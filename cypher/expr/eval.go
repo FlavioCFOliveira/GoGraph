@@ -462,10 +462,19 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value
 		}
 		return subscriptList(c, idx), nil
 	case MapValue:
+		if _, ok := idx.(StringValue); !ok {
+			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
+		}
 		return subscriptMap(c, idx), nil
 	case NodeValue:
+		if _, ok := idx.(StringValue); !ok {
+			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
+		}
 		return subscriptMap(c.Properties, idx), nil
 	case RelationshipValue:
+		if _, ok := idx.(StringValue); !ok {
+			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
+		}
 		return subscriptMap(c.Properties, idx), nil
 	default:
 		// Subscripting a non-list / non-map / non-graph-element value is
