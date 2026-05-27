@@ -615,9 +615,17 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 	prevNodeVar := sharedLeadVar
 
 	// Enforce any label/property constraints declared on the leading node.
-	for _, lbl := range el.Node.Labels {
-		pred := fmt.Sprintf("%s:%s", sharedLeadVar, lbl)
-		plan = NewSelection(pred, plan)
+	// Wrap label predicates in a typed AST node so the physical builder
+	// evaluates them via expr.Eval — opaque string predicates fall through
+	// to the always-true filter.
+	if len(el.Node.Labels) > 0 {
+		labels := make([]string, len(el.Node.Labels))
+		copy(labels, el.Node.Labels)
+		lp := &ast.LabelPredicate{
+			Receiver: &ast.Variable{Name: sharedLeadVar},
+			Labels:   labels,
+		}
+		plan = NewSelectionExpr(lp.String(), lp, plan)
 	}
 	if el.Node.Properties != nil {
 		plan = buildPropertySelection(sharedLeadVar, el.Node.Properties, plan)
@@ -666,10 +674,17 @@ func (t *translator) matchNodeScan(np *ast.NodePattern) LogicalPlan {
 	scan := NewNodeByLabelScan(nodeVar, np.Labels[0])
 	var plan LogicalPlan = scan
 
-	// Extra labels: AND-filter as Selection operators, innermost first.
-	for _, lbl := range np.Labels[1:] {
-		pred := fmt.Sprintf("%s:%s", nodeVar, lbl)
-		plan = NewSelection(pred, plan)
+	// Extra labels: AND-filter via a typed LabelPredicate so the physical
+	// builder routes them through the expression evaluator. Opaque-string
+	// Selection nodes are evaluated as always-true.
+	if len(np.Labels) > 1 {
+		extras := make([]string, len(np.Labels)-1)
+		copy(extras, np.Labels[1:])
+		lp := &ast.LabelPredicate{
+			Receiver: &ast.Variable{Name: nodeVar},
+			Labels:   extras,
+		}
+		plan = NewSelectionExpr(lp.String(), lp, plan)
 	}
 
 	// Inline property predicates sit above label selections, still below any

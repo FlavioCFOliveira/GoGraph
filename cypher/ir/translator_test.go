@@ -103,7 +103,7 @@ func TestTranslate_NodeByLabelScan_MultiLabel(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *ir.Selection for extra label, got %T", plan)
 	}
-	if sel.Predicate != "n:Employee" {
+	if sel.Predicate != "(n:Employee)" {
 		t.Errorf("Selection predicate = %q", sel.Predicate)
 	}
 	if _, ok := sel.Child.(*ir.NodeByLabelScan); !ok {

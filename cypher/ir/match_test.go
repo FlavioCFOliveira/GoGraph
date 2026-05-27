@@ -344,8 +344,8 @@ func Test_Match_MultiLabel_ExtraLabelAsSelection(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *ir.Selection for extra label, got %T", plan)
 	}
-	if sel.Predicate != "n:Employee" {
-		t.Errorf("Selection.Predicate = %q, want n:Employee", sel.Predicate)
+	if sel.Predicate != "(n:Employee)" {
+		t.Errorf("Selection.Predicate = %q, want (n:Employee)", sel.Predicate)
 	}
 	scan, ok := sel.Child.(*ir.NodeByLabelScan)
 	if !ok {
