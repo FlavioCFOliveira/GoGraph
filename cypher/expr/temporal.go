@@ -1028,7 +1028,11 @@ func offsetLocation(offsetSec int) *time.Location {
 	return time.FixedZone(formatOffsetSec(offsetSec), offsetSec)
 }
 
-// ParseDuration parses an ISO-8601 duration: P[nY][nMo][nW][nD][T[nH][nMi][nS]].
+// ParseDuration parses an ISO-8601 duration in either form:
+//
+//	Designator form     P[nY][nMo][nW][nD][T[nH][nMi][nS]]
+//	Date-and-time form  PYYYY-MM-DDTHH:MM:SS[.fraction]
+//
 // Fractional components are supported for the final emitted unit (per openCypher);
 // internally the parser absorbs fractional months/days as fractional seconds added
 // to the appropriate component.
@@ -1040,6 +1044,14 @@ func ParseDuration(s string) (DurationValue, error) {
 		return DurationValue{}, fmt.Errorf("invalid duration prefix: %q", s)
 	}
 	rest := s[1:]
+	// Date-and-time alternative form: the body contains a "-" or ":"
+	// before any designator letter. ISO 8601 lets a duration be expressed
+	// as the literal "PYYYY-MM-DDTHH:MM:SS[.frac]" — components are
+	// positional rather than tagged, but the openCypher TCK accepts it
+	// (Temporal2 [7] row 'P2012-02-02T14:37:21.545' → P2012Y2M2DT14H37M21.545S).
+	if isISODateTimeDuration(rest) {
+		return parseISODateTimeDuration(rest, s)
+	}
 	var (
 		months  int64
 		days    int64
@@ -1111,6 +1123,107 @@ func ParseDuration(s string) (DurationValue, error) {
 		default:
 			return DurationValue{}, fmt.Errorf("unexpected duration unit %q in %q", unit, s)
 		}
+	}
+	return NewDuration(months, days, seconds, nanos), nil
+}
+
+// isISODateTimeDuration reports whether the body (after the leading 'P')
+// is in the date-and-time alternative form rather than the designator
+// form. The two are unambiguous: the alternative form contains either
+// '-' (separating year/month/day) or ':' (separating hour/minute/second)
+// before any designator letter (Y, M, W, D, H, S after T). Designator
+// form may include '-' inside negative numeric components (e.g. "P-5D"),
+// so a leading sign is skipped before the scan.
+func isISODateTimeDuration(rest string) bool {
+	if rest == "" {
+		return false
+	}
+	i := 0
+	if rest[0] == '+' || rest[0] == '-' {
+		i = 1
+	}
+	for ; i < len(rest); i++ {
+		ch := rest[i]
+		if ch == '-' || ch == ':' {
+			return true
+		}
+		if ch >= 'A' && ch <= 'Z' {
+			return false
+		}
+		if ch >= 'a' && ch <= 'z' {
+			return false
+		}
+	}
+	return false
+}
+
+// parseISODateTimeDuration handles the "PYYYY-MM-DDTHH:MM:SS[.frac]"
+// alternative form. The original full string is passed in for error
+// messages so the caller's surrounding context is preserved.
+func parseISODateTimeDuration(body, full string) (DurationValue, error) {
+	// Split on T (case-insensitive). The date part may be missing
+	// (PT14:37:21) but the alternative form normally requires it.
+	tIdx := -1
+	for i := 0; i < len(body); i++ {
+		if body[i] == 'T' || body[i] == 't' {
+			tIdx = i
+			break
+		}
+	}
+	datePart := body
+	timePart := ""
+	if tIdx >= 0 {
+		datePart = body[:tIdx]
+		timePart = body[tIdx+1:]
+	}
+	var months, days, seconds int64
+	var nanos int32
+	if datePart != "" {
+		// YYYY-MM-DD (each field positional, no leading zero requirement
+		// beyond what ParseInt accepts).
+		parts := strings.Split(datePart, "-")
+		if len(parts) != 3 {
+			return DurationValue{}, fmt.Errorf("invalid duration date part %q in %q", datePart, full)
+		}
+		y, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return DurationValue{}, fmt.Errorf("invalid year %q in %q", parts[0], full)
+		}
+		mo, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return DurationValue{}, fmt.Errorf("invalid month %q in %q", parts[1], full)
+		}
+		d, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return DurationValue{}, fmt.Errorf("invalid day %q in %q", parts[2], full)
+		}
+		months = y*12 + mo
+		days = d
+	}
+	if timePart != "" {
+		// HH:MM:SS[.frac]
+		parts := strings.Split(timePart, ":")
+		if len(parts) != 3 {
+			return DurationValue{}, fmt.Errorf("invalid duration time part %q in %q", timePart, full)
+		}
+		h, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return DurationValue{}, fmt.Errorf("invalid hour %q in %q", parts[0], full)
+		}
+		mi, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return DurationValue{}, fmt.Errorf("invalid minute %q in %q", parts[1], full)
+		}
+		// Seconds may carry a fractional component (.545 etc.).
+		secStr := strings.Replace(parts[2], ",", ".", 1)
+		sf, err := strconv.ParseFloat(secStr, 64)
+		if err != nil {
+			return DurationValue{}, fmt.Errorf("invalid second %q in %q", parts[2], full)
+		}
+		secInt := int64(sf)
+		secFrac := sf - float64(secInt)
+		seconds = h*3600 + mi*60 + secInt
+		nanos = int32(math.Round(secFrac * 1_000_000_000))
 	}
 	return NewDuration(months, days, seconds, nanos), nil
 }
