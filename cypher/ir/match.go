@@ -566,16 +566,20 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 
 	// Walk remaining (rel, node) pairs. prevNodeVar threads the previous node's
 	// variable name into the next Expand step so its FromVar is correct.
+	// Anonymous nodes are assigned a synthetic IR-only variable so a
+	// subsequent hop can reference the destination column emitted by the
+	// preceding Expand (without a name, fromVar="" forces the next step to
+	// scan from an empty schema key and the chain breaks — see Match3 [17]).
 	el = el.Next
 	for el != nil {
 		if el.Relationship != nil && el.Node != nil {
-			plan = t.matchExpandStepBoundWithFrom(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar)
-			if el.Node.Variable != nil {
-				prevNodeVar = *el.Node.Variable
-				boundVars[*el.Node.Variable] = struct{}{}
-			} else {
-				prevNodeVar = ""
+			if el.Node.Variable == nil {
+				synth := t.freshAnonVar()
+				el.Node.Variable = &synth
 			}
+			plan = t.matchExpandStepBoundWithFrom(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar)
+			prevNodeVar = *el.Node.Variable
+			boundVars[*el.Node.Variable] = struct{}{}
 			if el.Relationship.Variable != nil {
 				boundVars[*el.Relationship.Variable] = struct{}{}
 			}
@@ -633,16 +637,20 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 
 	// Walk remaining (rel, node) pairs. prevNodeVar threads the previous node's
 	// variable name into the next Expand step so its FromVar is correct.
+	// Anonymous nodes are assigned a synthetic IR-only variable so a
+	// subsequent hop can reference the destination column emitted by the
+	// preceding Expand (without a name, fromVar="" forces the next step to
+	// scan from an empty schema key and the chain breaks — see Match3 [17]).
 	el = el.Next
 	for el != nil {
 		if el.Relationship != nil && el.Node != nil {
-			plan = t.matchExpandStepBoundWithFrom(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar)
-			if el.Node.Variable != nil {
-				prevNodeVar = *el.Node.Variable
-				boundVars[*el.Node.Variable] = struct{}{}
-			} else {
-				prevNodeVar = ""
+			if el.Node.Variable == nil {
+				synth := t.freshAnonVar()
+				el.Node.Variable = &synth
 			}
+			plan = t.matchExpandStepBoundWithFrom(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar)
+			prevNodeVar = *el.Node.Variable
+			boundVars[*el.Node.Variable] = struct{}{}
 			if el.Relationship.Variable != nil {
 				boundVars[*el.Relationship.Variable] = struct{}{}
 			}
