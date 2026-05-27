@@ -3736,6 +3736,70 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph
 	return expr.PathValue{Nodes: nodes, Relationships: rels}, true
 }
 
+// buildPathValueFromVLEMeta reconstructs an [expr.PathValue] from the flat
+// alternating ListValue [srcID, edgePos0, dst0, edgePos1, dst1, …] that the
+// VarLengthExpand operator deposits into the named-path column described by
+// pmeta. It mirrors the named-path-VLE fast path in buildIRProjection and is
+// factored out so that buildRowCtx can produce a real PathValue for
+// expression evaluation (e.g. `relationships(p)`, `nodes(p)`,
+// `length(p)` over var-length paths). Returns (zero, false) when the
+// column is missing, not a ListValue, empty, or carries non-integer entries.
+func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[string, float64]) (expr.PathValue, bool) {
+	if pmeta.listCol >= len(row) {
+		return expr.PathValue{}, false
+	}
+	lv, ok := row[pmeta.listCol].(expr.ListValue)
+	if !ok || len(lv) == 0 {
+		return expr.PathValue{}, false
+	}
+	nHops := (len(lv) - 1) / 2
+	nodes := make([]expr.NodeValue, 0, nHops+1)
+	rels := make([]expr.RelationshipValue, 0, nHops)
+	leadID, ok := lv[0].(expr.IntegerValue)
+	if !ok {
+		return expr.PathValue{}, false
+	}
+	nodes = append(nodes, buildNodeValueFromID(graph.NodeID(leadID), g))
+	for h := 0; h < nHops; h++ {
+		edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
+		dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
+		if !ok1 || !ok2 {
+			return expr.PathValue{}, false
+		}
+		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
+		nodes = append(nodes, dstNode)
+		et := pmeta.edgeType
+		var edgeProps expr.MapValue
+		if g != nil {
+			srcKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(nodes[h].ID))
+			dstKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
+			if sOK && dOK {
+				if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+					et = ets[0]
+				} else if ets := g.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
+					et = ets[0]
+				}
+				rawEP := g.EdgeProperties(srcKey, dstKey)
+				if len(rawEP) == 0 {
+					rawEP = g.EdgeProperties(dstKey, srcKey)
+				}
+				edgeProps = make(expr.MapValue, len(rawEP))
+				for k, pv := range rawEP {
+					edgeProps[k] = lpgPropToExpr(pv)
+				}
+			}
+		}
+		rels = append(rels, expr.RelationshipValue{
+			ID:         uint64(edgePos),
+			StartID:    nodes[h].ID,
+			EndID:      dstNode.ID,
+			Type:       et,
+			Properties: edgeProps,
+		})
+	}
+	return expr.PathValue{Nodes: nodes, Relationships: rels}, true
+}
+
 // buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,
 // upgrading IntegerValue(nodeID) entries to NodeValue with properties loaded
 // from the graph. g may be nil when no graph is available (upgrade is
@@ -3756,6 +3820,14 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 		if bopts != nil && bopts.pathVarChain != nil {
 			if cinfo, isChain := bopts.pathVarChain[varName]; isChain {
 				if pv, ok := buildPathValueFromChainInfo(row, cinfo, g); ok {
+					ctx[varName] = pv
+					continue
+				}
+			}
+		}
+		if bopts != nil && bopts.pathVarMeta != nil {
+			if pmeta, isVLE := bopts.pathVarMeta[varName]; isVLE {
+				if pv, ok := buildPathValueFromVLEMeta(row, pmeta, g); ok {
 					ctx[varName] = pv
 					continue
 				}
