@@ -56,6 +56,12 @@ type RelCols struct {
 // column indices.
 //
 // SetProperty is NOT safe for concurrent use.
+// errSetNullTarget is the sentinel resolveEntity returns when the schema
+// column for the SET target carries a null value. SET on a null entity is
+// a no-op per openCypher 9 §3.5.4; the operator treats this sentinel as
+// "skip the mutation but keep the row in the stream".
+var errSetNullTarget = errors.New("exec: SET target is NULL — no-op")
+
 // ValueEvalFn evaluates a SET RHS expression against the current input row
 // and returns the resulting property value plus a flag distinguishing the
 // "no value produced" case from the "explicit null" case. The exec operator
@@ -178,6 +184,10 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 
 	ent, err := op.resolveEntity(op.entityVar, childRow)
 	if err != nil {
+		if errors.Is(err, errSetNullTarget) {
+			*out = childRow
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: SetProperty %q: %w", op.entityVar, err)
 	}
 
@@ -225,6 +235,13 @@ func (op *SetProperty) resolveEntity(varName string, row Row) (entityBinding, er
 	}
 	if colIdx >= len(row) {
 		return entityBinding{}, fmt.Errorf("column %d out of range (row len %d)", colIdx, len(row))
+	}
+	// openCypher 9 §3.5.4: SET on a NULL entity is a no-op (the rows pass
+	// through unchanged). Surface this via a sentinel that the caller turns
+	// into a row pass-through. The sentinel error preserves the existing
+	// resolveEntity API for non-null callers.
+	if row[colIdx] == nil || expr.IsNull(row[colIdx]) {
+		return entityBinding{}, errSetNullTarget
 	}
 	switch v := row[colIdx].(type) {
 	case expr.IntegerValue:
@@ -493,6 +510,10 @@ func (op *SetLabels) Next(out *Row) (bool, error) {
 
 	nodeID, err := op.resolveNodeID(op.nodeVar, childRow)
 	if err != nil {
+		if errors.Is(err, errSetNullTarget) {
+			*out = childRow
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: SetLabels %q: %w", op.nodeVar, err)
 	}
 	nodeKey, resolved := op.mutator.ResolveNodeLabel(nodeID)
@@ -518,6 +539,9 @@ func (op *SetLabels) resolveNodeID(varName string, row Row) (graph.NodeID, error
 	}
 	if colIdx >= len(row) {
 		return 0, fmt.Errorf("column %d out of range (row len %d)", colIdx, len(row))
+	}
+	if row[colIdx] == nil || expr.IsNull(row[colIdx]) {
+		return 0, errSetNullTarget
 	}
 	iv, ok := row[colIdx].(expr.IntegerValue)
 	if !ok {

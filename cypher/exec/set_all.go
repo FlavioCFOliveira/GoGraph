@@ -250,6 +250,10 @@ func (op *SetAllProperties) Next(out *Row) (bool, error) {
 
 	target, terr := resolveEntityBinding(op.entityVar, op.schema, op.relCols, childRow, op.mutator)
 	if terr != nil {
+		if errors.Is(terr, errSetNullTarget) {
+			*out = childRow
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: SetAllProperties %q: %w", op.entityVar, terr)
 	}
 
@@ -397,6 +401,9 @@ func resolveEntityBinding(
 	}
 	if colIdx >= len(row) {
 		return entityBinding{}, fmt.Errorf("column %d out of range (row len %d)", colIdx, len(row))
+	}
+	if row[colIdx] == nil || expr.IsNull(row[colIdx]) {
+		return entityBinding{}, errSetNullTarget
 	}
 	switch v := row[colIdx].(type) {
 	case expr.IntegerValue:
