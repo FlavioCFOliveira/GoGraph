@@ -964,8 +964,15 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 	}
 	name := *rp.Variable
 	// Re-using an existing name as a relationship: must be a relationship
-	// already, otherwise VariableTypeConflict.
+	// already, otherwise VariableTypeConflict. Exception: a variable-length
+	// relationship pattern (`[rs*]`) accepts a previously-bound "value" or
+	// "list" alias as a list-of-relationships constraint — openCypher
+	// allows `WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)` so the var-length
+	// match is restricted to the supplied relationship list.
 	if sym, ok := a.scope.Lookup(name); ok {
+		if rp.Range != nil && (sym.Type == "value" || sym.Type == "list") {
+			return
+		}
 		if conflictsWith(sym.Type, "relationship") {
 			a.error(redeclarationError(name, rp.Pos))
 		}
