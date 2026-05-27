@@ -17,6 +17,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"gograph/cypher/expr"
@@ -89,6 +90,13 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 
 	ent, entErr := resolveEntityMaybeRel(op.entityVar, op.schema, op.relCols, childRow, op.mutator)
 	if entErr != nil {
+		if errors.Is(entErr, errNullTarget) {
+			// openCypher: REMOVE on a NULL target is silently ignored.
+			// Pass the row through unchanged so OPTIONAL MATCH chains
+			// still produce their null-padded rows downstream.
+			*out = childRow
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: RemoveProperty %q: %w", op.entityVar, entErr)
 	}
 
@@ -237,9 +245,11 @@ func resolveEntityFromRow(varName string, schema map[string]int, row Row, mut Gr
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
 		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
-	default:
-		return resolvedEntity{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
 	}
+	if expr.IsNull(row[colIdx]) {
+		return resolvedEntity{}, errNullTarget
+	}
+	return resolvedEntity{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
 }
 
 // resolveEntityMaybeRel resolves the entity at varName. When rc is non-nil
@@ -270,9 +280,11 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
 		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
-	default:
-		return resolvedEntity{}, fmt.Errorf("variable %q is not IntegerValue/RelationshipValue for relationship entity (got %T)", varName, row[colIdx])
 	}
+	if expr.IsNull(row[colIdx]) {
+		return resolvedEntity{}, errNullTarget
+	}
+	return resolvedEntity{}, fmt.Errorf("variable %q is not IntegerValue/RelationshipValue for relationship entity (got %T)", varName, row[colIdx])
 }
 
 // resolveRelBindingFromRow resolves a relationship entity from the (srcCol,
