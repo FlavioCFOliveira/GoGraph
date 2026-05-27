@@ -126,15 +126,39 @@ func (t *translator) singleQuery(q *ast.SingleQuery) (LogicalPlan, error) {
 	// For manually-constructed ast.SingleQuery objects (unit tests), q.LeadingCountSet
 	// is false and q.With holds the WITH clauses.  Fall back to the legacy
 	// "all ReadingClauses first, then q.With" ordering to preserve compat.
-	for _, rc := range q.ReadingClauses {
-		var err error
-		plan, err = t.readingClause(rc, plan)
-		if err != nil {
-			return nil, err
+	if q.LeadingCountSet {
+		// Document-order processing: interleave reading and updating clauses
+		// by source position so that queries like CREATE … WITH … RETURN
+		// place the CREATE before the WITH (otherwise the WITH runs with
+		// no input and the subsequent CREATE re-references the now-bound
+		// variable, dropping the actual node creation).
+		clauses := make([]orderedClause, 0, len(q.ReadingClauses)+len(q.UpdatingClauses))
+		for _, rc := range q.ReadingClauses {
+			clauses = append(clauses, orderedClause{pos: positionFromNode(rc), kind: 0, rc: rc})
 		}
-	}
-	if !q.LeadingCountSet {
-		// Legacy path: WITH clauses stored in q.With (manually-constructed ASTs).
+		for _, uc := range q.UpdatingClauses {
+			clauses = append(clauses, orderedClause{pos: positionFromNode(uc), kind: 1, uc: uc})
+		}
+		sortByPos(clauses)
+		for _, c := range clauses {
+			var err error
+			if c.kind == 0 {
+				plan, err = t.readingClause(c.rc, plan)
+			} else {
+				plan, err = t.updatingClause(c.uc, plan)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		for _, rc := range q.ReadingClauses {
+			var err error
+			plan, err = t.readingClause(rc, plan)
+			if err != nil {
+				return nil, err
+			}
+		}
 		for _, w := range q.With {
 			var err error
 			plan, err = t.withClause(w, plan)
@@ -142,13 +166,12 @@ func (t *translator) singleQuery(q *ast.SingleQuery) (LogicalPlan, error) {
 				return nil, err
 			}
 		}
-	}
-
-	for _, uc := range q.UpdatingClauses {
-		var err error
-		plan, err = t.updatingClause(uc, plan)
-		if err != nil {
-			return nil, err
+		for _, uc := range q.UpdatingClauses {
+			var err error
+			plan, err = t.updatingClause(uc, plan)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -166,6 +189,58 @@ func (t *translator) singleQuery(q *ast.SingleQuery) (LogicalPlan, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Reading clauses
 // ─────────────────────────────────────────────────────────────────────────────
+
+// positionFromNode returns the Pos field of any ast.Node that carries one.
+// It uses a small type switch over the concrete clause kinds the IR
+// translator actually iterates over.
+func positionFromNode(n ast.Node) ast.Position {
+	switch v := n.(type) {
+	case *ast.Match:
+		return v.Pos
+	case *ast.OptionalMatch:
+		return v.Pos
+	case *ast.Unwind:
+		return v.Pos
+	case *ast.With:
+		return v.Pos
+	case *ast.Call:
+		return v.Pos
+	case *ast.Create:
+		return v.Pos
+	case *ast.Merge:
+		return v.Pos
+	case *ast.Set:
+		return v.Pos
+	case *ast.Remove:
+		return v.Pos
+	case *ast.Delete:
+		return v.Pos
+	case *ast.DetachDelete:
+		return v.Pos
+	}
+	return ast.Position{}
+}
+
+// orderedClause is a (reading or updating) clause paired with its source
+// position so the singleQuery loop can interleave them by document order.
+type orderedClause struct {
+	pos  ast.Position
+	kind int // 0=reading, 1=updating
+	rc   ast.ReadingClause
+	uc   ast.UpdatingClause
+}
+
+// sortByPos sorts the orderedClause slice by source-position offset using
+// insertion sort (the slices are short — typically ≤6 clauses).
+func sortByPos(s []orderedClause) {
+	for i := 1; i < len(s); i++ {
+		j := i
+		for j > 0 && s[j-1].pos.Offset > s[j].pos.Offset {
+			s[j-1], s[j] = s[j], s[j-1]
+			j--
+		}
+	}
+}
 
 func (t *translator) readingClause(rc ast.ReadingClause, child LogicalPlan) (LogicalPlan, error) {
 	switch v := rc.(type) {
