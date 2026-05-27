@@ -932,6 +932,36 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3796: raised after round 20 closed every Temporal10 scenario
+//     except [12] (statement-time now-cache, deferred). Three
+//     coordinated fixes landed:
+//     (a) durationBetweenTimeOnly / elapsedNanosTimeOnly select the
+//         projection frame from operand kinds — UTC arithmetic when
+//         both sides are zoned (Time / DateTime), wall-clock when at
+//         least one side is local. timeOfDayNanos applies
+//         TimeValue.OffsetSec only in UTC mode. Closes Temporal10
+//         [2]/[5] both-zoned mixed-kind rows.
+//     (b) elapsedNanos and elapsedNanosTimeOnly invoke
+//         dstAwareInstants first: when one side is DateTime (zoned)
+//         and the other is local (LocalDateTime / LocalTime / Date),
+//         the local is rebuilt with time.Date in the DateTime's
+//         *time.Location (and date when needed) so Go's time package
+//         picks the correct DST offset. Both are then subtracted as
+//         instants. Closes Temporal10 [8] (datetime(Europe/Stockholm,
+//         …) vs local on a DST-end day reports PT5H / PT25H).
+//     (c) ParseDate accepts the extended ISO year form
+//         ([+-]Y+(-MM(-DD)?)?) and ParseLocalDateTime accepts a bare
+//         date with no T separator. fnDurationInSeconds /
+//         fnDurationInDays now go through elapsedSecsAndNanos, which
+//         returns (secs, nanos) without overflowing int64-nanos;
+//         the both-local date-bearing branch uses Julian-Day-Number
+//         arithmetic (julianDayGregorian) outside ±200 years.
+//         formatDuration decomposes (Seconds, Nanos) into H/M/S on
+//         the seconds axis directly so the toString of a ±10^9-year
+//         duration no longer saturates. Closes Temporal10 [9]
+//         (P1999999998Y11M30D) and [10] (PT17531639991215H59M59S).
+//     Observed 3796-3801 across a 10-run sample; gate set at the
+//     floor.
 //   - 3784: raised after the parser's normalize step learnt to
 //     preserve a user-given `-` in a varlen range bound. Previously
 //     `[r*-2]` was rewritten and abs'd into a positive `2`, so the
@@ -1129,7 +1159,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3784
+const tckExecutionBaseline = 3796
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
