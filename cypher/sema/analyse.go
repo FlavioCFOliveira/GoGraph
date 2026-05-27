@@ -317,6 +317,8 @@ func (a *analyser) withClause(w *ast.With) {
 		for _, s := range w.Projection.OrderBy {
 			a.checkExpr(s.Expr)
 		}
+		a.checkProjectionSkipLimit("SKIP", w.Projection.Skip)
+		a.checkProjectionSkipLimit("LIMIT", w.Projection.Limit)
 		return
 	}
 
@@ -432,6 +434,8 @@ func (a *analyser) withClause(w *ast.With) {
 		}
 		a.error(a.scope.Define(name, p.pos, inferProjectedType(p.expr)))
 	}
+	a.checkProjectionSkipLimit("SKIP", w.Projection.Skip)
+	a.checkProjectionSkipLimit("LIMIT", w.Projection.Limit)
 }
 
 // inferProjectedType returns a coarse static type for a WITH/RETURN
@@ -897,28 +901,36 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 		a.checkExpr(s.Expr)
 	}
 	a.checkOrderByAggregation(proj)
-	if proj.Skip != nil {
-		errsBefore := len(a.errs)
-		a.checkExpr(proj.Skip)
-		// Only flag the non-constant error when checkExpr did not already
-		// report something for this expression (e.g. UndefinedVariable on
-		// an unbound reference): avoids double-reporting the same site.
-		if len(a.errs) == errsBefore && hasVariableReference(proj.Skip) {
-			a.error(invalidBooleanOperandError("SKIP", "non-constant", positionOf(proj.Skip)))
-		}
-		if _, isFloat := proj.Skip.(*ast.FloatLiteral); isFloat {
-			a.error(invalidBooleanOperandError("SKIP", "Float", positionOf(proj.Skip)))
-		}
+	a.checkProjectionSkipLimit("SKIP", proj.Skip)
+	a.checkProjectionSkipLimit("LIMIT", proj.Limit)
+}
+
+// checkProjectionSkipLimit validates the SKIP and LIMIT expressions of
+// a projection at compile time. It composes three checks:
+//   - generic checkExpr (variable scoping, sub-expression types);
+//   - non-constant expressions referencing variables (openCypher 9 §3.6
+//     requires SKIP/LIMIT to be constant);
+//   - literal-type rules: negative IntLiteral → NegativeIntegerArgument;
+//     FloatLiteral → InvalidArgumentType.
+//
+// Parameters ($x) are deliberately accepted at compile time; they are
+// validated at runtime when their values are known.
+func (a *analyser) checkProjectionSkipLimit(clause string, e ast.Expression) {
+	if e == nil {
+		return
 	}
-	if proj.Limit != nil {
-		errsBefore := len(a.errs)
-		a.checkExpr(proj.Limit)
-		if len(a.errs) == errsBefore && hasVariableReference(proj.Limit) {
-			a.error(invalidBooleanOperandError("LIMIT", "non-constant", positionOf(proj.Limit)))
+	errsBefore := len(a.errs)
+	a.checkExpr(e)
+	if len(a.errs) == errsBefore && hasVariableReference(e) {
+		a.error(invalidBooleanOperandError(clause, "non-constant", positionOf(e)))
+	}
+	switch v := e.(type) {
+	case *ast.IntLiteral:
+		if v.Value < 0 {
+			a.error(negativeIntegerArgumentError(clause, v.Value, v.Pos))
 		}
-		if _, isFloat := proj.Limit.(*ast.FloatLiteral); isFloat {
-			a.error(invalidBooleanOperandError("LIMIT", "Float", positionOf(proj.Limit)))
-		}
+	case *ast.FloatLiteral:
+		a.error(invalidIntegerArgumentError(clause, "FLOAT", v.Pos))
 	}
 }
 

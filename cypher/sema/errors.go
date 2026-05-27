@@ -70,6 +70,11 @@ const (
 	// §3.3.1.2 forbids this: a single path pattern cannot bind two
 	// distinct edges to the same relationship name.
 	KindRelationshipUniqueness ErrorKind = "RELATIONSHIP_UNIQUENESS"
+
+	// KindNegativeIntegerArgument is reported when a SKIP or LIMIT
+	// clause is given a negative integer literal. openCypher 9 §3.6
+	// requires the argument to be a non-negative INTEGER.
+	KindNegativeIntegerArgument ErrorKind = "NEGATIVE_INTEGER_ARGUMENT"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -182,6 +187,28 @@ func relationshipUniquenessError(name string, pos ast.Position) *ScopeError {
 	}
 }
 
+// negativeIntegerArgumentError constructs a KindNegativeIntegerArgument
+// ScopeError for a SKIP or LIMIT clause supplied with a negative
+// integer literal.
+func negativeIntegerArgumentError(clause string, value int64, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindNegativeIntegerArgument,
+		Pos:     pos,
+		Message: fmt.Sprintf("%s expects a non-negative integer, got %d", clause, value),
+	}
+}
+
+// invalidIntegerArgumentError constructs a KindInvalidArgumentType
+// ScopeError for a SKIP or LIMIT clause supplied with a non-integer
+// literal (e.g. a float).
+func invalidIntegerArgumentError(clause, gotKind string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindInvalidArgumentType,
+		Pos:     pos,
+		Message: fmt.Sprintf("%s expects an INTEGER, got %s literal", clause, gotKind),
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bolt-compatible mapping (TCK error categories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +265,10 @@ const (
 	// a relationship variable introduced more than once in the same
 	// path pattern.
 	SubTypeRelationshipUniqueness = "RelationshipUniquenessViolation"
+
+	// SubTypeNegativeIntegerArgument is the canonical TCK sub-type for
+	// a negative integer literal supplied to SKIP or LIMIT.
+	SubTypeNegativeIntegerArgument = "NegativeIntegerArgument"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -309,6 +340,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindColumnNameConflict, Category: CategorySyntaxError, SubType: SubTypeColumnNameConflict},
 	{Kind: KindUnknownFunction, Category: CategorySyntaxError, SubType: SubTypeUnknownFunction},
 	{Kind: KindRelationshipUniqueness, Category: CategorySyntaxError, SubType: SubTypeRelationshipUniqueness},
+	{Kind: KindNegativeIntegerArgument, Category: CategorySyntaxError, SubType: SubTypeNegativeIntegerArgument},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]
