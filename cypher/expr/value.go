@@ -184,6 +184,14 @@ func (v IntegerValue) Equal(other Value) Value {
 		return BoolValue(v == o)
 	case FloatValue:
 		return BoolValue(float64(v) == float64(o))
+	case NodeValue:
+		// Symmetric with NodeValue.Equal — accept a raw NodeID as equal
+		// to the projected NodeValue when the underlying IDs match.
+		return BoolValue(int64(v) == int64(o.ID))
+	case RelationshipValue:
+		// Symmetric with RelationshipValue.Equal — accept a raw edge ID
+		// as equal to the projected RelationshipValue.
+		return BoolValue(int64(v) == int64(o.ID))
 	}
 	return BoolValue(false)
 }
@@ -458,14 +466,24 @@ func (v NodeValue) String() string {
 	return fmt.Sprintf("(node#%d)", v.ID)
 }
 
-// Equal returns Null if other is Null, BoolValue(true) iff both NodeValues
-// have the same ID (node identity per openCypher semantics).
+// Equal returns Null if other is Null, BoolValue(true) iff both refer to
+// the same node (node identity per openCypher semantics). The peer may
+// be a NodeValue (canonical projected form) or an IntegerValue carrying
+// the raw NodeID (the in-pipeline encoding emitted by NodeScan/Expand);
+// both forms compare on the underlying ID so `n = m` and similar
+// equalities work when one operand has flowed through a projection and
+// the other has not.
 func (v NodeValue) Equal(other Value) Value {
 	if IsNull(other) {
 		return Null
 	}
-	o, ok := other.(NodeValue)
-	return BoolValue(ok && v.ID == o.ID)
+	switch o := other.(type) {
+	case NodeValue:
+		return BoolValue(v.ID == o.ID)
+	case IntegerValue:
+		return BoolValue(int64(v.ID) == int64(o))
+	}
+	return BoolValue(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -493,14 +511,24 @@ func (v RelationshipValue) String() string {
 	return fmt.Sprintf("-[rel#%d:%s]->", v.ID, v.Type)
 }
 
-// Equal returns Null if other is Null, BoolValue(true) iff both
-// RelationshipValues have the same ID (relationship identity per openCypher).
+// Equal returns Null if other is Null, BoolValue(true) iff both refer
+// to the same relationship (relationship identity per openCypher
+// semantics). Symmetric to [NodeValue.Equal]: the peer may be a
+// RelationshipValue (canonical projected form) or an IntegerValue
+// carrying the raw edge ID (the in-pipeline encoding emitted by
+// Expand), so `r = s` compares on the underlying ID regardless of
+// which side has flowed through a projection.
 func (v RelationshipValue) Equal(other Value) Value {
 	if IsNull(other) {
 		return Null
 	}
-	o, ok := other.(RelationshipValue)
-	return BoolValue(ok && v.ID == o.ID)
+	switch o := other.(type) {
+	case RelationshipValue:
+		return BoolValue(v.ID == o.ID)
+	case IntegerValue:
+		return BoolValue(int64(v.ID) == int64(o))
+	}
+	return BoolValue(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
