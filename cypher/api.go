@@ -118,6 +118,17 @@ type pathChainInfo struct {
 	steps      []pathChainStep
 }
 
+// vleRelInfo describes the schema column and edge-type filter for a
+// VarLengthExpand relationship variable. The column holds a flat
+// alternating ListValue [srcID, edgePos0, dst0, edgePos1, dst1, …];
+// buildIRProjection extracts each (edgePos, dst) pair and reconstructs
+// a RelationshipValue per hop so `RETURN r` for variable-length r
+// projects [[:T], [:T], …] instead of the raw integer list.
+type vleRelInfo struct {
+	listCol  int
+	edgeType string
+}
+
 type buildOpts struct {
 	// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] expressions
 	// encountered inside Filter/Project closures. May be nil; in that case
@@ -162,6 +173,12 @@ type buildOpts struct {
 	// consumes the triplets appended during the child build to associate
 	// IR chain elements with row slots.
 	expandTripletSeq []pathChainStep
+	// vleRelMeta maps a VarLengthExpand relationship variable name (e.g. "r"
+	// from `MATCH (a)-[r*]->(b)`) to the flat-list column it occupies plus
+	// the optional edge-type filter. Used by buildIRProjection to render the
+	// variable as a list of RelationshipValues rather than the raw
+	// alternating ListValue emitted by the VLE operator.
+	vleRelMeta map[string]vleRelInfo
 	// scalarCols is the set of schema variable names whose row values must NOT be
 	// upgraded from IntegerValue(NodeID) to NodeValue. Aggregate output columns
 	// (e.g. the output of count(*), sum, avg) are always scalars; their integer
@@ -2258,6 +2275,18 @@ func buildOperator(
 			// Also register in schema so variable is accessible.
 			schema[p.PathVar] = schemaBaseVLE
 		}
+		// Record the VLE relationship variable so the projection renders it
+		// as a list of RelationshipValues instead of the raw flat list.
+		if p.RelVar != "" && bopts != nil {
+			if bopts.vleRelMeta == nil {
+				bopts.vleRelMeta = make(map[string]vleRelInfo)
+			}
+			info := vleRelInfo{listCol: schemaBaseVLE}
+			if len(p.RelTypes) > 0 {
+				info.edgeType = p.RelTypes[0]
+			}
+			bopts.vleRelMeta[p.RelVar] = info
+		}
 
 		var g *lpg.Graph[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
@@ -3421,9 +3450,77 @@ func buildIRProjection(
 		var evalFn func(exec.Row) (expr.Value, error)
 		if item.Expr != nil {
 			if v, ok := item.Expr.(*ast.Variable); ok {
+				// VLE relationship-list fast path: reconstruct a list of
+				// RelationshipValues from the flat alternating ListValue
+				// emitted by VarLengthExpand into the rel-variable column.
+				if bopts != nil {
+					if rmeta, isVLERel := bopts.vleRelMeta[v.Name]; isVLERel {
+						capturedMeta := rmeta
+						capturedG := g
+						evalFn = func(row exec.Row) (expr.Value, error) {
+							if capturedMeta.listCol >= len(row) {
+								return expr.Null, nil
+							}
+							lv, ok := row[capturedMeta.listCol].(expr.ListValue)
+							if !ok {
+								return expr.Null, nil
+							}
+							if len(lv) == 0 {
+								// Empty path (0 hops, possible with *0..0 patterns).
+								return expr.ListValue{}, nil
+							}
+							// Flat format: [srcID, edgePos0, dst0, edgePos1, dst1, …].
+							nHops := (len(lv) - 1) / 2
+							rels := make(expr.ListValue, 0, nHops)
+							srcID := uint64(0)
+							if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
+								srcID = uint64(iv)
+							}
+							for h := 0; h < nHops; h++ {
+								edgeID, ok1 := lv[1+2*h].(expr.IntegerValue)
+								dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
+								if !ok1 || !ok2 {
+									continue
+								}
+								dstID := uint64(dstIDVal)
+								et := capturedMeta.edgeType
+								var edgeProps expr.MapValue
+								if capturedG != nil {
+									srcKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
+									dstKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+									if sOK && dOK {
+										if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+											et = ets[0]
+										} else if ets := capturedG.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
+											// Reverse-edge fall-back.
+											et = ets[0]
+										}
+										rawEP := capturedG.EdgeProperties(srcKey, dstKey)
+										if len(rawEP) == 0 {
+											rawEP = capturedG.EdgeProperties(dstKey, srcKey)
+										}
+										edgeProps = make(expr.MapValue, len(rawEP))
+										for k, pv := range rawEP {
+											edgeProps[k] = lpgPropToExpr(pv)
+										}
+									}
+								}
+								rels = append(rels, expr.RelationshipValue{
+									ID:         uint64(edgeID),
+									StartID:    srcID,
+									EndID:      dstID,
+									Type:       et,
+									Properties: edgeProps,
+								})
+								srcID = dstID
+							}
+							return rels, nil
+						}
+					}
+				}
 				// Path variable fast path: reconstruct PathValue from the flat
 				// alternating ListValue emitted by the VarLengthExpand operator.
-				if bopts != nil {
+				if bopts != nil && evalFn == nil {
 					if pmeta, isPMeta := bopts.pathVarMeta[v.Name]; isPMeta {
 						capturedMeta := pmeta
 						capturedG := g
