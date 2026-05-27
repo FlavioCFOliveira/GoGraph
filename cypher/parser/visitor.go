@@ -2791,7 +2791,21 @@ func hasInvalidNumericChar(s string) bool {
 }
 
 // unquoteString strips surrounding quotes from a string/char literal token
-// and processes common escape sequences.
+// and processes the openCypher 9 §6.3.3 escape sequences:
+//
+//	\\ \' \" \b \f \n \r \t \uXXXX
+//
+// A backslash followed by any other character is preserved verbatim
+// (matches the ANTLR grammar that accepts e.g. `\\u41` as the two
+// literal characters `\` and `u41` once the leading `\\` is decoded).
+// The grammar already rejects malformed \u escapes at parse time
+// (`\u`, `\uH`, `\u00ZZ`, …) so the 4-hex-digit case is safe here.
+//
+// Implementation note: chained strings.ReplaceAll cannot be used —
+// it would mis-decode patterns like `\\'` (literal backslash followed
+// by an end-of-string quote) because the `\\'` substring would match
+// the `\'` rule before the `\\` rule. A single left-to-right walk
+// over the runes is the only correct decoding.
 func unquoteString(raw string) string {
 	if len(raw) < 2 {
 		return raw
@@ -2801,14 +2815,67 @@ func unquoteString(raw string) string {
 		return raw
 	}
 	inner := raw[1 : len(raw)-1]
-	// Process escape sequences.
-	inner = strings.ReplaceAll(inner, "\\'", "'")
-	inner = strings.ReplaceAll(inner, "\\\"", "\"")
-	inner = strings.ReplaceAll(inner, "\\n", "\n")
-	inner = strings.ReplaceAll(inner, "\\t", "\t")
-	inner = strings.ReplaceAll(inner, "\\r", "\r")
-	inner = strings.ReplaceAll(inner, "\\\\", "\\")
-	return inner
+	var b strings.Builder
+	b.Grow(len(inner))
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		if c != '\\' || i+1 >= len(inner) {
+			b.WriteByte(c)
+			continue
+		}
+		next := inner[i+1]
+		switch next {
+		case '\\':
+			b.WriteByte('\\')
+			i++
+		case '\'':
+			b.WriteByte('\'')
+			i++
+		case '"':
+			b.WriteByte('"')
+			i++
+		case 'n':
+			b.WriteByte('\n')
+			i++
+		case 't':
+			b.WriteByte('\t')
+			i++
+		case 'r':
+			b.WriteByte('\r')
+			i++
+		case 'b':
+			b.WriteByte('\b')
+			i++
+		case 'f':
+			b.WriteByte('\f')
+			i++
+		case 'u':
+			// Walk past any additional `u` characters (the grammar
+			// accepts `\uuu...XXXX` where the trailing 4 hex digits
+			// define the codepoint). Decode the 4 hex digits if they
+			// are present; otherwise emit the raw backslash and let
+			// the unconsumed text follow.
+			j := i + 2
+			for j < len(inner) && inner[j] == 'u' {
+				j++
+			}
+			if j+4 <= len(inner) && isHex(inner[j]) && isHex(inner[j+1]) && isHex(inner[j+2]) && isHex(inner[j+3]) {
+				cp, _ := strconv.ParseUint(inner[j:j+4], 16, 32)
+				b.WriteRune(rune(cp))
+				i = j + 3
+			} else {
+				b.WriteByte('\\')
+			}
+		default:
+			b.WriteByte('\\')
+		}
+	}
+	return b.String()
+}
+
+// isHex reports whether b is an ASCII hexadecimal digit.
+func isHex(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
 // containsBareRelChainPattern reports whether expr contains an
