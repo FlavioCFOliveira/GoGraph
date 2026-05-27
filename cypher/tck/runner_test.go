@@ -932,6 +932,18 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3748: raised after ast.FloatLiteral.String() learnt to keep
+//     the float discriminator. strconv.FormatFloat with precision -1
+//     strips the trailing ".0" for whole-number values, so a CREATE
+//     ({price: 10.0}) round-tripped through the writes pipeline
+//     ended up calling parsePropValue("10") → Int64Value(10) and
+//     subsequent percentileDisc/percentileCont over those properties
+//     returned IntegerValue instead of FloatValue. The fix appends
+//     ".0" to FormatFloat output whenever the rendered text lacks
+//     both a "." and an exponent marker, leaving NaN/Inf untouched
+//     (those are not valid Cypher literals). Closes the 3
+//     Aggregation6 [1] percentileDisc float-discriminator failures.
+//     Observed 3748-3755 across a 5-run sample; gate set at 3748.
 //   - 3745: raised after dateFromMap / timeComponentsFromMap learnt
 //     to treat the {datetime: ...} key as a date+time base source
 //     (previously only {date:..} / {time:..} were consulted, so
@@ -961,7 +973,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3745
+const tckExecutionBaseline = 3748
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

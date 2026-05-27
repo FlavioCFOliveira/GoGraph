@@ -34,8 +34,19 @@ type FloatLiteral struct {
 func (*FloatLiteral) astNode()  {}
 func (*FloatLiteral) exprNode() {}
 
-// String returns the decimal representation of the float.
-func (n *FloatLiteral) String() string { return strconv.FormatFloat(n.Value, 'f', -1, 64) }
+// String returns the decimal representation of the float. Always emits a
+// fractional or exponent marker so the literal round-trips back to a float
+// when re-parsed by downstream property-value parsers — strconv.FormatFloat
+// drops the trailing ".0" for whole-number values like 10.0, but the
+// downstream parser uses presence of "." or "eE" to discriminate float
+// from integer literals.
+func (n *FloatLiteral) String() string {
+	s := strconv.FormatFloat(n.Value, 'f', -1, 64)
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
+}
 
 // StringLiteral is a single-quoted or double-quoted string literal.
 type StringLiteral struct {
