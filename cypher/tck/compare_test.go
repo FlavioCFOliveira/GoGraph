@@ -697,7 +697,14 @@ func formatFloatTCK(f float64) string {
 func formatNodeTCK(n expr.NodeValue) string {
 	var b strings.Builder
 	b.WriteByte('(')
-	for _, lbl := range n.Labels {
+	// LPG returns labels in unspecified (map-iteration) order, but the
+	// TCK expected-table cells are stable: a node with labels {A, B, C}
+	// renders as `(:A:B:C)`. Sort the slice deterministically so the
+	// multiset comparison sees the same string across runs.
+	labels := make([]string, len(n.Labels))
+	copy(labels, n.Labels)
+	sort.Strings(labels)
+	for _, lbl := range labels {
 		b.WriteByte(':')
 		b.WriteString(lbl)
 	}
