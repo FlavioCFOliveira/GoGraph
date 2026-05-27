@@ -9,6 +9,7 @@ package tck_test
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/cucumber/godog"
@@ -218,6 +219,13 @@ func mapTCKTypeToKind(t string) expr.Kind {
 		return expr.KindMap
 	case "PATH":
 		return expr.KindPath
+	case "NUMBER", "ANY":
+		// NUMBER accepts both INTEGER and FLOAT inputs; ANY accepts every
+		// type. parseProcCell uses KindNull as the "auto-detect from cell
+		// shape" sentinel so the table rows are parsed as Integer when the
+		// cell parses as an int, Float when it parses as a float, String
+		// for quoted literals, etc.
+		return expr.KindNull
 	default:
 		return expr.KindNull
 	}
@@ -337,6 +345,23 @@ func parseProcCell(s string, kind expr.Kind) (expr.Value, error) {
 			return nil, fmt.Errorf("not a boolean: %q", s)
 		}
 	default:
+		// Auto-detect (used for NUMBER / ANY / unknown declared kinds):
+		// quoted strings, booleans, integers, floats, then string fallback.
+		if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') && s[len(s)-1] == s[0] {
+			return expr.StringValue(s[1 : len(s)-1]), nil
+		}
+		switch strings.ToLower(s) {
+		case "true":
+			return expr.BoolValue(true), nil
+		case "false":
+			return expr.BoolValue(false), nil
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return expr.IntegerValue(n), nil
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return expr.FloatValue(f), nil
+		}
 		return expr.StringValue(s), nil
 	}
 }
