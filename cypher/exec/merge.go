@@ -66,6 +66,7 @@ type Merge struct {
 	created    bool
 	createdRow Row
 	done       bool
+	firedOnce  bool // tracks whether at least one merge cycle has run
 }
 
 // mergeAction is a pre-parsed ON CREATE / ON MATCH SET item. Two shapes
@@ -159,21 +160,66 @@ func (op *Merge) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *M
 // returned any rows.
 func (op *Merge) Init(ctx context.Context) error {
 	op.resetRunState(ctx)
+	return op.child.Init(ctx)
+}
 
-	if err := op.child.Init(ctx); err != nil {
-		return err
-	}
+// runMergeForChild executes one search-or-create cycle of the merge pattern
+// against the current graph state and buffers the resulting rows so that
+// Next can emit them. Called once per upstream child row so a query like
+//
+//	MATCH (person:Person) MERGE (city:City) RETURN person, city
+//
+// observes the merged binding once per driving row (the second person row
+// re-finds the city created on the first row, rather than skipping the
+// merge entirely).
+func (op *Merge) runMergeForChild(childRow Row) error {
+	op.matched = op.matched[:0]
+	op.matchedIdx = 0
+	op.created = false
+	op.createdRow = nil
 
-	// Execute the search sub-plan.
-	rows, err := op.searchFn(ctx)
+	rows, err := op.searchFn(op.ctx)
 	if err != nil {
 		return fmt.Errorf("exec: Merge: search: %w", err)
 	}
 
 	if len(rows) > 0 {
-		return op.runOnMatchPath(rows)
+		// Combine each matching node with the driving child row so the
+		// downstream projection sees both bindings.
+		combined := make([]Row, 0, len(rows))
+		for _, mr := range rows {
+			combined = append(combined, op.combineRows(childRow, mr))
+		}
+		return op.runOnMatchPath(combined)
 	}
-	return op.runOnCreatePath()
+	if err := op.runOnCreatePath(); err != nil {
+		return err
+	}
+	op.createdRow = op.combineRows(childRow, op.createdRow)
+	return nil
+}
+
+// combineRows appends mergeRow's columns to childRow, growing the schema-
+// mapped node slot of the merge variable when the child row does not
+// already include it.
+func (op *Merge) combineRows(childRow, mergeRow Row) Row {
+	if len(mergeRow) == 0 {
+		return childRow
+	}
+	mergeCol, ok := op.schema[op.nodeVar]
+	if !ok || mergeCol < len(childRow) {
+		// No dedicated merge column or it overlaps an existing slot —
+		// fall back to a verbatim child-row passthrough; the downstream
+		// projection will resolve the merge variable via the schema
+		// lookup against whatever column carries the merge node.
+		out := make(Row, len(childRow), len(childRow)+len(mergeRow))
+		copy(out, childRow)
+		return append(out, mergeRow...)
+	}
+	out := make(Row, mergeCol+1)
+	copy(out, childRow)
+	out[mergeCol] = mergeRow[0]
+	return out
 }
 
 // resetRunState clears the per-Init state so the operator can be re-Init'd
@@ -185,6 +231,7 @@ func (op *Merge) resetRunState(ctx context.Context) {
 	op.created = false
 	op.createdRow = nil
 	op.done = false
+	op.firedOnce = false
 }
 
 // runOnMatchPath applies each ON MATCH action to every row returned by the
@@ -245,24 +292,50 @@ func (op *Merge) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
 	}
-	if op.done {
-		return false, nil
+	for {
+		// Emit any rows buffered from the previous child row.
+		if op.matchedIdx < len(op.matched) {
+			*out = op.matched[op.matchedIdx]
+			op.matchedIdx++
+			return true, nil
+		}
+		if op.created {
+			op.created = false
+			*out = op.createdRow
+			return true, nil
+		}
+		if op.done {
+			return false, nil
+		}
+		// Drained — pull the next child row, run the merge cycle.
+		var childRow Row
+		ok, err := op.child.Next(&childRow)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			// Child has no more rows. When MERGE is the leading clause
+			// (no driving rows at all) the operator still fires once
+			// against an empty driving row so a standalone
+			// `MERGE (a:Foo)` creates the node — this matches the
+			// openCypher single-empty-row semantics that powers the
+			// Argument leaf.
+			if !op.firedOnce {
+				op.firedOnce = true
+				op.done = true
+				if err := op.runMergeForChild(Row{}); err != nil {
+					return false, err
+				}
+				continue
+			}
+			op.done = true
+			return false, nil
+		}
+		op.firedOnce = true
+		if err := op.runMergeForChild(childRow); err != nil {
+			return false, err
+		}
 	}
-
-	if op.created {
-		op.done = true
-		*out = op.createdRow
-		return true, nil
-	}
-
-	if op.matchedIdx < len(op.matched) {
-		*out = op.matched[op.matchedIdx]
-		op.matchedIdx++
-		return true, nil
-	}
-
-	op.done = true
-	return false, nil
 }
 
 // Close closes the child operator.
