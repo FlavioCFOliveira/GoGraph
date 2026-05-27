@@ -995,15 +995,26 @@ func durationBetweenDateBearing(a, b expr.Value) (expr.Value, bool) {
 
 // durationBetweenTimeOnly handles pairs where AT LEAST ONE side is a
 // time-only value (LocalTimeValue / TimeValue). Both sides are
-// projected to a nanosecond-since-midnight count via toNanosOfDay; the
-// date component, when present, is dropped — duration.between with a
-// time-only argument is defined on the time-of-day axis only.
+// projected to a nanosecond-since-midnight count via timeOfDayNanos;
+// the date component, when present, is dropped — duration.between with
+// a time-only argument is defined on the time-of-day axis only.
+//
+// When BOTH sides carry a zone (TimeValue or DateTimeValue), the
+// time-of-day axis is taken in UTC (the zone offsets are subtracted)
+// so that the difference reflects the elapsed wall time across zones:
+// duration.between(time('14:30'), time('16:30+0100')) is PT1H, not
+// PT2H. When at least one side is local (LocalTimeValue,
+// LocalDateTimeValue, DateValue), the time-of-day axis is taken in
+// the wall-clock frame on both sides — the zoned side's offset is
+// dropped — so the difference reflects the literal hands-of-the-clock
+// gap (matching openCypher's mixed-kind semantics).
 func durationBetweenTimeOnly(a, b expr.Value) (expr.Value, bool) {
-	na, oka := toNanosOfDay(a)
+	useUTC := isZoned(a) && isZoned(b)
+	na, oka := timeOfDayNanos(a, useUTC)
 	if !oka {
 		return nil, false
 	}
-	nb, okb := toNanosOfDay(b)
+	nb, okb := timeOfDayNanos(b, useUTC)
 	if !okb {
 		return nil, false
 	}
@@ -1036,23 +1047,54 @@ func toLocalDateTime(v expr.Value) (expr.LocalDateTimeValue, bool) {
 	return expr.LocalDateTimeValue{}, false
 }
 
-// toNanosOfDay returns the nanoseconds-since-midnight component of any
-// temporal value. For DateValue this is zero (date with no time means
-// midnight); for LocalDateTimeValue the wall-clock time-of-day; for
-// DateTimeValue the UTC time-of-day (the zone offset matters for any
-// duration computation against a time-only or LocalDateTime argument);
-// for time-only types the underlying Nanos field is returned directly.
-func toNanosOfDay(v expr.Value) (int64, bool) {
+// isZoned reports whether v carries an explicit zone offset. Only the
+// zoned temporal kinds (TimeValue, DateTimeValue) return true; the
+// local-only kinds (LocalTimeValue, LocalDateTimeValue, DateValue) and
+// non-temporal values return false.
+func isZoned(v expr.Value) bool {
+	switch v.(type) {
+	case expr.TimeValue, expr.DateTimeValue:
+		return true
+	}
+	return false
+}
+
+// timeOfDayNanos returns the nanoseconds-since-midnight component of
+// any temporal value, with a frame-of-reference toggle that selects
+// between UTC and wall-clock projection for the zoned kinds.
+//
+// useUTC=false (wall-clock frame): the visible HH:MM:SS.ns components
+// are returned verbatim. The zone offset on TimeValue / DateTimeValue
+// is ignored. This is the correct frame when at least one side of a
+// duration computation is zone-less, so the diff reflects the
+// hands-of-the-clock gap.
+//
+// useUTC=true (UTC frame): TimeValue subtracts OffsetSec; DateTimeValue
+// takes .T.UTC() before extraction. This is the correct frame when
+// both sides carry a zone, so the diff reflects the elapsed wall time
+// (duration.between(time('14:30'), time('16:30+0100')) → PT1H).
+//
+// DateValue is always 00:00 (no time component). LocalTimeValue
+// and LocalDateTimeValue have no zone, so the toggle has no effect on
+// them.
+func timeOfDayNanos(v expr.Value, useUTC bool) (int64, bool) {
+	const nsPerSec = int64(1_000_000_000)
 	switch vv := v.(type) {
 	case expr.DateValue:
 		return 0, true
 	case expr.LocalDateTimeValue:
 		return nanosOfDay(vv.T), true
 	case expr.DateTimeValue:
-		return nanosOfDay(vv.T.UTC()), true
+		if useUTC {
+			return nanosOfDay(vv.T.UTC()), true
+		}
+		return nanosOfDay(vv.T), true
 	case expr.LocalTimeValue:
 		return vv.Nanos, true
 	case expr.TimeValue:
+		if useUTC {
+			return vv.Nanos - int64(vv.OffsetSec)*nsPerSec, true
+		}
 		return vv.Nanos, true
 	}
 	return 0, false
@@ -1210,13 +1252,17 @@ func elapsedNanos(a, b expr.Value) (int64, bool) {
 }
 
 // elapsedNanosTimeOnly computes (b - a) on the nanos-of-day axis. It
-// is the projection used when at least one side is time-only.
+// is the projection used when at least one side is time-only. The
+// frame-of-reference (UTC vs wall-clock) matches
+// [durationBetweenTimeOnly]: UTC when both sides are zoned, wall-clock
+// otherwise.
 func elapsedNanosTimeOnly(a, b expr.Value) (int64, bool) {
-	na, oka := toNanosOfDay(a)
+	useUTC := isZoned(a) && isZoned(b)
+	na, oka := timeOfDayNanos(a, useUTC)
 	if !oka {
 		return 0, false
 	}
-	nb, okb := toNanosOfDay(b)
+	nb, okb := timeOfDayNanos(b, useUTC)
 	if !okb {
 		return 0, false
 	}
