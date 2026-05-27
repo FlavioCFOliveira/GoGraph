@@ -257,13 +257,43 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 			return false, true // filtered out; caller retries
 		}
 	}
-	syntheticID := int64(uint64(len(op.fwdEdges)) + pos)
-	if !op.passesRelMorphism(syntheticID) {
+	// Canonical edge ID: prefer the forward-edge position when the
+	// (dst → src) edge exists in the forward CSR, so cyphermorphism
+	// observes the SAME id for the forward and reverse traversals of the
+	// same edge. This is required for openCypher 9 §3.2.2: an undirected
+	// `(:Label2)--()` step that follows a previous forward hop must
+	// reject the same edge being matched in the reverse direction.
+	fwdPos, hasFwd := op.lookupFwdEdgePos(uint64(dst), uint64(op.srcID))
+	var edgeID int64
+	if hasFwd {
+		edgeID = int64(fwdPos)
+	} else {
+		edgeID = int64(uint64(len(op.fwdEdges)) + pos)
+	}
+	if !op.passesRelMorphism(edgeID) {
 		return false, true // cyphermorphism: duplicate edge; caller retries
 	}
-	op.buildRow(out, op.srcID, syntheticID, int64(dst))
+	op.buildRow(out, op.srcID, edgeID, int64(dst))
 	op.incEmitCount()
 	return true, true
+}
+
+// lookupFwdEdgePos returns the forward-CSR position of the edge
+// (src → dst), or (0, false) when no such edge exists. Used by the
+// reverse-traversal emit path so the cyphermorphism check observes the
+// same edge ID for forward and reverse traversals of an undirected edge.
+func (op *Expand) lookupFwdEdgePos(src, dst uint64) (uint64, bool) {
+	if src+1 >= uint64(len(op.fwdVerts)) {
+		return 0, false
+	}
+	start := op.fwdVerts[src]
+	end := op.fwdVerts[src+1]
+	for pos := start; pos < end; pos++ {
+		if uint64(op.fwdEdges[pos]) == dst {
+			return pos, true
+		}
+	}
+	return 0, false
 }
 
 // reverseEdgePassesFilter reports whether the forward edge (dst → src),
