@@ -393,6 +393,11 @@ func (a *analyser) callClause(c *ast.Call) {
 // after [orderClauses] sorts every clause by source position.
 
 func (a *analyser) createClause(c *ast.Create) {
+	// Detect bound-node augmentation BEFORE patternIntroduce defines the new
+	// occurrences in the scope. A node pattern whose variable is already in
+	// scope AND declares new labels or properties is rejected as
+	// VariableAlreadyBound.
+	a.checkCreateNoRebind(c.Pattern)
 	// CREATE introduces new variables from the pattern.
 	a.patternIntroduce(c.Pattern)
 	// CREATE-specific relationship checks: every relationship pattern
@@ -400,6 +405,75 @@ func (a *analyser) createClause(c *ast.Create) {
 	// union types, variable-length and undirected relationships are all
 	// rejected.
 	a.checkCreateRelationshipTypes(c.Pattern, true)
+	// Validate any property expressions on node or relationship patterns —
+	// in particular flag undefined-variable references (e.g.
+	// CREATE (b {name: missing}) where `missing` is not in scope).
+	a.checkPatternPropertyExprs(c.Pattern)
+}
+
+// checkPatternPropertyExprs walks every node and relationship pattern in pat
+// and runs the standard expression checker over any inline property map. The
+// pattern-variable scope is unchanged — this only surfaces UndefinedVariable
+// and the other diagnostics produced by [checkExpr] for property values.
+func (a *analyser) checkPatternPropertyExprs(pat *ast.Pattern) {
+	if pat == nil {
+		return
+	}
+	for _, pp := range pat.Paths {
+		el := pp.Head
+		for el != nil {
+			if np := el.Node; np != nil && np.Properties != nil {
+				a.checkExpr(np.Properties)
+			}
+			if rp := el.Relationship; rp != nil && rp.Properties != nil {
+				a.checkExpr(rp.Properties)
+			}
+			el = el.Next
+		}
+	}
+}
+
+// checkCreateNoRebind walks every node pattern in pat and reports a
+// KindVariableAlreadyBound error in two situations:
+//
+//  1. A node pattern whose variable is already bound (by an earlier
+//     clause or by an earlier occurrence in this same pattern) carries
+//     new labels or properties. The bound entity already has its label
+//     and property set; CREATE may not augment them.
+//  2. A single-node path pattern (no relationships in the path) refers
+//     to an already bound variable, with or without new attributes —
+//     this is a no-op that openCypher 9 §3.5.1 still rejects as
+//     "Cannot create a node that is already bound".
+//
+// Reusing a bound variable as an endpoint of a relationship in CREATE
+// is legal, provided no new labels or properties are declared on that
+// node — that is how CREATE attaches new relationships to existing
+// nodes.
+func (a *analyser) checkCreateNoRebind(pat *ast.Pattern) {
+	if pat == nil {
+		return
+	}
+	seen := map[string]struct{}{}
+	for _, pp := range pat.Paths {
+		// A path is "standalone-node" when its head has no Next link —
+		// i.e. the entire path is just a single node with no relationship.
+		standalone := pp.Head != nil && pp.Head.Next == nil && pp.Head.Node != nil
+		el := pp.Head
+		for el != nil {
+			if np := el.Node; np != nil && np.Variable != nil {
+				name := *np.Variable
+				_, alreadyInScope := a.scope.Lookup(name)
+				_, alreadyInPattern := seen[name]
+				bound := alreadyInScope || alreadyInPattern
+				hasNewAttrs := len(np.Labels) > 0 || np.Properties != nil
+				if bound && (hasNewAttrs || standalone) {
+					a.error(variableAlreadyBoundError(name, np.Pos))
+				}
+				seen[name] = struct{}{}
+			}
+			el = el.Next
+		}
+	}
 }
 
 func (a *analyser) mergeClause(m *ast.Merge) {

@@ -41,6 +41,13 @@ const (
 	// itself contain any aggregation. Aggregations only fold over groups
 	// defined by the projection; standing alone in an ORDER BY is illegal.
 	KindInvalidAggregation ErrorKind = "INVALID_AGGREGATION"
+
+	// KindVariableAlreadyBound is reported when CREATE re-uses a previously
+	// bound variable AND attempts to add new labels or properties to it.
+	// openCypher 9 §3.5.1: a bound node may be referenced from CREATE (so
+	// the pattern can describe edges around it) but cannot have its labels
+	// or properties augmented.
+	KindVariableAlreadyBound ErrorKind = "VARIABLE_ALREADY_BOUND"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -110,6 +117,17 @@ func invalidAggregationError(pos ast.Position) *ScopeError {
 	}
 }
 
+// variableAlreadyBoundError constructs a KindVariableAlreadyBound ScopeError
+// for a CREATE node pattern that re-uses a bound variable AND attempts to
+// declare new labels or properties on it.
+func variableAlreadyBoundError(name string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindVariableAlreadyBound,
+		Pos:     pos,
+		Message: fmt.Sprintf("variable %q is already bound; CREATE cannot augment its labels or properties", name),
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bolt-compatible mapping (TCK error categories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +167,10 @@ const (
 	// SubTypeInvalidAggregation is the TCK sub-type for an aggregation
 	// used in ORDER BY when the projection does not itself aggregate.
 	SubTypeInvalidAggregation = "InvalidAggregation"
+
+	// SubTypeVariableAlreadyBound is the TCK sub-type for CREATE on a
+	// previously bound variable with new labels or properties.
+	SubTypeVariableAlreadyBound = "VariableAlreadyBound"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -216,6 +238,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindRedeclaration, Category: CategorySyntaxError, SubType: SubTypeVariableTypeConflict},
 	{Kind: KindInvalidArgumentType, Category: CategorySyntaxError, SubType: SubTypeInvalidArgumentType},
 	{Kind: KindInvalidAggregation, Category: CategorySyntaxError, SubType: SubTypeInvalidAggregation},
+	{Kind: KindVariableAlreadyBound, Category: CategorySyntaxError, SubType: SubTypeVariableAlreadyBound},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]
