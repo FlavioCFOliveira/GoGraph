@@ -2369,6 +2369,13 @@ func buildOperator(
 		}
 		return exec.NewTop(child, keys, n)
 
+	case *ir.Eager:
+		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		return exec.NewEager(child), nil
+
 	case *ir.Limit:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
@@ -2381,6 +2388,15 @@ func buildOperator(
 				return nil, rerr
 			}
 			count = n
+		}
+		// LIMIT 0 over a write subtree: drain the child via an Eager
+		// barrier so the write operators below run to completion
+		// even though Limit.Next would otherwise return false on the
+		// very first call. openCypher 9 §3.6.2 requires the write
+		// side effects to occur regardless of how many rows the
+		// projection finally returns.
+		if count == 0 && ir.ContainsWrite(p.Child) {
+			return exec.NewLimit(exec.NewEager(child), count)
 		}
 		return exec.NewLimit(child, count)
 
