@@ -1016,6 +1016,15 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		case *ast.StringLiteral, *ast.ListLiteral, *ast.MapLiteral, *ast.BoolLiteral:
 			a.error(invalidBooleanOperandError(".", "non-graph", v.Pos))
 		}
+		// Transitive non-graph-receiver check intentionally NOT
+		// implemented here: inferProjectedType lumps every non-graph
+		// literal under "value", but maps DO admit property access
+		// (`WITH {k: 1} AS m RETURN m.k`). A correct transitive rule
+		// would need inferProjectedType to distinguish map from list
+		// from scalar, and probably to propagate types through
+		// arithmetic / function calls. Until that lands, only the
+		// direct-literal check above fires; transitive errors slip
+		// through and surface at runtime instead of at compile time.
 
 	case *ast.LabelPredicate:
 		a.checkExpr(v.Receiver)
