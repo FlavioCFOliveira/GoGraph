@@ -932,6 +932,15 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3784: raised after the parser's normalize step learnt to
+//     preserve a user-given `-` in a varlen range bound. Previously
+//     `[r*-2]` was rewritten and abs'd into a positive `2`, so the
+//     query silently accepted a negative-bound pattern. The new
+//     normalize emits `--2`, ParseInt fails, and the parser surfaces
+//     a SyntaxError(InvalidRelationshipPattern). Match4 [10] closes;
+//     Match4 [9] (missing `*` entirely) is documented as a grammar gap
+//     in parser_only.go::grammarGapExact.
+//     Observed 3784-3785 across a 5-run sample; gate set at 3784.
 //   - 3782: raised after three follow-up fixes landed alongside the
 //     PatternComprehension work:
 //     * Pattern1 [11] — sema rejects a bare node pattern (`WHERE (n)`)
@@ -1120,7 +1129,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3782
+const tckExecutionBaseline = 3784
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
