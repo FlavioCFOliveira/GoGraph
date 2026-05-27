@@ -4330,9 +4330,21 @@ func buildIRProjection(
 				// value. Other Property shapes keep the fast path
 				// because they reuse the same alias name and the
 				// schema slot already carries the projected value.
+				//
+				// Map-literal extension: a projection item whose
+				// expression is a *ast.MapLiteral and whose alias
+				// collides with a pre-existing schema entry that
+				// holds a bound node (`WITH {first: m.id} AS m`) is
+				// the same shape — the schema-name fast path would
+				// return the original bound node, not the freshly
+				// constructed map.
 				skipForCollidingAlias := false
 				if prop, isProp := item.Expr.(*ast.Property); isProp && exprStr != name {
 					if recv, recvIsVar := prop.Receiver.(*ast.Variable); recvIsVar && recv.Name == name {
+						skipForCollidingAlias = true
+					}
+				} else if _, isMap := item.Expr.(*ast.MapLiteral); isMap && exprStr != name {
+					if _, exists := schema[name]; exists {
 						skipForCollidingAlias = true
 					}
 				}
