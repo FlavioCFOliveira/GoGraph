@@ -570,11 +570,32 @@ import (
 //     above 3226. Observed 3265-3274 across a 7-run sample (one
 //     -race outlier at 3265); gate set conservatively at 3260
 //     (minimum observed - 5).
+//   - 3493: raised after task T986 — cumulative outer-scope variable
+//     resolution. Several IR operators (Expand, OptionalExpand,
+//     VarLengthExpand) report only their own (RelVar, ToVar) additions
+//     from [LogicalPlan.Vars]; a non-recursive `child.Vars()` therefore
+//     missed leading-bound nodes (e.g. the NodeByLabelScan beneath a
+//     chain of Expands). [newOptionalInnerCtx] and the
+//     [matchPattern] boundVars seed now use the new [collectAllVars]
+//     helper that walks the whole plan subtree, so OPTIONAL MATCH and
+//     multi-pattern MATCH correctly classify the leading node of a
+//     subsequent path as "shared with outer" when only its child plan
+//     introduced it. Pre-fix the canonical TriadicSelection [11] shape
+//     translated to `OptionalApply{outer, Selection{Apply{Argument,
+//     Expand→AllNodesScan}}}` (plain Apply with fresh AllNodesScan
+//     instead of correlated Expand on top of Argument), so `a` was
+//     re-scanned across all nodes and the destination-rebinding
+//     equality never satisfied for the canonical row. Post-fix the
+//     plan is the expected `OptionalApply{outer,
+//     Selection{Expand→Argument}}` and the existing destRebinding
+//     equality resolves correctly. Net uplift: +2 to +4 scenarios above
+//     3494-3496 pre-fix band. Observed 3498 stable across a 3-run
+//     sample; gate set conservatively at 3493 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3260
+const tckExecutionBaseline = 3493
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

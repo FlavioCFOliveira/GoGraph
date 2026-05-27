@@ -321,3 +321,82 @@ func Test_OptionalMatch_Vars(t *testing.T) {
 		t.Errorf("Vars() = %v, want to contain r and b", vars)
 	}
 }
+
+// Test_OptionalMatch_ExpandIntoBothBound covers the openCypher pattern
+//
+//	MATCH (a)-[:T]->(b)-->(c)
+//	OPTIONAL MATCH (a)-[r:T]->(c)
+//
+// where both endpoints of the optional path are already bound by a chain of
+// Expands in the outer plan. The fix for the long-standing T986 bug was to
+// detect that a is reachable via the cumulative variables introduced by the
+// outer subtree — Expand.Vars() reports only its own (RelVar, ToVar) pair, so
+// a non-recursive check missed the leading NodeByLabelScan's binding and
+// routed the optional pattern through a plain Apply with a fresh AllNodesScan
+// for a (and a separate Argument leaf), producing wrong row data.
+//
+// After the fix the inner subtree must use the Argument leaf as the Expand's
+// source (a is the leadVar, treated as shared with the outer) and append a
+// destination-rebinding equality Selection on top.
+func Test_OptionalMatch_ExpandIntoBothBound(t *testing.T) {
+	q := &ast.SingleQuery{
+		ReadingClauses: []ast.ReadingClause{
+			// MATCH (a:A)-[:KNOWS]->(b)-->(c)
+			&ast.Match{
+				Pattern: &ast.Pattern{Paths: []*ast.PathPattern{
+					{Head: &ast.PathElement{
+						Node: &ast.NodePattern{Variable: strPtr("a"), Labels: []string{"A"}},
+						Next: &ast.PathElement{
+							Relationship: &ast.RelationshipPattern{Types: []string{"KNOWS"}, Direction: ast.RelDirectionOutgoing},
+							Node:         &ast.NodePattern{Variable: strPtr("b")},
+							Next: &ast.PathElement{
+								Relationship: &ast.RelationshipPattern{Direction: ast.RelDirectionOutgoing},
+								Node:         &ast.NodePattern{Variable: strPtr("c")},
+							},
+						},
+					}},
+				}},
+			},
+			// OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+			&ast.OptionalMatch{
+				Pattern: &ast.Pattern{Paths: []*ast.PathPattern{
+					{Head: &ast.PathElement{
+						Node: &ast.NodePattern{Variable: strPtr("a")},
+						Next: &ast.PathElement{
+							Relationship: &ast.RelationshipPattern{
+								Variable:  strPtr("r"),
+								Types:     []string{"KNOWS"},
+								Direction: ast.RelDirectionOutgoing,
+							},
+							Node: &ast.NodePattern{Variable: strPtr("c")},
+						},
+					}},
+				}},
+			},
+		},
+	}
+	plan := mustFromAST(t, q)
+
+	opt, ok := plan.(*ir.OptionalApply)
+	if !ok {
+		t.Fatalf("expected *ir.OptionalApply at root, got %T", plan)
+	}
+	// Inner must be Selection(c == synthetic) → Expand(a→r→synthetic) → Argument.
+	sel, ok := opt.Inner.(*ir.Selection)
+	if !ok {
+		t.Fatalf("OptionalApply.Inner expected *ir.Selection (destRebinding equality), got %T", opt.Inner)
+	}
+	exp, ok := sel.Child.(*ir.Expand)
+	if !ok {
+		t.Fatalf("Selection.Child expected *ir.Expand, got %T", sel.Child)
+	}
+	if exp.FromVar != "a" {
+		t.Errorf("Expand.FromVar = %q, want a", exp.FromVar)
+	}
+	if exp.RelVar != "r" {
+		t.Errorf("Expand.RelVar = %q, want r", exp.RelVar)
+	}
+	if _, ok := exp.Child.(*ir.Argument); !ok {
+		t.Fatalf("Expand.Child expected *ir.Argument (outer-row seam), got %T — pre-fix this was an AllNodesScan wrapped in plain Apply", exp.Child)
+	}
+}

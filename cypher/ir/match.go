@@ -212,7 +212,7 @@ type optionalInnerCtx struct {
 func newOptionalInnerCtx(child LogicalPlan) *optionalInnerCtx {
 	outerVars := map[string]struct{}{}
 	if child != nil {
-		for _, v := range child.Vars() {
+		for _, v := range collectAllVars(child) {
 			outerVars[v] = struct{}{}
 		}
 	}
@@ -378,15 +378,53 @@ func copyVarSet(s map[string]struct{}) map[string]struct{} {
 	return cp
 }
 
-// childVarSlice returns child.Vars() as a fresh slice, or nil when child is nil.
+// childVarSlice returns the cumulative set of variables introduced by child
+// and every plan in its transitive subtree. Returns nil when child is nil.
+//
+// Several IR operators (Expand, OptionalExpand, VarLengthExpand) report only
+// the variables they themselves introduce in [LogicalPlan.Vars], not their
+// child's vars — so a non-recursive `child.Vars()` misses leading-bound
+// variables (e.g. the node bound by the lowest NodeByLabelScan beneath a
+// chain of Expands). [collectAllVars] descends the whole subtree, deduping.
 func childVarSlice(child LogicalPlan) []string {
 	if child == nil {
 		return nil
 	}
-	vs := child.Vars()
-	cp := make([]string, len(vs))
-	copy(cp, vs)
-	return cp
+	return collectAllVars(child)
+}
+
+// collectAllVars returns the deduplicated union of [LogicalPlan.Vars] across
+// plan and every plan in its transitive [LogicalPlan.Children] subtree.
+//
+// This is the correct seed for "what does the outer scope bind" reasoning
+// (shared-variable detection in OPTIONAL MATCH and multi-pattern MATCH).
+// Order preserves first-seen position to keep diagnostic output stable.
+func collectAllVars(plan LogicalPlan) []string {
+	if plan == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	var walk func(p LogicalPlan)
+	walk = func(p LogicalPlan) {
+		if p == nil {
+			return
+		}
+		for _, v := range p.Vars() {
+			if v == "" {
+				continue
+			}
+			if _, ok := seen[v]; !ok {
+				seen[v] = struct{}{}
+				out = append(out, v)
+			}
+		}
+		for _, c := range p.Children() {
+			walk(c)
+		}
+	}
+	walk(plan)
+	return out
 }
 
 // matchPattern translates a MATCH Pattern (comma-separated path list) into a
@@ -406,7 +444,7 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 	boundVars := map[string]struct{}{}
 	if child != nil {
 		plan = child
-		for _, v := range child.Vars() {
+		for _, v := range collectAllVars(child) {
 			boundVars[v] = struct{}{}
 		}
 	}
