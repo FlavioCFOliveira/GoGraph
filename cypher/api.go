@@ -1261,6 +1261,13 @@ func buildOperatorWrite(
 				if v == nil || expr.IsNull(v) {
 					return lpg.PropertyValue{}, true, false, nil
 				}
+				// Reject property values whose shape is not storable: a Map,
+				// a List containing a Map, or any deeper nesting of either.
+				// Per openCypher these surface as InvalidPropertyType at
+				// runtime (Set1 [10]).
+				if !isStorableProperty(v) {
+					return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: SET %s: InvalidPropertyType: maps cannot be stored as property values", p.PropertyKey)
+				}
 				pv, ok := exprValueToLPGProp(v)
 				if !ok {
 					return lpg.PropertyValue{}, false, false, nil
@@ -1649,6 +1656,24 @@ func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.Gr
 // (0x01..0x06) followed by the canonical openCypher textual form, the
 // same scheme used by [cypher.exec.parseTemporalLiteral] on the
 // literal-string write path. The decoder is [decodeTemporalString].
+// isStorableProperty reports whether v can be stored as a node or
+// relationship property value. Maps and lists-containing-maps are
+// rejected; openCypher classifies an attempt to set such a value as
+// InvalidPropertyType at runtime.
+func isStorableProperty(v expr.Value) bool {
+	switch val := v.(type) {
+	case expr.MapValue:
+		return false
+	case expr.ListValue:
+		for _, el := range val {
+			if !isStorableProperty(el) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {
 	switch val := v.(type) {
 	case expr.StringValue:
