@@ -332,6 +332,15 @@ func (a *analyser) withClause(w *ast.With) {
 	projs := make([]projection, 0, len(w.Projection.Items))
 	for _, item := range w.Projection.Items {
 		a.checkExprForWith(item.Expr)
+		// openCypher 9 §5.1.2: every WITH item must be either a bare
+		// Variable (whose name becomes the projected name) or aliased
+		// via AS. A complex expression without an alias has no
+		// downstream name and must be rejected at compile time.
+		if item.Alias == nil {
+			if _, isVar := item.Expr.(*ast.Variable); !isVar {
+				a.error(noExpressionAliasError(item.Pos))
+			}
+		}
 		projs = append(projs, projection{item.Expr, item.Alias, item.Pos})
 	}
 
@@ -858,7 +867,15 @@ func (a *analyser) checkTypeConflict(name, kind string, pos ast.Position) {
 // because RETURN is the terminal clause of a single query.
 func (a *analyser) projectionCheck(proj *ast.Projection) {
 	if proj.All {
-		return // RETURN * — accept everything that is in scope
+		// RETURN * requires at least one in-scope variable, walking
+		// through parent scopes (a subquery RETURN * still sees outer
+		// bindings via the parent chain). openCypher 9 §3.3.2 rejects
+		// star projection with a truly empty scope as
+		// NoVariablesInScope.
+		if !scopeHasAnyName(a.scope) && len(proj.Items) == 0 {
+			a.error(noVariablesInScopeError(proj.Pos))
+		}
+		return
 	}
 	// Reject duplicate output column names (e.g. RETURN 1 AS a, 2 AS a).
 	// openCypher 9 §3.3.3 raises ColumnNameConflict at compile time for

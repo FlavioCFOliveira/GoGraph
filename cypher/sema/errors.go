@@ -85,6 +85,18 @@ const (
 	// runtime cannot decide which row of the group should supply the
 	// non-grouped reference.
 	KindAmbiguousAggregationExpression ErrorKind = "AMBIGUOUS_AGGREGATION_EXPRESSION"
+
+	// KindNoVariablesInScope is reported when `RETURN *` or `WITH *`
+	// appears in a projection but no variables are in scope at that
+	// point (openCypher 9 §3.3.2 forbids a star projection with an
+	// empty scope).
+	KindNoVariablesInScope ErrorKind = "NO_VARIABLES_IN_SCOPE"
+
+	// KindNoExpressionAlias is reported when a WITH projection item is
+	// neither a bare Variable nor aliased via AS. openCypher 9 §5.1.2
+	// requires every non-Variable WITH item to have an explicit alias
+	// so the downstream scope can name it.
+	KindNoExpressionAlias ErrorKind = "NO_EXPRESSION_ALIAS"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -162,6 +174,27 @@ func ambiguousAggregationError(name string, pos ast.Position) *ScopeError {
 		Kind:    KindAmbiguousAggregationExpression,
 		Pos:     pos,
 		Message: fmt.Sprintf("variable %q appears outside an aggregate in an aggregating projection item but is not a grouping key", name),
+	}
+}
+
+// noVariablesInScopeError constructs a KindNoVariablesInScope ScopeError
+// for a `RETURN *` / `WITH *` projection emitted with no variables in
+// scope at that point.
+func noVariablesInScopeError(pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindNoVariablesInScope,
+		Pos:     pos,
+		Message: "star projection requires at least one variable in scope",
+	}
+}
+
+// noExpressionAliasError constructs a KindNoExpressionAlias ScopeError
+// for a WITH item that is neither a bare Variable nor aliased via AS.
+func noExpressionAliasError(pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindNoExpressionAlias,
+		Pos:     pos,
+		Message: "WITH item is not a bare variable and must be aliased with AS",
 	}
 }
 
@@ -295,6 +328,15 @@ const (
 	// sub-type for non-grouped references appearing outside an
 	// aggregate call in an aggregating projection item.
 	SubTypeAmbiguousAggregationExpression = "AmbiguousAggregationExpression"
+
+	// SubTypeNoVariablesInScope is the canonical TCK sub-type for a
+	// star projection with no in-scope variables.
+	SubTypeNoVariablesInScope = "NoVariablesInScope"
+
+	// SubTypeNoExpressionAlias is the canonical TCK sub-type for a
+	// WITH item that is not a bare Variable and lacks an explicit
+	// alias.
+	SubTypeNoExpressionAlias = "NoExpressionAlias"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -368,6 +410,8 @@ var kindMappings = []boltMapping{
 	{Kind: KindRelationshipUniqueness, Category: CategorySyntaxError, SubType: SubTypeRelationshipUniqueness},
 	{Kind: KindNegativeIntegerArgument, Category: CategorySyntaxError, SubType: SubTypeNegativeIntegerArgument},
 	{Kind: KindAmbiguousAggregationExpression, Category: CategorySyntaxError, SubType: SubTypeAmbiguousAggregationExpression},
+	{Kind: KindNoVariablesInScope, Category: CategorySyntaxError, SubType: SubTypeNoVariablesInScope},
+	{Kind: KindNoExpressionAlias, Category: CategorySyntaxError, SubType: SubTypeNoExpressionAlias},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]

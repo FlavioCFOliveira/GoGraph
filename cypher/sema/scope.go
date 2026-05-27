@@ -88,3 +88,15 @@ func (s *Scope) reset() {
 	s.symbols = make(map[string]*Symbol)
 	s.parent = nil
 }
+
+// scopeHasAnyName reports whether the scope (or any parent in its chain)
+// contains at least one defined symbol. Used by [projectionCheck] to
+// detect star projections issued with truly nothing in scope.
+func scopeHasAnyName(s *Scope) bool {
+	for cur := s; cur != nil; cur = cur.parent {
+		if len(cur.symbols) > 0 {
+			return true
+		}
+	}
+	return false
+}

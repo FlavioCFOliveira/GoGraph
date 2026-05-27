@@ -1185,9 +1185,14 @@ func TestClean_WithProjectionLiteral(t *testing.T) {
 	assertClean(t, q)
 }
 
-func TestClean_WithProjectionNoAlias_Literal(t *testing.T) {
-	// WITH 1  — literal projection with no alias; no name enters the scope.
-	// This exercises the projectedName("") branch. A subsequent RETURN * is fine.
+func TestNeg_WithProjectionNoAlias_Literal(t *testing.T) {
+	// `WITH 1 RETURN *` violates two openCypher rules simultaneously:
+	//   - WITH item is neither a bare Variable nor aliased
+	//     (NoExpressionAlias, §5.1.2);
+	//   - RETURN * with empty post-WITH scope (NoVariablesInScope,
+	//     §3.3.2).
+	// Both are now reported at compile time. Previously the analyser
+	// silently accepted this shape (TestClean_WithProjectionNoAlias_Literal).
 	q := singleNode(
 		nil,
 		[]*ast.With{
@@ -1198,7 +1203,23 @@ func TestClean_WithProjectionNoAlias_Literal(t *testing.T) {
 		nil,
 		&ast.Return{Projection: &ast.Projection{All: true}},
 	)
-	assertClean(t, q)
+	// Both kinds are expected; assertErrors only checks the first kind
+	// pattern uniformly, so verify count + presence of each kind
+	// manually here.
+	errs := sema.Analyse(q)
+	if len(errs) != 2 {
+		t.Fatalf("want 2 errors, got %d: %v", len(errs), errs)
+	}
+	seen := map[sema.ErrorKind]bool{}
+	for _, e := range errs {
+		seen[e.Kind] = true
+	}
+	if !seen[sema.KindNoExpressionAlias] {
+		t.Errorf("expected NoExpressionAlias in errors, got %v", errs)
+	}
+	if !seen[sema.KindNoVariablesInScope] {
+		t.Errorf("expected NoVariablesInScope in errors, got %v", errs)
+	}
 }
 
 func TestClean_ReadingClauseWithNode(t *testing.T) {
