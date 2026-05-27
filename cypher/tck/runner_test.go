@@ -813,11 +813,24 @@ import (
 //         Merge7 #3 and related).
 //     Observed 3633 stable across five-run samples; gate set at
 //     3628 to absorb run-to-run variance.
+//   - 3643: raised after two further uplifts:
+//     (a) The Sort+LimitExpr fallback in applyProjectionTail now
+//         preserves the limit expression (NewLimitExpr) instead of
+//         silently using a literal zero limit, so a float-typed
+//         parameter surfaces as the documented runtime
+//         InvalidArgumentType (ReturnSkipLimit2 #15).
+//     (b) sema flags `any/none/all/single(x IN <homogeneous list>
+//         WHERE <arithmetic on x>)` at compile time when the list is
+//         homogeneously typed under a non-numeric kind. Adds
+//         inferListElementType and quantifierPredicateUsesArithOn
+//         (Quantifier1-4 #15/#16, twelve scenarios).
+//     Observed 3648 stable across five-run samples; gate set at
+//     3643 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3628
+const tckExecutionBaseline = 3643
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
