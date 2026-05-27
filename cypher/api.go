@@ -2607,6 +2607,17 @@ func buildEagerAggregation(
 		if ferr != nil {
 			return nil, fmt.Errorf("cypher: %w", ferr)
 		}
+		// DISTINCT inside aggregation: wrap each per-group instance with a
+		// "seen-values" set so repeated identical inputs are skipped.
+		// Equality uses [expr.Value.Hash] + per-value Equal (via
+		// IsTruthy(a.Equal(b))), so list/map values with the same shape
+		// dedup correctly.
+		if aggExpr.Distinct {
+			inner := factory
+			factory = func() funcs.Aggregator {
+				return newDistinctAggregator(inner())
+			}
+		}
 		aggFactories = append(aggFactories, factory)
 
 		// count(*) — argument is irrelevant; emit a constant non-null sentinel so
@@ -2680,6 +2691,47 @@ func buildEagerAggregation(
 
 	return topOp, nil
 }
+
+// distinctAggregator wraps a [funcs.Aggregator] with a "seen-values" set
+// so the inner Step receives only the first occurrence of each distinct
+// value within the same group. The hash bucket holds full Values so
+// list/map equality (which falls outside a usable Hash collision) still
+// resolves correctly via [expr.Value.Equal]. NULL is silently skipped
+// per openCypher aggregation semantics.
+//
+// distinctAggregator is NOT safe for concurrent use.
+type distinctAggregator struct {
+	inner funcs.Aggregator
+	seen  map[uint64][]expr.Value
+}
+
+func newDistinctAggregator(inner funcs.Aggregator) *distinctAggregator {
+	return &distinctAggregator{inner: inner, seen: map[uint64][]expr.Value{}}
+}
+
+func (d *distinctAggregator) Init() {
+	d.inner.Init()
+	d.seen = map[uint64][]expr.Value{}
+}
+
+func (d *distinctAggregator) Step(v expr.Value) {
+	if expr.IsNull(v) {
+		// NULL is filtered by every standard aggregator's Step; preserve
+		// that behaviour and skip the dedup bookkeeping too.
+		d.inner.Step(v)
+		return
+	}
+	h := v.Hash()
+	for _, prev := range d.seen[h] {
+		if expr.IsTruthy(prev.Equal(v)) {
+			return
+		}
+	}
+	d.seen[h] = append(d.seen[h], v)
+	d.inner.Step(v)
+}
+
+func (d *distinctAggregator) Result() expr.Value { return d.inner.Result() }
 
 // newAggregationEval returns a row-evaluator function suitable for an
 // EagerAggregation pre-projection slot. The evaluator's resolution order is:
