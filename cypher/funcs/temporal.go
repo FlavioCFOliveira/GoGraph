@@ -412,20 +412,32 @@ func timeComponentsFromMap(m expr.MapValue) (h, mn, s, ns int) {
 			s = int(i)
 		}
 	}
-	// Sub-second overrides: explicit nanosecond wins; otherwise millisecond
-	// or microsecond overrides the base's nanosecond entirely.
-	if v, ok := m["nanosecond"]; ok {
-		if i, ok2 := intFromValue(v); ok2 {
-			ns = int(i)
+	// Sub-second fields are ADDITIVE per openCypher 9 §3.10.1: when
+	// millisecond / microsecond / nanosecond are all supplied, the total
+	// nanosecond component is ms·1_000_000 + us·1_000 + ns. Any base
+	// nanosecond inherited from a {time: …} key is replaced entirely
+	// once any sub-second key is supplied.
+	_, hasMs := m["millisecond"]
+	_, hasUs := m["microsecond"]
+	_, hasNs := m["nanosecond"]
+	if hasMs || hasUs || hasNs {
+		var sub int
+		if v, ok := m["millisecond"]; ok {
+			if i, ok2 := intFromValue(v); ok2 {
+				sub += int(i) * 1_000_000
+			}
 		}
-	} else if v, ok := m["millisecond"]; ok {
-		if i, ok2 := intFromValue(v); ok2 {
-			ns = int(i) * 1_000_000
+		if v, ok := m["microsecond"]; ok {
+			if i, ok2 := intFromValue(v); ok2 {
+				sub += int(i) * 1_000
+			}
 		}
-	} else if v, ok := m["microsecond"]; ok {
-		if i, ok2 := intFromValue(v); ok2 {
-			ns = int(i) * 1_000
+		if v, ok := m["nanosecond"]; ok {
+			if i, ok2 := intFromValue(v); ok2 {
+				sub += int(i)
+			}
 		}
+		ns = sub
 	}
 	return
 }

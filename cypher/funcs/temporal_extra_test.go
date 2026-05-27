@@ -926,7 +926,10 @@ func TestFn_TimeComponents_MicrosecondConverted(t *testing.T) {
 	}
 }
 
-func TestFn_TimeComponents_NanosecondTakesPrecedence(t *testing.T) {
+func TestFn_TimeComponents_SubSecondFieldsAreAdditive(t *testing.T) {
+	// openCypher 9 §3.10.1: when millisecond/microsecond/nanosecond are
+	// all supplied, the nanosecond component is the sum of their scaled
+	// contributions, not the highest-precision override.
 	m := expr.MapValue{
 		"hour":        expr.IntegerValue(13),
 		"nanosecond":  expr.IntegerValue(42),
@@ -937,7 +940,7 @@ func TestFn_TimeComponents_NanosecondTakesPrecedence(t *testing.T) {
 	if !ok {
 		t.Fatalf("localtime(ns) = %T", v)
 	}
-	want := expr.NewLocalTime(13, 0, 0, 42)
+	want := expr.NewLocalTime(13, 0, 0, 999*1_000_000+42)
 	if lt != want {
 		t.Errorf("localtime(ns) = %v, want %v", lt, want)
 	}
