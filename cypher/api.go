@@ -300,6 +300,13 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	if reg == nil {
 		reg = funcs.DefaultRegistry
 	}
+	// Wrap the registry so the graph-aware startnode / endnode overrides
+	// hydrate the returned NodeValue with labels and properties looked up
+	// against the live graph. The default funcs implementation only sets
+	// NodeValue.ID, which makes subsequent property access (`startNode(r).id`)
+	// return null because the per-row schema upgrade does not fire on
+	// function-produced values.
+	reg = newGraphAwareRegistry(reg, g)
 	e := &Engine{
 		g:             g,
 		store:         opts.Store,
@@ -312,6 +319,59 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		return e.constraintReg.ListConstraintRows()
 	})
 	return e
+}
+
+// graphAwareRegistry overlays a small set of graph-bound functions on top of
+// a delegate FunctionRegistry. The overlay currently covers startnode and
+// endnode: both look up the bound RelationshipValue's StartID / EndID in the
+// graph and return a NodeValue carrying labels and properties so that
+// downstream property access works.
+type graphAwareRegistry struct {
+	delegate expr.FunctionRegistry
+	g        *lpg.Graph[string, float64]
+}
+
+// newGraphAwareRegistry wraps delegate with graph-aware startnode and
+// endnode implementations. Other function lookups pass through unchanged.
+func newGraphAwareRegistry(delegate expr.FunctionRegistry, g *lpg.Graph[string, float64]) expr.FunctionRegistry {
+	return &graphAwareRegistry{delegate: delegate, g: g}
+}
+
+// Resolve implements [expr.FunctionRegistry].
+func (r *graphAwareRegistry) Resolve(name string) (expr.BuiltinFn, bool) {
+	switch name {
+	case "startnode":
+		fn := r.g
+		return func(args []expr.Value) (expr.Value, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("funcs: startNode() takes exactly 1 argument(s), got %d", len(args))
+			}
+			if expr.IsNull(args[0]) {
+				return expr.Null, nil
+			}
+			rv, ok := args[0].(expr.RelationshipValue)
+			if !ok {
+				return nil, fmt.Errorf("funcs: startNode() argument 0: got %s, want Relationship", args[0].Kind())
+			}
+			return buildNodeValueFromID(graph.NodeID(rv.StartID), fn), nil
+		}, true
+	case "endnode":
+		fn := r.g
+		return func(args []expr.Value) (expr.Value, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("funcs: endNode() takes exactly 1 argument(s), got %d", len(args))
+			}
+			if expr.IsNull(args[0]) {
+				return expr.Null, nil
+			}
+			rv, ok := args[0].(expr.RelationshipValue)
+			if !ok {
+				return nil, fmt.Errorf("funcs: endNode() argument 0: got %s, want Relationship", args[0].Kind())
+			}
+			return buildNodeValueFromID(graph.NodeID(rv.EndID), fn), nil
+		}, true
+	}
+	return r.delegate.Resolve(name)
 }
 
 // ensureIndexManager installs a new empty index.Manager on g when none is
