@@ -654,18 +654,35 @@ func eval3VLXOR(left, right Value) (Value, error) {
 }
 
 // evalOrdering handles <, <=, >, >= with 3VL: NULL operand → NULL.
-// openCypher 9 §3.5.4 specifies that any comparison involving NaN yields
-// NULL (the IEEE-754 "FALSE for every comparison" semantics is not what
-// the spec uses — NaN propagates as the unknown / undefined value).
-// Detect NaN BEFORE calling compareValues so the sort-friendly
-// cmpFloat64 (which orders NaN after every finite number for ORDER BY
-// stability) does not leak that ordering decision into runtime
-// comparison results.
+// openCypher 9 §3.5.4 distinguishes two NaN cases:
+//   - NaN compared with a NUMBER (Integer / Float) → FALSE for every
+//     ordering operator. This follows IEEE-754: a NaN is not greater,
+//     less, or equal to any finite number.
+//   - NaN compared with a non-number (String, Bool, Node, …) → NULL.
+//     The kinds are incompatible for ordering, so the result is
+//     undefined rather than the IEEE-754 FALSE.
+// The NaN-handling branch runs BEFORE compareValues so the
+// sort-friendly cmpFloat64 (which orders NaN after every finite number
+// for ORDER BY stability) does not leak that ordering decision into
+// runtime comparison results.
 func evalOrdering(op string, left, right Value) (Value, error) {
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
 	}
 	if isFloatNaN(left) || isFloatNaN(right) {
+		// Determine the "other" operand's kind: NaN-vs-number → FALSE,
+		// NaN-vs-anything-else → NULL.
+		other := right
+		if isFloatNaN(left) {
+			other = right
+		}
+		if isFloatNaN(right) {
+			other = left
+		}
+		switch other.Kind() {
+		case KindInteger, KindFloat:
+			return BoolValue(false), nil
+		}
 		return Null, nil
 	}
 	cmp, err := compareValues(left, right)
