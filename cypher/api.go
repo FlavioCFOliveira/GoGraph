@@ -2983,16 +2983,6 @@ func buildProcedureCallOperator(
 		}
 	}
 
-	// Build argument evaluators. Each argument string is either a
-	// variable reference resolved via the current schema, or a literal
-	// (quoted string, integer, float, boolean, null) materialised once
-	// at plan-build time. The latter is the common case for TCK
-	// fixtures and any hand-written CALL with explicit constants.
-	argEvals := make([]func(exec.Row) (expr.Value, error), len(p.Arguments))
-	for i, argStr := range p.Arguments {
-		argEvals[i] = buildProcArgEvaluator(argStr, schema)
-	}
-
 	// Resolve effective registry (never nil at runtime to avoid nil deref).
 	effectiveProcReg := procReg
 	if effectiveProcReg == nil {
@@ -3003,6 +2993,36 @@ func buildProcedureCallOperator(
 	entry, err := effectiveProcReg.Lookup(p.Namespace, p.Name)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: ProcedureCall %q: %w", p.Name, err)
+	}
+
+	// Build argument evaluators. Each argument string is either a
+	// variable reference resolved via the current schema, or a literal
+	// (quoted string, integer, float, boolean, null) materialised once
+	// at plan-build time. The latter is the common case for TCK
+	// fixtures and any hand-written CALL with explicit constants.
+	//
+	// When the declared input kind is FLOAT and the evaluator yields an
+	// IntegerValue, the value is widened to FloatValue at runtime so the
+	// procedure receives the kind it expects (openCypher numeric widening
+	// per the TCK Call3 scenarios).
+	argEvals := make([]func(exec.Row) (expr.Value, error), len(p.Arguments))
+	for i, argStr := range p.Arguments {
+		baseEval := buildProcArgEvaluator(argStr, schema)
+		if i < len(entry.Sig.Inputs) && entry.Sig.Inputs[i] == expr.KindFloat {
+			inner := baseEval
+			argEvals[i] = func(row exec.Row) (expr.Value, error) {
+				v, err := inner(row)
+				if err != nil {
+					return v, err
+				}
+				if iv, ok := v.(expr.IntegerValue); ok {
+					return expr.FloatValue(float64(iv)), nil
+				}
+				return v, nil
+			}
+		} else {
+			argEvals[i] = baseEval
+		}
 	}
 
 	// Compile-time arity validation. The procedure declares N inputs;
@@ -3043,11 +3063,14 @@ func buildProcedureCallOperator(
 		if got == want {
 			continue
 		}
-		// NUMBER-style compatibility: integer accepted where float is
-		// declared and vice versa is already covered by the equality
-		// above when the literal parses to the matching kind. We do
-		// NOT auto-promote across boolean/string/number boundaries —
-		// that mismatch is what the TCK expects to flag.
+		// Numeric widening: INTEGER is accepted wherever FLOAT is
+		// declared. openCypher TCK Call3 specifies that an integer
+		// literal value is coercible to FLOAT (the procedure receives
+		// a FloatValue at runtime). We do NOT promote in the other
+		// direction or across boolean/string/number boundaries.
+		if got == expr.KindInteger && want == expr.KindFloat {
+			continue
+		}
 		return nil, fmt.Errorf(
 			"cypher: SyntaxError.InvalidArgumentType: procedure %q argument %d expects %s, got %s",
 			p.Name, i, want, got,
@@ -3618,6 +3641,85 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }
 
+// buildPathValueFromChainInfo reconstructs an [expr.PathValue] from the
+// flat alternating column layout described by cinfo. It mirrors the logic
+// inside the named-path fast path in buildIRProjection and is factored out
+// so that buildRowCtx can produce a correct PathValue for WHERE-clause
+// predicates (e.g. `WHERE length(p) = 1`) that reference a named path
+// bound in the preceding MATCH pattern. Returns (zero, false) when the row
+// does not contain the expected columns or when the leading column does
+// not carry a recognisable node value.
+func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph[string, float64]) (expr.PathValue, bool) {
+	if cinfo.leadingCol >= len(row) {
+		return expr.PathValue{}, false
+	}
+	leadVal := row[cinfo.leadingCol]
+	if leadVal == nil || expr.IsNull(leadVal) {
+		return expr.PathValue{}, false
+	}
+	var leadNode expr.NodeValue
+	switch lv := leadVal.(type) {
+	case expr.NodeValue:
+		leadNode = lv
+	case expr.IntegerValue:
+		leadNode = buildNodeValueFromID(graph.NodeID(lv), g)
+	default:
+		return expr.PathValue{}, false
+	}
+	nodes := make([]expr.NodeValue, 0, len(cinfo.steps)+1)
+	rels := make([]expr.RelationshipValue, 0, len(cinfo.steps))
+	nodes = append(nodes, leadNode)
+	for _, step := range cinfo.steps {
+		if step.edgeCol >= len(row) || step.dstCol >= len(row) {
+			return expr.PathValue{}, false
+		}
+		edgeIDVal, ok1 := row[step.edgeCol].(expr.IntegerValue)
+		dstIDVal, ok2 := row[step.dstCol].(expr.IntegerValue)
+		if !ok1 || !ok2 {
+			return expr.PathValue{}, false
+		}
+		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
+		et := step.edgeType
+		var edgeProps expr.MapValue
+		pathStart := nodes[len(nodes)-1].ID
+		pathEnd := dstNode.ID
+		storageStart := pathStart
+		storageEnd := pathEnd
+		if g != nil && pathStart != 0 {
+			sKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(pathStart))
+			dKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(pathEnd))
+			if sOK && dOK {
+				if ets := g.EdgeLabels(sKey, dKey); len(ets) > 0 {
+					et = ets[0]
+					rawEP := g.EdgeProperties(sKey, dKey)
+					edgeProps = make(expr.MapValue, len(rawEP))
+					for k, pv := range rawEP {
+						edgeProps[k] = lpgPropToExpr(pv)
+					}
+				} else if ets := g.EdgeLabels(dKey, sKey); len(ets) > 0 {
+					et = ets[0]
+					rawEP := g.EdgeProperties(dKey, sKey)
+					edgeProps = make(expr.MapValue, len(rawEP))
+					for k, pv := range rawEP {
+						edgeProps[k] = lpgPropToExpr(pv)
+					}
+					storageStart = pathEnd
+					storageEnd = pathStart
+				}
+			}
+		}
+		rels = append(rels, expr.RelationshipValue{
+			ID:         uint64(edgeIDVal),
+			StartID:    storageStart,
+			EndID:      storageEnd,
+			Type:       et,
+			Properties: edgeProps,
+		})
+		nodes = append(nodes, dstNode)
+	}
+	return expr.PathValue{Nodes: nodes, Relationships: rels}, true
+}
+
 // buildRowCtx converts a row plus a schema snapshot into an expr.RowContext,
 // upgrading IntegerValue(nodeID) entries to NodeValue with properties loaded
 // from the graph. g may be nil when no graph is available (upgrade is
@@ -3625,11 +3727,23 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 // variables they describe are reconstructed as full RelationshipValues with
 // their typed properties loaded from the graph, so property-access
 // expressions such as `r.since` resolve through the bound relationship.
+// When bopts carries pathVarChain entries the named path variables are
+// reconstructed as PathValues so that WHERE-clause predicates such as
+// `length(p) = 1` operate on the documented Path kind rather than on the
+// leading node value.
 func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
+		}
+		if bopts != nil && bopts.pathVarChain != nil {
+			if cinfo, isChain := bopts.pathVarChain[varName]; isChain {
+				if pv, ok := buildPathValueFromChainInfo(row, cinfo, g); ok {
+					ctx[varName] = pv
+					continue
+				}
+			}
 		}
 		if bopts != nil && bopts.edgeVarMeta != nil {
 			if meta, isEdge := bopts.edgeVarMeta[varName]; isEdge {

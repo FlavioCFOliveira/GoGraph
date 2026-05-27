@@ -340,6 +340,38 @@ func extractAggregatesFromExpr(e ast.Expression, aggs *[]AggregateExpr, counter 
 		cp.Predicate = extractAggregatesFromExpr(n.Predicate, aggs, counter)
 		cp.Projection = extractAggregatesFromExpr(n.Projection, aggs, counter)
 		return &cp
+	case *ast.MapLiteral:
+		cp := *n
+		cp.Values = make([]ast.Expression, len(n.Values))
+		for i, v := range n.Values {
+			cp.Values[i] = extractAggregatesFromExpr(v, aggs, counter)
+		}
+		return &cp
+	case *ast.ListLiteral:
+		cp := *n
+		cp.Elements = make([]ast.Expression, len(n.Elements))
+		for i, el := range n.Elements {
+			cp.Elements[i] = extractAggregatesFromExpr(el, aggs, counter)
+		}
+		return &cp
+	case *ast.SliceExpr:
+		cp := *n
+		cp.Expr = extractAggregatesFromExpr(n.Expr, aggs, counter)
+		cp.From = extractAggregatesFromExpr(n.From, aggs, counter)
+		cp.To = extractAggregatesFromExpr(n.To, aggs, counter)
+		return &cp
+	case *ast.CaseExpression:
+		cp := *n
+		cp.Subject = extractAggregatesFromExpr(n.Subject, aggs, counter)
+		cp.ElseExpr = extractAggregatesFromExpr(n.ElseExpr, aggs, counter)
+		cp.Alternatives = make([]*ast.CaseAlternative, len(n.Alternatives))
+		for i, alt := range n.Alternatives {
+			altCp := *alt
+			altCp.Condition = extractAggregatesFromExpr(alt.Condition, aggs, counter)
+			altCp.Consequent = extractAggregatesFromExpr(alt.Consequent, aggs, counter)
+			cp.Alternatives[i] = &altCp
+		}
+		return &cp
 	}
 	return e
 }

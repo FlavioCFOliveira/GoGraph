@@ -408,17 +408,13 @@ func (a *analyser) withClause(w *ast.With) {
 			}
 		}
 		for _, s := range w.Projection.OrderBy {
-			// Skip the UndefinedVariable check when the ORDER BY
-			// expression OR any of its sub-expressions matches a
-			// projected expression text. The row carries the computed
-			// column under the projected alias, so the ORDER BY can
-			// legally compose new values from it (e.g.
-			// `ORDER BY a.name + 'C'` over a projection of
-			// `a.name AS name`).
-			if s.Expr != nil && exprMatchesAnyProjection(s.Expr, projectedExprs) {
-				continue
-			}
-			for _, v := range collectVariables(s.Expr) {
+			// In an aggregated projection, the post-WITH row only carries
+			// the projected aliases plus the values of projected aggregate
+			// calls. The ORDER BY may compose them freely with literals and
+			// scalar function calls, but a reference to a pre-WITH variable
+			// that is not itself projected and does not sit inside a
+			// projected aggregate is undefined per openCypher 9 §3.3.5.
+			for _, v := range collectFreeVarsOutsideProjectedAggs(s.Expr, projectedExprs) {
 				if _, ok := projected[v]; ok {
 					continue
 				}
@@ -918,6 +914,56 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 	}
 	for _, s := range proj.OrderBy {
 		a.checkExpr(s.Expr)
+	}
+	// DISTINCT or aggregation collapses the row identity so that ORDER BY can
+	// only reference the projected columns. openCypher 9 §3.3.5 raises
+	// UndefinedVariable for an ORDER BY item that references a pre-projection
+	// variable that is no longer accessible after the projection.
+	projAggregates := false
+	for _, item := range proj.Items {
+		if containsAggregation(item.Expr) {
+			projAggregates = true
+			break
+		}
+	}
+	if proj.Distinct || projAggregates {
+		projected := map[string]struct{}{}
+		projectedExprs := map[string]struct{}{}
+		for _, item := range proj.Items {
+			if name := projectedName(item.Expr, item.Alias); name != "" {
+				projected[name] = struct{}{}
+			}
+			if item.Expr != nil {
+				projectedExprs[item.Expr.String()] = struct{}{}
+			}
+		}
+		for _, s := range proj.OrderBy {
+			if projAggregates {
+				for _, v := range collectFreeVarsOutsideProjectedAggs(s.Expr, projectedExprs) {
+					if _, ok := projected[v]; ok {
+						continue
+					}
+					a.error(undefinedVarError(v, positionOf(s.Expr)))
+					break
+				}
+				continue
+			}
+			// DISTINCT (no aggregation): the row identity is collapsed to
+			// the projected columns. ORDER BY may compose new values from
+			// projected sub-expressions, so allow a partial sub-expression
+			// match. Variables that are not in projected and never appear
+			// as a top-level projected expression are undefined.
+			if s.Expr != nil && exprMatchesAnyProjection(s.Expr, projectedExprs) {
+				continue
+			}
+			for _, v := range collectVariables(s.Expr) {
+				if _, ok := projected[v]; ok {
+					continue
+				}
+				a.error(undefinedVarError(v, positionOf(s.Expr)))
+				break
+			}
+		}
 	}
 	a.checkOrderByAggregation(proj)
 	a.checkProjectionSkipLimit("SKIP", proj.Skip)
@@ -1575,6 +1621,81 @@ func exprMatchesAnyProjection(e ast.Expression, projected map[string]struct{}) b
 // collectVariables walks e and returns every Variable name referenced,
 // deduplicated. Used by the ORDER-BY-after-aggregation check to find
 // references that fall outside the post-WITH projected-alias scope.
+// collectFreeVarsOutsideProjectedAggs returns the variable names referenced
+// in e that fall outside any aggregation function call whose surface text is
+// in projectedExprs. Used by the aggregated-projection ORDER BY check so an
+// expression like `me.age + count(you.age)` (where `count(you.age)` is
+// projected but `me.age` is not) reports `me` as undefined while still
+// permitting expressions composed entirely of projected aggregates and
+// literals.
+func collectFreeVarsOutsideProjectedAggs(e ast.Expression, projectedExprs map[string]struct{}) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	var walk func(x ast.Expression)
+	walk = func(x ast.Expression) {
+		if x == nil {
+			return
+		}
+		// If the sub-expression's surface form matches a projected
+		// expression (e.g. a projected aggregate call), every variable
+		// inside is consumed by the projection — stop the descent.
+		if _, projected := projectedExprs[x.String()]; projected {
+			return
+		}
+		switch v := x.(type) {
+		case *ast.Variable:
+			if _, dup := seen[v.Name]; !dup {
+				seen[v.Name] = struct{}{}
+				out = append(out, v.Name)
+			}
+		case *ast.Property:
+			walk(v.Receiver)
+		case *ast.LabelPredicate:
+			walk(v.Receiver)
+		case *ast.BinaryOp:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.UnaryOp:
+			walk(v.Operand)
+		case *ast.FunctionInvocation:
+			for _, arg := range v.Args {
+				walk(arg)
+			}
+		case *ast.SubscriptExpr:
+			walk(v.Expr)
+			walk(v.Index)
+		case *ast.SliceExpr:
+			walk(v.Expr)
+			walk(v.From)
+			walk(v.To)
+		case *ast.ListLiteral:
+			for _, el := range v.Elements {
+				walk(el)
+			}
+		case *ast.MapLiteral:
+			for _, val := range v.Values {
+				walk(val)
+			}
+		case *ast.CaseExpression:
+			walk(v.Subject)
+			for _, alt := range v.Alternatives {
+				walk(alt.Condition)
+				walk(alt.Consequent)
+			}
+			walk(v.ElseExpr)
+		case *ast.ListComprehension:
+			walk(v.Source)
+			walk(v.Predicate)
+			walk(v.Projection)
+		case *ast.PatternComprehension:
+			walk(v.Predicate)
+			walk(v.Projection)
+		}
+	}
+	walk(e)
+	return out
+}
+
 func collectVariables(e ast.Expression) []string {
 	seen := map[string]struct{}{}
 	var out []string
