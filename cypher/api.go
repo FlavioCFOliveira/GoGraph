@@ -1750,11 +1750,11 @@ func buildOperator(
 	switch p := plan.(type) {
 
 	case *ir.AllNodesScan:
-		schema[p.NodeVar] = len(schema)
+		schema[p.NodeVar] = schemaWidth(schema)
 		return exec.NewAllNodesScan(walker), nil
 
 	case *ir.NodeByLabelScan:
-		schema[p.NodeVar] = len(schema)
+		schema[p.NodeVar] = schemaWidth(schema)
 		// Adapt lpgLabelResolver to exec.labelResolver; both have the same
 		// method signature so a direct wrapper suffices.
 		src := &execLabelAdapter{labelSrc: labelSrc}

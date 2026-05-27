@@ -1957,10 +1957,16 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 		// EXISTS { fullQuery } — convert to ExistsSubquery with Query field.
 		switch q := qr.(type) {
 		case *ast.SingleQuery:
+			if err := existsSubqueryHasUpdateClause(q); err != nil {
+				return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
+			}
 			return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
 			// Wrap first part for simplicity; multi-union inside EXISTS is unusual.
 			if len(q.Parts) > 0 {
+				if err := existsSubqueryHasUpdateClause(q.Parts[0]); err != nil {
+					return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
+				}
 				return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
 			}
 		}
@@ -1978,6 +1984,23 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 		}
 	}
 	return unsupported(ctx, "subqueryExist", "unrecognised EXISTS form")
+}
+
+// existsSubqueryHasUpdateClause reports whether sq contains an updating
+// clause (CREATE, MERGE, SET, REMOVE, DELETE/DETACH DELETE). EXISTS { … }
+// is a read-only existence check, so any embedded update is rejected at
+// compile time per openCypher 9 §3.4.7 (InvalidClauseComposition).
+func existsSubqueryHasUpdateClause(sq *ast.SingleQuery) error {
+	if sq == nil {
+		return nil
+	}
+	for _, c := range sq.UpdatingClauses {
+		switch c.(type) {
+		case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete:
+			return fmt.Errorf("InvalidClauseComposition: EXISTS subquery cannot contain update clauses")
+		}
+	}
+	return nil
 }
 
 // VisitSubqueryCount handles COUNT { … }. The shape mirrors EXISTS { … }

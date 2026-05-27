@@ -466,10 +466,19 @@ func validQueryGen() *rapid.Generator[string] {
 		return "UNWIND [" + strings.Join(elems, ", ") + "] AS " + v + " RETURN " + v
 	})
 
-	// UNION query
+	// UNION query — every branch must project the same column count
+	// (and identical aliases when explicit aliases are used) per
+	// openCypher 9 §3.3.2. Generate ONE projection and reuse it on
+	// both sides; vary only the MATCH pattern.
 	unionQueryGen := rapid.Custom(func(t *rapid.T) string {
-		left := matchReturnQueryGen.Draw(t, "left")
-		right := matchReturnQueryGen.Draw(t, "right")
+		nProj := rapid.IntRange(1, 2).Draw(t, "nUnionProj")
+		items := make([]string, nProj)
+		for i := range items {
+			items[i] = projItemGen.Draw(t, "unionProj")
+		}
+		retClause := "RETURN " + strings.Join(items, ", ")
+		left := "MATCH " + pathPatternGen.Draw(t, "leftPath") + " " + retClause
+		right := "MATCH " + pathPatternGen.Draw(t, "rightPath") + " " + retClause
 		all := rapid.Bool().Draw(t, "unionAll")
 		if all {
 			return left + " UNION ALL " + right

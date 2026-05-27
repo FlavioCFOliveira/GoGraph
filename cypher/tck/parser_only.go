@@ -168,6 +168,11 @@ var parseTimeErrors = map[string]bool{
 	// floating-point overflow, matching TCK expectations for a compile-time error.
 	"IntegerOverflow":       true,
 	"FloatingPointOverflow": true,
+	// UNION negative cases are detected by VisitRegularQuery via the
+	// post-parse SemaError path; treat them as parse-time errors for
+	// the purposes of the TCK parser-only gate.
+	"InvalidClauseComposition": true,
+	"DifferentColumnsInUnion":  true,
 }
 
 // grammarGapExact lists (file, scenarioNamePrefix) pairs for scenarios that
