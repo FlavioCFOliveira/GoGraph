@@ -654,17 +654,19 @@ func eval3VLXOR(left, right Value) (Value, error) {
 }
 
 // evalOrdering handles <, <=, >, >= with 3VL: NULL operand → NULL.
-// Per IEEE 754 / openCypher, any comparison involving NaN yields FALSE
-// (not NULL): NaN > 1, NaN >= 1, NaN < 1, NaN <= 1 are all FALSE. We
-// detect NaN before calling compareValues so the sort-friendly
-// cmpFloat64 (which treats NaN as equal) does not surface as TRUE for
-// `>=` / `<=`.
+// openCypher 9 §3.5.4 specifies that any comparison involving NaN yields
+// NULL (the IEEE-754 "FALSE for every comparison" semantics is not what
+// the spec uses — NaN propagates as the unknown / undefined value).
+// Detect NaN BEFORE calling compareValues so the sort-friendly
+// cmpFloat64 (which orders NaN after every finite number for ORDER BY
+// stability) does not leak that ordering decision into runtime
+// comparison results.
 func evalOrdering(op string, left, right Value) (Value, error) {
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
 	}
 	if isFloatNaN(left) || isFloatNaN(right) {
-		return BoolValue(false), nil
+		return Null, nil
 	}
 	cmp, err := compareValues(left, right)
 	if err != nil {
