@@ -63,73 +63,84 @@ func (w *world) givenAnEmptyGraph(_ context.Context) error {
 // givenAnyGraph is a no-op — the existing graph (empty by default) is used.
 func (w *world) givenAnyGraph(_ context.Context) error { return nil }
 
-// givenBinaryTree1 builds the standard TCK binary-tree-1 graph.
-// The graph is a complete binary tree with 3 levels (7 nodes, 6 edges).
-// Nodes are labelled Root, A-F; edges have type KNOWS.
-//
-// Structure:
-//
-//	    Root
-//	   /    \
-//	  A      B
-//	 / \    / \
-//	C   D  E   F
+// givenBinaryTree1 builds the canonical openCypher TCK binary-tree-1 graph.
+// 13 nodes (a:A + b1..b4:X + c11..c42:X), edges :KNOWS / :FOLLOWS / :FRIEND.
+// Source: github.com/opencypher/openCypher tck/graphs/binary-tree-1/binary-tree-1.cypher
 func (w *world) givenBinaryTree1(ctx context.Context) error {
 	if err := w.givenAnEmptyGraph(ctx); err != nil {
 		return err
 	}
 	return w.runSetup(ctx, `
-CREATE (root:Root {name: 'root'})
 CREATE (a:A {name: 'a'})
-CREATE (b:B {name: 'b'})
-CREATE (c:C {name: 'c'})
-CREATE (d:D {name: 'd'})
-CREATE (e:E {name: 'e'})
-CREATE (f:F {name: 'f'})
-CREATE (root)-[:KNOWS]->(a)
-CREATE (root)-[:KNOWS]->(b)
-CREATE (a)-[:KNOWS]->(c)
-CREATE (a)-[:KNOWS]->(d)
-CREATE (b)-[:KNOWS]->(e)
-CREATE (b)-[:KNOWS]->(f)
+CREATE (b1:X {name: 'b1'})
+CREATE (b2:X {name: 'b2'})
+CREATE (b3:X {name: 'b3'})
+CREATE (b4:X {name: 'b4'})
+CREATE (c11:X {name: 'c11'})
+CREATE (c12:X {name: 'c12'})
+CREATE (c21:X {name: 'c21'})
+CREATE (c22:X {name: 'c22'})
+CREATE (c31:X {name: 'c31'})
+CREATE (c32:X {name: 'c32'})
+CREATE (c41:X {name: 'c41'})
+CREATE (c42:X {name: 'c42'})
+CREATE (a)-[:KNOWS]->(b1)
+CREATE (a)-[:KNOWS]->(b2)
+CREATE (a)-[:FOLLOWS]->(b3)
+CREATE (a)-[:FOLLOWS]->(b4)
+CREATE (b1)-[:FRIEND]->(c11)
+CREATE (b1)-[:FRIEND]->(c12)
+CREATE (b2)-[:FRIEND]->(c21)
+CREATE (b2)-[:FRIEND]->(c22)
+CREATE (b3)-[:FRIEND]->(c31)
+CREATE (b3)-[:FRIEND]->(c32)
+CREATE (b4)-[:FRIEND]->(c41)
+CREATE (b4)-[:FRIEND]->(c42)
+CREATE (b1)-[:FRIEND]->(b2)
+CREATE (b2)-[:FRIEND]->(b3)
+CREATE (b3)-[:FRIEND]->(b4)
+CREATE (b4)-[:FRIEND]->(b1)
 `)
 }
 
-// givenBinaryTree2 builds the standard TCK binary-tree-2 graph.
+// givenBinaryTree2 builds the canonical openCypher TCK binary-tree-2 graph.
+// Same topology as binary-tree-1 but the cN2 leaves (c12, c22, c32, c42)
+// carry label :Y instead of :X.
+// Source: github.com/opencypher/openCypher tck/graphs/binary-tree-2/binary-tree-2.cypher
 func (w *world) givenBinaryTree2(ctx context.Context) error {
 	if err := w.givenAnEmptyGraph(ctx); err != nil {
 		return err
 	}
 	return w.runSetup(ctx, `
 CREATE (a:A {name: 'a'})
-CREATE (b:B {name: 'b'})
-CREATE (c:C {name: 'c'})
-CREATE (d:D {name: 'd'})
-CREATE (e:E {name: 'e'})
-CREATE (f:F {name: 'f'})
-CREATE (g:G {name: 'g'})
-CREATE (h:H {name: 'h'})
-CREATE (i:I {name: 'i'})
-CREATE (j:J {name: 'j'})
-CREATE (k:K {name: 'k'})
-CREATE (l:L {name: 'l'})
-CREATE (m:M {name: 'm'})
-CREATE (n:N {name: 'n'})
-CREATE (o:O {name: 'o'})
-CREATE (a)-[:KNOWS]->(b)
-CREATE (a)-[:KNOWS]->(c)
-CREATE (b)-[:KNOWS]->(d)
-CREATE (b)-[:KNOWS]->(e)
-CREATE (c)-[:KNOWS]->(f)
-CREATE (c)-[:KNOWS]->(g)
-CREATE (d)-[:KNOWS]->(h)
-CREATE (d)-[:KNOWS]->(i)
-CREATE (e)-[:KNOWS]->(j)
-CREATE (e)-[:KNOWS]->(k)
-CREATE (f)-[:KNOWS]->(l)
-CREATE (f)-[:KNOWS]->(m)
-CREATE (g)-[:KNOWS]->(n)
-CREATE (g)-[:KNOWS]->(o)
+CREATE (b1:X {name: 'b1'})
+CREATE (b2:X {name: 'b2'})
+CREATE (b3:X {name: 'b3'})
+CREATE (b4:X {name: 'b4'})
+CREATE (c11:X {name: 'c11'})
+CREATE (c12:Y {name: 'c12'})
+CREATE (c21:X {name: 'c21'})
+CREATE (c22:Y {name: 'c22'})
+CREATE (c31:X {name: 'c31'})
+CREATE (c32:Y {name: 'c32'})
+CREATE (c41:X {name: 'c41'})
+CREATE (c42:Y {name: 'c42'})
+CREATE (a)-[:KNOWS]->(b1)
+CREATE (a)-[:KNOWS]->(b2)
+CREATE (a)-[:FOLLOWS]->(b3)
+CREATE (a)-[:FOLLOWS]->(b4)
+CREATE (b1)-[:FRIEND]->(c11)
+CREATE (b1)-[:FRIEND]->(c12)
+CREATE (b2)-[:FRIEND]->(c21)
+CREATE (b2)-[:FRIEND]->(c22)
+CREATE (b3)-[:FRIEND]->(c31)
+CREATE (b3)-[:FRIEND]->(c32)
+CREATE (b4)-[:FRIEND]->(c41)
+CREATE (b4)-[:FRIEND]->(c42)
+CREATE (b1)-[:FRIEND]->(b2)
+CREATE (b2)-[:FRIEND]->(b3)
+CREATE (b3)-[:FRIEND]->(b4)
+CREATE (b4)-[:FRIEND]->(b1)
 `)
 }
 
