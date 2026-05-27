@@ -612,25 +612,69 @@ func fnTime(args []expr.Value) (expr.Value, error) {
 			return d, nil
 		case expr.MapValue:
 			h, mn, s, ns := timeComponentsFromMap(v)
-			off := 0
+			// Resolve the new (target) offset and the base offset (if any).
+			// When BOTH are present, the base's wall-clock is converted to
+			// preserve the instant (openCypher 9 §3.10.5: time({time: t,
+			// timezone: …}) shifts t's local time into the new zone). When
+			// only the base has an offset, we inherit it unchanged.
+			var newOff int
+			haveNewOff := false
 			if zv, ok := v["timezone"]; ok {
 				if sv, ok2 := zv.(expr.StringValue); ok2 {
 					if str := strings.TrimSpace(string(sv)); str != "" && str != "Z" {
 						if o, err := parseSignedOffset(str); err == nil {
-							off = o
+							newOff = o
+							haveNewOff = true
 						}
+					} else if str == "Z" {
+						newOff = 0
+						haveNewOff = true
 					}
 				}
-			} else if tv, ok := v["time"]; ok {
-				// Inherit offset from {time: ...} base when no explicit
-				// timezone key was provided.
+			}
+			baseOff := 0
+			haveBaseOff := false
+			if tv, ok := v["time"]; ok {
 				switch t := tv.(type) {
 				case expr.TimeValue:
-					off = int(t.OffsetSec)
+					baseOff = int(t.OffsetSec)
+					haveBaseOff = true
 				case expr.DateTimeValue:
 					_, o := t.T.Zone()
-					off = o
+					baseOff = o
+					haveBaseOff = true
 				}
+			}
+			off := 0
+			switch {
+			case haveNewOff && haveBaseOff:
+				// Convert: shift wall-clock by (newOff - baseOff), but only
+				// when no explicit hour/minute/second key overrides the
+				// inherited wall-clock. Explicit overrides take priority
+				// over the zone-conversion shift.
+				if _, hasH := v["hour"]; !hasH {
+					if _, hasMn := v["minute"]; !hasMn {
+						deltaSec := newOff - baseOff
+						totalNs := int64(h)*3600*int64(time.Second) +
+							int64(mn)*60*int64(time.Second) +
+							int64(s)*int64(time.Second) +
+							int64(ns) +
+							int64(deltaSec)*int64(time.Second)
+						const day = int64(24) * int64(time.Hour)
+						totalNs = ((totalNs % day) + day) % day
+						h = int(totalNs / int64(time.Hour))
+						totalNs -= int64(h) * int64(time.Hour)
+						mn = int(totalNs / int64(time.Minute))
+						totalNs -= int64(mn) * int64(time.Minute)
+						s = int(totalNs / int64(time.Second))
+						ns = int(totalNs - int64(s)*int64(time.Second))
+					}
+				}
+				off = newOff
+			case haveNewOff:
+				off = newOff
+			case haveBaseOff:
+				off = baseOff
 			}
 			return expr.NewTime(h, mn, s, ns, off), nil
 		case expr.TimeValue:
