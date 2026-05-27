@@ -773,11 +773,39 @@ import (
 //     Unlocks Merge5 [2]/[4]/[5]/[7] and related scenarios.
 //     Observed 3598-3604 across a 5-run sample (median 3601); gate
 //     set conservatively at 3593 (minimum observed - 5).
+//   - 3620: raised after eight targeted execution-level fixes landed
+//     across two commits:
+//     (a) extractAggregatesFromExpr recurses into MapLiteral /
+//         ListLiteral / SliceExpr / CaseExpression so a nested
+//         collect()/sum()/count() inside `WITH {key: collect(u)} AS m`
+//         is hoisted correctly (Delete5 #5/#6/#7).
+//     (b) Procedure args: INTEGER literal accepted where FLOAT is
+//         declared, with runtime arg-evaluator coercion (Call3 #5/#6).
+//     (c) buildRowCtx reconstructs PathValue from pathVarChain so
+//         `WHERE length(p) = 1` operates on the proper Path kind
+//         (MatchWhere1 #12/#13).
+//     (d) RETURN respects DISTINCT → ORDER BY → SKIP → LIMIT canonical
+//         order via applyProjectionTail, so SKIP reads from the
+//         ordered stream (ReturnSkipLimit1 #1/#2, ReturnSkipLimit3 #1/#2).
+//     (e) Sema flags UndefinedVariable on ORDER BY items that reference
+//         pre-projection variables after DISTINCT or aggregation
+//         collapses row identity, with collectFreeVarsOutsideProjectedAggs
+//         honouring projected aggregate calls (ReturnOrderBy2 #13,
+//         ReturnOrderBy6 #4, WithOrderBy4 #19).
+//     (f) checkMergeNoRebind rejects bound-variable re-use with new
+//         labels/properties (Merge5 #22).
+//     (g) MERGE patterns with literal `null` property values fail with
+//         MergeReadOwnWrites at runtime (Merge1 #17, Merge5 #29).
+//     (h) MERGE ON CREATE/ON MATCH applies SET label items
+//         (`SET a:Foo` form), not just `var.key = value` (Merge2 #1,
+//         Merge3 #2, plus three related scenarios).
+//     Observed 3624-3625 across five-run samples; gate set at 3620
+//     to absorb run-to-run variance from order-sensitive scenarios.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3593
+const tckExecutionBaseline = 3620
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
