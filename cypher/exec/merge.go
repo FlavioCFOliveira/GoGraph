@@ -68,12 +68,19 @@ type Merge struct {
 	done       bool
 }
 
-// mergeAction is a pre-parsed single-property assignment from an ON
-// CREATE/MATCH SET item like `n.name = "Alice"`.
+// mergeAction is a pre-parsed ON CREATE / ON MATCH SET item. Two shapes
+// are supported:
+//
+//   - Property assignment (`n.name = "Alice"`): nodeVar, key, value populated,
+//     setLabels nil.
+//   - Label set (`SET a:Foo:Bar`): nodeVar populated, setLabels carries the
+//     list of label names to add to the node. key and value are empty in
+//     this case.
 type mergeAction struct {
-	nodeVar string
-	key     string
-	value   string // opaque literal string
+	nodeVar   string
+	key       string
+	value     string // opaque literal string; empty for label-set actions
+	setLabels []string
 }
 
 // NewMerge creates a Merge operator.
@@ -273,12 +280,6 @@ func (op *Merge) freshNodeKey() string {
 // carry an IntegerValue NodeID at column 0 when op.nodeVar is involved.
 func (op *Merge) applyActions(actions []mergeAction, row Row) error {
 	for _, a := range actions {
-		pv, err := parsePropValue(a.value)
-		if err != nil {
-			// Non-literal expression: skip.
-			continue
-		}
-
 		var nodeKey string
 		var resolved bool
 
@@ -296,46 +297,83 @@ func (op *Merge) applyActions(actions []mergeAction, row Row) error {
 			}
 		}
 
-		if resolved {
-			// Constraint enforcement for ON MATCH / ON CREATE action.
-			if op.reg != nil {
-				labels := op.mutator.NodeLabels(nodeKey)
-				if cerr := op.reg.CheckSetProperty(labels, a.key, pv, op.mgr); cerr != nil {
-					return cerr
+		if !resolved {
+			continue
+		}
+
+		// Label-set action (`SET a:Foo:Bar`): add every label to the node.
+		if len(a.setLabels) > 0 {
+			for _, lbl := range a.setLabels {
+				if serr := op.mutator.SetNodeLabel(nodeKey, lbl); serr != nil {
+					return fmt.Errorf("exec: Merge: action SetNodeLabel %q: %w", lbl, serr)
 				}
 			}
-			if serr := op.mutator.SetNodeProperty(nodeKey, a.key, pv); serr != nil {
-				return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
+			continue
+		}
+
+		// Property-set action.
+		pv, err := parsePropValue(a.value)
+		if err != nil {
+			// Non-literal expression: skip.
+			continue
+		}
+		// Constraint enforcement for ON MATCH / ON CREATE action.
+		if op.reg != nil {
+			labels := op.mutator.NodeLabels(nodeKey)
+			if cerr := op.reg.CheckSetProperty(labels, a.key, pv, op.mgr); cerr != nil {
+				return cerr
 			}
-			if op.reg != nil {
-				labels := op.mutator.NodeLabels(nodeKey)
-				op.reg.RecordPropertySet(labels, a.key, pv)
-			}
+		}
+		if serr := op.mutator.SetNodeProperty(nodeKey, a.key, pv); serr != nil {
+			return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
+		}
+		if op.reg != nil {
+			labels := op.mutator.NodeLabels(nodeKey)
+			op.reg.RecordPropertySet(labels, a.key, pv)
 		}
 	}
 	return nil
 }
 
-// parseMergeActions parses a slice of opaque SET-item strings like
-// `n.name = "Alice"` into structured mergeAction values.
-// Items that do not match the expected pattern are silently skipped.
+// parseMergeActions parses a slice of opaque SET-item strings into structured
+// mergeAction values. Two surface shapes are recognised:
+//
+//   - `var.key = value`            → property assignment
+//   - `var:Label1:Label2…`         → label-set on the node
+//
+// Items that do not match either pattern are silently skipped.
 func parseMergeActions(strs []string) ([]mergeAction, error) {
 	out := make([]mergeAction, 0, len(strs))
 	for _, s := range strs {
 		s = strings.TrimSpace(s)
-		eqIdx := strings.Index(s, "=")
-		if eqIdx < 0 {
+		if eqIdx := strings.Index(s, "="); eqIdx >= 0 {
+			lhs := strings.TrimSpace(s[:eqIdx])
+			rhs := strings.TrimSpace(s[eqIdx+1:])
+			dotIdx := strings.LastIndex(lhs, ".")
+			if dotIdx < 0 {
+				continue
+			}
+			varName := strings.TrimSpace(lhs[:dotIdx])
+			key := strings.TrimSpace(lhs[dotIdx+1:])
+			out = append(out, mergeAction{nodeVar: varName, key: key, value: rhs})
 			continue
 		}
-		lhs := strings.TrimSpace(s[:eqIdx])
-		rhs := strings.TrimSpace(s[eqIdx+1:])
-		dotIdx := strings.LastIndex(lhs, ".")
-		if dotIdx < 0 {
-			continue
+		// Label-set form: identifier followed by one or more `:Label` parts.
+		if colonIdx := strings.Index(s, ":"); colonIdx > 0 {
+			varName := strings.TrimSpace(s[:colonIdx])
+			rest := s[colonIdx+1:]
+			parts := strings.Split(rest, ":")
+			labels := make([]string, 0, len(parts))
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					labels = append(labels, p)
+				}
+			}
+			if varName != "" && len(labels) > 0 {
+				out = append(out, mergeAction{nodeVar: varName, setLabels: labels})
+			}
 		}
-		varName := strings.TrimSpace(lhs[:dotIdx])
-		key := strings.TrimSpace(lhs[dotIdx+1:])
-		out = append(out, mergeAction{nodeVar: varName, key: key, value: rhs})
 	}
 	return out, nil
 }
