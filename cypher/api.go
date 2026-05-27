@@ -3006,10 +3006,12 @@ func buildProcedureCallOperator(
 	}
 
 	// Compile-time arity validation. The procedure declares N inputs;
-	// the call must supply exactly N arguments (no default values,
-	// no varargs). Surfaces SyntaxError(InvalidNumberOfArguments) per
-	// openCypher CALL semantics.
-	if len(p.Arguments) != len(entry.Sig.Inputs) {
+	// the call must supply exactly N arguments OR zero (the "implicit"
+	// form, where openCypher binds inputs from query parameters whose
+	// names match the declared input names). Surfaces
+	// SyntaxError(InvalidNumberOfArguments) per openCypher CALL
+	// semantics for the partial / overflow cases.
+	if len(p.Arguments) != 0 && len(p.Arguments) != len(entry.Sig.Inputs) {
 		return nil, fmt.Errorf(
 			"cypher: SyntaxError.InvalidNumberOfArguments: procedure %q expects %d argument(s), got %d",
 			p.Name, len(entry.Sig.Inputs), len(p.Arguments),
