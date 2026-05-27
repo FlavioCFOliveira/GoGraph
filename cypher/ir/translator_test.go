@@ -2,6 +2,7 @@ package ir_test
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -419,7 +420,7 @@ func TestTranslate_VarLengthExpand_Unbounded(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *ir.VarLengthExpand, got %T", plan)
 	}
-	if vle.MinDepth != 1 || vle.MaxDepth != 0 {
+	if vle.MinDepth != 1 || vle.MaxDepth != math.MaxInt {
 		t.Errorf("unbounded: MinDepth=%d MaxDepth=%d", vle.MinDepth, vle.MaxDepth)
 	}
 }

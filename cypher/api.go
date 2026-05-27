@@ -43,7 +43,6 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"math"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -2272,12 +2271,11 @@ func buildOperator(
 		dir := irDirToExec(p.Direction)
 		minHops := p.MinDepth
 		maxHops := p.MaxDepth
-		if maxHops == 0 {
-			// ir.VarLengthExpand.MaxDepth == 0 means "unbounded".
-			// exec.VarLengthConfig.MaxHops == 0 means "no expansion";
-			// use math.MaxInt as the practical unbounded sentinel.
-			maxHops = math.MaxInt
-		}
+		// ir.VarLengthExpand.MaxDepth carries math.MaxInt for an unbounded
+		// upper bound and a real integer otherwise (including 0 for the
+		// degenerate "*0" quantifier). The exec.VarLengthExpand operator
+		// honours MaxHops==0 as "no expansion beyond the source", which is
+		// exactly the desired semantics for *0 / *0..0 / *N..M (N>M).
 
 		var etFilter map[uint64]string
 		edgeType := ""

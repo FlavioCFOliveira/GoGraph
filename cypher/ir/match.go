@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"math"
 
 	"gograph/cypher/ast"
 )
@@ -718,8 +719,12 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 
 	// Variable-length expansion (e.g. -[r*1..3]->).
 	if rp.Range != nil {
+		// Defaults match openCypher 9 §3.2.3.2: omitted lower bound is 1,
+		// omitted upper bound is "unbounded". The IR encodes unbounded as
+		// math.MaxInt so MaxDepth==0 unambiguously means "exactly 0 hops"
+		// (which is a legal — though degenerate — quantifier).
 		minDepth := 1
-		maxDepth := 0 // 0 means unbounded
+		maxDepth := math.MaxInt
 		if rp.Range.Min != nil {
 			minDepth = int(*rp.Range.Min)
 		}
