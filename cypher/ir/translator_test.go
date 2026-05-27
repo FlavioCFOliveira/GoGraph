@@ -513,12 +513,16 @@ func TestTranslate_WithClause_WithWhere(t *testing.T) {
 		},
 	}
 	plan := mustFromAST(t, q)
-	sel, ok := plan.(*ir.Selection)
+	// openCypher 9 §5.1.5 specifies the WITH WHERE predicate filters the
+	// pre-projection row stream (so it can reference pre-WITH variables
+	// dropped by the projection). The plan shape is therefore
+	// Projection(Selection(child)), not Selection(Projection(child)).
+	proj, ok := plan.(*ir.Projection)
 	if !ok {
-		t.Fatalf("expected *ir.Selection from WITH WHERE, got %T", plan)
+		t.Fatalf("expected *ir.Projection from WITH (WHERE applies below), got %T", plan)
 	}
-	if _, ok := sel.Child.(*ir.Projection); !ok {
-		t.Fatalf("sel.Child expected *ir.Projection, got %T", sel.Child)
+	if _, ok := proj.Child.(*ir.Selection); !ok {
+		t.Fatalf("proj.Child expected *ir.Selection (WHERE), got %T", proj.Child)
 	}
 }
 

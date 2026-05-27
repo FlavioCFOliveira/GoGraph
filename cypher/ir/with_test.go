@@ -104,15 +104,19 @@ func Test_With_WhereFilter(t *testing.T) {
 	}
 	plan := mustFromAST(t, q)
 
-	sel, ok := plan.(*ir.Selection)
+	// openCypher 9 §5.1.5: WITH WHERE filters the pre-projection stream
+	// (so the predicate can reference pre-WITH variables that the
+	// projection drops). The plan shape is Projection(Selection(child)).
+	proj, ok := plan.(*ir.Projection)
 	if !ok {
-		t.Fatalf("expected *ir.Selection (WHERE), got %T", plan)
+		t.Fatalf("expected *ir.Projection (WHERE filters below it), got %T", plan)
+	}
+	sel, ok := proj.Child.(*ir.Selection)
+	if !ok {
+		t.Fatalf("proj.Child expected *ir.Selection (WHERE), got %T", proj.Child)
 	}
 	if sel.Predicate == "" {
 		t.Error("WHERE Selection.Predicate must be non-empty")
-	}
-	if _, ok := sel.Child.(*ir.Projection); !ok {
-		t.Fatalf("sel.Child expected *ir.Projection, got %T", sel.Child)
 	}
 }
 

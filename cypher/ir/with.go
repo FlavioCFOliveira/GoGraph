@@ -19,7 +19,27 @@ import "gograph/cypher/ast"
 // translateWith is called from translator.go.
 
 // translateWith converts a WITH clause into a logical plan subtree.
+//
+// The WHERE clause on a WITH is applied to the pre-WITH scope: openCypher
+// 9 §5.1.5 specifies that the predicate sees both the variables bound by
+// the preceding query part and any new aliases introduced by the
+// projection (the aliases are equivalent to their source expressions).
+// Implementation: filter the child plan first with the WHERE predicate,
+// substituting any reference to a new projection alias with the alias's
+// source expression. The aggregation and projection then run over the
+// already-filtered rows. The DISTINCT / ORDER BY / SKIP / LIMIT tail
+// applies AFTER the projection because openCypher evaluates them on the
+// projected stream.
 func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan, error) {
+	if w.Where != nil {
+		pred := rewriteWithProjectionAliases(w.Where.Predicate, w.Projection)
+		var err error
+		child, err = t.translateExistsPredicate(pred, child)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(w.Projection)
 
 	var plan LogicalPlan
@@ -43,14 +63,104 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 	// Sort+Limit pipeline rather than silently passing the full row stream.
 	plan = applyProjectionTail(plan, w.Projection)
 
-	if w.Where != nil {
-		var err error
-		plan, err = t.translateExistsPredicate(w.Where.Predicate, plan)
-		if err != nil {
-			return nil, err
-		}
-	}
 	return plan, nil
+}
+
+// rewriteWithProjectionAliases returns a copy of pred in which every
+// *ast.Variable reference whose name matches a projection alias introduced
+// by proj is replaced with the alias's source expression. This lets a
+// WHERE-on-WITH predicate that uses a new alias (`WITH x.foo AS y …
+// WHERE y > 0`) be applied to the pre-projection row stream where x is
+// in scope and y is not yet defined.
+//
+// Aliases are detected as ProjectionItem entries whose .Alias is non-nil
+// and whose .Expr is not itself a bare ast.Variable with the same name
+// (a self-alias `WITH x AS x` is a no-op and ignored).
+func rewriteWithProjectionAliases(pred ast.Expression, proj *ast.Projection) ast.Expression {
+	if pred == nil || proj == nil {
+		return pred
+	}
+	aliasMap := make(map[string]ast.Expression, len(proj.Items))
+	for _, it := range proj.Items {
+		if it == nil || it.Alias == nil || it.Expr == nil {
+			continue
+		}
+		if v, isVar := it.Expr.(*ast.Variable); isVar && v.Name == *it.Alias {
+			continue
+		}
+		aliasMap[*it.Alias] = it.Expr
+	}
+	if len(aliasMap) == 0 {
+		return pred
+	}
+	return substVarRefs(pred, aliasMap)
+}
+
+// substVarRefs returns a copy of e in which any *ast.Variable whose name
+// is a key in subst is replaced with the mapped expression. Non-leaf
+// nodes are reconstructed only along the path that contains a substitution
+// so unrelated subtrees keep their original pointers.
+func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Expression { //nolint:gocyclo // case-per-AST-node dispatch
+	if e == nil {
+		return nil
+	}
+	switch n := e.(type) {
+	case *ast.Variable:
+		if repl, ok := subst[n.Name]; ok {
+			return repl
+		}
+		return n
+	case *ast.BinaryOp:
+		left := substVarRefs(n.Left, subst)
+		right := substVarRefs(n.Right, subst)
+		if left == n.Left && right == n.Right {
+			return n
+		}
+		cp := *n
+		cp.Left = left
+		cp.Right = right
+		return &cp
+	case *ast.UnaryOp:
+		op := substVarRefs(n.Operand, subst)
+		if op == n.Operand {
+			return n
+		}
+		cp := *n
+		cp.Operand = op
+		return &cp
+	case *ast.Property:
+		rec := substVarRefs(n.Receiver, subst)
+		if rec == n.Receiver {
+			return n
+		}
+		cp := *n
+		cp.Receiver = rec
+		return &cp
+	case *ast.FunctionInvocation:
+		var changed bool
+		newArgs := make([]ast.Expression, len(n.Args))
+		for i, a := range n.Args {
+			newArgs[i] = substVarRefs(a, subst)
+			if newArgs[i] != a {
+				changed = true
+			}
+		}
+		if !changed {
+			return n
+		}
+		cp := *n
+		cp.Args = newArgs
+		return &cp
+	case *ast.LabelPredicate:
+		rec := substVarRefs(n.Receiver, subst)
+		if rec == n.Receiver {
+			return n
+		}
+		cp := *n
+		cp.Receiver = rec
+		return &cp
+	}
+	return e
 }
 
 // applyProjectionTail wraps plan with the DISTINCT / ORDER BY / SKIP /

@@ -632,11 +632,29 @@ import (
 //     and the broader set of scenarios projecting `<x> IS [NOT] NULL`.
 //     Observed 3508-3510 across a 5-run sample (median 3509); gate set
 //     conservatively at 3503 (minimum observed - 5).
+//   - 3515: raised after translateWith pre-projection WHERE fix —
+//     openCypher 9 §5.1.5 specifies that `WITH … WHERE` filters the
+//     pre-projection row stream so the predicate can reference both the
+//     pre-WITH variables (potentially dropped by the projection) and
+//     any new aliases introduced by the projection. Implementation:
+//     translateWith now applies the WHERE Selection to `child` BEFORE
+//     building the EagerAggregation/Projection, with a new
+//     [rewriteWithProjectionAliases] AST rewriter that substitutes any
+//     reference to a new projection alias with the alias's source
+//     expression so it evaluates against the pre-projection row. Pre-fix
+//     the Selection sat ABOVE Projection so references to dropped
+//     pre-WITH variables resolved to NULL and the filter let everything
+//     through (or no rows for an unrelated reason). Unlocks
+//     WithWhere1 [3]/[4], WithWhere7 [1]/[2]/[3] and the broader
+//     ExistentialSubquery / aggregation-after-WITH families that depend
+//     on pre-WITH scope visibility. Observed 3520-3524 across a 5-run
+//     sample (median 3523); gate set conservatively at 3515 (minimum
+//     observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3503
+const tckExecutionBaseline = 3515
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
