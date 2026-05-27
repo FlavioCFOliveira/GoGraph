@@ -606,11 +606,25 @@ import (
 //     wider variance band while still locking in the deterministic +2
 //     uplift the T986 + rel-property fixes deliver over the pre-fix
 //     3494-3496 band.
+//   - 3494: raised after sema function-argument type-check follow-on —
+//     checkFunctionArgTypes (defined but previously never called) is
+//     now wired into checkExpr's *ast.FunctionInvocation arm and
+//     restructured from a permissive must-be-set classifier to a
+//     reject-set classifier that only flags Variable args whose static
+//     symbol type is definitively wrong (so projection-alias variables
+//     with "value" / "any" / "" types fall through unchecked).
+//     Coverage extended to length() and size() with graph-element
+//     receivers. Unlocks the compile-time InvalidArgumentType
+//     expectations for type() on node (Graph4 [7]), labels() on path
+//     (Graph3 [8]), length() on node (Path3 [2]), length() on
+//     relationship (Path3 [3]), size() on path (List6 [5]) — +5
+//     deterministic scenarios. Observed 3499-3503 across a 5-run sample
+//     (median 3501); gate set conservatively at 3494 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3490
+const tckExecutionBaseline = 3494
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -1055,6 +1055,7 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		if !isKnownFunctionName(strings.ToLower(qualified)) {
 			a.error(unknownFunctionError(qualified, v.Pos))
 		}
+		a.checkFunctionArgTypes(v)
 		for _, arg := range v.Args {
 			a.checkExpr(arg)
 		}
@@ -1560,14 +1561,20 @@ func containsAggregation(e ast.Expression) bool {
 
 // checkFunctionArgTypes performs a coarse static type-check on a handful
 // of graph-built-in functions whose argument kind is constrained by the
-// openCypher spec. Only fires when the argument is a Variable whose scope
-// type is definitively incompatible — Variables of type "any" and complex
-// expressions (function calls, property access, etc.) remain unchecked.
+// openCypher spec. The check fires only when the argument is a Variable
+// whose scope symbol type is one of the kinds we can prove is definitely
+// invalid for this function ("reject set"). Variables typed "any" /
+// "value" / "" and complex expressions (function calls, parameters,
+// literals, property access, …) fall through unchecked so we never
+// flag a legitimate use.
 //
-// Checks:
-//   - type(x)         requires x to be a relationship
-//   - labels(x), keys(x) requires x to be a node (keys also accepts relationship)
-//   - nodes(p), relationships(p) requires p to be a path
+// Reject-set per function (everything else is permitted):
+//   - type(x):                rejects node, path        (only relationships have a type)
+//   - labels(x):              rejects relationship, path (only nodes carry labels)
+//   - keys(x):                rejects path              (nodes / relationships / maps all have keys)
+//   - nodes(p), relationships(p): rejects node, relationship (must be a path)
+//   - length(x):              rejects node, relationship (length is path-only here)
+//   - size(x):                rejects node, relationship, path (size is for strings / lists)
 //
 // The first failing argument surfaces InvalidArgumentType; subsequent
 // arguments are not re-reported for the same invocation.
@@ -1576,27 +1583,24 @@ func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
 		return
 	}
 	name := strings.ToLower(fn.Name)
-	type argTypeReq struct {
-		argIdx int
-		ok     map[string]bool
-	}
-	var req argTypeReq
+	var reject map[string]bool
 	switch name {
 	case "type":
-		req = argTypeReq{argIdx: 0, ok: map[string]bool{"relationship": true, "any": true, "": true}}
+		reject = map[string]bool{"node": true, "path": true}
 	case "labels":
-		req = argTypeReq{argIdx: 0, ok: map[string]bool{"node": true, "any": true, "": true}}
+		reject = map[string]bool{"relationship": true, "path": true}
 	case "keys":
-		req = argTypeReq{argIdx: 0, ok: map[string]bool{"node": true, "relationship": true, "any": true, "": true}}
+		reject = map[string]bool{"path": true}
 	case "nodes", "relationships":
-		req = argTypeReq{argIdx: 0, ok: map[string]bool{"path": true, "any": true, "": true}}
+		reject = map[string]bool{"node": true, "relationship": true}
+	case "length":
+		reject = map[string]bool{"node": true, "relationship": true}
+	case "size":
+		reject = map[string]bool{"node": true, "relationship": true, "path": true}
 	default:
 		return
 	}
-	if req.argIdx >= len(fn.Args) {
-		return
-	}
-	v, ok := fn.Args[req.argIdx].(*ast.Variable)
+	v, ok := fn.Args[0].(*ast.Variable)
 	if !ok {
 		return
 	}
@@ -1604,7 +1608,7 @@ func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
 	if !exists {
 		return
 	}
-	if req.ok[sym.Type] {
+	if !reject[sym.Type] {
 		return
 	}
 	a.error(invalidBooleanOperandError(name, sym.Type, v.Pos))
