@@ -1960,13 +1960,22 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		// The Argument operator is the leaf of the inner plan; it re-emits the
-		// outer row so correlated inner scans can consume it. For non-correlated
-		// inner plans (independent scans) the arg is inert but required.
+		// The inner subtree of a plain (non-correlated) Apply runs in
+		// isolation — it does not consume the outer row, so inner rows are
+		// inner-columns-only. Build the inner with a FRESH schema so its
+		// operators index columns from 0. After the build, merge the inner
+		// schema back into the shared schema with each column offset by the
+		// outer's width so the post-Apply combined row layout (outer||inner)
+		// stays addressable downstream.
+		outerWidth := schemaWidth(schema)
+		innerSchema := map[string]int{}
 		arg := exec.NewArgument()
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
+		}
+		for k, v := range innerSchema {
+			schema[k] = v + outerWidth
 		}
 		return exec.NewApply(outer, inner, arg), nil
 
