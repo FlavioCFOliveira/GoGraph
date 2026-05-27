@@ -958,7 +958,27 @@ func (a *analyser) nodePatternIntroduce(np *ast.NodePattern) {
 	a.error(a.scope.Define(name, np.Pos, "node"))
 }
 
+// validateRelRange flags negative lower or upper bounds on a variable-length
+// relationship pattern (`-[r:T*-2..3]->`). Both bounds must be non-negative
+// per openCypher 9 §3.2.6, and Min must not exceed Max when both are
+// present. Reports the violation as InvalidRelationshipPattern.
+func (a *analyser) validateRelRange(rp *ast.RelationshipPattern) {
+	if rp == nil || rp.Range == nil {
+		return
+	}
+	if rp.Range.Min != nil && *rp.Range.Min < 0 {
+		a.error(invalidBooleanOperandError("range", "negative-lower-bound", rp.Pos))
+	}
+	if rp.Range.Max != nil && *rp.Range.Max < 0 {
+		a.error(invalidBooleanOperandError("range", "negative-upper-bound", rp.Pos))
+	}
+	if rp.Range.Min != nil && rp.Range.Max != nil && *rp.Range.Min > *rp.Range.Max {
+		a.error(invalidBooleanOperandError("range", "lower-bound-exceeds-upper", rp.Pos))
+	}
+}
+
 func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
+	a.validateRelRange(rp)
 	if rp.Variable == nil {
 		return
 	}
