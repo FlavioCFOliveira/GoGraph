@@ -1752,16 +1752,27 @@ func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (a
 	// digit (unless explicitly back-quoted), so a single accessor whose key
 	// is all digits unambiguously reconstructs the float literal.
 	if len(names) == 1 {
-		if intLit, ok := base.(*ast.IntLiteral); ok {
-			key := nameText(names[0])
-			// The fractional-part token may carry an exponent suffix too
-			// (e.g. `1.0e9` lexes as 1 + . + 0e9), so accept either a
-			// pure-digit key or a digit-run-with-exponent shape.
-			if isAllDigits(key) || looksLikeExponentFloat(key) {
+		key := nameText(names[0])
+		// The fractional-part token may carry an exponent suffix too
+		// (e.g. `1.0e9` lexes as 1 + . + 0e9), so accept either a
+		// pure-digit key or a digit-run-with-exponent shape.
+		isFracKey := isAllDigits(key) || looksLikeExponentFloat(key)
+		if isFracKey {
+			if intLit, ok := base.(*ast.IntLiteral); ok {
 				f, ferr := strconv.ParseFloat(fmt.Sprintf("%d.%s", intLit.Value, key), 64)
 				if ferr == nil {
 					return &ast.FloatLiteral{Pos: intLit.Pos, EndPos: endPositionOf(ctx), Value: f}, nil
 				}
+			}
+			// When the integer part overflows int64, VisitNumberLit
+			// fell back to *ast.FloatLiteral that already holds the
+			// rounded representation of the whole-number prefix. The
+			// subsequent `.0` (or `.0e9`) accessor cannot add precision
+			// the float64 cannot already represent, so the FloatLiteral
+			// IS the correct decoded value. Treat the accessor as the
+			// closing of a float literal, not a property projection.
+			if floatLit, ok := base.(*ast.FloatLiteral); ok {
+				return &ast.FloatLiteral{Pos: floatLit.Pos, EndPos: endPositionOf(ctx), Value: floatLit.Value}, nil
 			}
 		}
 	}
