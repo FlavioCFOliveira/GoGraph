@@ -3024,23 +3024,43 @@ func buildProcedureCallOperator(
 	// IntegerValue, the value is widened to FloatValue at runtime so the
 	// procedure receives the kind it expects (openCypher numeric widening
 	// per the TCK Call3 scenarios).
-	argEvals := make([]func(exec.Row) (expr.Value, error), len(p.Arguments))
-	for i, argStr := range p.Arguments {
-		baseEval := buildProcArgEvaluator(argStr, schema)
-		if i < len(entry.Sig.Inputs) && entry.Sig.Inputs[i] == expr.KindFloat {
-			inner := baseEval
-			argEvals[i] = func(row exec.Row) (expr.Value, error) {
-				v, err := inner(row)
-				if err != nil {
-					return v, err
-				}
-				if iv, ok := v.(expr.IntegerValue); ok {
-					return expr.FloatValue(float64(iv)), nil
-				}
-				return v, nil
+	var argEvals []func(exec.Row) (expr.Value, error)
+	if len(p.Arguments) == 0 && len(entry.Sig.Inputs) > 0 && len(entry.Sig.InputNames) == len(entry.Sig.Inputs) {
+		// Implicit-argument form: bind each declared input from the
+		// query parameter whose name matches the declared input name.
+		argEvals = make([]func(exec.Row) (expr.Value, error), len(entry.Sig.Inputs))
+		for i, paramName := range entry.Sig.InputNames {
+			v, ok := params[paramName]
+			if !ok {
+				v = expr.Null
 			}
-		} else {
-			argEvals[i] = baseEval
+			if entry.Sig.Inputs[i] == expr.KindFloat {
+				if iv, isInt := v.(expr.IntegerValue); isInt {
+					v = expr.FloatValue(float64(iv))
+				}
+			}
+			captured := v
+			argEvals[i] = func(_ exec.Row) (expr.Value, error) { return captured, nil }
+		}
+	} else {
+		argEvals = make([]func(exec.Row) (expr.Value, error), len(p.Arguments))
+		for i, argStr := range p.Arguments {
+			baseEval := buildProcArgEvaluator(argStr, schema)
+			if i < len(entry.Sig.Inputs) && entry.Sig.Inputs[i] == expr.KindFloat {
+				inner := baseEval
+				argEvals[i] = func(row exec.Row) (expr.Value, error) {
+					v, err := inner(row)
+					if err != nil {
+						return v, err
+					}
+					if iv, ok := v.(expr.IntegerValue); ok {
+						return expr.FloatValue(float64(iv)), nil
+					}
+					return v, nil
+				}
+			} else {
+				argEvals[i] = baseEval
+			}
 		}
 	}
 

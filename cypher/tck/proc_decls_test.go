@@ -85,10 +85,11 @@ func parseProcedureSignature(sig string) (parsedProc, error) {
 	ns, leaf := splitNamespace(name)
 	return parsedProc{
 		Signature: procs.Signature{
-			Namespace: ns,
-			Name:      leaf,
-			Inputs:    inputKinds,
-			Outputs:   outputCols,
+			Namespace:  ns,
+			Name:       leaf,
+			Inputs:     inputKinds,
+			InputNames: inputNames,
+			Outputs:    outputCols,
 		},
 		InputNames:  inputNames,
 		OutputNames: outputNames,

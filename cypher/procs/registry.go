@@ -45,6 +45,13 @@ type Signature struct {
 	Name string
 	// Inputs lists the expected kinds for each positional argument.
 	Inputs []expr.Kind
+	// InputNames lists the declared name of each positional input, parallel
+	// to Inputs. When populated (len == len(Inputs)) the engine supports the
+	// openCypher implicit-argument form: a `CALL ns.name` with no argument
+	// list binds each declared input from the query parameter whose name
+	// matches the corresponding entry here. Empty / nil leaves the implicit
+	// form unsupported for this procedure.
+	InputNames []string
 	// Outputs lists the named output columns produced by the procedure.
 	Outputs []NamedType
 }
