@@ -801,11 +801,23 @@ import (
 //         Merge3 #2, plus three related scenarios).
 //     Observed 3624-3625 across five-run samples; gate set at 3620
 //     to absorb run-to-run variance from order-sensitive scenarios.
+//   - 3628: raised after three additional execution-level uplifts:
+//     (a) sema's transitive property-access check now distinguishes
+//         "scalar" / "list" / "map" projection types and rejects
+//         `WITH 123 AS x RETURN x.num`-style accesses at compile
+//         time (Map1 #6, Graph6 #9).
+//     (b) MergeRelationship binds the relationship variable in the
+//         output row via a synthetic RelationshipValue, so count(r),
+//         RETURN r, and r.prop downstream of `MERGE (a)-[r:T]->(b)`
+//         observe the bound edge (Merge5 #2 / #5–#8, Merge6 #2,
+//         Merge7 #3 and related).
+//     Observed 3633 stable across five-run samples; gate set at
+//     3628 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3620
+const tckExecutionBaseline = 3628
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
