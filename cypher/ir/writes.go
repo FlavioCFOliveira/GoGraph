@@ -202,7 +202,29 @@ func collectPlanVars(plan LogicalPlan) map[string]struct{} {
 }
 
 // mergeClause translates a MERGE clause.
+//
+// Special-case: when the pattern is a single-hop relationship between
+// two endpoint variables that are BOTH already bound by the child
+// plan and the MERGE has no ON CREATE / ON MATCH actions, the
+// translator emits [MergeRelationship] — a focused operator that
+// checks for an existing edge and creates one only when absent. All
+// other MERGE shapes (node-only, multi-hop, with ON-actions) keep
+// using the node-oriented [Merge] path.
 func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, error) {
+	if child != nil && len(m.OnCreate) == 0 && len(m.OnMatch) == 0 {
+		if srcVar, dstVar, relVar, relType, ok := mergeSingleHopRel(m.Pattern); ok {
+			outerVars := collectAllVars(child)
+			outer := map[string]struct{}{}
+			for _, v := range outerVars {
+				outer[v] = struct{}{}
+			}
+			if _, hasSrc := outer[srcVar]; hasSrc {
+				if _, hasDst := outer[dstVar]; hasDst {
+					return NewMergeRelationship(srcVar, dstVar, relVar, relType, child), nil
+				}
+			}
+		}
+	}
 	onCreate := make([]string, len(m.OnCreate))
 	for i, si := range m.OnCreate {
 		onCreate[i] = si.String()
@@ -213,6 +235,58 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 	}
 	boundVars := patternVars(m.Pattern)
 	return NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child), nil
+}
+
+// mergeSingleHopRel returns (srcVar, dstVar, relVar, relType, true) when
+// pp is a single-hop directed/undirected relationship pattern with two
+// named endpoints and at most one type label. Returns ok=false for any
+// other shape (zero hops, multi-hop, anonymous endpoint, zero or
+// multiple types). The check is intentionally narrow: only the
+// canonical Merge5 [2]-style shape qualifies.
+func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType string, ok bool) {
+	if pp == nil || pp.Head == nil {
+		return "", "", "", "", false
+	}
+	head := pp.Head
+	if head.Node == nil || head.Node.Variable == nil {
+		return "", "", "", "", false
+	}
+	step := head.Next
+	if step == nil || step.Relationship == nil || step.Node == nil || step.Node.Variable == nil {
+		return "", "", "", "", false
+	}
+	if step.Next != nil {
+		// Multi-hop — handled by the node-only Merge path for now.
+		return "", "", "", "", false
+	}
+	if len(step.Relationship.Types) != 1 {
+		return "", "", "", "", false
+	}
+	if step.Relationship.Properties != nil {
+		// Relationship inline properties on MERGE — search/create
+		// semantics needs property-aware matching, not yet wired.
+		return "", "", "", "", false
+	}
+	if head.Node.Properties != nil || step.Node.Properties != nil ||
+		len(head.Node.Labels) != 0 || len(step.Node.Labels) != 0 {
+		// Re-asserting labels/properties on bound endpoints is the
+		// "Fail when imposing new predicates" scenario; skip
+		// translation here so the node-only Merge path can surface
+		// the appropriate error.
+		return "", "", "", "", false
+	}
+	rv := ""
+	if step.Relationship.Variable != nil {
+		rv = *step.Relationship.Variable
+	}
+	src := *head.Node.Variable
+	dst := *step.Node.Variable
+	// For outgoing direction the source is head, dst is step; for
+	// incoming we swap so the edge is stored in the canonical direction.
+	if step.Relationship.Direction == ast.RelDirectionIncoming {
+		src, dst = dst, src
+	}
+	return src, dst, rv, step.Relationship.Types[0], true
 }
 
 // setClause translates a SET clause. Each SetItem becomes one of:

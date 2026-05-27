@@ -757,11 +757,27 @@ import (
 //     authorise leaf substitution in an aggregating sibling.
 //     Observed 3589-3596 across a 5-run sample (median 3593); gate
 //     set conservatively at 3584 (minimum observed - 5).
+//   - 3593: raised after MergeRelationship — new IR + exec operator
+//     handling the canonical single-hop MERGE-of-relationship-between-
+//     bound-endpoints shape (`MATCH (a:A), (b:B) MERGE (a)-[r:T]->(b)`).
+//     The translator routes the simplest case (one rel hop, both
+//     endpoint vars bound by child, no ON CREATE / ON MATCH actions,
+//     no inline rel properties, no re-asserted endpoint
+//     labels/properties) to a focused exec operator that resolves
+//     both endpoint NodeIDs, calls HasEdge, and either tags the
+//     existing edge with the requested type (idempotent
+//     SetEdgeLabel) or AddEdge + SetEdgeLabel for a fresh edge.
+//     Pre-fix the IR translator funnelled every MERGE through the
+//     node-only Merge path; relationship-pattern MERGEs returned
+//     zero rows because the search-fn scanned nodes, not edges.
+//     Unlocks Merge5 [2]/[4]/[5]/[7] and related scenarios.
+//     Observed 3598-3604 across a 5-run sample (median 3601); gate
+//     set conservatively at 3593 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3584
+const tckExecutionBaseline = 3593
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

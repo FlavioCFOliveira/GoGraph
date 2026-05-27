@@ -1702,6 +1702,46 @@ type Merge struct {
 	Child LogicalPlan
 }
 
+// MergeRelationship is the relationship-pattern variant of [Merge]. It
+// targets the single-hop MERGE shape `(src)-[r:T]->(dst)` where both
+// endpoints are bound by an upstream operator (a preceding MATCH or
+// CREATE). The physical builder emits an exec.MergeRelationship that
+// checks for an existing edge between the bound endpoints with the
+// requested type and creates one when absent.
+//
+// More elaborate MERGE shapes (multi-hop patterns, edge properties,
+// ON CREATE / ON MATCH actions) keep using the node-only [Merge] path.
+type MergeRelationship struct {
+	// SrcVar is the variable name of the source endpoint.
+	SrcVar string
+	// DstVar is the variable name of the destination endpoint.
+	DstVar string
+	// RelVar is the relationship variable name (may be empty for an
+	// anonymous relationship).
+	RelVar string
+	// RelType is the relationship type label.
+	RelType string
+	// Child is the driving subplan that binds SrcVar and DstVar.
+	Child LogicalPlan
+}
+
+// NewMergeRelationship creates a MergeRelationship operator.
+func NewMergeRelationship(srcVar, dstVar, relVar, relType string, child LogicalPlan) *MergeRelationship {
+	return &MergeRelationship{SrcVar: srcVar, DstVar: dstVar, RelVar: relVar, RelType: relType, Child: child}
+}
+
+// Children implements LogicalPlan.
+func (m *MergeRelationship) Children() []LogicalPlan { return []LogicalPlan{m.Child} }
+
+// Vars implements LogicalPlan. The merged relationship introduces its
+// variable into the downstream scope when named.
+func (m *MergeRelationship) Vars() []string {
+	if m.RelVar != "" {
+		return []string{m.RelVar}
+	}
+	return nil
+}
+
 // NewMerge creates a Merge operator.
 func NewMerge(pattern string, onCreate, onMatch, boundVars []string, child LogicalPlan) *Merge {
 	oc := make([]string, len(onCreate))
