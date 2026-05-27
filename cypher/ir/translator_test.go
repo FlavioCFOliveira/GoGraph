@@ -342,8 +342,15 @@ func TestTranslate_OptionalExpand(t *testing.T) {
 		},
 	}
 	plan := mustFromAST(t, q)
-	if _, ok := plan.(*ir.OptionalExpand); !ok {
-		t.Fatalf("expected *ir.OptionalExpand, got %T", plan)
+	// OPTIONAL MATCH at the start of a query is wrapped in an
+	// OptionalApply so an empty result still emits one NULL-extended row
+	// (openCypher 9 §3.2.4). The inner pattern uses regular Expand.
+	opt, ok := plan.(*ir.OptionalApply)
+	if !ok {
+		t.Fatalf("expected *ir.OptionalApply, got %T", plan)
+	}
+	if _, ok := opt.Inner.(*ir.Expand); !ok {
+		t.Fatalf("OptionalApply.Inner expected *ir.Expand, got %T", opt.Inner)
 	}
 }
 

@@ -107,32 +107,28 @@ func (t *translator) translateOptionalMatch(m *ast.OptionalMatch, child LogicalP
 		// standalone pattern in an OptionalApply over an empty
 		// Argument seed so the inner subtree's empty result becomes a
 		// single NULL row.
-		if !patternHasRelationships(m.Pattern) {
-			inner, err := t.matchPattern(m.Pattern, nil, false)
-			if err != nil {
-				return nil, err
-			}
-			if m.Where != nil {
-				inner, err = t.translateExistsPredicate(m.Where.Predicate, inner)
-				if err != nil {
-					return nil, err
-				}
-			}
-			optTag := nextArgTag()
-			seed := NewArgumentWithTag(nil, optTag)
-			return NewOptionalApplyWithTag(seed, inner, optTag), nil
-		}
-		plan, err := t.matchPattern(m.Pattern, nil, true)
+		// Both node-only and relationship-bearing OPTIONAL MATCH at the
+		// start of a query need an OptionalApply wrapper so an empty
+		// pattern result still emits one NULL-extended row, per
+		// openCypher 9 §3.2.4. The inner pattern itself uses regular
+		// Expand (optional=false) because the OptionalApply now provides
+		// the full-pattern NULL emission semantics; previously the
+		// relationship-bearing branch returned the inner plan
+		// unwrapped, so `OPTIONAL MATCH ()-[r]->()` on an empty graph
+		// returned zero rows instead of one null row.
+		inner, err := t.matchPattern(m.Pattern, nil, false)
 		if err != nil {
 			return nil, err
 		}
 		if m.Where != nil {
-			plan, err = t.translateExistsPredicate(m.Where.Predicate, plan)
+			inner, err = t.translateExistsPredicate(m.Where.Predicate, inner)
 			if err != nil {
 				return nil, err
 			}
 		}
-		return plan, nil
+		optTag := nextArgTag()
+		seed := NewArgumentWithTag(nil, optTag)
+		return NewOptionalApplyWithTag(seed, inner, optTag), nil
 	}
 
 	// Build the inner pattern as a standalone subtree using a fresh Argument

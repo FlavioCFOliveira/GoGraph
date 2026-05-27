@@ -721,11 +721,24 @@ import (
 //     net +4-7 deterministic uplift. Observed 3560-3566 across a 5-run
 //     sample (median 3564); gate set conservatively at 3555 (minimum
 //     observed - 5).
+//   - 3564: raised after OPTIONAL MATCH at query start now always wraps
+//     in an OptionalApply over a singleton Argument seed (regardless
+//     of whether the pattern contains relationships). openCypher 9
+//     §3.2.4 requires at least one NULL-extended row per driving
+//     outer row; pre-fix the relationship-bearing branch returned the
+//     inner plan unwrapped so `OPTIONAL MATCH ()-[r]->()` on an empty
+//     graph produced zero rows instead of one. The inner pattern now
+//     uses regular Expand (the OptionalApply provides the NULL
+//     emission). Standalone-CALL output-column auto-yield + TCK proc
+//     declaration NUMBER/ANY kind parsing landed on top of this for
+//     additional uplift. Observed 3569-3572 across a 5-run sample
+//     (median 3571); gate set conservatively at 3564 (minimum
+//     observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3555
+const tckExecutionBaseline = 3564
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

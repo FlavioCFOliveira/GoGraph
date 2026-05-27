@@ -112,24 +112,33 @@ func Test_OptionalMatch_SingleHop_OptionalExpand(t *testing.T) {
 	}
 	plan := mustFromAST(t, q)
 
-	oe, ok := plan.(*ir.OptionalExpand)
+	// OPTIONAL MATCH at the start of a query is now wrapped in an
+	// OptionalApply over a singleton Argument seed so an empty match
+	// emits one NULL-extended row (openCypher 9 §3.2.4). The inner
+	// pattern uses regular Expand because the OptionalApply provides
+	// the full-pattern NULL emission semantics.
+	opt, ok := plan.(*ir.OptionalApply)
 	if !ok {
-		t.Fatalf("expected *ir.OptionalExpand, got %T", plan)
+		t.Fatalf("expected *ir.OptionalApply, got %T", plan)
 	}
-	if oe.FromVar != "a" {
-		t.Errorf("FromVar = %q, want a", oe.FromVar)
+	e, ok := opt.Inner.(*ir.Expand)
+	if !ok {
+		t.Fatalf("OptionalApply.Inner expected *ir.Expand, got %T", opt.Inner)
 	}
-	if oe.ToVar != "b" {
-		t.Errorf("ToVar = %q, want b", oe.ToVar)
+	if e.FromVar != "a" {
+		t.Errorf("FromVar = %q, want a", e.FromVar)
 	}
-	if oe.Direction != ir.DirectionOutgoing {
-		t.Errorf("Direction = %v, want Outgoing", oe.Direction)
+	if e.ToVar != "b" {
+		t.Errorf("ToVar = %q, want b", e.ToVar)
 	}
-	if len(oe.RelTypes) != 1 || oe.RelTypes[0] != "R" {
-		t.Errorf("RelTypes = %v, want [R]", oe.RelTypes)
+	if e.Direction != ir.DirectionOutgoing {
+		t.Errorf("Direction = %v, want Outgoing", e.Direction)
 	}
-	if _, ok := oe.Child.(*ir.AllNodesScan); !ok {
-		t.Fatalf("Child expected *ir.AllNodesScan, got %T", oe.Child)
+	if len(e.RelTypes) != 1 || e.RelTypes[0] != "R" {
+		t.Errorf("RelTypes = %v, want [R]", e.RelTypes)
+	}
+	if _, ok := e.Child.(*ir.AllNodesScan); !ok {
+		t.Fatalf("Expand.Child expected *ir.AllNodesScan, got %T", e.Child)
 	}
 }
 
@@ -165,17 +174,22 @@ func Test_OptionalMatch_WithWhere(t *testing.T) {
 	}
 	plan := mustFromAST(t, q)
 
-	// Root: Selection (WHERE).
-	sel, ok := plan.(*ir.Selection)
+	// OPTIONAL MATCH at the start of a query is wrapped in an
+	// OptionalApply. The WHERE Selection sits inside, between the
+	// OptionalApply and the Expand body.
+	opt, ok := plan.(*ir.OptionalApply)
 	if !ok {
-		t.Fatalf("expected *ir.Selection (WHERE), got %T", plan)
+		t.Fatalf("expected *ir.OptionalApply, got %T", plan)
+	}
+	sel, ok := opt.Inner.(*ir.Selection)
+	if !ok {
+		t.Fatalf("OptionalApply.Inner expected *ir.Selection (WHERE), got %T", opt.Inner)
 	}
 	if sel.Predicate == "" {
 		t.Error("WHERE Selection.Predicate must be non-empty")
 	}
-	// Child: OptionalExpand.
-	if _, ok := sel.Child.(*ir.OptionalExpand); !ok {
-		t.Fatalf("sel.Child expected *ir.OptionalExpand, got %T", sel.Child)
+	if _, ok := sel.Child.(*ir.Expand); !ok {
+		t.Fatalf("sel.Child expected *ir.Expand, got %T", sel.Child)
 	}
 }
 
@@ -264,25 +278,28 @@ func Test_OptionalMatch_TwoHops(t *testing.T) {
 	}
 	plan := mustFromAST(t, q)
 
-	// Root: second hop OptionalExpand (R2→c).
-	oe2, ok := plan.(*ir.OptionalExpand)
+	// Root: OptionalApply wrapper.
+	opt, ok := plan.(*ir.OptionalApply)
 	if !ok {
-		t.Fatalf("root expected *ir.OptionalExpand (hop 2), got %T", plan)
+		t.Fatalf("root expected *ir.OptionalApply, got %T", plan)
 	}
-	if oe2.ToVar != "c" {
-		t.Errorf("hop2.ToVar = %q, want c", oe2.ToVar)
-	}
-	// Child: first hop OptionalExpand (R1→b).
-	oe1, ok := oe2.Child.(*ir.OptionalExpand)
+	// Inner: second hop Expand (R2→c) on top of first hop Expand (R1→b).
+	e2, ok := opt.Inner.(*ir.Expand)
 	if !ok {
-		t.Fatalf("hop2.Child expected *ir.OptionalExpand (hop 1), got %T", oe2.Child)
+		t.Fatalf("OptionalApply.Inner expected *ir.Expand (hop 2), got %T", opt.Inner)
 	}
-	if oe1.ToVar != "b" {
-		t.Errorf("hop1.ToVar = %q, want b", oe1.ToVar)
+	if e2.ToVar != "c" {
+		t.Errorf("hop2.ToVar = %q, want c", e2.ToVar)
 	}
-	// Leaf: AllNodesScan for anchor.
-	if _, ok := oe1.Child.(*ir.AllNodesScan); !ok {
-		t.Fatalf("hop1.Child expected *ir.AllNodesScan, got %T", oe1.Child)
+	e1, ok := e2.Child.(*ir.Expand)
+	if !ok {
+		t.Fatalf("hop2.Child expected *ir.Expand (hop 1), got %T", e2.Child)
+	}
+	if e1.ToVar != "b" {
+		t.Errorf("hop1.ToVar = %q, want b", e1.ToVar)
+	}
+	if _, ok := e1.Child.(*ir.AllNodesScan); !ok {
+		t.Fatalf("hop1.Child expected *ir.AllNodesScan, got %T", e1.Child)
 	}
 }
 
@@ -312,11 +329,15 @@ func Test_OptionalMatch_Vars(t *testing.T) {
 	}
 	plan := mustFromAST(t, q)
 
-	oe, ok := plan.(*ir.OptionalExpand)
+	opt, ok := plan.(*ir.OptionalApply)
 	if !ok {
-		t.Fatalf("expected *ir.OptionalExpand, got %T", plan)
+		t.Fatalf("expected *ir.OptionalApply, got %T", plan)
 	}
-	vars := oe.Vars()
+	e, ok := opt.Inner.(*ir.Expand)
+	if !ok {
+		t.Fatalf("OptionalApply.Inner expected *ir.Expand, got %T", opt.Inner)
+	}
+	vars := e.Vars()
 	if !containsAll(vars, "r", "b") {
 		t.Errorf("Vars() = %v, want to contain r and b", vars)
 	}
