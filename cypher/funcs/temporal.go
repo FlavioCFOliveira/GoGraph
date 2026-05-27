@@ -951,9 +951,10 @@ func toLocalDateTime(v expr.Value) (expr.LocalDateTimeValue, bool) {
 
 // toNanosOfDay returns the nanoseconds-since-midnight component of any
 // temporal value. For DateValue this is zero (date with no time means
-// midnight); for date-bearing types the time component is extracted
-// from the wall clock; for time-only types the underlying Nanos field
-// is returned directly.
+// midnight); for LocalDateTimeValue the wall-clock time-of-day; for
+// DateTimeValue the UTC time-of-day (the zone offset matters for any
+// duration computation against a time-only or LocalDateTime argument);
+// for time-only types the underlying Nanos field is returned directly.
 func toNanosOfDay(v expr.Value) (int64, bool) {
 	switch vv := v.(type) {
 	case expr.DateValue:
@@ -961,7 +962,7 @@ func toNanosOfDay(v expr.Value) (int64, bool) {
 	case expr.LocalDateTimeValue:
 		return nanosOfDay(vv.T), true
 	case expr.DateTimeValue:
-		return nanosOfDay(vv.T), true
+		return nanosOfDay(vv.T.UTC()), true
 	case expr.LocalTimeValue:
 		return vv.Nanos, true
 	case expr.TimeValue:

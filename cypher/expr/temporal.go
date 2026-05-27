@@ -1340,11 +1340,15 @@ func SubLocalDateTimes(a, b LocalDateTimeValue) DurationValue {
 }
 
 // SubDateTimes returns a-b as a duration with the same calendar-based
-// decomposition as SubLocalDateTimes. Wall-clock semantics: both sides
-// are observed in their own zone but the result captures the elapsed
-// instant.
+// decomposition as SubLocalDateTimes, but anchored on the absolute
+// instant (both sides shifted to UTC before the calendar walk). Per
+// openCypher, the duration between two DateTime values is independent
+// of their local zones — what matters is the elapsed time on the
+// global timeline. Without the UTC shift, the wall-clock-anchored
+// diff drifts by the zone offset (e.g. 2014-07-21T21:40+0200 to
+// 2015-07-21T21:40+0100 would report P11M instead of P1Y).
 func SubDateTimes(a, b DateTimeValue) DurationValue {
-	return calendarDateTimeDiff(a.T, b.T)
+	return calendarDateTimeDiff(a.T.UTC(), b.T.UTC())
 }
 
 // calendarDateTimeDiff computes a-b as (months, days, seconds, nanos)
