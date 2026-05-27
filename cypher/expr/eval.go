@@ -337,9 +337,11 @@ func evalMapLiteral(n *ast.MapLiteral, row RowContext, params map[string]Value, 
 // ─────────────────────────────────────────────────────────────────────────────
 
 // evalLabelPredicate evaluates `receiver:Label1:Label2`. The receiver
-// must be a Node; any non-Node, non-null value yields NULL (a runtime
-// type mismatch). NULL receiver propagates to NULL. Empty label list is
-// vacuously true (the parser never produces this shape).
+// may be a Node (conjunctive label test against the node's labels) or
+// a Relationship (type-name match — a relationship has exactly one
+// type and only one label may be specified after the colon, per
+// openCypher 9). NULL receiver propagates to NULL; any other kind
+// yields NULL (a runtime type mismatch).
 func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	recv, err := evalExpr(n.Receiver, row, params, reg)
 	if err != nil {
@@ -348,23 +350,34 @@ func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, params map[string
 	if IsNull(recv) {
 		return Null, nil
 	}
-	node, ok := recv.(NodeValue)
-	if !ok {
-		return Null, nil
-	}
-	for _, want := range n.Labels {
-		found := false
-		for _, have := range node.Labels {
-			if have == want {
-				found = true
-				break
+	switch r := recv.(type) {
+	case NodeValue:
+		for _, want := range n.Labels {
+			found := false
+			for _, have := range r.Labels {
+				if have == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return BoolValue(false), nil
 			}
 		}
-		if !found {
-			return BoolValue(false), nil
+		return BoolValue(true), nil
+	case RelationshipValue:
+		// A relationship has exactly one type; the openCypher spec
+		// only allows a single label after the colon. We accept the
+		// same conjunctive walk for forward-compat but the only legal
+		// shape today is `r:Type`.
+		for _, want := range n.Labels {
+			if r.Type != want {
+				return BoolValue(false), nil
+			}
 		}
+		return BoolValue(true), nil
 	}
-	return BoolValue(true), nil
+	return Null, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
