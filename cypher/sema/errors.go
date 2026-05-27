@@ -55,6 +55,14 @@ const (
 	// compile time because the downstream consumer cannot disambiguate
 	// the columns.
 	KindColumnNameConflict ErrorKind = "COLUMN_NAME_CONFLICT"
+
+	// KindUnknownFunction is reported when a function-call expression
+	// names a function that is not registered in the engine's function
+	// registry and is not a recognised aggregate (count, sum, avg, min,
+	// max, collect, stdev, stdevp, percentileCont, percentileDisc).
+	// openCypher 9 §6.1 requires compile-time rejection of unknown
+	// function calls.
+	KindUnknownFunction ErrorKind = "UNKNOWN_FUNCTION"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -145,6 +153,17 @@ func columnNameConflictError(name string, pos ast.Position) *ScopeError {
 	}
 }
 
+// unknownFunctionError constructs a KindUnknownFunction ScopeError for a
+// function-call expression whose name does not resolve to any registered
+// scalar built-in or recognised aggregate.
+func unknownFunctionError(name string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindUnknownFunction,
+		Pos:     pos,
+		Message: fmt.Sprintf("unknown function %q", name),
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bolt-compatible mapping (TCK error categories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +211,10 @@ const (
 	// SubTypeColumnNameConflict is the TCK sub-type for a RETURN/WITH
 	// projection that declares duplicate output column names.
 	SubTypeColumnNameConflict = "ColumnNameConflict"
+
+	// SubTypeUnknownFunction is the canonical TCK sub-type for
+	// references to functions the engine does not implement.
+	SubTypeUnknownFunction = "UnknownFunction"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -261,6 +284,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindInvalidAggregation, Category: CategorySyntaxError, SubType: SubTypeInvalidAggregation},
 	{Kind: KindVariableAlreadyBound, Category: CategorySyntaxError, SubType: SubTypeVariableAlreadyBound},
 	{Kind: KindColumnNameConflict, Category: CategorySyntaxError, SubType: SubTypeColumnNameConflict},
+	{Kind: KindUnknownFunction, Category: CategorySyntaxError, SubType: SubTypeUnknownFunction},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]

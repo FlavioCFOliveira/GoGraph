@@ -67,6 +67,17 @@ import (
 	"gograph/store/txn"
 )
 
+// init wires the cross-package hook that lets sema reject calls to
+// non-existent functions at compile time. The hook is consulted from
+// sema's *ast.FunctionInvocation check; aggregates are recognised by
+// sema independently.
+func init() {
+	sema.IsKnownFunction = func(qualifiedLower string) bool {
+		_, ok := funcs.DefaultRegistry.Resolve(qualifiedLower)
+		return ok
+	}
+}
+
 // buildOpts carries the query-scope, optional state threaded through
 // [buildOperator] alongside the per-call positional arguments. A nil
 // *buildOpts is equivalent to the legacy build path: no SubqueryEvaluator,

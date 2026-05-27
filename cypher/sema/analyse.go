@@ -7,6 +7,67 @@ import (
 	"gograph/cypher/ast"
 )
 
+// IsKnownFunction, when non-nil, is consulted by [Analyse] to decide
+// whether a scalar function-call expression refers to a known function.
+// The argument is the lower-cased qualified name (namespace components
+// joined to the function name with '.', e.g. "duration.between").
+//
+// The hook is intentionally a package-level variable rather than an
+// argument so existing call sites do not need to change. It is set by
+// cypher/api.init() to a closure that consults the engine's function
+// registry; sema fails closed (no UnknownFunction reports) when the
+// hook is nil, preserving the pre-hook behaviour.
+//
+//nolint:gochecknoglobals // hook for cross-package wiring; set once at init
+var IsKnownFunction func(qualifiedLowerName string) bool
+
+// knownAggregates is the closed set of aggregate function names that
+// sema accepts even when [IsKnownFunction] returns false. The set
+// mirrors cypher/ir/aggregation.aggFunctions but is duplicated here to
+// avoid an import cycle (sema is upstream of ir).
+var knownAggregates = map[string]bool{
+	"count":          true,
+	"sum":            true,
+	"avg":            true,
+	"min":            true,
+	"max":            true,
+	"collect":        true,
+	"stdev":          true,
+	"stdevp":         true,
+	"percentilecont": true,
+	"percentiledisc": true,
+}
+
+// knownQuantifiers is the set of names that look like function calls
+// in the parser but are actually openCypher quantifier predicates over
+// a list (`all(x IN xs WHERE p)`, `any(...)`, `none(...)`,
+// `single(...)`) or existential subqueries (`exists { ... }`). They
+// must not be flagged as unknown by the function-name check.
+var knownQuantifiers = map[string]bool{
+	"all":    true,
+	"any":    true,
+	"none":   true,
+	"single": true,
+	"exists": true,
+}
+
+// isKnownFunctionName reports whether a function-call name is acceptable
+// at sema time. Aggregates and the IsKnownFunction hook are consulted
+// in that order; an unset hook short-circuits to "known" so sema does
+// not report false positives when the engine wiring is incomplete.
+func isKnownFunctionName(qualifiedLower string) bool {
+	if knownAggregates[qualifiedLower] {
+		return true
+	}
+	if knownQuantifiers[qualifiedLower] {
+		return true
+	}
+	if IsKnownFunction == nil {
+		return true
+	}
+	return IsKnownFunction(qualifiedLower)
+}
+
 // Analyse runs the scope-analysis pass on q and returns all scope violations
 // found. An empty (or nil) slice means the query is scope-clean.
 //
@@ -963,6 +1024,13 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		a.checkExpr(v.Operand)
 
 	case *ast.FunctionInvocation:
+		qualified := v.Name
+		if len(v.Namespace) > 0 {
+			qualified = strings.Join(append(append([]string{}, v.Namespace...), v.Name), ".")
+		}
+		if !isKnownFunctionName(strings.ToLower(qualified)) {
+			a.error(unknownFunctionError(qualified, v.Pos))
+		}
 		for _, arg := range v.Args {
 			a.checkExpr(arg)
 		}
