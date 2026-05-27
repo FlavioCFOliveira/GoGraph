@@ -75,6 +75,16 @@ const (
 	// clause is given a negative integer literal. openCypher 9 §3.6
 	// requires the argument to be a non-negative INTEGER.
 	KindNegativeIntegerArgument ErrorKind = "NEGATIVE_INTEGER_ARGUMENT"
+
+	// KindAmbiguousAggregationExpression is reported when a projection
+	// item contains an aggregating sub-expression nested inside a larger
+	// expression (e.g. `me.age + count(you.age)`) and a Variable or
+	// Property reference appearing OUTSIDE the aggregate call does not
+	// match any standalone "simple" grouping-key projection item.
+	// openCypher 9 §5.3.3 rejects this at compile time because the
+	// runtime cannot decide which row of the group should supply the
+	// non-grouped reference.
+	KindAmbiguousAggregationExpression ErrorKind = "AMBIGUOUS_AGGREGATION_EXPRESSION"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -141,6 +151,17 @@ func invalidAggregationError(pos ast.Position) *ScopeError {
 		Kind:    KindInvalidAggregation,
 		Pos:     pos,
 		Message: "aggregation in ORDER BY requires a matching aggregation in the projection",
+	}
+}
+
+// ambiguousAggregationError constructs a KindAmbiguousAggregationExpression
+// ScopeError for a non-grouped Variable / Property reference that appears
+// outside an aggregate call in an aggregating projection item.
+func ambiguousAggregationError(name string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindAmbiguousAggregationExpression,
+		Pos:     pos,
+		Message: fmt.Sprintf("variable %q appears outside an aggregate in an aggregating projection item but is not a grouping key", name),
 	}
 }
 
@@ -269,6 +290,11 @@ const (
 	// SubTypeNegativeIntegerArgument is the canonical TCK sub-type for
 	// a negative integer literal supplied to SKIP or LIMIT.
 	SubTypeNegativeIntegerArgument = "NegativeIntegerArgument"
+
+	// SubTypeAmbiguousAggregationExpression is the canonical TCK
+	// sub-type for non-grouped references appearing outside an
+	// aggregate call in an aggregating projection item.
+	SubTypeAmbiguousAggregationExpression = "AmbiguousAggregationExpression"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -341,6 +367,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindUnknownFunction, Category: CategorySyntaxError, SubType: SubTypeUnknownFunction},
 	{Kind: KindRelationshipUniqueness, Category: CategorySyntaxError, SubType: SubTypeRelationshipUniqueness},
 	{Kind: KindNegativeIntegerArgument, Category: CategorySyntaxError, SubType: SubTypeNegativeIntegerArgument},
+	{Kind: KindAmbiguousAggregationExpression, Category: CategorySyntaxError, SubType: SubTypeAmbiguousAggregationExpression},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]

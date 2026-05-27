@@ -883,6 +883,7 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 		}
 		a.checkExpr(item.Expr)
 	}
+	a.checkAmbiguousAggregation(proj)
 	// Introduce projected aliases (and bare-Variable projections) so that
 	// ORDER BY / SKIP / LIMIT references resolve. Redeclaration errors are
 	// suppressed here because the alias often shadows a pre-existing name
@@ -1238,6 +1239,156 @@ func nonListLiteralKind(e ast.Expression) (string, bool) {
 		return "Map", true
 	}
 	return "", false
+}
+
+// checkAmbiguousAggregation enforces openCypher 9 §5.3.3: when a
+// projection item contains an aggregating sub-expression nested inside
+// a larger expression (e.g. `me.age + count(you.age)`), every Variable
+// or Property reference that appears OUTSIDE the aggregate call must
+// either (a) match a standalone "simple" projection item in the same
+// projection (so it is a true grouping key) or (b) be a constant /
+// literal / parameter. References that fail the check surface as
+// SyntaxError(AmbiguousAggregationExpression).
+//
+// Pure bare-aggregate items (`count(x)`) skip this check — they have no
+// non-aggregate body to scrutinise. Non-aggregating items in an
+// aggregating projection ARE the grouping keys and are unconstrained
+// here (their own checkExpr enforces scope). The check fires only when
+// the projection actually contains at least one aggregate.
+func (a *analyser) checkAmbiguousAggregation(proj *ast.Projection) {
+	if proj == nil {
+		return
+	}
+	hasAgg := false
+	for _, item := range proj.Items {
+		if containsAggregation(item.Expr) {
+			hasAgg = true
+			break
+		}
+	}
+	if !hasAgg {
+		return
+	}
+	// Build the set of "simple" projection items — those whose Expr is
+	// a Variable or Property reference and which does NOT contain an
+	// aggregate. Such items act as grouping keys. The set is keyed by
+	// the canonical String() form so a complex expression can match.
+	keys := map[string]struct{}{}
+	for _, item := range proj.Items {
+		if containsAggregation(item.Expr) {
+			continue
+		}
+		keys[item.Expr.String()] = struct{}{}
+	}
+	for _, item := range proj.Items {
+		if !containsAggregation(item.Expr) {
+			continue
+		}
+		// Bare aggregate at top level — no surrounding non-agg body.
+		if _, ok := extractAggregation(item.Expr); ok && exprIsBareCall(item.Expr) {
+			continue
+		}
+		// Walk; report the first non-grouping Variable / Property
+		// reference that appears outside an aggregate sub-call.
+		if pos, name, bad := findUngroupedNonAggRef(item.Expr, keys); bad {
+			a.error(ambiguousAggregationError(name, pos))
+		}
+	}
+}
+
+// extractAggregation returns the FunctionInvocation if e is a direct
+// aggregate call, otherwise false. Mirrors the IR helper but stays in
+// sema so we do not depend on cypher/ir from cypher/sema.
+func extractAggregation(e ast.Expression) (*ast.FunctionInvocation, bool) {
+	fn, ok := e.(*ast.FunctionInvocation)
+	if !ok {
+		return nil, false
+	}
+	if len(fn.Namespace) > 0 {
+		return nil, false
+	}
+	switch strings.ToLower(fn.Name) {
+	case "count", "sum", "avg", "min", "max", "collect",
+		"stdev", "stdevp", "percentilecont", "percentiledisc":
+		return fn, true
+	}
+	return nil, false
+}
+
+// exprIsBareCall reports whether e is a single FunctionInvocation
+// (not wrapped in any arithmetic/property/cast).
+func exprIsBareCall(e ast.Expression) bool {
+	_, ok := e.(*ast.FunctionInvocation)
+	return ok
+}
+
+// findUngroupedNonAggRef walks e and looks for any Variable or Property
+// sub-expression that (a) is NOT a key in groupingKeys and (b) does NOT
+// sit inside an aggregate function call. The first such reference is
+// returned with its position and surface name. Returns bad=false when
+// every non-aggregate sub-expression matches a grouping key.
+func findUngroupedNonAggRef(e ast.Expression, groupingKeys map[string]struct{}) (ast.Position, string, bool) { //nolint:gocyclo
+	if e == nil {
+		return ast.Position{}, "", false
+	}
+	// Match against grouping keys first — if THIS expression as a whole
+	// matches, we're done.
+	if _, ok := groupingKeys[e.String()]; ok {
+		return ast.Position{}, "", false
+	}
+	switch n := e.(type) {
+	case *ast.Variable:
+		return n.Pos, n.Name, true
+	case *ast.Property:
+		// A nested Property reference must match a grouping key in
+		// full (handled at the top of the function) — otherwise the
+		// receiver Variable must also be a grouping key. Recurse.
+		return findUngroupedNonAggRef(n.Receiver, groupingKeys)
+	case *ast.BinaryOp:
+		if pos, name, bad := findUngroupedNonAggRef(n.Left, groupingKeys); bad {
+			return pos, name, true
+		}
+		return findUngroupedNonAggRef(n.Right, groupingKeys)
+	case *ast.UnaryOp:
+		return findUngroupedNonAggRef(n.Operand, groupingKeys)
+	case *ast.FunctionInvocation:
+		if _, ok := extractAggregation(n); ok {
+			// Stop descending into aggregate arguments — references
+			// inside the aggregate are unrestricted.
+			return ast.Position{}, "", false
+		}
+		for _, arg := range n.Args {
+			if pos, name, bad := findUngroupedNonAggRef(arg, groupingKeys); bad {
+				return pos, name, true
+			}
+		}
+	case *ast.ListLiteral:
+		for _, elem := range n.Elements {
+			if pos, name, bad := findUngroupedNonAggRef(elem, groupingKeys); bad {
+				return pos, name, true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range n.Values {
+			if pos, name, bad := findUngroupedNonAggRef(val, groupingKeys); bad {
+				return pos, name, true
+			}
+		}
+	case *ast.CaseExpression:
+		if pos, name, bad := findUngroupedNonAggRef(n.Subject, groupingKeys); bad {
+			return pos, name, true
+		}
+		for _, alt := range n.Alternatives {
+			if pos, name, bad := findUngroupedNonAggRef(alt.Condition, groupingKeys); bad {
+				return pos, name, true
+			}
+			if pos, name, bad := findUngroupedNonAggRef(alt.Consequent, groupingKeys); bad {
+				return pos, name, true
+			}
+		}
+		return findUngroupedNonAggRef(n.ElseExpr, groupingKeys)
+	}
+	return ast.Position{}, "", false
 }
 
 // checkOrderByAggregation flags ORDER BY items that contain aggregation
