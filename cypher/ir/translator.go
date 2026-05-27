@@ -337,48 +337,12 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	}
 
 	// DISTINCT.
-	if proj.Distinct {
-		plan = NewDistinct(plan)
-	}
-
-	// SKIP must be applied before LIMIT so that the offset is taken from the
-	// full result stream, not from an already-truncated one. The IR is built
-	// bottom-up, so we apply SKIP first (inner) and LIMIT on top (outer).
-	if proj.Skip != nil {
-		if sk, err := intExpr(proj.Skip); err == nil {
-			plan = NewSkip(sk, plan)
-		} else {
-			plan = NewSkipExpr(proj.Skip, plan)
-		}
-	}
-
-	// ORDER BY (with LIMIT → fused Top; without LIMIT → Sort).
-	if len(proj.OrderBy) > 0 {
-		sortItems := make([]SortItem, len(proj.OrderBy))
-		for i, s := range proj.OrderBy {
-			sortItems[i] = SortItem{Expression: s.Expr.String(), Expr: s.Expr, Descending: s.Descending}
-		}
-		if proj.Limit != nil {
-			lim, err := intExpr(proj.Limit)
-			if err != nil {
-				// Fall back to Sort + (deferred Limit) when the limit
-				// is a parameter; the deferred path resolves the count
-				// at physical-build time against the query params.
-				plan = NewSort(sortItems, plan)
-				plan = NewLimitExpr(proj.Limit, plan)
-			} else {
-				plan = NewTop(sortItems, lim, plan)
-			}
-		} else {
-			plan = NewSort(sortItems, plan)
-		}
-	} else if proj.Limit != nil {
-		if lim, err := intExpr(proj.Limit); err == nil {
-			plan = NewLimit(lim, plan)
-		} else {
-			plan = NewLimitExpr(proj.Limit, plan)
-		}
-	}
+	// DISTINCT → ORDER BY → SKIP → LIMIT, canonical openCypher order.
+	// applyProjectionTail builds the plan tree bottom-up in that order so
+	// the runtime evaluation matches the spec (e.g. SKIP reads from the
+	// ordered stream, not the pre-sort one). Sort+Limit fuse into Top only
+	// when no SKIP is present.
+	plan = applyProjectionTail(plan, proj)
 
 	// Collect output column names for ProduceResults.
 	cols := make([]string, len(items))
