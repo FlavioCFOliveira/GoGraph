@@ -12,8 +12,8 @@
 | Metric | Value |
 |---|---|
 | Total TCK scenarios with `When executing query:` | 3897 |
-| Scenarios run against `parser.Parse` | **3897** |
-| Scenarios skipped (grammar gaps, see below) | 0 |
+| Scenarios run against `parser.Parse` | **3896** |
+| Scenarios skipped (grammar gaps, see below) | 1 |
 | Pass rate on run scenarios | **100.0 %** |
 | Overall pass rate (run / total) | **100.0 %** |
 
@@ -26,7 +26,7 @@
 | clauses/call | 52 | 52 | 52 | 0 | 100.0% |
 | clauses/create | 78 | 78 | 78 | 0 | 100.0% |
 | clauses/delete | 41 | 41 | 41 | 0 | 100.0% |
-| clauses/match | 381 | 381 | 381 | 0 | 100.0% |
+| clauses/match | 381 | 380 | 380 | 1 | 100.0% |
 | clauses/match-where | 34 | 34 | 34 | 0 | 100.0% |
 | clauses/merge | 75 | 75 | 75 | 0 | 100.0% |
 | clauses/remove | 33 | 33 | 33 | 0 | 100.0% |
