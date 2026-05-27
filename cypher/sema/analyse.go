@@ -326,12 +326,25 @@ func (a *analyser) withClause(w *ast.With) {
 	}
 	if projAggregates {
 		projected := map[string]struct{}{}
+		projectedExprs := map[string]struct{}{}
 		for _, p := range projs {
 			if name := projectedName(p.expr, p.alias); name != "" {
 				projected[name] = struct{}{}
 			}
+			if p.expr != nil {
+				projectedExprs[p.expr.String()] = struct{}{}
+			}
 		}
 		for _, s := range w.Projection.OrderBy {
+			// Skip the UndefinedVariable check when the ORDER BY
+			// expression matches a projected expression text — that
+			// usage is legal because the row already carries the
+			// computed column under the projected alias.
+			if s.Expr != nil {
+				if _, projOK := projectedExprs[s.Expr.String()]; projOK {
+					continue
+				}
+			}
 			for _, v := range collectVariables(s.Expr) {
 				if _, ok := projected[v]; ok {
 					continue
