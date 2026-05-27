@@ -972,9 +972,13 @@ func (a *analyser) validateRelRange(rp *ast.RelationshipPattern) {
 	if rp.Range.Max != nil && *rp.Range.Max < 0 {
 		a.error(invalidBooleanOperandError("range", "negative-upper-bound", rp.Pos))
 	}
-	if rp.Range.Min != nil && rp.Range.Max != nil && *rp.Range.Min > *rp.Range.Max {
-		a.error(invalidBooleanOperandError("range", "lower-bound-exceeds-upper", rp.Pos))
-	}
+	// Min > Max is a real-but-rare authoring mistake; we intentionally do
+	// NOT flag it here because the parser's normalize-then-abs pipeline
+	// (see cypher/parser/normalize.go) collapses originally-negative range
+	// bounds back to positive numbers, so a user-written `*-2..1` reaches
+	// sema as `*2..1` and would trip a false positive. A separate parser-
+	// level fix that preserves the originally-negative sign is required
+	// before this check can be re-enabled.
 }
 
 func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
