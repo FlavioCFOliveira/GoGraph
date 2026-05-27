@@ -470,10 +470,14 @@ func exprToColumnName(e ast.Expression) string {
 		}
 		return op + operand
 	case *ast.Property:
-		// `n.x` keeps the bare-receiver spelling; expressions like
-		// `(list[1]).x` or `(case … end).x` parenthesise the receiver.
-		if _, isVar := n.Receiver.(*ast.Variable); isVar {
-			return n.Receiver.String() + "." + n.Key
+		// `n.x` and chained `a.b.c` keep the bare dotted spelling; only
+		// expressions like `(list[1]).x` or `(case … end).x` parenthesise
+		// the receiver. Nested Property receivers are themselves bare
+		// property chains so they recurse straight through this branch
+		// without ever adding parens.
+		switch n.Receiver.(type) {
+		case *ast.Variable, *ast.Property:
+			return exprToColumnName(n.Receiver) + "." + n.Key
 		}
 		return "(" + exprToColumnName(n.Receiver) + ")." + n.Key
 	default:

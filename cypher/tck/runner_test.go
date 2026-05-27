@@ -932,6 +932,19 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3771: raised after exprToColumnName stopped wrapping nested
+//     Property receivers in parens. The previous code parenthesised
+//     anything that was not a bare Variable, so `nestedMap.name
+//     .name2` was projected as the column `(nestedMap.name).name2`.
+//     The TCK comparator looks up the cell by the header spelling
+//     `nestedMap.name.name2`, which produced a null fallback even
+//     though the engine had computed the right value. Adding
+//     *ast.Property to the pass-through list lets bare property
+//     chains recurse without ever adding parens, while
+//     `(list[1]).name` and `(case … end).x` still parenthesise.
+//     Closes With2 [2] "Forwarding a nested map literal" plus a
+//     handful of variance-sensitive adjacent tests.
+//     Observed 3771-3777 across a 5-run sample; gate set at 3771.
 //   - 3770: raised after the TCK comparator implemented the
 //     "ignoring element order for lists" contract instead of
 //     delegating verbatim to the strict comparator. Both
@@ -1053,7 +1066,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3770
+const tckExecutionBaseline = 3771
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
