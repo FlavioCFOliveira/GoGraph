@@ -52,9 +52,19 @@ func (t *translator) translatePatternComprehension(
 	// Translate the path pattern using the Argument leaf as the base.
 	// PatternComprehension.Pattern is a single *PathPattern; wrap it in a
 	// *Pattern (which holds a slice of paths) so we can reuse matchPattern.
+	// When the comprehension declares a named path (`p = (a)-->(b) | p`)
+	// propagate the variable onto the wrapped PathPattern so the
+	// matcher registers the path metadata that buildIRProjection /
+	// buildRowCtx rely on to reconstruct a PathValue.
 	var inner LogicalPlan
 	if pc.Pattern != nil {
-		pat := &ast.Pattern{Paths: []*ast.PathPattern{pc.Pattern}}
+		pp := pc.Pattern
+		if pc.Variable != nil && pp.Variable == nil {
+			cp := *pp
+			cp.Variable = pc.Variable
+			pp = &cp
+		}
+		pat := &ast.Pattern{Paths: []*ast.PathPattern{pp}}
 		var err error
 		inner, err = t.matchPattern(pat, arg, false)
 		if err != nil {
