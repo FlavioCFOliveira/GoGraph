@@ -877,11 +877,29 @@ import (
 //         (Match4 #8, Match9 #6/#7).
 //     Observed 3688 stable across five-run samples; gate set at
 //     3683 to absorb run-to-run variance.
+//   - 3697: raised after three further uplifts:
+//     (a) buildIRProjection's alias-collision guard now covers map
+//         literals too — `WITH {k: m.id} AS m` survives without the
+//         schema-name fast path swallowing the bound node
+//         (With4 #7).
+//     (b) Expand.tryRevEdge now resolves the reverse edge to its
+//         forward-CSR position (via lookupFwdEdgePos) when available
+//         so cyphermorphism observes the same id across both
+//         traversal directions; previously the synthetic
+//         `len(fwd) + revPos` id let undirected re-traversals slip
+//         through (Match6 #9/#10/#11/#12/#13/#14).
+//     (c) formatNodeTCK sorts the node-label slice deterministically
+//         before emission so the result-set comparator no longer
+//         flips on map iteration order
+//         (Graph5 #1/#3 etc., plus a handful of label-list
+//         comparisons elsewhere).
+//     Observed 3702 stable across five-run samples; gate set at
+//     3697 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3683
+const tckExecutionBaseline = 3697
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
