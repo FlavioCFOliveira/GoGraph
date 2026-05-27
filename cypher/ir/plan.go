@@ -1707,10 +1707,13 @@ type Merge struct {
 // endpoints are bound by an upstream operator (a preceding MATCH or
 // CREATE). The physical builder emits an exec.MergeRelationship that
 // checks for an existing edge between the bound endpoints with the
-// requested type and creates one when absent.
+// requested type and creates one when absent. ON CREATE / ON MATCH
+// actions targeting the relationship variable are applied to the
+// matched-or-created edge.
 //
-// More elaborate MERGE shapes (multi-hop patterns, edge properties,
-// ON CREATE / ON MATCH actions) keep using the node-only [Merge] path.
+// More elaborate MERGE shapes (multi-hop patterns, inline relationship
+// properties, ON-actions on a different variable, re-asserted endpoint
+// predicates) keep using the node-only [Merge] path.
 type MergeRelationship struct {
 	// SrcVar is the variable name of the source endpoint.
 	SrcVar string
@@ -1721,13 +1724,37 @@ type MergeRelationship struct {
 	RelVar string
 	// RelType is the relationship type label.
 	RelType string
+	// OnCreate is the list of (key, value) pairs to set on the
+	// relationship when a new edge is created.
+	OnCreate []KVAction
+	// OnMatch is the list of (key, value) pairs to set on the
+	// relationship when an existing edge is matched.
+	OnMatch []KVAction
 	// Child is the driving subplan that binds SrcVar and DstVar.
 	Child LogicalPlan
 }
 
-// NewMergeRelationship creates a MergeRelationship operator.
+// KVAction is a (key, value) pair captured by the IR for MERGE
+// ON CREATE / ON MATCH SET items.
+type KVAction struct {
+	Key   string
+	Value string // opaque literal string (parsed at physical-build time)
+}
+
+// NewMergeRelationship creates a MergeRelationship operator without
+// ON CREATE / ON MATCH actions.
 func NewMergeRelationship(srcVar, dstVar, relVar, relType string, child LogicalPlan) *MergeRelationship {
 	return &MergeRelationship{SrcVar: srcVar, DstVar: dstVar, RelVar: relVar, RelType: relType, Child: child}
+}
+
+// NewMergeRelationshipWithActions creates a MergeRelationship that also
+// applies the supplied ON CREATE / ON MATCH actions.
+func NewMergeRelationshipWithActions(srcVar, dstVar, relVar, relType string, onCreate, onMatch []KVAction, child LogicalPlan) *MergeRelationship {
+	oc := make([]KVAction, len(onCreate))
+	copy(oc, onCreate)
+	om := make([]KVAction, len(onMatch))
+	copy(om, onMatch)
+	return &MergeRelationship{SrcVar: srcVar, DstVar: dstVar, RelVar: relVar, RelType: relType, OnCreate: oc, OnMatch: om, Child: child}
 }
 
 // Children implements LogicalPlan.

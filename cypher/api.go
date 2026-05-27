@@ -1352,7 +1352,22 @@ func buildOperatorWrite(
 			return nil, fmt.Errorf("cypher: MergeRelationship: src=%q (in schema=%v) dst=%q (in schema=%v) unresolved",
 				p.SrcVar, srcOk, p.DstVar, dstOk)
 		}
-		return exec.NewMergeRelationship(child, srcCol, dstCol, p.RelType, mutator), nil
+		op := exec.NewMergeRelationship(child, srcCol, dstCol, p.RelType, mutator)
+		if len(p.OnCreate) > 0 {
+			actions := make([]exec.MergeRelAction, 0, len(p.OnCreate))
+			for _, kv := range p.OnCreate {
+				actions = append(actions, exec.MergeRelActionFromKV(kv.Key, kv.Value))
+			}
+			op = op.WithOnCreate(p.RelVar, actions)
+		}
+		if len(p.OnMatch) > 0 {
+			actions := make([]exec.MergeRelAction, 0, len(p.OnMatch))
+			for _, kv := range p.OnMatch {
+				actions = append(actions, exec.MergeRelActionFromKV(kv.Key, kv.Value))
+			}
+			op = op.WithOnMatch(p.RelVar, actions)
+		}
+		return op, nil
 
 	case *ir.Merge:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)

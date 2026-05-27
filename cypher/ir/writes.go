@@ -211,7 +211,7 @@ func collectPlanVars(plan LogicalPlan) map[string]struct{} {
 // other MERGE shapes (node-only, multi-hop, with ON-actions) keep
 // using the node-oriented [Merge] path.
 func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, error) {
-	if child != nil && len(m.OnCreate) == 0 && len(m.OnMatch) == 0 {
+	if child != nil {
 		if srcVar, dstVar, relVar, relType, ok := mergeSingleHopRel(m.Pattern); ok {
 			outerVars := collectAllVars(child)
 			outer := map[string]struct{}{}
@@ -220,7 +220,15 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 			}
 			if _, hasSrc := outer[srcVar]; hasSrc {
 				if _, hasDst := outer[dstVar]; hasDst {
-					return NewMergeRelationship(srcVar, dstVar, relVar, relType, child), nil
+					// Extract ON CREATE / ON MATCH SET items whose
+					// target is the relationship variable. Other targets
+					// (the endpoint nodes or unrelated names) fall back
+					// to the node-only Merge path.
+					onCreate, ocOk := extractRelKVActions(m.OnCreate, relVar)
+					onMatch, omOk := extractRelKVActions(m.OnMatch, relVar)
+					if ocOk && omOk {
+						return NewMergeRelationshipWithActions(srcVar, dstVar, relVar, relType, onCreate, onMatch, child), nil
+					}
 				}
 			}
 		}
@@ -235,6 +243,39 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 	}
 	boundVars := patternVars(m.Pattern)
 	return NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child), nil
+}
+
+// extractRelKVActions converts ON CREATE / ON MATCH SET items into a
+// [KVAction] slice when EVERY item targets a property on relVar (the
+// single-property form `SET <relVar>.<key> = <value>`). Returns
+// ok=false when any item is on a different target (label assignment,
+// whole-entity replace, property on a different variable, etc.) so the
+// caller falls back to the node-only Merge path which preserves the
+// original opaque-string handling. relVar="" returns ok=false unless
+// items is empty.
+func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool) {
+	if len(items) == 0 {
+		return nil, true
+	}
+	if relVar == "" {
+		return nil, false
+	}
+	out := make([]KVAction, 0, len(items))
+	for _, item := range items {
+		if item == nil || len(item.Labels) > 0 || item.Value == nil {
+			return nil, false
+		}
+		prop, isProp := item.Target.(*ast.Property)
+		if !isProp {
+			return nil, false
+		}
+		recv, isVar := prop.Receiver.(*ast.Variable)
+		if !isVar || recv.Name != relVar {
+			return nil, false
+		}
+		out = append(out, KVAction{Key: prop.Key, Value: item.Value.String()})
+	}
+	return out, true
 }
 
 // mergeSingleHopRel returns (srcVar, dstVar, relVar, relType, true) when

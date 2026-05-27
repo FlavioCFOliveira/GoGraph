@@ -40,17 +40,28 @@ import (
 )
 
 // MergeRelationship matches-or-creates a single-hop directed relationship
-// between two already-bound endpoint columns.
+// between two already-bound endpoint columns. ON CREATE / ON MATCH
+// actions targeting the relationship variable are applied to the
+// matched-or-created edge.
 //
 // MergeRelationship is NOT safe for concurrent use.
 type MergeRelationship struct {
-	child   Operator
-	srcCol  int    // input-row column index holding src NodeID / NodeValue
-	dstCol  int    // input-row column index holding dst NodeID / NodeValue
-	relType string // empty when the pattern declared no type (rejected upstream)
-	mutator GraphMutator
+	child           Operator
+	srcCol          int    // input-row column index holding src NodeID / NodeValue
+	dstCol          int    // input-row column index holding dst NodeID / NodeValue
+	relType         string // empty when the pattern declared no type (rejected upstream)
+	relVar          string // empty when the relationship is anonymous
+	onCreateActions []MergeRelAction
+	onMatchActions  []MergeRelAction
+	mutator         GraphMutator
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+}
+
+// MergeRelAction is a pre-parsed `SET <relVar>.<key> = <value>` item.
+type MergeRelAction struct {
+	key   string
+	value string // opaque literal string, parsed via parsePropValue
 }
 
 // NewMergeRelationship constructs a MergeRelationship operator.
@@ -67,6 +78,31 @@ func NewMergeRelationship(child Operator, srcCol, dstCol int, relType string, mu
 		relType: relType,
 		mutator: mutator,
 	}
+}
+
+// WithOnCreate registers ON CREATE SET actions to apply when the edge
+// is newly created. Each action is `<relVar>.<key> = <value>`; the
+// caller has already verified that every action targets the
+// relationship variable bound by this operator.
+func (op *MergeRelationship) WithOnCreate(relVar string, actions []MergeRelAction) *MergeRelationship {
+	op.relVar = relVar
+	op.onCreateActions = actions
+	return op
+}
+
+// WithOnMatch registers ON MATCH SET actions to apply when the edge
+// already exists.
+func (op *MergeRelationship) WithOnMatch(relVar string, actions []MergeRelAction) *MergeRelationship {
+	op.relVar = relVar
+	op.onMatchActions = actions
+	return op
+}
+
+// MergeRelActionFromKV constructs a MergeRelationship ON CREATE / ON
+// MATCH action from a (key, value) pair. value is the opaque literal
+// string as it appears in the source query (e.g. `'foo'` or `42`).
+func MergeRelActionFromKV(key, value string) MergeRelAction {
+	return MergeRelAction{key: key, value: value}
 }
 
 // Init initialises the operator and its child.
@@ -114,28 +150,45 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	// the check accepts any (src, dst) edge whose label set contains
 	// relType. The single-writer guarantee makes this safe.
 	if op.mutator.HasEdge(srcKey, dstKey) {
-		labels := op.mutator.NodeLabels(srcKey)
-		_ = labels // labels here are node labels; edge labels live in EdgeLabels via the LPG
-		// Edge labels are looked up directly via the LPG graph behind
-		// the mutator; the mutator does not expose EdgeLabels(src,dst)
-		// in the GraphMutator interface, so we approximate the match
-		// by trusting HasEdge + the type registration below. When
-		// HasEdge is true and the requested type is one of the edge's
-		// labels (the common case after SetEdgeLabel), no new edge is
-		// created. Adding the same label twice is idempotent.
+		// Edge labels are per-(src,dst) in the LPG; adding the same
+		// label twice is idempotent. Ensure the requested type is
+		// recorded, then run ON MATCH actions.
 		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
+		if err := op.applyRelActions(srcKey, dstKey, op.onMatchActions); err != nil {
+			return false, err
+		}
 		*out = row
 		return true, nil
 	}
-	// No matching edge — create one and tag it with the requested type.
+	// No matching edge — create one, tag it, run ON CREATE actions.
 	if _, _, addErr := op.mutator.AddEdge(srcKey, dstKey, 0); addErr != nil {
 		return false, fmt.Errorf("exec: MergeRelationship: AddEdge: %w", addErr)
 	}
 	if op.relType != "" {
 		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
 	}
+	if err := op.applyRelActions(srcKey, dstKey, op.onCreateActions); err != nil {
+		return false, err
+	}
 	*out = row
 	return true, nil
+}
+
+// applyRelActions sets every action's property on the (src, dst) edge
+// via the graph mutator. value parsing reuses parsePropValue (the same
+// helper the literal-property paths use) so the formats accepted are
+// consistent across MERGE / CREATE / SET.
+func (op *MergeRelationship) applyRelActions(srcKey, dstKey string, actions []MergeRelAction) error {
+	for _, act := range actions {
+		v, err := parsePropValue(act.value)
+		if err != nil {
+			return fmt.Errorf("exec: MergeRelationship: parse value %q: %w", act.value, err)
+		}
+		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, act.key, v); setErr != nil {
+			return fmt.Errorf("exec: MergeRelationship: SetEdgeProperty: %w", setErr)
+		}
+	}
+	return nil
 }
 
 // Close closes the child operator.
