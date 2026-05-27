@@ -846,11 +846,31 @@ import (
 //         Merge7 #4/#5, Merge8 #1, Merge9 #1/#4).
 //     Observed 3669 stable across five-run samples; gate set at
 //     3665 to absorb run-to-run variance.
+//   - 3678: raised after three further uplifts:
+//     (a) MERGE relationship inline property predicate filters the
+//         existing-edge search via matchesRelProps and seeds the
+//         freshly created edge with the literal properties; the IR
+//         translator no longer falls back to the node-only Merge path
+//         for `MERGE (a)-[r:T {k: v}]->(b)` (Merge5 #5/#6/#8/#14).
+//     (b) projectionsWithComprehensions hoists NESTED PatternCompre-
+//         hensions out of projection items via the new
+//         extractNestedPatternComprehensions walker, so
+//         `size([(n)-->() | 1])`-style queries no longer surface
+//         "unsupported expression type *ast.PatternComprehension"
+//         at runtime (List6 #7–#10 and related).
+//     (c) translatePatternComprehension now propagates the
+//         named-path binding (`p = (n)-->(:B)`) onto the inner
+//         PathPattern so matchPattern emits NamedPath; the
+//         comprehension's `| p` projection then sees a real
+//         PathValue via pathVarMeta / pathVarChain (Pattern2 #1–#3
+//         and related, nine scenarios).
+//     Observed 3682 stable across five-run samples; gate set at
+//     3678 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3665
+const tckExecutionBaseline = 3678
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
