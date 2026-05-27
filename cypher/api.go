@@ -2909,6 +2909,42 @@ func buildProcedureCallOperator(
 		return nil, fmt.Errorf("cypher: ProcedureCall %q: %w", p.Name, err)
 	}
 
+	// Compile-time argument-type validation. For every positional
+	// argument that is a known primitive literal (string, integer,
+	// float, boolean, null), check it against the declared input kind
+	// from entry.Sig.Inputs. Mismatches surface as a typed compile-time
+	// error that the engine maps to SyntaxError(InvalidArgumentType).
+	// expr.KindNull is treated as a wildcard (NUMBER / ANY / unknown
+	// declared kinds map to KindNull in our TCK proc-decl parser). A
+	// null literal arg is always accepted (procedures whose inputs are
+	// declared nullable are the common case).
+	for i, argStr := range p.Arguments {
+		if i >= len(entry.Sig.Inputs) {
+			break
+		}
+		want := entry.Sig.Inputs[i]
+		if want == expr.KindNull {
+			continue
+		}
+		lit, ok := parseProcArgLiteral(argStr)
+		if !ok || lit == expr.Null {
+			continue
+		}
+		got := lit.Kind()
+		if got == want {
+			continue
+		}
+		// NUMBER-style compatibility: integer accepted where float is
+		// declared and vice versa is already covered by the equality
+		// above when the literal parses to the matching kind. We do
+		// NOT auto-promote across boolean/string/number boundaries —
+		// that mismatch is what the TCK expects to flag.
+		return nil, fmt.Errorf(
+			"cypher: SyntaxError.InvalidArgumentType: procedure %q argument %d expects %s, got %s",
+			p.Name, i, want, got,
+		)
+	}
+
 	// Determine yield variables: explicit YIELD wins; otherwise emit all output columns.
 	yieldVars := p.YieldVars
 	if len(yieldVars) == 0 {
