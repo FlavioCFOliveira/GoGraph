@@ -1440,15 +1440,43 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 		}
 	}
 
-	// Apply IN / subscript / slice.
-	for _, le := range ctx.AllListExpression() {
-		r := v.visit(le)
+	// Apply IN / subscript / slice. Subscripts and slices that
+	// immediately follow an IN clause apply to the IN's right operand,
+	// not to the (lhs IN rhs) result — `3 IN list[0]` parses as
+	// `3 IN (list[0])`, matching the openCypher precedence rule that
+	// list/subscript operators bind tighter than the IN comparison.
+	listExprs := ctx.AllListExpression()
+	i := 0
+	for i < len(listExprs) {
+		r := v.visit(listExprs[i])
 		if err := firstError(r); err != nil {
 			return err
 		}
 		switch e := r.(type) {
 		case *listInExpr:
-			base = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: base, Operator: "IN", Right: e.list}
+			// Consume any trailing subscripts/slices that operate on
+			// the IN's right operand before wrapping the whole thing.
+			rhs := e.list
+			j := i + 1
+			for j < len(listExprs) {
+				inner := v.visit(listExprs[j])
+				if err := firstError(inner); err != nil {
+					return err
+				}
+				sub, isSub := inner.(*subscriptOrSlice)
+				if !isSub {
+					break
+				}
+				if sub.isSlice {
+					rhs = &ast.SliceExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: rhs, From: sub.from, To: sub.to}
+				} else {
+					rhs = &ast.SubscriptExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: rhs, Index: sub.index}
+				}
+				j++
+			}
+			base = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: base, Operator: "IN", Right: rhs}
+			i = j
+			continue
 		case *subscriptOrSlice:
 			if e.isSlice {
 				base = &ast.SliceExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, From: e.from, To: e.to}
@@ -1456,6 +1484,7 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 				base = &ast.SubscriptExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, Index: e.index}
 			}
 		}
+		i++
 	}
 
 	// Apply IS NULL / IS NOT NULL.
