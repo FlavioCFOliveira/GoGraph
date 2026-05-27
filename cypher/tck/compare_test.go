@@ -256,26 +256,41 @@ func collapseWS(s string) string {
 // collectActualRows iterates the result and returns string representations of
 // each row in the column order specified by cols.
 func collectActualRows(r *cypher.Result, cols []string) ([][]string, error) {
-	// Build a whitespace-collapsed reverse map so that TCK column headers
-	// like "cOuNt( * )" resolve to the engine key "cOuNt(*)" when no
-	// exact match exists.
+	// Build whitespace-collapsed and (collapsed-and-lowered) reverse maps so
+	// that TCK column headers like "cOuNt( * )" resolve to the engine key
+	// "count(*)" — Cypher source spellings preserve case + whitespace
+	// (`cOuNt( * )`, `coUnt( dIstInct p )`) while our IR canonicalises
+	// function names and drops interior whitespace. The fallback chain is:
+	//   1. exact match on the source spelling
+	//   2. whitespace-insensitive (e.g. `cOuNt(*)` ↔ `cOuNt( * )`)
+	//   3. whitespace-and-case-insensitive (e.g. `count(*)` ↔ `cOuNt( * )`,
+	//      `coUnt(DISTINCT p)` ↔ `coUnt( dIstInct p )`).
+	// All three are scoped to this single result's row record map; no global
+	// state is touched.
 	var collapsedMap map[string]string // collapsed engine key → engine key
+	var lowerMap map[string]string     // lower(collapsed) engine key → engine key
 	var out [][]string
 	for r.Next() {
 		rec := r.Record()
-		// Build the collapsed map lazily on the first row.
 		if collapsedMap == nil {
 			collapsedMap = make(map[string]string, len(rec))
+			lowerMap = make(map[string]string, len(rec))
 			for k := range rec {
-				collapsedMap[collapseWS(k)] = k
+				ck := collapseWS(k)
+				collapsedMap[ck] = k
+				lowerMap[strings.ToLower(ck)] = k
 			}
 		}
 		row := make([]string, len(cols))
 		for i, col := range cols {
 			v, ok := rec[col]
 			if !ok {
-				// Whitespace-insensitive fallback: "cOuNt( * )" → "cOuNt(*)"
 				if engKey, found := collapsedMap[collapseWS(col)]; found {
+					v, ok = rec[engKey]
+				}
+			}
+			if !ok {
+				if engKey, found := lowerMap[strings.ToLower(collapseWS(col))]; found {
 					v, ok = rec[engKey]
 				}
 			}
