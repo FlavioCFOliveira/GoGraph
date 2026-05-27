@@ -932,6 +932,19 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3765: raised after fnLocalDateTime preserved the wall-clock
+//     components when stripping the zone from a DateTimeValue
+//     input. Previously the DateTimeValue branch returned
+//     LocalDateTimeValue{T: v.T.UTC()}, which shifts the wall
+//     clock by the source offset and produces 11:00 for a
+//     12:00+01:00 source. The new code re-anchors v.T's wall-clock
+//     numbers in UTC via NewLocalDateTime so the result reads
+//     back as the original H:M:S regardless of the source zone.
+//     Closes the Temporal3 [7] localdatetime(datetime+01:00) sub-
+//     rows that returned the UTC-shifted wall clock; an analogous
+//     fix is not needed for fnLocalTime/fnTime which already
+//     extract Hour()/Minute()/etc. directly from v.T.
+//     Observed 3765-3767 across a 3-run sample; gate set at 3765.
 //   - 3762: raised after the TCK exprValueToString StringValue
 //     formatter learnt the canonical Cypher escapes — backslash
 //     and inner single quote are now escaped (in that order) so
@@ -1001,7 +1014,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3762
+const tckExecutionBaseline = 3765
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

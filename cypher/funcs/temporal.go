@@ -318,7 +318,14 @@ func fnLocalDateTime(args []expr.Value) (expr.Value, error) {
 		case expr.LocalDateTimeValue:
 			return v, nil
 		case expr.DateTimeValue:
-			return expr.LocalDateTimeValue{T: v.T.UTC()}, nil
+			// openCypher: localdatetime(datetime) strips the zone but
+			// preserves the wall-clock components — converting v.T via
+			// .UTC() shifts the wall clock by the source offset, which
+			// is the opposite of "drop the timezone". Re-anchor the
+			// wall-clock numbers to UTC instead so the resulting
+			// LocalDateTime reads back as the original H:M:S.
+			return expr.NewLocalDateTime(v.T.Year(), int(v.T.Month()), v.T.Day(),
+				v.T.Hour(), v.T.Minute(), v.T.Second(), v.T.Nanosecond()), nil
 		case expr.DateValue:
 			return expr.NewLocalDateTime(v.Year, v.Month, v.Day, 0, 0, 0, 0), nil
 		default:
