@@ -826,11 +826,31 @@ import (
 //         (Quantifier1-4 #15/#16, twelve scenarios).
 //     Observed 3648 stable across five-run samples; gate set at
 //     3643 to absorb run-to-run variance.
+//   - 3665: raised after four further uplifts:
+//     (a) collectActualRows column-name fallback is now
+//         case-insensitive in addition to whitespace-insensitive, so
+//         TCK fixtures that use mixed-case source spellings (cOuNt,
+//         dIstInct) resolve against the canonicalised engine column
+//         keys (Return4 #4–#6).
+//     (b) Map / node / relationship subscript with a non-string index
+//         surfaces MapElementAccessByNonString at runtime instead of
+//         silently returning NULL (Map2 #6/#7).
+//     (c) buildRowCtx reconstructs a PathValue from pathVarMeta when a
+//         named path is bound by a variable-length pattern, so
+//         relationships(p) / nodes(p) / length(p) observe the proper
+//         Path kind (Path2 #1/#2 and related, ~11 scenarios).
+//     (d) Merge.Next iterates one upstream child row per merge cycle
+//         instead of running the cycle once in Init, so
+//         `MATCH (person) MERGE (city) RETURN person, city` emits one
+//         row per Person (Merge2 #5, Merge3 #4, Merge4 #2, Merge6 #6/#7,
+//         Merge7 #4/#5, Merge8 #1, Merge9 #1/#4).
+//     Observed 3669 stable across five-run samples; gate set at
+//     3665 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3643
+const tckExecutionBaseline = 3665
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
