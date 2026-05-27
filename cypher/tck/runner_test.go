@@ -932,6 +932,15 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3774: raised after sema.checkExpr's transitive-type guard added
+//     "path" to its rejected-types switch alongside "scalar" and
+//     "list". A named path variable (e.g. `p = (a)-[*]->(b)`) carries
+//     the path itself rather than a property map, so `p.x` is a
+//     compile-time InvalidArgumentType per openCypher. MatchWhere1
+//     [14] used to succeed silently because the switch only flagged
+//     scalar/list receivers. Plus one variance-sensitive adjacent
+//     scenario re-stabilises in the new baseline window.
+//     Observed 3774-3779 across a 7-run sample; gate set at 3774.
 //   - 3771: raised after exprToColumnName stopped wrapping nested
 //     Property receivers in parens. The previous code parenthesised
 //     anything that was not a bare Variable, so `nestedMap.name
@@ -1066,7 +1075,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3771
+const tckExecutionBaseline = 3774
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
