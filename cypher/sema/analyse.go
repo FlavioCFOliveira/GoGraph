@@ -733,12 +733,24 @@ func (a *analyser) pathPatternIntroduce(pp *ast.PathPattern) {
 		a.checkTypeConflict(*pp.Variable, "path", pp.Pos)
 		a.error(a.scope.Define(*pp.Variable, pp.Pos, "path"))
 	}
+	// relSeen tracks named relationship variables already introduced
+	// inside this path. openCypher 9 §3.3.1.2 forbids re-using the same
+	// relationship name in a single path (the relationship-uniqueness
+	// constraint); we report it here so the error surfaces before
+	// type-conflict checks in relPatternIntroduce.
+	relSeen := make(map[string]bool)
 	el := pp.Head
 	for el != nil {
 		if el.Node != nil {
 			a.nodePatternIntroduce(el.Node)
 		}
 		if el.Relationship != nil {
+			if rv := el.Relationship.Variable; rv != nil {
+				if relSeen[*rv] {
+					a.error(relationshipUniquenessError(*rv, el.Relationship.Pos))
+				}
+				relSeen[*rv] = true
+			}
 			a.relPatternIntroduce(el.Relationship)
 		}
 		el = el.Next

@@ -63,6 +63,13 @@ const (
 	// openCypher 9 §6.1 requires compile-time rejection of unknown
 	// function calls.
 	KindUnknownFunction ErrorKind = "UNKNOWN_FUNCTION"
+
+	// KindRelationshipUniqueness is reported when a relationship
+	// variable is introduced more than once within the same path
+	// pattern (e.g. `MATCH (a)-[r]->()-[r]->(a)`). openCypher 9
+	// §3.3.1.2 forbids this: a single path pattern cannot bind two
+	// distinct edges to the same relationship name.
+	KindRelationshipUniqueness ErrorKind = "RELATIONSHIP_UNIQUENESS"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -164,6 +171,17 @@ func unknownFunctionError(name string, pos ast.Position) *ScopeError {
 	}
 }
 
+// relationshipUniquenessError constructs a KindRelationshipUniqueness
+// ScopeError for a relationship variable introduced twice within the
+// same path pattern.
+func relationshipUniquenessError(name string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindRelationshipUniqueness,
+		Pos:     pos,
+		Message: fmt.Sprintf("relationship variable %q cannot be used twice in the same path pattern", name),
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bolt-compatible mapping (TCK error categories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,6 +233,11 @@ const (
 	// SubTypeUnknownFunction is the canonical TCK sub-type for
 	// references to functions the engine does not implement.
 	SubTypeUnknownFunction = "UnknownFunction"
+
+	// SubTypeRelationshipUniqueness is the canonical TCK sub-type for
+	// a relationship variable introduced more than once in the same
+	// path pattern.
+	SubTypeRelationshipUniqueness = "RelationshipUniquenessViolation"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -285,6 +308,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindVariableAlreadyBound, Category: CategorySyntaxError, SubType: SubTypeVariableAlreadyBound},
 	{Kind: KindColumnNameConflict, Category: CategorySyntaxError, SubType: SubTypeColumnNameConflict},
 	{Kind: KindUnknownFunction, Category: CategorySyntaxError, SubType: SubTypeUnknownFunction},
+	{Kind: KindRelationshipUniqueness, Category: CategorySyntaxError, SubType: SubTypeRelationshipUniqueness},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]
