@@ -1311,8 +1311,23 @@ func SubDates(a, b DateValue) DurationValue {
 
 // calendarDateDiff computes the calendar-based difference (a - b) as
 // (months, days). The day count is the residual after the whole-month
-// stride; it may be negative when b is after a.
+// stride and carries the same sign as the months component.
+//
+// Sign normalisation: when a < b we compute |b - a| using the positive
+// arithmetic and negate both components at the end. Doing the borrow
+// logic on a negative (year, mo, dy) triple silently fed positive
+// residual days back into a negative-month diff and over-counted by one
+// month (duration.inMonths(date('2018-03-11'), date('2016-06-24'))
+// returned P-1Y-9M+13D when the openCypher reference projects the
+// borrow on the magnitude side and reports P-1Y-8M-15D).
 func calendarDateDiff(a, b DateValue) (months, days int64) {
+	neg := false
+	if a.Year < b.Year ||
+		(a.Year == b.Year && a.Month < b.Month) ||
+		(a.Year == b.Year && a.Month == b.Month && a.Day < b.Day) {
+		neg = true
+		a, b = b, a
+	}
 	years := a.Year - b.Year
 	mo := a.Month - b.Month
 	dy := a.Day - b.Day
@@ -1328,7 +1343,12 @@ func calendarDateDiff(a, b DateValue) (months, days int64) {
 		mo += 12
 		years--
 	}
-	return int64(years*12 + mo), int64(dy)
+	months = int64(years*12 + mo)
+	days = int64(dy)
+	if neg {
+		months, days = -months, -days
+	}
+	return months, days
 }
 
 // SubLocalDateTimes returns a-b as a duration with calendar-based
