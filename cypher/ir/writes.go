@@ -212,7 +212,7 @@ func collectPlanVars(plan LogicalPlan) map[string]struct{} {
 // using the node-oriented [Merge] path.
 func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, error) {
 	if child != nil {
-		if srcVar, dstVar, relVar, relType, ok := mergeSingleHopRel(m.Pattern); ok {
+		if srcVar, dstVar, relVar, relType, relProps, ok := mergeSingleHopRel(m.Pattern); ok {
 			outerVars := collectAllVars(child)
 			outer := map[string]struct{}{}
 			for _, v := range outerVars {
@@ -227,7 +227,9 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 					onCreate, ocOk := extractRelKVActions(m.OnCreate, relVar)
 					onMatch, omOk := extractRelKVActions(m.OnMatch, relVar)
 					if ocOk && omOk {
-						return NewMergeRelationshipWithActions(srcVar, dstVar, relVar, relType, onCreate, onMatch, child), nil
+						mr := NewMergeRelationshipWithActions(srcVar, dstVar, relVar, relType, onCreate, onMatch, child)
+						mr.RelProps = relProps
+						return mr, nil
 					}
 				}
 			}
@@ -278,35 +280,31 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 	return out, true
 }
 
-// mergeSingleHopRel returns (srcVar, dstVar, relVar, relType, true) when
-// pp is a single-hop directed/undirected relationship pattern with two
-// named endpoints and at most one type label. Returns ok=false for any
-// other shape (zero hops, multi-hop, anonymous endpoint, zero or
-// multiple types). The check is intentionally narrow: only the
-// canonical Merge5 [2]-style shape qualifies.
-func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType string, ok bool) {
+// mergeSingleHopRel returns (srcVar, dstVar, relVar, relType, relProps, true)
+// when pp is a single-hop directed/undirected relationship pattern with two
+// named endpoints and at most one type label. relProps carries the inline
+// relationship property-map source string when present, or "" when absent.
+// Returns ok=false for any other shape (zero hops, multi-hop, anonymous
+// endpoint, zero or multiple types). The check is intentionally narrow:
+// only the canonical Merge5-style shape qualifies.
+func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType, relProps string, ok bool) {
 	if pp == nil || pp.Head == nil {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	head := pp.Head
 	if head.Node == nil || head.Node.Variable == nil {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	step := head.Next
 	if step == nil || step.Relationship == nil || step.Node == nil || step.Node.Variable == nil {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	if step.Next != nil {
 		// Multi-hop — handled by the node-only Merge path for now.
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	if len(step.Relationship.Types) != 1 {
-		return "", "", "", "", false
-	}
-	if step.Relationship.Properties != nil {
-		// Relationship inline properties on MERGE — search/create
-		// semantics needs property-aware matching, not yet wired.
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	if head.Node.Properties != nil || step.Node.Properties != nil ||
 		len(head.Node.Labels) != 0 || len(step.Node.Labels) != 0 {
@@ -314,7 +312,7 @@ func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType str
 		// "Fail when imposing new predicates" scenario; skip
 		// translation here so the node-only Merge path can surface
 		// the appropriate error.
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	rv := ""
 	if step.Relationship.Variable != nil {
@@ -327,7 +325,11 @@ func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType str
 	if step.Relationship.Direction == ast.RelDirectionIncoming {
 		src, dst = dst, src
 	}
-	return src, dst, rv, step.Relationship.Types[0], true
+	rp := ""
+	if step.Relationship.Properties != nil {
+		rp = step.Relationship.Properties.String()
+	}
+	return src, dst, rv, step.Relationship.Types[0], rp, true
 }
 
 // setClause translates a SET clause. Each SetItem becomes one of:

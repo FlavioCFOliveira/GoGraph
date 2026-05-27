@@ -37,6 +37,7 @@ import (
 
 	"gograph/cypher/expr"
 	"gograph/graph"
+	"gograph/graph/lpg"
 )
 
 // MergeRelationship matches-or-creates a single-hop directed relationship
@@ -47,11 +48,14 @@ import (
 // MergeRelationship is NOT safe for concurrent use.
 type MergeRelationship struct {
 	child           Operator
-	srcCol          int    // input-row column index holding src NodeID / NodeValue
-	dstCol          int    // input-row column index holding dst NodeID / NodeValue
-	relCol          int    // output-row column index for the bound relationship; -1 when anonymous
-	relType         string // empty when the pattern declared no type (rejected upstream)
-	relVar          string // empty when the relationship is anonymous
+	srcCol          int             // input-row column index holding src NodeID / NodeValue
+	dstCol          int             // input-row column index holding dst NodeID / NodeValue
+	relCol          int             // output-row column index for the bound relationship; -1 when anonymous
+	relType         string          // empty when the pattern declared no type (rejected upstream)
+	relVar          string          // empty when the relationship is anonymous
+	relPropsRaw     string          // inline `{k: v, …}` source string, "" when absent
+	relPropPredsParsed bool         // tracks one-time parse of relPropsRaw
+	relPropPreds    []propLiteral   // parsed predicate values (only literals)
 	onCreateActions []MergeRelAction
 	onMatchActions  []MergeRelAction
 	mutator         GraphMutator
@@ -89,6 +93,18 @@ func NewMergeRelationship(child Operator, srcCol, dstCol int, relType string, mu
 // relationship.
 func (op *MergeRelationship) WithRelColumn(relCol int) *MergeRelationship {
 	op.relCol = relCol
+	return op
+}
+
+// WithRelProperties registers an inline relationship property predicate
+// (e.g. `{name: 'r2'}` from `MERGE (a)-[r:T {name: 'r2'}]->(b)`). When
+// set, the operator filters the existing-edge search by the predicate
+// AND writes the listed properties when a new edge is created. Pass an
+// empty string to clear.
+func (op *MergeRelationship) WithRelProperties(propsRaw string) *MergeRelationship {
+	op.relPropsRaw = propsRaw
+	op.relPropPredsParsed = false
+	op.relPropPreds = nil
 	return op
 }
 
@@ -157,11 +173,23 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		// notices a graph-state inconsistency.
 		return false, fmt.Errorf("exec: MergeRelationship: unresolved endpoint NodeID (src=%d, dst=%d)", srcID, dstID)
 	}
-	// Match if an edge already exists with the requested type. HasEdge
-	// is per-pair; combined with the per-pair label model in the LPG
-	// the check accepts any (src, dst) edge whose label set contains
-	// relType. The single-writer guarantee makes this safe.
-	if op.mutator.HasEdge(srcKey, dstKey) {
+	// Parse inline property predicates lazily on the first call.
+	if !op.relPropPredsParsed {
+		if op.relPropsRaw != "" {
+			parsed, perr := parsePropLiteral(op.relPropsRaw)
+			if perr != nil {
+				return false, fmt.Errorf("exec: MergeRelationship: parse rel props %q: %w", op.relPropsRaw, perr)
+			}
+			op.relPropPreds = parsed
+		}
+		op.relPropPredsParsed = true
+	}
+	// Match if an edge already exists with the requested type AND the
+	// inline property predicate (if any) holds against the live edge
+	// property map. HasEdge is per-pair; combined with the per-pair
+	// label model the check accepts any (src, dst) edge whose label set
+	// contains relType. The single-writer guarantee makes this safe.
+	if op.mutator.HasEdge(srcKey, dstKey) && op.matchesRelProps(srcKey, dstKey) {
 		// Edge labels are per-(src,dst) in the LPG; adding the same
 		// label twice is idempotent. Ensure the requested type is
 		// recorded, then run ON MATCH actions.
@@ -172,18 +200,91 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
 		return true, nil
 	}
-	// No matching edge — create one, tag it, run ON CREATE actions.
+	// No matching edge — create one, tag it, write inline rel properties,
+	// and run ON CREATE actions.
 	if _, _, addErr := op.mutator.AddEdge(srcKey, dstKey, 0); addErr != nil {
 		return false, fmt.Errorf("exec: MergeRelationship: AddEdge: %w", addErr)
 	}
 	if op.relType != "" {
 		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
 	}
+	for _, p := range op.relPropPreds {
+		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); setErr != nil {
+			return false, fmt.Errorf("exec: MergeRelationship: SetEdgeProperty %q: %w", p.key, setErr)
+		}
+	}
 	if err := op.applyRelActions(srcKey, dstKey, op.onCreateActions); err != nil {
 		return false, err
 	}
 	*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
 	return true, nil
+}
+
+// matchesRelProps reports whether the (src, dst) edge satisfies the inline
+// property predicate captured in relPropPreds. Returns true when no
+// predicate was declared; otherwise every predicate key must be present
+// and Equal to the matching property value on the edge.
+func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string) bool {
+	if len(op.relPropPreds) == 0 {
+		return true
+	}
+	live := op.mutator.EdgeProperties(srcKey, dstKey)
+	for _, p := range op.relPropPreds {
+		got, ok := live[p.key]
+		if !ok {
+			return false
+		}
+		if !propertyValuesEqual(got, p.value) {
+			return false
+		}
+	}
+	return true
+}
+
+// propertyValuesEqual compares two lpg.PropertyValue for value equality
+// across all supported kinds. Returns true when the kinds match AND the
+// underlying scalar / temporal / byte representation compares equal.
+// String and float kinds use Go's == operator; time uses time.Equal;
+// bytes uses byte-slice equality.
+func propertyValuesEqual(a, b lpg.PropertyValue) bool {
+	if a.Kind() != b.Kind() {
+		return false
+	}
+	switch a.Kind() {
+	case lpg.PropString:
+		as, _ := a.String()
+		bs, _ := b.String()
+		return as == bs
+	case lpg.PropInt64:
+		ai, _ := a.Int64()
+		bi, _ := b.Int64()
+		return ai == bi
+	case lpg.PropFloat64:
+		af, _ := a.Float64()
+		bf, _ := b.Float64()
+		return af == bf
+	case lpg.PropBool:
+		av, _ := a.Bool()
+		bv, _ := b.Bool()
+		return av == bv
+	case lpg.PropTime:
+		at, _ := a.Time()
+		bt, _ := b.Time()
+		return at.Equal(bt)
+	case lpg.PropBytes:
+		ab, _ := a.Bytes()
+		bb, _ := b.Bytes()
+		if len(ab) != len(bb) {
+			return false
+		}
+		for i := range ab {
+			if ab[i] != bb[i] {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // emitRow returns the output row for a successfully matched-or-created

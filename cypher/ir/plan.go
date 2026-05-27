@@ -1724,6 +1724,12 @@ type MergeRelationship struct {
 	RelVar string
 	// RelType is the relationship type label.
 	RelType string
+	// RelProps is the opaque map-literal string representation of the
+	// inline relationship property predicate (e.g. `{name: 'r2'}`). Empty
+	// when the MERGE pattern declares no inline properties on the
+	// relationship. When non-empty the exec operator filters the
+	// search by these properties and writes them on creation.
+	RelProps string
 	// OnCreate is the list of (key, value) pairs to set on the
 	// relationship when a new edge is created.
 	OnCreate []KVAction
