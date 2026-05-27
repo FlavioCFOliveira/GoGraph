@@ -309,10 +309,37 @@ func (a *analyser) withClause(w *ast.With) {
 	if w.Where != nil {
 		a.whereClause(w.Where)
 	}
-	// ORDER BY sees the same merged scope as WHERE (pre-WITH names + aliases).
-	// Any variable reference not present in this merged scope is undefined.
+	// ORDER BY sees the merged scope (pre-WITH names + aliases).
 	for _, s := range w.Projection.OrderBy {
 		a.checkExpr(s.Expr)
+	}
+	// When the projection aggregates, the post-WITH row only contains
+	// projected aliases, so an ORDER BY reference to a non-projected
+	// pre-WITH variable is undefined per openCypher 9 §3.3.5. Flag
+	// those cases without disturbing the merged-scope check above.
+	projAggregates := false
+	for _, p := range projs {
+		if containsAggregation(p.expr) {
+			projAggregates = true
+			break
+		}
+	}
+	if projAggregates {
+		projected := map[string]struct{}{}
+		for _, p := range projs {
+			if name := projectedName(p.expr, p.alias); name != "" {
+				projected[name] = struct{}{}
+			}
+		}
+		for _, s := range w.Projection.OrderBy {
+			for _, v := range collectVariables(s.Expr) {
+				if _, ok := projected[v]; ok {
+					continue
+				}
+				a.error(undefinedVarError(v, positionOf(s.Expr)))
+				break
+			}
+		}
 	}
 	// InvalidAggregation: an ORDER BY item containing an aggregation
 	// function is only legal when the projection itself contains an
@@ -1169,6 +1196,71 @@ func positionOf(e ast.Expression) ast.Position {
 		return v.Pos
 	}
 	return ast.Position{}
+}
+
+// collectVariables walks e and returns every Variable name referenced,
+// deduplicated. Used by the ORDER-BY-after-aggregation check to find
+// references that fall outside the post-WITH projected-alias scope.
+func collectVariables(e ast.Expression) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	var walk func(x ast.Expression)
+	walk = func(x ast.Expression) {
+		if x == nil {
+			return
+		}
+		switch v := x.(type) {
+		case *ast.Variable:
+			if _, dup := seen[v.Name]; !dup {
+				seen[v.Name] = struct{}{}
+				out = append(out, v.Name)
+			}
+		case *ast.Property:
+			walk(v.Receiver)
+		case *ast.LabelPredicate:
+			walk(v.Receiver)
+		case *ast.BinaryOp:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.UnaryOp:
+			walk(v.Operand)
+		case *ast.FunctionInvocation:
+			for _, arg := range v.Args {
+				walk(arg)
+			}
+		case *ast.SubscriptExpr:
+			walk(v.Expr)
+			walk(v.Index)
+		case *ast.SliceExpr:
+			walk(v.Expr)
+			walk(v.From)
+			walk(v.To)
+		case *ast.ListLiteral:
+			for _, el := range v.Elements {
+				walk(el)
+			}
+		case *ast.MapLiteral:
+			for _, val := range v.Values {
+				walk(val)
+			}
+		case *ast.CaseExpression:
+			walk(v.Subject)
+			for _, alt := range v.Alternatives {
+				walk(alt.Condition)
+				walk(alt.Consequent)
+			}
+			walk(v.ElseExpr)
+		case *ast.ListComprehension:
+			walk(v.Source)
+			walk(v.Predicate)
+			walk(v.Projection)
+		case *ast.PatternComprehension:
+			walk(v.Predicate)
+			walk(v.Projection)
+		}
+	}
+	walk(e)
+	return out
 }
 
 // aggInsideComprehension reports whether e contains a list or pattern
