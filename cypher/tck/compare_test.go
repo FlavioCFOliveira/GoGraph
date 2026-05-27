@@ -157,15 +157,211 @@ func (w *world) resultShouldBeInOrder(_ context.Context, table *godog.Table) (re
 
 // resultShouldBeInAnyOrderIgnoringListOrder is a variant of
 // resultShouldBeInAnyOrder for scenarios that note "ignoring element order for
-// lists". For string-based comparison we treat it identically.
-func (w *world) resultShouldBeInAnyOrderIgnoringListOrder(ctx context.Context, table *godog.Table) error {
-	return w.resultShouldBeInAnyOrder(ctx, table)
+// lists". Top-level list literals in each cell are canonicalised (elements
+// sorted as strings) on both the expected and actual sides before the per-row
+// string comparison runs, so map iteration order or aggregation emission
+// order does not cause a spurious mismatch.
+func (w *world) resultShouldBeInAnyOrderIgnoringListOrder(ctx context.Context, table *godog.Table) (retErr error) {
+	if w.err != nil {
+		return fmt.Errorf("expected result table but query failed: %w", w.err)
+	}
+	if table == nil {
+		return errors.New("result table step called with nil table argument")
+	}
+	if w.result == nil {
+		return errors.New("no result available")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("panic during result iteration: %v", r)
+		}
+	}()
+	defer w.result.Close() //nolint:errcheck // result close is best-effort in test teardown
+	cols, expected, err := parseExpectedTable(table)
+	if err != nil {
+		return err
+	}
+	actual, err := collectActualRows(w.result, cols)
+	if err != nil {
+		return err
+	}
+	normaliseRowsListOrder(expected)
+	normaliseRowsListOrder(actual)
+	return compareMultiset(expected, actual)
 }
 
 // resultShouldBeInOrderIgnoringListOrder is a variant of resultShouldBeInOrder
 // for scenarios that note "ignoring element order for lists".
-func (w *world) resultShouldBeInOrderIgnoringListOrder(ctx context.Context, table *godog.Table) error {
-	return w.resultShouldBeInOrder(ctx, table)
+func (w *world) resultShouldBeInOrderIgnoringListOrder(ctx context.Context, table *godog.Table) (retErr error) {
+	if w.err != nil {
+		return fmt.Errorf("expected result table but query failed: %w", w.err)
+	}
+	if table == nil {
+		return errors.New("result table step called with nil table argument")
+	}
+	if w.result == nil {
+		return errors.New("no result available")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("panic during result iteration: %v", r)
+		}
+	}()
+	defer w.result.Close() //nolint:errcheck // result close is best-effort in test teardown
+	cols, expected, err := parseExpectedTable(table)
+	if err != nil {
+		return err
+	}
+	actual, err := collectActualRows(w.result, cols)
+	if err != nil {
+		return err
+	}
+	normaliseRowsListOrder(expected)
+	normaliseRowsListOrder(actual)
+	return compareOrdered(expected, actual)
+}
+
+// normaliseRowsListOrder canonicalises the order of list elements inside
+// every cell of rows. The transformation only touches top-level [ ... ] list
+// literals; nested lists inside maps or nested-list elements are sorted
+// recursively at each bracket depth so two valid emissions with different
+// element orders compare equal.
+func normaliseRowsListOrder(rows [][]string) {
+	for _, row := range rows {
+		for i, cell := range row {
+			row[i] = sortListElementsInCell(cell)
+		}
+	}
+}
+
+// sortListElementsInCell walks the cell string and sorts the elements of
+// every top-level [ ... ] list literal it encounters. Element splitting
+// respects nested brackets, braces and string literals so a list of maps
+// like [{k: 1}, {k: 2}] is split on the outer commas only. Sorting uses
+// the same recursive normalisation so nested lists are themselves
+// canonicalised before the outer sort runs — the result is deterministic
+// regardless of the depth at which the divergence sits.
+func sortListElementsInCell(s string) string {
+	if !strings.ContainsAny(s, "[]") {
+		return s
+	}
+	var out strings.Builder
+	out.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		ch := s[i]
+		if ch != '[' {
+			// Skip past quoted strings verbatim so embedded brackets do not
+			// trigger the list walker.
+			if ch == '\'' || ch == '"' {
+				j := skipQuoted(s, i)
+				out.WriteString(s[i:j])
+				i = j
+				continue
+			}
+			out.WriteByte(ch)
+			i++
+			continue
+		}
+		// Find the matching closing bracket at the same depth.
+		end := matchingBracket(s, i)
+		if end < 0 {
+			// Malformed; pass the rest through unchanged.
+			out.WriteString(s[i:])
+			return out.String()
+		}
+		inner := s[i+1 : end]
+		parts := splitTopLevel(inner)
+		for j, p := range parts {
+			parts[j] = sortListElementsInCell(strings.TrimSpace(p))
+		}
+		sort.Strings(parts)
+		out.WriteByte('[')
+		for j, p := range parts {
+			if j > 0 {
+				out.WriteString(", ")
+			}
+			out.WriteString(p)
+		}
+		out.WriteByte(']')
+		i = end + 1
+	}
+	return out.String()
+}
+
+// matchingBracket returns the index of the ']' that closes the '[' at
+// position start. Returns -1 when the brackets are unbalanced. Quoted
+// strings and nested {…}/[…] blocks are skipped without affecting depth.
+func matchingBracket(s string, start int) int {
+	depth := 0
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		switch ch {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		case '\'', '"':
+			i = skipQuoted(s, i) - 1
+		}
+	}
+	return -1
+}
+
+// splitTopLevel splits s on commas that sit at bracket/brace depth zero
+// and outside any quoted string. Empty input yields a nil slice (an
+// empty list literal "[]" has no elements).
+func splitTopLevel(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var (
+		parts []string
+		depth int
+		start int
+	)
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch ch {
+		case '[', '{', '(':
+			depth++
+		case ']', '}', ')':
+			depth--
+		case '\'', '"':
+			i = skipQuoted(s, i) - 1
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
+// skipQuoted scans past a single-quoted or double-quoted string starting
+// at position i (which must point at the opening quote). Backslash
+// escapes are honoured so an embedded \' or \" does not close the
+// string. Returns the index immediately after the closing quote, or
+// len(s) when the string is unterminated.
+func skipQuoted(s string, i int) int {
+	quote := s[i]
+	i++
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) {
+			i += 2
+			continue
+		}
+		if s[i] == quote {
+			return i + 1
+		}
+		i++
+	}
+	return len(s)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

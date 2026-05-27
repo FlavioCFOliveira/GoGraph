@@ -932,6 +932,21 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3770: raised after the TCK comparator implemented the
+//     "ignoring element order for lists" contract instead of
+//     delegating verbatim to the strict comparator. Both
+//     resultShouldBeInAnyOrderIgnoringListOrder and the in-order
+//     variant now canonicalise every [ ... ] list literal in
+//     every cell on both sides via sortListElementsInCell — a
+//     bracket-balanced walker that splits on top-level commas
+//     (respecting quoted strings and nested [], {}, () blocks),
+//     sorts the parts with the same recursive normaliser so the
+//     order is deterministic at every depth, then re-joins.
+//     Closes the Map3 [1]/[2]/[4] keys() scenarios that hit
+//     spurious mismatches purely because Go's map iteration order
+//     does not match the literal source order, plus Aggregation5
+//     [2] and similar collect-order tests, plus a few singletons.
+//     Observed 3771-3775 across a 7-run sample; gate set at 3770.
 //   - 3766: raised after MergeRelationship.applyRelActions learnt
 //     to silently skip null property values. The parsePropValue
 //     helper already flags null via the typed
@@ -1038,7 +1053,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3766
+const tckExecutionBaseline = 3770
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
