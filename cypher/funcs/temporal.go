@@ -1010,6 +1010,12 @@ func fnDurationInMonths(args []expr.Value) (expr.Value, error) {
 }
 
 // fnDurationInDays supports two arities mirroring [fnDurationInMonths].
+//
+// The 2-arg form is NOT the residual-days of a calendar-decomposed
+// duration.between — that would discard the months stride and silently
+// undercount by orders of magnitude. Instead it projects the elapsed
+// time from t1 to t2 to a pure days+seconds axis (zero months) and
+// reports the whole-day component.
 func fnDurationInDays(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 1:
@@ -1023,22 +1029,26 @@ func fnDurationInDays(args []expr.Value) (expr.Value, error) {
 		totalDays := d.Days + (d.Seconds / 86400)
 		return expr.NewDuration(0, totalDays, 0, 0), nil
 	case 2:
-		between, err := fnDurationBetween(args)
-		if err != nil {
-			return nil, err
-		}
-		if expr.IsNull(between) {
+		if expr.IsNull(args[0]) || expr.IsNull(args[1]) {
 			return expr.Null, nil
 		}
-		d, _ := between.(expr.DurationValue)
-		totalDays := d.Days + (d.Seconds / 86400)
-		return expr.NewDuration(0, totalDays, 0, 0), nil
+		elapsedNs, ok := elapsedNanos(args[0], args[1])
+		if !ok {
+			return expr.Null, nil
+		}
+		const nsPerDay = int64(86_400) * int64(1_000_000_000)
+		days := elapsedNs / nsPerDay
+		return expr.NewDuration(0, days, 0, 0), nil
 	default:
 		return nil, &ArityError{Function: "duration.inDays", Got: len(args), Want: "1..2"}
 	}
 }
 
 // fnDurationInSeconds supports two arities mirroring [fnDurationInMonths].
+//
+// The 2-arg form projects the elapsed time from t1 to t2 to a pure
+// seconds+nanos axis (zero months, zero days), so the day stride of
+// duration.between is rolled up into the seconds count.
 func fnDurationInSeconds(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 1:
@@ -1052,19 +1062,82 @@ func fnDurationInSeconds(args []expr.Value) (expr.Value, error) {
 		totalSecs := d.Days*86400 + d.Seconds
 		return expr.NewDuration(0, 0, totalSecs, d.Nanos), nil
 	case 2:
-		between, err := fnDurationBetween(args)
-		if err != nil {
-			return nil, err
-		}
-		if expr.IsNull(between) {
+		if expr.IsNull(args[0]) || expr.IsNull(args[1]) {
 			return expr.Null, nil
 		}
-		d, _ := between.(expr.DurationValue)
-		totalSecs := d.Days*86400 + d.Seconds
-		return expr.NewDuration(0, 0, totalSecs, d.Nanos), nil
+		elapsedNs, ok := elapsedNanos(args[0], args[1])
+		if !ok {
+			return expr.Null, nil
+		}
+		const nsPerSec = int64(1_000_000_000)
+		secs := elapsedNs / nsPerSec
+		nanos := int32(elapsedNs % nsPerSec)
+		return expr.NewDuration(0, 0, secs, nanos), nil
 	default:
 		return nil, &ArityError{Function: "duration.inSeconds", Got: len(args), Want: "1..2"}
 	}
+}
+
+// elapsedNanos returns (b - a) in absolute elapsed nanoseconds, used by
+// the 2-arg projection functions duration.inDays / duration.inSeconds.
+//
+// Same-kind date-bearing pairs subtract via their UTC instants — this
+// matters for DateTime, where the two operands may live in different
+// zones and wall-clock subtraction would drift by the zone delta.
+// Time-only pairs subtract on the nanos-of-day axis.
+//
+// Cross-kind pairs follow duration.between's projection rules: any
+// pair mixing a time-only side with a date-bearing side reduces to the
+// time-of-day diff; two date-bearing values project to LocalDateTime
+// and subtract as wall-clocks (zone-stripped).
+//
+// Returns ok=false when neither projection applies.
+func elapsedNanos(a, b expr.Value) (int64, bool) {
+	if _, aTimeOnly := isTimeOnly(a); aTimeOnly {
+		return elapsedNanosTimeOnly(a, b)
+	}
+	if _, bTimeOnly := isTimeOnly(b); bTimeOnly {
+		return elapsedNanosTimeOnly(a, b)
+	}
+	// Both date-bearing. DateTime same-kind pairs subtract as instants;
+	// any other combination projects to LocalDateTime wall-clock.
+	if va, ok := a.(expr.DateTimeValue); ok {
+		if vb, ok := b.(expr.DateTimeValue); ok {
+			return vb.T.Sub(va.T).Nanoseconds(), true
+		}
+	}
+	la, oka := toLocalDateTime(a)
+	if !oka {
+		return 0, false
+	}
+	lb, okb := toLocalDateTime(b)
+	if !okb {
+		return 0, false
+	}
+	return lb.T.Sub(la.T).Nanoseconds(), true
+}
+
+// elapsedNanosTimeOnly computes (b - a) on the nanos-of-day axis. It
+// is the projection used when at least one side is time-only.
+func elapsedNanosTimeOnly(a, b expr.Value) (int64, bool) {
+	na, oka := toNanosOfDay(a)
+	if !oka {
+		return 0, false
+	}
+	nb, okb := toNanosOfDay(b)
+	if !okb {
+		return 0, false
+	}
+	return nb - na, true
+}
+
+// isTimeOnly reports whether v is a LocalTimeValue or TimeValue.
+func isTimeOnly(v expr.Value) (expr.Value, bool) {
+	switch v.(type) {
+	case expr.LocalTimeValue, expr.TimeValue:
+		return v, true
+	}
+	return nil, false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
