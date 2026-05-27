@@ -4507,6 +4507,31 @@ func buildIRProjection(
 		}
 		projItems[i] = exec.ProjectionItem{Alias: name, Eval: evalFn}
 	}
+	// Post-projection schema reset: the live row has exactly one column per
+	// projection item at indices 0..len(items)-1. Stale entries from the
+	// upstream pipeline (e.g. an UNWIND element variable that the projection
+	// dropped) MUST be removed from the shared schema map; otherwise
+	// schemaWidth(schema) returns a wider value than the actual row, and
+	// downstream operators that allocate fresh columns via that helper
+	// (Apply, Expand, AllNodesScan, …) mis-offset their bindings.
+	//
+	// The reset preserves only the alias→index mapping and the secondary
+	// expression-string keys registered above; everything else is dropped.
+	keep := make(map[string]int, len(items)*2)
+	for i, item := range items {
+		keep[item.Name] = i
+		if item.Expression != "" && item.Expression != item.Name {
+			keep[item.Expression] = i
+		}
+	}
+	for k := range schema {
+		if _, ok := keep[k]; !ok {
+			delete(schema, k)
+		}
+	}
+	for k, v := range keep {
+		schema[k] = v
+	}
 	return exec.NewProject(child, projItems)
 }
 
