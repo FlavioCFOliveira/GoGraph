@@ -559,6 +559,13 @@ func (a *analyser) returnClause(r *ast.Return) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (a *analyser) whereClause(w *ast.Where) {
+	// openCypher 9 §3.4.5: aggregations are forbidden in WHERE because
+	// the filter applies per row, before any grouping; allowing
+	// count/sum/… here would be ambiguous (the aggregator has no group
+	// to fold over).
+	if containsAggregation(w.Predicate) {
+		a.error(invalidAggregationError(positionOf(w.Predicate)))
+	}
 	a.checkExpr(w.Predicate)
 }
 
