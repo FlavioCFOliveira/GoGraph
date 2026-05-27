@@ -361,6 +361,12 @@ func localDateTimeFromMap(m expr.MapValue) (expr.Value, error) {
 
 // dateTimeFromMap builds a DateTimeValue from a component map. The zone is
 // derived from "timezone" key (string), defaulting to UTC.
+//
+// openCypher 9 §3.10.5: when the map contains both a base time/datetime
+// (under "time" or "datetime") whose own offset differs from an explicit
+// "timezone" override, the wall-clock is shifted so the instant is
+// preserved (timezone conversion). Explicit hour/minute keys on the
+// override map still win over the shift.
 func dateTimeFromMap(m expr.MapValue) (expr.Value, error) {
 	dv, err := dateFromMap(m)
 	if err != nil {
@@ -372,7 +378,45 @@ func dateTimeFromMap(m expr.MapValue) (expr.Value, error) {
 	}
 	h, mn, s, ns := timeComponentsFromMap(m)
 	loc := zoneFromMap(m)
+
+	// Detect base-vs-target offset mismatch and apply the conversion shift.
+	baseOff, haveBaseOff := baseOffsetFromMap(m)
+	_, explicitTZ := m["timezone"]
+	if haveBaseOff && explicitTZ {
+		_, newOff := time.Date(d.Year, time.Month(d.Month), d.Day, h, mn, s, ns, loc).Zone()
+		if newOff != baseOff {
+			if _, hasH := m["hour"]; !hasH {
+				if _, hasMn := m["minute"]; !hasMn {
+					shift := time.Duration(newOff-baseOff) * time.Second
+					shifted := time.Date(d.Year, time.Month(d.Month), d.Day, h, mn, s, ns, time.UTC).Add(shift)
+					d.Year, d.Month, d.Day = shifted.Year(), int(shifted.Month()), shifted.Day()
+					h, mn, s, ns = shifted.Hour(), shifted.Minute(), shifted.Second(), shifted.Nanosecond()
+				}
+			}
+		}
+	}
 	return expr.NewDateTime(d.Year, d.Month, d.Day, h, mn, s, ns, loc), nil
+}
+
+// baseOffsetFromMap returns the offset (seconds east of UTC) of the
+// time/datetime carried under m's "time" or "datetime" key, if any.
+func baseOffsetFromMap(m expr.MapValue) (int, bool) {
+	if tv, ok := m["time"]; ok {
+		switch t := tv.(type) {
+		case expr.TimeValue:
+			return int(t.OffsetSec), true
+		case expr.DateTimeValue:
+			_, o := t.T.Zone()
+			return o, true
+		}
+	}
+	if dv, ok := m["datetime"]; ok {
+		if t, ok2 := dv.(expr.DateTimeValue); ok2 {
+			_, o := t.T.Zone()
+			return o, true
+		}
+	}
+	return 0, false
 }
 
 // timeComponentsFromMap extracts hour/minute/second/nanosecond from m.
