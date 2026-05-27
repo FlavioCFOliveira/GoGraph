@@ -199,6 +199,22 @@ func (op *EagerAggregation) consume() error {
 			agg.Step(v)
 		}
 	}
+	// openCypher 9 §3.6: a pure aggregation (no grouping keys) over an
+	// empty input emits exactly one row carrying the empty-state values
+	// of every aggregator (count → 0, sum → 0, collect → [], min/max
+	// → null, avg → null). Synthesise the singleton group with its
+	// default-initialised aggregators so the downstream projection has
+	// something to render. When grouping keys are present this branch
+	// is intentionally skipped: an empty input correctly yields zero
+	// groups.
+	if len(op.order) == 0 && len(op.keyCols) == 0 {
+		aggs := make([]funcs.Aggregator, len(op.aggFactories))
+		for i, factory := range op.aggFactories {
+			aggs[i] = factory()
+		}
+		entry := &groupEntry{keyVals: nil, aggs: aggs}
+		op.order = append(op.order, entry)
+	}
 	return nil
 }
 
