@@ -449,15 +449,21 @@ func (a *analyser) withClause(w *ast.With) {
 // (`MATCH (n)`, `MATCH (a)-[r]->(b)`) can detect a type conflict when
 // the alias was previously bound to a non-graph-element value.
 //
-// Recognised types: "node", "relationship", "path", "value" (any
-// non-graph literal / scalar / list / map) and "any" (unknown).
-// Variable references propagate the existing scope type.
+// Recognised types: "node", "relationship", "path", "map" (literal map
+// expression, supports property access at runtime), "list", "scalar"
+// (string / int / float / bool — no property access), "value" (general
+// non-graph literal — used by [conflictsWith] as a catch-all that does
+// not conflict with anything), and "any" (unknown). Variable references
+// would propagate the existing scope type but this function currently
+// inspects only the immediate AST node and returns "any" for them.
 func inferProjectedType(e ast.Expression) string {
-	switch v := e.(type) {
-	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
-		*ast.BoolLiteral, *ast.ListLiteral, *ast.MapLiteral:
-		_ = v
-		return "value"
+	switch e.(type) {
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral, *ast.BoolLiteral:
+		return "scalar"
+	case *ast.ListLiteral:
+		return "list"
+	case *ast.MapLiteral:
+		return "map"
 	case *ast.NullLiteral:
 		// NULL is a wildcard; do not constrain downstream pattern use.
 		return "any"
@@ -1096,28 +1102,35 @@ func (a *analyser) checkExpr(e ast.Expression) {
 	case *ast.Property:
 		a.checkExpr(v.Receiver)
 		// Compile-time type check: property access on a direct
-		// StringLiteral / ListLiteral / MapLiteral receiver is
-		// statically invalid (RETURN 'str'.foo, RETURN [].foo, …).
-		// IntLiteral and FloatLiteral receivers are intentionally NOT
-		// flagged here — the parser reconstructs float literals like
-		// `1.0` from an IntLiteral atom followed by a numeric "Name"
-		// accessor, but very long floats may slip through that
-		// reconstruction and reach sema as IntLiteral.someDigits, which
-		// is a valid (round-trip-tolerant) float literal in the source
-		// rather than a property access.
+		// StringLiteral / ListLiteral / BoolLiteral receiver is
+		// statically invalid (`RETURN 'str'.foo`, `RETURN [].foo`,
+		// `RETURN true.foo`). MapLiteral is excluded because maps DO
+		// admit property access (`RETURN {k: 1}.k`). IntLiteral and
+		// FloatLiteral receivers are intentionally NOT flagged here —
+		// the parser reconstructs float literals like `1.0` from an
+		// IntLiteral atom followed by a numeric "Name" accessor, but
+		// very long floats may slip through that reconstruction and
+		// reach sema as IntLiteral.someDigits, which is a valid
+		// (round-trip-tolerant) float literal in the source rather
+		// than a property access.
 		switch v.Receiver.(type) {
-		case *ast.StringLiteral, *ast.ListLiteral, *ast.MapLiteral, *ast.BoolLiteral:
+		case *ast.StringLiteral, *ast.ListLiteral, *ast.BoolLiteral:
 			a.error(invalidBooleanOperandError(".", "non-graph", v.Pos))
 		}
-		// Transitive non-graph-receiver check intentionally NOT
-		// implemented here: inferProjectedType lumps every non-graph
-		// literal under "value", but maps DO admit property access
-		// (`WITH {k: 1} AS m RETURN m.k`). A correct transitive rule
-		// would need inferProjectedType to distinguish map from list
-		// from scalar, and probably to propagate types through
-		// arithmetic / function calls. Until that lands, only the
-		// direct-literal check above fires; transitive errors slip
-		// through and surface at runtime instead of at compile time.
+		// Transitive check: when the receiver is a Variable whose
+		// scope symbol carries a static type that cannot have
+		// properties (scalar / list), reject the access at compile
+		// time. Map / node / relationship / path / any all admit
+		// property access (or might at runtime, for "any"), so they
+		// pass through.
+		if vref, isVar := v.Receiver.(*ast.Variable); isVar {
+			if sym, ok := a.scope.Lookup(vref.Name); ok {
+				switch sym.Type {
+				case "scalar", "list":
+					a.error(invalidBooleanOperandError(".", "non-graph", v.Pos))
+				}
+			}
+		}
 
 	case *ast.LabelPredicate:
 		a.checkExpr(v.Receiver)
