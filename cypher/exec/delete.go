@@ -94,6 +94,12 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 
 	nodeID, err := resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
 	if err != nil {
+		if err == errNullTarget {
+			// OPTIONAL-MATCH-bound or otherwise NULL target: DELETE
+			// is a no-op per openCypher; propagate the row unchanged.
+			*out = childRow
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: DeleteNode %q: %w", op.nodeVar, err)
 	}
 	nodeKey, resolved := op.mutator.ResolveNodeLabel(nodeID)

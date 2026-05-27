@@ -76,6 +76,10 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 
 	nodeID, err := resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
 	if err != nil {
+		if err == errNullTarget {
+			*out = childRow
+			return true, nil
+		}
 		return false, fmt.Errorf("exec: DetachDelete %q: %w", op.nodeVar, err)
 	}
 	nodeKey, resolved := op.mutator.ResolveNodeLabel(nodeID)

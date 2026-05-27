@@ -298,7 +298,11 @@ func resolveRelBindingFromRow(srcCol, dstCol int, row Row, mut GraphMutator) (re
 // resolveNodeIDFromRow extracts the NodeID stored at the column position of
 // varName using the provided schema map. It accepts both IntegerValue (NodeID
 // emitted by scan/create operators) and NodeValue (full node value).
-// Used by RemoveLabels which operates on nodes only.
+// Used by RemoveLabels which operates on nodes only. A NULL value (typically
+// from OPTIONAL MATCH that did not bind the variable) is signalled via the
+// sentinel [errNullTarget] so callers can treat the row as a no-op rather
+// than a hard error — matches the openCypher contract that DELETE / REMOVE /
+// SET on a NULL target is silently skipped.
 func resolveNodeIDFromRow(varName string, schema map[string]int, row Row) (graph.NodeID, error) {
 	colIdx, ok := schema[varName]
 	if !ok {
@@ -312,7 +316,15 @@ func resolveNodeIDFromRow(varName string, schema map[string]int, row Row) (graph
 		return graph.NodeID(v), nil
 	case expr.NodeValue:
 		return graph.NodeID(v.ID), nil
-	default:
-		return 0, fmt.Errorf("variable %q is not IntegerValue/NodeValue (got %T)", varName, row[colIdx])
 	}
+	if expr.IsNull(row[colIdx]) {
+		return 0, errNullTarget
+	}
+	return 0, fmt.Errorf("variable %q is not IntegerValue/NodeValue (got %T)", varName, row[colIdx])
 }
+
+// errNullTarget signals that a DELETE / REMOVE / SET target variable
+// resolved to NULL. Callers treat the row as a no-op (silently
+// passing the row through unchanged) per openCypher's "null inputs
+// are silently ignored by mutating clauses" rule.
+var errNullTarget = fmt.Errorf("target is null")
