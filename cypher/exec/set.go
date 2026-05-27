@@ -30,6 +30,7 @@ import (
 	"gograph/cypher/expr"
 	"gograph/graph"
 	"gograph/graph/index"
+	"gograph/graph/lpg"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,10 +56,17 @@ type RelCols struct {
 // column indices.
 //
 // SetProperty is NOT safe for concurrent use.
+// ValueEvalFn evaluates a SET RHS expression against the current input row
+// and returns the resulting property value plus a flag distinguishing the
+// "no value produced" case from the "explicit null" case. The exec operator
+// uses null/no-value semantics to either delete (null) or no-op (no value).
+type ValueEvalFn func(row Row) (value lpg.PropertyValue, isNull bool, hasValue bool, err error)
+
 type SetProperty struct {
 	entityVar   string
 	propertyKey string // empty → whole-entity assignment
 	valueExpr   string // opaque literal string from IR
+	valueEvalFn ValueEvalFn // non-nil → evaluate the AST per row
 	merge       bool   // true when mode is SET n += {…}
 	schema      map[string]int
 	relCols     *RelCols // non-nil when entityVar is a relationship
@@ -121,6 +129,15 @@ func (op *SetProperty) WithConstraints(reg *ConstraintRegistry, mgr *index.Manag
 	return op
 }
 
+// WithValueEvalFn attaches a per-row evaluator for the SET RHS expression.
+// The closure is invoked whenever the operator needs to compute the new
+// property value; it takes priority over the literal-string parser path
+// for single-property assignments.
+func (op *SetProperty) WithValueEvalFn(fn ValueEvalFn) *SetProperty {
+	op.valueEvalFn = fn
+	return op
+}
+
 // WithParams attaches query parameters for $name substitution in value
 // expressions. Returns op for chaining.
 func (op *SetProperty) WithParams(params map[string]expr.Value) *SetProperty {
@@ -166,12 +183,12 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 
 	if ent.isRel {
 		// Relationship target: dispatch to edge property methods.
-		if err := op.applyToRelationship(ent.relSrcKey, ent.relDstKey); err != nil {
+		if err := op.applyToRelationship(ent.relSrcKey, ent.relDstKey, childRow); err != nil {
 			return false, err
 		}
 	} else {
 		// Node target: dispatch to node property methods.
-		if err := op.applyToNode(ent.nodeKey); err != nil {
+		if err := op.applyToNode(ent.nodeKey, childRow); err != nil {
 			return false, err
 		}
 	}
@@ -263,8 +280,38 @@ func resolveRelBinding(srcCol, dstCol int, row Row, mut GraphMutator) (entityBin
 // its mutator-facing key.
 //
 //nolint:gocyclo // three assignment modes (single, merge, replace) × optional constraint enforcement
-func (op *SetProperty) applyToNode(nodeKey string) error {
+func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 	if op.propertyKey != "" {
+		// AST-eval path: when the IR carries a parsed expression for the
+		// RHS, evaluate it per row. This handles SET n.num = n.num + 1,
+		// SET n.name = a.name, and any other non-literal value.
+		if op.valueEvalFn != nil {
+			pv, isNull, hasValue, evalErr := op.valueEvalFn(row)
+			if evalErr != nil {
+				return evalErr
+			}
+			if isNull {
+				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
+				return nil
+			}
+			if !hasValue {
+				return nil
+			}
+			if op.reg != nil {
+				labels := op.mutator.NodeLabels(nodeKey)
+				if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
+					return cerr
+				}
+			}
+			if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
+				return serr
+			}
+			if op.reg != nil {
+				labels := op.mutator.NodeLabels(nodeKey)
+				op.reg.RecordPropertySet(labels, op.propertyKey, pv)
+			}
+			return nil
+		}
 		pv, parseErr := parsePropValueWithParams(op.valueExpr, op.params)
 		if parseErr != nil {
 			if errors.Is(parseErr, ErrPropertyValueIsNull) {
@@ -337,8 +384,22 @@ func (op *SetProperty) applyToNode(nodeKey string) error {
 // applyToRelationship applies the configured property mutation to a
 // relationship identified by its endpoint keys. Constraint enforcement is not
 // performed for relationships (the constraint registry is node-label-scoped).
-func (op *SetProperty) applyToRelationship(srcKey, dstKey string) error {
+func (op *SetProperty) applyToRelationship(srcKey, dstKey string, row Row) error {
 	if op.propertyKey != "" {
+		if op.valueEvalFn != nil {
+			pv, isNull, hasValue, evalErr := op.valueEvalFn(row)
+			if evalErr != nil {
+				return evalErr
+			}
+			if isNull {
+				op.mutator.DelEdgeProperty(srcKey, dstKey, op.propertyKey)
+				return nil
+			}
+			if !hasValue {
+				return nil
+			}
+			return op.mutator.SetEdgeProperty(srcKey, dstKey, op.propertyKey, pv)
+		}
 		pv, parseErr := parsePropValueWithParams(op.valueExpr, op.params)
 		if parseErr != nil {
 			if errors.Is(parseErr, ErrPropertyValueIsNull) {

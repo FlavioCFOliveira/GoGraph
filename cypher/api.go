@@ -1165,6 +1165,38 @@ func buildOperatorWrite(
 				sp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
 			}
 		}
+		// AST-eval path for non-literal RHS expressions (SET n.num = n.num + 1,
+		// SET n.name = a.name, etc.). When the IR carries a parsed expression,
+		// build a per-row closure that evaluates it and converts the result to
+		// an lpg.PropertyValue. The closure short-circuits to ('no value') for
+		// expr.Eval errors or unsupported value kinds so the operator skips
+		// the write without aborting the pipeline.
+		if p.ValueExpr != nil && p.PropertyKey != "" {
+			schemaSnap := schemaCopy
+			capturedExpr := p.ValueExpr
+			capturedParams := params
+			capturedReg := reg
+			capturedBopts := bopts
+			var capturedG *lpg.Graph[string, float64]
+			if lw, ok := walker.(*lpgNodeWalker); ok {
+				capturedG = lw.g
+			}
+			sp.WithValueEvalFn(func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
+				rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+				v, evalErr := evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+				if evalErr != nil {
+					return lpg.PropertyValue{}, false, false, nil // surface as no-op
+				}
+				if v == nil || expr.IsNull(v) {
+					return lpg.PropertyValue{}, true, false, nil
+				}
+				pv, ok := exprValueToLPGProp(v)
+				if !ok {
+					return lpg.PropertyValue{}, false, false, nil
+				}
+				return pv, false, true, nil
+			})
+		}
 		return sp, nil
 
 	case *ir.SetAllProperties:

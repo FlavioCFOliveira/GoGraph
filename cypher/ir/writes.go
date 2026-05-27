@@ -232,7 +232,7 @@ func (t *translator) setClause(s *ast.Set, child LogicalPlan) (LogicalPlan, erro
 			continue
 		}
 		if prop, ok := item.Target.(*ast.Property); ok {
-			plan = NewSetProperty(prop.Receiver.String(), prop.Key, item.Value.String(), plan)
+			plan = NewSetPropertyExpr(prop.Receiver.String(), prop.Key, item.Value.String(), item.Value, plan)
 			continue
 		}
 		// Whole-entity assignment: `SET n = …` (replace) or `SET n += …` (merge).

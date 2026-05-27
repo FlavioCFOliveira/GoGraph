@@ -1360,6 +1360,12 @@ type SetProperty struct {
 	PropertyKey string
 	// Value is the opaque string representation of the new value expression.
 	Value string
+	// ValueExpr is the parsed AST for the value expression when available.
+	// The physical builder uses it to construct a per-row evaluator so that
+	// non-literal RHS expressions (variable references, arithmetic, property
+	// access, function calls) actually run against each input row instead of
+	// silently failing the literal-parser fast path.
+	ValueExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
 }
@@ -1370,6 +1376,19 @@ func NewSetProperty(entityVar, propertyKey, value string, child LogicalPlan) *Se
 		EntityVar:   entityVar,
 		PropertyKey: propertyKey,
 		Value:       value,
+		Child:       child,
+	}
+}
+
+// NewSetPropertyExpr creates a SetProperty operator carrying the parsed AST
+// for the value expression. The exec builder uses it to evaluate non-literal
+// RHS expressions per row.
+func NewSetPropertyExpr(entityVar, propertyKey, value string, valueExpr ast.Expression, child LogicalPlan) *SetProperty {
+	return &SetProperty{
+		EntityVar:   entityVar,
+		PropertyKey: propertyKey,
+		Value:       value,
+		ValueExpr:   valueExpr,
 		Child:       child,
 	}
 }
