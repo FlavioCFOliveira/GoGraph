@@ -173,6 +173,12 @@ var parseTimeErrors = map[string]bool{
 	// the purposes of the TCK parser-only gate.
 	"InvalidClauseComposition": true,
 	"DifferentColumnsInUnion":  true,
+	// InvalidRelationshipPattern: a negative range bound (`-[r*-2]->`)
+	// is rejected by the normalize step's user-given-`-` preservation,
+	// so ParseInt fails and the parser surfaces a SyntaxError. The
+	// missing-`*` variant (`-[r..]->`, Match4 [9]) still parses today
+	// and is tracked via [grammarGapExact].
+	"InvalidRelationshipPattern": true,
 }
 
 // grammarGapExact lists (file, scenarioNamePrefix) pairs for scenarios that
@@ -190,7 +196,12 @@ var parseTimeErrors = map[string]bool{
 //     (invalid hex characters).
 //
 // No exact-pair entries are currently active.
-var grammarGapExact = [][2]string{}
+var grammarGapExact = [][2]string{
+	// Match4 [9] uses `-[r:T..]->` (`..` without the leading `*`). The
+	// grammar treats this as a varlen-unbounded pattern instead of
+	// rejecting it as InvalidRelationshipPattern. Documented gap.
+	{"features/clauses/match/Match4.feature", "[9] Fail when asterisk operator is missing"},
+}
 
 // reAngleBracket matches Scenario Outline placeholder tokens such as
 // <pattern>, <yield>, <rename>.

@@ -310,12 +310,27 @@ func normalizeVarlenBounds(q string) string {
 				// Found a range-literal marker.
 				buf = append(buf, c)
 				i++
+				// User-given negative sign: preserve it so the rewrite
+				// emits `--<digits>` (an unparseable double-negative)
+				// rather than `-<digits>` (which would collapse with the
+				// visitor's abs-of-bound). The visitor's ParseInt then
+				// fails and the query surfaces InvalidRelationshipPattern,
+				// which is the canonical openCypher error for a negative
+				// range bound (Match4 [10]).
+				if i < n && q[i] == '-' {
+					buf = append(buf, '-')
+					i++
+				}
 				// Optional lower bound: rewrite digits as negative.
 				writeNegDigits()
 				// Optional '..' followed by optional upper bound.
 				if i+1 < n && q[i] == '.' && q[i+1] == '.' {
 					buf = append(buf, '.', '.')
 					i += 2
+					if i < n && q[i] == '-' {
+						buf = append(buf, '-')
+						i++
+					}
 					// Optional upper bound.
 					writeNegDigits()
 				}
