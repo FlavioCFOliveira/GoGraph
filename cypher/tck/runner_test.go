@@ -905,11 +905,32 @@ import (
 //         (Call2 #3).
 //     Observed 3705 stable across five-run samples; gate set at
 //     3700 to absorb run-to-run variance.
+//   - 3712: raised after a foundational projection-schema fix:
+//     buildIRProjection now resets the shared schema map to ONLY the
+//     output items' aliases / expression-string secondary keys after
+//     processing the projection list. The previous behaviour added
+//     output names but kept stale upstream entries, so a sequence
+//     like `WITH x[0] AS y MATCH (n)` saw an inflated schemaWidth
+//     (counting both y and the dropped lst/x slots) and the
+//     downstream Apply mis-offset the inner subtree's columns —
+//     reading the MATCH-bound node returned null. Unlocks
+//     Comparison1 #1, Comparison2 #3 (×4), and adjacent multi-clause
+//     scenarios in the same family.
+//
+//     Two further focused uplifts landed alongside the schema fix:
+//     * NaN-vs-number ordering yields FALSE; NaN-vs-non-number
+//       yields NULL (Comparison2 #5 examples).
+//     * sema/validateRelRange retains the negative-bound checks but
+//       drops the Min > Max branch (false-positive against the
+//       parser's abs-normalisation pipeline).
+//
+//     Observed 3716 stable across five-run samples; gate set at
+//     3712 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3700
+const tckExecutionBaseline = 3712
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
