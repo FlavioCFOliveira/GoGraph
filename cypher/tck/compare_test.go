@@ -601,7 +601,15 @@ func exprValueToString(v expr.Value) string {
 	case expr.FloatValue:
 		return formatFloatTCK(float64(val))
 	case expr.StringValue:
-		return "'" + string(val) + "'"
+		// TCK string literals are wrapped in single quotes with the
+		// canonical Cypher escapes — backslash and inner single quote
+		// must be escaped so the rendered cell parses back to the same
+		// runtime value (Literals6 [4]/[5]). Order matters: escape
+		// backslashes first so the newly-introduced backslashes in
+		// front of the quotes are not double-escaped.
+		s := strings.ReplaceAll(string(val), `\`, `\\`)
+		s = strings.ReplaceAll(s, `'`, `\'`)
+		return "'" + s + "'"
 	case expr.NodeValue:
 		return formatNodeTCK(val)
 	case expr.RelationshipValue:

@@ -932,6 +932,12 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3762: raised after the TCK exprValueToString StringValue
+//     formatter learnt the canonical Cypher escapes — backslash
+//     and inner single quote are now escaped (in that order) so
+//     RETURN '\'' renders as '\'' instead of ''' and matches the
+//     TCK table cells. Closes Literals6 [4] and [5].
+//     Observed 3762-3767 across a 7-run sample; gate set at 3762.
 //   - 3760: raised after RemoveProperty learnt to silently skip
 //     rows whose target variable is NULL. resolveEntityFromRow
 //     and resolveEntityMaybeRel now return the existing
@@ -995,7 +1001,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3760
+const tckExecutionBaseline = 3762
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
