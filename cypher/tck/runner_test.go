@@ -926,6 +926,12 @@ import (
 //
 //     Observed 3716 stable across five-run samples; gate set at
 //     3712 to absorb run-to-run variance.
+//   - 3715: holds — exec.Eager pipeline barrier and the LIMIT-0-over-
+//     writes gate fix Create6 #8 ("Limiting to zero results after
+//     creating relationships affects the result set but not the side
+//     effects"); the wider LIMIT-N-over-writes wrap regressed
+//     Match5 #26's mid-pipeline setup query and is intentionally not
+//     applied.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
