@@ -866,11 +866,22 @@ import (
 //         and related, nine scenarios).
 //     Observed 3682 stable across five-run samples; gate set at
 //     3678 to absorb run-to-run variance.
+//   - 3683: raised after two further uplifts:
+//     (a) RETURN n.prop AS n bypasses the schema-name fast path so
+//         the row carries the projected scalar instead of the bound
+//         node (Merge5 #16–#19, Return4 #1).
+//     (b) Variable-length relationship pattern accepts a
+//         previously-bound list alias without raising
+//         VariableTypeConflict, enabling
+//         `MATCH ... WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)`
+//         (Match4 #8, Match9 #6/#7).
+//     Observed 3688 stable across five-run samples; gate set at
+//     3683 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3678
+const tckExecutionBaseline = 3683
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
