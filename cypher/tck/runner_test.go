@@ -660,11 +660,21 @@ import (
 //     forwarding family. Observed 3525-3530 across a 5-run sample
 //     (median 3529); gate set conservatively at 3520 (minimum
 //     observed - 5).
+//   - 3539: raised after projectionItems now honours [ast.Projection.All]
+//     and prepends every variable introduced by the child subtree
+//     (collected via [collectAllVars]) to the projection. Pre-fix
+//     `RETURN *` / `WITH *` translated to a Projection with zero items,
+//     so the output had no columns and any row count check failed.
+//     Both [translateWith] and [returnClause] now pass child.Vars
+//     through the helper. Unlocks With1 [1]/[2], Return7 [1] and the
+//     broader RETURN * / WITH * forwarding family. Observed 3544-3548
+//     across a 5-run sample (median 3546); gate set conservatively at
+//     3539 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3520
+const tckExecutionBaseline = 3539
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

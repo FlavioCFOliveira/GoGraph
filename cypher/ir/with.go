@@ -49,12 +49,12 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		// need renaming (alias not equal to the expression string). In practice the
 		// EagerAggregation already exposes the correct output names, so the
 		// Projection is needed only to preserve ordering and aliasing.
-		items := projectionItems(w.Projection)
+		items := projectionItems(w.Projection, collectAllVars(child))
 		if len(items) > 0 {
 			plan = NewProjection(items, plan)
 		}
 	} else {
-		items := projectionItems(w.Projection)
+		items := projectionItems(w.Projection, collectAllVars(child))
 		plan = NewProjection(items, child)
 	}
 

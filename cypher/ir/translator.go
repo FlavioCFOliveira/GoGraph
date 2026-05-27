@@ -315,7 +315,7 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	if len(regularItems) > 0 {
 		items = regularItems
 	} else {
-		items = projectionItems(proj)
+		items = projectionItems(proj, collectAllVars(planAfterComp))
 	}
 
 	// Detect aggregate functions among non-comprehension items. When present,
@@ -404,17 +404,34 @@ func (t *translator) updatingClause(uc ast.UpdatingClause, child LogicalPlan) (L
 // ─────────────────────────────────────────────────────────────────────────────
 
 // projectionItems converts ast.Projection items into ir.ProjectionItem values.
-func projectionItems(proj *ast.Projection) []ProjectionItem {
+// When proj.All is true (the openCypher `*` projection), every variable
+// introduced by the child subtree is added to the projection before any
+// explicit items, so `RETURN *` and `WITH *` forward all in-scope
+// bindings. childVars supplies the in-scope variable list; pass nil when
+// the caller does not have a child plan available.
+func projectionItems(proj *ast.Projection, childVars []string) []ProjectionItem {
 	if proj == nil {
 		return nil
 	}
-	items := make([]ProjectionItem, len(proj.Items))
-	for i, it := range proj.Items {
-		items[i] = ProjectionItem{
+	var items []ProjectionItem
+	if proj.All {
+		for _, v := range childVars {
+			if v == "" {
+				continue
+			}
+			items = append(items, ProjectionItem{
+				Name:       v,
+				Expression: v,
+				Expr:       &ast.Variable{Name: v},
+			})
+		}
+	}
+	for _, it := range proj.Items {
+		items = append(items, ProjectionItem{
 			Name:       projectionColumnName(it),
 			Expression: it.Expr.String(),
 			Expr:       it.Expr,
-		}
+		})
 	}
 	return items
 }
