@@ -493,6 +493,95 @@ func splitMapItems(s string) []string {
 	return parts
 }
 
+// PropMapContainsNullLiteral reports whether the property-map source string
+// contains any value that is the literal `null`. It is used by MERGE to surface
+// the openCypher `MergeReadOwnWrites` error when a merge predicate contains a
+// null property value — such a merge can never match its own write because
+// null comparisons are always tri-valued false, so the engine rejects the
+// pattern outright. Used at MERGE plan-build time; CREATE silently drops
+// null-valued properties so it does NOT use this check.
+//
+// The argument may be either a single map literal "{k: v, …}" or a larger
+// surface form (e.g. a full pattern string "(a)-[r:T {k: null}]->(b)") in
+// which case every embedded balanced "{...}" segment is scanned. The check
+// splits each map at top-level commas, isolates each value substring, and
+// reports true if any value (case-insensitively) equals the bare token
+// `null`. Variable refs and expressions are ignored — they parse to
+// non-literal forms.
+func PropMapContainsNullLiteral(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	// Walk the string and check every balanced "{...}" segment.
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' {
+			continue
+		}
+		depth := 0
+		end := -1
+		inStr := false
+		var strChar byte
+		for j := i; j < len(s); j++ {
+			c := s[j]
+			if inStr {
+				if c == strChar && (j == 0 || s[j-1] != '\\') {
+					inStr = false
+				}
+				continue
+			}
+			switch c {
+			case '"', '\'':
+				inStr = true
+				strChar = c
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = j
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			return false
+		}
+		if mapHasNullValue(s[i : end+1]) {
+			return true
+		}
+		i = end
+	}
+	return false
+}
+
+// mapHasNullValue reports whether a balanced "{k: v, …}" literal contains
+// any value that is the bare token `null`.
+func mapHasNullValue(s string) bool {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+		return false
+	}
+	inner := strings.TrimSpace(s[1 : len(s)-1])
+	if inner == "" {
+		return false
+	}
+	parts := splitMapItems(inner)
+	for _, part := range parts {
+		colonIdx := strings.Index(part, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		valStr := strings.TrimSpace(part[colonIdx+1:])
+		if strings.EqualFold(valStr, "null") {
+			return true
+		}
+	}
+	return false
+}
+
 // parsePropLiteralWithParams parses a Cypher property-map literal (e.g.
 // "{key: $param, key2: 'lit'}") into a slice of propLiterals, substituting
 // parameter references of the form "$name" from the supplied params map.

@@ -531,26 +531,54 @@ func (a *analyser) createClause(c *ast.Create) {
 	a.checkPatternPropertyExprs(c.Pattern)
 }
 
-// checkMergeNoRebind is the MERGE counterpart of checkCreateNoRebind. The
-// rule is narrower: MERGE may augment a bound node's labels/properties (the
-// pattern is matched first, then created on miss), but it may NOT take a
-// standalone bound node as its whole pattern (MERGE (a) where a is already
-// bound is a no-op that openCypher 9 §3.5.2 rejects as VariableAlreadyBound).
+// checkMergeNoRebind is the MERGE counterpart of checkCreateNoRebind. Two
+// situations are rejected as VariableAlreadyBound per openCypher 9 §3.5.2:
+//
+//  1. A standalone bound node as the whole pattern (MERGE (a) where a is
+//     already bound is a no-op the spec forbids).
+//  2. A node pattern that references an already-bound variable while
+//     adding new label predicates or a property map. The bound entity
+//     already has its labels and properties set; MERGE may not impose
+//     additional ones.
+//
+// Reusing a bound variable as an endpoint of a relationship in MERGE without
+// new attributes is legal — that is how MERGE attaches new relationships to
+// existing nodes.
 func (a *analyser) checkMergeNoRebind(pp *ast.PathPattern) {
 	if pp == nil {
 		return
 	}
 	standalone := pp.Head != nil && pp.Head.Next == nil && pp.Head.Node != nil
-	if !standalone {
-		return
+	if standalone {
+		np := pp.Head.Node
+		if np.Variable == nil {
+			return
+		}
+		name := *np.Variable
+		if _, alreadyInScope := a.scope.Lookup(name); alreadyInScope {
+			a.error(variableAlreadyBoundError(name, np.Pos))
+			return
+		}
 	}
-	np := pp.Head.Node
-	if np.Variable == nil {
-		return
-	}
-	name := *np.Variable
-	if _, alreadyInScope := a.scope.Lookup(name); alreadyInScope {
-		a.error(variableAlreadyBoundError(name, np.Pos))
+	// Walk every node pattern in the path; flag any bound-variable
+	// re-use that adds new labels or properties. Track within-pattern
+	// occurrences so the second `(a:Bar)` in `(a)-[r:KNOWS]->(a:Bar)`
+	// also trips the check.
+	seen := map[string]struct{}{}
+	el := pp.Head
+	for el != nil {
+		if np := el.Node; np != nil && np.Variable != nil {
+			name := *np.Variable
+			_, alreadyInScope := a.scope.Lookup(name)
+			_, alreadyInPattern := seen[name]
+			bound := alreadyInScope || alreadyInPattern
+			hasNewAttrs := len(np.Labels) > 0 || np.Properties != nil
+			if bound && hasNewAttrs {
+				a.error(variableAlreadyBoundError(name, np.Pos))
+			}
+			seen[name] = struct{}{}
+		}
+		el = el.Next
 	}
 }
 

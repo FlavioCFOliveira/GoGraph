@@ -1384,6 +1384,14 @@ func buildOperatorWrite(
 		}
 		schemaCopy := copySchema(schema)
 		labels, props := parseNodePatternStr(p.Pattern)
+		// MERGE with a null property literal can never match its own write —
+		// null property comparisons are tri-valued false — so the spec
+		// rejects the pattern as MergeReadOwnWrites at runtime. The check
+		// scans the full pattern string so relationship-property maps in
+		// shapes like (a)-[r:T {k: null}]->(b) are also caught.
+		if exec.PropMapContainsNullLiteral(p.Pattern) {
+			return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE pattern contains a null property literal")
+		}
 		// Real MERGE search (T930): scan the live graph for a node whose
 		// labels are a superset of `labels` AND whose properties equal every
 		// (key, value) parsed from `props`. When matches are found the ON
@@ -4202,6 +4210,23 @@ func buildIRProjection(
 				// results (count(*), sum(...), etc.) are scalar integers
 				// that can numerically collide with a real NodeID and would
 				// be mis-upgraded into a node row.
+				//
+				// Soundness guard: the fast path is only safe when the
+				// schema slot already carries the projection's output
+				// value. That holds in three cases:
+				//   (a) name is registered as a scalar aggregate output
+				//       column (bopts.scalarCols) — EagerAggregation
+				//       pre-computed the column under this name.
+				//   (b) the expression string equals the alias text —
+				//       no transformation is required.
+				//   (c) exprStr is empty — no AST expression was
+				//       carried, so direct lookup is the only option.
+				// When none of those hold the alias may be shadowing a
+				// pre-projection variable whose slot still holds the
+				// source value (e.g. RETURN n.name AS n, where schema[n]
+				// is the bound node); the fast path would return that
+				// stale value instead of the projected one, so the
+				// general eval path runs instead.
 				//
 				// Edge-variable carve-out: when the alias name maps to a
 				// bound relationship variable (i.e. the schema slot carries
