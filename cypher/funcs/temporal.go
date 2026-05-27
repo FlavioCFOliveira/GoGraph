@@ -1215,15 +1215,24 @@ func fnDurationInSeconds(args []expr.Value) (expr.Value, error) {
 // elapsedNanos returns (b - a) in absolute elapsed nanoseconds, used by
 // the 2-arg projection functions duration.inDays / duration.inSeconds.
 //
-// Same-kind date-bearing pairs subtract via their UTC instants — this
-// matters for DateTime, where the two operands may live in different
-// zones and wall-clock subtraction would drift by the zone delta.
-// Time-only pairs subtract on the nanos-of-day axis.
+// Dispatch order:
 //
-// Cross-kind pairs follow duration.between's projection rules: any
-// pair mixing a time-only side with a date-bearing side reduces to the
-// time-of-day diff; two date-bearing values project to LocalDateTime
-// and subtract as wall-clocks (zone-stripped).
+//   - Time-only pairs (at least one side is LocalTime/Time) take the
+//     nanos-of-day axis via [elapsedNanosTimeOnly] (which itself
+//     handles DST-aware projection when a DateTime is paired with a
+//     time-only local).
+//   - DST-aware path for date-bearing pairs: when one side is
+//     DateTime (zoned) and the other is local-date-bearing
+//     (LocalDateTime or Date), the local side is rebuilt in the
+//     DateTime's *time.Location with its own wall components (and
+//     midnight for Date). Both are then subtracted as instants, which
+//     correctly counts the extra/missing hour across DST transitions
+//     (datetime(Europe/Stockholm, 2017-10-29T00:00) → date(2017-10-30)
+//     is PT25H, not PT24H). [dstAwareInstants] also handles same-kind
+//     DateTime pairs as a no-op projection.
+//   - Both local: project to LocalDateTime wall-clock and subtract;
+//     the two times share the UTC reference frame so the subtraction
+//     is well-defined.
 //
 // Returns ok=false when neither projection applies.
 func elapsedNanos(a, b expr.Value) (int64, bool) {
@@ -1233,12 +1242,8 @@ func elapsedNanos(a, b expr.Value) (int64, bool) {
 	if _, bTimeOnly := isTimeOnly(b); bTimeOnly {
 		return elapsedNanosTimeOnly(a, b)
 	}
-	// Both date-bearing. DateTime same-kind pairs subtract as instants;
-	// any other combination projects to LocalDateTime wall-clock.
-	if va, ok := a.(expr.DateTimeValue); ok {
-		if vb, ok := b.(expr.DateTimeValue); ok {
-			return vb.T.Sub(va.T).Nanoseconds(), true
-		}
+	if ta, tb, ok := dstAwareInstants(a, b); ok {
+		return tb.Sub(ta).Nanoseconds(), true
 	}
 	la, oka := toLocalDateTime(a)
 	if !oka {
@@ -1251,12 +1256,23 @@ func elapsedNanos(a, b expr.Value) (int64, bool) {
 	return lb.T.Sub(la.T).Nanoseconds(), true
 }
 
-// elapsedNanosTimeOnly computes (b - a) on the nanos-of-day axis. It
-// is the projection used when at least one side is time-only. The
-// frame-of-reference (UTC vs wall-clock) matches
-// [durationBetweenTimeOnly]: UTC when both sides are zoned, wall-clock
-// otherwise.
+// elapsedNanosTimeOnly computes (b - a) in nanoseconds for pairs in
+// which at least one side is a time-only kind (LocalTime / Time).
+//
+// DST-aware first: when one side is a zoned DateTime and the other a
+// local time-only (LocalTime or Date), [dstAwareInstants] projects the
+// local side into the DateTime's zone+date so the two operands can be
+// subtracted as instants. This is what makes
+// duration.inSeconds(localtime(0), datetime({…hour:4,timezone:'Europe/Stockholm'}))
+// report PT5H on a DST-end day rather than PT4H.
+//
+// Otherwise the result is the time-of-day axis difference: UTC frame
+// when both sides are zoned (so the offset matters), wall-clock frame
+// when at least one side is local.
 func elapsedNanosTimeOnly(a, b expr.Value) (int64, bool) {
+	if ta, tb, ok := dstAwareInstants(a, b); ok {
+		return tb.Sub(ta).Nanoseconds(), true
+	}
 	useUTC := isZoned(a) && isZoned(b)
 	na, oka := timeOfDayNanos(a, useUTC)
 	if !oka {
@@ -1267,6 +1283,83 @@ func elapsedNanosTimeOnly(a, b expr.Value) (int64, bool) {
 		return 0, false
 	}
 	return nb - na, true
+}
+
+// dstAwareInstants projects a pair of temporal values into the same
+// reference frame (UTC instants in a shared *time.Location), so that
+// time.Time.Sub returns the elapsed wall time even when the zoned side
+// straddles a daylight-saving transition.
+//
+// The projection rules:
+//
+//   - DateTime + DateTime → both already instants; returned as-is.
+//   - DateTime + local (LocalDateTime / LocalTime / Date) → the local
+//     side is rebuilt with [time.Date] using the DateTime's
+//     *time.Location, the local side's wall components, and (for
+//     time-only locals) the DateTime's calendar date. The same applies
+//     in the reverse direction.
+//   - Anything else (both local, or one TimeValue which is zoned but
+//     not date-bearing) → ok=false; the caller falls back to its own
+//     wall-clock or UTC-time-of-day path.
+//
+// Using [time.Date] with the named *time.Location is what makes the
+// projection DST-aware: Go's time package picks the correct offset for
+// the chosen wall instant (or shifts forward through a spring-ahead
+// gap), so the diff naturally absorbs the 23h/24h/25h day variants.
+func dstAwareInstants(a, b expr.Value) (time.Time, time.Time, bool) {
+	aDT, aIsDT := a.(expr.DateTimeValue)
+	bDT, bIsDT := b.(expr.DateTimeValue)
+	switch {
+	case aIsDT && bIsDT:
+		return aDT.T, bDT.T, true
+	case aIsDT:
+		t, ok := projectLocalIntoZone(b, aDT)
+		if !ok {
+			return time.Time{}, time.Time{}, false
+		}
+		return aDT.T, t, true
+	case bIsDT:
+		t, ok := projectLocalIntoZone(a, bDT)
+		if !ok {
+			return time.Time{}, time.Time{}, false
+		}
+		return t, bDT.T, true
+	}
+	return time.Time{}, time.Time{}, false
+}
+
+// projectLocalIntoZone takes a local temporal value (DateValue,
+// LocalDateTimeValue or LocalTimeValue) and an anchor DateTimeValue,
+// and returns a [time.Time] positioned in the anchor's *time.Location
+// with the local value's wall-clock components. Time-only locals
+// borrow the anchor's calendar date. Returns ok=false for non-local
+// inputs (TimeValue is zoned and therefore not "local" in this sense).
+func projectLocalIntoZone(local expr.Value, anchor expr.DateTimeValue) (time.Time, bool) {
+	loc := anchor.T.Location()
+	switch v := local.(type) {
+	case expr.DateValue:
+		return time.Date(v.Year, time.Month(v.Month), v.Day, 0, 0, 0, 0, loc), true
+	case expr.LocalDateTimeValue:
+		y, mo, d := v.T.Date()
+		h, mn, s := v.T.Clock()
+		return time.Date(y, mo, d, h, mn, s, v.T.Nanosecond(), loc), true
+	case expr.LocalTimeValue:
+		const (
+			nsPerHour   = int64(time.Hour)
+			nsPerMinute = int64(time.Minute)
+			nsPerSecond = int64(time.Second)
+		)
+		ns := v.Nanos
+		h := int(ns / nsPerHour)
+		ns -= int64(h) * nsPerHour
+		mn := int(ns / nsPerMinute)
+		ns -= int64(mn) * nsPerMinute
+		s := int(ns / nsPerSecond)
+		ns -= int64(s) * nsPerSecond
+		y, mo, d := anchor.T.Date()
+		return time.Date(y, mo, d, h, mn, s, int(ns), loc), true
+	}
+	return time.Time{}, false
 }
 
 // isTimeOnly reports whether v is a LocalTimeValue or TimeValue.
