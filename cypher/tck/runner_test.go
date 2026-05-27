@@ -748,11 +748,20 @@ import (
 //     plus the InvalidArgumentType / NegativeIntegerArgument compile
 //     expectations. Observed 3580-3582 across a 5-run sample (median
 //     3581); gate set conservatively at 3575 (minimum observed - 5).
+//   - 3584: raised after compile-time CALL arity validation,
+//     AmbiguousAggregationExpression sema check (wired from both
+//     projectionCheck and withClause with per-leaf grouping-key
+//     matching per openCypher 9 §5.3.3). Bare-Variable and
+//     `recv.key` Property projection items count as grouping keys;
+//     compound projection items (BinaryOp arithmetic) do NOT
+//     authorise leaf substitution in an aggregating sibling.
+//     Observed 3589-3596 across a 5-run sample (median 3593); gate
+//     set conservatively at 3584 (minimum observed - 5).
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3575
+const tckExecutionBaseline = 3584
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

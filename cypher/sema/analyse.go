@@ -1270,16 +1270,28 @@ func (a *analyser) checkAmbiguousAggregation(proj *ast.Projection) {
 	if !hasAgg {
 		return
 	}
-	// Build the set of "simple" projection items — those whose Expr is
-	// a Variable or Property reference and which does NOT contain an
-	// aggregate. Such items act as grouping keys. The set is keyed by
-	// the canonical String() form so a complex expression can match.
+	// Build the set of "grouping keys". A projection item that is a
+	// bare Variable adds the name; a projection item whose Expr is a
+	// Property `recv.key` adds the full canonical string. Compound
+	// projection items (BinaryOp arithmetic, function calls) are NOT
+	// added — per openCypher 9 §5.3.3 the per-leaf rule requires
+	// individual references inside an aggregating sibling to each
+	// resolve, and a compound projection does not authorise
+	// substituting its leaves.
 	keys := map[string]struct{}{}
 	for _, item := range proj.Items {
 		if containsAggregation(item.Expr) {
 			continue
 		}
-		keys[item.Expr.String()] = struct{}{}
+		switch n := item.Expr.(type) {
+		case *ast.Variable:
+			keys[n.Name] = struct{}{}
+		case *ast.Property:
+			keys[n.String()] = struct{}{}
+			if vv, isVar := n.Receiver.(*ast.Variable); isVar {
+				keys[vv.Name] = struct{}{}
+			}
+		}
 	}
 	for _, item := range proj.Items {
 		if !containsAggregation(item.Expr) {
@@ -1324,26 +1336,45 @@ func exprIsBareCall(e ast.Expression) bool {
 }
 
 // findUngroupedNonAggRef walks e and looks for any Variable or Property
-// sub-expression that (a) is NOT a key in groupingKeys and (b) does NOT
-// sit inside an aggregate function call. The first such reference is
-// returned with its position and surface name. Returns bad=false when
-// every non-aggregate sub-expression matches a grouping key.
+// leaf that (a) does NOT sit inside an aggregate function call and (b)
+// does NOT match a grouping key. The first such leaf is returned with
+// its position and surface name. Returns bad=false when every non-
+// aggregate leaf matches a grouping key.
+//
+// Per openCypher 9 §5.3.3, the "grouping key" match is per leaf: a
+// compound projection item like `me.age + you.age AS grp` is NOT
+// sufficient to authorise `me.age + you.age + count(*)` as an
+// aggregating sibling, because the rule requires me.age and you.age
+// individually to be standalone projection items (or me / you to be
+// standalone-projected Variables that authorise their property
+// children). The keyExprs set still short-circuits when the whole
+// expression-under-walk matches a key, but compound matches DO NOT
+// stop descent — leaves are always checked.
 func findUngroupedNonAggRef(e ast.Expression, groupingKeys map[string]struct{}) (ast.Position, string, bool) { //nolint:gocyclo
 	if e == nil {
 		return ast.Position{}, "", false
 	}
-	// Match against grouping keys first — if THIS expression as a whole
-	// matches, we're done.
-	if _, ok := groupingKeys[e.String()]; ok {
-		return ast.Position{}, "", false
-	}
 	switch n := e.(type) {
 	case *ast.Variable:
+		if _, ok := groupingKeys[n.Name]; ok {
+			return ast.Position{}, "", false
+		}
 		return n.Pos, n.Name, true
 	case *ast.Property:
-		// A nested Property reference must match a grouping key in
-		// full (handled at the top of the function) — otherwise the
-		// receiver Variable must also be a grouping key. Recurse.
+		// `recv.key` matches when the full property string is a key
+		// OR when the receiver Variable name is a key (a grouping
+		// key on the bare entity authorises all its property
+		// children — a node grouped per `n` has a fixed `n.prop` per
+		// group).
+		if _, ok := groupingKeys[n.String()]; ok {
+			return ast.Position{}, "", false
+		}
+		if vv, isVar := n.Receiver.(*ast.Variable); isVar {
+			if _, ok := groupingKeys[vv.Name]; ok {
+				return ast.Position{}, "", false
+			}
+			return vv.Pos, vv.Name, true
+		}
 		return findUngroupedNonAggRef(n.Receiver, groupingKeys)
 	case *ast.BinaryOp:
 		if pos, name, bad := findUngroupedNonAggRef(n.Left, groupingKeys); bad {
