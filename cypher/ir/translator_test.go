@@ -1442,8 +1442,12 @@ func TestTranslate_Expand_Anonymous(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *ir.Expand, got %T", plan)
 	}
-	if exp.RelVar != "" {
-		t.Errorf("anonymous rel should have empty RelVar, got %q", exp.RelVar)
+	// Anonymous relationships now receive a synthetic IR-only name so
+	// relationship-isomorphism (cyphermorphism) bookkeeping can refer to
+	// the edge column by name. The synthetic always starts with the
+	// translator's `__anon_` prefix.
+	if exp.RelVar == "" || exp.RelVar[:2] != "__" {
+		t.Errorf("anonymous rel should carry synthetic RelVar, got %q", exp.RelVar)
 	}
 	if len(exp.RelTypes) != 0 {
 		t.Errorf("anonymous rel should have no types, got %v", exp.RelTypes)

@@ -1988,6 +1988,17 @@ func buildOperator(
 			cfg.EdgeType = p.RelTypes[0]
 			cfg.EdgeTypeFilter = buildEdgeTypeFilter(g, p.RelTypes)
 		}
+		// Cyphermorphism: pass the schema columns of every sibling
+		// relationship variable already bound in this MATCH pattern so
+		// the Expand operator excludes those edges from its emissions.
+		// Resolving names here keeps the IR free of schema-index
+		// concerns; SiblingRelVars carries the names attached by
+		// matchPathPattern when the chain was built.
+		for _, name := range p.SiblingRelVars {
+			if col, ok := schema[name]; ok {
+				cfg.RelCols = append(cfg.RelCols, col)
+			}
+		}
 		return exec.NewExpand(child, fwd, rev, cfg), nil
 
 	case *ir.Apply:

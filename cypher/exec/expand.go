@@ -117,6 +117,12 @@ type ExpandConfig struct {
 	// InputCol is the column index in each input row that holds the source
 	// NodeID (as expr.IntegerValue).  Defaults to 0.
 	InputCol int
+	// RelCols lists the input-row columns holding edge IDs already traversed
+	// by sibling Expand operators in the same MATCH pattern. Each emitted
+	// edge must NOT match any of these columns (openCypher 9 §3.2.2
+	// relationship-isomorphism / cyphermorphism). Empty disables the
+	// check.
+	RelCols []int
 }
 
 // NewExpand creates an Expand operator.
@@ -135,6 +141,7 @@ func NewExpand(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig) *Expand 
 		edgeType:       cfg.EdgeType,
 		edgeTypeFilter: cfg.EdgeTypeFilter,
 		inputCol:       cfg.InputCol,
+		relCols:        cfg.RelCols,
 	}
 }
 

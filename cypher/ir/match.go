@@ -638,6 +638,11 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 	// subsequent hop can reference the destination column emitted by the
 	// preceding Expand (without a name, fromVar="" forces the next step to
 	// scan from an empty schema key and the chain breaks — see Match3 [17]).
+	// Anonymous relationships likewise get a synthetic IR-only variable so
+	// the relationship-isomorphism (cyphermorphism) guard can refer to their
+	// edge column by name when later hops in the same pattern need to
+	// exclude already-traversed edges.
+	siblingRels := []string{}
 	el = el.Next
 	for el != nil {
 		if el.Relationship != nil && el.Node != nil {
@@ -645,12 +650,15 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 				synth := t.freshAnonVar()
 				el.Node.Variable = &synth
 			}
-			plan = t.matchExpandStepBoundWithFrom(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar)
+			if el.Relationship.Variable == nil {
+				synth := t.freshAnonVar()
+				el.Relationship.Variable = &synth
+			}
+			plan = t.matchExpandStepBoundWithFromSiblings(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar, siblingRels)
 			prevNodeVar = *el.Node.Variable
 			boundVars[*el.Node.Variable] = struct{}{}
-			if el.Relationship.Variable != nil {
-				boundVars[*el.Relationship.Variable] = struct{}{}
-			}
+			boundVars[*el.Relationship.Variable] = struct{}{}
+			siblingRels = append(siblingRels, *el.Relationship.Variable)
 		}
 		el = el.Next
 	}
@@ -709,6 +717,7 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 	// subsequent hop can reference the destination column emitted by the
 	// preceding Expand (without a name, fromVar="" forces the next step to
 	// scan from an empty schema key and the chain breaks — see Match3 [17]).
+	siblingRels := []string{}
 	el = el.Next
 	for el != nil {
 		if el.Relationship != nil && el.Node != nil {
@@ -716,12 +725,15 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 				synth := t.freshAnonVar()
 				el.Node.Variable = &synth
 			}
-			plan = t.matchExpandStepBoundWithFrom(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar)
+			if el.Relationship.Variable == nil {
+				synth := t.freshAnonVar()
+				el.Relationship.Variable = &synth
+			}
+			plan = t.matchExpandStepBoundWithFromSiblings(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar, siblingRels)
 			prevNodeVar = *el.Node.Variable
 			boundVars[*el.Node.Variable] = struct{}{}
-			if el.Relationship.Variable != nil {
-				boundVars[*el.Relationship.Variable] = struct{}{}
-			}
+			boundVars[*el.Relationship.Variable] = struct{}{}
+			siblingRels = append(siblingRels, *el.Relationship.Variable)
 		}
 		el = el.Next
 	}
@@ -770,6 +782,42 @@ func (t *translator) matchNodeScan(np *ast.NodePattern) LogicalPlan {
 	}
 
 	return plan
+}
+
+// matchExpandStepBoundWithFromSiblings is the variant of
+// matchExpandStepBoundWithFrom that also threads the list of sibling
+// relationship variables (already bound by earlier hops in the same
+// pattern) into the resulting Expand's SiblingRelVars field — the
+// physical builder uses that list to enforce relationship-isomorphism
+// (cyphermorphism) per openCypher 9 §3.2.2.
+func (t *translator) matchExpandStepBoundWithFromSiblings(rp *ast.RelationshipPattern, to *ast.NodePattern, child LogicalPlan, optional bool, boundVars map[string]struct{}, fromVar string, siblings []string) LogicalPlan {
+	plan := t.matchExpandStepBoundWithFrom(rp, to, child, optional, boundVars, fromVar)
+	// Walk down through any Selection wrappers (label / property / equality
+	// filters added by matchExpandStepBoundWithFrom) to find the underlying
+	// Expand and stamp the sibling list on it.
+	stampSiblings(plan, siblings)
+	return plan
+}
+
+// stampSiblings walks a plan subtree looking for the topmost Expand and
+// stamps the given sibling relationship variable list on it. Selections
+// above the Expand are descended into; everything else stops the walk.
+func stampSiblings(plan LogicalPlan, siblings []string) {
+	for plan != nil {
+		switch p := plan.(type) {
+		case *Expand:
+			if len(siblings) > 0 {
+				cp := make([]string, len(siblings))
+				copy(cp, siblings)
+				p.SiblingRelVars = cp
+			}
+			return
+		case *Selection:
+			plan = p.Child
+		default:
+			return
+		}
+	}
 }
 
 // matchExpandStepBoundWithFrom is the canonical Expand-translation helper. It

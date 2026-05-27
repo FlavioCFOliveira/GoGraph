@@ -288,6 +288,13 @@ type Expand struct {
 	Direction Direction
 	// ToVar is the variable name bound to the destination node.
 	ToVar string
+	// SiblingRelVars carries the names of relationship variables already bound
+	// by earlier hops in the SAME MATCH pattern. The physical builder
+	// translates each name to its schema column and passes the column set as
+	// the Expand operator's relationship-isomorphism (cyphermorphism) guard,
+	// so every anonymous or named relationship in one pattern maps to a
+	// distinct edge per openCypher 9 §3.2.2.
+	SiblingRelVars []string
 	// Child is the subplan that produces FromVar.
 	Child LogicalPlan
 }
