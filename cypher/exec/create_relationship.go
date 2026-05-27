@@ -24,6 +24,7 @@ import (
 
 	"gograph/cypher/expr"
 	"gograph/graph"
+	"gograph/graph/lpg"
 )
 
 // CreateRelationship creates a new directed edge per input row between two
@@ -166,11 +167,26 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 
+	// Mirror the just-set properties onto the emitted RelationshipValue
+	// so a following `RETURN r.prop` reads the value through the row
+	// binding without an extra graph round-trip. The keys map onto
+	// expr.Value via lpgPropertyValueToExpr; for now propagate the
+	// well-typed scalars directly via the small set we know about
+	// (string/int/float/bool — temporals retain their SOH-tagged form
+	// when round-tripped through the graph, so a fresh read would
+	// reconstruct them, but the per-row binding does not).
+	relProps := make(expr.MapValue, len(props))
+	for _, p := range props {
+		if v, ok := lpgPropToExprBinding(p.value); ok {
+			relProps[p.key] = v
+		}
+	}
 	rel := expr.RelationshipValue{
-		ID:      uint64(actualSrcID)<<32 | uint64(actualDstID), // synthetic edge ID
-		StartID: uint64(actualSrcID),
-		EndID:   uint64(actualDstID),
-		Type:    op.relType,
+		ID:         uint64(actualSrcID)<<32 | uint64(actualDstID), // synthetic edge ID
+		StartID:    uint64(actualSrcID),
+		EndID:      uint64(actualDstID),
+		Type:       op.relType,
+		Properties: relProps,
 	}
 	newRow := make(Row, len(childRow)+1)
 	copy(newRow, childRow)
@@ -228,4 +244,85 @@ func nullRowWithRel(childRow Row, relVar string) Row {
 // Close closes the child operator.
 func (op *CreateRelationship) Close() error {
 	return op.child.Close()
+}
+
+// lpgPropToExprBinding converts an [lpg.PropertyValue] into the
+// corresponding [expr.Value] for a row-binding payload. It mirrors the
+// SOH-tagged temporal decoding handled by cypher/api.go's
+// lpgPropToExpr / decodeTemporalString — duplicated here so the
+// CreateRelationship operator can populate the RelationshipValue.
+// Properties map without importing the cypher package (which would
+// be a cycle).
+func lpgPropToExprBinding(pv lpg.PropertyValue) (expr.Value, bool) {
+	switch pv.Kind() {
+	case lpg.PropString:
+		if s, ok := pv.String(); ok {
+			if v, decoded := decodeTemporalBinding(s); decoded {
+				return v, true
+			}
+			return expr.StringValue(s), true
+		}
+	case lpg.PropInt64:
+		if i, ok := pv.Int64(); ok {
+			return expr.IntegerValue(i), true
+		}
+	case lpg.PropFloat64:
+		if f, ok := pv.Float64(); ok {
+			return expr.FloatValue(f), true
+		}
+	case lpg.PropBool:
+		if b, ok := pv.Bool(); ok {
+			return expr.BoolValue(b), true
+		}
+	case lpg.PropList:
+		if elems, ok := pv.List(); ok {
+			lv := make(expr.ListValue, 0, len(elems))
+			for _, el := range elems {
+				if v, ok2 := lpgPropToExprBinding(el); ok2 {
+					lv = append(lv, v)
+				}
+			}
+			return lv, true
+		}
+	}
+	return nil, false
+}
+
+// decodeTemporalBinding mirrors cypher/api.go's decodeTemporalString:
+// recognises the SOH-range tag introduced by
+// cypher/exec/temporal_literal.go and returns the matching temporal
+// Value. Returns (nil, false) when s does not start with a recognised
+// tag byte.
+func decodeTemporalBinding(s string) (expr.Value, bool) {
+	if len(s) < 2 {
+		return nil, false
+	}
+	body := s[1:]
+	switch s[0] {
+	case 0x01:
+		if v, err := expr.ParseDate(body); err == nil {
+			return v, true
+		}
+	case 0x02:
+		if v, err := expr.ParseLocalDateTime(body); err == nil {
+			return v, true
+		}
+	case 0x03:
+		if v, err := expr.ParseDateTime(body); err == nil {
+			return v, true
+		}
+	case 0x04:
+		if v, err := expr.ParseLocalTime(body); err == nil {
+			return v, true
+		}
+	case 0x05:
+		if v, err := expr.ParseTime(body); err == nil {
+			return v, true
+		}
+	case 0x06:
+		if v, err := expr.ParseDuration(body); err == nil {
+			return v, true
+		}
+	}
+	return nil, false
 }
