@@ -932,6 +932,19 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3782: raised after three follow-up fixes landed alongside the
+//     PatternComprehension work:
+//     * Pattern1 [11] — sema rejects a bare node pattern (`WHERE (n)`)
+//       as a predicate; existential patterns in WHERE must include at
+//       least one relationship per openCypher.
+//     * Set1 [10] — SetProperty's valueEvalFn now pre-checks the RHS
+//       and surfaces an InvalidPropertyType error when the value is a
+//       Map (or a List containing a Map), instead of silently no-op'ing
+//       the unstorable shape.
+//     * Remove2 [5] — RemoveLabels honours the errNullTarget sentinel
+//       (mirroring RemoveProperty) so an OPTIONAL MATCH that bound the
+//       target to null passes the row through unchanged.
+//     Observed 3782-3783 across a 5-run sample; gate set at 3782.
 //   - 3780: raised after the PatternComprehension extraction reached
 //     translateWith, the IR ListComprehension walker, and the aggregate-
 //     argument hoist. Two structural fixes landed together:
@@ -1107,7 +1120,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3780
+const tckExecutionBaseline = 3782
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
