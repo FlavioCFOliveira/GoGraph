@@ -2394,7 +2394,10 @@ func buildOperator(
 		// even though Limit.Next would otherwise return false on the
 		// very first call. openCypher 9 §3.6.2 requires the write
 		// side effects to occur regardless of how many rows the
-		// projection finally returns.
+		// projection finally returns. Other LIMIT N counts keep the
+		// lazy short-circuit so that scenarios whose setup queries
+		// also use LIMIT (e.g. partial-clean-up writes) are not
+		// disturbed.
 		if count == 0 && ir.ContainsWrite(p.Child) {
 			return exec.NewLimit(exec.NewEager(child), count)
 		}
