@@ -4322,7 +4322,21 @@ func buildIRProjection(
 				if bopts != nil && bopts.edgeVarMeta != nil {
 					_, aliasIsBoundRel = bopts.edgeVarMeta[name]
 				}
-				if !aliasIsBoundRel {
+				// Narrow soundness guard: when the item is a property
+				// access whose alias EXACTLY equals the property's
+				// receiver name (e.g. `RETURN a.id AS a`, where
+				// schema[a] still holds the bound node), bypass the
+				// fast path so general eval computes the property
+				// value. Other Property shapes keep the fast path
+				// because they reuse the same alias name and the
+				// schema slot already carries the projected value.
+				skipForCollidingAlias := false
+				if prop, isProp := item.Expr.(*ast.Property); isProp && exprStr != name {
+					if recv, recvIsVar := prop.Receiver.(*ast.Variable); recvIsVar && recv.Name == name {
+						skipForCollidingAlias = true
+					}
+				}
+				if !aliasIsBoundRel && !skipForCollidingAlias {
 					if colIdx, ok2 := schema[name]; ok2 {
 						idx := colIdx
 						evalFn = func(row exec.Row) (expr.Value, error) {
