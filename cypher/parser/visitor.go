@@ -1125,11 +1125,19 @@ func (v *visitor) VisitRelationshipPattern(ctx *gen.RelationshipPatternContext) 
 	rp := &ast.RelationshipPattern{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 
 	// Direction: LT present before SUB = incoming; GT present = outgoing.
-	if ctx.LT() != nil {
+	// The `<-->` shape (both LT and GT) parses as undirected — openCypher
+	// implementations treat it that way for MATCH; CREATE-specific sema
+	// rejects undirected relationships separately via checkCreateRelationshipTypes.
+	hasLT := ctx.LT() != nil
+	hasGT := ctx.GT() != nil
+	switch {
+	case hasLT && hasGT:
+		rp.Direction = ast.RelDirectionNone
+	case hasLT:
 		rp.Direction = ast.RelDirectionIncoming
-	} else if ctx.GT() != nil {
+	case hasGT:
 		rp.Direction = ast.RelDirectionOutgoing
-	} else {
+	default:
 		rp.Direction = ast.RelDirectionNone
 	}
 
