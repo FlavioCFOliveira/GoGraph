@@ -49,6 +49,7 @@ type MergeRelationship struct {
 	child           Operator
 	srcCol          int    // input-row column index holding src NodeID / NodeValue
 	dstCol          int    // input-row column index holding dst NodeID / NodeValue
+	relCol          int    // output-row column index for the bound relationship; -1 when anonymous
 	relType         string // empty when the pattern declared no type (rejected upstream)
 	relVar          string // empty when the relationship is anonymous
 	onCreateActions []MergeRelAction
@@ -75,9 +76,20 @@ func NewMergeRelationship(child Operator, srcCol, dstCol int, relType string, mu
 		child:   child,
 		srcCol:  srcCol,
 		dstCol:  dstCol,
+		relCol:  -1,
 		relType: relType,
 		mutator: mutator,
 	}
+}
+
+// WithRelColumn registers the output-row column index that will carry
+// the matched / created edge ID. When set (relCol >= 0) MergeRelationship
+// extends the row with an IntegerValue(edgeID) at the column so
+// downstream operators (RETURN r, count(r), …) see the bound
+// relationship.
+func (op *MergeRelationship) WithRelColumn(relCol int) *MergeRelationship {
+	op.relCol = relCol
+	return op
 }
 
 // WithOnCreate registers ON CREATE SET actions to apply when the edge
@@ -157,7 +169,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		if err := op.applyRelActions(srcKey, dstKey, op.onMatchActions); err != nil {
 			return false, err
 		}
-		*out = row
+		*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
 		return true, nil
 	}
 	// No matching edge — create one, tag it, run ON CREATE actions.
@@ -170,8 +182,45 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	if err := op.applyRelActions(srcKey, dstKey, op.onCreateActions); err != nil {
 		return false, err
 	}
-	*out = row
+	*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
 	return true, nil
+}
+
+// emitRow returns the output row for a successfully matched-or-created
+// edge. When the operator has a non-anonymous relationship variable
+// (relCol >= 0) the row is extended with a RelationshipValue carrying
+// the declared type and the live property map; otherwise the input row
+// is passed through unchanged.
+func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey, dstKey string) Row {
+	if op.relCol < 0 {
+		return row
+	}
+	var relProps expr.MapValue
+	if rawProps := op.mutator.EdgeProperties(srcKey, dstKey); len(rawProps) > 0 {
+		relProps = make(expr.MapValue, len(rawProps))
+		for k, pv := range rawProps {
+			if v, ok := lpgPropToExprBinding(pv); ok {
+				relProps[k] = v
+			}
+		}
+	}
+	rel := expr.RelationshipValue{
+		ID:         uint64(srcID)<<32 | uint64(dstID),
+		StartID:    uint64(srcID),
+		EndID:      uint64(dstID),
+		Type:       op.relType,
+		Properties: relProps,
+	}
+	if op.relCol < len(row) {
+		out := make(Row, len(row))
+		copy(out, row)
+		out[op.relCol] = rel
+		return out
+	}
+	out := make(Row, op.relCol+1)
+	copy(out, row)
+	out[op.relCol] = rel
+	return out
 }
 
 // applyRelActions sets every action's property on the (src, dst) edge

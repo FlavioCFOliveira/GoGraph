@@ -1353,6 +1353,14 @@ func buildOperatorWrite(
 				p.SrcVar, srcOk, p.DstVar, dstOk)
 		}
 		op := exec.NewMergeRelationship(child, srcCol, dstCol, p.RelType, mutator)
+		// Allocate a schema column for the relationship variable so
+		// downstream operators (RETURN r, count(r), …) see the bound
+		// edge. Anonymous relationships keep relCol = -1.
+		if p.RelVar != "" {
+			relCol := schemaWidth(schema)
+			schema[p.RelVar] = relCol
+			op = op.WithRelColumn(relCol)
+		}
 		if len(p.OnCreate) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnCreate))
 			for _, kv := range p.OnCreate {
