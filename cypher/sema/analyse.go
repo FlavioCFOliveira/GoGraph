@@ -750,12 +750,18 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 		if len(a.errs) == errsBefore && hasVariableReference(proj.Skip) {
 			a.error(invalidBooleanOperandError("SKIP", "non-constant", positionOf(proj.Skip)))
 		}
+		if _, isFloat := proj.Skip.(*ast.FloatLiteral); isFloat {
+			a.error(invalidBooleanOperandError("SKIP", "Float", positionOf(proj.Skip)))
+		}
 	}
 	if proj.Limit != nil {
 		errsBefore := len(a.errs)
 		a.checkExpr(proj.Limit)
 		if len(a.errs) == errsBefore && hasVariableReference(proj.Limit) {
 			a.error(invalidBooleanOperandError("LIMIT", "non-constant", positionOf(proj.Limit)))
+		}
+		if _, isFloat := proj.Limit.(*ast.FloatLiteral); isFloat {
+			a.error(invalidBooleanOperandError("LIMIT", "Float", positionOf(proj.Limit)))
 		}
 	}
 }
