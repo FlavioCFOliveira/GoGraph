@@ -932,6 +932,16 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3745: raised after dateFromMap / timeComponentsFromMap learnt
+//     to treat the {datetime: ...} key as a date+time base source
+//     (previously only {date:..} / {time:..} were consulted, so
+//     `datetime({datetime: other})` and `localdatetime({datetime:
+//     other})` collapsed to the 1970-01-01T00:00 default). Closes all
+//     14 Temporal3 [7]/[10]/[11] failures. The {date:..}/{time:..}
+//     explicit keys still win when both are supplied, matching the
+//     explicit-over-implicit precedence used elsewhere in the
+//     constructor.
+//     Observed 3745-3752 across a 6-run sample; gate set at 3745.
 //   - 3735: raised after two surgical temporal-truncate fixes that
 //     together close every Temporal9 [4]/[5] failure (≈24 scenarios):
 //     (a) sourceToTime() for TimeValue/LocalTimeValue rebuilds the
@@ -951,7 +961,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3735
+const tckExecutionBaseline = 3745
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

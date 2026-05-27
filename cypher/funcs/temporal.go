@@ -131,11 +131,14 @@ func fnDate(args []expr.Value) (expr.Value, error) {
 //
 //nolint:gocyclo // Sequential overlay of map fields onto a DateValue; each branch is uniform — splitting hides the field-priority logic.
 func dateFromMap(m expr.MapValue) (expr.Value, error) {
-	// Base from {date: ...} if present. The base may be any temporal kind
-	// carrying a date component (Date, LocalDateTime, DateTime).
+	// Base from {date: ...} or {datetime: ...} if present. The base may be
+	// any temporal kind carrying a date component (Date, LocalDateTime,
+	// DateTime). The {date: ...} key wins when both are supplied, matching
+	// the explicit-over-implicit precedence used elsewhere in the map
+	// constructors.
 	base := expr.DateValue{Year: 1970, Month: 1, Day: 1}
 	hasBase := false
-	if dv, ok := m["date"]; ok {
+	pick := func(dv expr.Value) {
 		switch d := dv.(type) {
 		case expr.DateValue:
 			base = d
@@ -147,6 +150,12 @@ func dateFromMap(m expr.MapValue) (expr.Value, error) {
 			base = expr.DateFromTime(d.T)
 			hasBase = true
 		}
+	}
+	if dv, ok := m["datetime"]; ok {
+		pick(dv)
+	}
+	if dv, ok := m["date"]; ok {
+		pick(dv)
 	}
 	year := base.Year
 	month := base.Month
@@ -472,8 +481,10 @@ func baseOffsetFromMap(m expr.MapValue) (int, bool) {
 // are used as the base; explicit hour/minute/second/nanosecond/millisecond/
 // microsecond keys override the base component-by-component.
 func timeComponentsFromMap(m expr.MapValue) (h, mn, s, ns int) {
-	// Base from {time: ...} if present.
-	if tv, ok := m["time"]; ok {
+	// Base from {datetime: ...} or {time: ...} if present. The {time: ...}
+	// key wins when both are supplied, matching the explicit-over-implicit
+	// precedence used elsewhere in the map constructors.
+	pick := func(tv expr.Value) {
 		switch t := tv.(type) {
 		case expr.LocalTimeValue:
 			hh, mm, ss, nn := splitNanos(t.Nanos)
@@ -486,6 +497,12 @@ func timeComponentsFromMap(m expr.MapValue) (h, mn, s, ns int) {
 		case expr.DateTimeValue:
 			h, mn, s, ns = t.T.Hour(), t.T.Minute(), t.T.Second(), t.T.Nanosecond()
 		}
+	}
+	if tv, ok := m["datetime"]; ok {
+		pick(tv)
+	}
+	if tv, ok := m["time"]; ok {
+		pick(tv)
 	}
 	if v, ok := m["hour"]; ok {
 		if i, ok2 := intFromValue(v); ok2 {
