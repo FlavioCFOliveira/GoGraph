@@ -812,8 +812,12 @@ func durationFromMap(m expr.MapValue) expr.Value {
 	// Fold months and days into canonical form.
 	mInt := int64(months)
 	mFrac := months - float64(mInt)
-	// Fractional months → days approximation (30.4375).
-	days += mFrac * 30.4375
+	// Fractional months → days approximation. openCypher's reference
+	// constant is the Gregorian average month — 365.2425 days / 12 =
+	// 30.4368750 days = 2_629_746 seconds exactly. Using the Julian
+	// 30.4375 instead introduces a 40-second drift on the smallest
+	// fractional input (months: 0.75 → P22DT19H51M49.5S vs P22DT19H52M30S).
+	days += mFrac * 30.436875
 	dInt := int64(days)
 	dFrac := days - float64(dInt)
 	// Fractional days → seconds.

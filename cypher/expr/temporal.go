@@ -1070,8 +1070,10 @@ func ParseDuration(s string) (DurationValue, error) {
 			days += daysPerMonthEstimate(fFrac)
 		case !inTime && unit == 'M':
 			months += intPart
-			// Fractional months → carry into seconds (avg month = 30.4375 days).
-			daysFloat := fracPart * 30.4375
+			// Fractional months → carry into seconds (avg month =
+			// 30.4368750 days = 365.2425/12, the Gregorian average
+			// per openCypher).
+			daysFloat := fracPart * 30.436875
 			d, sNano := splitDaysToSeconds(daysFloat)
 			days += d
 			seconds += sNano / 1_000_000_000
@@ -1157,10 +1159,11 @@ func splitFloat(f float64) (intPart int64, fracPart float64) {
 }
 
 // daysPerMonthEstimate returns the approximate number of whole days for the
-// fractional months input. openCypher does not normalise fractional years
-// into days, so this is best-effort.
+// fractional months input, using the Gregorian average month
+// (365.2425/12 = 30.4368750 days) — the constant openCypher uses for
+// fractional-month-to-day projection in its duration model.
 func daysPerMonthEstimate(fracMonths float64) int64 {
-	return int64(fracMonths * 30.4375)
+	return int64(fracMonths * 30.436875)
 }
 
 // splitDaysToSeconds returns (whole days, total nanoseconds for the rest).
@@ -1269,7 +1272,7 @@ func MulDuration(d DurationValue, k int64) DurationValue {
 
 // MulDurationFloat scales d by a floating-point factor. The result rounds
 // fractional months/days into the seconds component using the same
-// 30.4375-day-month approximation as [ParseDuration].
+// 30.4368750-day Gregorian-month approximation as [ParseDuration].
 func MulDurationFloat(d DurationValue, k float64) DurationValue {
 	months := float64(d.Months) * k
 	days := float64(d.Days) * k
@@ -1277,8 +1280,8 @@ func MulDurationFloat(d DurationValue, k float64) DurationValue {
 	nanos := float64(d.Nanos) * k
 
 	mInt, mFrac := splitFloat(months)
-	// Fractional months → seconds via 30.4375-day estimate.
-	extraDays := mFrac * 30.4375
+	// Fractional months → seconds via Gregorian 30.4368750-day estimate.
+	extraDays := mFrac * 30.436875
 	dInt, dFrac := splitFloat(days + extraDays)
 	// Fractional days → seconds.
 	extraNs := int64(math.Round(dFrac * 86400 * 1_000_000_000))
