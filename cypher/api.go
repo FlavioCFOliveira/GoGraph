@@ -1492,11 +1492,28 @@ func buildOperatorWrite(
 		}
 		// Allocate a schema column for the relationship variable so
 		// downstream operators (RETURN r, count(r), …) see the bound
-		// edge. Anonymous relationships keep relCol = -1.
-		if p.RelVar != "" {
-			relCol := schemaWidth(schema)
-			schema[p.RelVar] = relCol
-			op = op.WithRelColumn(relCol)
+		// edge. Anonymous relationships still get a slot so a NamedPath
+		// wrapper above can reconstruct the edge id when reconstructing
+		// the path — but the slot must be reserved in the schema map so
+		// subsequent operators do not allocate over it (Create3 [12]
+		// regression: a CREATE following an anonymous-rel MERGE picked
+		// the same column for its new node and read the
+		// RelationshipValue back as the bound node).
+		relCol := schemaWidth(schema)
+		relKey := p.RelVar
+		if relKey == "" {
+			relKey = fmt.Sprintf("__anon_merge_rel_%d", relCol)
+		}
+		schema[relKey] = relCol
+		op = op.WithRelColumn(relCol)
+		// Register the (srcCol, edgeCol, dstCol) triplet so a NamedPath
+		// wrapper above the MergeRelationship can reconstruct a PathValue
+		// for `MERGE p = (a)-[:R]->(b) RETURN p`. Without this hook the
+		// projection fast-path only sees the leading-node column and emits
+		// a single-node path (Merge5 [10]).
+		if bopts != nil {
+			step := pathChainStep{srcCol: srcCol, edgeCol: relCol, dstCol: dstCol, edgeType: p.RelType}
+			bopts.expandTripletSeq = append(bopts.expandTripletSeq, step)
 		}
 		if len(p.OnCreate) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnCreate))
@@ -4649,7 +4666,17 @@ func buildIRProjection(
 								if step.edgeCol >= len(row) || step.dstCol >= len(row) {
 									return expr.Null, nil
 								}
-								edgeIDVal, ok1 := row[step.edgeCol].(expr.IntegerValue)
+								// Accept both IntegerValue (Expand emits raw edge
+								// ids) and RelationshipValue (MergeRelationship
+								// emits a fully-populated rel into the column).
+								var edgeIDVal expr.IntegerValue
+								var ok1 bool
+								switch ev := row[step.edgeCol].(type) {
+								case expr.IntegerValue:
+									edgeIDVal, ok1 = ev, true
+								case expr.RelationshipValue:
+									edgeIDVal, ok1 = expr.IntegerValue(ev.ID), true
+								}
 								dstIDVal, ok2 := row[step.dstCol].(expr.IntegerValue)
 								if !ok1 || !ok2 {
 									// OPTIONAL hops or otherwise-missing

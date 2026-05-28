@@ -1329,6 +1329,20 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3847: ratcheted after round 54 — mergeClause now wraps the
+//     MergeRelationship shortcut with applyPathVar (mirroring the
+//     general Merge path-binding fix from round 53), and
+//     MergeRelationship's physical builder reserves a schema slot for
+//     the relationship column (with an internal __anon_merge_rel_N
+//     key when the rel is anonymous) and registers a (src, edge, dst)
+//     triplet in bopts.expandTripletSeq so a NamedPath wrapper can
+//     reconstruct a PathValue. The NamedPath projection fast-path now
+//     accepts both expr.IntegerValue (Expand-emitted) and
+//     expr.RelationshipValue (MergeRelationship-emitted) in the edge
+//     column. Closes Merge5 [10]. 20-run sample: floor 3845, median
+//     ~3849, max 3852; gate at 3847 with 2 of headroom (the 3845 run
+//     is a recurrence of the flaky Match2 [6] disjunction failure
+//     that is not introduced by this round).
 //   - 3846: ratcheted after round 53. Three coordinated changes:
 //     (a) mergeClause now wraps a MERGE p = (...) plan with
 //         NamedPath, mirroring the MATCH path-binding pipeline; the
@@ -1350,7 +1364,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3846
+const tckExecutionBaseline = 3847
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

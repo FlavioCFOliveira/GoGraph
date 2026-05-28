@@ -229,7 +229,16 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 					if ocOk && omOk {
 						mr := NewMergeRelationshipWithActions(srcVar, dstVar, relVar, relType, onCreate, onMatch, child)
 						mr.RelProps = relProps
-						return mr, nil
+						// MERGE p = (a)-[:R]->(b) on the MergeRelationship
+						// shortcut still needs the NamedPath wrapper so the
+						// projection of p reconstructs a PathValue from the
+						// bound source/dest endpoints. Without it `RETURN p`
+						// returns null (Merge5 [10]).
+						var plan LogicalPlan = mr
+						if m.Pattern != nil && m.Pattern.Variable != nil {
+							plan = applyPathVar(m.Pattern, plan)
+						}
+						return plan, nil
 					}
 				}
 			}
