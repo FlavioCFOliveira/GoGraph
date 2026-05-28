@@ -1208,9 +1208,9 @@ import (
 //     after an AS rename. Round 24.
 //     Observed 3808-3816 across a 10-run sample (median 3810); gate set
 //     at 3808 to absorb run-to-run variance.
-//   - (still 3808): rounds 25 and 26 added two additional deterministic
-//     fixes that lifted the band but did not warrant a ratchet given the
-//     persisting variance floor:
+//   - (still 3808): rounds 25, 26 and 27 added three additional
+//     deterministic fixes that lifted the band but did not warrant a
+//     ratchet given the persisting variance floor:
 //       round 25: drop normalizeVarlenDotDot from the parse pipeline so
 //                 `-[:T..]-` (no asterisk) raises a compile-time syntax
 //                 error per Match4 [9].
@@ -1218,10 +1218,13 @@ import (
 //                 RANGE token (`0..0`, `*..0`, `*N..0`) is not rewritten;
 //                 the prior rewrite turned `list[0..0]` into a property
 //                 chain that evaluated to null. Closes List2 [5].
-//     Observed 3809-3819 across an 80-run sample (median ~3814) after the
-//     round-26 fix; gate kept at 3808 because the 3809 floor sits at the
-//     variance edge (3.75% of runs) and adding 1 of headroom would burn
-//     the entire gain.
+//       round 27: in-query CALL (one with explicit YIELD) now rejects
+//                 the implicit-argument form. openCypher restricts
+//                 implicit param-binding to STANDALONE CALL. Closes
+//                 Call2 [4].
+//     Observed 3810-3819 across a 50-run sample (median ~3815) after the
+//     round-27 fix; gate kept at 3808 because 3810 still flaps (~4% of
+//     runs) and ratcheting would burn the entire variance buffer.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
