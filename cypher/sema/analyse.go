@@ -1113,6 +1113,13 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 		if aggInsideComprehension(item.Expr) {
 			a.error(invalidAggregationError(positionOf(item.Expr)))
 		}
+		// openCypher rejects non-deterministic function calls (rand,
+		// randomUUID) inside an aggregation argument because their value
+		// changes per call, leaving the aggregation result undefined.
+		// Surfaces as SyntaxError(NonConstantExpression) per Return6 [15].
+		if pos, ok := nondetInsideAggArg(item.Expr); ok {
+			a.error(invalidBooleanOperandError("aggregation-argument", "non-constant", pos))
+		}
 		a.checkExpr(item.Expr)
 	}
 	a.checkAmbiguousAggregation(proj)
@@ -2133,6 +2140,159 @@ func containsAggregation(e ast.Expression) bool {
 			containsAggregation(v.Projection)
 	}
 	return false
+}
+
+// nondetInsideAggArg reports whether e contains an aggregation call whose
+// argument transitively references a non-deterministic function (rand,
+// randomUUID). openCypher classifies these as SyntaxError(NonConstantExpression)
+// because their value varies per call, leaving aggregation results undefined.
+// Returns the position of the offending non-deterministic call when found.
+func nondetInsideAggArg(e ast.Expression) (ast.Position, bool) {
+	if e == nil {
+		return ast.Position{}, false
+	}
+	switch v := e.(type) {
+	case *ast.FunctionInvocation:
+		if len(v.Namespace) == 0 {
+			switch strings.ToLower(v.Name) {
+			case "count", "sum", "avg", "min", "max", "collect",
+				"stdev", "stdevp", "percentilecont", "percentiledisc":
+				for _, arg := range v.Args {
+					if pos, ok := containsNonDetCall(arg); ok {
+						return pos, true
+					}
+				}
+			}
+		}
+		for _, arg := range v.Args {
+			if pos, ok := nondetInsideAggArg(arg); ok {
+				return pos, true
+			}
+		}
+	case *ast.BinaryOp:
+		if pos, ok := nondetInsideAggArg(v.Left); ok {
+			return pos, true
+		}
+		return nondetInsideAggArg(v.Right)
+	case *ast.UnaryOp:
+		return nondetInsideAggArg(v.Operand)
+	case *ast.Property:
+		return nondetInsideAggArg(v.Receiver)
+	case *ast.LabelPredicate:
+		return nondetInsideAggArg(v.Receiver)
+	case *ast.SubscriptExpr:
+		if pos, ok := nondetInsideAggArg(v.Expr); ok {
+			return pos, true
+		}
+		return nondetInsideAggArg(v.Index)
+	case *ast.SliceExpr:
+		if pos, ok := nondetInsideAggArg(v.Expr); ok {
+			return pos, true
+		}
+		if pos, ok := nondetInsideAggArg(v.From); ok {
+			return pos, true
+		}
+		return nondetInsideAggArg(v.To)
+	case *ast.CaseExpression:
+		if pos, ok := nondetInsideAggArg(v.Subject); ok {
+			return pos, true
+		}
+		for _, alt := range v.Alternatives {
+			if pos, ok := nondetInsideAggArg(alt.Condition); ok {
+				return pos, true
+			}
+			if pos, ok := nondetInsideAggArg(alt.Consequent); ok {
+				return pos, true
+			}
+		}
+		return nondetInsideAggArg(v.ElseExpr)
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			if pos, ok := nondetInsideAggArg(el); ok {
+				return pos, true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range v.Values {
+			if pos, ok := nondetInsideAggArg(val); ok {
+				return pos, true
+			}
+		}
+	}
+	return ast.Position{}, false
+}
+
+// containsNonDetCall reports whether e contains a call to one of the
+// non-deterministic openCypher functions (rand, randomUUID). The classifier
+// is case-insensitive and unqualified-only.
+func containsNonDetCall(e ast.Expression) (ast.Position, bool) {
+	if e == nil {
+		return ast.Position{}, false
+	}
+	switch v := e.(type) {
+	case *ast.FunctionInvocation:
+		if len(v.Namespace) == 0 {
+			switch strings.ToLower(v.Name) {
+			case "rand", "randomuuid":
+				return v.Pos, true
+			}
+		}
+		for _, arg := range v.Args {
+			if pos, ok := containsNonDetCall(arg); ok {
+				return pos, true
+			}
+		}
+	case *ast.BinaryOp:
+		if pos, ok := containsNonDetCall(v.Left); ok {
+			return pos, true
+		}
+		return containsNonDetCall(v.Right)
+	case *ast.UnaryOp:
+		return containsNonDetCall(v.Operand)
+	case *ast.Property:
+		return containsNonDetCall(v.Receiver)
+	case *ast.LabelPredicate:
+		return containsNonDetCall(v.Receiver)
+	case *ast.SubscriptExpr:
+		if pos, ok := containsNonDetCall(v.Expr); ok {
+			return pos, true
+		}
+		return containsNonDetCall(v.Index)
+	case *ast.SliceExpr:
+		if pos, ok := containsNonDetCall(v.Expr); ok {
+			return pos, true
+		}
+		if pos, ok := containsNonDetCall(v.From); ok {
+			return pos, true
+		}
+		return containsNonDetCall(v.To)
+	case *ast.CaseExpression:
+		if pos, ok := containsNonDetCall(v.Subject); ok {
+			return pos, true
+		}
+		for _, alt := range v.Alternatives {
+			if pos, ok := containsNonDetCall(alt.Condition); ok {
+				return pos, true
+			}
+			if pos, ok := containsNonDetCall(alt.Consequent); ok {
+				return pos, true
+			}
+		}
+		return containsNonDetCall(v.ElseExpr)
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			if pos, ok := containsNonDetCall(el); ok {
+				return pos, true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range v.Values {
+			if pos, ok := containsNonDetCall(val); ok {
+				return pos, true
+			}
+		}
+	}
+	return ast.Position{}, false
 }
 
 // checkFunctionArgTypes performs a coarse static type-check on a handful
