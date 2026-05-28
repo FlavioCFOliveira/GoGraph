@@ -463,23 +463,55 @@ func dateTimeFromMap(m expr.MapValue) (expr.Value, error) {
 
 // baseOffsetFromMap returns the offset (seconds east of UTC) of the
 // time/datetime carried under m's "time" or "datetime" key, if any.
+//
+// When the map also carries date-override keys (year/month/day/etc.)
+// or its own explicit date, the offset is recomputed for the OVERRIDDEN
+// date in the SAME zone as the base. This matters across DST
+// boundaries: October 11 Stockholm is CET (+01:00) but March 28
+// Stockholm is CEST (+02:00); a datetime built with the October
+// instant's wall clock applied on March 28 must convert using the
+// March 28 offset, not the October one (Temporal3 [10]).
 func baseOffsetFromMap(m expr.MapValue) (int, bool) {
+	baseTime := func(t time.Time) (int, bool) {
+		// Recompute the offset on the override date (if any) in the
+		// base's location, so a DST flip on the new date is honoured.
+		if d, ok := datePartFromMap(m, t); ok {
+			_, o := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location()).Zone()
+			return o, true
+		}
+		_, o := t.Zone()
+		return o, true
+	}
 	if tv, ok := m["time"]; ok {
 		switch t := tv.(type) {
 		case expr.TimeValue:
 			return int(t.OffsetSec), true
 		case expr.DateTimeValue:
-			_, o := t.T.Zone()
-			return o, true
+			return baseTime(t.T)
 		}
 	}
 	if dv, ok := m["datetime"]; ok {
 		if t, ok2 := dv.(expr.DateTimeValue); ok2 {
-			_, o := t.T.Zone()
-			return o, true
+			return baseTime(t.T)
 		}
 	}
 	return 0, false
+}
+
+// datePartFromMap returns the override date assembled from m's keys
+// (year/month/day/week/dayOfWeek/quarter/dayOfQuarter/ordinalDay) on
+// top of fallback. Returns ok=false when m carries no date keys at
+// all, so the caller can decide whether to use the base's own date.
+func datePartFromMap(m expr.MapValue, fallback time.Time) (time.Time, bool) {
+	dv, err := dateFromMap(m)
+	if err != nil {
+		return fallback, false
+	}
+	d, ok := dv.(expr.DateValue)
+	if !ok {
+		return fallback, false
+	}
+	return time.Date(d.Year, time.Month(d.Month), d.Day, 0, 0, 0, 0, fallback.Location()), true
 }
 
 // timeComponentsFromMap extracts hour/minute/second/nanosecond from m.

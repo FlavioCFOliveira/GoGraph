@@ -1329,6 +1329,16 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3853: ratcheted after round 63 — baseOffsetFromMap recomputes the
+//     base time's offset on the OVERRIDE date (not the original date)
+//     when the map carries date keys. This honours DST flips between
+//     the base instant's date and the constructed datetime's date, so
+//     `datetime({time: <Oct 11 12:00 Stockholm>, date: <Mar 28>,
+//     timezone: 'Pacific/Honolulu'})` uses Stockholm's March 28 CEST
+//     offset (+02:00) for the shift instead of Stockholm's October
+//     CET offset (+01:00). Closes Temporal3 [10] across multiple
+//     Examples rows. 20-run sample: floor 3853, median ~3856, max
+//     3859; gate at 3853 with 0 headroom.
 //   - 3851: ratcheted after round 61 — IR's matchPattern now recognises
 //     a pure bound-rel pass-through path: when every relationship in
 //     a `MATCH ()-[r]->()` style pattern is already in the upstream
@@ -1420,7 +1430,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3851
+const tckExecutionBaseline = 3853
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
