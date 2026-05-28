@@ -550,6 +550,14 @@ func (v PathValue) Kind() Kind { return KindPath }
 // wrapped in `<…>` so a path is visibly distinct from a bare node or
 // relationship value. A zero-relationship path of a single node renders
 // as `<(node)>`, matching the TCK convention.
+//
+// Each relationship is rendered direction-aware against the path's
+// traversal order: when the relationship's storage StartID matches the
+// preceding node, the forward form `-[rel]->` is used; otherwise the
+// reverse form `<-[rel]-` is used. The renderer compares against the
+// rel's StartID rather than re-querying the graph so a relationship
+// projected with explicit direction (e.g. by the named-path fast path)
+// renders consistently.
 func (v PathValue) String() string {
 	if len(v.Nodes) == 0 {
 		return "<empty-path>"
@@ -558,11 +566,37 @@ func (v PathValue) String() string {
 	b = append(b, '<')
 	b = append(b, v.Nodes[0].String()...)
 	for i, rel := range v.Relationships {
-		b = append(b, rel.String()...)
+		prev := v.Nodes[i].ID
+		forward := rel.StartID == prev
+		inner := relInnerString(rel)
+		if forward {
+			b = append(b, '-')
+			b = append(b, inner...)
+			b = append(b, '-', '>')
+		} else {
+			b = append(b, '<', '-')
+			b = append(b, inner...)
+			b = append(b, '-')
+		}
 		b = append(b, v.Nodes[i+1].String()...)
 	}
 	b = append(b, '>')
 	return string(b)
+}
+
+// relInnerString returns the bracketed `[…]` body of a relationship's
+// rendering: the rel id, type, and properties. PathValue.String uses
+// this to wrap the body with direction-appropriate dashes (forward
+// `-[…]->`, reverse `<-[…]-`).
+//
+// rel.String() returns the canonical forward form `-[…]->`, so we
+// strip the leading `-` and trailing `->` to recover the `[…]` body.
+func relInnerString(rel RelationshipValue) string {
+	s := rel.String()
+	if len(s) >= 4 && s[0] == '-' && s[1] == '[' && s[len(s)-3] == ']' && s[len(s)-2] == '-' && s[len(s)-1] == '>' {
+		return s[1 : len(s)-2]
+	}
+	return s
 }
 
 // Hash combines the hashes of the constituent nodes and relationships.
