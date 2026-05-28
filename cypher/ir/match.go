@@ -308,6 +308,7 @@ func (t *translator) firstOptionalPath(
 // inner Expand step — are not mis-peeled.
 func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (LogicalPlan, []*Selection) {
 	var hoisted []*Selection
+	// Phase 1: peel from the very top of p (top-of-Selection-chain stripping).
 	for {
 		sel, ok := p.(*Selection)
 		if !ok || sel.PredicateExpr == nil {
@@ -323,7 +324,151 @@ func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (Logic
 		hoisted = append(hoisted, sel)
 		p = sel.Child
 	}
+	// Phase 2: deep peel — when the inner subtree contains a rel-rebinding
+	// or dest-rebinding equality Selection BURIED below other operators
+	// (e.g. inside a chained VLE+Expand pattern: the outer `r` is bound,
+	// the inner Expand emits `__anon_rel_r`, the Selection `r =
+	// __anon_rel_r` sits between the Expand and a subsequent VLE step),
+	// peel those too. Since the plain-Apply inner side has no access to
+	// outer columns at runtime, the Selection cannot evaluate `r` in
+	// place and would always reject. Hoisting it above the Apply, where
+	// the combined outer||inner row makes both `r` and `__anon_rel_r`
+	// reachable, restores the join. Closes Match4 [7]'s bound-rel-mid-
+	// pattern shape.
+	p = deepPeelOuterRebindings(p, outerVars, &hoisted)
 	return p, hoisted
+}
+
+// deepPeelOuterRebindings recursively walks p and replaces every
+// equality Selection whose predicate references an outer-bound variable
+// with its child, appending the Selection to *hoisted in document
+// order (top-most first). The walker stops at operators that introduce
+// a fresh schema scope (Projection / EagerAggregation) because peeling
+// across such a boundary would lift a Selection above the projection
+// that produced its inner-side variable.
+func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoisted *[]*Selection) LogicalPlan { //nolint:gocyclo // case-per-operator dispatch
+	if p == nil {
+		return nil
+	}
+	if _, isProj := p.(*Projection); isProj {
+		return p
+	}
+	if _, isAgg := p.(*EagerAggregation); isAgg {
+		return p
+	}
+	if sel, ok := p.(*Selection); ok && sel.PredicateExpr != nil {
+		if bin, isBin := sel.PredicateExpr.(*ast.BinaryOp); isBin && bin.Operator == "=" {
+			if referencesOuterVar(bin.Left, outerVars) || referencesOuterVar(bin.Right, outerVars) {
+				*hoisted = append(*hoisted, sel)
+				return deepPeelOuterRebindings(sel.Child, outerVars, hoisted)
+			}
+		}
+	}
+	children := p.Children()
+	if len(children) == 0 {
+		return p
+	}
+	// Single-child operators (Selection, Sort, Top, Limit, Distinct,
+	// NamedPath, Eager, Expand, OptionalExpand, VarLengthExpand,
+	// ProduceResults): rebuild with the recursively-peeled child via the
+	// operator's exposed setter. We use reflection-free local switches
+	// for the operators we know about; unknown multi-child operators
+	// stop the descent so we do not accidentally peel across an Apply
+	// boundary.
+	switch n := p.(type) {
+	case *Selection:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *Sort:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *Top:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *Limit:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *Distinct:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *Skip:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *NamedPath:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *Eager:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *Expand:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *OptionalExpand:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	case *VarLengthExpand:
+		newChild := deepPeelOuterRebindings(n.Child, outerVars, hoisted)
+		if newChild == n.Child {
+			return n
+		}
+		cp := *n
+		cp.Child = newChild
+		return &cp
+	}
+	// Default: leave the operator and its children untouched. Multi-child
+	// operators (Apply, CorrelatedApply, OptionalApply) define their own
+	// inner-side scope; peeling across them is not safe.
+	return p
 }
 
 // referencesOuterVar reports whether e contains any reference to a variable
