@@ -213,6 +213,17 @@ type buildOpts struct {
 	// and the guard reads only scalarCols. Closes WithSkipLimit3 [3]
 	// without re-breaking WithOrderBy4 [7]/[9]/[10].
 	projAliasScalarCols map[string]struct{}
+	// aggKeyScalarCols tracks EagerAggregation grouping-key alias names
+	// whose value at the post-aggregation row slot is a scalar (the
+	// grouping expression evaluated against the pre-aggregation row).
+	// Read ONLY by the buildIRProjection Variable fast path's upgrade
+	// guard, NOT by buildRowCtx — the pre-projection's
+	// buildRowCtxFromMutator must keep upgrading the underlying bound
+	// variable so the grouping expression `a.num2 % 3` can evaluate
+	// against the NodeValue `a`. Closes WithOrderBy4 [12] without
+	// regressing Return6 [1] / ExistentialSubquery2 [2] (which both
+	// rely on the pre-projection's `a`/`n` staying a NodeValue).
+	aggKeyScalarCols map[string]struct{}
 	// preprojectedCols is the set of schema variable names whose row column
 	// already holds the projection-equivalent value (e.g. an EagerAggregation
 	// grouping-key column carries the pre-evaluated grouping expression, not
@@ -3173,6 +3184,32 @@ func buildEagerAggregation(
 		for _, varName := range p.GroupBy {
 			bopts.preprojectedCols[varName] = struct{}{}
 		}
+		// Computed (non-Variable) grouping keys evaluate to a scalar at
+		// the EagerAggregation's pre-projection — e.g. `WITH a.num2 % 3
+		// AS mod` stores the integer mod value in the post-aggregation
+		// row slot. Downstream Variable fast-path reads of `mod` must
+		// NOT upgrade the integer to a NodeValue when it numerically
+		// coincides with an interned NodeID (WithOrderBy4 [12] flake:
+		// `RETURN mod, sum` surfaced `(node#2)` instead of `2`). Track
+		// these in a dedicated set rather than projAliasScalarCols
+		// because the latter is also read by buildRowCtx — which the
+		// pre-projection closure invokes when evaluating the grouping
+		// expression. Adding `mod` to projAliasScalarCols would suppress
+		// the upgrade of `a` (the only variable in scope at the
+		// pre-projection); we only want the suppression in the POST-
+		// aggregation Variable read.
+		if bopts.aggKeyScalarCols == nil {
+			bopts.aggKeyScalarCols = make(map[string]struct{})
+		}
+		for i, varName := range p.GroupBy {
+			if i >= len(p.GroupByExprs) {
+				break
+			}
+			if _, isVar := p.GroupByExprs[i].(*ast.Variable); isVar {
+				continue
+			}
+			bopts.aggKeyScalarCols[varName] = struct{}{}
+		}
 	}
 
 	return topOp, nil
@@ -5141,6 +5178,22 @@ func buildIRProjection(
 						}
 						if !varIsScalar && bopts != nil && bopts.projAliasScalarCols != nil {
 							if _, ok3 := bopts.projAliasScalarCols[v.Name]; ok3 {
+								varIsScalar = true
+							}
+						}
+						// aggKeyScalarCols: a non-Variable EagerAggregation
+						// grouping key (e.g. `WITH a.num2 % 3 AS mod`) stores
+						// the computed integer at the post-aggregation `mod`
+						// column. Reading `mod` via the Variable fast path
+						// must NOT upgrade that integer to a NodeValue when
+						// it numerically coincides with an interned NodeID.
+						// Only the post-aggregation Variable read consults
+						// this set; the pre-projection's buildRowCtxFromMutator
+						// does not, so the grouping expression itself can
+						// still see `a` as a NodeValue (closes WithOrderBy4
+						// [12] without regressing Return6 [1]).
+						if !varIsScalar && bopts != nil && bopts.aggKeyScalarCols != nil {
+							if _, ok3 := bopts.aggKeyScalarCols[v.Name]; ok3 {
 								varIsScalar = true
 							}
 						}

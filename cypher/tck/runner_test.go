@@ -1329,6 +1329,29 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3877: ratcheted after round 80 — new bopts.aggKeyScalarCols set
+//     suppresses the IntegerValue→NodeValue upgrade in the
+//     buildIRProjection Variable fast path for any post-aggregation
+//     read of a non-Variable grouping-key alias. `WITH a.num2 % 3 AS
+//     mod, sum(...) AS sum ORDER BY sum LIMIT 2 RETURN mod, sum`
+//     surfaced `mod=(node#2)` instead of `mod=2` when the integer
+//     coincided with an interned :A node id (WithOrderBy4 [12] flake
+//     1-of-20). The earlier projAliasScalarCols tagging is suppressed
+//     for these aliases by the shadowsInput guard, since the alias
+//     already lives in the post-EagerAggregation schema.
+//
+//     The new field is kept distinct from projAliasScalarCols because
+//     the latter is also consulted by buildRowCtxFromMutator at
+//     pre-projection time — adding `mod` there would have suppressed
+//     the upgrade of the pre-projection's underlying bound variable
+//     `a`, breaking the grouping expression `a.num2 % 3` (which needs
+//     `a` as a NodeValue to access .num2). aggKeyScalarCols is read
+//     ONLY by the post-aggregation Variable fast path, so Return6
+//     [1] (`MATCH (n) RETURN n.num AS n, count(n) AS count`) and
+//     ExistentialSubquery2 [2] (`WITH n, count(*) ... RETURN n`)
+//     remain correct: `n` stays a NodeValue in the pre-projection
+//     and an upgraded NodeValue in the post-projection.
+//     20-run sample: 20-of-20 at 3877; gate at 3877 with 0 headroom.
 //   - 3876: ratcheted after round 79 — two coordinated non-determinism
 //     fixes:
 //     (a) buildPropsEvalFn (CREATE / row-aware MERGE) now folds
@@ -1655,7 +1678,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3876
+const tckExecutionBaseline = 3877
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
