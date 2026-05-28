@@ -93,6 +93,18 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		} else {
 			items = projectionItems(w.Projection, collectAllVars(planAfterComp))
 		}
+		// openCypher allows ORDER BY (and SKIP/LIMIT) on a WITH to
+		// reference variables that exist BEFORE this projection but
+		// aren't explicitly projected. To preserve them through the
+		// projection so the downstream Sort can read them, append
+		// "hidden" projection items for any pre-projection variable
+		// referenced by ORDER BY but not already in items. The final
+		// projection above ProduceResults / the next WITH will discard
+		// these extras because it only emits its declared columns.
+		// Closes WithOrderBy4 [8] (`WITH a, sum; WITH a, mod ORDER BY
+		// sum LIMIT 3` no longer drops `sum`).
+		preVars := collectAllVars(planAfterComp)
+		items = appendOrderByPassthrough(items, w.Projection, preVars)
 		plan = NewProjection(items, planAfterComp)
 	}
 
@@ -210,6 +222,112 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		return &cp
 	}
 	return e
+}
+
+// appendOrderByPassthrough scans proj.OrderBy for Variable references that
+// are in scope BEFORE this projection (preVars) but not already among the
+// projection items. For each such variable it appends a passthrough
+// ProjectionItem so the variable survives the projection's schema reset
+// and the downstream Sort can resolve it. Aggregating WITHs and DISTINCT
+// projections skip this augmentation because their output schema is
+// strictly defined by the aggregation contract / DISTINCT contract.
+func appendOrderByPassthrough(items []ProjectionItem, proj *ast.Projection, preVars []string) []ProjectionItem {
+	if proj == nil || len(proj.OrderBy) == 0 {
+		return items
+	}
+	if proj.Distinct {
+		return items
+	}
+	preSet := make(map[string]struct{}, len(preVars))
+	for _, v := range preVars {
+		preSet[v] = struct{}{}
+	}
+	itemNames := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		if it.Name != "" {
+			itemNames[it.Name] = struct{}{}
+		}
+		if it.Expression != "" {
+			itemNames[it.Expression] = struct{}{}
+		}
+	}
+	// Collect variable names referenced by ORDER BY but not yet in items.
+	var added []string
+	for _, s := range proj.OrderBy {
+		if s == nil {
+			continue
+		}
+		collectOrderByVars(s.Expr, preSet, itemNames, &added)
+	}
+	for _, v := range added {
+		items = append(items, ProjectionItem{
+			Name:       v,
+			Expression: v,
+			Expr:       &ast.Variable{Name: v},
+		})
+		itemNames[v] = struct{}{}
+	}
+	return items
+}
+
+// collectOrderByVars walks the expression and appends to *out every variable
+// name that exists in preSet but not in itemNames, deduplicated. Helper for
+// appendOrderByPassthrough.
+func collectOrderByVars(e ast.Expression, preSet, itemNames map[string]struct{}, out *[]string) {
+	if e == nil {
+		return
+	}
+	switch n := e.(type) {
+	case *ast.Variable:
+		if _, inPre := preSet[n.Name]; !inPre {
+			return
+		}
+		if _, exists := itemNames[n.Name]; exists {
+			return
+		}
+		// Dedupe.
+		for _, existing := range *out {
+			if existing == n.Name {
+				return
+			}
+		}
+		*out = append(*out, n.Name)
+	case *ast.Property:
+		collectOrderByVars(n.Receiver, preSet, itemNames, out)
+	case *ast.LabelPredicate:
+		collectOrderByVars(n.Receiver, preSet, itemNames, out)
+	case *ast.BinaryOp:
+		collectOrderByVars(n.Left, preSet, itemNames, out)
+		collectOrderByVars(n.Right, preSet, itemNames, out)
+	case *ast.UnaryOp:
+		collectOrderByVars(n.Operand, preSet, itemNames, out)
+	case *ast.FunctionInvocation:
+		for _, a := range n.Args {
+			collectOrderByVars(a, preSet, itemNames, out)
+		}
+	case *ast.SubscriptExpr:
+		collectOrderByVars(n.Expr, preSet, itemNames, out)
+		collectOrderByVars(n.Index, preSet, itemNames, out)
+	case *ast.SliceExpr:
+		collectOrderByVars(n.Expr, preSet, itemNames, out)
+		collectOrderByVars(n.From, preSet, itemNames, out)
+		collectOrderByVars(n.To, preSet, itemNames, out)
+	case *ast.CaseExpression:
+		collectOrderByVars(n.Subject, preSet, itemNames, out)
+		for _, alt := range n.Alternatives {
+			collectOrderByVars(alt.Condition, preSet, itemNames, out)
+			collectOrderByVars(alt.Consequent, preSet, itemNames, out)
+		}
+		collectOrderByVars(n.ElseExpr, preSet, itemNames, out)
+	case *ast.ListLiteral:
+		for _, el := range n.Elements {
+			collectOrderByVars(el, preSet, itemNames, out)
+		}
+	case *ast.MapLiteral:
+		for _, v := range n.Values {
+			collectOrderByVars(v, preSet, itemNames, out)
+		}
+	}
 }
 
 // applyProjectionTail wraps plan with the DISTINCT / ORDER BY / SKIP /
