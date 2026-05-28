@@ -466,6 +466,18 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			continue
 		}
 
+		// Pure bound-rel pass-through: when every relationship and named
+		// node in the path is already in scope (forwarded by an upstream
+		// MATCH/WITH) and no inline filter narrows the match further, the
+		// path needs no Scan/Expand — the upstream row already carries
+		// every binding the pattern names.
+		if isPureBoundRelPath(pp, outputVarSet(plan)) {
+			for _, v := range pathPatternVars(pp) {
+				boundVars[v] = struct{}{}
+			}
+			continue
+		}
+
 		if shared {
 			// Build the path's inner subtree with an Argument leaf carrying a
 			// shared tag. The CorrelatedApply node uses the same tag so the
@@ -604,6 +616,83 @@ func leadingNodeVar(pp *ast.PathPattern) string {
 		return ""
 	}
 	return *pp.Head.Node.Variable
+}
+
+// isPureBoundRelPath reports whether every relationship in pp is already in
+// outputVars (so it was forwarded by an upstream WITH/MATCH) and every node
+// in the pattern is anonymous-with-no-filter. Such a path adds no new
+// constraints: the upstream row already binds the rel, and the anonymous
+// endpoints are trivially satisfied by the rel's actual start/end.
+//
+// Bound endpoints are deliberately rejected — `MATCH (a)-[r]->(b)` with
+// every variable in scope LOOKS like a no-op but in practice an
+// upstream aggregating WITH does not always preserve the
+// RelationshipValue at the column the projection later reads from, so
+// the second MATCH's Expand is the channel that re-resolves r's
+// metadata against the live graph. Skipping in that case surfaces the
+// upstream's NULL.
+//
+// outputVars is restricted to the names exposed by the child plan's
+// Vars() (post-Projection) rather than the cumulative boundVars set,
+// because boundVars also contains stale pre-projection names. Without
+// this restriction `WITH r AS r2 MATCH ()-[r2]->()` could skip the
+// second MATCH when r2 is shadowed by an earlier scope.
+//
+// The pattern is rejected when:
+//   - the path carries a path-binding variable (`p = (...)`),
+//   - any relationship is unnamed, in a variable-length quantifier, or
+//     carries an inline type/property predicate,
+//   - any node has inline labels, properties, or a non-anonymous
+//     variable.
+func isPureBoundRelPath(pp *ast.PathPattern, outputVars map[string]struct{}) bool {
+	if pp == nil || pp.Head == nil {
+		return false
+	}
+	if pp.Variable != nil {
+		return false
+	}
+	sawBoundRel := false
+	for el := pp.Head; el != nil; el = el.Next {
+		if el.Node != nil {
+			if len(el.Node.Labels) > 0 || el.Node.Properties != nil {
+				return false
+			}
+			if el.Node.Variable != nil {
+				return false
+			}
+		}
+		if el.Relationship != nil {
+			if el.Relationship.Variable == nil {
+				return false
+			}
+			if _, ok := outputVars[*el.Relationship.Variable]; !ok {
+				return false
+			}
+			if el.Relationship.Range != nil {
+				return false
+			}
+			if len(el.Relationship.Types) > 0 || el.Relationship.Properties != nil {
+				return false
+			}
+			sawBoundRel = true
+		}
+	}
+	return sawBoundRel
+}
+
+// outputVarSet returns the variables exposed by plan as a set.
+func outputVarSet(plan LogicalPlan) map[string]struct{} {
+	if plan == nil {
+		return nil
+	}
+	vs := plan.Vars()
+	out := make(map[string]struct{}, len(vs))
+	for _, v := range vs {
+		if v != "" {
+			out[v] = struct{}{}
+		}
+	}
+	return out
 }
 
 // pathPatternVars collects all named node and relationship variables appearing

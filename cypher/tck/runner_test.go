@@ -1329,6 +1329,19 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3851: ratcheted after round 61 — IR's matchPattern now recognises
+//     a pure bound-rel pass-through path: when every relationship in
+//     a `MATCH ()-[r]->()` style pattern is already in the upstream
+//     plan's output Vars() and both endpoints are anonymous with no
+//     filters, the path adds no constraints and the IR skips the
+//     Scan/Expand. Concurrently, the projection's edgeVarMeta
+//     fast-path now forwards a RelationshipValue stored directly in
+//     the schema slot, so the projection of an upstream-forwarded rel
+//     surfaces the right edge even when the cached edgeVarMeta
+//     coordinates point at a pre-WITH triplet shape. Closes
+//     With1 [3]. 20-run sample: floor 3850, median ~3855, max 3857;
+//     gate at 3851 with 1 of headroom (the 3850 floor is the Pattern2
+//     [11] / Delete4 [1] flake band).
 //   - 3850: ratcheted after round 60 — MERGE ON CREATE/MATCH SET r = a
 //     now copies the source node's properties onto the relationship.
 //     extractRelKVActions encodes the entity-copy as a sentinel
@@ -1407,7 +1420,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3850
+const tckExecutionBaseline = 3851
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

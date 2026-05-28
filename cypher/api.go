@@ -4767,7 +4767,30 @@ func buildIRProjection(
 					if meta, isMeta := bopts.edgeVarMeta[v.Name]; isMeta {
 						capturedMeta := meta
 						capturedG := g
+						capturedName := v.Name
+						capturedSchema := inputSchema
 						evalFn = func(row exec.Row) (expr.Value, error) {
+							// Post-projection forward: if the input schema
+							// slot for this rel variable already carries a
+							// RelationshipValue (an earlier projection
+							// emitted it into the column), use that
+							// directly. The edgeVarMeta srcCol/edgeCol/
+							// dstCol coordinates only apply to the Expand-
+							// emitted triplet shape; after a WITH the
+							// column holds a self-describing
+							// RelationshipValue and the triplet slots
+							// belong to other variables. Without this
+							// short-circuit `MATCH ()-[r]->() WITH r AS
+							// r2 MATCH ()-[r2]->() RETURN r2` and the
+							// `MATCH … WITH a, r, b … RETURN r` shape
+							// surface the wrong edge.
+							if capturedSchema != nil {
+								if col, ok := capturedSchema[capturedName]; ok && col < len(row) {
+									if rv, isRel := row[col].(expr.RelationshipValue); isRel {
+										return rv, nil
+									}
+								}
+							}
 							if capturedMeta.edgeCol >= len(row) {
 								return expr.Null, nil
 							}
