@@ -1329,6 +1329,19 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3867: ratcheted after round 72 — buildIRProjection's edge-variable
+//     fast path now also probes the input schema at the projection ALIAS
+//     name (not just the source variable name) when forwarding a
+//     RelationshipValue from an earlier projection. A covering Projection
+//     that wraps an EagerAggregation carries the original AST expression
+//     (`Variable{r1}`) but the EagerAggregation has stored the value
+//     under the alias slot (`r2` after `WITH r1 AS r2, count(*) AS c`).
+//     The previous forward only checked the source name's slot, missed
+//     it, and fell through to triplet reconstruction with stale pre-
+//     aggregation coordinates that addressed unrelated columns in the
+//     post-aggregation row. Closes With6 [2]. 10-run sample: floor
+//     3867, median ~3869, max 3871; gate at 3867 with 0 headroom (flake
+//     band Pattern2 [11] / Delete4 [1] / Merge1 [9]).
 //   - 3866: ratcheted after round 71 — coordinated row-aware MERGE +
 //     hoisted outer-property selections:
 //     (a) `referencesOuterVar` now walks the *ast.Property receiver

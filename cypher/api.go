@@ -4955,6 +4955,7 @@ func buildIRProjection(
 						capturedMeta := meta
 						capturedG := g
 						capturedName := v.Name
+						capturedAlias := name
 						capturedSchema := inputSchema
 						evalFn = func(row exec.Row) (expr.Value, error) {
 							// Post-projection forward: if the input schema
@@ -4975,6 +4976,24 @@ func buildIRProjection(
 								if col, ok := capturedSchema[capturedName]; ok && col < len(row) {
 									if rv, isRel := row[col].(expr.RelationshipValue); isRel {
 										return rv, nil
+									}
+								}
+								// Alias-rename forward: when the projection
+								// renames the rel variable (`r1 AS r2`),
+								// the input schema carries the renamed
+								// column under the ALIAS name. An upstream
+								// EagerAggregation that emitted the rel
+								// at its grouping-key column also stores
+								// the renamed value under the alias. Probe
+								// that slot before the triplet
+								// reconstruction (whose coordinates are
+								// pre-rename and would address other
+								// columns in the post-aggregation row).
+								if capturedAlias != "" && capturedAlias != capturedName {
+									if col, ok := capturedSchema[capturedAlias]; ok && col < len(row) {
+										if rv, isRel := row[col].(expr.RelationshipValue); isRel {
+											return rv, nil
+										}
 									}
 								}
 							}
