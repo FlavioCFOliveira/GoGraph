@@ -321,34 +321,23 @@ func (t *translator) extractNestedPatternComprehensions(
 		return &cp, curPlan, nil
 	case *ast.ListComprehension:
 		// Only the Source sits in the outer scope where a hoisted
-		// RollUpApply on plan would correlate correctly. Predicate /
+		// RollUpApply on plan would correlate correctly. Predicate and
 		// Projection run per element with the iteration variable in
-		// scope, so a PatternComprehension nested there would need to
-		// see the element binding, not the outer row — recurse anyway:
-		// the existing RollUpApply currently captures only outer
-		// variables, so a nested correlated comprehension that depends
-		// on the iteration variable is best-effort. The common openCypher
-		// case (Pattern2 [7]) uses the iteration variable as the
-		// PatternComprehension's source node, and the matcher resolves
-		// it via the runtime row context the executor builds for the
-		// surrounding list comprehension.
+		// scope — hoisting a PatternComprehension out of those
+		// positions would lose the iteration-variable binding (e.g.
+		// `[x IN nodes(p) | size([(x)-->(:Y) | 1])]` would evaluate
+		// the inner comprehension once with `x` unbound, yielding the
+		// same count for every iteration). Recurse only into Source;
+		// leave any nested PatternComprehension inside Predicate /
+		// Projection in place so the expression evaluator resolves it
+		// per iteration via the runtime row context (Pattern2 [7]).
 		src, plan2, err := t.extractNestedPatternComprehensions(n.Source, plan, counter)
-		if err != nil {
-			return nil, plan, err
-		}
-		pred, plan3, err := t.extractNestedPatternComprehensions(n.Predicate, plan2, counter)
-		if err != nil {
-			return nil, plan, err
-		}
-		proj, plan4, err := t.extractNestedPatternComprehensions(n.Projection, plan3, counter)
 		if err != nil {
 			return nil, plan, err
 		}
 		cp := *n
 		cp.Source = src
-		cp.Predicate = pred
-		cp.Projection = proj
-		return &cp, plan4, nil
+		return &cp, plan2, nil
 	case *ast.CaseExpression:
 		newAlts := make([]*ast.CaseAlternative, len(n.Alternatives))
 		curPlan := plan

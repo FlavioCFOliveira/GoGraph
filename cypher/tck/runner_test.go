@@ -1790,10 +1790,27 @@ import (
 //     bound-rel-rebinding synthetic). 5-run sample: floor 3892,
 //     median 3892, max 3892. Gate set at 3892 with 0 headroom.
 //
+//   - 3893: ratcheted after round 60 — runtime PatternComprehension
+//     evaluation. The PatternEvaluator interface gains an
+//     EvalPatternComp method that enumerates every match of a
+//     pattern comprehension against the live graph using the current
+//     RowContext bindings; expr.Eval dispatches *ast.PatternComprehension
+//     to it. The IR's extractNestedPatternComprehensions stops
+//     recursing into a ListComprehension's Predicate / Projection so
+//     comprehensions nested in those positions reach the runtime
+//     evaluator with the iteration variable still in scope. Closes
+//     Pattern2 [7]. Also added an exprContainsRowDependency check on
+//     the percentile aggregator's secondArg expression so a
+//     row-varying percentile (Aggregation6 [5]) is rejected at
+//     plan-build with ArgumentError: NumberOutOfRange — would
+//     otherwise be exposed by the new pattern-comp dispatch.
+//     5-run sample: floor 3893, median 3893, max 3893. Gate set at
+//     3893 with 0 headroom.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3892
+const tckExecutionBaseline = 3893
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

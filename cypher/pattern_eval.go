@@ -64,6 +64,260 @@ func (pe *patternEvaluator) EvalPattern(ctx context.Context, pp *ast.PathPattern
 	return expr.BoolValue(found), nil
 }
 
+// EvalPatternComp implements the list-producing variant of
+// [expr.PatternEvaluator] for [ast.PatternComprehension] expressions.
+// It enumerates every match of pc.Pattern given the bindings in row,
+// evaluates pc.Predicate (when present) and pc.Projection per match,
+// and returns the collected list value. Currently handles single-hop
+// patterns of the form `(anchor)-[:T]->(other)` and undirected /
+// incoming variants, which covers Pattern2 [7] (`size([(x)-->(:Y) |
+// 1])`). Multi-hop and variable-length comprehensions fall back to an
+// empty list — these are not yet observed in the openCypher TCK.
+func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.PatternComprehension, row expr.RowContext, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
+	if pe.g == nil || pc == nil || pc.Pattern == nil || pc.Pattern.Head == nil {
+		return expr.ListValue{}, nil
+	}
+	pp := pc.Pattern
+	results := expr.ListValue{}
+	err := pe.enumeratePatternMatches(ctx, pp, row, func(innerRow expr.RowContext) error {
+		if pc.Predicate != nil {
+			pv, perr := expr.EvalWith(ctx, pc.Predicate, innerRow, params, reg, nil, pe)
+			if perr != nil {
+				return perr
+			}
+			if !expr.IsTruthy(pv) {
+				return nil
+			}
+		}
+		var projVal expr.Value = expr.Null
+		if pc.Projection != nil {
+			v, perr := expr.EvalWith(ctx, pc.Projection, innerRow, params, reg, nil, pe)
+			if perr != nil {
+				return perr
+			}
+			projVal = v
+		}
+		results = append(results, projVal)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// enumeratePatternMatches walks pp and invokes cb once per complete
+// match, passing an extended RowContext that binds every named variable
+// in pp (path / node / relationship variables) to its matched value.
+// Restricted to single-hop, fixed-length patterns — sufficient for
+// Pattern2 [7]. Multi-hop is handled by recursing through each
+// successive step; variable-length is not yet supported and is silently
+// treated as zero matches.
+func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast.PathPattern, row expr.RowContext, cb func(expr.RowContext) error) error {
+	adj := pe.g.AdjList()
+	mapper := adj.Mapper()
+
+	startNode := pp.Head.Node
+	var startIDs []graph.NodeID
+	if startNode != nil && startNode.Variable != nil {
+		varName := *startNode.Variable
+		if v, ok := row[varName]; ok {
+			id, resolved := nodeIDFromValue(v, mapper)
+			if !resolved {
+				return nil
+			}
+			startIDs = []graph.NodeID{id}
+		} else {
+			startIDs = allNodeIDs(mapper)
+		}
+	} else {
+		startIDs = allNodeIDs(mapper)
+	}
+
+	steps := collectSteps(pp.Head)
+	for _, sid := range startIDs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !pe.checkStartNode(startNode, sid, row) {
+			continue
+		}
+		base := cloneRow(row)
+		if startNode != nil && startNode.Variable != nil {
+			base[*startNode.Variable] = nodeValueForID(pe.g, sid)
+		}
+		if err := pe.enumerateSteps(ctx, sid, steps, base, cb); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// enumerateSteps recursively walks the remaining hop list, extending
+// the running RowContext with each hop's bindings. When the list is
+// empty the callback is invoked with the accumulated row.
+func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.NodeID, steps []step, row expr.RowContext, cb func(expr.RowContext) error) error {
+	if len(steps) == 0 {
+		return cb(row)
+	}
+	s := steps[0]
+	remaining := steps[1:]
+	if s.rel != nil && s.rel.Range != nil {
+		// Variable-length: not handled by the comprehension evaluator yet.
+		return nil
+	}
+
+	mapper := pe.g.AdjList().Mapper()
+	srcKey, ok := mapper.Resolve(srcID)
+	if !ok {
+		return nil
+	}
+	dir := ast.RelDirectionOutgoing
+	if s.rel != nil {
+		dir = s.rel.Direction
+	}
+
+	candidates := func() []candidateHop {
+		switch dir {
+		case ast.RelDirectionOutgoing:
+			return pe.collectOutgoingCandidates(srcID, srcKey, s)
+		case ast.RelDirectionIncoming:
+			return pe.collectIncomingCandidates(srcID, srcKey, s)
+		default:
+			out := pe.collectOutgoingCandidates(srcID, srcKey, s)
+			return append(out, pe.collectIncomingCandidates(srcID, srcKey, s)...)
+		}
+	}()
+	for _, c := range candidates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !pe.checkEndNode(s.node, c.dstID, row) {
+			continue
+		}
+		next := cloneRow(row)
+		if s.node != nil && s.node.Variable != nil {
+			next[*s.node.Variable] = nodeValueForID(pe.g, c.dstID)
+		}
+		if s.rel != nil && s.rel.Variable != nil {
+			next[*s.rel.Variable] = relValueFromHop(pe.g, c, s.rel)
+		}
+		if err := pe.enumerateSteps(ctx, c.dstID, remaining, next, cb); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// candidateHop describes one (rel, dst) traversal candidate found by
+// enumerateSteps.
+type candidateHop struct {
+	srcID, dstID graph.NodeID
+	srcKey, dstKey string
+	forward      bool
+}
+
+func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey string, s step) []candidateHop {
+	mapper := pe.g.AdjList().Mapper()
+	nbs, _ := pe.g.AdjList().LoadEntry(srcID)
+	out := make([]candidateHop, 0, len(nbs))
+	for _, dstID := range nbs {
+		dstKey, ok := mapper.Resolve(dstID)
+		if !ok {
+			continue
+		}
+		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) {
+			continue
+		}
+		out = append(out, candidateHop{srcID: srcID, dstID: dstID, srcKey: srcKey, dstKey: dstKey, forward: true})
+	}
+	return out
+}
+
+func (pe *patternEvaluator) collectIncomingCandidates(dstID graph.NodeID, dstKey string, s step) []candidateHop {
+	mapper := pe.g.AdjList().Mapper()
+	var out []candidateHop
+	mapper.Walk(func(candidateID graph.NodeID, candidateKey string) bool {
+		if candidateID == dstID {
+			return true
+		}
+		nbs, _ := pe.g.AdjList().LoadEntry(candidateID)
+		for _, nb := range nbs {
+			if nb != dstID {
+				continue
+			}
+			if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) {
+				continue
+			}
+			out = append(out, candidateHop{srcID: candidateID, dstID: dstID, srcKey: candidateKey, dstKey: dstKey, forward: false})
+			break
+		}
+		return true
+	})
+	return out
+}
+
+// cloneRow returns a shallow copy of row so the callback never mutates
+// the caller's map.
+func cloneRow(row expr.RowContext) expr.RowContext {
+	out := make(expr.RowContext, len(row)+2)
+	for k, v := range row {
+		out[k] = v
+	}
+	return out
+}
+
+// nodeValueForID materialises an expr.NodeValue for nodeID using the
+// live graph's labels and properties. Returns a bare NodeValue with
+// only the ID populated when the mapper cannot resolve the id.
+func nodeValueForID(g *lpg.Graph[string, float64], id graph.NodeID) expr.NodeValue {
+	mapper := g.AdjList().Mapper()
+	key, ok := mapper.Resolve(id)
+	if !ok {
+		return expr.NodeValue{ID: uint64(id)}
+	}
+	labels := append([]string(nil), g.NodeLabels(key)...)
+	var props expr.MapValue
+	if raw := g.NodeProperties(key); len(raw) > 0 {
+		props = make(expr.MapValue, len(raw))
+		for k, pv := range raw {
+			props[k] = lpgPropToExpr(pv)
+		}
+	}
+	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
+}
+
+// relValueFromHop materialises an expr.RelationshipValue for a single
+// hop produced by enumerateSteps. The edge's storage direction is
+// (forward ? srcKey→dstKey : dstKey→srcKey) — callers pass forward=true
+// when the traversal followed the storage direction and false for the
+// reverse leg of an undirected / incoming match.
+func relValueFromHop(g *lpg.Graph[string, float64], hop candidateHop, _ *ast.RelationshipPattern) expr.RelationshipValue {
+	srcKey, dstKey := hop.srcKey, hop.dstKey
+	startID, endID := uint64(hop.srcID), uint64(hop.dstID)
+	if !hop.forward {
+		srcKey, dstKey = hop.dstKey, hop.srcKey
+		startID, endID = endID, startID
+	}
+	var typeName string
+	if labels := g.EdgeLabels(srcKey, dstKey); len(labels) > 0 {
+		typeName = labels[0]
+	}
+	var props expr.MapValue
+	if raw := g.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
+		props = make(expr.MapValue, len(raw))
+		for k, pv := range raw {
+			props[k] = lpgPropToExpr(pv)
+		}
+	}
+	return expr.RelationshipValue{
+		StartID:    startID,
+		EndID:      endID,
+		Type:       typeName,
+		Properties: props,
+	}
+}
+
 // matchPattern returns true iff at least one path in the graph matches pp
 // given the bindings in row.
 func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPattern, row expr.RowContext) (bool, error) {

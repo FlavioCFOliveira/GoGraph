@@ -74,10 +74,25 @@ type SubqueryEvaluator interface {
 // pattern exists in the graph given the bindings in row, BoolValue(false) when
 // no match exists, or Null when the result is undefined. It must honour the
 // supplied context for cancellation and propagate errors unchanged.
+//
+// EvalPatternComp is the list-producing variant used for
+// [ast.PatternComprehension] expressions that survive IR hoisting (e.g.
+// when nested inside a [ast.ListComprehension]'s predicate or
+// projection, where lifting the comprehension out of the per-iteration
+// scope would lose the iteration variable binding). It enumerates every
+// match of pc.Pattern given the bindings in row, evaluates the
+// per-match projection (or returns the matched relationship for the
+// projection-less form), and returns the collected ListValue. WHERE
+// predicates declared inside the comprehension are honoured.
 type PatternEvaluator interface {
 	// EvalPattern evaluates pp as an existential predicate and returns a boolean
 	// Value indicating whether the pattern matches at least one path in the graph.
 	EvalPattern(ctx context.Context, pp *ast.PathPattern, row RowContext, params map[string]Value) (Value, error)
+	// EvalPatternComp evaluates pc as a list-producing pattern
+	// comprehension and returns the projected list. The runtime
+	// implementation iterates every match of pc.Pattern with the
+	// bindings in row as anchors.
+	EvalPatternComp(ctx context.Context, pc *ast.PatternComprehension, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error)
 }
 
 // EvalError is returned when Eval encounters a type or semantic error that
@@ -298,6 +313,18 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 			return nil, &EvalError{Msg: "pattern predicate is not supported in this evaluation context (no PatternEvaluator wired)"}
 		}
 		return patEval.EvalPattern(ctx, n, row, params)
+
+	// ── Pattern comprehension (list-producing) ────────────────────────────────
+	// Survives IR hoisting in nested contexts (e.g. inside a list
+	// comprehension's projection) where lifting the comprehension out of
+	// the iteration scope would lose the iteration variable binding.
+	// Closes Pattern2 [7].
+	case *ast.PatternComprehension:
+		ctx, patEval := extractPatternEvaluator(row)
+		if patEval == nil {
+			return nil, &EvalError{Msg: "pattern comprehension is not supported in this evaluation context (no PatternEvaluator wired)"}
+		}
+		return patEval.EvalPatternComp(ctx, n, row, params, reg)
 
 	default:
 		return nil, &EvalError{Msg: fmt.Sprintf("unsupported expression type %T", e)}

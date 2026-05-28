@@ -3120,13 +3120,29 @@ func buildEagerAggregation(
 		// Two-arg aggregates (percentileCont, percentileDisc) carry the
 		// percentile parameter in SecondArgExpr. Evaluate it once at
 		// build time so the factory bakes the value in. Single-arg
-		// aggregates pass expr.Null which is ignored downstream.
+		// aggregates pass expr.Null which is ignored downstream. The
+		// openCypher TCK (Aggregation6 [5]) treats a row-dependent
+		// percentile (e.g. a bare Variable that resolves only at row
+		// time) as ArgumentError: NumberOutOfRange — propagate that
+		// distinction by leaving secondArg as Null when the
+		// build-time eval cannot bind every leaf to a constant, then
+		// rely on aggregateFactory's strict numeric check below to
+		// surface the typed error.
 		var secondArg expr.Value = expr.Null
+		var secondArgIsRowDependent bool
 		if aggExpr.SecondArgExpr != nil {
-			v, evErr := expr.Eval(aggExpr.SecondArgExpr, expr.RowContext{}, params, reg)
-			if evErr == nil {
-				secondArg = v
+			if exprContainsRowDependency(aggExpr.SecondArgExpr) {
+				secondArgIsRowDependent = true
+			} else {
+				v, evErr := expr.Eval(aggExpr.SecondArgExpr, expr.RowContext{}, params, reg)
+				if evErr == nil {
+					secondArg = v
+				}
 			}
+		}
+		_ = secondArgIsRowDependent
+		if secondArgIsRowDependent {
+			return nil, fmt.Errorf("cypher: ArgumentError.NumberOutOfRange: percentile argument of %s must be a constant in [0.0, 1.0], got a row-dependent expression", aggExpr.Function)
 		}
 		factory, ferr := aggregateFactory(aggExpr.Function, aggExpr.Argument, secondArg)
 		if ferr != nil {
@@ -3389,6 +3405,47 @@ func aggregateFactory(fn, argument string, secondArg expr.Value) (funcs.Aggregat
 	default:
 		return nil, fmt.Errorf("unknown aggregate function %q", fn)
 	}
+}
+
+// exprContainsRowDependency reports whether e references at least one
+// row-dependent value — any *ast.Variable (which only binds at row
+// time) or any non-parameter expression that walks down to one.
+// Parameters and literals are NOT row-dependent. Used by the
+// percentile-aggregate builder to reject row-varying percentile
+// arguments at plan-build time (Aggregation6 [5]).
+func exprContainsRowDependency(e ast.Expression) bool {
+	if e == nil {
+		return false
+	}
+	switch n := e.(type) {
+	case *ast.Variable:
+		return true
+	case *ast.Property:
+		return exprContainsRowDependency(n.Receiver)
+	case *ast.BinaryOp:
+		return exprContainsRowDependency(n.Left) || exprContainsRowDependency(n.Right)
+	case *ast.UnaryOp:
+		return exprContainsRowDependency(n.Operand)
+	case *ast.FunctionInvocation:
+		for _, arg := range n.Args {
+			if exprContainsRowDependency(arg) {
+				return true
+			}
+		}
+		return false
+	case *ast.SubscriptExpr:
+		return exprContainsRowDependency(n.Expr) || exprContainsRowDependency(n.Index)
+	case *ast.SliceExpr:
+		return exprContainsRowDependency(n.Expr) || exprContainsRowDependency(n.From) || exprContainsRowDependency(n.To)
+	case *ast.ListLiteral:
+		for _, el := range n.Elements {
+			if exprContainsRowDependency(el) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // percentileParam coerces the second argument of a percentile aggregate
