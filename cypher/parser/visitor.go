@@ -1759,7 +1759,25 @@ func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (a
 		isFracKey := isAllDigits(key) || looksLikeExponentFloat(key)
 		if isFracKey {
 			if intLit, ok := base.(*ast.IntLiteral); ok {
-				f, ferr := strconv.ParseFloat(fmt.Sprintf("%d.%s", intLit.Value, key), 64)
+				// Recover a leading sign that was absorbed into the integer
+				// token: int64 cannot represent -0, so an input like
+				// `-0.001` reaches this branch as IntLit{Value: 0} and the
+				// sign is lost when we format the float string. When the
+				// integer's source text starts with '-' AND the fractional
+				// key has a non-zero digit we re-add the sign so ParseFloat
+				// produces the negative value the literal denotes. A
+				// fractional key that is all zeros (e.g. `-0.0`,
+				// `-0.000`) collapses to a positive zero per the
+				// openCypher canonical form (signed zero is not exposed at
+				// the literal level). The non-zero-integer branch keeps
+				// its sign in intLit.Value already.
+				sign := ""
+				if intLit.Value == 0 && ctx.Atom() != nil &&
+					strings.HasPrefix(ctx.Atom().GetText(), "-") &&
+					!isAllZeroDigits(key) {
+					sign = "-"
+				}
+				f, ferr := strconv.ParseFloat(fmt.Sprintf("%s%d.%s", sign, intLit.Value, key), 64)
 				if ferr == nil {
 					return &ast.FloatLiteral{Pos: intLit.Pos, EndPos: endPositionOf(ctx), Value: f}, nil
 				}
@@ -1792,6 +1810,23 @@ func isAllDigits(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isAllZeroDigits reports whether s is a non-empty run of ASCII '0'
+// characters. Used to detect canonical-zero fractional parts so a
+// negated integer literal whose fraction collapses to zero (e.g.
+// `-0.0`, `-0.000`) is normalised to a positive zero rather than
+// IEEE-754 negative zero.
+func isAllZeroDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '0' {
 			return false
 		}
 	}
