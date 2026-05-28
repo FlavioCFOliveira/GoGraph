@@ -682,10 +682,15 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 	return plan, nil
 }
 
-// setPathVarOnVLE walks the plan tree depth-first and sets PathVar on the first
-// VarLengthExpand node found, so that the physical builder can allocate a
-// schema slot and emit a PathValue. Only the first VarLengthExpand is tagged
-// (one path variable per pattern).
+// setPathVarOnVLE walks the plan tree depth-first and sets PathVar on
+// EVERY VarLengthExpand node it finds, so that the physical builder can
+// reconstruct the path from a chain of VLE emissions. When more than one
+// VLE shares the same path variable (chained VLE pattern like `MATCH p
+// = (a)-[*]->(b)-[*]->(c)`), each VLE registers a segment in
+// bopts.pathVarMeta[pathVar].segments, and the projection iterates them
+// in order to stitch the full path. The single-VLE case behaves
+// identically to the previous "first-VLE-only" tagging because the
+// segments slice ends up with one entry.
 func setPathVarOnVLE(plan LogicalPlan, pathVar string) {
 	if plan == nil {
 		return
@@ -694,7 +699,7 @@ func setPathVarOnVLE(plan LogicalPlan, pathVar string) {
 		if vle.PathVar == "" {
 			vle.PathVar = pathVar
 		}
-		return
+		// Continue walking so chained VLEs also get tagged.
 	}
 	for _, child := range plan.Children() {
 		setPathVarOnVLE(child, pathVar)

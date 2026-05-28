@@ -1329,6 +1329,21 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3878: ratcheted after round 81 — chained-VLE named-path
+//     reconstruction. pathVarInfo gains a `segments []pathVarSegment`
+//     field; each VarLengthExpand that shares the named-path variable
+//     appends a segment in plan-build order. setPathVarOnVLE now
+//     visits EVERY VLE in the chain (previously it returned after
+//     the first). buildIRProjection's path-variable fast path (and
+//     buildPathValueFromVLEMeta, used by buildRowCtx) iterates the
+//     segments slice and stitches the full path: each segment
+//     contributes its hops, with the leading node taken from the
+//     first non-empty segment. Closes Match6 [17] (`MATCH p = (a
+//     {name: 'A'})-[:KNOWS*0..1]->(b)-[:FRIEND*0..1]->(c)` was
+//     returning <(b)> and <(b)-[:FRIEND]->(c)> instead of the
+//     a→b→c-rooted paths because the legacy pathVarMeta only tracked
+//     the LAST VLE's emission). 10-run sample: 10-of-10 at 3878;
+//     gate at 3878 with 0 headroom.
 //   - 3877: ratcheted after round 80 — new bopts.aggKeyScalarCols set
 //     suppresses the IntegerValue→NodeValue upgrade in the
 //     buildIRProjection Variable fast path for any post-aggregation
@@ -1678,7 +1693,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3877
+const tckExecutionBaseline = 3878
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

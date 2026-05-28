@@ -110,9 +110,28 @@ type edgeVarInfo struct {
 //	[srcNodeID, edgePos0, dstNode0, edgePos1, dstNode1, ...]
 //
 // buildIRProjection uses this to reconstruct an expr.PathValue.
+//
+// For a chained-VLE path pattern (`MATCH p = (a)-[*]->(b)-[*]->(c)`),
+// each VLE in the chain registers a segment in the `segments` field
+// (in plan-build order, which is bottom-up, so the leftmost VLE in
+// the pattern is appended FIRST). The projection iterates segments in
+// reverse plan-build order to stitch the path left-to-right. When
+// only one VLE contributes to the path (the common case), segments
+// has length 1 — equivalent to the legacy (listCol, edgeType)
+// shape — and the projection reads it identically.
 type pathVarInfo struct {
-	listCol  int    // schema column holding the flat alternating ListValue
-	edgeType string // first element of RelTypes, or empty
+	listCol  int              // first segment's listCol (legacy shape)
+	edgeType string           // first segment's edgeType (legacy shape)
+	segments []pathVarSegment // chained-VLE segments in plan-build order
+}
+
+// pathVarSegment captures one VarLengthExpand's contribution to a
+// chained-VLE named path. listCol points at the flat alternating
+// ListValue this VLE emits ([srcID, edgePos0, dst0, ...]); edgeType
+// is the first declared RelTypes filter or empty.
+type pathVarSegment struct {
+	listCol  int
+	edgeType string
 }
 
 // pathChainStep describes one (relationship, destination-node) hop of a
@@ -2842,18 +2861,30 @@ func buildOperator(
 		}
 		schema[toKey] = schemaBaseVLE + 1
 
-		// Record path variable metadata for buildIRProjection.
+		// Record path variable metadata for buildIRProjection. For a
+		// chained-VLE pattern (multiple VLEs sharing the same PathVar)
+		// each VLE registers a segment in plan-build order; the
+		// projection iterates segments to stitch the full path. The
+		// single-VLE case is unchanged: segments has length 1 and the
+		// legacy listCol/edgeType fields mirror the first segment.
 		if p.PathVar != "" && bopts != nil {
 			if bopts.pathVarMeta == nil {
 				bopts.pathVarMeta = make(map[string]pathVarInfo)
 			}
-			info := pathVarInfo{listCol: schemaBaseVLE}
+			seg := pathVarSegment{listCol: schemaBaseVLE}
 			if len(p.RelTypes) > 0 {
-				info.edgeType = p.RelTypes[0]
+				seg.edgeType = p.RelTypes[0]
 			}
+			info, exists := bopts.pathVarMeta[p.PathVar]
+			if !exists {
+				info = pathVarInfo{listCol: seg.listCol, edgeType: seg.edgeType}
+			}
+			info.segments = append(info.segments, seg)
 			bopts.pathVarMeta[p.PathVar] = info
 			// Also register in schema so variable is accessible.
-			schema[p.PathVar] = schemaBaseVLE
+			if !exists {
+				schema[p.PathVar] = schemaBaseVLE
+			}
 		}
 		// Record the VLE relationship variable so the projection renders it
 		// as a list of RelationshipValues instead of the raw flat list.
@@ -4269,57 +4300,77 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph
 // `length(p)` over var-length paths). Returns (zero, false) when the
 // column is missing, not a ListValue, empty, or carries non-integer entries.
 func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[string, float64]) (expr.PathValue, bool) {
-	if pmeta.listCol >= len(row) {
-		return expr.PathValue{}, false
+	segments := pmeta.segments
+	if len(segments) == 0 {
+		segments = []pathVarSegment{{listCol: pmeta.listCol, edgeType: pmeta.edgeType}}
 	}
-	lv, ok := row[pmeta.listCol].(expr.ListValue)
-	if !ok || len(lv) == 0 {
-		return expr.PathValue{}, false
-	}
-	nHops := (len(lv) - 1) / 2
-	nodes := make([]expr.NodeValue, 0, nHops+1)
-	rels := make([]expr.RelationshipValue, 0, nHops)
-	leadID, ok := lv[0].(expr.IntegerValue)
-	if !ok {
-		return expr.PathValue{}, false
-	}
-	nodes = append(nodes, buildNodeValueFromID(graph.NodeID(leadID), g))
-	for h := 0; h < nHops; h++ {
-		edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
-		dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
-		if !ok1 || !ok2 {
+	var nodes []expr.NodeValue
+	var rels []expr.RelationshipValue
+	for segIdx, seg := range segments {
+		if seg.listCol >= len(row) {
 			return expr.PathValue{}, false
 		}
-		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
-		nodes = append(nodes, dstNode)
-		et := pmeta.edgeType
-		var edgeProps expr.MapValue
-		if g != nil {
-			srcKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(nodes[h].ID))
-			dstKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
-			if sOK && dOK {
-				if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
-					et = ets[0]
-				} else if ets := g.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
-					et = ets[0]
-				}
-				rawEP := g.EdgeProperties(srcKey, dstKey)
-				if len(rawEP) == 0 {
-					rawEP = g.EdgeProperties(dstKey, srcKey)
-				}
-				edgeProps = make(expr.MapValue, len(rawEP))
-				for k, pv := range rawEP {
-					edgeProps[k] = lpgPropToExpr(pv)
+		lv, ok := row[seg.listCol].(expr.ListValue)
+		if !ok {
+			return expr.PathValue{}, false
+		}
+		if len(lv) == 0 {
+			continue
+		}
+		nHops := (len(lv) - 1) / 2
+		if segIdx == 0 {
+			leadID, ok2 := lv[0].(expr.IntegerValue)
+			if !ok2 {
+				return expr.PathValue{}, false
+			}
+			nodes = append(nodes, buildNodeValueFromID(graph.NodeID(leadID), g))
+		}
+		for h := 0; h < nHops; h++ {
+			edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
+			dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
+			if !ok1 || !ok2 {
+				return expr.PathValue{}, false
+			}
+			dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
+			if len(nodes) == 0 {
+				if iv, ok3 := lv[0].(expr.IntegerValue); ok3 {
+					nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), g))
 				}
 			}
+			prev := nodes[len(nodes)-1]
+			nodes = append(nodes, dstNode)
+			et := seg.edgeType
+			var edgeProps expr.MapValue
+			if g != nil {
+				srcKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(prev.ID))
+				dstKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
+				if sOK && dOK {
+					if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+						et = ets[0]
+					} else if ets := g.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
+						et = ets[0]
+					}
+					rawEP := g.EdgeProperties(srcKey, dstKey)
+					if len(rawEP) == 0 {
+						rawEP = g.EdgeProperties(dstKey, srcKey)
+					}
+					edgeProps = make(expr.MapValue, len(rawEP))
+					for k, pv := range rawEP {
+						edgeProps[k] = lpgPropToExpr(pv)
+					}
+				}
+			}
+			rels = append(rels, expr.RelationshipValue{
+				ID:         uint64(edgePos),
+				StartID:    prev.ID,
+				EndID:      dstNode.ID,
+				Type:       et,
+				Properties: edgeProps,
+			})
 		}
-		rels = append(rels, expr.RelationshipValue{
-			ID:         uint64(edgePos),
-			StartID:    nodes[h].ID,
-			EndID:      dstNode.ID,
-			Type:       et,
-			Properties: edgeProps,
-		})
+	}
+	if len(nodes) == 0 {
+		return expr.PathValue{}, false
 	}
 	return expr.PathValue{Nodes: nodes, Relationships: rels}, true
 }
@@ -4813,7 +4864,11 @@ func buildIRProjection(
 					}
 				}
 				// Path variable fast path: reconstruct PathValue from the flat
-				// alternating ListValue emitted by the VarLengthExpand operator.
+				// alternating ListValue(s) emitted by the VarLengthExpand
+				// operator(s) — one segment per VLE for a chained pattern
+				// (`MATCH p = (a)-[*]->(b)-[*]->(c)`). The segments slice is
+				// populated bottom-up so iteration in slice order walks the
+				// path left-to-right.
 				if bopts != nil && evalFn == nil {
 					if pmeta, isPMeta := bopts.pathVarMeta[v.Name]; isPMeta {
 						capturedMeta := pmeta
@@ -4837,56 +4892,93 @@ func buildIRProjection(
 									}
 								}
 							}
-							lv, ok := row[capturedMeta.listCol].(expr.ListValue)
-							if !ok || len(lv) == 0 {
-								if pv, isPath := row[capturedMeta.listCol].(expr.PathValue); isPath {
-									return pv, nil
+							segments := capturedMeta.segments
+							if len(segments) == 0 {
+								// Legacy shape: synthesise a single segment
+								// from the top-level listCol/edgeType so the
+								// chained reconstruction below covers the
+								// uniform code path.
+								segments = []pathVarSegment{{
+									listCol:  capturedMeta.listCol,
+									edgeType: capturedMeta.edgeType,
+								}}
+							}
+							var nodes []expr.NodeValue
+							var rels []expr.RelationshipValue
+							for segIdx, seg := range segments {
+								if seg.listCol >= len(row) {
+									return expr.Null, nil
 								}
-								return expr.Null, nil
-							}
-							// Flat alternating format: [srcID, edgePos0, dst0, edgePos1, dst1, ...]
-							// len = 1 + 2*N for N hops.
-							nHops := (len(lv) - 1) / 2
-							nodes := make([]expr.NodeValue, 0, nHops+1)
-							rels := make([]expr.RelationshipValue, 0, nHops)
-							if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
-								nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), capturedG))
-							}
-							edgeType := capturedMeta.edgeType
-							for h := 0; h < nHops; h++ {
-								edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
-								dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
-								if !ok1 || !ok2 {
+								lv, ok := row[seg.listCol].(expr.ListValue)
+								if !ok {
+									// PathValue forwarded by an earlier
+									// projection; bail with the forwarded
+									// value when this is the only segment.
+									if pv, isPath := row[seg.listCol].(expr.PathValue); isPath && len(segments) == 1 {
+										return pv, nil
+									}
+									return expr.Null, nil
+								}
+								if len(lv) == 0 {
+									// Empty segment is degenerate: it
+									// contributes no hops and no nodes. The
+									// chain continues from the previous
+									// segment's tail.
 									continue
 								}
-								dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
-								nodes = append(nodes, dstNode)
-								// Resolve edge type from graph if known.
-								et := edgeType
-								var edgeProps expr.MapValue
-								if capturedG != nil && len(nodes) >= 2 {
-									srcNodeID := nodes[h].ID
-									dstNodeID := nodes[h+1].ID
-									srcKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcNodeID))
-									dstKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstNodeID))
-									if sOK && dOK {
-										if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
-											et = ets[0]
-										}
-										rawEP := capturedG.EdgeProperties(srcKey, dstKey)
-										edgeProps = make(expr.MapValue, len(rawEP))
-										for k, pv := range rawEP {
-											edgeProps[k] = lpgPropToExpr(pv)
-										}
+								nHops := (len(lv) - 1) / 2
+								if segIdx == 0 {
+									if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
+										nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), capturedG))
 									}
 								}
-								rels = append(rels, expr.RelationshipValue{
-									ID:         uint64(edgePos),
-									StartID:    nodes[h].ID,
-									EndID:      dstNode.ID,
-									Type:       et,
-									Properties: edgeProps,
-								})
+								edgeType := seg.edgeType
+								for h := 0; h < nHops; h++ {
+									edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
+									dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
+									if !ok1 || !ok2 {
+										continue
+									}
+									dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
+									if len(nodes) == 0 {
+										// Defensive: a chained segment without
+										// a leading-node from segment 0 (e.g.
+										// the first segment emitted an empty
+										// list and we proceeded). Seed nodes
+										// from this segment's src.
+										if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
+											nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), capturedG))
+										}
+									}
+									prev := nodes[len(nodes)-1]
+									nodes = append(nodes, dstNode)
+									et := edgeType
+									var edgeProps expr.MapValue
+									if capturedG != nil {
+										srcKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(prev.ID))
+										dstKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
+										if sOK && dOK {
+											if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+												et = ets[0]
+											}
+											rawEP := capturedG.EdgeProperties(srcKey, dstKey)
+											edgeProps = make(expr.MapValue, len(rawEP))
+											for k, pv := range rawEP {
+												edgeProps[k] = lpgPropToExpr(pv)
+											}
+										}
+									}
+									rels = append(rels, expr.RelationshipValue{
+										ID:         uint64(edgePos),
+										StartID:    prev.ID,
+										EndID:      dstNode.ID,
+										Type:       et,
+										Properties: edgeProps,
+									})
+								}
+							}
+							if len(nodes) == 0 {
+								return expr.Null, nil
 							}
 							return expr.PathValue{Nodes: nodes, Relationships: rels}, nil
 						}
