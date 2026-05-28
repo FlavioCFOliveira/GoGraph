@@ -33,3 +33,23 @@ func ContainsWrite(p LogicalPlan) bool {
 	}
 	return false
 }
+
+// ContainsDelete reports whether p's subtree contains any DELETE-class
+// operator. Used to decide whether a subsequent MERGE needs an Eager
+// pipeline-breaker so the deletion's writes are visible to the
+// MERGE-search (Merge1 [14]).
+func ContainsDelete(p LogicalPlan) bool {
+	if p == nil {
+		return false
+	}
+	switch p.(type) {
+	case *DeleteNode, *DeleteRelationship, *DetachDelete:
+		return true
+	}
+	for _, ch := range p.Children() {
+		if ContainsDelete(ch) {
+			return true
+		}
+	}
+	return false
+}

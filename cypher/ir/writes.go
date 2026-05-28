@@ -211,6 +211,17 @@ func collectPlanVars(plan LogicalPlan) map[string]struct{} {
 // other MERGE shapes (node-only, multi-hop, with ON-actions) keep
 // using the node-oriented [Merge] path.
 func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, error) {
+	// Eager pipeline-break when the child contains a DELETE: openCypher
+	// requires DELETE's writes to be visible to a subsequent MERGE's
+	// match-or-create search. Without the Eager wrap the MERGE-search
+	// runs row-by-row interleaved with DELETEs, so the first row's
+	// MERGE may match a node that LATER rows would have deleted —
+	// surfacing as Merge1 [14]: `MATCH (a:A) DELETE a MERGE (a2:A)
+	// RETURN a2.num` returned the second :A node's num before the
+	// second row's DELETE completed.
+	if child != nil && ContainsDelete(child) {
+		child = NewEager(child)
+	}
 	if child != nil {
 		if srcVar, dstVar, relVar, relType, relProps, ok := mergeSingleHopRel(m.Pattern); ok {
 			outerVars := collectAllVars(child)
