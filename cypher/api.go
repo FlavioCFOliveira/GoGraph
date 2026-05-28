@@ -1179,7 +1179,7 @@ func buildOperatorWrite(
 		}
 		if p.PropertiesExpr != nil {
 			if ml, ok := p.PropertiesExpr.(*ast.MapLiteral); ok {
-				if fn := buildPropsEvalFn(ml, propsSchema, params, reg, mutator); fn != nil {
+				if fn := buildPropsEvalFn(ml, propsSchema, params, reg, mutator, bopts); fn != nil {
 					cn.WithPropsEvalFn(fn)
 				}
 			}
@@ -1219,7 +1219,7 @@ func buildOperatorWrite(
 				if p.RelVar != "" {
 					delete(relPropsSchema, p.RelVar)
 				}
-				if fn := buildPropsEvalFn(ml, relPropsSchema, params, reg, mutator); fn != nil {
+				if fn := buildPropsEvalFn(ml, relPropsSchema, params, reg, mutator, bopts); fn != nil {
 					cr.WithPropsEvalFn(fn)
 				}
 			}
@@ -1625,6 +1625,7 @@ func buildPropsEvalFn(
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	mutator exec.GraphMutator,
+	bopts *buildOpts,
 ) exec.PropsEvalFn {
 	if ml == nil {
 		return nil
@@ -1634,11 +1635,25 @@ func buildPropsEvalFn(
 	copy(keys, ml.Keys)
 	vals := make([]ast.Expression, len(ml.Values))
 	copy(vals, ml.Values)
+	// Snapshot the scalar-column set: any column that flows from an UNWIND
+	// element variable or an aggregate output is numeric and must NOT be
+	// upgraded to a NodeValue when it numerically coincides with an internal
+	// node id. Without this guard a CREATE that consumes the unwound element
+	// as a property value (e.g. `UNWIND range(0, 15) AS i CREATE ({count:
+	// i})`) intermittently stores a NodeValue (which reads back as null) for
+	// whichever element happens to match a freshly-allocated node id.
+	var scalarSnap map[string]struct{}
+	if bopts != nil && len(bopts.scalarCols) > 0 {
+		scalarSnap = make(map[string]struct{}, len(bopts.scalarCols))
+		for k := range bopts.scalarCols {
+			scalarSnap[k] = struct{}{}
+		}
+	}
 
 	return func(row exec.Row) []exec.PropEntry {
 		// Build a RowContext that can resolve variable bindings and node
 		// property accesses from the current row.
-		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator)
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
 
 		var out []exec.PropEntry
 		for i, k := range keys {
@@ -1667,13 +1682,25 @@ func buildPropsEvalFn(
 //
 // When no mutator is available, or when the integer cannot be resolved to a
 // node, the raw IntegerValue is kept.
-func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator) expr.RowContext {
+//
+// scalarCols, when non-nil, lists variable names whose row values must pass
+// through unchanged: UNWIND element variables and EagerAggregation outputs
+// are scalar by construction and may numerically coincide with internal node
+// ids — upgrading them would silently corrupt downstream CREATE/SET property
+// writes.
+func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator, scalarCols map[string]struct{}) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
 		}
 		v := row[colIdx]
+		if scalarCols != nil {
+			if _, isScalar := scalarCols[varName]; isScalar {
+				ctx[varName] = v
+				continue
+			}
+		}
 		if mutator != nil {
 			if iv, ok := v.(expr.IntegerValue); ok {
 				nodeID := graph.NodeID(iv)

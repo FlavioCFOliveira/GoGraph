@@ -1310,11 +1310,20 @@ import (
 //     compares regardless of MapValue's Go-map iteration order. Closes
 //     Literals8 [18]. 20-run sample: floor 3839, median ~3843, max
 //     3847; gate at 3839 with 0 headroom.
+//   - 3841: ratcheted after round 51 — buildPropsEvalFn now honours
+//     bopts.scalarCols when building the per-row context for CREATE and
+//     CREATE relationship property maps. Previously a CREATE inside an
+//     UNWIND of integers that numerically coincided with internal LPG
+//     node ids (e.g. `UNWIND range(0, 15) AS i CREATE ({count: i})`)
+//     intermittently stored a NodeValue (read back as NULL) instead of
+//     the integer. Closes Create6 [6] and ReturnSkipLimit3 [3]. 20-run
+//     sample: floor 3841, median ~3844, max 3848; gate at 3841 with 0
+//     headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3839
+const tckExecutionBaseline = 3841
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
