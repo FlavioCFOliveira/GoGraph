@@ -4565,12 +4565,30 @@ func buildIRProjection(
 					if pmeta, isPMeta := bopts.pathVarMeta[v.Name]; isPMeta {
 						capturedMeta := pmeta
 						capturedG := g
+						capturedName := v.Name
+						capturedSchema := inputSchema
 						evalFn = func(row exec.Row) (expr.Value, error) {
 							if capturedMeta.listCol >= len(row) {
 								return expr.Null, nil
 							}
+							// Post-aggregation projection: an EagerAggregation
+							// that grouped by `p` stored the PathValue directly
+							// into the new key column, dropping the flat-list
+							// representation pathVarMeta was built against. If
+							// the input schema slot for `p` holds a PathValue,
+							// forward it unchanged (With6 [4]).
+							if capturedSchema != nil {
+								if col, ok := capturedSchema[capturedName]; ok && col < len(row) {
+									if pv, isPath := row[col].(expr.PathValue); isPath {
+										return pv, nil
+									}
+								}
+							}
 							lv, ok := row[capturedMeta.listCol].(expr.ListValue)
 							if !ok || len(lv) == 0 {
+								if pv, isPath := row[capturedMeta.listCol].(expr.PathValue); isPath {
+									return pv, nil
+								}
 								return expr.Null, nil
 							}
 							// Flat alternating format: [srcID, edgePos0, dst0, edgePos1, dst1, ...]

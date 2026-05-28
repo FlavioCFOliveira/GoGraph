@@ -1329,6 +1329,15 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3849: ratcheted after round 59 — the projection's path-variable
+//     fast-path now forwards a PathValue directly when the schema slot
+//     for the variable holds one, instead of always trying to decode
+//     a flat-list encoding at pmeta.listCol. An EagerAggregation that
+//     groups by a VLE path variable stores the reconstructed PathValue
+//     in the new key column; the OLD listCol no longer holds the flat
+//     list, so the projection fast-path used to surface NULL. Closes
+//     With6 [4]. 20-run sample: floor 3849, median ~3852, max 3854;
+//     gate at 3849 with 0 headroom.
 //   - 3847 (held): round 58 added DeleteNode PathValue handling that
 //     mirrors DetachDelete's path sweep so `DELETE pathColls.key[0],
 //     pathColls.key[1]` deletes the path's rels and nodes. Closes
@@ -1390,7 +1399,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3847
+const tckExecutionBaseline = 3849
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
