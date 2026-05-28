@@ -1329,6 +1329,22 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3881: ratcheted after round 83 — destRebinding-aware prevNodeVar
+//     threading in matchPathPattern / matchPathPatternWithArg. When the
+//     destination-node rebinding fires (e.g. the middle `(n)` of
+//     `(l)<-[:R]-(n)-[:R]->(m)` is already bound by the outer scope),
+//     the Expand emits its dst into a synthetic `__anon_N_to_<toVar>`
+//     column and the rebinding equality Selection is hoisted above the
+//     Apply. The walker was setting prevNodeVar to the LOGICAL toVar
+//     for the next hop, but schema[<toVar>] points at the outer column
+//     (or no column at all in inner-subtree scope); the next hop's
+//     Expand fell back to row[0] (the leaf scan target), so the chain
+//     expanded from the WRONG node. A new lastSyntheticToFor helper
+//     walks the just-emitted plan to recover the synthetic name, and
+//     matchPathPattern / matchPathPatternWithArg thread it into
+//     prevNodeVar when destRebinding fired. Closes ExistentialSubquery3
+//     [2]'s nested-EXISTS `(l)<-[:R]-(n)-[:R]->(m)` pattern.
+//     10-run sample: 10-of-10 at 3881; gate at 3881 with 0 headroom.
 //   - 3880: ratcheted after round 82 — edge-ID-based storage-direction
 //     resolution for path reconstruction. A new bopts.edgeIDResolver
 //     (lazily built once per query from the LPG's forward CSR) maps a
@@ -1715,7 +1731,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3880
+const tckExecutionBaseline = 3881
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

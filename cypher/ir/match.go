@@ -3,6 +3,7 @@ package ir
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"gograph/cypher/ast"
 )
@@ -914,6 +915,43 @@ func liveOutputVars(plan LogicalPlan) map[string]struct{} { //nolint:gocyclo // 
 	}
 }
 
+// lastSyntheticToFor walks plan top-down looking for an Expand-family
+// node whose ToVar matches the `__anon_N_to_<toVar>` synthetic naming
+// convention emitted by matchExpandStepBoundWithFrom's destRebinding
+// branch. Returns the synthetic name when found, otherwise falls back
+// to toVar. The lookup follows single-child wrappers (Selection)
+// because the destRebinding equality Selection sits directly above
+// the Expand that emitted the synthetic. Used by matchPathPattern /
+// matchPathPatternWithArg to thread the synthetic as the next hop's
+// fromVar when destRebinding fires.
+func lastSyntheticToFor(plan LogicalPlan, toVar string) string {
+	suffix := "_to_" + toVar
+	for cur := plan; cur != nil; {
+		switch n := cur.(type) {
+		case *Expand:
+			if strings.HasSuffix(n.ToVar, suffix) {
+				return n.ToVar
+			}
+			cur = n.Child
+		case *OptionalExpand:
+			if strings.HasSuffix(n.ToVar, suffix) {
+				return n.ToVar
+			}
+			cur = n.Child
+		case *VarLengthExpand:
+			if strings.HasSuffix(n.ToVar, suffix) {
+				return n.ToVar
+			}
+			cur = n.Child
+		case *Selection:
+			cur = n.Child
+		default:
+			return toVar
+		}
+	}
+	return toVar
+}
+
 // outputVarSet returns the variables exposed by plan as a set.
 func outputVarSet(plan LogicalPlan) map[string]struct{} {
 	if plan == nil {
@@ -1011,8 +1049,24 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 				synth := t.freshAnonVar()
 				el.Relationship.Variable = &synth
 			}
+			nodeAlreadyBound := false
+			if _, ab := boundVars[*el.Node.Variable]; ab {
+				nodeAlreadyBound = true
+			}
 			plan = t.matchExpandStepBoundWithFromSiblings(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar, siblingRels)
-			prevNodeVar = *el.Node.Variable
+			next := *el.Node.Variable
+			if nodeAlreadyBound {
+				// destRebinding fired: the Expand emitted a synthetic
+				// `__anon_N_to_<toVar>` column. Subsequent hops must
+				// thread that synthetic as fromVar — schema[<toVar>]
+				// points at the outer column (or no column at all in
+				// inner-subtree scope), so reading from the logical
+				// name would scan row[0] (the leaf scan target).
+				// Closes ExistentialSubquery3 [2]'s chained
+				// `(l)<-[:R]-(n)-[:R]->(m)`.
+				next = lastSyntheticToFor(plan, *el.Node.Variable)
+			}
+			prevNodeVar = next
 			boundVars[*el.Node.Variable] = struct{}{}
 			boundVars[*el.Relationship.Variable] = struct{}{}
 			siblingRels = append(siblingRels, *el.Relationship.Variable)
@@ -1086,8 +1140,24 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 				synth := t.freshAnonVar()
 				el.Relationship.Variable = &synth
 			}
+			nodeAlreadyBound := false
+			if _, ab := boundVars[*el.Node.Variable]; ab {
+				nodeAlreadyBound = true
+			}
 			plan = t.matchExpandStepBoundWithFromSiblings(el.Relationship, el.Node, plan, optional, boundVars, prevNodeVar, siblingRels)
-			prevNodeVar = *el.Node.Variable
+			next := *el.Node.Variable
+			if nodeAlreadyBound {
+				// destRebinding fired: the Expand emitted a synthetic
+				// `__anon_N_to_<toVar>` column. Subsequent hops must
+				// thread that synthetic as fromVar — schema[<toVar>]
+				// points at the outer column (or no column at all in
+				// inner-subtree scope), so reading from the logical
+				// name would scan row[0] (the leaf scan target).
+				// Closes ExistentialSubquery3 [2]'s chained
+				// `(l)<-[:R]-(n)-[:R]->(m)`.
+				next = lastSyntheticToFor(plan, *el.Node.Variable)
+			}
+			prevNodeVar = next
 			boundVars[*el.Node.Variable] = struct{}{}
 			boundVars[*el.Relationship.Variable] = struct{}{}
 			siblingRels = append(siblingRels, *el.Relationship.Variable)
