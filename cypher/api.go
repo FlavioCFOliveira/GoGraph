@@ -2423,16 +2423,18 @@ func buildOperator(
 			}
 			count = n
 		}
-		// LIMIT 0 over a write subtree: drain the child via an Eager
+		// LIMIT over a write subtree: drain the child via an Eager
 		// barrier so the write operators below run to completion
-		// even though Limit.Next would otherwise return false on the
-		// very first call. openCypher 9 §3.6.2 requires the write
-		// side effects to occur regardless of how many rows the
-		// projection finally returns. Other LIMIT N counts keep the
-		// lazy short-circuit so that scenarios whose setup queries
-		// also use LIMIT (e.g. partial-clean-up writes) are not
-		// disturbed.
-		if count == 0 && ir.ContainsWrite(p.Child) {
+		// before LIMIT short-circuits the output stream. openCypher
+		// 9 §3.6.2 requires the write side effects to occur
+		// regardless of how many rows the projection finally returns
+		// — `UNWIND $list AS x CREATE (...) RETURN ... LIMIT 2` must
+		// still create one node/relationship per UNWIND element even
+		// though only 2 rows make it past LIMIT. The Eager wrapper
+		// materialises every input row (firing every write) before
+		// LIMIT begins consuming. Closes Create6 [10] and similar
+		// SKIP/LIMIT-truncated CREATE scenarios.
+		if ir.ContainsWrite(p.Child) {
 			return exec.NewLimit(exec.NewEager(child), count)
 		}
 		return exec.NewLimit(child, count)
