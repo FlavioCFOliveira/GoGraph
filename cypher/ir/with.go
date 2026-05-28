@@ -83,6 +83,14 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		if rewritten := rewriteProjectionForAggregation(aggProj); rewritten != nil {
 			items = rewritten
 		}
+		// openCypher §3.6.4: ORDER BY on an aggregating WITH can reference
+		// either the grouping-key alias or its source expression. Rewrite
+		// the ORDER BY items so any subexpression whose String() equals a
+		// projection item's source expression is replaced by a Variable
+		// referencing the alias. Without this, `WITH a.name AS name,
+		// count(*) AS cnt ORDER BY a.name + 'C'` fails because `a` is no
+		// longer in scope after the aggregation (WithOrderBy2 [23]).
+		rewriteOrderByForAggregation(w.Projection, items)
 		if len(items) > 0 {
 			plan = NewProjection(items, plan)
 		}
@@ -219,6 +227,116 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		}
 		cp := *n
 		cp.Receiver = rec
+		return &cp
+	}
+	return e
+}
+
+// rewriteOrderByForAggregation rewrites every ORDER BY expression on the
+// projection so any subexpression matching a projection item's source
+// expression is replaced by a Variable referencing the item's alias.
+// openCypher allows aggregating-WITH ORDER BY to reference the grouping
+// expression OR its alias; after EagerAggregation only the alias is in
+// scope, so the source-expression form must be rewritten to evaluate
+// against the aggregated row.
+func rewriteOrderByForAggregation(proj *ast.Projection, items []ProjectionItem) {
+	if proj == nil || len(proj.OrderBy) == 0 {
+		return
+	}
+	// Build a map from source-expression string → alias variable.
+	exprToAlias := make(map[string]string, len(items))
+	for _, it := range items {
+		if it.Name == "" || it.Expression == "" || it.Expression == it.Name {
+			continue
+		}
+		exprToAlias[it.Expression] = it.Name
+	}
+	if len(exprToAlias) == 0 {
+		return
+	}
+	for _, s := range proj.OrderBy {
+		if s == nil || s.Expr == nil {
+			continue
+		}
+		s.Expr = substExprByString(s.Expr, exprToAlias)
+	}
+}
+
+// substExprByString returns a copy of e in which any sub-expression whose
+// String() equals a key in subst is replaced by a Variable referencing
+// subst[s.String()]. Used by rewriteOrderByForAggregation to translate
+// grouping-expression references in ORDER BY items into the alias variable
+// they were projected as.
+func substExprByString(e ast.Expression, subst map[string]string) ast.Expression { //nolint:gocyclo // case-per-AST-node dispatch
+	if e == nil {
+		return nil
+	}
+	if alias, ok := subst[e.String()]; ok {
+		return &ast.Variable{Name: alias}
+	}
+	switch n := e.(type) {
+	case *ast.BinaryOp:
+		left := substExprByString(n.Left, subst)
+		right := substExprByString(n.Right, subst)
+		if left == n.Left && right == n.Right {
+			return n
+		}
+		cp := *n
+		cp.Left = left
+		cp.Right = right
+		return &cp
+	case *ast.UnaryOp:
+		op := substExprByString(n.Operand, subst)
+		if op == n.Operand {
+			return n
+		}
+		cp := *n
+		cp.Operand = op
+		return &cp
+	case *ast.Property:
+		rec := substExprByString(n.Receiver, subst)
+		if rec == n.Receiver {
+			return n
+		}
+		cp := *n
+		cp.Receiver = rec
+		return &cp
+	case *ast.FunctionInvocation:
+		var changed bool
+		newArgs := make([]ast.Expression, len(n.Args))
+		for i, a := range n.Args {
+			newArgs[i] = substExprByString(a, subst)
+			if newArgs[i] != a {
+				changed = true
+			}
+		}
+		if !changed {
+			return n
+		}
+		cp := *n
+		cp.Args = newArgs
+		return &cp
+	case *ast.SubscriptExpr:
+		expr := substExprByString(n.Expr, subst)
+		idx := substExprByString(n.Index, subst)
+		if expr == n.Expr && idx == n.Index {
+			return n
+		}
+		cp := *n
+		cp.Expr = expr
+		cp.Index = idx
+		return &cp
+	case *ast.SliceExpr:
+		ex := substExprByString(n.Expr, subst)
+		from := substExprByString(n.From, subst)
+		to := substExprByString(n.To, subst)
+		if ex == n.Expr && from == n.From && to == n.To {
+			return n
+		}
+		cp := *n
+		cp.Expr = ex
+		cp.From = from
+		cp.To = to
 		return &cp
 	}
 	return e
