@@ -1329,6 +1329,17 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3882: ratcheted after round 84 — VarLengthExpand now accepts both
+//     IntegerValue (Expand-emitted raw NodeID, the in-pipeline encoding)
+//     AND NodeValue (the upgraded form an upstream Projection emits)
+//     at its source-column row slot. Without this, patterns like
+//     `MATCH (a) WITH a AS x MATCH (x)-[*]->(...)` were silently dropping
+//     every input row because the WITH had upgraded `x` to a NodeValue
+//     and the VLE's `cp[op.inputCol].(expr.IntegerValue)` type assertion
+//     failed. Closes Match9 [6] (`MATCH (a)-[r1]->()-[r2]->(b) WITH
+//     [r1, r2] AS rs, a AS first, b AS second LIMIT 1 MATCH
+//     (first)-[rs*]->(second) RETURN first, second`). 10-run sample:
+//     10-of-10 at 3882; gate at 3882 with 0 headroom.
 //   - 3881: ratcheted after round 83 — destRebinding-aware prevNodeVar
 //     threading in matchPathPattern / matchPathPatternWithArg. When the
 //     destination-node rebinding fires (e.g. the middle `(n)` of
@@ -1731,7 +1742,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3881
+const tckExecutionBaseline = 3882
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

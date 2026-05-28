@@ -296,15 +296,25 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 		copy(cp, inputRow)
 		op.inputRow = cp
 
-		// Seed BFS from the source node.
+		// Seed BFS from the source node. The input column may carry either
+		// the raw IntegerValue NodeID (Expand-emitted, the in-pipeline
+		// encoding) or an upgraded NodeValue (after a WITH projection has
+		// run through buildRowCtx's upgrade pass). Accept both shapes so
+		// patterns like `MATCH (a) WITH a AS x MATCH (x)-[*]->(...)` work
+		// — the WITH stores `x` as a NodeValue in the row, and the
+		// downstream VLE was silently skipping every such row.
 		if op.inputCol >= len(cp) {
 			continue // row too narrow; skip
 		}
-		iv, ok2 := cp[op.inputCol].(expr.IntegerValue)
-		if !ok2 {
-			continue // not an integer; skip
+		var srcID uint64
+		switch v := cp[op.inputCol].(type) {
+		case expr.IntegerValue:
+			srcID = uint64(v)
+		case expr.NodeValue:
+			srcID = v.ID
+		default:
+			continue // unsupported source-column type
 		}
-		srcID := uint64(iv)
 
 		// Reset per-source state.
 		op.queue = op.queue[:0]
