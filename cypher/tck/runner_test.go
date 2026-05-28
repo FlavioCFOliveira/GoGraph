@@ -1329,6 +1329,20 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3873: ratcheted after round 75 — translateReturn now appends hidden
+//     `appendOrderByPassthrough` items when ORDER BY references variables
+//     that the RETURN itself does not output (e.g. `RETURN [p = (n)--() |
+//     p] AS isNew ORDER BY n.time`). Mirrors the existing WITH-side
+//     pre-projection passthrough. Without this the Sort runs against a
+//     post-projection row that has no `n` slot, the sort-key evaluator
+//     falls back to NULL, and rows order non-deterministically — Pattern2
+//     [11] flaked 7-of-10 between forward and reverse arrows because the
+//     time=10 vs time=20 ordering was effectively random. Skipped for
+//     aggregating RETURNs (their EagerAggregation pre-projection runs
+//     rewriteOrderByForAggregation instead). Closes Pattern2 [11].
+//     10-run sample: floor 3873, median ~3875, max 3877; gate at 3873
+//     with 0 headroom (flake band Delete4 [1] / Merge1 [9] / Match2 [6]
+//     / MatchWhere1 [11] absorbed in median).
 //   - 3872: ratcheted after round 73 — three coordinated changes for the
 //     bound-relationship and rename-swap cluster:
 //     (a) matchExpandStepBoundWithFrom now detects rel-rebinding (when
@@ -1574,7 +1588,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3872
+const tckExecutionBaseline = 3873
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

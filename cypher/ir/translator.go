@@ -332,6 +332,23 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	// wrap in EagerAggregation first, then Projection.
 	var plan LogicalPlan
 	groupBy, groupByExprs, aggs, hasAgg := detectAggregation(aggProj)
+	// openCypher allows ORDER BY to reference pre-projection variables
+	// that the RETURN itself does not output (e.g. `RETURN [p = (n)--() |
+	// p] AS isNew ORDER BY n.time`). Without a hidden passthrough the
+	// Sort runs against the post-projection row which has no `n` slot,
+	// the sort-key evaluator falls back to NULL, and rows order non-
+	// deterministically (Pattern2 [11] flaked between forward and reverse
+	// arrows because the time=10 vs time=20 ordering was effectively
+	// random). Append hidden projection items for any pre-projection
+	// variable referenced by ORDER BY but not already in items; the
+	// final ProduceResults below drops them again. Skipped when the
+	// projection contains aggregates — the aggregation operator's
+	// pre-projection has its own ORDER-BY rewrite (rewriteOrderByForAggregation
+	// in with.go).
+	if !hasAgg {
+		preVars := collectAllVars(planAfterComp)
+		items = appendOrderByPassthrough(items, proj, preVars)
+	}
 	if hasAgg {
 		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, planAfterComp)
 		// When the projection contains aggregates nested inside larger
