@@ -4375,6 +4375,17 @@ func buildIRProjection(
 	bopts *buildOpts,
 ) (*exec.Project, error) {
 	projItems := make([]exec.ProjectionItem, len(items))
+	// Snapshot the INPUT schema before the loop mutates it. Each projection
+	// item's evalFn runs against the INPUT row from the child operator, so
+	// fast-path lookups must consult the input schema rather than the
+	// progressively-updated live schema. Without this snapshot, an item N
+	// taking the fast path on `schema[exprStr]` would resolve to a column
+	// index that a PRIOR item set as its OUTPUT position; that index does
+	// not address the same value in the INPUT row, so `RETURN a.id AS a,
+	// a.id` returned the bound node for the second column instead of the
+	// integer property (Return4 [3]).
+	inputSchema := copySchema(schema)
+	_ = inputSchema // referenced below in fast-path branches
 	for i, item := range items {
 		name := item.Name
 		exprStr := item.Expression
@@ -4913,16 +4924,15 @@ func buildIRProjection(
 			evalFn = func(_ exec.Row) (expr.Value, error) { return expr.Null, nil }
 		}
 
-		// Update schema: output variable maps to index i.
-		schema[name] = i
-		// Also register the expression string as a secondary key so that ORDER BY
-		// clauses that reference the un-aliased expression (e.g. ORDER BY n.num
-		// after RETURN n.num AS prop) can still resolve the correct column via
-		// irSortKeys. Only added when exprStr differs from name to avoid redundant
-		// writes; the primary alias always wins on any read.
-		if exprStr != "" && exprStr != name {
-			schema[exprStr] = i
-		}
+		// The per-item schema update is deferred to the post-projection
+		// reset below. Updating schema in-place during the loop would leak
+		// item i's OUTPUT column index into item i+1's fast-path lookups,
+		// which run against the INPUT row (e.g. `RETURN a.id AS a, a.id`:
+		// item 0 sets schema[a.id]=0 as a secondary key for ORDER BY, then
+		// item 1 falls through to schema[a.id]=0 and returns INPUT row[0] =
+		// bound NodeValue instead of evaluating a.id against it). The
+		// inputSchema snapshot taken before the loop still informs the
+		// fast-path branches that need to see the input layout.
 		projItems[i] = exec.ProjectionItem{Alias: name, Eval: evalFn}
 	}
 	// Post-projection schema reset: the live row has exactly one column per
