@@ -1208,9 +1208,11 @@ import (
 //     after an AS rename. Round 24.
 //     Observed 3808-3816 across a 10-run sample (median 3810); gate set
 //     at 3808 to absorb run-to-run variance.
-//   - (still 3808): rounds 25, 26 and 27 added three additional
+//   - (still 3808): rounds 25 through 33 added nine additional
 //     deterministic fixes that lifted the band but did not warrant a
-//     ratchet given the persisting variance floor:
+//     ratchet — the variance floor persists below the deterministic
+//     gain because a handful of TCK scenarios still use `rand()` or
+//     map iteration order in unstable ways:
 //       round 25: drop normalizeVarlenDotDot from the parse pipeline so
 //                 `-[:T..]-` (no asterisk) raises a compile-time syntax
 //                 error per Match4 [9].
@@ -1222,9 +1224,32 @@ import (
 //                 the implicit-argument form. openCypher restricts
 //                 implicit param-binding to STANDALONE CALL. Closes
 //                 Call2 [4].
-//     Observed 3810-3819 across a 50-run sample (median ~3815) after the
-//     round-27 fix; gate kept at 3808 because 3810 still flaps (~4% of
-//     runs) and ratcheting would burn the entire variance buffer.
+//       round 28: EXISTS { pattern WHERE pred } preserves the inline
+//                 WHERE through AST → IR → exec. Closes
+//                 ExistentialSubquery1 [2], [4].
+//       round 29: buildEdgeTypeFilter accepts any matching edge label
+//                 on a multi-label edge (`(a)-[:PLAYS_FOR]->(b)` +
+//                 `(a)-[:SUPPORTS]->(b)` on the same pair). Closes
+//                 Match7 [29] and de-flakes Match2 [6], Unwind1 [12].
+//       round 30: LIMIT over a write subtree wraps the child in Eager
+//                 so every UNWIND iteration fires before LIMIT
+//                 short-circuits. Closes Create6 [10], Delete6 [14],
+//                 Remove1 [4].
+//       round 31: DELETE r dispatches to mutator.RemoveEdge when r
+//                 is a bound relationship variable. Closes Match5 [26]
+//                 and the long-standing DELETE-r planner gap.
+//       round 32: the colliding-alias guard now respects EagerAggregation
+//                 grouping keys (bopts.preprojectedCols). `RETURN n.num
+//                 AS n, count(n) AS count` no longer returns
+//                 [null, 1]. Closes Return6 [1].
+//       round 33: the colliding-alias guard now also fires for computed
+//                 expressions whose alias collides with a prior WITH's
+//                 projected name, even when the expression doesn't
+//                 reference the alias. Closes WithOrderBy4 [7].
+//     Observed 3815-3826 across a 10-run sample (median ~3822) after
+//     the round-33 fix; gate kept at 3808 because flaps from
+//     rand()/iteration-order scenarios still push the floor below the
+//     deterministic gain.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
