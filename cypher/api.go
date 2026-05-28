@@ -5414,12 +5414,18 @@ func csrPairFromGraph(g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]
 
 // buildEdgeTypeFilter constructs an edge-type filter map for the forward CSR
 // of g.  The map key is the edge's absolute position in the CSR's EdgesSlice;
-// the value is the first label attached to that edge in the LPG.
+// the value is a label attached to that edge in the LPG.
 //
-// When relTypes is non-empty only edges whose first label matches one of the
-// listed types are included; all others are omitted from the map.  An empty
-// relTypes slice means "accept all edge types" — the returned map still lists
-// every typed edge so callers can perform label-keyed filtering.
+// When relTypes is non-empty an edge passes the filter if ANY of the labels
+// attached to that edge matches one of the listed types; the stored value
+// is the matching label (used by reverseEdgePassesFilter and downstream
+// per-edge bookkeeping). An empty relTypes slice means "accept all edge
+// types" — the returned map lists every labelled edge with its first label.
+//
+// The any-label semantics let `MATCH (a)-[:T]->(b)` match an edge that
+// carries multiple labels (e.g. PLAYS_FOR + SUPPORTS on the same (src,dst)
+// pair) when one of them equals T. Closes Match7 [29] and unblocks the
+// general "multiple labels per edge" scenario.
 //
 // O(V+E) time; allocates one map entry per labelled edge.
 func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[uint64]string {
@@ -5454,11 +5460,18 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 			if len(labels) == 0 {
 				continue
 			}
-			typ := labels[0]
 			if acceptAll {
-				filter[pos] = typ
-			} else if _, ok := accept[typ]; ok {
-				filter[pos] = typ
+				filter[pos] = labels[0]
+				continue
+			}
+			// any-label match: include the edge when at least one label
+			// is in the accept set; record the matching label so
+			// reverseEdgePassesFilter can route the lookup.
+			for _, lbl := range labels {
+				if _, ok := accept[lbl]; ok {
+					filter[pos] = lbl
+					break
+				}
 			}
 		}
 	}
