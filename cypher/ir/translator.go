@@ -55,6 +55,15 @@ func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (L
 // names for anonymous nodes in CREATE patterns (e.g. CREATE ()-[:R]->()).
 type translator struct {
 	anonCounter int // monotonic counter for synthetic anonymous-node vars
+	// outerBoundRels carries the relationship-variable names already in
+	// scope at the entry of the current matchPattern call. The
+	// VarLengthExpand construction inside matchExpandStepBoundWithFrom
+	// reads this so excluded-edge bitsets honour rel vars bound by
+	// preceding MATCH/WITH clauses (Match4 [7]) even though those vars
+	// are not visible inside the inner-MATCH child subtree (which is
+	// rooted at an Argument leaf). matchPattern saves and restores this
+	// set per call so nested patterns observe the correct scope.
+	outerBoundRels map[string]struct{}
 }
 
 // freshAnonVar returns a unique internal variable name for an anonymous node

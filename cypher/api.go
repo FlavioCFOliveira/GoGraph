@@ -2935,13 +2935,26 @@ func buildOperator(
 			etFilter = buildEdgeTypeFilter(g, p.RelTypes)
 		}
 
+		// Resolve excluded rel-variable names to row column indices via
+		// the current schema. Variables not in schema (not yet bound at
+		// this point in the plan) are silently dropped — the exec op
+		// reads the row column at runtime and skips non-edge values, so
+		// passing a wrong col is also a soft no-op.
+		var excludedCols []int
+		for _, v := range p.ExcludedRelVars {
+			if col, ok := schema[v]; ok {
+				excludedCols = append(excludedCols, col)
+			}
+		}
+
 		cfg := exec.VarLengthConfig{
-			Direction:      dir,
-			EdgeType:       edgeType,
-			EdgeTypeFilter: etFilter,
-			InputCol:       fromCol,
-			MinHops:        minHops,
-			MaxHops:        maxHops,
+			Direction:       dir,
+			EdgeType:        edgeType,
+			EdgeTypeFilter:  etFilter,
+			InputCol:        fromCol,
+			MinHops:         minHops,
+			MaxHops:         maxHops,
+			ExcludedRelCols: excludedCols,
 		}
 		return exec.NewVarLengthExpand(child, fwd, rev, cfg), nil
 

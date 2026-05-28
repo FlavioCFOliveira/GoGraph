@@ -111,6 +111,7 @@ type VarLengthExpand struct {
 	minHops           int
 	maxHops           int
 	maxEdgesTraversed int
+	excludedRelCols   []int
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -167,6 +168,15 @@ type VarLengthConfig struct {
 	// MaxEdgesTraversed is the safety cap on total edge traversals per input
 	// row. Defaults to 1,000,000 when 0.
 	MaxEdgesTraversed int
+	// ExcludedRelCols lists column indices in the input row holding edge
+	// identifiers (IntegerValue or RelationshipValue) that must not be
+	// traversed inside this VLE step. Implements the openCypher
+	// no-repeated-relationships rule across distinct rel patterns within
+	// the same MATCH (e.g. `MATCH ()-[r:EDGE]-() MATCH (n)-[*0..1]-()-[r]
+	// -()-[*0..1]-(m)` — the two variable-length steps must not reuse the
+	// edge bound to `r`). The visited bitset is pre-populated with each
+	// listed column's edge position at BFS seed time.
+	ExcludedRelCols []int
 }
 
 // NewVarLengthExpand creates a VarLengthExpand operator.
@@ -190,6 +200,7 @@ func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg VarLengthConf
 		minHops:           cfg.MinHops,
 		maxHops:           cfg.MaxHops,
 		maxEdgesTraversed: capVal,
+		excludedRelCols:   append([]int(nil), cfg.ExcludedRelCols...),
 	}
 }
 
@@ -323,19 +334,39 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 		op.resultIdx = 0
 		op.edgesVisited = 0
 
+		// Compute the per-row initial visited bitset from any
+		// excluded-rel columns. Edge identifiers carried in those
+		// columns (IntegerValue raw edge position or
+		// RelationshipValue.ID) are added to the visited set so the
+		// BFS cannot traverse them — closing the openCypher
+		// no-repeated-relationships rule across distinct rel patterns
+		// within the same MATCH (Match4 [7] / Match5 [27]).
+		var initialVisited []uint64
+		for _, exCol := range op.excludedRelCols {
+			if exCol < 0 || exCol >= len(cp) {
+				continue
+			}
+			switch v := cp[exCol].(type) {
+			case expr.IntegerValue:
+				initialVisited = bitsetAdd(initialVisited, uint64(v))
+			case expr.RelationshipValue:
+				initialVisited = bitsetAdd(initialVisited, v.ID)
+			}
+		}
+
 		// If minHops == 0, the source node itself is a valid result.
 		if op.minHops == 0 {
 			op.results = append(op.results, pathState{
 				hops:    0,
 				srcNode: srcID,
 				path:    nil,
-				visited: nil,
+				visited: initialVisited,
 			})
 		}
 
 		// Seed BFS queue with each neighbour of srcID (hop 1).
 		if op.maxHops > 0 {
-			if err := op.seedQueue(srcID); err != nil {
+			if err := op.seedQueueWithVisited(srcID, initialVisited); err != nil {
 				return false, err
 			}
 		}
@@ -346,15 +377,30 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 // (op.queue), which at this point is empty. It returns an error if the safety
 // cap is exceeded during seeding.
 func (op *VarLengthExpand) seedQueue(srcID uint64) error {
+	return op.seedQueueWithVisited(srcID, nil)
+}
+
+// seedQueueWithVisited is the variant of [seedQueue] that pre-loads the
+// per-path visited bitset from an excluded-edge set (sibling bound rel
+// vars in the same MATCH pattern). The seeded paths' visited bitset
+// inherits the initial set so the corresponding edges are unreachable.
+func (op *VarLengthExpand) seedQueueWithVisited(srcID uint64, initialVisited []uint64) error {
+	// Build a synthetic parent state when initialVisited is non-empty so
+	// enqueueEdges' bitsetContains check rejects excluded edges at hop 1
+	// already.
+	var parent *pathState
+	if len(initialVisited) > 0 {
+		parent = &pathState{visited: initialVisited}
+	}
 	// Forward edges.
 	if op.dir != DirIn {
-		if err := op.enqueueEdges(srcID, true, nil, &op.queue); err != nil {
+		if err := op.enqueueEdges(srcID, true, parent, &op.queue); err != nil {
 			return err
 		}
 	}
 	// Reverse edges.
 	if op.dir != DirOut && op.revVerts != nil {
-		if err := op.enqueueEdges(srcID, false, nil, &op.queue); err != nil {
+		if err := op.enqueueEdges(srcID, false, parent, &op.queue); err != nil {
 			return err
 		}
 	}

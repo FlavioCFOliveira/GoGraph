@@ -1775,10 +1775,25 @@ import (
 //     pattern-comprehension evaluation) that are out of this round's
 //     scope.
 //
+//   - 3892: ratcheted after round 59 — VarLengthExpand now honours an
+//     ExcludedRelCols config that pre-populates the per-path
+//     visited bitset from rel-variable values carried by named row
+//     columns. The IR walker propagates the relationship variables
+//     in scope at the entry of each matchPattern call (snapshotted
+//     on the translator via outerBoundRels and combined with
+//     liveRelVars(child) — filtered to relationship-only vars so node
+//     and path variables do not leak into the exclusion set), so a
+//     bound rel from an earlier MATCH excludes its edge from any
+//     subsequent variable-length expansion in the same MATCH. Closes
+//     Match5 [27] outright and shrinks Match4 [7] (84→52 with the
+//     remaining gap traceable to second-VLE wiring through the
+//     bound-rel-rebinding synthetic). 5-run sample: floor 3892,
+//     median 3892, max 3892. Gate set at 3892 with 0 headroom.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3891
+const tckExecutionBaseline = 3892
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -612,6 +612,14 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			boundVars[v] = struct{}{}
 		}
 	}
+	// Snapshot outer-scope rel vars (relationship vars bound BEFORE this
+	// matchPattern call) so VarLengthExpand construction below can wire
+	// them into the no-repeated-relationships exclusion set (Match4 [7]
+	// / Match5 [27]). Save and restore so nested matchPattern calls do
+	// not bleed outer scope into deeper patterns.
+	prevOuterRels := t.outerBoundRels
+	t.outerBoundRels = liveRelVars(child)
+	defer func() { t.outerBoundRels = prevOuterRels }()
 
 	for _, pp := range pat.Paths {
 		leadVar := leadingNodeVar(pp)
@@ -913,6 +921,74 @@ func liveOutputVars(plan LogicalPlan) map[string]struct{} { //nolint:gocyclo // 
 		}
 		return out
 	}
+}
+
+// liveRelVars returns the set of relationship-variable names in scope
+// at the top of plan, by walking the same scopes as [liveOutputVars]
+// but only collecting RelVars from Expand-family operators. Used by
+// VLE construction to populate ExcludedRelVars without dragging node
+// or path variables into the exclusion list.
+func liveRelVars(plan LogicalPlan) map[string]struct{} {
+	out := map[string]struct{}{}
+	if plan == nil {
+		return out
+	}
+	switch p := plan.(type) {
+	case *Projection:
+		// After projection only the projected names remain. We cannot
+		// know which projected name was a rel variable without
+		// schema-type info, so conservatively descend into the child
+		// for rel vars and intersect with the projection's output set.
+		live := map[string]struct{}{}
+		for _, v := range p.Vars() {
+			if v != "" {
+				live[v] = struct{}{}
+			}
+		}
+		for _, c := range plan.Children() {
+			for r := range liveRelVars(c) {
+				if _, ok := live[r]; ok {
+					out[r] = struct{}{}
+				}
+			}
+		}
+		return out
+	case *EagerAggregation:
+		live := map[string]struct{}{}
+		for _, v := range p.Vars() {
+			if v != "" {
+				live[v] = struct{}{}
+			}
+		}
+		for _, c := range plan.Children() {
+			for r := range liveRelVars(c) {
+				if _, ok := live[r]; ok {
+					out[r] = struct{}{}
+				}
+			}
+		}
+		return out
+	}
+	switch n := plan.(type) {
+	case *Expand:
+		if n.RelVar != "" {
+			out[n.RelVar] = struct{}{}
+		}
+	case *OptionalExpand:
+		if n.RelVar != "" {
+			out[n.RelVar] = struct{}{}
+		}
+	case *VarLengthExpand:
+		if n.RelVar != "" {
+			out[n.RelVar] = struct{}{}
+		}
+	}
+	for _, c := range plan.Children() {
+		for r := range liveRelVars(c) {
+			out[r] = struct{}{}
+		}
+	}
+	return out
 }
 
 // lastSyntheticToFor walks plan top-down looking for an Expand-family
@@ -1315,7 +1391,34 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 		if rp.Range.Max != nil {
 			maxDepth = int(*rp.Range.Max)
 		}
-		var plan LogicalPlan = NewVarLengthExpand(fromVar, expandRel, relTypes, dir, expandTo, minDepth, maxDepth, child)
+		vle := NewVarLengthExpand(fromVar, expandRel, relTypes, dir, expandTo, minDepth, maxDepth, child)
+		// Collect bound relationship variables in scope at the top of
+		// the child plan PLUS outer-scope rels snapshotted by
+		// matchPattern at entry. These are foreign rels (from earlier
+		// MATCHes or pattern hops) whose bound edges must NOT be reused
+		// inside this VLE step, per the openCypher no-repeated-
+		// relationships rule across distinct rel patterns within the
+		// same MATCH (Match4 [7], Match5 [27]). The filter is rel-only
+		// (via [liveRelVars]) so node and path variables never leak
+		// into the excluded-edges bitset at exec time.
+		seenEx := map[string]struct{}{}
+		addExclude := func(v string) {
+			if v == "" || v == expandRel || v == relVar {
+				return
+			}
+			if _, ok := seenEx[v]; ok {
+				return
+			}
+			seenEx[v] = struct{}{}
+			vle.ExcludedRelVars = append(vle.ExcludedRelVars, v)
+		}
+		for v := range liveRelVars(child) {
+			addExclude(v)
+		}
+		for v := range t.outerBoundRels {
+			addExclude(v)
+		}
+		var plan LogicalPlan = vle
 		// Inline property predicate on a variable-length relationship is
 		// per-element: `[:T* {year: 1988}]` selects ONLY those VLE paths
 		// where every relationship has year=1988. Wrap the property

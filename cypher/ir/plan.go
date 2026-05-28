@@ -383,6 +383,15 @@ type VarLengthExpand struct {
 	// `MATCH p=(a)-[*1..3]->(b)`). The physical builder allocates a schema slot
 	// for it and emits a PathValue in that column.
 	PathVar string
+	// ExcludedRelVars lists relationship-variable names already in scope
+	// at the time this VLE step is reached whose bound edge must not be
+	// traversed. Implements the openCypher no-repeated-relationships rule
+	// across distinct rel patterns in the same MATCH (e.g. `MATCH ()-[r]
+	// -() MATCH (n)-[*0..1]-()-[r]-()-[*0..1]-(m)` — the two VLE steps
+	// must exclude r's edge). The physical builder resolves each name
+	// against the current schema; unresolved names are silently dropped
+	// (the variable is not yet bound).
+	ExcludedRelVars []string
 	// Child is the subplan that produces FromVar.
 	Child LogicalPlan
 }
