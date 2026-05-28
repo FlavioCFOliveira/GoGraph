@@ -394,6 +394,9 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 	}
 	switch r := recv.(type) {
 	case NodeValue:
+		if r.Deleted {
+			return nil, &EvalError{Msg: fmt.Sprintf("EntityNotFound: DeletedEntityAccess: cannot read property %q of deleted node", n.Key)}
+		}
 		if r.Properties != nil {
 			if v, ok := r.Properties[n.Key]; ok {
 				return v, nil
@@ -401,6 +404,9 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 		}
 		return Null, nil
 	case RelationshipValue:
+		if r.Deleted {
+			return nil, &EvalError{Msg: fmt.Sprintf("EntityNotFound: DeletedEntityAccess: cannot read property %q of deleted relationship", n.Key)}
+		}
 		if r.Properties != nil {
 			if v, ok := r.Properties[n.Key]; ok {
 				return v, nil

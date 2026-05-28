@@ -241,6 +241,11 @@ func fnLabels(args []expr.Value) (expr.Value, error) {
 	if !ok {
 		return nil, &TypeError{Function: "labels", ArgIndex: 0, Got: args[0].Kind(), Want: "Node"}
 	}
+	if nv.Deleted {
+		// openCypher 9 §3.5.8: accessing the label set of a node deleted
+		// in the same statement is EntityNotFound: DeletedEntityAccess.
+		return nil, &expr.EvalError{Msg: "EntityNotFound: DeletedEntityAccess: cannot read labels of deleted node"}
+	}
 	result := make(expr.ListValue, len(nv.Labels))
 	for i, l := range nv.Labels {
 		result[i] = expr.StringValue(l)

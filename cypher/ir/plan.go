@@ -1738,6 +1738,11 @@ type MergeRelationship struct {
 	// relationship. When non-empty the exec operator filters the
 	// search by these properties and writes them on creation.
 	RelProps string
+	// Undirected reports whether the MERGE relationship pattern declares
+	// an undirected hop (`MERGE (a)-[r:T]-(b)`). When true the exec
+	// operator searches for an existing edge in either direction before
+	// creating one (closes Merge5 [13]).
+	Undirected bool
 	// OnCreate is the list of (key, value) pairs to set on the
 	// relationship when a new edge is created.
 	OnCreate []KVAction

@@ -1550,6 +1550,9 @@ func buildOperatorWrite(
 		if p.RelProps != "" {
 			op = op.WithRelProperties(p.RelProps)
 		}
+		if p.Undirected {
+			op = op.WithUndirected(true)
+		}
 		// Allocate a schema column for the relationship variable so
 		// downstream operators (RETURN r, count(r), …) see the bound
 		// edge. Anonymous relationships still get a slot so a NamedPath
@@ -3543,7 +3546,17 @@ func buildProcedureCallOperator(
 		for i, paramName := range entry.Sig.InputNames {
 			v, ok := params[paramName]
 			if !ok {
-				v = expr.Null
+				// openCypher: implicit-argument CALL must find every
+				// declared input as a query parameter. A missing
+				// parameter is ParameterMissing: MissingParameter at
+				// compile time (Call1 [11]). We surface the error here
+				// — the closest the engine has to a "compile time" gate
+				// — so the result drainage propagates it before any
+				// rows are emitted.
+				return nil, fmt.Errorf(
+					"cypher: ParameterMissing: MissingParameter: procedure %q implicit argument %q has no matching $%s parameter",
+					p.Name, paramName, paramName,
+				)
 			}
 			if entry.Sig.Inputs[i] == expr.KindFloat {
 				if iv, isInt := v.(expr.IntegerValue); isInt {
@@ -5916,6 +5929,12 @@ func (a *lpgMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.Prope
 	return a.g.EdgeProperties(src, dst)
 }
 
+// EdgeLabels returns a snapshot of every label currently attached to the
+// directed edge (src, dst).
+func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
+	return a.g.EdgeLabels(src, dst)
+}
+
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 	var out []string
@@ -6193,6 +6212,12 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 // directed edge (src, dst).
 func (a *walMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
 	return a.g.EdgeProperties(src, dst)
+}
+
+// EdgeLabels returns a snapshot of every label currently attached to the
+// directed edge (src, dst).
+func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
+	return a.g.EdgeLabels(src, dst)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.

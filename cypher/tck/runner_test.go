@@ -1739,10 +1739,46 @@ import (
 //     Closes Merge1 [13] and MatchWhere1 [11]. 20-run sample: floor
 //     3846, median ~3848, max 3851; gate at 3846 with 0 headroom.
 //
+//   - 3891: ratcheted after round 58 — five compounding uplifts in one
+//     pass:
+//     (a) the generic error-assertion regex was widened from
+//         `(\w+Error)` to `([A-Z]\w+)` so non-Error-suffixed TCK
+//         categories (EntityNotFound, ConstraintVerificationFailed,
+//         ParameterMissing) reach the handler instead of going
+//         undefined (Delete1, Return2, Call1);
+//     (b) MulDurationFloat now truncates fractional nanoseconds
+//         toward zero — `duration({nanoseconds: 1}) / 2` yields zero
+//         nanos rather than rounding up to 1 (Temporal8 [7] both
+//         examples);
+//     (c) the duration parser absorbs IEEE-754 inexactness by
+//         rounding the fractional-seconds×1e9 conversion before
+//         truncating to int64, so `duration('PT-2.001S')` round-trips
+//         the original value (Temporal6 [6]);
+//     (d) MERGE single-hop pattern carries an Undirected flag through
+//         the IR; the exec MergeRelationship now probes both
+//         (src, dst) and (dst, src) before falling through to the
+//         create path, matching openCypher semantics of `MERGE
+//         (a)-[r:T]-(b)` (Merge5 [13]);
+//     (e) NodeValue / RelationshipValue gained a Deleted flag and
+//         the DELETE operators upgrade the row's column to a Deleted
+//         snapshot. evalProperty and fnLabels raise EntityNotFound:
+//         DeletedEntityAccess on Deleted entities while id(),
+//         type(), and other identity accessors still work
+//         (Return2 [15]/[16]/[17]);
+//     (f) the implicit-argument CALL builder now returns
+//         ParameterMissing: MissingParameter when a declared input
+//         has no matching $param (Call1 [11]).
+//     5-run sample: floor 3891, median 3891, max 3891. Gate set at
+//     3891 with 0 headroom — the remaining 6 scenarios fail on three
+//     deeper limitations (multi-edge LPG storage, cross-pattern
+//     no-repeat-rel in variable-length expansion, expression-level
+//     pattern-comprehension evaluation) that are out of this round's
+//     scope.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3882
+const tckExecutionBaseline = 3891
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
@@ -1921,16 +1957,19 @@ func initScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^a TypeError should be raised at compile time: (.+)$`, func(ctx context.Context, errType string) error {
 		return w.typeErrorAtCompileTime(ctx, errType)
 	})
-	// Generic handler for all other error categories (ArgumentError, SemanticError, etc.).
-	// Must be registered AFTER the specific SyntaxError and TypeError steps so the
-	// more-specific patterns take precedence when both could match.
-	sc.Step(`^a (\w+Error) should be raised at runtime: (.+)$`, func(ctx context.Context, errCategory, errType string) error {
+	// Generic handler for all other error categories. Must be registered AFTER
+	// the specific SyntaxError and TypeError steps so the more-specific
+	// patterns take precedence when both could match. The category capture is
+	// any CamelCase identifier — TCK uses both "Error"-suffixed
+	// (ArgumentError, SemanticError, …) and non-suffixed categories
+	// (EntityNotFound, ConstraintVerificationFailed, ParameterMissing).
+	sc.Step(`^a ([A-Z]\w+) should be raised at runtime: (.+)$`, func(ctx context.Context, errCategory, errType string) error {
 		return w.genericErrorAtRuntime(ctx, errCategory, errType)
 	})
-	sc.Step(`^a (\w+Error) should be raised at compile time: (.+)$`, func(ctx context.Context, errCategory, errType string) error {
+	sc.Step(`^a ([A-Z]\w+) should be raised at compile time: (.+)$`, func(ctx context.Context, errCategory, errType string) error {
 		return w.genericErrorAtCompileTime(ctx, errCategory, errType)
 	})
-	sc.Step(`^a (\w+Error) should be raised at any time: (.+)$`, func(ctx context.Context, errCategory, errType string) error {
+	sc.Step(`^a ([A-Z]\w+) should be raised at any time: (.+)$`, func(ctx context.Context, errCategory, errType string) error {
 		return w.genericErrorAtRuntime(ctx, errCategory, errType)
 	})
 }

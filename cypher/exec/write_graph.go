@@ -92,6 +92,13 @@ type GraphMutator interface {
 	// no properties or does not exist.
 	EdgeProperties(src, dst string) map[string]lpg.PropertyValue
 
+	// EdgeLabels returns a snapshot of every label currently attached to
+	// the directed edge (src, dst). Returns an empty slice when the edge
+	// has no labels or does not exist. Used by DELETE r to capture the
+	// relationship type before tombstoning the edge so the row's
+	// post-delete RelationshipValue keeps `RETURN type(r)` working.
+	EdgeLabels(src, dst string) []string
+
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.
 	OutNeighbours(n string) []string

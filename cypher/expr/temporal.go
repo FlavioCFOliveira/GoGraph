@@ -1186,18 +1186,23 @@ func ParseDuration(s string) (DurationValue, error) {
 			nanos += int32(sNano % 1_000_000_000)
 		case inTime && unit == 'H':
 			seconds += intPart * 3600
-			// Fractional hours → seconds + nanos.
-			extraNs := int64(fracPart * 3600 * 1_000_000_000)
+			// Fractional hours → seconds + nanos. math.Round absorbs the
+			// IEEE-754 inexactness that strconv.ParseFloat introduces for
+			// decimal fractions like "0.001" — without it, the float
+			// round-trip can land 1 nanosecond short of the canonical form,
+			// which breaks the duration(toString(d)) = d equality the TCK
+			// asserts (Temporal6 [6] {seconds: -2, milliseconds: -1}).
+			extraNs := int64(math.Round(fracPart * 3600 * 1_000_000_000))
 			seconds += extraNs / 1_000_000_000
 			nanos += int32(extraNs % 1_000_000_000)
 		case inTime && unit == 'M':
 			seconds += intPart * 60
-			extraNs := int64(fracPart * 60 * 1_000_000_000)
+			extraNs := int64(math.Round(fracPart * 60 * 1_000_000_000))
 			seconds += extraNs / 1_000_000_000
 			nanos += int32(extraNs % 1_000_000_000)
 		case inTime && unit == 'S':
 			seconds += intPart
-			extraNs := int64(fracPart * 1_000_000_000)
+			extraNs := int64(math.Round(fracPart * 1_000_000_000))
 			seconds += extraNs / 1_000_000_000
 			nanos += int32(extraNs % 1_000_000_000)
 		default:
@@ -1466,6 +1471,12 @@ func MulDuration(d DurationValue, k int64) DurationValue {
 // MulDurationFloat scales d by a floating-point factor. The result rounds
 // fractional months/days into the seconds component using the same
 // 30.4368750-day Gregorian-month approximation as [ParseDuration].
+//
+// Fractional nanoseconds (the smallest representable unit) are truncated
+// toward zero — Java's `(long)` cast behaviour, matching the openCypher
+// TCK convention for `duration * scalar` and `duration / scalar`. A
+// half-nano result therefore disappears rather than rounding up: e.g.
+// `duration({nanoseconds: 1}) / 2` yields zero nanoseconds, not 1.
 func MulDurationFloat(d DurationValue, k float64) DurationValue {
 	months := float64(d.Months) * k
 	days := float64(d.Days) * k
@@ -1480,7 +1491,7 @@ func MulDurationFloat(d DurationValue, k float64) DurationValue {
 	extraNs := int64(math.Round(dFrac * 86400 * 1_000_000_000))
 	sInt, sFrac := splitFloat(seconds)
 	extraNs += int64(math.Round(sFrac * 1_000_000_000))
-	totalNanos := int64(math.Round(nanos)) + extraNs
+	totalNanos := int64(nanos) + extraNs
 	return NewDuration(mInt, dInt, sInt+totalNanos/1_000_000_000, int32(totalNanos%1_000_000_000))
 }
 

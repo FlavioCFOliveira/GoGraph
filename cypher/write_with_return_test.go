@@ -100,9 +100,10 @@ func TestRunInTx_SetReturn(t *testing.T) {
 }
 
 // TestRunInTx_DeleteReturn verifies that DELETE with RETURN drives the
-// pipeline and removes the node from the graph. The returned column is
-// allowed to be the pre-delete value or null — the contract under test
-// is that the statement does not error and the node is gone.
+// pipeline and removes the node from the graph. Per openCypher 9 §3.5.8
+// (Return2 [15]) accessing a deleted node's properties in the same
+// statement is EntityNotFound: DeletedEntityAccess; the test asserts
+// that the engine surfaces this and that the node is gone afterwards.
 func TestRunInTx_DeleteReturn(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	eng := cypher.NewEngine(g)
@@ -115,12 +116,19 @@ func TestRunInTx_DeleteReturn(t *testing.T) {
 	_ = drainRecords(t, res)
 
 	res2, err := eng.RunInTx(ctx, `MATCH (u:User {username: "carol"}) DELETE u RETURN u.username AS removed`, nil)
-	if err != nil {
-		t.Fatalf("RunInTx DELETE+RETURN: %v", err)
-	}
-	rows := drainRecords(t, res2)
-	if len(rows) != 1 {
-		t.Fatalf("DELETE+RETURN yielded %d rows, want 1", len(rows))
+	// The query is allowed to fail at compile / open phase OR to surface
+	// the EntityNotFound only when the result is drained — both shapes
+	// are observed across drivers. Accept either path: a non-nil err
+	// here, or a nil err followed by a draining error.
+	if err == nil {
+		for res2.Next() {
+			// drain
+		}
+		drainErr := res2.Err()
+		_ = res2.Close() //nolint:errcheck
+		if drainErr == nil {
+			t.Fatalf("DELETE+RETURN u.foo: expected DeletedEntityAccess error, got success")
+		}
 	}
 
 	res3, err := eng.Run(ctx, `MATCH (u:User) RETURN count(u) AS n`, nil)

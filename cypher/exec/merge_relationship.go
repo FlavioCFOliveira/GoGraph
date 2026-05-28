@@ -57,6 +57,11 @@ type MergeRelationship struct {
 	relPropsRaw     string          // inline `{k: v, …}` source string, "" when absent
 	relPropPredsParsed bool         // tracks one-time parse of relPropsRaw
 	relPropPreds    []propLiteral   // parsed predicate values (only literals)
+	// undirected reports whether the source pattern declared `(a)-[:T]-(b)`
+	// (no arrow head). When true, the match search probes both (src, dst)
+	// and (dst, src); the create path still uses the canonical (src, dst)
+	// direction.
+	undirected      bool
 	onCreateActions []MergeRelAction
 	onMatchActions  []MergeRelAction
 	mutator         GraphMutator
@@ -139,6 +144,15 @@ func (op *MergeRelationship) WithOnMatch(relVar string, actions []MergeRelAction
 	return op
 }
 
+// WithUndirected toggles the undirected-search behaviour. When true, the
+// match phase probes both (src, dst) and (dst, src) directions before
+// falling through to the edge-create path, matching the openCypher
+// semantics of `MERGE (a)-[r:T]-(b)` (Merge5 [13]).
+func (op *MergeRelationship) WithUndirected(u bool) *MergeRelationship {
+	op.undirected = u
+	return op
+}
+
 // MergeRelActionFromKV constructs a MergeRelationship ON CREATE / ON
 // MATCH action from a (key, value) pair. value is the opaque literal
 // string as it appears in the source query (e.g. `'foo'` or `42`).
@@ -211,6 +225,18 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 			return false, err
 		}
 		*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
+		return true, nil
+	}
+	// Undirected MERGE: also probe the reverse direction. When an edge
+	// exists from dst → src that satisfies the same type-and-property
+	// predicate, bind to that edge rather than creating a new one.
+	// Closes Merge5 [13].
+	if op.undirected && op.mutator.HasEdge(dstKey, srcKey) && op.matchesRelProps(dstKey, srcKey) {
+		op.mutator.SetEdgeLabel(dstKey, srcKey, op.relType)
+		if err := op.applyRelActions(row, dstKey, srcKey, op.onMatchActions); err != nil {
+			return false, err
+		}
+		*out = op.emitRow(row, dstID, srcID, dstKey, srcKey)
 		return true, nil
 	}
 	// No matching edge — create one, tag it, write inline rel properties,

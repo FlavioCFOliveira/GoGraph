@@ -149,10 +149,19 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			// edge; bypass the node-deletion guard.
 			srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
 			dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
+			var snapProps expr.MapValue
 			if srcOK && dstOK {
+				if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
+					snapProps = make(expr.MapValue, len(raw))
+					for k, pv := range raw {
+						if v, ok := lpgPropToExprBinding(pv); ok {
+							snapProps[k] = v
+						}
+					}
+				}
 				removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 			}
-			*out = childRow
+			*out = op.markRowDeletedRel(childRow, tv, snapProps)
 			return true, nil
 		case expr.PathValue:
 			// DELETE on a path: openCypher specifies this as a shortcut
@@ -198,7 +207,16 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			if relVal, isRel := childRow[colIdx].(expr.RelationshipValue); isRel {
 				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.StartID))
 				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.EndID))
+				var snapProps expr.MapValue
 				if srcOK && dstOK {
+					if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
+						snapProps = make(expr.MapValue, len(raw))
+						for k, pv := range raw {
+							if v, ok := lpgPropToExprBinding(pv); ok {
+								snapProps[k] = v
+							}
+						}
+					}
 					// Undirected MATCH emits both forward and reverse rows
 					// for the same edge; the reverse row carries
 					// (StartID=traversalSrc, EndID=traversalDst) which may
@@ -209,23 +227,37 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 					// Closes Delete4 [1] flake.
 					removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 				}
-				*out = childRow
+				*out = op.markRowDeletedRel(childRow, relVal, snapProps)
 				return true, nil
 			}
 			// IntegerValue (raw edge id) + bound relationship-variable
 			// metadata: dispatch via relEndpointsFn so we never treat
 			// the edge id as a node id. Closes Delete4 [1] and the
 			// "DELETE r" planner gap.
-			if _, isInt := childRow[colIdx].(expr.IntegerValue); isInt && op.relEndpointsFn != nil {
+			if intVal, isInt := childRow[colIdx].(expr.IntegerValue); isInt && op.relEndpointsFn != nil {
 				srcID, dstID, okEnds := op.relEndpointsFn(childRow)
+				snapRel := expr.RelationshipValue{ID: uint64(intVal)}
 				if okEnds {
 					srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(srcID))
 					dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(dstID))
 					if srcOK && dstOK {
+						snapRel.StartID = uint64(srcID)
+						snapRel.EndID = uint64(dstID)
+						if labels := op.mutator.EdgeLabels(srcKey, dstKey); len(labels) > 0 {
+							snapRel.Type = labels[0]
+						}
+						if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
+							snapRel.Properties = make(expr.MapValue, len(raw))
+							for k, pv := range raw {
+								if v, ok := lpgPropToExprBinding(pv); ok {
+									snapRel.Properties[k] = v
+								}
+							}
+						}
 						removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 					}
 				}
-				*out = childRow
+				*out = op.markRowDeletedRel(childRow, snapRel, snapRel.Properties)
 				return true, nil
 			}
 		}
@@ -256,6 +288,21 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return false, ErrDeleteNodeHasRelationships
 	}
 
+	// Snapshot labels and properties BEFORE removing them — these become
+	// the frozen view carried on the row's NodeValue after the entity is
+	// tombstoned, so `RETURN id(n)` still works but `RETURN n.foo` /
+	// `labels(n)` raise EntityNotFound on the Deleted flag (Return2 [15]
+	// / [16]).
+	deletedLabels := append([]string(nil), op.mutator.NodeLabels(nodeKey)...)
+	var deletedProps expr.MapValue
+	if raw := op.mutator.NodeProperties(nodeKey); len(raw) > 0 {
+		deletedProps = make(expr.MapValue, len(raw))
+		for k, pv := range raw {
+			if v, ok := lpgPropToExprBinding(pv); ok {
+				deletedProps[k] = v
+			}
+		}
+	}
 	// Remove all labels.
 	for _, lbl := range op.mutator.NodeLabels(nodeKey) {
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
@@ -268,8 +315,51 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	// Order accessor no longer see it (Merge1 [14] / Merge5 [20]).
 	op.mutator.RemoveNode(nodeKey)
 
-	*out = childRow
+	*out = op.markRowDeleted(childRow, nodeID, deletedLabels, deletedProps)
 	return true, nil
+}
+
+// markRowDeleted returns childRow with the column bound to op.nodeVar
+// replaced by a Deleted NodeValue snapshot, so downstream property /
+// label accessors raise EntityNotFound (Return2 [15]/[16]). The original
+// value at the column may be a NodeValue (canonical projection form) or
+// an IntegerValue (raw in-pipeline NodeID encoding); either is upgraded
+// to a Deleted NodeValue carrying the pre-tombstone labels and
+// properties so `id(n)` and similar identity accessors keep returning
+// the same value.
+func (op *DeleteNode) markRowDeleted(row Row, nodeID graph.NodeID, labels []string, props expr.MapValue) Row {
+	col, ok := op.schema[op.nodeVar]
+	if !ok || col >= len(row) {
+		return row
+	}
+	out := make(Row, len(row))
+	copy(out, row)
+	out[col] = expr.NodeValue{
+		ID:         uint64(nodeID),
+		Labels:     labels,
+		Properties: props,
+		Deleted:    true,
+	}
+	return out
+}
+
+// markRowDeletedRel mirrors [markRowDeleted] for the relationship-target
+// branches of DeleteNode (DELETE r where r is a RelationshipValue). The
+// row's relationship-variable column is upgraded to a Deleted
+// RelationshipValue snapshot so RETURN r.foo / property access raise
+// EntityNotFound while RETURN type(r) keeps returning the relationship
+// type (Return2 [17]).
+func (op *DeleteNode) markRowDeletedRel(row Row, rel expr.RelationshipValue, props expr.MapValue) Row {
+	col, ok := op.schema[op.nodeVar]
+	if !ok || col >= len(row) {
+		return row
+	}
+	out := make(Row, len(row))
+	copy(out, row)
+	rel.Properties = props
+	rel.Deleted = true
+	out[col] = rel
+	return out
 }
 
 // Close closes the child operator.
@@ -366,13 +456,42 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 
+	// Snapshot the property map BEFORE removing the edge so the row's
+	// deleted-rel marker carries the pre-removal view, letting
+	// `RETURN type(r)` keep returning the type while `RETURN r.foo`
+	// raises EntityNotFound on the Deleted flag (Return2 [17]).
+	var deletedProps expr.MapValue
+	if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
+		deletedProps = make(expr.MapValue, len(raw))
+		for k, pv := range raw {
+			if v, ok := lpgPropToExprBinding(pv); ok {
+				deletedProps[k] = v
+			}
+		}
+	}
 	// Remove edge labels and properties before removing the edge itself.
 	// (lpg.Graph's RemoveEdge removes the adjacency entry; label/property
 	// cleanup prevents orphaned metadata.)
 	op.mutator.RemoveEdge(srcKey, dstKey)
 
-	*out = childRow
+	*out = op.markRowDeleted(childRow, rel, deletedProps)
 	return true, nil
+}
+
+// markRowDeleted returns childRow with the column bound to op.relVar
+// replaced by a Deleted RelationshipValue snapshot. See
+// [DeleteNode.markRowDeleted] for the rationale.
+func (op *DeleteRelationship) markRowDeleted(row Row, rel expr.RelationshipValue, props expr.MapValue) Row {
+	col, ok := op.schema[op.relVar]
+	if !ok || col >= len(row) {
+		return row
+	}
+	out := make(Row, len(row))
+	copy(out, row)
+	rel.Properties = props
+	rel.Deleted = true
+	out[col] = rel
+	return out
 }
 
 // Close closes the child operator.

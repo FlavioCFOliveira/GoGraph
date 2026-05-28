@@ -453,6 +453,13 @@ type NodeValue struct {
 	ID         uint64
 	Labels     []string
 	Properties MapValue
+	// Deleted reports whether the entity has been removed by an earlier
+	// DELETE / DETACH DELETE clause in the same statement. Property and
+	// label accessors raise EntityNotFound: DeletedEntityAccess when
+	// Deleted is true (openCypher 9 §3.5.8 Return2 [15]/[16]); identity
+	// accessors (id, type) and the structural fields (ID, Type) stay
+	// readable so `RETURN type(r)` after `DELETE r` still works.
+	Deleted bool
 }
 
 // Kind implements [Value].
@@ -498,6 +505,8 @@ type RelationshipValue struct {
 	EndID      uint64
 	Type       string
 	Properties MapValue
+	// Deleted — see [NodeValue.Deleted].
+	Deleted bool
 }
 
 // Kind implements [Value].

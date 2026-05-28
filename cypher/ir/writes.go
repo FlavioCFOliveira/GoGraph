@@ -223,7 +223,7 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 		child = NewEager(child)
 	}
 	if child != nil {
-		if srcVar, dstVar, relVar, relType, relProps, ok := mergeSingleHopRel(m.Pattern); ok {
+		if srcVar, dstVar, relVar, relType, relProps, undirected, ok := mergeSingleHopRel(m.Pattern); ok {
 			outerVars := collectAllVars(child)
 			outer := map[string]struct{}{}
 			for _, v := range outerVars {
@@ -240,6 +240,7 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 					if ocOk && omOk {
 						mr := NewMergeRelationshipWithActions(srcVar, dstVar, relVar, relType, onCreate, onMatch, child)
 						mr.RelProps = relProps
+						mr.Undirected = undirected
 						// MERGE p = (a)-[:R]->(b) on the MergeRelationship
 						// shortcut still needs the NamedPath wrapper so the
 						// projection of p reconstructs a PathValue from the
@@ -382,31 +383,33 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 	return out, true
 }
 
-// mergeSingleHopRel returns (srcVar, dstVar, relVar, relType, relProps, true)
-// when pp is a single-hop directed/undirected relationship pattern with two
-// named endpoints and at most one type label. relProps carries the inline
-// relationship property-map source string when present, or "" when absent.
-// Returns ok=false for any other shape (zero hops, multi-hop, anonymous
-// endpoint, zero or multiple types). The check is intentionally narrow:
-// only the canonical Merge5-style shape qualifies.
-func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType, relProps string, ok bool) {
+// mergeSingleHopRel returns (srcVar, dstVar, relVar, relType, relProps,
+// undirected, true) when pp is a single-hop directed/undirected
+// relationship pattern with two named endpoints and at most one type
+// label. relProps carries the inline relationship property-map source
+// string when present, or "" when absent. undirected is true for the
+// `(a)-[r:T]-(b)` pattern. Returns ok=false for any other shape (zero
+// hops, multi-hop, anonymous endpoint, zero or multiple types). The
+// check is intentionally narrow: only the canonical Merge5-style shape
+// qualifies.
+func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType, relProps string, undirected, ok bool) {
 	if pp == nil || pp.Head == nil {
-		return "", "", "", "", "", false
+		return "", "", "", "", "", false, false
 	}
 	head := pp.Head
 	if head.Node == nil || head.Node.Variable == nil {
-		return "", "", "", "", "", false
+		return "", "", "", "", "", false, false
 	}
 	step := head.Next
 	if step == nil || step.Relationship == nil || step.Node == nil || step.Node.Variable == nil {
-		return "", "", "", "", "", false
+		return "", "", "", "", "", false, false
 	}
 	if step.Next != nil {
 		// Multi-hop — handled by the node-only Merge path for now.
-		return "", "", "", "", "", false
+		return "", "", "", "", "", false, false
 	}
 	if len(step.Relationship.Types) != 1 {
-		return "", "", "", "", "", false
+		return "", "", "", "", "", false, false
 	}
 	if head.Node.Properties != nil || step.Node.Properties != nil ||
 		len(head.Node.Labels) != 0 || len(step.Node.Labels) != 0 {
@@ -414,7 +417,7 @@ func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType, re
 		// "Fail when imposing new predicates" scenario; skip
 		// translation here so the node-only Merge path can surface
 		// the appropriate error.
-		return "", "", "", "", "", false
+		return "", "", "", "", "", false, false
 	}
 	rv := ""
 	if step.Relationship.Variable != nil {
@@ -427,11 +430,13 @@ func mergeSingleHopRel(pp *ast.PathPattern) (srcVar, dstVar, relVar, relType, re
 	if step.Relationship.Direction == ast.RelDirectionIncoming {
 		src, dst = dst, src
 	}
+	und := step.Relationship.Direction != ast.RelDirectionOutgoing &&
+		step.Relationship.Direction != ast.RelDirectionIncoming
 	rp := ""
 	if step.Relationship.Properties != nil {
 		rp = step.Relationship.Properties.String()
 	}
-	return src, dst, rv, step.Relationship.Types[0], rp, true
+	return src, dst, rv, step.Relationship.Types[0], rp, und, true
 }
 
 // setClause translates a SET clause. Each SetItem becomes one of:

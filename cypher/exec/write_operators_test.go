@@ -223,6 +223,23 @@ func (s *stubMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyVal
 	return out
 }
 
+// EdgeLabels returns the edge labels for (src, dst). Reads from the
+// edgeLabel set populated by SetEdgeLabel; returns nil when absent.
+func (s *stubMutator) EdgeLabels(src, dst string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := src + "|" + dst
+	labels := s.edgeLabels[k]
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(labels))
+	for l := range labels {
+		out = append(out, l)
+	}
+	return out
+}
+
 // getEdgeProp returns the edge property value for edge (src,dst) under key.
 func (s *stubMutator) getEdgeProp(src, dst, key string) (lpg.PropertyValue, bool) {
 	s.mu.Lock()
