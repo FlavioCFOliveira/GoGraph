@@ -1291,11 +1291,15 @@ import (
 //     (WithOrderBy2 [23] — aggregating-WITH ORDER BY rewrites source
 //     expr to alias). 25-run sample shows floor at 3832 (median 3838,
 //     max 3842); gate at 3832 with 0 headroom — accept variance flap.
+//   - 3836: ratcheted after round 46 (UNWIND scalar-tagging) and
+//     round 47 (extractRelKVActions handles SET rel += {literal map}).
+//     20-run sample shows floor at 3837 (median 3841, max 3845); gate
+//     at 3836 with 1 of headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3832
+const tckExecutionBaseline = 3836
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
