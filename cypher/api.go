@@ -4800,14 +4800,13 @@ func buildIRProjection(
 					}
 				} else if exprStr != name {
 					// Generalised colliding-alias guard: when the projection
-					// expression references the alias name as an INPUT variable
-					// (e.g. `RETURN a.id IS NOT NULL AS a` with a bound to a
-					// node), the schema slot still holds the upstream value;
-					// the schema-name fast path would return that stale value
-					// instead of the evaluated projection. Route through the
-					// general eval path when the alias name appears as a
-					// variable somewhere inside the expression and a value
-					// for that name already exists in the input schema.
+					// expression renames a value (`<expr> AS x`) and `x`
+					// already exists in the INPUT schema (typically because a
+					// prior WITH x... is being shadowed), the schema-name
+					// fast path would silently return the upstream value
+					// instead of computing the new expression. Route
+					// through the general eval path so the new value is
+					// projected.
 					//
 					// Aggregations are exempt: count/sum/avg/etc. are
 					// precomputed by EagerAggregation upstream and the
@@ -4817,20 +4816,49 @@ func buildIRProjection(
 					// (always 1) instead of the group's aggregate.
 					//
 					// Preprojected columns are also exempt: an
-					// EagerAggregation grouping key (e.g. `n` for the
-					// non-aggregate item `n.num AS n` in
-					// `RETURN n.num AS n, count(n)`) already carries the
+					// EagerAggregation grouping key already carries the
 					// pre-evaluated grouping expression value in the row
-					// slot. The fast path returns that value directly; routing
-					// through general eval would re-interpret `n` as the
-					// original NodeValue and the property access would fail.
+					// slot. The fast path returns that value directly;
+					// routing through general eval would re-interpret the
+					// variable as its pre-aggregation form.
+					//
+					// Only the BinaryOp / UnaryOp / arithmetic shapes are
+					// flagged here. A bare-Variable expression (`WITH x AS
+					// x`) takes the same value either way; a Property/
+					// MapLiteral has its own dedicated branch above.
 					isPreproj := false
 					if bopts != nil && bopts.preprojectedCols != nil {
 						_, isPreproj = bopts.preprojectedCols[name]
 					}
-					if _, exists := schema[name]; exists && !isPreproj {
+					isScalar := false
+					if bopts != nil && bopts.scalarCols != nil {
+						_, isScalar = bopts.scalarCols[name]
+					}
+					if _, exists := schema[name]; exists && !isPreproj && !isScalar {
+						// Case A: the expression references the alias name —
+						// the fast path would return the OLD value, but the
+						// expression intends to read the OLD value as input
+						// and produce a NEW transformed value. Route to
+						// general eval (already covered by exprReferencesVarName).
 						if exprReferencesVarName(item.Expr, name) && !exprContainsAggregate(item.Expr) {
 							skipForCollidingAlias = true
+						}
+						// Case B: the expression does NOT reference the alias
+						// name but still produces a new value (a WITH cascade
+						// of two projections that both bind `x`, where the
+						// second projection computes a fresh expression that
+						// happens to be independent of x). Route to general
+						// eval for any computed expression shape; bare
+						// Variable / Literal / Parameter projections keep the
+						// fast path because their value matches the slot.
+						if !skipForCollidingAlias && !exprContainsAggregate(item.Expr) {
+							switch item.Expr.(type) {
+							case *ast.BinaryOp, *ast.UnaryOp, *ast.FunctionInvocation,
+								*ast.SubscriptExpr, *ast.SliceExpr, *ast.CaseExpression,
+								*ast.ListComprehension, *ast.PatternComprehension,
+								*ast.ListLiteral, *ast.LabelPredicate:
+								skipForCollidingAlias = true
+							}
 						}
 					}
 				}
