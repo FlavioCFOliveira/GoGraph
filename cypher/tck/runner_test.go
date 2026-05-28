@@ -932,6 +932,16 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3798: raised after Literals5 [12] closed. ANTLR's DIGIT terminal
+//     absorbs a leading '-' into the integer token, so `-0.001` reaches
+//     the visitor as IntLit{Value: 0} + accessor key "001" — int64
+//     cannot carry the sign of negative zero. The
+//     fast-path that reconstructs the float from "%d.%s" therefore
+//     produced "0.001" and the sign vanished. The fix consults the
+//     atom's source text for the leading '-' and re-adds it when the
+//     fractional key has a non-zero digit (a purely-zero key
+//     collapses to canonical positive zero per openCypher). Observed
+//     3798-3803 across a 10-run sample; gate set at the floor.
 //   - 3797: raised after round 21 closed Match9 [1] (RETURN last(r)
 //     over a varlen rel). buildRowCtx now consults
 //     bopts.vleRelMeta and reconstructs the variable-length
@@ -1173,7 +1183,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3797
+const tckExecutionBaseline = 3798
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
