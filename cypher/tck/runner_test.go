@@ -1329,6 +1329,30 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3860: ratcheted after round 68 — two coordinated path-variable
+//     fixes that close List12 [5] (`MATCH p = (n:A)-->() WITH [x IN
+//     collect(p) | head(nodes(x))] AS p, count(n) AS c RETURN p,
+//     c`):
+//     (a) the projection's path-var fast-path no longer deletes
+//         pathVarChain[v.Name] at plan-build time. The delete was an
+//         optimisation to prevent a stale chain lookup against a
+//         post-projection row, but deleting at plan-build precedes
+//         every runtime read — including an aggregation's
+//         pre-projection that evaluates collect(p) against the
+//         original chain row layout. Without the delete the
+//         aggregation's pre-projection still reconstructs the
+//         PathValue and collect stores Paths instead of integer
+//         leading-node ids.
+//     (b) the projection's path-var fast-path now forwards a
+//         PathValue / ListValue already stored in the input schema
+//         slot before falling back to chain reconstruction (mirrors
+//         the round-59 pathVarMeta forward). After an aggregating
+//         WITH that emitted a list-of-paths at the p slot,
+//         `RETURN p` resolves through the schema-slot forward
+//         instead of trying to decode the post-aggregation row as
+//         a chain.
+//     20-run sample: floor 3860, median ~3862, max 3863; gate at
+//     3860 with 0 headroom.
 //   - 3859: ratcheted after round 67 — buildIRProjection tags every
 //     computed (non-Variable) projection alias whose name does NOT
 //     shadow an input-schema variable in a new bopts field
@@ -1475,7 +1499,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3859
+const tckExecutionBaseline = 3860
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

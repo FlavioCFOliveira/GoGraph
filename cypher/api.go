@@ -1603,6 +1603,15 @@ func buildOperatorWrite(
 	}
 }
 
+// keysOf returns the keys of m as a slice (for debugging).
+func keysOf[K comparable, V any](m map[K]V) []K {
+	out := make([]K, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // setSnap returns the set of keys present in m as a struct{} map. Used by
 // the plain-Apply builder to remember which metadata entries existed
 // before the inner-side build so newly-added entries can be offset by
@@ -4764,7 +4773,30 @@ func buildIRProjection(
 					if cinfo, isChain := bopts.pathVarChain[v.Name]; isChain {
 						capturedInfo := cinfo
 						capturedG := g
+						capturedName := v.Name
+						capturedSchema := inputSchema
 						evalFn = func(row exec.Row) (expr.Value, error) {
+							// Post-projection forward: if the schema slot for
+							// this path variable already carries a PathValue
+							// (an earlier projection emitted it into the
+							// column), forward it directly. The
+							// pathVarChain coordinates only apply to the
+							// original chain row layout; after a WITH the
+							// column may hold a self-describing PathValue
+							// and the chain slots belong to other variables.
+							// Without this `WITH … AS p RETURN p` after an
+							// aggregating WITH that emitted a ListValue at
+							// the p slot would surface NULL (List12 [5]).
+							if capturedSchema != nil {
+								if col, ok := capturedSchema[capturedName]; ok && col < len(row) {
+									switch v := row[col].(type) {
+									case expr.PathValue:
+										return v, nil
+									case expr.ListValue:
+										return v, nil
+									}
+								}
+							}
 							if capturedInfo.leadingCol >= len(row) {
 								return expr.Null, nil
 							}
@@ -4860,12 +4892,19 @@ func buildIRProjection(
 							}
 							return expr.PathValue{Nodes: nodes, Relationships: rels}, nil
 						}
-						// Mark this path variable as consumed so a subsequent
-						// projection over the same name (e.g. RETURN p after a
-						// WITH p) reads the freshly-projected PathValue
-						// column directly instead of attempting to re-evaluate
-						// the chain against the post-projection row layout.
-						delete(bopts.pathVarChain, v.Name)
+						// Subsequent projections over the same name read the
+						// freshly-projected PathValue column directly via the
+						// schema-slot fast-path (round-59 forward) when the
+						// row[col] is already a PathValue. The pathVarChain
+						// entry is left in place so any pre-projection that
+						// runs at runtime BEFORE this projection emits its
+						// row (e.g. an aggregation's pre-projection
+						// evaluating collect(p) when this RETURN was built
+						// in plan-build order) can still reconstruct the
+						// PathValue from the chain's original column
+						// positions. Deleting at plan-build time was an
+						// optimisation that broke nested-aggregate-in-list
+						// comprehension cases (List12 [5]).
 					}
 				}
 				// Edge variable fast path: reconstruct RelationshipValue from
