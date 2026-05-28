@@ -455,7 +455,14 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 	boundVars := map[string]struct{}{}
 	if child != nil {
 		plan = child
-		for _, v := range collectAllVars(child) {
+		// Use the scope-aware live-output set rather than collectAllVars:
+		// after a Projection (WITH a, r) the upstream-only variables (e.g.
+		// `b`) are no longer in scope at this point, so the rebinding
+		// equality (`b = __anon_0_to_b`) must NOT fire. Without this fix
+		// the Selection evaluates Variable{b} against a row whose schema
+		// has no `b`, yielding NULL, and the rebinding always rejects —
+		// closing the entire second MATCH.
+		for v := range liveOutputVars(child) {
 			boundVars[v] = struct{}{}
 		}
 	}
@@ -693,6 +700,68 @@ func isPureBoundRelPath(pp *ast.PathPattern, outputVars map[string]struct{}) boo
 		}
 	}
 	return sawBoundRel
+}
+
+// liveOutputVars returns the variables that are actually in scope at the
+// top of plan, respecting Projection / EagerAggregation scoping. The
+// physical layer's post-projection schema reset deletes upstream-only
+// variables; the IR layer must mirror that pruning when deciding whether
+// a subsequent MATCH should treat a variable as bound (and emit a
+// destination- or relationship-rebinding equality Selection).
+//
+// Walker semantics:
+//   - Projection / EagerAggregation: stop and return the projected names
+//     (the operator's own Vars()). Upstream variables NOT among them are
+//     no longer in scope.
+//   - Passthrough operators (Selection, Sort, Top, Limit, Distinct,
+//     NamedPath, Eager, ProduceResults): descend to child. The operator
+//     adds no new bindings of its own beyond what child provides.
+//   - Producers (Scan, Expand, OptionalExpand, VarLengthExpand, Argument,
+//     Apply, CorrelatedApply, OptionalApply, Unwind, ProcedureCall, …):
+//     return the union of self.Vars() and any in-scope child output
+//     (because these operators APPEND their own bindings to the
+//     upstream row layout).
+func liveOutputVars(plan LogicalPlan) map[string]struct{} { //nolint:gocyclo // case-per-operator dispatch
+	if plan == nil {
+		return nil
+	}
+	out := map[string]struct{}{}
+	switch p := plan.(type) {
+	case *Projection:
+		for _, v := range p.Vars() {
+			if v != "" {
+				out[v] = struct{}{}
+			}
+		}
+		return out
+	case *EagerAggregation:
+		for _, v := range p.Vars() {
+			if v != "" {
+				out[v] = struct{}{}
+			}
+		}
+		return out
+	case *Selection, *Sort, *Top, *Limit, *Distinct, *Skip, *NamedPath, *Eager, *ProduceResults:
+		for _, c := range plan.Children() {
+			for k := range liveOutputVars(c) {
+				out[k] = struct{}{}
+			}
+		}
+		return out
+	default:
+		// Producer / appender: union of self Vars() and child live outputs.
+		for _, v := range plan.Vars() {
+			if v != "" {
+				out[v] = struct{}{}
+			}
+		}
+		for _, c := range plan.Children() {
+			for k := range liveOutputVars(c) {
+				out[k] = struct{}{}
+			}
+		}
+		return out
+	}
 }
 
 // outputVarSet returns the variables exposed by plan as a set.
@@ -985,6 +1054,20 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 		}
 	}
 
+	// Detect relationship rebinding: when relVar is already bound (e.g.
+	// `WITH a, r MATCH (a)-[r]->(b)`), expand into a synthetic rel
+	// variable and equate it with the existing relVar via a Selection.
+	// Without this the inner Expand silently overwrites the outer
+	// relationship binding with a fresh one, breaking With7 [1].
+	relRebinding := false
+	syntheticRel := ""
+	if relVar != "" && boundVars != nil {
+		if _, ok := boundVars[relVar]; ok {
+			relRebinding = true
+			syntheticRel = t.freshAnonVar() + "_rel_" + relVar
+		}
+	}
+
 	dir := relDirection(rp.Direction)
 	relTypes := make([]string, len(rp.Types))
 	copy(relTypes, rp.Types)
@@ -992,6 +1075,10 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 	expandTo := toVar
 	if destRebinding {
 		expandTo = syntheticTo
+	}
+	expandRel := relVar
+	if relRebinding {
+		expandRel = syntheticRel
 	}
 
 	// Variable-length expansion (e.g. -[r*1..3]->).
@@ -1008,7 +1095,7 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 		if rp.Range.Max != nil {
 			maxDepth = int(*rp.Range.Max)
 		}
-		var plan LogicalPlan = NewVarLengthExpand(fromVar, relVar, relTypes, dir, expandTo, minDepth, maxDepth, child)
+		var plan LogicalPlan = NewVarLengthExpand(fromVar, expandRel, relTypes, dir, expandTo, minDepth, maxDepth, child)
 		// Inline property predicate on a variable-length relationship is
 		// per-element: `[:T* {year: 1988}]` selects ONLY those VLE paths
 		// where every relationship has year=1988. Wrap the property
@@ -1017,25 +1104,31 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 		// emission. Without this, the predicate would be applied to the
 		// list value itself, surfacing `property access requires Map,
 		// Node, or Relationship, got List` (Match4 [5]).
-		plan = t.matchApplyVarLengthRelFilter(rp, relVar, plan)
+		plan = t.matchApplyVarLengthRelFilter(rp, expandRel, plan)
 		plan = t.matchApplyNodeFilter(to, expandTo, plan)
 		if destRebinding {
 			plan = t.appendEqSelection(toVar, syntheticTo, plan)
+		}
+		if relRebinding {
+			plan = t.appendEqSelection(relVar, syntheticRel, plan)
 		}
 		return plan
 	}
 
 	var plan LogicalPlan
 	if optional {
-		plan = NewOptionalExpand(fromVar, relVar, relTypes, dir, expandTo, child)
+		plan = NewOptionalExpand(fromVar, expandRel, relTypes, dir, expandTo, child)
 	} else {
-		plan = NewExpand(fromVar, relVar, relTypes, dir, expandTo, child)
+		plan = NewExpand(fromVar, expandRel, relTypes, dir, expandTo, child)
 	}
 
-	plan = t.matchApplyRelFilter(rp, relVar, plan)
+	plan = t.matchApplyRelFilter(rp, expandRel, plan)
 	plan = t.matchApplyNodeFilter(to, expandTo, plan)
 	if destRebinding {
 		plan = t.appendEqSelection(toVar, syntheticTo, plan)
+	}
+	if relRebinding {
+		plan = t.appendEqSelection(relVar, syntheticRel, plan)
 	}
 	return plan
 }

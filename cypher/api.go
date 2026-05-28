@@ -5350,12 +5350,30 @@ func buildIRProjection(
 	//
 	// The reset preserves only the alias→index mapping and the secondary
 	// expression-string keys registered above; everything else is dropped.
+	// Two passes so alias keys are not overwritten by another item's
+	// secondary expression key when their names collide. For example
+	// `WITH a AS b, b AS tmp` would otherwise let item 1's expression
+	// key `b` overwrite item 0's alias key `b` and put the post-
+	// projection slot for `b` at item 1's index — which then surfaces
+	// item 1's value (`b`'s pre-projection value) instead of item 0's
+	// (`a`'s pre-projection value). Closes With7 [1]'s rename-swap
+	// chain.
 	keep := make(map[string]int, len(items)*2)
+	aliasNames := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		aliasNames[item.Name] = struct{}{}
+	}
 	for i, item := range items {
 		keep[item.Name] = i
-		if item.Expression != "" && item.Expression != item.Name {
-			keep[item.Expression] = i
+	}
+	for i, item := range items {
+		if item.Expression == "" || item.Expression == item.Name {
+			continue
 		}
+		if _, isAlias := aliasNames[item.Expression]; isAlias {
+			continue
+		}
+		keep[item.Expression] = i
 	}
 	for k := range schema {
 		if _, ok := keep[k]; !ok {

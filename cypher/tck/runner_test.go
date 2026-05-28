@@ -1329,6 +1329,28 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3872: ratcheted after round 73 — three coordinated changes for the
+//     bound-relationship and rename-swap cluster:
+//     (a) matchExpandStepBoundWithFrom now detects rel-rebinding (when
+//         the pattern's relationship variable is already bound, like
+//         `WITH a, r MATCH (a)-[r]->(b)`) and expands into a synthetic
+//         relVar with an outer/inner equality Selection — mirrors the
+//         existing destRebinding for endpoint nodes.
+//     (b) matchPattern's boundVars now uses a scope-aware
+//         `liveOutputVars` walker instead of `collectAllVars`. After a
+//         Projection / EagerAggregation the upstream-only variables
+//         (e.g. `b` after `WITH a, r`) are no longer in scope and must
+//         NOT drive destRebinding (which would emit a `b = synthetic`
+//         Selection that always rejects against an absent `b` slot).
+//     (c) the post-projection schema reset's keep map now prefers
+//         alias keys over secondary expression-string keys: `WITH a AS
+//         b, b AS tmp` no longer lets item 1's expression key `b`
+//         overwrite item 0's alias key `b`. Closes With7 [1]'s
+//         rename-swap chain.
+//     Closes With7 [1], Match7 [4]/[5], Match4 [8], MatchWhere6 [5].
+//     10-run sample: floor 3872, median ~3874, max 3876; gate at 3872
+//     with 0 headroom (flake band Pattern2 [11] / Delete4 [1] / Merge1
+//     [9] / MatchWhere1 [11] absorbed in median).
 //   - 3867: ratcheted after round 72 — buildIRProjection's edge-variable
 //     fast path now also probes the input schema at the projection ALIAS
 //     name (not just the source variable name) when forwarding a
@@ -1552,7 +1574,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3866
+const tckExecutionBaseline = 3872
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
