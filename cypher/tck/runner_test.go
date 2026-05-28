@@ -1266,11 +1266,15 @@ import (
 //     downstream RETURN n.<key> reads the freshly-set value
 //     (List12 [1] / [2]). Variance band moved to 3822-3830 (median
 //     ~3826); gate kept at 3815 to absorb the remaining flap floor.
+//   - 3820: ratcheted after a 30-run sample showed the floor stabilising
+//     at 3821 (median 3827, max 3834). With ~6 of headroom this gate
+//     captures all the deterministic gains from rounds 35-36 without
+//     burning the rand()/iteration-order variance budget.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3815
+const tckExecutionBaseline = 3820
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
