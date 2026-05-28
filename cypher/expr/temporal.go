@@ -1746,8 +1746,13 @@ func dateTimeAccessor(v DateTimeValue, key string) (Value, bool) {
 	case "offsetMinutes":
 		return IntegerValue(int64(off / 60)), true
 	case "timezone":
-		zone, _ := v.T.Zone()
-		return StringValue(zone), true
+		// openCypher's `.timezone` accessor returns the IANA location name
+		// (`Europe/Stockholm`) rather than the abbreviation produced by
+		// Go's time.Time.Zone() (`CET`). Use Location().String() so the
+		// zone identity round-trips through the type system; named zones
+		// keep their location identifier, fixed-offset zones render the
+		// numeric offset their Location was constructed from.
+		return StringValue(v.T.Location().String()), true
 	}
 	return nil, false
 }

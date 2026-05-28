@@ -1329,6 +1329,12 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3848: ratcheted after round 55 — DateTimeValue's `.timezone`
+//     accessor now returns the IANA location name (`Europe/Stockholm`)
+//     instead of Go's `time.Time.Zone()` abbreviation (`CET`), matching
+//     the openCypher TCK convention. Closes Temporal5 [6]. 20-run
+//     sample: floor 3847, median ~3851, max 3853; gate at 3848 with
+//     1 of headroom.
 //   - 3847: ratcheted after round 54 — mergeClause now wraps the
 //     MergeRelationship shortcut with applyPathVar (mirroring the
 //     general Merge path-binding fix from round 53), and
@@ -1364,7 +1370,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3847
+const tckExecutionBaseline = 3848
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
