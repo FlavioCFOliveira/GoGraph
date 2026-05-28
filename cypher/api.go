@@ -2973,6 +2973,23 @@ func buildEagerAggregation(
 			bopts.scalarCols = make(map[string]struct{})
 		}
 		for _, aggExpr := range p.Aggregates {
+			// Skip adding when OutputName shadows a variable that was in the
+			// PRE-aggregation schema (e.g. `count(n) AS n` keeps OutputName
+			// "n" but Selection operators below the aggregation still hold
+			// a closure over bopts.scalarCols and would interpret the
+			// existing pre-aggregation "n" column as scalar, breaking
+			// property predicates like `{matched: true}` on the bound node.
+			// The projection-fast-path that consults scalarCols for the
+			// post-aggregation read is harmless to skip — without the tag
+			// it falls through to upgradeNodeIDToValue, which only fires
+			// when the integer actually resolves to a node; aggregate
+			// integers that happen to coincide with a node id remain a
+			// known sharp edge but are vanishingly rare compared with the
+			// systematic alias-shadow breakage that the unguarded write
+			// causes.
+			if _, shadowsInput := schemaSnap[aggExpr.OutputName]; shadowsInput {
+				continue
+			}
 			bopts.scalarCols[aggExpr.OutputName] = struct{}{}
 		}
 		if bopts.preprojectedCols == nil {
@@ -4147,6 +4164,20 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 					ctx[varName] = rv
 					continue
 				}
+			}
+		}
+		// Scalar columns (UNWIND element variables, aggregate outputs) pass
+		// through unchanged: their integer values are not node ids and must
+		// not be upgraded. Without this guard a CREATE/UNWIND that reads an
+		// integer through a row variable would silently elevate the integer
+		// to a NodeValue when it happened to numerically equal an existing
+		// internal node id — breaking downstream property writes, range()
+		// arguments, list indexing, and more (Match4 [4] / Aggregation6 [5]
+		// setup queries).
+		if bopts != nil && bopts.scalarCols != nil {
+			if _, isScalar := bopts.scalarCols[varName]; isScalar {
+				ctx[varName] = row[colIdx]
+				continue
 			}
 		}
 		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)

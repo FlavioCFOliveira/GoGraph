@@ -1319,11 +1319,21 @@ import (
 //     the integer. Closes Create6 [6] and ReturnSkipLimit3 [3]. 20-run
 //     sample: floor 3841, median ~3844, max 3848; gate at 3841 with 0
 //     headroom.
+//   - 3843: ratcheted after round 52 — buildRowCtx now honours
+//     bopts.scalarCols (mirroring the projection fast-path), and
+//     buildEagerAggregation now skips adding an aggregate OutputName
+//     to scalarCols when that name shadows a variable from the
+//     pre-aggregation schema (e.g. `count(n) AS n`), so Selection
+//     operators built below the aggregation do not mis-interpret the
+//     entity column as scalar. Closes Match4 [4] (range(start, end)
+//     with a row-variable end) and Aggregation6 [5] (setup query
+//     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
+//     gate at 3843 with 0 headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3841
+const tckExecutionBaseline = 3843
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
