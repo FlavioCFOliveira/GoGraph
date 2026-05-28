@@ -1329,6 +1329,28 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3880: ratcheted after round 82 — edge-ID-based storage-direction
+//     resolution for path reconstruction. A new bopts.edgeIDResolver
+//     (lazily built once per query from the LPG's forward CSR) maps a
+//     forward-CSR edge position to the edge's true storage endpoints.
+//     buildRelationshipValueFromRow, the buildIRProjection edge-variable
+//     fast path, and the NamedPath chain fast path now consult the
+//     resolver when reconstructing a RelationshipValue. Previously
+//     these probed `EdgeLabels(traversal_src, traversal_dst)`, which
+//     returned the wrong (forward-stored) edge when BOTH directions
+//     between the endpoint pair carried storage edges — Match6 [12]'s
+//     graph (`(a:A)-[:T1]->(b:B)`, `(b:B)-[:T2]->(a:A)`) rendered every
+//     reverse hop as a forward arrow with the WRONG type because the
+//     forward probe at (A,B) always returned T1 even when the row's
+//     edge id was rel1 (T2, stored B→A).
+//
+//     With the resolver, the chain-reconstruction reads the row's edge
+//     id, looks up its storage src/dst via binary search over fwdVerts,
+//     and uses those endpoints to fetch the type and properties — so
+//     `MATCH p = (n)<-->(k)<-->(n) RETURN p` over the same graph now
+//     emits all 4 expected paths with correct arrows (`-[:T1]->`,
+//     `<-[:T2]-`, etc.). Closes Match6 [12] and Match6 [13]. 10-run
+//     sample: 10-of-10 at 3880; gate at 3880 with 0 headroom.
 //   - 3878: ratcheted after round 81 — chained-VLE named-path
 //     reconstruction. pathVarInfo gains a `segments []pathVarSegment`
 //     field; each VarLengthExpand that shares the named-path variable
@@ -1693,7 +1715,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3878
+const tckExecutionBaseline = 3880
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

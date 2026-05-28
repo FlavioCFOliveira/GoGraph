@@ -243,6 +243,14 @@ type buildOpts struct {
 	// regressing Return6 [1] / ExistentialSubquery2 [2] (which both
 	// rely on the pre-projection's `a`/`n` staying a NodeValue).
 	aggKeyScalarCols map[string]struct{}
+	// edgeIDResolver, when non-nil, returns the storage endpoints of an
+	// edge identified by its forward-CSR position. Used by the path-
+	// reconstruction fast paths to determine the true storage direction
+	// of a relationship when the row's (src, dst) columns reflect the
+	// traversal direction (which differs from storage for undirected /
+	// reverse-edge traversals). Lazily populated on first use to avoid
+	// building CSR snapshots for queries that never reconstruct paths.
+	edgeIDResolver func(edgeID uint64) (storageSrc, storageDst uint64, ok bool)
 	// preprojectedCols is the set of schema variable names whose row column
 	// already holds the projection-equivalent value (e.g. an EagerAggregation
 	// grouping-key column carries the pre-evaluated grouping expression, not
@@ -4561,6 +4569,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 	}
 	edgeType := meta.edgeType
 	var edgeProps expr.MapValue
+	storageStart, storageEnd := srcID, dstID
 	if g != nil {
 		srcKey, srcResolved := g.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 		dstKey, dstResolved := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
@@ -4571,12 +4580,18 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 			rawEP := g.EdgeProperties(srcKey, dstKey)
 			if len(ets) == 0 && len(rawEP) == 0 {
 				// Reverse-edge pass of an undirected expansion: storage
-				// holds the edge as (dstKey -> srcKey); look it up there
-				// so the relationship's type and properties survive
-				// reverse traversal (e.g. the b→a row of MATCH (a)-[r]-(b)
-				// over a single (:A)-[:T]->(:B) edge).
+				// holds the edge as (dstKey -> srcKey); record the
+				// inverted storage direction so the PathValue renderer
+				// (which compares rel.StartID against the path's
+				// preceding node) emits `<-[…]-` for this hop. Without
+				// this Match6 [12]/[13] rendered every undirected
+				// reverse hop as a forward arrow because StartID still
+				// matched the traversal-src.
 				ets = g.EdgeLabels(dstKey, srcKey)
 				rawEP = g.EdgeProperties(dstKey, srcKey)
+				if len(ets) > 0 || len(rawEP) > 0 {
+					storageStart, storageEnd = dstID, srcID
+				}
 			}
 			if len(ets) > 0 {
 				edgeType = pickEdgeType(ets, meta.acceptedTypes)
@@ -4589,8 +4604,8 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 	}
 	return expr.RelationshipValue{
 		ID:         uint64(edgeIDVal),
-		StartID:    srcID,
-		EndID:      dstID,
+		StartID:    storageStart,
+		EndID:      storageEnd,
 		Type:       edgeType,
 		Properties: edgeProps,
 	}, true
@@ -5003,6 +5018,7 @@ func buildIRProjection(
 						capturedG := g
 						capturedName := v.Name
 						capturedSchema := inputSchema
+						capturedBopts := bopts
 						evalFn = func(row exec.Row) (expr.Value, error) {
 							// Post-projection forward: if the schema slot for
 							// this path variable already carries a PathValue
@@ -5076,18 +5092,28 @@ func buildIRProjection(
 								// pathStart/pathEnd track the path's traversal
 								// order (preceding node → current dst). The
 								// edge's storage direction may run either way;
-								// we probe EdgeLabels in both orientations and
-								// record the real StartID/EndID so downstream
-								// renderers can choose the correct arrow.
+								// when the graph carries edges in BOTH
+								// directions between the endpoint pair (Match6
+								// [12]'s `a:A -[:T1]-> b:B` + `b:B -[:T2]->
+								// a:A`), probing EdgeLabels(pathStart, pathEnd)
+								// alone returns whichever direction happens
+								// to be present, even when the row's edge ID
+								// references the OPPOSITE direction. Resolve
+								// the edge by ID via the bopts resolver to
+								// get the true storage endpoints.
 								pathStart := nodes[len(nodes)-1].ID
 								pathEnd := dstNode.ID
 								storageStart := pathStart
 								storageEnd := pathEnd
+								if resolver := ensureEdgeIDResolver(capturedBopts, capturedG); resolver != nil {
+									if rss, rsd, ok := resolver(uint64(edgeIDVal)); ok {
+										storageStart, storageEnd = rss, rsd
+									}
+								}
 								if capturedG != nil {
-									sKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(pathStart))
-									dKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(pathEnd))
+									sKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(storageStart))
+									dKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(storageEnd))
 									if sOK && dOK {
-										// Try forward (pathStart → pathEnd).
 										if ets := capturedG.EdgeLabels(sKey, dKey); len(ets) > 0 {
 											et = ets[0]
 											rawEP := capturedG.EdgeProperties(sKey, dKey)
@@ -5095,17 +5121,6 @@ func buildIRProjection(
 											for k, pv := range rawEP {
 												edgeProps[k] = lpgPropToExpr(pv)
 											}
-										} else if ets := capturedG.EdgeLabels(dKey, sKey); len(ets) > 0 {
-											// Reverse storage: edge actually
-											// stored pathEnd → pathStart.
-											et = ets[0]
-											rawEP := capturedG.EdgeProperties(dKey, sKey)
-											edgeProps = make(expr.MapValue, len(rawEP))
-											for k, pv := range rawEP {
-												edgeProps[k] = lpgPropToExpr(pv)
-											}
-											storageStart = pathEnd
-											storageEnd = pathStart
 										}
 									}
 								}
@@ -5213,6 +5228,7 @@ func buildIRProjection(
 							// and Properties.
 							edgeType := capturedMeta.edgeType
 							var edgeProps expr.MapValue
+							storageStart, storageEnd := srcID, dstID
 							// Look up the edge's labels and properties from the
 							// live graph. The previous `srcID != 0` guard
 							// silently skipped the lookup when the source
@@ -5221,6 +5237,14 @@ func buildIRProjection(
 							// which left the RelationshipValue without its
 							// Type. Closes Pattern2 [11] (TCK's first node
 							// gets id 0, so the forward path lost `:T`).
+							//
+							// When the forward direction has no labels but
+							// the reverse does, the edge is stored in the
+							// opposite direction (undirected MATCH reverse
+							// pass). Swap StartID/EndID to reflect the
+							// storage direction so the PathValue renderer
+							// emits `<-[…]-` for this hop instead of `-[…]->`
+							// (Match6 [12]/[13] direction fix).
 							if capturedG != nil {
 								srcKey, srcResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 								dstKey, dstResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
@@ -5230,6 +5254,9 @@ func buildIRProjection(
 									if len(ets) == 0 && len(rawEP) == 0 {
 										ets = capturedG.EdgeLabels(dstKey, srcKey)
 										rawEP = capturedG.EdgeProperties(dstKey, srcKey)
+										if len(ets) > 0 || len(rawEP) > 0 {
+											storageStart, storageEnd = dstID, srcID
+										}
 									}
 									if len(ets) > 0 {
 										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)
@@ -5242,8 +5269,8 @@ func buildIRProjection(
 							}
 							return expr.RelationshipValue{
 								ID:         edgeID,
-								StartID:    srcID,
-								EndID:      dstID,
+								StartID:    storageStart,
+								EndID:      storageEnd,
 								Type:       edgeType,
 								Properties: edgeProps,
 							}, nil
@@ -6243,6 +6270,48 @@ func csrPairFromGraph(g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]
 	fwd = csr.BuildFromAdjList(adj)
 	rev = fwd.BuildReverse()
 	return
+}
+
+// ensureEdgeIDResolver makes sure bopts.edgeIDResolver is populated and
+// returns it. The resolver maps a forward-CSR edge position (the
+// IntegerValue Expand emits) to the edge's storage endpoints
+// (storage_src, storage_dst). Path-reconstruction fast paths use it to
+// determine the relationship's storage direction when the row's
+// traversal columns disagree (undirected MATCH reverse-pass rows
+// carry traversal_src ≠ storage_src).
+//
+// The resolver is built lazily on first use because most queries never
+// reconstruct paths. CSR construction is O(V+E) but happens at most
+// once per query.
+func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) func(uint64) (uint64, uint64, bool) {
+	if bopts == nil || g == nil {
+		return nil
+	}
+	if bopts.edgeIDResolver != nil {
+		return bopts.edgeIDResolver
+	}
+	fwd, _ := csrPairFromGraph(g)
+	verts := fwd.VerticesSlice()
+	edges := fwd.EdgesSlice()
+	nEdges := uint64(len(edges))
+	bopts.edgeIDResolver = func(edgeID uint64) (uint64, uint64, bool) {
+		if edgeID >= nEdges {
+			return 0, 0, false
+		}
+		storageDst := uint64(edges[edgeID])
+		// Binary search for the largest src such that verts[src] <= edgeID.
+		lo, hi := 0, len(verts)-1
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if verts[mid] <= edgeID {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		return uint64(lo), storageDst, true
+	}
+	return bopts.edgeIDResolver
 }
 
 // nodeIDOrNodeValue extracts a NodeID from a row column. The slot may hold a
