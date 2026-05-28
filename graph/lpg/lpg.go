@@ -16,6 +16,7 @@ package lpg
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"gograph/graph"
 	"gograph/graph/adjlist"
@@ -142,6 +143,24 @@ type Graph[N comparable, W any] struct {
 
 	nodePropShards [propMapShards]nodePropShard
 	edgePropShards [propMapShards]edgePropShard
+
+	// tombstones records NodeIDs that have been removed by RemoveNode.
+	// The underlying Mapper cannot release the index slot (NodeID stability
+	// is a hard contract), so removal is observable only via this set:
+	// every read path (Order, IsTombstoned, WalkLiveNodes) must filter
+	// tombstoned ids.
+	tombstoneMu sync.RWMutex
+	tombstones  map[graph.NodeID]struct{}
+
+	// nodesAddedCount / nodesRemovedCount / edgesAddedCount /
+	// edgesRemovedCount track per-direction counters used by the TCK
+	// side-effect comparator. Net Order() / Size() can't distinguish a
+	// CREATE+DELETE from a no-op, so the comparator needs the explicit
+	// addition and removal counts.
+	nodesAddedCount   atomic.Uint64
+	nodesRemovedCount atomic.Uint64
+	edgesAddedCount   atomic.Uint64
+	edgesRemovedCount atomic.Uint64
 
 	idxMgr    *index.Manager
 	validator atomicValidator
@@ -284,6 +303,73 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 	g.nodeIdx.Add(uint32(lid), id)
 	return nil
 }
+
+// RemoveNode marks the node n as removed. Subsequent reads through
+// IsTombstoned / WalkLiveNodes treat n as absent. The underlying
+// Mapper retains the slot (NodeID stability is a hard contract), but
+// label, property, and adjacency reads on the tombstoned id remain
+// safe; callers should also strip labels / properties / incident
+// edges before calling RemoveNode so the tombstone reflects the
+// fully-deleted node state. No-op when n was never interned or is
+// already tombstoned.
+func (g *Graph[N, W]) RemoveNode(n N) {
+	id, ok := g.adj.Mapper().Lookup(n)
+	if !ok {
+		return
+	}
+	g.tombstoneMu.Lock()
+	if g.tombstones == nil {
+		g.tombstones = make(map[graph.NodeID]struct{})
+	}
+	g.tombstones[id] = struct{}{}
+	g.tombstoneMu.Unlock()
+}
+
+// IsTombstoned reports whether id has been marked removed via
+// [Graph.RemoveNode]. Used by the Cypher executor's AllNodesScan to
+// skip phantom nodes (those that the Mapper still indexes but that
+// the graph treats as deleted).
+func (g *Graph[N, W]) IsTombstoned(id graph.NodeID) bool {
+	g.tombstoneMu.RLock()
+	defer g.tombstoneMu.RUnlock()
+	_, ok := g.tombstones[id]
+	return ok
+}
+
+// LiveOrder returns the number of non-tombstoned interned nodes.
+func (g *Graph[N, W]) LiveOrder() uint64 {
+	total := g.adj.Order()
+	g.tombstoneMu.RLock()
+	dead := uint64(len(g.tombstones))
+	g.tombstoneMu.RUnlock()
+	if dead > total {
+		return 0
+	}
+	return total - dead
+}
+
+// SideEffectCounters returns the per-direction counters maintained by the
+// graph: nodes added, nodes removed, edges added, edges removed since
+// SnapshotSideEffectCounters was last called. Used by the Cypher TCK
+// side-effect comparator to verify +nodes / -nodes / +relationships /
+// -relationships are accurate counts (not net changes).
+func (g *Graph[N, W]) SideEffectCounters() (nodesAdded, nodesRemoved, edgesAdded, edgesRemoved uint64) {
+	return g.nodesAddedCount.Load(),
+		g.nodesRemovedCount.Load(),
+		g.edgesAddedCount.Load(),
+		g.edgesRemovedCount.Load()
+}
+
+// IncrNodesAdded / IncrNodesRemoved / IncrEdgesAdded / IncrEdgesRemoved
+// expose the per-direction counters to the cypher executor so the
+// mutator adapters can record each event as it happens. The graph
+// itself does not call these — node and edge mutation flow through
+// the adapters, which know whether a given AddNode/AddEdge was a
+// fresh allocation or a no-op re-intern.
+func (g *Graph[N, W]) IncrNodesAdded()   { g.nodesAddedCount.Add(1) }
+func (g *Graph[N, W]) IncrNodesRemoved() { g.nodesRemovedCount.Add(1) }
+func (g *Graph[N, W]) IncrEdgesAdded()   { g.edgesAddedCount.Add(1) }
+func (g *Graph[N, W]) IncrEdgesRemoved() { g.edgesRemovedCount.Add(1) }
 
 // RemoveNodeLabel detaches name from n. No-op if absent.
 func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {

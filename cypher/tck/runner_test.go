@@ -1329,6 +1329,23 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3864: ratcheted after round 70 — coordinated node-removal +
+//     per-direction side-effect counters:
+//     (a) lpg.Graph gains a tombstones set + IsTombstoned /
+//         LiveOrder / RemoveNode; DeleteNode and DetachDelete now
+//         call RemoveNode after stripping labels/properties so
+//         AllNodesScan/count(*) treat the node as absent;
+//     (b) lpg.Graph gains per-direction side-effect counters
+//         (nodesAdded / nodesRemoved / edgesAdded / edgesRemoved)
+//         and exposes them via SideEffectCounters() and
+//         IncrNodesAdded / etc.; the mutator adapters bump the
+//         counters on AddNode / AddEdge / RemoveEdge / RemoveNode;
+//     (c) the TCK side-effect comparator snapshots the counters
+//         before each query and verifies ADD vs REMOVE counts
+//         independently (was net-change-only via Order()).
+//     Closes Create4 [1]/[2], Merge1 [14], Merge5 [20]. 20-run
+//     sample: floor 3863, median ~3866, max 3868; gate at 3864
+//     with 1 of headroom.
 //   - 3860: ratcheted after round 68 — two coordinated path-variable
 //     fixes that close List12 [5] (`MATCH p = (n:A)-->() WITH [x IN
 //     collect(p) | head(nodes(x))] AS p, count(n) AS c RETURN p,
@@ -1499,7 +1516,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3860
+const tckExecutionBaseline = 3864
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

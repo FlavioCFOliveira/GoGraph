@@ -180,6 +180,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				for k := range op.mutator.NodeProperties(nodeKey) {
 					op.mutator.DelNodeProperty(nodeKey, k)
 				}
+				op.mutator.RemoveNode(nodeKey)
 			}
 			*out = childRow
 			return true, nil
@@ -255,6 +256,9 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	for k := range op.mutator.NodeProperties(nodeKey) {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}
+	// Tombstone the node entity so AllNodesScan, count(*), and the
+	// Order accessor no longer see it (Merge1 [14] / Merge5 [20]).
+	op.mutator.RemoveNode(nodeKey)
 
 	*out = childRow
 	return true, nil

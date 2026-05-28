@@ -97,6 +97,8 @@ func (m *seedStubMutator) OutNeighbours(string) []string             { panic("un
 func (m *seedStubMutator) InNeighbours(string) []string              { panic("unused") }
 func (m *seedStubMutator) OutDegree(string) int                      { panic("unused") }
 func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool) { panic("unused") }
+func (m *seedStubMutator) RemoveNode(string)                         { panic("unused") }
+func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool            { return false }
 
 // Compile-time check: seedStubMutator must satisfy GraphMutator so the
 // production seedGlobalNodeCounter accepts it directly. If a future change

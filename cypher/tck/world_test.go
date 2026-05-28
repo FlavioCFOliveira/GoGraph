@@ -33,6 +33,14 @@ type world struct {
 	// enabling lightweight side-effect verification.
 	nodesBefore int64
 	relsBefore  int64
+	// Per-direction counters snapshotted before the test query runs.
+	// openCypher's side-effect spec tracks ADDITIONS and REMOVALS
+	// separately (not net change), so the comparator subtracts the
+	// before-snapshot from the after-snapshot of each counter.
+	nodesAddedBefore   uint64
+	nodesRemovedBefore uint64
+	edgesAddedBefore   uint64
+	edgesRemovedBefore uint64
 }
 
 // newWorld allocates a fresh world backed by an empty directed graph.
@@ -398,9 +406,11 @@ func (w *world) runSetup(ctx context.Context, query string) (retErr error) {
 	return res.Close()
 }
 
-// snapshotCounts records the current node and relationship counts before the
-// test query runs so side-effect verification can compare against them.
+// snapshotCounts records the current node and relationship counts and the
+// per-direction side-effect counters before the test query runs so the
+// comparator can verify ADD-vs-REMOVE counts independently.
 func (w *world) snapshotCounts() {
-	w.nodesBefore = int64(w.g.AdjList().Order())
+	w.nodesBefore = int64(w.g.LiveOrder())
 	w.relsBefore = int64(w.g.AdjList().Size())
+	w.nodesAddedBefore, w.nodesRemovedBefore, w.edgesAddedBefore, w.edgesRemovedBefore = w.g.SideEffectCounters()
 }

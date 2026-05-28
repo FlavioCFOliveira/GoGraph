@@ -1002,9 +1002,15 @@ type lpgNodeWalker struct {
 	g *lpg.Graph[string, float64]
 }
 
-// WalkNodeIDs implements nodeWalkerIface.
+// WalkNodeIDs implements nodeWalkerIface. Tombstoned node IDs (those
+// removed via the GraphMutator's RemoveNode) are skipped so
+// AllNodesScan, count(*), and downstream scans treat deleted nodes
+// as absent.
 func (w *lpgNodeWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
 	w.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
+		if w.g.IsTombstoned(id) {
+			return true // skip but continue iteration
+		}
 		return fn(id)
 	})
 }
@@ -5413,25 +5419,46 @@ func (a *lpgMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	_, existed := a.g.AdjList().Mapper().Lookup(n)
 	if err := a.g.AddNode(n); err != nil {
 		return 0, err
 	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
+	// Account for tombstone resurrection (re-creating a node with the
+	// same key) as a fresh creation for side-effect bookkeeping.
+	if existed && a.g.IsTombstoned(id) {
+		existed = false
+	}
+	if !existed {
+		a.g.IncrNodesAdded()
+	}
 	return id, nil
 }
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
+	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	if err := a.g.AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
+	if !srcExisted {
+		a.g.IncrNodesAdded()
+	}
+	if !dstExisted && src != dst {
+		a.g.IncrNodesAdded()
+	}
+	a.g.IncrEdgesAdded()
 	return srcID, dstID, nil
 }
 
 // RemoveEdge removes the directed edge (src, dst).
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
+	if a.g.AdjList().HasEdge(src, dst) {
+		a.g.IncrEdgesRemoved()
+	}
 	a.g.AdjList().RemoveEdge(src, dst)
 }
 
@@ -5460,6 +5487,23 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 			Label: uint32(a.g.Registry().Intern(label)),
 		})
 	}
+}
+
+// RemoveNode tombstones n in the underlying graph.
+func (a *lpgMutatorAdapter) RemoveNode(n string) {
+	id, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return
+	}
+	if !a.g.IsTombstoned(id) {
+		a.g.IncrNodesRemoved()
+	}
+	a.g.RemoveNode(n)
+}
+
+// IsTombstoned reports whether the NodeID has been tombstoned.
+func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
+	return a.g.IsTombstoned(id)
 }
 
 // SetNodeProperty sets the named property on n.
@@ -5608,9 +5652,12 @@ func (a *lpgMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node.
 func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
+		if a.g.IsTombstoned(id) {
+			return true
+		}
 		return fn(id)
 	})
 }
@@ -5643,27 +5690,46 @@ func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	_, existed := a.g.AdjList().Mapper().Lookup(n)
 	if err := a.g.AddNode(n); err != nil {
 		return 0, err
 	}
 	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
+	if existed && a.g.IsTombstoned(id) {
+		existed = false
+	}
+	if !existed {
+		a.g.IncrNodesAdded()
+	}
 	return id, nil
 }
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
+	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	if err := a.g.AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
 	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
+	if !srcExisted {
+		a.g.IncrNodesAdded()
+	}
+	if !dstExisted && src != dst {
+		a.g.IncrNodesAdded()
+	}
+	a.g.IncrEdgesAdded()
 	return srcID, dstID, nil
 }
 
 // RemoveEdge removes the directed edge (src, dst).
 func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
+	if a.g.AdjList().HasEdge(src, dst) {
+		a.g.IncrEdgesRemoved()
+	}
 	a.g.AdjList().RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
 }
@@ -5695,6 +5761,23 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 			Label: uint32(a.g.Registry().Intern(label)),
 		})
 	}
+}
+
+// RemoveNode tombstones n in the underlying graph.
+func (a *walMutatorAdapter) RemoveNode(n string) {
+	id, ok := a.g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return
+	}
+	if !a.g.IsTombstoned(id) {
+		a.g.IncrNodesRemoved()
+	}
+	a.g.RemoveNode(n)
+}
+
+// IsTombstoned reports whether the NodeID has been tombstoned.
+func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
+	return a.g.IsTombstoned(id)
 }
 
 // SetNodeProperty sets the named property on n.
@@ -5847,9 +5930,12 @@ func (a *walMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node.
 func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
+		if a.g.IsTombstoned(id) {
+			return true
+		}
 		return fn(id)
 	})
 }

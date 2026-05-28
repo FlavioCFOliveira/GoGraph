@@ -386,30 +386,35 @@ func (w *world) sideEffectsTable(_ context.Context, table *godog.Table) error {
 		if _, err := fmt.Sscanf(strings.TrimSpace(row.Cells[1].Value), "%d", &delta); err != nil {
 			continue
 		}
+		// openCypher tracks ADDITIONS and REMOVALS as separate counters,
+		// not net change. Use the per-direction counters maintained by
+		// the LPG so a CREATE+DELETE pair shows up as +1/-1 (and not as
+		// net 0).
+		nodesAdded, nodesRemoved, edgesAdded, edgesRemoved := w.g.SideEffectCounters()
 		switch key {
 		case "+nodes":
-			current := int64(w.g.AdjList().Order())
-			if current < w.nodesBefore+delta {
-				return fmt.Errorf("side effect +nodes %d: node count went from %d to %d (expected at least %d)",
-					delta, w.nodesBefore, current, w.nodesBefore+delta)
+			added := int64(nodesAdded - w.nodesAddedBefore)
+			if added < delta {
+				return fmt.Errorf("side effect +nodes %d: actual additions %d (expected at least %d)",
+					delta, added, delta)
 			}
 		case "+relationships":
-			current := int64(w.g.AdjList().Size())
-			if current < w.relsBefore+delta {
-				return fmt.Errorf("side effect +relationships %d: rel count went from %d to %d (expected at least %d)",
-					delta, w.relsBefore, current, w.relsBefore+delta)
+			added := int64(edgesAdded - w.edgesAddedBefore)
+			if added < delta {
+				return fmt.Errorf("side effect +relationships %d: actual additions %d (expected at least %d)",
+					delta, added, delta)
 			}
 		case "-nodes":
-			current := int64(w.g.AdjList().Order())
-			if current > w.nodesBefore-delta {
-				return fmt.Errorf("side effect -nodes %d: node count went from %d to %d (expected at most %d)",
-					delta, w.nodesBefore, current, w.nodesBefore-delta)
+			removed := int64(nodesRemoved - w.nodesRemovedBefore)
+			if removed < delta {
+				return fmt.Errorf("side effect -nodes %d: actual removals %d (expected at least %d)",
+					delta, removed, delta)
 			}
 		case "-relationships":
-			current := int64(w.g.AdjList().Size())
-			if current > w.relsBefore-delta {
-				return fmt.Errorf("side effect -relationships %d: rel count went from %d to %d (expected at most %d)",
-					delta, w.relsBefore, current, w.relsBefore-delta)
+			removed := int64(edgesRemoved - w.edgesRemovedBefore)
+			if removed < delta {
+				return fmt.Errorf("side effect -relationships %d: actual removals %d (expected at least %d)",
+					delta, removed, delta)
 			}
 		}
 	}

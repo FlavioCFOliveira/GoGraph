@@ -52,6 +52,7 @@ type stubMutator struct {
 	edges      map[string]map[string]bool              // src → dst set (directed)
 	edgeLabels map[string]map[string]bool              // "src|dst" → label set
 	edgeProps  map[string]map[string]lpg.PropertyValue // "src|dst" → prop map
+	tombstones map[graph.NodeID]struct{}               // RemoveNode'd ids
 }
 
 func newStubMutator() *stubMutator {
@@ -296,6 +297,29 @@ func (s *stubMutator) WalkNodeIDs(fn func(graph.NodeID) bool) {
 			return
 		}
 	}
+}
+
+// RemoveNode tombstones n in the test stub.
+func (s *stubMutator) RemoveNode(n string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tombstones == nil {
+		s.tombstones = make(map[graph.NodeID]struct{})
+	}
+	if id, ok := s.nodes[n]; ok {
+		s.tombstones[id] = struct{}{}
+	}
+}
+
+// IsTombstoned reports whether id has been tombstoned.
+func (s *stubMutator) IsTombstoned(id graph.NodeID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tombstones == nil {
+		return false
+	}
+	_, ok := s.tombstones[id]
+	return ok
 }
 
 // nodeCount returns the number of interned nodes.

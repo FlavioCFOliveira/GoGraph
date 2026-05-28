@@ -181,6 +181,8 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	for k := range op.mutator.NodeProperties(nodeKey) {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}
+	// Tombstone the node so subsequent scans treat it as absent.
+	op.mutator.RemoveNode(nodeKey)
 
 	*out = childRow
 	return true, nil
@@ -215,6 +217,7 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 		for k := range op.mutator.NodeProperties(nodeKey) {
 			op.mutator.DelNodeProperty(nodeKey, k)
 		}
+		op.mutator.RemoveNode(nodeKey)
 	}
 	return nil
 }

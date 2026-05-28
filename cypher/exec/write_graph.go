@@ -48,6 +48,16 @@ type GraphMutator interface {
 	// RemoveNodeLabel detaches label from n (no-op if absent).
 	RemoveNodeLabel(n, label string)
 
+	// RemoveNode tombstones n in the underlying graph so subsequent reads
+	// (AllNodesScan, count(*), Order) treat the node as absent. Callers
+	// should strip labels/properties/incident edges before invoking
+	// RemoveNode so the tombstone reflects the fully-deleted state.
+	RemoveNode(n string)
+
+	// IsTombstoned reports whether the NodeID has been tombstoned. Used by
+	// AllNodesScan to skip phantom entries the Mapper still indexes.
+	IsTombstoned(id graph.NodeID) bool
+
 	// SetNodeProperty sets the named property on n. Returns any error
 	// from the underlying [adjlist.AdjList.AddNode] (see
 	// [GraphMutator.AddNode]).
