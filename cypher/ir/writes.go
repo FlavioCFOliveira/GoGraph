@@ -248,13 +248,19 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 }
 
 // extractRelKVActions converts ON CREATE / ON MATCH SET items into a
-// [KVAction] slice when EVERY item targets a property on relVar (the
-// single-property form `SET <relVar>.<key> = <value>`). Returns
-// ok=false when any item is on a different target (label assignment,
-// whole-entity replace, property on a different variable, etc.) so the
-// caller falls back to the node-only Merge path which preserves the
-// original opaque-string handling. relVar="" returns ok=false unless
-// items is empty.
+// [KVAction] slice when EVERY item is one of:
+//
+//   - Property-on-relVar form: `SET <relVar>.<key> = <value>` — each
+//     produces a single KVAction.
+//   - Literal-map form on relVar: `SET <relVar> = {…}` or
+//     `SET <relVar> += {…}` where the RHS is a *ast.MapLiteral whose
+//     keys are identifiers and values are themselves literals — each
+//     map entry produces a KVAction. Closes Merge6 [7].
+//
+// Returns ok=false when any item is on a different target (label
+// assignment, entity copy from another bound entity, property on a
+// different variable, etc.) so the caller falls back to the node-only
+// Merge path. relVar="" returns ok=false unless items is empty.
 func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool) {
 	if len(items) == 0 {
 		return nil, true
@@ -267,15 +273,43 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 		if item == nil || len(item.Labels) > 0 || item.Value == nil {
 			return nil, false
 		}
-		prop, isProp := item.Target.(*ast.Property)
-		if !isProp {
-			return nil, false
+		// Property-on-relVar form.
+		if prop, isProp := item.Target.(*ast.Property); isProp {
+			recv, isVar := prop.Receiver.(*ast.Variable)
+			if !isVar || recv.Name != relVar {
+				return nil, false
+			}
+			out = append(out, KVAction{Key: prop.Key, Value: item.Value.String()})
+			continue
 		}
-		recv, isVar := prop.Receiver.(*ast.Variable)
-		if !isVar || recv.Name != relVar {
-			return nil, false
+		// Literal-map form on relVar: SET relVar = {…} or SET relVar += {…}.
+		// Decompose the map into one KVAction per key. The "+=" form is a
+		// no-op for the property-merge semantics we already implement — each
+		// key is either overwritten or added — so both operators flow
+		// through the same per-key writes. The whole-entity REPLACE
+		// semantics of "=" (drop existing properties first) is NOT
+		// implemented here; only the additive subset.
+		if v, isVar := item.Target.(*ast.Variable); isVar && v.Name == relVar {
+			ml, isMap := item.Value.(*ast.MapLiteral)
+			if !isMap {
+				return nil, false
+			}
+			// Every value must be a compile-time literal — variable
+			// references or function calls would need per-row evaluation,
+			// which MergeRelationship does not yet thread through.
+			allLit, _ := allMapValuesLiteral(ml)
+			if !allLit {
+				return nil, false
+			}
+			for i, key := range ml.Keys {
+				if i >= len(ml.Values) {
+					break
+				}
+				out = append(out, KVAction{Key: key, Value: ml.Values[i].String()})
+			}
+			continue
 		}
-		out = append(out, KVAction{Key: prop.Key, Value: item.Value.String()})
+		return nil, false
 	}
 	return out, true
 }
