@@ -1329,6 +1329,13 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3856: ratcheted after round 66 — exec.ProcedureCallOp.Next now
+//     prefixes the driver row onto each result row, so upstream
+//     bindings (e.g. `c` from `WITH count(*) AS c` between two CALL
+//     ... YIELD clauses) flow through to downstream operators
+//     instead of being dropped. Closes Call6 [1]. 20-run sample:
+//     floor 3855, median ~3859, max 3862; gate at 3856 with 1 of
+//     headroom (flake band absorbed in median).
 //   - 3855: ratcheted after round 65 — VLE inline property predicate
 //     (`[:T* {year: 1988}]`) now applies per-relationship instead of
 //     to the list. matchExpandStepBoundWithFrom routes the var-length
@@ -1455,7 +1462,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3855
+const tckExecutionBaseline = 3856
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

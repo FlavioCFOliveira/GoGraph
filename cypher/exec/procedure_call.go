@@ -47,10 +47,11 @@ type ProcedureCallOp struct {
 	child     Operator // nil for standalone CALL
 	reg       *procs.Registry
 
-	ctx       context.Context //nolint:containedctx // stored for per-Next ctx check
-	rows      [][]expr.Value
-	rowIdx    int
-	doneChild bool // true once the child (or synthetic single row) is exhausted
+	ctx              context.Context //nolint:containedctx // stored for per-Next ctx check
+	rows             [][]expr.Value
+	rowIdx           int
+	currentDriverRow Row  // driver row whose result is currently buffered
+	doneChild        bool // true once the child (or synthetic single row) is exhausted
 }
 
 // NewProcedureCallOp creates a ProcedureCallOp.
@@ -107,9 +108,16 @@ func (op *ProcedureCallOp) Next(out *Row) (bool, error) {
 			return false, err
 		}
 
-		// Emit next buffered row when available.
+		// Emit next buffered row when available. The driver row is
+		// prefixed onto each result row so downstream operators (RETURN,
+		// further CALL/MATCH) still see upstream bindings — `CALL …
+		// YIELD label WITH count(*) AS c CALL … YIELD label` needs `c`
+		// to flow through to RETURN (Call6 [1]).
 		if op.rowIdx < len(op.rows) {
-			*out = append((*out)[:0], op.rows[op.rowIdx]...)
+			combined := make(Row, 0, len(op.currentDriverRow)+len(op.rows[op.rowIdx]))
+			combined = append(combined, op.currentDriverRow...)
+			combined = append(combined, op.rows[op.rowIdx]...)
+			*out = combined
 			op.rowIdx++
 			return true, nil
 		}
@@ -162,9 +170,11 @@ func (op *ProcedureCallOp) Next(out *Row) (bool, error) {
 			return true, nil
 		}
 
-		// Buffer results and loop back to emit them.
+		// Buffer results and the driver row that produced them; loop back
+		// to emit them.
 		op.rows = resultRows
 		op.rowIdx = 0
+		op.currentDriverRow = driverRow
 	}
 }
 
