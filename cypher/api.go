@@ -89,10 +89,17 @@ func init() {
 // buildIRProjection to reconstruct a RelationshipValue from the raw
 // IntegerValue columns in the executor row.
 type edgeVarInfo struct {
-	srcCol   int
-	edgeCol  int
-	dstCol   int
-	edgeType string // first element of RelTypes, or empty
+	srcCol         int
+	edgeCol        int
+	dstCol         int
+	edgeType       string   // first element of RelTypes, or empty
+	acceptedTypes  []string // full RelTypes list; used to disambiguate when
+	// the stored edge carries multiple labels (e.g. (a)-[:HATES]->(c) and
+	// (a)-[:WONDERS]->(c) merge in LPG as one edge with labels {HATES,
+	// WONDERS}). For a pattern `(n)-[r:KNOWS|HATES]->(x)` we record
+	// [KNOWS, HATES] here, and the projection's RelationshipValue
+	// reconstruction prefers a matching label from acceptedTypes over the
+	// non-deterministic map-iteration first label. Closes Match2 [6] flake.
 }
 
 // pathVarInfo records the schema column that holds the flat alternating path
@@ -2300,6 +2307,7 @@ func buildOperator(
 			}
 			if len(p.RelTypes) > 0 {
 				info.edgeType = p.RelTypes[0]
+				info.acceptedTypes = append([]string(nil), p.RelTypes...)
 			}
 			bopts.edgeVarMeta[p.RelVar] = info
 		}
@@ -4466,7 +4474,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 				rawEP = g.EdgeProperties(dstKey, srcKey)
 			}
 			if len(ets) > 0 {
-				edgeType = ets[0]
+				edgeType = pickEdgeType(ets, meta.acceptedTypes)
 			}
 			edgeProps = make(expr.MapValue, len(rawEP))
 			for k, pv := range rawEP {
@@ -4481,6 +4489,40 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 		Type:       edgeType,
 		Properties: edgeProps,
 	}, true
+}
+
+// pickEdgeType chooses the rel-type label to surface for a stored edge.
+// LPG merges parallel edges between the same endpoint pair into one entry
+// with a label set, so g.EdgeLabels can return more than one label in
+// non-deterministic order. When the pattern carries a type filter
+// (`r:KNOWS|HATES`), accepted lists the allowed types and pickEdgeType
+// returns the first stored label that is also in accepted (deterministic:
+// scans stored labels in their EdgeLabels-returned order but prefers any
+// accepted match). When accepted is nil or empty, returns the
+// alphabetically smallest stored label so the surfaced type is at least
+// deterministic across runs. Closes Match2 [6] flake.
+func pickEdgeType(stored, accepted []string) string {
+	if len(stored) == 0 {
+		return ""
+	}
+	if len(accepted) > 0 {
+		acceptSet := make(map[string]struct{}, len(accepted))
+		for _, a := range accepted {
+			acceptSet[a] = struct{}{}
+		}
+		for _, s := range stored {
+			if _, ok := acceptSet[s]; ok {
+				return s
+			}
+		}
+	}
+	best := stored[0]
+	for _, s := range stored[1:] {
+		if s < best {
+			best = s
+		}
+	}
+	return best
 }
 
 // buildIRProjection converts IR ProjectionItems to a physical Project operator.
@@ -5044,7 +5086,7 @@ func buildIRProjection(
 										rawEP = capturedG.EdgeProperties(dstKey, srcKey)
 									}
 									if len(ets) > 0 {
-										edgeType = ets[0]
+										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)
 									}
 									edgeProps = make(expr.MapValue, len(rawEP))
 									for k, pv := range rawEP {

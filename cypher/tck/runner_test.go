@@ -1329,6 +1329,29 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3875: ratcheted after round 77 — RelationshipValue type
+//     reconstruction now prefers a pattern-accepted label over the
+//     non-deterministic EdgeLabels-first label. LPG merges parallel
+//     edges between the same endpoint pair into a single entry whose
+//     label set carries every original rel-type — `(a)-[:HATES]->(c)`
+//     followed by `(a)-[:WONDERS]->(c)` shows up as one stored edge with
+//     labels {HATES, WONDERS}. EdgeLabels iterates the bag's map in
+//     random order so the previous `ets[0]` could return either label.
+//     A query like `MATCH (n)-[r:KNOWS|HATES]->(x)` was therefore
+//     surfacing `[:WONDERS]` instead of `[:HATES]` on roughly 3 of 10
+//     runs (Match2 [6] flake) and the same root cause produced the
+//     MatchWhere1 [11] disjunction flake.
+//
+//     edgeVarInfo gains an acceptedTypes []string field carrying the
+//     IR's RelTypes for the pattern; pickEdgeType returns the first
+//     stored label that is also in acceptedTypes (deterministic by
+//     stored-label order), or — when no filter is active or no
+//     accepted label is stored — the alphabetically smallest stored
+//     label (deterministic across runs). Wired into both
+//     buildRelationshipValueFromRow and buildIRProjection's
+//     edge-variable fast path. Closes Match2 [6] and MatchWhere1 [11].
+//     10-run sample: floor 3875, median ~3876, max 3877; gate at 3875
+//     with 0 headroom.
 //   - 3874: ratcheted after round 76 — DeleteNode's schema-direct rel-
 //     value and rel-endpoints-fn branches (and DetachDelete's PathValue
 //     entry) now call a new removeEdgeEitherDirection helper that
@@ -1600,7 +1623,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3874
+const tckExecutionBaseline = 3875
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
