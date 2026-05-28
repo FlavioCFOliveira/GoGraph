@@ -197,6 +197,17 @@ type buildOpts struct {
 	// mis-upgrading a count result into a graph node. buildEagerAggregation
 	// populates this set for every aggregate output name it registers in the schema.
 	scalarCols map[string]struct{}
+	// preprojectedCols is the set of schema variable names whose row column
+	// already holds the projection-equivalent value (e.g. an EagerAggregation
+	// grouping-key column carries the pre-evaluated grouping expression, not
+	// the original variable). The colliding-alias guard in buildIRProjection
+	// skips when a name is in this set because the fast path is sound — the
+	// slot value is already the result the projection expression would
+	// compute. Without this Return6 [1] returns NULL for the first column of
+	// `RETURN n.num AS n, count(n) AS count` because the guard routes through
+	// general eval which interprets `n` as the original NodeValue rather
+	// than the pre-projected n.num.
+	preprojectedCols map[string]struct{}
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -2903,12 +2914,22 @@ func buildEagerAggregation(
 	// Mark every aggregate output column as scalar so that buildIRProjection's
 	// Variable fast-path does not mis-upgrade an integer count/sum/avg result into
 	// a NodeValue when the integer coincides with a real NodeID.
+	// Mark every grouping-key column as preprojected so the colliding-alias
+	// guard in buildIRProjection's schema-name fast path keeps the fast path
+	// instead of routing through general eval (which would re-interpret the
+	// variable as the original pre-aggregation value).
 	if bopts != nil {
 		if bopts.scalarCols == nil {
 			bopts.scalarCols = make(map[string]struct{})
 		}
 		for _, aggExpr := range p.Aggregates {
 			bopts.scalarCols[aggExpr.OutputName] = struct{}{}
+		}
+		if bopts.preprojectedCols == nil {
+			bopts.preprojectedCols = make(map[string]struct{})
+		}
+		for _, varName := range p.GroupBy {
+			bopts.preprojectedCols[varName] = struct{}{}
 		}
 	}
 
@@ -4762,7 +4783,14 @@ func buildIRProjection(
 				// return the original bound node, not the freshly
 				// constructed map.
 				skipForCollidingAlias := false
-				if prop, isProp := item.Expr.(*ast.Property); isProp && exprStr != name {
+				// Preprojected schema slots already carry the projection-
+				// equivalent value (e.g. an EagerAggregation grouping key)
+				// — the fast path is sound and skipColliding must not fire.
+				isPreprojSlot := false
+				if bopts != nil && bopts.preprojectedCols != nil {
+					_, isPreprojSlot = bopts.preprojectedCols[name]
+				}
+				if prop, isProp := item.Expr.(*ast.Property); isProp && exprStr != name && !isPreprojSlot {
 					if recv, recvIsVar := prop.Receiver.(*ast.Variable); recvIsVar && recv.Name == name {
 						skipForCollidingAlias = true
 					}
@@ -4787,7 +4815,20 @@ func buildIRProjection(
 					// Falling through to evalRow would re-evaluate them
 					// as scalar functions and return the per-row count
 					// (always 1) instead of the group's aggregate.
-					if _, exists := schema[name]; exists {
+					//
+					// Preprojected columns are also exempt: an
+					// EagerAggregation grouping key (e.g. `n` for the
+					// non-aggregate item `n.num AS n` in
+					// `RETURN n.num AS n, count(n)`) already carries the
+					// pre-evaluated grouping expression value in the row
+					// slot. The fast path returns that value directly; routing
+					// through general eval would re-interpret `n` as the
+					// original NodeValue and the property access would fail.
+					isPreproj := false
+					if bopts != nil && bopts.preprojectedCols != nil {
+						_, isPreproj = bopts.preprojectedCols[name]
+					}
+					if _, exists := schema[name]; exists && !isPreproj {
 						if exprReferencesVarName(item.Expr, name) && !exprContainsAggregate(item.Expr) {
 							skipForCollidingAlias = true
 						}
