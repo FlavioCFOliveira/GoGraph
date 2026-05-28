@@ -1329,11 +1329,28 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3846: ratcheted after round 53. Three coordinated changes:
+//     (a) mergeClause now wraps a MERGE p = (...) plan with
+//         NamedPath, mirroring the MATCH path-binding pipeline; the
+//         path variable is also removed from BoundVars so the Merge
+//         operator's combineRows stores the bound node at the
+//         correct (node-variable) column rather than the path-name
+//         column;
+//     (b) PathValue.String() now always wraps in `<…>`, including
+//         the zero-relationship single-node case (`<(node)>`), so
+//         the TCK-rendered path is visually distinct from a bare
+//         node value;
+//     (c) the per-test sample shows MERGE p = (a {num: 1}) RETURN p
+//         emits `<(node#N)>` and MatchWhere1 [11]'s relationship-type
+//         disjunction stabilises under the same projection-fast-path
+//         changes.
+//     Closes Merge1 [13] and MatchWhere1 [11]. 20-run sample: floor
+//     3846, median ~3848, max 3851; gate at 3846 with 0 headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3843
+const tckExecutionBaseline = 3846
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

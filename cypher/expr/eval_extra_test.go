@@ -549,11 +549,13 @@ func TestValue_PathString(t *testing.T) {
 		t.Errorf("empty path string = %q, want <empty-path>", s)
 	}
 
-	// Single-node path.
+	// Single-node path. PathValue.String() wraps the path in `<…>` so it is
+	// visually distinct from a bare node renderering — matching the openCypher
+	// TCK convention `<(node)>`.
 	sp := expr.PathValue{Nodes: []expr.NodeValue{{ID: 1}}}
 	s = sp.String()
-	if s != "(node#1)" {
-		t.Errorf("single-node path string = %q, want (node#1)", s)
+	if s != "<(node#1)>" {
+		t.Errorf("single-node path string = %q, want <(node#1)>", s)
 	}
 
 	// Full path.

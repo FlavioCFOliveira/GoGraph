@@ -243,8 +243,30 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 	for i, si := range m.OnMatch {
 		onMatch[i] = si.String()
 	}
-	boundVars := patternVars(m.Pattern)
-	return NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child), nil
+	// BoundVars carry node/relationship variables only. The path variable
+	// (m.Pattern.Variable) is handled separately by applyPathVar below — it
+	// is NOT a node/rel slot the Merge operator should write into. Including
+	// it in BoundVars would shift firstVar onto the path name and cause
+	// op.combineRows to store the bound node at the wrong column, masking
+	// the leading-node slot the NamedPath wrapper needs.
+	rawBoundVars := patternVars(m.Pattern)
+	boundVars := make([]string, 0, len(rawBoundVars))
+	for _, v := range rawBoundVars {
+		if m.Pattern != nil && m.Pattern.Variable != nil && v == *m.Pattern.Variable {
+			continue
+		}
+		boundVars = append(boundVars, v)
+	}
+	var plan LogicalPlan = NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child)
+	// MERGE p = (...) binds a path variable just like MATCH p = (...). Wrap
+	// the Merge with a NamedPath so the physical builder can reconstruct a
+	// PathValue from the row's leading-node column. Without this `MERGE p
+	// = (a {num: 1}) RETURN p` would surface only the bound node value
+	// (Merge1 [13] / Merge5 [10]).
+	if m.Pattern != nil && m.Pattern.Variable != nil {
+		plan = applyPathVar(m.Pattern, plan)
+	}
+	return plan, nil
 }
 
 // extractRelKVActions converts ON CREATE / ON MATCH SET items into a

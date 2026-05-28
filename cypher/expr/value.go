@@ -546,20 +546,22 @@ type PathValue struct {
 // Kind implements [Value].
 func (v PathValue) Kind() Kind { return KindPath }
 
-// String returns a short diagnostic representation of the path.
+// String returns the openCypher diagnostic representation of the path,
+// wrapped in `<…>` so a path is visibly distinct from a bare node or
+// relationship value. A zero-relationship path of a single node renders
+// as `<(node)>`, matching the TCK convention.
 func (v PathValue) String() string {
-	if len(v.Relationships) == 0 {
-		if len(v.Nodes) == 0 {
-			return "<empty-path>"
-		}
-		return v.Nodes[0].String()
+	if len(v.Nodes) == 0 {
+		return "<empty-path>"
 	}
 	b := make([]byte, 0, (len(v.Nodes)+len(v.Relationships))*16)
+	b = append(b, '<')
 	b = append(b, v.Nodes[0].String()...)
 	for i, rel := range v.Relationships {
 		b = append(b, rel.String()...)
 		b = append(b, v.Nodes[i+1].String()...)
 	}
+	b = append(b, '>')
 	return string(b)
 }
 
