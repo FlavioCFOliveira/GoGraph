@@ -1251,10 +1251,19 @@ import (
 //     rand()/iteration-order scenarios still push the floor below the
 //     deterministic gain.
 //
+//   - 3815: ratcheted after rounds 25-34 closed ~20 deterministic
+//     scenarios (Match4 [9], List2 [5], Call2 [4], ExistentialSubquery1
+//     [2]/[4], Match7 [29], Match2 [6], Unwind1 [12], Create6 [10],
+//     Delete6 [14], Remove1 [4], Match5 [26], MatchWhere1 [11], Return6
+//     [1], WithOrderBy4 [7]/[9], Return4 [3], List11 [3], plus the
+//     DELETE-r planner gap closing several related scenarios). The
+//     50-run band sits at 3820-3833 (median ~3826); gate set at 3815
+//     for ~5 of variance headroom.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3808
+const tckExecutionBaseline = 3815
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
