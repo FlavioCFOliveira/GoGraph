@@ -1329,6 +1329,18 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3874: ratcheted after round 76 — DeleteNode's schema-direct rel-
+//     value and rel-endpoints-fn branches (and DetachDelete's PathValue
+//     entry) now call a new removeEdgeEitherDirection helper that
+//     probes HasEdge(src,dst) first and falls back to HasEdge(dst,src)
+//     when the requested direction is empty. Undirected MATCH emits a
+//     reverse-pass row whose traversal `(src,dst)` is the opposite of
+//     the edge's storage direction; the previous RemoveEdge(src,dst)
+//     silently no-op'd and left the edge attached, so the subsequent
+//     DELETE node hit the OutDegree/InNeighbours guard and surfaced
+//     `cannot delete node with existing relationships`. Closes Delete4
+//     [1] (flaked 5-of-10 across runs). 10-run sample: floor 3874,
+//     median ~3875, max 3877; gate at 3874 with 0 headroom.
 //   - 3873: ratcheted after round 75 — translateReturn now appends hidden
 //     `appendOrderByPassthrough` items when ORDER BY references variables
 //     that the RETURN itself does not output (e.g. `RETURN [p = (n)--() |
@@ -1588,7 +1600,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3873
+const tckExecutionBaseline = 3874
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

@@ -150,7 +150,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
 			dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
 			if srcOK && dstOK {
-				op.mutator.RemoveEdge(srcKey, dstKey)
+				removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 			}
 			*out = childRow
 			return true, nil
@@ -199,7 +199,15 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.StartID))
 				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.EndID))
 				if srcOK && dstOK {
-					op.mutator.RemoveEdge(srcKey, dstKey)
+					// Undirected MATCH emits both forward and reverse rows
+					// for the same edge; the reverse row carries
+					// (StartID=traversalSrc, EndID=traversalDst) which may
+					// not match the edge's STORAGE direction. RemoveEdge
+					// is direction-sensitive (it ignores requests against
+					// the wrong direction), so probe both orientations
+					// when the requested one is not the storage direction.
+					// Closes Delete4 [1] flake.
+					removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 				}
 				*out = childRow
 				return true, nil
@@ -214,7 +222,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 					srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(srcID))
 					dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(dstID))
 					if srcOK && dstOK {
-						op.mutator.RemoveEdge(srcKey, dstKey)
+						removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 					}
 				}
 				*out = childRow
@@ -267,6 +275,23 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 // Close closes the child operator.
 func (op *DeleteNode) Close() error {
 	return op.child.Close()
+}
+
+// removeEdgeEitherDirection invokes mutator.RemoveEdge in the requested
+// direction first and falls back to the reverse if the forward call left
+// the edge in place. Used by the schema-direct edge-removal paths in
+// DeleteNode and DetachDelete to absorb the undirected-MATCH reverse
+// pass, where Expand emits a row whose traversal direction differs from
+// the edge's storage direction (`MATCH (a)-[r]-(b)` produces both
+// (a,r,b) and (b,r,a) rows for the single stored edge a→b — the second
+// row's RemoveEdge(b, a) is a no-op against the storage direction and
+// leaves the edge attached to its endpoints).
+func removeEdgeEitherDirection(mutator GraphMutator, src, dst string) {
+	if !mutator.HasEdge(src, dst) && mutator.HasEdge(dst, src) {
+		mutator.RemoveEdge(dst, src)
+		return
+	}
+	mutator.RemoveEdge(src, dst)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
