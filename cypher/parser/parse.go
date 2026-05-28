@@ -145,7 +145,12 @@ func Parse(query string) (ast.Query, error) {
 	query = normalizeNegHexOct(query)
 	query = normalizeFloatExpZeroPad(query)
 	query = normalizeArithmeticMinus(query)
-	query = normalizeVarlenDotDot(query)
+	// normalizeVarlenDotDot is intentionally NOT applied here: openCypher
+	// requires a leading `*` on every variable-length relationship pattern
+	// (`-[*]-`, `-[*..n]-`, `-[*n..m]-`), and the TCK Match4 [9] gates
+	// against accepting `-[:T..]-` without the star. Keeping the helper
+	// defined and unit-tested in this package documents the rewrite that
+	// used to run but is no longer in the pipeline.
 	query = normalizeVarlenBounds(query)
 	query = normalizeZeroDotFloat(query)
 	query = normalizeLeadingDotFloat(query)
