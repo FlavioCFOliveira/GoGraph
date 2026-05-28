@@ -1816,6 +1816,14 @@ type ProcedureCall struct {
 	// YieldVars is the ordered list of variable names produced by the YIELD
 	// clause. An empty slice means YIELD * (all output columns).
 	YieldVars []string
+	// YieldSourceNames is the parallel list of declared procedure-output
+	// names that each YieldVars entry binds (the LHS in `YIELD col AS alias`,
+	// or the same name as YieldVars when no AS rename is present). Used by
+	// the physical builder to map yield aliases to the procedure's declared
+	// output column index, so `CALL proc(…) YIELD b, a` (procedure declares
+	// outputs in order a, b) reads each column from the correct slot.
+	// Empty slice means defaulted to YieldVars (no AS rename).
+	YieldSourceNames []string
 	// Child is the driving subplan. May be nil when CALL appears at the start
 	// of a query.
 	Child LogicalPlan

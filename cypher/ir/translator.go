@@ -281,14 +281,18 @@ func (t *translator) callClause(c *ast.Call, child LogicalPlan) (LogicalPlan, er
 		args[i] = a.String()
 	}
 	yieldVars := make([]string, 0, len(c.Yield))
+	sourceNames := make([]string, 0, len(c.Yield))
 	for _, yi := range c.Yield {
 		name := yi.Name
 		if yi.Alias != nil {
 			name = *yi.Alias
 		}
 		yieldVars = append(yieldVars, name)
+		sourceNames = append(sourceNames, yi.Name)
 	}
-	return NewProcedureCall(c.Namespace, c.Procedure, args, yieldVars, child), nil
+	pc := NewProcedureCall(c.Namespace, c.Procedure, args, yieldVars, child)
+	pc.YieldSourceNames = sourceNames
+	return pc, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -3247,17 +3247,46 @@ func buildProcedureCallOperator(
 
 	// Determine yield variables: explicit YIELD wins; otherwise emit all output columns.
 	yieldVars := p.YieldVars
+	sourceNames := p.YieldSourceNames
 	if len(yieldVars) == 0 {
 		yieldVars = make([]string, len(entry.Sig.Outputs))
+		sourceNames = make([]string, len(entry.Sig.Outputs))
 		for i, out := range entry.Sig.Outputs {
 			yieldVars[i] = out.Name
+			sourceNames[i] = out.Name
 		}
+	} else if len(sourceNames) == 0 {
+		// IR built before YieldSourceNames was added falls back to assuming
+		// yield variables match declared output names (no AS rename).
+		sourceNames = yieldVars
 	}
 
-	// Register output columns in the schema.
-	for _, v := range yieldVars {
-		schema[v] = schemaWidth(schema)
+	// Register output columns in the schema. ProcedureCallOp emits every
+	// row in the procedure's declared output order (entry.Sig.Outputs);
+	// YIELD may reorder, subset, or rename those columns. Map each yield
+	// variable to the declared output column with the matching SOURCE name
+	// so a downstream RETURN/WITH that references `a` reads the procedure's
+	// `a` column even when YIELD listed `b, a` (Call5 [3]) or `a AS x, b AS y`
+	// (Call5 [4]).
+	declaredIdx := make(map[string]int, len(entry.Sig.Outputs))
+	for i, out := range entry.Sig.Outputs {
+		declaredIdx[out.Name] = i
 	}
+	base := schemaWidth(schema)
+	emitSlots := make([]int, 0, len(entry.Sig.Outputs))
+	for i, v := range yieldVars {
+		src := sourceNames[i]
+		if di, ok := declaredIdx[src]; ok {
+			schema[v] = base + di
+			emitSlots = append(emitSlots, di)
+		} else {
+			// Fallback: source not declared. Allocate the next available
+			// slot so the schema still has unique indices, even though the
+			// procedure cannot supply a matching value.
+			schema[v] = schemaWidth(schema)
+		}
+	}
+	_ = emitSlots // reserved for future column subsetting; today ProcedureCallOp emits all declared columns
 
 	return exec.NewProcedureCallOp(p.Namespace, p.Name, argEvals, yieldVars, child, effectiveProcReg), nil
 }
