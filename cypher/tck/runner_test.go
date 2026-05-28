@@ -1180,10 +1180,19 @@ import (
 //     Observed 3737-3740 across a 4-run sample; gate set at 3735 to
 //     absorb run-to-run variance.
 //
+//   - 3800: raised after two surgical sema additions that close Pattern1
+//     [11] (`MATCH (n) WHERE (n) RETURN n` must surface
+//     SyntaxError(InvalidArgumentType) because a bare node-typed Variable
+//     cannot coerce to Boolean) and Return6 [15] (`RETURN count(rand())`
+//     must surface SyntaxError(NonConstantExpression) because rand() is
+//     non-deterministic inside an aggregation argument). Round 22.
+//     Observed 3800-3807 across a 10-run sample (median 3803); gate set
+//     at 3800 to absorb run-to-run variance.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3798
+const tckExecutionBaseline = 3800
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
