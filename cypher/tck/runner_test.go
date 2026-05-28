@@ -1329,6 +1329,14 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3850: ratcheted after round 60 — MERGE ON CREATE/MATCH SET r = a
+//     now copies the source node's properties onto the relationship.
+//     extractRelKVActions encodes the entity-copy as a sentinel
+//     KVAction (Key="", Value="<sourceVar>"); MergeRelationship's
+//     applyRelActions resolves the source variable via a captured
+//     schema map and iterates the source node's properties at write
+//     time. Closes Merge6 [6] and Merge7 [4]. 20-run sample: floor
+//     3849, median ~3854, max 3856; gate at 3850 with 1 of headroom.
 //   - 3849: ratcheted after round 59 — the projection's path-variable
 //     fast-path now forwards a PathValue directly when the schema slot
 //     for the variable holds one, instead of always trying to decode
@@ -1399,7 +1407,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3849
+const tckExecutionBaseline = 3850
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

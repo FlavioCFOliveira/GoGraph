@@ -321,6 +321,16 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 		// semantics of "=" (drop existing properties first) is NOT
 		// implemented here; only the additive subset.
 		if v, isVar := item.Target.(*ast.Variable); isVar && v.Name == relVar {
+			// Entity-copy form: SET relVar = otherVar — copy every
+			// property of otherVar (a bound node or relationship) onto
+			// the relationship. Encoded as a single sentinel KVAction
+			// with Key="" and Value="<otherVar>"; the exec layer
+			// resolves the source variable from the row at write time.
+			// Closes Merge6 [6] / Merge7 [4].
+			if src, isSrcVar := item.Value.(*ast.Variable); isSrcVar && src.Name != relVar {
+				out = append(out, KVAction{Key: "", Value: src.Name})
+				continue
+			}
 			ml, isMap := item.Value.(*ast.MapLiteral)
 			if !isMap {
 				return nil, false

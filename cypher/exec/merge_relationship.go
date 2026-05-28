@@ -60,6 +60,10 @@ type MergeRelationship struct {
 	onCreateActions []MergeRelAction
 	onMatchActions  []MergeRelAction
 	mutator         GraphMutator
+	// schema lets entity-copy actions (`SET r = a`) resolve the source
+	// variable name to a row column at write time. nil when the upstream
+	// builder did not thread one in.
+	schema map[string]int
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 }
@@ -85,6 +89,14 @@ func NewMergeRelationship(child Operator, srcCol, dstCol int, relType string, mu
 		relType: relType,
 		mutator: mutator,
 	}
+}
+
+// WithSchema attaches the upstream variable-to-column mapping so
+// entity-copy actions (`SET r = a`) can resolve the source variable
+// from the row at write time.
+func (op *MergeRelationship) WithSchema(schema map[string]int) *MergeRelationship {
+	op.schema = schema
+	return op
 }
 
 // WithRelColumn registers the output-row column index that will carry
@@ -195,7 +207,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		// label twice is idempotent. Ensure the requested type is
 		// recorded, then run ON MATCH actions.
 		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
-		if err := op.applyRelActions(srcKey, dstKey, op.onMatchActions); err != nil {
+		if err := op.applyRelActions(row, srcKey, dstKey, op.onMatchActions); err != nil {
 			return false, err
 		}
 		*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
@@ -214,7 +226,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 			return false, fmt.Errorf("exec: MergeRelationship: SetEdgeProperty %q: %w", p.key, setErr)
 		}
 	}
-	if err := op.applyRelActions(srcKey, dstKey, op.onCreateActions); err != nil {
+	if err := op.applyRelActions(row, srcKey, dstKey, op.onCreateActions); err != nil {
 		return false, err
 	}
 	*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
@@ -334,8 +346,42 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 // flags ErrPropertyValueIsNull which the SET-clause translator routes
 // to DelEdgeProperty; the merge fast-path simply skips since the
 // edge was just created with no such property).
-func (op *MergeRelationship) applyRelActions(srcKey, dstKey string, actions []MergeRelAction) error {
+func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, actions []MergeRelAction) error {
 	for _, act := range actions {
+		// Entity-copy sentinel: key="" carries the source variable name in
+		// value. Resolve the variable to a node in the current row and
+		// copy every property of that node onto the relationship. Closes
+		// Merge6 [6] / Merge7 [4]: `ON CREATE/MATCH SET r = a`.
+		if act.key == "" {
+			srcVar := act.value
+			if srcVar == "" {
+				continue
+			}
+			var nodeID graph.NodeID
+			var resolved bool
+			if op.schema != nil {
+				if col, ok := op.schema[srcVar]; ok && col < len(row) {
+					nodeID, resolved = nodeIDFromValue(row[col])
+				}
+			}
+			if !resolved {
+				// Fall back to the canonical src/dst columns when the
+				// schema lookup did not yield a NodeID — covers the
+				// common cases SET r = <srcVar> / SET r = <dstVar> when
+				// the planner did not thread a schema.
+				continue
+			}
+			nodeKey, ok := op.mutator.ResolveNodeLabel(nodeID)
+			if !ok {
+				continue
+			}
+			for k, v := range op.mutator.NodeProperties(nodeKey) {
+				if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, k, v); setErr != nil {
+					return fmt.Errorf("exec: MergeRelationship: SetEdgeProperty(entity-copy) %q: %w", k, setErr)
+				}
+			}
+			continue
+		}
 		v, err := parsePropValue(act.value)
 		if err != nil {
 			if errors.Is(err, ErrPropertyValueIsNull) {

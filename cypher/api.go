@@ -1505,7 +1505,7 @@ func buildOperatorWrite(
 			relKey = fmt.Sprintf("__anon_merge_rel_%d", relCol)
 		}
 		schema[relKey] = relCol
-		op = op.WithRelColumn(relCol)
+		op = op.WithRelColumn(relCol).WithSchema(copySchema(schema))
 		// Register the (srcCol, edgeCol, dstCol) triplet so a NamedPath
 		// wrapper above the MergeRelationship can reconstruct a PathValue
 		// for `MERGE p = (a)-[:R]->(b) RETURN p`. Without this hook the
