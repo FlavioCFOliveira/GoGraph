@@ -1286,11 +1286,16 @@ import (
 //     now keep pre-projection variables in scope when ORDER BY
 //     references them. 20-run sample shows floor at 3832 (median
 //     3837, max 3841); gate at 3831 for 1 of headroom.
+//   - 3832: ratcheted after round 44 (Pattern2 [11] — drop the
+//     srcID != 0 guard on edge metadata lookup) and round 45
+//     (WithOrderBy2 [23] — aggregating-WITH ORDER BY rewrites source
+//     expr to alias). 25-run sample shows floor at 3832 (median 3838,
+//     max 3842); gate at 3832 with 0 headroom — accept variance flap.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3831
+const tckExecutionBaseline = 3832
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
