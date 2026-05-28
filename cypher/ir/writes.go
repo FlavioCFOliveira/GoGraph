@@ -277,7 +277,23 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 		}
 		boundVars = append(boundVars, v)
 	}
-	var plan LogicalPlan = NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child)
+	var plan LogicalPlan
+	{
+		mergeOp := NewMerge(m.Pattern.String(), onCreate, onMatch, boundVars, child)
+		// Surface the first node pattern's property-map AST so the physical
+		// builder can install a per-row PropsEvalFn when the map contains
+		// non-literal expressions (variable references, property accesses).
+		// Without this MERGE patterns like
+		//
+		//   UNWIND $props AS prop MERGE (p:Person {login: prop.login})
+		//
+		// silently degrade to literal-only search/create, producing nodes
+		// with null instead of the row-driven value.
+		if m.Pattern != nil && m.Pattern.Head != nil && m.Pattern.Head.Node != nil {
+			mergeOp.NodePropsAST = m.Pattern.Head.Node.Properties
+		}
+		plan = mergeOp
+	}
 	// MERGE p = (...) binds a path variable just like MATCH p = (...). Wrap
 	// the Merge with a NamedPath so the physical builder can reconstruct a
 	// PathValue from the row's leading-node column. Without this `MERGE p

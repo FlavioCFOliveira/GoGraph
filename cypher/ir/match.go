@@ -326,17 +326,32 @@ func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (Logic
 	return p, hoisted
 }
 
-// referencesOuterVar reports whether e is a Variable whose name is in
-// outerVars. The check is intentionally narrow: only the immediate
-// Variable form qualifies, mirroring the shape emitted by
-// matchExpandStepBoundWithFrom when destRebinding fires.
+// referencesOuterVar reports whether e contains any reference to a variable
+// in outerVars. Recognised shapes:
+//
+//   - A bare *ast.Variable whose name is in outerVars.
+//   - A *ast.Property whose receiver chain bottoms out at such a Variable
+//     (e.g. `event.year` when `event` is outer-bound).
+//
+// The walker is deliberately conservative: it stops at the first matching
+// reference and does not descend into sub-expressions of arithmetic / list
+// constructors. The destRebinding equality shapes (`v = u`, `a.k = b.k`)
+// that peelOuterDestRebinding cares about always present at one of these
+// two top-level shapes, so a deep walker would only mis-peel selections
+// that happen to mention an outer variable inside a function call.
 func referencesOuterVar(e ast.Expression, outerVars map[string]struct{}) bool {
-	v, ok := e.(*ast.Variable)
-	if !ok {
-		return false
+	for {
+		switch n := e.(type) {
+		case *ast.Variable:
+			_, isOuter := outerVars[n.Name]
+			return isOuter
+		case *ast.Property:
+			e = n.Receiver
+			continue
+		default:
+			return false
+		}
 	}
-	_, isOuter := outerVars[v.Name]
-	return isOuter
 }
 
 // subsequentOptionalPath handles the n-th (n>0) path of the OPTIONAL

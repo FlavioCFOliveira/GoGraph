@@ -104,6 +104,42 @@ func NewMergeSearchFnFromPattern(
 	}, nil
 }
 
+// searchMergeNodes runs the same scan as the closure returned by
+// [NewMergeSearchFnFromPattern] but with explicit (labels, props) inputs.
+// Used by row-aware MERGE: the property map's expressions are evaluated
+// against the driving child row and the resulting propLiterals drive the
+// search predicate. Returns one Row per matching node carrying the node id
+// as a single IntegerValue, identical in shape to the closure-returned rows.
+func searchMergeNodes(ctx context.Context, mutator GraphMutator, labels []string, props []propLiteral) ([]Row, error) {
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, cerr
+	}
+	var matches []Row
+	var walkErr error
+	mutator.WalkNodeIDs(func(id graph.NodeID) bool {
+		if cerr := ctx.Err(); cerr != nil {
+			walkErr = cerr
+			return false
+		}
+		nodeKey, ok := mutator.ResolveNodeLabel(id)
+		if !ok {
+			return true
+		}
+		if !nodeMatchesAllLabels(labels, mutator.NodeLabels(nodeKey)) {
+			return true
+		}
+		if !nodeMatchesAllProperties(props, mutator.NodeProperties(nodeKey)) {
+			return true
+		}
+		matches = append(matches, Row{expr.IntegerValue(int64(id))})
+		return true
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return matches, nil
+}
+
 // nodeMatchesAllLabels reports whether every label in want is also present
 // in got. An empty want list always matches. Comparison is exact, case-
 // sensitive, and order-independent.

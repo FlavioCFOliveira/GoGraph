@@ -1329,6 +1329,29 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3866: ratcheted after round 71 — coordinated row-aware MERGE +
+//     hoisted outer-property selections:
+//     (a) `referencesOuterVar` now walks the *ast.Property receiver
+//         chain, not only the bare *ast.Variable shape. Inline
+//         MATCH/MERGE property predicates that reference an outer
+//         variable through a property accessor (`event.year` after
+//         `UNWIND $events AS event`) are now recognised by
+//         peelOuterDestRebinding and hoisted above the Apply, so the
+//         outer column reaches the predicate evaluator.
+//     (b) ir.Merge gains a NodePropsAST ast.Expression field carrying
+//         the first node pattern's property-map AST. The physical
+//         builder detects MapLiteral values that are NOT primitive
+//         literals (Int/Float/String/Bool/Null) or parameters and
+//         installs a per-row [exec.PropsEvalFn] on the Merge
+//         operator. exec.Merge gains WithPropsEvalFn and
+//         runMergeForChild now evaluates the per-row map, drives the
+//         search via searchMergeNodes(labels, dynamicProps), and
+//         writes the merged literal∪dynamic property set on ON CREATE.
+//     Closes Merge9 [2], Unwind1 [6], Unwind1 [14] and contributes to
+//     the With6 [2] / With7 [1] cluster (rest blocked on aggregating-
+//     WITH bound-rel forwarding). 10-run sample: floor 3866, median
+//     ~3868, max 3870; gate at 3866 with 0 headroom (flake band
+//     absorbs Pattern2 [11] / Delete4 [1] / Merge1 [9] outliers).
 //   - 3864: ratcheted after round 70 — coordinated node-removal +
 //     per-direction side-effect counters:
 //     (a) lpg.Graph gains a tombstones set + IsTombstoned /
@@ -1516,7 +1539,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3864
+const tckExecutionBaseline = 3866
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

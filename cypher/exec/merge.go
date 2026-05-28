@@ -58,6 +58,7 @@ type Merge struct {
 	mutator         GraphMutator
 	reg             *ConstraintRegistry // nil means no enforcement
 	mgr             *index.Manager      // nil when reg is nil
+	propsEvalFn     PropsEvalFn         // nil when all props are literals
 	ctx             context.Context     //nolint:containedctx // stored for per-Next ctx check
 
 	// iteration state, reset on each Init call
@@ -155,6 +156,19 @@ func (op *Merge) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *M
 	return op
 }
 
+// WithPropsEvalFn attaches a per-row property evaluator. When fn is non-nil
+// the operator re-evaluates the MERGE node-pattern property map against each
+// driving row and uses the merged (literal ∪ dynamic) property set both as
+// the search predicate and as the ON CREATE node-property writes. Required
+// for MERGE patterns whose inline property map contains variable references
+// such as `MERGE (p:Person {login: prop.login})` after an UNWIND.
+//
+// Returns op for chaining.
+func (op *Merge) WithPropsEvalFn(fn PropsEvalFn) *Merge {
+	op.propsEvalFn = fn
+	return op
+}
+
 // Init initialises the operator: executes the search plan, then dispatches
 // to the ON MATCH or ON CREATE branch depending on whether the search
 // returned any rows.
@@ -172,13 +186,29 @@ func (op *Merge) Init(ctx context.Context) error {
 // observes the merged binding once per driving row (the second person row
 // re-finds the city created on the first row, rather than skipping the
 // merge entirely).
+//
+// When propsEvalFn is set the property map is re-evaluated against childRow
+// and the merged (literal ∪ dynamic) property set drives both the search
+// predicate and the ON CREATE writes — the path that powers row-driven
+// MERGE shapes such as `MERGE (p:Person {login: prop.login})`.
 func (op *Merge) runMergeForChild(childRow Row) error {
 	op.matched = op.matched[:0]
 	op.matchedIdx = 0
 	op.created = false
 	op.createdRow = nil
 
-	rows, err := op.searchFn(op.ctx)
+	propsForRow := op.props
+	if op.propsEvalFn != nil {
+		propsForRow = mergeProps(op.props, op.propsEvalFn, childRow)
+	}
+
+	var rows []Row
+	var err error
+	if op.propsEvalFn != nil {
+		rows, err = searchMergeNodes(op.ctx, op.mutator, op.labels, propsForRow)
+	} else {
+		rows, err = op.searchFn(op.ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("exec: Merge: search: %w", err)
 	}
@@ -192,7 +222,7 @@ func (op *Merge) runMergeForChild(childRow Row) error {
 		}
 		return op.runOnMatchPath(combined)
 	}
-	if err := op.runOnCreatePath(); err != nil {
+	if err := op.runOnCreatePathWithProps(propsForRow); err != nil {
 		return err
 	}
 	op.createdRow = op.combineRows(childRow, op.createdRow)
@@ -250,8 +280,16 @@ func (op *Merge) runOnMatchPath(rows []Row) error {
 // attaches its labels and properties, runs ON CREATE actions, and primes
 // the operator to emit the freshly created row.
 func (op *Merge) runOnCreatePath() error {
+	return op.runOnCreatePathWithProps(op.props)
+}
+
+// runOnCreatePathWithProps is the workhorse of [runOnCreatePath]; it accepts
+// the resolved property set so that row-aware MERGE (`MERGE (p:Person
+// {login: prop.login})`) writes the per-row values rather than the static
+// literal-only set.
+func (op *Merge) runOnCreatePathWithProps(props []propLiteral) error {
 	if op.reg != nil {
-		for _, p := range op.props {
+		for _, p := range props {
 			if cerr := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); cerr != nil {
 				return fmt.Errorf("exec: Merge: ON CREATE: %w", cerr)
 			}
@@ -268,7 +306,7 @@ func (op *Merge) runOnCreatePath() error {
 			return fmt.Errorf("exec: Merge: ON CREATE SetNodeLabel: %w", serr)
 		}
 	}
-	for _, p := range op.props {
+	for _, p := range props {
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 			return fmt.Errorf("exec: Merge: ON CREATE SetNodeProperty: %w", serr)
 		}

@@ -1698,6 +1698,14 @@ type Merge struct {
 	// BoundVars lists the variable names that are bound by the MERGE pattern and
 	// made available downstream.
 	BoundVars []string
+	// NodePropsAST carries the property-map AST of the first node pattern in
+	// the MERGE pattern, when present. The physical builder consults it to
+	// decide whether the property map contains row-driven expressions (e.g.
+	// `MERGE (p:Person {login: prop.login})` after an UNWIND) and, if so,
+	// installs a per-row PropsEvalFn on the [exec.Merge] operator.
+	// nil when no inline property map is present or when MERGE is shaped as
+	// a relationship MERGE (handled by [MergeRelationship]).
+	NodePropsAST ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
 }

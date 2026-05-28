@@ -1599,6 +1599,20 @@ func buildOperatorWrite(
 		if constraintReg != nil {
 			m.WithConstraints(constraintReg, idxMgr)
 		}
+		// Row-aware property map: when the IR carried a *ast.MapLiteral whose
+		// values include non-literal expressions (variable references,
+		// property accesses, parameter forms outside `$name`), install a
+		// PropsEvalFn that resolves them per row. The closure draws its
+		// schema from the snapshot taken right after the boundvars were
+		// added (schemaCopy), which mirrors the row layout the Merge
+		// operator sees at runtime.
+		if ml, isMap := p.NodePropsAST.(*ast.MapLiteral); isMap && ml != nil {
+			if mapLiteralHasNonLiteralValue(ml) {
+				if fn := buildPropsEvalFn(ml, schemaCopy, params, reg, mutator, bopts); fn != nil {
+					m.WithPropsEvalFn(fn)
+				}
+			}
+		}
 		return m, nil
 
 	default:
@@ -1658,6 +1672,26 @@ func schemaWidth(schema map[string]int) int {
 		}
 	}
 	return max + 1
+}
+
+// mapLiteralHasNonLiteralValue reports whether ml carries at least one value
+// whose evaluation requires a row context — anything other than a primitive
+// literal (Int / Float / String / Bool / Null) or a parameter reference
+// (`$name`). Used by the MERGE physical builder to decide whether to install
+// a per-row [exec.PropsEvalFn].
+func mapLiteralHasNonLiteralValue(ml *ast.MapLiteral) bool {
+	if ml == nil {
+		return false
+	}
+	for _, v := range ml.Values {
+		switch v.(type) {
+		case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+			*ast.BoolLiteral, *ast.NullLiteral, *ast.Parameter:
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // buildPropsEvalFn constructs a [exec.PropsEvalFn] closure that evaluates the
