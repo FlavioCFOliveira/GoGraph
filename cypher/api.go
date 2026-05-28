@@ -1595,6 +1595,21 @@ func buildOperatorWrite(
 	}
 }
 
+// setSnap returns the set of keys present in m as a struct{} map. Used by
+// the plain-Apply builder to remember which metadata entries existed
+// before the inner-side build so newly-added entries can be offset by
+// outerWidth post-merge.
+func setSnap[V any](m map[string]V) map[string]struct{} {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(m))
+	for k := range m {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
 // copySchema returns a shallow copy of the schema map.
 func copySchema(schema map[string]int) map[string]int {
 	cp := make(map[string]int, len(schema))
@@ -2281,6 +2296,25 @@ func buildOperator(
 		// stays addressable downstream.
 		outerWidth := schemaWidth(schema)
 		innerSchema := map[string]int{}
+		// Snapshot bopts state that records inner-relative column positions
+		// (edgeVarMeta / pathVarMeta / vleRelMeta / pathVarChain /
+		// expandTripletSeq). The inner build adds new entries indexed
+		// against innerSchema's 0-based positions; once the inner schema
+		// is merged with the outer offset those entries become stale, so
+		// we shift every metadata column by outerWidth post-merge. Closes
+		// Match8 [3] (`MATCH ()-->() WITH 1 AS x MATCH ()-[r1]->()<--()
+		// RETURN sum(r1.times)` returned NULL because edgeVarMeta[r1]
+		// still pointed at the inner-only triplet positions, which after
+		// the outer-side offset belonged to outer-or-other columns).
+		var preEdgeKeys, prePathChainKeys, prePathMetaKeys, preVLEKeys map[string]struct{}
+		var preTripletLen int
+		if bopts != nil {
+			preEdgeKeys = setSnap(bopts.edgeVarMeta)
+			prePathChainKeys = setSnap(bopts.pathVarChain)
+			prePathMetaKeys = setSnap(bopts.pathVarMeta)
+			preVLEKeys = setSnap(bopts.vleRelMeta)
+			preTripletLen = len(bopts.expandTripletSeq)
+		}
 		arg := exec.NewArgument()
 		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
@@ -2288,6 +2322,48 @@ func buildOperator(
 		}
 		for k, v := range innerSchema {
 			schema[k] = v + outerWidth
+		}
+		if bopts != nil {
+			for name, info := range bopts.edgeVarMeta {
+				if _, was := preEdgeKeys[name]; was {
+					continue
+				}
+				info.srcCol += outerWidth
+				info.edgeCol += outerWidth
+				info.dstCol += outerWidth
+				bopts.edgeVarMeta[name] = info
+			}
+			for name, info := range bopts.pathVarChain {
+				if _, was := prePathChainKeys[name]; was {
+					continue
+				}
+				info.leadingCol += outerWidth
+				for i := range info.steps {
+					info.steps[i].srcCol += outerWidth
+					info.steps[i].edgeCol += outerWidth
+					info.steps[i].dstCol += outerWidth
+				}
+				bopts.pathVarChain[name] = info
+			}
+			for name, info := range bopts.pathVarMeta {
+				if _, was := prePathMetaKeys[name]; was {
+					continue
+				}
+				info.listCol += outerWidth
+				bopts.pathVarMeta[name] = info
+			}
+			for name, info := range bopts.vleRelMeta {
+				if _, was := preVLEKeys[name]; was {
+					continue
+				}
+				info.listCol += outerWidth
+				bopts.vleRelMeta[name] = info
+			}
+			for i := preTripletLen; i < len(bopts.expandTripletSeq); i++ {
+				bopts.expandTripletSeq[i].srcCol += outerWidth
+				bopts.expandTripletSeq[i].edgeCol += outerWidth
+				bopts.expandTripletSeq[i].dstCol += outerWidth
+			}
 		}
 		return exec.NewApply(outer, inner, arg), nil
 
@@ -4176,10 +4252,27 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 			}
 		}
 		if bopts != nil && bopts.edgeVarMeta != nil {
-			if meta, isEdge := bopts.edgeVarMeta[varName]; isEdge {
-				if rv, ok := buildRelationshipValueFromRow(row, meta, g); ok {
+			if _, isEdge := bopts.edgeVarMeta[varName]; isEdge {
+				// Post-projection forward: if the schema slot for varName
+				// already carries a RelationshipValue (an upstream
+				// projection emitted it into the column), use that
+				// directly. The edgeVarMeta triplet coordinates only
+				// apply to the original Expand-emitted shape; after a
+				// WITH the column holds a self-describing
+				// RelationshipValue, and the triplet slots now belong
+				// to other variables (Comparison1 [5] regression: after
+				// `WITH a` followed by a plain Apply, edgeVarMeta[a]'s
+				// triplet positions point at the Apply-side inner
+				// columns).
+				if rv, isRel := row[colIdx].(expr.RelationshipValue); isRel {
 					ctx[varName] = rv
 					continue
+				}
+				if meta, isEdge2 := bopts.edgeVarMeta[varName]; isEdge2 {
+					if rv, ok := buildRelationshipValueFromRow(row, meta, g); ok {
+						ctx[varName] = rv
+						continue
+					}
 				}
 			}
 		}

@@ -1329,6 +1329,22 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3854: ratcheted after round 64 — two coordinated changes for the
+//     cross-MATCH-with-WITH cardinality cluster:
+//     (a) the plain Apply builder now offsets the inner-side
+//         edgeVarMeta / pathVarChain / pathVarMeta / vleRelMeta /
+//         expandTripletSeq entries by outerWidth post-merge, so the
+//         metadata coordinates match the combined outer||inner row
+//         layout (Match8 [3] returned NULL because edgeVarMeta[r1]
+//         still pointed at the inner-only triplet positions, which
+//         after the outer-side offset addressed outer or other
+//         columns).
+//     (b) buildRowCtx's edgeVarMeta fast-path short-circuits when
+//         the schema slot for the variable carries a
+//         RelationshipValue directly — mirrors the projection's
+//         round-61 fix. Closes Match8 [3]. 20-run sample: floor
+//         3854, median ~3857, max 3859; gate at 3854 with 0
+//         headroom.
 //   - 3853: ratcheted after round 63 — baseOffsetFromMap recomputes the
 //     base time's offset on the OVERRIDE date (not the original date)
 //     when the map carries date keys. This honours DST flips between
@@ -1430,7 +1446,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3853
+const tckExecutionBaseline = 3854
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
