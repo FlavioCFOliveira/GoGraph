@@ -1275,11 +1275,17 @@ import (
 //     ReturnOrderBy6 [5] (ambiguous-aggregation check extended to
 //     ORDER BY). 60-run sample shows the floor at 3824 (median 3830,
 //     max 3834); gate set at 3823 for 1 of headroom.
+//   - 3828: ratcheted after round 40 closed 4 VLE undirected scenarios
+//     (Match9 [3], Match9 [4], Match7 [14], Delete4 [2]) by keying the
+//     relationship-uniqueness bitset on the forward-edge position so
+//     DirBoth traversals dedupe the same physical edge across
+//     direction. 30-run sample shows floor at 3830 (median 3835, max
+//     3838); gate at 3828 for 2 of headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3823
+const tckExecutionBaseline = 3828
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
