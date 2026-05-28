@@ -48,6 +48,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
@@ -1739,10 +1740,26 @@ func buildPropsEvalFn(
 	// i})`) intermittently stores a NodeValue (which reads back as null) for
 	// whichever element happens to match a freshly-allocated node id.
 	var scalarSnap map[string]struct{}
-	if bopts != nil && len(bopts.scalarCols) > 0 {
-		scalarSnap = make(map[string]struct{}, len(bopts.scalarCols))
-		for k := range bopts.scalarCols {
-			scalarSnap[k] = struct{}{}
+	if bopts != nil {
+		nScalar := len(bopts.scalarCols)
+		nAlias := len(bopts.projAliasScalarCols)
+		if nScalar+nAlias > 0 {
+			scalarSnap = make(map[string]struct{}, nScalar+nAlias)
+			for k := range bopts.scalarCols {
+				scalarSnap[k] = struct{}{}
+			}
+			// projAliasScalarCols also covers integer-typed projection
+			// aliases (e.g. `WITH foo.x AS x`) whose integer value can
+			// numerically coincide with a real NodeID. Without folding
+			// it into scalarSnap, the closure's buildRowCtxFromMutator
+			// upgrades `x` to a NodeValue and the downstream property
+			// evaluation (`{x: x}` in a MERGE pattern) drops the entry
+			// because exprValueToLPGProp rejects NodeValue — leaving
+			// the MERGE search predicate under-filtered and matching
+			// every :N node regardless of `x`. Closes Merge1 [9] flake.
+			for k := range bopts.projAliasScalarCols {
+				scalarSnap[k] = struct{}{}
+			}
 		}
 	}
 
@@ -5464,6 +5481,22 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query)
 	}
+
+	// Freeze the "now" instant for this statement so every call to the
+	// temporal `now` constructors (localtime(), time(), date(),
+	// localdatetime(), datetime()) within this query observes the same
+	// instant — openCypher requirement (closes Temporal10 [12] flake
+	// `RETURN duration.inSeconds(localtime(), localtime())` whose two
+	// localtime() calls otherwise advance by one tick).
+	//
+	// We do NOT defer ClearStatementNow at RunInTx-return time: the
+	// engine returns a *Result whose Next() drives the operator
+	// pipeline lazily, so the temporal evaluators fire AFTER this
+	// function returns. Leaving statementNow installed until the next
+	// query overwrites it keeps sequential queries deterministic; the
+	// process-global value loses concurrent-query precision but the
+	// runner serialises writers anyway and reads share state safely.
+	funcs.SetStatementNow(time.Now())
 
 	entry, err := e.parseAndAnalyse(query)
 	if err != nil {

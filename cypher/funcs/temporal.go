@@ -13,7 +13,7 @@
 //
 // Constructors accept three argument forms per openCypher §3.4:
 //
-//   - Zero args: returns the current instant. We use time.Now().UTC() for
+//   - Zero args: returns the current instant. We use StatementNow() for
 //     determinism and document the deviation in godoc.
 //   - One String arg: parsed via expr.Parse*.
 //   - One Map arg: built from component keys (year, month, day, ...).
@@ -62,7 +62,7 @@ func registerTemporal(r *Registry) {
 	// .realtime all return the current instant; the distinction matters
 	// in a clustered setting but not in our single-process engine. All
 	// three aliases dispatch to the same 0-arg constructor which uses
-	// time.Now().UTC().
+	// StatementNow().
 	for _, kind := range []struct {
 		base string
 		fn   func([]expr.Value) (expr.Value, error)
@@ -89,7 +89,7 @@ func registerTemporal(r *Registry) {
 func fnDate(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 0:
-		return expr.DateFromTime(time.Now().UTC()), nil
+		return expr.DateFromTime(StatementNow()), nil
 	case 1:
 		if expr.IsNull(args[0]) {
 			return expr.Null, nil
@@ -301,7 +301,7 @@ func isoWeekDate(isoYear, isoWeek, dow int) (expr.DateValue, error) {
 func fnLocalDateTime(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 0:
-		return expr.LocalDateTimeValue{T: time.Now().UTC()}, nil
+		return expr.LocalDateTimeValue{T: StatementNow()}, nil
 	case 1:
 		if expr.IsNull(args[0]) {
 			return expr.Null, nil
@@ -338,7 +338,7 @@ func fnLocalDateTime(args []expr.Value) (expr.Value, error) {
 func fnDateTime(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 0:
-		return expr.DateTimeValue{T: time.Now().UTC()}, nil
+		return expr.DateTimeValue{T: StatementNow()}, nil
 	case 1:
 		if expr.IsNull(args[0]) {
 			return expr.Null, nil
@@ -721,7 +721,7 @@ func parseSignedOffset(s string) (int, error) {
 func fnLocalTime(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 0:
-		t := time.Now().UTC()
+		t := StatementNow()
 		return expr.NewLocalTime(t.Hour(), t.Minute(), t.Second(), t.Nanosecond()), nil
 	case 1:
 		if expr.IsNull(args[0]) {
@@ -756,7 +756,7 @@ func fnLocalTime(args []expr.Value) (expr.Value, error) {
 func fnTime(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 0:
-		t := time.Now().UTC()
+		t := StatementNow()
 		return expr.NewTime(t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), 0), nil
 	case 1:
 		if expr.IsNull(args[0]) {

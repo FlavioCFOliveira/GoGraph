@@ -1329,6 +1329,38 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3876: ratcheted after round 79 — two coordinated non-determinism
+//     fixes:
+//     (a) buildPropsEvalFn (CREATE / row-aware MERGE) now folds
+//         projAliasScalarCols into scalarSnap, in addition to
+//         scalarCols. A MERGE pattern like `MERGE (:N {x: x, y: y+1})`
+//         after `WITH foo.x AS x, foo.y AS y` was dropping the `x`
+//         entry of the per-row property map: x is a projection alias
+//         (round 67 tagged it in projAliasScalarCols) and the closure's
+//         buildRowCtxFromMutator was upgrading x's integer to a
+//         NodeValue when it numerically coincided with an interned
+//         NodeID, then exprValueToLPGProp rejected the NodeValue and
+//         silently dropped the entry. The under-filtered MERGE search
+//         then matched any :N node sharing only `y`, multiplying rows
+//         exponentially (Merge1 [9] flaked 3-of-10, producing 9 or 24
+//         or 59 or 534 rows non-deterministically).
+//     (b) Engine.RunInTx now freezes the "now" instant for the
+//         duration of the query via funcs.SetStatementNow(time.Now()).
+//         The temporal "now" constructors (localtime, time, date,
+//         localdatetime, datetime) call funcs.StatementNow() in place
+//         of time.Now() so all calls within one statement observe the
+//         same instant — openCypher requirement. The clear is
+//         intentionally NOT deferred: the operator pipeline yields
+//         lazily, so temporal evaluators fire AFTER RunInTx returns;
+//         leaving statementNow installed until the next query
+//         overwrites it keeps sequential queries deterministic.
+//         Closes Temporal10 [12] (`RETURN duration.inSeconds(
+//         localtime(), localtime())` whose two calls otherwise
+//         advanced by a tick, producing `PT0.000001S` instead of
+//         `PT0S`).
+//     20-run sample: floor 3876, median 3877, max 3877; gate at 3876
+//     with 0 headroom (only remaining flake is WithOrderBy4 [12] at
+//     2-of-20).
 //   - 3875: ratcheted after round 77 — RelationshipValue type
 //     reconstruction now prefers a pattern-accepted label over the
 //     non-deterministic EdgeLabels-first label. LPG merges parallel
@@ -1623,7 +1655,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3875
+const tckExecutionBaseline = 3876
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
