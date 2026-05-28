@@ -2516,6 +2516,18 @@ func buildOperator(
 		// (e.g. schema["[1,2,3]"] == schema["lst"] == 0), which inflates
 		// len(schema) without widening the actual row.
 		schema[p.ElementVar] = schemaWidth(schema)
+		// Tag the UNWIND element as a scalar column so buildIRProjection's
+		// Variable fast path does NOT upgrade an IntegerValue element into
+		// a NodeValue when the integer numerically equals a real NodeID.
+		// Without this, `UNWIND range(0, 20) AS i` would project i=14 as
+		// node#14 whenever a node with internal id 14 happened to exist —
+		// breaking downstream `list[i]` (Match4 [4] setup query).
+		if bopts != nil && p.ElementVar != "" {
+			if bopts.scalarCols == nil {
+				bopts.scalarCols = make(map[string]struct{})
+			}
+			bopts.scalarCols[p.ElementVar] = struct{}{}
+		}
 		return buildUnwindOperator(p, child, schema, walker, params, reg, bopts)
 
 	case *ir.Distinct:
