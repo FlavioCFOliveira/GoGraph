@@ -120,6 +120,15 @@ type VarLengthExpand struct {
 	revVerts []uint64
 	revEdges []graph.NodeID
 
+	// revToFwd maps a reverse-CSR edge position to its corresponding
+	// forward-CSR edge position. Used by the relationship-uniqueness
+	// bitset to recognise that a reverse traversal of the same physical
+	// edge is NOT a distinct edge. Built lazily in Init for DirBoth
+	// traversals only. Entry ^uint64(0) means "unresolved" (e.g.
+	// out-of-range vertex IDs); callers fall back to the synthetic
+	// reverse absPos in that rare case.
+	revToFwd []uint64
+
 	// BFS state for the current input row. Two slices are kept and ping-ponged
 	// per BFS level: `queue` is read by runBFS while extensions are appended to
 	// `nextQueue`. After each level the two are swapped. This avoids the
@@ -200,6 +209,39 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.inputRow = nil
 	op.inputEOS = false
 	op.edgesVisited = 0
+	// Precompute a reverse-edge-position → forward-edge-position mapping
+	// so the relationship-uniqueness bitset can dedupe the same physical
+	// edge across direction. For each reverse edge (b←a) in revEdges,
+	// scan a's forward adjacency for the matching destination b. Without
+	// this, DirBoth VLE traversal can use the same edge twice (once
+	// forward, once reverse encoding) and produce duplicated paths
+	// (Match9 [3]/[4]).
+	if op.dir == DirBoth && op.revEdges != nil {
+		op.revToFwd = make([]uint64, len(op.revEdges))
+		for revUid := uint64(0); revUid+1 < uint64(len(op.revVerts)); revUid++ {
+			start, end := op.revVerts[revUid], op.revVerts[revUid+1]
+			for revPos := start; revPos < end; revPos++ {
+				fwdSrc := uint64(op.revEdges[revPos])
+				// Find the forward position p such that fwdEdges[p] = revUid
+				// inside fwdSrc's adjacency range. The reverse CSR is the
+				// transpose of the forward CSR, so each reverse entry has
+				// exactly one forward counterpart.
+				if fwdSrc+1 >= uint64(len(op.fwdVerts)) {
+					op.revToFwd[revPos] = ^uint64(0) // unresolved
+					continue
+				}
+				fStart, fEnd := op.fwdVerts[fwdSrc], op.fwdVerts[fwdSrc+1]
+				fwdPos := ^uint64(0)
+				for fp := fStart; fp < fEnd; fp++ {
+					if uint64(op.fwdEdges[fp]) == revUid {
+						fwdPos = fp
+						break
+					}
+				}
+				op.revToFwd[revPos] = fwdPos
+			}
+		}
+	}
 	return op.input.Init(ctx)
 }
 
@@ -412,6 +454,20 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 			continue
 		}
 
+		// On undirected (DirBoth) traversal, alias the reverse-edge
+		// synthetic position to its forward counterpart so the
+		// relationship-uniqueness bitset rejects a path that uses the
+		// SAME physical edge twice (once forward, once reverse) — see
+		// Match9 [3]/[4]. Without this aliasing the BFS would emit
+		// `(a)-[REL1]->(b)-[REL1 reverse]->(a)` as a length-2 path that
+		// happens to "reuse" the only edge between a and b.
+		fwdAbsPos := absPos
+		if !isFwd && op.dir == DirBoth && op.revToFwd != nil && pos < uint64(len(op.revToFwd)) {
+			if mapped := op.revToFwd[pos]; mapped != ^uint64(0) {
+				fwdAbsPos = mapped
+			}
+		}
+
 		// Edge-type filter (forward only; reverse edges skip type filter).
 		if isFwd && op.edgeType != "" {
 			t, ok := op.edgeTypeFilter[absPos]
@@ -419,13 +475,29 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 				continue
 			}
 		}
+		// Edge-type filter for reverse edges: look up by the forward
+		// counterpart position. Without this, reverse traversal would
+		// emit any-type edges even when the pattern declared a type
+		// filter, leading Match9 [3]/[4] to enumerate paths through
+		// edges that should have been filtered out.
+		if !isFwd && op.edgeType != "" && op.dir == DirBoth && fwdAbsPos != absPos {
+			t, ok := op.edgeTypeFilter[fwdAbsPos]
+			if !ok || t != op.edgeType {
+				continue
+			}
+		}
 
 		// Relationship-uniqueness: skip if this edge is already on the path.
-		if parent != nil && bitsetContains(parent.visited, absPos) {
+		// Key the bitset on the FORWARD position so a reverse-direction
+		// traversal of the same edge is recognised as the same edge.
+		if parent != nil && bitsetContains(parent.visited, fwdAbsPos) {
 			continue
 		}
 
-		// Build new path state.
+		// Build new path state. The path step stores the absPos for
+		// rendering (so forward/reverse direction is preserved) but the
+		// visited bitset uses fwdAbsPos so a later traversal of the
+		// same edge in the opposite direction is rejected.
 		var newPath []edgeStep
 		var newVisited []uint64
 		hops := 1
@@ -434,10 +506,10 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 			newPath = make([]edgeStep, len(parent.path)+1)
 			copy(newPath, parent.path)
 			newPath[len(parent.path)] = edgeStep{edgePos: absPos, dstID: dst}
-			newVisited = bitsetAdd(parent.visited, absPos)
+			newVisited = bitsetAdd(parent.visited, fwdAbsPos)
 		} else {
 			newPath = []edgeStep{{edgePos: absPos, dstID: dst}}
-			newVisited = bitsetAdd(nil, absPos)
+			newVisited = bitsetAdd(nil, fwdAbsPos)
 		}
 
 		*target = append(*target, pathState{
