@@ -1475,6 +1475,17 @@ func buildOperatorWrite(
 			return nil, fmt.Errorf("cypher: MergeRelationship: src=%q (in schema=%v) dst=%q (in schema=%v) unresolved",
 				p.SrcVar, srcOk, p.DstVar, dstOk)
 		}
+		// openCypher rejects MERGE patterns whose property maps contain a
+		// null literal — null comparisons are tri-valued false, so the
+		// pattern can never match its own write and MergeReadOwnWrites is
+		// the canonical compile-time/runtime error. The general Merge
+		// branch above already enforces this; mirror the check here so
+		// the single-relationship MergeRelationship fast path does not
+		// silently accept `(a)-[r:X {num: null}]->(b)`. Closes
+		// Merge5 [29].
+		if p.RelProps != "" && exec.PropMapContainsNullLiteral(p.RelProps) {
+			return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE pattern contains a null property literal")
+		}
 		op := exec.NewMergeRelationship(child, srcCol, dstCol, p.RelType, mutator)
 		if p.RelProps != "" {
 			op = op.WithRelProperties(p.RelProps)
