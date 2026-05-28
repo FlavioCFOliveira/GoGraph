@@ -3157,6 +3157,18 @@ func buildProcedureCallOperator(
 	if len(p.Arguments) == 0 && len(entry.Sig.Inputs) > 0 && len(entry.Sig.InputNames) == len(entry.Sig.Inputs) {
 		// Implicit-argument form: bind each declared input from the
 		// query parameter whose name matches the declared input name.
+		// openCypher restricts implicit argument passing to STANDALONE
+		// CALL — `CALL proc` with no argument list and no YIELD. An
+		// in-query CALL (one that drives a downstream YIELD/RETURN, i.e.
+		// has YieldVars populated by the translator) must pass arguments
+		// explicitly. Surfaces SyntaxError(InvalidArgumentPassingMode)
+		// per Call2 [4].
+		if len(p.YieldVars) > 0 {
+			return nil, fmt.Errorf(
+				"cypher: SyntaxError.InvalidArgumentPassingMode: in-query CALL %q with YIELD must pass arguments explicitly",
+				p.Name,
+			)
+		}
 		argEvals = make([]func(exec.Row) (expr.Value, error), len(entry.Sig.Inputs))
 		for i, paramName := range entry.Sig.InputNames {
 			v, ok := params[paramName]
