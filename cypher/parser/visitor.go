@@ -2030,11 +2030,17 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 		if err != nil {
 			return err
 		}
-		// Build a minimal single-match query for the pattern form.
+		// Build a minimal single-match query for the pattern form. The
+		// inline WHERE (if present) is preserved on the ExistsSubquery
+		// so the IR translator can attach it as a Selection inside the
+		// SemiApply/AntiSemiApply subtree. Without this the WHERE would
+		// be silently dropped and EXISTS { ... WHERE p } would behave
+		// identically to EXISTS { ... } (per ExistentialSubquery1 [2]).
 		return &ast.ExistsSubquery{
 			Pos:     positionOf(ctx),
 			EndPos:  endPositionOf(ctx),
 			Pattern: pat.Pattern,
+			Where:   pat.Where,
 		}
 	}
 	return unsupported(ctx, "subqueryExist", "unrecognised EXISTS form")

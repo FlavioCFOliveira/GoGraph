@@ -1481,6 +1481,13 @@ func (a *analyser) existsSubquery(e *ast.ExistsSubquery) {
 	sub := &analyser{scope: a.scope.Child()}
 	if e.Pattern != nil {
 		sub.patternIntroduce(e.Pattern)
+		// Validate any inline WHERE clause that the parser preserved on
+		// the pattern form (e.g. `EXISTS { (n)-->(m) WHERE n.prop = m.prop }`).
+		// The predicate runs in the same scope as the pattern; aggregations
+		// are forbidden here per openCypher 9 §3.4.5.
+		if e.Where != nil {
+			sub.whereClause(e.Where)
+		}
 	} else if e.Query != nil {
 		sub.singleQuery(e.Query)
 	}

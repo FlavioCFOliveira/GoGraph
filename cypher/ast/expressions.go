@@ -304,6 +304,7 @@ type ExistsSubquery struct {
 	Pos     Position
 	EndPos  Position
 	Pattern *Pattern     // pattern form: EXISTS { (a)-[r]->(b) }
+	Where   *Where       // optional inline WHERE clause for the pattern form
 	Query   *SingleQuery // full subquery form: EXISTS { MATCH … RETURN … }
 }
 
@@ -313,7 +314,11 @@ func (*ExistsSubquery) exprNode() {}
 // String returns the Cypher EXISTS subquery.
 func (e *ExistsSubquery) String() string {
 	if e.Pattern != nil {
-		return "EXISTS { " + e.Pattern.String() + " }"
+		out := "EXISTS { " + e.Pattern.String()
+		if e.Where != nil {
+			out += " " + e.Where.String()
+		}
+		return out + " }"
 	}
 	return "EXISTS { " + e.Query.String() + " }"
 }

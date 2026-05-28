@@ -76,7 +76,18 @@ func (t *translator) existsSubPlan(exists *ast.ExistsSubquery, outer LogicalPlan
 
 	// EXISTS { pattern } — translate the pattern with the Argument as base.
 	if exists.Pattern != nil {
-		return t.matchPattern(exists.Pattern, arg, false)
+		plan, err := t.matchPattern(exists.Pattern, arg, false)
+		if err != nil {
+			return nil, err
+		}
+		// Inline WHERE clause inside the pattern form (e.g.
+		// EXISTS { (n)-->(m) WHERE n.prop = m.prop }) becomes a
+		// Selection wrapping the matched plan, so SemiApply / AntiSemiApply
+		// only see rows that satisfy the WHERE filter.
+		if exists.Where != nil {
+			plan = NewSelectionExpr(exists.Where.Predicate.String(), exists.Where.Predicate, plan)
+		}
+		return plan, nil
 	}
 
 	// EXISTS { MATCH … } — translate the full subquery.
