@@ -1199,11 +1199,20 @@ import (
 //     with the same alias-shadow shape. Round 23.
 //     Observed 3805-3814 across a 10-run sample (median 3810); gate set
 //     at 3805 to absorb run-to-run variance.
+//   - 3808: raised after CALL .. YIELD learnt to bind each YIELD variable
+//     to the procedure's declared output column by name (Sig.Outputs)
+//     rather than by position. Closes Call5 [3] (`YIELD b, a` with a
+//     procedure declared a, b) and Call5 [4] (`YIELD col AS alias` rename).
+//     ir.ProcedureCall now carries a parallel YieldSourceNames slice so
+//     the physical builder can recover the original declared name even
+//     after an AS rename. Round 24.
+//     Observed 3808-3816 across a 10-run sample (median 3810); gate set
+//     at 3808 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3805
+const tckExecutionBaseline = 3808
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
