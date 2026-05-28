@@ -3962,7 +3962,12 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 // When bopts carries pathVarChain entries the named path variables are
 // reconstructed as PathValues so that WHERE-clause predicates such as
 // `length(p) = 1` operate on the documented Path kind rather than on the
-// leading node value.
+// leading node value. When bopts carries vleRelMeta entries the
+// variable-length relationship variables are reconstructed as a
+// List<RelationshipValue> so expressions such as `last(r)`, `size(r)` and
+// `r[0].type` operate on the documented openCypher list-of-relationships
+// shape rather than on the raw alternating path encoding emitted by
+// VarLengthExpand.
 func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
 	for varName, colIdx := range schema {
@@ -3985,6 +3990,14 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 				}
 			}
 		}
+		if bopts != nil && bopts.vleRelMeta != nil {
+			if rmeta, isVLERel := bopts.vleRelMeta[varName]; isVLERel {
+				if rl, ok := buildVLERelListFromRow(row, rmeta, g); ok {
+					ctx[varName] = rl
+					continue
+				}
+			}
+		}
 		if bopts != nil && bopts.edgeVarMeta != nil {
 			if meta, isEdge := bopts.edgeVarMeta[varName]; isEdge {
 				if rv, ok := buildRelationshipValueFromRow(row, meta, g); ok {
@@ -3996,6 +4009,68 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)
 	}
 	return ctx
+}
+
+// buildVLERelListFromRow reconstructs a List<RelationshipValue> from the
+// flat alternating [src, edgePos, dst, edgePos, dst, ...] ListValue emitted
+// by VarLengthExpand into the rel-variable column. Returns an empty list
+// for a zero-hop result (the variable evaluates to []) and (nil, false)
+// when the column is absent or not a ListValue.
+func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string, float64]) (expr.ListValue, bool) {
+	if rmeta.listCol >= len(row) {
+		return nil, false
+	}
+	lv, ok := row[rmeta.listCol].(expr.ListValue)
+	if !ok {
+		return nil, false
+	}
+	if len(lv) == 0 {
+		return expr.ListValue{}, true
+	}
+	nHops := (len(lv) - 1) / 2
+	rels := make(expr.ListValue, 0, nHops)
+	srcID := uint64(0)
+	if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
+		srcID = uint64(iv)
+	}
+	for h := 0; h < nHops; h++ {
+		edgeID, ok1 := lv[1+2*h].(expr.IntegerValue)
+		dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
+		if !ok1 || !ok2 {
+			continue
+		}
+		dstID := uint64(dstIDVal)
+		et := rmeta.edgeType
+		var edgeProps expr.MapValue
+		if g != nil {
+			srcKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(srcID))
+			dstKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+			if sOK && dOK {
+				if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+					et = ets[0]
+				} else if ets := g.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
+					et = ets[0]
+				}
+				rawEP := g.EdgeProperties(srcKey, dstKey)
+				if len(rawEP) == 0 {
+					rawEP = g.EdgeProperties(dstKey, srcKey)
+				}
+				edgeProps = make(expr.MapValue, len(rawEP))
+				for k, pv := range rawEP {
+					edgeProps[k] = lpgPropToExpr(pv)
+				}
+			}
+		}
+		rels = append(rels, expr.RelationshipValue{
+			ID:         uint64(edgeID),
+			StartID:    srcID,
+			EndID:      dstID,
+			Type:       et,
+			Properties: edgeProps,
+		})
+		srcID = dstID
+	}
+	return rels, true
 }
 
 // buildRelationshipValueFromRow reconstructs a [expr.RelationshipValue] from
