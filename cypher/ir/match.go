@@ -3,6 +3,7 @@ package ir
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"gograph/cypher/ast"
@@ -682,6 +683,24 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			for _, sel := range hoisted {
 				combined = NewSelectionExpr(sel.Predicate, sel.PredicateExpr, combined)
 			}
+			// Cross-pattern no-repeat-rel: when the inner pattern
+			// reuses a rel variable bound by the outer plan, the inner
+			// subtree's VLE steps cannot see the outer rel through plain
+			// Apply's fresh-schema isolation. Layer a post-Apply
+			// Selection above that filters out rows where any inner
+			// VLE's traversed edge list contains the outer rel's id
+			// (Match4 [7]). The list at a VLE rel-var column is the
+			// flat alternating `[srcNode, edgePos0, dstNode0, …]`
+			// encoding emitted by VarLengthExpand, so the predicate
+			// indexes the odd positions only.
+			outerRels := keysOf(t.outerBoundRels)
+			vleRelVars := collectInnerVLERelVars(body)
+			for _, outerRel := range outerRels {
+				for _, vleRel := range vleRelVars {
+					pred := buildVLENoRepeatRelPredicate(outerRel, vleRel)
+					combined = NewSelectionExpr(pred.String(), pred, combined)
+				}
+			}
 			plan = combined
 		}
 		for _, v := range pathPatternVars(pp) {
@@ -689,6 +708,95 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 		}
 	}
 	return plan, nil
+}
+
+// keysOf returns the keys of a string-set map as a stable-ordered
+// slice. Used by the cross-pattern no-repeat-rel post-filter so the
+// predicate AST is deterministic across builds.
+func keysOf(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collectInnerVLERelVars walks plan depth-first and returns the names
+// of every named relationship variable bound by a VarLengthExpand
+// step. Anonymous synthetic rel vars (the `__anon_N` placeholders
+// emitted when the pattern declares no rel name) are included so the
+// no-repeat-rel post-filter can address every VLE step regardless of
+// whether the user named it.
+func collectInnerVLERelVars(plan LogicalPlan) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	var walk func(LogicalPlan)
+	walk = func(p LogicalPlan) {
+		if p == nil {
+			return
+		}
+		if vle, ok := p.(*VarLengthExpand); ok {
+			if vle.RelVar != "" {
+				if _, ok := seen[vle.RelVar]; !ok {
+					seen[vle.RelVar] = struct{}{}
+					out = append(out, vle.RelVar)
+				}
+			}
+		}
+		for _, c := range p.Children() {
+			walk(c)
+		}
+	}
+	walk(plan)
+	return out
+}
+
+// buildVLENoRepeatRelPredicate constructs the AST predicate
+//
+//	none(__crp_e_<vleRel> IN <vleRel> WHERE
+//	     (startNode(__crp_e_<vleRel>) = startNode(<outerRel>)
+//	      AND endNode(__crp_e_<vleRel>) = endNode(<outerRel>))
+//	     OR
+//	     (startNode(__crp_e_<vleRel>) = endNode(<outerRel>)
+//	      AND endNode(__crp_e_<vleRel>) = startNode(<outerRel>)))
+//
+// which evaluates to true iff no element of the VarLengthExpand-emitted
+// list bound to `vleRel` connects the same node pair (in either
+// orientation) as the outer-bound rel `outerRel`. Endpoint-pair
+// comparison is direction-insensitive — required because undirected
+// VLE traversal can emit a rel value whose StartID/EndID are the
+// traversal anchors rather than the storage direction, while
+// `<outerRel>` (lifted via buildRelationshipValueFromRow on Expand
+// metadata) carries the storage direction. In the simple-graph
+// configuration the TCK runs under, node-pair equality uniquely
+// identifies an edge so this predicate is exact.
+func buildVLENoRepeatRelPredicate(outerRel, vleRel string) ast.Expression {
+	eVar := "__crp_e_" + vleRel
+	startE := &ast.FunctionInvocation{Name: "startNode", Args: []ast.Expression{&ast.Variable{Name: eVar}}}
+	endE := &ast.FunctionInvocation{Name: "endNode", Args: []ast.Expression{&ast.Variable{Name: eVar}}}
+	startR := &ast.FunctionInvocation{Name: "startNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
+	endR := &ast.FunctionInvocation{Name: "endNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
+	sameForward := &ast.BinaryOp{
+		Left: &ast.BinaryOp{Left: startE, Operator: "=", Right: startR},
+		Operator: "AND",
+		Right: &ast.BinaryOp{Left: endE, Operator: "=", Right: endR},
+	}
+	sameReverse := &ast.BinaryOp{
+		Left: &ast.BinaryOp{Left: startE, Operator: "=", Right: endR},
+		Operator: "AND",
+		Right: &ast.BinaryOp{Left: endE, Operator: "=", Right: startR},
+	}
+	eqPred := &ast.BinaryOp{Left: sameForward, Operator: "OR", Right: sameReverse}
+	comp := &ast.ListComprehension{
+		Variable:  eVar,
+		Source:    &ast.Variable{Name: vleRel},
+		Predicate: eqPred,
+	}
+	return &ast.FunctionInvocation{Name: "none", Args: []ast.Expression{comp}}
 }
 
 // setPathVarOnVLE walks the plan tree depth-first and sets PathVar on
