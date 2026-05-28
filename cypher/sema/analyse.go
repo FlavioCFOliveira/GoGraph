@@ -887,6 +887,19 @@ func (a *analyser) whereClause(w *ast.Where) {
 	if containsAggregation(w.Predicate) {
 		a.error(invalidAggregationError(positionOf(w.Predicate)))
 	}
+	// A bare Variable predicate must reference a Boolean-compatible value.
+	// When the scope-symbol type proves the reference is a node,
+	// relationship, or path the predicate cannot coerce to Boolean and
+	// openCypher requires InvalidArgumentType at compile time
+	// (Pattern1 [11] `WHERE (n)` where n is bound to a node).
+	if v, ok := w.Predicate.(*ast.Variable); ok {
+		if sym, ok := a.scope.Lookup(v.Name); ok {
+			switch sym.Type {
+			case "node", "relationship", "path":
+				a.error(invalidBooleanOperandError("WHERE", sym.Type+"-variable", v.Pos))
+			}
+		}
+	}
 	a.checkExpr(w.Predicate)
 }
 
