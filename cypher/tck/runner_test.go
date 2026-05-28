@@ -932,6 +932,20 @@ import (
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//   - 3797: raised after round 21 closed Match9 [1] (RETURN last(r)
+//     over a varlen rel). buildRowCtx now consults
+//     bopts.vleRelMeta and reconstructs the variable-length
+//     relationship variable as a List<RelationshipValue> via the
+//     new buildVLERelListFromRow helper, so expressions that
+//     reference `r` indirectly (last(r), size(r), r[0].type, …) see
+//     the openCypher-canonical list-of-relationships shape rather
+//     than the raw alternating [src, edgePos, dst, …] encoding
+//     emitted by VarLengthExpand. The other Match cluster
+//     scenarios (mixed-direction over-counting, OPTIONAL MATCH
+//     bound-rel binding, cross-WITH variable scope) need deeper
+//     IR/exec work and are deferred to a follow-up round.
+//     Observed 3797-3803 across a 10-run sample; gate set at the
+//     floor.
 //   - 3796: raised after round 20 closed every Temporal10 scenario
 //     except [12] (statement-time now-cache, deferred). Three
 //     coordinated fixes landed:
@@ -1159,7 +1173,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3796
+const tckExecutionBaseline = 3797
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
