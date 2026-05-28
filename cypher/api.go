@@ -197,6 +197,14 @@ type buildOpts struct {
 	// mis-upgrading a count result into a graph node. buildEagerAggregation
 	// populates this set for every aggregate output name it registers in the schema.
 	scalarCols map[string]struct{}
+	// projAliasScalarCols mirrors scalarCols for the BUILDROWCTX / Variable
+	// fast-path upgrade-bypass only. Distinct from scalarCols so the
+	// colliding-alias guard in buildIRProjection still routes a
+	// re-aliasing projection (`WITH a.num%3 AS x WITH a.num+a.num2 AS x`)
+	// through general eval — the prior alias is here, not in scalarCols,
+	// and the guard reads only scalarCols. Closes WithSkipLimit3 [3]
+	// without re-breaking WithOrderBy4 [7]/[9]/[10].
+	projAliasScalarCols map[string]struct{}
 	// preprojectedCols is the set of schema variable names whose row column
 	// already holds the projection-equivalent value (e.g. an EagerAggregation
 	// grouping-key column carries the pre-evaluated grouping expression, not
@@ -4276,16 +4284,23 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 				}
 			}
 		}
-		// Scalar columns (UNWIND element variables, aggregate outputs) pass
-		// through unchanged: their integer values are not node ids and must
-		// not be upgraded. Without this guard a CREATE/UNWIND that reads an
-		// integer through a row variable would silently elevate the integer
-		// to a NodeValue when it happened to numerically equal an existing
-		// internal node id — breaking downstream property writes, range()
-		// arguments, list indexing, and more (Match4 [4] / Aggregation6 [5]
-		// setup queries).
+		// Scalar columns (UNWIND element variables, aggregate outputs,
+		// computed projection aliases) pass through unchanged: their
+		// integer values are not node ids and must not be upgraded.
+		// Without this guard a CREATE/UNWIND that reads an integer
+		// through a row variable would silently elevate the integer
+		// to a NodeValue when it happened to numerically equal an
+		// existing internal node id — breaking downstream property
+		// writes, range() arguments, list indexing, and more (Match4
+		// [4] / Aggregation6 [5] setup queries / WithSkipLimit3 [3]).
 		if bopts != nil && bopts.scalarCols != nil {
 			if _, isScalar := bopts.scalarCols[varName]; isScalar {
+				ctx[varName] = row[colIdx]
+				continue
+			}
+		}
+		if bopts != nil && bopts.projAliasScalarCols != nil {
+			if _, isScalar := bopts.projAliasScalarCols[varName]; isScalar {
 				ctx[varName] = row[colIdx]
 				continue
 			}
@@ -4967,6 +4982,11 @@ func buildIRProjection(
 						if varIsScalar {
 							_, varIsScalar = bopts.scalarCols[v.Name]
 						}
+						if !varIsScalar && bopts != nil && bopts.projAliasScalarCols != nil {
+							if _, ok3 := bopts.projAliasScalarCols[v.Name]; ok3 {
+								varIsScalar = true
+							}
+						}
 						if varIsScalar {
 							// Scalar aggregate output: return the raw value without
 							// upgrade. Integer counts/sums can numerically coincide with
@@ -5184,6 +5204,43 @@ func buildIRProjection(
 		// inputSchema snapshot taken before the loop still informs the
 		// fast-path branches that need to see the input layout.
 		projItems[i] = exec.ProjectionItem{Alias: name, Eval: evalFn}
+	}
+	// Tag every computed (non-Variable) projection alias in scalarCols so
+	// downstream operators (Sort, Limit, RETURN) reading the column do not
+	// re-upgrade its integer value to a NodeValue when it numerically
+	// coincides with an existing node id (WithSkipLimit3 [3]: `WITH
+	// a.count AS count` with count=14 was surfacing as `({count: 14})`
+	// instead of the integer 14).
+	//
+	// Skip aliases that shadow an input-schema variable that is NOT
+	// already tagged scalar — the upstream still treats that name as a
+	// bound entity, and a Selection / pre-projection that reads it via
+	// buildRowCtx would otherwise see scalarCols[name] and incorrectly
+	// skip the entity upgrade. Closes the round-52 / round-56 collision
+	// pattern (TestMerge_OnMatchSet's `count(n) AS n` would have flipped
+	// Selection on `n` to a no-upgrade path).
+	if bopts != nil {
+		for _, item := range items {
+			if item.Expr == nil {
+				continue
+			}
+			if _, isVar := item.Expr.(*ast.Variable); isVar {
+				continue
+			}
+			// Skip when the alias name was already in the INPUT schema as
+			// a bound entity (where a Selection below this projection
+			// might still need to upgrade the variable to a NodeValue /
+			// RelationshipValue). Adding such an alias to
+			// projAliasScalarCols would taint pre-projection closures
+			// that captured bopts and read it at runtime.
+			if _, shadowsInput := inputSchema[item.Name]; shadowsInput {
+				continue
+			}
+			if bopts.projAliasScalarCols == nil {
+				bopts.projAliasScalarCols = make(map[string]struct{})
+			}
+			bopts.projAliasScalarCols[item.Name] = struct{}{}
+		}
 	}
 	// Post-projection schema reset: the live row has exactly one column per
 	// projection item at indices 0..len(items)-1. Stale entries from the

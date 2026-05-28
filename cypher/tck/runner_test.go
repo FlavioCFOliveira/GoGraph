@@ -1329,6 +1329,19 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3859: ratcheted after round 67 — buildIRProjection tags every
+//     computed (non-Variable) projection alias whose name does NOT
+//     shadow an input-schema variable in a new bopts field
+//     `projAliasScalarCols`. Both buildRowCtx and the Variable
+//     fast-path consult this set in addition to scalarCols to skip
+//     the integer→NodeValue upgrade for downstream reads. Keeping
+//     the set distinct from scalarCols means the colliding-alias
+//     guard in buildIRProjection (which reads scalarCols only) still
+//     routes a re-aliasing projection (`WITH a.num2 % 3 AS x WITH
+//     a.num + a.num2 AS x ORDER BY x`) through general eval rather
+//     than the fast-path. Closes WithSkipLimit3 [3]. 20-run sample:
+//     floor 3859, median ~3861, max 3862; gate at 3859 with 0
+//     headroom.
 //   - 3856: ratcheted after round 66 — exec.ProcedureCallOp.Next now
 //     prefixes the driver row onto each result row, so upstream
 //     bindings (e.g. `c` from `WITH count(*) AS c` between two CALL
@@ -1462,7 +1475,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3856
+const tckExecutionBaseline = 3859
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
