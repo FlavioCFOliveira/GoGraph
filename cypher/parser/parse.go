@@ -188,11 +188,14 @@ func Parse(query string) (ast.Query, error) {
 		return nil, se
 	}
 
+	// The arithmetic visitors (VisitAddSubExpression / VisitMultDivExpression
+	// / VisitPowerExpression) lift list/string predicates (IN, CONTAINS,
+	// STARTS WITH, ENDS WITH) above each arithmetic level as the tree is
+	// built, so no post-pass is required here. See cypher/parser/rebalance.go
+	// for the rationale.
 	if q, ok := result.(ast.Query); ok {
 		return q, nil
 	}
-
-	// Script might return a *SingleQuery which satisfies ast.Query.
 	if sq, ok := result.(*ast.SingleQuery); ok {
 		return sq, nil
 	}

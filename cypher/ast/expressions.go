@@ -96,6 +96,15 @@ type BinaryOp struct {
 	Left     Expression
 	Operator string // e.g. "+", "-", "=", "<>", "AND", "OR", "IN", "CONTAINS"
 	Right    Expression
+	// Parenthesized records that this BinaryOp was explicitly parenthesized in
+	// the source. The precedence-rebalancing pass in cypher/parser uses this
+	// flag to suppress lifting list/string-predicate operators (IN, CONTAINS,
+	// STARTS WITH, ENDS WITH) out of arithmetic chains when the user wrote the
+	// parentheses explicitly: `[1] + (2 IN [3]) + 4` must remain `[1] +
+	// bool + 4`, but `[1] + 2 IN [3] + 4` must rebalance to `([1] + 2) IN
+	// ([3] + 4)`. The flag is cleared once the rebalance pass completes;
+	// downstream consumers ignore it.
+	Parenthesized bool
 }
 
 func (*BinaryOp) astNode()  {}

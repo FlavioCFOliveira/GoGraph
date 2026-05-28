@@ -1454,7 +1454,8 @@ func (v *visitor) VisitAddSubExpression(ctx *gen.AddSubExpressionContext) interf
 			op = operators[opIdx]
 		}
 		opIdx++
-		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
+		bo := &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
+		left = liftListPredicate(bo)
 	}
 	return left
 }
@@ -1479,7 +1480,8 @@ func (v *visitor) VisitMultDivExpression(ctx *gen.MultDivExpressionContext) inte
 		if i-1 < len(operators) {
 			op = operators[i-1]
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
+		bo := &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: op, Right: right}
+		left = liftListPredicate(bo)
 	}
 	return left
 }
@@ -1499,7 +1501,8 @@ func (v *visitor) VisitPowerExpression(ctx *gen.PowerExpressionContext) interfac
 		if err != nil {
 			return &SemaError{Rule: "powerExpression", Pos: positionOf(ctx), Message: err.Error()}
 		}
-		left = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: "^", Right: right}
+		bo := &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: left, Operator: "^", Right: right}
+		left = liftListPredicate(bo)
 	}
 	return left
 }
@@ -1943,8 +1946,19 @@ func (v *visitor) VisitLhs(ctx *gen.LhsContext) interface{} {
 }
 
 // VisitParenthesizedExpression returns the inner expression (no wrapper node).
+// When the inner expression is a list/string predicate BinaryOp (IN, CONTAINS,
+// STARTS WITH, ENDS WITH) the Parenthesized flag is set so the precedence-
+// rebalancing pass run by [Parse] knows not to lift that predicate out of an
+// enclosing arithmetic chain.
 func (v *visitor) VisitParenthesizedExpression(ctx *gen.ParenthesizedExpressionContext) interface{} {
-	return v.visit(ctx.Expression())
+	inner := v.visit(ctx.Expression())
+	if bo, ok := inner.(*ast.BinaryOp); ok {
+		switch bo.Operator {
+		case "IN", "CONTAINS", "STARTS WITH", "ENDS WITH":
+			bo.Parenthesized = true
+		}
+	}
+	return inner
 }
 
 // VisitCountAll returns a FunctionInvocation for COUNT(*).

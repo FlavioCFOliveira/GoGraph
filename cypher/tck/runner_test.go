@@ -1295,11 +1295,20 @@ import (
 //     round 47 (extractRelKVActions handles SET rel += {literal map}).
 //     20-run sample shows floor at 3837 (median 3841, max 3845); gate
 //     at 3836 with 1 of headroom.
+//   - 3838: ratcheted after round 49 — list/string-predicate precedence
+//     rebalance. The grammar consumes IN/CONTAINS/STARTS WITH/ENDS WITH
+//     as postfixes on atomicExpression, giving them the WRONG (higher)
+//     precedence than +/-/*/^. The arithmetic visitors now lift these
+//     predicates above each arithmetic level as the tree is built,
+//     respecting BinaryOp.Parenthesized set by the paren-expression
+//     visitor. Closes Precedence3 [4] and Precedence3 [5]. 20-run
+//     sample: floor 3838, median ~3842, max 3846; gate at 3838 with 0
+//     headroom — accept variance flap.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3836
+const tckExecutionBaseline = 3838
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
