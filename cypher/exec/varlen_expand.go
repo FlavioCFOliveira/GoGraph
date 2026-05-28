@@ -346,12 +346,7 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 			if exCol < 0 || exCol >= len(cp) {
 				continue
 			}
-			switch v := cp[exCol].(type) {
-			case expr.IntegerValue:
-				initialVisited = bitsetAdd(initialVisited, uint64(v))
-			case expr.RelationshipValue:
-				initialVisited = bitsetAdd(initialVisited, v.ID)
-			}
+			initialVisited = appendExcludedFromValue(initialVisited, cp[exCol])
 		}
 
 		// If minHops == 0, the source node itself is a valid result.
@@ -371,6 +366,33 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 			}
 		}
 	}
+}
+
+// appendExcludedFromValue extracts edge identifiers from v and appends
+// each to the bitset. Handles the three shapes a relationship-bearing
+// row column can carry: IntegerValue (raw edge position from Expand),
+// RelationshipValue (canonical projection form), and ListValue (the
+// alternating-flat representation a sibling VLE emits for the path's
+// edges — every odd-indexed IntegerValue is an edge id). Other types
+// are silently ignored so the no-repeat exclusion stays conservative.
+func appendExcludedFromValue(visited []uint64, v expr.Value) []uint64 {
+	switch t := v.(type) {
+	case expr.IntegerValue:
+		return bitsetAdd(visited, uint64(t))
+	case expr.RelationshipValue:
+		return bitsetAdd(visited, t.ID)
+	case expr.ListValue:
+		// VLE flat encoding: [srcNode, edgePos0, dstNode0, edgePos1,
+		// dstNode1, …]. Odd-indexed entries are edge positions.
+		for i := 1; i < len(t); i += 2 {
+			if iv, ok := t[i].(expr.IntegerValue); ok {
+				visited = bitsetAdd(visited, uint64(iv))
+			} else if rv, ok := t[i].(expr.RelationshipValue); ok {
+				visited = bitsetAdd(visited, rv.ID)
+			}
+		}
+	}
+	return visited
 }
 
 // seedQueue enqueues all one-hop neighbours of srcID into the BFS frontier
