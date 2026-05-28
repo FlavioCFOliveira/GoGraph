@@ -802,6 +802,17 @@ func normalizeLeadingDotFloat(q string) string {
 			}
 		}
 
+		// Guard: is the preceding character also '.'? Then we are sitting
+		// inside a RANGE token (`..`) — e.g. a list slice `[0..0]` or a
+		// VLE quantifier `*..0`. Inserting `0.` before the second dot
+		// would break the RANGE into a property chain (`0..0` → `0.0.0`).
+		// Leave the dot untouched so the lexer can still produce RANGE.
+		if len(buf) > 0 && buf[len(buf)-1] == '.' {
+			buf = append(buf, ch)
+			i++
+			continue
+		}
+
 		// Leading-dot float starting with zero (e.g. .0, .00, .05): insert '0' prefix.
 		// The resulting 0.0NNN form tokenises as a valid FLOAT in all cases.
 		buf = append(buf, '0', '.')
