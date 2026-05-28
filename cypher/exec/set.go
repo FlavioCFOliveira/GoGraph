@@ -327,6 +327,12 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				labels := op.mutator.NodeLabels(nodeKey)
 				op.reg.RecordPropertySet(labels, op.propertyKey, pv)
 			}
+			// Read-your-own-writes: refresh the row's NodeValue snapshot
+			// so downstream RETURN n.<key> reads the freshly set value
+			// instead of the pre-SET snapshot captured during the upstream
+			// projection/upgrade. Closes List12 [1]/[2] and similar
+			// SET-then-RETURN scenarios.
+			op.refreshNodeRowProperties(row, pv)
 			return nil
 		}
 		pv, parseErr := parsePropValueWithParams(op.valueExpr, op.params)
@@ -351,6 +357,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			labels := op.mutator.NodeLabels(nodeKey)
 			op.reg.RecordPropertySet(labels, op.propertyKey, pv)
 		}
+		op.refreshNodeRowProperties(row, pv)
 		return nil
 	}
 	if op.merge {
@@ -450,6 +457,56 @@ func (op *SetProperty) applyToRelationship(srcKey, dstKey string, row Row) error
 // Close closes the child operator.
 func (op *SetProperty) Close() error {
 	return op.child.Close()
+}
+
+// refreshNodeRowProperties updates the row's NodeValue slot (when present)
+// so a downstream RETURN n.<propertyKey> reads the freshly-set value
+// instead of the snapshot captured by an upstream projection or
+// IntegerValue→NodeValue upgrade. The Properties map is copied before
+// mutation so other rows sharing the same map are not aliased.
+//
+// pv may be either an expr.Value (from valueEvalFn) or an
+// lpg.PropertyValue (from parsePropValueWithParams). The latter is
+// converted via lpgPropToExprBinding.
+//
+// No-op when the row slot is not a NodeValue (e.g. raw IntegerValue
+// NodeID), an out-of-range column, or when the property value is null.
+func (op *SetProperty) refreshNodeRowProperties(row Row, pv any) {
+	if op.entityVar == "" || op.propertyKey == "" {
+		return
+	}
+	colIdx, ok := op.schema[op.entityVar]
+	if !ok || colIdx >= len(row) {
+		return
+	}
+	nv, isNode := row[colIdx].(expr.NodeValue)
+	if !isNode {
+		return
+	}
+	var val expr.Value
+	switch t := pv.(type) {
+	case expr.Value:
+		val = t
+	case lpg.PropertyValue:
+		v, okConv := lpgPropToExprBinding(t)
+		if !okConv {
+			return
+		}
+		val = v
+	default:
+		return
+	}
+	props := make(expr.MapValue, len(nv.Properties)+1)
+	for k, v := range nv.Properties {
+		props[k] = v
+	}
+	if expr.IsNull(val) {
+		delete(props, op.propertyKey)
+	} else {
+		props[op.propertyKey] = val
+	}
+	nv.Properties = props
+	row[colIdx] = nv
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
