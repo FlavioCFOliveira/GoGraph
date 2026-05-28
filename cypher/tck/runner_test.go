@@ -1807,10 +1807,29 @@ import (
 //     5-run sample: floor 3893, median 3893, max 3893. Gate set at
 //     3893 with 0 headroom.
 //
+//   - 3894: ratcheted after round 61 — post-Apply no-repeat-rel
+//     filter. A new IR-level Selection layered above the plain
+//     Apply checks that outer-bound rel variables do not appear in
+//     any inner VarLengthExpand's emitted rel-list, completing the
+//     openCypher no-repeated-relationships rule when the inner
+//     subtree's first VLE step cannot see the outer rel through
+//     plain Apply's fresh-schema isolation (Match4 [7] previously
+//     counted 52 vs the expected 32 because only the second VLE's
+//     rebinding-synthetic exclusion fired). The predicate is
+//     endpoint-pair based (`startNode = startNode` / `endNode =
+//     endNode` plus the reverse orientation) — undirected VLE
+//     traversal can emit a rel whose StartID/EndID are the
+//     traversal anchors rather than storage direction, while the
+//     lifted outer-rel carries storage direction; node-pair
+//     equality uniquely identifies an edge in the simple-graph
+//     configuration the TCK runs under. Closes Match4 [7]. 5-run
+//     sample stable at 3894/3897 (99.92%). Gate set at 3894 with 0
+//     headroom.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3893
+const tckExecutionBaseline = 3894
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
