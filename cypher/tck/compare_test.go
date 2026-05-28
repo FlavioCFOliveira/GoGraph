@@ -700,6 +700,11 @@ func sortMapLiteralKeys(inner string) string {
 // form "key: value" — trimmed key, single space after the colon, trimmed
 // value. The split point is the first top-level colon (not nested inside
 // braces or brackets) so that values that are themselves maps are preserved.
+//
+// Nested maps and lists inside the value are normalised recursively by
+// re-entering normalizeTCKCell on the value, so the key order of a deeply-
+// nested literal like `{data: [{id: '0001', type: 'donut'}]}` matches
+// regardless of the producer's iteration order.
 func normalizeMapPair(pair string) string {
 	depth := 0
 	for i := 0; i < len(pair); i++ {
@@ -712,12 +717,41 @@ func normalizeMapPair(pair string) string {
 			if depth == 0 {
 				key := strings.TrimSpace(pair[:i])
 				val := strings.TrimSpace(pair[i+1:])
+				if strings.ContainsAny(val, "{[") {
+					val = normalizeTCKValue(val)
+				}
 				return key + ": " + val
 			}
 		}
 	}
 	// No colon found — return trimmed.
 	return strings.TrimSpace(pair)
+}
+
+// normalizeTCKValue normalises a value that may contain nested maps and
+// lists. Top-level lists are walked element-by-element; each element is
+// re-normalised by recursing into normalizeTCKValue. Maps are normalised
+// via the same sort-keys path as the top-level cell processor. Other
+// strings (primitives, node/relationship renderings, etc.) are returned
+// unchanged.
+func normalizeTCKValue(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	if s[0] == '{' && s[len(s)-1] == '}' {
+		inner := s[1 : len(s)-1]
+		return "{" + sortMapLiteralKeys(inner) + "}"
+	}
+	if s[0] == '[' && s[len(s)-1] == ']' {
+		inner := s[1 : len(s)-1]
+		parts := splitTopLevelCommas(inner)
+		for i, p := range parts {
+			parts[i] = normalizeTCKValue(p)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	}
+	return s
 }
 
 // splitTopLevelCommas splits inner on commas that are not nested inside braces

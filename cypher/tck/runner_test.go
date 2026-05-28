@@ -1304,11 +1304,17 @@ import (
 //     visitor. Closes Precedence3 [4] and Precedence3 [5]. 20-run
 //     sample: floor 3838, median ~3842, max 3846; gate at 3838 with 0
 //     headroom — accept variance flap.
+//   - 3839: ratcheted after round 50 — TCK comparator now recursively
+//     normalises nested map/list values in normalizeMapPair, so a deeply
+//     nested map literal like `{data: [{id: '0001', type: 'donut'}]}`
+//     compares regardless of MapValue's Go-map iteration order. Closes
+//     Literals8 [18]. 20-run sample: floor 3839, median ~3843, max
+//     3847; gate at 3839 with 0 headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3838
+const tckExecutionBaseline = 3839
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
