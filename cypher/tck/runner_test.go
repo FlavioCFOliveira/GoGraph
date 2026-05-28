@@ -1259,6 +1259,13 @@ import (
 //     DELETE-r planner gap closing several related scenarios). The
 //     50-run band sits at 3820-3833 (median ~3826); gate set at 3815
 //     for ~5 of variance headroom.
+//   - (still 3815): round 35 deferred projection-loop schema mutations
+//     to post-loop so item N's fast path no longer reads item M's
+//     leaked OUTPUT key (Return4 [3] = [42, 226] → [42, 42]); round 36
+//     made SetProperty refresh the row's NodeValue snapshot so
+//     downstream RETURN n.<key> reads the freshly-set value
+//     (List12 [1] / [2]). Variance band moved to 3822-3830 (median
+//     ~3826); gate kept at 3815 to absorb the remaining flap floor.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
