@@ -1188,11 +1188,22 @@ import (
 //     non-deterministic inside an aggregation argument). Round 22.
 //     Observed 3800-3807 across a 10-run sample (median 3803); gate set
 //     at 3800 to absorb run-to-run variance.
+//   - 3805: raised after buildIRProjection learnt to skip the schema-name
+//     fast path when the projection alias collides with an input variable
+//     name AND the expression is a non-aggregate that references the
+//     alias as an input variable (`RETURN a.id IS NOT NULL AS a` returned
+//     the bound node value because the fast path read schema[a] directly
+//     instead of evaluating the IS NOT NULL operator). Aggregates remain
+//     in the fast path because EagerAggregation precomputes them upstream.
+//     Closes Return3 [1] / Return4 [3] / Return6 [1] and ~3 other scenarios
+//     with the same alias-shadow shape. Round 23.
+//     Observed 3805-3814 across a 10-run sample (median 3810); gate set
+//     at 3805 to absorb run-to-run variance.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3800
+const tckExecutionBaseline = 3805
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
