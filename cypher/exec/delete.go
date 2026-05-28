@@ -55,13 +55,21 @@ var ErrDeleteNodeHasRelationships = errors.New("exec: cannot delete node with ex
 // row-passthrough no-op (matches openCypher 9 §3.5.8).
 type TargetEvalFn func(row Row) (expr.Value, error)
 
+// RelEndpointFn returns the (srcID, dstID) endpoints for an edge that the
+// schema-direct path is about to delete. Used when the bare-variable
+// target carries an IntegerValue edge id (the in-pipeline encoding emitted
+// by Expand) so DeleteNode can dispatch to the edge-removal branch
+// without misinterpreting the id as a node id.
+type RelEndpointFn func(row Row) (uint64, uint64, bool)
+
 type DeleteNode struct {
-	nodeVar       string
-	schema        map[string]int
-	child         Operator
-	mutator       GraphMutator
-	targetEvalFn  TargetEvalFn
-	ctx           context.Context //nolint:containedctx // stored for per-Next ctx check
+	nodeVar          string
+	schema           map[string]int
+	child            Operator
+	mutator          GraphMutator
+	targetEvalFn     TargetEvalFn
+	relEndpointsFn   RelEndpointFn
+	ctx              context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -85,6 +93,17 @@ func NewDeleteNode(
 // lookup keyed by nodeVar.
 func (op *DeleteNode) WithTargetEvalFn(fn TargetEvalFn) *DeleteNode {
 	op.targetEvalFn = fn
+	return op
+}
+
+// WithRelEndpoints attaches a per-row lookup that returns the (srcID,
+// dstID) endpoints of the edge identified by the bare-variable target.
+// When set AND the schema-direct slot holds an IntegerValue (the
+// in-pipeline edge-id encoding emitted by Expand), the operator
+// dispatches to the edge-removal path instead of treating the integer
+// as a NodeID.
+func (op *DeleteNode) WithRelEndpoints(fn RelEndpointFn) *DeleteNode {
+	op.relEndpointsFn = fn
 	return op
 }
 
@@ -151,6 +170,22 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.EndID))
 				if srcOK && dstOK {
 					op.mutator.RemoveEdge(srcKey, dstKey)
+				}
+				*out = childRow
+				return true, nil
+			}
+			// IntegerValue (raw edge id) + bound relationship-variable
+			// metadata: dispatch via relEndpointsFn so we never treat
+			// the edge id as a node id. Closes Delete4 [1] and the
+			// "DELETE r" planner gap.
+			if _, isInt := childRow[colIdx].(expr.IntegerValue); isInt && op.relEndpointsFn != nil {
+				srcID, dstID, okEnds := op.relEndpointsFn(childRow)
+				if okEnds {
+					srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(srcID))
+					dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(dstID))
+					if srcOK && dstOK {
+						op.mutator.RemoveEdge(srcKey, dstKey)
+					}
 				}
 				*out = childRow
 				return true, nil

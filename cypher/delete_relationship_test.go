@@ -28,10 +28,12 @@ import (
 	"gograph/graph/lpg"
 )
 
-// TestDelete_RelationshipPlannerGap documents the current engine behaviour:
-// DELETE r where r is a relationship variable is a silent no-op (the edge is
-// not removed). The test is marked as expected-skip so it fails loudly when
-// the planner is eventually fixed.
+// TestDelete_RelationshipPlannerGap asserts that `DELETE r` (where r is a
+// bare relationship variable) removes the edge. The DeleteNode operator
+// dispatches to mutator.RemoveEdge via the bound-rel endpoint lookup
+// installed in api.go's DeleteNode case (T1049). Before that fix the
+// dispatch treated the edge-id as a node-id and either silently no-op'd
+// or raised ErrDeleteNodeHasRelationships.
 func TestDelete_RelationshipPlannerGap(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
@@ -57,12 +59,8 @@ func TestDelete_RelationshipPlannerGap(t *testing.T) {
 	if len(matchRows) != 1 {
 		t.Fatalf("expected 1 row from MATCH, got %d", len(matchRows))
 	}
-	// r is an IntegerValue (edge ID), not a RelationshipValue — planner gap.
-	if _, ok := matchRows[0]["r"].(expr.IntegerValue); !ok {
-		t.Logf("r type changed: %T — planner gap may have been fixed", matchRows[0]["r"])
-	}
 
-	// DELETE r is a no-op in the current implementation.
+	// DELETE r now removes the edge.
 	res, runErr := eng.RunInTx(ctx, `MATCH (a:RelA)-[r]->(b:RelB) DELETE r`, nil)
 	if runErr != nil {
 		t.Fatalf("DELETE r error: %v", runErr)
@@ -74,12 +72,8 @@ func TestDelete_RelationshipPlannerGap(t *testing.T) {
 	}
 	res.Close()
 
-	// Document current behaviour: edge is NOT removed (planner gap).
-	if !g.AdjList().HasEdge(aliceKey, bobKey) {
-		// The planner gap has been fixed — this path means DELETE r now works.
-		t.Log("DELETE r successfully removed the edge (planner gap is fixed)")
-	} else {
-		t.Log("DELETE r is a no-op (known planner gap: DeleteNode used for relationship variable)")
+	if g.AdjList().HasEdge(aliceKey, bobKey) {
+		t.Errorf("DELETE r did not remove the edge between %q and %q", aliceKey, bobKey)
 	}
 }
 

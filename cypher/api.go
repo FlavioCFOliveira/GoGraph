@@ -1354,7 +1354,36 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
+		// Redirect: if the bare-variable target names a relationship variable
+		// emitted by an upstream Expand, install an edge-ID → endpoint
+		// lookup so DeleteNode's schema-direct path dispatches to the
+		// edge-removal branch instead of treating the IntegerValue edge
+		// id as a node id. Without this `DELETE r` would either fail
+		// (ErrDeleteNodeHasRelationships when the colliding node still
+		// has incident edges) or silently delete the wrong entity.
+		var deleteRelEndpoints func(row exec.Row) (uint64, uint64, bool)
+		if p.TargetExpr != nil {
+			if v, isVar := p.TargetExpr.(*ast.Variable); isVar && bopts != nil && bopts.edgeVarMeta != nil {
+				if meta, isRel := bopts.edgeVarMeta[v.Name]; isRel {
+					srcCol, dstCol := meta.srcCol, meta.dstCol
+					deleteRelEndpoints = func(row exec.Row) (uint64, uint64, bool) {
+						if srcCol >= len(row) || dstCol >= len(row) {
+							return 0, 0, false
+						}
+						srcID, srcOk := nodeIDOrNodeValue(row[srcCol])
+						dstID, dstOk := nodeIDOrNodeValue(row[dstCol])
+						if !srcOk || !dstOk {
+							return 0, 0, false
+						}
+						return srcID, dstID, true
+					}
+				}
+			}
+		}
 		dn := exec.NewDeleteNode(p.NodeVar, schemaCopy, child, mutator)
+		if deleteRelEndpoints != nil {
+			dn.WithRelEndpoints(deleteRelEndpoints)
+		}
 		if p.TargetExpr != nil {
 			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
 				schemaSnap := schemaCopy
@@ -5412,6 +5441,20 @@ func csrPairFromGraph(g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]
 	fwd = csr.BuildFromAdjList(adj)
 	rev = fwd.BuildReverse()
 	return
+}
+
+// nodeIDOrNodeValue extracts a NodeID from a row column. The slot may hold a
+// raw IntegerValue (the in-pipeline encoding emitted by Expand) or a
+// NodeValue (the canonical projected form), so both shapes are accepted.
+// Returns (0, false) for null or any other value type.
+func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
+	switch x := v.(type) {
+	case expr.IntegerValue:
+		return uint64(int64(x)), true
+	case expr.NodeValue:
+		return x.ID, true
+	}
+	return 0, false
 }
 
 // buildEdgeTypeFilter constructs an edge-type filter map for the forward CSR
