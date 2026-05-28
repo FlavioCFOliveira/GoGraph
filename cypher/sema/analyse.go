@@ -1615,6 +1615,12 @@ func (a *analyser) checkAmbiguousAggregation(proj *ast.Projection) {
 				keys[vv.Name] = struct{}{}
 			}
 		}
+		// Explicit AS alias: register the alias name as a grouping key so
+		// `RETURN me.age AS age ORDER BY age, age + count(...)` can refer
+		// to the alias directly (per ReturnOrderBy6 [2] / [3]).
+		if item.Alias != nil {
+			keys[*item.Alias] = struct{}{}
+		}
 	}
 	for _, item := range proj.Items {
 		if !containsAggregation(item.Expr) {
@@ -1627,6 +1633,27 @@ func (a *analyser) checkAmbiguousAggregation(proj *ast.Projection) {
 		// Walk; report the first non-grouping Variable / Property
 		// reference that appears outside an aggregate sub-call.
 		if pos, name, bad := findUngroupedNonAggRef(item.Expr, keys); bad {
+			a.error(ambiguousAggregationError(name, pos))
+		}
+	}
+	// Same rule applies to ORDER BY items: an ORDER BY expression that
+	// contains an aggregation and references non-aggregate leaves which
+	// don't match a standalone grouping key surfaces
+	// AmbiguousAggregationExpression. `ORDER BY me.age + you.age +
+	// count(*)` (projection has `me.age + you.age` as a compound key, so
+	// the individual `me`/`you` leaves are NOT grouping keys) is the
+	// canonical case per ReturnOrderBy6 [5].
+	for _, s := range proj.OrderBy {
+		if s == nil || s.Expr == nil {
+			continue
+		}
+		if !containsAggregation(s.Expr) {
+			continue
+		}
+		if _, ok := extractAggregation(s.Expr); ok && exprIsBareCall(s.Expr) {
+			continue
+		}
+		if pos, name, bad := findUngroupedNonAggRef(s.Expr, keys); bad {
 			a.error(ambiguousAggregationError(name, pos))
 		}
 	}
