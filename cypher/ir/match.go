@@ -994,7 +994,15 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 			maxDepth = int(*rp.Range.Max)
 		}
 		var plan LogicalPlan = NewVarLengthExpand(fromVar, relVar, relTypes, dir, expandTo, minDepth, maxDepth, child)
-		plan = t.matchApplyRelFilter(rp, relVar, plan)
+		// Inline property predicate on a variable-length relationship is
+		// per-element: `[:T* {year: 1988}]` selects ONLY those VLE paths
+		// where every relationship has year=1988. Wrap the property
+		// constraint in an `all(__el IN r WHERE __el.<key> = <val>)`
+		// list-comprehension all-quantifier, applied after the VLE
+		// emission. Without this, the predicate would be applied to the
+		// list value itself, surfacing `property access requires Map,
+		// Node, or Relationship, got List` (Match4 [5]).
+		plan = t.matchApplyVarLengthRelFilter(rp, relVar, plan)
 		plan = t.matchApplyNodeFilter(to, expandTo, plan)
 		if destRebinding {
 			plan = t.appendEqSelection(toVar, syntheticTo, plan)
@@ -1028,6 +1036,58 @@ func (t *translator) matchApplyRelFilter(rp *ast.RelationshipPattern, relVar str
 		return plan
 	}
 	return buildPropertySelection(relVar, rp.Properties, plan)
+}
+
+// matchApplyVarLengthRelFilter wraps plan with a Selection that asserts
+// every relationship in a variable-length relationship list satisfies the
+// inline property predicate. The predicate is expressed as the
+// `all` quantifier over a list comprehension:
+//
+//	all(__elem IN <relVar> WHERE __elem.<key> = <val> AND …)
+//
+// Without this the predicate would access `.year` on the list itself,
+// surfacing `property access requires Map, Node, or Relationship,
+// got List` (Match4 [5]).
+func (t *translator) matchApplyVarLengthRelFilter(rp *ast.RelationshipPattern, relVar string, plan LogicalPlan) LogicalPlan {
+	if rp.Properties == nil || relVar == "" {
+		return plan
+	}
+	ml, ok := rp.Properties.(*ast.MapLiteral)
+	if !ok || len(ml.Keys) == 0 {
+		// Non-MapLiteral fallback — defer to the per-rel form. Will fail
+		// loudly at exec time, matching pre-fix behaviour.
+		return buildPropertySelection(relVar, rp.Properties, plan)
+	}
+	elem := t.freshAnonVar() + "_vle_elem"
+	var conj ast.Expression
+	for i, key := range ml.Keys {
+		if i >= len(ml.Values) {
+			break
+		}
+		eq := &ast.BinaryOp{
+			Operator: "=",
+			Left: &ast.Property{
+				Receiver: &ast.Variable{Name: elem},
+				Key:      key,
+			},
+			Right: ml.Values[i],
+		}
+		if conj == nil {
+			conj = eq
+		} else {
+			conj = &ast.BinaryOp{Operator: "AND", Left: conj, Right: eq}
+		}
+	}
+	listComp := &ast.ListComprehension{
+		Variable:  elem,
+		Source:    &ast.Variable{Name: relVar},
+		Predicate: conj,
+	}
+	allCall := &ast.FunctionInvocation{
+		Name: "all",
+		Args: []ast.Expression{listComp},
+	}
+	return NewSelectionExpr(allCall.String(), allCall, plan)
 }
 
 // appendEqSelection wraps plan in a Selection comparing two variables for

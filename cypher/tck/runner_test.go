@@ -1329,6 +1329,15 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3855: ratcheted after round 65 — VLE inline property predicate
+//     (`[:T* {year: 1988}]`) now applies per-relationship instead of
+//     to the list. matchExpandStepBoundWithFrom routes the var-length
+//     branch through matchApplyVarLengthRelFilter which emits
+//     `all(__elem IN <relVar> WHERE __elem.<key> = <val> AND …)` so
+//     the predicate filters each element of the rel list. Closes
+//     Match4 [5]. 20-run sample: floor 3852, median ~3858, max 3861;
+//     gate at 3855 with 3 of headroom (flake band absorbs Pattern2
+//     [11] / Delete6 / WithOrderBy4 / MatchWhere1 outliers).
 //   - 3854: ratcheted after round 64 — two coordinated changes for the
 //     cross-MATCH-with-WITH cardinality cluster:
 //     (a) the plain Apply builder now offsets the inner-side
@@ -1446,7 +1455,7 @@ import (
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3854
+const tckExecutionBaseline = 3855
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
