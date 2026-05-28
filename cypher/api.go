@@ -4144,6 +4144,133 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 // variables (RelationshipValue reconstruction from edge metadata), and named
 // path variables (PathValue reconstruction from flat alternating encoding).
 //
+// exprContainsAggregate reports whether e or any of its sub-expressions
+// invokes one of the openCypher aggregation functions (count/sum/avg/min/
+// max/collect/stdev/stdevp/percentileCont/percentileDisc). Used by the
+// projection builder to keep the schema-name fast path active for aggregate
+// columns even when the projection alias collides with an input variable —
+// EagerAggregation upstream has already evaluated the aggregate and stored
+// it under the alias name in the schema, so the fast path returns the
+// correct value while general eval would re-call the function as a scalar.
+func exprContainsAggregate(e ast.Expression) bool {
+	if e == nil {
+		return false
+	}
+	switch n := e.(type) {
+	case *ast.FunctionInvocation:
+		if len(n.Namespace) == 0 {
+			switch strings.ToLower(n.Name) {
+			case "count", "sum", "avg", "min", "max", "collect",
+				"stdev", "stdevp", "percentilecont", "percentiledisc":
+				return true
+			}
+		}
+		for _, a := range n.Args {
+			if exprContainsAggregate(a) {
+				return true
+			}
+		}
+	case *ast.BinaryOp:
+		return exprContainsAggregate(n.Left) || exprContainsAggregate(n.Right)
+	case *ast.UnaryOp:
+		return exprContainsAggregate(n.Operand)
+	case *ast.Property:
+		return exprContainsAggregate(n.Receiver)
+	case *ast.SubscriptExpr:
+		return exprContainsAggregate(n.Expr) || exprContainsAggregate(n.Index)
+	case *ast.SliceExpr:
+		return exprContainsAggregate(n.Expr) || exprContainsAggregate(n.From) || exprContainsAggregate(n.To)
+	case *ast.ListLiteral:
+		for _, el := range n.Elements {
+			if exprContainsAggregate(el) {
+				return true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range n.Values {
+			if exprContainsAggregate(val) {
+				return true
+			}
+		}
+	case *ast.CaseExpression:
+		if exprContainsAggregate(n.Subject) || exprContainsAggregate(n.ElseExpr) {
+			return true
+		}
+		for _, alt := range n.Alternatives {
+			if exprContainsAggregate(alt.Condition) || exprContainsAggregate(alt.Consequent) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// exprReferencesVarName reports whether e directly or transitively references
+// a *ast.Variable whose Name equals target. Used by the projection builder to
+// detect colliding-alias situations where a projection expression references
+// the very alias it produces (`RETURN a.id IS NOT NULL AS a`) and the schema
+// slot for that alias still holds the upstream variable's value rather than
+// the freshly evaluated projection.
+func exprReferencesVarName(e ast.Expression, target string) bool {
+	if e == nil || target == "" {
+		return false
+	}
+	switch n := e.(type) {
+	case *ast.Variable:
+		return n.Name == target
+	case *ast.Property:
+		return exprReferencesVarName(n.Receiver, target)
+	case *ast.LabelPredicate:
+		return exprReferencesVarName(n.Receiver, target)
+	case *ast.BinaryOp:
+		return exprReferencesVarName(n.Left, target) || exprReferencesVarName(n.Right, target)
+	case *ast.UnaryOp:
+		return exprReferencesVarName(n.Operand, target)
+	case *ast.FunctionInvocation:
+		for _, a := range n.Args {
+			if exprReferencesVarName(a, target) {
+				return true
+			}
+		}
+	case *ast.SubscriptExpr:
+		return exprReferencesVarName(n.Expr, target) || exprReferencesVarName(n.Index, target)
+	case *ast.SliceExpr:
+		return exprReferencesVarName(n.Expr, target) ||
+			exprReferencesVarName(n.From, target) ||
+			exprReferencesVarName(n.To, target)
+	case *ast.CaseExpression:
+		if exprReferencesVarName(n.Subject, target) {
+			return true
+		}
+		for _, alt := range n.Alternatives {
+			if exprReferencesVarName(alt.Condition, target) || exprReferencesVarName(alt.Consequent, target) {
+				return true
+			}
+		}
+		return exprReferencesVarName(n.ElseExpr, target)
+	case *ast.ListLiteral:
+		for _, el := range n.Elements {
+			if exprReferencesVarName(el, target) {
+				return true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, val := range n.Values {
+			if exprReferencesVarName(val, target) {
+				return true
+			}
+		}
+	case *ast.ListComprehension:
+		return exprReferencesVarName(n.Source, target) ||
+			exprReferencesVarName(n.Predicate, target) ||
+			exprReferencesVarName(n.Projection, target)
+	case *ast.PatternComprehension:
+		return exprReferencesVarName(n.Predicate, target) ||
+			exprReferencesVarName(n.Projection, target)
+	}
+	return false
+}
+
 //nolint:gocyclo,cyclop // dispatches over every projection kind and variable type; splitting would obscure the data-flow
 func buildIRProjection(
 	items []ir.ProjectionItem,
@@ -4570,6 +4697,28 @@ func buildIRProjection(
 				} else if _, isMap := item.Expr.(*ast.MapLiteral); isMap && exprStr != name {
 					if _, exists := schema[name]; exists {
 						skipForCollidingAlias = true
+					}
+				} else if exprStr != name {
+					// Generalised colliding-alias guard: when the projection
+					// expression references the alias name as an INPUT variable
+					// (e.g. `RETURN a.id IS NOT NULL AS a` with a bound to a
+					// node), the schema slot still holds the upstream value;
+					// the schema-name fast path would return that stale value
+					// instead of the evaluated projection. Route through the
+					// general eval path when the alias name appears as a
+					// variable somewhere inside the expression and a value
+					// for that name already exists in the input schema.
+					//
+					// Aggregations are exempt: count/sum/avg/etc. are
+					// precomputed by EagerAggregation upstream and the
+					// schema slot already carries their evaluated value.
+					// Falling through to evalRow would re-evaluate them
+					// as scalar functions and return the per-row count
+					// (always 1) instead of the group's aggregate.
+					if _, exists := schema[name]; exists {
+						if exprReferencesVarName(item.Expr, name) && !exprContainsAggregate(item.Expr) {
+							skipForCollidingAlias = true
+						}
 					}
 				}
 				if !aliasIsBoundRel && !skipForCollidingAlias {
