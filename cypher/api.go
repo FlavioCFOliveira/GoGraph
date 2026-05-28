@@ -3957,7 +3957,7 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph
 		pathEnd := dstNode.ID
 		storageStart := pathStart
 		storageEnd := pathEnd
-		if g != nil && pathStart != 0 {
+		if g != nil {
 			sKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(pathStart))
 			dKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(pathEnd))
 			if sOK && dOK {
@@ -4204,7 +4204,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 	}
 	edgeType := meta.edgeType
 	var edgeProps expr.MapValue
-	if g != nil && srcID != 0 {
+	if g != nil {
 		srcKey, srcResolved := g.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 		dstKey, dstResolved := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 		if srcResolved && dstResolved {
@@ -4600,7 +4600,7 @@ func buildIRProjection(
 								pathEnd := dstNode.ID
 								storageStart := pathStart
 								storageEnd := pathEnd
-								if capturedG != nil && pathStart != 0 {
+								if capturedG != nil {
 									sKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(pathStart))
 									dKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(pathEnd))
 									if sOK && dOK {
@@ -4681,7 +4681,15 @@ func buildIRProjection(
 							// and Properties.
 							edgeType := capturedMeta.edgeType
 							var edgeProps expr.MapValue
-							if capturedG != nil && srcID != 0 {
+							// Look up the edge's labels and properties from the
+							// live graph. The previous `srcID != 0` guard
+							// silently skipped the lookup when the source
+							// node's internal ID was 0 — a valid id in
+							// sequential allocators (used by the TCK runner),
+							// which left the RelationshipValue without its
+							// Type. Closes Pattern2 [11] (TCK's first node
+							// gets id 0, so the forward path lost `:T`).
+							if capturedG != nil {
 								srcKey, srcResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 								dstKey, dstResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 								if srcResolved && dstResolved {
