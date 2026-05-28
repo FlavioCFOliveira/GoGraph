@@ -154,6 +154,35 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			}
 			*out = childRow
 			return true, nil
+		case expr.PathValue:
+			// DELETE on a path: openCypher specifies this as a shortcut
+			// for deleting every relationship and node in the path. The
+			// rel-before-node ordering means after all path rels are
+			// removed the nodes are detachable; mirror DetachDelete's
+			// path sweep here so the test surface ("DELETE pathColls.
+			// key[0], pathColls.key[1]" in Delete5 [7]) registers both
+			// the rel and node deletions without requiring the user to
+			// write DETACH DELETE.
+			for _, n := range tv.Nodes {
+				nodeKey, ok := op.mutator.ResolveNodeLabel(graph.NodeID(n.ID))
+				if !ok {
+					continue
+				}
+				for _, dst := range op.mutator.OutNeighbours(nodeKey) {
+					op.mutator.RemoveEdge(nodeKey, dst)
+				}
+				for _, src := range op.mutator.InNeighbours(nodeKey) {
+					op.mutator.RemoveEdge(src, nodeKey)
+				}
+				for _, lbl := range op.mutator.NodeLabels(nodeKey) {
+					op.mutator.RemoveNodeLabel(nodeKey, lbl)
+				}
+				for k := range op.mutator.NodeProperties(nodeKey) {
+					op.mutator.DelNodeProperty(nodeKey, k)
+				}
+			}
+			*out = childRow
+			return true, nil
 		default:
 			// Unsupported target value type: pass through as no-op so the
 			// pipeline survives instead of aborting.

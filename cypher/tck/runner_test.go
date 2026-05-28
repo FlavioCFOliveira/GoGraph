@@ -1329,6 +1329,14 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//   - 3847 (held): round 58 added DeleteNode PathValue handling that
+//     mirrors DetachDelete's path sweep so `DELETE pathColls.key[0],
+//     pathColls.key[1]` deletes the path's rels and nodes. Closes
+//     Delete5 [7] deterministically. 20-run sample: floor 3846,
+//     median ~3850, max 3854. The 3846 floor is a flake band from
+//     Pattern2 [11] / MatchWhere1 [11] / Delete4 [1] tests becoming
+//     occasionally non-deterministic, not a regression from this
+//     round; baseline stays at 3847 to absorb the band.
 //   - 3847: ratcheted after round 57 — PathValue.String() now renders
 //     each relationship direction-aware against the path's traversal
 //     order: when the rel's storage StartID matches the preceding
