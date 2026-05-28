@@ -1281,11 +1281,16 @@ import (
 //     DirBoth traversals dedupe the same physical edge across
 //     direction. 30-run sample shows floor at 3830 (median 3835, max
 //     3838); gate at 3828 for 2 of headroom.
+//   - 3831: ratcheted after round 43 closed WithOrderBy4 [8] and
+//     WithOrderBy2 [21] via appendOrderByPassthrough — WITH projections
+//     now keep pre-projection variables in scope when ORDER BY
+//     references them. 20-run sample shows floor at 3832 (median
+//     3837, max 3841); gate at 3831 for 1 of headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3828
+const tckExecutionBaseline = 3831
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
