@@ -1270,11 +1270,16 @@ import (
 //     at 3821 (median 3827, max 3834). With ~6 of headroom this gate
 //     captures all the deterministic gains from rounds 35-36 without
 //     burning the rand()/iteration-order variance budget.
+//   - 3823: ratcheted after rounds 38 and 39 closed Merge5 [29]
+//     (MergeRelationship rejects null property literal) and
+//     ReturnOrderBy6 [5] (ambiguous-aggregation check extended to
+//     ORDER BY). 60-run sample shows the floor at 3824 (median 3830,
+//     max 3834); gate set at 3823 for 1 of headroom.
 //
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3820
+const tckExecutionBaseline = 3823
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:
