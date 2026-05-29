@@ -61,6 +61,23 @@ import (
 // already been committed or rolled back.
 var ErrTxFinished = errors.New("txn: transaction already finished")
 
+// ErrCommittedNotApplied is returned by [Tx.Commit] when the transaction
+// was made durable (its op frames and [OpCommit] marker were written and
+// fsynced) but a later in-memory apply step failed — today only reachable
+// as [adjlist.ErrShardFull] when the store's graph was built with a
+// [adjlist.Config.MaxShardCapacity] cap.
+//
+// The transaction IS durably committed: it carries a complete commit
+// marker, so recovery — which rebuilds the graph without a shard-capacity
+// cap — replays it in full and atomically. Callers must therefore treat
+// this as "committed; the in-memory view is temporarily behind and will be
+// consistent after the next recovery", NOT as a rollback: retrying the
+// transaction would commit it a second time. The underlying apply error is
+// wrapped and recoverable with [errors.Is]/[errors.Unwrap]. This sentinel
+// exists so a durable commit is never reported as a plain, ambiguous
+// failure (audit gap F5, see docs/acid-audit.md).
+var ErrCommittedNotApplied = errors.New("txn: transaction committed durably but in-memory apply failed; recovery will reconcile")
+
 // OpKind enumerates the mutation kinds supported by a transaction.
 type OpKind uint8
 
@@ -493,11 +510,16 @@ func (t *Tx[N, W]) Commit() error {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return err
 	}
-	// Apply to the in-memory graph after durability is secured.
+	// Apply to the in-memory graph after durability is secured. The
+	// transaction is already durable (op frames + OpCommit marker fsynced),
+	// so an apply error here does not undo the commit: recovery — which
+	// builds the graph without a shard-capacity cap — replays the whole
+	// transaction atomically. Surface it as ErrCommittedNotApplied so the
+	// caller knows the commit is durable and must not be retried (F5).
 	for _, op := range t.ops {
 		if err := applyOp(t.store.g, op); err != nil {
 			metrics.IncCounter("store.txn.Commit.applyErrors", 1)
-			return err
+			return fmt.Errorf("%w: %w", ErrCommittedNotApplied, err)
 		}
 	}
 	return nil

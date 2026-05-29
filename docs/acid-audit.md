@@ -44,7 +44,7 @@ tests: the suite validates atomicity only for **single-op** transactions
 | F2 | Durability + Consistency | **Critical** | **fixed** | A checkpoint writes a CSR-only snapshot then truncates the WAL, destroying committed labels/properties (and the mapper for non-string keys). |
 | F3 | Isolation | **High** | open | The in-memory apply loop publishes ops one-by-one, so a lock-free reader can observe a partially-applied, in-flight transaction. |
 | F4 | Durability | **Medium** | **fixed** | `wal.Open` never fsyncs the parent directory, so a freshly-created WAL file's directory entry may not survive a crash. |
-| F5 | Atomicity | **Low** | open | `Tx.Commit` applies after `Sync`; an apply error mid-loop leaves the in-memory view partial while the WAL is fully durable, and returns an error although the transaction is durably committed. |
+| F5 | Atomicity | **Low** | **fixed** | `Tx.Commit` applies after `Sync`; an apply error mid-loop leaves the in-memory view partial while the WAL is fully durable, and returns an error although the transaction is durably committed. |
 
 ### F1 — Multi-op transactions are not atomic across a crash (Atomicity)
 
@@ -223,6 +223,24 @@ replays all ops — the in-memory and durable views disagree until restart.
 known-durable) plus validating apply-ability before `Sync` where feasible, or
 documenting the post-durability apply error as "committed; in-memory catches up
 on next recovery" and surfacing it as a distinct sentinel.
+
+**Resolution (fixed).** `Tx.Commit` now wraps a post-durability apply error in
+the new exported sentinel `txn.ErrCommittedNotApplied` (which also wraps the
+underlying `adjlist.ErrShardFull`), so a durable commit is never reported as a
+plain, ambiguous failure — the caller can distinguish "committed durably; the
+in-memory view is temporarily behind and recovery will reconcile" from a true
+rollback, and must not retry. This is correct under F1: the transaction carries
+a complete commit marker, and recovery rebuilds the graph **without** a
+shard-capacity cap, so it replays the transaction in full and atomically. Test:
+`recovery.TestCommit_DurableButApplyFails_ReconciledByRecovery` commits 400
+edges into a `MaxShardCapacity:1` graph (apply overflows a shard after the WAL
+is durable), asserts `Commit` returns `errors.Is(err, ErrCommittedNotApplied)`
+and `errors.Is(err, adjlist.ErrShardFull)`, then recovers (uncapped) and
+asserts all 400 edges are present (`WALOps == 400`). A full apply-ability
+pre-check before `Sync` was considered but rejected: it would require either an
+in-memory undo log or duplicating shard-capacity accounting, for a path only
+reachable when a capacity cap is configured — disproportionate to the risk now
+that the durable state is provably atomic and self-reconciling.
 
 ## Remediation order
 
