@@ -232,15 +232,30 @@ Delivered:
   thousands of partial-transaction violations) and the txn-layer integration
   test `txn.TestIsolation_Commit_NoPartialTransactionObservable`.
 
+- **F3.3 (done).** The Cypher engine's query paths now execute under the
+  barrier and *materialise* their rows: `Engine.Run` (read) drains the whole
+  query inside `Graph.View`; `Engine.RunInTx` (write) drains inside
+  `Graph.ApplyAtomically`. Materialising releases the lock before the caller
+  iterates, so a long-open `Result` can never deadlock a concurrent writer —
+  the property that makes the barrier safe for the lazy, caller-managed
+  executor (verified: `cypher/exec` never re-enters `View`/`ApplyAtomically`).
+  Proven by `cypher.TestIsolation_Cypher_NoPartialWriteObservable` (concurrent
+  `RunInTxAny` writers + `RunAny` readers under `-race`, zero violations;
+  power-checked at 3 321 violations with the read barrier removed). TCK stays
+  3 897 green. Trade-off: queries now buffer their result rows instead of
+  streaming lazily — acceptable for transactional queries (analytics use the
+  lock-free CSR path); the lock-free per-shard snapshot below restores
+  streaming and is the tracked optimisation.
+
 Remaining (each keeps the module green and the TCK at 3897):
 
-- **F3.3** — route the engine's concurrent read/write paths through the barrier:
-  the Cypher executor's eager-apply (`GraphMutator` + `CommitWALOnly`) under
-  `ApplyAtomically`, and its read clauses (and any goroutine reading the mutable
-  graph concurrently with writers) under `View`.
 - **F3.4** — wire live secondary-index maintenance (`index.Manager.Apply`, never
   called from a live write today) and ensure it occurs inside the same
-  `ApplyAtomically` window so indexes flip atomically with the graph.
+  `ApplyAtomically` window so indexes flip atomically with the graph. (The live
+  roaring label bitmaps already update inside the write's `ApplyAtomically`
+  window, since `SetNodeLabel`/`SetEdgeLabel` run there; the `index.Manager`
+  hash/B-tree buffer is still committed at `Result.Close`, just after the
+  barrier — the remaining window F3.4 closes.)
 - **F3.5** — checkpoint/recovery read a consistent view (checkpoint under the
   store mutex already excludes writers; confirm it composes with the barrier).
 - **F3.6** — invariant/`rapid`/soak battery + `benchstat`/TCK regression gate.

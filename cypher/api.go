@@ -90,11 +90,11 @@ func init() {
 // buildIRProjection to reconstruct a RelationshipValue from the raw
 // IntegerValue columns in the executor row.
 type edgeVarInfo struct {
-	srcCol         int
-	edgeCol        int
-	dstCol         int
-	edgeType       string   // first element of RelTypes, or empty
-	acceptedTypes  []string // full RelTypes list; used to disambiguate when
+	srcCol        int
+	edgeCol       int
+	dstCol        int
+	edgeType      string   // first element of RelTypes, or empty
+	acceptedTypes []string // full RelTypes list; used to disambiguate when
 	// the stored edge carries multiple labels (e.g. (a)-[:HATES]->(c) and
 	// (a)-[:WONDERS]->(c) merge in LPG as one edge with labels {HATES,
 	// WONDERS}). For a pattern `(n)-[r:KNOWS|HATES]->(x)` we record
@@ -540,9 +540,18 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
 
-	// ── 3. Wrap in streaming Result ──────────────────────────────────────────
-	rs := exec.Run(ctx, op, cols)
-	return newResult(rs, cols, nil, nil, nil), nil
+	// ── 3. Execute under the read visibility barrier and materialise ─────────
+	// Draining the whole query inside Graph.View gives the read a consistent,
+	// partial-transaction-free snapshot (audit gap F3, docs/isolation-design.md);
+	// materialising releases the read lock before the caller iterates, so a
+	// long-open Result can never deadlock a concurrent writer.
+	var r *Result
+	e.g.View(func() {
+		rs := exec.Run(ctx, op, cols)
+		r = newResult(rs, cols, nil, nil, nil)
+		r.materialize()
+	})
+	return r, nil
 }
 
 // Explain returns a textual representation of the physical plan that would be
@@ -948,15 +957,64 @@ type Result struct {
 	idxMgr *index.Manager           // non-nil only when buf != nil
 	tx     *txn.Tx[string, float64] // non-nil only for WAL-backed RunInTx results
 
+	// matRows holds the rows drained under the transaction-visibility barrier
+	// (Graph.View for reads, Graph.ApplyAtomically for writes) at creation, so
+	// the whole query observes/produces one atomic, partial-transaction-free
+	// state (audit gap F3, docs/isolation-design.md). Once materialised the
+	// Result serves these buffered rows and holds NO lock while the caller
+	// iterates, so a long-open Result can never deadlock a concurrent writer —
+	// the property that makes the barrier safe for the lazy executor. matOn
+	// distinguishes a materialised Result (serve matRows) from a raw streaming
+	// one (delegate to rs).
+	matRows []exec.Record
+	matIdx  int
+	matOn   bool
+
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
 
 // Next advances to the next result row. Returns true when a row is available.
-func (r *Result) Next() bool { return r.rs.Next() }
+func (r *Result) Next() bool {
+	if r.matOn {
+		if r.matIdx < len(r.matRows) {
+			r.matIdx++
+			return true
+		}
+		return false
+	}
+	return r.rs.Next()
+}
 
 // Record returns the current row as a map from column name to value.
 // Must only be called after a successful [Next].
-func (r *Result) Record() exec.Record { return r.rs.Record() }
+func (r *Result) Record() exec.Record {
+	if r.matOn {
+		return r.matRows[r.matIdx-1]
+	}
+	return r.rs.Record()
+}
+
+// materialize drains the underlying ResultSet fully into matRows, copying each
+// Record (the ResultSet reuses its Record map across Next, so a shallow copy
+// per row is the documented way to retain it). It MUST be called inside
+// Graph.View (read queries) or Graph.ApplyAtomically (write queries): the whole
+// drain — every graph read and every eager write — then happens under one
+// barrier acquisition, so a concurrent reader observes the query's writes
+// atomically and the query itself observes a consistent, partial-transaction-
+// free snapshot. After materialize returns, the Result holds no lock; iteration
+// is served from matRows. Errors encountered during the drain are recorded on
+// the ResultSet and surfaced via Result.Err(); Close still commits/rolls back.
+func (r *Result) materialize() {
+	for r.rs.Next() {
+		rec := r.rs.Record()
+		cp := make(exec.Record, len(rec))
+		for k, v := range rec {
+			cp[k] = v
+		}
+		r.matRows = append(r.matRows, cp)
+	}
+	r.matOn = true
+}
 
 // Err returns the first error encountered during iteration, or nil.
 func (r *Result) Err() error { return r.rs.Err() }
@@ -6014,8 +6072,19 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
 
-	rs := exec.Run(ctx, op, cols)
-	return newResult(rs, cols, buf, e.g.IndexManager(), walTx), nil
+	// Execute the whole write statement under the write visibility barrier so
+	// all of its eager mutations flip visible to Graph.View readers atomically
+	// (audit gap F3, docs/isolation-design.md); materialising releases the lock
+	// before the caller iterates, and the transaction's WAL commit happens
+	// later in Result.Close (durability is independent of the visibility flip).
+	var r *Result
+	_ = e.g.ApplyAtomically(func() error {
+		rs := exec.Run(ctx, op, cols)
+		r = newResult(rs, cols, buf, e.g.IndexManager(), walTx)
+		r.materialize()
+		return nil
+	})
+	return r, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
