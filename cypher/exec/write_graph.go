@@ -99,6 +99,23 @@ type GraphMutator interface {
 	// post-delete RelationshipValue keeps `RETURN type(r)` working.
 	EdgeLabels(src, dst string) []string
 
+	// IncEdgeCreateCount bumps the Cypher CREATE-call multiplicity
+	// counter for the directed edge (src, dst) by one. The counter
+	// records how many CREATE statements have targeted the same
+	// endpoint pair regardless of whether the underlying storage
+	// already had an entry — MERGE consults it to emit
+	// multiplicity rows when an existing edge satisfies the merge
+	// pattern (Merge5 [3]).
+	IncEdgeCreateCount(src, dst string)
+	// EdgeCreateCount returns the current CREATE-call multiplicity
+	// counter for the directed edge (src, dst), or 0 when no CREATE
+	// has been recorded.
+	EdgeCreateCount(src, dst string) int64
+	// DecEdgeCreateCount decrements the CREATE-call multiplicity
+	// counter (floor 0). Called by DELETE so subsequent MERGEs see
+	// the correct multiplicity.
+	DecEdgeCreateCount(src, dst string)
+
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.
 	OutNeighbours(n string) []string

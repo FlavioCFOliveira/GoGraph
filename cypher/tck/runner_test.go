@@ -1826,10 +1826,25 @@ import (
 //     sample stable at 3894/3897 (99.92%). Gate set at 3894 with 0
 //     headroom.
 //
+//   - 3895: ratcheted after round 62 — Cypher CREATE-multiplicity
+//     counter at the LPG level. Each CreateRelationship bumps the
+//     per-(src, dst) counter regardless of whether the underlying
+//     simple-graph storage materialised a new edge or silently
+//     no-opped the duplicate (Merge5 [3] creates `(a)-[:TYPE]->(b)`
+//     twice — storage keeps one entry, but the TCK expects
+//     `count(r)` over the MERGE pattern to return 2). MergeRelationship
+//     reads the counter on a successful no-property-predicate match
+//     and emits one output row per recorded CREATE, holding the
+//     remaining count on a pendingRow slot consumed by subsequent
+//     Next() calls. Decremented on DELETE so subsequent MERGEs see
+//     the updated multiplicity. Closes Merge5 [3]. 5-run sample
+//     stable at 3895/3897 (99.95%). Gate set at 3895 with 0
+//     headroom.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3894
+const tckExecutionBaseline = 3895
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

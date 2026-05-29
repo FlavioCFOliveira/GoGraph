@@ -144,6 +144,14 @@ type Graph[N comparable, W any] struct {
 	nodePropShards [propMapShards]nodePropShard
 	edgePropShards [propMapShards]edgePropShard
 
+	// edgeCreateCountShards tracks how many CREATE statements have
+	// targeted each directed (src, dst) endpoint pair — separate from
+	// the underlying simple-graph adjacency, which silently collapses
+	// duplicate CREATEs. Used by MERGE to emit one output row per
+	// recorded CREATE call when the search matches an existing edge
+	// (Merge5 [3]). See edge_create_count.go for full semantics.
+	edgeCreateCountShards [propMapShards]edgeCreateCountShard
+
 	// tombstones records NodeIDs that have been removed by RemoveNode.
 	// The underlying Mapper cannot release the index slot (NodeID stability
 	// is a hard contract), so removal is observable only via this set:
@@ -229,6 +237,9 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	}
 	for i := range g.edgePropShards {
 		g.edgePropShards[i].m = make(map[edgeKey]map[PropertyKeyID]PropertyValue)
+	}
+	for i := range g.edgeCreateCountShards {
+		g.edgeCreateCountShards[i].m = make(map[edgeKey]int64)
 	}
 	return g
 }

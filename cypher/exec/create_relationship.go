@@ -153,6 +153,12 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	if op.relType != "" {
 		op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType)
 	}
+	// Bump the Cypher CREATE-multiplicity counter even when AddEdge
+	// silently no-ops a duplicate (a→b) in simple-graph storage —
+	// `MATCH (a:A),(b:B) MERGE (a)-[r:T]->(b) RETURN count(r)` must
+	// see one row per CREATE statement, not one per distinct storage
+	// entry (Merge5 [3]).
+	op.mutator.IncEdgeCreateCount(srcLabel, dstLabel)
 
 	props := mergeProps(op.props, op.propsExprFn, childRow)
 

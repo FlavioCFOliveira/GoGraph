@@ -6005,6 +6005,14 @@ func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
 	return a.g.EdgeLabels(src, dst)
 }
 
+// IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
+// the underlying [lpg.Graph] CREATE-multiplicity counter.
+func (a *lpgMutatorAdapter) IncEdgeCreateCount(src, dst string) { a.g.IncEdgeCreateCount(src, dst) }
+func (a *lpgMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
+	return a.g.EdgeCreateCount(src, dst)
+}
+func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) { a.g.DecEdgeCreateCount(src, dst) }
+
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 	var out []string
@@ -6289,6 +6297,14 @@ func (a *walMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.Prope
 func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
 	return a.g.EdgeLabels(src, dst)
 }
+
+// IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
+// the underlying [lpg.Graph] CREATE-multiplicity counter.
+func (a *walMutatorAdapter) IncEdgeCreateCount(src, dst string) { a.g.IncEdgeCreateCount(src, dst) }
+func (a *walMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
+	return a.g.EdgeCreateCount(src, dst)
+}
+func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) { a.g.DecEdgeCreateCount(src, dst) }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *walMutatorAdapter) OutNeighbours(n string) []string {

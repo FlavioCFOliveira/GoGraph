@@ -223,6 +223,13 @@ func (s *stubMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyVal
 	return out
 }
 
+// IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount are inert in
+// the stub: the write-operator tests do not exercise multi-edge
+// MERGE semantics.
+func (s *stubMutator) IncEdgeCreateCount(string, string)    {}
+func (s *stubMutator) EdgeCreateCount(string, string) int64 { return 0 }
+func (s *stubMutator) DecEdgeCreateCount(string, string)    {}
+
 // EdgeLabels returns the edge labels for (src, dst). Reads from the
 // edgeLabel set populated by SetEdgeLabel; returns nil when absent.
 func (s *stubMutator) EdgeLabels(src, dst string) []string {

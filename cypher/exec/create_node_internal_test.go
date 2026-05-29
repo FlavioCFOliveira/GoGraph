@@ -93,7 +93,10 @@ func (m *seedStubMutator) DelEdgeProperty(string, string, string) { panic("unuse
 func (m *seedStubMutator) EdgeProperties(string, string) map[string]lpg.PropertyValue {
 	panic("unused")
 }
-func (m *seedStubMutator) EdgeLabels(string, string) []string { panic("unused") }
+func (m *seedStubMutator) EdgeLabels(string, string) []string  { panic("unused") }
+func (m *seedStubMutator) IncEdgeCreateCount(string, string)   {}
+func (m *seedStubMutator) EdgeCreateCount(string, string) int64 { return 0 }
+func (m *seedStubMutator) DecEdgeCreateCount(string, string)   {}
 func (m *seedStubMutator) OutNeighbours(string) []string             { panic("unused") }
 func (m *seedStubMutator) InNeighbours(string) []string              { panic("unused") }
 func (m *seedStubMutator) OutDegree(string) int                      { panic("unused") }

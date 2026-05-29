@@ -70,6 +70,13 @@ type MergeRelationship struct {
 	// builder did not thread one in.
 	schema map[string]int
 
+	// Pending state for multi-row emission when an existing edge has
+	// CREATE-multiplicity > 1. The base row is held verbatim and the
+	// remaining count tells Next() how many more times to re-emit before
+	// pulling a fresh row from the child (Merge5 [3]).
+	pendingRow       Row
+	pendingRemaining int64
+
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
@@ -167,10 +174,17 @@ func (op *MergeRelationship) Init(ctx context.Context) error {
 }
 
 // Next emits the next input row, ensuring that the (src)-[:relType]->(dst)
-// edge exists in the graph (either pre-existing or newly created).
+// edge exists in the graph (either pre-existing or newly created). When
+// an existing edge has CREATE-multiplicity N > 1 the operator emits N
+// rows for the same upstream tuple (Merge5 [3]).
 func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
+	}
+	if op.pendingRemaining > 0 {
+		*out = op.pendingRow
+		op.pendingRemaining--
+		return true, nil
 	}
 	var row Row
 	ok, err := op.child.Next(&row)
@@ -224,7 +238,20 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		if err := op.applyRelActions(row, srcKey, dstKey, op.onMatchActions); err != nil {
 			return false, err
 		}
-		*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
+		emitted := op.emitRow(row, srcID, dstID, srcKey, dstKey)
+		// Multi-CREATE multiplicity emit (Merge5 [3]). Skip when the
+		// pattern carries an inline property predicate — the
+		// counter records every CREATE call regardless of property,
+		// but with a predicate only a subset can satisfy `r:T
+		// {prop: v}` (Merge5 [5] CREATEs with `name: 'r1'` and
+		// `name: 'r2'`, MERGEs with `name: 'r2'` → only one row).
+		if len(op.relPropPreds) == 0 {
+			if mult := op.mutator.EdgeCreateCount(srcKey, dstKey); mult > 1 {
+				op.pendingRow = emitted
+				op.pendingRemaining = mult - 1
+			}
+		}
+		*out = emitted
 		return true, nil
 	}
 	// Undirected MERGE: also probe the reverse direction. When an edge
@@ -236,7 +263,14 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		if err := op.applyRelActions(row, dstKey, srcKey, op.onMatchActions); err != nil {
 			return false, err
 		}
-		*out = op.emitRow(row, dstID, srcID, dstKey, srcKey)
+		emitted := op.emitRow(row, dstID, srcID, dstKey, srcKey)
+		if len(op.relPropPreds) == 0 {
+			if mult := op.mutator.EdgeCreateCount(dstKey, srcKey); mult > 1 {
+				op.pendingRow = emitted
+				op.pendingRemaining = mult - 1
+			}
+		}
+		*out = emitted
 		return true, nil
 	}
 	// No matching edge — create one, tag it, write inline rel properties,

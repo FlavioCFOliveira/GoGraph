@@ -376,12 +376,17 @@ func (op *DeleteNode) Close() error {
 // (a,r,b) and (b,r,a) rows for the single stored edge a→b — the second
 // row's RemoveEdge(b, a) is a no-op against the storage direction and
 // leaves the edge attached to its endpoints).
+//
+// Also decrements the Cypher CREATE-multiplicity counter so subsequent
+// MERGEs observe the deleted CREATE call (Merge5 [3] / [21]).
 func removeEdgeEitherDirection(mutator GraphMutator, src, dst string) {
 	if !mutator.HasEdge(src, dst) && mutator.HasEdge(dst, src) {
 		mutator.RemoveEdge(dst, src)
+		mutator.DecEdgeCreateCount(dst, src)
 		return
 	}
 	mutator.RemoveEdge(src, dst)
+	mutator.DecEdgeCreateCount(src, dst)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -473,6 +478,7 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 	// (lpg.Graph's RemoveEdge removes the adjacency entry; label/property
 	// cleanup prevents orphaned metadata.)
 	op.mutator.RemoveEdge(srcKey, dstKey)
+	op.mutator.DecEdgeCreateCount(srcKey, dstKey)
 
 	*out = op.markRowDeleted(childRow, rel, deletedProps)
 	return true, nil

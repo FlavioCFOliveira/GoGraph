@@ -83,8 +83,9 @@ type Expand struct {
 	// labels.  nil = no type filtering.
 	edgeTypeFilter map[uint64]string
 
-	inputCol int   // column in the input row that carries the source NodeID
-	relCols  []int // input-row columns holding existing edge IDs; nil = no check
+	inputCol      int                              // column in the input row that carries the source NodeID
+	relCols       []int                            // input-row columns holding existing edge IDs; nil = no check
+	multiplicity  func(srcID, dstID uint64) int64 // per-edge CREATE multiplicity; nil = single-row emit
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -100,6 +101,13 @@ type Expand struct {
 	revStart, revEnd uint64
 	fwdDone          bool // true after all forward edges for current src are exhausted
 	emitCount        int  // total rows emitted; drives ctx check cadence
+
+	// Pending state for emitting an edge N times when its
+	// CREATE-multiplicity is greater than 1 (Merge5 [21]). The full row
+	// is cached and re-emitted; pendingRemaining counts the extra
+	// emissions left after the first one.
+	pendingRow       Row
+	pendingRemaining int64
 
 	outBuf []expr.Value // reusable output row backing slice
 }
@@ -123,6 +131,15 @@ type ExpandConfig struct {
 	// relationship-isomorphism / cyphermorphism). Empty disables the
 	// check.
 	RelCols []int
+	// MultiplicityFn returns the Cypher CREATE-call multiplicity recorded
+	// for the directed edge (srcID, dstID). When the returned count is N >
+	// 1, the operator emits the corresponding output row N times in a row,
+	// reflecting the openCypher rule that `MATCH ()-[r]->()` enumerates
+	// each CREATE call separately even when the underlying simple-graph
+	// storage collapsed them to one entry (Merge5 [21]). A nil fn (or
+	// returning 0 / 1) disables the multiplicity emit and behaves like a
+	// plain single-row Expand.
+	MultiplicityFn func(srcID, dstID uint64) int64
 }
 
 // NewExpand creates an Expand operator.
@@ -142,6 +159,7 @@ func NewExpand(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig) *Expand 
 		edgeTypeFilter: cfg.EdgeTypeFilter,
 		inputCol:       cfg.InputCol,
 		relCols:        cfg.RelCols,
+		multiplicity:   cfg.MultiplicityFn,
 	}
 }
 
@@ -170,10 +188,22 @@ func (op *Expand) Next(out *Row) (bool, error) {
 		if err := op.ctx.Err(); err != nil {
 			return false, err
 		}
+		if op.pendingRemaining > 0 {
+			need := len(op.pendingRow)
+			if cap(op.outBuf) < need {
+				op.outBuf = make([]expr.Value, need)
+			}
+			op.outBuf = op.outBuf[:need]
+			copy(op.outBuf, op.pendingRow)
+			*out = op.outBuf
+			op.pendingRemaining--
+			return true, nil
+		}
 		// tryFwdEdge returns (true, true) = emitted; (false, true) = skipped
 		// (filtered/morphism), retry; (_, false) = no more forward edges.
 		if emitted, ok := op.tryFwdEdge(out); ok {
 			if emitted {
+				op.maybeQueueMultiplicity(*out)
 				return true, nil
 			}
 			continue // skip (filtered or morphism-rejected), try next edge
@@ -181,6 +211,7 @@ func (op *Expand) Next(out *Row) (bool, error) {
 		// tryRevEdge follows the same convention.
 		if emitted, ok := op.tryRevEdge(out); ok {
 			if emitted {
+				op.maybeQueueMultiplicity(*out)
 				return true, nil
 			}
 			continue // skip reverse edge
@@ -193,6 +224,33 @@ func (op *Expand) Next(out *Row) (bool, error) {
 			return false, nil
 		}
 	}
+}
+
+// maybeQueueMultiplicity inspects the just-emitted row's (srcID, dstID)
+// pair against the configured MultiplicityFn and, when the recorded
+// CREATE count is greater than 1, stages the remaining copies for
+// repeated emission via the pending-row slot. The cached row is a
+// fresh copy of the buffer so subsequent buildRow calls (which reuse
+// outBuf) do not corrupt the queued data.
+func (op *Expand) maybeQueueMultiplicity(emitted Row) {
+	if op.multiplicity == nil || len(emitted) < 3 {
+		return
+	}
+	srcVal, dstVal := uint64(0), uint64(0)
+	if iv, ok := emitted[len(emitted)-3].(expr.IntegerValue); ok {
+		srcVal = uint64(iv)
+	}
+	if iv, ok := emitted[len(emitted)-1].(expr.IntegerValue); ok {
+		dstVal = uint64(iv)
+	}
+	mult := op.multiplicity(srcVal, dstVal)
+	if mult <= 1 {
+		return
+	}
+	cp := make(Row, len(emitted))
+	copy(cp, emitted)
+	op.pendingRow = cp
+	op.pendingRemaining = mult - 1
 }
 
 // tryFwdEdge attempts to emit one forward edge for the current source node.
