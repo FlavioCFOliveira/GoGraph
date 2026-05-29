@@ -42,7 +42,7 @@ tests: the suite validates atomicity only for **single-op** transactions
 |----|----------|----------|--------|----------|
 | F1 | Atomicity | **Critical** | **fixed** | Multi-op transactions are not atomic across a crash — recovery can replay a *prefix* of a transaction's ops. |
 | F2 | Durability + Consistency | **Critical** | **fixed** | A checkpoint writes a CSR-only snapshot then truncates the WAL, destroying committed labels/properties (and the mapper for non-string keys). |
-| F3 | Isolation | **High** | open | The in-memory apply loop publishes ops one-by-one, so a lock-free reader can observe a partially-applied, in-flight transaction. |
+| F3 | Isolation | **High** | in progress | The in-memory apply loop publishes ops one-by-one, so a lock-free reader can observe a partially-applied, in-flight transaction. |
 | F4 | Durability | **Medium** | **fixed** | `wal.Open` never fsyncs the parent directory, so a freshly-created WAL file's directory entry may not survive a crash. |
 | F5 | Atomicity | **Low** | **fixed** | `Tx.Commit` applies after `Sync`; an apply error mid-loop leaves the in-memory view partial while the WAL is fully durable, and returns an error although the transaction is durably committed. |
 
@@ -175,6 +175,20 @@ Read paths must stay lock-free and allocation-free on the hot loop.
 cross-op invariant (e.g. "if the edge exists, both endpoint labels exist")
 while a writer commits multi-op transactions, under `-race`; no reader ever
 observes a violation.
+
+**Status (in progress — staged epic).** F3 is a snapshot-isolation
+re-architecture of the in-memory engine, tracked as epic with ordered,
+each-green sub-tasks (F3.1–F3.6). The full design is specified and locked in
+[`isolation-design.md`](isolation-design.md). **F3.1 (design) is complete.**
+The remaining stages migrate adjacency, then the RWMutex-guarded LPG
+substructures (labels/properties/tombstones), then the label bitmaps and live
+secondary-index maintenance, into a single `atomic.Pointer[Snapshot]` root, and
+finally make a whole transaction's writes flip visible in one atomic swap
+(F3.5) — at which point no reader can observe a partial transaction. Each stage
+keeps the module green and is never weaker than today's per-operation atomic
+visibility; until F3.5 lands, the engine provides per-operation atomic
+visibility under a single writer (a reader may still observe a partially-applied
+multi-op transaction — the gap this epic closes).
 
 ### F4 — WAL file creation is not durable against directory loss (Durability)
 
