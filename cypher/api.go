@@ -970,6 +970,14 @@ type Result struct {
 	matIdx  int
 	matOn   bool
 
+	// bufHandled is set once the secondary-index buffer has been committed (or
+	// rolled back) inside the write query's ApplyAtomically window (F3.4), so
+	// closeLocked does not act on it again. Committing the index buffer under
+	// the same barrier as the graph writes makes the secondary indexes flip
+	// atomically with the graph, so an index-seek read never observes a
+	// transaction whose graph change is visible but whose index change is not.
+	bufHandled bool
+
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
 
@@ -1016,6 +1024,27 @@ func (r *Result) materialize() {
 	r.matOn = true
 }
 
+// commitIndexUnderBarrier flips the secondary-index buffer for a write query
+// inside the same ApplyAtomically window as the graph writes, so the indexes
+// become visible atomically with the graph (audit gap F3.4): an index-seek
+// read can never observe a transaction whose graph change is visible but whose
+// index change is not. It is a no-op for read queries (buf == nil) and is
+// idempotent (bufHandled). The commit/rollback decision uses the
+// post-materialise iteration error — on success the buffered index.Changes are
+// applied; on a failed write they are discarded — and closeLocked then leaves
+// the buffer alone.
+func (r *Result) commitIndexUnderBarrier() {
+	if r.buf == nil || r.bufHandled {
+		return
+	}
+	if r.rs.Err() != nil {
+		r.buf.Rollback()
+	} else {
+		r.buf.Commit(r.idxMgr)
+	}
+	r.bufHandled = true
+}
+
 // Err returns the first error encountered during iteration, or nil.
 func (r *Result) Err() error { return r.rs.Err() }
 
@@ -1051,7 +1080,11 @@ func (r *Result) Close() error {
 // to ensure exactly-once semantics across both call sites.
 func (r *Result) closeLocked() error {
 	err := r.rs.Close()
-	if r.buf != nil {
+	if r.buf != nil && !r.bufHandled {
+		// Fallback path: the index buffer was not flipped under the barrier
+		// (e.g. a Result that was never materialised). Commit/roll back here as
+		// before. Materialised write queries flip it inside ApplyAtomically via
+		// commitIndexUnderBarrier (bufHandled), so this branch is skipped.
 		if err != nil || r.rs.Err() != nil {
 			r.buf.Rollback()
 		} else {
@@ -6082,6 +6115,9 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		rs := exec.Run(ctx, op, cols)
 		r = newResult(rs, cols, buf, e.g.IndexManager(), walTx)
 		r.materialize()
+		// Flip the secondary indexes inside the same barrier as the graph
+		// writes so index seeks never observe a partial transaction (F3.4).
+		r.commitIndexUnderBarrier()
 		return nil
 	})
 	return r, nil
