@@ -5,16 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
 // Server is the long-running HTTP front-end over a single dataStore. It
-// owns the *http.Server and orchestrates graceful shutdown. One Server is
-// created per process; its handlers are safe for concurrent use because
-// the underlying Cypher engine is (see dataStore).
+// owns the *http.Server and orchestrates graceful shutdown.
+//
+// Concurrency: the Cypher engine's read execution is lock-free over an
+// immutable snapshot, but its plan- and filter-building phase reads the
+// live adjacency offsets and interning tables, which a concurrent write
+// mutates. The mu RWMutex therefore serialises writes against reads: read
+// requests take RLock and run in parallel; write requests (and the seed)
+// take Lock and run exclusively. mu is always the outermost lock, acquired
+// before any engine call, so it cannot invert with the store's internal
+// single-writer mutex.
 type Server struct {
 	ds   *dataStore
 	http *http.Server
+	mu   sync.RWMutex
 }
 
 // newServer wires the routes and configures a bounded *http.Server. All

@@ -52,10 +52,13 @@ func hasManifest(dir string) bool {
 // engine, and the in-memory graph. A single dataStore is opened at
 // startup and shared by every HTTP handler.
 //
-// Concurrency: the embedded *cypher.Engine is safe for concurrent use.
-// Read queries run under a read lock and materialise before returning;
-// write queries serialise on the store's single-writer mutex and become
-// visible atomically. Handlers therefore need no additional locking.
+// Concurrency: the engine's read execution is lock-free over an immutable
+// snapshot and write commits are atomic, but its plan- and filter-building
+// phase reads the live adjacency offsets and interning tables that a
+// concurrent write mutates. A dataStore is therefore NOT safe for
+// concurrent read+write on its own; callers must serialise writes against
+// reads. The Server does this with an RWMutex (see Server); the
+// single-threaded tests drive the store directly.
 type dataStore struct {
 	dir      string
 	wal      *wal.Writer
