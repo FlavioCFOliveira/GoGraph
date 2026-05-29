@@ -43,7 +43,7 @@ tests: the suite validates atomicity only for **single-op** transactions
 | F1 | Atomicity | **Critical** | open | Multi-op transactions are not atomic across a crash — recovery can replay a *prefix* of a transaction's ops. |
 | F2 | Durability + Consistency | **Critical** | **fixed** | A checkpoint writes a CSR-only snapshot then truncates the WAL, destroying committed labels/properties (and the mapper for non-string keys). |
 | F3 | Isolation | **High** | open | The in-memory apply loop publishes ops one-by-one, so a lock-free reader can observe a partially-applied, in-flight transaction. |
-| F4 | Durability | **Medium** | open | `wal.Open` never fsyncs the parent directory, so a freshly-created WAL file's directory entry may not survive a crash. |
+| F4 | Durability | **Medium** | **fixed** | `wal.Open` never fsyncs the parent directory, so a freshly-created WAL file's directory entry may not survive a crash. |
 | F5 | Atomicity | **Low** | open | `Tx.Commit` applies after `Sync`; an apply error mid-loop leaves the in-memory view partial while the WAL is fully durable, and returns an error although the transaction is durably committed. |
 
 ### F1 — Multi-op transactions are not atomic across a crash (Atomicity)
@@ -170,6 +170,19 @@ unix/other build-tag split).
 
 **Acceptance.** A unit test verifies the parent directory is fsynced on first
 `Open` of a not-yet-existing WAL path; existing WAL tests still pass.
+
+**Resolution (fixed).** Added a `parentDirFsync` helper to `package wal` with
+the same unix/other build-tag split the snapshot package uses
+(`store/wal/parent_fsync_unix.go`, `parent_fsync_other.go`). `wal.Open` now
+stat-detects whether it is creating the file and, only on create, fsyncs the
+parent directory once so the new file's directory entry is durable; appends
+mutate the inode (made durable by `Writer.Sync`), so no per-`Sync` directory
+fsync is added to the commit hot path. On Windows the helper is a no-op (the
+directory entry is journalled). Tests: `wal.TestParentDirFsync_ExistingDir`,
+`wal.TestParentDirFsync_MissingParent`, and
+`wal.TestOpen_FreshCreateFsyncsParentAndReopens` (create path runs the fsync,
+reopen skips it, frames round-trip). Verified to build for both `GOOS=windows`
+and `GOOS=linux`.
 
 ### F5 — A failed Commit can be durably committed (Atomicity, minor)
 

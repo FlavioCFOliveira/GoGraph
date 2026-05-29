@@ -53,10 +53,34 @@ type Writer struct {
 // appended.
 func Open(path string) (*Writer, error) {
 	defer metrics.Time("store.wal.Open")()
+	// Detect whether this call creates the file. A newly-created WAL file
+	// needs a parent-directory fsync so its directory entry is durable;
+	// without it, a crash inside the kernel writeback window could lose the
+	// entire WAL even after a committed Sync — a Durability violation on the
+	// first commit (audit gap F4, docs/acid-audit.md). The stat/open window
+	// is benign: if a racing opener creates the file between the stat and the
+	// OpenFile we merely skip a redundant directory fsync (the other opener
+	// performs it), and WAL files are single-writer per this constructor's
+	// contract.
+	created := false
+	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+		created = true
+	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644) //nolint:gosec // caller-supplied path is by-design
 	if err != nil {
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: %w", path, err)
+	}
+	if created {
+		// fsync the parent directory once so the new file's directory entry
+		// is durable. Done only on create: appends mutate the inode (made
+		// durable by Writer.Sync), not the directory entry, so a per-Sync
+		// directory fsync would be wasted work on the commit hot path.
+		if syncErr := parentDirFsync(path); syncErr != nil {
+			_ = f.Close()
+			metrics.IncCounter("store.wal.Open.errors", 1)
+			return nil, fmt.Errorf("wal: fsync parent dir of %q: %w", path, syncErr)
+		}
 	}
 	return &Writer{
 		f:  f,
