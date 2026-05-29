@@ -510,17 +510,26 @@ func (t *Tx[N, W]) Commit() error {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return err
 	}
-	// Apply to the in-memory graph after durability is secured. The
-	// transaction is already durable (op frames + OpCommit marker fsynced),
-	// so an apply error here does not undo the commit: recovery — which
-	// builds the graph without a shard-capacity cap — replays the whole
-	// transaction atomically. Surface it as ErrCommittedNotApplied so the
-	// caller knows the commit is durable and must not be retried (F5).
-	for _, op := range t.ops {
-		if err := applyOp(t.store.g, op); err != nil {
-			metrics.IncCounter("store.txn.Commit.applyErrors", 1)
-			return fmt.Errorf("%w: %w", ErrCommittedNotApplied, err)
+	// Apply to the in-memory graph after durability is secured, under the
+	// graph's visibility barrier (ApplyAtomically) so the whole transaction's
+	// writes flip visible to Graph.View readers as one atomic step — no
+	// reader can observe a partially-applied transaction (audit gap F3,
+	// docs/isolation-design.md). The transaction is already durable (op
+	// frames + OpCommit marker fsynced), so an apply error here does not undo
+	// the commit: recovery — which builds the graph without a shard-capacity
+	// cap — replays the whole transaction atomically. Surface it as
+	// ErrCommittedNotApplied so the caller knows the commit is durable and
+	// must not be retried (F5).
+	if err := t.store.g.ApplyAtomically(func() error {
+		for _, op := range t.ops {
+			if aerr := applyOp(t.store.g, op); aerr != nil {
+				return aerr
+			}
 		}
+		return nil
+	}); err != nil {
+		metrics.IncCounter("store.txn.Commit.applyErrors", 1)
+		return fmt.Errorf("%w: %w", ErrCommittedNotApplied, err)
 	}
 	return nil
 }

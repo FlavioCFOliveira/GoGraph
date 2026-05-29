@@ -184,6 +184,62 @@ type Graph[N comparable, W any] struct {
 
 	idxMgr    *index.Manager
 	validator atomicValidator
+
+	// visMu is the transaction-visibility barrier (audit gap F3,
+	// docs/isolation-design.md). A writer applying a multi-op transaction
+	// holds visMu via [Graph.ApplyAtomically] for the whole apply, so the
+	// transaction's writes across every substructure become observable to
+	// readers as one atomic step; a transactional reader pins a consistent,
+	// partial-transaction-free view via [Graph.View]. The per-shard mutexes
+	// below visMu still guard individual writes; visMu adds the missing
+	// transaction-level atomicity that single-op locking cannot provide.
+	// It is a RWMutex (not an atomic snapshot pointer) by deliberate,
+	// correctness-first choice; the lock-free per-shard snapshot is the
+	// performance optimisation tracked by the later F3 sub-tasks. The
+	// immutable CSR analytics path does not go through these methods and
+	// stays lock-free.
+	visMu sync.RWMutex
+}
+
+// ApplyAtomically runs fn while holding the graph's transaction-visibility
+// write lock. Every mutation fn performs (across adjacency, labels,
+// properties, tombstones, bitmaps, and indexes) becomes visible to
+// [Graph.View] readers as a single atomic step: a concurrent View reader
+// observes either none of fn's writes or all of them, never a partial set.
+// fn is the in-memory apply of one durable transaction; callers invoke it
+// only after the transaction's WAL frames are fsynced.
+//
+// ApplyAtomically must not be called re-entrantly, and the mutations inside
+// fn must not call [Graph.View] (the RWMutex is not re-entrant). The graph's
+// per-shard write methods that fn calls take their own shard locks beneath
+// visMu, which is safe because visMu is acquired only here and in View.
+func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
+	g.visMu.Lock()
+	defer g.visMu.Unlock()
+	return fn()
+}
+
+// View runs fn while holding the graph's transaction-visibility read lock,
+// so fn observes a consistent snapshot of the graph in which no in-flight
+// transaction is partially applied: any transaction committed via
+// [Graph.ApplyAtomically] is visible to fn either entirely or not at all,
+// and that view is stable for fn's whole duration (snapshot isolation for
+// the bracketed reads). Concurrent View readers do not block one another.
+//
+// Transactional readers that must not observe a partial transaction — the
+// query executor's read clauses, and any goroutine reading the mutable
+// graph concurrently with writers — should perform their reads inside View.
+// Reads issued outside View remain per-operation atomic (the long-standing
+// concurrency contract) but may observe a partially-applied multi-op
+// transaction; View is what closes that window.
+//
+// fn must not perform writes and must not call [Graph.ApplyAtomically]
+// (the RWMutex is not re-entrant); nested View calls are permitted only
+// when no writer is contending, so callers should not nest View.
+func (g *Graph[N, W]) View(fn func()) {
+	g.visMu.RLock()
+	defer g.visMu.RUnlock()
+	fn()
 }
 
 // SetValidator installs v as the runtime schema validator for this graph.
@@ -389,9 +445,16 @@ func (g *Graph[N, W]) SideEffectCounters() (nodesAdded, nodesRemoved, edgesAdded
 // itself does not call these — node and edge mutation flow through
 // the adapters, which know whether a given AddNode/AddEdge was a
 // fresh allocation or a no-op re-intern.
-func (g *Graph[N, W]) IncrNodesAdded()   { g.nodesAddedCount.Add(1) }
+// IncrNodesAdded records that one node was freshly added.
+func (g *Graph[N, W]) IncrNodesAdded() { g.nodesAddedCount.Add(1) }
+
+// IncrNodesRemoved records that one node was removed.
 func (g *Graph[N, W]) IncrNodesRemoved() { g.nodesRemovedCount.Add(1) }
-func (g *Graph[N, W]) IncrEdgesAdded()   { g.edgesAddedCount.Add(1) }
+
+// IncrEdgesAdded records that one edge was freshly added.
+func (g *Graph[N, W]) IncrEdgesAdded() { g.edgesAddedCount.Add(1) }
+
+// IncrEdgesRemoved records that one edge was removed.
 func (g *Graph[N, W]) IncrEdgesRemoved() { g.edgesRemovedCount.Add(1) }
 
 // RemoveNodeLabel detaches name from n. No-op if absent.

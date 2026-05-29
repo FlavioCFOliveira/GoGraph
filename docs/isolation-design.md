@@ -207,6 +207,49 @@ R observes all of T or none of T, across every substructure.*
   noise; checkpoint-during-writes recovers exactly the committed state at the
   snapshot boundary.
 
+## Implementation status and chosen approach
+
+The guarantee is being delivered **correctness-first** via a transaction-
+visibility barrier (a graph-level `sync.RWMutex`, the expert's Approach 4 —
+"single visibility flip"), then optimised toward the lock-free per-shard
+snapshot above. Rationale: `lpg.Graph` exposes ~10 read-servable substructures
+(adjacency; node/edge labels; node/edge properties; tombstones; roaring
+bitmaps; `edgeCreateCount`; `edgeInstance*`; secondary indexes), and replacing
+all of them with lock-free immutable per-shard versions in one change carries a
+high risk of regressing the 3897-scenario TCK. The barrier closes the
+*correctness* gap (no reader observes a partial transaction) immediately and
+provably, while leaving the immutable-CSR analytics hot path — the perf
+mandate's specific lock-free requirement — untouched.
+
+Delivered:
+
+- **F3.2 (done).** `Graph.ApplyAtomically(fn)` (write lock) and `Graph.View(fn)`
+  (read lock) on `lpg.Graph`. `Tx.Commit` applies a transaction's ops inside
+  `ApplyAtomically`, so the whole transaction flips visible to `View` readers as
+  one atomic step. Proven by `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads`
+  (50 000 multi-op transactions × 8 readers under `-race`, zero violations;
+  power-checked — without the barrier the same test observes hundreds of
+  thousands of partial-transaction violations) and the txn-layer integration
+  test `txn.TestIsolation_Commit_NoPartialTransactionObservable`.
+
+Remaining (each keeps the module green and the TCK at 3897):
+
+- **F3.3** — route the engine's concurrent read/write paths through the barrier:
+  the Cypher executor's eager-apply (`GraphMutator` + `CommitWALOnly`) under
+  `ApplyAtomically`, and its read clauses (and any goroutine reading the mutable
+  graph concurrently with writers) under `View`.
+- **F3.4** — wire live secondary-index maintenance (`index.Manager.Apply`, never
+  called from a live write today) and ensure it occurs inside the same
+  `ApplyAtomically` window so indexes flip atomically with the graph.
+- **F3.5** — checkpoint/recovery read a consistent view (checkpoint under the
+  store mutex already excludes writers; confirm it composes with the barrier).
+- **F3.6** — invariant/`rapid`/soak battery + `benchstat`/TCK regression gate.
+
+The lock-free per-shard snapshot (Approach 1c above) remains the documented
+performance end-state, tracked as a follow-up optimisation: it removes the
+barrier's reader/writer mutual exclusion in favour of an `atomic.Pointer`
+swap, without changing the externally-observed isolation contract.
+
 ## References
 
 - Berenson et al., *A Critique of ANSI SQL Isolation Levels*, SIGMOD 1995.
