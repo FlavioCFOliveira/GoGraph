@@ -10,6 +10,14 @@ release. The intent is twofold:
    (e.g. v1.1.0 vs v1.0.1) is one diff against the previous file
    in this directory.
 
+For **per-change** (rather than per-release) performance tracking, see
+[`history/`](history/): every optimisation is recorded by
+[`scripts/bench-history.sh`](../../scripts/bench-history.sh) as a raw run plus
+a `benchstat` delta against the previous run, indexed in
+[`history/LEDGER.md`](history/LEDGER.md). This makes the gain or regression of
+each individual change measurable and reviewable, and every entry is gated on
+TCK staying at 3897/3897 and ACID/race remaining green.
+
 ## Convention
 
 Each release ships its own file: `<version>.md`. The file
