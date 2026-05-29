@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"gograph/cypher/ast"
 	"gograph/cypher/parser"
 )
 
@@ -40,4 +41,31 @@ func ExampleParseStrict() {
 	// Output:
 	// syntax error at 1:7
 	// syntax error at 1:11
+}
+
+// ExampleParse_inspectAST shows how to inspect the AST root that Parse returns.
+// A single-part query parses to *ast.SingleQuery, whose reading clauses and
+// RETURN can then be walked by downstream stages.
+func ExampleParse_inspectAST() {
+	q, err := parser.Parse("MATCH (n:Person) RETURN n.name")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	sq, ok := q.(*ast.SingleQuery)
+	if !ok {
+		fmt.Printf("unexpected root: %T\n", q)
+		return
+	}
+
+	fmt.Println("reading clauses:", len(sq.ReadingClauses))
+	fmt.Println("has RETURN:", sq.Return != nil)
+	if _, isMatch := sq.ReadingClauses[0].(*ast.Match); isMatch {
+		fmt.Println("first clause: MATCH")
+	}
+	// Output:
+	// reading clauses: 1
+	// has RETURN: true
+	// first clause: MATCH
 }
