@@ -4391,9 +4391,17 @@ func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Valu
 		return v
 	}
 	rawProps := g.NodePropertiesByID(id)
-	props := make(expr.MapValue, len(rawProps))
-	for k, pv := range rawProps {
-		props[k] = lpgPropToExpr(pv)
+	// Skip the map allocation entirely for propertyless nodes: a nil MapValue
+	// reads identically to an empty one (missing-key access yields null,
+	// keys()/properties() range as empty, Bolt serialises {}). This removes one
+	// allocation per propertyless returned node — common in label-only and
+	// relationship-dense graphs.
+	var props expr.MapValue
+	if len(rawProps) > 0 {
+		props = make(expr.MapValue, len(rawProps))
+		for k, pv := range rawProps {
+			props[k] = lpgPropToExpr(pv)
+		}
 	}
 	labels := g.NodeLabelsByID(id)
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
@@ -4410,9 +4418,12 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 		return expr.NodeValue{ID: uint64(id)}
 	}
 	rawProps := g.NodePropertiesByID(id)
-	props := make(expr.MapValue, len(rawProps))
-	for k, pv := range rawProps {
-		props[k] = lpgPropToExpr(pv)
+	var props expr.MapValue
+	if len(rawProps) > 0 {
+		props = make(expr.MapValue, len(rawProps))
+		for k, pv := range rawProps {
+			props[k] = lpgPropToExpr(pv)
+		}
 	}
 	labels := g.NodeLabelsByID(id)
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
