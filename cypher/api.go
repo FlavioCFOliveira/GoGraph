@@ -4382,16 +4382,20 @@ func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Valu
 		return v
 	}
 	id := graph.NodeID(iv)
-	name, resolved := g.AdjList().Mapper().Resolve(id)
-	if !resolved {
+	// Resolve still gates identity: it distinguishes a genuine NodeID from a
+	// plain integer that merely falls in NodeID range. Once identity is
+	// confirmed we fetch properties and labels by NodeID, skipping the two
+	// internal external-key → NodeID lookups that NodeProperties/NodeLabels
+	// would otherwise perform — 3 Mapper ops per node collapse to 1.
+	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
 		return v
 	}
-	rawProps := g.NodeProperties(name)
+	rawProps := g.NodePropertiesByID(id)
 	props := make(expr.MapValue, len(rawProps))
 	for k, pv := range rawProps {
 		props[k] = lpgPropToExpr(pv)
 	}
-	labels := g.NodeLabels(name)
+	labels := g.NodeLabelsByID(id)
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }
 
@@ -4402,16 +4406,15 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 	if g == nil {
 		return expr.NodeValue{ID: uint64(id)}
 	}
-	name, resolved := g.AdjList().Mapper().Resolve(id)
-	if !resolved {
+	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
 		return expr.NodeValue{ID: uint64(id)}
 	}
-	rawProps := g.NodeProperties(name)
+	rawProps := g.NodePropertiesByID(id)
 	props := make(expr.MapValue, len(rawProps))
 	for k, pv := range rawProps {
 		props[k] = lpgPropToExpr(pv)
 	}
-	labels := g.NodeLabels(name)
+	labels := g.NodeLabelsByID(id)
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }
 

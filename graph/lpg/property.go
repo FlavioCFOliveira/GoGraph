@@ -3,6 +3,8 @@ package lpg
 import (
 	"sync"
 	"time"
+
+	"gograph/graph"
 )
 
 // PropertyKind tags a [PropertyValue] with its underlying Go type.
@@ -258,6 +260,31 @@ func (g *Graph[N, W]) NodeProperties(n N) map[string]PropertyValue {
 	if !ok {
 		return nil
 	}
+	s := g.nodePropShardFor(id)
+	s.mu.RLock()
+	bag, ok := s.m[id]
+	if !ok {
+		s.mu.RUnlock()
+		return nil
+	}
+	out := make(map[string]PropertyValue, len(bag))
+	for k, v := range bag {
+		if name, ok := g.propKeys().Resolve(k); ok {
+			out[name] = v
+		}
+	}
+	s.mu.RUnlock()
+	return out
+}
+
+// NodePropertiesByID is the NodeID-keyed counterpart of [Graph.NodeProperties].
+// It skips the external-key → NodeID Mapper lookup, so callers that already
+// hold the NodeID — chiefly the Cypher result-materialisation path, which
+// resolves the NodeID once for identity and then needs both properties and
+// labels — avoid a redundant Mapper round-trip per node. The returned map is a
+// fresh copy owned by the caller; it is nil when id has no recorded
+// properties. Concurrency-safe under the same contract as NodeProperties.
+func (g *Graph[N, W]) NodePropertiesByID(id graph.NodeID) map[string]PropertyValue {
 	s := g.nodePropShardFor(id)
 	s.mu.RLock()
 	bag, ok := s.m[id]

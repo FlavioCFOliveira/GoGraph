@@ -524,6 +524,28 @@ func (g *Graph[N, W]) NodeLabels(n N) []string {
 	return out
 }
 
+// NodeLabelsByID is the NodeID-keyed counterpart of [Graph.NodeLabels]. It
+// skips the external-key → NodeID Mapper lookup for callers that already hold
+// the NodeID (the Cypher result-materialisation path), returning the label
+// names in unspecified order, or nil when id carries no labels.
+func (g *Graph[N, W]) NodeLabelsByID(id graph.NodeID) []string {
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	bag, ok := sh.m[id]
+	if !ok {
+		sh.mu.RUnlock()
+		return nil
+	}
+	out := make([]string, 0, len(bag))
+	for lid := range bag {
+		if name, ok := g.reg.Resolve(lid); ok {
+			out = append(out, name)
+		}
+	}
+	sh.mu.RUnlock()
+	return out
+}
+
 // SetEdgeLabel attaches label to the directed edge (src, dst). The
 // edge must already exist in the underlying adjacency list; otherwise
 // the call is a no-op. The label is associated with the source
