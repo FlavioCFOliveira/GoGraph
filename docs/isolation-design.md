@@ -247,23 +247,49 @@ Delivered:
   lock-free CSR path); the lock-free per-shard snapshot below restores
   streaming and is the tracked optimisation.
 
-Remaining (each keeps the module green and the TCK at 3897):
+- **F3.4 (done).** The `index.Manager` hash/B-tree buffer is now committed by
+  `commitIndexUnderBarrier` inside the write's `ApplyAtomically` window (right
+  after materialize), so the graph and its secondary indexes flip atomically —
+  an IndexSeek read can no longer observe a transaction whose graph change is
+  visible but whose index change is not. The live roaring label bitmaps already
+  update inside the same window (`SetNodeLabel`/`SetEdgeLabel` run there). Lock
+  order `visMu → index` matches the read side (`View → index`), so no deadlock.
+- **F3.5 (satisfied by existing serialization).** The checkpointer holds the
+  store mutex for its whole snapshot+truncate window, and `Tx.Commit`/`RunInTx`
+  hold that same mutex from `Begin` to commit (with the apply nested inside), so
+  a checkpoint never runs during an apply and captures a consistent
+  transaction-boundary snapshot; F2 proved recovery reconstructs the full state
+  from it. The non-blocking LSN/watermark checkpoint (read a pinned view without
+  holding the store mutex) is the deferred optimisation.
+- **F3.6 (done).** Isolation proven by the invariant battery under `-race`:
+  `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (property atomicity,
+  power-checked), `lpg.TestIsolation_CrossSubstructure_EdgeImpliesLabels`
+  (adjacency+label atomicity), `txn.TestIsolation_Commit_NoPartialTransactionObservable`,
+  and `cypher.TestIsolation_Cypher_NoPartialWriteObservable` (concurrent
+  Cypher reads/writes, power-checked). TCK stays 3897; the barrier spawns no
+  goroutines (goleak-neutral).
 
-- **F3.4** — wire live secondary-index maintenance (`index.Manager.Apply`, never
-  called from a live write today) and ensure it occurs inside the same
-  `ApplyAtomically` window so indexes flip atomically with the graph. (The live
-  roaring label bitmaps already update inside the write's `ApplyAtomically`
-  window, since `SetNodeLabel`/`SetEdgeLabel` run there; the `index.Manager`
-  hash/B-tree buffer is still committed at `Result.Close`, just after the
-  barrier — the remaining window F3.4 closes.)
-- **F3.5** — checkpoint/recovery read a consistent view (checkpoint under the
-  store mutex already excludes writers; confirm it composes with the barrier).
-- **F3.6** — invariant/`rapid`/soak battery + `benchstat`/TCK regression gate.
+### Performance trade-off and the optimisation path
 
-The lock-free per-shard snapshot (Approach 1c above) remains the documented
-performance end-state, tracked as a follow-up optimisation: it removes the
-barrier's reader/writer mutual exclusion in favour of an `atomic.Pointer`
-swap, without changing the externally-observed isolation contract.
+The barrier is correctness-first and has two documented costs, both on the
+**mutable-graph transactional** path only (the immutable-CSR analytics path is
+untouched and stays lock-free):
+
+1. **Reader/writer mutual exclusion.** A write query holds the visibility write
+   lock for its execution, excluding concurrent transactional readers (and vice
+   versa). Under the single-writer model writers are already serialised; this
+   adds reader exclusion during a write.
+2. **Materialisation allocations.** Cypher queries now buffer their result rows
+   (one shallow `Record` copy per row) instead of reusing a single streaming
+   `Record`, adding `O(rows)` allocations per query and holding the full result
+   in memory. Acceptable for transactional queries; unbounded result streaming
+   is not preserved.
+
+Both costs are removed by the **lock-free per-shard snapshot** (Approach 1c
+above): readers pin an `atomic.Pointer[Snapshot]` (no lock, no materialisation,
+streaming preserved, no reader/writer exclusion) and the writer swaps it once
+per commit. That is the tracked performance end-state; it does not change the
+externally-observed isolation contract this barrier already guarantees.
 
 ## References
 

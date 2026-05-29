@@ -8,6 +8,86 @@ import (
 	"gograph/graph/adjlist"
 )
 
+// TestIsolation_CrossSubstructure_EdgeImpliesLabels proves the barrier flips a
+// transaction's writes across DIFFERENT substructures (adjacency + node labels)
+// atomically. Each transaction toggles between two consistent states —
+// {edge u→v present, u:Hot, v:Hot} and {no edge, no labels} — so the invariant
+// "HasEdge(u,v) ⇔ HasNodeLabel(u,Hot) ⇔ HasNodeLabel(v,Hot)" must hold on every
+// pinned read. A reader observing the edge without a label (or vice versa)
+// would have seen a partial transaction across substructures. Run under -race.
+func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
+	t.Parallel()
+
+	g := New[string, int64](adjlist.Config{Directed: true})
+	// Intern u, v up front so the toggling only adds/removes the edge + labels.
+	if err := g.AddNode("u"); err != nil {
+		t.Fatalf("AddNode u: %v", err)
+	}
+	if err := g.AddNode("v"); err != nil {
+		t.Fatalf("AddNode v: %v", err)
+	}
+
+	const (
+		toggles = 40000
+		readers = 8
+	)
+	var (
+		wg        sync.WaitGroup
+		done      atomic.Bool
+		violation atomic.Int64
+		reads     atomic.Int64
+	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer done.Store(true)
+		present := false
+		for i := 0; i < toggles; i++ {
+			want := !present
+			_ = g.ApplyAtomically(func() error {
+				if want {
+					_ = g.AddEdge("u", "v", 0)
+					_ = g.SetNodeLabel("u", "Hot")
+					_ = g.SetNodeLabel("v", "Hot")
+				} else {
+					g.AdjList().RemoveEdge("u", "v")
+					g.RemoveNodeLabel("u", "Hot")
+					g.RemoveNodeLabel("v", "Hot")
+				}
+				return nil
+			})
+			present = want
+		}
+	}()
+
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for !done.Load() {
+				g.View(func() {
+					e := g.AdjList().HasEdge("u", "v")
+					lu := g.HasNodeLabel("u", "Hot")
+					lv := g.HasNodeLabel("v", "Hot")
+					reads.Add(1)
+					if e != lu || e != lv {
+						violation.Add(1)
+					}
+				})
+			}
+		}()
+	}
+
+	wg.Wait()
+	if v := violation.Load(); v != 0 {
+		t.Fatalf("observed %d cross-substructure violations (edge/label disagreement inside a pinned View)", v)
+	}
+	if reads.Load() == 0 {
+		t.Fatal("readers never read; test did not exercise the invariant")
+	}
+}
+
 // TestIsolation_ApplyAtomically_View_NoPartialReads stress-tests the F3
 // transaction-visibility barrier (docs/isolation-design.md) directly on the
 // lpg mechanism, with no WAL/I/O so it can run many iterations.
