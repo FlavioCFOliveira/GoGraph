@@ -330,7 +330,7 @@ ORDER BY component
 MATCH (d:Developer {key:$dev})-[a:ASSIGNED_TO]->(t:Task)
 WHERE t.status <> 'done' AND a.state <> 'done'
 RETURN t.key AS task, t.title AS title, t.status AS status, t.priority AS priority, a.role AS role
-ORDER BY t.priority DESC
+ORDER BY priority DESC
 ```
 
 **Q5 — What is blocked, and why (transitive chain).** *Which open tasks are
@@ -368,7 +368,7 @@ ORDER BY componentOnCycle
 MATCH (dev:Developer)-[:ASSIGNED_TO]->(t:Task)-[r:TOUCHES]->(c:Component {key:$k})
 RETURN dev.key AS developer, t.key AS task,
        r.change_type AS change, r.churn AS churn, r.at AS at
-ORDER BY r.at DESC
+ORDER BY at DESC
 ```
 
 Queries Q1, Q5 and Q7 rely on variable-length paths (`DEPENDS_ON*` / `BLOCKS*`).
