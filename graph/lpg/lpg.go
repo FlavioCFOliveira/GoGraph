@@ -152,6 +152,18 @@ type Graph[N comparable, W any] struct {
 	// (Merge5 [3]). See edge_create_count.go for full semantics.
 	edgeCreateCountShards [propMapShards]edgeCreateCountShard
 
+	// edgeInstanceLabelShards / edgeInstancePropShards carry the
+	// per-CREATE-instance label and property sets so each parallel
+	// CREATE call can supply its own attributes independent of the
+	// merged-union view the per-pair stores keep. The instance index
+	// is the 1-based value returned by IncEdgeCreateCount; CreateRelationship
+	// writes through both stores so the per-pair surfaces stay
+	// untouched while the per-instance surfaces unlock Match2 [6] /
+	// Match7 [29] / Merge5 [21] / Match6 [14]. See
+	// edge_instance_labels.go and edge_instance_props.go.
+	edgeInstanceLabelShards [propMapShards]edgeInstanceLabelShard
+	edgeInstancePropShards  [propMapShards]edgeInstancePropShard
+
 	// tombstones records NodeIDs that have been removed by RemoveNode.
 	// The underlying Mapper cannot release the index slot (NodeID stability
 	// is a hard contract), so removal is observable only via this set:

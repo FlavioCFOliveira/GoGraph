@@ -158,7 +158,10 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	// `MATCH (a:A),(b:B) MERGE (a)-[r:T]->(b) RETURN count(r)` must
 	// see one row per CREATE statement, not one per distinct storage
 	// entry (Merge5 [3]).
-	op.mutator.IncEdgeCreateCount(srcLabel, dstLabel)
+	instanceIdx := op.mutator.IncEdgeCreateCount(srcLabel, dstLabel)
+	if op.relType != "" {
+		op.mutator.SetEdgeLabelAt(srcLabel, dstLabel, instanceIdx, op.relType)
+	}
 
 	props := mergeProps(op.props, op.propsExprFn, childRow)
 
@@ -166,6 +169,7 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		if err := op.mutator.SetEdgeProperty(srcLabel, dstLabel, p.key, p.value); err != nil {
 			return false, fmt.Errorf("exec: CreateRelationship SetEdgeProperty %q: %w", p.key, err)
 		}
+		op.mutator.SetEdgePropertyAt(srcLabel, dstLabel, instanceIdx, p.key, p.value)
 	}
 
 	if op.relVar == "" {

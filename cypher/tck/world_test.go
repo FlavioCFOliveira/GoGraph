@@ -45,7 +45,7 @@ type world struct {
 
 // newWorld allocates a fresh world backed by an empty directed graph.
 func newWorld() *world {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	return &world{g: g, eng: cypher.NewEngine(g)}
 }
 
@@ -59,7 +59,7 @@ func (w *world) givenAnEmptyGraph(_ context.Context) error {
 		w.queryCancel()
 		w.queryCancel = nil
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	w.g = g
 	w.eng = cypher.NewEngine(g)
 	w.result = nil

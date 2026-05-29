@@ -4676,6 +4676,20 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 					storageStart, storageEnd = dstID, srcID
 				}
 			}
+			// Per-instance label override: when the CSR slot at
+			// edgeIDVal corresponds to a specific parallel CREATE
+			// (multigraph mode), narrow the edge's type to that
+			// CREATE's label set. The per-pair property union is
+			// kept so SET / REMOVE / `r.foo` reflect the live edge
+			// state — only the type label benefits from
+			// per-instance specialisation (Match2 [6] / Match7 [29]
+			// / MatchWhere1 [11]).
+			instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(g, srcKey, dstKey, uint64(edgeIDVal))
+			if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
+				if perInstance := g.EdgeLabelsAt(srcKey, dstKey, instanceIdx); len(perInstance) > 0 {
+					ets = perInstance
+				}
+			}
 			if len(ets) > 0 {
 				edgeType = pickEdgeType(ets, meta.acceptedTypes)
 			}
@@ -4692,6 +4706,66 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 		Type:       edgeType,
 		Properties: edgeProps,
 	}, true
+}
+
+// edgeInstanceIdxFor returns the 1-based per-CREATE instance index that
+// the CSR slot at edgePos corresponds to, together with the total
+// CREATE count for (srcKey, dstKey) and the number of parallel CSR
+// entries for that pair. Returns 0 / 0 / 0 when the position is out of
+// range or either endpoint is unknown to the mapper.
+//
+// Multigraph storage records one parallel CSR slot per CREATE, so
+// counting how many earlier entries (in the src's adjacency range)
+// share the same dst — up to and including edgePos — yields the
+// CREATE-time instance idx. Simple-graph storage collapses every
+// parallel CREATE onto one slot, so parallelCount stays at 1 and
+// callers fall back to the per-pair union surfaces.
+func edgeInstanceIdxFor(g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
+	totalCreates = g.EdgeCreateCount(srcKey, dstKey)
+	if totalCreates == 0 {
+		return 0, 0, 0
+	}
+	adj := g.AdjList()
+	srcID, ok := adj.Mapper().Lookup(srcKey)
+	if !ok {
+		return 0, totalCreates, 0
+	}
+	dstID, ok := adj.Mapper().Lookup(dstKey)
+	if !ok {
+		return 0, totalCreates, 0
+	}
+	fwdCSR := csr.BuildFromAdjList(adj)
+	verts := fwdCSR.VerticesSlice()
+	edges := fwdCSR.EdgesSlice()
+	if uint64(srcID)+1 >= uint64(len(verts)) {
+		return 0, totalCreates, 0
+	}
+	start := verts[uint64(srcID)]
+	end := verts[uint64(srcID)+1]
+	if edgePos < start || edgePos >= end {
+		return 0, totalCreates, 0
+	}
+	for pos := start; pos <= edgePos; pos++ {
+		if pos >= uint64(len(edges)) {
+			break
+		}
+		if edges[pos] == dstID {
+			parallelCount++
+		}
+	}
+	// parallelCount now equals the index of edgePos within (srcID, dstID)
+	// parallel entries (1-based). Also count remaining occurrences so
+	// the caller knows the total parallel storage entries for the pair.
+	total := parallelCount
+	for pos := edgePos + 1; pos < end; pos++ {
+		if pos >= uint64(len(edges)) {
+			break
+		}
+		if edges[pos] == dstID {
+			total++
+		}
+	}
+	return parallelCount, totalCreates, total
 }
 
 // pickEdgeType chooses the rel-type label to surface for a stored edge.
@@ -6007,11 +6081,32 @@ func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
 
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
-func (a *lpgMutatorAdapter) IncEdgeCreateCount(src, dst string) { a.g.IncEdgeCreateCount(src, dst) }
+func (a *lpgMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	return a.g.IncEdgeCreateCount(src, dst)
+}
 func (a *lpgMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) { a.g.DecEdgeCreateCount(src, dst) }
+
+// SetEdgeLabelAt / EdgeLabelsAt / SetEdgePropertyAt / EdgePropertiesAt /
+// RemoveEdgeInstance delegate to the per-instance metadata stores on
+// the underlying [lpg.Graph].
+func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
+	a.g.SetEdgeLabelAt(src, dst, idx, label)
+}
+func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
+	return a.g.EdgeLabelsAt(src, dst, idx)
+}
+func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) {
+	a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+}
+func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
+	return a.g.EdgePropertiesAt(src, dst, idx)
+}
+func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
+	a.g.RemoveEdgeInstance(src, dst, idx)
+}
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
@@ -6300,11 +6395,32 @@ func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
 
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
-func (a *walMutatorAdapter) IncEdgeCreateCount(src, dst string) { a.g.IncEdgeCreateCount(src, dst) }
+func (a *walMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	return a.g.IncEdgeCreateCount(src, dst)
+}
 func (a *walMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) { a.g.DecEdgeCreateCount(src, dst) }
+
+// SetEdgeLabelAt / EdgeLabelsAt / SetEdgePropertyAt / EdgePropertiesAt /
+// RemoveEdgeInstance delegate to the per-instance metadata stores on
+// the underlying [lpg.Graph].
+func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
+	a.g.SetEdgeLabelAt(src, dst, idx, label)
+}
+func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
+	return a.g.EdgeLabelsAt(src, dst, idx)
+}
+func (a *walMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) {
+	a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+}
+func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
+	return a.g.EdgePropertiesAt(src, dst, idx)
+}
+func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
+	a.g.RemoveEdgeInstance(src, dst, idx)
+}
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *walMutatorAdapter) OutNeighbours(n string) []string {
@@ -6478,12 +6594,45 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 		if !ok {
 			continue
 		}
+		// Per-dst parallel-occurrence counter so each parallel edge in
+		// multigraph mode maps to its own CREATE-instance idx (Match2
+		// [6] / Match7 [29]). Simple-graph mode collapses parallel
+		// CREATEs into a single CSR entry, so the counter stays at 1
+		// and the lookup naturally degrades to the per-pair union.
+		// First pass: count parallel CSR occurrences per dst so we
+		// can tell whether the storage is operating in multigraph
+		// (N_csr == N_create) or simple-graph (N_csr < N_create)
+		// mode for each pair. In simple-graph mode every CSR slot
+		// must surface the UNION of all CREATE instance labels; in
+		// multigraph mode each slot maps to exactly one instance.
+		dstParallelTotal := make(map[graph.NodeID]int64, end-start)
 		for pos := start; pos < end; pos++ {
-			dstStr, ok := mapper.Resolve(edges[pos])
+			dstParallelTotal[edges[pos]]++
+		}
+		dstSeen := make(map[graph.NodeID]int64, len(dstParallelTotal))
+		for pos := start; pos < end; pos++ {
+			dst := edges[pos]
+			dstStr, ok := mapper.Resolve(dst)
 			if !ok {
 				continue
 			}
-			labels := g.EdgeLabels(srcStr, dstStr)
+			dstSeen[dst]++
+			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
+			parallel := dstParallelTotal[dst]
+			var labels []string
+			if parallel >= totalCreates && totalCreates > 0 {
+				// Multigraph: one CSR slot per CREATE. Use the
+				// per-instance label set for this specific slot.
+				labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
+			} else {
+				// Simple-graph (or no per-instance store): merge every
+				// instance's labels with the per-pair union so a
+				// filter targeting any CREATE's label still matches.
+				labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
+			}
+			if len(labels) == 0 {
+				labels = g.EdgeLabels(srcStr, dstStr)
+			}
 			if len(labels) == 0 {
 				continue
 			}
@@ -6503,6 +6652,27 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 		}
 	}
 	return filter
+}
+
+// collectAllInstanceLabels returns the union of every per-CREATE label
+// recorded for (srcStr, dstStr) over instance indices 1..totalCreates.
+// Used by simple-graph filter construction, where one CSR slot must
+// service every collapsed CREATE.
+func collectAllInstanceLabels(g *lpg.Graph[string, float64], srcStr, dstStr string, totalCreates int64) []string {
+	if totalCreates <= 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for i := int64(1); i <= totalCreates; i++ {
+		for _, l := range g.EdgeLabelsAt(srcStr, dstStr, i) {
+			if _, ok := seen[l]; !ok {
+				seen[l] = struct{}{}
+				out = append(out, l)
+			}
+		}
+	}
+	return out
 }
 
 // irDirToExec converts an IR Direction to the corresponding exec Direction.

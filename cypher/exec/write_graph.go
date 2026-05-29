@@ -100,13 +100,15 @@ type GraphMutator interface {
 	EdgeLabels(src, dst string) []string
 
 	// IncEdgeCreateCount bumps the Cypher CREATE-call multiplicity
-	// counter for the directed edge (src, dst) by one. The counter
-	// records how many CREATE statements have targeted the same
-	// endpoint pair regardless of whether the underlying storage
-	// already had an entry — MERGE consults it to emit
-	// multiplicity rows when an existing edge satisfies the merge
-	// pattern (Merge5 [3]).
-	IncEdgeCreateCount(src, dst string)
+	// counter for the directed edge (src, dst) by one and returns the
+	// new (1-based) value. The counter records how many CREATE
+	// statements have targeted the same endpoint pair regardless of
+	// whether the underlying storage already had an entry — MERGE
+	// consults it to emit multiplicity rows when an existing edge
+	// satisfies the merge pattern (Merge5 [3]). The returned index is
+	// the per-instance idx callers pass to the *At family of
+	// metadata-write helpers.
+	IncEdgeCreateCount(src, dst string) int64
 	// EdgeCreateCount returns the current CREATE-call multiplicity
 	// counter for the directed edge (src, dst), or 0 when no CREATE
 	// has been recorded.
@@ -115,6 +117,27 @@ type GraphMutator interface {
 	// counter (floor 0). Called by DELETE so subsequent MERGEs see
 	// the correct multiplicity.
 	DecEdgeCreateCount(src, dst string)
+	// SetEdgeLabelAt attaches `label` to the directed edge instance
+	// (src, dst) at the supplied 1-based CREATE index. Used by
+	// CreateRelationship so parallel CREATEs of the same endpoint
+	// pair retain their distinct labels (Match2 [6] / Match7 [29]).
+	SetEdgeLabelAt(src, dst string, idx int64, label string)
+	// EdgeLabelsAt returns the labels recorded at instance `idx` of
+	// the directed edge (src, dst), or nil when the instance has no
+	// per-CREATE labels.
+	EdgeLabelsAt(src, dst string, idx int64) []string
+	// SetEdgePropertyAt records `key`=`value` on the directed edge
+	// instance (src, dst) at the supplied 1-based CREATE index.
+	SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue)
+	// EdgePropertiesAt returns the property map recorded at instance
+	// `idx` of the directed edge (src, dst), or nil when no
+	// per-CREATE map was captured.
+	EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue
+	// RemoveEdgeInstance drops every per-CREATE label and property
+	// associated with (src, dst) at `idx`. Used by DELETE to discard
+	// a specific logical edge while leaving sibling instances
+	// untouched.
+	RemoveEdgeInstance(src, dst string, idx int64)
 
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.

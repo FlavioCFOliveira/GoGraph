@@ -1841,10 +1841,33 @@ import (
 //     stable at 3895/3897 (99.95%). Gate set at 3895 with 0
 //     headroom.
 //
+//   - 3896: ratcheted after round 63 — per-CREATE edge label
+//     storage plus Multigraph adjlist in the TCK harness. New
+//     edgeInstanceLabelShards / edgeInstancePropShards on
+//     lpg.Graph keep per-CREATE-call label and property sets keyed
+//     by the IncEdgeCreateCount-derived 1-based idx. CreateRelationship
+//     writes to both the per-pair and per-instance stores; the
+//     per-pair surfaces stay untouched so SET / REMOVE / property
+//     reads keep working unchanged. buildEdgeTypeFilter consults
+//     the per-instance store when each CSR slot maps 1:1 to a
+//     CREATE (multigraph) and falls back to the union of every
+//     instance's labels in simple-graph mode.
+//     buildRelationshipValueFromRow narrows the emitted
+//     RelationshipValue.Type to the per-CREATE label set when in
+//     multigraph mode so `type(r)` distinguishes parallel edges
+//     created with different types (closes Match2 [6] /
+//     Match7 [29] / MatchWhere1 [11] regressions that surface when
+//     Multigraph is enabled). TCK world now constructs the LPG
+//     with Multigraph: true so parallel CREATEs of the same
+//     (src, dst) materialise as distinct adjacency entries, and
+//     Merge5 [21] / Match7 [29] / Unwind1 [12] match the
+//     openCypher-expected row counts. 5-run sample stable at
+//     3896/3897 (99.97%). Gate set at 3896 with 0 headroom.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3895
+const tckExecutionBaseline = 3896
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

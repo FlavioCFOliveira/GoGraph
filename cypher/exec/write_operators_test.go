@@ -223,12 +223,20 @@ func (s *stubMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyVal
 	return out
 }
 
-// IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount are inert in
-// the stub: the write-operator tests do not exercise multi-edge
-// MERGE semantics.
-func (s *stubMutator) IncEdgeCreateCount(string, string)    {}
-func (s *stubMutator) EdgeCreateCount(string, string) int64 { return 0 }
-func (s *stubMutator) DecEdgeCreateCount(string, string)    {}
+// IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount and the
+// per-instance metadata stubs are inert: the write-operator tests do
+// not exercise multi-edge MERGE / parallel-CREATE semantics.
+func (s *stubMutator) IncEdgeCreateCount(string, string) int64 { return 0 }
+func (s *stubMutator) EdgeCreateCount(string, string) int64    { return 0 }
+func (s *stubMutator) DecEdgeCreateCount(string, string)       {}
+func (s *stubMutator) SetEdgeLabelAt(string, string, int64, string) {}
+func (s *stubMutator) EdgeLabelsAt(string, string, int64) []string  { return nil }
+func (s *stubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) {
+}
+func (s *stubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg.PropertyValue {
+	return nil
+}
+func (s *stubMutator) RemoveEdgeInstance(string, string, int64) {}
 
 // EdgeLabels returns the edge labels for (src, dst). Reads from the
 // edgeLabel set populated by SetEdgeLabel; returns nil when absent.
