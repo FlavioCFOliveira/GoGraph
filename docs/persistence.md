@@ -607,23 +607,47 @@ new WAL frames between snapshot capture and WAL truncation:
 1. Acquire the store mutex.
 2. Build a CSR from the current adjacency list.
 3. Write `snapshot/` atomically via the `.tmp` + `os.Rename`
-   protocol documented above.
-4. Call `wal.Writer.Sync` so the WAL is in a defined state.
-5. Call `wal.Writer.Truncate` to reclaim the WAL prefix now
-   covered by the snapshot. The reclaimed byte count is recorded
-   on the lifetime counter `Stats.WALTruncBytes` and emitted via
-   the observability metric
-   `store.checkpoint.wal_truncated_bytes`.
-6. Release the store mutex.
+   protocol documented above, using `snapshot.WriteSnapshotFull`
+   so the snapshot is a **self-sufficient** image of committed
+   state: CSR adjacency *plus* `labels.bin`, `properties.bin`,
+   registered indexes, and — for string-keyed graphs — `mapper.bin`
+   (the durable `NodeID→key` table).
+4. Determine whether the snapshot is self-sufficient — i.e. whether
+   its manifest carries `mapper.bin`, the only file that lets
+   recovery rebuild the `NodeID→key` mapping *without* the WAL.
+5. Call `wal.Writer.Sync` so the WAL is in a defined state.
+6. If the snapshot is self-sufficient, call `wal.Writer.Truncate`
+   to reclaim the WAL prefix now folded into the snapshot. The
+   reclaimed byte count is recorded on `Stats.WALTruncBytes` and
+   emitted via `store.checkpoint.wal_truncated_bytes`.
+   If it is **not** self-sufficient (a non-string key type, for
+   which `mapper.bin` is not yet written), truncation is **skipped**
+   and the WAL is retained — truncating it would erase the only
+   durable copy of the `NodeID→key` mapping and destroy committed
+   data. The skip is surfaced via
+   `store.checkpoint.truncate_skipped_not_self_sufficient`.
+7. Release the store mutex.
 
-The lock-during-IO trade-off is acknowledged in
-`checkpoint.go:223-230`: for very large graphs this can stall
-writers and may be reworked later to a position-tracked truncate
-(capture LSN under lock, write snapshot lock-free, truncate
-up-to-LSN under lock). For v1 the simple correctness-first path
-is preferred and produces a strictly bounded WAL: at most one
-checkpoint interval of frames live on disk between successful
-runs.
+Why this matters (audit gap F2, see `docs/acid-audit.md`): the
+v1.0 checkpoint wrote a *CSR-only* snapshot and then truncated the
+WAL unconditionally. Because a CSR-only snapshot carries neither
+labels/properties nor a mapper, recovery after such a checkpoint
+lost every committed label and property and could not even
+reconstruct the adjacency by key — a **Durability** violation. The
+self-sufficient snapshot plus the truncate-only-when-self-sufficient
+guard close that gap for every key type: a committed transaction
+always survives a checkpoint.
+
+Non-string key types currently take the WAL-retained path (no
+truncation), so their WAL is not reclaimed by the checkpointer yet;
+extending `mapper.bin` to all key types (so non-string checkpoints
+can also truncate) is tracked as a follow-up operational improvement
+and does not affect the Durability guarantee.
+
+The lock-during-IO trade-off is acknowledged in `checkpoint.go`:
+for very large graphs this can stall writers and may be reworked
+later to a position-tracked truncate (capture LSN under lock, write
+snapshot lock-free, truncate up-to-LSN under lock).
 
 ## Recovery procedure
 

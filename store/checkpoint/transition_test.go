@@ -78,19 +78,22 @@ func TestCheckpoint_TransitionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot.Open: %v", err)
 	}
-	// The checkpointer uses WriteSnapshotCSR (v1 legacy writer).
-	if loaded.Manifest.Version != 1 {
-		t.Fatalf("manifest version %d, want 1", loaded.Manifest.Version)
+	// The checkpointer now writes a self-sufficient v3 snapshot
+	// (WriteSnapshotFull with mapper.bin) before truncating the WAL —
+	// the F2 durability fix (docs/acid-audit.md).
+	if loaded.Manifest.Version != snapshot.ManifestVersion {
+		t.Fatalf("manifest version %d, want %d", loaded.Manifest.Version, snapshot.ManifestVersion)
 	}
 	// 5 edges must be encoded in the CSR edge array.
 	if got := len(loaded.CSR.Edges); got != len(edges) {
 		t.Fatalf("CSR edge count = %d, want %d", got, len(edges))
 	}
 
-	// recovery.OpenString must recognise the snapshot directory even
-	// though it cannot reconstruct string-keyed edges from a v1 CSR
-	// (no mapper.bin). The important invariant: no error, SnapshotHit
-	// is true, WALOps is 0 (WAL was truncated by the checkpoint).
+	// recovery.OpenString reconstructs the full string-keyed graph from
+	// the self-sufficient snapshot ALONE: mapper.bin restores the
+	// NodeID->key table, so all 5 edges are recoverable by key with the
+	// WAL truncated (WALOps == 0). Before F2 a v1 CSR-only snapshot could
+	// not reconstruct string-keyed edges and they were silently lost.
 	res, err := recovery.OpenString(dir)
 	if err != nil {
 		t.Fatalf("recovery.OpenString: %v", err)
@@ -98,7 +101,15 @@ func TestCheckpoint_TransitionRecovery(t *testing.T) {
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit = false after checkpoint")
 	}
-	if res.SnapshotSchemaVersion != 1 {
-		t.Fatalf("SnapshotSchemaVersion = %d, want 1", res.SnapshotSchemaVersion)
+	if res.SnapshotSchemaVersion != snapshot.ManifestVersion {
+		t.Fatalf("SnapshotSchemaVersion = %d, want %d", res.SnapshotSchemaVersion, snapshot.ManifestVersion)
+	}
+	if res.WALOps != 0 {
+		t.Fatalf("WALOps = %d, want 0 (WAL truncated; state from snapshot)", res.WALOps)
+	}
+	for _, e := range edges {
+		if !res.Graph.AdjList().HasEdge(e[0], e[1]) {
+			t.Errorf("edge %s->%s not reconstructed from self-sufficient snapshot", e[0], e[1])
+		}
 	}
 }

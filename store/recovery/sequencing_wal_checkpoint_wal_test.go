@@ -17,28 +17,26 @@ import (
 // write→checkpoint→write→recovery sequence:
 //
 //  1. Write 5 edges via txn commits to the WAL.
-//  2. Trigger a checkpoint (creates a v1 CSR-only snapshot, truncates WAL).
+//  2. Trigger a checkpoint (writes a self-sufficient snapshot, truncates WAL).
 //  3. Write 3 more edges via txn commits to the truncated WAL.
 //  4. Close WAL and checkpointer.
-//  5. Call recovery.OpenString and assert that the graph contains all
+//  5. Call recovery.OpenString and assert that the graph contains ALL
 //     8 distinct edges (5 pre-checkpoint + 3 post-checkpoint).
 //
-// The snapshot written by the checkpointer is a v1 CSR-only snapshot
-// (WriteSnapshotCSR). Recovery replays the post-checkpoint WAL
-// on top of the snapshot to reconstruct the full graph. Because v1
-// snapshots carry no mapper.bin, recovery rebuilds the mapper solely
-// from the WAL ops — the 3 post-checkpoint edges. The 5 pre-checkpoint
-// edges are encoded in the CSR edge array but the NodeID→string
-// mapping is lost; those edges are therefore NOT restorable by string
-// key from a v1 snapshot. This is the documented v1 limitation.
+// The checkpointer now writes a self-sufficient v3 snapshot for
+// string-keyed graphs (WriteSnapshotFull: CSR + labels + properties +
+// mapper.bin). Because the snapshot carries the NodeID→string mapper,
+// the 5 pre-checkpoint edges survive truncation and are reconstructed
+// from the snapshot ALONE; the 3 post-checkpoint edges are then layered
+// on by replaying the post-checkpoint WAL tail. This is the Durability
+// fix for audit gap F2 (docs/acid-audit.md): before the fix the
+// checkpoint wrote a v1 CSR-only snapshot and the 5 pre-checkpoint edges
+// were permanently lost — a committed transaction did not survive a
+// checkpoint.
 //
 // We therefore assert:
 //   - SnapshotHit == true
-//   - WALOps == number of ops committed after the checkpoint
-//   - The 3 post-checkpoint edges are present in the recovered graph.
-//
-// This test confirms the overall sequence works without error and the
-// post-checkpoint WAL replay completes correctly.
+//   - All 8 edges (5 pre-checkpoint + 3 post-checkpoint) are present.
 func TestSequencing_WALCheckpointWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -111,7 +109,14 @@ func TestSequencing_WALCheckpointWAL(t *testing.T) {
 		t.Fatalf("WALOps = %d, want >= %d (post-checkpoint edges)", res.WALOps, len(postEdges))
 	}
 
-	// All 3 post-checkpoint edges must be recoverable from the WAL replay.
+	// Durability (F2): ALL 8 edges must survive — the 5 pre-checkpoint
+	// edges from the self-sufficient snapshot and the 3 post-checkpoint
+	// edges from the WAL tail replay.
+	for _, e := range preEdges {
+		if !res.Graph.AdjList().HasEdge(e[0], e[1]) {
+			t.Errorf("pre-checkpoint edge %s->%s missing — committed data lost across checkpoint", e[0], e[1])
+		}
+	}
 	for _, e := range postEdges {
 		if !res.Graph.AdjList().HasEdge(e[0], e[1]) {
 			t.Errorf("post-checkpoint edge %s->%s missing from recovered graph", e[0], e[1])

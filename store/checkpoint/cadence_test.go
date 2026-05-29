@@ -39,11 +39,15 @@ func TestCheckpoint_Cadence_TimeBased(t *testing.T) {
 	cp.Start(ctx)
 	defer cp.Stop()
 
-	// Sleep long enough for the ticker to fire at least twice.
-	// MaxAge=50ms with the default Interval=MaxAge/4=12.5ms rounded up
-	// to 13ms: within 200ms we expect at least 3–4 ticks that each
-	// qualify for a checkpoint.
-	time.Sleep(200 * time.Millisecond)
+	// Sleep long enough for the ticker to fire at least twice. MaxAge=50ms
+	// with the default Interval=MaxAge/4=13ms. Each checkpoint now writes a
+	// self-sufficient snapshot (CSR + labels + properties + mapper, several
+	// fsyncs) per the F2 durability fix, so a single checkpoint can take
+	// tens of ms on a real disk; the window is sized generously so the
+	// time-based trigger reliably fires more than once regardless of
+	// per-checkpoint I/O cost. This test asserts repeated triggering, not
+	// throughput.
+	time.Sleep(time.Second)
 	cp.Stop()
 
 	if got := cp.Stats().Checkpoints; got < 2 {

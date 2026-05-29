@@ -10,6 +10,7 @@ import (
 	"gograph/graph/lpg"
 	"gograph/store/checkpoint"
 	"gograph/store/recovery"
+	"gograph/store/snapshot"
 	"gograph/store/wal"
 )
 
@@ -99,16 +100,20 @@ func TestSequencing_BulkCheckpointSnapshotRecovery(t *testing.T) {
 		t.Fatal("SnapshotHit = false after checkpoint")
 	}
 
-	// The checkpointer uses WriteSnapshotCSR (v1 CSR-only). A v1 snapshot
-	// does not carry mapper.bin so recovery cannot reconstruct string-keyed
-	// edges from the snapshot alone. We verify instead that the snapshot
-	// was found and the graph order is reported correctly from the raw CSR
-	// node count.
-	//
-	// Callers that need full edge reconstruction across recovery should
-	// use WriteSnapshotFull (v2/v3) — see TestLoader_RecoveryEqual.
-	if res.SnapshotSchemaVersion != 1 {
-		t.Fatalf("SnapshotSchemaVersion = %d, want 1 (WriteSnapshotCSR)", res.SnapshotSchemaVersion)
+	// The checkpointer now writes a self-sufficient v3 snapshot
+	// (WriteSnapshotFull with mapper.bin) — the F2 durability fix
+	// (docs/acid-audit.md). All 20 string-keyed edges are reconstructed
+	// from the snapshot ALONE: no WAL frames were written, so WALOps == 0.
+	if res.SnapshotSchemaVersion != snapshot.ManifestVersion {
+		t.Fatalf("SnapshotSchemaVersion = %d, want %d (self-sufficient snapshot)", res.SnapshotSchemaVersion, snapshot.ManifestVersion)
+	}
+	if res.WALOps != 0 {
+		t.Fatalf("WALOps = %d, want 0 (no WAL frames; state from snapshot)", res.WALOps)
+	}
+	for _, e := range edges {
+		if !res.Graph.AdjList().HasEdge(e.Src, e.Dst) {
+			t.Errorf("edge %s->%s not reconstructed from self-sufficient snapshot", e.Src, e.Dst)
+		}
 	}
 	if cp.Stats().Checkpoints < 1 {
 		t.Fatalf("Checkpoints = %d, want >= 1", cp.Stats().Checkpoints)

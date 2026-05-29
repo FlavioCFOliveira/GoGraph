@@ -233,13 +233,43 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 
 	cs := csr.BuildFromAdjList(c.g.AdjList())
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
-	if err := snapshot.WriteSnapshotCSR(snapDir, cs); err != nil {
+	// Durability invariant (audit gap F2): the snapshot MUST be a
+	// self-sufficient image of the committed state — CSR adjacency PLUS
+	// labels, properties, indexes, and (for string keys) the NodeID->key
+	// mapper — before the WAL is truncated. The legacy WriteSnapshotCSR
+	// captured adjacency only, so truncating the WAL afterwards destroyed
+	// every committed label/property and, because v1 snapshots carry no
+	// mapper, the NodeID->key mapping too: recovery then yielded an empty
+	// graph. WriteSnapshotFull writes a self-sufficient v3 snapshot for
+	// string-keyed graphs (the production key type). For non-string keys
+	// it still emits a v2 snapshot without a mapper, which is NOT
+	// self-sufficient after truncation; runCheckpoint guards against that
+	// data loss below by refusing to truncate when the snapshot cannot
+	// stand alone. See docs/acid-audit.md (F2).
+	if err := snapshot.WriteSnapshotFull(snapDir, cs, c.g); err != nil {
+		c.setErr(err)
+		return err
+	}
+	selfSufficient, err := snapshotIsSelfSufficient(snapDir)
+	if err != nil {
 		c.setErr(err)
 		return err
 	}
 	if err := c.wlog.Sync(); err != nil {
 		c.setErr(err)
 		return err
+	}
+	if !selfSufficient {
+		// The snapshot cannot reconstruct the graph on its own (no
+		// mapper.bin for this key type), so truncating the WAL would lose
+		// committed data. Skip truncation: the WAL is retained and replayed
+		// on top of the snapshot at recovery, preserving Durability at the
+		// cost of unbounded WAL growth for this key type. Surfaced via a
+		// metric so operators can detect the degraded mode.
+		metrics.IncCounter("store.checkpoint.truncate_skipped_not_self_sufficient", 1)
+		c.checkpoints.Add(1)
+		c.setErr(nil)
+		return nil
 	}
 	truncated, err := c.wlog.Truncate()
 	if err != nil {
@@ -269,4 +299,29 @@ func (c *Checkpointer[N, W]) setErr(err error) {
 		c.lastErr = err.Error()
 	}
 	c.lastErrMu.Unlock()
+}
+
+// snapshotIsSelfSufficient reports whether the snapshot just written to
+// dir can reconstruct the graph WITHOUT replaying the WAL. A snapshot is
+// self-sufficient when it carries a mapper.bin: the durable NodeID->key
+// interning table that recovery needs to apply the CSR adjacency and the
+// label/property records independently of the WAL. Only a self-sufficient
+// snapshot makes WAL truncation safe — truncating the WAL after a snapshot
+// that lacks the mapper would destroy committed data, since the NodeID->key
+// mapping lived only in the now-erased WAL frames (audit gap F2).
+//
+// Detection is by manifest content, not version number, so it stays
+// correct if the version scheme evolves: the snapshot is self-sufficient
+// iff its manifest lists [snapshot.MapperFile].
+func snapshotIsSelfSufficient(dir string) (bool, error) {
+	m, err := snapshot.ReadManifestFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return false, fmt.Errorf("checkpoint: read snapshot manifest: %w", err)
+	}
+	for _, f := range m.Files {
+		if f.Name == snapshot.MapperFile {
+			return true, nil
+		}
+	}
+	return false, nil
 }

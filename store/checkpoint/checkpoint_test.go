@@ -47,12 +47,14 @@ func TestCheckpoint_TriggerProducesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot.Open: %v", err)
 	}
-	// The checkpointer calls snapshot.WriteSnapshotCSR (the legacy
-	// v1 CSR-only writer), so the manifest carries version 1
-	// regardless of the build's ManifestVersion constant. A later
-	// sprint extends the checkpointer to write v2 (CSR + labels).
-	if loaded.Manifest.Version != 1 {
-		t.Fatalf("manifest version %d, want 1 (legacy CSR-only checkpoint)", loaded.Manifest.Version)
+	// The checkpointer now writes a self-sufficient snapshot
+	// (snapshot.WriteSnapshotFull) before truncating the WAL, so a
+	// string-keyed graph produces a v3 manifest carrying a mapper.bin —
+	// the durability fix for audit gap F2 (docs/acid-audit.md). The
+	// legacy v1 CSR-only checkpoint destroyed committed labels/properties
+	// (and the NodeID->key mapper) on truncation.
+	if loaded.Manifest.Version != snapshot.ManifestVersion {
+		t.Fatalf("manifest version %d, want %d (self-sufficient checkpoint)", loaded.Manifest.Version, snapshot.ManifestVersion)
 	}
 
 	stats := cp.Stats()
