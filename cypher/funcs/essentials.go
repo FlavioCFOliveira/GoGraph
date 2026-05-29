@@ -49,6 +49,7 @@ type TypeError struct {
 	Want string
 }
 
+// Error implements the error interface.
 func (e *TypeError) Error() string {
 	return fmt.Sprintf("funcs: %s() argument %d: got %s, want %s", e.Function, e.ArgIndex, e.Got, e.Want)
 }
@@ -64,6 +65,7 @@ type ArityError struct {
 	Want string
 }
 
+// Error implements the error interface.
 func (e *ArityError) Error() string {
 	return fmt.Sprintf("funcs: %s() takes %s argument(s), got %d", e.Function, e.Want, e.Got)
 }

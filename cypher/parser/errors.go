@@ -22,6 +22,7 @@ type SemaError struct {
 	Message string
 }
 
+// Error implements the error interface.
 func (e *SemaError) Error() string {
 	return fmt.Sprintf("sema error at %s in rule %q: %s", e.Pos, e.Rule, e.Message)
 }

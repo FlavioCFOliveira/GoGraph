@@ -101,6 +101,7 @@ type EvalError struct {
 	Msg string
 }
 
+// Error implements the error interface.
 func (e *EvalError) Error() string { return "eval: " + e.Msg }
 
 // Eval evaluates expr in the context of row and params. It dispatches on the

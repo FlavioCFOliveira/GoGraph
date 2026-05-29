@@ -44,10 +44,6 @@ var ErrDeleteNodeHasRelationships = errors.New("exec: cannot delete node with ex
 // DeleteNode
 // ─────────────────────────────────────────────────────────────────────────────
 
-// DeleteNode deletes an already-bound node (labels + properties stripped) from
-// the graph, provided it has no incident relationships.
-//
-// DeleteNode is NOT safe for concurrent use.
 // TargetEvalFn evaluates a DELETE / DETACH DELETE target expression
 // against the current input row and returns the resolved value. The exec
 // operator inspects the value: NodeValue / IntegerValue selects the
@@ -62,6 +58,10 @@ type TargetEvalFn func(row Row) (expr.Value, error)
 // without misinterpreting the id as a node id.
 type RelEndpointFn func(row Row) (uint64, uint64, bool)
 
+// DeleteNode deletes an already-bound node (labels + properties stripped) from
+// the graph, provided it has no incident relationships.
+//
+// DeleteNode is NOT safe for concurrent use.
 type DeleteNode struct {
 	nodeVar          string
 	schema           map[string]int

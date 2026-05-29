@@ -49,13 +49,6 @@ type RelCols struct {
 	DstCol int
 }
 
-// SetProperty sets or replaces properties on an already-bound node or
-// relationship per input row. The entity is identified by entityVar. For
-// nodes, the column value must be an IntegerValue-encoded NodeID or a
-// NodeValue. For relationships, call WithRelCols to supply the endpoint
-// column indices.
-//
-// SetProperty is NOT safe for concurrent use.
 // errSetNullTarget is the sentinel resolveEntity returns when the schema
 // column for the SET target carries a null value. SET on a null entity is
 // a no-op per openCypher 9 §3.5.4; the operator treats this sentinel as
@@ -68,6 +61,13 @@ var errSetNullTarget = errors.New("exec: SET target is NULL — no-op")
 // uses null/no-value semantics to either delete (null) or no-op (no value).
 type ValueEvalFn func(row Row) (value lpg.PropertyValue, isNull bool, hasValue bool, err error)
 
+// SetProperty sets or replaces properties on an already-bound node or
+// relationship per input row. The entity is identified by entityVar. For
+// nodes, the column value must be an IntegerValue-encoded NodeID or a
+// NodeValue. For relationships, call WithRelCols to supply the endpoint
+// column indices.
+//
+// SetProperty is NOT safe for concurrent use.
 type SetProperty struct {
 	entityVar   string
 	propertyKey string // empty → whole-entity assignment

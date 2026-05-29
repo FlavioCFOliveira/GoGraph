@@ -7,10 +7,11 @@ import (
 	"gograph/cypher/ast"
 )
 
-// IsKnownFunction, when non-nil, is consulted by [Analyse] to decide
+// IsKnownFunction is an optional hook consulted by [Analyse] to decide
 // whether a scalar function-call expression refers to a known function.
-// The argument is the lower-cased qualified name (namespace components
-// joined to the function name with '.', e.g. "duration.between").
+// When non-nil, it reports whether the lower-cased qualified function name
+// is registered. The argument is the lower-cased qualified name (namespace
+// components joined to the function name with '.', e.g. "duration.between").
 //
 // The hook is intentionally a package-level variable rather than an
 // argument so existing call sites do not need to change. It is set by

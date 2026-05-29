@@ -30,6 +30,7 @@ type ParamTypeError struct {
 	Got expr.Kind
 }
 
+// Error implements the error interface.
 func (e *ParamTypeError) Error() string {
 	return fmt.Sprintf("cypher: parameter $%s: expected %s value, got %s",
 		e.Name, e.Expected, e.Got)
