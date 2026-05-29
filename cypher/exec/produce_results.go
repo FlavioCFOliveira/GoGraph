@@ -145,8 +145,25 @@ func (rs *ResultSet) Next() bool {
 }
 
 // Record returns the current row. Must only be called after a successful Next.
+//
+// The returned map is owned by the ResultSet and reused by the next Next call;
+// callers that need to retain a row beyond the next Next must copy it (or use
+// [ResultSet.TakeRecord]).
 func (rs *ResultSet) Record() Record {
 	return rs.current
+}
+
+// TakeRecord returns the current row and transfers ownership of its backing
+// map to the caller, installing a fresh map for subsequent Next calls. Unlike
+// [ResultSet.Record] — whose result is reused on the next Next — the map
+// returned here is safe to retain. The materialisation path uses this to drain
+// rows under the transaction-visibility barrier without the extra per-row copy
+// that re-hashing every column into a new map would cost. Must only be called
+// after a successful Next.
+func (rs *ResultSet) TakeRecord() Record {
+	rec := rs.current
+	rs.current = make(Record, len(rs.cols))
+	return rec
 }
 
 // Err returns the first error encountered during iteration, or nil.

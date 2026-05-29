@@ -1002,24 +1002,22 @@ func (r *Result) Record() exec.Record {
 	return r.rs.Record()
 }
 
-// materialize drains the underlying ResultSet fully into matRows, copying each
-// Record (the ResultSet reuses its Record map across Next, so a shallow copy
-// per row is the documented way to retain it). It MUST be called inside
-// Graph.View (read queries) or Graph.ApplyAtomically (write queries): the whole
-// drain — every graph read and every eager write — then happens under one
-// barrier acquisition, so a concurrent reader observes the query's writes
-// atomically and the query itself observes a consistent, partial-transaction-
-// free snapshot. After materialize returns, the Result holds no lock; iteration
-// is served from matRows. Errors encountered during the drain are recorded on
-// the ResultSet and surfaced via Result.Err(); Close still commits/rolls back.
+// materialize drains the underlying ResultSet fully into matRows. Each row is
+// retained by taking ownership of the ResultSet's per-row map (TakeRecord
+// installs a fresh map for the next Next), which avoids the extra shallow copy
+// that re-hashing every column into a new map would cost — the alloc count is
+// unchanged (one map per retained row either way) but the per-row copy loop is
+// removed. It MUST be called inside Graph.View (read queries) or
+// Graph.ApplyAtomically (write queries): the whole drain — every graph read and
+// every eager write — then happens under one barrier acquisition, so a
+// concurrent reader observes the query's writes atomically and the query itself
+// observes a consistent, partial-transaction-free snapshot. After materialize
+// returns, the Result holds no lock; iteration is served from matRows. Errors
+// encountered during the drain are recorded on the ResultSet and surfaced via
+// Result.Err(); Close still commits/rolls back.
 func (r *Result) materialize() {
 	for r.rs.Next() {
-		rec := r.rs.Record()
-		cp := make(exec.Record, len(rec))
-		for k, v := range rec {
-			cp[k] = v
-		}
-		r.matRows = append(r.matRows, cp)
+		r.matRows = append(r.matRows, r.rs.TakeRecord())
 	}
 	r.matOn = true
 }
