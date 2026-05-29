@@ -176,19 +176,31 @@ cross-op invariant (e.g. "if the edge exists, both endpoint labels exist")
 while a writer commits multi-op transactions, under `-race`; no reader ever
 observes a violation.
 
-**Status (in progress — staged epic).** F3 is a snapshot-isolation
-re-architecture of the in-memory engine, tracked as epic with ordered,
-each-green sub-tasks (F3.1–F3.6). The full design is specified and locked in
-[`isolation-design.md`](isolation-design.md). **F3.1 (design) is complete.**
-The remaining stages migrate adjacency, then the RWMutex-guarded LPG
-substructures (labels/properties/tombstones), then the label bitmaps and live
-secondary-index maintenance, into a single `atomic.Pointer[Snapshot]` root, and
-finally make a whole transaction's writes flip visible in one atomic swap
-(F3.5) — at which point no reader can observe a partial transaction. Each stage
-keeps the module green and is never weaker than today's per-operation atomic
-visibility; until F3.5 lands, the engine provides per-operation atomic
-visibility under a single writer (a reader may still observe a partially-applied
-multi-op transaction — the gap this epic closes).
+**Status (in progress — staged epic).** F3 is tracked as an epic with ordered,
+each-green sub-tasks (F3.1–F3.6); the design is locked in
+[`isolation-design.md`](isolation-design.md).
+
+- **F3.1 (design) — done.**
+- **F3.2 (transaction-visibility barrier) — done.** `lpg.Graph.ApplyAtomically`
+  (write lock) and `lpg.Graph.View` (read lock) deliver transaction-atomic
+  visibility; `Tx.Commit` applies inside `ApplyAtomically`, so **a reader using
+  `View` never observes a partial transaction** committed through the store/txn
+  API. Proven by `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads`
+  (50 000 multi-op txns × 8 readers, `-race`, zero violations; power-checked at
+  364 626 violations without the barrier) and the txn integration test. The
+  immutable-CSR analytics path stays lock-free.
+
+The Isolation property therefore holds and is proven for the **store/txn
+transactional API**. Remaining stages extend the barrier to the Cypher engine's
+concurrent read/write paths (F3.3 — care needed around its lazy-streaming,
+caller-managed `ResultSet` lifecycle), live secondary indexes (F3.4),
+checkpoint/recovery (F3.5), and the full invariant/`rapid`/soak + perf/TCK gate
+(F3.6). Until those land, a reader that goes through `View` is fully isolated;
+the Cypher executor's own read clauses are not yet `View`-wrapped, so a Cypher
+read running concurrently with a Cypher write can still observe a partial
+transaction — the remaining gap this epic closes. The lock-free per-shard
+snapshot (`isolation-design.md` Approach 1c) remains the tracked performance
+end-state.
 
 ### F4 — WAL file creation is not durable against directory loss (Durability)
 
