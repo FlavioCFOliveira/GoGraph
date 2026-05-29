@@ -123,6 +123,14 @@ type pathVarInfo struct {
 	listCol  int              // first segment's listCol (legacy shape)
 	edgeType string           // first segment's edgeType (legacy shape)
 	segments []pathVarSegment // chained-VLE segments in plan-build order
+	// leadingSteps captures fixed-length Expand hops that precede the
+	// VLE within the same named path (Match6 [14]'s `MATCH p =
+	// (:Start)<-[:CONNECTED_TO]-()-[:CONNECTED_TO*3..3]-(:End)` has
+	// one leading Expand and one VLE — the path reconstruction must
+	// prepend the leading hop's (src, edge, dst) triplet before
+	// iterating the VLE list). Recorded in plan-build order with the
+	// leading-most hop at index 0.
+	leadingSteps []pathChainStep
 }
 
 // pathVarSegment captures one VarLengthExpand's contribution to a
@@ -2350,6 +2358,19 @@ func buildOperator(
 				step.edgeType = p.RelTypes[0]
 			}
 			bopts.expandTripletSeq = append(bopts.expandTripletSeq, step)
+			// When this Expand participates in a named path that also
+			// has a VLE (set by the IR's setPathVarOnVLE tagging),
+			// record the triplet as a leading hop in pathVarMeta so
+			// buildPathValueFromVLEMeta can prepend it to the
+			// VLE-emitted node list (Match6 [14]).
+			if p.PathVar != "" {
+				if bopts.pathVarMeta == nil {
+					bopts.pathVarMeta = make(map[string]pathVarInfo)
+				}
+				info := bopts.pathVarMeta[p.PathVar]
+				info.leadingSteps = append(info.leadingSteps, step)
+				bopts.pathVarMeta[p.PathVar] = info
+			}
 		}
 
 		// Record edge variable metadata so buildIRProjection can reconstruct
@@ -4397,6 +4418,61 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 	}
 	var nodes []expr.NodeValue
 	var rels []expr.RelationshipValue
+	// Prepend any leading fixed-length Expand hops captured during
+	// plan build. Each leading step contributes a (rel, dst) pair;
+	// the first step also seeds the path's lead node from its srcCol
+	// (Match6 [14] `(:Start)<-[:CONNECTED_TO]-()-[...VLE...]-` puts
+	// :Start at position 0 of the path before the VLE list takes over).
+	for i, step := range pmeta.leadingSteps {
+		if step.edgeCol >= len(row) || step.dstCol >= len(row) || step.srcCol >= len(row) {
+			break
+		}
+		edgeIDVal, eOK := row[step.edgeCol].(expr.IntegerValue)
+		dstIDVal, dOK := row[step.dstCol].(expr.IntegerValue)
+		srcIDVal, sOK := row[step.srcCol].(expr.IntegerValue)
+		if !eOK || !dOK || !sOK {
+			break
+		}
+		if i == 0 {
+			nodes = append(nodes, buildNodeValueFromID(graph.NodeID(srcIDVal), g))
+		}
+		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
+		prevID := nodes[len(nodes)-1].ID
+		et := step.edgeType
+		var edgeProps expr.MapValue
+		storageStart, storageEnd := prevID, dstNode.ID
+		if g != nil {
+			sKey, sR := g.AdjList().Mapper().Resolve(graph.NodeID(prevID))
+			dKey, dR := g.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
+			if sR && dR {
+				ets := g.EdgeLabels(sKey, dKey)
+				rawEP := g.EdgeProperties(sKey, dKey)
+				if len(ets) == 0 && len(rawEP) == 0 {
+					ets = g.EdgeLabels(dKey, sKey)
+					rawEP = g.EdgeProperties(dKey, sKey)
+					if len(ets) > 0 || len(rawEP) > 0 {
+						storageStart, storageEnd = dstNode.ID, prevID
+					}
+				}
+				if len(ets) > 0 {
+					et = ets[0]
+				}
+				edgeProps = make(expr.MapValue, len(rawEP))
+				for k, pv := range rawEP {
+					edgeProps[k] = lpgPropToExpr(pv)
+				}
+			}
+		}
+		rels = append(rels, expr.RelationshipValue{
+			ID:         uint64(edgeIDVal),
+			StartID:    storageStart,
+			EndID:      storageEnd,
+			Type:       et,
+			Properties: edgeProps,
+		})
+		nodes = append(nodes, dstNode)
+	}
+	leadingNodeCount := len(nodes)
 	for segIdx, seg := range segments {
 		if seg.listCol >= len(row) {
 			return expr.PathValue{}, false
@@ -4409,7 +4485,7 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 			continue
 		}
 		nHops := (len(lv) - 1) / 2
-		if segIdx == 0 {
+		if segIdx == 0 && leadingNodeCount == 0 {
 			leadID, ok2 := lv[0].(expr.IntegerValue)
 			if !ok2 {
 				return expr.PathValue{}, false
@@ -4432,18 +4508,27 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 			nodes = append(nodes, dstNode)
 			et := seg.edgeType
 			var edgeProps expr.MapValue
+			storageStart, storageEnd := prev.ID, dstNode.ID
 			if g != nil {
 				srcKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(prev.ID))
 				dstKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
 				if sOK && dOK {
-					if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
-						et = ets[0]
-					} else if ets := g.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
-						et = ets[0]
-					}
+					ets := g.EdgeLabels(srcKey, dstKey)
 					rawEP := g.EdgeProperties(srcKey, dstKey)
-					if len(rawEP) == 0 {
+					if len(ets) == 0 && len(rawEP) == 0 {
+						// Reverse pass of an undirected VLE: storage
+						// holds the edge as (dstKey -> srcKey). Swap the
+						// reported StartID/EndID so PathValue.String
+						// renders this hop with the inverted arrow
+						// (Match6 [14]).
+						ets = g.EdgeLabels(dstKey, srcKey)
 						rawEP = g.EdgeProperties(dstKey, srcKey)
+						if len(ets) > 0 || len(rawEP) > 0 {
+							storageStart, storageEnd = dstNode.ID, prev.ID
+						}
+					}
+					if len(ets) > 0 {
+						et = ets[0]
 					}
 					edgeProps = make(expr.MapValue, len(rawEP))
 					for k, pv := range rawEP {
@@ -4453,8 +4538,8 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 			}
 			rels = append(rels, expr.RelationshipValue{
 				ID:         uint64(edgePos),
-				StartID:    prev.ID,
-				EndID:      dstNode.ID,
+				StartID:    storageStart,
+				EndID:      storageEnd,
 				Type:       et,
 				Properties: edgeProps,
 			})
@@ -5077,6 +5162,60 @@ func buildIRProjection(
 							}
 							var nodes []expr.NodeValue
 							var rels []expr.RelationshipValue
+							// Prepend leading fixed-length Expand hops
+							// captured during plan build so a path that
+							// blends Expand + VLE (Match6 [14]) renders
+							// every hop, not just the VLE segment.
+							for i, lstep := range capturedMeta.leadingSteps {
+								if lstep.edgeCol >= len(row) || lstep.dstCol >= len(row) || lstep.srcCol >= len(row) {
+									break
+								}
+								edgeIDVal, e1 := row[lstep.edgeCol].(expr.IntegerValue)
+								dstIDVal, e2 := row[lstep.dstCol].(expr.IntegerValue)
+								srcIDVal, e3 := row[lstep.srcCol].(expr.IntegerValue)
+								if !e1 || !e2 || !e3 {
+									break
+								}
+								if i == 0 {
+									nodes = append(nodes, buildNodeValueFromID(graph.NodeID(srcIDVal), capturedG))
+								}
+								dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
+								prevID := nodes[len(nodes)-1].ID
+								et := lstep.edgeType
+								var edgeProps expr.MapValue
+								storageStart, storageEnd := prevID, dstNode.ID
+								if capturedG != nil {
+									sKey, sR := capturedG.AdjList().Mapper().Resolve(graph.NodeID(prevID))
+									dKey, dR := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
+									if sR && dR {
+										ets := capturedG.EdgeLabels(sKey, dKey)
+										rawEP := capturedG.EdgeProperties(sKey, dKey)
+										if len(ets) == 0 && len(rawEP) == 0 {
+											ets = capturedG.EdgeLabels(dKey, sKey)
+											rawEP = capturedG.EdgeProperties(dKey, sKey)
+											if len(ets) > 0 || len(rawEP) > 0 {
+												storageStart, storageEnd = dstNode.ID, prevID
+											}
+										}
+										if len(ets) > 0 {
+											et = ets[0]
+										}
+										edgeProps = make(expr.MapValue, len(rawEP))
+										for k, pv := range rawEP {
+											edgeProps[k] = lpgPropToExpr(pv)
+										}
+									}
+								}
+								rels = append(rels, expr.RelationshipValue{
+									ID:         uint64(edgeIDVal),
+									StartID:    storageStart,
+									EndID:      storageEnd,
+									Type:       et,
+									Properties: edgeProps,
+								})
+								nodes = append(nodes, dstNode)
+							}
+							leadingNodeCountInline := len(nodes)
 							for segIdx, seg := range segments {
 								if seg.listCol >= len(row) {
 									return expr.Null, nil
@@ -5099,7 +5238,7 @@ func buildIRProjection(
 									continue
 								}
 								nHops := (len(lv) - 1) / 2
-								if segIdx == 0 {
+								if segIdx == 0 && leadingNodeCountInline == 0 {
 									if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
 										nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), capturedG))
 									}
@@ -5126,14 +5265,25 @@ func buildIRProjection(
 									nodes = append(nodes, dstNode)
 									et := edgeType
 									var edgeProps expr.MapValue
+									storageStart, storageEnd := prev.ID, dstNode.ID
 									if capturedG != nil {
 										srcKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(prev.ID))
 										dstKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
 										if sOK && dOK {
-											if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
+											ets := capturedG.EdgeLabels(srcKey, dstKey)
+											rawEP := capturedG.EdgeProperties(srcKey, dstKey)
+											if len(ets) == 0 && len(rawEP) == 0 {
+												// Reverse pass of an undirected VLE
+												// — Match6 [14]'s `<-[…]-` hops.
+												ets = capturedG.EdgeLabels(dstKey, srcKey)
+												rawEP = capturedG.EdgeProperties(dstKey, srcKey)
+												if len(ets) > 0 || len(rawEP) > 0 {
+													storageStart, storageEnd = dstNode.ID, prev.ID
+												}
+											}
+											if len(ets) > 0 {
 												et = ets[0]
 											}
-											rawEP := capturedG.EdgeProperties(srcKey, dstKey)
 											edgeProps = make(expr.MapValue, len(rawEP))
 											for k, pv := range rawEP {
 												edgeProps[k] = lpgPropToExpr(pv)
@@ -5142,8 +5292,8 @@ func buildIRProjection(
 									}
 									rels = append(rels, expr.RelationshipValue{
 										ID:         uint64(edgePos),
-										StartID:    prev.ID,
-										EndID:      dstNode.ID,
+										StartID:    storageStart,
+										EndID:      storageEnd,
 										Type:       et,
 										Properties: edgeProps,
 									})

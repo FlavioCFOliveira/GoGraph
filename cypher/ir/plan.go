@@ -295,6 +295,13 @@ type Expand struct {
 	// so every anonymous or named relationship in one pattern maps to a
 	// distinct edge per openCypher 9 §3.2.2.
 	SiblingRelVars []string
+	// PathVar, when non-empty, is the named-path variable this Expand
+	// step participates in. Set by applyPathVar for mixed paths
+	// (Expand + VLE) so the physical builder can record this hop's
+	// (src, edge, dst) triplet as a leading segment in the same
+	// pathVarMeta entry the downstream VLE updates — closing the
+	// "missing leading hop" path-reconstruction gap (Match6 [14]).
+	PathVar string
 	// Child is the subplan that produces FromVar.
 	Child LogicalPlan
 }

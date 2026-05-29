@@ -1864,10 +1864,27 @@ import (
 //     openCypher-expected row counts. 5-run sample stable at
 //     3896/3897 (99.97%). Gate set at 3896 with 0 headroom.
 //
+//   - 3897: ratcheted after round 64 — named-path reconstruction for
+//     mixed Expand + VLE patterns. The IR's setPathVarOnVLE walks
+//     also tag every Expand operator along the way, so the
+//     physical Expand builder records its (src, edge, dst) triplet
+//     into pathVarMeta.leadingSteps under the same path-var key the
+//     downstream VLE updates. buildPathValueFromVLEMeta and the
+//     inline VLE projection in buildIRProjection both consume
+//     leadingSteps to prepend the leading hops to the path before
+//     emitting the VLE segment(s). buildPathValueFromVLEMeta also
+//     gained direction-aware StartID / EndID resolution for
+//     undirected VLE rev-pass hops (matching the existing
+//     buildRelationshipValueFromRow logic) so a path that mixes
+//     forward and reverse traversal renders with the correct
+//     `<-[…]-` / `-[…]->` arrows. Closes Match6 [14]. 10-run sample
+//     stable at 3897/3897 (100.00%). The execution-level TCK is
+//     fully green.
+//
 // To raise the baseline after a deliberate uplift in execution support, run
 // the suite, read the "<N> scenarios (<P> passed, ...)" summary, and edit
 // this constant in a dedicated commit.
-const tckExecutionBaseline = 3896
+const tckExecutionBaseline = 3897
 
 // scenarioSummaryRE matches the godog summary line emitted by the progress
 // formatter:

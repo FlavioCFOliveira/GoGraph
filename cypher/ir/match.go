@@ -818,6 +818,14 @@ func setPathVarOnVLE(plan LogicalPlan, pathVar string) {
 		}
 		// Continue walking so chained VLEs also get tagged.
 	}
+	if ex, ok := plan.(*Expand); ok {
+		if ex.PathVar == "" {
+			ex.PathVar = pathVar
+		}
+		// Continue walking so a leading chain of Expands all tag
+		// themselves; the physical builder folds each triplet into
+		// pathVarMeta as a leading segment (Match6 [14]).
+	}
 	for _, child := range plan.Children() {
 		setPathVarOnVLE(child, pathVar)
 	}
