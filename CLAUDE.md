@@ -6,6 +6,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GoGraph is a Go module for working with graphs: persistence, manipulation, and — above all — fast search. The API surface should stay small and ergonomic; performance is a first-class concern.
 
+## Compliance Mandates
+
+These two properties are non-negotiable invariants of the module. Every change — feature work, refactor, bug fix, performance tuning — must preserve them. A change that regresses either property is not acceptable.
+
+### 1. 100% Cypher TCK Compliant
+
+The module is **100% compliant with the openCypher TCK** (Technology Compatibility Kit) at the execution level, as published at <https://opencypher.org/>. Every development must guarantee that the module remains 100% compatible with the openCypher specification.
+
+- The full openCypher TCK execution suite is fully green: every scenario in `cypher/tck/features/` passes, with no `failed`, no `undefined`, and no `pending` steps.
+- The regression gate in `cypher/tck/runner_test.go` (`const tckExecutionBaseline`) is set to the full scenario count. Any pull request that lowers the passing count is rejected by CI.
+- Conformance is evidence-based: do not claim openCypher behaviour from memory. When a question arises, consult the openCypher 9 specification, the relevant TCK feature file, or the upstream openCypher reference implementation before changing behaviour.
+- New features that the openCypher TCK does not cover are allowed only when they do not conflict with any TCK-covered semantics.
+
+### 2. 100% ACID Compliant
+
+The module guarantees the **ACID** transactional properties — **Atomicity**, **Consistency**, **Isolation**, and **Durability** — across every feature, to provide **RELIABILITY** and **INTEGRITY** of stored data.
+
+- **Atomicity** — every transaction is all-or-nothing: either every write becomes visible together or none of them do. Partial application after a crash or error is forbidden.
+- **Consistency** — every committed transaction leaves the graph in a state that satisfies every declared invariant (schema constraints, uniqueness, label/property typing, referential integrity for edges, index correctness). Reads never observe a state that violates an invariant.
+- **Isolation** — concurrent transactions behave as if serialised. Readers never observe the partial writes of an in-flight transaction; writers never silently overwrite each other.
+- **Durability** — once a commit acknowledgement is returned, the change survives process crash, host crash, and `kill -9`. Verified by the deterministic crash-injection battery in `internal/crashinject/` and the WAL recovery tests in `store/wal/` and `store/recovery/`.
+
+These properties must be preserved both for the in-memory engine and for every persistence backend. Any code path that could compromise an ACID property — a non-atomic multi-step write, a read that could observe partial state, a commit that does not durably flush — must be rejected at code review and must not be merged.
+
 ## Behavioural Rules
 
 ### Decision autonomy
