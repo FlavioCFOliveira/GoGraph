@@ -214,11 +214,11 @@ func TestTxn_AddEdge_NoWeightCodec_NonzeroErr(t *testing.T) {
 	})
 }
 
-// TestTxn_Options_NewStoreWithOptions_AccessorsAndV2Frame confirms
+// TestTxn_Options_NewStoreWithOptions_AccessorsAndV3Frame confirms
 // that NewStoreWithOptions records both codecs on the Store and that
-// a weighted commit produces a v2-tagged frame whose kind byte is
-// OpAddEdgeWeighted.
-func TestTxn_Options_NewStoreWithOptions_AccessorsAndV2Frame(t *testing.T) {
+// a weighted commit produces a v3-tagged OpAddEdgeWeighted frame
+// followed by the v3 OpCommit marker.
+func TestTxn_Options_NewStoreWithOptions_AccessorsAndV3Frame(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wal")
@@ -249,24 +249,28 @@ func TestTxn_Options_NewStoreWithOptions_AccessorsAndV2Frame(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	var seen int
+	var kinds []byte
 	if err := r.Replay(func(f wal.Frame) error {
-		seen++
 		if len(f.Payload) < 2 {
 			t.Fatalf("payload too short: %d", len(f.Payload))
 		}
-		if f.Payload[0] != OpRecordV2 {
-			t.Fatalf("first byte = 0x%02x, want OpRecordV2 = 0x%02x", f.Payload[0], OpRecordV2)
+		if f.Payload[0] != OpRecordV3 {
+			t.Fatalf("first byte = 0x%02x, want OpRecordV3 = 0x%02x", f.Payload[0], OpRecordV3)
 		}
-		if f.Payload[1] != byte(OpAddEdgeWeighted) {
-			t.Fatalf("kind byte = 0x%02x, want OpAddEdgeWeighted = 0x%02x", f.Payload[1], byte(OpAddEdgeWeighted))
-		}
+		kinds = append(kinds, f.Payload[1])
 		return nil
 	}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if seen != 1 {
-		t.Fatalf("frame count = %d, want 1", seen)
+	// Two frames: the OpAddEdgeWeighted op then the OpCommit marker.
+	want := []byte{byte(OpAddEdgeWeighted), byte(OpCommit)}
+	if len(kinds) != len(want) {
+		t.Fatalf("frame count = %d, want %d", len(kinds), len(want))
+	}
+	for i, k := range want {
+		if kinds[i] != k {
+			t.Fatalf("frame %d kind = 0x%02x, want 0x%02x", i, kinds[i], k)
+		}
 	}
 }
 
@@ -307,12 +311,22 @@ func TestTxn_Options_ZeroWeightEmitsOpAddEdgeWeighted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
+	// The first frame is the op (OpAddEdgeWeighted even for a zero weight);
+	// the trailing v3 OpCommit marker closes the transaction.
+	var kinds []byte
 	if err := r.Replay(func(f wal.Frame) error {
-		if f.Payload[1] != byte(OpAddEdgeWeighted) {
-			t.Fatalf("weighted store commit emitted kind 0x%02x, want OpAddEdgeWeighted=0x%02x", f.Payload[1], byte(OpAddEdgeWeighted))
-		}
+		kinds = append(kinds, f.Payload[1])
 		return nil
 	}); err != nil {
 		t.Fatalf("Replay: %v", err)
+	}
+	want := []byte{byte(OpAddEdgeWeighted), byte(OpCommit)}
+	if len(kinds) != len(want) {
+		t.Fatalf("frame count = %d, want %d", len(kinds), len(want))
+	}
+	for i, k := range want {
+		if kinds[i] != k {
+			t.Fatalf("frame %d kind = 0x%02x, want 0x%02x", i, kinds[i], k)
+		}
 	}
 }

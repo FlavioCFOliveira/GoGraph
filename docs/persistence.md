@@ -15,10 +15,10 @@ graph state and how it recovers it after a process crash.
 
 ## Durability contract
 
-`Tx.Commit` writes every buffered op to the WAL, calls
-`wal.Writer.Sync` (which fsyncs the file), and only then applies the
-ops to the live graph. A process killed at any point during this
-sequence is recoverable by `recovery.OpenString(dir)`:
+`Tx.Commit` writes every buffered op to the WAL as a v3 frame, appends a
+single `OpCommit` marker frame, calls `wal.Writer.Sync` (which fsyncs the
+file), and only then applies the ops to the live graph. A process killed at
+any point during this sequence is recoverable by `recovery.Open`/`OpenString`:
 
 - If the crash happened **before the fsync**, the WAL tail is torn;
   recovery drops it and the in-memory graph is exactly what was
@@ -28,6 +28,20 @@ sequence is recoverable by `recovery.OpenString(dir)`:
 - If the crash happened **after some ops are applied in memory**,
   the in-memory state is lost (it was not durable anyway) — recovery
   re-applies from the WAL.
+
+**Atomicity of multi-op transactions (audit gap F1).** A typed-store
+transaction is all-or-nothing across a crash. Recovery buffers a v3
+transaction's op frames and applies them only on reading the durable
+`OpCommit` marker, which is the last frame the commit writes. A torn write
+that loses any op frame *or* the marker therefore discards the **entire**
+transaction — recovery never applies a prefix, so a `CREATE`/`MERGE`/
+multi-`SET` statement can never leave a half-built node or a dangling edge.
+The commit issues exactly one fsync, so group-commit throughput is unchanged;
+bufio may flush a prefix of frames to the OS before the fsync, but that is
+benign because durability is gated on the fsync and an un-marked tail is
+discarded. (The legacy `NewStore` fmt-codec path keeps per-op v1 framing
+without a marker and is not durable-multi-op-atomic; every production write
+path uses a typed store.)
 
 `Tx.Rollback` neither writes to the WAL nor mutates the graph;
 nothing is durable, nothing is visible, mutex released.
@@ -56,18 +70,29 @@ on the read path, while writes serialise.
 
 ## WAL payload schema
 
-Each WAL frame carries one op payload. The encoder supports two
+Each WAL frame carries one op payload. The encoder supports three
 on-disk layouts, distinguished by the first byte of the payload:
 
 | Version | First byte                  | Producer                                       |
 |---------|-----------------------------|------------------------------------------------|
 | v1      | `[OpKind]` (one of 0x01..0x04) | `txn.NewStore` (legacy)                        |
-| v2      | `0xFE` (`txn.OpRecordV2`)   | `txn.NewStoreWithCodec` / `txn.NewStoreWithOptions` |
+| v2      | `0xFE` (`txn.OpRecordV2`)   | superseded by v3 (still read for old WALs)     |
+| v3      | `0xFD` (`txn.OpRecordV3`)   | `txn.NewStoreWithCodec` / `txn.NewStoreWithOptions` |
 
-`OpKind` values currently occupy 0x01..0x04, leaving the low byte
-region free for future kinds. The v2 magic byte 0xFE is chosen far
-outside that range so a reader can disambiguate by peeking the first
-byte alone — any payload starting with 0xFE is necessarily a v2 frame.
+`OpKind` values currently occupy 0x01..0x0D (the last being `OpCommit`,
+the v3 commit marker), leaving the rest of the low byte region free. The
+magic bytes 0xFE/0xFD are chosen far outside that range so a reader
+disambiguates by peeking the first byte alone — any payload starting with
+0xFE is a v2 frame, 0xFD a v3 frame, anything else a v1 frame.
+
+A **v3** payload is `version(0xFD) | kind | uint64 txnSeq (LE) | <v2 body>`.
+The body after `txnSeq` is byte-identical to the v2 body for that kind, so
+recovery reuses the v2 body walk. The `txnSeq` groups a transaction's frames;
+the trailing `OpCommit` marker (`version | OpCommit | txnSeq`, no body) is the
+atomicity boundary — recovery applies a v3 transaction's buffered ops only on
+reading its durable marker (see the Durability contract above). Typed stores
+emit v3; v2 frames remain fully readable so existing on-disk WALs replay
+unchanged.
 
 | `OpKind`              | Value | Mutation                                          |
 |-----------------------|-------|---------------------------------------------------|

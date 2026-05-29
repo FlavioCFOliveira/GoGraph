@@ -78,9 +78,10 @@ func TestTx_AddNode_Idempotence(t *testing.T) {
 	if got := s.Graph().AdjList().Mapper().Len(); got != 1 {
 		t.Fatalf("mapper Len = %d, want 1 (AddNode must be idempotent)", got)
 	}
-	// Two WAL frames must be present — the WAL is the durable log;
-	// dedup is the responsibility of the in-memory mapper.
-	if err := walFrameCountEquals(walPath, 2); err != nil {
+	// Three WAL frames must be present: one per op (the WAL is the durable
+	// log; dedup is the in-memory mapper's job) plus the v3 OpCommit marker
+	// that closes the transaction atomically.
+	if err := walFrameCountEquals(walPath, 3); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -429,8 +430,8 @@ func TestTx_CommitWALOnly_HappyPath(t *testing.T) {
 		t.Fatal("CommitWALOnly applied edge to in-memory graph (expected WAL-only)")
 	}
 
-	// WAL must contain exactly two frames (one per op).
-	if err := walFrameCountEquals(walPath, 2); err != nil {
+	// WAL must contain three frames: one per op plus the v3 OpCommit marker.
+	if err := walFrameCountEquals(walPath, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -729,11 +730,12 @@ func TestTx_WeightedStore_AddEdgeWeighted_RoundTrip(t *testing.T) {
 		t.Fatalf("weight = %d, want %d", got, want)
 	}
 
-	// Wire shape: one frame, v2-tagged, OpAddEdgeWeighted kind.
-	if err := walFrameCountEquals(walPath, 1); err != nil {
+	// Wire shape: two frames — the v3-tagged OpAddEdgeWeighted op followed
+	// by the v3 OpCommit marker that closes the transaction.
+	if err := walFrameCountEquals(walPath, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := assertFirstFrameKind(walPath, OpRecordV2, byte(OpAddEdgeWeighted)); err != nil {
+	if err := assertFirstFrameKind(walPath, OpRecordV3, byte(OpAddEdgeWeighted)); err != nil {
 		t.Fatal(err)
 	}
 }

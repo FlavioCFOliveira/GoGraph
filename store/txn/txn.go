@@ -2,10 +2,22 @@
 // Rollback) layered over an [lpg.Graph] and a [wal.Writer].
 //
 // A transaction buffers mutations in a per-Tx slice. Commit appends
-// each mutation as a single WAL frame, fsyncs the WAL, and only then
-// applies the mutations to the in-memory graph — so a process crash
-// between Commit's WAL sync and the in-memory apply is recoverable
-// by replaying the WAL into a fresh graph.
+// each mutation as a WAL frame, then a single [OpCommit] marker frame,
+// fsyncs the WAL once, and only then applies the mutations to the
+// in-memory graph — so a process crash between Commit's WAL sync and the
+// in-memory apply is recoverable by replaying the WAL into a fresh graph.
+//
+// # Atomicity
+//
+// Typed stores ([NewStoreWithCodec], [NewStoreWithOptions]) write each op
+// as a v3 ([OpRecordV3]) frame carrying a per-Store transaction sequence,
+// followed by an [OpCommit] marker frame for the same sequence; recovery
+// buffers a transaction's ops and applies them only on reading the durable
+// marker. A crash that tears the batch at any point therefore recovers all
+// of the transaction or none of it — never a partial node or edge. This
+// is the Atomicity guarantee (see docs/acid-audit.md, gap F1). The legacy
+// fmt-codec store ([NewStore]) keeps the v1 per-op layout without a marker
+// and is not recommended where durable multi-op atomicity is required.
 //
 // Single-writer is enforced by a per-store mutex acquired in Begin
 // and released in Commit or Rollback; reads on the underlying graph
@@ -37,6 +49,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gograph/graph/lpg"
@@ -98,6 +111,19 @@ const (
 	// OpDelEdgeProperty buffers a DelEdgeProperty(src, dst, key) mutation.
 	// Key is the property key.
 	OpDelEdgeProperty
+
+	// OpCommit is a control record, not a graph mutation. It marks the
+	// durable end of a transaction batch in the v3 ([OpRecordV3]) WAL
+	// envelope: a commit writes one OpCommit frame, carrying the
+	// transaction's sequence number, after all of the transaction's op
+	// frames and immediately before the single fsync. Recovery treats it
+	// as a no-op against the graph; its sole effect is on the replay state
+	// machine, which applies a buffered transaction's ops only when it
+	// reads the matching OpCommit. A torn write that loses the OpCommit
+	// (or any preceding op frame) causes recovery to discard the whole
+	// transaction, giving all-or-nothing atomicity (audit gap F1, see
+	// docs/acid-audit.md). OpCommit never appears in a v1/v2 frame.
+	OpCommit
 )
 
 // Op-record version markers. The marker is a single byte written at
@@ -123,6 +149,23 @@ const (
 	// OpRecordV2 is the magic byte that marks the start of a v2-tagged
 	// op record. See the package doc above for the rationale.
 	OpRecordV2 uint8 = 0xFE
+	// OpRecordV3 is the magic byte that marks the start of a v3-tagged
+	// op record. A v3 payload is laid out as:
+	//
+	//	uint8  version (OpRecordV3 = 0xFD)
+	//	uint8  kind    (an [OpKind], or [OpCommit] for the commit marker)
+	//	uint64 txnSeq  little-endian per-Store transaction sequence
+	//	...    the same body bytes a v2 record of this kind carries...
+	//
+	// v3 adds the txnSeq word and the [OpCommit] marker so a multi-op
+	// transaction is recovered atomically: recovery buffers a v3
+	// transaction's ops and applies them only on reading the matching
+	// OpCommit. The body after the txnSeq word is byte-identical to the
+	// v2 body for the same kind, so the recovery decoder reuses the v2
+	// body walk. 0xFD is the value reserved for OpRecordV3 in the
+	// disambiguation scheme documented above; a v1/v2/v3 reader peeks the
+	// first byte to select the decoder.
+	OpRecordV3 uint8 = 0xFD
 )
 
 // codecHolder is the type-erased view of [Codec] used by Store so the
@@ -162,6 +205,15 @@ type Store[N comparable, W any] struct {
 	codec  codecHolder[N]
 	wcodec WeightCodec[W]
 	legacy bool
+
+	// txnSeq is the last assigned transaction sequence number. A typed
+	// (non-legacy) Commit/CommitWALOnly increments it once and stamps the
+	// value into every v3 op frame and the trailing [OpCommit] marker, so
+	// recovery can group a transaction's frames and apply them atomically.
+	// It is incremented only while the store mutex is held (the single-
+	// writer lock acquired in Begin), so the atomic type is for safe
+	// publication rather than contended access.
+	txnSeq atomic.Uint64
 }
 
 // NewStore returns a Store wrapping g and wal. The store emits v1
@@ -420,8 +472,15 @@ func (t *Tx[N, W]) DelEdgeProperty(src, dst N, propKey string) error {
 	return nil
 }
 
-// Commit fsync-appends every buffered op to the WAL and only then
+// Commit durably appends every buffered op to the WAL and only then
 // applies it to the in-memory graph.
+//
+// For a typed store the whole batch is committed atomically: every op is
+// written as a v3 frame carrying one transaction sequence, followed by an
+// [OpCommit] marker frame, then a single fsync. Recovery applies the
+// transaction only on reading the durable marker, so a crash that tears
+// the batch at any point recovers all of the transaction or none of it
+// (audit gap F1, see docs/acid-audit.md).
 func (t *Tx[N, W]) Commit() error {
 	defer metrics.Time("store.txn.Commit")()
 	if t.finished {
@@ -430,27 +489,7 @@ func (t *Tx[N, W]) Commit() error {
 	}
 	defer t.release()
 
-	// Encode every op as a separate WAL frame so a torn write at
-	// any point in the batch only loses tail ops, never partial
-	// ones.
-	for _, op := range t.ops {
-		var payload []byte
-		if t.store.legacy {
-			payload = encodeOpLegacy(op)
-		} else {
-			var enErr error
-			payload, enErr = encodeOpTyped(op, t.store.codec, t.store.wcodec)
-			if enErr != nil {
-				metrics.IncCounter("store.txn.Commit.errors", 1)
-				return enErr
-			}
-		}
-		if err := t.store.wal.Append(payload); err != nil {
-			metrics.IncCounter("store.txn.Commit.errors", 1)
-			return err
-		}
-	}
-	if err := t.store.wal.Sync(); err != nil {
+	if err := t.appendAndSync(); err != nil {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return err
 	}
@@ -464,10 +503,11 @@ func (t *Tx[N, W]) Commit() error {
 	return nil
 }
 
-// CommitWALOnly fsync-appends every buffered op to the WAL but does NOT
+// CommitWALOnly durably appends every buffered op to the WAL but does NOT
 // apply the ops to the in-memory graph. Use this when the caller has
 // already applied mutations eagerly (e.g. [walMutatorAdapter]) and only
-// needs WAL durability without a second in-memory pass.
+// needs WAL durability without a second in-memory pass. It uses the same
+// atomic v3 framing as [Tx.Commit] for typed stores.
 func (t *Tx[N, W]) CommitWALOnly() error {
 	defer metrics.Time("store.txn.CommitWALOnly")()
 	if t.finished {
@@ -476,28 +516,57 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 	}
 	defer t.release()
 
-	for _, op := range t.ops {
-		var payload []byte
-		if t.store.legacy {
-			payload = encodeOpLegacy(op)
-		} else {
-			var enErr error
-			payload, enErr = encodeOpTyped(op, t.store.codec, t.store.wcodec)
-			if enErr != nil {
-				metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
-				return enErr
-			}
-		}
-		if err := t.store.wal.Append(payload); err != nil {
-			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
-			return err
-		}
-	}
-	if err := t.store.wal.Sync(); err != nil {
+	if err := t.appendAndSync(); err != nil {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 		return err
 	}
 	return nil
+}
+
+// appendAndSync writes the transaction's ops to the WAL and fsyncs them.
+//
+// For a typed store every op is encoded as a v3 frame carrying a fresh
+// per-transaction sequence ([Store.txnSeq]), and an [OpCommit] marker
+// frame for the same sequence is appended after the last op; a single
+// [wal.Writer.Sync] then makes the whole batch durable. The marker is the
+// atomicity boundary: bufio may auto-flush a prefix of frames to the OS
+// before the Sync, but that is benign — durability is gated on the fsync,
+// and recovery discards any op frames not followed by a durable matching
+// marker, so a torn batch recovers all-or-nothing.
+//
+// A legacy store (fmt codec, no version tag) keeps the v1 per-op layout
+// with no marker. Legacy multi-op commits therefore retain only the older
+// per-frame atomicity; durable multi-op atomicity requires a typed store
+// ([NewStoreWithCodec] / [NewStoreWithOptions]), which every production
+// write path uses.
+func (t *Tx[N, W]) appendAndSync() error {
+	if t.store.legacy {
+		for _, op := range t.ops {
+			if err := t.store.wal.Append(encodeOpLegacy(op)); err != nil {
+				return err
+			}
+		}
+		return t.store.wal.Sync()
+	}
+	if len(t.ops) == 0 {
+		// Empty commit: preserve the historical no-op-with-Sync behaviour
+		// (flush any prior buffered tail) without writing a lone marker.
+		return t.store.wal.Sync()
+	}
+	seq := t.store.txnSeq.Add(1)
+	for _, op := range t.ops {
+		payload, enErr := encodeOpTypedV3(op, seq, t.store.codec, t.store.wcodec)
+		if enErr != nil {
+			return enErr
+		}
+		if err := t.store.wal.Append(payload); err != nil {
+			return err
+		}
+	}
+	if err := t.store.wal.Append(encodeCommitV3(seq)); err != nil {
+		return err
+	}
+	return t.store.wal.Sync()
 }
 
 // Rollback discards buffered ops without touching the WAL or graph.
@@ -610,7 +679,37 @@ func encodeOpTyped[N comparable, W any](op Op[N, W], codec Codec[N], wcodec Weig
 	const headroom = 2 + 2 // version + kind + uint16 labelLen
 	buf := make([]byte, 0, headroom+len(op.Label)+32)
 	buf = append(buf, OpRecordV2, byte(op.Kind))
+	return appendOpBodyTyped(buf, op, codec, wcodec)
+}
 
+// encodeOpTypedV3 serialises one op to a v3 ([OpRecordV3]) WAL payload:
+// the v2 header (version + kind) plus an 8-byte little-endian transaction
+// sequence, followed by the byte-identical v2 body for that kind. The
+// sequence groups a transaction's frames so recovery can apply them
+// atomically (see [OpRecordV3] and [OpCommit]).
+func encodeOpTypedV3[N comparable, W any](op Op[N, W], seq uint64, codec Codec[N], wcodec WeightCodec[W]) ([]byte, error) {
+	const headroom = 2 + 8 + 2 // version + kind + txnSeq + uint16 labelLen
+	buf := make([]byte, 0, headroom+len(op.Label)+32)
+	buf = append(buf, OpRecordV3, byte(op.Kind))
+	buf = binary.LittleEndian.AppendUint64(buf, seq)
+	return appendOpBodyTyped(buf, op, codec, wcodec)
+}
+
+// encodeCommitV3 serialises the [OpCommit] marker for a v3 transaction:
+// version + kind + the transaction sequence, with no body. Recovery
+// applies the buffered ops carrying the same sequence when it reads this
+// frame; a torn write that loses it discards the whole transaction.
+func encodeCommitV3(seq uint64) []byte {
+	buf := make([]byte, 0, 2+8)
+	buf = append(buf, OpRecordV3, byte(OpCommit))
+	buf = binary.LittleEndian.AppendUint64(buf, seq)
+	return buf
+}
+
+// appendOpBodyTyped appends the codec-encoded body for op to buf (which
+// already holds the version + kind, and for v3 the txnSeq). The body
+// layout is shared verbatim by the v2 and v3 encoders.
+func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N], wcodec WeightCodec[W]) ([]byte, error) {
 	switch op.Kind {
 	case OpAddNode, OpRemoveNode, OpRemoveNodeLabel:
 		return encodeOpNodeOnly(buf, op, codec)

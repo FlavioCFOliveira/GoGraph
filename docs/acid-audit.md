@@ -40,7 +40,7 @@ tests: the suite validates atomicity only for **single-op** transactions
 
 | ID | Property | Severity | Status | One-line |
 |----|----------|----------|--------|----------|
-| F1 | Atomicity | **Critical** | open | Multi-op transactions are not atomic across a crash — recovery can replay a *prefix* of a transaction's ops. |
+| F1 | Atomicity | **Critical** | **fixed** | Multi-op transactions are not atomic across a crash — recovery can replay a *prefix* of a transaction's ops. |
 | F2 | Durability + Consistency | **Critical** | **fixed** | A checkpoint writes a CSR-only snapshot then truncates the WAL, destroying committed labels/properties (and the mapper for non-string keys). |
 | F3 | Isolation | **High** | open | The in-memory apply loop publishes ops one-by-one, so a lock-free reader can observe a partially-applied, in-flight transaction. |
 | F4 | Durability | **Medium** | **fixed** | `wal.Open` never fsyncs the parent directory, so a freshly-created WAL file's directory entry may not survive a crash. |
@@ -74,6 +74,30 @@ chosen design must preserve replay of existing single-op v1/v2 WALs unchanged.
 **Acceptance.** A new crash-injection scenario tears a multi-op transaction at
 every interior frame boundary; recovery must yield either the full transaction
 or none of it — never a prefix. Existing single-op torn-tail tests still pass.
+
+**Resolution (fixed).** Implemented the commit-record design at the payload
+layer (no `wal` frame-format bump). A new `txn.OpRecordV3` (0xFD) envelope
+prefixes each typed op frame with a per-`Store` transaction sequence
+(`txn.Store.txnSeq`), and a typed commit appends a trailing `txn.OpCommit`
+marker frame for that sequence before the single `wal.Sync`
+(`txn.Tx.appendAndSync`). `CommitWALOnly` uses the same framing. Recovery
+(`openCodec` and the deprecated `OpenStringCtx`) buffers a v3 transaction's
+ops and applies them only on reading the durable `OpCommit` marker; an
+incomplete trailing transaction (no marker) is discarded. Backward compatible:
+v1/v2 frames have no marker and self-commit exactly as before, so every
+existing on-disk WAL — and the cross-process SIGKILL/recovery fixtures —
+replays unchanged; a mixed v2-then-v3 log is also correct. The bufio 64 KiB
+auto-flush is provably benign because durability is gated on the single fsync
+and recovery discards any op frames not followed by a durable marker. Tests
+(`-race` green across `store/...`, `internal/crashinject`, `cypher/exec`,
+`bolt/...`): `recovery.TestRecovery_MultiOpTransactionAtomic_TornAtEveryBoundary`
+commits a 6-op transaction and truncates the WAL at **every byte offset**,
+asserting the recovered graph is empty for every truncation before the marker
+and complete only for the whole WAL — never a prefix; the existing single-op
+`torn_tail_test.go` and all crash-injection scenarios still pass (single-op
+commits are trivially all-or-nothing as `[op][marker]` pairs). The legacy
+`NewStore` (v1 fmt codec, deprecated, edge/label only) retains per-op framing
+and is documented as not durable-multi-op-atomic.
 
 ### F2 — Checkpoint destroys committed labels/properties (Durability + Consistency)
 

@@ -10,10 +10,11 @@ import (
 	"gograph/store/wal"
 )
 
-// TestNewStoreWithCodec_EmitsV2 asserts that a typed-codec store
-// produces v2-tagged frames on the WAL and that the [Store.Codec]
-// accessor returns the codec the caller passed in.
-func TestNewStoreWithCodec_EmitsV2(t *testing.T) {
+// TestNewStoreWithCodec_EmitsV3 asserts that a typed-codec store
+// produces v3-tagged frames on the WAL — one per op plus a trailing
+// OpCommit marker that makes the transaction atomic on recovery — and
+// that the [Store.Codec] accessor returns the codec the caller passed in.
+func TestNewStoreWithCodec_EmitsV3(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -43,24 +44,28 @@ func TestNewStoreWithCodec_EmitsV2(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	var seen int
+	var kinds []byte
 	if err := r.Replay(func(f wal.Frame) error {
-		seen++
 		if len(f.Payload) < 2 {
 			t.Fatalf("payload too short: %d", len(f.Payload))
 		}
-		if f.Payload[0] != OpRecordV2 {
-			t.Fatalf("v2 store emitted byte 0x%02x at offset 0, want 0x%02x", f.Payload[0], OpRecordV2)
+		if f.Payload[0] != OpRecordV3 {
+			t.Fatalf("v3 store emitted byte 0x%02x at offset 0, want 0x%02x", f.Payload[0], OpRecordV3)
 		}
-		if f.Payload[1] != byte(OpAddEdge) {
-			t.Fatalf("v2 store emitted OpKind 0x%02x, want 0x%02x", f.Payload[1], byte(OpAddEdge))
-		}
+		kinds = append(kinds, f.Payload[1])
 		return nil
 	}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if seen != 1 {
-		t.Fatalf("frame count = %d, want 1", seen)
+	// Two frames: the OpAddEdge op then the OpCommit marker.
+	want := []byte{byte(OpAddEdge), byte(OpCommit)}
+	if len(kinds) != len(want) {
+		t.Fatalf("frame count = %d, want %d", len(kinds), len(want))
+	}
+	for i, k := range want {
+		if kinds[i] != k {
+			t.Fatalf("frame %d kind = 0x%02x, want 0x%02x", i, kinds[i], k)
+		}
 	}
 }
 

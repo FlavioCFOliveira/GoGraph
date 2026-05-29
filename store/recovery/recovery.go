@@ -147,6 +147,10 @@ type Op struct {
 	Label    string
 	Version  uint8
 	Body     []byte
+	// TxnSeq is the transaction sequence carried by a v3
+	// ([txn.OpRecordV3]) frame, grouping the frames of one atomically-
+	// committed transaction. It is 0 for v1/v2 frames.
+	TxnSeq uint64
 }
 
 // Decode parses one payload back into an [Op]. The parser peeks the
@@ -163,10 +167,38 @@ func Decode(payload []byte) (Op, error) {
 		metrics.IncCounter("store.recovery.Decode.errors", 1)
 		return Op{}, errors.New("recovery: short payload")
 	}
-	if payload[0] == txn.OpRecordV2 {
+	switch payload[0] {
+	case txn.OpRecordV3:
+		return decodeV3(payload)
+	case txn.OpRecordV2:
 		return decodeV2(payload)
+	default:
+		return decodeV1(payload)
 	}
-	return decodeV1(payload)
+}
+
+// decodeV3 parses a typed v3 tagged record. Layout:
+//
+//	uint8  version (txn.OpRecordV3)
+//	uint8  kind
+//	uint64 txnSeq  (little-endian)
+//	...    body, byte-identical to the v2 body for this kind...
+//
+// The body (everything after the txnSeq word) matches the v2 layout, so it
+// is copied verbatim into [Op.Body] and walked by the same typed apply
+// path ([applyOpCodec]). An [txn.OpCommit] marker has an empty body; the
+// recovery replay loop reads it to apply the buffered transaction.
+func decodeV3(payload []byte) (Op, error) {
+	if len(payload) < 10 { // version + kind + uint64 txnSeq
+		metrics.IncCounter("store.recovery.Decode.errors", 1)
+		return Op{}, errors.New("recovery: short v3 payload")
+	}
+	return Op{
+		Version: txn.OpRecordV3,
+		Kind:    txn.OpKind(payload[1]),
+		TxnSeq:  binary.LittleEndian.Uint64(payload[2:10]),
+		Body:    append([]byte(nil), payload[10:]...),
+	}, nil
 }
 
 // decodeV1 parses a legacy untagged record. The original layout —
@@ -401,6 +433,10 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 		}
 		// best-effort: read-only WAL reader, close err is non-actionable for callers.
 		defer func() { _ = r.Close() }()
+		// pending buffers a v3 transaction's ops until its OpCommit marker;
+		// an un-marked tail is discarded for atomicity (F1). v1/v2 frames
+		// self-commit. See the matching loop in openCodec for the rationale.
+		var pending []Op
 		for f := range r.Frames() {
 			if res.WALOps&0xFFF == 0 {
 				if err := ctx.Err(); err != nil {
@@ -413,10 +449,24 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 				res.TailErr = derr
 				break
 			}
+			if op.Version == txn.OpRecordV3 {
+				if op.Kind != txn.OpCommit {
+					pending = append(pending, op)
+					continue
+				}
+				for i := range pending {
+					applyOpString(g, &pending[i])
+					res.WALOps++
+				}
+				pending = pending[:0]
+				continue
+			}
 			applyOpString(g, &op)
 			res.WALOps++
 		}
-		res.TailErr = r.TailError()
+		if tErr := r.TailError(); tErr != nil {
+			res.TailErr = tErr
+		}
 	}
 
 	// Replay any snapshot-side labels after the WAL is fully applied
@@ -456,9 +506,11 @@ func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], erro
 }
 
 func applyOpString(g *lpg.Graph[string, int64], op *Op) {
-	// Delegate v2 records to the typed codec path (string codec, nil wcodec).
-	// v1 records use the legacy byte-copy fallback below.
-	if op.Version == txn.OpRecordV2 {
+	// Delegate v2 and v3 records to the typed codec path (string codec, nil
+	// wcodec). v1 records use the legacy byte-copy fallback below. The
+	// caller is responsible for the v3 buffer-until-OpCommit protocol; by
+	// the time a v3 op reaches here it is part of a committed transaction.
+	if op.Version == txn.OpRecordV2 || op.Version == txn.OpRecordV3 {
 		if op.Kind == txn.OpAddEdgeWeighted {
 			// OpenString has no WeightCodec; cannot decode weight payload.
 			metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
@@ -659,6 +711,12 @@ func openCodec[N comparable, W any](
 		}
 		// best-effort: read-only WAL reader, close err is non-actionable for callers.
 		defer func() { _ = r.Close() }()
+		// pending buffers the ops of an in-flight v3 transaction until its
+		// OpCommit marker is read. The store serialises commits (single
+		// writer), so a transaction's frames are contiguous and never
+		// interleave with another's; an un-marked tail at end of input is
+		// an incomplete transaction and is discarded for atomicity (F1).
+		var pending []Op
 		for f := range r.Frames() {
 			if res.WALOps&0xFFF == 0 {
 				if err := ctx.Err(); err != nil {
@@ -671,6 +729,30 @@ func openCodec[N comparable, W any](
 				res.TailErr = derr
 				break
 			}
+			if op.Version == txn.OpRecordV3 {
+				if op.Kind != txn.OpCommit {
+					pending = append(pending, op)
+					continue
+				}
+				// Durable transaction boundary: apply the buffered ops as a
+				// unit. A crash that tore the batch never reaches a marker
+				// with a partial set — the marker is the last frame written.
+				ok := true
+				for i := range pending {
+					if !applyOpCodec(g, &pending[i], codec, wcodec) {
+						ok = false
+						break
+					}
+					res.WALOps++
+				}
+				pending = pending[:0]
+				if !ok {
+					res.TailErr = errors.New("recovery: corrupt op inside a committed v3 transaction")
+					break
+				}
+				continue
+			}
+			// v1/v2 frame: self-committing (one frame is one transaction).
 			if !applyOpCodec(g, &op, codec, wcodec) {
 				// A v1 frame met an instantiation with no inverse; stop
 				// replay so callers see the cut-off boundary deterministically.
@@ -679,7 +761,9 @@ func openCodec[N comparable, W any](
 			}
 			res.WALOps++
 		}
-		res.TailErr = r.TailError()
+		if tErr := r.TailError(); tErr != nil {
+			res.TailErr = tErr
+		}
 	}
 
 	// Apply snapshot-side labels after WAL replay — see the matching
@@ -737,7 +821,10 @@ func applyOpCodec[N comparable, W any](
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
 ) bool {
-	if op.Version != txn.OpRecordV2 {
+	// v2 and v3 frames share the same codec-encoded body; v3 differs only
+	// in the envelope header (txnSeq) which Decode already stripped into
+	// Op.Body. v1 frames are not invertible through a typed codec.
+	if op.Version != txn.OpRecordV2 && op.Version != txn.OpRecordV3 {
 		return false
 	}
 	src, rest, err := codec.Decode(op.Body)
