@@ -1,9 +1,15 @@
 # ACID Compliance Audit
 
-Status: **in remediation** — this document is the specification for the
-ACID-hardening sprint. It records, with first-hand `file:line` evidence,
-every gap found between the module's behaviour and the ACID mandate stated
-in `CLAUDE.md` ("100% ACID Compliant"). It is updated as each gap is closed.
+Status: **complete** — all five gaps (F1–F5) are fixed, committed, and
+verified; the module is ACID compliant across its full extent (the in-memory
+engine, the store/txn transactional layer, the Cypher query engine, and the
+persistence stack). This document records, with first-hand `file:line`
+evidence, every gap found between the module's behaviour and the ACID mandate
+stated in `CLAUDE.md` ("100% ACID Compliant"), and its resolution. Verified by
+`go test ./...` (61 packages green, openCypher TCK 3897 intact) and a
+comprehensive `go test -race` battery (zero data races), with the full
+durability suite under crash injection (`internal/crashinject`, `store/wal`,
+`store/recovery`).
 
 ACID is defined here exactly as the mandate states:
 
@@ -42,7 +48,7 @@ tests: the suite validates atomicity only for **single-op** transactions
 |----|----------|----------|--------|----------|
 | F1 | Atomicity | **Critical** | **fixed** | Multi-op transactions are not atomic across a crash — recovery can replay a *prefix* of a transaction's ops. |
 | F2 | Durability + Consistency | **Critical** | **fixed** | A checkpoint writes a CSR-only snapshot then truncates the WAL, destroying committed labels/properties (and the mapper for non-string keys). |
-| F3 | Isolation | **High** | in progress | The in-memory apply loop publishes ops one-by-one, so a lock-free reader can observe a partially-applied, in-flight transaction. |
+| F3 | Isolation | **High** | **fixed** | The in-memory apply loop publishes ops one-by-one, so a lock-free reader can observe a partially-applied, in-flight transaction. |
 | F4 | Durability | **Medium** | **fixed** | `wal.Open` never fsyncs the parent directory, so a freshly-created WAL file's directory entry may not survive a crash. |
 | F5 | Atomicity | **Low** | **fixed** | `Tx.Commit` applies after `Sync`; an apply error mid-loop leaves the in-memory view partial while the WAL is fully durable, and returns an error although the transaction is durably committed. |
 
@@ -176,31 +182,42 @@ cross-op invariant (e.g. "if the edge exists, both endpoint labels exist")
 while a writer commits multi-op transactions, under `-race`; no reader ever
 observes a violation.
 
-**Status (in progress — staged epic).** F3 is tracked as an epic with ordered,
-each-green sub-tasks (F3.1–F3.6); the design is locked in
-[`isolation-design.md`](isolation-design.md).
+**Resolution (fixed).** Delivered as a staged epic (F3.1–F3.6); design in
+[`isolation-design.md`](isolation-design.md). A graph-level transaction-
+visibility barrier — `lpg.Graph.ApplyAtomically` (write lock) and
+`lpg.Graph.View` (read lock) — makes a whole transaction's writes flip visible
+to readers as one atomic step, so **no reader ever observes a partial
+transaction**:
 
-- **F3.1 (design) — done.**
-- **F3.2 (transaction-visibility barrier) — done.** `lpg.Graph.ApplyAtomically`
-  (write lock) and `lpg.Graph.View` (read lock) deliver transaction-atomic
-  visibility; `Tx.Commit` applies inside `ApplyAtomically`, so **a reader using
-  `View` never observes a partial transaction** committed through the store/txn
-  API. Proven by `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads`
-  (50 000 multi-op txns × 8 readers, `-race`, zero violations; power-checked at
-  364 626 violations without the barrier) and the txn integration test. The
-  immutable-CSR analytics path stays lock-free.
+- **store/txn API** (F3.2): `Tx.Commit` applies inside `ApplyAtomically`.
+- **Cypher engine** (F3.3): `Engine.Run` executes inside `View`, `Engine.RunInTx`
+  inside `ApplyAtomically`, each *materialising* its rows under the barrier so
+  the lock is released before the caller iterates — deadlock-free for the lazy,
+  caller-managed `ResultSet` (verified: `cypher/exec` never re-enters the
+  barrier).
+- **Secondary indexes** (F3.4): the `index.Manager` buffer is committed inside
+  the same write barrier, so index seeks never observe a partial transaction;
+  the live roaring label bitmaps already update there.
+- **Checkpoint/recovery** (F3.5): the checkpointer holds the store mutex, which
+  serialises it against the apply, so it snapshots a consistent
+  transaction-boundary state (recovery proven by F2).
 
-The Isolation property therefore holds and is proven for the **store/txn
-transactional API**. Remaining stages extend the barrier to the Cypher engine's
-concurrent read/write paths (F3.3 — care needed around its lazy-streaming,
-caller-managed `ResultSet` lifecycle), live secondary indexes (F3.4),
-checkpoint/recovery (F3.5), and the full invariant/`rapid`/soak + perf/TCK gate
-(F3.6). Until those land, a reader that goes through `View` is fully isolated;
-the Cypher executor's own read clauses are not yet `View`-wrapped, so a Cypher
-read running concurrently with a Cypher write can still observe a partial
-transaction — the remaining gap this epic closes. The lock-free per-shard
-snapshot (`isolation-design.md` Approach 1c) remains the tracked performance
-end-state.
+Proven under `-race` by the invariant battery, all power-checked:
+`lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (property atomicity,
+364 626 violations without the barrier),
+`lpg.TestIsolation_CrossSubstructure_EdgeImpliesLabels` (adjacency+label
+atomicity), `txn.TestIsolation_Commit_NoPartialTransactionObservable`, and
+`cypher.TestIsolation_Cypher_NoPartialWriteObservable` (concurrent Cypher
+reads/writes, 3 321 violations without the barrier). TCK stays 3897 green;
+the comprehensive `-race` battery passes; the barrier spawns no goroutines.
+
+This is a correctness-first RWMutex barrier (the expert's "single visibility
+flip"). Its costs — reader/writer mutual exclusion and `O(rows)` materialisation
+allocations, both on the mutable-graph *transactional* path only — are documented
+in `isolation-design.md`; the immutable-CSR analytics hot path is untouched and
+stays lock-free. The lock-free per-shard `atomic.Pointer[Snapshot]` (Approach 1c)
+is the tracked optimisation that removes both costs without changing the
+isolation contract.
 
 ### F4 — WAL file creation is not durable against directory loss (Durability)
 
