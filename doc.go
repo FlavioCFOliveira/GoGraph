@@ -20,6 +20,70 @@
 // Subpackages are added incrementally per the project roadmap; the
 // present package documents the top-level module only.
 //
+// # Common tasks and their entrypoints
+//
+// The following map points each common task at the function or type that
+// starts it. Every link resolves to an exported symbol; follow it for the
+// full signature and contract.
+//
+// Build a labelled property graph:
+//
+//   - [lpg.New] constructs a Graph[N, W]; add nodes, labels, typed
+//     properties, and edges through its methods.
+//
+// Run a Cypher query:
+//
+//   - [cypher.NewEngine] wraps an in-memory lpg.Graph[string, float64].
+//   - [cypher.Engine.Run] executes a query string with typed parameters.
+//
+// Run durable, WAL-backed Cypher queries:
+//
+//   - [cypher.NewEngineWithStore] binds the engine to a [txn.Store], so
+//     writes are journalled and survive a crash.
+//
+// Pass parameters to a query:
+//
+//   - [cypher.Engine.RunAny] accepts plain Go values as parameters.
+//   - [cypher.BindParams] converts a map of Go values into the typed
+//     parameter map that [cypher.Engine.Run] expects.
+//
+// Find a shortest path (weighted):
+//
+//   - [search.Dijkstra] for non-negative edge weights.
+//   - [search.AStar] when an admissible heuristic is available.
+//
+// Traverse without weights:
+//
+//   - [search.BFS] for breadth-first order and unweighted distances.
+//   - [search.DFS] for depth-first order.
+//
+// Compute analytics:
+//
+//   - [centrality.PageRank] for influence ranking.
+//   - [community.Leiden] (or [community.LabelPropagation]) for community
+//     detection; pair with [community.DefaultLeidenOptions].
+//   - [flow.MaxFlow] / [flow.MinCostMaxFlow] for network-flow problems.
+//
+// Import and export graphs:
+//
+//   - CSV: [csv.ReadInto] and [csv.Write].
+//   - GraphML: [graphml.ReadInto] / [graphml.ReadWithProps] and
+//     [graphml.Write] / [graphml.WriteWithProps].
+//   - JSON Lines: [jsonl.ReadInto] / [jsonl.ReadWithProps] and
+//     [jsonl.Write] / [jsonl.WriteWithProps].
+//   - DOT (export only): [dot.Write].
+//
+// Persist and recover:
+//
+//   - [wal.Open] opens a write-ahead log for appending frames.
+//   - [snapshot.WriteSnapshotFull] writes a full CSR-plus-labels snapshot
+//     to a directory.
+//   - [recovery.Open] reconstructs a graph from a snapshot and its WAL.
+//
+// Serve the Bolt protocol:
+//
+//   - [server.NewServer] starts a Bolt v5 server backed by a [cypher.Engine].
+//
 // # NodeID space, MaxNodeID, and live nodes
 //
 // The graph.Mapper interns user keys into compact NodeIDs using a
