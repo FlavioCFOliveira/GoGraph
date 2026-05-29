@@ -70,10 +70,10 @@ type ValueEvalFn func(row Row) (value lpg.PropertyValue, isNull bool, hasValue b
 // SetProperty is NOT safe for concurrent use.
 type SetProperty struct {
 	entityVar   string
-	propertyKey string // empty → whole-entity assignment
-	valueExpr   string // opaque literal string from IR
+	propertyKey string      // empty → whole-entity assignment
+	valueExpr   string      // opaque literal string from IR
 	valueEvalFn ValueEvalFn // non-nil → evaluate the AST per row
-	merge       bool   // true when mode is SET n += {…}
+	merge       bool        // true when mode is SET n += {…}
 	schema      map[string]int
 	relCols     *RelCols // non-nil when entityVar is a relationship
 	child       Operator

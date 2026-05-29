@@ -695,6 +695,7 @@ func eval3VLXOR(left, right Value) (Value, error) {
 //   - NaN compared with a non-number (String, Bool, Node, …) → NULL.
 //     The kinds are incompatible for ordering, so the result is
 //     undefined rather than the IEEE-754 FALSE.
+//
 // The NaN-handling branch runs BEFORE compareValues so the
 // sort-friendly cmpFloat64 (which orders NaN after every finite number
 // for ORDER BY stability) does not leak that ordering decision into

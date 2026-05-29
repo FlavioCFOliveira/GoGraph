@@ -63,13 +63,13 @@ type RelEndpointFn func(row Row) (uint64, uint64, bool)
 //
 // DeleteNode is NOT safe for concurrent use.
 type DeleteNode struct {
-	nodeVar          string
-	schema           map[string]int
-	child            Operator
-	mutator          GraphMutator
-	targetEvalFn     TargetEvalFn
-	relEndpointsFn   RelEndpointFn
-	ctx              context.Context //nolint:containedctx // stored for per-Next ctx check
+	nodeVar        string
+	schema         map[string]int
+	child          Operator
+	mutator        GraphMutator
+	targetEvalFn   TargetEvalFn
+	relEndpointsFn RelEndpointFn
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewDeleteNode creates a DeleteNode operator.
