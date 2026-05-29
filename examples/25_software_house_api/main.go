@@ -1,7 +1,3 @@
-// Command 25_software_house_api is a persistent REST WebAPI over a
-// multi-layer Labeled Property Graph that models task management inside a
-// software-house. See doc.go for the full package documentation and
-// SPEC.md for the data model, REST contract and query catalogue.
 package main
 
 import (
