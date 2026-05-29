@@ -1,0 +1,97 @@
+goos: darwin
+goarch: arm64
+pkg: gograph/bench/cypher_alloc
+cpu: Apple M4
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                │                                         sec/op                                          │                                           sec/op                                            vs base              │
+AllNodesScan-10                                                                               4.372µ ± 1%                                                                                  4.431µ ± 1%  +1.37% (p=0.024 n=6)
+ProjectOp-10                                                                                  13.44µ ± 1%                                                                                  13.51µ ± 1%  +0.54% (p=0.041 n=6)
+ResultSet-10                                                                                  23.99µ ± 0%                                                                                  24.09µ ± 1%       ~ (p=0.065 n=6)
+geomean                                                                                       11.21µ                                                                                       11.30µ       +0.77%
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                │                                          B/op                                           │                                           B/op                                            vs base                │
+AllNodesScan-10                                                                              10.06Ki ± 0%                                                                               10.06Ki ± 0%       ~ (p=1.000 n=6) ¹
+ProjectOp-10                                                                                 21.95Ki ± 0%                                                                               21.95Ki ± 0%       ~ (p=1.000 n=6) ¹
+ResultSet-10                                                                                 34.10Ki ± 0%                                                                               34.10Ki ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                                                      19.60Ki                                                                                    19.60Ki       +0.00%
+¹ all samples are equal
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                │                                        allocs/op                                        │                                        allocs/op                                          vs base                │
+AllNodesScan-10                                                                                258.0 ± 0%                                                                                 258.0 ± 0%       ~ (p=1.000 n=6) ¹
+ProjectOp-10                                                                                   762.0 ± 0%                                                                                 762.0 ± 0%       ~ (p=1.000 n=6) ¹
+ResultSet-10                                                                                  1.266k ± 0%                                                                                1.266k ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                                                        629.0                                                                                      629.0       +0.00%
+¹ all samples are equal
+
+pkg: gograph/bench/cypher_ldbc
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+        │                                         sec/op                                          │                                           sec/op                                            vs base              │
+IC1-10                                                                                408.4µ ± 1%                                                                                  383.3µ ± 1%  -6.15% (p=0.002 n=6)
+IC2-10                                                                                135.4µ ± 0%                                                                                  127.1µ ± 1%  -6.18% (p=0.002 n=6)
+IC5-10                                                                                1.449µ ± 3%                                                                                  1.354µ ± 3%  -6.52% (p=0.002 n=6)
+IC9-10                                                                                165.5µ ± 0%                                                                                  158.2µ ± 1%  -4.41% (p=0.002 n=6)
+IC10-10                                                                               232.2µ ± 1%                                                                                  225.7µ ± 3%  -2.80% (p=0.015 n=6)
+IC13-10                                                                               2.165µ ± 5%                                                                                  2.130µ ± 2%  -1.62% (p=0.002 n=6)
+geomean                                                                               43.38µ                                                                                       41.37µ       -4.63%
+
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+        │                                          B/op                                           │                                            B/op                                             vs base              │
+IC1-10                                                                               588.2Ki ± 0%                                                                                 556.9Ki ± 0%  -5.31% (p=0.002 n=6)
+IC2-10                                                                               193.9Ki ± 0%                                                                                 183.5Ki ± 0%  -5.38% (p=0.002 n=6)
+IC5-10                                                                               1.810Ki ± 3%                                                                                 1.774Ki ± 0%  -1.94% (p=0.002 n=6)
+IC9-10                                                                               286.7Ki ± 0%                                                                                 276.2Ki ± 0%  -3.64% (p=0.002 n=6)
+IC10-10                                                                              429.3Ki ± 0%                                                                                 418.9Ki ± 0%  -2.43% (p=0.002 n=6)
+IC13-10                                                                              2.586Ki ± 0%                                                                                 2.555Ki ± 0%  -1.21% (p=0.002 n=6)
+geomean                                                                              63.52Ki                                                                                      61.40Ki       -3.33%
+
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+        │                                        allocs/op                                        │                                         allocs/op                                          vs base               │
+IC1-10                                                                               10.794k ± 0%                                                                                 8.794k ± 0%  -18.53% (p=0.002 n=6)
+IC2-10                                                                                3.641k ± 0%                                                                                 2.973k ± 0%  -18.35% (p=0.002 n=6)
+IC5-10                                                                                 37.00 ± 0%                                                                                  31.00 ± 0%  -16.22% (p=0.002 n=6)
+IC9-10                                                                                3.634k ± 0%                                                                                 2.966k ± 0%  -18.38% (p=0.002 n=6)
+IC10-10                                                                               5.315k ± 0%                                                                                 4.647k ± 0%  -12.57% (p=0.002 n=6)
+IC13-10                                                                                47.00 ± 0%                                                                                  45.00 ± 0%   -4.26% (p=0.002 n=6)
+geomean                                                                               1.047k                                                                                       891.7       -14.86%
+
+pkg: gograph/search
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                            │                                         sec/op                                          │                                           sec/op                                            vs base              │
+BFSDirectionOpt_PowerLaw-10                                                                               30.07m ± 2%                                                                                  29.83m ± 2%       ~ (p=0.132 n=6)
+Dijkstra_Large-10                                                                                         8.428m ± 2%                                                                                  8.365m ± 2%       ~ (p=0.132 n=6)
+Dijkstra_PostWarmup-10                                                                                    8.486m ± 3%                                                                                  8.472m ± 2%       ~ (p=1.000 n=6)
+geomean                                                                                                   12.91m                                                                                       12.83m       -0.57%
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                            │                                          B/op                                           │                                           B/op                                            vs base                │
+BFSDirectionOpt_PowerLaw-10                                                                              0.000 ± 0%                                                                                   0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Dijkstra_Large-10                                                                                      1.088Mi ± 2%                                                                                 1.088Mi ± 0%       ~ (p=0.132 n=6)
+Dijkstra_PostWarmup-10                                                                                   0.000 ± 0%                                                                                   0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                                                                             ²                                                                                             -0.01%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                            │                                        allocs/op                                        │                                        allocs/op                                          vs base                │
+BFSDirectionOpt_PowerLaw-10                                                                              0.000 ± 0%                                                                                   0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Dijkstra_Large-10                                                                                        4.000 ± 0%                                                                                   4.000 ± 0%       ~ (p=1.000 n=6) ¹
+Dijkstra_PostWarmup-10                                                                                   0.000 ± 0%                                                                                   0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                                                                             ²                                                                                             +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+pkg: gograph/search/centrality
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                       │                                         sec/op                                          │                                             sec/op                                               vs base         │
+Brandes_RandomGraph-10                                                                               7.936m ± 1%                                                                                       7.927m ± 1%  ~ (p=0.589 n=6)
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                       │                                          B/op                                           │                                              B/op                                                vs base         │
+Brandes_RandomGraph-10                                                                              94.34Ki ± 0%                                                                                      94.34Ki ± 0%  ~ (p=1.000 n=6)
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0001__baseline__1634256.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0002__opt1-mapper-shardfor-unsafe__1634256-dirty.txt │
+                       │                                        allocs/op                                        │                                           allocs/op                                            vs base           │
+Brandes_RandomGraph-10                                                                               1.921k ± 0%                                                                                     1.921k ± 0%  ~ (p=1.000 n=6) ¹
+¹ all samples are equal

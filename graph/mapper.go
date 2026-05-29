@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sync"
+	"unsafe"
 )
 
 // FNV-1a 64-bit constants. Kept inline (not via hash/fnv) so the fast
@@ -74,6 +75,125 @@ func MapperShardOf(id NodeID) uint64 { return uint64(id) & mapperShardMask }
 // The zero value of Mapper is not usable; construct one with [NewMapper].
 type Mapper[N comparable] struct {
 	shards [mapperShardCount]mapperShard[N]
+	// kind classifies N once at construction so the per-call shard hash can
+	// dispatch on a plain integer instead of boxing the key into interface{}.
+	// Boxing a string into any() heap-allocates its 16-byte header on every
+	// call; on the string-keyed Cypher/LPG read path that single allocation
+	// dominated per-row cost. kind is set once in NewMapper and never mutated,
+	// so concurrent reads in shardFor are race-free.
+	kind keyKind
+}
+
+// keyKind enumerates the concrete key types that [Mapper.shardFor] can hash
+// without boxing. Types not covered here (named string/int types, custom
+// structs) fall through to [mapperShardFor], which boxes once via a type
+// switch — acceptable because those types are not on any hot path.
+type keyKind uint8
+
+const (
+	kindOther keyKind = iota
+	kindString
+	kindInt
+	kindInt8
+	kindInt16
+	kindInt32
+	kindInt64
+	kindUint
+	kindUint8
+	kindUint16
+	kindUint32
+	kindUint64
+	kind16Bytes
+)
+
+// detectKeyKind classifies N exactly once (at Mapper construction). The single
+// any() boxing here is amortised over the Mapper's whole lifetime. A type
+// switch matches exact types, not underlying types, so a defined type such as
+// `type Key string` resolves to kindOther and uses the boxing fallback — the
+// same behaviour [mapperShardFor] already had for such types.
+func detectKeyKind[N comparable]() keyKind {
+	var zero N
+	switch any(zero).(type) {
+	case string:
+		return kindString
+	case int:
+		return kindInt
+	case int8:
+		return kindInt8
+	case int16:
+		return kindInt16
+	case int32:
+		return kindInt32
+	case int64:
+		return kindInt64
+	case uint:
+		return kindUint
+	case uint8:
+		return kindUint8
+	case uint16:
+		return kindUint16
+	case uint32:
+		return kindUint32
+	case uint64:
+		return kindUint64
+	case [16]byte:
+		return kind16Bytes
+	default:
+		return kindOther
+	}
+}
+
+// shardFor selects the shard for key k. It produces the identical index to
+// [mapperShardFor] (same FNV-1a hash, same mask) but avoids boxing k into
+// interface{} on the hot path: the key's concrete type is known from m.kind,
+// so the bytes of k are reinterpreted directly via unsafe.Pointer. This is
+// sound because m.kind was derived from N's exact dynamic type, so the
+// reinterpretation matches N's memory layout precisely. The shared FNV
+// helpers guarantee shard placement stays byte-for-byte stable across
+// processes, which the persistence/restore path depends on.
+func (m *Mapper[N]) shardFor(k N) uint64 {
+	// Each unsafe reinterpretation below is sound because m.kind was derived
+	// from N's exact dynamic type in detectKeyKind, so &k addresses memory whose
+	// layout matches the target pointer type precisely. The pointer never
+	// escapes (the value is read, hashed, and discarded), so no allocation or
+	// aliasing hazard arises. The //nolint:gosec markers acknowledge the
+	// project's audit policy for intentional zero-copy reinterpretation.
+	switch m.kind {
+	case kindString:
+		return fnv1aString(*(*string)(unsafe.Pointer(&k))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of a string key
+	case kindInt:
+		return fnv1aUint64(uint64(*(*int)(unsafe.Pointer(&k)))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of an int key
+	case kindInt8:
+		return fnv1aUint64(uint64(uint8(*(*int8)(unsafe.Pointer(&k))))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of an int8 key
+	case kindInt16:
+		return fnv1aUint64(uint64(uint16(*(*int16)(unsafe.Pointer(&k))))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of an int16 key
+	case kindInt32:
+		return fnv1aUint64(uint64(uint32(*(*int32)(unsafe.Pointer(&k))))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of an int32 key
+	case kindInt64:
+		return fnv1aUint64(uint64(*(*int64)(unsafe.Pointer(&k)))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of an int64 key
+	case kindUint:
+		return fnv1aUint64(uint64(*(*uint)(unsafe.Pointer(&k)))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of a uint key
+	case kindUint8:
+		return fnv1aUint64(uint64(*(*uint8)(unsafe.Pointer(&k)))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of a uint8 key
+	case kindUint16:
+		return fnv1aUint64(uint64(*(*uint16)(unsafe.Pointer(&k)))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of a uint16 key
+	case kindUint32:
+		return fnv1aUint64(uint64(*(*uint32)(unsafe.Pointer(&k)))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of a uint32 key
+	case kindUint64:
+		return fnv1aUint64(*(*uint64)(unsafe.Pointer(&k))) & mapperShardMask //nolint:gosec // G103: audited reinterpretation of a uint64 key
+	case kind16Bytes:
+		v := *(*[16]byte)(unsafe.Pointer(&k)) //nolint:gosec // G103: audited reinterpretation of a [16]byte key
+		h := fnvOffset
+		for i := 0; i < 16; i++ {
+			h ^= uint64(v[i])
+			h *= fnvPrime
+		}
+		return h & mapperShardMask
+	default:
+		// Exotic key types (named types, structs): one boxing per call, but
+		// these never appear on a hot path.
+		return mapperShardFor(k)
+	}
 }
 
 // mapperShard is one of the independently locked stripes of a Mapper.
@@ -86,7 +206,7 @@ type mapperShard[N comparable] struct {
 
 // NewMapper returns a fresh, empty Mapper ready for concurrent use.
 func NewMapper[N comparable]() *Mapper[N] {
-	m := &Mapper[N]{}
+	m := &Mapper[N]{kind: detectKeyKind[N]()}
 	for i := range m.shards {
 		m.shards[i].forward = make(map[N]NodeID)
 	}
@@ -98,7 +218,7 @@ func NewMapper[N comparable]() *Mapper[N] {
 // same NodeID. The fast path (k already interned) takes a read lock
 // only and performs no heap allocation.
 func (m *Mapper[N]) Intern(k N) NodeID {
-	shardIdx := mapperShardFor(k)
+	shardIdx := m.shardFor(k)
 	s := &m.shards[shardIdx]
 
 	s.mu.RLock()
@@ -135,7 +255,7 @@ func (m *Mapper[N]) internSlow(s *mapperShard[N], shardIdx uint64, k N) NodeID {
 // the right primitive for read-only operations (HasEdge, Neighbours,
 // existence checks) on backends layered above the Mapper.
 func (m *Mapper[N]) Lookup(k N) (NodeID, bool) {
-	shardIdx := mapperShardFor(k)
+	shardIdx := m.shardFor(k)
 	s := &m.shards[shardIdx]
 	s.mu.RLock()
 	id, ok := s.forward[k]

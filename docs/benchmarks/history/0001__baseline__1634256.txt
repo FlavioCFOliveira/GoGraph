@@ -1,0 +1,110 @@
+goos: darwin
+goarch: arm64
+pkg: gograph/bench/cypher_ldbc
+cpu: Apple M4
+BenchmarkIC1-10     	    2932	    406948 ns/op	  602312 B/op	   10794 allocs/op
+BenchmarkIC1-10     	    2910	    408688 ns/op	  602311 B/op	   10794 allocs/op
+BenchmarkIC1-10     	    2980	    411429 ns/op	  602312 B/op	   10794 allocs/op
+BenchmarkIC1-10     	    2924	    407829 ns/op	  602311 B/op	   10794 allocs/op
+BenchmarkIC1-10     	    2913	    408603 ns/op	  602314 B/op	   10794 allocs/op
+BenchmarkIC1-10     	    2890	    408119 ns/op	  602312 B/op	   10794 allocs/op
+BenchmarkIC2-10     	    8764	    135219 ns/op	  198554 B/op	    3641 allocs/op
+BenchmarkIC2-10     	    8799	    135071 ns/op	  198554 B/op	    3641 allocs/op
+BenchmarkIC2-10     	    9104	    135211 ns/op	  198554 B/op	    3641 allocs/op
+BenchmarkIC2-10     	    8931	    135958 ns/op	  198554 B/op	    3641 allocs/op
+BenchmarkIC2-10     	    8689	    135669 ns/op	  198554 B/op	    3641 allocs/op
+BenchmarkIC2-10     	    8908	    135793 ns/op	  198554 B/op	    3641 allocs/op
+BenchmarkIC5-10     	  933927	      1494 ns/op	    1910 B/op	      37 allocs/op
+BenchmarkIC5-10     	  906301	      1445 ns/op	    1841 B/op	      37 allocs/op
+BenchmarkIC5-10     	  902773	      1434 ns/op	    1830 B/op	      37 allocs/op
+BenchmarkIC5-10     	  907731	      1449 ns/op	    1841 B/op	      37 allocs/op
+BenchmarkIC5-10     	  928957	      1472 ns/op	    1906 B/op	      37 allocs/op
+BenchmarkIC5-10     	  916744	      1448 ns/op	    1865 B/op	      37 allocs/op
+BenchmarkIC9-10     	    7063	    165500 ns/op	  293556 B/op	    3634 allocs/op
+BenchmarkIC9-10     	    7381	    165700 ns/op	  293556 B/op	    3634 allocs/op
+BenchmarkIC9-10     	    7124	    165574 ns/op	  293557 B/op	    3634 allocs/op
+BenchmarkIC9-10     	    7222	    165909 ns/op	  293557 B/op	    3634 allocs/op
+BenchmarkIC9-10     	    7230	    165480 ns/op	  293556 B/op	    3634 allocs/op
+BenchmarkIC9-10     	    7110	    165354 ns/op	  293556 B/op	    3634 allocs/op
+BenchmarkIC10-10    	    5248	    231660 ns/op	  439605 B/op	    5315 allocs/op
+BenchmarkIC10-10    	    5161	    230331 ns/op	  439606 B/op	    5315 allocs/op
+BenchmarkIC10-10    	    5128	    231143 ns/op	  439606 B/op	    5315 allocs/op
+BenchmarkIC10-10    	    5227	    233720 ns/op	  439607 B/op	    5315 allocs/op
+BenchmarkIC10-10    	    5186	    233091 ns/op	  439606 B/op	    5315 allocs/op
+BenchmarkIC10-10    	    5082	    232759 ns/op	  439606 B/op	    5315 allocs/op
+BenchmarkIC13-10    	  549045	      2164 ns/op	    2648 B/op	      47 allocs/op
+BenchmarkIC13-10    	  551378	      2165 ns/op	    2648 B/op	      47 allocs/op
+BenchmarkIC13-10    	  554654	      2163 ns/op	    2648 B/op	      47 allocs/op
+BenchmarkIC13-10    	  552139	      2271 ns/op	    2648 B/op	      47 allocs/op
+BenchmarkIC13-10    	  551961	      2183 ns/op	    2648 B/op	      47 allocs/op
+BenchmarkIC13-10    	  544334	      2150 ns/op	    2648 B/op	      47 allocs/op
+PASS
+ok  	gograph/bench/cypher_ldbc	45.156s
+goos: darwin
+goarch: arm64
+pkg: gograph/bench/cypher_alloc
+cpu: Apple M4
+BenchmarkAllNodesScan-10    	  275166	      4369 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  274770	      4358 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  274875	      4369 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  274272	      4436 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  272509	      4380 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  276268	      4374 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkProjectOp-10       	   89607	     13442 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   88744	     13574 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   88897	     13466 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   89980	     13347 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   89842	     13437 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   89944	     13441 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkResultSet-10       	   50068	     23957 ns/op	   34920 B/op	    1266 allocs/op
+BenchmarkResultSet-10       	   50164	     23884 ns/op	   34920 B/op	    1266 allocs/op
+BenchmarkResultSet-10       	   50218	     24045 ns/op	   34920 B/op	    1266 allocs/op
+BenchmarkResultSet-10       	   49981	     23964 ns/op	   34920 B/op	    1266 allocs/op
+BenchmarkResultSet-10       	   50188	     24012 ns/op	   34920 B/op	    1266 allocs/op
+BenchmarkResultSet-10       	   49522	     24068 ns/op	   34920 B/op	    1266 allocs/op
+PASS
+ok  	gograph/bench/cypher_alloc	25.517s
+goos: darwin
+goarch: arm64
+pkg: gograph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29429274 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  30086985 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  30078725 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  30036907 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  30057740 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  30325333 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     138	   8551018 ns/op	 1169069 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     142	   8400990 ns/op	 1140958 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     142	   8418332 ns/op	 1140948 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     141	   8437975 ns/op	 1141137 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     142	   8591024 ns/op	 1140979 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     141	   8392617 ns/op	 1167903 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     139	   8678691 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     141	   8448377 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     140	   8426178 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     140	   8524032 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     142	   8575139 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     145	   8223718 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	gograph/search	71.401s
+PASS
+ok  	gograph/search/centrality	0.394s
+PASS
+ok  	gograph/search/community	0.305s
+PASS
+ok  	gograph/search/extern	0.275s
+PASS
+ok  	gograph/search/flow	0.252s
+goos: darwin
+goarch: arm64
+pkg: gograph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     151	   8001912 ns/op	   96601 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     150	   7936641 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     151	   7928000 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     151	   7935229 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     150	   7944353 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     151	   7909831 ns/op	   96600 B/op	    1921 allocs/op
+PASS
+ok  	gograph/search/centrality	12.204s
