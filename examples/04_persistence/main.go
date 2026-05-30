@@ -20,11 +20,14 @@
 // Sample output: run `go run ./examples/04_persistence` and capture the
 // stdout — the output is deterministic for the inputs hard-coded
 // above and serves as the regression baseline a future change should
-// preserve.
+// preserve. The example persists to a directory created with
+// os.MkdirTemp; that path is intentionally kept out of stdout so the
+// output stays stable across runs.
 package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -39,21 +42,34 @@ import (
 	"gograph/store/wal"
 )
 
-//nolint:gocyclo // example walk-through: setup + commits + property writes + snapshot + recovery + per-kind assertions
 func main() {
+	if err := run(os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run drives the full persistence walk-through — WAL transactions,
+// typed property writes, a v2 snapshot, and recovery from disk — and
+// writes the report to w. All output goes to w so a test can capture
+// and assert it; run returns wrapped errors rather than terminating
+// the process. The temp directory it persists to is never written to
+// w, so the report stays deterministic.
+//
+//nolint:gocyclo // example walk-through: setup + commits + property writes + snapshot + recovery + per-kind assertions
+func run(w io.Writer) error {
 	dir, err := os.MkdirTemp("", "gograph-ex04-")
 	if err != nil {
-		log.Fatalf("MkdirTemp: %v", err)
+		return fmt.Errorf("MkdirTemp: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	walPath := filepath.Join(dir, "wal")
 
-	w, err := wal.Open(walPath)
+	wl, err := wal.Open(walPath)
 	if err != nil {
-		log.Fatalf("wal.Open: %v", err)
+		return fmt.Errorf("wal.Open: %w", err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
+	store := txn.NewStoreWithCodec(g, wl, txn.NewStringCodec())
 
 	commits := []struct{ src, dst, nodeLabel, edgeLabel string }{
 		{"alice", "bob", "Person", "KNOWS"},
@@ -68,39 +84,39 @@ func main() {
 		_ = tx.SetEdgeLabel(c.src, c.dst, c.edgeLabel)
 		_ = tx.Commit()
 	}
-	fmt.Printf("Committed %d transactions to the WAL.\n", len(commits))
+	fmt.Fprintf(w, "Committed %d transactions to the WAL.\n", len(commits))
 
 	// Attach typed properties before snapshotting. These travel
 	// through properties.bin only; the WAL records labels and edges
 	// today, not property writes.
 	joined := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
 	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("Alice")); err != nil {
-		log.Fatalf("SetNodeProperty: %v", err)
+		return fmt.Errorf("SetNodeProperty name: %w", err)
 	}
 	if err := g.SetNodeProperty("alice", "age", lpg.Int64Value(30)); err != nil {
-		log.Fatalf("SetNodeProperty: %v", err)
+		return fmt.Errorf("SetNodeProperty age: %w", err)
 	}
 	if err := g.SetNodeProperty("alice", "joined", lpg.TimeValue(joined)); err != nil {
-		log.Fatalf("SetNodeProperty: %v", err)
+		return fmt.Errorf("SetNodeProperty joined: %w", err)
 	}
 	if err := g.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026")); err != nil {
-		log.Fatalf("SetEdgeProperty since: %v", err)
+		return fmt.Errorf("SetEdgeProperty since: %w", err)
 	}
 	if err := g.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7)); err != nil {
-		log.Fatalf("SetEdgeProperty weight: %v", err)
+		return fmt.Errorf("SetEdgeProperty weight: %w", err)
 	}
-	fmt.Println("Typed properties set on alice and edge alice->bob.")
+	fmt.Fprintln(w, "Typed properties set on alice and edge alice->bob.")
 
 	// Persist a v2 snapshot (CSR + labels.bin + properties.bin)
 	// alongside the WAL.
 	cs := csr.BuildFromAdjList(g.AdjList())
 	snapDir := filepath.Join(dir, "snapshot")
 	if err := snapshot.WriteSnapshotFull(snapDir, cs, g); err != nil {
-		fmt.Println("snapshot.WriteSnapshotFull:", err)
-		return
+		fmt.Fprintln(w, "snapshot.WriteSnapshotFull:", err)
+		return nil
 	}
-	fmt.Println("v2 snapshot persisted: csr.bin + labels.bin + properties.bin + manifest.json.")
-	_ = w.Close()
+	fmt.Fprintln(w, "v2 snapshot persisted: csr.bin + labels.bin + properties.bin + manifest.json.")
+	_ = wl.Close()
 
 	// "Restart": drop all in-memory references and rebuild from disk.
 	_ = store
@@ -110,55 +126,56 @@ func main() {
 		WeightCodec: txn.NewInt64WeightCodec(),
 	})
 	if err != nil {
-		fmt.Println("recovery.Open:", err)
-		return
+		fmt.Fprintln(w, "recovery.Open:", err)
+		return nil
 	}
-	fmt.Printf("Recovered: WAL ops=%d, snapshot hit=%v, snapshot label records=%d, snapshot property records=%d.\n",
+	fmt.Fprintf(w, "Recovered: WAL ops=%d, snapshot hit=%v, snapshot label records=%d, snapshot property records=%d.\n",
 		res.WALOps, res.SnapshotHit, res.SnapshotLabels, res.SnapshotProperties)
 	for _, c := range commits {
 		if res.Graph.HasNodeLabel(c.src, c.nodeLabel) &&
 			res.Graph.HasEdgeLabel(c.src, c.dst, c.edgeLabel) {
-			fmt.Printf("  recovered %s -[%s]-> %s (src carries %q)\n",
+			fmt.Fprintf(w, "  recovered %s -[%s]-> %s (src carries %q)\n",
 				c.src, c.edgeLabel, c.dst, c.nodeLabel)
 		} else {
-			fmt.Printf("  MISSING label data for %s -> %s\n", c.src, c.dst)
+			fmt.Fprintf(w, "  MISSING label data for %s -> %s\n", c.src, c.dst)
 		}
 	}
 
 	// Assert typed-property survival.
 	if v, ok := res.Graph.GetNodeProperty("alice", "name"); !ok {
-		fmt.Println("  MISSING property alice.name")
+		fmt.Fprintln(w, "  MISSING property alice.name")
 	} else if s, _ := v.String(); s != "Alice" {
-		fmt.Printf("  property alice.name mismatch: %q\n", s)
+		fmt.Fprintf(w, "  property alice.name mismatch: %q\n", s)
 	} else {
-		fmt.Printf("  recovered alice.name = %q\n", s)
+		fmt.Fprintf(w, "  recovered alice.name = %q\n", s)
 	}
 	if v, ok := res.Graph.GetNodeProperty("alice", "age"); !ok {
-		fmt.Println("  MISSING property alice.age")
+		fmt.Fprintln(w, "  MISSING property alice.age")
 	} else if i, _ := v.Int64(); i != 30 {
-		fmt.Printf("  property alice.age mismatch: %d\n", i)
+		fmt.Fprintf(w, "  property alice.age mismatch: %d\n", i)
 	} else {
-		fmt.Printf("  recovered alice.age = %d\n", i)
+		fmt.Fprintf(w, "  recovered alice.age = %d\n", i)
 	}
 	if v, ok := res.Graph.GetNodeProperty("alice", "joined"); !ok {
-		fmt.Println("  MISSING property alice.joined")
+		fmt.Fprintln(w, "  MISSING property alice.joined")
 	} else if tm, _ := v.Time(); !tm.Equal(joined) {
-		fmt.Printf("  property alice.joined mismatch: %v\n", tm)
+		fmt.Fprintf(w, "  property alice.joined mismatch: %v\n", tm)
 	} else {
-		fmt.Printf("  recovered alice.joined = %s\n", tm.Format(time.RFC3339))
+		fmt.Fprintf(w, "  recovered alice.joined = %s\n", tm.Format(time.RFC3339))
 	}
 	if v, ok := res.Graph.GetEdgeProperty("alice", "bob", "since"); !ok {
-		fmt.Println("  MISSING edge property since")
+		fmt.Fprintln(w, "  MISSING edge property since")
 	} else if s, _ := v.String(); s != "2026" {
-		fmt.Printf("  edge(alice,bob).since mismatch: %q\n", s)
+		fmt.Fprintf(w, "  edge(alice,bob).since mismatch: %q\n", s)
 	} else {
-		fmt.Printf("  recovered edge(alice,bob).since = %q\n", s)
+		fmt.Fprintf(w, "  recovered edge(alice,bob).since = %q\n", s)
 	}
 	if v, ok := res.Graph.GetEdgeProperty("alice", "bob", "weight"); !ok {
-		fmt.Println("  MISSING edge property weight")
+		fmt.Fprintln(w, "  MISSING edge property weight")
 	} else if i, _ := v.Int64(); i != 7 {
-		fmt.Printf("  edge(alice,bob).weight mismatch: %d\n", i)
+		fmt.Fprintf(w, "  edge(alice,bob).weight mismatch: %d\n", i)
 	} else {
-		fmt.Printf("  recovered edge(alice,bob).weight = %d\n", i)
+		fmt.Fprintf(w, "  recovered edge(alice,bob).weight = %d\n", i)
 	}
+	return nil
 }
