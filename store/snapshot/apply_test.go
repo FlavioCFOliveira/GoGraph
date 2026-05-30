@@ -74,7 +74,10 @@ func TestApplyMapperToGraph_RoundTrip(t *testing.T) {
 	if m.Len() != 3 {
 		t.Fatalf("mapper Len = %d, want 3", m.Len())
 	}
-	for _, tc := range []struct{ id graph.NodeID; key string }{{alice, "alice"}, {bob, "bob"}, {carol, "carol"}} {
+	for _, tc := range []struct {
+		id  graph.NodeID
+		key string
+	}{{alice, "alice"}, {bob, "bob"}, {carol, "carol"}} {
 		got, ok := m.Resolve(tc.id)
 		if !ok || got != tc.key {
 			t.Errorf("Resolve(%d) = %q, %v; want %q, true", tc.id, got, ok, tc.key)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"testing"
 
+	"gograph/cypher/expr"
 	"gograph/graph/lpg"
 )
 
@@ -200,6 +201,121 @@ func TestParsePropValue_NullSentinel(t *testing.T) {
 	_, err := parsePropValue("null")
 	if !errors.Is(err, ErrPropertyValueIsNull) {
 		t.Fatalf("parsePropValue(\"null\") = %v, want ErrPropertyValueIsNull", err)
+	}
+}
+
+// TestExprListToLPGList exercises exprListToLPGList directly for all
+// supported element types, including nested lists and the error path.
+func TestExprListToLPGList(t *testing.T) {
+	t.Parallel()
+	t.Run("strings", func(t *testing.T) {
+		got, err := exprListToLPGList(expr.ListValue{expr.StringValue("a"), expr.StringValue("b")})
+		if err != nil {
+			t.Fatalf("exprListToLPGList: %v", err)
+		}
+		want := lpg.ListValue([]lpg.PropertyValue{lpg.StringValue("a"), lpg.StringValue("b")})
+		if !propValueDeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("integers", func(t *testing.T) {
+		got, err := exprListToLPGList(expr.ListValue{expr.IntegerValue(1), expr.IntegerValue(2)})
+		if err != nil {
+			t.Fatalf("exprListToLPGList: %v", err)
+		}
+		want := lpg.ListValue([]lpg.PropertyValue{lpg.Int64Value(1), lpg.Int64Value(2)})
+		if !propValueDeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("floats", func(t *testing.T) {
+		got, err := exprListToLPGList(expr.ListValue{expr.FloatValue(3.14)})
+		if err != nil {
+			t.Fatalf("exprListToLPGList: %v", err)
+		}
+		want := lpg.ListValue([]lpg.PropertyValue{lpg.Float64Value(3.14)})
+		if !propValueDeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("bools", func(t *testing.T) {
+		got, err := exprListToLPGList(expr.ListValue{expr.BoolValue(true), expr.BoolValue(false)})
+		if err != nil {
+			t.Fatalf("exprListToLPGList: %v", err)
+		}
+		want := lpg.ListValue([]lpg.PropertyValue{lpg.BoolValue(true), lpg.BoolValue(false)})
+		if !propValueDeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("nested list", func(t *testing.T) {
+		inner := expr.ListValue{expr.IntegerValue(10), expr.IntegerValue(20)}
+		got, err := exprListToLPGList(expr.ListValue{inner})
+		if err != nil {
+			t.Fatalf("exprListToLPGList nested: %v", err)
+		}
+		wantInner := lpg.ListValue([]lpg.PropertyValue{lpg.Int64Value(10), lpg.Int64Value(20)})
+		want := lpg.ListValue([]lpg.PropertyValue{wantInner})
+		if !propValueDeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("unsupported type errors", func(t *testing.T) {
+		_, err := exprListToLPGList(expr.ListValue{expr.Null}) // Null is unsupported
+		if err == nil {
+			t.Fatal("expected error for unsupported element type")
+		}
+	})
+}
+
+// TestParsePropLiteralWithParams exercises parsePropLiteralWithParams
+// for all supported parameter value types including ListValue.
+func TestParsePropLiteralWithParams(t *testing.T) {
+	t.Parallel()
+	params := map[string]expr.Value{
+		"name":   expr.StringValue("Alice"),
+		"age":    expr.IntegerValue(30),
+		"score":  expr.FloatValue(9.8),
+		"active": expr.BoolValue(true),
+		"tags":   expr.ListValue{expr.StringValue("go"), expr.StringValue("graph")},
+	}
+
+	cases := []struct {
+		name    string
+		input   string
+		key     string
+		wantErr bool
+	}{
+		{"string param", `{n: $name}`, "n", false},
+		{"integer param", `{n: $age}`, "n", false},
+		{"float param", `{n: $score}`, "n", false},
+		{"bool param", `{n: $active}`, "n", false},
+		{"list param", `{n: $tags}`, "n", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePropLiteralWithParams(tc.input, params)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePropLiteralWithParams(%q): %v", tc.input, err)
+			}
+			found := false
+			for i := range got {
+				if got[i].key == tc.key {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("key %q not found in result %v", tc.key, got)
+			}
+		})
 	}
 }
 
