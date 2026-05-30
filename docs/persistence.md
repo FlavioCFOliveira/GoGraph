@@ -62,10 +62,11 @@ on the read path, while writes serialise.
   snapshot/
     manifest.json    — versioned index of files + CRC32C per file
     csr.bin          — serialised CSR (vertices / edges / weights)
-    labels.bin       — serialised LPG labels (v2 manifests only)
-    properties.bin   — serialised LPG typed properties (v2 manifests only)
+    labels.bin       — serialised LPG labels (v2+ manifests only)
+    properties.bin   — serialised LPG typed properties (v2+ manifests only)
+    mapper.bin       — durable NodeID→key interning table (v3 manifests only)
     indexes/         — secondary indexes registered with index.Manager
-      <name>.bin     — one file per registered serialisable index (v2)
+      <name>.bin     — one file per registered serialisable index (v2+)
 ```
 
 ## WAL payload schema
@@ -318,26 +319,38 @@ and only present when at least one secondary index registered with
 
 ## Snapshot file format
 
-The manifest schema is versioned. The build understands two versions
-transparently:
+The manifest schema is versioned. `snapshot.ManifestVersion` (the
+highest schema this build emits) is **3**. The build understands all
+three versions transparently:
 
 - **v1** — `csr.bin` only. Written by the legacy
-  `snapshot.WriteSnapshotCSR` / `WriteSnapshotCSRCtx` helpers and by
-  the current `store/checkpoint.Checkpointer`. The on-disk shape is
-  identical to v1.0.0 so existing fixtures keep loading bit-for-bit.
+  `snapshot.WriteSnapshotCSR` / `WriteSnapshotCSRCtx` helpers. The
+  on-disk shape is identical to v1.0.0 so existing fixtures keep
+  loading bit-for-bit.
 - **v2** — `csr.bin` + `labels.bin` + `properties.bin`. Written by
-  `snapshot.WriteSnapshotFull` / `WriteSnapshotFullCtx`. Adds
-  durable LPG label and typed-property state to the snapshot. The
-  individual component files are independent of each other: a v2
-  manifest may carry any combination of `labels.bin` and
-  `properties.bin`, or neither (CSR-only v2), and
-  `snapshot.LoadSnapshotFull` tolerates every combination.
+  `snapshot.WriteSnapshotFull` / `WriteSnapshotFullCtx` when the graph
+  is keyed by a non-string type **and** no mapper codec is supplied.
+  Adds durable LPG label and typed-property state, but carries no
+  mapper, so recovery from a v2 snapshot must replay the WAL to
+  re-intern the `NodeID→key` mapping. The individual component files
+  are independent of each other: a v2 manifest may carry any
+  combination of `labels.bin` and `properties.bin`, or neither
+  (CSR-only v2), and `snapshot.LoadSnapshotFull` tolerates every
+  combination.
+- **v3** — `csr.bin` + `labels.bin` + `properties.bin` + `mapper.bin`.
+  Written by `snapshot.WriteSnapshotFull` for string-keyed graphs, and
+  by `snapshot.WriteSnapshotFullWithMapperCodec` for **any** key type.
+  The extra `mapper.bin` makes the snapshot **self-sufficient**:
+  recovery reconstructs the full graph from the snapshot alone, with
+  no WAL replay required (audit gap F3). This is the shape the current
+  checkpointer emits.
 
-`snapshot.LoadManifest` accepts both versions; a future version 3+
-manifest surfaces `snapshot.ErrManifestUnsupported`. The high-level
-`snapshot.LoadSnapshotFull` reads both shapes and returns empty
-`LabelsReadback` / `PropertiesReadback` for components that are
-absent.
+`snapshot.LoadManifest` accepts all three versions; a manifest whose
+version exceeds `ManifestVersion` (4 or higher) surfaces
+`snapshot.ErrManifestUnsupported`. The high-level
+`snapshot.LoadSnapshotFull` reads every shape and returns empty
+`LabelsReadback` / `PropertiesReadback` / `MapperReadback` for
+components that are absent.
 
 ### `snapshot/manifest.json` (v1)
 
@@ -381,7 +394,33 @@ transparently. The `indexes` array is omitted entirely when no
 registered indexes implement `index.Serializer`, keeping the on-disk
 form bit-identical to pre-extension v2 snapshots.
 
-### `snapshot/csr.bin` (binary, identical across v1 and v2)
+### `snapshot/manifest.json` (v3)
+
+```json
+{
+  "version": 3,
+  "created_at": "2026-05-19T14:00:00Z",
+  "order": 1000,
+  "size": 5000,
+  "files": [
+    {"name": "csr.bin",        "size": 24014, "crc32c": 305419896},
+    {"name": "labels.bin",     "size":   312, "crc32c":  47119123},
+    {"name": "properties.bin", "size":   568, "crc32c": 837469102},
+    {"name": "mapper.bin",     "size":  4096, "crc32c": 314159265}
+  ],
+  "indexes": [
+    {"name": "labels.nodes",  "size":  1024, "crc32c": 123456789}
+  ]
+}
+```
+
+A v3 manifest is a v2 manifest with an extra `mapper.bin` entry in
+`files`. The `version` field is bumped to `3` only when `mapper.bin`
+is present; the writer stamps `2` for non-string-keyed snapshots that
+omit the mapper. `snapshot/csr.bin`, `labels.bin`, and
+`properties.bin` are byte-identical across v2 and v3.
+
+### `snapshot/csr.bin` (binary, identical across v1, v2 and v3)
 
 | Offset  | Field            | Type                          |
 |---------|------------------|-------------------------------|
@@ -393,7 +432,7 @@ form bit-identical to pre-extension v2 snapshots.
 | ...     | edges            | uint64[nEdges]                |
 | ...     | weights          | raw[weightSize·nEdges] (opt.) |
 
-### `snapshot/labels.bin` (binary, v2 only)
+### `snapshot/labels.bin` (binary, v2+ only)
 
 Little-endian throughout. The whole file is covered by the CRC32C
 stored in the manifest entry, including the magic header.
@@ -447,7 +486,7 @@ on-disk migration step — the next call to
 `snapshot.WriteSnapshotFull` simply emits a fresh v2 directory at
 the same path under the atomic `.tmp` + `os.Rename` protocol.
 
-### `snapshot/properties.bin` (binary, v2 only)
+### `snapshot/properties.bin` (binary, v2+ only)
 
 Little-endian throughout. The whole file is covered by the CRC32C
 stored in the manifest entry, including the magic header.
@@ -540,7 +579,77 @@ transaction commit and replayed on restart. The snapshot's
 historical baseline; the WAL contributes the delta since the
 prior snapshot.
 
-### `snapshot/indexes/<name>.bin` (binary, v2 only)
+### `snapshot/mapper.bin` (binary, v3 only)
+
+`mapper.bin` is the durable `NodeID→key` interning table. It is what
+turns a snapshot **self-sufficient**: with it, recovery rebuilds the
+mapper from the snapshot and applies the CSR adjacency without
+replaying the WAL. Little-endian throughout; the whole file is
+covered by the CRC32C stored in its manifest entry, including the
+magic header. The internal `formatVersion` byte is independent of the
+manifest version — a future mapper layout change bumps it without
+forcing a `manifest.json` schema bump.
+
+| Offset | Field         | Type                                   |
+|--------|---------------|----------------------------------------|
+| 0      | magic         | uint32 LE = `0x50414D47` (`'GMAP'`)    |
+| 4      | formatVersion | uint16 LE (1 = string, 2 = codec)      |
+| 6      | pairCount     | uint64 LE                              |
+| ...    | pair records  | pairCount × (uint64 NodeID, uint32 keyLen, [keyLen]byte key) |
+
+Records are emitted in `graph.Mapper.Walk` order (shard-major,
+intra-index-major) so the reader reconstructs the interning table
+deterministically. A single key entry is capped at 1 GiB
+(`maxMapperKeyLen`); a length prefix beyond that, a bad magic, an
+unsupported version, or a truncated record all surface as
+`snapshot.ErrMapperCorrupted`.
+
+There are two on-disk layouts, distinguished by `formatVersion`:
+
+- **version 1 (string keys)** — the per-record `key` bytes are the
+  raw UTF-8 of the string key, with no codec framing. This layout is
+  **frozen**: every `mapper.bin` produced for a string-keyed graph is
+  byte-identical to the pre-codec writer, so cross-process
+  byte-equality is preserved. Written by `snapshot.WriteMapperString`
+  and read by `snapshot.ReadMapperString` into `MapperReadback.Pairs`.
+- **version 2 (any other key type)** — the per-record `key` bytes are
+  the opaque output of `txn.Codec[N].Encode` for the natural key,
+  framed by the same `uint32` length prefix the v1 layout uses.
+  Written by `snapshot.WriteMapper` (which delegates to
+  `WriteMapperString` when `N` is `string`, so strings never emit
+  version 2) and read by `snapshot.ReadMapperBytes` into
+  `MapperReadback.RawPairs`.
+
+`snapshot.LoadSnapshotFull` peeks the `formatVersion` prefix
+(`peekMapperVersion`) and routes to the matching reader, so a single
+load path serves both layouts without a codec of its own. The
+recovery layer decodes the bytes back into `N`:
+`snapshot.ApplyMapperToGraph` consumes `Pairs` directly for
+string-keyed graphs, while `snapshot.ApplyMapperToGraphWithCodec`
+decodes `RawPairs` through the store's codec.
+
+#### WAL truncation for non-string keys (F3)
+
+Before this change `mapper.bin` was written for string keys only, so
+non-string-keyed checkpoints were not self-sufficient and the
+checkpointer **retained** the WAL rather than truncating it
+(preserving Durability at the cost of unbounded WAL growth). With the
+codec-based version-2 layout, a checkpointer constructed with
+`checkpoint.WithMapperCodec` emits `mapper.bin` for every key type, so
+non-string checkpoints are now self-sufficient and **do** truncate the
+WAL. An `int64`- or `[16]byte`-keyed store recovers from the snapshot
+alone (`WALOps == 0`) after such a checkpoint.
+
+Two deterministic crash-injection scenarios cover the truncation
+window and prove full recovery on `SIGKILL`:
+`checkpoint.post-snapshot-pre-truncate` (the snapshot is durable but
+the WAL is intact) fires in `store/checkpoint.runCheckpoint`, and
+`checkpoint.mid-truncate` (the WAL file has just been shrunk to zero)
+fires inside `wal.Writer.Truncate`. Both are no-ops in production
+(`GOGRAPH_CRASH_AT` unset) and exercised by
+`store/recovery/checkpoint_crashinject_test.go`.
+
+### `snapshot/indexes/<name>.bin` (binary, v2+ only)
 
 Each registered secondary index that implements `index.Serializer`
 is persisted under `snapshot/indexes/<name>.bin`, where `<name>` is
@@ -632,11 +741,15 @@ new WAL frames between snapshot capture and WAL truncation:
 1. Acquire the store mutex.
 2. Build a CSR from the current adjacency list.
 3. Write `snapshot/` atomically via the `.tmp` + `os.Rename`
-   protocol documented above, using `snapshot.WriteSnapshotFull`
-   so the snapshot is a **self-sufficient** image of committed
-   state: CSR adjacency *plus* `labels.bin`, `properties.bin`,
-   registered indexes, and — for string-keyed graphs — `mapper.bin`
-   (the durable `NodeID→key` table).
+   protocol documented above so the snapshot is a **self-sufficient**
+   image of committed state: CSR adjacency *plus* `labels.bin`,
+   `properties.bin`, registered indexes, and `mapper.bin` (the durable
+   `NodeID→key` table). When the checkpointer was constructed with
+   `checkpoint.WithMapperCodec`, the write goes through
+   `snapshot.WriteSnapshotFullWithMapperCodec`, which emits `mapper.bin`
+   for **any** key type. Without a codec the checkpointer calls
+   `snapshot.WriteSnapshotFull`, which emits `mapper.bin` only for
+   string-keyed graphs (the historical fallback).
 4. Determine whether the snapshot is self-sufficient — i.e. whether
    its manifest carries `mapper.bin`, the only file that lets
    recovery rebuild the `NodeID→key` mapping *without* the WAL.
@@ -645,15 +758,15 @@ new WAL frames between snapshot capture and WAL truncation:
    to reclaim the WAL prefix now folded into the snapshot. The
    reclaimed byte count is recorded on `Stats.WALTruncBytes` and
    emitted via `store.checkpoint.wal_truncated_bytes`.
-   If it is **not** self-sufficient (a non-string key type, for
-   which `mapper.bin` is not yet written), truncation is **skipped**
-   and the WAL is retained — truncating it would erase the only
-   durable copy of the `NodeID→key` mapping and destroy committed
-   data. The skip is surfaced via
+   If it is **not** self-sufficient (a non-string key type when no
+   mapper codec was supplied, so `mapper.bin` was not written),
+   truncation is **skipped** and the WAL is retained — truncating it
+   would erase the only durable copy of the `NodeID→key` mapping and
+   destroy committed data. The skip is surfaced via
    `store.checkpoint.truncate_skipped_not_self_sufficient`.
 7. Release the store mutex.
 
-Why this matters (audit gap F2, see `docs/acid-audit.md`): the
+Why this matters (audit gaps F2/F3, see `docs/acid-audit.md`): the
 v1.0 checkpoint wrote a *CSR-only* snapshot and then truncated the
 WAL unconditionally. Because a CSR-only snapshot carries neither
 labels/properties nor a mapper, recovery after such a checkpoint
@@ -663,11 +776,18 @@ self-sufficient snapshot plus the truncate-only-when-self-sufficient
 guard close that gap for every key type: a committed transaction
 always survives a checkpoint.
 
-Non-string key types currently take the WAL-retained path (no
-truncation), so their WAL is not reclaimed by the checkpointer yet;
-extending `mapper.bin` to all key types (so non-string checkpoints
-can also truncate) is tracked as a follow-up operational improvement
-and does not affect the Durability guarantee.
+When the checkpointer is wired with `checkpoint.WithMapperCodec`
+(gap F3), the snapshot carries `mapper.bin` for **every** key type,
+so the self-sufficiency guard is satisfied and the WAL is truncated
+after each checkpoint regardless of `N`. The WAL therefore stays
+bounded for non-string-keyed stores as well.
+
+Without a codec, non-string key types still fall through the
+WAL-retained path (no truncation), because `mapper.bin` is then
+written only for string keys; their WAL is not reclaimed by the
+checkpointer in that configuration. Either way the Durability
+guarantee holds: the guard never truncates a WAL whose snapshot
+cannot stand alone.
 
 The lock-during-IO trade-off is acknowledged in `checkpoint.go`:
 for very large graphs this can stall writers and may be reworked
@@ -684,8 +804,8 @@ containing the rebuilt `*lpg.Graph[N, W]` plus:
   and validated.
 - `SnapshotSchemaVersion int` — the on-disk manifest version of the
   snapshot that was loaded (1 for legacy CSR-only directories, 2 for
-  the labels + properties + indexes shape). 0 when no snapshot was
-  found.
+  the labels + properties + indexes shape, 3 when `mapper.bin` is also
+  present). 0 when no snapshot was found.
 - `SnapshotLabels int` — how many label records the snapshot's
   `labels.bin` contributed back into the graph after WAL replay.
   v1 snapshots and v2 snapshots without `labels.bin` leave this at
@@ -701,12 +821,18 @@ containing the rebuilt `*lpg.Graph[N, W]` plus:
   truncation after a crash); `wal.ErrCRCMismatch` indicates real
   corruption and must be surfaced.
 
-Component apply order during open is fixed: CSR (implicit, via
-mapper replay from WAL) → labels.bin → properties.bin. The
-properties pass runs last so the mapper is fully populated and the
-edge bag (built from CSR + WAL) is in place — property records
-that point at endpoints the apply phase has not yet seen are
-skipped and metered rather than aborting recovery.
+Component apply order during open is fixed. When the snapshot is v3
+(carries `mapper.bin`) the mapper is restored first and the snapshot
+CSR is applied on top of it **before** WAL replay, so the load is
+self-sufficient even when the WAL is empty: mapper.bin → snapshot CSR
+→ WAL replay → labels.bin → properties.bin. For v1/v2 snapshots there
+is no durable mapper, so the mapper is instead populated implicitly by
+the WAL replay and the order is: WAL replay (rebuilds mapper + CSR
+adjacency) → labels.bin → properties.bin. Either way the properties
+pass runs last, so the mapper is fully populated and the edge bag is
+in place — property records that point at endpoints the apply phase
+has not yet seen are skipped and metered rather than aborting
+recovery.
 
 The recovery contract is verified by the fuzz test in
 `store/recovery/recovery_test.go::TestRecovery_FuzzedTruncation`,
@@ -746,4 +872,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-05-22 against commit `cd97f07`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-05-30 against commit `7236360`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

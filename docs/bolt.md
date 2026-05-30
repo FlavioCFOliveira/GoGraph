@@ -47,6 +47,18 @@ opts := server.Options{
 }
 ```
 
+## Limits and backpressure
+
+`Options` exposes the bounds that protect the server under load. All of them
+fall back to a default when left at the zero value:
+
+| Field | Default | Effect |
+|---|---|---|
+| `MaxConnections` | 1024 | Upper bound on concurrent connections. When the limit is reached, a newly accepted connection is closed immediately rather than queued. |
+| `MaxMessageBytes` | `proto.DefaultMaxMessageBytes` (16 MiB) | Caps the cumulative payload of one Bolt message reassembled across chunks, closing the Slowloris-style vector of an unbounded chunk stream. |
+| `MaxInFlightPerConnection` | `DefaultMaxInFlightPerConnection` (1024) | Caps the number of `RUN` statements issued inside a single explicit transaction before `COMMIT`/`ROLLBACK`. Exceeding it returns a `Neo.ClientError.General.LimitExceeded` failure. Auto-commit cursors are not counted. |
+| `ConnTimeout` | 0 (disabled) | Per-connection idle read deadline, reset before each message read. |
+
 ## Message support
 
 | Message    | Direction       | Notes                                   |
@@ -68,20 +80,32 @@ opts := server.Options{
 | IGNORED    | Server → Client | Request was ignored (failed state)      |
 | RECORD     | Server → Client | One row of result data                  |
 
-## Write queries
+## Auto-commit and explicit transactions
 
-Write queries (`CREATE`, `MERGE`, `SET`, `DELETE`) must be executed inside an
-explicit transaction:
+Both read and write queries may run in auto-commit mode (no `BEGIN`/`COMMIT`).
+Each auto-commit `RUN` is executed as its own atomic transaction through the
+write-aware planner, so `CREATE`, `MERGE`, `SET`, and `DELETE` are durable
+without an enclosing `BEGIN`/`COMMIT`:
+
+```cypher
+RUN  CREATE (n:Person {name: "Alice"})
+PULL
+```
+
+Use an explicit transaction to group several statements so they commit or roll
+back together:
 
 ```cypher
 BEGIN
 RUN  CREATE (n:Person {name: "Alice"})
 PULL
+RUN  CREATE (m:Person {name: "Bob"})
+PULL
 COMMIT
 ```
 
-Read-only queries (`MATCH`, `RETURN`) may be executed in auto-commit mode (no
-`BEGIN`/`COMMIT` required).
+Nested transactions are not supported: a `BEGIN` while a transaction is already
+open is rejected with `Neo.ClientError.Statement.SemanticError`.
 
 ## Routing
 
@@ -269,16 +293,28 @@ in `FAILURE` messages. The mapping (from `bolt/server/errors.go`) is:
 Error matching uses `errors.Is` and `errors.As`, so wrapped errors are matched
 correctly.
 
+A few codes are produced directly by the session handlers rather than by the
+`FailureCode` map above:
+
+| Condition | Neo4j error code |
+|---|---|
+| Malformed message, unrecognised message type, or illegal state transition | `Neo.ClientError.Request.Invalid` |
+| In-flight cursor cap exceeded (`MaxInFlightPerConnection`) | `Neo.ClientError.General.LimitExceeded` |
+| Nested `BEGIN` | `Neo.ClientError.Statement.SemanticError` |
+| Unknown auth scheme | `Neo.ClientError.Security.AuthProviderFailed` |
+| Context cancelled mid-request or mid-`PULL` | `Neo.TransientError.General.RequestInterrupted` |
+
 ### Connection refused
 
 - Verify the server is running and listening on the expected port
   (`netstat -tlnp | grep 7687` or `ss -tlnp | grep 7687`).
 - Check that `ListenAndServe` has not returned early; the goroutine may have
   exited due to a bind error (port in use, permission denied).
-- Confirm the `MaxConnections` semaphore is not exhausted: if all connection
-  slots are occupied, new connections are accepted at the TCP level but the
-  goroutine is not started until a slot is released. The caller sees slow
-  responses, not a refused connection.
+- Confirm the `MaxConnections` semaphore is not exhausted: the accept loop
+  acquires a slot without blocking, so when all slots are occupied a newly
+  accepted connection is closed immediately (a warning is logged with the
+  remote address). The client sees the connection dropped right after the TCP
+  accept, not a slow response.
 
 ### TLS certificate errors
 
@@ -306,8 +342,9 @@ Drivers that negotiate Bolt 3.x or earlier are not supported.
 - [docs/cypher.md](cypher.md) — Cypher language reference
 - [docs/benchmarks/cypher.md](benchmarks/cypher.md) — IC1–IC14 benchmark results
 - [docs/metrics.md](metrics.md) — observability metrics
+- [examples/23_bolt_server](../examples/23_bolt_server) — runnable embedding example (start + graceful shutdown)
 
 
 ---
 
-*Last reviewed: 2026-05-22 against commit `cd97f07`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-05-30 against commit `7236360`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

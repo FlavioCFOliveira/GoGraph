@@ -20,7 +20,7 @@ For the three-layer test discipline and CI integration, see
 5. [Invariant checkers (`internal/invariants`)](#invariant-checkers-internalinvariants)
 6. [Fault-injection packages](#fault-injection-packages)
    - [`internal/testfs`](#internaltestfs)
-   - [`internal/crashinject`](#internalcrashinject)
+   - [`internal/crashpoint` and `internal/crashinject`](#internalcrashpoint-and-internalcrashinject)
    - [`internal/subproc`](#internalsubproc)
 7. [Golden-file helper (`internal/goldens`)](#golden-file-helper-internalgoldens)
 8. [Test layers quick-reference](#test-layers-quick-reference)
@@ -49,7 +49,7 @@ For the three-layer test discipline and CI integration, see
 │            ┌────────────────────┼───────────────────┐              │
 │            │                    │                   │              │
 │  ┌─────────▼──────┐  ┌──────────▼────────┐  ┌──────▼──────────┐  │
-│  │ internal/testfs │  │internal/crashinject│  │internal/subproc │  │
+│  │ internal/testfs │  │crashpoint+crashinject│ │internal/subproc │  │
 │  │ (FS faults)     │  │ (SIGKILL harness)  │  │ (child procs)   │  │
 │  └─────────────────┘  └───────────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
@@ -61,10 +61,12 @@ For the three-layer test discipline and CI integration, see
 
 Package: `gograph/internal/shapegen`
 
-Every graph shape is represented by the `Shape` interface:
+Every graph shape is represented by the `Shape` interface, which is
+generic on the node type `N` and the edge weight type `W` so it can
+produce graphs compatible with any LPG specialisation in the module:
 
 ```go
-type Shape interface {
+type Shape[N comparable, W any] interface {
     Name() string
     Build(cfg adjlist.Config) (*lpg.Graph[N, W], error)
     Knobs() []Knob
@@ -84,6 +86,17 @@ type Shape interface {
 
 All `Build` implementations are safe for concurrent calls. Each call
 creates an independent graph; there is no shared state between calls.
+
+### Registry and knob sweeps
+
+`shapegen` maintains a process-local typed registry keyed by `Shape`
+`Name()` and its `(N, W)` specialisation, guarded by a `sync.RWMutex`.
+`Register[N, W]`, `Lookup[N, W]`, and `Unregister[N, W]` are the only
+mutation surface; tests that register transient shapes clean up via
+`t.Cleanup`. `MakeKnobValues(g *rapid.T, knobs []Knob) []int` draws one
+integer per knob — in declaration order, using each knob's `Name` as
+its rapid label — so property-based tests can sweep the parameter space
+with self-describing counter-examples.
 
 ---
 
@@ -187,30 +200,59 @@ w, _ := wal.OpenWith(ff)  // inject fault into WAL writer
 
 `IsENOSPC(err)` unwraps `*os.PathError` to check for `syscall.ENOSPC`.
 
-### `internal/crashinject`
+### `internal/crashpoint` and `internal/crashinject`
+
+The crash-injection machinery is split across two packages so that
+production code never links the `testing` package or the subprocess
+runner.
+
+#### `internal/crashpoint`
+
+Package: `gograph/internal/crashpoint`
+
+The production-callable half. It holds the `Breakpoint` hook and the two
+environment-variable constants (`EnvCrashAt` = `GOGRAPH_CRASH_AT`,
+`EnvCrashDir` = `GOGRAPH_CRASH_DIR`) and depends on nothing beyond `os`
+and `syscall`. Production write paths embed breakpoints by importing it
+directly:
+
+```go
+// In production library code (store/checkpoint, store/wal, …):
+crashpoint.Breakpoint("checkpoint.mid-truncate") // no-op in production
+```
+
+`Breakpoint(name)` is a no-op when `GOGRAPH_CRASH_AT` is unset or does
+not match `name` (one string comparison, no locks, safe for concurrent
+use). When it matches, the process sends itself SIGKILL, simulating an
+abrupt crash at that exact execution point.
+
+#### `internal/crashinject`
 
 Package: `gograph/internal/crashinject`
 
-Subprocess-based crash harness using SIGKILL.
+The subprocess crash harness. It re-exports `Breakpoint`, `EnvCrashAt`,
+and `EnvCrashDir` from `crashpoint` so existing call sites keep working,
+and adds the `Run` driver:
 
 ```go
-// In production library code:
-crashinject.Breakpoint("wal.mid-frame") // no-op in production
-
 // In tests:
 out, err := crashinject.Run(t, "wal.mid-frame", crashinject.Opts{})
 // out.Killed == true; out.Dir contains the artefacts
 ```
 
 `Run` lazily builds `cmd/crashinject-helper` and spawns it with
-`GOGRAPH_CRASH_AT=<scenario>`. The helper calls `Breakpoint` at the
-named execution point, triggering SIGKILL.
+`GOGRAPH_CRASH_AT=<scenario>` and `GOGRAPH_CRASH_DIR=<dir>`. The helper
+exercises the scenario's write path until a `Breakpoint` call at the
+named execution point triggers SIGKILL, leaving the artefacts in a
+deterministically torn state for the parent to inspect.
 
 **Registered scenarios in `cmd/crashinject-helper`:**
 
-| Scenario | Description |
-|---|---|
-| `wal.mid-frame` | Writes one complete WAL frame, appends a torn 10-byte header, then SIGKILL |
+| Scenario | Breakpoint site | Description |
+|---|---|---|
+| `wal.mid-frame` | helper | Writes one complete WAL frame, appends a partial second-frame header, then SIGKILL; `wal.Reader` must report `ErrTornFrame` |
+| `checkpoint.post-snapshot-pre-truncate` | `store/checkpoint` | Commits an int64-keyed workload, then drives a codec-aware checkpoint that crashes after the self-sufficient snapshot is durable but before the WAL is truncated; recovery rebuilds state from the snapshot plus the still-intact WAL |
+| `checkpoint.mid-truncate` | `store/wal` | Same workload and checkpoint, but the crash lands mid-truncation (the WAL file is already shrunk to zero); recovery rebuilds state from the self-sufficient snapshot alone |
 
 ### `internal/subproc`
 
@@ -259,6 +301,15 @@ in `TestMain` to gate conditional generation logic.
 Each layer is a strict superset: `nightly` always includes `soak` and
 `short`. See [docs/test-layers.md](test-layers.md) for the full
 specification, CI workflow table, and Makefile targets.
+
+### Runnable godoc examples
+
+The public packages ship runnable `Example` functions (around 97 across
+the `graph/`, `cypher/`, `search/`, `store/`, `bolt/`, and `ds/` trees).
+They carry `// Output:` markers, so the `testing` framework compiles and
+executes them — and verifies their printed output — as part of the
+default **short** layer on plain `go test ./...`. They double as
+compiler-checked documentation and as a category of correctness test.
 
 ---
 
@@ -351,4 +402,4 @@ and update the "Last reviewed" footer at the bottom of this file.
 
 ---
 
-*Last reviewed: 2026-05-26 against commit `a9a2a75931163939b6f50c94f3e1a192b0fd894e`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
+*Last reviewed: 2026-05-30 against commit `7236360`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*

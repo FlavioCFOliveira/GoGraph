@@ -12,6 +12,7 @@ require.
 import (
     "context"
     "gograph/cypher"
+    "gograph/cypher/expr"
     "gograph/graph/adjlist"
     "gograph/graph/lpg"
 )
@@ -19,9 +20,9 @@ import (
 g   := lpg.New[string, float64](adjlist.Config{})
 eng := cypher.NewEngine(g)
 
-res, err := eng.Run(context.Background(),
+res, err := eng.RunInTx(context.Background(),
     "CREATE (n:Person {name: $name}) RETURN n",
-    map[string]expr.Value{"name": expr.StringVal("Alice")},
+    map[string]expr.Value{"name": expr.StringValue("Alice")},
 )
 if err != nil {
     // handle
@@ -34,6 +35,18 @@ for res.Next() {
 ```
 
 Write queries must use `RunInTx`; read queries may use `Run` directly.
+
+A single `Engine` is safe for concurrent use: any number of `Run` readers may
+execute alongside concurrent `RunInTx` writers. Both the physical-plan build
+and execution run under the graph's visibility barrier, so a writer that grows
+the node space can never tear a concurrent reader's plan build, and readers
+never observe a partially-applied write transaction. When the engine is backed
+by a WAL store, concurrent `RunInTx` calls serialise on the store's single
+writer. The returned `Result` is not safe for concurrent use.
+
+To classify a query as read or write without running it (for example, to route
+writers to `RunInTx`), call `cypher.QueryHasWritingClause(query)`; this is the
+same textual heuristic `RunAny`/`RunInTxAny` use to dispatch.
 
 ---
 
@@ -155,8 +168,10 @@ OPTIONAL MATCH (n)-[:LIVES_IN]->(c:City)
 RETURN   n.name, c.name
 ```
 
-Currently, `OPTIONAL MATCH` supports single-hop relationship patterns via the
-`OptionalExpand` operator. Multi-hop optional patterns are not yet planned.
+`OPTIONAL MATCH` supports both single-hop and multi-hop relationship patterns:
+the optional segment is planned as an `OptionalApply` operator that drives the
+inner pattern per outer row and NULL-extends the unbound variables when no match
+is found.
 
 ### Aggregation
 
@@ -289,20 +304,25 @@ SET    item.price = item.price
 
 ### CREATE INDEX
 
-Two syntactic forms are accepted; both create a property index on a label.
+Creates a property index on a label. The index name is optional; when omitted
+it is derived as `<label>_<property>_<type>`.
 
 ```cypher
--- legacy form
-CREATE INDEX ON :Person(email)
-
--- named form (preferred)
+-- named
 CREATE INDEX person_email FOR (n:Person) ON (n.email)
+
+-- unnamed (name derived automatically)
+CREATE INDEX FOR (n:Person) ON (n.email)
+
+-- idempotent
+CREATE INDEX IF NOT EXISTS person_email FOR (n:Person) ON (n.email)
 ```
 
-By default, a hash index is created. The named form supports `USING BTREE`:
+By default a hash index is created. A BTree index is selected with an `OPTIONS`
+clause:
 
 ```cypher
-CREATE INDEX person_age USING BTREE FOR (n:Person) ON (n.age)
+CREATE INDEX person_age FOR (n:Person) ON (n.age) OPTIONS {indexType: 'btree'}
 ```
 
 A BTree index supports range queries (`<`, `>`, `<=`, `>=`, `ORDER BY`). A
@@ -434,31 +454,44 @@ res, err := eng.RunAny(ctx,
 )
 ```
 
-`BindParams` converts native Go types to `expr.Value`; the supported
-conversions are: `bool`, `int`/`int64` (and other integer widths), `float64`,
-`string`, `nil`.
+`RunAny`/`RunInTxAny` dispatch to `Run` or `RunInTx` automatically based on
+whether the query contains a writing clause.
 
-Parameters are type-checked at plan time against inferred parameter types. A
-type mismatch returns a semantic error before execution begins.
+`BindParams` converts native Go types to `expr.Value`. The supported
+conversions are: `nil` (→ `expr.Null`), `bool`, every signed and unsigned
+integer width (`int`, `int8`…`int64`, `uint`…`uint64`; unsigned values are
+truncated to `int64`), `float32`/`float64`, `string`, `[]any` (recursively),
+`map[string]any` (recursively), and any `expr.Value` (passed through
+unchanged). Other types return an error.
+
+Parameters are type-checked at plan time and a type mismatch returns a
+`*sema.ParamTypeError` before execution begins. Inference is index-aware: a
+property-vs-parameter equality (`n.prop = $p`) is typed from the index that
+backs `n.prop` when one exists — an integer-keyed index proves an `Integer`
+parameter, a string-keyed index a `String` parameter. Absent a matching index
+the inference defaults to `String`. This means an integer parameter is accepted
+on an integer-property index seek, while a string parameter against an
+integer-keyed index is rejected.
 
 ---
 
 ## Known limitations
 
-The following constructs parse correctly but are not yet executed, or are
-not yet parsed:
+The following constructs are not yet supported:
 
 | Feature | Status |
 |---|---|
-| `FOREACH` | Parser-level; no exec operator |
-| `CALL { … }` (correlated subquery) | Not yet supported |
-| Chained `WITH` (multiple `WITH … MATCH …` in one query) | Grammar gap |
-| Zero-prefix float literals (`0.5`) | Lexer gap |
-| Leading-dot float literals (`.5`) | Lexer gap |
-| Variable-length patterns without an explicit bound (`[:*]`) | Exec gap |
+| `FOREACH` | Not parsed; rejected at parse time |
+| `CALL { … }` standalone subquery clause | Not parsed; rejected at parse time |
+| `CALL { … } IN TRANSACTIONS` | Not supported |
 
-For the full divergence taxonomy and pass-rate breakdown, see
-[docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md).
+`EXISTS { … }`, `COUNT { … }`, and `COLLECT { … }` subquery *expressions* are
+supported (see [WHERE](#where) and [Aggregation](#aggregation)); only the
+standalone `CALL { … }` subquery *clause* is unsupported.
+
+The openCypher TCK execution suite is fully green: all 3897 scenarios pass
+(100%), enforced by `tckExecutionBaseline` in `cypher/tck/runner_test.go`. For
+the full divergence taxonomy, see [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md).
 
 ---
 
@@ -471,4 +504,4 @@ For the full divergence taxonomy and pass-rate breakdown, see
 
 ---
 
-*Last reviewed: 2026-05-22 against commit `cd97f07`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-05-30 against commit `7236360`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
