@@ -23,9 +23,8 @@ import (
 // a transaction commits a mutation, the store is closed, recovery
 // reopens the on-disk directory, and the recovered graph must reflect
 // every previously committed op. Each named subtest exercises one
-// mutation kind end-to-end across the v2 typed codec path. The v1
-// (legacy fmt) path is exercised in the AddEdge / SetNodeLabel /
-// SetEdgeLabel subtests via NewStore.
+// mutation kind end-to-end across the typed codec path via
+// NewStoreWithOptions.
 
 // recoveryOpen reopens dir through recovery.Open with the canonical
 // string+int64 codecs. The returned graph is the post-replay state.

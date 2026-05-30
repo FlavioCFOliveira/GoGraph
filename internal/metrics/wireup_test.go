@@ -188,7 +188,7 @@ func driveTxnSample(t *testing.T, be *countingBackend, walPath string) {
 	defer func() { _ = w.Close() }()
 
 	gph := newSmokeGraph()
-	store := txn.NewStore[string, int64](gph, w)
+	store := txn.NewStoreWithCodec[string, int64](gph, w, txn.NewStringCodec())
 	tx := store.Begin()
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("txn.Commit: %v", err)

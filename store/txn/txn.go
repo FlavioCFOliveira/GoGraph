@@ -9,15 +9,17 @@
 //
 // # Atomicity
 //
-// Typed stores ([NewStoreWithCodec], [NewStoreWithOptions]) write each op
-// as a v3 ([OpRecordV3]) frame carrying a per-Store transaction sequence,
-// followed by an [OpCommit] marker frame for the same sequence; recovery
-// buffers a transaction's ops and applies them only on reading the durable
-// marker. A crash that tears the batch at any point therefore recovers all
-// of the transaction or none of it — never a partial node or edge. This
-// is the Atomicity guarantee (see docs/acid-audit.md, gap F1). The legacy
-// fmt-codec store ([NewStore]) keeps the v1 per-op layout without a marker
-// and is not recommended where durable multi-op atomicity is required.
+// Every store writes each op as a v3 ([OpRecordV3]) frame carrying a
+// per-Store transaction sequence, followed by an [OpCommit] marker frame
+// for the same sequence; recovery buffers a transaction's ops and applies
+// them only on reading the durable marker. A crash that tears the batch at
+// any point therefore recovers all of the transaction or none of it —
+// never a partial node or edge. This is the Atomicity guarantee (see
+// docs/acid-audit.md, gap F1).
+//
+// The legacy v1 (untagged, fmt.Sprintf-based) frame format is no longer
+// produced; the v1 constructor has been removed and recovery rejects any
+// v1 frame found on disk (see [store/recovery.ErrUnsupportedRecordVersion]).
 //
 // Single-writer is enforced by a per-store mutex acquired in Begin
 // and released in Commit or Rollback; reads on the underlying graph
@@ -25,20 +27,16 @@
 //
 // # Constructor matrix
 //
-// The package exposes three constructors that trade durability of
-// edge weights for backwards-compatibility:
+// The package exposes two constructors that differ only in whether edge
+// weights are made durable:
 //
-//   - [NewStore] — legacy fmt.Sprintf codec, no weight codec; emits
-//     v1 untagged frames and only [OpAddEdge]. [Tx.AddEdge] with a
-//     non-zero weight returns [ErrNoWeightCodec]; zero-weight calls
-//     buffer an [OpAddEdge] record.
-//   - [NewStoreWithCodec] — typed N codec, no weight codec; emits v2
-//     tagged frames and only [OpAddEdge]. Same weight semantics as
-//     [NewStore].
+//   - [NewStoreWithCodec] — typed N codec, no weight codec; emits only
+//     [OpAddEdge]. [Tx.AddEdge] with a non-zero weight returns
+//     [ErrNoWeightCodec]; zero-weight calls buffer an [OpAddEdge] record.
 //   - [NewStoreWithOptions] — typed N codec plus typed W codec; emits
-//     v2 frames with [OpAddEdgeWeighted] for every [Tx.AddEdge] call
-//     (the weight payload is written even when the caller passes the
-//     zero value of W, so the wire shape stays unambiguous).
+//     [OpAddEdgeWeighted] for every [Tx.AddEdge] call (the weight payload
+//     is written even when the caller passes the zero value of W, so the
+//     wire shape stays unambiguous).
 package txn
 
 import (
@@ -159,9 +157,14 @@ const (
 // for at least one further version bump (e.g. OpRecordV3 = 0xFD) in
 // the same disambiguation scheme.
 const (
-	// OpRecordV1 is the logical version of legacy untagged records.
-	// The byte is never written to disk; the constant exists so call
-	// sites can name the version they expect.
+	// OpRecordV1 is the reserved logical version of the legacy untagged
+	// record format. This format is no longer produced — the v1 store
+	// constructor and its encoder were removed — and any v1 frame found
+	// on disk is rejected on read by [store/recovery.Decode] with
+	// [store/recovery.ErrUnsupportedRecordVersion]. The constant is
+	// retained (value 0) as a RESERVED sentinel so the rejection path and
+	// its tests can name the version they refuse; it is never written to
+	// disk and must not be reused for a new record version.
 	OpRecordV1 uint8 = 0
 	// OpRecordV2 is the magic byte that marks the start of a v2-tagged
 	// op record. See the package doc above for the rationale.
@@ -186,10 +189,10 @@ const (
 )
 
 // codecHolder is the type-erased view of [Codec] used by Store so the
-// Store struct itself does not need to be parameterised on whether the
-// codec is the legacy fmt fallback or a typed implementation. Methods
-// on the holder are called from the Commit fast path; the indirection
-// is a single interface dispatch per op.
+// Store struct itself carries the codec without re-parameterising on the
+// concrete codec implementation. Methods on the holder are called from
+// the Commit fast path; the indirection is a single interface dispatch
+// per op.
 type codecHolder[N comparable] interface {
 	Codec[N]
 }
@@ -199,8 +202,7 @@ type codecHolder[N comparable] interface {
 // WeightCodec serialises edge weights for [OpAddEdgeWeighted] records.
 //
 // A nil WeightCodec is rejected by [NewStoreWithOptions]; callers that
-// do not need durable weights should use [NewStoreWithCodec] (or
-// [NewStore]) instead.
+// do not need durable weights should use [NewStoreWithCodec] instead.
 type Options[N comparable, W any] struct {
 	// Codec serialises endpoint identifiers. Must not be nil.
 	Codec Codec[N]
@@ -221,10 +223,9 @@ type Store[N comparable, W any] struct {
 	wal    *wal.Writer
 	codec  codecHolder[N]
 	wcodec WeightCodec[W]
-	legacy bool
 
-	// txnSeq is the last assigned transaction sequence number. A typed
-	// (non-legacy) Commit/CommitWALOnly increments it once and stamps the
+	// txnSeq is the last assigned transaction sequence number. A
+	// Commit/CommitWALOnly increments it once and stamps the
 	// value into every v3 op frame and the trailing [OpCommit] marker, so
 	// recovery can group a transaction's frames and apply them atomically.
 	// It is incremented only while the store mutex is held (the single-
@@ -233,39 +234,17 @@ type Store[N comparable, W any] struct {
 	txnSeq atomic.Uint64
 }
 
-// NewStore returns a Store wrapping g and wal. The store emits v1
-// (untagged, fmt.Sprintf-based) WAL payloads so that callers that
-// existed prior to the typed codec introduction observe byte-identical
-// on-disk frames.
-//
-// The returned store has no [WeightCodec]; [Tx.AddEdge] called with a
-// non-zero weight returns [ErrNoWeightCodec]. Callers that need
-// durable weighted edges should use [NewStoreWithOptions].
-//
-// New code that does not need durable weights but does want a stable
-// endpoint encoding should prefer [NewStoreWithCodec], which installs
-// a typed [Codec] and emits v2 (tagged) frames that survive arbitrary
-// N types.
-func NewStore[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer) *Store[N, W] {
-	return &Store[N, W]{
-		g:      g,
-		wal:    wlog,
-		codec:  legacyFmtCodec[N]{},
-		legacy: true,
-	}
-}
-
 // NewStoreWithCodec returns a Store wrapping g and wal that encodes
-// node identifiers via the supplied typed [Codec]. Each WAL payload is
-// emitted in the v2 format: a one-byte version tag ([OpRecordV2]),
-// then the [OpKind], then the codec-encoded src and dst values
-// inline, then a uint16 little-endian label length and the label
-// bytes. The frame is the dual of the v2 branch in
-// [store/recovery.Decode], which detects the version tag and walks
-// the body back through the same codec.
+// node identifiers via the supplied typed [Codec]. Each transaction is
+// emitted as v3-tagged frames: a one-byte version tag ([OpRecordV3]),
+// the [OpKind], the per-transaction sequence, then the codec-encoded
+// src and dst values inline, then a uint16 little-endian label length
+// and the label bytes — one frame per op, followed by an [OpCommit]
+// marker so recovery applies the transaction atomically. The body is
+// the dual of the v3 branch in [store/recovery.Decode], which detects
+// the version tag and walks the body back through the same codec.
 //
-// codec must not be nil. The function does not validate that codec
-// is non-legacy; passing the legacy fmt codec is undefined behaviour.
+// codec must not be nil.
 //
 // The returned store has no [WeightCodec]; [Tx.AddEdge] called with a
 // non-zero weight returns [ErrNoWeightCodec]. Callers that need
@@ -273,10 +252,9 @@ func NewStore[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer) *Store[
 func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N]) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithCodec")()
 	return &Store[N, W]{
-		g:      g,
-		wal:    wlog,
-		codec:  codec,
-		legacy: isLegacyCodec[N](codec),
+		g:     g,
+		wal:   wlog,
+		codec: codec,
 	}
 }
 
@@ -306,14 +284,12 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 		wal:    wlog,
 		codec:  opts.Codec,
 		wcodec: opts.WeightCodec,
-		legacy: isLegacyCodec[N](opts.Codec),
 	}
 }
 
 // Codec returns the [Codec] installed on the Store. The returned value
-// is the same one passed to [NewStoreWithCodec], or the internal legacy
-// codec installed by [NewStore]. Callers should treat the return as
-// read-only.
+// is the same one passed to [NewStoreWithCodec] or [NewStoreWithOptions].
+// Callers should treat the return as read-only.
 func (s *Store[N, W]) Codec() Codec[N] { return s.codec }
 
 // WeightCodec returns the [WeightCodec] installed on the Store, or nil
@@ -556,29 +532,15 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 
 // appendAndSync writes the transaction's ops to the WAL and fsyncs them.
 //
-// For a typed store every op is encoded as a v3 frame carrying a fresh
-// per-transaction sequence ([Store.txnSeq]), and an [OpCommit] marker
-// frame for the same sequence is appended after the last op; a single
-// [wal.Writer.Sync] then makes the whole batch durable. The marker is the
-// atomicity boundary: bufio may auto-flush a prefix of frames to the OS
-// before the Sync, but that is benign — durability is gated on the fsync,
-// and recovery discards any op frames not followed by a durable matching
-// marker, so a torn batch recovers all-or-nothing.
-//
-// A legacy store (fmt codec, no version tag) keeps the v1 per-op layout
-// with no marker. Legacy multi-op commits therefore retain only the older
-// per-frame atomicity; durable multi-op atomicity requires a typed store
-// ([NewStoreWithCodec] / [NewStoreWithOptions]), which every production
-// write path uses.
+// Every op is encoded as a v3 frame carrying a fresh per-transaction
+// sequence ([Store.txnSeq]), and an [OpCommit] marker frame for the same
+// sequence is appended after the last op; a single [wal.Writer.Sync] then
+// makes the whole batch durable. The marker is the atomicity boundary:
+// bufio may auto-flush a prefix of frames to the OS before the Sync, but
+// that is benign — durability is gated on the fsync, and recovery discards
+// any op frames not followed by a durable matching marker, so a torn batch
+// recovers all-or-nothing.
 func (t *Tx[N, W]) appendAndSync() error {
-	if t.store.legacy {
-		for _, op := range t.ops {
-			if err := t.store.wal.Append(encodeOpLegacy(op)); err != nil {
-				return err
-			}
-		}
-		return t.store.wal.Sync()
-	}
 	if len(t.ops) == 0 {
 		// Empty commit: preserve the historical no-op-with-Sync behaviour
 		// (flush any prior buffered tail) without writing a lone marker.
@@ -614,45 +576,6 @@ func (t *Tx[N, W]) Rollback() error {
 func (t *Tx[N, W]) release() {
 	t.finished = true
 	t.store.mu.Unlock()
-}
-
-// encodeOpLegacy serialises one op to a v1 (untagged) WAL payload.
-// Layout:
-//
-//	uint8  kind
-//	uint16 srcLen
-//	[srcLen]byte src   (fmt.Sprintf("%v") of op.Src)
-//	uint16 dstLen
-//	[dstLen]byte dst   (fmt.Sprintf("%v") of op.Dst)
-//	uint16 labelLen
-//	[labelLen]byte label
-//
-// Endpoints are serialised via fmt.Sprintf("%v") — sufficient for the
-// v1 N types (string, integer) and the test fixtures. This function
-// is preserved bit-for-bit so call sites using [NewStore] continue to
-// produce WAL frames identical to the ones written prior to the typed
-// codec introduction. Weighted ops cannot reach this encoder because
-// [NewStore] never installs a [WeightCodec]; [Tx.AddEdge] refuses
-// non-zero weights up-front with [ErrNoWeightCodec].
-func encodeOpLegacy[N comparable, W any](op Op[N, W]) []byte {
-	src := encodeAny(op.Src)
-	dst := encodeAny(op.Dst)
-	label := []byte(op.Label)
-	buf := make([]byte, 1+2+len(src)+2+len(dst)+2+len(label))
-	buf[0] = byte(op.Kind)
-	off := 1
-	binary.LittleEndian.PutUint16(buf[off:], uint16(len(src)))
-	off += 2
-	copy(buf[off:], src)
-	off += len(src)
-	binary.LittleEndian.PutUint16(buf[off:], uint16(len(dst)))
-	off += 2
-	copy(buf[off:], dst)
-	off += len(dst)
-	binary.LittleEndian.PutUint16(buf[off:], uint16(len(label)))
-	off += 2
-	copy(buf[off:], label)
-	return buf
 }
 
 // encodeOpTyped serialises one op to a v2 (tagged) WAL payload using
@@ -1121,10 +1044,6 @@ func decodeTxnTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 		return lpg.PropertyValue{}, buf, errors.New("txn: short time property")
 	}
 	return lpg.TimeValue(time.Unix(0, nanos).UTC()), buf[n:], nil
-}
-
-func encodeAny[N comparable](v N) []byte {
-	return []byte(goFormat(v))
 }
 
 // applyOp dispatches one buffered Op against the in-memory LPG.

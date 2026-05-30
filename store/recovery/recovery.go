@@ -128,39 +128,56 @@ func applySnapshotIndexes(m *index.Manager, rb []snapshot.IndexReadback) int {
 // Op is the decoded form of a transaction-encoded WAL payload,
 // mirroring the encoder in [store/txn].
 //
-// The struct is the union of v1 and v2 record shapes:
+// Only the typed, tagged record shapes are decodable; the legacy v1
+// (untagged, fmt.Sprintf-based) frame written by the removed v1 store
+// constructor is no longer produced and is rejected at [Decode] (see
+// [ErrUnsupportedRecordVersion]).
 //
-//   - For a v1 (legacy, untagged) frame, [Op.Version] is [txn.OpRecordV1]
-//     and [Op.SrcBytes] / [Op.DstBytes] carry the length-prefixed
-//     fmt.Sprintf bytes that the legacy [store/txn].NewStore wrote.
 //   - For a v2 (typed, tagged) frame, [Op.Version] is [txn.OpRecordV2] and
 //     [Op.Body] carries the opaque codec-encoded endpoints (src then
 //     dst, back-to-back, self-delimiting per the installed [txn.Codec]).
-//     [Op.SrcBytes] / [Op.DstBytes] are nil; the caller walks them
-//     out of [Op.Body] via the codec.
+//     The caller walks them out of [Op.Body] via the codec.
+//   - For a v3 (typed, tagged, transaction-grouped) frame, [Op.Version]
+//     is [txn.OpRecordV3], [Op.TxnSeq] carries the per-transaction
+//     sequence, and [Op.Body] is byte-identical to the v2 body for the
+//     same kind.
 //
-// [Op.Kind] and [Op.Label] are populated for both versions.
+// [Op.Kind] and [Op.Label] are populated for both decodable versions.
 type Op struct {
-	Kind     txn.OpKind
-	SrcBytes []byte
-	DstBytes []byte
-	Label    string
-	Version  uint8
-	Body     []byte
+	Kind    txn.OpKind
+	Label   string
+	Version uint8
+	Body    []byte
 	// TxnSeq is the transaction sequence carried by a v3
 	// ([txn.OpRecordV3]) frame, grouping the frames of one atomically-
-	// committed transaction. It is 0 for v1/v2 frames.
+	// committed transaction. It is 0 for v2 frames.
 	TxnSeq uint64
 }
 
+// ErrUnsupportedRecordVersion is returned by [Decode] for a WAL record
+// whose leading version byte is neither [txn.OpRecordV2] nor
+// [txn.OpRecordV3]. In practice this is a legacy v1 ([txn.OpRecordV1])
+// untagged frame: such frames are no longer produced by the module
+// (the v1 store constructor was removed) and the fmt.Sprintf-derived
+// endpoints they carried have no inverse through a typed codec, so they
+// are rejected explicitly rather than silently mis-decoded. The recovery
+// replay loop surfaces the wrapped error via [Result.TailErr] and stops
+// at the offending frame.
+var ErrUnsupportedRecordVersion = errors.New("recovery: unsupported WAL record version")
+
 // Decode parses one payload back into an [Op]. The parser peeks the
-// first byte to disambiguate v1 from v2:
+// first byte to select the decoder:
 //
+//   - 0xFD ([txn.OpRecordV3]) introduces a v3 (tagged, transaction-
+//     grouped) record; the body after the txnSeq word is copied into
+//     [Op.Body] verbatim for the typed open path.
 //   - 0xFE ([txn.OpRecordV2]) introduces a v2 (tagged) record; the
 //     remainder up to the uint16-length-prefixed trailing label is
 //     copied into [Op.Body] verbatim for the typed open path.
-//   - Any other first byte is interpreted as the v1 [txn.OpKind] and
-//     parsed via the legacy length-prefixed layout.
+//   - Any other first byte is a legacy v1 ([txn.OpRecordV1]) untagged
+//     frame, which the module no longer produces; [Decode] rejects it
+//     with [ErrUnsupportedRecordVersion] rather than mis-decoding the
+//     non-invertible fmt.Sprintf layout.
 func Decode(payload []byte) (Op, error) {
 	defer metrics.Time("store.recovery.Decode")()
 	if len(payload) < 1 {
@@ -173,7 +190,12 @@ func Decode(payload []byte) (Op, error) {
 	case txn.OpRecordV2:
 		return decodeV2(payload)
 	default:
-		return decodeV1(payload)
+		// A v1 (txn.OpRecordV1) untagged frame, or any unknown version
+		// tag. v1 frames are no longer written and are not invertible
+		// through a typed codec; reject explicitly.
+		metrics.IncCounter("store.recovery.Decode.errors", 1)
+		return Op{}, fmt.Errorf("%w: leading byte 0x%02x (legacy %s = 0x%02x is rejected)",
+			ErrUnsupportedRecordVersion, payload[0], "txn.OpRecordV1", txn.OpRecordV1)
 	}
 }
 
@@ -199,48 +221,6 @@ func decodeV3(payload []byte) (Op, error) {
 		TxnSeq:  binary.LittleEndian.Uint64(payload[2:10]),
 		Body:    append([]byte(nil), payload[10:]...),
 	}, nil
-}
-
-// decodeV1 parses a legacy untagged record. The original layout —
-// kept verbatim so all pre-existing v1 frames replay unchanged.
-func decodeV1(payload []byte) (Op, error) {
-	op := Op{Kind: txn.OpKind(payload[0]), Version: txn.OpRecordV1}
-	off := 1
-	read := func(want int) ([]byte, error) {
-		if len(payload)-off < want {
-			return nil, errors.New("recovery: truncated payload")
-		}
-		out := payload[off : off+want]
-		off += want
-		return out, nil
-	}
-	for _, ptr := range []*[]byte{&op.SrcBytes, &op.DstBytes} {
-		lenb, err := read(2)
-		if err != nil {
-			metrics.IncCounter("store.recovery.Decode.errors", 1)
-			return Op{}, err
-		}
-		n := int(binary.LittleEndian.Uint16(lenb))
-		buf, err := read(n)
-		if err != nil {
-			metrics.IncCounter("store.recovery.Decode.errors", 1)
-			return Op{}, err
-		}
-		*ptr = append([]byte(nil), buf...)
-	}
-	lenb, err := read(2)
-	if err != nil {
-		metrics.IncCounter("store.recovery.Decode.errors", 1)
-		return Op{}, err
-	}
-	n := int(binary.LittleEndian.Uint16(lenb))
-	lbl, err := read(n)
-	if err != nil {
-		metrics.IncCounter("store.recovery.Decode.errors", 1)
-		return Op{}, err
-	}
-	op.Label = string(lbl)
-	return op, nil
 }
 
 // decodeV2 parses a typed tagged record. The codec-encoded endpoints,
@@ -449,11 +429,15 @@ func openCodec[N comparable, W any](
 				}
 				continue
 			}
-			// v1/v2 frame: self-committing (one frame is one transaction).
+			// v2 frame: self-committing (one frame is one transaction). v1
+			// frames never reach here — Decode rejects them upstream with
+			// ErrUnsupportedRecordVersion.
 			if !applyOpCodec(g, &op, codec, wcodec) {
-				// A v1 frame met an instantiation with no inverse; stop
-				// replay so callers see the cut-off boundary deterministically.
-				res.TailErr = errors.New("recovery: v1 frame is not decodable through the supplied codec")
+				// A malformed v2 body (truncated endpoints, missing or
+				// overflowing trailing label/key length) failed to decode
+				// through the codec; stop replay so callers see the cut-off
+				// boundary deterministically.
+				res.TailErr = errors.New("recovery: v2 frame is not decodable through the supplied codec")
 				break
 			}
 			res.WALOps++
@@ -497,11 +481,14 @@ func openCodec[N comparable, W any](
 }
 
 // applyOpCodec applies a decoded op into g via codec. It returns
-// true if the op was applied. For v1 (legacy, untagged) frames the
-// function returns false because the legacy fmt.Sprintf encoding is
-// not generally invertible through a typed codec; the surrounding
-// replay loop surfaces such a frame as a tail error so callers see the
-// cut-off boundary deterministically.
+// true if the op was applied. It returns false for any op whose
+// [Op.Version] is not a typed tag ([txn.OpRecordV2] / [txn.OpRecordV3])
+// and for a typed frame whose codec-encoded body cannot be walked
+// (truncated endpoints, missing or overflowing trailing label/key
+// length); the surrounding replay loop surfaces such a frame as a tail
+// error so callers see the cut-off boundary deterministically. Legacy
+// v1 frames never reach here — [Decode] rejects them with
+// [ErrUnsupportedRecordVersion] before apply.
 //
 // When wcodec is non-nil and the op is [txn.OpAddEdgeWeighted], the
 // typed weight payload between codec.dst and the trailing label is
@@ -522,7 +509,9 @@ func applyOpCodec[N comparable, W any](
 ) bool {
 	// v2 and v3 frames share the same codec-encoded body; v3 differs only
 	// in the envelope header (txnSeq) which Decode already stripped into
-	// Op.Body. v1 frames are not invertible through a typed codec.
+	// Op.Body. Any other version (e.g. a zero-value Op) is not invertible
+	// through a typed codec and is rejected defensively; legacy v1 frames
+	// are already rejected upstream by Decode.
 	if op.Version != txn.OpRecordV2 && op.Version != txn.OpRecordV3 {
 		return false
 	}

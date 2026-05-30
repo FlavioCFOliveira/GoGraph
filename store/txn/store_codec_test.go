@@ -1,7 +1,6 @@
 package txn
 
 import (
-	"errors"
 	"path/filepath"
 	"testing"
 
@@ -66,74 +65,5 @@ func TestNewStoreWithCodec_EmitsV3(t *testing.T) {
 		if kinds[i] != k {
 			t.Fatalf("frame %d kind = 0x%02x, want 0x%02x", i, kinds[i], k)
 		}
-	}
-}
-
-// TestNewStore_CodecIsLegacy checks that [NewStore] installs the
-// legacy fmt codec and that [isLegacyCodec] recognises it.
-func TestNewStore_CodecIsLegacy(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	s := NewStore(g, w)
-	c := s.Codec()
-	if !isLegacyCodec[string](c) {
-		t.Fatal("NewStore did not install the legacy codec")
-	}
-	// The legacy codec's Encode mirrors goFormat output...
-	got, _ := c.Encode(nil, "alice")
-	if string(got) != "alice" {
-		t.Fatalf("legacy Encode = %q, want %q", got, "alice")
-	}
-	// ...and its Decode always errors.
-	if _, _, err := c.Decode([]byte{1, 2, 3}); !errors.Is(err, ErrCodecDecode) {
-		t.Fatalf("legacy Decode err = %v, want ErrCodecDecode", err)
-	}
-}
-
-// TestNewStoreWithCodec_LegacyCodecKeepsLegacyOutput asserts that
-// passing the legacy codec into [NewStoreWithCodec] keeps the v1
-// on-disk layout — the version tag is NOT emitted because the
-// constructor sets the legacy flag.
-func TestNewStoreWithCodec_LegacyCodecKeepsLegacyOutput(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	s := NewStoreWithCodec[string, int64](g, w, legacyFmtCodec[string]{})
-	tx := s.Begin()
-	if err := tx.AddEdge("alice", "bob", 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	r, err := wal.OpenReader(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Close() }()
-	if err := r.Replay(func(f wal.Frame) error {
-		if f.Payload[0] == OpRecordV2 {
-			t.Fatalf("legacy codec must not emit v2 tag")
-		}
-		if f.Payload[0] != byte(OpAddEdge) {
-			t.Fatalf("first byte = 0x%02x, want OpAddEdge", f.Payload[0])
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("Replay: %v", err)
 	}
 }
