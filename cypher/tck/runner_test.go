@@ -1890,9 +1890,14 @@ const tckExecutionBaseline = 3897
 // formatter:
 //
 //	"1234 scenarios (1005 passed, 229 failed)"
+//	"3897 scenarios (3897 passed)"
 //
 // Sub-groups: 1 = total scenarios, 2 = passed scenarios.
 var scenarioSummaryRE = regexp.MustCompile(`(\d+)\s+scenarios?\s+\((\d+)\s+passed`)
+
+// scenarioUndefinedRE extracts the undefined-step count from the summary line,
+// e.g. "3 undefined". Returns no match when all steps are defined.
+var scenarioUndefinedRE = regexp.MustCompile(`(\d+)\s+undefined`)
 
 // TestTCKExecution runs the openCypher TCK feature files through the execution engine.
 // It uses godog to parse Gherkin and dispatch step implementations.
@@ -1951,14 +1956,19 @@ func TestTCKExecution(t *testing.T) {
 		return
 	}
 
-	total, passed, ok := parseScenarioSummary(buf.Bytes())
+	raw := buf.Bytes()
+	total, passed, ok := parseScenarioSummary(raw)
 	if !ok {
 		t.Fatalf("TCK execution: could not locate scenario summary line in formatter output (looked for %q)",
 			scenarioSummaryRE.String())
 	}
-	t.Logf("TCK execution: %d scenarios, %d passed (baseline=%d)", total, passed, tckExecutionBaseline)
+	undefined := parseUndefinedCount(raw)
+	t.Logf("TCK execution: %d scenarios, %d passed, %d undefined (baseline=%d)", total, passed, undefined, tckExecutionBaseline)
 	if passed < tckExecutionBaseline {
 		t.Errorf("TCK execution regression: %d scenarios passed, baseline=%d", passed, tckExecutionBaseline)
+	}
+	if undefined > 0 {
+		t.Errorf("TCK execution: %d scenario(s) have undefined step definitions — register step handlers for all new TCK steps", undefined)
 	}
 }
 
@@ -1979,6 +1989,20 @@ func parseScenarioSummary(raw []byte) (total, passed int, ok bool) {
 		return 0, 0, false
 	}
 	return t, p, true
+}
+
+// parseUndefinedCount extracts the undefined-scenario count from the godog
+// summary line. Returns 0 when the "N undefined" sub-expression is absent.
+func parseUndefinedCount(raw []byte) int {
+	m := scenarioUndefinedRE.FindSubmatch(raw)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // initScenario creates a fresh world per scenario and registers all step

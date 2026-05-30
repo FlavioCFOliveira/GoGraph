@@ -274,3 +274,51 @@ func BenchmarkIC9_Parallel(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkIC3_Parallel — concurrent Person full-scan (read-only, GOMAXPROCS goroutines).
+func BenchmarkIC3_Parallel(b *testing.B) { benchmarkQueryParallel(b, "ic3.cypher") }
+
+// BenchmarkIC4_Parallel — concurrent Person IS NOT NULL filter (read-only).
+func BenchmarkIC4_Parallel(b *testing.B) { benchmarkQueryParallel(b, "ic4.cypher") }
+
+// BenchmarkIC7_Parallel — concurrent City scan (read-only).
+func BenchmarkIC7_Parallel(b *testing.B) { benchmarkQueryParallel(b, "ic7.cypher") }
+
+// BenchmarkIC10_Parallel — concurrent property projection (MATCH … RETURN n.name).
+func BenchmarkIC10_Parallel(b *testing.B) { benchmarkQueryParallel(b, "ic10.cypher") }
+
+// BenchmarkIC11_Parallel — concurrent WHERE filter on boolean property.
+func BenchmarkIC11_Parallel(b *testing.B) { benchmarkQueryParallel(b, "ic11.cypher") }
+
+// BenchmarkIC14_Parallel — concurrent Company scan (read-only).
+func BenchmarkIC14_Parallel(b *testing.B) { benchmarkQueryParallel(b, "ic14.cypher") }
+
+// benchmarkQueryParallel runs query from file concurrently under GOMAXPROCS
+// goroutines using b.RunParallel. Only read-only queries are supported; write
+// queries must use a dedicated fresh graph and cannot share state safely.
+func benchmarkQueryParallel(b *testing.B, file string) {
+	b.Helper()
+	qBytes, err := os.ReadFile(filepath.Join("queries", file)) //nolint:gosec // path is a fixed test fixture
+	if err != nil {
+		b.Fatalf("read %s: %v", file, err)
+	}
+	query := strings.TrimSpace(string(qBytes))
+	engine := cypher.NewEngine(benchGraph)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			res, err := engine.Run(ctx, query, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for res.Next() {
+			}
+			if e := res.Err(); e != nil {
+				b.Fatal(e)
+			}
+			_ = res.Close()
+		}
+	})
+}
