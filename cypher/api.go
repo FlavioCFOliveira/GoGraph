@@ -318,7 +318,18 @@ type EngineOptions struct {
 // Engine is the public query engine. It binds a graph, a function registry,
 // and a plan cache, and exposes a single Run method for query execution.
 //
-// Engine is safe for concurrent use.
+// Engine is safe for concurrent use. A single Engine may serve any number of
+// concurrent [Engine.Run] readers together with concurrent [Engine.RunInTx]
+// writers: each call builds its own operator tree, the plan cache is
+// internally synchronised, and both the physical-plan build and execution run
+// under the graph's visibility barrier ([lpg.Graph.View] for reads,
+// [lpg.Graph.ApplyAtomically] for writes). A writer that grows the node space
+// can therefore never tear a concurrent reader's plan build, and readers never
+// observe a partially-applied write transaction (#1077, audit gap F3).
+//
+// Write queries remain subject to the underlying store's single-writer
+// constraint: when the Engine is backed by a [txn.Store], concurrent
+// [Engine.RunInTx] calls serialise on the store's writer mutex.
 type Engine struct {
 	g             *lpg.Graph[string, float64]
 	store         *txn.Store[string, float64] // non-nil when WAL-backed
@@ -538,33 +549,46 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		return nil, err
 	}
 
-	// ── 2. Build physical operator tree ─────────────────────────────────────
-	walker := &lpgNodeWalker{g: e.g}
-	labelSrc := &lpgLabelResolver{g: e.g}
-	// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
-	// expressions encountered inside Filter/Project closures can drive their
-	// inner pipelines against the current outer row (task-396).
-	subEval := newSubqueryEvaluator(walker, labelSrc, e.reg, e.g)
-	// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
-	// predicates can be evaluated against the live graph (task-961).
-	patEval := newPatternEvaluator(e.g)
-	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx}
-	op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager(), e.procReg, bopts)
-	if err != nil {
-		return nil, fmt.Errorf("cypher: build plan: %w", err)
-	}
-
-	// ── 3. Execute under the read visibility barrier and materialise ─────────
-	// Draining the whole query inside Graph.View gives the read a consistent,
-	// partial-transaction-free snapshot (audit gap F3, docs/isolation-design.md);
-	// materialising releases the read lock before the caller iterates, so a
-	// long-open Result can never deadlock a concurrent writer.
-	var r *Result
+	// ── 2+3. Build the physical operator tree AND execute it under the read
+	// visibility barrier (#1077) ─────────────────────────────────────────────
+	// The physical build snapshots live mutable graph structures (the forward
+	// CSR in buildEdgeTypeFilter, the per-edge label/instance lookups). Running
+	// it inside Graph.View (visMu.RLock) means a concurrent writer — which grows
+	// the adjacency under Graph.ApplyAtomically (visMu.Lock) — cannot tear those
+	// snapshots mid-build. Draining the whole query inside the same barrier also
+	// gives the read a consistent, partial-transaction-free view (audit gap F3,
+	// docs/isolation-design.md); materialising releases the read lock before the
+	// caller iterates, so a long-open Result can never deadlock a writer.
+	//
+	// build runs under visMu.RLock; nothing here may call g.View/g.ApplyAtomically
+	// (visMu is non-re-entrant — see lpg.Graph.View/ApplyAtomically).
+	var (
+		r        *Result
+		buildErr error
+	)
 	e.g.View(func() {
+		walker := &lpgNodeWalker{g: e.g}
+		labelSrc := &lpgLabelResolver{g: e.g}
+		// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
+		// expressions encountered inside Filter/Project closures can drive their
+		// inner pipelines against the current outer row (task-396).
+		subEval := newSubqueryEvaluator(walker, labelSrc, e.reg, e.g)
+		// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
+		// predicates can be evaluated against the live graph (task-961).
+		patEval := newPatternEvaluator(e.g)
+		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx}
+		op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager(), e.procReg, bopts)
+		if err != nil {
+			buildErr = err
+			return
+		}
 		rs := exec.Run(ctx, op, cols)
 		r = newResult(rs, cols, nil, nil, nil)
 		r.materialize()
 	})
+	if buildErr != nil {
+		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
 	return r, nil
 }
 
@@ -722,22 +746,34 @@ func (e *Engine) RunAny(ctx context.Context, query string, params map[string]any
 	return e.Run(ctx, query, converted)
 }
 
-// queryHasWritingClause reports whether the query string contains any
+// QueryHasWritingClause reports whether the query string contains any
 // writing keyword (CREATE, MERGE, SET, REMOVE, DELETE, DETACH) outside a
-// DDL prefix. This is a textual heuristic: it avoids triggering the
-// plan-cache machinery on a second pass, which would otherwise double-
-// count hits and misses in concurrency tests.
+// DDL prefix, i.e. whether it must be routed through [Engine.RunInTx]
+// rather than [Engine.Run]. This is a textual heuristic: it avoids
+// triggering the plan-cache machinery on a second pass, which would
+// otherwise double-count hits and misses in concurrency tests.
+//
+// External front-ends that classify queries as read vs write (for example,
+// to serialise writers or pick a read replica) should call this rather than
+// re-deriving the keyword set, so the classification stays in lockstep with
+// [Engine.RunAny].
 //
 // The heuristic is intentionally permissive — false positives (writing
 // keywords inside string literals or backtick identifiers) merely cause a
 // read-only query to be routed through RunInTx, which executes identical
 // semantics with the same correctness guarantees, only with the cost of
 // opening and committing a write transaction.
-func queryHasWritingClause(query string) bool {
+func QueryHasWritingClause(query string) bool {
 	if ir.IsDDL(query) {
 		return false
 	}
 	return writingKeywordRE.MatchString(query)
+}
+
+// queryHasWritingClause is the internal alias for [QueryHasWritingClause],
+// retained so existing call sites read naturally.
+func queryHasWritingClause(query string) bool {
+	return QueryHasWritingClause(query)
 }
 
 // writingKeywordRE matches any writing-clause keyword as a standalone word.
@@ -6171,10 +6207,11 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		return nil, err
 	}
 
-	walker := &lpgNodeWalker{g: e.g}
-	labelSrc := &lpgLabelResolver{g: e.g}
 	buf := &exec.IndexBuffer{}
 
+	// The WAL transaction is opened OUTSIDE the visibility barrier: Begin()
+	// takes the store's single-writer mutex and must not nest under visMu.
+	// The mutator adapter only captures references; no graph reads happen yet.
 	var mutator exec.GraphMutator
 	var walTx *txn.Tx[string, float64]
 	if e.store != nil {
@@ -6184,21 +6221,32 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		mutator = &lpgMutatorAdapter{g: e.g, buf: buf}
 	}
 
-	op, cols, err := buildPlanWithMutatorFull(plan, walker, labelSrc, e.reg, params, mutator, e.constraintReg, e.g.IndexManager())
-	if err != nil {
-		if walTx != nil {
-			_ = walTx.Rollback()
-		}
-		return nil, fmt.Errorf("cypher: build plan: %w", err)
-	}
-
-	// Execute the whole write statement under the write visibility barrier so
-	// all of its eager mutations flip visible to Graph.View readers atomically
-	// (audit gap F3, docs/isolation-design.md); materialising releases the lock
-	// before the caller iterates, and the transaction's WAL commit happens
-	// later in Result.Close (durability is independent of the visibility flip).
-	var r *Result
+	// Build the physical operator tree AND execute the whole write statement
+	// under the write visibility barrier (#1077). The physical build snapshots
+	// live mutable graph structures (the forward CSR in buildEdgeTypeFilter,
+	// per-edge label lookups); running it inside Graph.ApplyAtomically (visMu)
+	// stops a concurrent reader from observing a torn snapshot and stops a
+	// concurrent writer from growing the node space mid-build. Holding visMu
+	// also makes every eager mutation flip visible to Graph.View readers
+	// atomically (audit gap F3, docs/isolation-design.md); materialising
+	// releases the lock before the caller iterates, and the transaction's WAL
+	// commit happens later in Result.Close (durability is independent of the
+	// visibility flip).
+	//
+	// build runs under visMu.Lock; nothing here may call g.View/g.ApplyAtomically
+	// (visMu is non-re-entrant — see lpg.Graph.View/ApplyAtomically).
+	var (
+		r        *Result
+		buildErr error
+	)
 	_ = e.g.ApplyAtomically(func() error {
+		walker := &lpgNodeWalker{g: e.g}
+		labelSrc := &lpgLabelResolver{g: e.g}
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, e.reg, params, mutator, e.constraintReg, e.g.IndexManager())
+		if berr != nil {
+			buildErr = berr
+			return nil
+		}
 		rs := exec.Run(ctx, op, cols)
 		r = newResult(rs, cols, buf, e.g.IndexManager(), walTx)
 		r.materialize()
@@ -6207,6 +6255,12 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		r.commitIndexUnderBarrier()
 		return nil
 	})
+	if buildErr != nil {
+		if walTx != nil {
+			_ = walTx.Rollback()
+		}
+		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
 	return r, nil
 }
 
@@ -6928,7 +6982,13 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 	}
 
 	filter := make(map[uint64]string)
-	maxID := uint64(adj.MaxNodeID())
+	// Bound the loop on the SNAPSHOT CSR, not the live graph. fwdCSR was
+	// built from a point-in-time copy of adj above; verts has a fixed length
+	// of fwdCSR.MaxNodeID()+1, so verts[srcID+1] is in-range by construction
+	// for srcID < fwdCSR.MaxNodeID(). Re-reading adj.MaxNodeID() here would
+	// tear the read if a concurrent writer grew the node space between the
+	// CSR build and this loop (panic: index out of range on verts[srcID+1]).
+	maxID := uint64(fwdCSR.MaxNodeID())
 	for srcID := uint64(0); srcID < maxID; srcID++ {
 		start := verts[srcID]
 		end := verts[srcID+1]
