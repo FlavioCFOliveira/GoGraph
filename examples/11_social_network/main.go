@@ -15,7 +15,9 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"sort"
 
 	"gograph/graph"
@@ -27,6 +29,16 @@ import (
 )
 
 func main() {
+	if err := run(os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run builds the labelled social graph, runs the analytics, and writes
+// the report to w. All output goes to w so a test can capture and
+// assert it; run returns wrapped errors rather than terminating the
+// process.
+func run(w io.Writer) error {
 	g := lpg.New[string, int64](adjlist.Config{Directed: false})
 
 	users := []struct {
@@ -44,15 +56,15 @@ func main() {
 	}
 	for _, u := range users {
 		if err := g.SetNodeLabel(u.name, "User"); err != nil {
-			log.Fatalf("SetNodeLabel: %v", err)
+			return fmt.Errorf("SetNodeLabel User %s: %w", u.name, err)
 		}
 		if u.verified {
 			if err := g.SetNodeLabel(u.name, "Verified"); err != nil {
-				log.Fatalf("SetNodeLabel: %v", err)
+				return fmt.Errorf("SetNodeLabel Verified %s: %w", u.name, err)
 			}
 		}
 		if err := g.SetNodeProperty(u.name, "age", lpg.Int64Value(u.age)); err != nil {
-			log.Fatalf("SetNodeProperty: %v", err)
+			return fmt.Errorf("SetNodeProperty age %s: %w", u.name, err)
 		}
 	}
 
@@ -63,55 +75,76 @@ func main() {
 		{"dave", "grace"}, {"erin", "grace"},
 	} {
 		if err := g.AddEdge(e[0], e[1], 1); err != nil {
-			log.Fatalf("AddEdge: %v", err)
+			return fmt.Errorf("AddEdge %s-%s: %w", e[0], e[1], err)
 		}
 	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
+	mapper := g.AdjList().Mapper()
 
-	fmt.Println("Influence (PageRank):")
+	// Influence: rank users by PageRank. ranks is indexed by NodeID and
+	// may contain phantom zero entries for ids the mapper cannot resolve,
+	// so skip those. Ties between equal ranks are broken by name to keep
+	// the output byte-stable (sort.Slice is not a stable sort).
+	fmt.Fprintln(w, "Influence (PageRank):")
 	ranks, _, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())
 	type ranked struct {
 		name string
 		rank float64
 	}
-	var ordered []ranked
+	ordered := make([]ranked, 0, len(users))
 	for i, r := range ranks {
-		name, ok := g.AdjList().Mapper().Resolve(graph.NodeID(i))
+		name, ok := mapper.Resolve(graph.NodeID(i))
 		if !ok {
 			continue
 		}
 		ordered = append(ordered, ranked{name, r})
 	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].rank > ordered[j].rank })
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].rank != ordered[j].rank {
+			return ordered[i].rank > ordered[j].rank
+		}
+		return ordered[i].name < ordered[j].name
+	})
 	for _, o := range ordered {
-		fmt.Printf("  %-8s %.4f\n", o.name, o.rank)
+		fmt.Fprintf(w, "  %-8s %.4f\n", o.name, o.rank)
 	}
 
-	fmt.Println("\nCommunities (Leiden):")
+	// Communities: group users by Leiden cluster id. The clusters map is
+	// iterated in non-deterministic order, so collect the cluster ids
+	// into a slice and sort them before printing.
+	fmt.Fprintln(w, "\nCommunities (Leiden):")
 	p := community.Leiden(c, community.DefaultLeidenOptions())
 	clusters := map[int][]string{}
 	for i, cid := range p.Community {
-		name, _ := g.AdjList().Mapper().Resolve(graph.NodeID(i))
-		if name == "" {
+		name, ok := mapper.Resolve(graph.NodeID(i))
+		if !ok {
 			continue
 		}
 		clusters[cid] = append(clusters[cid], name)
 	}
-	for cid, names := range clusters {
+	cids := make([]int, 0, len(clusters))
+	for cid := range clusters {
+		cids = append(cids, cid)
+	}
+	sort.Ints(cids)
+	for _, cid := range cids {
+		names := clusters[cid]
 		sort.Strings(names)
-		fmt.Printf("  community %d: %v\n", cid, names)
+		fmt.Fprintf(w, "  community %d: %v\n", cid, names)
 	}
 
-	fmt.Println("\nFriend-of-friend recommendations for alice:")
+	fmt.Fprintln(w, "\nFriend-of-friend recommendations for alice:")
 	for _, name := range friendsOfFriends(g, "alice") {
-		fmt.Printf("  -> %s\n", name)
+		fmt.Fprintf(w, "  -> %s\n", name)
 	}
+	return nil
 }
 
 // friendsOfFriends returns users two hops away from src that are not
 // already direct friends. The function shows a manual two-hop walk
-// over the live adjacency list without building a CSR.
+// over the live adjacency list without building a CSR. The result is
+// sorted by suggestion count (descending) then name, so it is stable.
 func friendsOfFriends(g *lpg.Graph[string, int64], src string) []string {
 	direct := map[string]bool{src: true}
 	for v := range g.AdjList().Neighbours(src) {
