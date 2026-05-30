@@ -11,7 +11,9 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"sort"
 
 	"gograph/graph"
@@ -22,6 +24,22 @@ import (
 )
 
 func main() {
+	if err := run(os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run builds the two-cluster bridged network, computes betweenness
+// centrality and label-propagation communities over it, and writes the
+// report to w. All output goes to w so a test can capture and assert
+// it; run returns wrapped errors rather than terminating the process.
+//
+// Both rankings are emitted in a fully deterministic order: the
+// betweenness ranking sorts by descending score and breaks ties by
+// node name, and the cluster listing sorts both the community IDs and
+// the member names. This keeps the output byte-stable across runs even
+// though the underlying scores contain structural ties.
+func run(w io.Writer) error {
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: false})
 	for _, e := range [][2]string{
 		// Cluster 1 (around "marie")
@@ -32,12 +50,13 @@ func main() {
 		{"marie", "jose"},
 	} {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
-			log.Fatalf("AddEdge: %v", err)
+			return fmt.Errorf("AddEdge %s--%s: %w", e[0], e[1], err)
 		}
 	}
 	c := csr.BuildFromAdjList(a)
+	mapper := a.Mapper()
 
-	fmt.Println("Betweenness (higher = more critical):")
+	fmt.Fprintln(w, "Betweenness (higher = more critical):")
 	bc := centrality.Betweenness(c)
 	type entry struct {
 		name  string
@@ -45,29 +64,45 @@ func main() {
 	}
 	var entries []entry
 	for i, s := range bc {
-		name, _ := a.Mapper().Resolve(graph.NodeID(i))
-		if name == "" {
+		name, ok := mapper.Resolve(graph.NodeID(i))
+		if !ok || name == "" {
 			continue
 		}
 		entries = append(entries, entry{name, s})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].score > entries[j].score })
+	// Sort by descending score, breaking ties by ascending name so the
+	// structurally symmetric nodes (marie/jose) print in a stable order.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].score != entries[j].score {
+			return entries[i].score > entries[j].score
+		}
+		return entries[i].name < entries[j].name
+	})
 	for _, e := range entries {
-		fmt.Printf("  %-7s %.2f\n", e.name, e.score)
+		fmt.Fprintf(w, "  %-7s %.2f\n", e.name, e.score)
 	}
 
-	fmt.Println("\nLabel propagation clusters:")
+	fmt.Fprintln(w, "\nLabel propagation clusters:")
 	p := community.LabelPropagation(c, community.DefaultLabelPropagationOptions())
 	clusters := map[int][]string{}
 	for i, cid := range p.Community {
-		name, _ := a.Mapper().Resolve(graph.NodeID(i))
-		if name == "" {
+		name, ok := mapper.Resolve(graph.NodeID(i))
+		if !ok || name == "" {
 			continue
 		}
 		clusters[cid] = append(clusters[cid], name)
 	}
-	for cid, names := range clusters {
-		sort.Strings(names)
-		fmt.Printf("  community %d: %v\n", cid, names)
+	// Map iteration order is non-deterministic, so collect the community
+	// IDs and sort them before printing; member names are sorted too.
+	cids := make([]int, 0, len(clusters))
+	for cid := range clusters {
+		cids = append(cids, cid)
 	}
+	sort.Ints(cids)
+	for _, cid := range cids {
+		names := clusters[cid]
+		sort.Strings(names)
+		fmt.Fprintf(w, "  community %d: %v\n", cid, names)
+	}
+	return nil
 }
