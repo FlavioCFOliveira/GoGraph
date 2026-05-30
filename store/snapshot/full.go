@@ -19,10 +19,15 @@ import (
 // LoadedSnapshot is the result of [LoadSnapshotFull]: the parsed CSR
 // arrays, the parsed labels readback (empty for v1 snapshots), the
 // parsed properties readback (empty when properties.bin is absent),
-// the parsed mapper readback (empty when mapper.bin is absent, which
-// is the case for every v1 and v2 snapshot), the optional per-index
-// byte payloads (one entry per indexes/<name>.bin file referenced by
-// the manifest), and the manifest that produced them.
+// the parsed mapper readback (empty when mapper.bin is absent, e.g. a
+// v1 CSR-only snapshot or a v2 snapshot written without a codec for a
+// non-string key type), the optional per-index byte payloads (one
+// entry per indexes/<name>.bin file referenced by the manifest), and
+// the manifest that produced them.
+//
+// When mapper.bin is present, exactly one of [MapperReadback.Pairs]
+// (version-1 string layout) and [MapperReadback.RawPairs] (version-2
+// codec layout) is populated; see [MapperReadback].
 //
 // Each [IndexReadback].Bytes may be nil even when the manifest
 // references the index — that signals the file was missing or its
@@ -72,14 +77,40 @@ func WriteSnapshotFull[N comparable, W any](dir string, c *csr.CSR[W], g *lpg.Gr
 	return err
 }
 
+// WriteSnapshotFullWithMapperCodec is the codec-aware variant of
+// [WriteSnapshotFull]: it threads codec (the same [txn.Codec] the store
+// uses to serialise node identifiers onto the WAL) into the mapper.bin
+// writer so the durable NodeID->key interning table is emitted for ANY
+// comparable key type N, not just string. A snapshot written this way
+// is self-sufficient on load for every key type, which lets the
+// checkpointer truncate the WAL instead of retaining it unboundedly
+// (audit gap F3).
+//
+// For string-keyed graphs the mapper bytes remain byte-identical to the
+// version-1 layout (see [WriteMapper]), so this entry point is a safe
+// drop-in for the existing [WriteSnapshotFull] on string stores too.
+//
+// codec must not be nil; pass the store's [txn.Store.Codec].
+func WriteSnapshotFullWithMapperCodec[N comparable, W any](
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodec")()
+	err := WriteSnapshotFullWithMapperCodecCtx(context.Background(), dir, c, g, codec)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodec.errors", 1)
+	}
+	return err
+}
+
 // WriteSnapshotFullCtx is the context-aware variant of
 // [WriteSnapshotFull]. ctx.Err() is checked at five stage boundaries:
 // before the CSR write, before the labels write, before the
 // properties write, before the manifest write, and before the
 // atomic rename. On cancellation the temporary staging directory is
 // cleaned up and the wrapped ctx.Err is returned.
-//
-//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + manifest + atomic rename + ctx ticks
 func WriteSnapshotFullCtx[N comparable, W any](
 	ctx context.Context,
 	dir string,
@@ -87,6 +118,52 @@ func WriteSnapshotFullCtx[N comparable, W any](
 	g *lpg.Graph[N, W],
 ) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotFullCtx")()
+	// No codec: the mapper is persisted only for string-keyed graphs
+	// (the historical v3 behaviour). writeMapperIfStringKeyed performs
+	// the string-only probe.
+	return writeSnapshotFullCore(ctx, dir, c, g, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+		return writeMapperIfStringKeyed(c2, tmp, g)
+	})
+}
+
+// WriteSnapshotFullWithMapperCodecCtx is the context-aware variant of
+// [WriteSnapshotFullWithMapperCodec]. ctx cancellation is honoured at
+// the same stage boundaries as [WriteSnapshotFullCtx]; the only
+// difference is that the mapper.bin component is emitted for every key
+// type via codec rather than for string alone.
+func WriteSnapshotFullWithMapperCodecCtx[N comparable, W any](
+	ctx context.Context,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecCtx")()
+	if codec == nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecCtx.errors", 1)
+		return errors.New("snapshot: nil mapper codec")
+	}
+	return writeSnapshotFullCore(ctx, dir, c, g, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+		return writeMapperWithCodec(c2, tmp, g, codec)
+	})
+}
+
+// writeSnapshotFullCore is the shared implementation behind
+// [WriteSnapshotFullCtx] and [WriteSnapshotFullWithMapperCodecCtx]. The
+// only behaviour that varies between the two is how the mapper.bin
+// component is produced, which the caller supplies as writeMapper:
+// it writes mapper.bin under tmp and returns (size, crc, haveMapper,
+// err). When haveMapper is false the snapshot is stamped v2 (no
+// mapper.bin) exactly as before; when true it is stamped v3.
+//
+//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + manifest + atomic rename + ctx ticks
+func writeSnapshotFullCore[N comparable, W any](
+	ctx context.Context,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	writeMapper func(ctx context.Context, tmp string) (size int64, crc uint32, haveMapper bool, err error),
+) error {
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
@@ -156,14 +233,16 @@ func WriteSnapshotFullCtx[N comparable, W any](
 		return err
 	}
 
-	// mapper.bin — durable (NodeID -> natural key) table. Only emitted
-	// when the graph's Mapper is string-keyed: that is the only N for
-	// which the codec is implemented today and the only N exercised by
-	// production call sites (txn.NewStoreWithOptions, the social_cli
-	// example, every Cypher TCK persistence test). Non-string N falls
-	// back to the v2 layout (no mapper.bin) and recovery continues to
-	// rebuild the mapper from the WAL — the documented v2 contract.
-	mapperSize, mapperCRC, haveMapper, err := writeMapperIfStringKeyed(ctx, tmp, g)
+	// mapper.bin — durable (NodeID -> natural key) table. The supplied
+	// writeMapper strategy decides whether it is emitted: the no-codec
+	// caller ([WriteSnapshotFullCtx]) writes it only for string-keyed
+	// graphs (the historical v3 behaviour); the codec-aware caller
+	// ([WriteSnapshotFullWithMapperCodecCtx]) writes it for every key
+	// type, making non-string snapshots self-sufficient too. When the
+	// strategy returns haveMapper=false the snapshot stays v2 and
+	// recovery rebuilds the mapper from the WAL — the documented v2
+	// contract.
+	mapperSize, mapperCRC, haveMapper, err := writeMapper(ctx, tmp)
 	if err != nil {
 		_ = os.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
@@ -310,6 +389,31 @@ func writeMapperIfStringKeyed[N comparable, W any](
 	return mSize, mCRC, true, nil
 }
 
+// writeMapperWithCodec serialises g's mapper to mapper.bin under tmp via
+// codec, for ANY comparable key type N. It always emits the component
+// (returning haveMapper=true on success), so the resulting snapshot is
+// self-sufficient regardless of N. Returns a non-nil error on a write
+// or encode failure (callers must clean tmp and surface the error).
+func writeMapperWithCodec[N comparable, W any](
+	ctx context.Context,
+	tmp string,
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+) (size int64, crc uint32, ok bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, false, err
+	}
+	mapper := g.AdjList().Mapper()
+	mapperPath := filepath.Join(tmp, MapperFile)
+	mSize, mCRC, werr := writeAndSync(mapperPath, func(w io.Writer) (int64, uint32, error) {
+		return WriteMapper(w, mapper, codec)
+	})
+	if werr != nil {
+		return 0, 0, false, werr
+	}
+	return mSize, mCRC, true, nil
+}
+
 // writeAndSync creates path, hands the file handle to write, fsyncs
 // and closes the file. It returns the (size, crc) tuple computed by
 // write so the caller can record them in the manifest. The caller's
@@ -395,7 +499,22 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 
 	var mapperParsed MapperReadback
 	if mapperEntry != nil {
-		mapperParsed, err = readVerifiedMapper(filepath.Join(dir, MapperFile), mapperEntry.CRC32C)
+		mapperPath := filepath.Join(dir, MapperFile)
+		ver, verr := peekMapperVersion(mapperPath)
+		if verr != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, verr
+		}
+		// Version 1 carries string keys (Pairs); version 2 carries
+		// codec-encoded key bytes (RawPairs) that the recovery layer
+		// decodes with the matching codec. Reading the version up front
+		// lets a single LoadSnapshotFull serve both layouts without a
+		// codec of its own.
+		if ver == mapperFormatVersionCodec {
+			mapperParsed, err = readVerifiedMapperBytes(mapperPath, mapperEntry.CRC32C)
+		} else {
+			mapperParsed, err = readVerifiedMapper(mapperPath, mapperEntry.CRC32C)
+		}
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err

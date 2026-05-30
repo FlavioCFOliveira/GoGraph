@@ -48,39 +48,27 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"gograph/internal/crashpoint"
 )
 
 // EnvCrashAt is the environment variable read by [Breakpoint] to
-// decide which named point should trigger a crash.
-const EnvCrashAt = "GOGRAPH_CRASH_AT"
+// decide which named point should trigger a crash. It is an alias for
+// [crashpoint.EnvCrashAt]; the canonical definition lives in the
+// dependency-light crashpoint package so production code can embed
+// breakpoints without importing this test-harness package.
+const EnvCrashAt = crashpoint.EnvCrashAt
 
 // EnvCrashDir is the environment variable that tells the helper
-// binary where to place its artefacts (WAL files, temp data).
-const EnvCrashDir = "GOGRAPH_CRASH_DIR"
+// binary where to place its artefacts (WAL files, temp data). Alias
+// for [crashpoint.EnvCrashDir].
+const EnvCrashDir = crashpoint.EnvCrashDir
 
-// Breakpoint checks whether GOGRAPH_CRASH_AT equals name; if so,
-// it sends SIGKILL to the current process to simulate an abrupt crash
-// at this exact execution point.
-//
-// name must be non-empty; an empty name is silently ignored so that
-// callers cannot accidentally crash when the environment variable is
-// unset (where os.Getenv returns "").
-//
-// In production (GOGRAPH_CRASH_AT unset or empty) this function is
-// a no-op with no measurable overhead (one string comparison).
-//
-// Breakpoint is safe for concurrent use.
-func Breakpoint(name string) {
-	if name == "" {
-		return // guard: never match the empty env value
-	}
-	if at := os.Getenv(EnvCrashAt); at != "" && at == name {
-		// Self-kill via SIGKILL; cannot be caught or deferred.
-		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
-		// Block until the signal is delivered (should be instant).
-		select {} //nolint:staticcheck
-	}
-}
+// Breakpoint is a thin re-export of [crashpoint.Breakpoint] so existing
+// callers of crashinject.Breakpoint keep working. New production call
+// sites should import internal/crashpoint directly to avoid pulling the
+// testing package into their binaries.
+func Breakpoint(name string) { crashpoint.Breakpoint(name) }
 
 // Out captures the observable outcome of a helper child process
 // spawned by [Run].

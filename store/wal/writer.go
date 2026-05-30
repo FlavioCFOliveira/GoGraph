@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"gograph/internal/crashpoint"
 	"gograph/internal/metrics"
 )
 
@@ -223,6 +224,16 @@ func (w *Writer) Truncate() (int64, error) {
 		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return sz, err
 	}
+	// Crash-injection point: the file has just been shrunk to zero on
+	// disk but the truncation has not yet been fully finalised (seek +
+	// metadata sync + buffer reset). A crash here models a tear in the
+	// middle of a checkpoint's WAL truncation; recovery must reconstruct
+	// the full state from the (already durable, self-sufficient)
+	// snapshot alone, since the WAL is now empty. No-op in production
+	// (GOGRAPH_CRASH_AT unset). The hook lives here because os.File
+	// truncation is where the WAL prefix is physically discarded; see
+	// store/checkpoint.runCheckpoint for the surrounding sequence.
+	crashpoint.Breakpoint("checkpoint.mid-truncate")
 	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
 		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return sz, err

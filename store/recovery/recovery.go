@@ -675,11 +675,19 @@ func openCodec[N comparable, W any](
 		// v3 snapshot: the mapper.bin payload re-seeds the in-memory
 		// interning table BEFORE WAL replay so the rest of the load
 		// chain (CSR apply, labels apply, properties apply, WAL apply)
-		// finds every NodeID already resolved. v2 snapshots produce an
-		// empty Mapper readback here and the original WAL-replay-only
-		// reconstruction path applies.
-		if len(loaded.Mapper.Pairs) > 0 {
-			if err := snapshot.ApplyMapperToGraph(g, loaded.Mapper); err != nil {
+		// finds every NodeID already resolved. A version-1 (string)
+		// mapper.bin lands in Pairs; a version-2 (codec) mapper.bin lands
+		// in RawPairs and is decoded through the supplied codec. v2
+		// snapshots without a mapper produce an empty readback here and
+		// the original WAL-replay-only reconstruction path applies.
+		haveMapper := len(loaded.Mapper.Pairs) > 0 || len(loaded.Mapper.RawPairs) > 0
+		if haveMapper {
+			if len(loaded.Mapper.RawPairs) > 0 {
+				if err := snapshot.ApplyMapperToGraphWithCodec(g, loaded.Mapper, codec); err != nil {
+					metrics.IncCounter("store.recovery.openCodec.errors", 1)
+					return res, fmt.Errorf("recovery: apply snapshot mapper: %w", err)
+				}
+			} else if err := snapshot.ApplyMapperToGraph(g, loaded.Mapper); err != nil {
 				metrics.IncCounter("store.recovery.openCodec.errors", 1)
 				return res, fmt.Errorf("recovery: apply snapshot mapper: %w", err)
 			}

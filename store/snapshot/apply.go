@@ -62,6 +62,57 @@ func ApplyMapperToGraph[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadba
 	return nil
 }
 
+// ApplyMapperToGraphWithCodec rebuilds g's underlying [graph.Mapper]
+// from a version-2 (codec) snapshot readback for ANY comparable key
+// type N. Each [MapperRawPair] carries the codec-encoded key bytes the
+// snapshot writer produced via [WriteMapper]; this function decodes
+// them back into N via the supplied codec (the same one the store uses
+// on the WAL) and seeds the interning table through [graph.Mapper.LoadFrom].
+//
+// It is the codec-aware dual of [ApplyMapperToGraph]: recovery calls
+// this when the loaded readback carries RawPairs (non-string keys) and
+// the string-specialised path when it carries Pairs. An empty readback
+// is a no-op.
+//
+// Pre-condition and concurrency contract match [ApplyMapperToGraph]: g
+// must hold a fresh (empty) mapper, and the call must not race with any
+// other access to g. A decode failure surfaces as [ErrMapperApply]
+// wrapping the codec error; a structural violation surfaces as
+// [ErrMapperApply] wrapping the relevant [graph.ErrMapper…] sentinel.
+func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadback, codec keyDecoder[N]) error {
+	defer metrics.Time("store.snapshot.ApplyMapperToGraphWithCodec")()
+	if len(rb.RawPairs) == 0 {
+		return nil
+	}
+	if codec == nil {
+		metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
+		return fmt.Errorf("%w: nil codec", ErrMapperApply)
+	}
+	mapper := g.AdjList().Mapper()
+	entries := make([]graph.MapperEntry[N], len(rb.RawPairs))
+	for i := range rb.RawPairs {
+		key, rest, derr := codec.Decode(rb.RawPairs[i].Key)
+		if derr != nil {
+			metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
+			return fmt.Errorf("%w: decode key for node %d: %w",
+				ErrMapperApply, uint64(rb.RawPairs[i].ID), derr)
+		}
+		if len(rest) != 0 {
+			// The writer encoded exactly one key per record; trailing bytes
+			// mean the on-disk record and the codec disagree on framing.
+			metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
+			return fmt.Errorf("%w: trailing bytes after key for node %d (%d left)",
+				ErrMapperApply, uint64(rb.RawPairs[i].ID), len(rest))
+		}
+		entries[i] = graph.MapperEntry[N]{ID: rb.RawPairs[i].ID, Key: key}
+	}
+	if err := mapper.LoadFrom(entries); err != nil {
+		metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
+		return fmt.Errorf("%w: %w", ErrMapperApply, err)
+	}
+	return nil
+}
+
 // ApplyCSRToGraph replays the adjacency in rb into g. The pre-
 // condition is that g's underlying mapper has already been populated
 // with every NodeID referenced by rb — typically by an immediately-

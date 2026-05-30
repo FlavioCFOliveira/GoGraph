@@ -15,17 +15,37 @@
 //	                 second-frame header, then crashes. The resulting
 //	                 WAL file has a torn tail that wal.Reader must
 //	                 detect as ErrTornFrame.
+//
+//	checkpoint.post-snapshot-pre-truncate
+//	               — commits an int64-keyed workload, then triggers a
+//	                 codec-aware checkpoint that crashes AFTER the
+//	                 self-sufficient snapshot is durable but BEFORE the
+//	                 WAL is truncated. Recovery must reconstruct the full
+//	                 state from the snapshot plus the still-intact WAL.
+//
+//	checkpoint.mid-truncate
+//	               — same workload and checkpoint, but the crash lands
+//	                 in the middle of the WAL truncation (file already
+//	                 shrunk to zero on disk). Recovery must reconstruct
+//	                 the full state from the self-sufficient snapshot
+//	                 alone (the WAL is empty).
 package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
+	"gograph/graph/adjlist"
+	"gograph/graph/lpg"
 	"gograph/internal/crashinject"
+	"gograph/store/checkpoint"
+	"gograph/store/txn"
 	"gograph/store/wal"
 )
 
@@ -67,11 +87,102 @@ func run() int {
 	switch scenario {
 	case "wal.mid-frame":
 		runWALMidFrame(dir)
+	case "checkpoint.post-snapshot-pre-truncate", "checkpoint.mid-truncate":
+		runCheckpointCrash(dir, scenario)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
 		return 1
 	}
 	return 0
+}
+
+// checkpointSeedEdges is the deterministic int64-keyed workload the
+// checkpoint crash scenarios commit before the checkpoint fires. The
+// parent test reconstructs the same expectations to assert no data
+// loss after recovery.
+var checkpointSeedEdges = []struct {
+	src, dst int64
+	weight   int64
+}{
+	{1, 2, 100},
+	{2, 3, 200},
+	{3, 1, 300},
+}
+
+// runCheckpointCrash commits an int64-keyed workload through a typed
+// Store, then drives a codec-aware checkpoint that crashes at the named
+// breakpoint:
+//
+//   - checkpoint.post-snapshot-pre-truncate fires inside runCheckpoint,
+//     after the self-sufficient snapshot is durable but before the WAL
+//     is truncated.
+//   - checkpoint.mid-truncate fires inside wal.Writer.Truncate, after
+//     the file has been shrunk to zero but before the truncation is
+//     finalised.
+//
+// Both rely on WithMapperCodec so the snapshot carries mapper.bin for
+// the int64 key type and is therefore self-sufficient on load. The
+// artefacts (snapshot/ + wal) are left in GOGRAPH_CRASH_DIR for the
+// parent to recover from.
+func runCheckpointCrash(dir, scenario string) {
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+
+	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	opts := txn.Options[int64, int64]{
+		Codec:       txn.NewInt64Codec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	}
+	store := txn.NewStoreWithOptions[int64, int64](g, w, opts)
+
+	tx := store.Begin()
+	for _, e := range checkpointSeedEdges {
+		if err := tx.AddEdge(e.src, e.dst, e.weight); err != nil {
+			log.Fatalf("AddEdge(%d->%d): %v", e.src, e.dst, err)
+		}
+	}
+	if err := tx.SetNodeLabel(1, "Root"); err != nil {
+		log.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := tx.SetNodeProperty(2, "weight", lpg.Int64Value(42)); err != nil {
+		log.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Fatalf("Commit: %v", err)
+	}
+
+	// Codec-aware checkpointer: the int64 mapper is persisted, so the
+	// snapshot is self-sufficient and the checkpointer will attempt to
+	// truncate the WAL — exactly the path the two breakpoints sit on.
+	var mu sync.Mutex
+	cp := checkpoint.New[int64, int64](
+		checkpoint.Config{Dir: dir},
+		g, w, &mu,
+		checkpoint.WithMapperCodec[int64, int64](store.Codec()),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cp.Start(ctx)
+
+	// Trigger blocks until the checkpoint completes — but the breakpoint
+	// (GOGRAPH_CRASH_AT=scenario) self-kills the process mid-checkpoint,
+	// so under the crash harness this call never returns. On the
+	// non-crash self-test path we shut the goroutine down cleanly and
+	// release the context before reporting; cancel() is invoked
+	// explicitly (no defer) so the gocritic exitAfterDefer pitfall the
+	// rest of this file guards against cannot arise.
+	err = cp.Trigger()
+	cp.Stop()
+	cancel()
+	if err != nil {
+		log.Fatalf("checkpoint Trigger: %v", err)
+	}
+
+	// Reached only on the non-crash self-test path
+	// (GOGRAPH_CRASH_AT != scenario).
+	fmt.Printf("runCheckpointCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
 }
 
 // runWALMidFrame writes one complete WAL frame to a file in dir,

@@ -21,8 +21,10 @@ import (
 
 	"gograph/graph/csr"
 	"gograph/graph/lpg"
+	"gograph/internal/crashpoint"
 	"gograph/internal/metrics"
 	"gograph/store/snapshot"
+	"gograph/store/txn"
 	"gograph/store/wal"
 )
 
@@ -59,6 +61,12 @@ type Checkpointer[N comparable, W any] struct {
 	g       *lpg.Graph[N, W]
 	wlog    *wal.Writer
 	storeMu *sync.Mutex
+	// codec, when non-nil, serialises the NodeID->key mapper into a
+	// self-sufficient snapshot for ANY key type N (see WithMapperCodec).
+	// When nil the checkpointer falls back to the string-only mapper:
+	// non-string snapshots are then not self-sufficient and the WAL is
+	// retained rather than truncated.
+	codec txn.Codec[N]
 
 	stopCh    chan struct{}
 	triggerCh chan chan error
@@ -72,16 +80,47 @@ type Checkpointer[N comparable, W any] struct {
 	lastErr      string
 }
 
+// Option customises a [Checkpointer] at construction. Options are
+// applied in order by [New].
+type Option[N comparable, W any] func(*Checkpointer[N, W])
+
+// WithMapperCodec supplies the node-identifier codec the checkpointer
+// uses to persist the NodeID->key interning table (mapper.bin) for ANY
+// key type N. Pass the owning store's codec ([txn.Store.Codec]).
+//
+// Without this option the checkpointer persists the mapper only for
+// string-keyed graphs; non-string snapshots are then not
+// self-sufficient and the WAL is retained (never truncated) to avoid
+// data loss, at the cost of unbounded WAL growth. With this option the
+// snapshot is self-sufficient for every key type, so the checkpointer
+// can truncate the WAL after each successful checkpoint and keep the
+// log bounded (audit gap F3).
+//
+// A nil codec is ignored (the checkpointer keeps the string-only
+// fallback).
+func WithMapperCodec[N comparable, W any](codec txn.Codec[N]) Option[N, W] {
+	return func(c *Checkpointer[N, W]) {
+		if codec != nil {
+			c.codec = codec
+		}
+	}
+}
+
 // New returns a Checkpointer; call Start to launch the goroutine.
 //
 // storeMu must be the same mutex the transaction layer holds during
 // commit; the checkpointer acquires it briefly to take a consistent
 // snapshot of the graph state.
+//
+// Pass [WithMapperCodec] to make non-string-keyed snapshots
+// self-sufficient so the WAL can be truncated for every key type; see
+// that option's documentation for the durability rationale.
 func New[N comparable, W any](
 	cfg Config,
 	g *lpg.Graph[N, W],
 	wlog *wal.Writer,
 	storeMu *sync.Mutex,
+	opts ...Option[N, W],
 ) *Checkpointer[N, W] {
 	if cfg.Interval == 0 && cfg.MaxAge > 0 {
 		cfg.Interval = cfg.MaxAge / 4
@@ -89,7 +128,7 @@ func New[N comparable, W any](
 			cfg.Interval = time.Millisecond
 		}
 	}
-	return &Checkpointer[N, W]{
+	c := &Checkpointer[N, W]{
 		cfg:       cfg,
 		g:         g,
 		wlog:      wlog,
@@ -98,6 +137,10 @@ func New[N comparable, W any](
 		triggerCh: make(chan chan error, 4),
 		doneCh:    make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Start launches the background goroutine. ctx cancellation stops
@@ -233,20 +276,22 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 
 	cs := csr.BuildFromAdjList(c.g.AdjList())
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
-	// Durability invariant (audit gap F2): the snapshot MUST be a
+	// Durability invariant (audit gaps F2/F3): the snapshot MUST be a
 	// self-sufficient image of the committed state — CSR adjacency PLUS
-	// labels, properties, indexes, and (for string keys) the NodeID->key
-	// mapper — before the WAL is truncated. The legacy WriteSnapshotCSR
-	// captured adjacency only, so truncating the WAL afterwards destroyed
-	// every committed label/property and, because v1 snapshots carry no
-	// mapper, the NodeID->key mapping too: recovery then yielded an empty
-	// graph. WriteSnapshotFull writes a self-sufficient v3 snapshot for
-	// string-keyed graphs (the production key type). For non-string keys
-	// it still emits a v2 snapshot without a mapper, which is NOT
-	// self-sufficient after truncation; runCheckpoint guards against that
-	// data loss below by refusing to truncate when the snapshot cannot
-	// stand alone. See docs/acid-audit.md (F2).
-	if err := snapshot.WriteSnapshotFull(snapDir, cs, c.g); err != nil {
+	// labels, properties, indexes, and the NodeID->key mapper — before
+	// the WAL is truncated. The legacy WriteSnapshotCSR captured
+	// adjacency only, so truncating the WAL afterwards destroyed every
+	// committed label/property and, because v1 snapshots carry no mapper,
+	// the NodeID->key mapping too: recovery then yielded an empty graph.
+	//
+	// When a mapper codec is wired in (WithMapperCodec, F3) the snapshot
+	// is self-sufficient for EVERY key type, so the WAL can always be
+	// truncated. Without a codec the mapper is persisted for string keys
+	// only; non-string snapshots are then not self-sufficient and
+	// runCheckpoint guards against data loss below by refusing to
+	// truncate when the snapshot cannot stand alone. See
+	// docs/acid-audit.md (F2/F3).
+	if err := c.writeSnapshot(snapDir, cs); err != nil {
 		c.setErr(err)
 		return err
 	}
@@ -259,6 +304,12 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 		c.setErr(err)
 		return err
 	}
+	// Crash-injection point: the snapshot is durable on disk but the WAL
+	// has NOT been truncated yet. A crash here must leave the store fully
+	// recoverable — recovery loads the self-sufficient snapshot and
+	// idempotently replays the still-intact WAL on top. No-op in
+	// production (GOGRAPH_CRASH_AT unset).
+	crashpoint.Breakpoint("checkpoint.post-snapshot-pre-truncate")
 	if !selfSufficient {
 		// The snapshot cannot reconstruct the graph on its own (no
 		// mapper.bin for this key type), so truncating the WAL would lose
@@ -289,6 +340,18 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 	c.checkpoints.Add(1)
 	c.setErr(nil)
 	return nil
+}
+
+// writeSnapshot publishes a self-sufficient snapshot of the current
+// graph state to snapDir. When a mapper codec is configured
+// ([WithMapperCodec]) it threads the codec so mapper.bin is emitted for
+// every key type; otherwise it uses the string-only writer (mapper.bin
+// for string keys, v2 without a mapper for other key types).
+func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W]) error {
+	if c.codec != nil {
+		return snapshot.WriteSnapshotFullWithMapperCodec(snapDir, cs, c.g, c.codec)
+	}
+	return snapshot.WriteSnapshotFull(snapDir, cs, c.g)
 }
 
 func (c *Checkpointer[N, W]) setErr(err error) {
