@@ -1,3 +1,5 @@
+//go:build soak
+
 package exec_test
 
 // exec_coverage_ext_test.go — targeted tests for low-coverage branches in:

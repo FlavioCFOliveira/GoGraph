@@ -1,3 +1,5 @@
+//go:build soak
+
 package exec_test
 
 // engine_coverage_test.go — targeted Engine-based tests to lift own-package
