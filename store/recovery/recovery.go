@@ -248,11 +248,10 @@ func decodeV1(payload []byte) (Op, error) {
 // layer: locating the boundaries between them requires walking the
 // codec (and the weight codec for [txn.OpAddEdgeWeighted]), so
 // [Decode] returns the entire post-header region in [Op.Body] and
-// leaves [Op.Label] empty. The typed open path
-// ([OpenWithCodec] / [OpenWithOptions]) is responsible for invoking
-// the codec on [Op.Body] to extract src, dst, the optional weight,
-// then reading the uint16 label length prefix and label bytes from
-// the remaining tail.
+// leaves [Op.Label] empty. The typed apply path ([applyOpCodec]) is
+// responsible for invoking the codec on [Op.Body] to extract src, dst,
+// the optional weight, then reading the uint16 label length prefix and
+// label bytes from the remaining tail.
 func decodeV2(payload []byte) (Op, error) {
 	// version + kind = 2 bytes minimum. The body may be empty for
 	// hypothetical zero-byte-codec endpoints, so we do not enforce a
@@ -273,10 +272,7 @@ func decodeV2(payload []byte) (Op, error) {
 // Open opens the store at dir for graphs keyed by N values and
 // weighted by W values, using opts.Codec for endpoint identifiers
 // and opts.WeightCodec for [txn.OpAddEdgeWeighted] frames. It is the
-// canonical recovery entry point: callers should reach for it first,
-// in preference to the specialised wrappers ([OpenString],
-// [OpenWithCodec], [OpenWithOptions]) which remain available for
-// backwards compatibility.
+// canonical recovery entry point.
 //
 // Open loads any snapshot under dir/snapshot (v1 or v2; CSR-only or
 // CSR + labels + properties + indexes), then replays the WAL at
@@ -327,317 +323,10 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 	return res, err
 }
 
-// OpenString opens the store at dir for graphs keyed by string node
-// values. It loads any snapshot under dir/snapshot, then replays the
-// WAL at dir/wal applying each op into the live graph.
-//
-// Deprecated: OpenString is the v1.0.0 string-keyed convenience
-// wrapper. New code should use [Open][string, int64] with the
-// canonical built-in codecs:
-//
-//	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
-//	    Codec:       txn.NewStringCodec(),
-//	    WeightCodec: txn.NewInt64WeightCodec(),
-//	})
-//
-// The wrapper continues to load existing v1 (untagged) and v2
-// (string-codec) WALs verbatim; the deprecation is purely an API
-// surface signal — there is no behavioural change for callers who
-// keep using it.
-//
-// Edge weights are not interpreted by [OpenString]: [txn.OpAddEdge]
-// frames apply with a zero weight (unchanged from before T8) and
-// [txn.OpAddEdgeWeighted] frames also apply with a zero weight
-// because no [txn.WeightCodec] is wired through this entry point.
-// The fallback is reported via the
-// `store.recovery.applyOp.fallbackZeroWeight` metric counter so
-// observability surfaces the loss. Callers that need to preserve
-// weights on replay should use [Open] (preferred) or
-// [OpenWithOptions] (deprecated).
-func OpenString(dir string) (Result[string, int64], error) {
-	defer metrics.Time("store.recovery.OpenString")()
-	res, err := OpenStringCtx(context.Background(), dir)
-	if err != nil {
-		metrics.IncCounter("store.recovery.OpenString.errors", 1)
-	}
-	return res, err
-}
-
-// OpenStringCtx is the context-aware variant of [OpenString]. ctx.Err()
-// is checked at the snapshot-load boundary and at every 4096 WAL
-// frames replayed; on cancellation returns the partially-recovered
-// Result paired with the wrapped ctx.Err.
-//
-// Deprecated: OpenStringCtx is the v1.0.0 string-keyed convenience
-// wrapper. New code should use [OpenCtx] with the canonical
-// [txn.NewStringCodec] / [txn.NewInt64WeightCodec] pair.
-//
-//nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
-func OpenStringCtx(ctx context.Context, dir string) (Result[string, int64], error) {
-	defer metrics.Time("store.recovery.OpenStringCtx")()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	res := Result[string, int64]{Graph: g}
-
-	if err := ctx.Err(); err != nil {
-		metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-		return res, err
-	}
-	snapDir := filepath.Join(dir, "snapshot")
-	var snapLabels snapshot.LabelsReadback
-	var snapProps snapshot.PropertiesReadback
-	var snapIndexes []snapshot.IndexReadback
-	var haveSnapLabels, haveSnapProps bool
-	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
-		loaded, err := snapshot.LoadSnapshotFull(snapDir)
-		if err != nil {
-			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-			return res, fmt.Errorf("recovery: snapshot open: %w", err)
-		}
-		res.SnapshotHit = true
-		res.SnapshotSchemaVersion = loaded.Manifest.Version
-		snapLabels = loaded.Labels
-		snapProps = loaded.Properties
-		snapIndexes = loaded.Indexes
-		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
-		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
-
-		// v3 snapshot: restore the mapper + CSR before WAL replay so
-		// the load is self-sufficient even when the WAL is empty. See
-		// the matching block in openCodec for the rationale.
-		if len(loaded.Mapper.Pairs) > 0 {
-			if err := snapshot.ApplyMapperToGraph(g, loaded.Mapper); err != nil {
-				metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-				return res, fmt.Errorf("recovery: apply snapshot mapper: %w", err)
-			}
-			if err := snapshot.ApplyCSRToGraph(g, &loaded.CSR); err != nil {
-				metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", err)
-			}
-		}
-	}
-
-	walPath := filepath.Join(dir, "wal")
-	walMissing := false
-	if _, err := os.Stat(walPath); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-			return res, err
-		}
-		walMissing = true
-	}
-	if !walMissing {
-		r, err := wal.OpenReader(walPath)
-		if err != nil {
-			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-			return res, err
-		}
-		// best-effort: read-only WAL reader, close err is non-actionable for callers.
-		defer func() { _ = r.Close() }()
-		// pending buffers a v3 transaction's ops until its OpCommit marker;
-		// an un-marked tail is discarded for atomicity (F1). v1/v2 frames
-		// self-commit. See the matching loop in openCodec for the rationale.
-		var pending []Op
-		for f := range r.Frames() {
-			if res.WALOps&0xFFF == 0 {
-				if err := ctx.Err(); err != nil {
-					metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-					return res, err
-				}
-			}
-			op, derr := Decode(f.Payload)
-			if derr != nil {
-				res.TailErr = derr
-				break
-			}
-			if op.Version == txn.OpRecordV3 {
-				if op.Kind != txn.OpCommit {
-					pending = append(pending, op)
-					continue
-				}
-				for i := range pending {
-					applyOpString(g, &pending[i])
-					res.WALOps++
-				}
-				pending = pending[:0]
-				continue
-			}
-			applyOpString(g, &op)
-			res.WALOps++
-		}
-		if tErr := r.TailError(); tErr != nil {
-			res.TailErr = tErr
-		}
-	}
-
-	// Replay any snapshot-side labels after the WAL is fully applied
-	// so the mapper has every node interned that the WAL referenced.
-	// Snapshot label records whose NodeIDs the mapper cannot resolve
-	// are dropped (with metric) by ApplyLabelsToGraph, not surfaced
-	// as an error: this keeps recovery resilient against future
-	// snapshot-without-WAL flows.
-	if haveSnapLabels {
-		if err := snapshot.ApplyLabelsToGraph(g, snapLabels); err != nil {
-			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-			return res, fmt.Errorf("recovery: apply snapshot labels: %w", err)
-		}
-		res.SnapshotLabels = len(snapLabels.NodeLabels) + len(snapLabels.EdgeLabels)
-	}
-	// Properties are applied after labels for symmetry with the
-	// write path (labels.bin, then properties.bin). Records whose
-	// NodeIDs are unresolvable or whose target edge is missing are
-	// dropped with metrics by ApplyPropertiesToGraph.
-	if haveSnapProps {
-		if err := snapshot.ApplyPropertiesToGraph(g, snapProps); err != nil {
-			metrics.IncCounter("store.recovery.OpenStringCtx.errors", 1)
-			return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
-		}
-		res.SnapshotProperties = len(snapProps.NodeProperties) + len(snapProps.EdgeProperties)
-	}
-	// Secondary indexes (label / hash / btree) are re-hydrated last so
-	// the live graph is fully populated when we ask the Manager for the
-	// matching subscribers. Indexes whose snapshot file was missing or
-	// failed CRC32C validation are skipped and logged; the LPG is
-	// usable either way (the index stays empty until the next mutation
-	// pass rebuilds it via the Manager change stream).
-	if len(snapIndexes) > 0 {
-		res.SnapshotIndexes = applySnapshotIndexes(g.IndexManager(), snapIndexes)
-	}
-	return res, nil
-}
-
-func applyOpString(g *lpg.Graph[string, int64], op *Op) {
-	// Delegate v2 and v3 records to the typed codec path (string codec, nil
-	// wcodec). v1 records use the legacy byte-copy fallback below. The
-	// caller is responsible for the v3 buffer-until-OpCommit protocol; by
-	// the time a v3 op reaches here it is part of a committed transaction.
-	if op.Version == txn.OpRecordV2 || op.Version == txn.OpRecordV3 {
-		if op.Kind == txn.OpAddEdgeWeighted {
-			// OpenString has no WeightCodec; cannot decode weight payload.
-			metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
-			return
-		}
-		applyOpCodec(g, op, txn.NewStringCodec(), txn.WeightCodec[int64](nil))
-		return
-	}
-	// v1 legacy path: src/dst/label already decoded into SrcBytes/DstBytes/Label.
-	src := string(op.SrcBytes)
-	dst := string(op.DstBytes)
-	label := op.Label
-	switch op.Kind {
-	case txn.OpAddEdge:
-		if err := g.AddEdge(src, dst, 0); err != nil {
-			metrics.IncCounter("store.recovery.applyOp.addEdgeErrors", 1)
-		}
-	case txn.OpSetNodeLabel:
-		if err := g.SetNodeLabel(src, label); err != nil {
-			metrics.IncCounter("store.recovery.applyOp.setNodeLabelErrors", 1)
-		}
-	case txn.OpSetEdgeLabel:
-		g.SetEdgeLabel(src, dst, label)
-	}
-}
-
-// OpenWithCodec opens the store at dir for graphs keyed by N values,
-// using codec to decode endpoint identifiers from v2 (tagged) WAL
-// frames. It is the generalised dual of [OpenString].
-//
-// Deprecated: OpenWithCodec is the codec-only convenience path that
-// predates the introduction of [txn.WeightCodec]. New code should use
-// [Open] with a non-nil opts.WeightCodec to preserve durable weights;
-// callers that do not need weighted edges may pass
-// [txn.NewInt64WeightCodec] (or another built-in) and ignore the W
-// type parameter — the canonical entry point handles both shapes.
-//
-// Edge weights are not interpreted: [txn.OpAddEdge] frames apply with
-// a zero weight (unchanged from before T8) and [txn.OpAddEdgeWeighted]
-// frames also apply with a zero weight because no [txn.WeightCodec]
-// is wired through this entry point. The fallback is reported via the
-// `store.recovery.applyOp.fallbackZeroWeight` metric counter. Callers
-// that need to preserve weights on replay should use [Open]
-// (preferred) or [OpenWithOptions] (deprecated).
-//
-// v1 (legacy fmt.Sprintf-based) frames are not generally invertible
-// because the original write path used fmt.Sprintf("%v") which has no
-// inverse for arbitrary N. The function therefore only supports
-// instantiations where the legacy fallback can be implemented; the
-// recovery path either skips a v1 frame or surfaces it as a tail
-// error, depending on the recoverable state. Callers that need to
-// migrate a v1 corpus to a typed codec should use [OpenString] to
-// drain the existing log and re-emit it via a typed Store.
-func OpenWithCodec[N comparable, W any](dir string, codec txn.Codec[N]) (Result[N, W], error) {
-	defer metrics.Time("store.recovery.OpenWithCodec")()
-	res, err := OpenWithCodecCtx[N, W](context.Background(), dir, codec)
-	if err != nil {
-		metrics.IncCounter("store.recovery.OpenWithCodec.errors", 1)
-	}
-	return res, err
-}
-
-// OpenWithCodecCtx is the context-aware variant of [OpenWithCodec].
-// ctx.Err() is checked at the snapshot-load boundary and every 4096
-// WAL frames during replay.
-//
-// Deprecated: see [OpenWithCodec]. New code should use [OpenCtx]
-// with both Codec and WeightCodec wired in.
-//
-//nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
-func OpenWithCodecCtx[N comparable, W any](ctx context.Context, dir string, codec txn.Codec[N]) (Result[N, W], error) {
-	defer metrics.Time("store.recovery.OpenWithCodecCtx")()
-	if codec == nil {
-		return Result[N, W]{}, errors.New("recovery: nil codec")
-	}
-	return openCodec[N, W](ctx, dir, codec, nil)
-}
-
-// OpenWithOptions opens the store at dir for graphs keyed by N values
-// and weighted by W values, using opts.Codec for endpoint
-// identifiers and opts.WeightCodec for [txn.OpAddEdgeWeighted] frames.
-//
-// Deprecated: OpenWithOptions takes a [txn.Options] across package
-// boundaries. New code should use [Open] with [Options] — the
-// recovery-local mirror that spares callers the cross-package
-// argument type. Behaviour is identical; the only change is the
-// argument's package.
-//
-// Pre-T8 WALs that contain only [txn.OpAddEdge] frames replay
-// identically to [OpenWithCodec]: the apply path writes the zero
-// value of W to the graph (forward compatibility). Mixed WALs that
-// contain both [txn.OpAddEdge] and [txn.OpAddEdgeWeighted] frames
-// preserve weights for the weighted records and apply zero for the
-// unweighted ones.
-//
-// Both opts.Codec and opts.WeightCodec must be non-nil.
-func OpenWithOptions[N comparable, W any](dir string, opts txn.Options[N, W]) (Result[N, W], error) {
-	defer metrics.Time("store.recovery.OpenWithOptions")()
-	res, err := OpenWithOptionsCtx[N, W](context.Background(), dir, opts)
-	if err != nil {
-		metrics.IncCounter("store.recovery.OpenWithOptions.errors", 1)
-	}
-	return res, err
-}
-
-// OpenWithOptionsCtx is the context-aware variant of
-// [OpenWithOptions]. ctx.Err() is checked at the snapshot-load
-// boundary and every 4096 WAL frames during replay.
-//
-// Deprecated: see [OpenWithOptions]. New code should use [OpenCtx].
-//
-//nolint:gocyclo // recovery: snapshot probe + WAL open + per-frame decode + per-frame apply + ctx ticks
-func OpenWithOptionsCtx[N comparable, W any](ctx context.Context, dir string, opts txn.Options[N, W]) (Result[N, W], error) {
-	defer metrics.Time("store.recovery.OpenWithOptionsCtx")()
-	if opts.Codec == nil {
-		return Result[N, W]{}, errors.New("recovery: nil codec")
-	}
-	if opts.WeightCodec == nil {
-		return Result[N, W]{}, errors.New("recovery: nil weight codec")
-	}
-	return openCodec[N, W](ctx, dir, opts.Codec, opts.WeightCodec)
-}
-
-// openCodec is the shared core of [OpenWithCodecCtx] and
-// [OpenWithOptionsCtx]. wcodec is nil for the codec-only path; when
-// non-nil the function honours [txn.OpAddEdgeWeighted] records by
-// decoding the typed weight payload before applying.
+// openCodec is the shared core of [Open] and [OpenCtx]. wcodec is nil
+// for the codec-only path; when non-nil the function honours
+// [txn.OpAddEdgeWeighted] records by decoding the typed weight payload
+// before applying.
 //
 //nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
 func openCodec[N comparable, W any](
@@ -774,9 +463,11 @@ func openCodec[N comparable, W any](
 		}
 	}
 
-	// Apply snapshot-side labels after WAL replay — see the matching
-	// block in OpenStringCtx for the rationale on ordering and the
-	// resilient skip-on-unresolved semantics.
+	// Apply snapshot-side labels after the WAL is fully applied so the
+	// mapper has every node interned that the WAL referenced. Snapshot
+	// label records whose NodeIDs the mapper cannot resolve are dropped
+	// (with metric) by ApplyLabelsToGraph, not surfaced as an error:
+	// this keeps recovery resilient against snapshot-without-WAL flows.
 	if haveSnapLabels {
 		if err := snapshot.ApplyLabelsToGraph(g, snapLabels); err != nil {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
@@ -794,10 +485,11 @@ func openCodec[N comparable, W any](
 		}
 		res.SnapshotProperties = len(snapProps.NodeProperties) + len(snapProps.EdgeProperties)
 	}
-	// Secondary indexes — same semantics as OpenStringCtx. Indexes are
-	// only re-hydrated when the LPG has a Manager wired in; absent
-	// that, the snapshot bytes are dropped (the index is rebuilt
-	// lazily on the next mutation pass).
+	// Secondary indexes (label / hash / btree) are re-hydrated last so
+	// the live graph is fully populated when we ask the Manager for the
+	// matching subscribers. Indexes are only re-hydrated when the LPG
+	// has a Manager wired in; absent that, the snapshot bytes are
+	// dropped (the index is rebuilt lazily on the next mutation pass).
 	if len(snapIndexes) > 0 {
 		res.SnapshotIndexes = applySnapshotIndexes(g.IndexManager(), snapIndexes)
 	}
@@ -807,10 +499,9 @@ func openCodec[N comparable, W any](
 // applyOpCodec applies a decoded op into g via codec. It returns
 // true if the op was applied. For v1 (legacy, untagged) frames the
 // function returns false because the legacy fmt.Sprintf encoding is
-// not generally invertible: callers needing to replay a v1 corpus
-// must use [OpenString] (string-keyed only) and then re-emit via
-// [txn.NewStoreWithCodec] / [txn.NewStoreWithOptions] to migrate the
-// WAL to v2.
+// not generally invertible through a typed codec; the surrounding
+// replay loop surfaces such a frame as a tail error so callers see the
+// cut-off boundary deterministically.
 //
 // When wcodec is non-nil and the op is [txn.OpAddEdgeWeighted], the
 // typed weight payload between codec.dst and the trailing label is
