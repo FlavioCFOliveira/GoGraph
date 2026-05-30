@@ -120,13 +120,35 @@ Sequential benchmarks:
 
 ## Parallel Benchmark Results
 
-10 goroutines (GOMAXPROCS=10 on Apple M4):
+Read-only IC queries measured across GOMAXPROCS levels (Apple M4, 10 performance cores).
+Values are single-run medians in ns/op. Sequential column = GOMAXPROCS=1.
+Memory per operation is stable across all concurrency levels (not shown — see
+sequential table above; parallel execution does not increase allocations).
 
-| Benchmark        | Median ns/op | B/op    | allocs/op | Speedup vs sequential |
-|------------------|--------------:|--------:|----------:|-----------------------|
-| IC1_Parallel     |       110,428 | 439,897 |     5,780 | ~1.36×                |
-| IC2_Parallel     |        34,452 | 140,127 |     1,946 | ~1.44×                |
-| IC9_Parallel     |        34,337 | 140,208 |     1,947 | ~1.49×                |
+| Query   | Description                        | GOMAXPROCS=1 | GOMAXPROCS=4 | GOMAXPROCS=8 | GOMAXPROCS=10 | Speedup (1→10) |
+|---------|------------------------------------|-------------:|-------------:|-------------:|--------------:|---------------:|
+| IC1     | Full node scan (~1 k nodes)        |      352,989 |      159,603 |      167,773 |       160,457 | ~2.2×          |
+| IC2     | Person label scan (~333 nodes)     |      111,936 |       54,930 |       62,828 |        58,016 | ~1.9×          |
+| IC3     | Person label scan (same as IC2)    |      116,799 |       54,974 |       61,252 |        57,676 | ~2.0×          |
+| IC4     | Person IS NOT NULL filter          |      168,478 |       78,432 |       82,567 |        81,431 | ~2.1×          |
+| IC7     | City label scan (~333 nodes)       |      113,485 |       54,886 |       65,740 |        59,433 | ~1.9×          |
+| IC9     | Person IS NOT NULL (age property)  |      165,845 |       79,442 |       85,206 |        76,692 | ~2.2×          |
+| IC10    | Property projection (n.name)       |      233,534 |      115,058 |      115,841 |       105,763 | ~2.2×          |
+| IC11    | Boolean filter (full-scan, 0 hits) |      519,703 |      227,552 |      244,379 |       222,484 | ~2.3×          |
+| IC14    | Company label scan (~333 nodes)    |      116,664 |       53,987 |       59,573 |        56,258 | ~2.1×          |
+
+**Scaling note.** Speedup saturates between GOMAXPROCS=4 and GOMAXPROCS=10 (sub-linear:
+maximum theoretical is 10× on a 10-core machine). Each concurrent read query acquires
+a `visMu` read-lock (RWMutex) for the full duration of its node scan, which limits
+parallelism when multiple scans are in flight. The RWMutex allows concurrent readers
+so reads are non-blocking against each other, but the scan itself is CPU-bound.
+A future migration to lock-free `atomic.Pointer[Snapshot]` swap pattern would remove
+this ceiling (tracked in `docs/isolation-design.md`).
+
+Write queries (IC5 CREATE, IC6 MERGE, IC8 CREATE, IC12 CREATE+props, IC13 MERGE+props)
+are not parallelised: they require a fresh graph per goroutine or serialise on the
+single-writer mutex. The Bolt round-trip benchmarks at 1/8/64/256/1024 goroutines
+cover the full write concurrency matrix (see `docs/benchmarks/SOAK.md`).
 
 ## Observations
 
