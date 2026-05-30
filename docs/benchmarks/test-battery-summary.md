@@ -239,7 +239,7 @@ than absolute numbers.
 
 **Soak stability:** Pass (goleak clean; `AllocsPerRun` run non-parallel to avoid interference).
 
-**Known limitations:** No automatic N-ops trigger in `Config` (Sprint 67 note). Snapshot v1 lacks `mapper.bin`; recovery on v1 snapshots requires WAL replay. `txn.NewStore` required for `OpAddEdge` in write paths.
+**Known limitations:** No automatic N-ops trigger in `Config` (Sprint 67 note). Snapshot v1 lacks `mapper.bin`; recovery on v1 snapshots requires WAL replay. `txn.NewStoreWithCodec` (or `NewStoreWithOptions`) required for `OpAddEdge` in write paths (the v1 `txn.NewStore` was removed in 2.0.0, #929).
 
 ---
 

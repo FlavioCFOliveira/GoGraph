@@ -18,7 +18,7 @@ graph state and how it recovers it after a process crash.
 `Tx.Commit` writes every buffered op to the WAL as a v3 frame, appends a
 single `OpCommit` marker frame, calls `wal.Writer.Sync` (which fsyncs the
 file), and only then applies the ops to the live graph. A process killed at
-any point during this sequence is recoverable by `recovery.Open`/`OpenString`:
+any point during this sequence is recoverable by `recovery.Open`/`OpenCtx`:
 
 - If the crash happened **before the fsync**, the WAL tail is torn;
   recovery drops it and the in-memory graph is exactly what was
@@ -39,9 +39,9 @@ multi-`SET` statement can never leave a half-built node or a dangling edge.
 The commit issues exactly one fsync, so group-commit throughput is unchanged;
 bufio may flush a prefix of frames to the OS before the fsync, but that is
 benign because durability is gated on the fsync and an un-marked tail is
-discarded. (The legacy `NewStore` fmt-codec path keeps per-op v1 framing
-without a marker and is not durable-multi-op-atomic; every production write
-path uses a typed store.)
+discarded. Every store is a typed store on the v3 commit path; the legacy v1
+fmt-codec write path was removed in 2.0.0 (see "WAL payload schema" below), so
+there is no non-durable, non-atomic per-op framing left in the module.
 
 `Tx.Rollback` neither writes to the WAL nor mutates the graph;
 nothing is durable, nothing is visible, mutex released.
@@ -71,20 +71,29 @@ on the read path, while writes serialise.
 
 ## WAL payload schema
 
-Each WAL frame carries one op payload. The encoder supports three
-on-disk layouts, distinguished by the first byte of the payload:
+Each WAL frame carries one op payload, distinguished by the first byte
+of the payload. The **v1 (legacy, untagged) record format was removed in
+2.0.0**, together with its `txn.NewStore` write API; it is no longer
+produced and is rejected on read (see below). Two layouts remain on the
+wire:
 
-| Version | First byte                  | Producer                                       |
-|---------|-----------------------------|------------------------------------------------|
-| v1      | `[OpKind]` (one of 0x01..0x04) | `txn.NewStore` (legacy)                        |
-| v2      | `0xFE` (`txn.OpRecordV2`)   | superseded by v3 (still read for old WALs)     |
-| v3      | `0xFD` (`txn.OpRecordV3`)   | `txn.NewStoreWithCodec` / `txn.NewStoreWithOptions` |
+| Version | First byte                  | Status in 2.0.0                                                  |
+|---------|-----------------------------|-----------------------------------------------------------------|
+| v1      | any other first byte        | **Removed.** Never written; rejected on read with `recovery.ErrUnsupportedRecordVersion` (`txn.OpRecordV1` is a reserved sentinel — see below). |
+| v2      | `0xFE` (`txn.OpRecordV2`)   | Read-only legacy: still decoded so existing on-disk WALs replay, but no longer produced (superseded by v3). |
+| v3      | `0xFD` (`txn.OpRecordV3`)   | The only format produced. Emitted by `txn.NewStoreWithCodec` / `txn.NewStoreWithOptions`. |
 
 `OpKind` values currently occupy 0x01..0x0D (the last being `OpCommit`,
 the v3 commit marker), leaving the rest of the low byte region free. The
 magic bytes 0xFE/0xFD are chosen far outside that range so a reader
 disambiguates by peeking the first byte alone — any payload starting with
-0xFE is a v2 frame, 0xFD a v3 frame, anything else a v1 frame.
+0xFE is a v2 frame, 0xFD a v3 frame. `recovery.Decode` rejects any other
+leading byte with `recovery.ErrUnsupportedRecordVersion`: in practice that
+is a legacy v1 frame (whose `fmt.Sprintf`-derived endpoints have no inverse
+through a typed codec) or an unknown future tag. `txn.OpRecordV1` (value 0)
+is retained only as a reserved sentinel so the rejection path and its tests
+can name the version they refuse; it is never written and must not be reused
+for a new record version.
 
 A **v3** payload is `version(0xFD) | kind | uint64 txnSeq (LE) | <v2 body>`.
 The body after `txnSeq` is byte-identical to the v2 body for that kind, so
@@ -109,24 +118,18 @@ kind, which is the intended forward-compat behaviour: the typed
 weight payload cannot be inferred without the registered
 `WeightCodec`.
 
-### v1 (legacy, untagged) layout
+### v1 (legacy, untagged) layout — removed in 2.0.0
 
-```
-uint8  kind
-uint16 srcLen (LE)
-[srcLen]byte src   (fmt.Sprintf("%v") of op.Src)
-uint16 dstLen (LE)
-[dstLen]byte dst   (fmt.Sprintf("%v") of op.Dst)
-uint16 labelLen (LE)
-[labelLen]byte label
-```
-
-v1 endpoints are serialised via `fmt.Sprintf("%v")`, which is only
-reliably reversible for the `string` type. Recovery via
-`recovery.OpenString` works because `string(SrcBytes)` returns the
-original key. For arbitrary node types, v1 is **not** generally
-reversible; callers wanting to migrate must first replay the v1 log
-into a typed store and re-emit v2 frames.
+The v1 record format (an untagged `uint8 kind` followed by
+`fmt.Sprintf("%v")`-encoded endpoints) was removed in 2.0.0 along with the
+`txn.NewStore` constructor that produced it and the recovery read wrappers
+that decoded it. Those endpoints were only reliably reversible for the
+`string` type, so the format could never round-trip an arbitrary node key.
+A v1 frame found on disk is no longer parsed: `recovery.Decode` rejects any
+non-`0xFE`/`0xFD` leading byte with `recovery.ErrUnsupportedRecordVersion`.
+A v1 corpus must be migrated to v2 (replay + re-commit through a typed store)
+with a 1.x build **before** upgrading to 2.0.0; see
+[the 1.x → 2.x migration guide](migration-1-to-2.md).
 
 ### v2 (tagged, typed) layout
 
@@ -156,8 +159,7 @@ uint16      labelLen (LE, always 0 today; reserved for future use)
 The codec writes the framing for src/dst inline — no separate length
 prefix at the payload level. The optional weight payload follows the
 same self-delimiting contract via the `WeightCodec`. The trailing
-label keeps the v1 uint16 prefix for symmetry with the legacy
-reader.
+label carries a uint16 little-endian length prefix.
 
 ### Built-in node codecs
 
@@ -196,26 +198,31 @@ records every commit as an `OpAddEdgeWeighted` frame (kind byte
 endpoints and the trailing label, framed by the registered
 `WeightCodec`.
 
-Stores constructed via `NewStore` or `NewStoreWithCodec` have no
-`WeightCodec`. They accept zero-valued `AddEdge` calls (which buffer
-an `OpAddEdge` frame, applied with `var zero W`) and reject
-non-zero weights with `txn.ErrNoWeightCodec`. Callers that need
-durable weighted edges must upgrade to `NewStoreWithOptions`.
+Stores constructed via `NewStoreWithCodec` have no `WeightCodec`. They
+accept zero-valued `AddEdge` calls (which buffer an `OpAddEdge` frame,
+applied with `var zero W`) and reject non-zero weights with
+`txn.ErrNoWeightCodec`. Callers that need durable weighted edges must
+upgrade to `NewStoreWithOptions`.
 
-The recovery side mirrors the constructor matrix:
+`recovery.Open` (and its context-aware twin `recovery.OpenCtx`) is the
+only recovery entry point in 2.0.0. The deprecated `OpenString`,
+`OpenWithCodec`, and `OpenWithOptions` wrappers were removed together with
+the v1 WAL format; pass the codecs explicitly via `recovery.Options`
+instead:
 
 | Open path                                 | N decoded via | W decoded via | OpAddEdge | OpAddEdgeWeighted |
 |-------------------------------------------|---------------|----------------|-----------|-------------------|
-| `Open` (canonical)                        | typed `Codec[N]` | typed `WeightCodec[W]` | applied with `W=zero` | applied with decoded weight |
-| `OpenString` (Deprecated)                 | `string(SrcBytes)` (v1) or `NewStringCodec` (v2) | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
-| `OpenWithCodec` (Deprecated)              | typed `Codec[N]` | none — applies zero | applied with `W=zero` | dropped, `store.recovery.applyOp.fallbackZeroWeight` |
-| `OpenWithOptions` (Deprecated)            | typed `Codec[N]` | typed `WeightCodec[W]` | applied with `W=zero` | applied with decoded weight |
+| `Open` / `OpenCtx` (canonical, codecs required) | typed `Codec[N]` | typed `WeightCodec[W]` | applied with `W=zero` | applied with decoded weight |
+
+A WAL whose `WeightCodec` is absent from `recovery.Options` cannot open:
+both `Codec` and `WeightCodec` are required and a nil for either returns an
+error before any frame is read.
 
 Forward compatibility: a pre-T8 WAL that contains only `OpAddEdge`
-frames replays cleanly under `Open` / `OpenWithOptions`. The apply
-path writes `var zero W` for those records and reserves the typed
-weight payload for `OpAddEdgeWeighted` frames only. The recovery
-test `TestTxn_ForwardCompat_PreT8WALReplays` locks this contract.
+frames replays cleanly under `Open`. The apply path writes `var zero W`
+for those records and reserves the typed weight payload for
+`OpAddEdgeWeighted` frames only. The recovery test
+`TestTxn_ForwardCompat_PreT8WALReplays` locks this contract.
 
 ### Generic recovery API
 
@@ -251,52 +258,43 @@ in place (`recovery.Options[N, W](opts)`). Keeping the
 recovery-argument type local to the recovery package spares callers
 the cross-package import.
 
-### Recovery surface (legacy / wrappers)
+### Recovery surface (removed wrappers)
 
-The following entry points predate the canonical `Open[N, W]` API.
-They remain available for backwards compatibility and are
-documented as `Deprecated:` in their godoc:
-
-`recovery.OpenString(dir)` accepts both v1 and v2-`StringCodec`
-frames on the same WAL. It has no `WeightCodec` and therefore drops
-`OpAddEdgeWeighted` frames (the loss is metered via
-`store.recovery.applyOp.fallbackZeroWeight`). New code should use
-`Open[string, int64]` with `txn.NewStringCodec()` +
-`txn.NewInt64WeightCodec()`.
-
-`recovery.OpenWithCodec[N, W](dir, codec)` is the codec-only path
-that predates `txn.WeightCodec`. It supports v2 `OpAddEdge` frames
-natively, applies zero W for them, and drops `OpAddEdgeWeighted`
-frames with the same fallback metric.
-
-`recovery.OpenWithOptions[N, W](dir, opts)` takes a `txn.Options`
-across package boundaries. Behaviour is identical to `Open`; the
-only difference is the argument's package.
+The deprecated `recovery.OpenString`, `recovery.OpenWithCodec`, and
+`recovery.OpenWithOptions` wrappers (and their `*Ctx` variants) were
+removed in 2.0.0 along with the v1 WAL format. `recovery.Open[N, W]` /
+`recovery.OpenCtx[N, W]` are the only entry points: pass the same two
+codecs the typed `Store` was built with via `recovery.Options[N, W]`.
+For example, the former `OpenString(dir)` call is replaced by
+`Open[string, int64](dir, recovery.Options[string, int64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec()})`.
 
 ### Migrating a v1 corpus
 
-Existing stores keep emitting v1 frames bit-for-bit while the
-constructor is `NewStore`. To migrate to a typed-codec v2 store:
+The v1 WAL format and its read/write API were removed in 2.0.0, so there
+is no in-place v1 reader in this release. A v1 corpus must be migrated to
+a typed-codec v2 store **before** upgrading, using a 1.x build:
 
-1. Replay the v1 log via `recovery.OpenString` into an in-memory
-   graph.
-2. Construct a new store via `txn.NewStoreWithCodec` against a fresh
-   WAL.
-3. Re-commit the recovered ops through the new store; subsequent
-   frames are v2-tagged.
+1. With a 1.x build, replay the v1 log into an in-memory graph via the
+   (then-available) string-recovery wrapper.
+2. Construct a new store via `txn.NewStoreWithCodec` against a fresh WAL.
+3. Re-commit the recovered ops through the new store; subsequent frames
+   are typed-tagged.
 
-This is the same migration recipe used by snapshot + WAL-truncation
-checkpoints, so the workflow does not require any new tooling.
+After this one-time conversion the store carries only tagged frames and
+opens cleanly under 2.0.0's `recovery.Open`. The same conversion is what
+a snapshot + WAL-truncation checkpoint performs, so the workflow does not
+require any new tooling. See [the 1.x → 2.x migration guide](migration-1-to-2.md).
 
 ### Migrating an unweighted v2 corpus to durable weights
 
 A store that started life under `NewStoreWithCodec` (typed N, no W
-codec) emits v2 frames with only `OpAddEdge`. To upgrade to durable
+codec) emits frames with only `OpAddEdge`. To upgrade to durable
 weights:
 
-1. Replay the existing WAL via `recovery.OpenWithCodec[N, W]` (or
-   `OpenWithOptions` with the legacy weights interpreted as zero).
-   The recovered graph carries every committed edge with `W=zero`.
+1. Replay the existing WAL via `recovery.Open[N, W]` with a
+   `WeightCodec` supplied (the legacy unweighted frames are interpreted
+   as zero). The recovered graph carries every committed edge with
+   `W=zero`.
 2. Reassign the real weights in memory if they are known from an
    out-of-band source (otherwise the migration is a no-op weight-
    wise; only future commits will carry typed weights).
@@ -466,8 +464,9 @@ to the labels layout (e.g., parallel-edge labels) bumps the
 `*lpg.Graph`. Its pre-condition is that the underlying
 `graph.Mapper` is already populated with every NodeID the labels
 reference. In the standard durability path that pre-condition is
-met by the WAL replay performed earlier in `recovery.OpenString` /
-`OpenWithCodec` / `OpenWithOptions`. Label records whose NodeID
+met by the WAL replay (or, for a v3 snapshot, the `mapper.bin`
+restore) performed earlier in `recovery.Open` / `OpenCtx`. Label
+records whose NodeID
 cannot be resolved by the mapper are skipped and counted via
 `store.snapshot.ApplyLabels.unresolved` so observability surfaces
 the loss instead of failing recovery.
@@ -548,8 +547,8 @@ live `*lpg.Graph`. Its pre-condition mirrors
 `ApplyLabelsToGraph`: the underlying `graph.Mapper` must already
 be populated with every NodeID the properties reference. In the
 standard durability path that pre-condition is met by the WAL
-replay performed earlier in `recovery.OpenString` /
-`OpenWithCodec` / `OpenWithOptions`. Property records whose
+replay (or, for a v3 snapshot, the `mapper.bin` restore) performed
+earlier in `recovery.Open` / `OpenCtx`. Property records whose
 NodeID cannot be resolved by the mapper are skipped and counted
 via `store.snapshot.ApplyProperties.unresolved` so observability
 surfaces the loss instead of failing recovery.
@@ -796,8 +795,8 @@ snapshot lock-free, truncate up-to-LSN under lock).
 
 ## Recovery procedure
 
-`recovery.Open[N, W](dir, opts)` (canonical) and
-`recovery.OpenString(dir)` (deprecated wrapper) return a `Result`
+`recovery.Open[N, W](dir, opts)` and its context-aware twin
+`recovery.OpenCtx[N, W](ctx, dir, opts)` return a `Result`
 containing the rebuilt `*lpg.Graph[N, W]` plus:
 
 - `SnapshotHit bool` — whether `snapshot/manifest.json` was found
@@ -872,4 +871,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-05-30 against commit `7236360`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-05-30 against commit `9c31f06`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

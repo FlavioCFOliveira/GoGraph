@@ -87,12 +87,14 @@ prefixes each typed op frame with a per-`Store` transaction sequence
 (`txn.Store.txnSeq`), and a typed commit appends a trailing `txn.OpCommit`
 marker frame for that sequence before the single `wal.Sync`
 (`txn.Tx.appendAndSync`). `CommitWALOnly` uses the same framing. Recovery
-(`openCodec` and the deprecated `OpenStringCtx`) buffers a v3 transaction's
+(`openCodec`, the sole codec recovery path) buffers a v3 transaction's
 ops and applies them only on reading the durable `OpCommit` marker; an
-incomplete trailing transaction (no marker) is discarded. Backward compatible:
-v1/v2 frames have no marker and self-commit exactly as before, so every
-existing on-disk WAL — and the cross-process SIGKILL/recovery fixtures —
-replays unchanged; a mixed v2-then-v3 log is also correct. The bufio 64 KiB
+incomplete trailing transaction (no marker) is discarded. Backward compatible
+with v2: v2 frames have no marker and self-commit exactly as before, so v2
+on-disk WALs — and the cross-process SIGKILL/recovery fixtures — replay
+unchanged, and a mixed v2-then-v3 log is also correct. (The v1 WAL record
+format was removed in 2.0.0 (#929); a v1 frame is now rejected on read with
+`recovery.ErrUnsupportedRecordVersion`.) The bufio 64 KiB
 auto-flush is provably benign because durability is gated on the single fsync
 and recovery discards any op frames not followed by a durable marker. Tests
 (`-race` green across `store/...`, `internal/crashinject`, `cypher/exec`,
@@ -101,9 +103,9 @@ commits a 6-op transaction and truncates the WAL at **every byte offset**,
 asserting the recovered graph is empty for every truncation before the marker
 and complete only for the whole WAL — never a prefix; the existing single-op
 `torn_tail_test.go` and all crash-injection scenarios still pass (single-op
-commits are trivially all-or-nothing as `[op][marker]` pairs). The legacy
-`NewStore` (v1 fmt codec, deprecated, edge/label only) retains per-op framing
-and is documented as not durable-multi-op-atomic.
+commits are trivially all-or-nothing as `[op][marker]` pairs). The legacy v1
+fmt-codec write path (former `txn.NewStore`) was removed in 2.0.0 (#929); every
+store now uses the v3 typed, durable-multi-op-atomic path.
 
 ### F2 — Checkpoint destroys committed labels/properties (Durability + Consistency)
 

@@ -262,8 +262,8 @@ with no return value).
 | Metric                                | Description                                                      |
 | ------------------------------------- | ---------------------------------------------------------------- |
 | `store.recovery.Decode`               | Decode one transactional WAL payload.                            |
-| `store.recovery.OpenString`           | Snapshot+WAL recovery into a fresh string-keyed graph.           |
-| `store.recovery.OpenStringCtx`        | Recovery with context.                                           |
+| `store.recovery.Open`                 | Snapshot+WAL recovery into a fresh graph (any key type).         |
+| `store.recovery.OpenCtx`              | Context-aware recovery; honours cancellation and deadlines.      |
 
 ### `store/bulk`
 

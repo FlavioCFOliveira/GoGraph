@@ -78,6 +78,31 @@ authoritative pass-rate table.
   and the v2.0.0 execution-TCK milestone target (80 % everywhere,
   matching the release gate). Closes T936.
 
+### Removed (breaking) — v1 WAL format excision (#929)
+
+- **`store/txn`**, **`store/recovery`**: the legacy **v1 WAL record
+  format** (untagged, `fmt.Sprintf`-encoded endpoints) and its entire
+  read/write API are removed. Gone: the `txn.NewStore` constructor and
+  the `recovery.OpenString`, `recovery.OpenStringCtx`,
+  `recovery.OpenWithCodec`, `recovery.OpenWithCodecCtx`,
+  `recovery.OpenWithOptions`, and `recovery.OpenWithOptionsCtx` read
+  wrappers. Use `txn.NewStoreWithCodec` / `txn.NewStoreWithOptions` to
+  write and `recovery.Open` / `recovery.OpenCtx` (with explicit
+  `recovery.Options` codecs) to read.
+- **`store/recovery`**: `recovery.Decode` now rejects any WAL record
+  whose leading byte is neither `txn.OpRecordV2` (`0xFE`) nor
+  `txn.OpRecordV3` (`0xFD`) with the new sentinel
+  `recovery.ErrUnsupportedRecordVersion`; a legacy v1 frame on disk is
+  surfaced via `Result.TailErr` rather than mis-decoded. There is **no
+  in-place v1 WAL reader** in 2.0.0 — a v1 corpus must be migrated to a
+  typed v2 store with a 1.x build **before** upgrading (see the
+  [1.x → 2.x migration guide](docs/migration-1-to-2.md)).
+- **`store/txn`**: `txn.OpRecordV1` (value 0) is retained only as a
+  reserved, never-written sentinel so the rejection path can name the
+  version it refuses; `Op.Version` continues to carry the v2/v3 tag.
+  On-disk **snapshot** directories are unaffected — a v1 snapshot still
+  loads, since only the WAL record format changed.
+
 Adopters upgrading from a 1.x release line should consult the new
 [1.x → 2.x migration guide](docs/migration-1-to-2.md), which collects
 the API and on-disk-format changes (error returns on `AddNode`/`AddEdge`,
