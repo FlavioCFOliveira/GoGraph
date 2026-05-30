@@ -61,7 +61,7 @@ func TestRecovery_IndexesSurvive(t *testing.T) {
 	}
 
 	// Commit a set of nodes via the WAL so the mapper is populated.
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	nodeNames := []string{"alice", "bob", "carol", "dave", "eve"}
 	for i := 0; i < len(nodeNames)-1; i++ {
 		tx := store.Begin()
@@ -105,9 +105,12 @@ func TestRecovery_IndexesSurvive(t *testing.T) {
 
 	// Phase 2: recover. Wire the fresh manager BEFORE loading the
 	// snapshot index payload via applySnapshotIndexes.
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 
 	freshMgr := index.NewManager()

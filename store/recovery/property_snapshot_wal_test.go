@@ -136,9 +136,9 @@ func TestRecovery_PropertyBased_SnapshotWAL(t *testing.T) {
 		}
 
 		// Recover.
-		res, err := OpenWithOptions[string, int64](dir, opts)
+		res, err := Open[string, int64](dir, Options[string, int64](opts))
 		if err != nil {
-			rt.Fatalf("OpenWithOptions: %v (truncate=%v)", err, doTruncate)
+			rt.Fatalf("Open: %v (truncate=%v)", err, doTruncate)
 		}
 		if res.Graph == nil {
 			rt.Fatal("Graph must not be nil")

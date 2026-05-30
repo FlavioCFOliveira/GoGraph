@@ -20,7 +20,7 @@ import (
 //  2. Trigger a checkpoint (writes a self-sufficient snapshot, truncates WAL).
 //  3. Write 3 more edges via txn commits to the truncated WAL.
 //  4. Close WAL and checkpointer.
-//  5. Call recovery.OpenString and assert that the graph contains ALL
+//  5. Call recovery.Open and assert that the graph contains ALL
 //     8 distinct edges (5 pre-checkpoint + 3 post-checkpoint).
 //
 // The checkpointer now writes a self-sufficient v3 snapshot for
@@ -48,7 +48,7 @@ func TestSequencing_WALCheckpointWAL(t *testing.T) {
 	}
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Phase 1: 5 pre-checkpoint edges.
 	preEdges := [][2]string{
@@ -95,16 +95,21 @@ func TestSequencing_WALCheckpointWAL(t *testing.T) {
 	}
 
 	// Phase 5: recovery.
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false, want true")
 	}
 
 	// WALOps must account for the 3 post-checkpoint AddEdge commits.
-	// Each AddEdge via txn.NewStore writes one v1 WAL frame.
+	// Each AddEdge via the typed-codec store writes one v3 op frame
+	// (recovery counts one WALOp per applied op; the per-transaction
+	// OpCommit marker does not add to the count).
 	if res.WALOps < len(postEdges) {
 		t.Fatalf("WALOps = %d, want >= %d (post-checkpoint edges)", res.WALOps, len(postEdges))
 	}

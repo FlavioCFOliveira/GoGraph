@@ -10,20 +10,21 @@ import (
 	"gograph/graph/lpg"
 	"gograph/store/recovery"
 	"gograph/store/snapshot"
+	"gograph/store/txn"
 	"gograph/store/wal"
 )
 
 // TestCheckpoint_TransitionRecovery verifies the WAL→snapshot
 // transition: after a forced checkpoint the snapshot exists on disk,
-// the WAL is truncated, and recovery.OpenString recognises the
+// the WAL is truncated, and recovery.Open recognises the
 // snapshot directory.
 //
-// The checkpointer writes a v1 CSR-only snapshot (WriteSnapshotCSR).
-// v1 snapshots do not carry mapper.bin, so recovery.OpenString cannot
-// reconstruct string-keyed edges from the snapshot alone; it reports
-// SnapshotHit=true and WALOps=0 (WAL was truncated). Correct
-// topology is therefore verified via snapshot.Open on the raw CSR,
-// which exposes the edge count independently of the mapper.
+// The checkpointer writes a self-sufficient v3 snapshot
+// (WriteSnapshotFull with mapper.bin) — the F2 durability fix
+// (docs/acid-audit.md). Because the snapshot carries the
+// NodeID->key table, recovery.Open reconstructs every string-keyed
+// edge from the snapshot alone, reporting SnapshotHit=true and
+// WALOps=0 (the WAL was truncated).
 func TestCheckpoint_TransitionRecovery(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -89,14 +90,17 @@ func TestCheckpoint_TransitionRecovery(t *testing.T) {
 		t.Fatalf("CSR edge count = %d, want %d", got, len(edges))
 	}
 
-	// recovery.OpenString reconstructs the full string-keyed graph from
+	// recovery.Open reconstructs the full string-keyed graph from
 	// the self-sufficient snapshot ALONE: mapper.bin restores the
 	// NodeID->key table, so all 5 edges are recoverable by key with the
 	// WAL truncated (WALOps == 0). Before F2 a v1 CSR-only snapshot could
 	// not reconstruct string-keyed edges and they were silently lost.
-	res, err := recovery.OpenString(dir)
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("recovery.OpenString: %v", err)
+		t.Fatalf("recovery.Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit = false after checkpoint")

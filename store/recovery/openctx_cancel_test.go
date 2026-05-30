@@ -21,9 +21,7 @@ import (
 // cancels the context before calling [OpenCtx]. The call must return
 // context.Canceled (or a wrapping error) within 100 ms.
 //
-// [TestOpenString_PreCancelledContext] and
-// [TestOpenWithCodec_PreCancelledCtx] already cover the two deprecated
-// entry points; this test anchors the canonical [OpenCtx] entry point.
+// This test anchors the canonical [OpenCtx] entry point.
 func TestRecovery_OpenCtxPreCancelled(t *testing.T) {
 	t.Parallel()
 

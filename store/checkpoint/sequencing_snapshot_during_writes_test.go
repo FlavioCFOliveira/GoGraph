@@ -23,7 +23,7 @@ import (
 //  2. Write a full snapshot (WriteSnapshotFull) at the current graph state.
 //  3. Commit 2 post-checkpoint edges via txn and sync the WAL.
 //  4. Close WAL.
-//  5. recovery.OpenString → assert all 5 edges present.
+//  5. recovery.Open → assert all 5 edges present.
 //
 // The test uses snapshot.WriteSnapshotFull (v2/v3) so that the mapper
 // is persisted and recovery can reconstruct all string-keyed edges
@@ -40,11 +40,10 @@ func TestCheckpoint_SnapshotDuringWrites(t *testing.T) {
 	defer func() { _ = w.Close() }()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	// Use NewStore (no WeightCodec) so every AddEdge writes an OpAddEdge
-	// frame (not OpAddEdgeWeighted). recovery.OpenString can replay OpAddEdge
-	// frames via its legacy codec path; OpAddEdgeWeighted frames with a nil
-	// WeightCodec are silently dropped.
-	store := txn.NewStore(g, w)
+	// Use a typed-codec store with no WeightCodec so every zero-weight
+	// AddEdge writes an OpAddEdge frame (not OpAddEdgeWeighted), which
+	// recovery.Open replays with the string codec.
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Phase 1: 3 pre-checkpoint edges.
 	preEdges := make([][2]string, 0, 5)
@@ -99,9 +98,12 @@ func TestCheckpoint_SnapshotDuringWrites(t *testing.T) {
 	// We rely on the defer above to close — just flush.
 
 	// Phase 5: recovery using the v2/v3 snapshot + WAL tail.
-	res, err := recovery.OpenString(dir)
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("recovery.OpenString: %v", err)
+		t.Fatalf("recovery.Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false")

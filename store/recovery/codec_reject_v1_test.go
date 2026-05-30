@@ -11,7 +11,7 @@ import (
 
 // rejectingCodec is a [txn.Codec[string]] that always returns
 // [errCodecAlwaysRejects] from Decode. It is used to verify that
-// codec errors propagate out of [OpenWithCodec] without crashing the
+// codec errors propagate out of [Open] without crashing the
 // recovery loop or masking the real cause.
 type rejectingCodec struct{}
 
@@ -29,7 +29,7 @@ func (rejectingCodec) Decode(buf []byte) (value string, rest []byte, err error) 
 // standard v2 string codec, then replays it through a
 // [rejectingCodec] whose Decode always fails. The test asserts that:
 //
-//  1. [OpenWithCodec] returns no Go-level error (the recovery loop
+//  1. [Open] returns no Go-level error (the recovery loop
 //     treats codec decode failures as torn/unknown frames and skips
 //     them, consistent with the documented "stop-at-first-unknown"
 //     policy).
@@ -71,9 +71,9 @@ func TestRecovery_CodecRejectInvalidVersion(t *testing.T) {
 
 	// Replay through the rejecting codec. Every Decode call fails, so
 	// the loop must stop cleanly and return no ops applied.
-	res, err := OpenWithCodec[string, int64](dir, rejectingCodec{})
+	res, err := Open[string, int64](dir, Options[string, int64]{Codec: rejectingCodec{}, WeightCodec: txn.NewInt64WeightCodec()})
 	if err != nil {
-		t.Fatalf("OpenWithCodec(rejecting codec) = %v, want nil", err)
+		t.Fatalf("Open(rejecting codec) = %v, want nil", err)
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (all frames rejected by codec)", res.WALOps)

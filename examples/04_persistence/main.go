@@ -12,7 +12,7 @@
 //  3. snapshot.WriteSnapshotFull persists the CSR view, labels.bin,
 //     and properties.bin atomically alongside the WAL.
 //  4. The process "restarts" — every in-memory reference is dropped
-//     and recovery.OpenString rebuilds the graph from disk. The WAL
+//     and recovery.Open rebuilds the graph from disk. The WAL
 //     replay re-populates the mapper; labels.bin re-attaches the
 //     snapshot-time label set; properties.bin re-attaches the
 //     snapshot-time typed property set.
@@ -53,7 +53,7 @@ func main() {
 		log.Fatalf("wal.Open: %v", err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	commits := []struct{ src, dst, nodeLabel, edgeLabel string }{
 		{"alice", "bob", "Person", "KNOWS"},
@@ -105,9 +105,12 @@ func main() {
 	// "Restart": drop all in-memory references and rebuild from disk.
 	_ = store
 	_ = g
-	res, err := recovery.OpenString(dir)
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		fmt.Println("recovery.OpenString:", err)
+		fmt.Println("recovery.Open:", err)
 		return
 	}
 	fmt.Printf("Recovered: WAL ops=%d, snapshot hit=%v, snapshot label records=%d, snapshot property records=%d.\n",

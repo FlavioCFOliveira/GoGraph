@@ -13,10 +13,9 @@ import (
 	"gograph/store/wal"
 )
 
-// TestRecovery_OpenWithOptions exercises [OpenWithOptions] with an
-// explicit [txn.Options] that carries both a non-default Codec
-// (string) and a non-default WeightCodec (float64). The test verifies
-// that:
+// TestRecovery_Open_CustomCodec exercises [Open] with an explicit
+// [Options] that carries both a non-default Codec (string) and a
+// non-default WeightCodec (float64). The test verifies that:
 //
 //  1. Both codec fields are honoured during WAL replay (the weight is
 //     recovered correctly through the typed codec path).
@@ -29,7 +28,7 @@ import (
 // covers the weight round-trip in isolation. This test additionally
 // verifies the snapshot + WAL integration path and checks the Options
 // struct field pass-through.
-func TestRecovery_OpenWithOptions(t *testing.T) {
+func TestRecovery_Open_CustomCodec(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -89,10 +88,11 @@ func TestRecovery_OpenWithOptions(t *testing.T) {
 		t.Fatalf("wal Close: %v", err)
 	}
 
-	// Recover via OpenWithOptions, passing the same txn.Options.
-	res, err := OpenWithOptions[string, float64](dir, opts)
+	// Recover via Open, converting the txn.Options used by the writer
+	// into the field-identical recovery.Options.
+	res, err := Open[string, float64](dir, Options[string, float64](opts))
 	if err != nil {
-		t.Fatalf("OpenWithOptions: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false, want true")

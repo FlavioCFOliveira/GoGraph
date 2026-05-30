@@ -8,10 +8,9 @@ import (
 
 // TestRecovery_EmptyDir exercises [Open] on an empty directory across
 // two instantiations: the canonical (string, int64) and the numeric
-// (int64, float64). [TestOpenString_EmptyDirectoryReturnsEmptyResult]
-// already covers the deprecated [OpenString] wrapper; this test
-// anchors the canonical [Open] entry point and confirms that the
-// zero-state contract holds for non-string key types.
+// (int64, float64). It anchors the canonical [Open] entry point and
+// confirms that the zero-state contract holds for non-string key
+// types.
 //
 // Expectation per both sub-tests:
 //   - No error (empty dir is a valid cold-start state).

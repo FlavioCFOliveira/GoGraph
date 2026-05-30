@@ -21,7 +21,7 @@ func openStore(t *testing.T) (store *Store[string, int64], walPath string, clean
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store = NewStore(g, w)
+	store = NewStoreWithCodec(g, w, NewStringCodec())
 	walPath = path
 	cleanup = func() {
 		_ = w.Close()
@@ -120,7 +120,9 @@ func TestTx_DurableViaWAL(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Without restarting the process, prove the WAL recorded one
-	// commit by counting frames via the Reader.
+	// commit by counting frames via the Reader. A typed-codec store
+	// writes one v3 frame per op plus a trailing OpCommit marker that
+	// bounds the atomic batch, so two ops yield three frames.
 	r, err := wal.OpenReader(walPath)
 	if err != nil {
 		t.Fatalf("OpenReader: %v", err)
@@ -133,7 +135,7 @@ func TestTx_DurableViaWAL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if frames != 2 {
-		t.Fatalf("WAL frames = %d, want 2 (one per op)", frames)
+	if frames != 3 {
+		t.Fatalf("WAL frames = %d, want 3 (two ops + OpCommit marker)", frames)
 	}
 }

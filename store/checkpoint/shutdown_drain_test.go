@@ -9,13 +9,14 @@ import (
 	"gograph/graph/adjlist"
 	"gograph/graph/lpg"
 	"gograph/store/recovery"
+	"gograph/store/txn"
 	"gograph/store/wal"
 )
 
 // TestCheckpoint_ShutdownDrain verifies that Stop blocks until the
 // background goroutine exits, that no goroutine leak occurs, and that
 // after a Trigger+Stop cycle the snapshot directory is recognised by
-// recovery.OpenString.
+// recovery.Open.
 func TestCheckpoint_ShutdownDrain(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -51,9 +52,12 @@ func TestCheckpoint_ShutdownDrain(t *testing.T) {
 	}
 
 	// Snapshot must be visible after Stop.
-	res, err := recovery.OpenString(dir)
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("recovery.OpenString: %v", err)
+		t.Fatalf("recovery.Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit = false after shutdown drain")

@@ -120,12 +120,12 @@ func TestWrite_PropertyDurability(t *testing.T) {
 	}
 
 	// Parent: recover the graph written by the child (WAL-only, no snapshot).
-	recRes, openErr := recovery.OpenWithOptions[string, float64](dir, txn.Options[string, float64]{
+	recRes, openErr := recovery.Open[string, float64](dir, recovery.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
 	})
 	if openErr != nil {
-		t.Fatalf("recovery.OpenWithOptions: %v", openErr)
+		t.Fatalf("recovery.Open: %v", openErr)
 	}
 
 	recEng := cypher.NewEngine(recRes.Graph)
@@ -292,12 +292,12 @@ func TestWrite_PropertyDurability_SIGKILLPostCommit(t *testing.T) {
 	}
 
 	// Parent: recover from the WAL (no snapshot was written).
-	recRes, openErr := recovery.OpenWithOptions[string, float64](dir, txn.Options[string, float64]{
+	recRes, openErr := recovery.Open[string, float64](dir, recovery.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
 	})
 	if openErr != nil {
-		t.Fatalf("recovery.OpenWithOptions: %v", openErr)
+		t.Fatalf("recovery.Open: %v", openErr)
 	}
 
 	recEng := cypher.NewEngine(recRes.Graph)

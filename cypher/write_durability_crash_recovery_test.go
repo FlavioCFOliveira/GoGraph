@@ -5,7 +5,7 @@ package cypher_test
 // TestWrite_DurabilityCleanExit verifies that nodes created through a
 // WAL-backed Cypher engine in a child process are visible after the child
 // exits cleanly and the parent opens the same directory via
-// recovery.OpenWithOptions.
+// recovery.Open.
 //
 // Architecture (cross-process clean-exit):
 //   Child  (mode "cypher-write-and-exit"):
@@ -17,7 +17,7 @@ package cypher_test
 //
 //   Parent:
 //     1. Spawn child with t.TempDir() as the shared dir.
-//     2. Open the same dir via recovery.OpenWithOptions[string, float64].
+//     2. Open the same dir via recovery.Open[string, float64].
 //     3. Build a read-only cypher.Engine on the recovered graph.
 //     4. MATCH (n:Person) RETURN count(*) → assert count == 5.
 //
@@ -113,12 +113,12 @@ func TestWrite_DurabilityCleanExit(t *testing.T) {
 	}
 
 	// Parent: recover the graph written by the child.
-	recRes, openErr := recovery.OpenWithOptions[string, float64](dir, txn.Options[string, float64]{
+	recRes, openErr := recovery.Open[string, float64](dir, recovery.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
 	})
 	if openErr != nil {
-		t.Fatalf("recovery.OpenWithOptions: %v", openErr)
+		t.Fatalf("recovery.Open: %v", openErr)
 	}
 
 	// Read-only engine on the recovered graph.

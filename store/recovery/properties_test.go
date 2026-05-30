@@ -16,12 +16,12 @@ import (
 
 // TestRecovery_PropertiesSurviveRestart wires the full v2 snapshot
 // path into a transactional flow: the test writes a graph with
-// typed properties via txn.NewStore (WAL-driven for the edge
-// topology) plus direct property sets on the graph, then persists a
-// v2 snapshot alongside the WAL via snapshot.WriteSnapshotFull,
-// then calls recovery.OpenString to simulate a restart. The
-// recovered graph must carry every typed property attached before
-// the snapshot.
+// typed properties via a typed-codec txn.Store (WAL-driven for the
+// edge topology) plus direct property sets on the graph, then
+// persists a v2 snapshot alongside the WAL via
+// snapshot.WriteSnapshotFull, then calls recovery.Open to simulate a
+// restart. The recovered graph must carry every typed property
+// attached before the snapshot.
 //
 // Note: this test exercises the snapshot apply path. As of T931 the
 // WAL also records typed property ops (OpSetNodeProperty et al.) so
@@ -41,7 +41,7 @@ func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	tx := store.Begin()
 	if err := tx.AddEdge("alice", "bob", 0); err != nil {
@@ -99,9 +99,12 @@ func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 		t.Fatalf("wal Close: %v", err)
 	}
 
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false")
@@ -155,7 +158,7 @@ func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 
 // TestRecovery_V1SnapshotPropertiesEmpty asserts that an old v1
 // snapshot (no properties.bin) coexisting with the WAL continues to
-// load cleanly via OpenString. SnapshotHit is true and
+// load cleanly via Open. SnapshotHit is true and
 // SnapshotProperties is 0 — the forward-compat contract.
 func TestRecovery_V1SnapshotPropertiesEmpty(t *testing.T) {
 	t.Parallel()
@@ -167,7 +170,7 @@ func TestRecovery_V1SnapshotPropertiesEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatal(err)
@@ -184,9 +187,12 @@ func TestRecovery_V1SnapshotPropertiesEmpty(t *testing.T) {
 		t.Fatalf("wal Close: %v", err)
 	}
 
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false")

@@ -9,6 +9,7 @@ import (
 	"gograph/graph/lpg"
 	"gograph/store/recovery"
 	"gograph/store/snapshot"
+	"gograph/store/txn"
 	"gograph/store/wal"
 )
 
@@ -77,9 +78,12 @@ func TestLoader_RecoveryEqual(t *testing.T) {
 	}
 
 	// Phase 3: recovery.
-	res, err := recovery.OpenString(dir)
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("recovery.OpenString: %v", err)
+		t.Fatalf("recovery.Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false")

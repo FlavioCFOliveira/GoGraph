@@ -102,9 +102,9 @@ func TestRecovery_SnapshotPlusWALReplay(t *testing.T) {
 	}
 
 	// Phase 4: recovery.
-	res, err := OpenWithOptions[string, int64](dir, opts)
+	res, err := Open[string, int64](dir, Options[string, int64](opts))
 	if err != nil {
-		t.Fatalf("OpenWithOptions: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false, want true")

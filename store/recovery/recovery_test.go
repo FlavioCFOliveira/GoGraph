@@ -31,7 +31,7 @@ func writeWorkload(t *testing.T, dir string, ops []committedOp, syncEvery int) {
 	}
 	defer func() { _ = w.Close() }()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for i, op := range ops {
 		tx := store.Begin()
 		switch op.kind {
@@ -59,9 +59,12 @@ func TestRecovery_RestoresCommittedOps(t *testing.T) {
 		{kind: txn.OpSetEdgeLabel, src: "alice", dst: "bob", label: "KNOWS"},
 	}
 	writeWorkload(t, dir, ops, 1)
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.WALOps != len(ops) {
 		t.Fatalf("WALOps = %d, want %d", res.WALOps, len(ops))
@@ -95,9 +98,12 @@ func TestRecovery_TornTailDropsLastOp(t *testing.T) {
 	if err := os.Truncate(path, info.Size()-1); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.WALOps > 2 {
 		t.Fatalf("torn tail should drop at least the last op; got %d", res.WALOps)
@@ -133,9 +139,12 @@ func TestRecovery_FuzzedTruncation(t *testing.T) {
 		if err := os.Truncate(path, newSize); err != nil {
 			t.Fatal(err)
 		}
-		res, err := OpenString(dir)
+		res, err := Open[string, int64](dir, Options[string, int64]{
+			Codec:       txn.NewStringCodec(),
+			WeightCodec: txn.NewInt64WeightCodec(),
+		})
 		if err != nil {
-			t.Fatalf("iter %d: OpenString: %v", it, err)
+			t.Fatalf("iter %d: Open: %v", it, err)
 		}
 		// Recovery must not panic and must produce some prefix of
 		// the committed sequence.

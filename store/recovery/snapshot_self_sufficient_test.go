@@ -38,7 +38,7 @@ func TestRecovery_V3Snapshot_WALAbsent_SelfSufficient(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Seed: small social graph with edges, node labels, edge labels.
 	type commit struct{ src, dst, srcLabel, dstLabel, edgeLabel string }
@@ -189,7 +189,7 @@ func TestRecovery_V3Snapshot_RoundTripByteStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for _, e := range []struct{ s, d string }{
 		{"a", "b"}, {"b", "c"}, {"c", "d"}, {"a", "d"},
 	} {

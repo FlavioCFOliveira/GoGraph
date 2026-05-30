@@ -405,13 +405,11 @@ func TestOpen_SnapshotSchemaVersion_v1(t *testing.T) {
 	}
 }
 
-// TestOpenString_DeprecatedButStillWorks confirms the legacy
-// [OpenString] wrapper continues to recover a `(string, int64)`
-// graph end-to-end after the canonical [Open] API is promoted. The
-// new [Result.SnapshotSchemaVersion] field must also be populated
-// through the deprecated wrapper because the wrapper shares the
-// same snapshot-load code path.
-func TestOpenString_DeprecatedButStillWorks(t *testing.T) {
+// TestOpen_StringInt64_SnapshotSchemaVersion confirms that a
+// `(string, int64)` graph recovers end-to-end through the canonical
+// [Open] entry point and that [Result.SnapshotSchemaVersion] is
+// populated from the snapshot manifest.
+func TestOpen_StringInt64_SnapshotSchemaVersion(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -420,7 +418,7 @@ func TestOpenString_DeprecatedButStillWorks(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	s := txn.NewStore(g, w)
+	s := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := s.Begin()
 	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -439,9 +437,12 @@ func TestOpenString_DeprecatedButStillWorks(t *testing.T) {
 		t.Fatalf("wal Close: %v", err)
 	}
 
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false, want true")
@@ -451,10 +452,10 @@ func TestOpenString_DeprecatedButStillWorks(t *testing.T) {
 			res.SnapshotSchemaVersion, snapshot.ManifestVersion)
 	}
 	if !res.Graph.AdjList().HasEdge("alice", "bob") {
-		t.Fatal("OpenString did not recover alice -> bob")
+		t.Fatal("Open did not recover alice -> bob")
 	}
 	if !res.Graph.HasNodeLabel("alice", "Person") {
-		t.Fatal("OpenString did not recover alice/Person label")
+		t.Fatal("Open did not recover alice/Person label")
 	}
 }
 

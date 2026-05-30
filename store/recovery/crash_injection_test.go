@@ -1321,44 +1321,6 @@ func TestCrashInjection_ApplySnapshotIndexes_NilManager(t *testing.T) {
 	}
 }
 
-// TestCrashInjection_OpenString_CodecErrorDuringReplay drives the
-// codec-error path through OpenString: a hand-built v2 frame with a
-// corrupted weight payload is appended to the WAL. Recovery must not
-// apply the partial frame, must not panic, and the graph must be
-// empty of the corrupted edge.
-func TestCrashInjection_OpenString_CodecErrorDuringReplay(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	codec := txn.NewStringCodec()
-	// Craft an OpAddEdgeWeighted frame that OpenString can't decode
-	// (no WeightCodec on the OpenString path). The frame is otherwise
-	// well-formed.
-	payload := []byte{txn.OpRecordV2, byte(txn.OpAddEdgeWeighted)}
-	payload, _ = codec.Encode(payload, "alice")
-	payload, _ = codec.Encode(payload, "bob")
-	payload = binary.LittleEndian.AppendUint16(payload, 0x0102_0304%0xFFFF)
-	if err := w.Append(payload); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	res, err := OpenString(dir)
-	if err != nil {
-		t.Fatalf("OpenString: %v", err)
-	}
-	if res.Graph.AdjList().HasEdge("alice", "bob") {
-		t.Fatal("malformed weighted frame must not apply through OpenString")
-	}
-}
-
 // TestCrashInjection_WALReader_TornEvenWithoutCommit drives the path
 // where the WAL is open but no frames have been synced before a
 // crash. The reader must report a clean EOF (or torn) without
@@ -1375,9 +1337,12 @@ func TestCrashInjection_WALReader_TornEvenWithoutCommit(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString on empty WAL: %v", err)
+		t.Fatalf("Open on empty WAL: %v", err)
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0", res.WALOps)

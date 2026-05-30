@@ -1,10 +1,7 @@
 package recovery
 
 import (
-	"context"
 	"encoding/binary"
-	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -12,19 +9,30 @@ import (
 	"gograph/store/wal"
 )
 
-// TestOpenWithCodec_RejectsV1Frames confirms that a v1 WAL replayed
-// through the generic typed path is rejected — the legacy
-// fmt.Sprintf encoding is not generally invertible. The first frame
-// halts the loop and surfaces a tail error. Callers that need to
-// drain a v1 corpus must use [OpenString].
-func TestOpenWithCodec_RejectsV1Frames(t *testing.T) {
+// TestOpen_RejectsUnknownLeadingByte confirms that a frame whose
+// leading byte is neither the v2 nor the v3 magic tag is rejected by
+// the generic typed [Open] path: such a frame is parsed as a legacy
+// untagged record, and the fmt.Sprintf-derived endpoints have no
+// inverse through a typed codec, so the op does not apply. The frame
+// is hand-built here (a leading non-magic kind byte followed by a
+// well-formed length-prefixed body) so the assertion is independent
+// of any v1 encoder.
+func TestOpen_RejectsUnknownLeadingByte(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Append(encodeLegacyV1(txn.OpSetNodeLabel, "alice", "", "Person")); err != nil {
+	// Leading byte = OpSetNodeLabel (a v1 OpKind, not OpRecordV2/V3),
+	// followed by srcLen|src, dstLen|dst, labelLen|label.
+	frame := []byte{byte(txn.OpSetNodeLabel)}
+	frame = binary.LittleEndian.AppendUint16(frame, uint16(len("alice")))
+	frame = append(frame, "alice"...)
+	frame = binary.LittleEndian.AppendUint16(frame, 0) // empty dst
+	frame = binary.LittleEndian.AppendUint16(frame, uint16(len("Person")))
+	frame = append(frame, "Person"...)
+	if err := w.Append(frame); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Sync(); err != nil {
@@ -33,58 +41,28 @@ func TestOpenWithCodec_RejectsV1Frames(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenWithCodec[string, int64](dir, txn.NewStringCodec())
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenWithCodec: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.WALOps != 0 {
-		t.Fatalf("WALOps = %d, want 0 (v1 frame must not apply through OpenWithCodec)", res.WALOps)
+		t.Fatalf("WALOps = %d, want 0 (legacy-tagged frame must not apply through Open)", res.WALOps)
 	}
-	// NB: TailErr is overwritten by the WAL reader's clean tail-error
-	// at the loop exit, mirroring OpenStringCtx's documented behaviour.
-	// The contract we assert is "no ops applied", not "error surfaced".
-}
-
-// TestOpenWithCodec_NilCodec rejects a nil codec.
-func TestOpenWithCodec_NilCodec(t *testing.T) {
-	t.Parallel()
-	_, err := OpenWithCodec[string, int64](t.TempDir(), nil)
-	if err == nil {
-		t.Fatal("OpenWithCodec(nil) must error")
+	// The recovery loop stops at the undecodable frame and records the
+	// cut-off via TailErr; we assert the load-bearing contract — no ops
+	// applied — rather than the exact error text.
+	if res.TailErr == nil {
+		t.Fatal("TailErr = nil, want a non-nil cut-off error for the rejected frame")
 	}
 }
 
-// TestOpenWithCodec_PreCancelledCtx confirms the snapshot-boundary
-// ctx.Err() check fires for the typed open path.
-func TestOpenWithCodec_PreCancelledCtx(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := OpenWithCodecCtx[string, int64](ctx, t.TempDir(), txn.NewStringCodec())
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-}
-
-// TestOpenWithCodec_EmptyDir mirrors the OpenString empty-dir test:
-// the typed path returns a fresh graph and no error.
-func TestOpenWithCodec_EmptyDir(t *testing.T) {
-	t.Parallel()
-	res, err := OpenWithCodec[string, int64](t.TempDir(), txn.NewStringCodec())
-	if err != nil {
-		t.Fatalf("OpenWithCodec: %v", err)
-	}
-	if res.WALOps != 0 {
-		t.Fatalf("WALOps = %d, want 0", res.WALOps)
-	}
-	if res.Graph == nil {
-		t.Fatal("Graph must be non-nil")
-	}
-}
-
-// TestOpenWithCodec_TruncatedV2Body produces a v2 frame with a
-// truncated body and verifies the recovery loop stops cleanly.
-func TestOpenWithCodec_TruncatedV2Body(t *testing.T) {
+// TestOpen_TruncatedV2Body produces a v2 frame with a truncated body
+// and verifies the recovery loop stops cleanly through the typed
+// [Open] path.
+func TestOpen_TruncatedV2Body(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -102,20 +80,28 @@ func TestOpenWithCodec_TruncatedV2Body(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenWithCodec[string, int64](dir, txn.NewStringCodec())
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenWithCodec: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (truncated v2 body)", res.WALOps)
 	}
 	// TailErr is overwritten by the WAL reader's tail-error at loop
-	// exit (same as OpenStringCtx); we only assert no ops applied.
+	// exit; we only assert no ops applied.
 }
 
-// TestOpenString_TruncatedV2Body exercises the v2 truncation branch on
-// applyOpString — string-keyed path covering the early-return arms.
-func TestOpenString_TruncatedV2Body(t *testing.T) {
+// TestOpen_TruncatedV2DstBody exercises the dst-decode-failure branch
+// on applyOpCodec: codec(src) decodes cleanly but codec(dst) claims a
+// length its body cannot satisfy, so codec.Decode returns an error and
+// the op is rejected. This complements TestOpen_TruncatedV2Body, which
+// fails on the src decode instead. The malformed-frame rejection lives
+// on the surviving generic [Open] path (applyOpCodec); the deleted
+// OpenString wrapper exercised the equivalent branch in applyOpString.
+func TestOpen_TruncatedV2DstBody(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -136,21 +122,27 @@ func TestOpenString_TruncatedV2Body(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
-	// applyOpString returns early without applying; the loop continues
-	// so WALOps is still incremented (the op is a no-op). The graph
-	// must not carry the alice node.
+	// applyOpCodec returns false on the dst decode failure, so the op is
+	// not applied and the graph must not carry the alice node.
 	if _, ok := res.Graph.AdjList().Mapper().Lookup("alice"); ok {
 		t.Fatal("partial v2 frame should not apply")
 	}
 }
 
-// TestOpenString_V2MissingTrailingLabelLength forces the rest-len < 2
-// branch of applyOpString's v2 path.
-func TestOpenString_V2MissingTrailingLabelLength(t *testing.T) {
+// TestOpen_V2MissingTrailingLabelLength forces the rest-len < 2 branch
+// of applyOpCodec's OpAddEdge arm: src and dst decode cleanly but the
+// mandatory trailing uint16 label-length prefix is absent, so the
+// frame is treated as corrupt and not applied. This is the surviving
+// generic [Open] path; the deleted OpenString wrapper exercised the
+// matching branch in applyOpString.
+func TestOpen_V2MissingTrailingLabelLength(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -160,7 +152,7 @@ func TestOpenString_V2MissingTrailingLabelLength(t *testing.T) {
 	codec := txn.NewStringCodec()
 	body, _ := codec.Encode(nil, "alice")
 	body, _ = codec.Encode(body, "bob")
-	// No uint16 labelLen trailer; applyOpString must reject and bail.
+	// No uint16 labelLen trailer; applyOpCodec must reject and bail.
 	payload := append([]byte{txn.OpRecordV2, byte(txn.OpAddEdge)}, body...)
 	if err := w.Append(payload); err != nil {
 		t.Fatal(err)
@@ -171,18 +163,25 @@ func TestOpenString_V2MissingTrailingLabelLength(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.Graph.AdjList().HasEdge("alice", "bob") {
 		t.Fatal("payload missing labelLen must not apply")
 	}
 }
 
-// TestOpenString_V2LabelOverflow forces the labelLen-larger-than-rest
-// branch of applyOpString's v2 path.
-func TestOpenString_V2LabelOverflow(t *testing.T) {
+// TestOpen_V2LabelOverflow forces the labelLen-larger-than-rest branch
+// of applyOpCodec's OpAddEdge arm: src and dst decode cleanly but the
+// trailing label-length prefix claims more bytes than the frame holds,
+// so the frame is rejected as corrupt. This is the surviving generic
+// [Open] path; the deleted OpenString wrapper exercised the matching
+// branch in applyOpString.
+func TestOpen_V2LabelOverflow(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -204,9 +203,12 @@ func TestOpenString_V2LabelOverflow(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.Graph.AdjList().HasEdge("alice", "bob") {
 		t.Fatal("payload with overflowing labelLen must not apply")
@@ -219,46 +221,5 @@ func TestDecode_ShortV2Payload(t *testing.T) {
 	t.Parallel()
 	if _, err := Decode([]byte{txn.OpRecordV2}); err == nil {
 		t.Fatal("Decode([0xFE]) returned no error")
-	}
-}
-
-// TestOpenWithCodec_BogusSnapshotErrors checks that a corrupted
-// snapshot manifest surfaces as an error on the typed open path,
-// mirroring OpenString's behaviour.
-func TestOpenWithCodec_BogusSnapshotErrors(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	snapDir := filepath.Join(dir, "snapshot")
-	if err := os.MkdirAll(snapDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(snapDir, "manifest.json"), []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := OpenWithCodec[string, int64](dir, txn.NewStringCodec())
-	if err == nil {
-		t.Fatal("OpenWithCodec with corrupted snapshot must error")
-	}
-}
-
-// TestOpenWithCodec_UnreadableWalErrors covers the "wal exists but
-// cannot be opened" branch on the typed open path.
-func TestOpenWithCodec_UnreadableWalErrors(t *testing.T) {
-	t.Parallel()
-	parent := t.TempDir()
-	dir := filepath.Join(parent, "store")
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	walPath := filepath.Join(dir, "wal")
-	if err := os.WriteFile(walPath, []byte{}, 0o600); err != nil { //nolint:gosec // t.TempDir
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chmod(dir, 0o700) }() //nolint:gosec // test cleanup restores access
-	if _, err := OpenWithCodec[string, int64](dir, txn.NewStringCodec()); err == nil {
-		t.Fatal("OpenWithCodec with unreadable WAL should error")
 	}
 }

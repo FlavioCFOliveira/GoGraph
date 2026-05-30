@@ -67,12 +67,15 @@ func TestDecode_ShortPayloads(t *testing.T) {
 	}
 }
 
-func TestOpenString_EmptyDirectoryReturnsEmptyResult(t *testing.T) {
+func TestOpen_EmptyDirectoryReturnsEmptyResult(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString empty dir = %v, want nil", err)
+		t.Fatalf("Open empty dir = %v, want nil", err)
 	}
 	if res.SnapshotHit {
 		t.Fatalf("SnapshotHit on empty dir should be false")
@@ -85,7 +88,7 @@ func TestOpenString_EmptyDirectoryReturnsEmptyResult(t *testing.T) {
 	}
 }
 
-func TestOpenString_SnapshotPresentNoWAL(t *testing.T) {
+func TestOpen_SnapshotPresentNoWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// Lay down a valid empty snapshot under dir/snapshot.
@@ -98,9 +101,12 @@ func TestOpenString_SnapshotPresentNoWAL(t *testing.T) {
 	if err := snapshot.WriteSnapshotCSR(filepath.Join(dir, "snapshot"), c); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString = %v", err)
+		t.Fatalf("Open = %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit should be true after writing a snapshot")
@@ -110,7 +116,7 @@ func TestOpenString_SnapshotPresentNoWAL(t *testing.T) {
 	}
 }
 
-func TestOpenString_CorruptedSnapshot(t *testing.T) {
+func TestOpen_CorruptedSnapshot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	snapDir := filepath.Join(dir, "snapshot")
@@ -121,12 +127,15 @@ func TestOpenString_CorruptedSnapshot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(snapDir, "manifest.json"), []byte("{bogus"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenString(dir); err == nil {
-		t.Fatalf("OpenString with corrupted snapshot manifest should error")
+	if _, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	}); err == nil {
+		t.Fatalf("Open with corrupted snapshot manifest should error")
 	}
 }
 
-func TestOpenString_TornDecodeStopsCleanly(t *testing.T) {
+func TestOpen_TornDecodeStopsCleanly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -145,14 +154,17 @@ func TestOpenString_TornDecodeStopsCleanly(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString with malformed payload = %v, want nil err", err)
+		t.Fatalf("Open with malformed payload = %v, want nil err", err)
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (decode failed on first op)", res.WALOps)
 	}
-	// NB: OpenStringCtx overwrites res.TailErr with the WAL reader's
+	// NB: the recovery core overwrites res.TailErr with the WAL reader's
 	// tail error at the end of the function, so a decode failure on a
 	// fully-framed payload is silently swallowed in the returned
 	// Result. We only assert that recovery does not panic and does not
@@ -160,18 +172,21 @@ func TestOpenString_TornDecodeStopsCleanly(t *testing.T) {
 	// caller is a separate concern tracked outside this test.
 }
 
-func TestOpenString_PreCancelledContext(t *testing.T) {
+func TestOpen_PreCancelledContext(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := OpenStringCtx(ctx, dir)
+	_, err := OpenCtx[string, int64](ctx, dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("OpenStringCtx pre-cancelled = %v, want context.Canceled", err)
+		t.Fatalf("OpenCtx pre-cancelled = %v, want context.Canceled", err)
 	}
 }
 
-func TestOpenString_NonExistentWALPathBubblesError(t *testing.T) {
+func TestOpen_NonExistentWALPathBubblesError(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "store")
@@ -190,15 +205,18 @@ func TestOpenString_NonExistentWALPathBubblesError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chmod(dir, 0o700) }() //nolint:gosec // test cleanup restores access
-	if _, err := OpenString(dir); err == nil {
-		t.Fatalf("OpenString with unreadable WAL should error")
+	if _, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	}); err == nil {
+		t.Fatalf("Open with unreadable WAL should error")
 	}
 }
 
-// TestOpenString_ContextCancelledMidReplay drives a deadline that
+// TestOpen_ContextCancelledMidReplay drives a deadline that
 // expires while we are still replaying so we cross the per-4096-frame
-// ctx.Err() checkpoint inside OpenStringCtx.
-func TestOpenString_ContextCancelledMidReplay(t *testing.T) {
+// ctx.Err() checkpoint inside the recovery core.
+func TestOpen_ContextCancelledMidReplay(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -207,7 +225,7 @@ func TestOpenString_ContextCancelledMidReplay(t *testing.T) {
 	}
 	// Append enough valid frames that the >=4096 checkpoint can fire.
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for i := 0; i < 4500; i++ {
 		tx := store.Begin()
 		_ = tx.SetNodeLabel("alice", "Person")
@@ -221,10 +239,13 @@ func TestOpenString_ContextCancelledMidReplay(t *testing.T) {
 	// Use a context that is already past its deadline so the very
 	// first ctx.Err() after the snapshot probe trips. We don't strictly
 	// need to land "mid-replay" — any non-nil ctx.Err triggers the
-	// abort path inside OpenStringCtx.
+	// abort path inside the recovery core.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	if _, err := OpenStringCtx(ctx, dir); err == nil {
-		t.Fatalf("OpenStringCtx with expired deadline should error")
+	if _, err := OpenCtx[string, int64](ctx, dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	}); err == nil {
+		t.Fatalf("OpenCtx with expired deadline should error")
 	}
 }

@@ -383,49 +383,6 @@ func TestRoundtrip_Mutations_RecoverFromWAL(t *testing.T) {
 	})
 }
 
-// TestRoundtrip_LegacyV1Codec_BasicOps confirms the v1 (legacy
-// fmt-based) write path produces frames the recovery layer can still
-// replay. Only the three op kinds emitted by NewStore are covered
-// (AddEdge, SetNodeLabel, SetEdgeLabel) — see NewStore docs.
-func TestRoundtrip_LegacyV1Codec_BasicOps(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	s := txn.NewStore[string, int64](g, w)
-
-	tx := s.Begin()
-	_ = tx.AddEdge("alice", "bob", 0)
-	_ = tx.SetNodeLabel("alice", "Person")
-	_ = tx.SetEdgeLabel("alice", "bob", "KNOWS")
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// OpenString is the legacy recovery entry point for v1 string-
-	// keyed WAL frames written by NewStore.
-	res, err := recovery.OpenString(dir)
-	if err != nil {
-		t.Fatalf("OpenString: %v", err)
-	}
-	g2 := res.Graph
-	if !g2.AdjList().HasEdge("alice", "bob") {
-		t.Fatal("alice->bob edge missing after v1 replay")
-	}
-	if !g2.HasNodeLabel("alice", "Person") {
-		t.Fatal("Person label missing after v1 replay")
-	}
-	if !g2.HasEdgeLabel("alice", "bob", "KNOWS") {
-		t.Fatal("KNOWS edge label missing after v1 replay")
-	}
-}
-
 // TestRoundtrip_CommitWALOnly_RecoversIntoGraph documents the
 // production invariant of CommitWALOnly: the in-memory graph remains
 // untouched, but the WAL has every op, so recovery rebuilds the full

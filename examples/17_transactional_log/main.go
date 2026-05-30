@@ -33,7 +33,7 @@ func main() {
 	walPath := filepath.Join(dir, "wal")
 	w, _ := wal.Open(walPath)
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Background checkpointer firing every 50 ms.
 	cp := checkpoint.New(checkpoint.Config{
@@ -68,7 +68,10 @@ func main() {
 	// We do not touch g or store after this point.
 	_ = store
 	_ = g
-	res, err := recovery.OpenString(dir)
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
 		fmt.Println("recovery failed:", err)
 		return

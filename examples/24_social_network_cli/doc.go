@@ -136,12 +136,11 @@
 // produces) is self-sufficient: the snapshot alone carries enough
 // state to rebuild the in-memory graph without any WAL frames. On
 // open, recovery.Open (the canonical [string, float64] generic entry
-// point — the deprecated OpenString wrapper is avoided) restores the
-// natural-key interning table from mapper.bin, applies the CSR
-// adjacency, attaches labels.bin and properties.bin, then replays
-// any WAL tail on top. Every write performed through Engine.RunInTx
-// is appended to the WAL with fsync at commit, so a process crash
-// mid-write leaves the data directory recoverable.
+// point) restores the natural-key interning table from mapper.bin,
+// applies the CSR adjacency, attaches labels.bin and properties.bin,
+// then replays any WAL tail on top. Every write performed through
+// Engine.RunInTx is appended to the WAL with fsync at commit, so a
+// process crash mid-write leaves the data directory recoverable.
 //
 // The CLI is one-shot: every invocation opens the data directory,
 // performs its operation, and closes the recovery handle. There is no

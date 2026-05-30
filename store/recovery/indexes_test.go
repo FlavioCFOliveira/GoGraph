@@ -23,7 +23,7 @@ import (
 
 // TestRecovery_IndexesSurviveRestart wires the full snapshot+WAL
 // path with three registered indexes (label / hash / btree), takes
-// a v2 snapshot, then re-opens the store via OpenString. The fresh
+// a v2 snapshot, then re-opens the store via Open. The fresh
 // Manager on the recovered graph is populated with three fresh
 // (empty) indexes registered under the same names; the recovery
 // path must re-hydrate every index from the snapshot file so the
@@ -62,7 +62,7 @@ func TestRecovery_IndexesSurviveRestart(t *testing.T) {
 	// Commit nodes/edges through the WAL so recovery's WAL replay
 	// rebuilds the mapper for us. Populate indexes directly in
 	// memory (the Apply path is a no-op for hash/btree by design).
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for i := 0; i < 8; i++ {
 		tx := store.Begin()
 		src := "n" + string(rune('a'+i))
@@ -91,9 +91,12 @@ func TestRecovery_IndexesSurviveRestart(t *testing.T) {
 	}
 
 	// === Phase 3: recovery with a fresh Manager ===
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit = false, want true")
@@ -115,7 +118,7 @@ func TestRecovery_IndexesSurviveRestart(t *testing.T) {
 	}
 
 	// Re-trigger the snapshot apply now that the Manager is wired up.
-	// OpenString already loaded the bytes; we have to call the apply
+	// Open already loaded the bytes; we have to call the apply
 	// helper directly because the auto-call happened before
 	// SetIndexManager was invoked. This mirrors the production
 	// pattern where a startup sequence constructs the Manager BEFORE
@@ -156,7 +159,7 @@ func TestRecovery_IndexesSurviveRestart(t *testing.T) {
 // TestRecovery_IndexesSurviveRestart_WiredEarly is the production
 // happy path: the caller registers indexes on the LPG Graph BEFORE
 // recovery walks the snapshot, so the auto-call in
-// OpenString/OpenWithCodec deserialises every index in one pass.
+// Open deserialises every index in one pass.
 func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -175,7 +178,7 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 	_ = mgr.CreateIndex("hash.user", hsh)
 	_ = mgr.CreateIndex("btree.score", bt)
 
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for i := 0; i < 4; i++ {
 		tx := store.Begin()
 		if err := tx.AddEdge("n"+string(rune('a'+i)), "n"+string(rune('a'+i+1)), 0); err != nil {
@@ -200,7 +203,7 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 	}
 
 	// Wire a fresh manager BEFORE recovery's snapshot apply.
-	// OpenString constructs its own graph; we can't pre-wire its
+	// Open constructs its own graph; we can't pre-wire its
 	// IndexManager via the public API. Use the lower-level helper.
 	// Instead, we exercise SetIndexManager + applySnapshotIndexes via
 	// the same code path by re-opening a separate flow:
@@ -222,7 +225,7 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 
 // TestRecovery_CorruptedIndex_RebuildsAndLogs writes a snapshot with
 // three indexes, corrupts one on disk, runs recovery, and asserts:
-// (a) OpenString succeeds, (b) the recovered graph is fully usable
+// (a) Open succeeds, (b) the recovered graph is fully usable
 // (every committed edge is present), (c) the corrupted index is
 // reported via log.Printf with the expected warning, and (d)
 // SnapshotIndexes counts only the indexes that survived.
@@ -245,7 +248,7 @@ func TestRecovery_CorruptedIndex_RebuildsAndLogs(t *testing.T) {
 	_ = mgr.CreateIndex("hash.email", hsh)
 	_ = mgr.CreateIndex("btree.age", bt)
 
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	commits := []string{"a", "b", "c"}
 	for i := 0; i < len(commits)-1; i++ {
 		tx := store.Begin()
@@ -333,7 +336,7 @@ func TestRecovery_NoManagerNoIndexes(t *testing.T) {
 	g.SetIndexManager(mgr)
 	lab := label.NewIndex()
 	_ = mgr.CreateIndex("labels.nodes", lab)
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	if err := tx.AddEdge("a", "b", 0); err != nil {
 		t.Fatal(err)
@@ -350,9 +353,12 @@ func TestRecovery_NoManagerNoIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.SnapshotIndexes != 0 {
 		t.Fatalf("SnapshotIndexes = %d, want 0 (no manager wired)", res.SnapshotIndexes)

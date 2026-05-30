@@ -19,7 +19,7 @@ import (
 // the file to a position INSIDE the last frame (mid-payload), and
 // asserts:
 //
-//  1. [OpenWithOptions] returns no error (torn tail is tolerated).
+//  1. [Open] returns no error (torn tail is tolerated).
 //  2. The recovered graph reflects exactly the first K-1 frames —
 //     the label from the torn last frame must NOT be present.
 //
@@ -109,9 +109,9 @@ func TestRecovery_TornTailDropsLastOp_WithSnapshot(t *testing.T) {
 	}
 
 	// Phase 4: recover and assert.
-	res, err := OpenWithOptions[string, int64](dir, opts)
+	res, err := Open[string, int64](dir, Options[string, int64](opts))
 	if err != nil {
-		t.Fatalf("OpenWithOptions with torn tail: %v", err)
+		t.Fatalf("Open with torn tail: %v", err)
 	}
 
 	// The snapshot node must be present regardless.

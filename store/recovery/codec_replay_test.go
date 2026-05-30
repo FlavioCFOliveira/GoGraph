@@ -11,71 +11,6 @@ import (
 	"gograph/store/wal"
 )
 
-// encodeLegacyV1 builds a v1 (untagged) op payload by hand so the test
-// does not rely on the txn package's internal encoder. The layout
-// mirrors the format documented on [txn.encodeOpLegacy].
-func encodeLegacyV1(kind txn.OpKind, src, dst, label string) []byte {
-	buf := make([]byte, 0, 1+2+len(src)+2+len(dst)+2+len(label))
-	buf = append(buf, byte(kind))
-	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(src)))
-	buf = append(buf, src...)
-	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(dst)))
-	buf = append(buf, dst...)
-	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(label)))
-	buf = append(buf, label...)
-	return buf
-}
-
-// TestTxn_LegacyV1Replay verifies that a WAL composed entirely of
-// hand-crafted v1 frames is replayed cleanly by the new recovery
-// path. The fixture is constructed without going through
-// [txn.NewStore] so any regression in the v1 reader is caught even if
-// the writer changes.
-func TestTxn_LegacyV1Replay(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	frames := [][]byte{
-		encodeLegacyV1(txn.OpSetNodeLabel, "alice", "", "Person"),
-		encodeLegacyV1(txn.OpSetNodeLabel, "bob", "", "Person"),
-		encodeLegacyV1(txn.OpAddEdge, "alice", "bob", ""),
-		encodeLegacyV1(txn.OpSetEdgeLabel, "alice", "bob", "KNOWS"),
-	}
-	for _, p := range frames {
-		if err := w.Append(p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := w.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	res, err := OpenString(dir)
-	if err != nil {
-		t.Fatalf("OpenString: %v", err)
-	}
-	if res.WALOps != len(frames) {
-		t.Fatalf("WALOps = %d, want %d", res.WALOps, len(frames))
-	}
-	if !res.Graph.HasNodeLabel("alice", "Person") {
-		t.Fatal("alice Person not applied")
-	}
-	if !res.Graph.HasNodeLabel("bob", "Person") {
-		t.Fatal("bob Person not applied")
-	}
-	if !res.Graph.AdjList().HasEdge("alice", "bob") {
-		t.Fatal("alice->bob edge not applied")
-	}
-	if !res.Graph.HasEdgeLabel("alice", "bob", "KNOWS") {
-		t.Fatal("alice->bob KNOWS label not applied")
-	}
-}
-
 // writeV2Workload commits a small mixed workload via a typed-codec
 // store and closes the WAL. It is shared by the v2 replay tests.
 func writeV2Workload(t *testing.T, dir string, codec txn.Codec[string]) {
@@ -138,17 +73,24 @@ func TestTxn_V2Replay(t *testing.T) {
 	codec := txn.NewStringCodec()
 	writeV2Workload(t, dir, codec)
 
-	// OpenString recognises v2-StringCodec frames; verify state.
-	res, err := OpenString(dir)
+	// Open recognises v2-StringCodec frames; verify state.
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       codec,
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	assertV2GraphState(t, res.Graph, res.WALOps)
 
-	// OpenWithCodec walks the same WAL through the typed codec.
-	res2, err := OpenWithCodec[string, int64](dir, codec)
+	// A second Open over the same WAL through the typed codec yields
+	// the identical recovered state.
+	res2, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       codec,
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenWithCodec: %v", err)
+		t.Fatalf("Open (second pass): %v", err)
 	}
 	assertV2GraphState(t, res2.Graph, res2.WALOps)
 }
@@ -183,9 +125,12 @@ func TestTxn_V2Replay_BinaryMarshaler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := OpenWithCodec[textKey, int64](dir, codec)
+	res, err := Open[textKey, int64](dir, Options[textKey, int64]{
+		Codec:       codec,
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenWithCodec: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if res.WALOps != 2 {
 		t.Fatalf("WALOps = %d, want 2", res.WALOps)

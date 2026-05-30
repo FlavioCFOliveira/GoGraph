@@ -14,9 +14,9 @@ import (
 
 // TestRecovery_LabelsSurviveRestart wires the full v2 snapshot path
 // into a transactional flow: the test writes a graph with labels via
-// txn.NewStore (WAL-driven), then explicitly persists a v2 snapshot
-// alongside the WAL via snapshot.WriteSnapshotFull, then calls
-// recovery.OpenString to simulate a restart. The recovered graph
+// a typed-codec txn.Store (WAL-driven), then explicitly persists a v2
+// snapshot alongside the WAL via snapshot.WriteSnapshotFull, then
+// calls recovery.Open to simulate a restart. The recovered graph
 // must carry every node and edge label that was committed before the
 // snapshot.
 //
@@ -37,7 +37,7 @@ func TestRecovery_LabelsSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	commits := []struct{ src, dst, nodeLabel, edgeLabel string }{
 		{"alice", "bob", "Person", "KNOWS"},
@@ -72,9 +72,12 @@ func TestRecovery_LabelsSurviveRestart(t *testing.T) {
 		t.Fatalf("wal Close: %v", err)
 	}
 
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit = false, want true")
@@ -101,7 +104,7 @@ func TestRecovery_LabelsSurviveRestart(t *testing.T) {
 
 // TestRecovery_V1SnapshotStillRecovers asserts that an old v1
 // snapshot (csr.bin only) coexisting with the WAL continues to load
-// cleanly via OpenString. SnapshotHit is true and SnapshotLabels is
+// cleanly via Open. SnapshotHit is true and SnapshotLabels is
 // 0 — exactly the forward-compat contract.
 func TestRecovery_V1SnapshotStillRecovers(t *testing.T) {
 	t.Parallel()
@@ -113,7 +116,7 @@ func TestRecovery_V1SnapshotStillRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	if err := tx.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatal(err)
@@ -134,9 +137,12 @@ func TestRecovery_V1SnapshotStillRecovers(t *testing.T) {
 		t.Fatalf("wal Close: %v", err)
 	}
 
-	res, err := OpenString(dir)
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("OpenString: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit = false")

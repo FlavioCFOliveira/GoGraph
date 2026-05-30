@@ -14,11 +14,11 @@ import (
 )
 
 // TestRecovery_UnreadableWAL verifies that a WAL file whose
-// permissions deny read access causes [OpenString] to return a
+// permissions deny read access causes [Open] to return a
 // non-nil error rather than panicking or silently ignoring the
 // permission failure.
 //
-// The test differs from [TestOpenString_NonExistentWALPathBubblesError]
+// The test differs from [TestOpen_NonExistentWALPathBubblesError]
 // which revokes access on the *parent directory* of the WAL. Here
 // we create a valid snapshot so recovery proceeds past the snapshot
 // phase, then place a readable WAL, and then revoke read permission
@@ -75,8 +75,8 @@ func TestRecovery_UnreadableWAL(t *testing.T) {
 	defer func() { _ = os.Chmod(walPath, 0o600) }() //nolint:gosec // test cleanup
 
 	// 4. Recovery must fail with a non-nil error.
-	_, err = OpenString(dir)
+	_, err = Open[string, int64](dir, Options[string, int64](opts))
 	if err == nil {
-		t.Fatal("OpenString with unreadable WAL: want error, got nil")
+		t.Fatal("Open with unreadable WAL: want error, got nil")
 	}
 }

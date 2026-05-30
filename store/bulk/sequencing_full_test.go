@@ -11,6 +11,7 @@ import (
 	"gograph/store/checkpoint"
 	"gograph/store/recovery"
 	"gograph/store/snapshot"
+	"gograph/store/txn"
 	"gograph/store/wal"
 )
 
@@ -22,7 +23,7 @@ import (
 //  3. Open a WAL and create a Checkpointer backed by that LPG.
 //  4. Trigger a checkpoint — this writes a snapshot via WriteSnapshotCSR.
 //  5. Close WAL and Checkpointer.
-//  6. Recover via recovery.OpenString and verify edge count.
+//  6. Recover via recovery.Open and verify edge count.
 //
 // The test does not write any WAL frames; it relies exclusively on the
 // snapshot written by the checkpointer. Recovery.SnapshotHit must be
@@ -92,9 +93,12 @@ func TestSequencing_BulkCheckpointSnapshotRecovery(t *testing.T) {
 	}
 
 	// Phase 5: recover.
-	res, err := recovery.OpenString(dir)
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("recovery.OpenString: %v", err)
+		t.Fatalf("recovery.Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false after checkpoint")

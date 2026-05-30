@@ -19,14 +19,14 @@ import (
 // before the atomic rename to snapshot/ completes.
 //
 // Setup:
-//  1. Commit edge "a"→"b" through txn.Store (WAL v1 frame + in-memory).
+//  1. Commit edge "a"→"b" through txn.Store (WAL frame + in-memory).
 //  2. Force a checkpoint (checkpoint A): writes v1 CSR snapshot and
 //     truncates the WAL.
 //  3. Commit 3 more edges via txn.Store (WAL tail after checkpoint A).
 //  4. Create snapshot.tmp as a sibling of snapshot/ to simulate a crash
 //     mid-rename (the write started but never reached os.Rename).
 //
-// After the simulated crash, recovery.OpenString must:
+// After the simulated crash, recovery.Open must:
 //   - Find snapshot A (SnapshotHit = true).
 //   - Replay the 3 post-checkpoint WAL frames (WALOps = 3).
 //   - Return no error.
@@ -46,7 +46,7 @@ func TestCheckpoint_CrashMidSimulation(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	store := txn.NewStore(g, w)
+	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Phase 1: commit one edge so the WAL is non-empty before checkpoint.
 	tx := store.Begin()
@@ -98,16 +98,19 @@ func TestCheckpoint_CrashMidSimulation(t *testing.T) {
 
 	// Recovery must load snapshot A + replay the 3 post-checkpoint WAL frames.
 	// snapshot.tmp is not a valid snapshot directory (no manifest.json), so
-	// recovery.OpenString should ignore it and continue with snapshot/.
-	res, err := recovery.OpenString(dir)
+	// recovery.Open should ignore it and continue with snapshot/.
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
 	if err != nil {
-		t.Fatalf("recovery.OpenString: %v", err)
+		t.Fatalf("recovery.Open: %v", err)
 	}
 	if !res.SnapshotHit {
 		t.Fatalf("SnapshotHit = false: snapshot A should be present at %s/snapshot",
 			dir)
 	}
-	// v1 WAL frames emitted by txn.NewStore are decoded by applyOpString.
+	// The post-checkpoint v3 WAL frames are replayed by the typed open path.
 	if res.WALOps != len(postEdges) {
 		t.Fatalf("WALOps = %d, want %d (post-checkpoint edges)", res.WALOps, len(postEdges))
 	}
