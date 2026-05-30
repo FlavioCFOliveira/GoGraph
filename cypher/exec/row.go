@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"gograph/cypher/expr"
+	"gograph/internal/metrics"
 )
 
 // DefaultSlabCapacity is the default maximum number of rows a [RowSlab] holds
@@ -178,11 +179,13 @@ func NewSlabPool(width, capacity int) *SlabPool {
 
 // Get retrieves a reset RowSlab from the pool, or allocates a new one.
 func (sp *SlabPool) Get() *RowSlab {
+	metrics.IncCounter("cypher.pool.slab.get", 1)
 	return sp.p.Get().(*RowSlab) //nolint:forcetypeassert // pool invariant: New always returns *RowSlab
 }
 
 // Put resets s and returns it to the pool.
 func (sp *SlabPool) Put(s *RowSlab) {
+	metrics.IncCounter("cypher.pool.slab.put", 1)
 	s.Reset()
 	sp.p.Put(s)
 }

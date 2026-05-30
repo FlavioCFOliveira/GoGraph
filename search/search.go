@@ -45,6 +45,7 @@ var bfsPool = sync.Pool{
 }
 
 func acquireBFS(bitsetWords int) *bfsState {
+	metrics.IncCounter("search.pool.bfs.get", 1)
 	s, _ := bfsPool.Get().(*bfsState)
 	if cap(s.visited) < bitsetWords {
 		s.visited = make([]uint64, bitsetWords)
@@ -59,7 +60,7 @@ func acquireBFS(bitsetWords int) *bfsState {
 	return s
 }
 
-func releaseBFS(s *bfsState) { bfsPool.Put(s) }
+func releaseBFS(s *bfsState) { metrics.IncCounter("search.pool.bfs.put", 1); bfsPool.Put(s) }
 
 // dfsState is the per-call working state of [DFS]. The stack holds
 // (node, depth) pairs so the iterative form preserves the visitation
@@ -79,6 +80,7 @@ var dfsPool = sync.Pool{
 }
 
 func acquireDFS(bitsetWords int) *dfsState {
+	metrics.IncCounter("search.pool.dfs.get", 1)
 	s, _ := dfsPool.Get().(*dfsState)
 	if cap(s.visited) < bitsetWords {
 		s.visited = make([]uint64, bitsetWords)
@@ -92,7 +94,7 @@ func acquireDFS(bitsetWords int) *dfsState {
 	return s
 }
 
-func releaseDFS(s *dfsState) { dfsPool.Put(s) }
+func releaseDFS(s *dfsState) { metrics.IncCounter("search.pool.dfs.put", 1); dfsPool.Put(s) }
 
 func setVisited(visited []uint64, id graph.NodeID) {
 	visited[uint64(id)>>6] |= 1 << (uint64(id) & 63)

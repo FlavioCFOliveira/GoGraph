@@ -396,6 +396,7 @@ func newDistancesCopy[W Weight](st *dijkstraState[W], src graph.NodeID, maxID ui
 }
 
 func acquireDijkstra[W Weight](maxID uint64) *dijkstraState[W] {
+	metrics.IncCounter("search.pool.dijkstra.get", 1)
 	st, _ := dijkstraPool[W]().Get().(*dijkstraState[W])
 	if st == nil {
 		st = &dijkstraState[W]{}
@@ -414,6 +415,7 @@ func acquireDijkstra[W Weight](maxID uint64) *dijkstraState[W] {
 }
 
 func releaseDijkstra[W Weight](st *dijkstraState[W]) {
+	metrics.IncCounter("search.pool.dijkstra.put", 1)
 	dijkstraPool[W]().Put(st)
 }
 

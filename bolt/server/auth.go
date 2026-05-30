@@ -1,6 +1,9 @@
 package server
 
-import "errors"
+import (
+	"crypto/subtle"
+	"errors"
+)
 
 // Common auth errors.
 var (
@@ -45,11 +48,49 @@ func (NoAuthHandler) Authenticate(_, principal, _ string) (Identity, error) {
 // Validate function. The Validate function must return nil on success and a
 // non-nil error (typically ErrAuthFailed) on failure.
 //
+// # Timing side-channels
+//
+// Validate is called with the raw credential string from the client. If the
+// implementation compares credentials with == or strings.Equal, an attacker
+// can infer the correct value by measuring response latency (timing
+// side-channel). Always use [ConstantTimeValidate] or
+// [crypto/subtle.ConstantTimeCompare] for credential comparison:
+//
+//	handler := BasicAuthHandler{
+//	    Validate: ConstantTimeValidate("alice", "correct-horse-battery-staple"),
+//	}
+//
+// Do not add rate-limiting or account-lockout logic inside Validate; place it
+// in a middleware wrapping the AuthHandler instead so the Bolt server
+// remains stateless per-connection.
+//
 // BasicAuthHandler is safe for concurrent use as long as Validate is.
 type BasicAuthHandler struct {
 	// Validate is called with the principal and credentials from the client.
 	// It must return nil on success and a non-nil error on failure.
+	// See the type-level documentation for timing side-channel guidance.
 	Validate func(principal, credentials string) error
+}
+
+// ConstantTimeValidate returns a Validate function that accepts only the given
+// principal and credentials, using [crypto/subtle.ConstantTimeCompare] for both
+// comparisons. The comparison time is independent of the values being compared,
+// eliminating timing side-channels.
+//
+// Example:
+//
+//	handler := server.BasicAuthHandler{
+//	    Validate: server.ConstantTimeValidate("alice", "correct-horse-battery-staple"),
+//	}
+func ConstantTimeValidate(wantPrincipal, wantCredentials string) func(principal, credentials string) error {
+	return func(principal, credentials string) error {
+		pOK := subtle.ConstantTimeCompare([]byte(principal), []byte(wantPrincipal))
+		cOK := subtle.ConstantTimeCompare([]byte(credentials), []byte(wantCredentials))
+		if pOK&cOK != 1 {
+			return ErrAuthFailed
+		}
+		return nil
+	}
 }
 
 // Authenticate implements [AuthHandler]. It accepts only the "basic" scheme;

@@ -118,6 +118,47 @@ linters:
       - linters: [gosec]
         path: "_test\\.go"
         text: "G302"
+      # gosec G115 in test files: test harnesses cast node IDs and protocol
+      # constants between int64/uint64/uint16 with documented bounds. These
+      # casts mirror the production code they exercise and cannot overflow.
+      - linters: [gosec]
+        path: "_test\\.go"
+        text: "G115"
+      # gosec G115 in cypher/: all int64 ↔ uint64 NodeID conversions are
+      # bounded by the LPG node count (max 2^63-1 on 64-bit; sign bit is never
+      # set in practice). Every site is a Cypher integer-value to graph.NodeID
+      # cast where the Cypher value is validated as non-negative before the cast.
+      - linters: [gosec]
+        path: "cypher/"
+        text: "G115"
+      # gosec G115 in bolt/server/session.go: element-ID bookmark conversions
+      # cast atomic.Uint64 counter values to int64. The counter is monotonically
+      # increasing from 0; it will not reach 2^63 within the session lifetime.
+      - linters: [gosec]
+        path: "bolt/server/session\\.go"
+        text: "G115"
+      # gosec G115 in ds/: int → int32 casts in union-find are bounded by the
+      # caller-supplied n (node count); int32 represents up to ~2.1 billion nodes.
+      - linters: [gosec]
+        path: "ds/"
+        text: "G115"
+      # gosec G115 in graph/: all NodeID/property-index conversions are bounded by
+      # the LPG node and edge count. The sign bit (uint64 → int64 and int64 → uint64)
+      # is never set in practice on any graph that fits in addressable memory.
+      - linters: [gosec]
+        path: "graph/"
+        text: "G115"
+      # gosec G115 in search/: all int ↔ uint conversions are over node/edge
+      # indices bounded by the graph size, which cannot exceed addressable memory.
+      - linters: [gosec]
+        path: "search/"
+        text: "G115"
+      # gosec G115 in store/: WAL offsets, snapshot sizes, and codec widths are
+      # bounded by 64-bit address space; the narrowing casts mirror the on-disk
+      # format widths which are always within range.
+      - linters: [gosec]
+        path: "store/"
+        text: "G115"
       # gocritic: unnamedResult is a style preference, not a defect; allowed in
       # both production and test code where the return-type signature is
       # self-documenting.
@@ -173,18 +214,7 @@ linters:
         - name: unreachable-code
         - name: redefines-builtin-id
     gosec:
-      excludes:
-        # G115: integer overflow conversion. Excluded project-wide
-        # because the canonical use cases in graphs and persistence
-        # involve converting between graph.NodeID (uint64) and the
-        # smaller types ANTLR/Roaring/CRC32C require — e.g.,
-        # uint32(nodeID) into a Roaring container, int(rune) for
-        # parser tokens, int32(slotIdx) into the union-find slice
-        # backing. Every site has a documented upper bound (NodeID
-        # cap, parser token alphabet, slice length), so the runtime
-        # truncation G115 warns about cannot occur. Re-enable if a
-        # new code site lacks the upper-bound invariant.
-        - G115
+      excludes: []
     gocritic:
       enabled-tags:
         - performance

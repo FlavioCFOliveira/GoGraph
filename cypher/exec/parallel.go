@@ -40,6 +40,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"runtime/pprof"
 	"sync"
 
 	"gograph/cypher/expr"
@@ -140,19 +141,22 @@ func (op *ParallelScan) Init(ctx context.Context) error {
 	op.cancel = cancel
 	op.wg.Add(nWorkers)
 
-	for range nWorkers {
+	for i := range nWorkers {
+		i := i
 		go func() {
 			defer op.wg.Done()
-			op.workerLoop(wCtx, workCh, outCh, errCh)
+			pprof.Do(wCtx, pprof.Labels("component", "cypher-parallel-scan", "worker", fmt.Sprintf("%d", i)), func(ctx context.Context) {
+				op.workerLoop(ctx, workCh, outCh, errCh)
+			})
 		}()
 	}
 
 	// Closer goroutine: when all workers finish, close the output channel so
 	// Next() gets the end-of-stream signal.
-	go func() {
+	go pprof.Do(wCtx, pprof.Labels("component", "cypher-parallel-scan-closer"), func(_ context.Context) {
 		op.wg.Wait()
 		close(outCh)
-	}()
+	})
 
 	return nil
 }

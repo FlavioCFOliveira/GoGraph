@@ -2,7 +2,9 @@ package centrality
 
 import (
 	"context"
+	"fmt"
 	"runtime"
+	"runtime/pprof"
 	"sync"
 
 	"gograph/graph"
@@ -66,22 +68,25 @@ func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorker
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			localCB := make([]float64, n)
-			sigma := make([]float64, n)
-			dist := make([]int, n)
-			delta := make([]float64, n)
-			pred := make([][]int, n)
-			queue := make([]int, 0, n)
-			stack := make([]int, 0, n)
-			for s := w; s < n; s += numWorkers {
-				if err := workCtx.Err(); err != nil {
-					results[w].err = err
-					cancel()
-					return
-				}
-				queue, stack = brandesSource(s, n, verts, edges, sigma, dist, delta, pred, localCB, queue, stack)
-			}
-			results[w].cb = localCB
+			pprof.Do(workCtx, pprof.Labels("component", "betweenness-parallel", "worker", fmt.Sprintf("%d", w)),
+				func(wCtx context.Context) {
+					localCB := make([]float64, n)
+					sigma := make([]float64, n)
+					dist := make([]int, n)
+					delta := make([]float64, n)
+					pred := make([][]int, n)
+					queue := make([]int, 0, n)
+					stack := make([]int, 0, n)
+					for s := w; s < n; s += numWorkers {
+						if err := wCtx.Err(); err != nil {
+							results[w].err = err
+							cancel()
+							return
+						}
+						queue, stack = brandesSource(s, n, verts, edges, sigma, dist, delta, pred, localCB, queue, stack)
+					}
+					results[w].cb = localCB
+				})
 		}(w)
 	}
 	wg.Wait()

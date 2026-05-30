@@ -42,6 +42,7 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -313,6 +314,17 @@ type EngineOptions struct {
 	// it. A negative value is treated as misconfiguration and is
 	// clamped to the default by the constructor.
 	PlanCacheCapacity int
+
+	// MaxResultRows, when positive, limits the number of rows a single
+	// [Engine.Run] or [Engine.RunInTx] call may materialise. If a query
+	// produces more rows than MaxResultRows, the [Result] iterator returns
+	// [ErrResultRowsExceeded] from [Result.Next] when the limit is hit, and
+	// [Result.Err] reports the same error. Zero means no limit.
+	//
+	// This circuit-breaker prevents unintentional Cartesian-product queries
+	// from exhausting available memory. Set it to a value appropriate for the
+	// operational environment (e.g. 1_000_000 for a shared multi-tenant server).
+	MaxResultRows int64
 }
 
 // Engine is the public query engine. It binds a graph, a function registry,
@@ -337,6 +349,7 @@ type Engine struct {
 	constraintReg *exec.ConstraintRegistry
 	procReg       *procs.Registry
 	cache         *planCache
+	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
 }
 
 // NewEngine creates an Engine backed by g. The default built-in function
@@ -398,6 +411,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		constraintReg: exec.NewConstraintRegistry(),
 		procReg:       procs.NewRegistry(),
 		cache:         newPlanCache(opts.PlanCacheCapacity),
+		maxResultRows: opts.MaxResultRows,
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
 		return e.constraintReg.ListConstraintRows()
@@ -598,7 +612,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 			return
 		}
 		rs := exec.Run(ctx, op, cols)
-		r = newResult(rs, cols, nil, nil, nil)
+		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows)
 		r.materialize()
 	})
 	if buildErr != nil {
@@ -795,6 +809,11 @@ func queryHasWritingClause(query string) bool {
 // The pattern uses a case-insensitive flag and a word boundary anchor so
 // fragments like "PRESET" or "NOMERGE" are not falsely classified.
 //
+// ErrResultRowsExceeded is returned by [Result.Next] and [Result.Err] when the
+// number of materialised rows exceeds [EngineOptions.MaxResultRows]. It is a
+// permanent error: once set, subsequent Next calls return false.
+var ErrResultRowsExceeded = errors.New("cypher: result row limit exceeded")
+
 //nolint:gochecknoglobals // singleton regex compiled once at init
 var writingKeywordRE = regexp.MustCompile(`(?i)\b(CREATE|MERGE|SET|REMOVE|DELETE|DETACH)\b`)
 
@@ -1043,11 +1062,22 @@ type Result struct {
 	// transaction whose graph change is visible but whose index change is not.
 	bufHandled bool
 
+	// maxRows, when positive, caps the total number of rows Next() may return.
+	// Set from EngineOptions.MaxResultRows at result construction time.
+	maxRows  int64
+	rowCount int64  // incremented by Next(); never reset
+	rowsErr  error  // set to ErrResultRowsExceeded when the cap is hit
+
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
 
 // Next advances to the next result row. Returns true when a row is available.
+// If [EngineOptions.MaxResultRows] is set and the limit is reached, Next sets
+// the result's error to [ErrResultRowsExceeded] and returns false.
 func (r *Result) Next() bool {
+	if r.rowsErr != nil {
+		return false
+	}
 	if r.matOn {
 		if r.matIdx < len(r.matRows) {
 			r.matIdx++
@@ -1055,7 +1085,17 @@ func (r *Result) Next() bool {
 		}
 		return false
 	}
-	return r.rs.Next()
+	if !r.rs.Next() {
+		return false
+	}
+	if r.maxRows > 0 {
+		r.rowCount++
+		if r.rowCount > r.maxRows {
+			r.rowsErr = ErrResultRowsExceeded
+			return false
+		}
+	}
+	return true
 }
 
 // Record returns the current row as a map from column name to value.
@@ -1083,6 +1123,10 @@ func (r *Result) Record() exec.Record {
 func (r *Result) materialize() {
 	for r.rs.Next() {
 		r.matRows = append(r.matRows, r.rs.TakeRecord())
+		if r.maxRows > 0 && int64(len(r.matRows)) > r.maxRows {
+			r.rowsErr = ErrResultRowsExceeded
+			break
+		}
 	}
 	r.matOn = true
 }
@@ -1109,7 +1153,12 @@ func (r *Result) commitIndexUnderBarrier() {
 }
 
 // Err returns the first error encountered during iteration, or nil.
-func (r *Result) Err() error { return r.rs.Err() }
+func (r *Result) Err() error {
+	if r.rowsErr != nil {
+		return r.rowsErr
+	}
+	return r.rs.Err()
+}
 
 // Columns returns the ordered list of output column names.
 func (r *Result) Columns() []string { return r.cols }
@@ -1176,8 +1225,8 @@ func (r *Result) closeLocked() error {
 // trailing projection). In that case newResult drains the underlying
 // [exec.ResultSet] eagerly so the writes execute and the iterator becomes
 // immediately exhausted — TCK-conformant write-only semantics.
-func newResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64]) *Result {
-	r := &Result{rs: rs, cols: cols, buf: buf, idxMgr: idxMgr, tx: tx}
+func newResultWithLimit(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64], maxRows int64) *Result {
+	r := &Result{rs: rs, cols: cols, buf: buf, idxMgr: idxMgr, tx: tx, maxRows: maxRows}
 	if len(cols) == 0 {
 		for rs.Next() {
 			// discard the row; write side effects execute as a side effect
@@ -1185,6 +1234,10 @@ func newResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr 
 	}
 	runtime.SetFinalizer(r, finalizeResult)
 	return r
+}
+
+func newResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64]) *Result {
+	return newResultWithLimit(rs, cols, buf, idxMgr, tx, 0)
 }
 
 // finalizeResult is the runtime.SetFinalizer callback invoked by the GC
@@ -6266,7 +6319,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 			return nil
 		}
 		rs := exec.Run(ctx, op, cols)
-		r = newResult(rs, cols, buf, e.g.IndexManager(), walTx)
+		r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows)
 		r.materialize()
 		// Flip the secondary indexes inside the same barrier as the graph
 		// writes so index seeks never observe a partial transaction (F3.4).

@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -125,6 +127,7 @@ func (r *CertReloader) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate,
 // installed at construction time; Watch itself never returns an
 // error.
 func (r *CertReloader) Watch(interval time.Duration, stop <-chan struct{}) {
+	pprof.SetGoroutineLabels(pprof.WithLabels(context.Background(), pprof.Labels("component", "tls-cert-reloader")))
 	if interval <= 0 {
 		interval = time.Minute
 	}

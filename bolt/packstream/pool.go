@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"sync"
+
+	"gograph/internal/metrics"
 )
 
 // EncodePool is a pool of Encoders backed by bytes.Buffer writers.
@@ -25,6 +27,7 @@ func NewEncodePool() *EncodePool {
 // Get retrieves an Encoder from the pool, resetting it to write into dst.
 // The caller must call Put when done.
 func (ep *EncodePool) Get(dst *bytes.Buffer) *Encoder {
+	metrics.IncCounter("bolt.pool.encoder.get", 1)
 	enc := ep.p.Get().(*Encoder) //nolint:errcheck // sync.Pool.Get returns the concrete type we put in.
 	enc.Reset(dst)
 	return enc
@@ -32,6 +35,7 @@ func (ep *EncodePool) Get(dst *bytes.Buffer) *Encoder {
 
 // Put returns enc to the pool for reuse.
 func (ep *EncodePool) Put(enc *Encoder) {
+	metrics.IncCounter("bolt.pool.encoder.put", 1)
 	ep.p.Put(enc)
 }
 
@@ -53,6 +57,7 @@ func NewDecodePool() *DecodePool {
 // Get retrieves a Decoder from the pool, resetting it to read from src.
 // The caller must call Put when done.
 func (dp *DecodePool) Get(src *bytes.Reader) *Decoder {
+	metrics.IncCounter("bolt.pool.decoder.get", 1)
 	dec := dp.p.Get().(*Decoder) //nolint:errcheck // sync.Pool.Get returns the concrete type we put in.
 	dec.Reset(src)
 	return dec
@@ -60,5 +65,6 @@ func (dp *DecodePool) Get(src *bytes.Reader) *Decoder {
 
 // Put returns dec to the pool for reuse.
 func (dp *DecodePool) Put(dec *Decoder) {
+	metrics.IncCounter("bolt.pool.decoder.put", 1)
 	dp.p.Put(dec)
 }

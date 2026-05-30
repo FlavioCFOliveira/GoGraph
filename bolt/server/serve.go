@@ -148,11 +148,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	// cleanup and avoid spurious goroutine-leak reports.
 	var closeWG sync.WaitGroup
 	closeWG.Add(1)
-	go func() {
+	go pprof.Do(acceptCtx, pprof.Labels("component", "bolt-server-close-waiter"), func(_ context.Context) {
 		defer closeWG.Done()
 		<-acceptCtx.Done()
 		_ = ln.Close() //nolint:errcheck // closing to unblock Accept; error is not actionable
-	}()
+	})
 
 	defer func() {
 		cancel()       // signals the close goroutine to run
@@ -242,10 +242,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Wait for active connections with a drain timeout.
 	done := make(chan struct{})
-	go func() {
+	go pprof.Do(ctx, pprof.Labels("component", "bolt-server-drain"), func(_ context.Context) {
 		s.wg.Wait()
 		close(done)
-	}()
+	})
 
 	drainTimeout := shutdownDrainTimeout
 	if deadline, ok := ctx.Deadline(); ok {

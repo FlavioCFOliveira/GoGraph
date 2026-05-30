@@ -174,7 +174,7 @@ func (cw *ChunkedWriter) WriteMessage(msg []byte) error {
 		}
 		remaining = remaining[len(chunk):]
 
-		binary.BigEndian.PutUint16(lenBuf[:], uint16(len(chunk)))
+		binary.BigEndian.PutUint16(lenBuf[:], uint16(len(chunk))) //nolint:gosec // G115: chunk is capped to maxChunkSize (65535) two lines above, so len(chunk) <= 65535 and uint16 truncation cannot occur
 		if _, err := cw.w.Write(lenBuf[:]); err != nil {
 			return fmt.Errorf("bolt chunk: write length: %w", err)
 		}

@@ -230,6 +230,7 @@ func (s *bfsDoScratch) resize(words int) {
 var bfsDoScratchPool = sync.Pool{New: func() any { return &bfsDoScratch{} }}
 
 func acquireBFSDOScratch() *bfsDoScratch {
+	metrics.IncCounter("search.pool.bfs_do.get", 1)
 	s, _ := bfsDoScratchPool.Get().(*bfsDoScratch)
 	if s == nil {
 		s = &bfsDoScratch{}
@@ -238,5 +239,6 @@ func acquireBFSDOScratch() *bfsDoScratch {
 }
 
 func releaseBFSDOScratch(s *bfsDoScratch) {
+	metrics.IncCounter("search.pool.bfs_do.put", 1)
 	bfsDoScratchPool.Put(s)
 }
