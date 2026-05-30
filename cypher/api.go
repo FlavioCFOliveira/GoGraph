@@ -498,6 +498,22 @@ func (e *Engine) Procs() *procs.Registry {
 // ErrorKind→Bolt mapping used. Callers may use [errors.As] to recover the
 // typed error and inspect Category / SubType.
 //
+// checkParamTypes validates the supplied params against the types inferred from
+// plan. Property-vs-parameter equalities are typed from the index that backs
+// the property when one exists (an int64 index proves an Integer property, a
+// string index a String property); absent an index the inference defaults to
+// String. It is a no-op when params is empty.
+func (e *Engine) checkParamTypes(plan ir.LogicalPlan, params map[string]expr.Value) error {
+	if len(params) == 0 {
+		return nil
+	}
+	idxMgr := e.g.IndexManager()
+	resolve := func(label, property string) (expr.Kind, bool) {
+		return indexedPropKind(idxMgr, label, property)
+	}
+	return sema.CheckParams(sema.InferParamTypesWithResolver(plan, resolve), params)
+}
+
 // Sprint 25 support: MATCH (full scan or label scan) + RETURN.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
 	// ── 0. DDL fast-path ─────────────────────────────────────────────────────
@@ -518,10 +534,8 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	plan := entry.plan
 
 	// ── 1b. Parameter type check ─────────────────────────────────────────────
-	if len(params) > 0 {
-		if err := sema.CheckParams(sema.InferParamTypes(plan), params); err != nil {
-			return nil, err
-		}
+	if err := e.checkParamTypes(plan, params); err != nil {
+		return nil, err
 	}
 
 	// ── 2. Build physical operator tree ─────────────────────────────────────
@@ -4206,15 +4220,78 @@ type hashInt64Lookup interface {
 }
 
 // tryNewHashSeek attempts to build a NodeByIndexSeek operator using sub as the
-// hash index. It returns (nil, false) when sub is not a supported hash type.
+// hash index. It returns (nil, false) when sub is not a supported hash type, or
+// when seekVal's kind is incompatible with the index key type.
+//
+// The kind gate keeps the index a transparent optimisation: a string parameter
+// compared against an int64-keyed property is a type-incompatible equality that
+// openCypher evaluates to false. Declining the seek here lets the planner fall
+// back to the scan+filter, which yields the same zero-row result a non-indexed
+// graph would — rather than building a seek that fails at Init with
+// [exec.ErrIndexTypeMismatch].
 func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndexSeek, bool) {
 	if sl, ok := sub.(hashStringLookup); ok {
+		if seekVal.Kind() != expr.KindString {
+			return nil, false
+		}
 		return exec.NewNodeByIndexSeek(exec.NewStringHashIndex(sl), seekVal), true
 	}
 	if il, ok := sub.(hashInt64Lookup); ok {
+		if seekVal.Kind() != expr.KindInteger {
+			return nil, false
+		}
 		return exec.NewNodeByIndexSeek(exec.NewInt64HashIndex(il), seekVal), true
 	}
 	return nil, false
+}
+
+// indexedPropKind returns the declared key kind of the hash index that backs
+// (label, property), suitable for a [sema.PropTypeResolver]. It mirrors the
+// index-discovery order used by tryBuildIndexSeekFromSelection: the auto-named
+// "<label>_<property>_hash" index first, then any registered hash index as a
+// fallback. ok is false when no hash index is found or its key type is not one
+// of the kinds the seek path supports.
+//
+// Only hash indexes carry a Go-typed key the engine can map to an expr.Kind;
+// label and btree indexes return ("", false) and leave the parameter type at
+// its conservative default.
+func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, bool) {
+	if idxMgr == nil || property == "" {
+		return 0, false
+	}
+	if label != "" {
+		wantName := strings.ToLower(label) + "_" + strings.ToLower(property) + "_hash"
+		if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" {
+			if k, ok := hashIndexKind(sub); ok {
+				return k, true
+			}
+		}
+	}
+	// Fallback: scan registered indexes, matching tryAnyHashSeek's reach. With
+	// no label to disambiguate we accept the first usable hash index, which is
+	// the same index that fallback seek would bind.
+	for _, name := range idxMgr.ListIndexes() {
+		sub, err := idxMgr.GetIndex(name)
+		if err != nil || sub.Kind() != "hash" {
+			continue
+		}
+		if k, ok := hashIndexKind(sub); ok {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+// hashIndexKind maps a hash index Subscriber to the expr.Kind of its key, by
+// the same type assertions tryNewHashSeek uses to bind the seek operator.
+func hashIndexKind(sub index.Subscriber) (expr.Kind, bool) {
+	if _, ok := sub.(hashStringLookup); ok {
+		return expr.KindString, true
+	}
+	if _, ok := sub.(hashInt64Lookup); ok {
+		return expr.KindInteger, true
+	}
+	return 0, false
 }
 
 // lpgPropToExpr converts an lpg.PropertyValue to its expr.Value counterpart.
@@ -6090,10 +6167,8 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	}
 	plan := entry.plan
 
-	if len(params) > 0 {
-		if err := sema.CheckParams(sema.InferParamTypes(plan), params); err != nil {
-			return nil, err
-		}
+	if err := e.checkParamTypes(plan, params); err != nil {
+		return nil, err
 	}
 
 	walker := &lpgNodeWalker{g: e.g}

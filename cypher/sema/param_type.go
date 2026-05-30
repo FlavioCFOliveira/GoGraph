@@ -15,9 +15,16 @@ import (
 //
 //	n.prop = $name   or   $name = n.prop
 //
-// The inferred kind is KindString by default (most property lookups use string
-// keys). Callers can use the returned map with CheckParams to validate that
-// the params map supplied at Run time is type-compatible before query execution.
+// The query text alone does not reveal the type of n.prop: it depends on the
+// data stored under that property. The only authoritative, declared type signal
+// the engine has is an index on (label, prop) — an int64 hash index proves the
+// property is Integer, a string hash index proves String, and so on. Callers
+// therefore supply a PropTypeResolver that maps (label, prop) to the indexed
+// key kind; when the resolver knows the type it wins. Absent any index, the
+// kind falls back to KindString, the most common property-lookup key type.
+//
+// Callers use the returned map with CheckParams to validate that the params map
+// supplied at Run time is type-compatible before query execution.
 
 // ParamTypeError is returned by [CheckParams] when a parameter value's Kind
 // does not match the expected Kind inferred from the query context.
@@ -36,38 +43,73 @@ func (e *ParamTypeError) Error() string {
 		e.Name, e.Expected, e.Got)
 }
 
+// PropTypeResolver returns the declared expr.Kind of a (nodeLabel, property)
+// pair when an authoritative type signal exists for it — in practice, an index
+// whose key type is known. label is empty when the property is read from an
+// unlabelled scan. ok is false when no type is known, in which case the caller
+// keeps its conservative default.
+//
+// A resolver must be a pure read-only lookup; InferParamTypesWithResolver may
+// call it once per inferrable predicate.
+type PropTypeResolver func(label, property string) (kind expr.Kind, ok bool)
+
 // InferParamTypes walks plan looking for Selection nodes whose predicate is an
 // equality comparison involving a parameter reference ($name) and a property
 // access (n.prop). It returns a map from parameter name (without $) to the
-// expected expr.Kind.
+// expected expr.Kind, defaulting to KindString for every property-vs-parameter
+// equality.
+//
+// It is equivalent to InferParamTypesWithResolver(plan, nil) and is retained
+// for callers (and tests) that have no index information to offer.
+func InferParamTypes(plan ir.LogicalPlan) map[string]expr.Kind {
+	return InferParamTypesWithResolver(plan, nil)
+}
+
+// InferParamTypesWithResolver behaves like InferParamTypes but consults resolve
+// to determine the expected kind of a parameter compared against a property.
+// When resolve reports a known kind for the (scanLabel, prop) pair it is used;
+// otherwise the kind falls back to KindString. A nil resolve always falls back.
 //
 // When the same parameter appears in multiple incompatible contexts the first
 // encountered wins. Parameters used in non-inferrable positions are omitted.
-func InferParamTypes(plan ir.LogicalPlan) map[string]expr.Kind {
+func InferParamTypesWithResolver(plan ir.LogicalPlan, resolve PropTypeResolver) map[string]expr.Kind {
 	result := make(map[string]expr.Kind)
-	inferFromPlan(plan, result)
+	inferFromPlan(plan, resolve, result)
 	return result
 }
 
-func inferFromPlan(plan ir.LogicalPlan, out map[string]expr.Kind) {
+func inferFromPlan(plan ir.LogicalPlan, resolve PropTypeResolver, out map[string]expr.Kind) {
 	if plan == nil {
 		return
 	}
 	if sel, ok := plan.(*ir.Selection); ok {
-		inferFromPredicate(sel.Predicate, out)
+		inferFromPredicate(sel.Predicate, scanLeafLabel(sel.Child), resolve, out)
 	}
 	for _, child := range plan.Children() {
-		inferFromPlan(child, out)
+		inferFromPlan(child, resolve, out)
+	}
+}
+
+// scanLeafLabel returns the node label of a bare scan leaf directly beneath a
+// Selection, or "" for an unlabelled AllNodesScan or any non-scan child. The
+// label lets the resolver disambiguate which index backs the property.
+func scanLeafLabel(child ir.LogicalPlan) string {
+	switch c := child.(type) {
+	case *ir.NodeByLabelScan:
+		return c.Label
+	default:
+		return ""
 	}
 }
 
 // inferFromPredicate parses the opaque predicate string for patterns of the
-// form "(n.prop = $name)" or "($name = n.prop)" and records
-// name → KindString as the expected type.
+// form "(n.prop = $name)" or "($name = n.prop)" and records the expected kind
+// for name. The kind is taken from resolve(label, prop) when known, else
+// KindString.
 //
 // The string form produced by [ast.BinaryOp.String] wraps the expression in
 // parentheses: "(left op right)". We strip outer parens and match the = case.
-func inferFromPredicate(pred string, out map[string]expr.Kind) {
+func inferFromPredicate(pred, label string, resolve PropTypeResolver, out map[string]expr.Kind) {
 	pred = strings.TrimSpace(pred)
 	// Strip wrapping parens produced by BinaryOp.String().
 	if strings.HasPrefix(pred, "(") && strings.HasSuffix(pred, ")") {
@@ -83,20 +125,41 @@ func inferFromPredicate(pred string, out map[string]expr.Kind) {
 	right := strings.TrimSpace(pred[idx+3:])
 
 	// Pattern 1: n.prop = $name
-	if strings.ContainsRune(left, '.') && strings.HasPrefix(right, "$") {
-		name := right[1:]
-		if _, seen := out[name]; !seen {
-			out[name] = expr.KindString
-		}
+	if prop, isProp := propKeyOf(left); isProp && strings.HasPrefix(right, "$") {
+		recordParam(out, right[1:], label, prop, resolve)
 		return
 	}
 	// Pattern 2: $name = n.prop
-	if strings.HasPrefix(left, "$") && strings.ContainsRune(right, '.') {
-		name := left[1:]
-		if _, seen := out[name]; !seen {
-			out[name] = expr.KindString
+	if prop, isProp := propKeyOf(right); isProp && strings.HasPrefix(left, "$") {
+		recordParam(out, left[1:], label, prop, resolve)
+	}
+}
+
+// propKeyOf returns the property key of a "var.key" operand and true, or
+// ("", false) when operand is not a property access. Only the final dotted
+// segment is treated as the key, mirroring [ast.Property.String].
+func propKeyOf(operand string) (key string, ok bool) {
+	i := strings.LastIndexByte(operand, '.')
+	if i < 0 || i == len(operand)-1 {
+		return "", false
+	}
+	return operand[i+1:], true
+}
+
+// recordParam records name → kind, resolving the kind from the (label, prop)
+// pair when the resolver knows it and defaulting to KindString otherwise. The
+// first kind recorded for a given name wins.
+func recordParam(out map[string]expr.Kind, name, label, prop string, resolve PropTypeResolver) {
+	if _, seen := out[name]; seen {
+		return
+	}
+	kind := expr.KindString
+	if resolve != nil {
+		if k, ok := resolve(label, prop); ok {
+			kind = k
 		}
 	}
+	out[name] = kind
 }
 
 // CheckParams validates that every parameter in inferred also appears in
