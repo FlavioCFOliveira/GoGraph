@@ -16,20 +16,27 @@ import (
 // produces a non-zero duration because each call to time.Now() advances by
 // at least one tick.
 //
-// The engine calls [SetStatementNow] at the start of every query and
-// [ClearStatementNow] when the query result is closed. Within a query the
-// temporal "now" constructors call [StatementNow], which returns the
-// frozen time when set and time.Now().UTC() otherwise (the engine never
-// installs a value when the registry is used standalone, e.g. in unit
-// tests that call a function directly).
+// The production engine (cypher.Engine) satisfies this requirement without
+// touching statementNow: it wraps its FunctionRegistry in a per-query
+// nowAwareRegistry (cypher/stmt_now_reg.go) that captures time.Now() once at
+// the start of each Engine.Run / Engine.RunInTx call and overrides the
+// zero-argument forms of the five temporal constructors to return values
+// derived from that frozen instant. Concurrent queries therefore each observe
+// their own independent timestamp with no shared mutable state.
+//
+// statementNow is retained exclusively for the TCK runner
+// (cypher/tck/runner_test.go) and for standalone unit tests that call
+// temporal functions directly outside an Engine: those callers use
+// [SetStatementNow] to pin a deterministic instant before running the
+// scenario and [ClearStatementNow] to restore the fall-through behaviour
+// afterwards.
 //
 // # Concurrency
 //
-// statementNow is process-global. Two queries running concurrently in
-// the same process will race; the last writer wins. This is acceptable
-// for the TCK runner (one query at a time per worker) but a future
-// improvement is to thread the timestamp through the per-query
-// FunctionRegistry instead, so each query owns its own instant.
+// statementNow is process-global. Callers outside the engine (e.g. the TCK
+// runner) that use [SetStatementNow] must serialise their own calls if they
+// run in parallel, as the last writer wins. The engine itself never calls
+// SetStatementNow.
 
 //nolint:gochecknoglobals // process-global statement-now; replaceable via Set/Clear
 var statementNow atomic.Pointer[time.Time]

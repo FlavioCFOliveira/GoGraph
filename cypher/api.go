@@ -526,7 +526,13 @@ func (e *Engine) checkParamTypes(plan ir.LogicalPlan, params map[string]expr.Val
 }
 
 // Sprint 25 support: MATCH (full scan or label scan) + RETURN.
-func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
+func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
+	defer cmetrics.Time("cypher.Run")()
+	defer func() {
+		if err != nil {
+			cmetrics.IncCounter("cypher.Run.errors", 1)
+		}
+	}()
 	// ── 0. DDL fast-path ─────────────────────────────────────────────────────
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query)
@@ -566,18 +572,27 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		r        *Result
 		buildErr error
 	)
+	// Freeze a per-query "now" so all temporal constructors (date(), time(),
+	// localtime(), datetime(), localdatetime()) observe the same instant within
+	// this statement — openCypher requirement. The registry wrapper captures
+	// the frozen time and overrides only the zero-argument forms of those five
+	// functions; all other functions and all non-zero-argument calls are
+	// delegated unchanged. Using a per-query registry avoids touching the
+	// process-global statementNow in funcs, so concurrent Engine.Run calls
+	// never race on it.
+	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
 		walker := &lpgNodeWalker{g: e.g}
 		labelSrc := &lpgLabelResolver{g: e.g}
 		// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
 		// expressions encountered inside Filter/Project closures can drive their
 		// inner pipelines against the current outer row (task-396).
-		subEval := newSubqueryEvaluator(walker, labelSrc, e.reg, e.g)
+		subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, e.g)
 		// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
 		// predicates can be evaluated against the live graph (task-961).
 		patEval := newPatternEvaluator(e.g)
 		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx}
-		op, cols, err := buildPlanEngine(plan, walker, labelSrc, e.reg, params, e.g.IndexManager(), e.procReg, bopts)
+		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
 			buildErr = err
 			return
@@ -6171,27 +6186,30 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 //
 // RunInTx is safe for concurrent use (each call creates an independent
 // operator tree), subject to the single-writer constraint on write queries.
-func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
+func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
+	defer cmetrics.Time("cypher.RunInTx")()
+	defer func() {
+		if err != nil {
+			cmetrics.IncCounter("cypher.RunInTx.errors", 1)
+		}
+	}()
 	// DDL queries don't require a write transaction.
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query)
 	}
 
-	// Freeze the "now" instant for this statement so every call to the
-	// temporal `now` constructors (localtime(), time(), date(),
-	// localdatetime(), datetime()) within this query observes the same
-	// instant — openCypher requirement (closes Temporal10 [12] flake
+	// Freeze a per-query "now" so all temporal constructors (date(), time(),
+	// localtime(), datetime(), localdatetime()) observe the same instant within
+	// this statement — openCypher requirement (closes Temporal10 [12] flake
 	// `RETURN duration.inSeconds(localtime(), localtime())` whose two
 	// localtime() calls otherwise advance by one tick).
 	//
-	// We do NOT defer ClearStatementNow at RunInTx-return time: the
-	// engine returns a *Result whose Next() drives the operator
-	// pipeline lazily, so the temporal evaluators fire AFTER this
-	// function returns. Leaving statementNow installed until the next
-	// query overwrites it keeps sequential queries deterministic; the
-	// process-global value loses concurrent-query precision but the
-	// runner serialises writers anyway and reads share state safely.
-	funcs.SetStatementNow(time.Now())
+	// The registry wrapper captures the frozen time per-query and overrides
+	// only the zero-argument forms of those five functions, so concurrent
+	// Engine.RunInTx calls never race on the process-global statementNow
+	// in funcs. (statementNow is still used by the TCK runner and standalone
+	// unit tests via funcs.SetStatementNow; see cypher/funcs/now.go.)
+	queryReg := newNowAwareRegistry(e.reg, time.Now())
 
 	entry, err := e.parseAndAnalyse(query)
 	if err != nil {
@@ -6242,7 +6260,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	_ = e.g.ApplyAtomically(func() error {
 		walker := &lpgNodeWalker{g: e.g}
 		labelSrc := &lpgLabelResolver{g: e.g}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, e.reg, params, mutator, e.constraintReg, e.g.IndexManager())
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager())
 		if berr != nil {
 			buildErr = berr
 			return nil
