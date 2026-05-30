@@ -6,6 +6,65 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Sprint 125 (Production readiness — P0 blockers & P1 items, 2026-05-30)
+
+- **`internal/metrics/prometheus`**: new subpackage providing a self-contained
+  Prometheus text-exposition-format backend implementing `metrics.Backend`. No
+  external dependencies; exposes `New()`, `WriteText(io.Writer)`, and
+  `Handler() http.Handler` for `/metrics` scrape endpoints.
+- **`bolt/server`**: `Options.MaxStatementTimeout` — server-side cap on
+  client-supplied query timeouts. When set, client timeouts exceeding the cap are
+  silently clamped; queries with no client timeout receive the cap unconditionally.
+- **`bolt/server`**: startup warning via `slog.Warn` when `NoAuthHandler` is the
+  active auth handler, making insecure-default deployments immediately visible in logs.
+- **`cypher`**: per-query statement-now registry (`nowAwareRegistry`) so concurrent
+  `Engine.Run` and `Engine.RunInTx` calls each observe an independent frozen
+  timestamp for temporal `now` constructors — resolves the process-global race on
+  `NOW()`, `date()`, `datetime()`, etc.
+
+### Fixed — Sprint 125
+
+- **`cypher/api.go`**: `Engine.Run` and `Engine.RunInTx` now emit latency
+  histograms (`cypher.Run`, `cypher.RunInTx`) and paired error counters via
+  `internal/metrics`, satisfying the CLAUDE.md mandate for latency observation
+  on every public blocking API.
+- **`bolt/server/session.go`**: internal error messages are sanitised before
+  being sent to Bolt clients; raw `err.Error()` strings (including auth-failure
+  details and internal stack paths) are replaced with safe client-visible
+  categories. The real error is logged server-side with the session correlation ID.
+- **`.github/workflows/tck.yml`**: added explicit `TestTCKExecution` step with
+  `-timeout 600s` so the full 3 897-scenario execution gate runs on every PR/push
+  independently of the `make test-short` timeout budget.
+
+### Changed — Sprint 125
+
+- **`docs/tck/DIVERGENCES.md`**: execution-level table updated to reflect
+  3 897/3 897 (100 %) at HEAD; all Category 5 gaps marked RESOLVED.
+- **`README.md`**: execution-level TCK status updated from 39.4 % to 100 %
+  (3 897/3 897); examples count updated from 23 to 25.
+- **`cypher/tck/conformance_history.go`**: package godoc extended with the full
+  execution-level progression through Sprints 58–64 and the 100 % milestone.
+
+### Added — Sprint 119 (Godoc effort, 2026-05-30)
+
+- **+95 runnable `Example*` functions** across all ~44 exported packages
+  (2 → 97 total), covering every major API surface with compilable, testable
+  demonstrations.
+- **Package-level doc comments** on all library packages that lacked them.
+- **Entrypoint map** in the root `doc.go` cross-linking every subsystem.
+
+### Added — Sprint 110 (ACID hardening, 2026-05-29)
+
+- **`store/txn`**: `ErrCommittedNotApplied` sentinel (F5) ensures post-durability
+  apply failures are never ambiguous plain errors.
+- **`store/wal`**: parent-directory `fsync` on WAL file creation (F4).
+- **`store/checkpoint`**: self-sufficiency gate before WAL truncation (F2) —
+  checkpoints include `mapper.bin` before truncating.
+- **`store/txn`**: isolation barrier via `lpg.Graph.ApplyAtomically` / `Graph.View`
+  (F3) — no reader observes a partial transaction.
+- **`store/recovery`**: `committed_apply_failed_test.go` — cross-process test
+  proving recovery reconciles a durable-but-unapplied transaction (F5).
+
 ### Added — Sprint 58 (Test infrastructure & shape generators)
 
 - **Makefile**: three new layer-aligned test targets `test-short`, `test-soak`,
@@ -31,13 +90,11 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - **`internal/shapegen`**: soak-layer tests for LDBC Graphalytics reference
   graphs (`cit-Patents`, `dota-league`, `kgs`).
 
-v2.0.0 stable is pending. Gate requirement: execution-level TCK ≥ 80 %,
-all CI checks green, and all T-series tasks in `docs/tck/DIVERGENCES.md`
-closed. Current status (commit `7405463`, 2026-05-22):
-**parser-level TCK 100 %** (3 897 / 3 897 scenarios, up from 99.5 % at
-v2.0.0-rc2 — task #402, Sprint 43 closed the last grammar-gap-literal
-sub-class) and **39.4 % execution TCK** (1 536 / 3 897 scenarios, up
-from 25.8 % at v2.0.0-rc2). See `docs/semver.md` for the full
+v2.0.0 stable is pending the canonical 4-hour Cypher mixed-load soak run
+(the Bolt 4-hour soak is already green). Gate status (HEAD, 2026-05-30):
+**parser-level TCK 100 %** (3 897/3 897) and **execution-level TCK 100 %**
+(3 897/3 897, `tckExecutionBaseline = 3897` enforced on every PR). ACID
+hardening complete (F1–F5 all closed). See `docs/semver.md` for the full
 release-gate specification and `docs/tck/DIVERGENCES.md` for the
 authoritative pass-rate table.
 

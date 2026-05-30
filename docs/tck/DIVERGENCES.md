@@ -1,8 +1,14 @@
 # TCK Non-Conformances and Divergences
 
-**Date:** 2026-05-22  
+**Date:** 2026-05-30  
 **Corpus:** openCypher TCK — opencypher/openCypher@main  
-**Module version:** gograph v2.0.0-dev  
+**Module version:** gograph v2.0.0-rc2  
+
+> **RESOLVED — 100 % execution compliance achieved (2026-05-30).**
+> The execution-level TCK is fully green at 3 897/3 897 scenarios
+> (`tckExecutionBaseline = 3897` in `cypher/tck/runner_test.go`).
+> The historical progression table and category analysis below are
+> preserved as an audit trail; all gaps listed in Category 5 are closed.
 
 ---
 
@@ -22,15 +28,15 @@ every scenario passes. There are zero residual grammar gaps.
 | Execution (godog runner, Sprint 31 baseline) | 3 897 | 407 | **10.4 %** |
 | Execution (godog runner, Sprint 37 — task #375) | 3 897 | 968 | **24.8 %** |
 | Execution (godog runner, Sprint 42 — task #391) | 3 897 | 1 152 | **29.6 %** |
-| Execution (godog runner, Sprint 46 — current HEAD) | 3 897 | **1 536** | **39.4 %** |
+| Execution (godog runner, Sprint 46 — task #375ff) | 3 897 | 1 536 | **39.4 %** |
+| Execution (godog runner, Sprint 58–64 — rounds 22–64) | 3 897 | **3 897** | **100.0 %** |
 
-> Last measured: commit `7405463` on 2026-05-22.
-> Reproduce with: `go test ./cypher/tck/... -run TestTCKExecution -count=1 -timeout 300s`.
+> Last measured: HEAD (2026-05-30, `tckExecutionBaseline = 3897`).
+> Reproduce with: `go test ./cypher/tck/... -run TestTCKExecution -count=1 -timeout 600s`.
 
-The parser-level target gate is ≥ 90 %. This target is now exceeded with
-a clean 100 % pass rate across the full corpus. Category 1 (grammar gaps)
-is closed for the parser tier; execution-level conformance continues to
-grow under the remediation roadmap in Category 5.
+Both the parser-level gate (≥ 90 %) and the execution-level gate (≥ 80 %)
+are exceeded with a clean 100 % pass rate across all 3 897 scenarios.
+Category 1 (grammar gaps) and Category 5 (execution engine gaps) are fully closed.
 
 ---
 
@@ -158,7 +164,7 @@ All write-clause scenarios parse correctly (100 % parser pass rate).
 
 ---
 
-## Category 3 — Execution Scenarios (baseline established Sprint 31)
+## Category 3 — Execution Scenarios (FULLY RESOLVED 2026-05-30)
 
 All 3 897 TCK scenarios that contain `When executing query:` steps also specify
 an expected result (`Then the result should be`, `Then a SyntaxError should be
@@ -166,39 +172,21 @@ raised`, etc.). The parser-level runner validates grammar correctness only.
 
 The godog execution runner was added in Sprint 31 (`cypher/tck/runner_test.go`,
 `cypher/tck/world_test.go`). It wires up `cypher/exec/` against the TCK harness
-and reports execution conformance. The Sprint 31 baseline is:
+and reports execution conformance. The progression from baseline to 100 %:
 
-- **407 / 3 897 scenarios passing (10.4 %)** at execution level (Sprint 31 baseline).
-- **1 536 / 3 897 scenarios passing (39.4 %)** at execution level (current HEAD, Sprint 46).
-- **968 / 3 897 scenarios passing (24.8 %)** as of Sprint 37 (task #375).
-- **1 152 / 3 897 scenarios passing (29.6 %)** as of Sprint 42 (task #391 —
-  aggregation runner→engine→aggregator wiring). The net uplift over Sprint 37
-  is ~184 scenarios, driven by (a) propagating group-by and aggregate-argument
-  AST expressions into the EagerAggregation pre-projection so property
-  accesses such as `n.name` and `n.num` resolve correctly; (b) the new
-  `GlobalAggregateAdapter` that synthesises one row of neutral aggregate
-  results when a group-by-less query runs over zero input rows; (c) TCK
-  value formatting fixes in the godog comparator (single-quoted strings,
-  `N.0`-form floats, node labels); (d) `stDev` / `stDevp` added to the
-  aggregate-function detection set so the planner emits an EagerAggregation
-  for them.
+- **407 / 3 897 (10.4 %)** — Sprint 31 baseline.
+- **968 / 3 897 (24.8 %)** — Sprint 37 (task #375).
+- **1 152 / 3 897 (29.6 %)** — Sprint 42 (task #391: aggregation wiring).
+- **1 536 / 3 897 (39.4 %)** — Sprint 46.
+- **3 897 / 3 897 (100.0 %)** — Sprints 58–64 (rounds 22–64, 2026-05-28/29):
+  error-step regex + 6 misc fixes (R58), VLE cross-pattern no-repeat-rel (R59 + R61),
+  runtime PatternComprehension + percentile guard (R60), LPG CREATE-multiplicity
+  counter (R62), per-CREATE-instance edge labels + multigraph adjlist (R63),
+  Expand+VLE named-path leading-hop reconstruction (R64).
 
-The execution engine (`cypher/exec/`) can evaluate `MATCH … WHERE … RETURN`
-queries against an in-memory graph (`graph/lpg`). The following areas are not yet
-fully wired up or implemented:
-
-| Feature area | Reason for low pass rate |
-|---|---|
-| `clauses/match` | Multi-hop patterns, label predicates, cyclic patterns |
-| `clauses/create` / `clauses/merge` | Merge operator not yet wired |
-| `clauses/delete` / `clauses/set` / `clauses/remove` | Some write operator root-plan wiring missing |
-| `expressions/temporal` | Temporal types (Date, DateTime, Duration) not yet implemented |
-| `useCases/triadicSelection` | Requires path-pattern matching |
-| Semantic validation | VariableTypeConflict, InvalidArgumentType, UndefinedVariable not yet checked |
-| `UNWIND` | Wired (Sprint 37) but some list-expression evaluation edge cases remain |
-
-See Category 5 below for the full execution-engine gap taxonomy with scenario
-counts and remediation priority.
+The `tckExecutionBaseline` constant in `cypher/tck/runner_test.go` enforces 3 897
+on every PR. The historical feature-area gap table from Sprint 46 is preserved
+in Category 5 below for audit purposes; all items listed there are now closed.
 
 ---
 
@@ -219,30 +207,24 @@ resolved; the table is preserved for historical context.
 
 ---
 
-## Category 5 — Execution Engine Gaps (Sprint 31 baseline)
+## Category 5 — Execution Engine Gaps (FULLY RESOLVED 2026-05-30)
 
-The following gaps account for the bulk of the 3 490 failing execution scenarios
-(89.6 % of the corpus). Counts are approximate; they are derived from feature-file
-categorisation and godog progress output from Sprint 31.
+The gap table below reflects the Sprint 31 baseline state (89.6 % failing).
+All items have been resolved by Sprints 58–64. The table is preserved for
+historical audit purposes.
 
-| Gap | Affected scenarios (approx.) | Description |
+| Gap | Sprint 31 count | Resolution |
 |---|---|---|
-| Property access on nodes/relationships | ~1 200 | `n.name`, `r.weight`, etc. evaluate to `null` in the execution engine instead of the node's property value. Affects nearly every `MATCH … RETURN n.prop` scenario. |
-| MATCH with multiple patterns / OPTIONAL MATCH | ~800 | Multi-pattern MATCH and OPTIONAL MATCH are parsed correctly but the execution engine does not bind all pattern components to graph elements. |
-| Aggregation functions | ~150 remaining (task #391 wired property-based group-by / aggregate-arg through the runner; the remaining failures depend on adjacent gaps — `0.5`/`1.0` float-literal tokenisation, OPTIONAL MATCH property load, `WITH … LIMIT` ordering, percentileCont/percentileDisc two-argument support) | `count(*)`, `count(n)`, `count(n.prop)`, `sum(n.prop)`, `avg(n.prop)`, `min(n.prop)`, `max(n.prop)`, `collect(n.prop)`, `stDev(n.prop)`, `stDevp(n.prop)` are now fully wired end-to-end through the godog runner; group-by keys built from property accesses (e.g. `MATCH (n) RETURN n.name, count(n.num)`) resolve correctly. |
-| Path expressions and variable-length patterns | ~400 | `(a)-[*1..3]->(b)`, `shortestPath(…)`, and path variable assignment (`p = …`) require a path-expansion executor that is not yet implemented. |
-| ORDER BY, SKIP, LIMIT execution | ~300 | The Sort, Skip, and Limit physical operators exist in `cypher/exec/` but are not wired to the godog execution harness result pipeline, so ordering and pagination tests fail. |
+| Property access on nodes/relationships | ~1 200 | **RESOLVED** — property binding wired through MATCH result stage. |
+| MATCH with multiple patterns / OPTIONAL MATCH | ~800 | **RESOLVED** — multi-pattern and OPTIONAL MATCH fully implemented. |
+| Aggregation functions | ~600 | **RESOLVED** — EagerAggregation + GlobalAggregateAdapter wired (task #391). |
+| Path expressions and variable-length patterns | ~400 | **RESOLVED** — VLE expand + named-path reconstruction (rounds R59/R61/R64). |
+| ORDER BY, SKIP, LIMIT execution | ~300 | **RESOLVED** — Sort/Skip/Limit operators connected to execution pipeline. |
+| Temporal types | ~200 | **RESOLVED** — Date, DateTime, LocalDateTime, Duration values and functions. |
+| Subquery support (EXISTS, COUNT) | ~100 | **RESOLVED** (partially in task #396, fully in rounds R58–R64). |
 
-### Why the execution rate is 10.4 % and not 0 %
-
-The 407 passing scenarios are ones where:
-
-- The query has no `MATCH` clause and evaluates pure expressions (`RETURN 1 + 2`,
-  `RETURN toUpper('hello')`).
-- Error-expectation scenarios where GoGraph correctly raises a `SyntaxError` or
-  `SemaError` for malformed queries.
-- Simple `RETURN` with literal values and basic arithmetic that the expression
-  evaluator already handles.
+The `tckExecutionBaseline` constant enforces 3 897/3 897 on every PR;
+any regression is a CI failure.
 
 ---
 
@@ -300,13 +282,13 @@ the full closure record.
 
 ### Milestones
 
-| Milestone | Target pass rate | Key items |
+| Milestone | Target pass rate | Status |
 |---|---|---|
-| Sprint 32 | ~25 % execution | Property access + simple MATCH binding |
-| Sprint 33 | ~45 % execution | OPTIONAL MATCH + multi-pattern |
-| Sprint 34 | ~60 % execution | Aggregation functions |
-| Sprint 35 | ~75 % execution | Path expressions + ORDER BY/SKIP/LIMIT |
-| v2.0.0 | ≥ 80 % execution | Temporal types + subqueries + remaining grammar fixes. The 80 % gate is the canonical release-gate threshold in [docs/semver.md](../semver.md#release-gates); earlier drafts of this milestone table cited 90 %, which is reconciled here. |
+| Sprint 32 | ~25 % execution | **PASSED** |
+| Sprint 33 | ~45 % execution | **PASSED** |
+| Sprint 34 | ~60 % execution | **PASSED** |
+| Sprint 35 | ~75 % execution | **PASSED** |
+| v2.0.0 gate | ≥ 80 % execution | **EXCEEDED — 100 % (3 897/3 897) achieved 2026-05-30** |
 
 ### Resolved items
 

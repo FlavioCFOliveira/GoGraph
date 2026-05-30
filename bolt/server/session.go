@@ -61,6 +61,10 @@ type Session struct {
 	// stmtTimeout is extracted from RUN extra metadata ("timeout" key, ms).
 	stmtTimeout time.Duration
 
+	// maxStmtTimeout is the server-side cap applied to client-supplied timeouts.
+	// Zero means no cap.
+	maxStmtTimeout time.Duration
+
 	// bookmark holds the last committed transaction bookmark (server-generated
 	// placeholder for this sprint).
 	bookmark string
@@ -96,6 +100,14 @@ func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session
 		localAddr:   localAddr,
 		log:         slog.Default(),
 		maxInFlight: DefaultMaxInFlightPerConnection,
+	}
+}
+
+// setMaxStmtTimeout sets the server-side statement timeout cap. Non-positive
+// values are ignored.
+func (s *Session) setMaxStmtTimeout(d time.Duration) {
+	if d > 0 {
+		s.maxStmtTimeout = d
 	}
 }
 
@@ -202,8 +214,8 @@ func (s *Session) handleHello(m *proto.Hello) ([]any, error) {
 	id, err := s.auth.Authenticate(scheme, principal, credentials)
 	if err != nil {
 		s.state = StateFailed
-		code := authErrorCode(err)
-		return []any{&proto.Failure{Code: code, Message: err.Error()}}, nil
+		s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
+		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 	}
 	s.identity = id
 
@@ -235,7 +247,8 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 	id, err := s.auth.Authenticate(scheme, principal, credentials)
 	if err != nil {
 		s.state = StateFailed
-		return []any{&proto.Failure{Code: authErrorCode(err), Message: err.Error()}}, nil
+		s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
+		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 	}
 	s.identity = id
 
@@ -326,18 +339,29 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 			slog.Any("bookmarks", bms))
 	}
 
-	// Extract optional statement timeout from extra metadata.
+	// Extract optional statement timeout from extra metadata and apply the
+	// server-side cap (maxStmtTimeout). When the client supplies no timeout
+	// but maxStmtTimeout is set, the cap is applied unconditionally.
 	if v, ok := m.Extra["timeout"]; ok {
 		if ms, ok := v.(int64); ok && ms > 0 {
 			s.stmtTimeout = time.Duration(ms) * time.Millisecond
 		}
 	}
+	effective := s.stmtTimeout
+	if s.maxStmtTimeout > 0 {
+		switch {
+		case effective <= 0:
+			effective = s.maxStmtTimeout
+		case effective > s.maxStmtTimeout:
+			effective = s.maxStmtTimeout
+		}
+	}
 
 	// Build execution context with optional deadline.
 	runCtx := ctx
-	if s.stmtTimeout > 0 {
+	if effective > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, s.stmtTimeout)
+		runCtx, cancel = context.WithTimeout(ctx, effective)
 		defer cancel()
 	}
 
@@ -373,9 +397,10 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	s.state = next
 
 	if runErr != nil {
+		s.log.Error("bolt: query execution failed", slog.String("session", s.id), slog.String("err", runErr.Error()))
 		return []any{&proto.Failure{
 			Code:    FailureCode(runErr),
-			Message: runErr.Error(),
+			Message: s.sanitiseErr(runErr),
 		}}, nil
 	}
 
@@ -437,9 +462,10 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		s.drainResult()
 		s.peeked = nil
 		s.state = StateFailed
+		s.log.Error("bolt: result stream error", slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{
 			Code:    FailureCode(err),
-			Message: err.Error(),
+			Message: s.sanitiseErr(err),
 		}}, nil
 	}
 
@@ -557,9 +583,10 @@ func (s *Session) handleCommit() ([]any, error) {
 	if s.tx != nil {
 		if err := s.tx.Commit(); err != nil {
 			s.state = StateFailed
+			s.log.Error("bolt: commit failed", slog.String("session", s.id), slog.String("err", err.Error()))
 			return []any{&proto.Failure{
 				Code:    FailureCode(err),
-				Message: err.Error(),
+				Message: s.sanitiseErr(err),
 			}}, nil
 		}
 		s.tx = nil
@@ -646,6 +673,55 @@ func authErrorCode(err error) string {
 	default:
 		return "Neo.ClientError.Security.Unauthorized"
 	}
+}
+
+// sanitiseErr returns a safe client-visible error message for err, suppressing
+// internal Go type names, file paths, and stack details. The real error is
+// logged server-side by the caller using the session ID for correlation.
+//
+// Mapping:
+//   - Auth errors → "Authentication failed."
+//   - Cypher syntax/sema errors → the error text (already a user-facing message).
+//   - All other errors → a generic message with a session ID for log correlation.
+func (s *Session) sanitiseErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	// Auth errors: never reveal the underlying cause to the client.
+	if errors.Is(err, ErrSchemeUnknown) {
+		return "Authentication failed."
+	}
+	// Syntax and semantic errors are already composed as user-facing messages.
+	if isCypherUserError(err) {
+		return err.Error()
+	}
+	// All other errors (internal engine, storage, unexpected): generic + session ID.
+	return fmt.Sprintf("An internal error occurred. See server logs for details (session: %s).", s.id)
+}
+
+// isCypherUserError reports whether err is a Cypher syntax or semantic error
+// that is safe to forward verbatim to the client.
+func isCypherUserError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Heuristic: Cypher user errors start with their Bolt error code prefix or
+	// contain "SyntaxError" / "SemanticError" in their message. This is safer
+	// than a type assertion because the cypher package is not imported here.
+	for _, prefix := range []string{
+		"Neo.ClientError.Statement.",
+		"Neo.ClientError.Schema.",
+		"SyntaxError",
+		"SemanticError",
+		"TypeError",
+		"ArgumentError",
+	} {
+		if len(msg) >= len(prefix) && msg[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
 }
 
 // extractString retrieves a string value from a packstream map by key.

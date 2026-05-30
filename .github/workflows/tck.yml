@@ -32,3 +32,5 @@ jobs:
           RATE=$(go test ./cypher/tck/... -run TestTCKReport -v -count=1 2>&1 | grep -oP 'overall-rate=\K[0-9.]+')
           echo "Overall pass rate: ${RATE}%"
           python3 -c "import sys; rate=float('${RATE}'); sys.exit(0 if rate >= 90.0 else 1)"
+      - name: TCK execution gate (3897 scenarios)
+        run: go test ./cypher/tck/... -run TestTCKExecution -v -count=1 -timeout 600s

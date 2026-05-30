@@ -69,6 +69,14 @@ type Options struct {
 	// now+ConnTimeout. Zero means no timeout.
 	ConnTimeout time.Duration
 
+	// MaxStatementTimeout is the server-side upper bound on per-statement
+	// execution time. When a client supplies a timeout via the RUN or BEGIN
+	// extra metadata, it is silently clamped to MaxStatementTimeout. When
+	// a client supplies no timeout and MaxStatementTimeout is positive, the
+	// server applies MaxStatementTimeout unconditionally. Zero means no
+	// server-side cap (client controls its own timeout).
+	MaxStatementTimeout time.Duration
+
 	// TLSConfig, when non-nil, wraps accepted connections with TLS using
 	// the given configuration. nil means plain TCP.
 	TLSConfig *tls.Config
@@ -113,6 +121,9 @@ func NewServer(eng *cypher.Engine, opts Options) *Server {
 	log := opts.Logger
 	if log == nil {
 		log = slog.Default()
+	}
+	if _, isNoAuth := opts.Auth.(NoAuthHandler); isNoAuth {
+		log.Warn("bolt: server started with no authentication — every client is admitted without credential validation; set Options.Auth to a real AuthHandler before exposing this server on a network")
 	}
 	return &Server{
 		eng:  eng,
@@ -300,6 +311,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	s.mu.Unlock()
 	sess := newSession(s.eng, s.opts.Auth, localAddr)
 	sess.setMaxInFlight(s.opts.MaxInFlightPerConnection)
+	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)
 
 	// ── 3. Message loop ──────────────────────────────────────────────────
 	for {

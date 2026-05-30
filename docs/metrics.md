@@ -274,6 +274,23 @@ with no return value).
 | `store.bulk.Drain`           | Drain a channel of edges into the loader.                             |
 | `store.bulk.Finalise`        | Build the CSR and write the csrfile.                                  |
 
+### `cypher`
+
+| Metric                    | Description                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| `cypher.Run`              | Full latency of `Engine.Run` (parse + plan + materialise) per query.            |
+| `cypher.RunInTx`          | Full latency of `Engine.RunInTx` (parse + plan + write-tx materialise).         |
+| `cypher.result.leaked`    | Count of `*Result` values collected by the GC without an explicit `Close` call. |
+
+Plan-cache event counters (no latency dimension; incremented as raw counters):
+
+| Counter                             | Description                                     |
+| ----------------------------------- | ----------------------------------------------- |
+| `cypher.plan_cache.hits`            | Cached plan returned without re-planning.        |
+| `cypher.plan_cache.misses`          | Cache miss — plan compiled from scratch.         |
+| `cypher.plan_cache.evictions`       | Entry evicted from the bounded LRU plan cache.   |
+| `cypher.plan_cache.invalidations`   | Entry invalidated by a schema change (DDL).      |
+
 ## Error counters
 
 Every metric listed above that can return a non-nil `error` has a
@@ -289,25 +306,38 @@ fails loudly when a wired symbol stops emitting its expected name.
 ## Backend integration
 
 The default backend is a stateless no-op (`internal/metrics`
-`noopBackend{}`). To wire Prometheus or OpenTelemetry, implement
-the `Backend` interface in the consuming application and install
-it via `metrics.SetBackend`:
+`noopBackend{}`). The module ships a ready-to-use Prometheus
+text-exposition-format backend in `internal/metrics/prometheus` with
+no external dependencies:
 
 ```go
-type promBackend struct {
-    counters   *prometheus.CounterVec
-    histograms *prometheus.HistogramVec
-}
+import (
+    "net/http"
+    "gograph/internal/metrics"
+    prom "gograph/internal/metrics/prometheus"
+)
 
-func (p *promBackend) IncCounter(name string, delta uint64) {
-    p.counters.WithLabelValues(name).Add(float64(delta))
-}
+reg := prom.New()
+metrics.SetBackend(reg)
 
-func (p *promBackend) ObserveLatency(name string, d time.Duration) {
-    p.histograms.WithLabelValues(name).Observe(d.Seconds())
-}
+// Expose /metrics endpoint:
+http.Handle("/metrics", reg.Handler())
+http.ListenAndServe(":9090", nil)
+```
 
-metrics.SetBackend(&promBackend{ /* ... */ })
+`reg.WriteText(w)` outputs all counters and latency histograms in
+Prometheus text format (standard latency buckets: 100 µs to 5 s).
+Metric names follow the convention `<package>_<symbol>` with dots
+and slashes converted to underscores.
+
+To integrate with `prometheus/client_golang` or OpenTelemetry instead,
+implement the `Backend` interface directly and install it via
+`metrics.SetBackend`:
+
+```go
+func (p *myBackend) IncCounter(name string, delta uint64) { /* ... */ }
+func (p *myBackend) ObserveLatency(name string, d time.Duration) { /* ... */ }
+metrics.SetBackend(&myBackend{})
 ```
 
 `SetBackend(nil)` restores the no-op default. Backend swaps are

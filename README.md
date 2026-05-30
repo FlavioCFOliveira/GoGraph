@@ -10,7 +10,7 @@ subsystems below are functional and tested under race, lint, and soak
 gates; the path to **`v2.0.0` stable** is governed by the release gates
 in [docs/semver.md](docs/semver.md#release-gates) (execution-level TCK
 ≥ 80 %, full CI green, all T-series tasks closed, full 4-hour Bolt soak
-green). Execution-level TCK is currently 39.4 % on HEAD; production
+green). Execution-level TCK is **100 % (3 897/3 897)** on HEAD; production
 deployments should pin a stable tag once cut.
 
 ### Core graph (`graph/`)
@@ -78,7 +78,7 @@ deployments should pin a stable tag once cut.
 - `gograph/cypher/funcs` · `cypher/procs` — built-in functions and
   procedures.
 - `gograph/cypher/tck` — openCypher TCK harness (parser 100 %,
-  execution 39.4 % on HEAD; see
+  execution 100 % — 3 897/3 897 scenarios; see
   [docs/tck/DIVERGENCES.md](docs/tck/DIVERGENCES.md)).
 
 ### Bolt server (`bolt/`)
@@ -98,7 +98,7 @@ Subsystem references: [docs/persistence.md](docs/persistence.md)
 
 ## Examples
 
-The `examples/` directory contains 23 runnable demonstrations:
+The `examples/` directory contains 25 runnable demonstrations:
 
 ### Basics
 
@@ -118,6 +118,8 @@ The `examples/` directory contains 23 runnable demonstrations:
 
 - **22_cypher** — Cypher execution engine social-graph demo: CREATE, MATCH, RETURN, WHERE.
 - **23_bolt_server** — Bolt v5 TCP server start + graceful shutdown demo; compatible with `neo4j-go-driver` v5.
+- **24_social_network_cli** — interactive CLI over a persistent LPG social network (WAL + recovery + Cypher queries).
+- **25_software_house_api** — multi-layer LPG REST API over a software-house domain (Code/Work/People entities).
 
 ### Interchange
 
@@ -271,7 +273,7 @@ internal/goldens          — golden-file assertion helper with -update and atom
 See [docs/test-battery.md](docs/test-battery.md) for the production-readiness
 test battery guide and the add-new-shape recipe.
 
-examples/                 — 23 runnable example programs (see "Examples" section)
+examples/                 — 25 runnable example programs (see "Examples" section)
 ```
 
 ## Labelled Property Graph + Query Example
