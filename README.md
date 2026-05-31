@@ -98,13 +98,15 @@ Subsystem references: [docs/persistence.md](docs/persistence.md)
 
 ## Examples
 
-The `examples/` directory contains 25 runnable demonstrations:
+The `examples/` directory contains 25 runnable demonstrations. See
+[examples/README.md](examples/README.md) for the full categorized index
+with per-example links and run commands.
 
 ### Basics
 
 - **01_basic** — Dijkstra on a small European routing graph.
 - **02_property_graph** — labels + typed properties + indexed query.
-- **03_advanced_algorithms** — BFS, Dijkstra, PageRank composed.
+- **03_advanced_algorithms** — BFS, Dijkstra, Brandes betweenness, and PageRank composed over one CSR snapshot.
 
 ### Persistence and out-of-core
 
@@ -116,8 +118,8 @@ The `examples/` directory contains 25 runnable demonstrations:
 
 ### Cypher and Bolt
 
-- **22_cypher** — Cypher execution engine social-graph demo: CREATE, MATCH, RETURN, WHERE.
-- **23_bolt_server** — Bolt v5 TCP server start + graceful shutdown demo; compatible with `neo4j-go-driver` v5.
+- **22_cypher** — Cypher execution engine social-graph demo: label scan with `ORDER BY`, `WHERE` filter, relationship pattern, and `CREATE` — values printed in human-readable form.
+- **23_bolt_server** — Bolt v5 server round-trip: a real `neo4j-go-driver` v5 client runs a Cypher query over the wire, then the server shuts down cleanly with no goroutine leak.
 - **24_social_network_cli** — interactive CLI over a persistent LPG social network (WAL + recovery + Cypher queries).
 - **25_software_house_api** — multi-layer LPG REST API over a software-house domain (Code/Work/People entities).
 
@@ -128,10 +130,10 @@ The `examples/` directory contains 25 runnable demonstrations:
 
 ### Algorithms
 
-- **08_pagerank** — PageRank on a directed cycle.
+- **08_pagerank** — PageRank on a directed authority web, ranking pages from most to least important with distinct ranks.
 - **09_leiden** — community detection on two cliques + bridge.
-- **10_dimacs9_routing** — DIMACS 9 SSSP harness.
-- **14_routing_alternatives** — Dijkstra, Yen k-shortest, A\* on the same graph.
+- **10_dimacs9_routing** — DIMACS 9 synthetic road network + a concrete Dijkstra SSSP query with a reconstructed shortest path.
+- **14_routing_alternatives** — Dijkstra, Yen k-shortest, and A\* with a coordinate-based Euclidean heuristic that expands fewer nodes for the same optimal cost.
 - **15_task_assignment** — Hungarian (cost-minimising) + Hopcroft-Karp (cardinality).
 - **16_centrality_analytics** — Brandes betweenness + label propagation.
 
@@ -139,7 +141,7 @@ The `examples/` directory contains 25 runnable demonstrations:
 
 - **11_social_network** — labels + PageRank + Leiden + friend-of-friend recommendations.
 - **12_build_dependency** — topological sort + Tarjan SCC for circular-dependency detection.
-- **13_network_reliability** — Hopcroft-Tarjan SPOF analysis + Dinic max-flow.
+- **13_network_reliability** — Hopcroft-Tarjan SPOF analysis + max-flow with the limiting min-cut bottleneck, both over the same network.
 - **19_pattern_query** — multi-hop MATCH-style queries combining labels and property predicates.
 - **20_concurrent_reads** — multiple algorithms run concurrently over a shared immutable CSR.
 
