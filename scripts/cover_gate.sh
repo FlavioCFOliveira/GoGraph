@@ -41,12 +41,31 @@ COVER_EXCLUDE=${COVER_EXCLUDE:-'gograph/(examples|cmd|bench/soak|bench/ldbc|benc
 MIN_TOTAL=${MIN_TOTAL:-85.0}
 MIN_PER_PKG=${MIN_PER_PKG:-75.0}
 
+# Packages kept in the AGGREGATE coverage figure but exempt from the
+# per-package floor, because part of their code is structurally impossible to
+# line-cover. internal/crashpoint is production crash-injection instrumentation
+# (imported by store/wal and store/checkpoint); its sole uncovered statements
+# are the `syscall.Kill(SIGKILL); select{}` firing body — the process dies
+# before the Go runtime can flush coverage counters, so that block can never be
+# credited by any test. Its non-firing guard/arming logic IS covered (60% is
+# the hard ceiling). The firing path is verified behaviourally by the
+# subprocess crash-injection tests (internal/crashpoint, store/recovery).
+COVER_PKG_FLOOR_EXEMPT=${COVER_PKG_FLOOR_EXEMPT:-'gograph/internal/crashpoint'}
+
 # Force a deterministic numeric locale so awk prints '.' as the
 # decimal separator regardless of the user's locale.
 export LC_ALL=C
 
 echo "==> generating coverage profile: ${COVER_PROFILE}"
-"${GO}" test -coverprofile="${COVER_PROFILE}" -covermode=atomic ./... >/dev/null
+# -coverpkg=./... attributes coverage of EVERY package to whichever test
+# exercises it, not just that package's own _test.go files. The query engine
+# (cypher/...) is validated overwhelmingly by the openCypher TCK suite and the
+# integration tests that live in OTHER packages; without -coverpkg those hits
+# are discarded and the engine packages read far below their true coverage.
+# Crediting cross-package coverage is the accurate measure of how well the
+# library is tested. The trade-off is a slower instrumented run, hence the
+# generous timeout.
+"${GO}" test -coverpkg=./... -coverprofile="${COVER_PROFILE}" -covermode=atomic -timeout=20m ./... >/dev/null
 
 echo "==> filtering non-library packages: ${COVER_EXCLUDE}"
 {
@@ -71,18 +90,28 @@ per_pkg=$(
     NR == 1 { next }              # skip "mode: atomic" header
     NF < 3 { next }
     {
-      loc = $1
-      # Drop ":line.col,line.col" suffix to get pkg/path/file.go.
-      sub(":[0-9]+\\.[0-9]+,[0-9]+\\.[0-9]+", "", loc)
-      n = split(loc, parts, "/")
-      pkg = parts[1]
-      for (i = 2; i < n; i++) pkg = pkg "/" parts[i]
+      # With -coverpkg the same block can appear once per test binary that
+      # instrumented it. Deduplicate by block id first (taking the max hit
+      # count across binaries) so a block is counted exactly once per package;
+      # otherwise the per-package denominator is inflated N-fold. This also
+      # works correctly for a non -coverpkg profile (each block appears once).
+      key   = $1                  # "pkg/path/file.go:line.col,line.col"
       stmts = $(NF - 1) + 0
       hits  = $NF + 0
-      total[pkg] += stmts
-      if (hits > 0) covered[pkg] += stmts
+      blkstmts[key] = stmts       # identical across duplicate entries
+      if (hits > blkhits[key]) blkhits[key] = hits
     }
     END {
+      for (key in blkstmts) {
+        loc = key
+        # Drop ":line.col,line.col" suffix to get pkg/path/file.go.
+        sub(":[0-9]+\\.[0-9]+,[0-9]+\\.[0-9]+", "", loc)
+        n = split(loc, parts, "/")
+        pkg = parts[1]
+        for (i = 2; i < n; i++) pkg = pkg "/" parts[i]
+        total[pkg] += blkstmts[key]
+        if (blkhits[key] > 0) covered[pkg] += blkstmts[key]
+      }
       for (p in total) {
         if (total[p] == 0) {
           printf "%s 100.0\n", p
@@ -99,7 +128,14 @@ echo "${per_pkg}" | awk '{ printf "    %-40s %s%%\n", $1, $2 }'
 
 failed=$(
   echo "${per_pkg}" \
-    | awk -v threshold="${MIN_PER_PKG}" '$2 + 0 < threshold + 0 { print $1 " " $2 "%" }'
+    | awk -v threshold="${MIN_PER_PKG}" -v exempt="${COVER_PKG_FLOOR_EXEMPT}" '
+        $2 + 0 < threshold + 0 {
+          if (exempt != "" && $1 ~ exempt) {
+            print "    (exempt from floor) " $1 " " $2 "%" > "/dev/stderr"
+            next
+          }
+          print $1 " " $2 "%"
+        }'
 )
 
 agg_ok=$(awk -v a="${total_pct}" -v b="${MIN_TOTAL}" 'BEGIN { print (a + 0 < b + 0) ? 0 : 1 }')
