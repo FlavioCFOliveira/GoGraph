@@ -151,14 +151,14 @@ func reportThroughput(w io.Writer, mapper *graph.Mapper[string]) error {
 	// site's index in the residual graph is its NodeID. Every
 	// undirected backbone link becomes a pair of opposing directed
 	// edges of equal capacity, so flow may traverse it either way.
-	net := newResidual(int(mapper.MaxNodeID()) + 1)
+	net := newResidual(int(mapper.MaxNodeID()) + 1) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 	for _, l := range backbone {
 		ua, _ := mapper.Lookup(l.a)
 		ub, _ := mapper.Lookup(l.b)
-		net.addUndirected(int(ua), int(ub), l.cap)
+		net.addUndirected(int(ua), int(ub), l.cap) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 	}
 
-	flowValue := net.maxFlow(int(src), int(snk))
+	flowValue := net.maxFlow(int(src), int(snk)) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 
 	// Cross-check the value against the library's Dinic implementation
 	// built from the identical edge list: the example's own residual
@@ -173,7 +173,7 @@ func reportThroughput(w io.Writer, mapper *graph.Mapper[string]) error {
 	// still reachable from the source over edges with spare capacity is
 	// the source side of the cut. Every backbone link crossing from
 	// that side to the rest is saturated and forms the bottleneck.
-	cut, cutCap := net.minCut(int(src), backbone, mapper)
+	cut, cutCap := net.minCut(int(src), backbone, mapper) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 	if cutCap != flowValue {
 		return fmt.Errorf("min-cut capacity %d != max flow %d (max-flow min-cut theorem violated)", cutCap, flowValue)
 	}
@@ -189,18 +189,18 @@ func reportThroughput(w io.Writer, mapper *graph.Mapper[string]) error {
 // the Dinic max flow from source to sink. It exists only to cross-check
 // the example's in-line residual solver against the library.
 func libMaxFlow(mapper *graph.Mapper[string]) int {
-	g := flow.NewNetwork(int(mapper.MaxNodeID()) + 1)
+	g := flow.NewNetwork(int(mapper.MaxNodeID()) + 1) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 	for _, l := range backbone {
 		ua, _ := mapper.Lookup(l.a)
 		ub, _ := mapper.Lookup(l.b)
 		// An undirected link is two opposing directed edges, each of
 		// the link's capacity.
-		g.AddEdge(int(ua), int(ub), l.cap)
-		g.AddEdge(int(ub), int(ua), l.cap)
+		g.AddEdge(int(ua), int(ub), l.cap) //nolint:gosec // G115: bounded example graph size, no realistic overflow
+		g.AddEdge(int(ub), int(ua), l.cap) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 	}
 	src, _ := mapper.Lookup(source)
 	snk, _ := mapper.Lookup(sink)
-	return flow.MaxFlow(g, int(src), int(snk))
+	return flow.MaxFlow(g, int(src), int(snk)) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 }
 
 // residual is a small Edmonds-Karp max-flow solver kept inside the
@@ -214,11 +214,11 @@ type residual struct {
 }
 
 func newResidual(n int) *residual {
-	cap := make([][]int, n)
-	for i := range cap {
-		cap[i] = make([]int, n)
+	capacity := make([][]int, n)
+	for i := range capacity {
+		capacity[i] = make([]int, n)
 	}
-	return &residual{n: n, cap: cap}
+	return &residual{n: n, cap: capacity}
 }
 
 // addUndirected adds an undirected link as two opposing directed

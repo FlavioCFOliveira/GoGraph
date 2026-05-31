@@ -66,14 +66,33 @@ func run(w io.Writer) error {
 	}
 	n, m := len(workers), len(tasks)
 
-	// --- Minimum-cost assignment (Hungarian) -------------------------
-	// Hungarian sees the whole matrix and minimises total cost. It does
-	// not know about the willingness rule, so a pair it picks may be one
-	// the worker would refuse.
+	a, withinWilling, err := reportHungarian(w, workers, tasks, cost, n, m)
+	if err != nil {
+		return err
+	}
+
+	reportWillingSet(w, workers, tasks, cost, n, m)
+
+	matchSize, matchedCost, err := reportMatching(w, workers, tasks, cost, n, m)
+	if err != nil {
+		return err
+	}
+
+	reportComparison(w, a, withinWilling, matchSize, matchedCost, n)
+	return nil
+}
+
+// reportHungarian computes and prints the globally cheapest one-to-one
+// assignment over the full cost matrix. Hungarian does not know about the
+// willingness rule, so a pair it picks may be one the worker would
+// refuse; each printed pair is annotated accordingly. It returns the
+// assignment and how many of its pairs fall within the willing set, for
+// the later comparison.
+func reportHungarian(w io.Writer, workers, tasks []string, cost []float64, n, m int) (search.Assignment, int, error) {
 	fmt.Fprintln(w, "=== Minimum-cost assignment (Hungarian) ===")
 	a, err := search.Hungarian(cost, n, m)
 	if err != nil {
-		return fmt.Errorf("Hungarian: %w", err)
+		return search.Assignment{}, 0, fmt.Errorf("hungarian: %w", err)
 	}
 	withinWilling := 0
 	for i, j := range a.RowToCol {
@@ -90,10 +109,13 @@ func run(w io.Writer) error {
 		fmt.Fprintf(w, "  %-7s -> %-7s (cost %.0f, %s)\n", workers[i], tasks[j], c, note)
 	}
 	fmt.Fprintf(w, "  total = %.0f\n", a.TotalCost)
+	return a, withinWilling, nil
+}
 
-	// --- The willing set (the business rule made explicit) -----------
-	// List, per worker, which tasks they accept and which they refuse.
-	// This is exactly the edge set fed to Hopcroft-Karp below.
+// reportWillingSet makes the business rule explicit by listing, per
+// worker, which tasks they accept and which they refuse. This is exactly
+// the edge set fed to Hopcroft-Karp.
+func reportWillingSet(w io.Writer, workers, tasks []string, cost []float64, n, m int) {
 	fmt.Fprintf(w, "\n=== Willing set (worker accepts task when cost <= %.0f) ===\n", willingCostThreshold)
 	for i := 0; i < n; i++ {
 		fmt.Fprintf(w, "  %-7s willing:", workers[i])
@@ -101,29 +123,31 @@ func run(w io.Writer) error {
 		fmt.Fprintf(w, "          refuses:")
 		writeTaskList(w, tasks, cost, n, m, i, false)
 	}
+}
 
-	// --- Maximum willing matching (Hopcroft-Karp) --------------------
-	// Build a bipartite graph whose only edges are willing pairs, then
-	// find the largest matching. Hopcroft-Karp ignores cost; it answers
-	// "how many workers can be staffed at all once refusals are
-	// honoured?".
+// reportMatching builds a bipartite graph whose only edges are willing
+// pairs and finds the largest matching with Hopcroft-Karp, which ignores
+// cost and answers "how many workers can be staffed at all once refusals
+// are honoured?". It prints each worker's assignment and returns the
+// matching size and its total cost for the comparison.
+func reportMatching(w io.Writer, workers, tasks []string, cost []float64, n, m int) (int, float64, error) {
 	fmt.Fprintln(w, "\n=== Maximum willing matching (Hopcroft-Karp) ===")
 	adj := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
 	for i := 0; i < n; i++ {
 		if err := adj.AddNode(i); err != nil {
-			return fmt.Errorf("AddNode worker %d: %w", i, err)
+			return 0, 0, fmt.Errorf("AddNode worker %d: %w", i, err)
 		}
 	}
 	for j := 0; j < m; j++ {
 		if err := adj.AddNode(n + j); err != nil {
-			return fmt.Errorf("AddNode task %d: %w", j, err)
+			return 0, 0, fmt.Errorf("AddNode task %d: %w", j, err)
 		}
 	}
 	for i := 0; i < n; i++ {
 		for j := 0; j < m; j++ {
 			if cost[i*m+j] <= willingCostThreshold {
 				if err := adj.AddEdge(i, n+j, struct{}{}); err != nil {
-					return fmt.Errorf("AddEdge %d->%d: %w", i, n+j, err)
+					return 0, 0, fmt.Errorf("AddEdge %d->%d: %w", i, n+j, err)
 				}
 			}
 		}
@@ -136,13 +160,13 @@ func run(w io.Writer) error {
 	// vertex; right (task) vertices have no out-edges and so never
 	// match anything, leaving the cardinality correct. This mirrors the
 	// convention in search/hopcroft_karp_test.go.
-	match := search.HopcroftKarp(c, int(c.MaxNodeID()))
+	match := search.HopcroftKarp(c, int(c.MaxNodeID())) //nolint:gosec // G115: bounded example graph size, no realistic overflow
 
 	matchedCost := 0.0
 	for i := 0; i < n; i++ {
 		j, ok, err := matchedTask(mapper, match, i, n)
 		if err != nil {
-			return fmt.Errorf("resolve match for %s: %w", workers[i], err)
+			return 0, 0, fmt.Errorf("resolve match for %s: %w", workers[i], err)
 		}
 		if !ok {
 			fmt.Fprintf(w, "  %-7s -> (unmatched)\n", workers[i])
@@ -152,10 +176,13 @@ func run(w io.Writer) error {
 		fmt.Fprintf(w, "  %-7s -> %-7s (cost %.0f)\n", workers[i], tasks[j], cost[i*m+j])
 	}
 	fmt.Fprintf(w, "  matched pairs: %d of %d workers\n", match.Size, n)
+	return match.Size, matchedCost, nil
+}
 
-	// --- Comparison: how the two answers relate ----------------------
-	// The headline relationship: does the cheapest assignment survive
-	// the willingness rule, and does honouring that rule cost coverage?
+// reportComparison relates the two answers: whether the cheapest
+// assignment survives the willingness rule, and whether honouring that
+// rule costs coverage.
+func reportComparison(w io.Writer, a search.Assignment, withinWilling, matchSize int, matchedCost float64, n int) {
 	fmt.Fprintln(w, "\n=== Comparison ===")
 	if withinWilling == n {
 		fmt.Fprintf(w, "  Hungarian: all %d pairs are within the willing set (total cost %.0f).\n", n, a.TotalCost)
@@ -164,22 +191,21 @@ func run(w io.Writer) error {
 			withinWilling, n, n-withinWilling)
 	}
 	fmt.Fprintf(w, "  Hopcroft-Karp: %d of %d workers can be staffed using willing pairs only (total cost %.0f).\n",
-		match.Size, n, matchedCost)
+		matchSize, n, matchedCost)
 	switch {
-	case match.Size == n && withinWilling == n:
+	case matchSize == n && withinWilling == n:
 		fmt.Fprintln(w, "  Verdict: the willingness rule is not binding here — the cheapest")
 		fmt.Fprintln(w, "  assignment is already fully willing and every worker stays staffed,")
 		fmt.Fprintf(w, "  so cost-optimality (%.0f) and full coverage (%d/%d) are achievable together.\n",
-			a.TotalCost, match.Size, n)
-	case match.Size == n:
+			a.TotalCost, matchSize, n)
+	case matchSize == n:
 		fmt.Fprintln(w, "  Verdict: full coverage is still possible under the willingness rule,")
 		fmt.Fprintln(w, "  but the cheapest assignment uses pairs a worker would refuse, so the")
 		fmt.Fprintln(w, "  willing roster must trade extra cost for staying within the rule.")
 	default:
-		fmt.Fprintf(w, "  Verdict: the willingness rule is binding — only %d of %d workers can be\n", match.Size, n)
+		fmt.Fprintf(w, "  Verdict: the willingness rule is binding — only %d of %d workers can be\n", matchSize, n)
 		fmt.Fprintln(w, "  staffed at all, so some task must go unstaffed or the rule relaxed.")
 	}
-	return nil
 }
 
 // writeTaskList prints, on one line, the tasks worker i is willing to
@@ -187,16 +213,16 @@ func run(w io.Writer) error {
 // cost, ordered by task index for deterministic output. It prints
 // "(none)" when the list is empty.
 func writeTaskList(w io.Writer, tasks []string, cost []float64, n, m, i int, willing bool) {
-	any := false
+	printed := false
 	for j := 0; j < m; j++ {
 		isWilling := cost[i*m+j] <= willingCostThreshold
 		if isWilling != willing {
 			continue
 		}
 		fmt.Fprintf(w, " %s(%.0f)", tasks[j], cost[i*m+j])
-		any = true
+		printed = true
 	}
-	if !any {
+	if !printed {
 		fmt.Fprint(w, " (none)")
 	}
 	fmt.Fprintln(w)

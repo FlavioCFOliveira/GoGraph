@@ -180,6 +180,16 @@ linters:
       - linters: [gocritic]
         path: "examples/.*\\.go"
         text: "exitAfterDefer"
+      # errcheck: fmt.Fprint/Fprintf/Fprintln writes in example programs emit
+      # demo output to os.Stdout (or a test buffer), exactly as fmt.Print does
+      # in errcheck's own default exclusion list. A failed write to that sink
+      # is not actionable in didactic code, so the unchecked Fprint* is
+      # conventional here. The narrow text regex keeps every other unchecked
+      # return (e.g. res.Close) flagged, and production code stays fully
+      # checked outside examples/.
+      - linters: [errcheck]
+        path: "examples/.*\\.go"
+        text: "Error return value of `fmt\\.Fprint(f|ln)?` is not checked"
   settings:
     errorlint:
       errorf: true

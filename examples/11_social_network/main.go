@@ -82,17 +82,29 @@ func run(w io.Writer) error {
 	c := csr.BuildFromAdjList(g.AdjList())
 	mapper := g.AdjList().Mapper()
 
-	// Influence: rank users by PageRank. ranks is indexed by NodeID and
-	// may contain phantom zero entries for ids the mapper cannot resolve,
-	// so skip those. Ties between equal ranks are broken by name to keep
-	// the output byte-stable (sort.Slice is not a stable sort).
+	reportInfluence(w, c, mapper, len(users))
+	reportCommunities(w, c, mapper)
+
+	fmt.Fprintln(w, "\nFriend-of-friend recommendations for alice:")
+	for _, name := range friendsOfFriends(g, "alice") {
+		fmt.Fprintf(w, "  -> %s\n", name)
+	}
+	return nil
+}
+
+// reportInfluence ranks users by PageRank and writes them to w in
+// descending rank order, breaking ties by name so the output is
+// byte-stable (sort.Slice is not a stable sort). ranks is indexed by
+// NodeID and may contain phantom zero entries for ids the mapper cannot
+// resolve, so those are skipped. numUsers sizes the result slice.
+func reportInfluence(w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string], numUsers int) {
 	fmt.Fprintln(w, "Influence (PageRank):")
 	ranks, _, _ := centrality.PageRank(c, centrality.DefaultPageRankOptions())
 	type ranked struct {
 		name string
 		rank float64
 	}
-	ordered := make([]ranked, 0, len(users))
+	ordered := make([]ranked, 0, numUsers)
 	for i, r := range ranks {
 		name, ok := mapper.Resolve(graph.NodeID(i))
 		if !ok {
@@ -109,10 +121,13 @@ func run(w io.Writer) error {
 	for _, o := range ordered {
 		fmt.Fprintf(w, "  %-8s %.4f\n", o.name, o.rank)
 	}
+}
 
-	// Communities: group users by Leiden cluster id. The clusters map is
-	// iterated in non-deterministic order, so collect the cluster ids
-	// into a slice and sort them before printing.
+// reportCommunities groups users by Leiden cluster id and writes each
+// cluster to w in ascending cluster-id order, with member names sorted,
+// so the output is deterministic despite the non-deterministic map
+// iteration order of the partition.
+func reportCommunities(w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string]) {
 	fmt.Fprintln(w, "\nCommunities (Leiden):")
 	p := community.Leiden(c, community.DefaultLeidenOptions())
 	clusters := map[int][]string{}
@@ -133,12 +148,6 @@ func run(w io.Writer) error {
 		sort.Strings(names)
 		fmt.Fprintf(w, "  community %d: %v\n", cid, names)
 	}
-
-	fmt.Fprintln(w, "\nFriend-of-friend recommendations for alice:")
-	for _, name := range friendsOfFriends(g, "alice") {
-		fmt.Fprintf(w, "  -> %s\n", name)
-	}
-	return nil
 }
 
 // friendsOfFriends returns users two hops away from src that are not

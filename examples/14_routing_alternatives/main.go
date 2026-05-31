@@ -116,23 +116,44 @@ func run(w io.Writer) error {
 		return fmt.Errorf("destination city %q not found in graph", "berlin")
 	}
 
-	// 1. Single shortest path with Dijkstra.
+	dijkstraCost, err := reportDijkstra(w, c, mapper, src, dst)
+	if err != nil {
+		return err
+	}
+	if err := reportYen(w, c, mapper, src, dst); err != nil {
+		return err
+	}
+	astarCost, h, err := reportAStar(w, c, mapper, src, dst)
+	if err != nil {
+		return err
+	}
+	return reportExpansions(w, c, src, dst, h, dijkstraCost, astarCost)
+}
+
+// reportDijkstra runs a single Dijkstra shortest path from src to dst,
+// prints it to w, and returns the optimal cost for the later A*
+// comparison.
+func reportDijkstra(w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string], src, dst graph.NodeID) (int64, error) {
 	d, err := search.Dijkstra(c, src)
 	if err != nil {
-		return fmt.Errorf("Dijkstra: %w", err)
+		return 0, fmt.Errorf("dijkstra: %w", err)
 	}
 	dijkstraCost, reachable := d.Distance(dst)
 	if !reachable {
-		return fmt.Errorf("berlin unreachable from lisbon")
+		return 0, fmt.Errorf("berlin unreachable from lisbon")
 	}
 	route, err := routeNames(mapper, d.Path(dst))
 	if err != nil {
-		return fmt.Errorf("resolve Dijkstra route: %w", err)
+		return 0, fmt.Errorf("resolve Dijkstra route: %w", err)
 	}
 	fmt.Fprintf(w, "Dijkstra lisbon -> berlin: %d km\n", dijkstraCost)
 	fmt.Fprintf(w, "  route: %s\n", route)
+	return dijkstraCost, nil
+}
 
-	// 2. Three k-shortest alternatives with Yen's algorithm.
+// reportYen prints the three k-shortest alternative paths from src to
+// dst computed with Yen's algorithm.
+func reportYen(w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string], src, dst graph.NodeID) error {
 	fmt.Fprintln(w, "\nYen's 3 shortest paths lisbon -> berlin:")
 	for i, p := range search.YenKShortest(c, src, dst, 3) {
 		names, err := routeNames(mapper, p.Nodes)
@@ -141,29 +162,37 @@ func run(w io.Writer) error {
 		}
 		fmt.Fprintf(w, "  %d. %d km via %s\n", i+1, p.Cost, names)
 	}
+	return nil
+}
 
-	// 3. A* with the coordinate-based Euclidean heuristic.
+// reportAStar runs A* with the coordinate-based Euclidean heuristic from
+// src to dst, prints the path to w, and returns the optimal cost and the
+// heuristic so reportExpansions can reuse it.
+func reportAStar(w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string], src, dst graph.NodeID) (int64, func(graph.NodeID) int64, error) {
 	h, err := heuristic(mapper, "berlin")
 	if err != nil {
-		return fmt.Errorf("build heuristic: %w", err)
+		return 0, nil, fmt.Errorf("build heuristic: %w", err)
 	}
 	path, astarCost, err := search.AStar(c, src, dst, h)
 	if err != nil {
-		return fmt.Errorf("AStar: %w", err)
+		return 0, nil, fmt.Errorf("AStar: %w", err)
 	}
 	astarRoute, err := routeNames(mapper, path)
 	if err != nil {
-		return fmt.Errorf("resolve A* route: %w", err)
+		return 0, nil, fmt.Errorf("resolve A* route: %w", err)
 	}
 	fmt.Fprintln(w, "\nA* lisbon -> berlin (coordinate-based Euclidean heuristic):")
 	fmt.Fprintf(w, "  cost = %d km, %d hops\n", astarCost, len(path)-1)
 	fmt.Fprintf(w, "  route: %s\n", astarRoute)
+	return astarCost, h, nil
+}
 
-	// 4. Demonstrate the benefit: A* expands no more nodes than
-	// Dijkstra (A* with the zero heuristic) while returning the same
-	// optimal cost. The expansion counts come from an instrumented
-	// runner over the public NeighboursByID API; the runner's cost is
-	// cross-checked against the library result below.
+// reportExpansions demonstrates the benefit of the heuristic: A* expands
+// no more nodes than Dijkstra (A* with the zero heuristic) while
+// returning the same optimal cost. The expansion counts come from an
+// instrumented runner over the public NeighboursByID API; the runner's
+// cost is cross-checked against the library results passed in.
+func reportExpansions(w io.Writer, c *csr.CSR[int64], src, dst graph.NodeID, h func(graph.NodeID) int64, dijkstraCost, astarCost int64) error {
 	zeroH := func(graph.NodeID) int64 { return 0 }
 	dijkstraExpanded, dijkstraRunCost, err := expansions(c, src, dst, zeroH)
 	if err != nil {
@@ -173,7 +202,7 @@ func run(w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("count A* expansions: %w", err)
 	}
-	if dijkstraRunCost != int64(dijkstraCost) || astarRunCost != int64(astarCost) {
+	if dijkstraRunCost != dijkstraCost || astarRunCost != astarCost {
 		return fmt.Errorf(
 			"expansion runner cost mismatch: dijkstra run=%d lib=%d, astar run=%d lib=%d",
 			dijkstraRunCost, dijkstraCost, astarRunCost, astarCost,

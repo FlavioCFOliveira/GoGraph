@@ -61,7 +61,7 @@ func run(w io.Writer) error {
 
 	d, err := search.Dijkstra(c, src)
 	if err != nil {
-		return fmt.Errorf("Dijkstra: %w", err)
+		return fmt.Errorf("dijkstra: %w", err)
 	}
 
 	for _, city := range []string{"Madrid", "Paris", "Rome"} {

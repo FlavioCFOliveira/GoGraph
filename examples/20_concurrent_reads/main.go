@@ -57,6 +57,8 @@ type aggregates struct {
 // aggregates alongside any error so a test can assert the invariants
 // without depending on goroutine timing. All output goes to w; run
 // returns wrapped errors rather than terminating the process.
+//
+//nolint:gocyclo // example walk-through: setup + three concurrent reader goroutines + join + ordered report
 func run(w io.Writer) (aggregates, error) {
 	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
 	for i := 0; i < 100; i++ {

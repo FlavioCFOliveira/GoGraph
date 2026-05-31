@@ -107,7 +107,7 @@ func matchPersonNames(ctx context.Context, eng *cypher.Engine, w io.Writer) erro
 	if err != nil {
 		return fmt.Errorf("MATCH Person names: %w", err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 	for res.Next() {
 		rec := res.Record()
 		name, err := stringCell(rec, "name")
@@ -132,7 +132,7 @@ func matchOlderThan(ctx context.Context, eng *cypher.Engine, w io.Writer, minAge
 	if err != nil {
 		return fmt.Errorf("MATCH WHERE age: %w", err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 	for res.Next() {
 		rec := res.Record()
 		name, err := stringCell(rec, "name")
@@ -160,7 +160,7 @@ func matchKnows(ctx context.Context, eng *cypher.Engine, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("MATCH KNOWS: %w", err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 	for res.Next() {
 		rec := res.Record()
 		from, err := stringCell(rec, "from")

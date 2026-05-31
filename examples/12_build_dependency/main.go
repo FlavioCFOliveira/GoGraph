@@ -110,7 +110,7 @@ func detectCycle(w io.Writer) error {
 
 	c := csr.BuildFromAdjList(a)
 	if _, err := search.TopologicalSort(c); !errors.Is(err, search.ErrCycle) {
-		return fmt.Errorf("expected ErrCycle, got %v", err)
+		return fmt.Errorf("expected ErrCycle, got %w", err)
 	}
 	fmt.Fprintln(w, "topological sort rejects the cycle (ErrCycle).")
 

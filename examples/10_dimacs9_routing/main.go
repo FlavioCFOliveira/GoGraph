@@ -79,7 +79,7 @@ func run(w io.Writer) error {
 	// distance and the reconstructed route to the destination.
 	d, err := search.Dijkstra(c, src)
 	if err != nil {
-		return fmt.Errorf("Dijkstra: %w", err)
+		return fmt.Errorf("dijkstra: %w", err)
 	}
 	dist, reachable := d.Distance(dst)
 	if !reachable {

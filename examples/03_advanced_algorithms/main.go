@@ -80,7 +80,7 @@ func run(w io.Writer) error {
 	// Dijkstra — shortest weighted distance alice -> dave.
 	d, err := search.Dijkstra(c, src)
 	if err != nil {
-		return fmt.Errorf("Dijkstra: %w", err)
+		return fmt.Errorf("dijkstra: %w", err)
 	}
 	dave, ok := mapper.Lookup("dave")
 	if !ok {

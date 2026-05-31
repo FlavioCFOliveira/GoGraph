@@ -143,7 +143,7 @@ func run(w io.Writer) error {
 // liveRankAt returns the rank stored at NodeID id, or an error if that
 // slot is out of range or carries no live rank.
 func liveRankAt(ranks []float64, id graph.NodeID) (float64, error) {
-	if int(id) >= len(ranks) {
+	if int(id) >= len(ranks) { //nolint:gosec // G115: bounded example graph size, no realistic overflow
 		return 0, fmt.Errorf("node %d out of range (len %d)", id, len(ranks))
 	}
 	r := ranks[id]
