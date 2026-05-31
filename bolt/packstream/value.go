@@ -1,6 +1,30 @@
 package packstream
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// maxValueDepth bounds how deeply ReadValue will recurse into nested
+// composite values (List/Map/Structure). PackStream messages are decoded one
+// Go stack frame per nesting level, and a single wire byte (e.g. 0x91, a
+// TinyList of one element) is enough to open a new level. Without a bound, a
+// crafted message can request millions of levels — far beyond Go's goroutine
+// stack limit — and trigger a fatal, unrecoverable stack overflow that crashes
+// the whole process. This is reachable pre-authentication during the first
+// HELLO decode, so the bound is a hard security boundary, not a convenience.
+//
+// Well-formed Bolt values nest only a handful of levels (a Path holding a list
+// of node/relationship structures, a map of lists, and so on), so 128 is far
+// above any legitimate need while staying comfortably within the stack budget.
+// The value matches typical Neo4j/driver practice.
+const maxValueDepth = 128
+
+// ErrNestingTooDeep is returned by ReadValue when a composite value
+// (List/Map/Structure) nests deeper than maxValueDepth. It guards against
+// stack-overflow denial-of-service from maliciously crafted messages; see
+// maxValueDepth for the rationale.
+var ErrNestingTooDeep = errors.New("packstream: value nesting too deep")
 
 // Value is a sum type over all PackStream value kinds:
 //
@@ -95,9 +119,22 @@ func (e *Encoder) WriteValue(v Value) error {
 //	[]Value      → List
 //	map[string]Value → Map
 //	Struct       → Structure
+func (d *Decoder) ReadValue() (Value, error) {
+	return d.readValue(0)
+}
+
+// readValue is the recursive worker behind ReadValue. depth is the current
+// nesting level; each composite arm recurses with depth+1 and the bound is
+// enforced at entry, so every recursive entry point (List elements, Map
+// values, Struct fields) is covered by a single check. Exceeding maxValueDepth
+// returns ErrNestingTooDeep instead of recursing, preventing a fatal stack
+// overflow on adversarial input.
 //
 //nolint:gocyclo // switch over PackStream's nine value kinds; complexity is irreducible.
-func (d *Decoder) ReadValue() (Value, error) {
+func (d *Decoder) readValue(depth int) (Value, error) {
+	if depth > maxValueDepth {
+		return nil, ErrNestingTooDeep
+	}
 	t, err := d.PeekType()
 	if err != nil {
 		return nil, err
@@ -122,7 +159,7 @@ func (d *Decoder) ReadValue() (Value, error) {
 		}
 		items := make([]Value, n)
 		for i := range items {
-			items[i], err = d.ReadValue()
+			items[i], err = d.readValue(depth + 1)
 			if err != nil {
 				return nil, err
 			}
@@ -139,7 +176,7 @@ func (d *Decoder) ReadValue() (Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			val, err := d.ReadValue()
+			val, err := d.readValue(depth + 1)
 			if err != nil {
 				return nil, err
 			}
@@ -153,7 +190,7 @@ func (d *Decoder) ReadValue() (Value, error) {
 		}
 		fields := make([]Value, n)
 		for i := range fields {
-			fields[i], err = d.ReadValue()
+			fields[i], err = d.readValue(depth + 1)
 			if err != nil {
 				return nil, err
 			}
