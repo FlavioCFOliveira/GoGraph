@@ -179,8 +179,9 @@ type VarLengthConfig struct {
 	ExcludedRelCols []int
 }
 
-// NewVarLengthExpand creates a VarLengthExpand operator.
-func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg VarLengthConfig) *VarLengthExpand {
+// NewVarLengthExpand creates a VarLengthExpand operator. cfg is read-only and
+// taken by pointer to avoid copying the configuration struct on this hot path.
+func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg *VarLengthConfig) *VarLengthExpand {
 	dir := cfg.Direction
 	if dir == 0 {
 		dir = DirOut
@@ -229,11 +230,11 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 	// (Match9 [3]/[4]).
 	if op.dir == DirBoth && op.revEdges != nil {
 		op.revToFwd = make([]uint64, len(op.revEdges))
-		for revUid := uint64(0); revUid+1 < uint64(len(op.revVerts)); revUid++ {
-			start, end := op.revVerts[revUid], op.revVerts[revUid+1]
+		for revUID := uint64(0); revUID+1 < uint64(len(op.revVerts)); revUID++ {
+			start, end := op.revVerts[revUID], op.revVerts[revUID+1]
 			for revPos := start; revPos < end; revPos++ {
 				fwdSrc := uint64(op.revEdges[revPos])
-				// Find the forward position p such that fwdEdges[p] = revUid
+				// Find the forward position p such that fwdEdges[p] = revUID
 				// inside fwdSrc's adjacency range. The reverse CSR is the
 				// transpose of the forward CSR, so each reverse entry has
 				// exactly one forward counterpart.
@@ -244,7 +245,7 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 				fStart, fEnd := op.fwdVerts[fwdSrc], op.fwdVerts[fwdSrc+1]
 				fwdPos := ^uint64(0)
 				for fp := fStart; fp < fEnd; fp++ {
-					if uint64(op.fwdEdges[fp]) == revUid {
+					if uint64(op.fwdEdges[fp]) == revUID {
 						fwdPos = fp
 						break
 					}
@@ -385,27 +386,23 @@ func appendExcludedFromValue(visited []uint64, v expr.Value) []uint64 {
 		// VLE flat encoding: [srcNode, edgePos0, dstNode0, edgePos1,
 		// dstNode1, …]. Odd-indexed entries are edge positions.
 		for i := 1; i < len(t); i += 2 {
-			if iv, ok := t[i].(expr.IntegerValue); ok {
-				visited = bitsetAdd(visited, uint64(iv))
-			} else if rv, ok := t[i].(expr.RelationshipValue); ok {
-				visited = bitsetAdd(visited, rv.ID)
+			switch x := t[i].(type) {
+			case expr.IntegerValue:
+				visited = bitsetAdd(visited, uint64(x))
+			case expr.RelationshipValue:
+				visited = bitsetAdd(visited, x.ID)
 			}
 		}
 	}
 	return visited
 }
 
-// seedQueue enqueues all one-hop neighbours of srcID into the BFS frontier
-// (op.queue), which at this point is empty. It returns an error if the safety
-// cap is exceeded during seeding.
-func (op *VarLengthExpand) seedQueue(srcID uint64) error {
-	return op.seedQueueWithVisited(srcID, nil)
-}
-
-// seedQueueWithVisited is the variant of [seedQueue] that pre-loads the
-// per-path visited bitset from an excluded-edge set (sibling bound rel
-// vars in the same MATCH pattern). The seeded paths' visited bitset
-// inherits the initial set so the corresponding edges are unreachable.
+// seedQueueWithVisited enqueues all one-hop neighbours of srcID into the BFS
+// frontier (op.queue), which at this point is empty. It returns an error if the
+// safety cap is exceeded during seeding. It pre-loads the per-path visited
+// bitset from an excluded-edge set (sibling bound rel vars in the same MATCH
+// pattern). The seeded paths' visited bitset inherits the initial set so the
+// corresponding edges are unreachable.
 func (op *VarLengthExpand) seedQueueWithVisited(srcID uint64, initialVisited []uint64) error {
 	// Build a synthetic parent state when initialVisited is non-empty so
 	// enqueueEdges' bitsetContains check rejects excluded edges at hop 1

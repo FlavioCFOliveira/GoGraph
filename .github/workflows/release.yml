@@ -32,7 +32,7 @@ jobs:
       - name: Install golangci-lint (needed by pre-release.sh)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.5.0
+          version: v2.12.2
           args: --version
           install-mode: binary
       - name: Pre-release gate (vet + build + test -race + lint + TCK)

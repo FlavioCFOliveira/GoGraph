@@ -89,7 +89,7 @@ func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.Pattern
 				return nil
 			}
 		}
-		var projVal expr.Value = expr.Null
+		var projVal = expr.Null
 		if pc.Projection != nil {
 			v, perr := expr.EvalWith(ctx, pc.Projection, innerRow, params, reg, nil, pe)
 			if perr != nil {
@@ -212,9 +212,9 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 // candidateHop describes one (rel, dst) traversal candidate found by
 // enumerateSteps.
 type candidateHop struct {
-	srcID, dstID graph.NodeID
+	srcID, dstID   graph.NodeID
 	srcKey, dstKey string
-	forward      bool
+	forward        bool
 }
 
 func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey string, s step) []candidateHop {

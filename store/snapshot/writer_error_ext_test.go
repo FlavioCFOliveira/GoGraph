@@ -426,7 +426,7 @@ func TestReadMapperBytes_BadMagic(t *testing.T) {
 // read-failure branch.
 func TestReadMapperBytes_TruncatedVersion(t *testing.T) {
 	t.Parallel()
-	buf := make([]byte, 4)
+	buf := make([]byte, 4, 5)
 	binary.LittleEndian.PutUint32(buf, mapperMagic)
 	// Append only 1 of the 2 version bytes.
 	buf = append(buf, 0x01)
@@ -567,7 +567,7 @@ func TestReadMapperBytes_V1LayoutAccepted(t *testing.T) {
 // read-failure branch in ReadMapperString.
 func TestReadMapperString_TruncatedVersion(t *testing.T) {
 	t.Parallel()
-	buf := make([]byte, 4)
+	buf := make([]byte, 4, 5)
 	binary.LittleEndian.PutUint32(buf, mapperMagic)
 	buf = append(buf, 0x01) // only 1 of 2 version bytes
 	if _, err := ReadMapperString(bytes.NewReader(buf)); !errors.Is(err, ErrMapperCorrupted) {

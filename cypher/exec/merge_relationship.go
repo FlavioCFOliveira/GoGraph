@@ -48,15 +48,15 @@ import (
 //
 // MergeRelationship is NOT safe for concurrent use.
 type MergeRelationship struct {
-	child           Operator
-	srcCol          int             // input-row column index holding src NodeID / NodeValue
-	dstCol          int             // input-row column index holding dst NodeID / NodeValue
-	relCol          int             // output-row column index for the bound relationship; -1 when anonymous
-	relType         string          // empty when the pattern declared no type (rejected upstream)
-	relVar          string          // empty when the relationship is anonymous
-	relPropsRaw     string          // inline `{k: v, …}` source string, "" when absent
-	relPropPredsParsed bool         // tracks one-time parse of relPropsRaw
-	relPropPreds    []propLiteral   // parsed predicate values (only literals)
+	child              Operator
+	srcCol             int           // input-row column index holding src NodeID / NodeValue
+	dstCol             int           // input-row column index holding dst NodeID / NodeValue
+	relCol             int           // output-row column index for the bound relationship; -1 when anonymous
+	relType            string        // empty when the pattern declared no type (rejected upstream)
+	relVar             string        // empty when the relationship is anonymous
+	relPropsRaw        string        // inline `{k: v, …}` source string, "" when absent
+	relPropPredsParsed bool          // tracks one-time parse of relPropsRaw
+	relPropPreds       []propLiteral // parsed predicate values (only literals)
 	// undirected reports whether the source pattern declared `(a)-[:T]-(b)`
 	// (no arrow head). When true, the match search probes both (src, dst)
 	// and (dst, src); the create path still uses the canonical (src, dst)

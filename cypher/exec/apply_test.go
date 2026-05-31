@@ -649,7 +649,7 @@ func TestVarLenExpand_1to3Hops_Linear(t *testing.T) {
 	rev := buildCSR(5, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -672,7 +672,7 @@ func TestVarLenExpand_MinHops0_IncludesSource(t *testing.T) {
 	rev := buildCSR(3, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   0,
@@ -697,7 +697,7 @@ func TestVarLenExpand_CyclicGraphTerminates(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{1, 0}, {2, 1}, {0, 2}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -725,7 +725,7 @@ func TestVarLenExpand_SafetyCapExceeded(t *testing.T) {
 	rev := buildCSR(101, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction:         exec.DirOut,
 		InputCol:          0,
 		MinHops:           1,
@@ -745,7 +745,7 @@ func TestVarLenExpand_IsolatedNode(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{2, 1}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -767,7 +767,7 @@ func TestVarLenExpand_ExactHops(t *testing.T) {
 	rev := buildCSR(4, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   2,
@@ -797,7 +797,7 @@ func TestVarLenExpand_MultipleInputRows(t *testing.T) {
 		exec.Row{expr.IntegerValue(0)},
 		exec.Row{expr.IntegerValue(1)},
 	)
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -824,7 +824,7 @@ func TestVarLenExpand_EdgeDeduplicationWithinPath(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -853,7 +853,7 @@ func TestVarLenExpand_CancellationHonoured(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1176,7 +1176,7 @@ func TestVarLenExpand_ZeroHopOnly(t *testing.T) {
 	rev := buildCSR(3, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   0,
@@ -1217,7 +1217,7 @@ func TestVarLenExpand_OneToOneHop(t *testing.T) {
 	rev := buildCSR(7, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1240,7 +1240,7 @@ func TestVarLenExpand_OneToFiveHops_Chain(t *testing.T) {
 	rev := buildCSR(6, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1291,7 +1291,7 @@ func TestVarLenExpand_OneToFiveHops_Tree(t *testing.T) {
 	rev := buildCSR(9, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1335,7 +1335,7 @@ func TestVarLenExpand_RingRelationshipIsomorphism(t *testing.T) {
 	rev := buildCSR(n, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1363,7 +1363,7 @@ func TestVarLenExpand_TightCycleCapDoesNotExplode(t *testing.T) {
 	rev := buildCSR(3, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction:         exec.DirOut,
 		InputCol:          0,
 		MinHops:           1,
@@ -1404,7 +1404,7 @@ func TestVarLenExpand_TimeoutCancelsBoundedEnumeration(t *testing.T) {
 	rev := buildCSR(n, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
 		Direction:         exec.DirOut,
 		InputCol:          0,
 		MinHops:           1,

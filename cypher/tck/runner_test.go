@@ -21,27 +21,33 @@ import (
 // gate, but any real regression in execution support fails CI.
 //
 // History:
+//
 //   - 1000: initial gate.
+//
 //   - 1145: raised after task #391 wired EagerAggregation argument/group-by
 //     AST expressions and TCK value formatting (observed ≈1152±2 over a
 //     5-run sample).
+//
 //   - 1225: raised after task #392 wired multi-pattern MATCH binding via
 //     CorrelatedApply, OPTIONAL MATCH whole-pattern NULL emission via
 //     OptionalApply, destination-rebinding equi-join in
 //     matchExpandStepBoundWithFrom, and explicit fromVar threading in
 //     matchPathPattern (observed ≈1233
 //     over a 3-run sample).
+//
 //   - 1230: raised after task #393 fixed the VarLengthExpand BFS slice-
 //     aliasing hazard (the read frontier and the write target shared a
 //     backing slice, silently overwriting unprocessed entries). Observed
 //     1234 across a 5-run sample; the gate is set conservatively at 1230
 //     to absorb run-to-run variance.
+//
 //   - 1370: raised after task #394 added the temporal value kinds (Date,
 //     DateTime, LocalDateTime, LocalTime, Time, Duration), their string and
 //     map constructors, ISO-8601 arithmetic, and the SOH-tagged PropString
 //     bridge that round-trips temporal property values through snapshot+WAL
 //     replay. Observed 1374 across a 3-run sample; the gate is set
 //     conservatively at 1370 to absorb run-to-run variance.
+//
 //   - 1520: raised after task #395 wired the cypher/sema scope analyser
 //     into Engine.Run and Engine.RunInTx as a pre-execution gate that
 //     short-circuits with a typed *sema.SemanticError before plan build.
@@ -55,6 +61,7 @@ import (
 //     reuse and surface them as SyntaxError.VariableTypeConflict.
 //     Observed 1527-1528 across a 3-run sample; the gate is set
 //     conservatively at 1520 to absorb run-to-run variance.
+//
 //   - 1568: raised after task T930 replaced [exec.Merge]'s stub searchFn
 //     with a real label+property scan ([exec.NewMergeSearchFnFromPattern]).
 //     MERGE on an existing pattern now fires the ON MATCH branch instead of
@@ -62,6 +69,7 @@ import (
 //     scenarios that rely on idempotent merge semantics.
 //     Observed 1571-1573 across a 3-run sample; the gate is set
 //     conservatively at 1568 to absorb run-to-run variance.
+//
 //   - 1576: raised after task T937 partial closure — buildRowCtx now
 //     reconstructs full [expr.RelationshipValue]s (with typed properties)
 //     for every variable in bopts.edgeVarMeta, so r.prop expressions in
@@ -69,6 +77,7 @@ import (
 //     evaluating to null.
 //     Observed 1578-1580 across a 3-run sample; the gate is set
 //     conservatively at 1576 to absorb run-to-run variance.
+//
 //   - 1628: raised after task T937 partial closure — formatNodeTCK and
 //     formatRelTCK now include the property map in the TCK textual form
 //     (`({name: 'bar'})`, `[:KNOWS {since: 2020}]`), matching the format
@@ -76,6 +85,7 @@ import (
 //     full-relationship comparisons.
 //     Observed 1631-1633 across a 3-run sample; the gate is set
 //     conservatively at 1628 to absorb run-to-run variance.
+//
 //   - 1654: raised after the temporal duration projection functions
 //     ([fnDurationInMonths], [fnDurationInDays], [fnDurationInSeconds])
 //     accepted a 2-argument form computing the difference between two
@@ -84,6 +94,7 @@ import (
 //     (component extraction from an existing Duration) was supported.
 //     Observed 1655-1658 across a 3-run sample; the gate is set
 //     conservatively at 1654 to absorb run-to-run variance.
+//
 //   - 1766: raised after the five `X.truncate(unit, source [, fields])`
 //     functions (date / datetime / localdatetime / time / localtime)
 //     landed in cypher/funcs/temporal_truncate.go. Each function
@@ -92,6 +103,7 @@ import (
 //     then applies the optional MapValue overrides.
 //     Observed 1769-1770 across a 3-run sample; the gate is set
 //     conservatively at 1766 to absorb run-to-run variance.
+//
 //   - 1815: raised after [Engine.RunAny] auto-detected writing clauses
 //     (CREATE, MERGE, SET, REMOVE, DELETE, DETACH) via a regex word-
 //     boundary scan and routed them through RunInTx instead of failing
@@ -101,6 +113,7 @@ import (
 //     for WITH * patterns that bind no variables.
 //     Observed 1817-1825 across a 5-run sample; the gate is set
 //     conservatively at 1815 to absorb run-to-run variance.
+//
 //   - 1856: raised after newResult began draining the underlying
 //     ResultSet eagerly when the query has no RETURN clause (cols=nil).
 //     Write-only queries (CREATE/SET/DELETE/MERGE/REMOVE without a
@@ -108,6 +121,7 @@ import (
 //     an empty result iterator, matching the openCypher TCK contract.
 //     Observed 1858-1859 across a 3-run sample; the gate is set
 //     conservatively at 1856 to absorb run-to-run variance.
+//
 //   - 1876: raised after two semantic fixes landed together:
 //     (a) the parser recognises that ANTLR tokenises a float literal
 //     such as `1.0` as the three tokens `1`, `.`, `0` and reconstructs
@@ -118,6 +132,7 @@ import (
 //     as true (numeric cross-type equality), instead of false.
 //     Observed 1879-1882 across a 3-run sample; the gate is set
 //     conservatively at 1876 to absorb run-to-run variance.
+//
 //   - 1882: raised after two reverse-direction relationship fixes
 //     landed together: (a) ir.createRelationship now honours
 //     ast.RelDirectionIncoming by swapping startVar/endVar so
@@ -128,6 +143,7 @@ import (
 //     skipping reverse edges when an edge-type filter is active.
 //     Observed 1885-1889 across a 3-run sample; the gate is set
 //     conservatively at 1882 to absorb run-to-run variance.
+//
 //   - 1893: raised after task T937 partial closure — temporal map-literal
 //     constructors date({year:…}), localdate/time/datetime/datetime({...}),
 //     duration({…}) are now evaluated at CreateNode/Relationship time
@@ -136,6 +152,7 @@ import (
 //     mapFieldsTo<Kind>String and delegates to the existing expr.ParseX.
 //     Observed 1896-1897 across a 3-run sample; gate set conservatively
 //     at 1893 to absorb run-to-run variance.
+//
 //   - 1948: raised after task T937 partial closure — WITH-clause
 //     OrderBy/Skip/Limit/Distinct were silently dropped by translateWith
 //     (the tail applied only to RETURN). applyProjectionTail now wraps
@@ -143,18 +160,21 @@ import (
 //     pipeline. +55 scenarios across with-orderBy, with-skip-limit,
 //     pattern-comprehension and aggregation suites. Observed 1951
 //     across a 3-run sample; gate set conservatively at 1948.
+//
 //   - 1955: raised after task T937 partial closure — parsePropValue
 //     recognises the "null" literal and returns ErrPropertyValueIsNull;
 //     the property-map iterators in parsePropLiteral and
 //     parsePropLiteralWithParams skip null entries entirely, matching
 //     openCypher CREATE-with-null semantics (the property is not set).
 //     Observed 1958 across a 3-run sample.
+//
 //   - 1961: raised after task T937 partial closure — buildPlanEngine
 //     now accepts *ir.Union and *ir.UnionAll as plan roots and dispatches
 //     into each branch recursively. Replaces the "plan root must be
 //     ProduceResults, got *ir.Union" hard error with a proper
 //     concatenation operator (exec.NewUnion / exec.NewUnionAll).
 //     Observed 1964 across a 3-run sample.
+//
 //   - 1962: raised after task T937 partial closure — ProcedureCallOp now
 //     implements void-procedure passthrough: when the procedure declares
 //     no output columns and the impl returns no rows, the driver row is
@@ -164,6 +184,7 @@ import (
 //     MATCH … CALL <void-proc> RETURN pattern (a side-effect-only step
 //     should not erase upstream bindings). Observed 1963 across a 3-run
 //     sample; gate set conservatively at 1962.
+//
 //   - 1978: raised after task T937 partial closure — three CALL-pipeline
 //     enhancements landed together: (a) buildProcedureCallOperator's
 //     argEval now recognises primitive literals (quoted strings,
@@ -179,6 +200,7 @@ import (
 //     test.labels and test.my.proc fixture scenarios across
 //     features/clauses/call/Call*. Observed 1980 across a 3-run sample;
 //     gate set conservatively at 1978.
+//
 //   - 1981: raised after task T937 partial closure — *ir.RollUpApply
 //     dispatch now wired into buildOperator: the existing
 //     exec.RollUpApply operator is allocated with the routed Argument
@@ -192,6 +214,7 @@ import (
 //     item so the final RETURN includes the collected list column.
 //     Observed 1979-1983 across an 8-run sample; gate set
 //     conservatively at 1979 to absorb the wider run-to-run variance.
+//
 //   - 1984: raised after task T937 partial closure — two parser-level
 //     fixes for scientific-notation float literals: (a) VisitAtom now
 //     reinterprets a Symbol token of shape `<digits>[eE][+-]?<digits>`
@@ -204,6 +227,7 @@ import (
 //     Together these unlock features/expressions/literals/Literals5
 //     scientific-notation scenarios. Observed 1986 across a 5-run
 //     sample.
+//
 //   - 1985: raised after task T937 partial closure — evalSubscript now
 //     handles NodeValue and RelationshipValue subscript access:
 //     n['name'] and r['since'] return the property value instead of
@@ -211,6 +235,7 @@ import (
 //     subscriptMap) to stay under the gocyclo:15 budget. Unlocks
 //     features/expressions/graph/Graph7 (dynamic property access).
 //     Observed 1985 stable across a 5-run sample.
+//
 //   - 2022: raised after task T937 partial closure — formatNanosToTime
 //     now elides the seconds field when both seconds and nanoseconds
 //     are zero (`12:00` instead of `12:00:00`) — the shortest
@@ -218,6 +243,7 @@ import (
 //     features/expressions/temporal/Temporal1, Temporal3 and many
 //     temporal-projection scenarios. Observed 2024 across a 5-run
 //     sample; gate set conservatively at 2022.
+//
 //   - 2179: raised after task T937 partial closure — formatLocalDateTime
 //     and formatDateTime extend the same :00-seconds elision through a
 //     shared formatHMSNanos helper. `1984-10-11T12:00` and
@@ -227,6 +253,7 @@ import (
 //     localdatetime/datetime values at the top of the hour or minute.
 //     Observed 2181 across a 3-run sample; gate set conservatively at
 //     2179.
+//
 //   - 2240: raised after task T937 partial closure — fnDurationBetween
 //     now accepts mixed-kind inputs. Two date-bearing values (Date,
 //     LocalDateTime, DateTime in any combination) project to
@@ -240,6 +267,7 @@ import (
 //     features/expressions/temporal/Temporal10 mixed-kind scenarios.
 //     Observed 2242 across a 3-run sample; gate set conservatively at
 //     2240.
+//
 //   - 2258: raised after task T937 partial closure — two coupled fixes:
 //     (a) compareValues now falls through to compareSameKind for
 //     same-kind Date/LocalDateTime/DateTime/LocalTime/Time/Duration
@@ -254,6 +282,7 @@ import (
 //     Temporal7 comparison scenarios across all five temporal kinds.
 //     Observed 2260 across a 3-run sample; gate set conservatively at
 //     2258.
+//
 //   - 2265: raised after task T937 partial closure — evalSlice now
 //     propagates NULL when an explicitly-written bound evaluates to
 //     NULL (`list[1..null]`, `list[null..3]`, `list[null..null]` all
@@ -264,6 +293,7 @@ import (
 //     unchanged. Observed 2262-2266 across an 8-run sample;
 //     subsequently lowered to 2260 to absorb the wider variance from
 //     the comprehension-driven scenarios.
+//
 //   - 2264: raised after task T937 partial closure — ListValue.Equal
 //     now implements openCypher 3VL semantics correctly: a single
 //     FALSE element comparison short-circuits to FALSE (overrides any
@@ -273,6 +303,7 @@ import (
 //     element would have produced FALSE. Unlocks features/expressions/
 //     list/List3 equality-with-null scenarios. Observed 2266-2269
 //     across a 5-run sample.
+//
 //   - 2268: raised after task T937 partial closure — the list
 //     quantifiers all/any/none/single now partition predicate outcomes
 //     into a (trueCount, falseCount, nullCount) tuple instead of the
@@ -284,6 +315,7 @@ import (
 //     `total - trueCount > 0` test conflated falses and nulls. Unlocks
 //     features/expressions/quantifier/Quantifier4 [10] all-with-nulls
 //     scenarios. Observed 2269-2272 across a 5-run sample.
+//
 //   - 2273: raised after task T937 partial closure — precedence-aware
 //     column-header builder exprToColumnName replaces the previous
 //     "strip outermost parens only" heuristic. Nested arithmetic and
@@ -295,6 +327,7 @@ import (
 //     Unlocks features/expressions/mathematical/Mathematical8 and
 //     similar precedence scenarios. Observed 2274-2275 across a 5-run
 //     sample.
+//
 //   - 2308: raised after Audit Cycle 4 (Sprint 82) — two fixes:
 //     (a) T957: list literal support in property map parser for CREATE/MERGE
 //     ({seasons: [1,2,3,4,5,6,7]}, {list: ['A','B']}, etc.) backed by new
@@ -303,6 +336,7 @@ import (
 //     kinds (DATE, DATETIME, LOCALDATETIME, TIME, LOCALTIME, DURATION)
 //     returning their canonical ISO-8601 string representation.
 //     Net uplift: +35 scenarios. Observed 2305-2308 across a 5-run sample.
+//
 //   - 2311: raised after T959+T960 fixes:
 //     (a) T959: SetProperty/RemoveProperty NodeID-0 resolution — row bindings
 //     that arrive as NodeValue or RelationshipValue are now resolved to their
@@ -315,6 +349,7 @@ import (
 //     non-nil on the ir.CreateNode/ir.CreateRelationship node.
 //     Net uplift: +6 scenarios. Observed 2308-2311 across a 6-run sample.
 //     Baseline set conservatively at 2306 to absorb run-to-run variance.
+//
 //   - 2378: raised after task T962 — ORDER BY clauses inside WITH are now
 //     scope-checked against the merged pre-WITH scope (original names plus
 //     new projection aliases), matching the same scope that WHERE-on-WITH
@@ -326,6 +361,7 @@ import (
 //     and other scenarios referencing variables dropped by a prior WITH.
 //     Net uplift: +72 scenarios. Observed 2382 stable across a 2-run sample;
 //     baseline set conservatively at 2378 to absorb run-to-run variance.
+//
 //   - 2440: raised after task T961 — pattern predicates in WHERE clauses are
 //     now evaluated as existential checks against the live graph. Adds a
 //     PatternEvaluator interface and patternEvaluator implementation that walks
@@ -335,6 +371,7 @@ import (
 //     1-9, 12-21), clauses/match-where, and other WHERE-predicate scenarios.
 //     Net uplift: +69 scenarios above 2378. Observed 2447-2485 across a 4-run
 //     sample; baseline set conservatively at 2440 to absorb run-to-run variance.
+//
 //   - 2550: raised after task T940 — ORDER BY / SKIP / LIMIT result-pipeline
 //     wiring. Fixes: (1) irSortKeys schema resolution (expr string + AST eval
 //     closure fallback), (2) count(*) column name (FunctionInvocation.CountStar
@@ -344,6 +381,7 @@ import (
 //     and map parameter literals. Net uplift: +118 scenarios above 2440.
 //     Observed 2558 stable; baseline set conservatively at 2550 to absorb
 //     run-to-run variance.
+//
 //   - 2860: raised after Sprint 84 audit round 7 — four execution-level
 //     fixes landed together: (a) T964 formatFloatTCK falls back to %f
 //     when %g produces scientific notation, so float properties render
@@ -364,6 +402,7 @@ import (
 //     Net uplift: +225 scenarios above 2638. Observed 2869 across a
 //     3-run sample; gate set conservatively at 2860 to absorb
 //     run-to-run variance.
+//
 //   - 2985: raised after Sprint 84 audit round 8 — three temporal-stack
 //     fixes landed together: (a) T967 timeComponentsFromMap now accepts
 //     a {time: <baseValue>} key (LocalTime/Time/LocalDateTime/DateTime)
@@ -384,6 +423,7 @@ import (
 //     letting `datetime('2017-10-28T23:00+02:00[Europe/Stockholm]')`
 //     parse correctly. Net uplift: +126 scenarios above 2860. Observed
 //     2995 across a 3-run sample; gate set conservatively at 2985.
+//
 //   - 3045: raised after Sprint 84 audit round 9 — the TCK error
 //     assertions (`assertError`, `assertSyntaxError`) now drain the
 //     pending lazy result when no error was recorded at execution
@@ -393,6 +433,7 @@ import (
 //     mismatches, NumberOutOfRange) and the eager-eval path otherwise
 //     misses them. Net uplift: +60 scenarios above 2985. Observed
 //     3055 across a 3-run sample; gate set conservatively at 3045.
+//
 //   - 3055: raised after Sprint 84 audit round 9 follow-on — three
 //     coordinated fixes: (a) toInteger("1.7") now falls back to a
 //     ParseFloat → math.Trunc path when the integer parse fails, so
@@ -408,6 +449,7 @@ import (
 //     hour/minute/second the duration calculation expects. Net uplift:
 //     +9 scenarios above 3055. Observed 3064 across a 3-run sample;
 //     gate set conservatively at 3055.
+//
 //   - 3065: raised after Sprint 84 audit round 9 follow-on 2 —
 //     applyProjectionTail in cypher/ir/with.go reordered to wrap the
 //     plan in the canonical openCypher order: DISTINCT → ORDER BY →
@@ -420,6 +462,7 @@ import (
 //     ORDER-BY-then-SKIP scenarios. Net uplift: +9 scenarios above
 //     3064. Observed 3073 across a 3-run sample; gate set
 //     conservatively at 3065.
+//
 //   - 3070: raised after Sprint 84 audit round 9 follow-on 3 — Time
 //     value comparison in compareSameKind now anchors the comparison
 //     on the UTC instant (Nanos − OffsetSec * nsPerSec) so two Time
@@ -429,6 +472,7 @@ import (
 //     scenarios in WithOrderBy1/2 and similar features. Net uplift:
 //     +7 scenarios above 3073. Observed 3080 across a 3-run sample;
 //     gate set conservatively at 3070.
+//
 //   - 3098: raised after Sprint 84 audit round 9 follow-on 4 —
 //     compareSameKind for KindLocalDateTime and KindDateTime now uses
 //     t.Compare() instead of t.UnixNano(). UnixNano overflows int64
@@ -439,6 +483,7 @@ import (
 //     values without overflow. Net uplift: +27 scenarios above 3080.
 //     Observed 3107 across a 3-run sample; gate set conservatively
 //     at 3098.
+//
 //   - 3100: raised after Sprint 84 audit round 9 follow-on 5 —
 //     kindOrder re-ordered to match the openCypher 9 cross-type
 //     sort order: Map(0) < Node(1) < Relationship(2) < List(3) <
@@ -447,6 +492,7 @@ import (
 //     the order asserted by the WithOrderBy1 [21]/[22] "Sort distinct
 //     types" scenarios. Net uplift: +1 scenario above 3107. Observed
 //     3108 across a 3-run sample; gate set conservatively at 3100.
+//
 //   - 3105: raised after Sprint 84 audit round 9 follow-on 6 —
 //     sema/analyse.go checkExpr now flags `RETURN <expr> IN <literal>`
 //     where the RHS is a statically-known non-list literal (Integer,
@@ -456,6 +502,7 @@ import (
 //     existing nonBooleanLiteralKind classifier. Net uplift: +1
 //     scenario above 3108. Observed 3109 across a 3-run sample;
 //     gate set conservatively at 3105.
+//
 //   - 3110: raised after Sprint 84 audit round 9 follow-on 7 —
 //     compareValues in cypher/expr/eval.go now compares two ListValues
 //     lexicographically with openCypher 3-valued logic via the new
@@ -466,6 +513,7 @@ import (
 //     and collapses to NULL when only NULL elements differentiate the
 //     two lists. Net uplift: +7 scenarios above 3109. Observed 3116
 //     across a 3-run sample; gate set conservatively at 3110.
+//
 //   - 3120: raised after Sprint 85 (gate raised from 80%→95%) audit
 //     round 10 — label predicate expression `(n:Foo:Bar)` now parses
 //     into a dedicated ast.LabelPredicate node and evaluates to
@@ -475,6 +523,7 @@ import (
 //     from PropertyOrLabelExpression so `RETURN (n:Foo)` evaluated as
 //     just `n`. Net uplift: +10 scenarios above 3118. Observed 3125-
 //     3129 across a 3-run sample; gate set conservatively at 3120.
+//
 //   - 3175: raised after Sprint 85 audit round 10 follow-on 1 — four
 //     sema enhancements landed together: (a) new KindInvalidAggregation
 //     ErrorKind + checkOrderByAggregation surface SyntaxError
@@ -493,6 +542,7 @@ import (
 //     `RETURN 1.foo` now raises InvalidArgumentType at compile time.
 //     Net uplift: +56 scenarios above 3120. Observed 3184 across a
 //     3-run sample; gate set conservatively at 3175.
+//
 //   - 3200: raised after Sprint 85 audit round 10 follow-on 2 — two
 //     property-store fixes for temporal values. (a) cypher/api.go's
 //     exprValueToLPGProp now encodes the six temporal expr.Value kinds
@@ -509,6 +559,7 @@ import (
 //     variants are indistinguishable from time.Now(). Net uplift: +24
 //     scenarios above 3184. Observed 3208 across a 3-run sample; gate
 //     set conservatively at 3200.
+//
 //   - 3205: raised after Sprint 85 audit round 10 follow-on 3 — two
 //     execution-side fixes for variable forwarding: (a)
 //     CreateRelationship's resolveNodeID now accepts both
@@ -522,6 +573,7 @@ import (
 //     variable bound to NULL) instead of failing. Net uplift: +2
 //     scenarios above 3208. Observed 3210 stable across runs; gate
 //     set conservatively at 3205.
+//
 //   - 3215: raised after the named-path uplift for zero- and
 //     fixed-length patterns. The IR translator now wraps every named
 //     path that is not a variable-length expansion with a new
@@ -539,6 +591,7 @@ import (
 //     and undirected patterns. Net uplift: +11-19 scenarios above
 //     3209. Observed 3220-3228 across a 5-run sample; gate set
 //     conservatively at 3215 (minimum observed - 5).
+//
 //   - 3235: raised after the SET entity-replace / map-merge property
 //     semantics uplift. The IR translator now emits a dedicated
 //     [ir.SetAllProperties] node for the whole-entity SET forms
@@ -555,6 +608,7 @@ import (
 //     Net uplift: +6-14 scenarios above 3228. Observed 3234-3243
 //     across an 8-run sample (some under -race showing the lower
 //     end); gate set conservatively at 3229 (minimum observed - 5).
+//
 //   - 3260: raised after the undirected self-loop MATCH dedup +
 //     type(r) projection fix. The Expand operator now skips its
 //     reverse-edge pass when the edge is a self-loop on the current
@@ -570,6 +624,7 @@ import (
 //     above 3226. Observed 3265-3274 across a 7-run sample (one
 //     -race outlier at 3265); gate set conservatively at 3260
 //     (minimum observed - 5).
+//
 //   - 3493: raised after task T986 — cumulative outer-scope variable
 //     resolution. Several IR operators (Expand, OptionalExpand,
 //     VarLengthExpand) report only their own (RelVar, ToVar) additions
@@ -591,6 +646,7 @@ import (
 //     equality resolves correctly. Net uplift: +2 to +4 scenarios above
 //     3494-3496 pre-fix band. Observed 3498 stable across a 3-run
 //     sample; gate set conservatively at 3493 (minimum observed - 5).
+//
 //   - 3490: lowered after task T986 follow-on — matchExpandStepBoundWithFrom
 //     now applies inline relationship property predicates from
 //     RelationshipPattern.Properties via the new [matchApplyRelFilter]
@@ -606,6 +662,7 @@ import (
 //     wider variance band while still locking in the deterministic +2
 //     uplift the T986 + rel-property fixes deliver over the pre-fix
 //     3494-3496 band.
+//
 //   - 3494: raised after sema function-argument type-check follow-on —
 //     checkFunctionArgTypes (defined but previously never called) is
 //     now wired into checkExpr's *ast.FunctionInvocation arm and
@@ -620,6 +677,7 @@ import (
 //     relationship (Path3 [3]), size() on path (List6 [5]) — +5
 //     deterministic scenarios. Observed 3499-3503 across a 5-run sample
 //     (median 3501); gate set conservatively at 3494 (minimum observed - 5).
+//
 //   - 3503: raised after exprToColumnName postfix-unary fix —
 //     `IS NULL` / `IS NOT NULL` render as `<operand> <op>` (postfix)
 //     instead of `<op><operand>` (prefix), and `NOT` keeps a separating
@@ -632,6 +690,7 @@ import (
 //     and the broader set of scenarios projecting `<x> IS [NOT] NULL`.
 //     Observed 3508-3510 across a 5-run sample (median 3509); gate set
 //     conservatively at 3503 (minimum observed - 5).
+//
 //   - 3515: raised after translateWith pre-projection WHERE fix —
 //     openCypher 9 §5.1.5 specifies that `WITH … WHERE` filters the
 //     pre-projection row stream so the predicate can reference both the
@@ -650,6 +709,7 @@ import (
 //     on pre-WITH scope visibility. Observed 3520-3524 across a 5-run
 //     sample (median 3523); gate set conservatively at 3515 (minimum
 //     observed - 5).
+//
 //   - 3520: raised after exec.Expand.advanceInput now accepts a
 //     NodeValue (in addition to the canonical IntegerValue) as the
 //     source-column value, so a projected node variable forwarded
@@ -660,6 +720,7 @@ import (
 //     forwarding family. Observed 3525-3530 across a 5-run sample
 //     (median 3529); gate set conservatively at 3520 (minimum
 //     observed - 5).
+//
 //   - 3539: raised after projectionItems now honours [ast.Projection.All]
 //     and prepends every variable introduced by the child subtree
 //     (collected via [collectAllVars]) to the projection. Pre-fix
@@ -670,6 +731,7 @@ import (
 //     broader RETURN * / WITH * forwarding family. Observed 3544-3548
 //     across a 5-run sample (median 3546); gate set conservatively at
 //     3539 (minimum observed - 5).
+//
 //   - 3544: raised after EagerAggregation now emits one row for an
 //     empty pure aggregation (openCypher 9 §3.6: `RETURN count(x)` over
 //     empty input returns 0, not zero rows) and after detectAggregation
@@ -683,6 +745,7 @@ import (
 //     +5 to +7 scenarios. Observed 3549-3555 across a 5-run sample
 //     (median 3553); gate set conservatively at 3544 (minimum
 //     observed - 5).
+//
 //   - 3549: raised after exec.Expand.passesFilter (and the symmetric
 //     reverseEdgePassesFilter) now decide acceptance by membership in
 //     the EdgeTypeFilter map rather than by comparing the looked-up
@@ -695,6 +758,7 @@ import (
 //     as edgeType), so multi-type relationship patterns only returned
 //     matches for the first type. Observed 3554-3559 across a 5-run
 //     sample (median 3556); gate set conservatively at 3549.
+//
 //   - 3549 (kept): translateWith now distinguishes the two WHERE-on-WITH
 //     positions per openCypher semantics: when the projection contains
 //     NO aggregates, WHERE filters pre-projection so it can reference
@@ -707,6 +771,7 @@ import (
 //     cannot evaluate row-by-row upstream of the aggregator. Observed
 //     3554-3561 across a 5-run sample (median 3559); baseline kept at
 //     3549 since the min observed only moved by zero.
+//
 //   - 3555: raised after standalone-CALL output-column auto-yield fix —
 //     when a `CALL ns.name(args)` query has no explicit YIELD, the
 //     buildPlanEngine standalone-CALL branch now looks up the
@@ -721,6 +786,7 @@ import (
 //     net +4-7 deterministic uplift. Observed 3560-3566 across a 5-run
 //     sample (median 3564); gate set conservatively at 3555 (minimum
 //     observed - 5).
+//
 //   - 3564: raised after OPTIONAL MATCH at query start now always wraps
 //     in an OptionalApply over a singleton Argument seed (regardless
 //     of whether the pattern contains relationships). openCypher 9
@@ -734,6 +800,7 @@ import (
 //     additional uplift. Observed 3569-3572 across a 5-run sample
 //     (median 3571); gate set conservatively at 3564 (minimum
 //     observed - 5).
+//
 //   - 3575: raised after SKIP/LIMIT parameter resolution deferred to
 //     physical-build time. ir.Skip and ir.Limit now carry an optional
 //     CountExpr AST that the physical builder evaluates via expr.Eval
@@ -748,6 +815,7 @@ import (
 //     plus the InvalidArgumentType / NegativeIntegerArgument compile
 //     expectations. Observed 3580-3582 across a 5-run sample (median
 //     3581); gate set conservatively at 3575 (minimum observed - 5).
+//
 //   - 3584: raised after compile-time CALL arity validation,
 //     AmbiguousAggregationExpression sema check (wired from both
 //     projectionCheck and withClause with per-leaf grouping-key
@@ -757,6 +825,7 @@ import (
 //     authorise leaf substitution in an aggregating sibling.
 //     Observed 3589-3596 across a 5-run sample (median 3593); gate
 //     set conservatively at 3584 (minimum observed - 5).
+//
 //   - 3593: raised after MergeRelationship — new IR + exec operator
 //     handling the canonical single-hop MERGE-of-relationship-between-
 //     bound-endpoints shape (`MATCH (a:A), (b:B) MERGE (a)-[r:T]->(b)`).
@@ -773,138 +842,147 @@ import (
 //     Unlocks Merge5 [2]/[4]/[5]/[7] and related scenarios.
 //     Observed 3598-3604 across a 5-run sample (median 3601); gate
 //     set conservatively at 3593 (minimum observed - 5).
+//
 //   - 3620: raised after eight targeted execution-level fixes landed
 //     across two commits:
 //     (a) extractAggregatesFromExpr recurses into MapLiteral /
-//         ListLiteral / SliceExpr / CaseExpression so a nested
-//         collect()/sum()/count() inside `WITH {key: collect(u)} AS m`
-//         is hoisted correctly (Delete5 #5/#6/#7).
+//     ListLiteral / SliceExpr / CaseExpression so a nested
+//     collect()/sum()/count() inside `WITH {key: collect(u)} AS m`
+//     is hoisted correctly (Delete5 #5/#6/#7).
 //     (b) Procedure args: INTEGER literal accepted where FLOAT is
-//         declared, with runtime arg-evaluator coercion (Call3 #5/#6).
+//     declared, with runtime arg-evaluator coercion (Call3 #5/#6).
 //     (c) buildRowCtx reconstructs PathValue from pathVarChain so
-//         `WHERE length(p) = 1` operates on the proper Path kind
-//         (MatchWhere1 #12/#13).
+//     `WHERE length(p) = 1` operates on the proper Path kind
+//     (MatchWhere1 #12/#13).
 //     (d) RETURN respects DISTINCT → ORDER BY → SKIP → LIMIT canonical
-//         order via applyProjectionTail, so SKIP reads from the
-//         ordered stream (ReturnSkipLimit1 #1/#2, ReturnSkipLimit3 #1/#2).
+//     order via applyProjectionTail, so SKIP reads from the
+//     ordered stream (ReturnSkipLimit1 #1/#2, ReturnSkipLimit3 #1/#2).
 //     (e) Sema flags UndefinedVariable on ORDER BY items that reference
-//         pre-projection variables after DISTINCT or aggregation
-//         collapses row identity, with collectFreeVarsOutsideProjectedAggs
-//         honouring projected aggregate calls (ReturnOrderBy2 #13,
-//         ReturnOrderBy6 #4, WithOrderBy4 #19).
+//     pre-projection variables after DISTINCT or aggregation
+//     collapses row identity, with collectFreeVarsOutsideProjectedAggs
+//     honouring projected aggregate calls (ReturnOrderBy2 #13,
+//     ReturnOrderBy6 #4, WithOrderBy4 #19).
 //     (f) checkMergeNoRebind rejects bound-variable re-use with new
-//         labels/properties (Merge5 #22).
+//     labels/properties (Merge5 #22).
 //     (g) MERGE patterns with literal `null` property values fail with
-//         MergeReadOwnWrites at runtime (Merge1 #17, Merge5 #29).
+//     MergeReadOwnWrites at runtime (Merge1 #17, Merge5 #29).
 //     (h) MERGE ON CREATE/ON MATCH applies SET label items
-//         (`SET a:Foo` form), not just `var.key = value` (Merge2 #1,
-//         Merge3 #2, plus three related scenarios).
+//     (`SET a:Foo` form), not just `var.key = value` (Merge2 #1,
+//     Merge3 #2, plus three related scenarios).
 //     Observed 3624-3625 across five-run samples; gate set at 3620
 //     to absorb run-to-run variance from order-sensitive scenarios.
+//
 //   - 3628: raised after three additional execution-level uplifts:
 //     (a) sema's transitive property-access check now distinguishes
-//         "scalar" / "list" / "map" projection types and rejects
-//         `WITH 123 AS x RETURN x.num`-style accesses at compile
-//         time (Map1 #6, Graph6 #9).
+//     "scalar" / "list" / "map" projection types and rejects
+//     `WITH 123 AS x RETURN x.num`-style accesses at compile
+//     time (Map1 #6, Graph6 #9).
 //     (b) MergeRelationship binds the relationship variable in the
-//         output row via a synthetic RelationshipValue, so count(r),
-//         RETURN r, and r.prop downstream of `MERGE (a)-[r:T]->(b)`
-//         observe the bound edge (Merge5 #2 / #5–#8, Merge6 #2,
-//         Merge7 #3 and related).
+//     output row via a synthetic RelationshipValue, so count(r),
+//     RETURN r, and r.prop downstream of `MERGE (a)-[r:T]->(b)`
+//     observe the bound edge (Merge5 #2 / #5–#8, Merge6 #2,
+//     Merge7 #3 and related).
 //     Observed 3633 stable across five-run samples; gate set at
 //     3628 to absorb run-to-run variance.
+//
 //   - 3643: raised after two further uplifts:
 //     (a) The Sort+LimitExpr fallback in applyProjectionTail now
-//         preserves the limit expression (NewLimitExpr) instead of
-//         silently using a literal zero limit, so a float-typed
-//         parameter surfaces as the documented runtime
-//         InvalidArgumentType (ReturnSkipLimit2 #15).
+//     preserves the limit expression (NewLimitExpr) instead of
+//     silently using a literal zero limit, so a float-typed
+//     parameter surfaces as the documented runtime
+//     InvalidArgumentType (ReturnSkipLimit2 #15).
 //     (b) sema flags `any/none/all/single(x IN <homogeneous list>
-//         WHERE <arithmetic on x>)` at compile time when the list is
-//         homogeneously typed under a non-numeric kind. Adds
-//         inferListElementType and quantifierPredicateUsesArithOn
-//         (Quantifier1-4 #15/#16, twelve scenarios).
+//     WHERE <arithmetic on x>)` at compile time when the list is
+//     homogeneously typed under a non-numeric kind. Adds
+//     inferListElementType and quantifierPredicateUsesArithOn
+//     (Quantifier1-4 #15/#16, twelve scenarios).
 //     Observed 3648 stable across five-run samples; gate set at
 //     3643 to absorb run-to-run variance.
+//
 //   - 3665: raised after four further uplifts:
 //     (a) collectActualRows column-name fallback is now
-//         case-insensitive in addition to whitespace-insensitive, so
-//         TCK fixtures that use mixed-case source spellings (cOuNt,
-//         dIstInct) resolve against the canonicalised engine column
-//         keys (Return4 #4–#6).
+//     case-insensitive in addition to whitespace-insensitive, so
+//     TCK fixtures that use mixed-case source spellings (cOuNt,
+//     dIstInct) resolve against the canonicalised engine column
+//     keys (Return4 #4–#6).
 //     (b) Map / node / relationship subscript with a non-string index
-//         surfaces MapElementAccessByNonString at runtime instead of
-//         silently returning NULL (Map2 #6/#7).
+//     surfaces MapElementAccessByNonString at runtime instead of
+//     silently returning NULL (Map2 #6/#7).
 //     (c) buildRowCtx reconstructs a PathValue from pathVarMeta when a
-//         named path is bound by a variable-length pattern, so
-//         relationships(p) / nodes(p) / length(p) observe the proper
-//         Path kind (Path2 #1/#2 and related, ~11 scenarios).
+//     named path is bound by a variable-length pattern, so
+//     relationships(p) / nodes(p) / length(p) observe the proper
+//     Path kind (Path2 #1/#2 and related, ~11 scenarios).
 //     (d) Merge.Next iterates one upstream child row per merge cycle
-//         instead of running the cycle once in Init, so
-//         `MATCH (person) MERGE (city) RETURN person, city` emits one
-//         row per Person (Merge2 #5, Merge3 #4, Merge4 #2, Merge6 #6/#7,
-//         Merge7 #4/#5, Merge8 #1, Merge9 #1/#4).
+//     instead of running the cycle once in Init, so
+//     `MATCH (person) MERGE (city) RETURN person, city` emits one
+//     row per Person (Merge2 #5, Merge3 #4, Merge4 #2, Merge6 #6/#7,
+//     Merge7 #4/#5, Merge8 #1, Merge9 #1/#4).
 //     Observed 3669 stable across five-run samples; gate set at
 //     3665 to absorb run-to-run variance.
+//
 //   - 3678: raised after three further uplifts:
 //     (a) MERGE relationship inline property predicate filters the
-//         existing-edge search via matchesRelProps and seeds the
-//         freshly created edge with the literal properties; the IR
-//         translator no longer falls back to the node-only Merge path
-//         for `MERGE (a)-[r:T {k: v}]->(b)` (Merge5 #5/#6/#8/#14).
+//     existing-edge search via matchesRelProps and seeds the
+//     freshly created edge with the literal properties; the IR
+//     translator no longer falls back to the node-only Merge path
+//     for `MERGE (a)-[r:T {k: v}]->(b)` (Merge5 #5/#6/#8/#14).
 //     (b) projectionsWithComprehensions hoists NESTED PatternCompre-
-//         hensions out of projection items via the new
-//         extractNestedPatternComprehensions walker, so
-//         `size([(n)-->() | 1])`-style queries no longer surface
-//         "unsupported expression type *ast.PatternComprehension"
-//         at runtime (List6 #7–#10 and related).
+//     hensions out of projection items via the new
+//     extractNestedPatternComprehensions walker, so
+//     `size([(n)-->() | 1])`-style queries no longer surface
+//     "unsupported expression type *ast.PatternComprehension"
+//     at runtime (List6 #7–#10 and related).
 //     (c) translatePatternComprehension now propagates the
-//         named-path binding (`p = (n)-->(:B)`) onto the inner
-//         PathPattern so matchPattern emits NamedPath; the
-//         comprehension's `| p` projection then sees a real
-//         PathValue via pathVarMeta / pathVarChain (Pattern2 #1–#3
-//         and related, nine scenarios).
+//     named-path binding (`p = (n)-->(:B)`) onto the inner
+//     PathPattern so matchPattern emits NamedPath; the
+//     comprehension's `| p` projection then sees a real
+//     PathValue via pathVarMeta / pathVarChain (Pattern2 #1–#3
+//     and related, nine scenarios).
 //     Observed 3682 stable across five-run samples; gate set at
 //     3678 to absorb run-to-run variance.
+//
 //   - 3683: raised after two further uplifts:
 //     (a) RETURN n.prop AS n bypasses the schema-name fast path so
-//         the row carries the projected scalar instead of the bound
-//         node (Merge5 #16–#19, Return4 #1).
+//     the row carries the projected scalar instead of the bound
+//     node (Merge5 #16–#19, Return4 #1).
 //     (b) Variable-length relationship pattern accepts a
-//         previously-bound list alias without raising
-//         VariableTypeConflict, enabling
-//         `MATCH ... WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)`
-//         (Match4 #8, Match9 #6/#7).
+//     previously-bound list alias without raising
+//     VariableTypeConflict, enabling
+//     `MATCH ... WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)`
+//     (Match4 #8, Match9 #6/#7).
 //     Observed 3688 stable across five-run samples; gate set at
 //     3683 to absorb run-to-run variance.
+//
 //   - 3697: raised after three further uplifts:
 //     (a) buildIRProjection's alias-collision guard now covers map
-//         literals too — `WITH {k: m.id} AS m` survives without the
-//         schema-name fast path swallowing the bound node
-//         (With4 #7).
+//     literals too — `WITH {k: m.id} AS m` survives without the
+//     schema-name fast path swallowing the bound node
+//     (With4 #7).
 //     (b) Expand.tryRevEdge now resolves the reverse edge to its
-//         forward-CSR position (via lookupFwdEdgePos) when available
-//         so cyphermorphism observes the same id across both
-//         traversal directions; previously the synthetic
-//         `len(fwd) + revPos` id let undirected re-traversals slip
-//         through (Match6 #9/#10/#11/#12/#13/#14).
+//     forward-CSR position (via lookupFwdEdgePos) when available
+//     so cyphermorphism observes the same id across both
+//     traversal directions; previously the synthetic
+//     `len(fwd) + revPos` id let undirected re-traversals slip
+//     through (Match6 #9/#10/#11/#12/#13/#14).
 //     (c) formatNodeTCK sorts the node-label slice deterministically
-//         before emission so the result-set comparator no longer
-//         flips on map iteration order
-//         (Graph5 #1/#3 etc., plus a handful of label-list
-//         comparisons elsewhere).
+//     before emission so the result-set comparator no longer
+//     flips on map iteration order
+//     (Graph5 #1/#3 etc., plus a handful of label-list
+//     comparisons elsewhere).
 //     Observed 3702 stable across five-run samples; gate set at
 //     3697 to absorb run-to-run variance.
+//
 //   - 3700: raised after two further uplifts:
 //     (a) cmpFloat64 sorts NaN after every finite number, so ORDER BY
-//         DESC produces the documented null > NaN > finite ordering
-//         (ReturnOrderBy1 #12 and related).
+//     DESC produces the documented null > NaN > finite ordering
+//     (ReturnOrderBy1 #12 and related).
 //     (b) procs.Signature gained InputNames, populated by the TCK
-//         proc-decl parser; CALL with no argument list now binds each
-//         declared input from the matching query parameter
-//         (Call2 #3).
+//     proc-decl parser; CALL with no argument list now binds each
+//     declared input from the matching query parameter
+//     (Call2 #3).
 //     Observed 3705 stable across five-run samples; gate set at
 //     3700 to absorb run-to-run variance.
+//
 //   - 3712: raised after a foundational projection-schema fix:
 //     buildIRProjection now resets the shared schema map to ONLY the
 //     output items' aliases / expression-string secondary keys after
@@ -918,20 +996,24 @@ import (
 //     scenarios in the same family.
 //
 //     Two further focused uplifts landed alongside the schema fix:
-//     * NaN-vs-number ordering yields FALSE; NaN-vs-non-number
-//       yields NULL (Comparison2 #5 examples).
-//     * sema/validateRelRange retains the negative-bound checks but
-//       drops the Min > Max branch (false-positive against the
-//       parser's abs-normalisation pipeline).
+//
+//   - NaN-vs-number ordering yields FALSE; NaN-vs-non-number
+//     yields NULL (Comparison2 #5 examples).
+//
+//   - sema/validateRelRange retains the negative-bound checks but
+//     drops the Min > Max branch (false-positive against the
+//     parser's abs-normalisation pipeline).
 //
 //     Observed 3716 stable across five-run samples; gate set at
 //     3712 to absorb run-to-run variance.
+//
 //   - 3715: holds — exec.Eager pipeline barrier and the LIMIT-0-over-
 //     writes gate fix Create6 #8 ("Limiting to zero results after
 //     creating relationships affects the result set but not the side
 //     effects"); the wider LIMIT-N-over-writes wrap regressed
 //     Match5 #26's mid-pipeline setup query and is intentionally not
 //     applied.
+//
 //   - 3798: raised after Literals5 [12] closed. ANTLR's DIGIT terminal
 //     absorbs a leading '-' into the integer token, so `-0.001` reaches
 //     the visitor as IntLit{Value: 0} + accessor key "001" — int64
@@ -942,6 +1024,7 @@ import (
 //     fractional key has a non-zero digit (a purely-zero key
 //     collapses to canonical positive zero per openCypher). Observed
 //     3798-3803 across a 10-run sample; gate set at the floor.
+//
 //   - 3797: raised after round 21 closed Match9 [1] (RETURN last(r)
 //     over a varlen rel). buildRowCtx now consults
 //     bopts.vleRelMeta and reconstructs the variable-length
@@ -956,36 +1039,38 @@ import (
 //     IR/exec work and are deferred to a follow-up round.
 //     Observed 3797-3803 across a 10-run sample; gate set at the
 //     floor.
+//
 //   - 3796: raised after round 20 closed every Temporal10 scenario
 //     except [12] (statement-time now-cache, deferred). Three
 //     coordinated fixes landed:
 //     (a) durationBetweenTimeOnly / elapsedNanosTimeOnly select the
-//         projection frame from operand kinds — UTC arithmetic when
-//         both sides are zoned (Time / DateTime), wall-clock when at
-//         least one side is local. timeOfDayNanos applies
-//         TimeValue.OffsetSec only in UTC mode. Closes Temporal10
-//         [2]/[5] both-zoned mixed-kind rows.
+//     projection frame from operand kinds — UTC arithmetic when
+//     both sides are zoned (Time / DateTime), wall-clock when at
+//     least one side is local. timeOfDayNanos applies
+//     TimeValue.OffsetSec only in UTC mode. Closes Temporal10
+//     [2]/[5] both-zoned mixed-kind rows.
 //     (b) elapsedNanos and elapsedNanosTimeOnly invoke
-//         dstAwareInstants first: when one side is DateTime (zoned)
-//         and the other is local (LocalDateTime / LocalTime / Date),
-//         the local is rebuilt with time.Date in the DateTime's
-//         *time.Location (and date when needed) so Go's time package
-//         picks the correct DST offset. Both are then subtracted as
-//         instants. Closes Temporal10 [8] (datetime(Europe/Stockholm,
-//         …) vs local on a DST-end day reports PT5H / PT25H).
+//     dstAwareInstants first: when one side is DateTime (zoned)
+//     and the other is local (LocalDateTime / LocalTime / Date),
+//     the local is rebuilt with time.Date in the DateTime's
+//     *time.Location (and date when needed) so Go's time package
+//     picks the correct DST offset. Both are then subtracted as
+//     instants. Closes Temporal10 [8] (datetime(Europe/Stockholm,
+//     …) vs local on a DST-end day reports PT5H / PT25H).
 //     (c) ParseDate accepts the extended ISO year form
-//         ([+-]Y+(-MM(-DD)?)?) and ParseLocalDateTime accepts a bare
-//         date with no T separator. fnDurationInSeconds /
-//         fnDurationInDays now go through elapsedSecsAndNanos, which
-//         returns (secs, nanos) without overflowing int64-nanos;
-//         the both-local date-bearing branch uses Julian-Day-Number
-//         arithmetic (julianDayGregorian) outside ±200 years.
-//         formatDuration decomposes (Seconds, Nanos) into H/M/S on
-//         the seconds axis directly so the toString of a ±10^9-year
-//         duration no longer saturates. Closes Temporal10 [9]
-//         (P1999999998Y11M30D) and [10] (PT17531639991215H59M59S).
+//     ([+-]Y+(-MM(-DD)?)?) and ParseLocalDateTime accepts a bare
+//     date with no T separator. fnDurationInSeconds /
+//     fnDurationInDays now go through elapsedSecsAndNanos, which
+//     returns (secs, nanos) without overflowing int64-nanos;
+//     the both-local date-bearing branch uses Julian-Day-Number
+//     arithmetic (julianDayGregorian) outside ±200 years.
+//     formatDuration decomposes (Seconds, Nanos) into H/M/S on
+//     the seconds axis directly so the toString of a ±10^9-year
+//     duration no longer saturates. Closes Temporal10 [9]
+//     (P1999999998Y11M30D) and [10] (PT17531639991215H59M59S).
 //     Observed 3796-3801 across a 10-run sample; gate set at the
 //     floor.
+//
 //   - 3784: raised after the parser's normalize step learnt to
 //     preserve a user-given `-` in a varlen range bound. Previously
 //     `[r*-2]` was rewritten and abs'd into a positive `2`, so the
@@ -995,41 +1080,46 @@ import (
 //     Match4 [9] (missing `*` entirely) is documented as a grammar gap
 //     in parser_only.go::grammarGapExact.
 //     Observed 3784-3785 across a 5-run sample; gate set at 3784.
+//
 //   - 3782: raised after three follow-up fixes landed alongside the
 //     PatternComprehension work:
-//     * Pattern1 [11] — sema rejects a bare node pattern (`WHERE (n)`)
-//       as a predicate; existential patterns in WHERE must include at
-//       least one relationship per openCypher.
-//     * Set1 [10] — SetProperty's valueEvalFn now pre-checks the RHS
-//       and surfaces an InvalidPropertyType error when the value is a
-//       Map (or a List containing a Map), instead of silently no-op'ing
-//       the unstorable shape.
-//     * Remove2 [5] — RemoveLabels honours the errNullTarget sentinel
-//       (mirroring RemoveProperty) so an OPTIONAL MATCH that bound the
-//       target to null passes the row through unchanged.
+//
+//   - Pattern1 [11] — sema rejects a bare node pattern (`WHERE (n)`)
+//     as a predicate; existential patterns in WHERE must include at
+//     least one relationship per openCypher.
+//
+//   - Set1 [10] — SetProperty's valueEvalFn now pre-checks the RHS
+//     and surfaces an InvalidPropertyType error when the value is a
+//     Map (or a List containing a Map), instead of silently no-op'ing
+//     the unstorable shape.
+//
+//   - Remove2 [5] — RemoveLabels honours the errNullTarget sentinel
+//     (mirroring RemoveProperty) so an OPTIONAL MATCH that bound the
+//     target to null passes the row through unchanged.
 //     Observed 3782-3783 across a 5-run sample; gate set at 3782.
+//
 //   - 3780: raised after the PatternComprehension extraction reached
 //     translateWith, the IR ListComprehension walker, and the aggregate-
 //     argument hoist. Two structural fixes landed together:
 //     (a) projectionsWithComprehensions now also returns a rewritten
-//         *ast.Projection (synthetic __pc_N variables in place of the
-//         hoisted PatternComprehension) that translateReturn and
-//         translateWith feed to detectAggregation. Without this, an
-//         aggregate over a comprehension — `count([p = (n)-->() | p])`
-//         in Pattern2 [6] — kept the raw PatternComprehension as the
-//         agg argument and the executor failed with "unsupported
-//         expression type".
+//     *ast.Projection (synthetic __pc_N variables in place of the
+//     hoisted PatternComprehension) that translateReturn and
+//     translateWith feed to detectAggregation. Without this, an
+//     aggregate over a comprehension — `count([p = (n)-->() | p])`
+//     in Pattern2 [6] — kept the raw PatternComprehension as the
+//     agg argument and the executor failed with "unsupported
+//     expression type".
 //     (b) translatePatternComprehension now collects correlation
-//         variables via collectAllVars(outer) instead of outer.Vars().
-//         Expand.Vars() omits its FromVar, so a comprehension whose
-//         leading node sat in the outer's MATCH (n)-->(b) chain saw
-//         n as unbound, fell into matchPattern's unshared-Cartesian
-//         branch, and scanned every node in the graph for each outer
-//         row. The first symptom was 2× duplicates in the collected
-//         list (each outer row's edge plus the down-stream edge that
-//         shared a node ID); the deeper symptom was a count(b) over
-//         the comprehension returning 0 because the GroupBy collapsed
-//         every row into a single group keyed by the corrupted list.
+//     variables via collectAllVars(outer) instead of outer.Vars().
+//     Expand.Vars() omits its FromVar, so a comprehension whose
+//     leading node sat in the outer's MATCH (n)-->(b) chain saw
+//     n as unbound, fell into matchPattern's unshared-Cartesian
+//     branch, and scanned every node in the graph for each outer
+//     row. The first symptom was 2× duplicates in the collected
+//     list (each outer row's edge plus the down-stream edge that
+//     shared a node ID); the deeper symptom was a count(b) over
+//     the comprehension returning 0 because the GroupBy collapsed
+//     every row into a single group keyed by the corrupted list.
 //     The RollUpApply builder also restores the outer schema verbatim
 //     after the inner build so the inner Projection's schema reset
 //     can no longer overwrite outer column entries (n and b were
@@ -1040,6 +1130,7 @@ import (
 //     comprehension's projection cannot be safely hoisted because
 //     the iteration variable is not in the outer scope).
 //     Observed 3780-3783 across a 5-run sample; gate set at 3780.
+//
 //   - 3774: raised after sema.checkExpr's transitive-type guard added
 //     "path" to its rejected-types switch alongside "scalar" and
 //     "list". A named path variable (e.g. `p = (a)-[*]->(b)`) carries
@@ -1049,6 +1140,7 @@ import (
 //     scalar/list receivers. Plus one variance-sensitive adjacent
 //     scenario re-stabilises in the new baseline window.
 //     Observed 3774-3779 across a 7-run sample; gate set at 3774.
+//
 //   - 3771: raised after exprToColumnName stopped wrapping nested
 //     Property receivers in parens. The previous code parenthesised
 //     anything that was not a bare Variable, so `nestedMap.name
@@ -1062,6 +1154,7 @@ import (
 //     Closes With2 [2] "Forwarding a nested map literal" plus a
 //     handful of variance-sensitive adjacent tests.
 //     Observed 3771-3777 across a 5-run sample; gate set at 3771.
+//
 //   - 3770: raised after the TCK comparator implemented the
 //     "ignoring element order for lists" contract instead of
 //     delegating verbatim to the strict comparator. Both
@@ -1077,6 +1170,7 @@ import (
 //     does not match the literal source order, plus Aggregation5
 //     [2] and similar collect-order tests, plus a few singletons.
 //     Observed 3771-3775 across a 7-run sample; gate set at 3770.
+//
 //   - 3766: raised after MergeRelationship.applyRelActions learnt
 //     to silently skip null property values. The parsePropValue
 //     helper already flags null via the typed
@@ -1089,6 +1183,7 @@ import (
 //     created and the SET is a no-op. Closes Merge6 [4] and lifts
 //     the floor of the run-to-run band by a few scenarios.
 //     Observed 3766-3770 across a 7-run sample; gate set at 3766.
+//
 //   - 3760 holds: SubDates now sign-normalises (compute |a-b| with
 //     positive arithmetic, negate the result) before the day/month
 //     borrow logic kicks in. The previous calendarDateDiff ran the
@@ -1101,6 +1196,7 @@ import (
 //     in adjacent flaky tests (Set3 [6], Map3 [4], Temporal10 [12]
 //     each appear/disappear independently across runs); baseline
 //     therefore stays at 3760 rather than ratcheting up.
+//
 //   - 3765: raised after fnLocalDateTime preserved the wall-clock
 //     components when stripping the zone from a DateTimeValue
 //     input. Previously the DateTimeValue branch returned
@@ -1114,12 +1210,14 @@ import (
 //     fix is not needed for fnLocalTime/fnTime which already
 //     extract Hour()/Minute()/etc. directly from v.T.
 //     Observed 3765-3767 across a 3-run sample; gate set at 3765.
+//
 //   - 3762: raised after the TCK exprValueToString StringValue
 //     formatter learnt the canonical Cypher escapes — backslash
 //     and inner single quote are now escaped (in that order) so
-//     RETURN '\'' renders as '\'' instead of ''' and matches the
+//     RETURN '\” renders as '\” instead of ”' and matches the
 //     TCK table cells. Closes Literals6 [4] and [5].
 //     Observed 3762-3767 across a 7-run sample; gate set at 3762.
+//
 //   - 3760: raised after RemoveProperty learnt to silently skip
 //     rows whose target variable is NULL. resolveEntityFromRow
 //     and resolveEntityMaybeRel now return the existing
@@ -1132,6 +1230,7 @@ import (
 //     scenarios alongside a small ripple of variance-sensitive
 //     adjacent tests.
 //     Observed 3760-3768 across a 5-run sample; gate set at 3760.
+//
 //   - 3756: raised after durationFromMap stopped truncating sub-
 //     second components via the bare int32(sFrac * 1e9) cast.
 //     For nanoseconds:1 the intermediate sFrac is 1e-9; the product
@@ -1142,6 +1241,7 @@ import (
 //     duration scenarios where the answer differed only in the
 //     sub-second tail.
 //     Observed 3757-3764 across a 5-run sample; gate set at 3756.
+//
 //   - 3748: raised after ast.FloatLiteral.String() learnt to keep
 //     the float discriminator. strconv.FormatFloat with precision -1
 //     strips the trailing ".0" for whole-number values, so a CREATE
@@ -1154,6 +1254,7 @@ import (
 //     (those are not valid Cypher literals). Closes the 3
 //     Aggregation6 [1] percentileDisc float-discriminator failures.
 //     Observed 3748-3755 across a 5-run sample; gate set at 3748.
+//
 //   - 3745: raised after dateFromMap / timeComponentsFromMap learnt
 //     to treat the {datetime: ...} key as a date+time base source
 //     (previously only {date:..} / {time:..} were consulted, so
@@ -1164,19 +1265,20 @@ import (
 //     explicit-over-implicit precedence used elsewhere in the
 //     constructor.
 //     Observed 3745-3752 across a 6-run sample; gate set at 3745.
+//
 //   - 3735: raised after two surgical temporal-truncate fixes that
 //     together close every Temporal9 [4]/[5] failure (≈24 scenarios):
 //     (a) sourceToTime() for TimeValue/LocalTimeValue rebuilds the
-//         internal time.Time from wall-clock components in the
-//         destination FixedZone instead of treating Nanos as a UTC
-//         instant and shifting via .In(loc), so
-//         localtime.truncate('hour', time(+01:00)) returns 12:00 not
-//         13:00 and the symmetric -01:00 source returns 12:00 not
-//         11:00.
+//     internal time.Time from wall-clock components in the
+//     destination FixedZone instead of treating Nanos as a UTC
+//     instant and shifting via .In(loc), so
+//     localtime.truncate('hour', time(+01:00)) returns 12:00 not
+//     13:00 and the symmetric -01:00 source returns 12:00 not
+//     11:00.
 //     (b) applyOverrides() timezone branch now parses '+HH:MM'/'-HH:MM'/
-//         'Z'/'UTC' via a shared parseTimezoneString helper alongside
-//         time.LoadLocation, so {timezone: '+01:00'} overrides actually
-//         take effect instead of silently keeping the source zone.
+//     'Z'/'UTC' via a shared parseTimezoneString helper alongside
+//     time.LoadLocation, so {timezone: '+01:00'} overrides actually
+//     take effect instead of silently keeping the source zone.
 //     Observed 3737-3740 across a 4-run sample; gate set at 3735 to
 //     absorb run-to-run variance.
 //
@@ -1188,6 +1290,7 @@ import (
 //     non-deterministic inside an aggregation argument). Round 22.
 //     Observed 3800-3807 across a 10-run sample (median 3803); gate set
 //     at 3800 to absorb run-to-run variance.
+//
 //   - 3805: raised after buildIRProjection learnt to skip the schema-name
 //     fast path when the projection alias collides with an input variable
 //     name AND the expression is a non-aggregate that references the
@@ -1199,6 +1302,7 @@ import (
 //     with the same alias-shadow shape. Round 23.
 //     Observed 3805-3814 across a 10-run sample (median 3810); gate set
 //     at 3805 to absorb run-to-run variance.
+//
 //   - 3808: raised after CALL .. YIELD learnt to bind each YIELD variable
 //     to the procedure's declared output column by name (Sig.Outputs)
 //     rather than by position. Closes Call5 [3] (`YIELD b, a` with a
@@ -1208,44 +1312,45 @@ import (
 //     after an AS rename. Round 24.
 //     Observed 3808-3816 across a 10-run sample (median 3810); gate set
 //     at 3808 to absorb run-to-run variance.
+//
 //   - (still 3808): rounds 25 through 33 added nine additional
 //     deterministic fixes that lifted the band but did not warrant a
 //     ratchet — the variance floor persists below the deterministic
 //     gain because a handful of TCK scenarios still use `rand()` or
 //     map iteration order in unstable ways:
-//       round 25: drop normalizeVarlenDotDot from the parse pipeline so
-//                 `-[:T..]-` (no asterisk) raises a compile-time syntax
-//                 error per Match4 [9].
-//       round 26: guard normalizeLeadingDotFloat so the second dot of a
-//                 RANGE token (`0..0`, `*..0`, `*N..0`) is not rewritten;
-//                 the prior rewrite turned `list[0..0]` into a property
-//                 chain that evaluated to null. Closes List2 [5].
-//       round 27: in-query CALL (one with explicit YIELD) now rejects
-//                 the implicit-argument form. openCypher restricts
-//                 implicit param-binding to STANDALONE CALL. Closes
-//                 Call2 [4].
-//       round 28: EXISTS { pattern WHERE pred } preserves the inline
-//                 WHERE through AST → IR → exec. Closes
-//                 ExistentialSubquery1 [2], [4].
-//       round 29: buildEdgeTypeFilter accepts any matching edge label
-//                 on a multi-label edge (`(a)-[:PLAYS_FOR]->(b)` +
-//                 `(a)-[:SUPPORTS]->(b)` on the same pair). Closes
-//                 Match7 [29] and de-flakes Match2 [6], Unwind1 [12].
-//       round 30: LIMIT over a write subtree wraps the child in Eager
-//                 so every UNWIND iteration fires before LIMIT
-//                 short-circuits. Closes Create6 [10], Delete6 [14],
-//                 Remove1 [4].
-//       round 31: DELETE r dispatches to mutator.RemoveEdge when r
-//                 is a bound relationship variable. Closes Match5 [26]
-//                 and the long-standing DELETE-r planner gap.
-//       round 32: the colliding-alias guard now respects EagerAggregation
-//                 grouping keys (bopts.preprojectedCols). `RETURN n.num
-//                 AS n, count(n) AS count` no longer returns
-//                 [null, 1]. Closes Return6 [1].
-//       round 33: the colliding-alias guard now also fires for computed
-//                 expressions whose alias collides with a prior WITH's
-//                 projected name, even when the expression doesn't
-//                 reference the alias. Closes WithOrderBy4 [7].
+//     round 25: drop normalizeVarlenDotDot from the parse pipeline so
+//     `-[:T..]-` (no asterisk) raises a compile-time syntax
+//     error per Match4 [9].
+//     round 26: guard normalizeLeadingDotFloat so the second dot of a
+//     RANGE token (`0..0`, `*..0`, `*N..0`) is not rewritten;
+//     the prior rewrite turned `list[0..0]` into a property
+//     chain that evaluated to null. Closes List2 [5].
+//     round 27: in-query CALL (one with explicit YIELD) now rejects
+//     the implicit-argument form. openCypher restricts
+//     implicit param-binding to STANDALONE CALL. Closes
+//     Call2 [4].
+//     round 28: EXISTS { pattern WHERE pred } preserves the inline
+//     WHERE through AST → IR → exec. Closes
+//     ExistentialSubquery1 [2], [4].
+//     round 29: buildEdgeTypeFilter accepts any matching edge label
+//     on a multi-label edge (`(a)-[:PLAYS_FOR]->(b)` +
+//     `(a)-[:SUPPORTS]->(b)` on the same pair). Closes
+//     Match7 [29] and de-flakes Match2 [6], Unwind1 [12].
+//     round 30: LIMIT over a write subtree wraps the child in Eager
+//     so every UNWIND iteration fires before LIMIT
+//     short-circuits. Closes Create6 [10], Delete6 [14],
+//     Remove1 [4].
+//     round 31: DELETE r dispatches to mutator.RemoveEdge when r
+//     is a bound relationship variable. Closes Match5 [26]
+//     and the long-standing DELETE-r planner gap.
+//     round 32: the colliding-alias guard now respects EagerAggregation
+//     grouping keys (bopts.preprojectedCols). `RETURN n.num
+//     AS n, count(n) AS count` no longer returns
+//     [null, 1]. Closes Return6 [1].
+//     round 33: the colliding-alias guard now also fires for computed
+//     expressions whose alias collides with a prior WITH's
+//     projected name, even when the expression doesn't
+//     reference the alias. Closes WithOrderBy4 [7].
 //     Observed 3815-3826 across a 10-run sample (median ~3822) after
 //     the round-33 fix; gate kept at 3808 because flaps from
 //     rand()/iteration-order scenarios still push the floor below the
@@ -1259,6 +1364,7 @@ import (
 //     DELETE-r planner gap closing several related scenarios). The
 //     50-run band sits at 3820-3833 (median ~3826); gate set at 3815
 //     for ~5 of variance headroom.
+//
 //   - (still 3815): round 35 deferred projection-loop schema mutations
 //     to post-loop so item N's fast path no longer reads item M's
 //     leaked OUTPUT key (Return4 [3] = [42, 226] → [42, 42]); round 36
@@ -1266,35 +1372,42 @@ import (
 //     downstream RETURN n.<key> reads the freshly-set value
 //     (List12 [1] / [2]). Variance band moved to 3822-3830 (median
 //     ~3826); gate kept at 3815 to absorb the remaining flap floor.
+//
 //   - 3820: ratcheted after a 30-run sample showed the floor stabilising
 //     at 3821 (median 3827, max 3834). With ~6 of headroom this gate
 //     captures all the deterministic gains from rounds 35-36 without
 //     burning the rand()/iteration-order variance budget.
+//
 //   - 3823: ratcheted after rounds 38 and 39 closed Merge5 [29]
 //     (MergeRelationship rejects null property literal) and
 //     ReturnOrderBy6 [5] (ambiguous-aggregation check extended to
 //     ORDER BY). 60-run sample shows the floor at 3824 (median 3830,
 //     max 3834); gate set at 3823 for 1 of headroom.
+//
 //   - 3828: ratcheted after round 40 closed 4 VLE undirected scenarios
 //     (Match9 [3], Match9 [4], Match7 [14], Delete4 [2]) by keying the
 //     relationship-uniqueness bitset on the forward-edge position so
 //     DirBoth traversals dedupe the same physical edge across
 //     direction. 30-run sample shows floor at 3830 (median 3835, max
 //     3838); gate at 3828 for 2 of headroom.
+//
 //   - 3831: ratcheted after round 43 closed WithOrderBy4 [8] and
 //     WithOrderBy2 [21] via appendOrderByPassthrough — WITH projections
 //     now keep pre-projection variables in scope when ORDER BY
 //     references them. 20-run sample shows floor at 3832 (median
 //     3837, max 3841); gate at 3831 for 1 of headroom.
+//
 //   - 3832: ratcheted after round 44 (Pattern2 [11] — drop the
 //     srcID != 0 guard on edge metadata lookup) and round 45
 //     (WithOrderBy2 [23] — aggregating-WITH ORDER BY rewrites source
 //     expr to alias). 25-run sample shows floor at 3832 (median 3838,
 //     max 3842); gate at 3832 with 0 headroom — accept variance flap.
+//
 //   - 3836: ratcheted after round 46 (UNWIND scalar-tagging) and
 //     round 47 (extractRelKVActions handles SET rel += {literal map}).
 //     20-run sample shows floor at 3837 (median 3841, max 3845); gate
 //     at 3836 with 1 of headroom.
+//
 //   - 3838: ratcheted after round 49 — list/string-predicate precedence
 //     rebalance. The grammar consumes IN/CONTAINS/STARTS WITH/ENDS WITH
 //     as postfixes on atomicExpression, giving them the WRONG (higher)
@@ -1304,12 +1417,14 @@ import (
 //     visitor. Closes Precedence3 [4] and Precedence3 [5]. 20-run
 //     sample: floor 3838, median ~3842, max 3846; gate at 3838 with 0
 //     headroom — accept variance flap.
+//
 //   - 3839: ratcheted after round 50 — TCK comparator now recursively
 //     normalises nested map/list values in normalizeMapPair, so a deeply
 //     nested map literal like `{data: [{id: '0001', type: 'donut'}]}`
 //     compares regardless of MapValue's Go-map iteration order. Closes
 //     Literals8 [18]. 20-run sample: floor 3839, median ~3843, max
 //     3847; gate at 3839 with 0 headroom.
+//
 //   - 3841: ratcheted after round 51 — buildPropsEvalFn now honours
 //     bopts.scalarCols when building the per-row context for CREATE and
 //     CREATE relationship property maps. Previously a CREATE inside an
@@ -1319,6 +1434,7 @@ import (
 //     the integer. Closes Create6 [6] and ReturnSkipLimit3 [3]. 20-run
 //     sample: floor 3841, median ~3844, max 3848; gate at 3841 with 0
 //     headroom.
+//
 //   - 3843: ratcheted after round 52 — buildRowCtx now honours
 //     bopts.scalarCols (mirroring the projection fast-path), and
 //     buildEagerAggregation now skips adding an aggregate OutputName
@@ -1329,6 +1445,7 @@ import (
 //     with a row-variable end) and Aggregation6 [5] (setup query
 //     range(0, i)). 20-run sample: floor 3843, median ~3847, max 3850;
 //     gate at 3843 with 0 headroom.
+//
 //   - 3882: ratcheted after round 84 — VarLengthExpand now accepts both
 //     IntegerValue (Expand-emitted raw NodeID, the in-pipeline encoding)
 //     AND NodeValue (the upgraded form an upstream Projection emits)
@@ -1340,6 +1457,7 @@ import (
 //     [r1, r2] AS rs, a AS first, b AS second LIMIT 1 MATCH
 //     (first)-[rs*]->(second) RETURN first, second`). 10-run sample:
 //     10-of-10 at 3882; gate at 3882 with 0 headroom.
+//
 //   - 3881: ratcheted after round 83 — destRebinding-aware prevNodeVar
 //     threading in matchPathPattern / matchPathPatternWithArg. When the
 //     destination-node rebinding fires (e.g. the middle `(n)` of
@@ -1356,6 +1474,7 @@ import (
 //     prevNodeVar when destRebinding fired. Closes ExistentialSubquery3
 //     [2]'s nested-EXISTS `(l)<-[:R]-(n)-[:R]->(m)` pattern.
 //     10-run sample: 10-of-10 at 3881; gate at 3881 with 0 headroom.
+//
 //   - 3880: ratcheted after round 82 — edge-ID-based storage-direction
 //     resolution for path reconstruction. A new bopts.edgeIDResolver
 //     (lazily built once per query from the LPG's forward CSR) maps a
@@ -1378,6 +1497,7 @@ import (
 //     emits all 4 expected paths with correct arrows (`-[:T1]->`,
 //     `<-[:T2]-`, etc.). Closes Match6 [12] and Match6 [13]. 10-run
 //     sample: 10-of-10 at 3880; gate at 3880 with 0 headroom.
+//
 //   - 3878: ratcheted after round 81 — chained-VLE named-path
 //     reconstruction. pathVarInfo gains a `segments []pathVarSegment`
 //     field; each VarLengthExpand that shares the named-path variable
@@ -1393,6 +1513,7 @@ import (
 //     a→b→c-rooted paths because the legacy pathVarMeta only tracked
 //     the LAST VLE's emission). 10-run sample: 10-of-10 at 3878;
 //     gate at 3878 with 0 headroom.
+//
 //   - 3877: ratcheted after round 80 — new bopts.aggKeyScalarCols set
 //     suppresses the IntegerValue→NodeValue upgrade in the
 //     buildIRProjection Variable fast path for any post-aggregation
@@ -1416,38 +1537,40 @@ import (
 //     remain correct: `n` stays a NodeValue in the pre-projection
 //     and an upgraded NodeValue in the post-projection.
 //     20-run sample: 20-of-20 at 3877; gate at 3877 with 0 headroom.
+//
 //   - 3876: ratcheted after round 79 — two coordinated non-determinism
 //     fixes:
 //     (a) buildPropsEvalFn (CREATE / row-aware MERGE) now folds
-//         projAliasScalarCols into scalarSnap, in addition to
-//         scalarCols. A MERGE pattern like `MERGE (:N {x: x, y: y+1})`
-//         after `WITH foo.x AS x, foo.y AS y` was dropping the `x`
-//         entry of the per-row property map: x is a projection alias
-//         (round 67 tagged it in projAliasScalarCols) and the closure's
-//         buildRowCtxFromMutator was upgrading x's integer to a
-//         NodeValue when it numerically coincided with an interned
-//         NodeID, then exprValueToLPGProp rejected the NodeValue and
-//         silently dropped the entry. The under-filtered MERGE search
-//         then matched any :N node sharing only `y`, multiplying rows
-//         exponentially (Merge1 [9] flaked 3-of-10, producing 9 or 24
-//         or 59 or 534 rows non-deterministically).
+//     projAliasScalarCols into scalarSnap, in addition to
+//     scalarCols. A MERGE pattern like `MERGE (:N {x: x, y: y+1})`
+//     after `WITH foo.x AS x, foo.y AS y` was dropping the `x`
+//     entry of the per-row property map: x is a projection alias
+//     (round 67 tagged it in projAliasScalarCols) and the closure's
+//     buildRowCtxFromMutator was upgrading x's integer to a
+//     NodeValue when it numerically coincided with an interned
+//     NodeID, then exprValueToLPGProp rejected the NodeValue and
+//     silently dropped the entry. The under-filtered MERGE search
+//     then matched any :N node sharing only `y`, multiplying rows
+//     exponentially (Merge1 [9] flaked 3-of-10, producing 9 or 24
+//     or 59 or 534 rows non-deterministically).
 //     (b) Engine.RunInTx now freezes the "now" instant for the
-//         duration of the query via funcs.SetStatementNow(time.Now()).
-//         The temporal "now" constructors (localtime, time, date,
-//         localdatetime, datetime) call funcs.StatementNow() in place
-//         of time.Now() so all calls within one statement observe the
-//         same instant — openCypher requirement. The clear is
-//         intentionally NOT deferred: the operator pipeline yields
-//         lazily, so temporal evaluators fire AFTER RunInTx returns;
-//         leaving statementNow installed until the next query
-//         overwrites it keeps sequential queries deterministic.
-//         Closes Temporal10 [12] (`RETURN duration.inSeconds(
-//         localtime(), localtime())` whose two calls otherwise
-//         advanced by a tick, producing `PT0.000001S` instead of
-//         `PT0S`).
+//     duration of the query via funcs.SetStatementNow(time.Now()).
+//     The temporal "now" constructors (localtime, time, date,
+//     localdatetime, datetime) call funcs.StatementNow() in place
+//     of time.Now() so all calls within one statement observe the
+//     same instant — openCypher requirement. The clear is
+//     intentionally NOT deferred: the operator pipeline yields
+//     lazily, so temporal evaluators fire AFTER RunInTx returns;
+//     leaving statementNow installed until the next query
+//     overwrites it keeps sequential queries deterministic.
+//     Closes Temporal10 [12] (`RETURN duration.inSeconds(
+//     localtime(), localtime())` whose two calls otherwise
+//     advanced by a tick, producing `PT0.000001S` instead of
+//     `PT0S`).
 //     20-run sample: floor 3876, median 3877, max 3877; gate at 3876
 //     with 0 headroom (only remaining flake is WithOrderBy4 [12] at
 //     2-of-20).
+//
 //   - 3875: ratcheted after round 77 — RelationshipValue type
 //     reconstruction now prefers a pattern-accepted label over the
 //     non-deterministic EdgeLabels-first label. LPG merges parallel
@@ -1471,6 +1594,7 @@ import (
 //     edge-variable fast path. Closes Match2 [6] and MatchWhere1 [11].
 //     10-run sample: floor 3875, median ~3876, max 3877; gate at 3875
 //     with 0 headroom.
+//
 //   - 3874: ratcheted after round 76 — DeleteNode's schema-direct rel-
 //     value and rel-endpoints-fn branches (and DetachDelete's PathValue
 //     entry) now call a new removeEdgeEitherDirection helper that
@@ -1483,6 +1607,7 @@ import (
 //     `cannot delete node with existing relationships`. Closes Delete4
 //     [1] (flaked 5-of-10 across runs). 10-run sample: floor 3874,
 //     median ~3875, max 3877; gate at 3874 with 0 headroom.
+//
 //   - 3873: ratcheted after round 75 — translateReturn now appends hidden
 //     `appendOrderByPassthrough` items when ORDER BY references variables
 //     that the RETURN itself does not output (e.g. `RETURN [p = (n)--() |
@@ -1497,28 +1622,30 @@ import (
 //     10-run sample: floor 3873, median ~3875, max 3877; gate at 3873
 //     with 0 headroom (flake band Delete4 [1] / Merge1 [9] / Match2 [6]
 //     / MatchWhere1 [11] absorbed in median).
+//
 //   - 3872: ratcheted after round 73 — three coordinated changes for the
 //     bound-relationship and rename-swap cluster:
 //     (a) matchExpandStepBoundWithFrom now detects rel-rebinding (when
-//         the pattern's relationship variable is already bound, like
-//         `WITH a, r MATCH (a)-[r]->(b)`) and expands into a synthetic
-//         relVar with an outer/inner equality Selection — mirrors the
-//         existing destRebinding for endpoint nodes.
+//     the pattern's relationship variable is already bound, like
+//     `WITH a, r MATCH (a)-[r]->(b)`) and expands into a synthetic
+//     relVar with an outer/inner equality Selection — mirrors the
+//     existing destRebinding for endpoint nodes.
 //     (b) matchPattern's boundVars now uses a scope-aware
-//         `liveOutputVars` walker instead of `collectAllVars`. After a
-//         Projection / EagerAggregation the upstream-only variables
-//         (e.g. `b` after `WITH a, r`) are no longer in scope and must
-//         NOT drive destRebinding (which would emit a `b = synthetic`
-//         Selection that always rejects against an absent `b` slot).
+//     `liveOutputVars` walker instead of `collectAllVars`. After a
+//     Projection / EagerAggregation the upstream-only variables
+//     (e.g. `b` after `WITH a, r`) are no longer in scope and must
+//     NOT drive destRebinding (which would emit a `b = synthetic`
+//     Selection that always rejects against an absent `b` slot).
 //     (c) the post-projection schema reset's keep map now prefers
-//         alias keys over secondary expression-string keys: `WITH a AS
-//         b, b AS tmp` no longer lets item 1's expression key `b`
-//         overwrite item 0's alias key `b`. Closes With7 [1]'s
-//         rename-swap chain.
+//     alias keys over secondary expression-string keys: `WITH a AS
+//     b, b AS tmp` no longer lets item 1's expression key `b`
+//     overwrite item 0's alias key `b`. Closes With7 [1]'s
+//     rename-swap chain.
 //     Closes With7 [1], Match7 [4]/[5], Match4 [8], MatchWhere6 [5].
 //     10-run sample: floor 3872, median ~3874, max 3876; gate at 3872
 //     with 0 headroom (flake band Pattern2 [11] / Delete4 [1] / Merge1
 //     [9] / MatchWhere1 [11] absorbed in median).
+//
 //   - 3867: ratcheted after round 72 — buildIRProjection's edge-variable
 //     fast path now also probes the input schema at the projection ALIAS
 //     name (not just the source variable name) when forwarding a
@@ -1532,70 +1659,74 @@ import (
 //     post-aggregation row. Closes With6 [2]. 10-run sample: floor
 //     3867, median ~3869, max 3871; gate at 3867 with 0 headroom (flake
 //     band Pattern2 [11] / Delete4 [1] / Merge1 [9]).
+//
 //   - 3866: ratcheted after round 71 — coordinated row-aware MERGE +
 //     hoisted outer-property selections:
 //     (a) `referencesOuterVar` now walks the *ast.Property receiver
-//         chain, not only the bare *ast.Variable shape. Inline
-//         MATCH/MERGE property predicates that reference an outer
-//         variable through a property accessor (`event.year` after
-//         `UNWIND $events AS event`) are now recognised by
-//         peelOuterDestRebinding and hoisted above the Apply, so the
-//         outer column reaches the predicate evaluator.
+//     chain, not only the bare *ast.Variable shape. Inline
+//     MATCH/MERGE property predicates that reference an outer
+//     variable through a property accessor (`event.year` after
+//     `UNWIND $events AS event`) are now recognised by
+//     peelOuterDestRebinding and hoisted above the Apply, so the
+//     outer column reaches the predicate evaluator.
 //     (b) ir.Merge gains a NodePropsAST ast.Expression field carrying
-//         the first node pattern's property-map AST. The physical
-//         builder detects MapLiteral values that are NOT primitive
-//         literals (Int/Float/String/Bool/Null) or parameters and
-//         installs a per-row [exec.PropsEvalFn] on the Merge
-//         operator. exec.Merge gains WithPropsEvalFn and
-//         runMergeForChild now evaluates the per-row map, drives the
-//         search via searchMergeNodes(labels, dynamicProps), and
-//         writes the merged literal∪dynamic property set on ON CREATE.
+//     the first node pattern's property-map AST. The physical
+//     builder detects MapLiteral values that are NOT primitive
+//     literals (Int/Float/String/Bool/Null) or parameters and
+//     installs a per-row [exec.PropsEvalFn] on the Merge
+//     operator. exec.Merge gains WithPropsEvalFn and
+//     runMergeForChild now evaluates the per-row map, drives the
+//     search via searchMergeNodes(labels, dynamicProps), and
+//     writes the merged literal∪dynamic property set on ON CREATE.
 //     Closes Merge9 [2], Unwind1 [6], Unwind1 [14] and contributes to
 //     the With6 [2] / With7 [1] cluster (rest blocked on aggregating-
 //     WITH bound-rel forwarding). 10-run sample: floor 3866, median
 //     ~3868, max 3870; gate at 3866 with 0 headroom (flake band
 //     absorbs Pattern2 [11] / Delete4 [1] / Merge1 [9] outliers).
+//
 //   - 3864: ratcheted after round 70 — coordinated node-removal +
 //     per-direction side-effect counters:
 //     (a) lpg.Graph gains a tombstones set + IsTombstoned /
-//         LiveOrder / RemoveNode; DeleteNode and DetachDelete now
-//         call RemoveNode after stripping labels/properties so
-//         AllNodesScan/count(*) treat the node as absent;
+//     LiveOrder / RemoveNode; DeleteNode and DetachDelete now
+//     call RemoveNode after stripping labels/properties so
+//     AllNodesScan/count(*) treat the node as absent;
 //     (b) lpg.Graph gains per-direction side-effect counters
-//         (nodesAdded / nodesRemoved / edgesAdded / edgesRemoved)
-//         and exposes them via SideEffectCounters() and
-//         IncrNodesAdded / etc.; the mutator adapters bump the
-//         counters on AddNode / AddEdge / RemoveEdge / RemoveNode;
+//     (nodesAdded / nodesRemoved / edgesAdded / edgesRemoved)
+//     and exposes them via SideEffectCounters() and
+//     IncrNodesAdded / etc.; the mutator adapters bump the
+//     counters on AddNode / AddEdge / RemoveEdge / RemoveNode;
 //     (c) the TCK side-effect comparator snapshots the counters
-//         before each query and verifies ADD vs REMOVE counts
-//         independently (was net-change-only via Order()).
+//     before each query and verifies ADD vs REMOVE counts
+//     independently (was net-change-only via Order()).
 //     Closes Create4 [1]/[2], Merge1 [14], Merge5 [20]. 20-run
 //     sample: floor 3863, median ~3866, max 3868; gate at 3864
 //     with 1 of headroom.
+//
 //   - 3860: ratcheted after round 68 — two coordinated path-variable
 //     fixes that close List12 [5] (`MATCH p = (n:A)-->() WITH [x IN
 //     collect(p) | head(nodes(x))] AS p, count(n) AS c RETURN p,
 //     c`):
 //     (a) the projection's path-var fast-path no longer deletes
-//         pathVarChain[v.Name] at plan-build time. The delete was an
-//         optimisation to prevent a stale chain lookup against a
-//         post-projection row, but deleting at plan-build precedes
-//         every runtime read — including an aggregation's
-//         pre-projection that evaluates collect(p) against the
-//         original chain row layout. Without the delete the
-//         aggregation's pre-projection still reconstructs the
-//         PathValue and collect stores Paths instead of integer
-//         leading-node ids.
+//     pathVarChain[v.Name] at plan-build time. The delete was an
+//     optimisation to prevent a stale chain lookup against a
+//     post-projection row, but deleting at plan-build precedes
+//     every runtime read — including an aggregation's
+//     pre-projection that evaluates collect(p) against the
+//     original chain row layout. Without the delete the
+//     aggregation's pre-projection still reconstructs the
+//     PathValue and collect stores Paths instead of integer
+//     leading-node ids.
 //     (b) the projection's path-var fast-path now forwards a
-//         PathValue / ListValue already stored in the input schema
-//         slot before falling back to chain reconstruction (mirrors
-//         the round-59 pathVarMeta forward). After an aggregating
-//         WITH that emitted a list-of-paths at the p slot,
-//         `RETURN p` resolves through the schema-slot forward
-//         instead of trying to decode the post-aggregation row as
-//         a chain.
+//     PathValue / ListValue already stored in the input schema
+//     slot before falling back to chain reconstruction (mirrors
+//     the round-59 pathVarMeta forward). After an aggregating
+//     WITH that emitted a list-of-paths at the p slot,
+//     `RETURN p` resolves through the schema-slot forward
+//     instead of trying to decode the post-aggregation row as
+//     a chain.
 //     20-run sample: floor 3860, median ~3862, max 3863; gate at
 //     3860 with 0 headroom.
+//
 //   - 3859: ratcheted after round 67 — buildIRProjection tags every
 //     computed (non-Variable) projection alias whose name does NOT
 //     shadow an input-schema variable in a new bopts field
@@ -1609,6 +1740,7 @@ import (
 //     than the fast-path. Closes WithSkipLimit3 [3]. 20-run sample:
 //     floor 3859, median ~3861, max 3862; gate at 3859 with 0
 //     headroom.
+//
 //   - 3856: ratcheted after round 66 — exec.ProcedureCallOp.Next now
 //     prefixes the driver row onto each result row, so upstream
 //     bindings (e.g. `c` from `WITH count(*) AS c` between two CALL
@@ -1616,6 +1748,7 @@ import (
 //     instead of being dropped. Closes Call6 [1]. 20-run sample:
 //     floor 3855, median ~3859, max 3862; gate at 3856 with 1 of
 //     headroom (flake band absorbed in median).
+//
 //   - 3855: ratcheted after round 65 — VLE inline property predicate
 //     (`[:T* {year: 1988}]`) now applies per-relationship instead of
 //     to the list. matchExpandStepBoundWithFrom routes the var-length
@@ -1625,22 +1758,24 @@ import (
 //     Match4 [5]. 20-run sample: floor 3852, median ~3858, max 3861;
 //     gate at 3855 with 3 of headroom (flake band absorbs Pattern2
 //     [11] / Delete6 / WithOrderBy4 / MatchWhere1 outliers).
+//
 //   - 3854: ratcheted after round 64 — two coordinated changes for the
 //     cross-MATCH-with-WITH cardinality cluster:
 //     (a) the plain Apply builder now offsets the inner-side
-//         edgeVarMeta / pathVarChain / pathVarMeta / vleRelMeta /
-//         expandTripletSeq entries by outerWidth post-merge, so the
-//         metadata coordinates match the combined outer||inner row
-//         layout (Match8 [3] returned NULL because edgeVarMeta[r1]
-//         still pointed at the inner-only triplet positions, which
-//         after the outer-side offset addressed outer or other
-//         columns).
+//     edgeVarMeta / pathVarChain / pathVarMeta / vleRelMeta /
+//     expandTripletSeq entries by outerWidth post-merge, so the
+//     metadata coordinates match the combined outer||inner row
+//     layout (Match8 [3] returned NULL because edgeVarMeta[r1]
+//     still pointed at the inner-only triplet positions, which
+//     after the outer-side offset addressed outer or other
+//     columns).
 //     (b) buildRowCtx's edgeVarMeta fast-path short-circuits when
-//         the schema slot for the variable carries a
-//         RelationshipValue directly — mirrors the projection's
-//         round-61 fix. Closes Match8 [3]. 20-run sample: floor
-//         3854, median ~3857, max 3859; gate at 3854 with 0
-//         headroom.
+//     the schema slot for the variable carries a
+//     RelationshipValue directly — mirrors the projection's
+//     round-61 fix. Closes Match8 [3]. 20-run sample: floor
+//     3854, median ~3857, max 3859; gate at 3854 with 0
+//     headroom.
+//
 //   - 3853: ratcheted after round 63 — baseOffsetFromMap recomputes the
 //     base time's offset on the OVERRIDE date (not the original date)
 //     when the map carries date keys. This honours DST flips between
@@ -1651,6 +1786,7 @@ import (
 //     CET offset (+01:00). Closes Temporal3 [10] across multiple
 //     Examples rows. 20-run sample: floor 3853, median ~3856, max
 //     3859; gate at 3853 with 0 headroom.
+//
 //   - 3851: ratcheted after round 61 — IR's matchPattern now recognises
 //     a pure bound-rel pass-through path: when every relationship in
 //     a `MATCH ()-[r]->()` style pattern is already in the upstream
@@ -1664,6 +1800,7 @@ import (
 //     With1 [3]. 20-run sample: floor 3850, median ~3855, max 3857;
 //     gate at 3851 with 1 of headroom (the 3850 floor is the Pattern2
 //     [11] / Delete4 [1] flake band).
+//
 //   - 3850: ratcheted after round 60 — MERGE ON CREATE/MATCH SET r = a
 //     now copies the source node's properties onto the relationship.
 //     extractRelKVActions encodes the entity-copy as a sentinel
@@ -1672,6 +1809,7 @@ import (
 //     schema map and iterates the source node's properties at write
 //     time. Closes Merge6 [6] and Merge7 [4]. 20-run sample: floor
 //     3849, median ~3854, max 3856; gate at 3850 with 1 of headroom.
+//
 //   - 3849: ratcheted after round 59 — the projection's path-variable
 //     fast-path now forwards a PathValue directly when the schema slot
 //     for the variable holds one, instead of always trying to decode
@@ -1681,6 +1819,7 @@ import (
 //     list, so the projection fast-path used to surface NULL. Closes
 //     With6 [4]. 20-run sample: floor 3849, median ~3852, max 3854;
 //     gate at 3849 with 0 headroom.
+//
 //   - 3847 (held): round 58 added DeleteNode PathValue handling that
 //     mirrors DetachDelete's path sweep so `DELETE pathColls.key[0],
 //     pathColls.key[1]` deletes the path's rels and nodes. Closes
@@ -1689,6 +1828,7 @@ import (
 //     Pattern2 [11] / MatchWhere1 [11] / Delete4 [1] tests becoming
 //     occasionally non-deterministic, not a regression from this
 //     round; baseline stays at 3847 to absorb the band.
+//
 //   - 3847: ratcheted after round 57 — PathValue.String() now renders
 //     each relationship direction-aware against the path's traversal
 //     order: when the rel's storage StartID matches the preceding
@@ -1701,12 +1841,14 @@ import (
 //     ~3851, max 3853; gate at 3847 with 0 headroom — accept variance
 //     flap. The drop relative to baseline 3848 is absorbed by the
 //     newly-flaky Pattern2 [11], not by any regression.
+//
 //   - 3848: ratcheted after round 55 — DateTimeValue's `.timezone`
 //     accessor now returns the IANA location name (`Europe/Stockholm`)
 //     instead of Go's `time.Time.Zone()` abbreviation (`CET`), matching
 //     the openCypher TCK convention. Closes Temporal5 [6]. 20-run
 //     sample: floor 3847, median ~3851, max 3853; gate at 3848 with
 //     1 of headroom.
+//
 //   - 3847: ratcheted after round 54 — mergeClause now wraps the
 //     MergeRelationship shortcut with applyPathVar (mirroring the
 //     general Merge path-binding fix from round 53), and
@@ -1721,53 +1863,54 @@ import (
 //     ~3849, max 3852; gate at 3847 with 2 of headroom (the 3845 run
 //     is a recurrence of the flaky Match2 [6] disjunction failure
 //     that is not introduced by this round).
+//
 //   - 3846: ratcheted after round 53. Three coordinated changes:
 //     (a) mergeClause now wraps a MERGE p = (...) plan with
-//         NamedPath, mirroring the MATCH path-binding pipeline; the
-//         path variable is also removed from BoundVars so the Merge
-//         operator's combineRows stores the bound node at the
-//         correct (node-variable) column rather than the path-name
-//         column;
+//     NamedPath, mirroring the MATCH path-binding pipeline; the
+//     path variable is also removed from BoundVars so the Merge
+//     operator's combineRows stores the bound node at the
+//     correct (node-variable) column rather than the path-name
+//     column;
 //     (b) PathValue.String() now always wraps in `<…>`, including
-//         the zero-relationship single-node case (`<(node)>`), so
-//         the TCK-rendered path is visually distinct from a bare
-//         node value;
+//     the zero-relationship single-node case (`<(node)>`), so
+//     the TCK-rendered path is visually distinct from a bare
+//     node value;
 //     (c) the per-test sample shows MERGE p = (a {num: 1}) RETURN p
-//         emits `<(node#N)>` and MatchWhere1 [11]'s relationship-type
-//         disjunction stabilises under the same projection-fast-path
-//         changes.
+//     emits `<(node#N)>` and MatchWhere1 [11]'s relationship-type
+//     disjunction stabilises under the same projection-fast-path
+//     changes.
 //     Closes Merge1 [13] and MatchWhere1 [11]. 20-run sample: floor
 //     3846, median ~3848, max 3851; gate at 3846 with 0 headroom.
 //
 //   - 3891: ratcheted after round 58 — five compounding uplifts in one
 //     pass:
 //     (a) the generic error-assertion regex was widened from
-//         `(\w+Error)` to `([A-Z]\w+)` so non-Error-suffixed TCK
-//         categories (EntityNotFound, ConstraintVerificationFailed,
-//         ParameterMissing) reach the handler instead of going
-//         undefined (Delete1, Return2, Call1);
+//     `(\w+Error)` to `([A-Z]\w+)` so non-Error-suffixed TCK
+//     categories (EntityNotFound, ConstraintVerificationFailed,
+//     ParameterMissing) reach the handler instead of going
+//     undefined (Delete1, Return2, Call1);
 //     (b) MulDurationFloat now truncates fractional nanoseconds
-//         toward zero — `duration({nanoseconds: 1}) / 2` yields zero
-//         nanos rather than rounding up to 1 (Temporal8 [7] both
-//         examples);
+//     toward zero — `duration({nanoseconds: 1}) / 2` yields zero
+//     nanos rather than rounding up to 1 (Temporal8 [7] both
+//     examples);
 //     (c) the duration parser absorbs IEEE-754 inexactness by
-//         rounding the fractional-seconds×1e9 conversion before
-//         truncating to int64, so `duration('PT-2.001S')` round-trips
-//         the original value (Temporal6 [6]);
+//     rounding the fractional-seconds×1e9 conversion before
+//     truncating to int64, so `duration('PT-2.001S')` round-trips
+//     the original value (Temporal6 [6]);
 //     (d) MERGE single-hop pattern carries an Undirected flag through
-//         the IR; the exec MergeRelationship now probes both
-//         (src, dst) and (dst, src) before falling through to the
-//         create path, matching openCypher semantics of `MERGE
-//         (a)-[r:T]-(b)` (Merge5 [13]);
+//     the IR; the exec MergeRelationship now probes both
+//     (src, dst) and (dst, src) before falling through to the
+//     create path, matching openCypher semantics of `MERGE
+//     (a)-[r:T]-(b)` (Merge5 [13]);
 //     (e) NodeValue / RelationshipValue gained a Deleted flag and
-//         the DELETE operators upgrade the row's column to a Deleted
-//         snapshot. evalProperty and fnLabels raise EntityNotFound:
-//         DeletedEntityAccess on Deleted entities while id(),
-//         type(), and other identity accessors still work
-//         (Return2 [15]/[16]/[17]);
+//     the DELETE operators upgrade the row's column to a Deleted
+//     snapshot. evalProperty and fnLabels raise EntityNotFound:
+//     DeletedEntityAccess on Deleted entities while id(),
+//     type(), and other identity accessors still work
+//     (Return2 [15]/[16]/[17]);
 //     (f) the implicit-argument CALL builder now returns
-//         ParameterMissing: MissingParameter when a declared input
-//         has no matching $param (Call1 [11]).
+//     ParameterMissing: MissingParameter when a declared input
+//     has no matching $param (Call1 [11]).
 //     5-run sample: floor 3891, median 3891, max 3891. Gate set at
 //     3891 with 0 headroom — the remaining 6 scenarios fail on three
 //     deeper limitations (multi-edge LPG storage, cross-pattern

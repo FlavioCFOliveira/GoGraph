@@ -232,7 +232,7 @@ type staticOp struct {
 func newStaticOp(rows ...exec.Row) *staticOp { return &staticOp{rows: rows} }
 
 func (s *staticOp) Init(_ context.Context) error { s.idx = 0; return nil }
-func (s *staticOp) Close() error                  { return nil }
+func (s *staticOp) Close() error                 { return nil }
 func (s *staticOp) Next(out *exec.Row) (bool, error) {
 	if s.idx >= len(s.rows) {
 		return false, nil
@@ -244,12 +244,12 @@ func (s *staticOp) Next(out *exec.Row) (bool, error) {
 
 type errInitOp struct{ err error }
 
-func (e *errInitOp) Init(_ context.Context) error         { return e.err }
-func (e *errInitOp) Close() error                          { return nil }
-func (e *errInitOp) Next(_ *exec.Row) (bool, error)        { return false, nil }
+func (e *errInitOp) Init(_ context.Context) error   { return e.err }
+func (e *errInitOp) Close() error                   { return nil }
+func (e *errInitOp) Next(_ *exec.Row) (bool, error) { return false, nil }
 
 func containsStr(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && findStr(s, sub))
+	return sub == "" || (len(s) >= len(sub) && findStr(s, sub))
 }
 
 func findStr(s, sub string) bool {

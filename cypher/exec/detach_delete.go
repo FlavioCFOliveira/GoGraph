@@ -22,6 +22,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"gograph/cypher/expr"
@@ -147,7 +148,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 		var err error
 		nodeID, err = resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
 		if err != nil {
-			if err == errNullTarget {
+			if errors.Is(err, errNullTarget) {
 				*out = childRow
 				return true, nil
 			}

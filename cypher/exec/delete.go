@@ -264,7 +264,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		var err error
 		nodeID, err = resolveNodeIDFromRow(op.nodeVar, op.schema, childRow)
 		if err != nil {
-			if err == errNullTarget {
+			if errors.Is(err, errNullTarget) {
 				// OPTIONAL-MATCH-bound or otherwise NULL target: DELETE
 				// is a no-op per openCypher; propagate the row unchanged.
 				*out = childRow

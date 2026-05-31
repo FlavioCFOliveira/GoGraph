@@ -20,6 +20,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"gograph/cypher/expr"
@@ -119,7 +120,7 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 
 	srcID, err := op.resolveNodeID(op.startVar, childRow)
 	if err != nil {
-		if err == errNullEndpoint {
+		if errors.Is(err, errNullEndpoint) {
 			// Null endpoint (typically from OPTIONAL MATCH): propagate
 			// the row unchanged, leaving the relationship variable
 			// (if any) at NULL.
@@ -130,7 +131,7 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	}
 	dstID, err := op.resolveNodeID(op.endVar, childRow)
 	if err != nil {
-		if err == errNullEndpoint {
+		if errors.Is(err, errNullEndpoint) {
 			*out = nullRowWithRel(childRow, op.relVar)
 			return true, nil
 		}

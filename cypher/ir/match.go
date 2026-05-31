@@ -781,14 +781,14 @@ func buildVLENoRepeatRelPredicate(outerRel, vleRel string) ast.Expression {
 	startR := &ast.FunctionInvocation{Name: "startNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
 	endR := &ast.FunctionInvocation{Name: "endNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
 	sameForward := &ast.BinaryOp{
-		Left: &ast.BinaryOp{Left: startE, Operator: "=", Right: startR},
+		Left:     &ast.BinaryOp{Left: startE, Operator: "=", Right: startR},
 		Operator: "AND",
-		Right: &ast.BinaryOp{Left: endE, Operator: "=", Right: endR},
+		Right:    &ast.BinaryOp{Left: endE, Operator: "=", Right: endR},
 	}
 	sameReverse := &ast.BinaryOp{
-		Left: &ast.BinaryOp{Left: startE, Operator: "=", Right: endR},
+		Left:     &ast.BinaryOp{Left: startE, Operator: "=", Right: endR},
 		Operator: "AND",
-		Right: &ast.BinaryOp{Left: endE, Operator: "=", Right: startR},
+		Right:    &ast.BinaryOp{Left: endE, Operator: "=", Right: startR},
 	}
 	eqPred := &ast.BinaryOp{Left: sameForward, Operator: "OR", Right: sameReverse}
 	comp := &ast.ListComprehension{
@@ -1672,22 +1672,4 @@ func (t *translator) matchApplyNodeFilter(np *ast.NodePattern, nodeVar string, p
 		plan = buildPropertySelection(nodeVar, np.Properties, plan)
 	}
 	return plan
-}
-
-// patternHasRelationships reports whether any path in pat contains at
-// least one relationship hop. Used by [translateOptionalMatch] to decide
-// whether a node-only OPTIONAL MATCH needs an explicit OptionalApply
-// wrapper so an empty NodeScan still emits a single NULL-extended row.
-func patternHasRelationships(pat *ast.Pattern) bool {
-	if pat == nil {
-		return false
-	}
-	for _, pp := range pat.Paths {
-		for el := pp.Head; el != nil; el = el.Next {
-			if el.Relationship != nil {
-				return true
-			}
-		}
-	}
-	return false
 }

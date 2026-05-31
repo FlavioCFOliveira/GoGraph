@@ -2,6 +2,7 @@ package tck_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,8 +30,8 @@ func TestListTCKFailures(t *testing.T) {
 		uri, name, err string
 	}
 	var (
-		mu             sync.Mutex
-		fails, undefs  []failure
+		mu            sync.Mutex
+		fails, undefs []failure
 	)
 
 	init := func(sc *godog.ScenarioContext) {
@@ -42,7 +43,7 @@ func TestListTCKFailures(t *testing.T) {
 			f := failure{uri: s.Uri, name: s.Name, err: err.Error()}
 			mu.Lock()
 			defer mu.Unlock()
-			if strings.Contains(err.Error(), "undefined") || err == godog.ErrUndefined {
+			if strings.Contains(err.Error(), "undefined") || errors.Is(err, godog.ErrUndefined) {
 				undefs = append(undefs, f)
 			} else {
 				fails = append(fails, f)

@@ -226,9 +226,9 @@ func (s *stubMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyVal
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount and the
 // per-instance metadata stubs are inert: the write-operator tests do
 // not exercise multi-edge MERGE / parallel-CREATE semantics.
-func (s *stubMutator) IncEdgeCreateCount(string, string) int64 { return 0 }
-func (s *stubMutator) EdgeCreateCount(string, string) int64    { return 0 }
-func (s *stubMutator) DecEdgeCreateCount(string, string)       {}
+func (s *stubMutator) IncEdgeCreateCount(string, string) int64      { return 0 }
+func (s *stubMutator) EdgeCreateCount(string, string) int64         { return 0 }
+func (s *stubMutator) DecEdgeCreateCount(string, string)            {}
 func (s *stubMutator) SetEdgeLabelAt(string, string, int64, string) {}
 func (s *stubMutator) EdgeLabelsAt(string, string, int64) []string  { return nil }
 func (s *stubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) {

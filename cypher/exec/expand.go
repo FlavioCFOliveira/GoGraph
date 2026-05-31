@@ -83,9 +83,9 @@ type Expand struct {
 	// labels.  nil = no type filtering.
 	edgeTypeFilter map[uint64]string
 
-	inputCol      int                              // column in the input row that carries the source NodeID
-	relCols       []int                            // input-row columns holding existing edge IDs; nil = no check
-	multiplicity  func(srcID, dstID uint64) int64 // per-edge CREATE multiplicity; nil = single-row emit
+	inputCol     int                             // column in the input row that carries the source NodeID
+	relCols      []int                           // input-row columns holding existing edge IDs; nil = no check
+	multiplicity func(srcID, dstID uint64) int64 // per-edge CREATE multiplicity; nil = single-row emit
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 

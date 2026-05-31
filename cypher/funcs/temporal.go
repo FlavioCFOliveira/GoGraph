@@ -1239,50 +1239,6 @@ func fnDurationInSeconds(args []expr.Value) (expr.Value, error) {
 	}
 }
 
-// elapsedNanos returns (b - a) in absolute elapsed nanoseconds, used by
-// the 2-arg projection functions duration.inDays / duration.inSeconds.
-//
-// Dispatch order:
-//
-//   - Time-only pairs (at least one side is LocalTime/Time) take the
-//     nanos-of-day axis via [elapsedNanosTimeOnly] (which itself
-//     handles DST-aware projection when a DateTime is paired with a
-//     time-only local).
-//   - DST-aware path for date-bearing pairs: when one side is
-//     DateTime (zoned) and the other is local-date-bearing
-//     (LocalDateTime or Date), the local side is rebuilt in the
-//     DateTime's *time.Location with its own wall components (and
-//     midnight for Date). Both are then subtracted as instants, which
-//     correctly counts the extra/missing hour across DST transitions
-//     (datetime(Europe/Stockholm, 2017-10-29T00:00) → date(2017-10-30)
-//     is PT25H, not PT24H). [dstAwareInstants] also handles same-kind
-//     DateTime pairs as a no-op projection.
-//   - Both local: project to LocalDateTime wall-clock and subtract;
-//     the two times share the UTC reference frame so the subtraction
-//     is well-defined.
-//
-// Returns ok=false when neither projection applies.
-func elapsedNanos(a, b expr.Value) (int64, bool) {
-	if _, aTimeOnly := isTimeOnly(a); aTimeOnly {
-		return elapsedNanosTimeOnly(a, b)
-	}
-	if _, bTimeOnly := isTimeOnly(b); bTimeOnly {
-		return elapsedNanosTimeOnly(a, b)
-	}
-	if ta, tb, ok := dstAwareInstants(a, b); ok {
-		return tb.Sub(ta).Nanoseconds(), true
-	}
-	la, oka := toLocalDateTime(a)
-	if !oka {
-		return 0, false
-	}
-	lb, okb := toLocalDateTime(b)
-	if !okb {
-		return 0, false
-	}
-	return lb.T.Sub(la.T).Nanoseconds(), true
-}
-
 // elapsedNanosTimeOnly computes (b - a) in nanoseconds for pairs in
 // which at least one side is a time-only kind (LocalTime / Time).
 //
@@ -1397,12 +1353,11 @@ func projectLocalIntoZone(local expr.Value, anchor expr.DateTimeValue) (time.Tim
 // elapsed magnitudes that can exceed int64-nanos but still fit in
 // int64-seconds (6.3e16 for the TCK's ±999999999-year span).
 //
-// Dispatch mirrors [elapsedNanos]: time-only paths via the nanos-of-day
-// axis (small magnitudes, no overflow risk); DST-aware projection for
-// zoned+local date-bearing pairs; both-local date-bearing via a
-// time.Time.Sub fast path when the year delta is moderate, falling
-// through to the Julian-Day-Number arithmetic in [subSecsAndNanos] for
-// extreme spans.
+// Dispatch order: time-only paths via the nanos-of-day axis (small
+// magnitudes, no overflow risk); DST-aware projection for zoned+local
+// date-bearing pairs; both-local date-bearing via a time.Time.Sub fast
+// path when the year delta is moderate, falling through to the
+// Julian-Day-Number arithmetic in [subSecsAndNanos] for extreme spans.
 func elapsedSecsAndNanos(a, b expr.Value) (int64, int32, bool) {
 	if _, aTO := isTimeOnly(a); aTO {
 		ns, ok := elapsedNanosTimeOnly(a, b)

@@ -16,7 +16,7 @@ COVER_PROFILE   := coverage.out
 # slim or fat tzdata build. See cypher/tck/testdata/README.md.
 export ZONEINFO := $(CURDIR)/cypher/tck/testdata/zoneinfo-slim.zip
 
-GOLANGCI_LINT_VERSION ?= v2.5.0
+GOLANGCI_LINT_VERSION ?= v2.12.2
 
 .PHONY: help
 help: ## Show this help

@@ -539,7 +539,11 @@ func (e *Engine) checkParamTypes(plan ir.LogicalPlan, params map[string]expr.Val
 	return sema.CheckParams(sema.InferParamTypesWithResolver(plan, resolve), params)
 }
 
-// Sprint 25 support: MATCH (full scan or label scan) + RETURN.
+// Run parses, analyses, plans, and executes query, returning a materialised
+// [Result]. The query is built and drained inside the read visibility barrier
+// (Graph.View) so it observes a consistent, partial-transaction-free snapshot.
+// DDL statements take a dedicated fast path. Parameters are bound from params
+// and type-checked against the plan before execution.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
 	defer cmetrics.Time("cypher.Run")()
 	defer func() {
@@ -805,15 +809,15 @@ func queryHasWritingClause(query string) bool {
 	return QueryHasWritingClause(query)
 }
 
-// writingKeywordRE matches any writing-clause keyword as a standalone word.
-// The pattern uses a case-insensitive flag and a word boundary anchor so
-// fragments like "PRESET" or "NOMERGE" are not falsely classified.
-//
 // ErrResultRowsExceeded is returned by [Result.Next] and [Result.Err] when the
 // number of materialised rows exceeds [EngineOptions.MaxResultRows]. It is a
 // permanent error: once set, subsequent Next calls return false.
 var ErrResultRowsExceeded = errors.New("cypher: result row limit exceeded")
 
+// writingKeywordRE matches any writing-clause keyword as a standalone word.
+// The pattern uses a case-insensitive flag and a word boundary anchor so
+// fragments like "PRESET" or "NOMERGE" are not falsely classified.
+//
 //nolint:gochecknoglobals // singleton regex compiled once at init
 var writingKeywordRE = regexp.MustCompile(`(?i)\b(CREATE|MERGE|SET|REMOVE|DELETE|DETACH)\b`)
 
@@ -1065,8 +1069,8 @@ type Result struct {
 	// maxRows, when positive, caps the total number of rows Next() may return.
 	// Set from EngineOptions.MaxResultRows at result construction time.
 	maxRows  int64
-	rowCount int64  // incremented by Next(); never reset
-	rowsErr  error  // set to ErrResultRowsExceeded when the cap is hit
+	rowCount int64 // incremented by Next(); never reset
+	rowsErr  error // set to ErrResultRowsExceeded when the cap is hit
 
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
@@ -1887,15 +1891,6 @@ func buildOperatorWrite(
 	}
 }
 
-// keysOf returns the keys of m as a slice (for debugging).
-func keysOf[K comparable, V any](m map[K]V) []K {
-	out := make([]K, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
-}
-
 // setSnap returns the set of keys present in m as a struct{} map. Used by
 // the plain-Apply builder to remember which metadata entries existed
 // before the inner-side build so newly-added entries can be offset by
@@ -1929,13 +1924,13 @@ func copySchema(schema map[string]int) map[string]int {
 // 0 for "WITH [1,2,3] AS lst"), because those secondary entries inflate
 // len(schema) without adding real row columns.
 func schemaWidth(schema map[string]int) int {
-	max := -1
+	maxIdx := -1
 	for _, idx := range schema {
-		if idx > max {
-			max = idx
+		if idx > maxIdx {
+			maxIdx = idx
 		}
 	}
-	return max + 1
+	return maxIdx + 1
 }
 
 // mapLiteralHasNonLiteralValue reports whether ml carries at least one value
@@ -3184,7 +3179,7 @@ func buildOperator(
 			MaxHops:         maxHops,
 			ExcludedRelCols: excludedCols,
 		}
-		return exec.NewVarLengthExpand(child, fwd, rev, cfg), nil
+		return exec.NewVarLengthExpand(child, fwd, rev, &cfg), nil
 
 	case *ir.NamedPath:
 		// NamedPath is a pure pass-through: build the child, then register
@@ -3356,7 +3351,7 @@ func buildEagerAggregation(
 		// build-time eval cannot bind every leaf to a constant, then
 		// rely on aggregateFactory's strict numeric check below to
 		// surface the typed error.
-		var secondArg expr.Value = expr.Null
+		var secondArg = expr.Null
 		var secondArgIsRowDependent bool
 		if aggExpr.SecondArgExpr != nil {
 			if exprContainsRowDependency(aggExpr.SecondArgExpr) {
@@ -3676,19 +3671,6 @@ func exprContainsRowDependency(e ast.Expression) bool {
 	return false
 }
 
-// percentileParam coerces the second argument of a percentile aggregate
-// to a float64 in [0, 1]. Non-numeric inputs fall back to 0.5 (the
-// median); the aggregator clamps the final value internally.
-func percentileParam(v expr.Value) float64 {
-	switch n := v.(type) {
-	case expr.FloatValue:
-		return float64(n)
-	case expr.IntegerValue:
-		return float64(int64(n))
-	}
-	return 0.5
-}
-
 // validPercentileParam coerces and validates the second argument of a
 // percentile aggregate. Per openCypher, the percentile must be a number
 // in [0.0, 1.0] (inclusive); values outside this range raise an
@@ -3709,8 +3691,8 @@ func validPercentileParam(v expr.Value) (float64, error) {
 		}
 		return f, nil
 	}
-	// Unset or non-numeric: default to median (matches percentileParam
-	// fallback for the non-failing happy paths).
+	// Unset or non-numeric: default to median (0.5) for the non-failing
+	// happy paths.
 	return 0.5, nil
 }
 

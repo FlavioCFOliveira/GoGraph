@@ -276,17 +276,11 @@ func (op *Merge) runOnMatchPath(rows []Row) error {
 	return nil
 }
 
-// runOnCreatePath enforces declared constraints, creates the merge node,
-// attaches its labels and properties, runs ON CREATE actions, and primes
-// the operator to emit the freshly created row.
-func (op *Merge) runOnCreatePath() error {
-	return op.runOnCreatePathWithProps(op.props)
-}
-
-// runOnCreatePathWithProps is the workhorse of [runOnCreatePath]; it accepts
-// the resolved property set so that row-aware MERGE (`MERGE (p:Person
-// {login: prop.login})`) writes the per-row values rather than the static
-// literal-only set.
+// runOnCreatePathWithProps enforces declared constraints, creates the merge
+// node, attaches its labels and properties, runs ON CREATE actions, and primes
+// the operator to emit the freshly created row. It accepts the resolved
+// property set so that row-aware MERGE (`MERGE (p:Person {login: prop.login})`)
+// writes the per-row values rather than the static literal-only set.
 func (op *Merge) runOnCreatePathWithProps(props []propLiteral) error {
 	if op.reg != nil {
 		for _, p := range props {

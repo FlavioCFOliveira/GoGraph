@@ -1341,7 +1341,7 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		}
 		// The IN operator requires a List on the right; a literal of any
 		// other type is a static type error per openCypher.
-		if strings.ToUpper(v.Operator) == "IN" {
+		if strings.EqualFold(v.Operator, "IN") {
 			if kind, bad := nonListLiteralKind(v.Right); bad {
 				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
 			}
