@@ -29,12 +29,13 @@ func TestMain(m *testing.M) {
 // interleaved with concurrent read queries leave the graph in a consistent
 // state and produce no data races or goroutine leaks.
 //
-// MERGE semantics note: the current exec/merge.go implementation uses a stub
-// searchFn that always returns no matches, so every serialised MERGE takes the
-// ON CREATE path and adds a new node. With N writer goroutines (each holding
-// the mutex in turn) the post-state invariant is exactly N nodes in the graph.
-// The test validates race-cleanliness and goroutine hygiene rather than
-// idempotent-MERGE semantics (tracked separately).
+// MERGE semantics note: since task T930, exec/merge.go uses a real searchFn
+// that scans the live graph, so MERGE is properly match-or-create. All N
+// writers MERGE the identical pattern (:Person {name:"Alice"}); the first
+// creates the node and every subsequent MERGE matches it. The post-state
+// invariant is therefore exactly ONE node, which exercises MERGE's idempotence
+// under serialised writers racing with concurrent readers — on top of the
+// race-cleanliness and goroutine-hygiene checks.
 func TestCypherWriteConflict_MERGE(t *testing.T) {
 	t.Parallel()
 
@@ -129,8 +130,10 @@ func runMergeConflictTest(t *testing.T, n int) {
 	readers.Wait()
 
 	// ── Post-state invariant ──────────────────────────────────────────────
-	// Each serialised MERGE took the ON CREATE path (searchFn stub returns
-	// no matches), so exactly n nodes must exist in the graph.
+	// All n writers MERGE the identical pattern. Under correct match-or-create
+	// semantics (T930: searchFn scans the live graph), the first serialised
+	// MERGE creates the node and every subsequent one matches it, so exactly
+	// one node must exist regardless of n.
 	res, err := engine.Run(ctx, "MATCH (n) RETURN n", nil)
 	if err != nil {
 		t.Fatalf("post-check Run: %v", err)
@@ -144,7 +147,7 @@ func runMergeConflictTest(t *testing.T, n int) {
 	}
 	res.Close() //nolint:errcheck // read-only result; no commit path
 
-	if count != n {
-		t.Errorf("post-state: expected %d nodes (one per serialised MERGE ON CREATE), got %d", n, count)
+	if count != 1 {
+		t.Errorf("post-state: expected 1 node (n identical MERGEs dedup to one under match-or-create), got %d", count)
 	}
 }

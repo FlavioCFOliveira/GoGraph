@@ -18,10 +18,15 @@ import (
 func TestAdjList_ConcurrentReads_ConsistentPrefix(t *testing.T) {
 	t.Parallel()
 
-	const (
-		N          = 10_000
-		numReaders = 8
-	)
+	const N = 10_000
+
+	// Leave at least one core for the writer. Each reader performs O(N)
+	// snapshot work per iteration, so a fixed high reader count starves the
+	// lone writer under the race detector on small/loaded CI runners — the
+	// observed "timeout: writer did not finish" flake on a 2-core runner.
+	// Scaling to GOMAXPROCS-1 keeps genuine read/write concurrency while
+	// guaranteeing the writer always has a core to run on.
+	numReaders := max(2, runtime.GOMAXPROCS(0)-1)
 
 	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
 
@@ -83,8 +88,10 @@ func TestAdjList_ConcurrentReads_ConsistentPrefix(t *testing.T) {
 		}()
 	}
 
-	// Guard: ensure the test terminates even if something stalls.
-	timer := time.AfterFunc(30*time.Second, func() {
+	// Hang guard: fires only if the writer never completes (a genuine stall),
+	// not as a throughput assertion — hence generous. Normal completion is a
+	// few seconds even under -race on a constrained runner.
+	timer := time.AfterFunc(120*time.Second, func() {
 		select {
 		case <-done:
 		default:
