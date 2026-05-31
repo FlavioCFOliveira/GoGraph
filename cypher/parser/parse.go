@@ -132,6 +132,15 @@ func tokenName(t int, litNames, symNames []string) string {
 //   - [*ParseError] — syntax error from the ANTLR lexer/parser.
 //   - [*SemaError]  — unsupported grammar rule encountered during tree walking.
 func Parse(query string) (ast.Query, error) {
+	// Reject over-length or excessively nested input before any lexing or
+	// parsing. Deep bracket nesting drives unbounded parser/visitor recursion
+	// into a fatal Go stack overflow that recover() cannot catch, so the guard
+	// must run first — once the stack has overflowed there is no recovery path.
+	// See guard.go.
+	if err := guardInput(query); err != nil {
+		return nil, err
+	}
+
 	// Validate string-literal escape sequences before any rewriting so that
 	// `normalizeSingleQuotes` does not silently hide a malformed `\u…`
 	// escape under a benign-looking double-quoted form.
@@ -215,6 +224,12 @@ func Parse(query string) (ast.Query, error) {
 //   - One or more [*ParseError] — syntax errors from lexer/parser.
 //   - A single [*SemaError] — unsupported grammar rule or structural violation.
 func ParseStrict(query string) (ast.Query, []error) {
+	// Reject over-length or excessively nested input before any lexing or
+	// parsing, for the same stack-overflow reason as [Parse]. See guard.go.
+	if err := guardInput(query); err != nil {
+		return nil, []error{err}
+	}
+
 	if err := validateUnicodeEscapes(query); err != nil {
 		return nil, []error{err}
 	}
