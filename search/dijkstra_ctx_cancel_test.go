@@ -12,6 +12,7 @@ package search
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,24 @@ import (
 	"gograph/graph/csr"
 	"gograph/internal/testlayers"
 )
+
+// cancelAfterFirstCheck is a context whose Err returns nil on its first call
+// and context.Canceled on every call thereafter. DijkstraCtx polls ctx.Err()
+// every 4096 heap pops, so the first poll lets the traversal begin and a later
+// poll observes the cancellation — making "cancelled mid-traversal" fully
+// deterministic, with no dependence on goroutine scheduling or traversal speed
+// (the source of the historical flake under load and -coverpkg instrumentation).
+type cancelAfterFirstCheck struct {
+	context.Context
+	calls atomic.Int64
+}
+
+func (c *cancelAfterFirstCheck) Err() error {
+	if c.calls.Add(1) <= 1 {
+		return nil
+	}
+	return context.Canceled
+}
 
 // buildDirectedPath constructs a directed CSR path
 // 0 → 1 → 2 → … → (n-1) with edge weight 1.0.
@@ -54,29 +73,25 @@ func TestDijkstraCtx_Cancel_PreCancelled(t *testing.T) {
 	}
 }
 
-// TestDijkstraCtx_Cancel_ViaChan verifies that cancelling a context
-// via a goroutine after a short delay causes DijkstraCtx to return
-// context.Canceled. The graph is large enough that Dijkstra would
-// not finish before the cancellation fires.
+// TestDijkstraCtx_Cancel_DuringTraversal verifies that a context which becomes
+// cancelled after the traversal has started causes DijkstraCtx to observe the
+// cancellation and return context.Canceled.
 //
-// Sizing rationale: on Apple M-series and other fast cores, a 100 k-
-// node CSR traversal completes in well under 1 ms, racing the
-// cancel goroutine and yielding a spurious nil error (task #925).
-// One million nodes ensures the traversal runs long enough for the
-// 1 ms sleep to elapse on any supported hardware while staying
-// within the short-layer per-package budget.
-func TestDijkstraCtx_Cancel_ViaChan(t *testing.T) {
+// This replaces an earlier goroutine+sleep variant that was inherently racy:
+// it relied on a 1 ms cancel timer beating a large traversal, which broke on
+// fast cores (traversal finishes first → spurious nil, task #925) and again
+// under -coverpkg instrumentation on slow CI runners (cancel goroutine starved
+// → traversal finishes first). cancelAfterFirstCheck removes the race entirely:
+// the traversal must run past at least one ctx.Err() poll before the next poll
+// reports cancellation. The graph only needs to exceed the 4096-pop poll
+// interval, so 20 k nodes suffices and keeps the test fast.
+func TestDijkstraCtx_Cancel_DuringTraversal(t *testing.T) {
 	t.Parallel()
 
-	const n = 1_000_000
+	const n = 20_000
 	c := buildDirectedPath(n)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(1 * time.Millisecond)
-		cancel()
-	}()
-	defer cancel()
+	ctx := &cancelAfterFirstCheck{Context: context.Background()}
 
 	_, err := DijkstraCtx(ctx, c, 0)
 	if !errors.Is(err, context.Canceled) {
