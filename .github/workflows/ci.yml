@@ -13,6 +13,13 @@ on:
 permissions:
   contents: read
 
+# Pin the IANA time-zone database so temporal TCK scenarios are deterministic
+# regardless of the runner's system tzdata build (slim vs fat). Go's time
+# package reads ZONEINFO before the system database. See
+# cypher/tck/testdata/README.md.
+env:
+  ZONEINFO: ${{ github.workspace }}/cypher/tck/testdata/zoneinfo-slim.zip
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

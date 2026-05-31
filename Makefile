@@ -10,6 +10,12 @@ BENCH_COUNT     ?= 5
 RACE_FLAGS      := -race
 COVER_PROFILE   := coverage.out
 
+# Pin the IANA time-zone database for deterministic openCypher TCK conformance
+# across hosts. Go's time package reads ZONEINFO before the system database;
+# without this, a few temporal scenarios depend on whether the host ships a
+# slim or fat tzdata build. See cypher/tck/testdata/README.md.
+export ZONEINFO := $(CURDIR)/cypher/tck/testdata/zoneinfo-slim.zip
+
 GOLANGCI_LINT_VERSION ?= v2.5.0
 
 .PHONY: help
