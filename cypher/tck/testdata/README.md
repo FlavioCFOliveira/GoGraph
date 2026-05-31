@@ -32,6 +32,13 @@ absolute path. Go's `time` package consults `ZONEINFO` **before** the system
 database, so the test process reads deterministic time-zone data regardless of
 the host OS.
 
+The archive entries are **stored uncompressed**. Go's minimal time-package zip
+reader rejects compressed entries (`"unsupported compression"`) and then
+*silently falls back* to the next `ZONEINFO` source — the host system database
+— which would defeat the purpose of pinning. The regeneration script builds
+with `zip -0`, and `TestZoneinfoFixtureIsUsableAndSlim` (in `cypher/tck`) fails
+the build if any entry is ever compressed.
+
 - Workflows: `.github/workflows/ci.yml`, `tck.yml`, `nightly.yml` set
   `ZONEINFO: ${{ github.workspace }}/cypher/tck/testdata/zoneinfo-slim.zip`.
 - Local: the `Makefile` exports

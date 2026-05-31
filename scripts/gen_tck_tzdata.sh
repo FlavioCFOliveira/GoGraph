@@ -62,34 +62,71 @@ zone_files=(africa antarctica asia australasia europe northamerica \
 echo "==> Packaging ${out_zip}"
 mkdir -p "$(dirname "${out_zip}")"
 rm -f "${out_zip}"
-# -X drops extra file attributes, -D omits directory entries: Go's zip reader
-# wants bare "Area/Location" entries. Entries are added in sorted order for a
-# stable archive layout.
+# -0 stores entries UNCOMPRESSED: Go's minimal time-package zip reader rejects
+# any compressed entry ("unsupported compression") and then silently falls back
+# to the host system database — which would reintroduce the very host-dependence
+# this file exists to remove. -X drops extra attributes, -D omits directory
+# entries (Go wants bare "Area/Location" names). Entries are added in sorted
+# order for a stable archive layout.
 ( cd "${workdir}/out" \
   && find . -type f | sed 's|^\./||' | LC_ALL=C sort \
-     | zip -X -D -q "${out_zip}" -@ )
+     | zip -0 -X -D -q "${out_zip}" -@ )
 
-echo "==> Self-check: Europe/Stockholm @ 1818-07-21 must be ${CANARY_EXPECTED}"
+echo "==> Self-check (fallback-proof): Stockholm @ 1818-07-21 must be ${CANARY_EXPECTED}"
+# This check reads the zone bytes DIRECTLY from the archive and parses them with
+# time.LoadLocationFromTZData, so it cannot be masked by Go falling back to the
+# host's own (possibly slim) system tzdata — the trap that hid the compression
+# bug on macOS. It also asserts every entry is stored (method 0).
 cat > "${workdir}/check.go" <<'GO'
 package main
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
 
 func main() {
-	loc, err := time.LoadLocation("Europe/Stockholm")
+	path := os.Args[1]
+	r, err := zip.OpenReader(path)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "load error:", err)
+		fmt.Fprintln(os.Stderr, "open zip:", err)
+		os.Exit(2)
+	}
+	defer r.Close()
+
+	var stockholm []byte
+	for _, f := range r.File {
+		if f.Method != zip.Store {
+			fmt.Fprintf(os.Stderr, "entry %q is compressed (method=%d); Go's tz reader needs stored\n", f.Name, f.Method)
+			os.Exit(3)
+		}
+		if f.Name == "Europe/Stockholm" {
+			rc, err := f.Open()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "open entry:", err)
+				os.Exit(2)
+			}
+			stockholm, _ = io.ReadAll(rc)
+			rc.Close()
+		}
+	}
+	if stockholm == nil {
+		fmt.Fprintln(os.Stderr, "Europe/Stockholm not found in archive")
+		os.Exit(2)
+	}
+	loc, err := time.LoadLocationFromTZData("Europe/Stockholm", stockholm)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "parse tzdata:", err)
 		os.Exit(2)
 	}
 	t := time.Date(1818, 7, 21, 21, 40, 32, 142000000, loc)
 	fmt.Print(t.Format("-07:00:00"))
 }
 GO
-got="$(ZONEINFO="${out_zip}" go run "${workdir}/check.go")"
+got="$(go run "${workdir}/check.go" "${out_zip}")"
 if [[ "${got}" != "${CANARY_EXPECTED}" ]]; then
   echo "FAIL: canary offset is ${got}, expected ${CANARY_EXPECTED}" >&2
   echo "The pinned IANA release or zic build mode no longer matches the" >&2
