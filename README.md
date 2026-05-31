@@ -5,13 +5,17 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v2.0.0-rc2`** (pre-release candidate). The five major
-subsystems below are functional and tested under race, lint, and soak
-gates; the path to **`v2.0.0` stable** is governed by the release gates
-in [docs/semver.md](docs/semver.md#release-gates) (execution-level TCK
-≥ 80 %, full CI green, all T-series tasks closed, full 4-hour Bolt soak
-green). Execution-level TCK is **100 % (3 897/3 897)** on HEAD; production
-deployments should pin a stable tag once cut.
+**Current release: `v2.0.0`** (stable). The five major subsystems below are
+functional and tested under race, lint, and soak gates. v2.0.0 meets the
+release gates in [docs/semver.md](docs/semver.md#release-gates):
+execution-level openCypher TCK is **100 % (3 897/3 897 scenarios,
+16 006/16 006 steps)**, CI is fully green (build, test, race, lint, vet,
+TCK, govulncheck), and all T-series tasks are closed. The module is
+**100 % openCypher TCK-compliant at the execution level** and **100 %
+ACID-compliant**. Production deployments should pin the `v2.0.0` tag. See
+[CHANGELOG.md](CHANGELOG.md) and [release-notes/v2.0.0.md](release-notes/v2.0.0.md)
+for the full release narrative, and [docs/migration-1-to-2.md](docs/migration-1-to-2.md)
+to upgrade from the 1.x line.
 
 ### Core graph (`graph/`)
 

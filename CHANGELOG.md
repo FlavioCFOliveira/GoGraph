@@ -6,6 +6,35 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [2.0.0] — 2026-05-31
+
+The first major release since the 1.x line. v2.0.0 turns GoGraph from a
+graph-algorithm library into a query-capable, server-ready graph engine,
+and it ships the two compliance guarantees that define the project: it is
+**100 % openCypher TCK-compliant at the execution level** (3 897/3 897
+scenarios, 16 006/16 006 steps) and **100 % ACID-compliant** (Atomicity,
+Consistency, Isolation, Durability) across the in-memory engine and every
+persistence backend.
+
+This release consolidates the two pre-release candidates —
+[v2.0.0-rc1](release-notes/v2.0.0-rc1.md) (sprints 21–32: the Cypher
+execution engine, the Bolt v5 server, and the TCK harness at 90.7 % parser
+/ 10.4 % execution) and [v2.0.0-rc2](release-notes/v2.0.0-rc2.md)
+(sprints 37–40: WAL durability bridging, 99.5 % parser, 25.8 % execution) —
+together with the post-rc2 work recorded below: openCypher execution
+conformance driven from 25.8 % to **100 %**, the ACID hardening programme
+(F1–F5), the production-readiness blockers (Sprints 125–126), the godoc
+effort (+95 runnable examples), the examples-excellence pass, and the
+breaking v1 WAL-format excision.
+
+The complete release narrative — grouped change explanations, the breaking
+changes, the 1.x → 2.0 migration walkthrough, and the validation and soak
+evidence — is in [release-notes/v2.0.0.md](release-notes/v2.0.0.md). Callers
+upgrading from a 1.x release must read the
+[1.x → 2.x migration guide](docs/migration-1-to-2.md).
+
 ### Added — Sprint 125 (Production readiness — P0 blockers & P1 items, 2026-05-30)
 
 - **`internal/metrics/prometheus`**: new subpackage providing a self-contained
@@ -90,13 +119,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - **`internal/shapegen`**: soak-layer tests for LDBC Graphalytics reference
   graphs (`cit-Patents`, `dota-league`, `kgs`).
 
-v2.0.0 stable is pending the canonical 4-hour Cypher mixed-load soak run
-(the Bolt 4-hour soak is already green). Gate status (HEAD, 2026-05-30):
-**parser-level TCK 100 %** (3 897/3 897) and **execution-level TCK 100 %**
-(3 897/3 897, `tckExecutionBaseline = 3897` enforced on every PR). ACID
-hardening complete (F1–F5 all closed). See `docs/semver.md` for the full
-release-gate specification and `docs/tck/DIVERGENCES.md` for the
-authoritative pass-rate table.
+Gate status at the v2.0.0 tag: **parser-level TCK 100 %** (3 897/3 897) and
+**execution-level TCK 100 %** (3 897/3 897, 16 006/16 006 steps,
+`tckExecutionBaseline = 3897` enforced on every PR). ACID hardening complete
+(F1–F5 all closed). **Soak provenance (honest):** the 1 024-connection
+4-hour Bolt soak PASSED, but against commit `b5453b9` — six infrastructure
+and test-only commits behind the `v2.0.0` tag (`#1213`–`#1216`: CI action
+bumps, a lint fix, a coverage-gate fix, and two flaky-test fixes; none touch
+a runtime hot path). A canonical full 4-hour **Cypher** mixed-load soak has
+not yet been recorded against the tag — only a 30-minute Cypher read/write
+run (2026-05-21) is archived. A 60-second soak-smoke was run against the
+release commit and passed (zero goroutine growth, stable heap); the full
+4-hour soak is being re-run against the tag out-of-band. See
+[release-notes/v2.0.0.md](release-notes/v2.0.0.md) for the full evidence
+table, `docs/semver.md` for the release-gate specification, and
+`docs/tck/DIVERGENCES.md` for the authoritative pass-rate table.
 
 ### Added — Sprint 78 (Production-readiness blockers)
 
