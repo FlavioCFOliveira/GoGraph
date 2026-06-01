@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"runtime/pprof"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"gograph/bolt/packstream"
 	"gograph/bolt/proto"
 	"gograph/cypher"
+	"gograph/internal/metrics"
 )
 
 const (
@@ -269,6 +271,34 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close() //nolint:errcheck // close error is not actionable on teardown
 
 	remote := conn.RemoteAddr().String()
+
+	// Defence-in-depth panic boundary (H7). A recoverable panic raised while
+	// decoding, dispatching, or executing a frame (e.g. an index-out-of-range
+	// on a malformed message or a future bug) would otherwise unwind past this
+	// goroutine and crash the whole process, taking down every other live
+	// connection — a direct violation of the CLAUDE.md "the library must never
+	// crash" mandate. Per the CLAUDE.md exception for goroutines the library
+	// owns, we recover ONLY to (a) log the panic with session/remote labels and
+	// a stack trace, (b) increment a metric counter, and (c) terminate this one
+	// goroutine cleanly. The deferred conn.Close above (registered first, so it
+	// runs after this recover) closes the offending connection; the accept-loop
+	// wrapper's semaphore/WaitGroup release still runs because handleConn
+	// returns normally. We do not swallow-and-continue: the connection dies.
+	//
+	// This guards RECOVERABLE panics only. A Go fatal runtime error (an
+	// uncatchable stack overflow) cannot be recovered here; that class is
+	// handled upstream by the depth/length guards in the PackStream decoder
+	// and the Cypher parser.
+	defer func() {
+		if r := recover(); r != nil {
+			metrics.IncCounter("bolt.server.conn.panics", 1)
+			s.log.Error("bolt: recovered panic in connection handler; closing connection",
+				slog.String("remote", remote),
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())))
+		}
+	}()
+
 	s.log.Debug("bolt: connection accepted", slog.String("remote", remote))
 
 	// Label the per-connection goroutine so pprof goroutine dumps

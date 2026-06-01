@@ -44,8 +44,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -539,11 +541,119 @@ func (e *Engine) checkParamTypes(plan ir.LogicalPlan, params map[string]expr.Val
 	return sema.CheckParams(sema.InferParamTypesWithResolver(plan, resolve), params)
 }
 
+// ErrInternalPanic wraps a recoverable panic that occurred while planning or
+// executing a query on behalf of a single caller. The engine's query
+// entrypoints ([Engine.Run], [Engine.RunInTx], [Engine.RunAny],
+// [Engine.RunInTxAny]) install a recover boundary so that such a panic — an
+// index-out-of-range on a malformed plan, a nil dereference, a future bug — is
+// converted into this error and returned to the caller instead of unwinding
+// past the engine and crashing the embedding process. Callers may match it
+// with [errors.Is].
+//
+// The returned error deliberately carries only the panic value, never a stack
+// trace: the full trace (via [runtime/debug.Stack]) is logged to the default
+// [slog] handler so internal details are not leaked to the caller. This is
+// defence-in-depth against recoverable panics; a Go fatal runtime error (an
+// uncatchable stack overflow) cannot be intercepted here and is instead
+// prevented upstream by the parser's length/nesting guards.
+var ErrInternalPanic = errors.New("cypher: internal panic")
+
+// recoverQueryPanic is the deferred recover boundary shared by the engine's
+// read-only query entrypoints. When a recoverable panic is in flight it logs
+// the panic value together with a full stack trace, increments the named
+// metric counter, and writes a sanitised typed error (wrapping
+// [ErrInternalPanic]) through errp — the caller's named return — so the
+// embedder receives an inspectable error rather than a process crash. When no
+// panic is in flight it is a no-op, so the happy path is unaffected.
+//
+// It must be called as `defer recoverQueryPanic(&err, "<entrypoint>", "<metric>")`
+// from a function with a named error return. Write entrypoints that hold a WAL
+// transaction must roll it back before delegating to [convertQueryPanic]; see
+// [Engine.RunInTx].
+//
+// errp must be a pointer: the deferred recover writes through the caller's
+// named return on the caller's stack frame, so this is structurally required,
+// not the style choice gocritic's ptrToRefParam assumes.
+//
+//nolint:gocritic // ptrToRefParam: errp must be the caller's named-return pointer
+func recoverQueryPanic(errp *error, entrypoint, counter string) {
+	if r := recover(); r != nil {
+		convertQueryPanic(r, errp, entrypoint, counter)
+	}
+}
+
+// convertQueryPanic performs the log+count+convert half of the panic boundary.
+// It is split out from [recoverQueryPanic] so that a write entrypoint can call
+// recover() itself, roll back its in-flight WAL transaction (releasing the
+// store's single-writer lock so future writes are not deadlocked), and only
+// then funnel the recovered value through the same logging, counting, and
+// typed-error conversion. The stack trace is logged, never returned, so engine
+// internals are not leaked to the caller.
+//
+// errp must be a pointer: it is the caller's named return, written through on
+// the caller's stack frame (gocritic's ptrToRefParam is a false positive here).
+//
+//nolint:gocritic // ptrToRefParam: errp must be the caller's named-return pointer
+func convertQueryPanic(r any, errp *error, entrypoint, counter string) {
+	cmetrics.IncCounter(counter, 1)
+	slog.Default().Error("cypher: recovered panic during query execution",
+		slog.String("entrypoint", entrypoint),
+		slog.Any("panic", r),
+		slog.String("stack", string(debug.Stack())))
+	*errp = fmt.Errorf("%w: %v", ErrInternalPanic, r)
+}
+
+// recoverWriteQueryPanic is the deferred recover boundary for write
+// entrypoints that hold an in-flight WAL transaction. It differs from
+// [recoverQueryPanic] in one ACID-critical respect: on a recovered panic it
+// first rolls back the transaction pointed to by *txp, releasing the store's
+// single-writer mutex, and only then funnels the panic value through
+// [convertQueryPanic] for logging, counting, and typed-error conversion.
+//
+// Without this rollback a panic raised after [txn.Store.Begin] — for example
+// inside the [lpg.Graph.ApplyAtomically] closure during plan build, exec, or
+// index commit — would convert to an error but leave the single-writer mutex
+// held forever, deadlocking every subsequent write transaction and leaving a
+// partial WAL transaction dangling: a violation of ACID atomicity and
+// liveness. (The visibility barrier itself is safe: [lpg.Graph.ApplyAtomically]
+// releases visMu with a deferred Unlock, so the panic unwinds past it cleanly.)
+//
+// Rolling back on panic is unconditionally correct here: a recovered panic
+// always returns an error and never hands a [Result] back to the caller, so
+// the transaction is never the caller's to Close. txp is a pointer-to-pointer
+// so the deferred call observes the transaction assigned after Begin; *txp is
+// nil when the engine is not WAL-backed, in which case the rollback is skipped.
+// [txn.Tx.Rollback] is idempotent against an already-finished transaction, so
+// it never double-unlocks.
+//
+// It must be called as
+// `defer recoverWriteQueryPanic(&err, &walTx, "<entrypoint>", "<metric>")`
+// from a function with a named error return whose walTx is declared before the
+// defer registers; see [Engine.RunInTx].
+//
+// errp (caller's named return) and txp (pointer-to-pointer, so the deferred
+// call observes the walTx assigned after Begin) are both structurally required
+// pointers, not the style choice gocritic's ptrToRefParam assumes.
+//
+//nolint:gocritic // ptrToRefParam: errp and txp must be pointers for this defer pattern
+func recoverWriteQueryPanic(errp *error, txp **txn.Tx[string, float64], entrypoint, counter string) {
+	if r := recover(); r != nil {
+		if txp != nil && *txp != nil {
+			_ = (*txp).Rollback() //nolint:errcheck // rollback error is not actionable while converting a panic
+		}
+		convertQueryPanic(r, errp, entrypoint, counter)
+	}
+}
+
 // Run parses, analyses, plans, and executes query, returning a materialised
 // [Result]. The query is built and drained inside the read visibility barrier
 // (Graph.View) so it observes a consistent, partial-transaction-free snapshot.
 // DDL statements take a dedicated fast path. Parameters are bound from params
 // and type-checked against the plan before execution.
+//
+// A recoverable panic raised while planning or executing the query is
+// intercepted and returned as an error wrapping [ErrInternalPanic]; it never
+// unwinds past this method to crash the embedding process.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
 	defer cmetrics.Time("cypher.Run")()
 	defer func() {
@@ -551,6 +661,9 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 			cmetrics.IncCounter("cypher.Run.errors", 1)
 		}
 	}()
+	// Registered last so it runs first on unwind: a recovered panic sets err
+	// before the cypher.Run.errors counter defer above observes it.
+	defer recoverQueryPanic(&err, "cypher.Run", "cypher.Run.panics")
 	// ── 0. DDL fast-path ─────────────────────────────────────────────────────
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query)
@@ -773,6 +886,8 @@ func (e *Engine) RunAny(ctx context.Context, query string, params map[string]any
 	if err != nil {
 		return nil, err
 	}
+	// The panic boundary (ErrInternalPanic) is inherited transitively: this
+	// method delegates to Run/RunInTx, which each install their own recover.
 	if queryHasWritingClause(query) {
 		return e.RunInTx(ctx, query, converted)
 	}
@@ -6228,6 +6343,18 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 			cmetrics.IncCounter("cypher.RunInTx.errors", 1)
 		}
 	}()
+	// walTx holds the store's single-writer mutex from Begin() (below) until it
+	// is rolled back or handed to the Result for Commit/Rollback in
+	// Result.Close. It is declared here, before the recover boundary registers,
+	// so recoverWriteQueryPanic can roll it back on a panic raised anywhere
+	// after Begin — releasing the single-writer mutex that would otherwise
+	// deadlock every future write (ACID atomicity + liveness). On the normal
+	// build-error path the explicit Rollback below still applies.
+	var walTx *txn.Tx[string, float64]
+	// Registered last so it runs first on unwind: a recovered panic rolls back
+	// walTx and sets err before the cypher.RunInTx.errors counter defer above
+	// observes it. RunInTxAny delegates here, so it is covered transitively.
+	defer recoverWriteQueryPanic(&err, &walTx, "cypher.RunInTx", "cypher.RunInTx.panics")
 	// DDL queries don't require a write transaction.
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query)
@@ -6266,7 +6393,6 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// takes the store's single-writer mutex and must not nest under visMu.
 	// The mutator adapter only captures references; no graph reads happen yet.
 	var mutator exec.GraphMutator
-	var walTx *txn.Tx[string, float64]
 	if e.store != nil {
 		walTx = e.store.Begin()
 		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf}
