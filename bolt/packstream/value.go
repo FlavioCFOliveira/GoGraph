@@ -157,6 +157,13 @@ func (d *Decoder) readValue(depth int) (Value, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Each list element occupies at least one wire byte, so a count
+		// exceeding the bytes still available is impossible for a well-formed
+		// message; reject it before make([]Value, n) commits ~16 bytes per
+		// slot. See ErrLengthExceedsInput.
+		if n > d.budget() {
+			return nil, fmt.Errorf("%w: List count %d > %d", ErrLengthExceedsInput, n, d.budget())
+		}
 		items := make([]Value, n)
 		for i := range items {
 			items[i], err = d.readValue(depth + 1)
@@ -169,6 +176,13 @@ func (d *Decoder) readValue(depth int) (Value, error) {
 		n, err := d.ReadMapHeader()
 		if err != nil {
 			return nil, err
+		}
+		// Each map entry is a key plus a value, so it occupies at least two
+		// wire bytes; a count exceeding the bytes still available is
+		// impossible for a well-formed message. Reject before make() commits
+		// the map's backing store. See ErrLengthExceedsInput.
+		if n > d.budget() {
+			return nil, fmt.Errorf("%w: Map count %d > %d", ErrLengthExceedsInput, n, d.budget())
 		}
 		m := make(map[string]Value, n)
 		for range n {
@@ -187,6 +201,13 @@ func (d *Decoder) readValue(depth int) (Value, error) {
 		tag, n, err := d.ReadStructHeader()
 		if err != nil {
 			return nil, err
+		}
+		// ReadStructHeader caps n at 15 (TinyStruct only), so this guard is
+		// defence-in-depth: each field is at least one wire byte, so a count
+		// exceeding the bytes still available is rejected before make(). See
+		// ErrLengthExceedsInput.
+		if n > d.budget() {
+			return nil, fmt.Errorf("%w: Struct field count %d > %d", ErrLengthExceedsInput, n, d.budget())
 		}
 		fields := make([]Value, n)
 		for i := range fields {
