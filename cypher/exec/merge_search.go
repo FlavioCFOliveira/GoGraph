@@ -170,59 +170,87 @@ func nodeMatchesAllProperties(want []propLiteral, got map[string]lpg.PropertyVal
 		if !ok {
 			return false
 		}
-		if !propertyValueEquals(w.value, gv) {
+		if !mergePropValueEquals(w.value, gv) {
 			return false
 		}
 	}
 	return true
 }
 
-// propertyValueEquals reports whether two [lpg.PropertyValue]s carry the
-// same kind and equal underlying value. PropString/PropInt64/PropFloat64/
-// PropBool use the language's == operator. PropTime uses [time.Time.Equal]
-// (which normalises monotonic clock readings and timezone offsets).
-// PropBytes uses [bytes.Equal]. PropList compares element-wise recursively.
-func propertyValueEquals(a, b lpg.PropertyValue) bool {
-	if a.Kind() != b.Kind() {
-		return false
-	}
-	switch a.Kind() {
-	case lpg.PropString:
-		av, _ := a.String()
-		bv, _ := b.String()
-		return av == bv
-	case lpg.PropInt64:
-		av, _ := a.Int64()
-		bv, _ := b.Int64()
-		return av == bv
-	case lpg.PropFloat64:
-		av, _ := a.Float64()
-		bv, _ := b.Float64()
-		return av == bv
-	case lpg.PropBool:
-		av, _ := a.Bool()
-		bv, _ := b.Bool()
-		return av == bv
-	case lpg.PropTime:
-		av, _ := a.Time()
-		bv, _ := b.Time()
-		return av.Equal(bv)
-	case lpg.PropBytes:
-		av, _ := a.Bytes()
-		bv, _ := b.Bytes()
-		return bytes.Equal(av, bv)
-	case lpg.PropList:
-		ae, _ := a.List()
-		be, _ := b.List()
-		if len(ae) != len(be) {
-			return false
-		}
-		for i := range ae {
-			if !propertyValueEquals(ae[i], be[i]) {
+// mergePropValueEquals reports whether two [lpg.PropertyValue]s are equal for
+// the purposes of MERGE's match phase. The comparison mirrors the openCypher
+// `=` operator (and therefore MATCH and WHERE): two values match when they are
+// equal under that operator, including cross-type numeric equality such as
+// `1 = 1.0`. Without this, a node stored as integer `(:N {x:1})` would fail to
+// match `MERGE (n:N {x:1.0})` and MERGE would wrongly create a duplicate
+// (openCypher conformance bug, rmp #1240).
+//
+// The helper is shared by both node MERGE ([nodeMatchesAllProperties]) and
+// relationship MERGE ([MergeRelationship.matchesRelProps]). It is symmetric in
+// its arguments, so call-site ordering of want/got is irrelevant.
+//
+// Same-kind comparisons keep the historical strict semantics verbatim:
+// PropString/PropInt64/PropFloat64/PropBool use the language's == operator;
+// PropTime uses [time.Time.Equal] (which normalises monotonic clock readings
+// and timezone offsets); PropBytes uses [bytes.Equal]; PropList compares
+// element-wise, recursing through this helper so cross-type list elements such
+// as `[1]` versus `[1.0]` match while temporal/byte elements stay on the
+// strict same-kind path.
+//
+// Cross-kind comparisons are the only new behaviour: both operands are
+// converted via [lpgPropToExprBinding] and compared with the canonical
+// [expr.Value.Equal]. A match requires both conversions to succeed AND the
+// result to be exactly true. PropTime and PropBytes do not convert, so a
+// cross-kind comparison involving them yields false rather than a spurious
+// match.
+func mergePropValueEquals(a, b lpg.PropertyValue) bool {
+	if a.Kind() == b.Kind() {
+		switch a.Kind() {
+		case lpg.PropString:
+			av, _ := a.String()
+			bv, _ := b.String()
+			return av == bv
+		case lpg.PropInt64:
+			av, _ := a.Int64()
+			bv, _ := b.Int64()
+			return av == bv
+		case lpg.PropFloat64:
+			av, _ := a.Float64()
+			bv, _ := b.Float64()
+			return av == bv
+		case lpg.PropBool:
+			av, _ := a.Bool()
+			bv, _ := b.Bool()
+			return av == bv
+		case lpg.PropTime:
+			av, _ := a.Time()
+			bv, _ := b.Time()
+			return av.Equal(bv)
+		case lpg.PropBytes:
+			av, _ := a.Bytes()
+			bv, _ := b.Bytes()
+			return bytes.Equal(av, bv)
+		case lpg.PropList:
+			ae, _ := a.List()
+			be, _ := b.List()
+			if len(ae) != len(be) {
 				return false
 			}
+			for i := range ae {
+				if !mergePropValueEquals(ae[i], be[i]) {
+					return false
+				}
+			}
+			return true
 		}
-		return true
+		return false
 	}
-	return false
+	// Kinds differ: fall back to the canonical `=` operator semantics so that
+	// cross-type numeric equality (1 == 1.0) matches exactly as MATCH/WHERE do.
+	av, aok := lpgPropToExprBinding(a)
+	bv, bok := lpgPropToExprBinding(b)
+	if !aok || !bok {
+		return false
+	}
+	return av.Equal(bv) == expr.BoolValue(true)
 }

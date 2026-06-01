@@ -38,7 +38,6 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
-	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // MergeRelationship matches-or-creates a single-hop directed relationship
@@ -307,57 +306,15 @@ func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string) bool {
 		if !ok {
 			return false
 		}
-		if !propertyValuesEqual(got, p.value) {
+		// Route through the shared MERGE equality helper so relationship
+		// MERGE matches with the same openCypher `=` semantics as node MERGE,
+		// including cross-type numeric equality (1 == 1.0). See
+		// [mergePropValueEquals] in merge_search.go (rmp #1240).
+		if !mergePropValueEquals(got, p.value) {
 			return false
 		}
 	}
 	return true
-}
-
-// propertyValuesEqual compares two lpg.PropertyValue for value equality
-// across all supported kinds. Returns true when the kinds match AND the
-// underlying scalar / temporal / byte representation compares equal.
-// String and float kinds use Go's == operator; time uses time.Equal;
-// bytes uses byte-slice equality.
-func propertyValuesEqual(a, b lpg.PropertyValue) bool {
-	if a.Kind() != b.Kind() {
-		return false
-	}
-	switch a.Kind() {
-	case lpg.PropString:
-		as, _ := a.String()
-		bs, _ := b.String()
-		return as == bs
-	case lpg.PropInt64:
-		ai, _ := a.Int64()
-		bi, _ := b.Int64()
-		return ai == bi
-	case lpg.PropFloat64:
-		af, _ := a.Float64()
-		bf, _ := b.Float64()
-		return af == bf
-	case lpg.PropBool:
-		av, _ := a.Bool()
-		bv, _ := b.Bool()
-		return av == bv
-	case lpg.PropTime:
-		at, _ := a.Time()
-		bt, _ := b.Time()
-		return at.Equal(bt)
-	case lpg.PropBytes:
-		ab, _ := a.Bytes()
-		bb, _ := b.Bytes()
-		if len(ab) != len(bb) {
-			return false
-		}
-		for i := range ab {
-			if ab[i] != bb[i] {
-				return false
-			}
-		}
-		return true
-	}
-	return false
 }
 
 // emitRow returns the output row for a successfully matched-or-created
