@@ -569,8 +569,10 @@ func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry, mapperEn
 // as [ErrCorrupted]. size is the manifest-recorded file size, passed as
 // the precise remaining-bytes bound so a malicious header declaring more
 // records than the file could hold is rejected before any allocation.
+// The file is opened with O_NOFOLLOW (via openSnapshotComponent) so a
+// component symlinked outside the snapshot dir is rejected.
 func readVerifiedCSR(path string, expected uint32, size int64) (CSRReadback, error) {
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return CSRReadback{}, err
 	}
@@ -595,7 +597,7 @@ func readVerifiedCSR(path string, expected uint32, size int64) (CSRReadback, err
 
 // readVerifiedLabels is the dual of [readVerifiedCSR] for labels.bin.
 func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return LabelsReadback{}, err
 	}
@@ -621,7 +623,7 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 // readVerifiedProperties is the dual of [readVerifiedCSR] for
 // properties.bin.
 func readVerifiedProperties(path string, expected uint32) (PropertiesReadback, error) {
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return PropertiesReadback{}, err
 	}

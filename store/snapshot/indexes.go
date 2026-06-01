@@ -206,7 +206,7 @@ func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) 
 			return nil, err
 		}
 		filename := filepath.Join(idxDir, e.Name+".bin")
-		buf, err := os.ReadFile(filename) //nolint:gosec // name validated by validateIndexName above
+		buf, err := readIndexFile(filename)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
 			out = append(out, IndexReadback{Name: e.Name})
@@ -220,4 +220,19 @@ func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) 
 		out = append(out, IndexReadback{Name: e.Name, Bytes: buf})
 	}
 	return out, nil
+}
+
+// readIndexFile reads an index component file in full, opening it via
+// [openSnapshotComponent] so an indexes/<name>.bin that is a symlink in
+// an untrusted snapshot directory is rejected (O_NOFOLLOW) rather than
+// dereferenced. It is the symlink-safe replacement for os.ReadFile on the
+// snapshot read path.
+func readIndexFile(path string) ([]byte, error) {
+	f, err := openSnapshotComponent(path)
+	if err != nil {
+		return nil, err
+	}
+	// best-effort: read-only file, close err is non-actionable for callers.
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
 }

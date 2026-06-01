@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"gograph/internal/metrics"
@@ -106,11 +105,13 @@ func LoadManifest(r io.Reader) (Manifest, error) {
 	return m, nil
 }
 
-// ReadManifestFile is a convenience wrapper around [os.Open] +
-// [LoadManifest].
+// ReadManifestFile is a convenience wrapper around an O_NOFOLLOW open
+// plus [LoadManifest]. The file is opened via [openSnapshotComponent] so
+// a manifest.json that is a symlink in an untrusted snapshot directory is
+// rejected rather than dereferenced.
 func ReadManifestFile(path string) (Manifest, error) {
 	defer metrics.Time("store.snapshot.ReadManifestFile")()
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	f, err := openSnapshotComponent(path)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.ReadManifestFile.errors", 1)
 		return Manifest{}, err

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"os"
 
 	"gograph/graph"
 	"gograph/internal/metrics"
@@ -490,7 +489,7 @@ func ReadMapperString(r io.Reader) (MapperReadback, error) {
 // surfaces as [ErrCorrupted]. Mirrors [readVerifiedCSR] /
 // [readVerifiedLabels] / [readVerifiedProperties] in shape.
 func readVerifiedMapper(path string, expected uint32) (MapperReadback, error) {
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return MapperReadback{}, err
 	}
@@ -518,7 +517,7 @@ func readVerifiedMapper(path string, expected uint32) (MapperReadback, error) {
 // full parse. A bad magic surfaces as [ErrMapperCorrupted]; an I/O or
 // open error surfaces verbatim.
 func peekMapperVersion(path string) (uint16, error) {
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return 0, err
 	}
@@ -546,7 +545,7 @@ func peekMapperVersion(path string) (uint16, error) {
 // decode through the matching codec. Any disagreement surfaces as
 // [ErrCorrupted].
 func readVerifiedMapperBytes(path string, expected uint32) (MapperReadback, error) {
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return MapperReadback{}, err
 	}
