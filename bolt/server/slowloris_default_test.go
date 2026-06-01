@@ -24,7 +24,10 @@ func newInProcEngine() *cypher.Engine {
 // connection that completes the handshake but then stalls cannot hold its slot
 // and goroutine forever. The test inspects the resolved option directly.
 func TestNewServer_DefaultsConnTimeout(t *testing.T) {
-	srv := NewServer(newInProcEngine(), Options{})
+	srv, err := NewServer(newInProcEngine(), Options{Auth: NoAuthHandler{}})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	if srv.opts.ConnTimeout != DefaultConnTimeout {
 		t.Fatalf("ConnTimeout: got %v, want default %v", srv.opts.ConnTimeout, DefaultConnTimeout)
 	}
@@ -63,9 +66,13 @@ func TestHandshakeTimeoutDefaults(t *testing.T) {
 // untouched.
 func TestNewServer_RespectsExplicitTimeouts(t *testing.T) {
 	const connTO = 7 * time.Second
-	srv := NewServer(newInProcEngine(), Options{
+	srv, err := NewServer(newInProcEngine(), Options{
 		ConnTimeout: connTO,
+		Auth:        NoAuthHandler{},
 	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	if srv.opts.ConnTimeout != connTO {
 		t.Errorf("ConnTimeout: got %v, want %v (explicit value must be preserved)", srv.opts.ConnTimeout, connTO)
 	}

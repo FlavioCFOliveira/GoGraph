@@ -31,7 +31,14 @@ func ExampleServer_Serve() {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
-	srv := server.NewServer(eng, server.Options{ConnTimeout: 5 * time.Second})
+	// The explicit NoAuthHandler{} value is the opt-in that lets this example
+	// run without credentials; the server is secure-by-default and otherwise
+	// refuses to start with a nil Auth handler.
+	srv, err := server.NewServer(eng, server.Options{ConnTimeout: 5 * time.Second, Auth: server.NoAuthHandler{}})
+	if err != nil {
+		fmt.Println("new server:", err)
+		return
+	}
 
 	// Ephemeral port; ln.Addr() reveals the chosen port for the client.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

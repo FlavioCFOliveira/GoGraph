@@ -106,9 +106,13 @@ func sendHello(t *testing.T, conn net.Conn) *proto.Success {
 // goleak.Find in TestMain after all servers have been shut down.
 func TestServe_HandshakeHello(t *testing.T) {
 	eng := newEngine(t)
-	srv := server.NewServer(eng, server.Options{
+	srv, err := server.NewServer(eng, server.Options{
 		ConnTimeout: 5 * time.Second,
+		Auth:        server.NoAuthHandler{},
 	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -174,10 +178,14 @@ func TestServe_HandshakeHello(t *testing.T) {
 // MaxConnections is reached (it should close the excess connection immediately).
 func TestServe_MaxConnections(t *testing.T) {
 	eng := newEngine(t)
-	srv := server.NewServer(eng, server.Options{
+	srv, err := server.NewServer(eng, server.Options{
 		MaxConnections: 1,
 		ConnTimeout:    2 * time.Second,
+		Auth:           server.NoAuthHandler{},
 	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

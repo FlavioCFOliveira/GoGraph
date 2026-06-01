@@ -31,7 +31,10 @@ func TestMain(m *testing.M) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
-	srv := server.NewServer(eng, server.Options{ConnTimeout: 5 * time.Second})
+	srv, err := server.NewServer(eng, server.Options{ConnTimeout: 5 * time.Second, Auth: server.NoAuthHandler{}})
+	if err != nil {
+		panic("TestMain: new server: " + err.Error())
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

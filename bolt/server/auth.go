@@ -35,6 +35,15 @@ type AuthHandler interface {
 // NoAuthHandler accepts any credentials without validation. Suitable for
 // development and testing only.
 //
+// Because it admits every client, NoAuthHandler is never installed by
+// default: the server is secure-by-default. To run without authentication an
+// embedder must opt in explicitly by setting Options.Auth to a NoAuthHandler{}
+// value. The explicit value is itself the opt-in — self-documenting at the
+// call site and impossible to set by accident — and [NewServer] logs a loud
+// warning when it sees one. Constructing a server with a nil Options.Auth
+// fails closed with [ErrNoAuthHandler]. Never expose a NoAuthHandler-backed
+// server on an untrusted network.
+//
 // NoAuthHandler is safe for concurrent use.
 type NoAuthHandler struct{}
 

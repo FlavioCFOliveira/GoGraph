@@ -126,7 +126,10 @@ func startNYBoltServer(t *testing.T) string {
 
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	eng := cypher.NewEngine(g)
-	srv := server.NewServer(eng, server.Options{ConnTimeout: 10 * time.Second})
+	srv, err := server.NewServer(eng, server.Options{ConnTimeout: 10 * time.Second, Auth: server.NoAuthHandler{}})
+	if err != nil {
+		t.Fatalf("startNYBoltServer: NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

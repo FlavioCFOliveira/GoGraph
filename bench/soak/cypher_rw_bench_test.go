@@ -244,10 +244,14 @@ func newBenchServer(b *testing.B) string {
 	// MaxConnections is set to max(concurrencyLevel) + headroom.  Because we
 	// share one server across all goroutines in the sub-benchmark, we pick a
 	// ceiling that comfortably covers any concurrency level we test.
-	srv := server.NewServer(eng, server.Options{
+	srv, err := server.NewServer(eng, server.Options{
 		MaxConnections: 1200,
 		ConnTimeout:    15 * time.Second,
+		Auth:           server.NoAuthHandler{},
 	})
+	if err != nil {
+		b.Fatalf("newBenchServer NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

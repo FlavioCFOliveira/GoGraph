@@ -129,14 +129,34 @@ type Options struct {
 	// the given configuration. nil means plain TCP.
 	TLSConfig *tls.Config
 
-	// Auth is the authentication handler used during HELLO/LOGON. When nil,
-	// NoAuthHandler is used.
+	// Auth is the authentication handler invoked during HELLO/LOGON. It is
+	// the security boundary of the server: every client must satisfy it
+	// before any Cypher statement executes.
+	//
+	// Auth must be set; leave it nil and [NewServer] returns
+	// [ErrNoAuthHandler]. The server is secure-by-default: a nil Auth is NOT
+	// silently replaced with an open, accept-everyone handler, so a careless
+	// embedder writing Options{} cannot accidentally expose an
+	// unauthenticated server. To enforce credentials, set Auth to a real
+	// [AuthHandler] such as [BasicAuthHandler]. To run without authentication
+	// (development or testing only) set Auth: [NoAuthHandler]{} explicitly:
+	// the explicit NoAuthHandler value is itself the opt-in, it is
+	// self-documenting at the call site, and it is impossible to set by
+	// accident. In that case [NewServer] still emits a loud warning.
 	Auth AuthHandler
 
 	// Logger is the structured logger for server events. When nil, the
 	// default slog handler is used.
 	Logger *slog.Logger
 }
+
+// ErrNoAuthHandler is returned by [NewServer] when Options.Auth is nil. The
+// server is secure-by-default: running without authentication must be an
+// explicit opt-in, never an accidental default. Set Options.Auth to a real
+// [AuthHandler] to require credentials, or set Options.Auth to a
+// [NoAuthHandler]{} value to run the open-door handler on purpose
+// (development and testing only).
+var ErrNoAuthHandler = errors.New("bolt: no auth handler configured; set Options.Auth to a real AuthHandler, or to NoAuthHandler{} to run without authentication")
 
 // Server is the Bolt v5 TCP server. It accepts connections from a
 // net.Listener, negotiates the protocol version, and runs the Bolt message
@@ -156,7 +176,18 @@ type Server struct {
 
 // NewServer creates a Server backed by eng. Zero-value Options fields are
 // filled with sensible defaults.
-func NewServer(eng *cypher.Engine, opts Options) *Server {
+//
+// NewServer is secure-by-default: it never silently installs an
+// accept-everyone authentication handler. If Options.Auth is nil it fails
+// closed and returns [ErrNoAuthHandler] so that an unauthenticated server is
+// never started by accident. To run without authentication on purpose
+// (development or testing), set Options.Auth to a [NoAuthHandler]{} value
+// explicitly: NewServer then admits every client and logs a loud warning that
+// the operator has knowingly disabled authentication. The explicit
+// NoAuthHandler value is itself the opt-in — self-documenting at the call site
+// and impossible to set by accident. When Options.Auth is any other
+// (real) handler it is used as-is.
+func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 	if opts.MaxConnections <= 0 {
 		opts.MaxConnections = defaultMaxConnections
 	}
@@ -166,22 +197,26 @@ func NewServer(eng *cypher.Engine, opts Options) *Server {
 	if opts.ConnTimeout <= 0 {
 		opts.ConnTimeout = DefaultConnTimeout
 	}
-	if opts.Auth == nil {
-		opts.Auth = NoAuthHandler{}
-	}
 	log := opts.Logger
 	if log == nil {
 		log = slog.Default()
 	}
-	if _, isNoAuth := opts.Auth.(NoAuthHandler); isNoAuth {
-		log.Warn("bolt: server started with no authentication — every client is admitted without credential validation; set Options.Auth to a real AuthHandler before exposing this server on a network")
+	if opts.Auth == nil {
+		// Secure-by-default: a missing auth handler is a hard error. A
+		// zero-value Options can never accidentally run open.
+		return nil, ErrNoAuthHandler
+	}
+	if _, ok := opts.Auth.(NoAuthHandler); ok {
+		// Explicit opt-in: the embedder constructed NoAuthHandler{} on purpose.
+		// Admit every client but warn loudly that authentication is disabled.
+		log.Warn("bolt: server started with no authentication (Options.Auth is NoAuthHandler) — every client is admitted without credential validation; set Options.Auth to a real AuthHandler before exposing this server on a network")
 	}
 	return &Server{
 		eng:  eng,
 		opts: opts,
 		sem:  make(chan struct{}, opts.MaxConnections),
 		log:  log,
-	}
+	}, nil
 }
 
 // Serve accepts connections from ln until ctx is cancelled or Shutdown is

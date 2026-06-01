@@ -60,11 +60,18 @@ func run(w io.Writer) error {
 		return fmt.Errorf("seed graph: %w", err)
 	}
 
-	// Bolt v5 server with a per-connection idle timeout.
-	srv := server.NewServer(eng, server.Options{
+	// Bolt v5 server with a per-connection idle timeout. The server is
+	// secure-by-default, so the explicit NoAuthHandler{} value is the opt-in
+	// that lets this development example run without credentials; a production
+	// deployment would instead set Options.Auth to a real AuthHandler.
+	srv, err := server.NewServer(eng, server.Options{
 		MaxConnections: 64,
 		ConnTimeout:    5 * time.Second,
+		Auth:           server.NoAuthHandler{},
 	})
+	if err != nil {
+		return fmt.Errorf("new server: %w", err)
+	}
 
 	// Kernel-assigned port; ln.Addr() reveals the chosen port for the client.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

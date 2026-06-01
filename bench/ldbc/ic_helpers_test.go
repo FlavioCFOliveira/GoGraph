@@ -87,10 +87,14 @@ func startICServer(t *testing.T) (addr string, driver neo4j.DriverWithContext) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	eng := cypher.NewEngine(g)
 
-	srv := server.NewServer(eng, server.Options{
+	srv, err := server.NewServer(eng, server.Options{
 		MaxConnections: 16,
 		ConnTimeout:    15 * time.Second,
+		Auth:           server.NoAuthHandler{},
 	})
+	if err != nil {
+		t.Fatalf("startICServer NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

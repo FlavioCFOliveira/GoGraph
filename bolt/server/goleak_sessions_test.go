@@ -53,7 +53,10 @@ func TestGoleak_Sessions_AllTransitions(t *testing.T) {
 	opts := []goleak.Option{goleak.IgnoreCurrent()}
 
 	eng := newEngine(t)
-	srv := server.NewServer(eng, server.Options{ConnTimeout: 5 * time.Second})
+	srv, err := server.NewServer(eng, server.Options{ConnTimeout: 5 * time.Second, Auth: server.NoAuthHandler{}})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

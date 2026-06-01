@@ -56,10 +56,14 @@ func TestBoltSoak_60s(t *testing.T) {
 	seedNodes(t, eng)
 
 	// ── Start server ─────────────────────────────────────────────────────────
-	srv := server.NewServer(eng, server.Options{
+	srv, err := server.NewServer(eng, server.Options{
 		MaxConnections: 512,
 		ConnTimeout:    15 * time.Second,
+		Auth:           server.NoAuthHandler{},
 	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

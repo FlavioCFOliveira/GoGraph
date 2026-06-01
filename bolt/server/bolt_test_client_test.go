@@ -238,7 +238,17 @@ func startTestServer(t *testing.T, opts server.Options) string {
 	if opts.ConnTimeout == 0 {
 		opts.ConnTimeout = 5 * time.Second
 	}
-	srv := server.NewServer(eng, opts)
+	// Test servers run without credentials by default. The production server
+	// is secure-by-default and refuses a nil Auth handler, so opt in here with
+	// the explicit NoAuthHandler{} value unless the caller supplied a real
+	// handler (e.g. the panic-boundary test).
+	if opts.Auth == nil {
+		opts.Auth = server.NoAuthHandler{}
+	}
+	srv, err := server.NewServer(eng, opts)
+	if err != nil {
+		t.Fatalf("startTestServer NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

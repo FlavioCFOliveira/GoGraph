@@ -76,10 +76,14 @@ func TestServe_OversizeMessage_ConnectionDropped(t *testing.T) {
 	const msgCap = 512 // small cap so the test stays fast and allocation-light
 
 	eng := newEngine(t)
-	srv := server.NewServer(eng, server.Options{
+	srv, err := server.NewServer(eng, server.Options{
 		MaxMessageBytes: msgCap,
 		ConnTimeout:     5 * time.Second,
+		Auth:            server.NoAuthHandler{},
 	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
