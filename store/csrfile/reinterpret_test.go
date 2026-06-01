@@ -2,6 +2,7 @@ package csrfile
 
 import (
 	"encoding/binary"
+	"math"
 	"math/rand/v2"
 	"testing"
 	"unsafe"
@@ -82,6 +83,26 @@ func TestReinterpret_MisalignedPanics(t *testing.T) {
 		off++
 	}
 	_ = Reinterpret[uint64](buf[off:], 1)
+}
+
+// TestReinterpret_OverflowPanics asserts that an (size, n) pair whose
+// byte requirement size(T)*n overflows int is rejected via the guarded
+// "data too short" panic path rather than wrapping to a small product
+// and slicing out of bounds. With T=uint64 (size 8), n = MaxInt/8 + 1
+// makes 8*n overflow int; no real buffer can satisfy it, so the call
+// must panic deterministically instead of succeeding.
+func TestReinterpret_OverflowPanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Fatalf("expected panic on overflowing (size, n)")
+		}
+	}()
+	// A tiny buffer: had the multiply wrapped to a small value, the
+	// length check could have spuriously passed and produced an
+	// out-of-bounds alias.
+	n := math.MaxInt/8 + 1
+	_ = Reinterpret[uint64](make([]byte, 16), n)
 }
 
 func BenchmarkReinterpret_Uint64(b *testing.B) {

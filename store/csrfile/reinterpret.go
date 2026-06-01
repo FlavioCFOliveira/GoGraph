@@ -2,6 +2,8 @@ package csrfile
 
 import (
 	"fmt"
+	"math"
+	"math/bits"
 	"unsafe"
 )
 
@@ -11,6 +13,15 @@ import (
 // type whose layout is identical to one of those. The function
 // panics when data is too short to hold n elements of T or when its
 // alignment is incompatible with T.
+//
+// Precondition on n: the byte requirement size(T)*n must be
+// representable; n is treated as untrusted. When size(T)*n overflows
+// (or exceeds what a Go slice length can address), the requirement
+// can never be satisfied by any real buffer, so Reinterpret takes the
+// same "data too short" panic path rather than computing a wrapped
+// product and slicing out of bounds. Callers that derive n from a
+// wire- or file-encoded value therefore get a deterministic, guarded
+// failure instead of an out-of-bounds read.
 //
 // Because the returned slice aliases data's memory, callers must
 // preserve the data buffer's lifetime for the duration they hold
@@ -33,7 +44,18 @@ func Reinterpret[T any](data []byte, n int) []T {
 	if size == 0 {
 		panic("csrfile: Reinterpret called with zero-sized element type")
 	}
-	need := size * n
+	// Compute size*n in 64-bit precision and reject overflow before
+	// it can wrap. bits.Mul64 yields the full 128-bit product; a
+	// non-zero high word, or a low word that exceeds the maximum int
+	// (and therefore any addressable slice length), means no real
+	// buffer can satisfy the requirement. Fall through to the same
+	// "data too short" panic with the saturated requirement so the
+	// failure is deterministic rather than an out-of-bounds slice.
+	hi, lo := bits.Mul64(uint64(size), uint64(n))
+	need := int(lo) //nolint:gosec // overflow guarded by hi/lo checks below
+	if hi != 0 || lo > uint64(math.MaxInt) {
+		need = math.MaxInt // unsatisfiable: forces the short-data path
+	}
 	if len(data) < need {
 		panic(fmt.Sprintf("csrfile: Reinterpret: need %d bytes for %d x %T, got %d",
 			need, n, zero, len(data)))
