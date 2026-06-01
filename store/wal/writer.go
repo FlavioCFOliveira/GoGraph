@@ -49,9 +49,10 @@ type Writer struct {
 }
 
 // Open opens or creates the WAL file at path for append-only
-// writing. The file is created with mode 0o644 if it does not
-// already exist; existing data is preserved and new frames are
-// appended.
+// writing. The file is created with mode 0o600 (owner read/write
+// only) if it does not already exist; existing data is preserved and
+// new frames are appended. The restrictive mode keeps the full graph
+// mutation stream from being world-readable.
 func Open(path string) (*Writer, error) {
 	defer metrics.Time("store.wal.Open")()
 	// Detect whether this call creates the file. A newly-created WAL file
@@ -67,7 +68,10 @@ func Open(path string) (*Writer, error) {
 	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
 		created = true
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644) //nolint:gosec // caller-supplied path is by-design
+	// 0o600: the WAL carries the full graph mutation stream and must not
+	// be world-readable (audit finding L2). Append/sync/durability flags
+	// are unchanged; only the create mode is tightened.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // caller-supplied path is by-design
 	if err != nil {
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: %w", path, err)

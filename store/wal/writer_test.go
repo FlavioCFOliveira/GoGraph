@@ -97,6 +97,47 @@ func TestWriter_AfterCloseIsError(t *testing.T) {
 	}
 }
 
+func TestWriter_CreatesFileWith0600(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "perm.wal")
+	w, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Write and durably commit a frame, then read it back, to confirm the
+	// tightened create mode does not disturb append/sync/recovery.
+	if err := w.Append([]byte("secret mutation")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("WAL file mode = %#o, want 0o600", got)
+	}
+
+	data, err := os.ReadFile(path) //nolint:gosec // path is from t.TempDir
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	out, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !bytes.Equal(out.Payload, []byte("secret mutation")) {
+		t.Fatalf("Payload mismatch: %q", out.Payload)
+	}
+}
+
 func TestWriter_Concurrent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
