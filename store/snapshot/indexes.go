@@ -5,12 +5,47 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gograph/graph/index"
 	"gograph/internal/metrics"
 )
+
+// validateIndexName rejects any index name that, when joined with the
+// snapshot's indexes/ directory, could escape that directory. Index
+// names originate from the (attacker-controlled) manifest of an
+// untrusted snapshot, so an entry such as "../../../../tmp/pwned" or an
+// absolute path would otherwise let [LoadIndexes] read — and
+// [WriteIndexes] write — an arbitrary file outside idxDir.
+//
+// A legitimate index name is a single, slash-free path element (the name
+// it was registered under with [index.Manager.CreateIndex]). The guard
+// therefore rejects "", ".", and "..", and accepts only names that:
+//   - equal their own [filepath.Base] (no directory component),
+//   - satisfy [fs.ValidPath] (rules out leading/trailing slashes and any
+//     ".." element; note [fs.ValidPath] alone still accepts "."),
+//   - contain no path separator ('/' or '\\', the latter for Windows),
+//   - contain no ".." substring, and
+//   - are not absolute.
+//
+// A rejection surfaces as [ErrManifestCorrupted] so callers classify it
+// alongside any other manifest/disk disagreement.
+func validateIndexName(name string) error {
+	if name == "" ||
+		name == "." ||
+		name == ".." ||
+		name != filepath.Base(name) ||
+		!fs.ValidPath(name) ||
+		strings.ContainsAny(name, `/\`) ||
+		strings.Contains(name, "..") ||
+		filepath.IsAbs(name) {
+		return fmt.Errorf("%w: illegal index name %q", ErrManifestCorrupted, name)
+	}
+	return nil
+}
 
 // IndexesDir is the conventional sub-directory inside a v2 snapshot
 // that holds one [index.Serializer]-encoded file per registered
@@ -72,6 +107,15 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 			// Subscriber does not implement Serializer; rebuild on
 			// restart is acceptable per the index Manager contract.
 			continue
+		}
+		// Defensive: index names from a live manager are trusted, but
+		// validating here keeps the on-disk invariant — that every
+		// indexes/<name>.bin stays inside idxDir — enforced at both the
+		// write and the read boundary.
+		if err := validateIndexName(name); err != nil {
+			_ = os.RemoveAll(idxDir)
+			metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
+			return nil, err
 		}
 		filename := filepath.Join(idxDir, name+".bin")
 		size, crc, werr := writeAndSyncIndex(filename, ser)
@@ -153,8 +197,16 @@ func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) 
 	}
 	out := make([]IndexReadback, 0, len(entries))
 	for _, e := range entries {
+		// e.Name comes from the (attacker-controlled) manifest. A name
+		// that escapes idxDir is a security event, not benign corruption,
+		// so fail-stop with a typed error rather than degrading to the
+		// rebuild path — that guarantees we read NOTHING outside idxDir.
+		if err := validateIndexName(e.Name); err != nil {
+			metrics.IncCounter("store.snapshot.LoadIndexes.errors", 1)
+			return nil, err
+		}
 		filename := filepath.Join(idxDir, e.Name+".bin")
-		buf, err := os.ReadFile(filename) //nolint:gosec // path built from manifest entry
+		buf, err := os.ReadFile(filename) //nolint:gosec // name validated by validateIndexName above
 		if err != nil {
 			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
 			out = append(out, IndexReadback{Name: e.Name})
