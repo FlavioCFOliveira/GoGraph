@@ -4,6 +4,7 @@ package snapshot
 // and ApplyCSRToGraph (all were at 0% own-package coverage).
 
 import (
+	"errors"
 	"testing"
 
 	"gograph/graph"
@@ -243,5 +244,87 @@ func TestApplyCSRToGraph_UnresolvedSrc(t *testing.T) {
 	// No edges must have been added.
 	if g.AdjList().Size() != 0 {
 		t.Fatalf("edges = %d, want 0", g.AdjList().Size())
+	}
+}
+
+// TestApplyCSRToGraph_NonMonotonicOffsets confirms that a crafted vertex-
+// offset array whose offsets decrease (start > end for some src) is
+// rejected with ErrCorrupted rather than triggering an unsigned
+// underflow or an out-of-bounds index. Finding H4.
+func TestApplyCSRToGraph_NonMonotonicOffsets(t *testing.T) {
+	t.Parallel()
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	// vertices[0]=5 > vertices[1]=0 — a decreasing offset. The legacy
+	// code would compute end-start = 0-5 as a huge uint64 and index
+	// rb.Edges past its end.
+	rb := &CSRReadback{
+		Vertices: []uint64{5, 0},
+		Edges:    []graph.NodeID{graph.NodeID(1)},
+	}
+	err := ApplyCSRToGraph(g, rb)
+	if err == nil {
+		t.Fatal("ApplyCSRToGraph with non-monotonic offsets must return an error, got nil")
+	}
+	if !errors.Is(err, ErrCorrupted) {
+		t.Fatalf("error = %v, want wrapping ErrCorrupted", err)
+	}
+}
+
+// TestApplyCSRToGraph_OffsetOverflowsEdges confirms that an offset array
+// whose final entry points beyond len(Edges) (e.g. 1<<40) is rejected
+// with ErrCorrupted instead of panicking on the rb.Edges[k] index.
+// Finding H4.
+func TestApplyCSRToGraph_OffsetOverflowsEdges(t *testing.T) {
+	t.Parallel()
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	rb := &CSRReadback{
+		Vertices: []uint64{0, 1 << 40}, // far beyond the single edge below
+		Edges:    []graph.NodeID{graph.NodeID(1)},
+	}
+	err := ApplyCSRToGraph(g, rb)
+	if err == nil {
+		t.Fatal("ApplyCSRToGraph with overflowing offset must return an error, got nil")
+	}
+	if !errors.Is(err, ErrCorrupted) {
+		t.Fatalf("error = %v, want wrapping ErrCorrupted", err)
+	}
+}
+
+// TestApplyCSRToGraph_ValidUnaffectedByGuard confirms the offset-array
+// validation does not change the behaviour of a legitimate, monotonic
+// CSR: the round-trip edge set is preserved exactly. Finding H4.
+func TestApplyCSRToGraph_ValidUnaffectedByGuard(t *testing.T) {
+	t.Parallel()
+	orig := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := orig.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := orig.AddEdge("b", "c", 2); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	c := csr.BuildFromAdjList(orig.AdjList())
+
+	var pairs []MapperPair
+	orig.AdjList().Mapper().Walk(func(id graph.NodeID, k string) bool {
+		pairs = append(pairs, MapperPair{ID: id, Key: k})
+		return true
+	})
+
+	g2 := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := ApplyMapperToGraph(g2, MapperReadback{Pairs: pairs}); err != nil {
+		t.Fatalf("ApplyMapperToGraph: %v", err)
+	}
+	rb := &CSRReadback{
+		Vertices: c.VerticesSlice(),
+		Edges:    c.EdgesSlice(),
+	}
+	if err := ApplyCSRToGraph(g2, rb); err != nil {
+		t.Fatalf("ApplyCSRToGraph on a valid snapshot: %v", err)
+	}
+	if !g2.AdjList().HasEdge("a", "b") {
+		t.Error("a→b missing after ApplyCSRToGraph")
+	}
+	if !g2.AdjList().HasEdge("b", "c") {
+		t.Error("b→c missing after ApplyCSRToGraph")
 	}
 }

@@ -156,15 +156,44 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 	// overshoots Order()).
 	maxSrc := uint64(len(rb.Vertices) - 1)
 	weightSize := uint64(rb.WeightSize)
+
+	// Validate the offset array once, up front. The vertices slice is
+	// file-controlled: in v3-snapshot recovery an attacker supplies both
+	// the interned NodeIDs and the CSR arrays. Without this guard the
+	// inner loop would index rb.Edges[k] for k in [start,end) using a
+	// hostile, non-monotonic, or out-of-range offset (e.g. 1<<40),
+	// causing an out-of-bounds panic instead of a clean error. A
+	// legitimate CSR is always monotonic (vertices[i] <= vertices[i+1])
+	// and its last offset never exceeds len(Edges), so valid snapshots
+	// are unaffected. The check is a single O(n) pass over the offset
+	// array, negligible next to the edge replay it precedes.
+	edgeCount := uint64(len(rb.Edges))
+	for i := uint64(0); i < maxSrc; i++ {
+		if rb.Vertices[i] > rb.Vertices[i+1] {
+			metrics.IncCounter("store.snapshot.ApplyCSR.corrupt", 1)
+			return fmt.Errorf("%w: non-monotonic vertex offsets at index %d (%d > %d)",
+				ErrCorrupted, i, rb.Vertices[i], rb.Vertices[i+1])
+		}
+	}
+	if last := rb.Vertices[maxSrc]; last > edgeCount {
+		metrics.IncCounter("store.snapshot.ApplyCSR.corrupt", 1)
+		return fmt.Errorf("%w: final vertex offset %d exceeds edge count %d",
+			ErrCorrupted, last, edgeCount)
+	}
+
 	for src := uint64(0); src < maxSrc; src++ {
 		start := rb.Vertices[src]
 		end := rb.Vertices[src+1]
-		if start == end {
+		if start >= end {
+			// start == end is an empty edge slice for this src. The
+			// up-front validation guarantees start > end never reaches
+			// here, but the >= comparison also guards the end-start
+			// metric subtraction below against an unsigned underflow.
 			continue
 		}
 		srcN, ok := mapper.Resolve(graph.NodeID(src))
 		if !ok {
-			metrics.IncCounter("store.snapshot.ApplyCSR.unresolved", uint64(end-start))
+			metrics.IncCounter("store.snapshot.ApplyCSR.unresolved", end-start)
 			continue
 		}
 		for k := start; k < end; k++ {
