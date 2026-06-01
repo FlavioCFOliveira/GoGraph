@@ -126,7 +126,13 @@ type Options struct {
 	MaxStatementTimeout time.Duration
 
 	// TLSConfig, when non-nil, wraps accepted connections with TLS using
-	// the given configuration. nil means plain TCP.
+	// the given configuration verbatim. nil means plain TCP (no TLS).
+	//
+	// The server applies no MinVersion or cipher policy of its own: whatever
+	// config is supplied here is used as-is. To start from a hardened baseline
+	// (TLS 1.2 floor, modern AEAD/ECDHE cipher list), begin with
+	// [DefaultTLSConfig] and add your own Certificates or GetCertificate before
+	// assigning it here.
 	TLSConfig *tls.Config
 
 	// Auth is the authentication handler invoked during HELLO/LOGON. It is

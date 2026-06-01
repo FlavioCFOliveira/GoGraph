@@ -64,6 +64,11 @@ func run(w io.Writer) error {
 	// secure-by-default, so the explicit NoAuthHandler{} value is the opt-in
 	// that lets this development example run without credentials; a production
 	// deployment would instead set Options.Auth to a real AuthHandler.
+	//
+	// This development example runs plaintext (Options.TLSConfig left nil). A
+	// production deployment would start from server.DefaultTLSConfig() — a
+	// hardened baseline (TLS 1.2 floor, modern AEAD/ECDHE ciphers) — add a
+	// certificate, and pass it as Options.TLSConfig.
 	srv, err := server.NewServer(eng, server.Options{
 		MaxConnections: 64,
 		ConnTimeout:    5 * time.Second,
