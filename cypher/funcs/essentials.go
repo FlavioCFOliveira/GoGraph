@@ -522,6 +522,27 @@ func fnLast(args []expr.Value) (expr.Value, error) {
 	return lv[len(lv)-1], nil
 }
 
+// maxRangeElements bounds the number of integers a single range() call may
+// materialise. It guards against untrusted queries such as
+// range(1, 9223372036854775807), whose unbounded element count previously
+// caused a makeslice panic or an out-of-memory kill. The limit (1e8) is far
+// above any value used by an openCypher TCK scenario (the largest TCK bound is
+// on the order of a few thousand) while keeping the worst-case allocation
+// bounded. A request that exceeds it returns a typed [expr.EvalError] rather
+// than allocating.
+const maxRangeElements = 100_000_000
+
+// errRangeTooLarge builds the typed error returned when a range() call would
+// materialise more than maxRangeElements integers. quotient is the floor of
+// span/|step|; the true element count is quotient+1, but quotient is already
+// at or above the cap and quotient+1 may overflow uint64, so the message is
+// expressed in terms of the lower bound to stay overflow-safe.
+func errRangeTooLarge(quotient uint64) error {
+	return &expr.EvalError{Msg: fmt.Sprintf(
+		"ArgumentError: NumberOutOfRange: range() would produce more than %d elements (at least %d), exceeding the maximum of %d",
+		maxRangeElements, quotient, maxRangeElements)}
+}
+
 // fnRange returns a list of integers: range(start, end) or range(start, end, step).
 // Start and end are inclusive. A negative step traverses downward.
 func fnRange(args []expr.Value) (expr.Value, error) {
@@ -546,17 +567,45 @@ func fnRange(args []expr.Value) (expr.Value, error) {
 		return nil, &ArityError{Function: "range", Got: 0, Want: "non-zero step"}
 	}
 
-	// Pre-calculate capacity to avoid repeated allocations.
-	var cap int
-	if step > 0 && end >= start {
-		cap = int((end-start)/step) + 1
-	} else if step < 0 && end <= start {
-		cap = int((start-end)/(-step)) + 1
+	// Compute the element count overflow-safely and reject ranges that would
+	// materialise more than maxRangeElements. The naive count
+	// (end-start)/step + 1 can overflow int64 (e.g. start=MinInt64,
+	// end=MaxInt64) and the int cap could be negative or astronomically large,
+	// which previously caused a `makeslice: cap out of range` panic or an
+	// out-of-memory kill for an untrusted query such as
+	// `range(1, 9223372036854775807)`.
+	//
+	// We never form a wrapped value nor hand a giant capacity to make. The span
+	// is computed in uint64 (two's complement yields the correct magnitude when
+	// the bounds are ordered, even when the signed difference would overflow).
+	// The element count is span/|step| + 1, but adding 1 can itself overflow
+	// uint64 when the quotient is 2^64-1 (e.g. range(MinInt64, MaxInt64)). Since
+	// maxRangeElements is far below uint64's range, we test the quotient first:
+	// count = quotient + 1 > maxRangeElements is equivalent to
+	// quotient >= maxRangeElements for any non-negative integer cap, so we never
+	// compute the wrapping +1 on the over-cap path.
+	var count uint64
+	switch {
+	case step > 0 && end >= start:
+		span := uint64(end) - uint64(start)
+		quotient := span / uint64(step)
+		if quotient >= maxRangeElements {
+			return nil, errRangeTooLarge(quotient)
+		}
+		count = quotient + 1
+	case step < 0 && end <= start:
+		span := uint64(start) - uint64(end)
+		quotient := span / uint64(-step)
+		if quotient >= maxRangeElements {
+			return nil, errRangeTooLarge(quotient)
+		}
+		count = quotient + 1
+	default:
+		// Direction of the range is inconsistent with the step: empty list.
+		count = 0
 	}
-	if cap < 0 {
-		cap = 0
-	}
-	result := make(expr.ListValue, 0, cap)
+
+	result := make(expr.ListValue, 0, count)
 	if step > 0 {
 		for i := start; i <= end; i += step {
 			result = append(result, expr.IntegerValue(i))
