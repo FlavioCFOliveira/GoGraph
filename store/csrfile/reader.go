@@ -64,11 +64,18 @@ func Open(path string) (*Reader, error) {
 		_ = f.Close()  // best-effort: already on error path, decode err preserved
 		return nil, err
 	}
-	if uint64(len(mm)) != h.TailCRCOffset+4 {
-		_ = mm.Unmap() // best-effort: already on error path, size-mismatch err preserved
-		_ = f.Close()  // best-effort: already on error path, size-mismatch err preserved
-		return nil, fmt.Errorf("%w: file size %d, header expects %d",
-			ErrFileCorrupted, len(mm), h.TailCRCOffset+4)
+	// Structural validation MUST precede any use of the header's
+	// offsets. It proves every section lies wholly within the mapped
+	// region and that the offsets match the one canonical layout, so
+	// the CRC slice below and the zero-copy reinterpretation in
+	// bindSlices are both in-bounds by construction. Without this, a
+	// hostile TailCRCOffset would panic on mm[h.TailCRCOffset:], and a
+	// hostile count/offset (including the 8*NEdges integer-overflow
+	// wrap) would make bindSlices read past the mmap region.
+	if err := h.validate(len(mm)); err != nil {
+		_ = mm.Unmap() // best-effort: already on error path, validate err preserved
+		_ = f.Close()  // best-effort: already on error path, validate err preserved
+		return nil, err
 	}
 	gotCRC := binary.LittleEndian.Uint32(mm[h.TailCRCOffset:])
 	wantCRC := crc32.Update(0, castagnoli, mm[:h.TailCRCOffset])
@@ -86,6 +93,12 @@ func Open(path string) (*Reader, error) {
 // bindSlices reinterprets the mmap'd byte regions as typed slices
 // without copying. The aliasing is sound because the mmap region
 // is read-only and lives at least as long as the Reader.
+//
+// Precondition: r.header has passed [Header.validate] against
+// len(r.mm) (enforced in Open). That guarantees every offset+length
+// computed below lies wholly within r.mm, so each slice expression
+// and unsafe.Slice view is in-bounds by construction — no slice
+// bound here can panic and no view can read past the mapped region.
 func (r *Reader) bindSlices() {
 	if r.header.NVertices > 0 {
 		off := r.header.VerticesOffset

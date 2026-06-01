@@ -10,6 +10,8 @@ package csrfile
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"math/bits"
 )
 
 // Magic is the 4-byte file identifier: ASCII "GGCS".
@@ -62,6 +64,13 @@ var (
 	ErrFileCorrupted = errors.New("csrfile: file corrupted")
 	// ErrHeaderTooShort indicates a short read while parsing the header.
 	ErrHeaderTooShort = errors.New("csrfile: header too short")
+	// ErrHeaderInconsistent indicates the decoded header's counts and
+	// offsets do not match the single canonical on-disk layout for
+	// those counts (a malformed, hostile, or overflowing header). It
+	// wraps [ErrFileCorrupted]: errors.Is(err, ErrFileCorrupted) is
+	// true for any structural rejection, so callers that already test
+	// for ErrFileCorrupted keep working.
+	ErrHeaderInconsistent = fmt.Errorf("%w: header layout inconsistent", ErrFileCorrupted)
 )
 
 // Header is the in-memory representation of the 64-byte file
@@ -84,10 +93,43 @@ func AlignUp(n, alignment uint64) uint64 {
 	return (n + mask) &^ mask
 }
 
+// mulOverflow returns a*b and whether the multiplication overflowed
+// uint64. It is the overflow-safe primitive used by [Layout] when
+// the operands originate from untrusted on-disk header fields.
+func mulOverflow(a, b uint64) (product uint64, overflowed bool) {
+	hi, lo := bits.Mul64(a, b)
+	return lo, hi != 0
+}
+
+// addOverflow returns a+b and whether the addition overflowed uint64.
+func addOverflow(a, b uint64) (sum uint64, overflowed bool) {
+	s, carry := bits.Add64(a, b, 0)
+	return s, carry != 0
+}
+
+// alignUpOverflow rounds n up to the next multiple of alignment,
+// reporting overflow. alignment is a power of two (the package-wide
+// [Alignment] constant), so the rounding adds at most alignment-1.
+func alignUpOverflow(n, alignment uint64) (aligned uint64, overflowed bool) {
+	mask := alignment - 1
+	s, of := addOverflow(n, mask)
+	if of {
+		return 0, true
+	}
+	return s &^ mask, false
+}
+
 // Layout computes the on-disk byte offsets and total size for a
 // header populated with NVertices, NEdges, and Weight. It returns
 // the header with offsets filled and the total file size including
 // the trailing CRC32C uint32.
+//
+// All arithmetic is overflow-safe: when NVertices, NEdges, or the
+// derived section sizes would overflow a uint64 (as a hostile or
+// corrupted header can request), Layout returns the zero Header and
+// a zero totalBytes. Callers — both the writer and [Header.validate]
+// — must treat a zero totalBytes as "this header is not representable
+// on disk" and reject it rather than proceeding with bogus offsets.
 func Layout(nVertices, nEdges uint64, weight WeightKind) (header Header, totalBytes uint64) {
 	if weight > WeightFloat64 {
 		return Header{}, 0
@@ -99,17 +141,63 @@ func Layout(nVertices, nEdges uint64, weight WeightKind) (header Header, totalBy
 		NEdges:    nEdges,
 		Weight:    weight,
 	}
+
+	// VerticesOffset: AlignUp(HeaderSize) — both constants, cannot overflow.
 	off := AlignUp(HeaderSize, Alignment)
 	header.VerticesOffset = off
-	off = AlignUp(off+8*nVertices, Alignment)
+
+	// EdgesOffset = AlignUp(VerticesOffset + 8*NVertices).
+	vBytes, of := mulOverflow(8, nVertices)
+	if of {
+		return Header{}, 0
+	}
+	off, of = addOverflow(off, vBytes)
+	if of {
+		return Header{}, 0
+	}
+	off, of = alignUpOverflow(off, Alignment)
+	if of {
+		return Header{}, 0
+	}
 	header.EdgesOffset = off
-	off = AlignUp(off+8*nEdges, Alignment)
+
+	// Next offset = AlignUp(EdgesOffset + 8*NEdges).
+	eBytes, of := mulOverflow(8, nEdges)
+	if of {
+		return Header{}, 0
+	}
+	off, of = addOverflow(off, eBytes)
+	if of {
+		return Header{}, 0
+	}
+	off, of = alignUpOverflow(off, Alignment)
+	if of {
+		return Header{}, 0
+	}
+
 	if weight != WeightAbsent {
 		header.WeightsOffset = off
-		off = AlignUp(off+uint64(weight.Size())*nEdges, Alignment)
+		// AlignUp(WeightsOffset + Weight.Size()*NEdges).
+		wBytes, wof := mulOverflow(uint64(weight.Size()), nEdges)
+		if wof {
+			return Header{}, 0
+		}
+		off, wof = addOverflow(off, wBytes)
+		if wof {
+			return Header{}, 0
+		}
+		off, wof = alignUpOverflow(off, Alignment)
+		if wof {
+			return Header{}, 0
+		}
 	}
 	header.TailCRCOffset = off
-	totalBytes = off + 4
+
+	// totalBytes = TailCRCOffset + 4 (the trailing CRC32C uint32).
+	totalBytes, of = addOverflow(off, 4)
+	if of {
+		return Header{}, 0
+	}
 	return header, totalBytes
 }
 
@@ -161,4 +249,46 @@ func DecodeHeader(buf []byte) (Header, error) {
 		WeightsOffset:  binary.LittleEndian.Uint64(buf[48:56]),
 		TailCRCOffset:  binary.LittleEndian.Uint64(buf[56:64]),
 	}, nil
+}
+
+// validate checks that h describes the one canonical on-disk layout
+// for its (NVertices, NEdges, Weight) triple and that it exactly fits
+// a file of fileLen bytes. It is the single structural-safety gate
+// that makes the subsequent zero-copy slice reinterpretation in
+// [Reader.bindSlices] provably in-bounds.
+//
+// The check is deliberately exact rather than a set of inequalities:
+// [Layout] is the sole authority on where each section lives, so a
+// header is sound only if every decoded offset equals the offset the
+// writer would have produced for those counts. Because Layout is
+// overflow-safe (it returns a zero totalBytes when the counts cannot
+// be represented on disk), a hostile header — including the integer
+// overflow case where 8*NEdges wraps to a small value — is rejected
+// here with [ErrHeaderInconsistent] before any byte is sliced, rather
+// than panicking on an out-of-range slice bound or building an
+// unsafe.Slice view that reads past the mapped region.
+//
+// validate never panics: it performs only equality comparisons on
+// already-decoded uint64 fields.
+func (h Header) validate(fileLen int) error {
+	want, total := Layout(h.NVertices, h.NEdges, h.Weight)
+	if total == 0 {
+		// Layout signalled an unrepresentable / overflowing header.
+		return fmt.Errorf("%w: counts not representable (NVertices=%d NEdges=%d weight=%d)",
+			ErrHeaderInconsistent, h.NVertices, h.NEdges, h.Weight)
+	}
+	if h.VerticesOffset != want.VerticesOffset ||
+		h.EdgesOffset != want.EdgesOffset ||
+		h.WeightsOffset != want.WeightsOffset ||
+		h.TailCRCOffset != want.TailCRCOffset {
+		return fmt.Errorf("%w: offsets %d/%d/%d/%d, canonical %d/%d/%d/%d",
+			ErrHeaderInconsistent,
+			h.VerticesOffset, h.EdgesOffset, h.WeightsOffset, h.TailCRCOffset,
+			want.VerticesOffset, want.EdgesOffset, want.WeightsOffset, want.TailCRCOffset)
+	}
+	if uint64(total) != uint64(fileLen) {
+		return fmt.Errorf("%w: file size %d, header layout requires %d",
+			ErrHeaderInconsistent, fileLen, total)
+	}
+	return nil
 }
