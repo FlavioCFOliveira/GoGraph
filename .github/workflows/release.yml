@@ -8,6 +8,15 @@ on:
 permissions:
   contents: write
 
+# Pin the IANA time-zone database so temporal TCK scenarios in the
+# pre-release gate are deterministic regardless of the runner's system
+# tzdata build (slim vs fat). Go's time package reads ZONEINFO before the
+# system database. Mirrors ci.yml / tck.yml / nightly.yml. Without this the
+# pre-1879 Europe/Stockholm offset in Temporal2.feature diverges and the TCK
+# gate fails. See cypher/tck/testdata/README.md.
+env:
+  ZONEINFO: ${{ github.workspace }}/cypher/tck/testdata/zoneinfo-slim.zip
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
