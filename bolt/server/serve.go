@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"runtime/pprof"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gograph/bolt/packstream"
@@ -38,7 +39,46 @@ const (
 	// shutdownDrainTimeout is the maximum time Shutdown waits for active
 	// connections to finish after stopping the accept loop.
 	shutdownDrainTimeout = 30 * time.Second
+
+	// DefaultConnTimeout is the default value applied to Options.ConnTimeout
+	// when the caller leaves it at zero. It is the per-message idle deadline
+	// applied throughout the post-handshake message loop: the server resets it
+	// before each read, so it bounds the time a connection may sit silent
+	// between messages, not the total session duration. A non-zero default is
+	// mandatory: with no deadline a client that completes the handshake but then
+	// stops sending bytes would hold its connection slot and goroutine forever,
+	// a Slowloris-style denial of service. The default of 30 s is generous
+	// enough not to disturb a legitimate interactive session pausing between
+	// queries while still reclaiming abandoned connections. Operators may set a
+	// larger value for long-lived idle sessions or a smaller one to reclaim
+	// connections more aggressively.
+	DefaultConnTimeout = 30 * time.Second
+
+	// DefaultHandshakeTimeout is the deadline that bounds the unauthenticated
+	// version-negotiation handshake — the cheapest phase for an attacker to
+	// abuse, since it requires no valid protocol bytes (a client may open a
+	// socket, send a single byte, and otherwise stall). The deadline is applied
+	// to the connection before [proto.Negotiate] and cleared on success so it
+	// never bleeds into normal operation. It is deliberately shorter than
+	// DefaultConnTimeout: a legitimate client sends its 20-byte handshake
+	// immediately, so 10 s is ample, while a stalled handshake is reclaimed
+	// promptly. The handshake bound is fixed (not configurable via Options) to
+	// keep the Options struct small; the package var handshakeTimeout is seeded
+	// from this const and overridable only by tests.
+	DefaultHandshakeTimeout = 10 * time.Second
 )
+
+// handshakeTimeout holds, in nanoseconds, the effective deadline applied to the
+// unauthenticated handshake in handleConn. It is seeded from the exported
+// [DefaultHandshakeTimeout] const and is overridable only from within the
+// package (see export_test.go) so that tests can drive the Slowloris reclaim
+// path quickly and deterministically. Production code never mutates it. It is
+// an atomic because handleConn reads it from per-connection worker goroutines
+// while a test may overwrite it on the main goroutine; the atomic keeps the
+// hot-path read lock-free and the race detector clean.
+var handshakeTimeout atomic.Int64
+
+func init() { handshakeTimeout.Store(int64(DefaultHandshakeTimeout)) }
 
 // Options configures a Server.
 type Options struct {
@@ -66,9 +106,15 @@ type Options struct {
 	// Bolt FAILURE with code "Neo.ClientError.General.LimitExceeded".
 	MaxInFlightPerConnection int
 
-	// ConnTimeout is the per-connection idle read deadline. Each time the
-	// server is about to read the next message, the deadline is reset to
-	// now+ConnTimeout. Zero means no timeout.
+	// ConnTimeout is the per-connection idle read deadline applied throughout
+	// the post-handshake message loop. Each time the server is about to read
+	// the next message, the deadline is reset to now+ConnTimeout, so it bounds
+	// the silent gap between messages rather than the total session duration.
+	// Zero or negative values default to [DefaultConnTimeout] (30 s); a
+	// non-zero deadline is always applied so an idle connection cannot hold its
+	// slot and goroutine forever. Set a larger value for long-lived idle
+	// sessions. The unauthenticated handshake phase is bounded separately and
+	// is not configurable here; see [DefaultHandshakeTimeout].
 	ConnTimeout time.Duration
 
 	// MaxStatementTimeout is the server-side upper bound on per-statement
@@ -116,6 +162,9 @@ func NewServer(eng *cypher.Engine, opts Options) *Server {
 	}
 	if opts.MaxInFlightPerConnection <= 0 {
 		opts.MaxInFlightPerConnection = DefaultMaxInFlightPerConnection
+	}
+	if opts.ConnTimeout <= 0 {
+		opts.ConnTimeout = DefaultConnTimeout
 	}
 	if opts.Auth == nil {
 		opts.Auth = NoAuthHandler{}
@@ -313,8 +362,21 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	)
 
 	// ── 1. Version negotiation ───────────────────────────────────────────
-	if s.opts.ConnTimeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(s.opts.ConnTimeout)) //nolint:errcheck
+	//
+	// Bound the unauthenticated handshake with a dedicated deadline. This is
+	// the cheapest phase for an attacker to abuse: a client may open a socket,
+	// send a single byte, and otherwise stall, holding a connection slot and
+	// goroutine forever (a Slowloris-style denial of service). The handshake
+	// bound is a fixed package value (handshakeTimeout, seeded from
+	// DefaultHandshakeTimeout) rather than a configurable Options field, so it
+	// is always applied regardless of the accept context (which carries no
+	// deadline) and independently of ConnTimeout. proto.Negotiate may install
+	// its own deadline from ctx and clear it on return, but we do not rely on
+	// that — we set the deadline here and clear it ourselves after a successful
+	// handshake so it never bleeds into the post-handshake message loop, which
+	// ConnTimeout governs.
+	if hsTO := time.Duration(handshakeTimeout.Load()); hsTO > 0 {
+		_ = conn.SetDeadline(time.Now().Add(hsTO)) //nolint:errcheck
 	}
 
 	ver, err := proto.Negotiate(ctx, conn)
@@ -324,6 +386,10 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			slog.String("err", err.Error()))
 		return
 	}
+
+	// Clear the handshake deadline so it does not constrain the message loop;
+	// the loop resets the idle ConnTimeout before every read below.
+	_ = conn.SetDeadline(time.Time{}) //nolint:errcheck
 	s.log.Debug("bolt: negotiated",
 		slog.String("remote", remote),
 		slog.Uint64("major", uint64(ver.Major)),
