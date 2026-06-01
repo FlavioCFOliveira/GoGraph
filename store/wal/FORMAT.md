@@ -43,6 +43,15 @@ Torn writes — partial last frames — are detected by the length /
 CRC mismatch and reported as `ErrTornFrame`. Readers stop cleanly
 at the last fully-readable frame; recovery resumes from there.
 
+As a defence-in-depth measure, the decoder rejects any frame whose
+declared `length` exceeds 1 GiB (`maxFrameSize`) with `ErrFrameTooLarge`
+*before* allocating the payload buffer. The `length` field is a uint32,
+so the format already bounds a payload to ~4 GiB; the 1 GiB ceiling
+caps the pathological case where a corrupted or crafted length would
+otherwise force a large one-shot allocation ahead of the CRC check. The
+ceiling sits far above any legitimate WAL frame, which carries a single
+transaction rather than bulk data.
+
 ## Concurrency
 
 The format itself imposes no concurrency model. The `wal.Writer`

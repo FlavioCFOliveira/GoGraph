@@ -31,6 +31,18 @@ const CurrentVersion uint16 = 1
 // (magic + version + length + crc32c).
 const HeaderSize = 4 + 2 + 4 + 4
 
+// maxFrameSize is the largest payload, in bytes, that [Decode] will
+// allocate for a single frame. The frame's length field is a uint32,
+// so the on-disk format already bounds a payload to ~4 GiB; this 1 GiB
+// ceiling is a defence-in-depth (INFO finding I2) that caps the
+// pathological case where a corrupted or crafted length field forces a
+// large one-shot allocation before the CRC has had a chance to reject
+// the frame. The ceiling is set well above any legitimate frame: WAL
+// payloads carry single transactions, not bulk data, so 1 GiB cannot
+// reject valid data — and a false rejection of a legitimately-large
+// frame would be a worse failure than the allocation it guards against.
+const maxFrameSize = 1 << 30
+
 // Errors returned by the reader.
 var (
 	// ErrBadMagic indicates the next four bytes did not match Magic.
@@ -44,6 +56,11 @@ var (
 	// ErrTornFrame indicates the underlying reader returned EOF
 	// before the frame was fully read.
 	ErrTornFrame = errors.New("wal: torn frame at end of input")
+	// ErrFrameTooLarge indicates the frame's declared payload length
+	// exceeds maxFrameSize. A length field this large is treated as
+	// corruption: the frame is rejected before any allocation, so a
+	// crafted or corrupted length cannot force a large one-shot make.
+	ErrFrameTooLarge = errors.New("wal: frame payload length exceeds maximum")
 )
 
 // castagnoli holds the precomputed CRC32C table used by every
@@ -110,6 +127,16 @@ func Decode(r io.Reader) (Frame, error) {
 	}
 	plen := binary.LittleEndian.Uint32(head[6:10])
 	expectCRC := binary.LittleEndian.Uint32(head[10:14])
+
+	// Reject an implausibly large length before allocating. plen is a
+	// uint32, so the format already caps a payload at ~4 GiB; this guard
+	// tightens that to maxFrameSize (1 GiB) so a corrupted or crafted
+	// length cannot force a large one-shot allocation ahead of the CRC
+	// check below. See maxFrameSize for the rationale.
+	if plen > maxFrameSize {
+		metrics.IncCounter("store.wal.Decode.errors", 1)
+		return Frame{}, ErrFrameTooLarge
+	}
 
 	payload := make([]byte, plen)
 	if plen > 0 {
