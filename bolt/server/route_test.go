@@ -123,3 +123,42 @@ func TestSession_HandleRoute(t *testing.T) {
 		t.Fatal("ROUTE SUCCESS metadata missing 'rt'")
 	}
 }
+
+// TestSession_HandleRoute_BeforeHello verifies that a ROUTE message received in
+// StateNegotiation (before HELLO) is rejected with a FAILURE
+// (Neo.ClientError.Request.Invalid) and does not return a routing table. An
+// unauthenticated client must not elicit a routing-table response. This is the
+// handler-level guard for #1225; the wire-level regression lives in
+// route_gating_test.go.
+func TestSession_HandleRoute_BeforeHello(t *testing.T) {
+	t.Parallel()
+
+	sess := newSession(newTestEngine(t), NoAuthHandler{}, "localhost:7687")
+
+	// Session starts in StateNegotiation; send ROUTE without a prior HELLO.
+	if sess.state != StateNegotiation {
+		t.Fatalf("fresh session state: got %v, want StateNegotiation", sess.state)
+	}
+
+	msgs, err := sess.HandleMessage(context.Background(), &proto.Route{
+		Routing:   map[string]packstream.Value{},
+		Bookmarks: nil,
+		DB:        nil,
+	})
+	if err != nil {
+		t.Fatalf("ROUTE: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ROUTE response count: %d, want 1", len(msgs))
+	}
+	fail, ok := msgs[0].(*proto.Failure)
+	if !ok {
+		t.Fatalf("pre-HELLO ROUTE response type: %T, want *proto.Failure", msgs[0])
+	}
+	if fail.Code != "Neo.ClientError.Request.Invalid" {
+		t.Errorf("pre-HELLO ROUTE failure code: got %q, want Neo.ClientError.Request.Invalid", fail.Code)
+	}
+	if sess.state != StateFailed {
+		t.Errorf("session state after pre-HELLO ROUTE: got %v, want StateFailed", sess.state)
+	}
+}

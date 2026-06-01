@@ -479,13 +479,22 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		dec := packstream.NewDecoder(bytes.NewReader(raw))
 		msg, decErr := proto.DecodeRequest(dec)
 		if decErr != nil {
-			// Send FAILURE for malformed message.
+			// Send FAILURE for a malformed or undecodable message. The raw
+			// decode error (e.g. "proto: unknown request tag 0x..") leaks
+			// internal framing/protocol detail, so route it through the same
+			// sanitiser used for every other client-visible failure
+			// (session.sanitiseErr): the real cause is logged server-side with
+			// the session ID for correlation, while the client receives a
+			// generic message under the Neo.ClientError.Request.Invalid code.
+			// Behaviour is otherwise unchanged: the loop continues (the Bolt
+			// state machine leaves the session free to send a fresh message or
+			// RESET); the connection is not torn down here.
 			s.log.Warn("bolt: decode error",
 				slog.String("remote", remote),
 				slog.String("err", decErr.Error()))
 			_ = sendResponse(cw, &proto.Failure{
 				Code:    "Neo.ClientError.Request.Invalid",
-				Message: decErr.Error(),
+				Message: sess.sanitiseErr(decErr),
 			})
 			continue
 		}

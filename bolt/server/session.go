@@ -626,8 +626,18 @@ func (s *Session) handleRollback() ([]any, error) {
 }
 
 func (s *Session) handleRoute(m *proto.Route) ([]any, error) {
-	// ROUTE is valid from READY or TX_READY states (some drivers send it early).
-	if s.state != StateReady && s.state != StateTxReady && s.state != StateNegotiation {
+	// ROUTE is valid only once the session has completed HELLO (and LOGON on
+	// Bolt >= 5.1), i.e. from READY or TX_READY. An unauthenticated client in
+	// StateNegotiation must not elicit any server response beyond the
+	// handshake/auth exchange; ROUTE in StateNegotiation is rejected as an
+	// illegal transition (Neo.ClientError.Request.Invalid via failTransition).
+	//
+	// This is wire-compatible with the official Neo4j Go driver: in routing
+	// mode it completes HELLO (and LOGON for Bolt >= 5.1) before issuing ROUTE.
+	// The driver's bolt4/bolt5 GetRoutingTable both assert the Ready state
+	// before sending ROUTE, so a legitimate driver is never in StateNegotiation
+	// when it sends ROUTE.
+	if s.state != StateReady && s.state != StateTxReady {
 		return s.failTransition(m)
 	}
 	rt := RoutingTable(s.localAddr)
