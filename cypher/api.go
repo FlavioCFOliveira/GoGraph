@@ -645,11 +645,38 @@ func recoverWriteQueryPanic(errp *error, txp **txn.Tx[string, float64], entrypoi
 	}
 }
 
+// checkContext returns a wrapped context error when ctx is already cancelled or
+// its deadline has expired, and nil otherwise. The engine's query entrypoints
+// call it once, before any synchronous parse/plan work, so a caller that has
+// already given up (a cancelled context, an elapsed deadline, the Bolt
+// statement-timeout) is answered promptly instead of paying for an
+// expensive-to-parse-but-valid query whose worst case the parser's
+// length/nesting guards only bound, not eliminate.
+//
+// The returned error wraps ctx.Err() with the package "cypher:" prefix, so it
+// reads consistently with the engine's other errors while remaining matchable
+// via errors.Is(err, context.Canceled) / errors.Is(err, context.DeadlineExceeded).
+//
+// It is O(1) and allocation-free on the happy path: ctx.Err() on a live context
+// is a single atomic/struct read returning nil, and the fmt.Errorf branch is
+// taken only when the context is already done.
+func checkContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("cypher: %w", err)
+	}
+	return nil
+}
+
 // Run parses, analyses, plans, and executes query, returning a materialised
 // [Result]. The query is built and drained inside the read visibility barrier
 // (Graph.View) so it observes a consistent, partial-transaction-free snapshot.
 // DDL statements take a dedicated fast path. Parameters are bound from params
 // and type-checked against the plan before execution.
+//
+// If ctx is already cancelled or its deadline has elapsed when Run is called,
+// it returns promptly — before any parse, plan, or execution work — with an
+// error wrapping the context error (matchable via [errors.Is] against
+// [context.Canceled] / [context.DeadlineExceeded]).
 //
 // A recoverable panic raised while planning or executing the query is
 // intercepted and returned as an error wrapping [ErrInternalPanic]; it never
@@ -664,7 +691,15 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// Registered last so it runs first on unwind: a recovered panic sets err
 	// before the cypher.Run.errors counter defer above observes it.
 	defer recoverQueryPanic(&err, "cypher.Run", "cypher.Run.panics")
-	// ── 0. DDL fast-path ─────────────────────────────────────────────────────
+	// ── 0. Honour an already-cancelled/expired context before any synchronous
+	// parse or plan work. Placed after the metrics/recover defers so a
+	// cancellation is still timed and counted (cypher.Run.errors) consistently,
+	// but before parseAndAnalyse so a caller that has already given up never
+	// pays for the parse. O(1) and allocation-free on the happy path. ─────────
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	// ── 1. DDL fast-path ─────────────────────────────────────────────────────
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query)
 	}
@@ -6336,6 +6371,11 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 //
 // RunInTx is safe for concurrent use (each call creates an independent
 // operator tree), subject to the single-writer constraint on write queries.
+//
+// If ctx is already cancelled or its deadline has elapsed when RunInTx is
+// called, it returns promptly — before any parse, plan, or [txn.Store.Begin]
+// work — with an error wrapping the context error (matchable via [errors.Is]
+// against [context.Canceled] / [context.DeadlineExceeded]).
 func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
 	defer cmetrics.Time("cypher.RunInTx")()
 	defer func() {
@@ -6355,6 +6395,15 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// walTx and sets err before the cypher.RunInTx.errors counter defer above
 	// observes it. RunInTxAny delegates here, so it is covered transitively.
 	defer recoverWriteQueryPanic(&err, &walTx, "cypher.RunInTx", "cypher.RunInTx.panics")
+	// Honour an already-cancelled/expired context before any synchronous parse,
+	// plan, or Begin work. Placed after the metrics/recover defers so a
+	// cancellation is still timed and counted (cypher.RunInTx.errors)
+	// consistently, but before parseAndAnalyse (and before any txn.Store.Begin)
+	// so a caller that has already given up never pays for the parse and never
+	// opens a write transaction. O(1) and allocation-free on the happy path.
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
 	// DDL queries don't require a write transaction.
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query)
