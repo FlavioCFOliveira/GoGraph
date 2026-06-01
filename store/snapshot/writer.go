@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,6 +21,37 @@ import (
 // CSRFile is the conventional file name carrying the CSR triplet
 // (vertices + edges + optional weights) inside a snapshot directory.
 const CSRFile = "csr.bin"
+
+// ErrCSRCorrupted is returned by [ReadCSR] when the csr.bin payload is
+// structurally malformed: an implausible vertex/edge count, an
+// out-of-range weight-element size, or a weights-array byte length that
+// overflows. It mirrors the per-component corruption sentinels used by
+// the sibling readers ([ErrLabelsCorrupted], [ErrPropertiesCorrupted],
+// [ErrMapperCorrupted]) so callers can classify a corrupt CSR the same
+// way. [readVerifiedCSR] / [Open] wrap it under [ErrCorrupted].
+var ErrCSRCorrupted = errors.New("snapshot: csr.bin corrupted")
+
+// maxCSRCount is the absolute backstop cap on the declared vertex and
+// edge counts read from the header. Each vertex and each edge consumes
+// at least 8 bytes of input, so a count above this bound cannot
+// correspond to a file of any plausible size and is treated as
+// corruption. The bound matches the absolute cap the sibling readers
+// apply to their per-8-byte-record counts (1<<40 entries ≈ 8 TiB),
+// keeping the validation style consistent across the package.
+//
+// It is the *backstop*, not the primary guard. On every real load path
+// the bytes flow through [Open] / [readVerifiedCSR], which pass the
+// manifest-recorded file size (FileEntry.Size) to [readCSRLimited] as a
+// precise remaining-bytes bound; the count is then rejected the moment
+// it exceeds what that many bytes could hold. The backstop only applies
+// when a caller invokes the bare exported [ReadCSR] over an io.Reader of
+// unknown length, where no manifest size is available.
+const maxCSRCount = 1 << 40
+
+// maxInt is the largest value representable by the platform int. It
+// bounds the overflow-safe weights-size computation in [ReadCSR] before
+// the uint64 -> int conversion that precedes the make().
+const maxInt = uint64(^uint(0) >> 1)
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
@@ -124,7 +156,39 @@ type CSRReadback struct {
 // ReadCSR parses a CSR previously written by [WriteCSR] from r.
 // The caller is responsible for verifying the surrounding manifest
 // CRC; this function only enforces the structural contract.
+//
+// Untrusted input: a bare ReadCSR over an io.Reader of unknown length
+// cannot know the true remaining-bytes bound, so the declared vertex,
+// edge, and weight sizes are checked only against an absolute backstop
+// cap (see [maxCSRCount]) plus the overflow-safe weights computation.
+// That stops an unbounded pre-EOF allocation, but the precise bound
+// requires the file size. Callers loading an untrusted snapshot should
+// prefer the [Open] / [LoadSnapshotFull] path, which supplies the
+// manifest-recorded size (FileEntry.Size) so the count is rejected the
+// moment it exceeds what that many bytes could possibly hold; bounding
+// a bare reader otherwise remains the caller's responsibility.
 func ReadCSR(r io.Reader) (CSRReadback, error) {
+	// maxBytes <= 0 selects the absolute backstop cap; the overflow
+	// guard still applies. See readCSRLimited.
+	return readCSRLimited(r, -1)
+}
+
+// readCSRLimited is the structural CSR reader behind [ReadCSR]. It
+// rejects implausible vertex/edge/weight sizes BEFORE any make(), so a
+// flipped or hostile header byte cannot drive a multi-gigabyte
+// allocation before binary.Read even reaches EOF.
+//
+// maxBytes is the precise upper bound on the bytes the reader may
+// legitimately contain — on the real load paths this is the
+// manifest-recorded file size (FileEntry.Size) passed by [Open] and
+// [readVerifiedCSR]. When maxBytes > 0, each declared count is rejected
+// the moment it exceeds what maxBytes bytes could hold (every vertex and
+// every edge needs 8 bytes; each weight needs wsize bytes). When
+// maxBytes <= 0 (the bare [ReadCSR] entry point, whose reader length is
+// unknown) the absolute backstop cap [maxCSRCount] is used instead. The
+// effective per-count limit is the smaller of the two so the precise
+// bound never relaxes the backstop.
+func readCSRLimited(r io.Reader, maxBytes int64) (CSRReadback, error) {
 	defer metrics.Time("store.snapshot.ReadCSR")()
 	br := bufio.NewReader(r)
 	var nV, nE uint64
@@ -143,6 +207,33 @@ func ReadCSR(r io.Reader) (CSRReadback, error) {
 	}
 	hasW := flag[0] == 1
 	wsize := flag[1]
+
+	// vertexCap / edgeCap is the largest count the available bytes can
+	// hold, computed overflow-safely (never multiply count*8 first). When
+	// a manifest size is known we use maxBytes (precise bound); otherwise
+	// 8*maxCSRCount (the absolute backstop). Each vertex and each edge
+	// needs 8 bytes; the header (18 bytes) is part of the file but
+	// counting it against the cap can only make the bound tighter, so we
+	// conservatively allow the full byte budget for records. Mirrors the
+	// sibling readers' cap checks (ReadLabels/ReadProperties/ReadMapper*).
+	byteBudget := uint64(8 * maxCSRCount)
+	if maxBytes > 0 && uint64(maxBytes) < byteBudget {
+		byteBudget = uint64(maxBytes)
+	}
+	recordCap := byteBudget / 8 // max vertices or edges these bytes could hold
+	if recordCap > maxCSRCount {
+		recordCap = maxCSRCount
+	}
+	if nV > recordCap {
+		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+		return CSRReadback{}, fmt.Errorf("%w: implausible vertex count %d (max %d for %d bytes)",
+			ErrCSRCorrupted, nV, recordCap, byteBudget)
+	}
+	if nE > recordCap {
+		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+		return CSRReadback{}, fmt.Errorf("%w: implausible edge count %d (max %d for %d bytes)",
+			ErrCSRCorrupted, nE, recordCap, byteBudget)
+	}
 	verts := make([]uint64, nV)
 	if err := binary.Read(br, binary.LittleEndian, verts); err != nil {
 		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
@@ -159,7 +250,12 @@ func ReadCSR(r io.Reader) (CSRReadback, error) {
 	}
 	var weightBytes []byte
 	if hasW {
-		weightBytes = make([]byte, int(wsize)*int(nE))
+		nbytes, err := weightsByteLen(wsize, nE, maxBytes, byteBudget)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+			return CSRReadback{}, err
+		}
+		weightBytes = make([]byte, nbytes)
 		if _, err := io.ReadFull(br, weightBytes); err != nil {
 			metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
 			return CSRReadback{}, err
@@ -172,6 +268,30 @@ func ReadCSR(r io.Reader) (CSRReadback, error) {
 		WeightSize:  wsize,
 		WeightBytes: weightBytes,
 	}, nil
+}
+
+// weightsByteLen computes the weights-array byte length overflow-safely
+// and bounds it before the make(). wsize is a 0-255 byte and nE is a
+// full uint64, so int(wsize)*int(nE) could wrap int to a small or
+// negative value, yielding a short buffer (a silent truncation) or a
+// make() panic. bits.Mul64 surfaces any overflow in the high word; the
+// low word is then bounded against (in order) the precise manifest-size
+// budget when known, the absolute backstop byteBudget, and the platform
+// int range before the conversion. Any failure returns [ErrCSRCorrupted].
+func weightsByteLen(wsize uint8, nE uint64, maxBytes int64, byteBudget uint64) (int, error) {
+	hi, lo := bits.Mul64(uint64(wsize), nE)
+	if hi != 0 || lo > uint64(maxInt) {
+		return 0, fmt.Errorf("%w: weights size overflow: wsize=%d nE=%d",
+			ErrCSRCorrupted, wsize, nE)
+	}
+	// The weights array alone cannot exceed the file's byte budget. When a
+	// manifest size is known, byteBudget == maxBytes (the whole file), an
+	// even tighter bound than the backstop.
+	if maxBytes > 0 && lo > byteBudget {
+		return 0, fmt.Errorf("%w: weights bytes %d exceed file budget %d: wsize=%d nE=%d",
+			ErrCSRCorrupted, lo, byteBudget, wsize, nE)
+	}
+	return int(lo), nil
 }
 
 // WriteSnapshotCSR is the legacy high-level helper that lays a

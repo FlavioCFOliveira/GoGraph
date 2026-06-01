@@ -57,7 +57,10 @@ func Open(dir string) (LoadedCSR, error) {
 
 	hasher := crc32.New(castagnoli)
 	tee := io.TeeReader(f, hasher)
-	parsed, err := ReadCSR(tee)
+	// Pass the manifest-recorded size as the precise remaining-bytes
+	// bound: a header that declares more vertices/edges/weights than
+	// csrEntry.Size bytes could hold is rejected before any allocation.
+	parsed, err := readCSRLimited(tee, csrEntry.Size)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, fmt.Errorf("%w: %w", ErrCorrupted, err)

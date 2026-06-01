@@ -473,7 +473,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		return LoadedSnapshot{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
 	}
 
-	csrParsed, err := readVerifiedCSR(filepath.Join(dir, CSRFile), csrEntry.CRC32C)
+	csrParsed, err := readVerifiedCSR(filepath.Join(dir, CSRFile), csrEntry.CRC32C, csrEntry.Size)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 		return LoadedSnapshot{}, err
@@ -566,8 +566,10 @@ func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry, mapperEn
 // readVerifiedCSR opens path, runs the file bytes through CRC32C and
 // the structural CSR reader simultaneously, and returns the parsed
 // snapshot iff the CRC matches expected. Any disagreement surfaces
-// as [ErrCorrupted].
-func readVerifiedCSR(path string, expected uint32) (CSRReadback, error) {
+// as [ErrCorrupted]. size is the manifest-recorded file size, passed as
+// the precise remaining-bytes bound so a malicious header declaring more
+// records than the file could hold is rejected before any allocation.
+func readVerifiedCSR(path string, expected uint32, size int64) (CSRReadback, error) {
 	f, err := os.Open(path) //nolint:gosec // caller-supplied path
 	if err != nil {
 		return CSRReadback{}, err
@@ -577,7 +579,7 @@ func readVerifiedCSR(path string, expected uint32) (CSRReadback, error) {
 
 	hasher := crc32.New(castagnoli)
 	tee := io.TeeReader(f, hasher)
-	parsed, err := ReadCSR(tee)
+	parsed, err := readCSRLimited(tee, size)
 	if err != nil {
 		return CSRReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
