@@ -39,7 +39,10 @@ func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 	header, total := Layout(uint64(len(verts)), uint64(len(edges)), weightKind)
 
 	tmp := path + ".tmp"
-	f, err := os.Create(tmp) //nolint:gosec // caller-supplied path
+	// Create the temp file mode 0600: the CSR payload contains full
+	// edge and weight data, so it must not be world- or group-readable.
+	// os.Rename preserves the mode, so the published file is 0600 too.
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // caller-supplied path
 	if err != nil {
 		return Header{}, err
 	}

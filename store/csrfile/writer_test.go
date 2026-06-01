@@ -59,6 +59,48 @@ func TestWriteToFile_AtomicProducesValidFile(t *testing.T) {
 	}
 }
 
+// TestWriteToFile_Perm0600 asserts that a freshly written CSR file is
+// created mode 0600 (owner read/write only), not the world-readable
+// 0666-and-umask that os.Create yields. The CSR payload contains full
+// edge and weight data, so it must not be group- or world-readable.
+// It also confirms the file still round-trips through Open.
+func TestWriteToFile_Perm0600(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	for i := 0; i < 8; i++ {
+		if err := a.AddEdge("hub", string(rune('a'+i)), int64(i)); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	}
+	c := csr.BuildFromAdjList(a)
+	path := filepath.Join(t.TempDir(), "perm.csr")
+	if _, err := WriteToFile(path, c); err != nil {
+		t.Fatalf("WriteToFile: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("file mode = %#o, want %#o", got, 0o600)
+	}
+
+	// Round-trip read must still succeed after the permission change.
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() {
+		if cerr := r.Close(); cerr != nil {
+			t.Errorf("Close: %v", cerr)
+		}
+	}()
+	if got := r.Header().NEdges; got != uint64(len(c.EdgesSlice())) {
+		t.Fatalf("NEdges = %d, want %d", got, len(c.EdgesSlice()))
+	}
+}
+
 func TestWriteToFile_StructWeightDowngrades(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
