@@ -337,7 +337,7 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 		return err
 	}
 	csrPath := filepath.Join(tmp, CSRFile)
-	f, err := os.Create(csrPath) //nolint:gosec // caller-controlled directory
+	f, err := createSnapshotFile(csrPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
@@ -373,7 +373,7 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 		return err
 	}
 	manifestPath := filepath.Join(tmp, "manifest.json")
-	mf, err := os.Create(manifestPath) //nolint:gosec // caller-controlled directory
+	mf, err := createSnapshotFile(manifestPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err

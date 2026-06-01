@@ -136,7 +136,7 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 // internal CRC trailer). Mirroring [writeAndSync] used for the other
 // snapshot components keeps the layout uniform.
 func writeAndSyncIndex(path string, ser index.Serializer) (size int64, crc uint32, err error) {
-	f, err := os.Create(path) //nolint:gosec // caller-controlled directory
+	f, err := createSnapshotFile(path)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -301,7 +301,7 @@ func writeSnapshotFullCore[N comparable, W any](
 	}
 
 	manifestPath := filepath.Join(tmp, "manifest.json")
-	mf, err := os.Create(manifestPath) //nolint:gosec // caller-controlled directory
+	mf, err := createSnapshotFile(manifestPath)
 	if err != nil {
 		_ = os.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
@@ -424,7 +424,7 @@ func writeAndSync(
 	path string,
 	write func(io.Writer) (int64, uint32, error),
 ) (size int64, crc uint32, err error) {
-	f, err := os.Create(path) //nolint:gosec // caller-controlled directory
+	f, err := createSnapshotFile(path)
 	if err != nil {
 		return 0, 0, err
 	}
