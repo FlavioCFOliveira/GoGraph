@@ -6,15 +6,15 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/index"
-	"gograph/graph/index/btree"
-	"gograph/graph/lpg"
-	"gograph/store/snapshot"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestOpen_StringInt64 exercises the canonical [Open] entry point on

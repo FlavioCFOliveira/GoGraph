@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestGraphML_TypedPropsRoundtrip verifies that all six PropertyKinds

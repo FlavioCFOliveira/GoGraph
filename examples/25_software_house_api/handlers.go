@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"regexp"
 
-	"gograph/cypher/parser"
-	"gograph/cypher/sema"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 )
 
 // maxQueryBodyBytes bounds the POST /query request body.

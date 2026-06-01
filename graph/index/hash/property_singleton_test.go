@@ -3,8 +3,8 @@ package hash_test
 import (
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 )
 
 // TestPropertySingleton verifies the degenerate case where 50 000 nodes

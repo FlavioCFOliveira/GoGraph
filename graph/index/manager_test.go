@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 type spySub struct {

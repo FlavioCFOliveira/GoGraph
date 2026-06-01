@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/internal/goldens"
+	"github.com/FlavioCFOliveira/GoGraph/internal/goldens"
 )
 
 func TestMain(m *testing.M) {

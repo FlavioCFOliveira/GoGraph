@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // TestSession_HandleRoute_FullPayload verifies the remaining ACs of T746 not

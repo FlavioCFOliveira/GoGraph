@@ -3,8 +3,8 @@ package label_test
 import (
 	"fmt"
 
-	"gograph/graph"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // Interned label identifiers used by the examples below. A real graph

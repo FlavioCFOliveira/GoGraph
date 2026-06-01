@@ -8,10 +8,10 @@ import (
 
 	"github.com/cucumber/godog"
 
-	"gograph/cypher"
-	"gograph/cypher/procs"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // world holds per-scenario execution state for the godog TCK runner.

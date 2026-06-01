@@ -5,8 +5,8 @@ import (
 	"math"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestDijkstra_ExtremeFloat64Weights verifies Dijkstra's behaviour on

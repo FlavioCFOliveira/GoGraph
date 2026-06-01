@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // runScanAllCount runs MATCH (n) RETURN n against g and returns the row count.

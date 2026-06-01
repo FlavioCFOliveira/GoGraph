@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/bench/rmat"
-	"gograph/graph"
-	"gograph/internal/testlayers"
-	"gograph/store/bulk"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/bench/rmat"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // TestBFS_RMATScale20_Nightly verifies that extern.BFS completes

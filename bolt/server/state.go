@@ -11,7 +11,7 @@ package server
 import (
 	"errors"
 
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // State represents the Bolt v5 per-connection protocol state machine state.

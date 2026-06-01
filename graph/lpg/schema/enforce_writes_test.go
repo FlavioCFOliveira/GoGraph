@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/graph/lpg/schema"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg/schema"
 )
 
 // TestSchema_EnforceWrites verifies that a Graph with an installed SchemaValidator

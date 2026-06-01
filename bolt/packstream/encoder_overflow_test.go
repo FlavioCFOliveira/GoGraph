@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // TestWriteInt_BoundaryRoundTrip encodes each boundary value, decodes it,

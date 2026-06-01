@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestOpen_RejectsUnknownLeadingByte confirms that a frame whose

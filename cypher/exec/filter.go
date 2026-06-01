@@ -14,7 +14,7 @@ package exec
 import (
 	"context"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // FilterFn is a predicate over a Row. It must return (BoolValue(true), nil) to

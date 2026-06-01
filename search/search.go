@@ -1,5 +1,5 @@
 // Package search provides graph traversal and path-finding algorithms
-// over the immutable [gograph/graph/csr.CSR] read-only view.
+// over the immutable [github.com/FlavioCFOliveira/GoGraph/graph/csr.CSR] read-only view.
 //
 // All algorithms operate in [graph.NodeID] space; callers wishing to
 // work with the user-facing N values resolve them via the originating
@@ -26,9 +26,9 @@ import (
 	"context"
 	"sync"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // bfsState is the per-call working state of [BFS]. The wavefront

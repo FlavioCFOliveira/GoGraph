@@ -3,8 +3,8 @@ package csr_test
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // buildFragmentedGraph constructs a directed graph with n total nodes where

@@ -22,9 +22,9 @@ import (
 	"strconv"
 	"time"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // ErrUnknownType is returned by [ReadInto], [ReadIntoCtx],

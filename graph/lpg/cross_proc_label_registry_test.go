@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // fixedLabels is the ordered sequence interned by both the child

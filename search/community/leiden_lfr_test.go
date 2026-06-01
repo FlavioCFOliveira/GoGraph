@@ -5,12 +5,12 @@ package community
 import (
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
-	"gograph/internal/shapegen"
-	"gograph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // lfrGroundTruth extracts the "community_id" property written by LFR

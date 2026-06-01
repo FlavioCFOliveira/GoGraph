@@ -6,7 +6,7 @@ import (
 	"math"
 	"runtime"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // ErrInvalidInput is returned by algorithms that detect NaN or +/-Inf

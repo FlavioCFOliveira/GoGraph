@@ -1,7 +1,7 @@
 package ir
 
 import (
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // exists.go — EXISTS / NOT EXISTS subquery translation.

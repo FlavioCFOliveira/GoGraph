@@ -12,7 +12,7 @@ import (
 
 	"github.com/cucumber/godog"
 
-	"gograph/cypher/tck"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/tck"
 )
 
 // tckExecutionBaseline is the minimum number of passing scenarios the godog

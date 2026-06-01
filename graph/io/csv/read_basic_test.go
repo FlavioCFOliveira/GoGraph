@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	csv "gograph/graph/io/csv"
+	csv "github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
 )
 
 // TestCSVRead_HeaderSkipCommentsBadWeightShortRow covers the common

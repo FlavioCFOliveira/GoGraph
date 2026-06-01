@@ -16,7 +16,7 @@ package expr
 // arms. When no arm matches, the ELSE expression is evaluated; if there is no
 // ELSE clause NULL is returned.
 
-import "gograph/cypher/ast"
+import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 
 // evalCase evaluates a [ast.CaseExpression] in the context of row and params.
 // It delegates to the simple-form or generic-form path depending on whether

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestRecoveryListCapHint_ClampsHostileCount confirms the capacity hint is

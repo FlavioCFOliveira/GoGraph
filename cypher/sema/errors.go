@@ -1,17 +1,17 @@
 // Package sema implements the scope-analysis pass for openCypher queries.
-// It operates on a parsed [gograph/cypher/ast.Query] and enforces variable
+// It operates on a parsed [github.com/FlavioCFOliveira/GoGraph/cypher/ast.Query] and enforces variable
 // scoping rules: WITH boundaries, UNWIND introduction, undefined references,
 // and redeclaration within the same scope.
 //
 // Concurrency: [Analyse] is a pure function; the returned slice of errors is
 // safe for concurrent reads after the call returns. Input AST nodes are treated
-// as immutable (see [gograph/cypher/ast] package documentation).
+// as immutable (see [github.com/FlavioCFOliveira/GoGraph/cypher/ast] package documentation).
 package sema
 
 import (
 	"fmt"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // ErrorKind classifies a scope-analysis violation.

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"gograph/internal/testfs"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testfs"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestWALFault_FsyncDelay verifies three properties of the FsyncDelay

@@ -30,8 +30,8 @@ import (
 	"testing"
 	"time"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

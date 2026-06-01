@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // TestCSRFile_V1Fixture opens the frozen v1 fixture and verifies that

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // FuzzDecodeValue feeds arbitrary bytes to ReadValue and verifies that it

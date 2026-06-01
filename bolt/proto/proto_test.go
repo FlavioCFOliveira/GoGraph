@@ -12,8 +12,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 func TestMain(m *testing.M) {

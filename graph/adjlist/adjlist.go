@@ -37,7 +37,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ErrShardFull is returned by [AdjList.AddNode] and [AdjList.AddEdge]

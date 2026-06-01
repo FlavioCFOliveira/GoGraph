@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph/lpg"
-	"gograph/internal/crashinject"
-	"gograph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashinject"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
 // crashSeedEdges mirrors the deterministic int64 workload the

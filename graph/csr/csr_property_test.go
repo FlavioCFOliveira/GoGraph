@@ -7,10 +7,10 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // shapes is the fixed representative set used by the rapid and

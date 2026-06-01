@@ -19,13 +19,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
-	"gograph/internal/crashpoint"
-	"gograph/internal/metrics"
-	"gograph/store/snapshot"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // Config controls when the checkpointer fires.

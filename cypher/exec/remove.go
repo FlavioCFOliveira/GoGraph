@@ -20,8 +20,8 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

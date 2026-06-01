@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 func TestCSR_BuildFromAdjList_Empty(t *testing.T) {

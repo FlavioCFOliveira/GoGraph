@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // errWriter fails on the first Write call, surfacing a stable error

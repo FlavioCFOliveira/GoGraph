@@ -4,9 +4,9 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // buildFloat64CSR builds a directed graph with float64 edge weights

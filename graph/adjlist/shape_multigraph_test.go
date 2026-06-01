@@ -5,8 +5,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph/adjlist"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // TestAdjList_Multigraph_ParallelDigon verifies that ParallelDigon(k)

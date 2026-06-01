@@ -20,7 +20,7 @@ package expr
 //
 // NULL subject: returns NULL per openCypher semantics.
 
-import "gograph/cypher/ast"
+import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 
 // evalMapProjection evaluates a [ast.MapProjection] node.
 func evalMapProjection(n *ast.MapProjection, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {

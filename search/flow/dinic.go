@@ -6,7 +6,7 @@ package flow
 import (
 	"context"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Network is a directed capacitated graph. It is stored as a sum of

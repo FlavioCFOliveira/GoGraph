@@ -4,8 +4,8 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // TestConcurrentRange verifies that concurrent AddRange and RemoveRange

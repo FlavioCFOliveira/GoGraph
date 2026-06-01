@@ -1,6 +1,6 @@
 package server
 
-import "gograph/bolt/packstream"
+import "github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 
 // RoutingTable returns the single-host routing table for the server at addr.
 // The TTL is hardcoded to 300 seconds. All three roles (WRITE, READ, ROUTE)

@@ -12,7 +12,7 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/internal/testfs"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testfs"
 )
 
 func TestMain(m *testing.M) {

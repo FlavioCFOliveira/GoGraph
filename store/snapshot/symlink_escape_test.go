@@ -6,9 +6,9 @@ import (
 	"runtime"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // writeValidFullSnapshot builds a small string-keyed graph and writes a

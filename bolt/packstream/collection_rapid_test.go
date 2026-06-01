@@ -23,7 +23,7 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // genPrimitiveValue returns a rapid generator that produces a non-collection

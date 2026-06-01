@@ -3,12 +3,12 @@ package plan_test
 import (
 	"testing"
 
-	"gograph/cypher/plan"
-	"gograph/graph"
-	"gograph/graph/index"
-	"gograph/graph/index/btree"
-	"gograph/graph/index/hash"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/plan"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // TestIndexEstimator_LabelCount verifies that LabelCount delegates

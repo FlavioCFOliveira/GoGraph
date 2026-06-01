@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	cmetrics "gograph/internal/metrics"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // leakProbe is a metrics.Backend that counts cypher.result.leaked

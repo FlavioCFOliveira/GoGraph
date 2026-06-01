@@ -17,8 +17,8 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/graph/index"
-	indexhash "gograph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	indexhash "github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 )
 
 // uniqueIndexName returns the synthetic backing-index name for a UNIQUE

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestReadIntoCtx_EmptyLines covers the empty-line skip branch in ReadIntoCtx.

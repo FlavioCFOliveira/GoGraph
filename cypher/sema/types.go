@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // CypherType enumerates the static types that can be inferred for a Cypher

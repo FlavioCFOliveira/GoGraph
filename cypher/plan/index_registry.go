@@ -1,6 +1,6 @@
 package plan
 
-import "gograph/graph/index"
+import "github.com/FlavioCFOliveira/GoGraph/graph/index"
 
 // IndexKind classifies the physical implementation of a registered index
 // as seen by the planner.

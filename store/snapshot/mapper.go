@@ -8,8 +8,8 @@ import (
 	"hash/crc32"
 	"io"
 
-	"gograph/graph"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // MapperFile is the conventional file name carrying the durable

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestDropIndex_ThenReCreate verifies that after DROP INDEX the name is freed

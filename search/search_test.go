@@ -8,9 +8,9 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // buildFromEdges returns a CSR over a directed graph with int nodes

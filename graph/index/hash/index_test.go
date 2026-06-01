@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 func TestIndex_Basic(t *testing.T) {

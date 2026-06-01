@@ -8,8 +8,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // staticLabelResolver is a test stub that returns a fixed bitmap for one label.

@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"gograph/cypher/exec"
-	"gograph/cypher/parser"
-	"gograph/cypher/procs"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // FailureCode returns the Neo4j-style dot-delimited error code for err.

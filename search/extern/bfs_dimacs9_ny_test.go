@@ -6,11 +6,11 @@ import (
 	"reflect"
 	"testing"
 
-	"gograph/bench/dimacs9"
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/search"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/bench/dimacs9"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // TestBFS_Dimacs9NY_CorrectVsInMemory verifies that extern.BFS

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 func TestSchema_RegisterAndValidate(t *testing.T) {

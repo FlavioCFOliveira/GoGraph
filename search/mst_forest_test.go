@@ -3,8 +3,8 @@ package search
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestMST_Forest verifies Kruskal on a disconnected graph with K=3

@@ -8,8 +8,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/cypher/exec"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 func TestCreateConstraintOp_Unique_CreatesIndex(t *testing.T) {

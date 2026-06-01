@@ -5,8 +5,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index/btree"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
 )
 
 // TestRange_DegenerateRanges verifies three special range-query shapes

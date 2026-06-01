@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"gograph/search/flow"
+	"github.com/FlavioCFOliveira/GoGraph/search/flow"
 )
 
 // TestASFlow_DinicMaxFlow builds a small synthetic Autonomous-System-link

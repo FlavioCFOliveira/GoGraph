@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // unknownBytes contains bytes that are not assigned to any PackStream type in

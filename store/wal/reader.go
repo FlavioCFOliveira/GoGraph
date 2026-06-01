@@ -8,7 +8,7 @@ import (
 	"iter"
 	"os"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Reader iterates the frames of a WAL file. It is read-only and

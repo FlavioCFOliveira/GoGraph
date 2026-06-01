@@ -30,9 +30,9 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // newCityEngineRaw creates a cypher.Engine for the given graph without

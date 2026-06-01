@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"gograph/cypher"
-	"gograph/cypher/exec"
-	"gograph/graph/adjlist"
-	"gograph/graph/index"
-	"gograph/graph/lpg"
-	cmetrics "gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // invalidationProbe records plan-cache metrics so DDL-invalidation tests

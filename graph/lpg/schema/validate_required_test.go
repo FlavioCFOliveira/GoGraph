@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 func TestSchema_Required(t *testing.T) {

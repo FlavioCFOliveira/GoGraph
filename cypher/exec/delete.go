@@ -31,8 +31,8 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ErrDeleteNodeHasRelationships is returned when DELETE is attempted on a node

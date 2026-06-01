@@ -70,8 +70,8 @@ import (
 	"context"
 	"errors"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ErrVarLenCapExceeded is returned when a VarLengthExpand exceeds its

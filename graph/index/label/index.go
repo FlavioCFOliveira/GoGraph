@@ -21,8 +21,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // Scope tags whether the index observes node-label or edge-label

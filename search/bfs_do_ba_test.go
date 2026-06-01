@@ -13,9 +13,9 @@ package search
 import (
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 func TestBFSDirectionOpt_BA_MatchesBFSAndSwitches(t *testing.T) {

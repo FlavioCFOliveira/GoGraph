@@ -8,8 +8,8 @@ import (
 	"bytes"
 	"fmt"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // ExampleEncodeRequest round-trips a RUN request. EncodeRequest serialises the

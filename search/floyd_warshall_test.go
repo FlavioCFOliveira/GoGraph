@@ -4,8 +4,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // BenchmarkFloydWarshall_V2048 is the headline benchmark for task

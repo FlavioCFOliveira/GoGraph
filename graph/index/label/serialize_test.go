@@ -6,8 +6,8 @@ import (
 	"io"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // TestIndexes_LabelSerializeRoundtrip seeds an index with a known

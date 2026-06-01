@@ -36,7 +36,7 @@ package exec
 import (
 	"context"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // CorrelatedApply is a Volcano pipeline operator that performs a dependent

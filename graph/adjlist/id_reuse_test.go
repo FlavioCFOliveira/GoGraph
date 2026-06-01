@@ -4,8 +4,8 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestAdjList_NodeID_NoReuse verifies that removing an edge does not

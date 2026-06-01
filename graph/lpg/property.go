@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // PropertyKind tags a [PropertyValue] with its underlying Go type.

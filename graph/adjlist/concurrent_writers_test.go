@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // findShardNKeys returns n distinct int keys whose Mapper-assigned NodeID has

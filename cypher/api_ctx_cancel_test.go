@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // newCtxTestEngine builds a small in-memory engine for the cancellation tests.

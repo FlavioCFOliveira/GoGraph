@@ -9,8 +9,8 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
 )
 
 // ExampleRegistry shows the full register → list → lookup → invoke cycle on a

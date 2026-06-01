@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 func TestReadInto_Basic(t *testing.T) {

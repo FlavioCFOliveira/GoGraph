@@ -9,8 +9,8 @@ import (
 	"context"
 	"fmt"
 
-	"gograph/cypher/ir"
-	"gograph/cypher/ir/rewrite"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir/rewrite"
 )
 
 // selectOverProjection builds the plan

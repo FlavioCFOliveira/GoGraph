@@ -3,8 +3,8 @@ package community
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestLabelPropagation_Bridge runs label propagation on two K30

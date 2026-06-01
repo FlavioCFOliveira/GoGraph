@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestIsolation_Commit_NoPartialTransactionObservable is the F3 isolation

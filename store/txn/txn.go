@@ -50,9 +50,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // ErrTxFinished is returned by operations on a transaction that has

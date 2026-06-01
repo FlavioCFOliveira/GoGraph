@@ -32,7 +32,7 @@ package exec
 import (
 	"context"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // Apply is a Volcano pipeline operator that performs a dependent (correlated)

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"runtime"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // ErrNegativeEdgeAPSP is returned by [DijkstraAPSP] when the input

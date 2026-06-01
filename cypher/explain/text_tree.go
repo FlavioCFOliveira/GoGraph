@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"strings"
 
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // estimator is an optional interface that logical plan nodes may implement to

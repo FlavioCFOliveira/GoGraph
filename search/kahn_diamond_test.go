@@ -17,8 +17,8 @@ package search
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 func TestTopologicalSort_DiamondShape(t *testing.T) {

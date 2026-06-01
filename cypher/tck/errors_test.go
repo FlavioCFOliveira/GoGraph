@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

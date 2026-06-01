@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // countingCompiler wraps regexp.Compile and counts invocations so a test can

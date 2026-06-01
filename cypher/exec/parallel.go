@@ -43,8 +43,8 @@ import (
 	"runtime/pprof"
 	"sync"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // DefaultMorselSize is the number of NodeIDs processed per worker goroutine

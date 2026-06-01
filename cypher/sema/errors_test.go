@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/sema"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 )
 
 // TestMapToBolt_Nil verifies that an empty error slice maps to nil.

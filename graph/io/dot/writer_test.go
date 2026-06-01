@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 func TestWrite_Directed(t *testing.T) {

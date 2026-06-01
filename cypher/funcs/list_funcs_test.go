@@ -8,7 +8,7 @@ package funcs_test
 import (
 	"testing"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

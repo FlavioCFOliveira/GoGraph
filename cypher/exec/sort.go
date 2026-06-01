@@ -28,7 +28,7 @@ import (
 	"fmt"
 	"sort"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // DefaultMaxSortRows is the default upper bound on rows that Sort holds in

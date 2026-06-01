@@ -15,7 +15,7 @@ import (
 	"context"
 	"errors"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // ErrUnwindNilChild is returned by [NewUnwind] when child is nil.

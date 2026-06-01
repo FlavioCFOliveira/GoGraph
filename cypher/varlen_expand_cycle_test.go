@@ -24,10 +24,10 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // buildCycle builds a directed cycle of n nodes: "a"→"b"→…→back to "a".

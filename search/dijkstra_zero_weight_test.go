@@ -3,9 +3,9 @@ package search
 import (
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestDijkstra_ZeroWeightEdges verifies that Dijkstra handles graphs

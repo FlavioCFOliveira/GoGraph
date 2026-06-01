@@ -10,8 +10,8 @@ package expr_test
 import (
 	"testing"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

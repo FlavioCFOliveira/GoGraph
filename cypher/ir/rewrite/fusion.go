@@ -1,7 +1,7 @@
 package rewrite
 
 import (
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // FusionRules implements three structural optimisations:

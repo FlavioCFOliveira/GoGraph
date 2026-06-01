@@ -13,8 +13,8 @@ package search
 import (
 	"testing"
 
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // TestHopcroftTarjanBCC_Dense_K8 tests BCC on an undirected K_8.

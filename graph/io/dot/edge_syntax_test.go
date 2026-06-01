@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/dot"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/dot"
 )
 
 // TestDOTWrite_EdgeSyntax verifies directed vs undirected edge operators,

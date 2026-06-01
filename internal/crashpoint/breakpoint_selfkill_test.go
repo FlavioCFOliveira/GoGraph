@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"testing"
 
-	"gograph/internal/crashpoint"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 )
 
 // crashChildEnv, when set, switches the test binary into "child" mode: it

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // propCase describes a single PropertyKind to exercise in the round-trip.

@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // LoadedSnapshot is the result of [LoadSnapshotFull]: the parsed CSR

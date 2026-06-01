@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // TestReset_DrainsCursorAndRollsBackTx covers T686 AC1–AC4:

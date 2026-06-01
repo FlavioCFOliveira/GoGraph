@@ -29,10 +29,10 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // canonicalQueries is the set of read queries exercised by T898.

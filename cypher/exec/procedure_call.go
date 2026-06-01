@@ -32,8 +32,8 @@ import (
 	"context"
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
 )
 
 // ProcedureCallOp invokes a registered procedure and emits its result rows.

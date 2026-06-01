@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // CSRFile is the conventional file name carrying the CSR triplet

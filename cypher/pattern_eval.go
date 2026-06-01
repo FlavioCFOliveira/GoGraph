@@ -34,10 +34,10 @@ package cypher
 import (
 	"context"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/expr"
-	"gograph/graph"
-	lpg "gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	lpg "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // patternEvaluator implements [expr.PatternEvaluator] using the live LPG

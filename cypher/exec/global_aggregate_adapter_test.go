@@ -12,8 +12,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // emptyChildOp is a leaf operator that signals EOF on the first Next call.

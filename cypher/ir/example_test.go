@@ -7,8 +7,8 @@ package ir_test
 import (
 	"fmt"
 
-	"gograph/cypher/ir"
-	"gograph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 )
 
 // ExampleFromAST translates a parsed query into a logical plan and prints the

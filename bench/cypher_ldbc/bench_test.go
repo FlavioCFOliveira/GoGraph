@@ -21,10 +21,10 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/index"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // seedSize is the number of nodes in the shared benchmark graph.

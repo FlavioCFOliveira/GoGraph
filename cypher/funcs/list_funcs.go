@@ -13,7 +13,7 @@ package funcs
 import (
 	"sort"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // registerListFuncs registers extended list built-ins into r.

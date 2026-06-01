@@ -3,9 +3,9 @@ package community
 import (
 	"math"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // nmi computes the Normalised Mutual Information between two

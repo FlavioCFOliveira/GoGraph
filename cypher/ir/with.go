@@ -1,6 +1,6 @@
 package ir
 
-import "gograph/cypher/ast"
+import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 
 // with.go — WITH pipeline-boundary translation.
 //

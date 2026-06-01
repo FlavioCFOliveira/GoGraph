@@ -6,7 +6,7 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 func TestIndex_AddHasCount(t *testing.T) {

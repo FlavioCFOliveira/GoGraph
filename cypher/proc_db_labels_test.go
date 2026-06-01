@@ -14,8 +14,8 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/cypher"
-	indexlabel "gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	indexlabel "github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // TestProcDbLabels_AfterCreatingNodes verifies that db.labels() returns the

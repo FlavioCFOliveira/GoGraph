@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // bookmarkCounter is the monotonically increasing transaction counter used to

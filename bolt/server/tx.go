@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"gograph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
 )
 
 // Tx wraps a cypher.Engine transaction context for an explicit Bolt transaction

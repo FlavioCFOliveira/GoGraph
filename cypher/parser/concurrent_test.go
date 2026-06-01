@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // TestConcurrentParsing verifies that Parse and ParseStrict are safe to call

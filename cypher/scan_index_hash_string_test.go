@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // TestScanIndexHash_AliceFound verifies that querying for Alice by name via a

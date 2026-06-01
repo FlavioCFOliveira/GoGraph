@@ -5,9 +5,9 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search/flow"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search/flow"
 )
 
 // buildBipartiteCSR constructs a directed CSR for a bipartite graph

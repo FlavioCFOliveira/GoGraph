@@ -13,8 +13,8 @@ package plan
 import (
 	"sync"
 
-	"gograph/graph/index"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // Estimator provides cardinality estimates for physical plan operators.

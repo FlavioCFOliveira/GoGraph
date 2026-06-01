@@ -19,7 +19,7 @@ import (
 	"context"
 	"errors"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // DefaultMaxDistinct is the default upper bound on distinct rows tracked by

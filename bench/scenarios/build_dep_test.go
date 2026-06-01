@@ -6,9 +6,9 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 // TestBuildDep_TopoAndSCC builds a synthetic Linux-kernel-like make-dependency

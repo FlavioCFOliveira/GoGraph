@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

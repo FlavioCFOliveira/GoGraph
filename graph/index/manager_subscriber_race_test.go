@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // latchSubscriber counts received events via an atomic so it is safe

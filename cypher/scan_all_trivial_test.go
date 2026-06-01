@@ -7,9 +7,9 @@ import (
 	"context"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestScanAll_EmptyGraph verifies that MATCH (n) RETURN n on an empty graph

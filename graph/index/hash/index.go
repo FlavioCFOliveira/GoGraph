@@ -5,7 +5,7 @@
 // The structure answers exact-match property predicates (for example
 // "every node where email == 'x@y.com'") in O(1) average time. For
 // range predicates use the B+ tree index in package
-// gograph/graph/index/btree (Sprint 2, T19).
+// github.com/FlavioCFOliveira/GoGraph/graph/index/btree (Sprint 2, T19).
 //
 // Index is safe for concurrent use by any number of goroutines; the
 // shard sharding aligns with [graph.NodeID]'s low-bit shard scheme.
@@ -25,8 +25,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 const (

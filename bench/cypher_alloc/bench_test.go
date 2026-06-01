@@ -27,9 +27,9 @@ import (
 	"os"
 	"testing"
 
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

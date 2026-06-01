@@ -44,8 +44,8 @@ package exec
 import (
 	"context"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // Direction controls which edges Expand follows.

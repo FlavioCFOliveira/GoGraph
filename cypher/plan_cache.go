@@ -4,7 +4,7 @@ import (
 	"container/list"
 	"sync"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // DefaultPlanCacheCapacity is the default upper bound on the number

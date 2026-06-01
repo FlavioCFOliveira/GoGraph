@@ -5,7 +5,7 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // TestMain dispatches subproc child modes before running tests and

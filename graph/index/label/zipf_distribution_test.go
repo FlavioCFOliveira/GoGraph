@@ -4,8 +4,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // TestZipfDistribution verifies the label index under a skewed label

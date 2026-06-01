@@ -4,8 +4,8 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestTarjanSCC_ChainOfSCCs verifies that Tarjan correctly identifies four

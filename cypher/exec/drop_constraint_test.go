@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/cypher/exec"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // setupUniqueConstraint creates a unique constraint on (label, prop) and

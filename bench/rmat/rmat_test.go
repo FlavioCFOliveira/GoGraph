@@ -3,7 +3,7 @@ package rmat
 import (
 	"testing"
 
-	"gograph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
 )
 
 func TestGenerate_CountsMatchSpec(t *testing.T) {

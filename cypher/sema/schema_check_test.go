@@ -3,10 +3,10 @@ package sema_test
 import (
 	"testing"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/sema"
-	"gograph/graph/lpg"
-	"gograph/graph/lpg/schema"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg/schema"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

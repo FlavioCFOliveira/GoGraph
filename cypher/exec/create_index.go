@@ -17,9 +17,9 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/graph/index"
-	indexbtree "gograph/graph/index/btree"
-	indexhash "gograph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	indexbtree "github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
+	indexhash "github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 )
 
 // IndexKindExec distinguishes hash vs. btree in the exec layer.

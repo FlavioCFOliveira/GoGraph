@@ -29,7 +29,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

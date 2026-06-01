@@ -36,9 +36,9 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // MergeRelationship matches-or-creates a single-hop directed relationship

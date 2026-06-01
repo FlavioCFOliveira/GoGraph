@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"gograph/bolt/proto"
-	"gograph/bolt/server"
-	cmetrics "gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // panickingAuth is a test-only AuthHandler whose Authenticate always panics.

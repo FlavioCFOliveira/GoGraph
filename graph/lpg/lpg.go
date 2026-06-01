@@ -1,5 +1,5 @@
 // Package lpg implements the Labelled Property Graph model on top of
-// the [gograph/graph/adjlist] mutable adjacency-list backend.
+// the [github.com/FlavioCFOliveira/GoGraph/graph/adjlist] mutable adjacency-list backend.
 //
 // An LPG decorates each node and each edge with a set of labels
 // (interned strings identifying classes/types) and a bag of typed
@@ -18,10 +18,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/index"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // LabelID is the compact internal identifier produced by the

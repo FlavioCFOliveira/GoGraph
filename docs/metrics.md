@@ -329,8 +329,8 @@ no external dependencies:
 ```go
 import (
     "net/http"
-    "gograph/internal/metrics"
-    prom "gograph/internal/metrics/prometheus"
+    "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+    prom "github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus"
 )
 
 reg := prom.New()

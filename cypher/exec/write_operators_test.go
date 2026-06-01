@@ -11,10 +11,10 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
-	"gograph/graph"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // mustAddNode wraps stubMutator.AddNode for tests that expect the

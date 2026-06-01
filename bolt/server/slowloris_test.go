@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // TestServe_SlowlorisHandshakeDisconnect is the primary regression for the

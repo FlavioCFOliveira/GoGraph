@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // TestCrossProc_DisjointDirs verifies that N independent writer

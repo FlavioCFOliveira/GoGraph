@@ -7,10 +7,10 @@ GoGraph includes a Bolt v5 server compatible with `neo4j-go-driver` v5 and `cyph
 ```go
 import (
     "context"
-    "gograph/bolt/server"
-    "gograph/cypher"
-    "gograph/graph/adjlist"
-    "gograph/graph/lpg"
+    "github.com/FlavioCFOliveira/GoGraph/bolt/server"
+    "github.com/FlavioCFOliveira/GoGraph/cypher"
+    "github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+    "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 g := lpg.New[string, float64](adjlist.Config{})
@@ -153,10 +153,10 @@ import (
     "syscall"
     "time"
 
-    "gograph/bolt/server"
-    "gograph/cypher"
-    "gograph/graph/adjlist"
-    "gograph/graph/lpg"
+    "github.com/FlavioCFOliveira/GoGraph/bolt/server"
+    "github.com/FlavioCFOliveira/GoGraph/cypher"
+    "github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+    "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 func main() {

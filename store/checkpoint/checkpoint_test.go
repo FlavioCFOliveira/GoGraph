@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/store/snapshot"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 func TestCheckpoint_TriggerProducesSnapshot(t *testing.T) {

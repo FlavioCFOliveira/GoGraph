@@ -3,7 +3,7 @@ package flow_test
 import (
 	"fmt"
 
-	"gograph/search/flow"
+	"github.com/FlavioCFOliveira/GoGraph/search/flow"
 )
 
 // ExampleMaxFlow computes the maximum s-t flow on the classic CLRS

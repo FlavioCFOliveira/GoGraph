@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // BenchmarkHierholzer_LargeEulerian measures Hierholzer on a large

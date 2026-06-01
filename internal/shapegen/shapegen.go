@@ -41,8 +41,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // Knob describes one integer-valued tunable parameter exposed by a

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // TestIndex_NotFound covers the "value not in index" branches of

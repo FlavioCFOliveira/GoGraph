@@ -5,11 +5,11 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // TestConcurrentReaders verifies that a single csrfile.Reader can be

@@ -1,4 +1,4 @@
-module gograph
+module github.com/FlavioCFOliveira/GoGraph
 
 go 1.26
 

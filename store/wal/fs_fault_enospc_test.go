@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/internal/testfs"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testfs"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestWALFault_ENOSPC verifies that ENOSPC on every Write is surfaced

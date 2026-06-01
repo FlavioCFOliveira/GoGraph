@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestParseSynthKeySuffix verifies the recogniser used by

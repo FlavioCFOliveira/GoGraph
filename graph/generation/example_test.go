@@ -3,9 +3,9 @@ package generation_test
 import (
 	"fmt"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/generation"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/generation"
 )
 
 // snapshot is a helper that freezes a directed graph with the given

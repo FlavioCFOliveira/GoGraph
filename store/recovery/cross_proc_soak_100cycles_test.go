@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestRecovery_CrossProc_SIGKILLSoak runs 100 cycles of the

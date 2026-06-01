@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Write streams a GraphML document representing a to w. The output

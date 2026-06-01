@@ -5,10 +5,10 @@ import (
 	"math"
 	"runtime"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
-	"gograph/search"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 // WeightedBetweenness computes the weighted betweenness centrality

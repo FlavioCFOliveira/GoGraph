@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // TestMapperAdv_GenerateShardZeroKeys_AllShardZero exercises AC #1

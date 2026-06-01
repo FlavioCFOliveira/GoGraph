@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // buildTinyCSR returns a 2-edge CSR over 3 nodes for snapshot tests

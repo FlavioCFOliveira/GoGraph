@@ -1,6 +1,6 @@
 package exec
 
-import "gograph/graph/index"
+import "github.com/FlavioCFOliveira/GoGraph/graph/index"
 
 // IndexBuffer collects index.Change events produced by write operators
 // during a single write transaction.

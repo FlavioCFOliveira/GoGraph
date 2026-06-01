@@ -3,9 +3,9 @@ package search
 import (
 	"context"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // BidirectionalDijkstra computes a shortest path from src to dst in c

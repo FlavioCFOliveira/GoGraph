@@ -3,7 +3,7 @@ package plan_test
 import (
 	"testing"
 
-	"gograph/cypher/plan"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/plan"
 )
 
 // joinEstimator is a configurable Estimator for join-enumeration tests.

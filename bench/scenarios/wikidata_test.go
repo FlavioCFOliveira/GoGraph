@@ -29,10 +29,10 @@ import (
 	"testing"
 	"time"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // cacheHitProbe is a [metrics.Backend] that counts plan-cache hits and misses.

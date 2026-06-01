@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"gograph/graph/lpg"
-	"gograph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
 // cmdSeed populates the data directory with the deterministic

@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // init registers the child handler before subproc.Dispatch() is called

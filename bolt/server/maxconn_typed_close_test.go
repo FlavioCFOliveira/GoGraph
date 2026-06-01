@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // TestServe_MaxConnections_TypedClose verifies the three ACs for T720 that the

@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 func buildWeightedCSR(tb testing.TB, edges []weightedEdge) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {

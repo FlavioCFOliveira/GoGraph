@@ -15,10 +15,10 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // ErrTooManyRows is returned by [Loader.Add], [Loader.AddBatch], and

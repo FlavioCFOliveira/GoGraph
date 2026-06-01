@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // TestCSR_CrossProcess_Subprocess_ByteEqual spawns two independent child

@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/bench/rmat"
-	"gograph/graph"
-	"gograph/internal/testlayers"
-	"gograph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/bench/rmat"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
 )
 
 // TestReader_LargeFile_RMAT generates a ~8M-edge RMAT graph (scale=20,

@@ -29,8 +29,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // ErrMismatchedLengths is returned by [Index.BulkLoad] when the

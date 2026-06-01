@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // helper: encode a struct header (tag, n fields) and optional extra bytes.

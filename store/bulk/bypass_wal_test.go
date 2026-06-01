@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestLoader_BypassesWAL verifies that the bulk loader writes only to

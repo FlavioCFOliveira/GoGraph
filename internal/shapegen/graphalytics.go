@@ -20,8 +20,8 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // graphalytics.go implements lazy loaders for the LDBC Graphalytics

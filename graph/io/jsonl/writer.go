@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Write streams every node and edge of a to w as JSON Lines. Nodes

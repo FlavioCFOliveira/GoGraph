@@ -8,10 +8,10 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/cypher/exec"
-	"gograph/graph/index"
-	indexhash "gograph/graph/index/hash"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	indexhash "github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 func TestConstraintRegistry_RegisterUnique_LooksUpName(t *testing.T) {

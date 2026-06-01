@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/dot"
-	"gograph/internal/goldens"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/dot"
+	"github.com/FlavioCFOliveira/GoGraph/internal/goldens"
 )
 
 // TestDOTWrite_Golden produces a deterministic DOT output for a 4-node directed

@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/subproc"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 func init() {

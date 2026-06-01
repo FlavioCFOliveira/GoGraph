@@ -10,7 +10,7 @@ import (
 
 	"github.com/edsrzf/mmap-go"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // AccessPattern is the advisory hint given to the OS about the

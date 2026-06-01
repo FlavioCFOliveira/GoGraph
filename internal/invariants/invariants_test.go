@@ -6,11 +6,11 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
-	"gograph/internal/invariants"
-	"gograph/search"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/invariants"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 func TestMain(m *testing.M) {

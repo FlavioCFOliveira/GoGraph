@@ -20,7 +20,7 @@ package exec
 import (
 	"context"
 
-	"gograph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // GlobalAggregateAdapter wraps an EagerAggregation operator that has no

@@ -3,8 +3,8 @@ package adjlist_test
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // degree returns the out-degree of node u in a by counting the

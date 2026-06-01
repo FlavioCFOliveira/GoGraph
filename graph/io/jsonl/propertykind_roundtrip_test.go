@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/jsonl"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestJSONL_PropertyKindRoundtrip verifies that all six PropertyKind

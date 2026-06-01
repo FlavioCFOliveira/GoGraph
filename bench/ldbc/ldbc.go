@@ -18,7 +18,7 @@ import (
 	"sort"
 	"time"
 
-	"gograph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
 )
 
 // Scale enumerates the LDBC SF presets the harness supports.

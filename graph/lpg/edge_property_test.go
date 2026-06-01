@@ -3,7 +3,7 @@ package lpg
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 func TestGraph_EdgeProperties(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"gograph/store/bulk"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // Example bulk-loads a small graph: edges are streamed through a Loader

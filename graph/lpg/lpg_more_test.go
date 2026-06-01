@@ -3,7 +3,7 @@ package lpg
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestGraph_Accessors covers the trivial getter exports that surface

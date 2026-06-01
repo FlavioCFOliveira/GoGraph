@@ -6,9 +6,9 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // -------------------------------------------------------------------

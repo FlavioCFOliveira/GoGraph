@@ -9,7 +9,7 @@ package search
 import (
 	"fmt"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // defaultCfg returns an adjlist.Config with defaults suitable for

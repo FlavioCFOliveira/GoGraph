@@ -14,10 +14,10 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/cypher/exec"
-	"gograph/graph"
-	"gograph/graph/index"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 func TestIndexBuffer_ConcurrentStress(t *testing.T) {

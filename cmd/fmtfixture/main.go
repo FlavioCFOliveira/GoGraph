@@ -22,11 +22,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/store/csrfile"
-	"gograph/store/snapshot"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // FixedTime is the deterministic timestamp embedded in any

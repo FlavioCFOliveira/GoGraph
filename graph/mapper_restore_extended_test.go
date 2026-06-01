@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // collectEntries returns all (NodeID, key) pairs emitted by Walk in the

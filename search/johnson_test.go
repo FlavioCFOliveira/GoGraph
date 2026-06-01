@@ -7,8 +7,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 func TestJohnson_MatchesFloydWarshall(t *testing.T) {

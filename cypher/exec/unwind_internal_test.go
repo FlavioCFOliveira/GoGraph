@@ -9,7 +9,7 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // initResetChild is a minimal Operator stub for verifying Unwind.Init's reset

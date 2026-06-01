@@ -6,8 +6,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestBetweenness_PropertyMatchesParallel checks that Betweenness and

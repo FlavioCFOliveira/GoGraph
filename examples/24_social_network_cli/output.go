@@ -7,8 +7,8 @@ import (
 	"io"
 	"sort"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // writeRecord serialises rec as a single line of JSON terminated by '\n'.

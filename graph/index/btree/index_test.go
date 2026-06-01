@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 func TestIndex_InsertAndRange(t *testing.T) {

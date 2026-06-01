@@ -12,8 +12,8 @@ package exec
 // cypher/api.go via the lpgMutatorAdapter type.
 
 import (
-	"gograph/graph"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // GraphMutator is the write surface exposed to Cypher write operators.

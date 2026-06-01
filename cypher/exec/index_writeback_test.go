@@ -11,9 +11,9 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/cypher/exec"
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // spySubscriber records every Apply call for later inspection.

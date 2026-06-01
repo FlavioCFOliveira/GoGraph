@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
-	"gograph/cypher/ir"
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

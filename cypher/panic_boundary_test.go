@@ -20,15 +20,15 @@ import (
 	"testing"
 	"time"
 
-	cmetrics "gograph/internal/metrics"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
-	"gograph/cypher/funcs"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // quietLogs installs a discard slog default for the duration of the test and

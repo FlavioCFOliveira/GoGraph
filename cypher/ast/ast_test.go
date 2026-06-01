@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // ptr returns a pointer to the given string value — helper for optional names.

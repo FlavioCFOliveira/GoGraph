@@ -28,8 +28,8 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // DefaultMaxGroups is the default upper bound on distinct groups that

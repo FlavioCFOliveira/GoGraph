@@ -12,8 +12,8 @@ package search
 import (
 	"testing"
 
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // TestBridges_Cn verifies that HopcroftTarjanBCC reports zero bridges and

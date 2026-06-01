@@ -57,9 +57,9 @@ import (
 	"math"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // PropertiesFile is the conventional file name carrying the durable

@@ -3,7 +3,7 @@ package ir
 import (
 	"fmt"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // TranslateError is returned by [FromAST] when it encounters an AST construct

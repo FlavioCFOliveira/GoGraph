@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ErrTypeMismatch is returned by [Schema.Validate] when a value's

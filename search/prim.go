@@ -3,9 +3,9 @@ package search
 import (
 	"context"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // PrimMST computes a minimum spanning tree of c rooted at src using

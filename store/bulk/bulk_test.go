@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 func TestLoader_AddAndFinalise(t *testing.T) {

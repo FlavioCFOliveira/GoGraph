@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"testing"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 // makePermutedKeys generates 200 fixed string keys ("key-0000"…"key-0199")

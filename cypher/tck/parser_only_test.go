@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher/parser"
-	"gograph/cypher/tck"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/tck"
 )
 
 // TestTCKParserOnly is the CI gate for grammar coverage.

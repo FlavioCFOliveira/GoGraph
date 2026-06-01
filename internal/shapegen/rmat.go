@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // This file implements the "random / R-MAT (Recursive MATrix)"
@@ -261,7 +261,7 @@ func buildRMAT(g *lpg.Graph[int, int64], scale, edgeFactor, a, b, c int, seed ui
 // implements the Graph500 quadrant split in branch-free integer
 // arithmetic.
 //
-// The function is exported so [gograph/bench/rmat.Generate] can share
+// The function is exported so [github.com/FlavioCFOliveira/GoGraph/bench/rmat.Generate] can share
 // the exact same recursive-descent core without duplicating the
 // (a, ab, abc) split logic. Outside the gograph module RMATPick is
 // not reachable because shapegen is under internal/.

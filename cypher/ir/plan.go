@@ -3,7 +3,7 @@ package ir
 import (
 	"sync/atomic"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // argTagSeq generates monotonic [Argument] tags. Tags are stable for the

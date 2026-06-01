@@ -7,8 +7,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestLPG_Concurrent fans out 16 goroutines, each writing 10 000

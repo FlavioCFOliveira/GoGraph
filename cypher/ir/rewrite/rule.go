@@ -20,7 +20,7 @@ package rewrite
 import (
 	"context"
 
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // Rule is the interface implemented by every rewrite rule.
@@ -150,7 +150,7 @@ func (d *Driver) Run(ctx context.Context, plan ir.LogicalPlan) (result ir.Logica
 // The returned bool reports whether any replacement occurred anywhere in the
 // tree.
 //
-// WalkAndReplace handles the full operator set defined in gograph/cypher/ir by
+// WalkAndReplace handles the full operator set defined in github.com/FlavioCFOliveira/GoGraph/cypher/ir by
 // reconstructing each operator with its (potentially rewritten) children.
 func WalkAndReplace(plan ir.LogicalPlan, fn func(ir.LogicalPlan) (ir.LogicalPlan, bool)) (ir.LogicalPlan, bool) {
 	if plan == nil {

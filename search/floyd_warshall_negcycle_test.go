@@ -13,8 +13,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestFloydWarshall_NegCycle_SimpleTriangle tests a 3-node directed

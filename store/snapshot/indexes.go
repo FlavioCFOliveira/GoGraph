@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gograph/graph/index"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // validateIndexName rejects any index name that, when joined with the

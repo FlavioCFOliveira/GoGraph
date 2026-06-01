@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	csv "gograph/graph/io/csv"
+	csv "github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
 )
 
 // TestCSVRead_CtxCancelMidStream verifies that ReadIntoCtx honours

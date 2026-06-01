@@ -1,6 +1,6 @@
 package cypher_test
 
-// api_extra_test.go — supplementary tests to bring gograph/cypher above the
+// api_extra_test.go — supplementary tests to bring github.com/FlavioCFOliveira/GoGraph/cypher above the
 // 75% coverage gate. Targets: NewEngineWithRegistry, Record(), label scan,
 // selection, expand, projection, and unsupported plan root error.
 
@@ -10,12 +10,12 @@ import (
 	"fmt"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
-	"gograph/cypher/funcs"
-	"gograph/cypher/sema"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

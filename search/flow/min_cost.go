@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // ErrNegativeCycle is returned by [MinCostMaxFlowCtx] when the

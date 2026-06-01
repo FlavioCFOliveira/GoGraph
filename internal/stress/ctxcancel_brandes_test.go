@@ -21,10 +21,10 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
-	"gograph/search/centrality"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/search/centrality"
 )
 
 // TestCtxCancel_Brandes_MidRun builds a BA scale-free graph and cancels

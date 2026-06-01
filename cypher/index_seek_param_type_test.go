@@ -29,9 +29,9 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
-	"gograph/cypher/sema"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 )
 
 func TestIndexSeekParam_IntegerPropertyAcceptsIntegerParam(t *testing.T) {

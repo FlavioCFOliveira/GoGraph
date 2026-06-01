@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // DropIndexOp is a Volcano DDL operator that deregisters a secondary index.

@@ -3,8 +3,8 @@ package plan_test
 import (
 	"testing"
 
-	"gograph/cypher/plan"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/plan"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // stubSubscriber is a minimal index.Subscriber used in tests to avoid

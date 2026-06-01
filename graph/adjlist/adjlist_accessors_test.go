@@ -3,7 +3,7 @@ package adjlist
 import (
 	"testing"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // TestAdjList_Accessors covers Mapper, Directed, Multigraph, and

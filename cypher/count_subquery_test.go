@@ -16,10 +16,10 @@ import (
 	"context"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // newHubSpokeEngine returns an engine backed by a hub-and-spoke graph:

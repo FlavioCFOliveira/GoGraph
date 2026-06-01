@@ -20,7 +20,7 @@ import (
 	"math"
 	"strings"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // RowContext maps variable names to their current runtime values.

@@ -3,8 +3,8 @@ package shapegen
 import (
 	"fmt"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // This file implements the "structured 2D/3D" family of the shape

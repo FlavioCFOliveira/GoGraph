@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // truncateUnit truncates t to the start of the named unit, preserving the

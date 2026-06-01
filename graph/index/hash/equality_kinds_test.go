@@ -6,8 +6,8 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 )
 
 // TestEqualityKinds_String verifies Lookup/Cardinality/Contains correctness

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestSchema_ValidateKinds exercises schema.Validate for every

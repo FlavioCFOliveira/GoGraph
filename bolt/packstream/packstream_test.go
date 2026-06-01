@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // roundTrip encodes v and decodes it back, returning the decoded Value.

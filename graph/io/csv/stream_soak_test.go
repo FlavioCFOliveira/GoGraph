@@ -8,9 +8,9 @@ import (
 	"runtime"
 	"testing"
 
-	"gograph/graph/adjlist"
-	csv "gograph/graph/io/csv"
-	"gograph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	csv "github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 
 	"go.uber.org/goleak"
 )

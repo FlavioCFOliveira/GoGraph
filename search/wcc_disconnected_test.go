@@ -15,8 +15,8 @@ package search
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestWCC_DisconnectedForest verifies that WCC correctly identifies

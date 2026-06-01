@@ -32,9 +32,9 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )

@@ -8,8 +8,8 @@ import (
 	"context"
 	"fmt"
 
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // ExampleDrain assembles the equivalent of `UNWIND [10, 20, 30] AS x RETURN x

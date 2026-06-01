@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // buildFullSnapshot writes a v3 snapshot for a small string-keyed

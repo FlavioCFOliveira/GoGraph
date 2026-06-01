@@ -50,7 +50,7 @@ when a single test function mixes short-layer assertions with optional
 soak-only steps — call one of the helpers in `internal/testlayers`:
 
 ```go
-import "gograph/internal/testlayers"
+import "github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 
 func TestSomething(t *testing.T) {
     testlayers.RequireSoak(t)
@@ -155,7 +155,7 @@ its own `soakfull` tag (see `.github/workflows/soak.yml`). Like
 
 ## Helpers reference
 
-`gograph/internal/testlayers` exposes the runtime API. The package is
+`github.com/FlavioCFOliveira/GoGraph/internal/testlayers` exposes the runtime API. The package is
 internal: it is consumed from elsewhere in this module and is not part
 of GoGraph's public surface.
 

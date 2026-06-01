@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // writeJSON marshals payload and writes it with the given status code and

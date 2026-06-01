@@ -42,10 +42,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
-	"gograph/graph/index"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ErrPropertyValueIsNull is the sentinel returned by [parsePropValue] when

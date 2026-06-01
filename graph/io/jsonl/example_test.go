@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"fmt"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/jsonl"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ExampleWrite shows a JSON Lines round-trip: marshal a directed,

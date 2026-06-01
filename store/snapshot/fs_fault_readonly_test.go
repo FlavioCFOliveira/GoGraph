@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestSnapshot_ReadOnly verifies that [WriteSnapshotFull] returns a

@@ -14,8 +14,8 @@ import (
 	"os"
 	"strings"
 
-	"gograph/graph/io/csv"
-	"gograph/graph/io/jsonl"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
 )
 
 func main() {

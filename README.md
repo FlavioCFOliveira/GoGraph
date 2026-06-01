@@ -19,77 +19,77 @@ to upgrade from the 1.x line.
 
 ### Core graph (`graph/`)
 
-- `gograph/graph` — generic node identifiers and the `Graph[N, W]`
+- `github.com/FlavioCFOliveira/GoGraph/graph` — generic node identifiers and the `Graph[N, W]`
   contract.
-- `gograph/graph/adjlist` — mutable, sharded adjacency-list backend
+- `github.com/FlavioCFOliveira/GoGraph/graph/adjlist` — mutable, sharded adjacency-list backend
   with copy-on-write snapshots and lock-free reads.
-- `gograph/graph/csr` — immutable Compressed Sparse Row view for
+- `github.com/FlavioCFOliveira/GoGraph/graph/csr` — immutable Compressed Sparse Row view for
   read-mostly analytics.
-- `gograph/graph/generation` — atomic pointer swap for snapshot
+- `github.com/FlavioCFOliveira/GoGraph/graph/generation` — atomic pointer swap for snapshot
   rotation across readers/writers.
-- `gograph/graph/lpg` — Labelled Property Graph model (vertex and
+- `github.com/FlavioCFOliveira/GoGraph/graph/lpg` — Labelled Property Graph model (vertex and
   edge labels, typed properties; `PropertyValue` covers string,
   int64, float64, bool, time.Time, []byte).
-- `gograph/graph/lpg/schema` — optional type schema with `Validate`.
-- `gograph/graph/index` — `Manager` coordinating named indexes and
+- `github.com/FlavioCFOliveira/GoGraph/graph/lpg/schema` — optional type schema with `Validate`.
+- `github.com/FlavioCFOliveira/GoGraph/graph/index` — `Manager` coordinating named indexes and
   fanning out `Change` events to subscribers.
-- `gograph/graph/index/label` — Roaring-bitmap inverted label index.
-- `gograph/graph/index/hash` — sharded hash exact-match property
+- `github.com/FlavioCFOliveira/GoGraph/graph/index/label` — Roaring-bitmap inverted label index.
+- `github.com/FlavioCFOliveira/GoGraph/graph/index/hash` — sharded hash exact-match property
   index.
-- `gograph/graph/index/btree` — order-preserving range property
+- `github.com/FlavioCFOliveira/GoGraph/graph/index/btree` — order-preserving range property
   index.
-- `gograph/graph/query` — fluent `MATCH`-style pattern engine.
-- `gograph/graph/io/csv` · `graph/io/graphml` · `graph/io/dot` ·
+- `github.com/FlavioCFOliveira/GoGraph/graph/query` — fluent `MATCH`-style pattern engine.
+- `github.com/FlavioCFOliveira/GoGraph/graph/io/csv` · `graph/io/graphml` · `graph/io/dot` ·
   `graph/io/jsonl` — interchange formats for CSV, GraphML, DOT,
   and JSON Lines.
-- `gograph/ds` — disjoint-set (union-find) primitive.
+- `github.com/FlavioCFOliveira/GoGraph/ds` — disjoint-set (union-find) primitive.
 
 ### Search and analytics (`search/`)
 
-- `gograph/search` — traversal and path-finding algorithms (BFS,
+- `github.com/FlavioCFOliveira/GoGraph/search` — traversal and path-finding algorithms (BFS,
   iterative DFS, Dijkstra, Bellman-Ford, A\*, bidirectional BFS,
   Yen k-shortest, topological sort (Kahn), Tarjan SCC, biconnected
   components, Eulerian path, APSP).
-- `gograph/search/centrality` — Brandes betweenness, PageRank,
+- `github.com/FlavioCFOliveira/GoGraph/search/centrality` — Brandes betweenness, PageRank,
   personalised PageRank.
-- `gograph/search/community` — Leiden, label propagation.
-- `gograph/search/flow` — Dinic, Edmonds-Karp, push-relabel,
+- `github.com/FlavioCFOliveira/GoGraph/search/community` — Leiden, label propagation.
+- `github.com/FlavioCFOliveira/GoGraph/search/flow` — Dinic, Edmonds-Karp, push-relabel,
   Stoer-Wagner, min-cost max-flow.
-- `gograph/search/extern` — semi-external BFS and PageRank over
+- `github.com/FlavioCFOliveira/GoGraph/search/extern` — semi-external BFS and PageRank over
   Tier 2 csrfile readers.
 
 ### Storage and persistence (`store/`)
 
-- `gograph/store/wal` — Write-Ahead Log with CRC32C framing.
-- `gograph/store/snapshot` — atomic on-disk snapshot directories.
-- `gograph/store/txn` — single-writer transactional API
+- `github.com/FlavioCFOliveira/GoGraph/store/wal` — Write-Ahead Log with CRC32C framing.
+- `github.com/FlavioCFOliveira/GoGraph/store/snapshot` — atomic on-disk snapshot directories.
+- `github.com/FlavioCFOliveira/GoGraph/store/txn` — single-writer transactional API
   (Begin/Commit/Rollback).
-- `gograph/store/checkpoint` — background WAL → snapshot folder.
-- `gograph/store/recovery` — snapshot + WAL replay on open.
-- `gograph/store/csrfile` — mmap-backed Tier 2 CSR file format,
+- `github.com/FlavioCFOliveira/GoGraph/store/checkpoint` — background WAL → snapshot folder.
+- `github.com/FlavioCFOliveira/GoGraph/store/recovery` — snapshot + WAL replay on open.
+- `github.com/FlavioCFOliveira/GoGraph/store/csrfile` — mmap-backed Tier 2 CSR file format,
   writer, reader, `Reinterpret` zero-copy helper, deterministic
   fixture generator.
-- `gograph/store/bulk` — high-throughput bulk loader bypassing
+- `github.com/FlavioCFOliveira/GoGraph/store/bulk` — high-throughput bulk loader bypassing
   the WAL.
 
 ### Cypher engine (`cypher/`)
 
-- `gograph/cypher` — openCypher-compatible parser, planner, and
+- `github.com/FlavioCFOliveira/GoGraph/cypher` — openCypher-compatible parser, planner, and
   execution engine; WAL-durable writes via `NewEngineWithStore`.
-- `gograph/cypher/parser` · `cypher/ast` · `cypher/sema` ·
+- `github.com/FlavioCFOliveira/GoGraph/cypher/parser` · `cypher/ast` · `cypher/sema` ·
   `cypher/ir` · `cypher/plan` · `cypher/exec` — parser-to-execution
   pipeline with plan-cache, EXPLAIN/PROFILE, and dbhits accounting.
-- `gograph/cypher/funcs` · `cypher/procs` — built-in functions and
+- `github.com/FlavioCFOliveira/GoGraph/cypher/funcs` · `cypher/procs` — built-in functions and
   procedures.
-- `gograph/cypher/tck` — openCypher TCK harness (parser 100 %,
+- `github.com/FlavioCFOliveira/GoGraph/cypher/tck` — openCypher TCK harness (parser 100 %,
   execution 100 % — 3 897/3 897 scenarios; see
   [docs/tck/DIVERGENCES.md](docs/tck/DIVERGENCES.md)).
 
 ### Bolt server (`bolt/`)
 
-- `gograph/bolt/proto` · `bolt/packstream` — Bolt v5 protocol and
+- `github.com/FlavioCFOliveira/GoGraph/bolt/proto` · `bolt/packstream` — Bolt v5 protocol and
   PackStream encoding (v5.0–v5.6 preferred; v4.4 fallback).
-- `gograph/bolt/server` — TCP server compatible with
+- `github.com/FlavioCFOliveira/GoGraph/bolt/server` — TCP server compatible with
   `neo4j-go-driver` v5 and `cypher-shell`, with TLS certificate
   hot-reload and graceful shutdown.
 
@@ -159,9 +159,9 @@ package main
 import (
 	"fmt"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 func main() {

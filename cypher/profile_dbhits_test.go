@@ -18,12 +18,12 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/exec"
-	"gograph/cypher/explain"
-	"gograph/cypher/expr"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/explain"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // nodeCountSource is an exec.Operator that emits exactly n rows,

@@ -11,11 +11,11 @@ import (
 	"context"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // newPropTestGraph builds a fresh *lpg.Graph[string, float64].

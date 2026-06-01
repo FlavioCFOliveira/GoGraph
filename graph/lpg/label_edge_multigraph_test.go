@@ -29,8 +29,8 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // TestLPG_EdgeLabel_ParallelDigon2 exercises the two-parallel-edge

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestAdjList_ConcurrentReads_ConsistentPrefix verifies the copy-on-write

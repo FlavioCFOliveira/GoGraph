@@ -29,9 +29,9 @@ import (
 	"fmt"
 	"strings"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

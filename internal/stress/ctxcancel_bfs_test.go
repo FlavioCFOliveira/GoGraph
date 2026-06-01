@@ -21,10 +21,10 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 // TestCtxCancel_BFS_MidRun builds a 10M-node path chain and cancels BFSCtx

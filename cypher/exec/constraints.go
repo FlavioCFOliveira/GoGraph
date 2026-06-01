@@ -37,9 +37,9 @@ import (
 	"sort"
 	"sync"
 
-	"gograph/cypher/expr"
-	"gograph/graph/index"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ConstraintKind distinguishes UNIQUE from NOT_NULL constraints.

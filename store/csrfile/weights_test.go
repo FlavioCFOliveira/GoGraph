@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestReader_WeightsRaw_Uint64 verifies that WeightsRaw exposes the

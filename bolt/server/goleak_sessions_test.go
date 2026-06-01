@@ -18,7 +18,7 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // TestGoleak_Sessions_AllTransitions starts a fresh bolt/server.Server, drives

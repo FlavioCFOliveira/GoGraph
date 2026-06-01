@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"sync"
 
-	"gograph/cypher/expr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // DefaultSlabCapacity is the default maximum number of rows a [RowSlab] holds

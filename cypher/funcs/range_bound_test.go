@@ -16,7 +16,7 @@ import (
 	"math"
 	"testing"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // callRange is a convenience wrapper that never fatals on error, so the

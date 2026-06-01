@@ -7,8 +7,8 @@ package ast_test
 import (
 	"fmt"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 )
 
 // ExamplePrint renders a parsed AST back to canonical Cypher source text.

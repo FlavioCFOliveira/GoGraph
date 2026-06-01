@@ -5,7 +5,7 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 func TestMain(m *testing.M) {

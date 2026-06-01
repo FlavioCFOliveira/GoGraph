@@ -23,8 +23,8 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // TestServe_RouteBeforeHello_Rejected verifies that a ROUTE sent in

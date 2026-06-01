@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 func TestPageRank_Star(t *testing.T) {

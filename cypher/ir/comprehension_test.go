@@ -6,8 +6,8 @@ package ir_test
 import (
 	"testing"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // buildComprehensionQuery builds a query that has a PatternComprehension as a

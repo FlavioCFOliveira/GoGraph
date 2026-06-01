@@ -8,7 +8,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // ExampleEncoder_WriteValue round-trips a heterogeneous list through the

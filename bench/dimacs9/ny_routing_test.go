@@ -22,9 +22,9 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/search"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 // TestNYRouting_DijkstraAStar verifies admissibility of the A* zero-heuristic

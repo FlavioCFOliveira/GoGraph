@@ -10,10 +10,10 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/parser"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

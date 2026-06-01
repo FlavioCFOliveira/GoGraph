@@ -5,9 +5,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // Example writes a CSR snapshot to an on-disk Tier 2 file and reads it

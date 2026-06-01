@@ -3,7 +3,7 @@ package flow
 import (
 	"context"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // EdmondsKarp computes the max-flow from src to sink in g using the

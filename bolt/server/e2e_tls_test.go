@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 
 	neo4jconfig "github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 

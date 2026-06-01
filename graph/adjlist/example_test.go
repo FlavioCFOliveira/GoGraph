@@ -3,7 +3,7 @@ package adjlist_test
 import (
 	"fmt"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // ExampleAdjList builds a small directed weighted graph and reads back

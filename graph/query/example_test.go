@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sort"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
-	"gograph/graph/query"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/query"
 )
 
 // buildSocialGraph returns a tiny labelled property graph and its CSR

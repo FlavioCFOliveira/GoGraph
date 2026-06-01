@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // TestIllegalTransitions_AllDocumentedPairs covers T689 AC1–AC3.

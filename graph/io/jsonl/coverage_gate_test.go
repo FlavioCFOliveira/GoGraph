@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // errAfterN is an io.Writer that returns errWriteFailed once a cumulative

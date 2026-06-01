@@ -26,12 +26,12 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
-	"gograph/bolt/server"
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestBoltSoak_60s runs a load test with concurrent connections.

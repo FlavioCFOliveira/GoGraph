@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // Example shows the core write-ahead-log loop: open a writer, append a

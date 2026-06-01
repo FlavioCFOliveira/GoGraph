@@ -15,8 +15,8 @@ import (
 	"io"
 	"strconv"
 
-	"gograph/graph/adjlist"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Options controls Reader / Writer behaviour.

@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/cypher/plan"
-	"gograph/graph"
-	"gograph/graph/index"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/plan"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // planFixture describes one regression scenario.

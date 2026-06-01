@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // FromAST converts a post-parse [ast.Query] into a [LogicalPlan] tree following

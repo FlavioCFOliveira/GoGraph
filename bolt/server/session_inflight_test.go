@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 // TestSession_InFlightCursorCap_DefaultRejectsSecondRunInTx confirms that a

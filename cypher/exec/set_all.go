@@ -35,10 +35,10 @@ import (
 	"fmt"
 	"strings"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
-	"gograph/graph/index"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // SetAllProperties replaces or merges every property on an already-bound node

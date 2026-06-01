@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/internal/testfs"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testfs"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestWriterFault_TornFrameAtByte128 is the AC#2 demo test for

@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/ir"
-	"gograph/cypher/sema"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 )
 
 func TestInferParamTypes_EqualityPredicate(t *testing.T) {

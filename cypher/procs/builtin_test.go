@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/procs"
-	"gograph/graph/index"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // newManagerWithLabel creates an index.Manager with a single label index

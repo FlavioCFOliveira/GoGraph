@@ -6,8 +6,8 @@ import (
 	"io"
 	"strconv"
 
-	"gograph/graph/adjlist"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Write streams every edge of a in src,dst,weight order to w.

@@ -11,8 +11,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestBidirectionalDijkstra_DeterministicGraph verifies that

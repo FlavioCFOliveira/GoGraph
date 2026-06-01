@@ -3,9 +3,9 @@ package search
 import (
 	"context"
 
-	"gograph/ds"
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/ds"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // WCC computes the weakly-connected components of c — equivalence

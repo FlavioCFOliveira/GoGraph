@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ExampleMapper shows the core contract of a Mapper: arbitrary

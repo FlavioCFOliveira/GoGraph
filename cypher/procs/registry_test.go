@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
 )
 
 // stubImpl is a no-op procedure implementation used across tests.

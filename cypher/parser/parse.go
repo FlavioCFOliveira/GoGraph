@@ -5,8 +5,8 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/parser/gen"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen"
 )
 
 // maxParseErrors is the maximum number of syntax errors collected per parse.

@@ -16,7 +16,7 @@ package expr
 //   - Comprehension: if the source is NULL, return an empty list (openCypher
 //     semantics: iterating over NULL yields no rows).
 
-import "gograph/cypher/ast"
+import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 
 // evalSlice evaluates a [ast.SliceExpr]: expr[from..to].
 //

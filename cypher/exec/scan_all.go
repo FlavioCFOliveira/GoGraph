@@ -22,8 +22,8 @@ import (
 	"context"
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // nodeWalker is the minimal interface that AllNodesScan requires from the

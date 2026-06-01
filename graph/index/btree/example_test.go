@@ -3,8 +3,8 @@ package btree_test
 import (
 	"fmt"
 
-	"gograph/graph"
-	"gograph/graph/index/btree"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
 )
 
 // ExampleIndex shows an order-preserving property index keyed by an

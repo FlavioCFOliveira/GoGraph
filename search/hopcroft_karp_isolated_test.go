@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestHopcroftKarp_Isolated_RightSide builds a bipartite graph with

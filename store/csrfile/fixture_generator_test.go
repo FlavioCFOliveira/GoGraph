@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 )
 
 func init() {

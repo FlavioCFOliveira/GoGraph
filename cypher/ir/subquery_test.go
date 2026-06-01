@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // TestSubqueryExists_BasicConstruction asserts the constructor seeds an

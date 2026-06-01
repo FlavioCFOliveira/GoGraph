@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"gograph/bolt/proto"
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // newTwoNodeEngine builds a Cypher engine backed by a graph with two nodes so

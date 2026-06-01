@@ -7,8 +7,8 @@ package funcs_test
 import (
 	"fmt"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // ExampleRegistry_Resolve resolves the built-in toUpper from DefaultRegistry

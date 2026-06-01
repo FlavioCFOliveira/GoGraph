@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/index/hash"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // personAgeEntry holds test data for a single Person node.

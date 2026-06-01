@@ -1,12 +1,12 @@
 // Package parser translates the antlr4-generated parse tree into the typed AST
-// defined in gograph/cypher/ast.
+// defined in github.com/FlavioCFOliveira/GoGraph/cypher/ast.
 package parser
 
 import (
 	"fmt"
 	"strings"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // SemaError is returned by the visitor when a parse-tree node corresponds to a

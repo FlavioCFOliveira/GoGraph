@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search"
-	"gograph/search/community"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
+	"github.com/FlavioCFOliveira/GoGraph/search/community"
 )
 
 // TestFraudDetection_KHopTriangleLeiden builds a 20-node "transaction"

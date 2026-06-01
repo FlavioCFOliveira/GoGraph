@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestReadIntoCtx_ContextCancelled covers the ctx.Err() path in ReadIntoCtx.

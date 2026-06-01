@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/tck"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/tck"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestDDLProcScenarios runs each DDLScenario through the execution engine and

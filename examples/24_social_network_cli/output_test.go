@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher/expr"
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // TestWriteRecord_AlphabeticalOrder verifies that keys are emitted in

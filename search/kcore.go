@@ -3,8 +3,8 @@ package search
 import (
 	"context"
 
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // KCore computes the coreness number of every vertex in c via the

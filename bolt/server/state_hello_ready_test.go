@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"gograph/bolt/proto"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 
-	"gograph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
 )
 
 // TestHelloReady_BothOutcomes covers T662 AC1–AC3:

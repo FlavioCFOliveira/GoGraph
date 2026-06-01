@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 func TestPropertyValue_Kinds(t *testing.T) {

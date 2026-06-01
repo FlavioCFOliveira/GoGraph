@@ -18,8 +18,8 @@ package procs
 import (
 	"context"
 
-	"gograph/cypher/expr"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // RegisterBuiltins registers all built-in db.* procedures into reg.

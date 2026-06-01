@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestWrite_QuoteWithDoubleQuote covers the '\' branch in quote().

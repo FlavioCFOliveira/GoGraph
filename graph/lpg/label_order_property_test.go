@@ -8,8 +8,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // labelAlphabet is the fixed set of label names used for the

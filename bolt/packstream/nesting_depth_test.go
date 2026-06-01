@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // markerTinyList1 is the PackStream TinyList-of-one-element marker (0x9X with

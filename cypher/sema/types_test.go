@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/sema"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ import (
 //
 // PackStream sizes Bytes/String payloads and List/Map/Struct collections with
 // a length prefix that is up to a uint32 (~4.29e9). The 16 MiB message cap in
-// [gograph/bolt/proto.ChunkedReader] bounds the bytes a client may send, but
+// [github.com/FlavioCFOliveira/GoGraph/bolt/proto.ChunkedReader] bounds the bytes a client may send, but
 // it does NOT bound the allocation those bytes can *request*: a 5-byte frame
 // such as 0xCE 0xFF 0xFF 0xFF 0xFF claims a ~4.29 GB Bytes payload, and a
 // 5-byte List32 header claims billions of 16-byte interface slots (~64 GB).

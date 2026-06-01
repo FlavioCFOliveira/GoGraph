@@ -10,7 +10,7 @@
 //
 // The recursive descent through the 2x2 probability matrix is
 // shared with the catalogue generator at
-// [gograph/internal/shapegen.RMAT] via [shapegen.RMATPick]: both
+// [github.com/FlavioCFOliveira/GoGraph/internal/shapegen.RMAT] via [shapegen.RMATPick]: both
 // callers run the exact same Graph500 quadrant split (A iff
 // v < a, B iff a <= v < a+b, C iff a+b <= v < a+b+c, D otherwise)
 // in integer-percent arithmetic. The previous bench/rmat
@@ -25,8 +25,8 @@ import (
 	"math"
 	"math/rand/v2"
 
-	"gograph/internal/shapegen"
-	"gograph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
 )
 
 // Spec configures a [Generate] run.

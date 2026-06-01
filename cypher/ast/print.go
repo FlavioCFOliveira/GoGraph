@@ -19,7 +19,7 @@ import (
 //   - Single-space token separators
 //   - Explicit parentheses around every binary and unary operator
 //
-// Round-trip guarantee: for any Cypher query Q that [gograph/cypher/parser.Parse]
+// Round-trip guarantee: for any Cypher query Q that [github.com/FlavioCFOliveira/GoGraph/cypher/parser.Parse]
 // accepts, Parse(Print(Parse(Q))) produces an AST that is structurally equal to
 // Parse(Q) when Position fields are ignored.
 func Print(q Query) string {

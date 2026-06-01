@@ -5,8 +5,8 @@ import (
 	"errors"
 	"math"
 
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // ErrInvalidInput is returned by centrality algorithms when their

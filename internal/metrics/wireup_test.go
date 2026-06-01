@@ -8,16 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/io/csv"
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
-	"gograph/search"
-	"gograph/search/centrality"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/search"
+	"github.com/FlavioCFOliveira/GoGraph/search/centrality"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // newSmokeGraph returns a fresh lpg.Graph for the store.txn smoke

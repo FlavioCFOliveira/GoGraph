@@ -3,7 +3,7 @@ package recovery
 import (
 	"testing"
 
-	"gograph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
 // TestRecovery_EmptyDir exercises [Open] on an empty directory across

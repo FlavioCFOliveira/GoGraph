@@ -8,12 +8,12 @@ import (
 	"reflect"
 	"testing"
 
-	"gograph/bench/ldbc"
-	"gograph/graph"
-	"gograph/internal/testlayers"
-	"gograph/search"
-	"gograph/store/bulk"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/bench/ldbc"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/search"
+	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // TestBFS_LDBCSf10_Soak verifies extern.BFS against in-memory

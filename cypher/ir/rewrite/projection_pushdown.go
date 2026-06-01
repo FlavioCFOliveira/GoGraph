@@ -1,7 +1,7 @@
 package rewrite
 
 import (
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // ProjectionPushdown removes Projection operators whose output columns are not

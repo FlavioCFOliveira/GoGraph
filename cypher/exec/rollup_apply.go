@@ -26,7 +26,7 @@ package exec
 import (
 	"context"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // RollUpApply is a Volcano pipeline operator that performs pattern-comprehension

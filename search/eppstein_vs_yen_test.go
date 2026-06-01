@@ -32,8 +32,8 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 //nolint:staticcheck // intentional exercise of the deprecated EppsteinKShortest alias

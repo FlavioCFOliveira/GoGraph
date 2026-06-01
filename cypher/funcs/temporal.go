@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // registerTemporal wires every temporal constructor and projection into r.

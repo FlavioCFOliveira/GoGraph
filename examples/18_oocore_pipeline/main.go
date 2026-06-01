@@ -20,11 +20,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/graph/io/csv"
-	"gograph/search/extern"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
+	"github.com/FlavioCFOliveira/GoGraph/search/extern"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 func main() {

@@ -14,17 +14,17 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/index"
-	"gograph/graph/index/btree"
-	"gograph/graph/index/hash"
-	"gograph/graph/index/label"
-	"gograph/graph/lpg"
-	"gograph/store/snapshot"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // frameBoundaries scans a WAL file and returns the byte offsets of

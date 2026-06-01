@@ -9,8 +9,8 @@ import (
 	"io"
 	"os"
 
-	"gograph/graph"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)

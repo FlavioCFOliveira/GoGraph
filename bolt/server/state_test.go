@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"gograph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
 func TestTransition(t *testing.T) {

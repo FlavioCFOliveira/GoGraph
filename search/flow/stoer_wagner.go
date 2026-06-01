@@ -3,7 +3,7 @@ package flow
 import (
 	"context"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // MinCutResult is the output of [StoerWagner].

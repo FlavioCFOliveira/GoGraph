@@ -19,8 +19,8 @@ package csr
 import (
 	"iter"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // CSR is an immutable compressed-sparse-row adjacency snapshot.

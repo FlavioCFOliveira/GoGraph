@@ -26,7 +26,7 @@ import (
 	"context"
 	"fmt"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // ProjectionItem describes a single column in a projection.  Eval is evaluated

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/internal/testlayers"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestCheckpoint_Soak_SustainedWrites exercises the Checkpointer under

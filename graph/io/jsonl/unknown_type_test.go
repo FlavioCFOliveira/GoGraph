@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/jsonl"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
 )
 
 // TestJSONL_UnknownRecordType confirms the public error contract for

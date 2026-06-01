@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestSchema_TypeMismatch verifies that schema.Validate returns an error

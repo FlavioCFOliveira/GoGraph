@@ -3,7 +3,7 @@ package plan_test
 import (
 	"testing"
 
-	"gograph/cypher/plan"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/plan"
 )
 
 // expandEstimator is a configurable Estimator for expand-direction tests.

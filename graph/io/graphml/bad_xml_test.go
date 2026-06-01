@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/io/graphml"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/graphml"
 )
 
 // TestGraphMLRead_BadXML verifies that malformed and edge-case inputs

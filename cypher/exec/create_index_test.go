@@ -6,8 +6,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/cypher/exec"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 func TestCreateIndexOp_Hash_CreatesIndex(t *testing.T) {

@@ -3,7 +3,7 @@ package cypher
 import (
 	"time"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // nowAwareRegistry wraps an [expr.FunctionRegistry] and overrides the

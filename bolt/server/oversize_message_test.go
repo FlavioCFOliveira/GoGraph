@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"gograph/bolt/proto"
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // writeRawChunkedMessage writes payload as a Bolt chunked message directly onto

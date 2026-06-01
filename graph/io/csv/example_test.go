@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/csv"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
 )
 
 // ExampleReadInto parses a CSV edge list (src,dst[,weight] per row,

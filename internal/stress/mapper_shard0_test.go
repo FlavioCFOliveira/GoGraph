@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"gograph/graph"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 func TestMapperShard0_Storm(t *testing.T) {

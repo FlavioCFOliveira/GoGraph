@@ -1,6 +1,6 @@
 package main
 
-import "gograph/graph/adjlist"
+import "github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 
 // lpgConfig returns the adjacency-list configuration shared by every
 // subcommand. The social-network model is directional throughout —

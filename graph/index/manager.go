@@ -14,7 +14,7 @@ import (
 	"io"
 	"sync"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ErrIndexExists is returned by [Manager.CreateIndex] when the name

@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"gograph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
 )
 
 // cmdStats counts nodes by label and edges by relationship type and

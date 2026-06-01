@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // param_type.go — parameter type inference and runtime binding validation.

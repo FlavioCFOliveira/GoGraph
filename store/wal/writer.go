@@ -10,8 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gograph/internal/crashpoint"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // ErrWriterClosed is returned by methods on a [Writer] that has

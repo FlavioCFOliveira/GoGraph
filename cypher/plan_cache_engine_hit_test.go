@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	cmetrics "gograph/internal/metrics"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // cacheProbe is a metrics.Backend that records plan-cache hits, misses

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"gograph/graph"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // adversarial.go provides deterministic generators for "adversarial"

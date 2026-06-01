@@ -4,7 +4,7 @@ import (
 	"crypto/tls"
 	"testing"
 
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // aeadECDHESuites is the set of cipher-suite IDs DefaultTLSConfig is permitted

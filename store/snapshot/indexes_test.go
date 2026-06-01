@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/index"
-	"gograph/graph/index/btree"
-	"gograph/graph/index/hash"
-	"gograph/graph/index/label"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // seededFixture bundles the graph, the manager, and the three

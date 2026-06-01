@@ -8,8 +8,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/internal/crashinject"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashinject"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 func TestMain(m *testing.M) {

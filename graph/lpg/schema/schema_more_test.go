@@ -3,7 +3,7 @@ package schema
 import (
 	"testing"
 
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestSchema_PropertyKind covers the introspection helper that

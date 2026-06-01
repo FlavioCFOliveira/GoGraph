@@ -131,7 +131,7 @@ Before writing a single line of code for any non-trivial component, conduct a **
   - `soak` — minutes-long workloads. Activated by the `soak` build tag or by setting `SOAK_FULL=1`. The pre-existing `stress` and `soakfull` build tags are considered part of the soak family.
   - `nightly` — hours-long workloads. Activated by the `nightly` build tag or by setting `GOGRAPH_NIGHTLY=1`; implies soak.
 
-  Prefer compile-time gating with a `//go:build soak` or `//go:build nightly` header on a dedicated file; when that is impractical, call `gograph/internal/testlayers.RequireSoak(t)` or `RequireNightly(t)` at the top of the test body. The full specification, including sample invocations and the helpers' API, lives in [`docs/test-layers.md`](docs/test-layers.md).
+  Prefer compile-time gating with a `//go:build soak` or `//go:build nightly` header on a dedicated file; when that is impractical, call `github.com/FlavioCFOliveira/GoGraph/internal/testlayers.RequireSoak(t)` or `RequireNightly(t)` at the top of the test body. The full specification, including sample invocations and the helpers' API, lives in [`docs/test-layers.md`](docs/test-layers.md).
 
   The production-readiness test battery — shape generators, invariant checkers, fault-injection packages, dataset loaders, and the add-new-shape recipe — is documented in [`docs/test-battery.md`](docs/test-battery.md).
 
@@ -209,7 +209,7 @@ The following sub-agents are available and **must be actively consulted** to max
 
 ```bash
 # Initialise the module (first time only)
-go mod init github.com/xumiga/gograph
+go mod init github.com/FlavioCFOliveira/GoGraph
 
 # Build
 go build ./...

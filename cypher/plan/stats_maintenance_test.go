@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/cypher/plan"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/plan"
 )
 
 // TestStatsManager_FreshAfterMark verifies that a new manager is fresh

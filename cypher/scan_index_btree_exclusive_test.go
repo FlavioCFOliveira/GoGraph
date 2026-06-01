@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // citiesExclusiveRange runs the exclusive range query (> lo AND < hi) and

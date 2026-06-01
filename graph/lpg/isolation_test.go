@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestIsolation_CrossSubstructure_EdgeImpliesLabels proves the barrier flips a

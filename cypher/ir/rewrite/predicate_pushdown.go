@@ -3,7 +3,7 @@ package rewrite
 import (
 	"strings"
 
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // PredicatePushdown pushes Selection predicates down the plan tree toward the

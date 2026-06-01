@@ -7,11 +7,11 @@ import (
 	"runtime"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/index"
-	"gograph/graph/index/btree"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestSnapshotFiles_Mode0600 writes a full snapshot — CSR, manifest,

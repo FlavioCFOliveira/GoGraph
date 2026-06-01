@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // BenchmarkWriteGraphML_1M measures the GraphML writer on a 1M-node

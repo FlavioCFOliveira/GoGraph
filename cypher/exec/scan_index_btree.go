@@ -26,7 +26,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // rangeLookup is the minimal interface that NodeByIndexRangeScan requires.

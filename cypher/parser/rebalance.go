@@ -1,7 +1,7 @@
 package parser
 
 import (
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // liftListPredicate reshapes a freshly-constructed arithmetic BinaryOp to

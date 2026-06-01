@@ -16,8 +16,8 @@ package ir_test
 import (
 	"testing"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

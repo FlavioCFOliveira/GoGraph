@@ -14,9 +14,9 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // TestProperty_BFSHops_LEQ_DijkstraDistance asserts that BFS hop

@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/expr"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestParsePropValue_ListLiterals verifies that parsePropValue correctly handles

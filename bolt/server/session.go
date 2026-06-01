@@ -9,10 +9,10 @@ import (
 	"log/slog"
 	"time"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
-	"gograph/cypher"
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // serverAgent is the agent string advertised in SUCCESS metadata after HELLO.

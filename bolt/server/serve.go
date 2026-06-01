@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
-	"gograph/cypher"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 const (

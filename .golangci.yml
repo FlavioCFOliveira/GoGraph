@@ -267,7 +267,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - gograph
+        - github.com/FlavioCFOliveira/GoGraph
 
 issues:
   max-issues-per-linter: 0

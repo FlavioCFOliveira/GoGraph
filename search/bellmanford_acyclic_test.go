@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 // TestBellmanFord_AcyclicNegWeights runs BellmanFord on DAGs with

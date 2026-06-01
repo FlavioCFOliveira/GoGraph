@@ -4,8 +4,8 @@ import (
 	"context"
 	"sort"
 
-	"gograph/graph/csr"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // LabelPropagationOptions configures [LabelPropagation].

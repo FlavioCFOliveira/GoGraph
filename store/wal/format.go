@@ -14,7 +14,7 @@ import (
 	"hash/crc32"
 	"io"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Magic is the 4-byte identifier prefix of every WAL frame: ASCII

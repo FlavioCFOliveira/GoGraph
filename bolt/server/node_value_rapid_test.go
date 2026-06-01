@@ -23,8 +23,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/bolt/packstream"
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // genNodeValue returns a rapid generator that produces random expr.NodeValue

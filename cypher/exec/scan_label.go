@@ -23,8 +23,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
-	"gograph/cypher/expr"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // labelResolver resolves a string label name to a bitmap of matching NodeIDs.

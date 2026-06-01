@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"fmt"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/graphml"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/graphml"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ExampleWrite shows a GraphML round-trip: marshal a directed, weighted

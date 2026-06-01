@@ -22,9 +22,9 @@ import (
 	"log"
 	"os"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search/community"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search/community"
 )
 
 func main() {

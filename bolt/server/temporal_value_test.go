@@ -40,7 +40,7 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 const msgTemporalNotImplemented = "Temporal expr.Value types " +

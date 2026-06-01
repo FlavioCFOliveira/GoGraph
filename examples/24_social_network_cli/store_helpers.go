@@ -9,13 +9,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"gograph/cypher"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
-	"gograph/store/recovery"
-	"gograph/store/snapshot"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // dataDirPaths returns the canonical WAL and snapshot paths inside dir.

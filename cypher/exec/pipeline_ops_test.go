@@ -12,9 +12,9 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
-	"gograph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

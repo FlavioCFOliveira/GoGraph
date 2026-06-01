@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gograph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // ErrDrainTimeout is returned by [Publisher.PublishWithDrain] when

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // generateSelfSigned creates an ephemeral ECDSA self-signed TLS certificate

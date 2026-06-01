@@ -59,7 +59,7 @@ For the three-layer test discipline and CI integration, see
 
 ## The Shape interface and `internal/shapegen`
 
-Package: `gograph/internal/shapegen`
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/shapegen`
 
 Every graph shape is represented by the `Shape` interface, which is
 generic on the node type `N` and the edge weight type `W` so it can
@@ -157,7 +157,7 @@ is fetched from the SURF cold-storage mirror; HTTP 409 is surfaced as
 
 ## Invariant checkers (`internal/invariants`)
 
-Package: `gograph/internal/invariants`
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/invariants`
 
 | Function | What it checks | Counter-example on failure |
 |---|---|---|
@@ -180,7 +180,7 @@ BFS from `src` and returns `map[graph.NodeID]int` for use with
 
 ### `internal/testfs`
 
-Package: `gograph/internal/testfs`
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/testfs`
 
 `FaultFile` wraps `*os.File` with configurable fault injection. It
 implements the `File` interface accepted by `store/wal.OpenWith` and
@@ -208,7 +208,7 @@ runner.
 
 #### `internal/crashpoint`
 
-Package: `gograph/internal/crashpoint`
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/crashpoint`
 
 The production-callable half. It holds the `Breakpoint` hook and the two
 environment-variable constants (`EnvCrashAt` = `GOGRAPH_CRASH_AT`,
@@ -228,7 +228,7 @@ abrupt crash at that exact execution point.
 
 #### `internal/crashinject`
 
-Package: `gograph/internal/crashinject`
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/crashinject`
 
 The subprocess crash harness. It re-exports `Breakpoint`, `EnvCrashAt`,
 and `EnvCrashDir` from `crashpoint` so existing call sites keep working,
@@ -256,7 +256,7 @@ deterministically torn state for the parent to inspect.
 
 ### `internal/subproc`
 
-Package: `gograph/internal/subproc`
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/subproc`
 
 TestMain-pattern subprocess helper for deterministic cross-process tests.
 
@@ -277,7 +277,7 @@ out, _, err := subproc.Run(t, "open-snapshot", snapshotPath)
 
 ## Golden-file helper (`internal/goldens`)
 
-Package: `gograph/internal/goldens`
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/goldens`
 
 ```go
 goldens.Assert(t, "testdata/output.golden", got)
@@ -368,7 +368,7 @@ Then commit `internal/shapegen/testdata/<family>.golden`.
 If the family has a known topological property, assert it:
 
 ```go
-import "gograph/internal/invariants"
+import "github.com/FlavioCFOliveira/GoGraph/internal/invariants"
 
 invariants.AssertConnected(t, g)     // connected families
 invariants.AssertDAG(t, g)           // DAG families

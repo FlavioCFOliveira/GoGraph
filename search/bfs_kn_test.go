@@ -9,9 +9,9 @@ package search
 import (
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/csr"
-	"gograph/internal/shapegen"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
 func TestBFS_CompleteGraph_AllAtDepthOne(t *testing.T) {

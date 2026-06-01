@@ -17,7 +17,7 @@ import (
 	"io"
 	"time"
 
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // ManifestVersion is the highest on-disk schema version this build

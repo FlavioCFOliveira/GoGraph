@@ -1,6 +1,6 @@
 package cypher_test
 
-// api_coverage_test.go — targeted tests to lift gograph/cypher above ≥75%
+// api_coverage_test.go — targeted tests to lift github.com/FlavioCFOliveira/GoGraph/cypher above ≥75%
 // statement coverage.
 //
 // Covers: BindParams all numeric/list/map/error paths, RunAny, RunInTxAny,
@@ -11,9 +11,9 @@ import (
 	"context"
 	"testing"
 
-	"gograph/cypher"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

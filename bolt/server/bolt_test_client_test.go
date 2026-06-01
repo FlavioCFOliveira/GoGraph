@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"gograph/bolt/packstream"
-	"gograph/bolt/proto"
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // boltTestClient wraps the low-level Bolt wire protocol for test convenience.

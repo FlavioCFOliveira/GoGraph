@@ -3,7 +3,7 @@
 **Date:** 2026-05-20  
 **Corpus:** openCypher TCK — opencypher/openCypher@main  
 **Grammar:** antlr/grammars-v4, commit 284602b (BSD-3)  
-**Runner:** `gograph/cypher/tck`, test `TestTCKParserOnly`
+**Runner:** `github.com/FlavioCFOliveira/GoGraph/cypher/tck`, test `TestTCKParserOnly`
 
 ---
 

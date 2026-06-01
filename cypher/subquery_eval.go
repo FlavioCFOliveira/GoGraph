@@ -42,12 +42,12 @@ import (
 	"context"
 	"fmt"
 
-	"gograph/cypher/ast"
-	"gograph/cypher/exec"
-	"gograph/cypher/expr"
-	"gograph/cypher/ir"
-	"gograph/graph"
-	lpg "gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	lpg "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // subqueryEvaluator implements [expr.SubqueryEvaluator] by compiling each

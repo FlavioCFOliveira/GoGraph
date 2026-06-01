@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // buildPropertySelection wraps child with Selection operator(s) for inline node

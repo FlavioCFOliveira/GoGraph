@@ -1,5 +1,5 @@
 // Package parser translates the ANTLR4-generated Cypher parse tree into the
-// typed AST defined in gograph/cypher/ast. The generated sources (under
+// typed AST defined in github.com/FlavioCFOliveira/GoGraph/cypher/ast. The generated sources (under
 // cypher/parser/gen/) are produced by the ANTLR4 tool and must not be
 // hand-edited.
 //

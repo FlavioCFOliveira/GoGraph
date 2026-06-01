@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // aggregation.go — aggregate-function detection for RETURN / WITH projections.

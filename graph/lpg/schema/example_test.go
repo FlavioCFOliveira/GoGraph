@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/graph/lpg"
-	"gograph/graph/lpg/schema"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg/schema"
 )
 
 // ExampleSchema declares property typing and a per-label requirement,

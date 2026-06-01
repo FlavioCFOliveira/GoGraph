@@ -7,11 +7,11 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/store/recovery"
-	"gograph/store/txn"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestCheckpoint_CrashMidSimulation models a crash that occurs after

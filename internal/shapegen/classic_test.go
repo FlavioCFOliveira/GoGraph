@@ -10,9 +10,9 @@ import (
 
 	"pgregory.net/rapid"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // classicGoldenDir is the directory holding the classic-family

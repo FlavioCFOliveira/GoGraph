@@ -10,9 +10,9 @@ import (
 
 	"go.uber.org/goleak"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/io/jsonl"
-	"gograph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // TestJSONL_Stream100MB_Bounded writes a 500 000-node path graph to a

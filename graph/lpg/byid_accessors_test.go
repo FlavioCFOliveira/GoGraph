@@ -5,8 +5,8 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // TestNodePropertiesByID_MatchesByKey verifies that the NodeID-keyed property

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // ---------------------------------------------------------------------------

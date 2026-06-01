@@ -16,8 +16,8 @@ import (
 	"os"
 	"strings"
 
-	"gograph/graph/io/dot"
-	"gograph/graph/io/graphml"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/dot"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/graphml"
 )
 
 func main() {

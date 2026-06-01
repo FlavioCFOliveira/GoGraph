@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"gograph/bolt/proto"
-	"gograph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
 // createNodeTx creates a node inside an explicit transaction using

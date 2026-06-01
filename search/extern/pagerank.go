@@ -5,9 +5,9 @@ import (
 	"errors"
 	"math"
 
-	"gograph/graph"
-	"gograph/internal/metrics"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // ErrInvalidInput is returned by extern algorithms when their float

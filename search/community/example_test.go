@@ -3,9 +3,9 @@ package community_test
 import (
 	"fmt"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search/community"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search/community"
 )
 
 // buildTwoTriangles returns an undirected CSR of two triangles

@@ -8,9 +8,9 @@ import (
 	"hash/crc32"
 	"io"
 
-	"gograph/graph"
-	"gograph/graph/lpg"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // LabelsFile is the conventional file name carrying the durable LPG

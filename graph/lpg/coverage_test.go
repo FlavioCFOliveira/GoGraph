@@ -3,9 +3,9 @@ package lpg_test
 import (
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/index"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestGraph_EdgeLabels_Coverage covers EdgeLabels including the nil paths.

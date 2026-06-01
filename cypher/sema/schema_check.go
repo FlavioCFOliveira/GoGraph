@@ -3,9 +3,9 @@ package sema
 import (
 	"fmt"
 
-	"gograph/cypher/ast"
-	"gograph/graph/lpg"
-	"gograph/graph/lpg/schema"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg/schema"
 )
 
 // SchemaError is reported by [CheckSchema] when a property access is

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

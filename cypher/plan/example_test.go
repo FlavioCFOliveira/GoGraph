@@ -7,7 +7,7 @@ package plan_test
 import (
 	"fmt"
 
-	"gograph/cypher/plan"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/plan"
 )
 
 // ExampleCacheKey computes a stable plan-cache key for a query and its

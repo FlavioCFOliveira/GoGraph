@@ -8,7 +8,7 @@ import (
 	"context"
 	"testing"
 
-	"gograph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
 
 // fakeSubEval is a deterministic SubqueryEvaluator stand-in. EXISTS yields a

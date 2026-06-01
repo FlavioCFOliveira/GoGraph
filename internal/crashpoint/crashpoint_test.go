@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"gograph/internal/crashpoint"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 )
 
 // TestBreakpoint_NoOp verifies that Breakpoint is a no-op when

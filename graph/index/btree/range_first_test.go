@@ -3,7 +3,7 @@ package btree
 import (
 	"testing"
 
-	"gograph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // TestIndex_RangeFirst covers the documented branches of RangeFirst:

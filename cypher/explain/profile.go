@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"gograph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -14,8 +14,8 @@ import (
 
 	"github.com/cucumber/godog"
 
-	"gograph/cypher/expr"
-	"gograph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
 )
 
 // parsedProc binds a [procs.Signature] to the column names of the

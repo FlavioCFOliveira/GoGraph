@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"gograph/graph"
-	"gograph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // TestIndexes_HashSerializeRoundtrip seeds an Index[string] with a

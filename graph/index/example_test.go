@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 
-	"gograph/graph"
-	"gograph/graph/index"
-	"gograph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 )
 
 // ExampleManager shows the Manager lifecycle: register a concrete index

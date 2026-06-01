@@ -4,9 +4,9 @@ import (
 	"sort"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 func setupSocialGraph(tb testing.TB) (*lpg.Graph[string, int64], *csr.CSR[int64]) {

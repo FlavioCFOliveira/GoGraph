@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph/adjlist"
-	"gograph/graph/lpg"
-	"gograph/store/wal"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 func openStore(t *testing.T) (store *Store[string, int64], walPath string, cleanup func()) {

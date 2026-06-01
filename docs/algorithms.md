@@ -1,7 +1,7 @@
 # Advanced Algorithms
 
 This document indexes every analytical algorithm shipped in
-`gograph/search` and its subpackages, with a one-line summary,
+`github.com/FlavioCFOliveira/GoGraph/search` and its subpackages, with a one-line summary,
 complexity bound, and pointer to the implementing file. Every
 algorithm has unit tests under the same package.
 

@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 var _ = io.Discard

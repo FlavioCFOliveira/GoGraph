@@ -25,11 +25,11 @@ import (
 	"log"
 	"os"
 
-	"gograph/graph"
-	"gograph/graph/adjlist"
-	"gograph/graph/csr"
-	"gograph/search"
-	"gograph/search/flow"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
+	"github.com/FlavioCFOliveira/GoGraph/search/flow"
 )
 
 // link is one undirected backbone connection between two sites with a

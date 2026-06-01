@@ -9,9 +9,9 @@ import (
 	"context"
 	"slices"
 
-	"gograph/graph"
-	"gograph/internal/metrics"
-	"gograph/store/csrfile"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // BFS performs breadth-first traversal of the graph captured by r,

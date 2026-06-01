@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"gograph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 func TestLabelRegistry(t *testing.T) {

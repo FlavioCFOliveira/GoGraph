@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"gograph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

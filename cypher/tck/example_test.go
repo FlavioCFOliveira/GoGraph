@@ -8,8 +8,8 @@ package tck_test
 import (
 	"fmt"
 
-	"gograph/cypher/parser"
-	"gograph/cypher/tck"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/tck"
 )
 
 // ExampleLoadScenarios loads the embedded TCK corpus and inspects one
