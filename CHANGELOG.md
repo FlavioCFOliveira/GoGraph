@@ -8,6 +8,185 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 Nothing yet.
 
+## [3.0.0] — 2026-06-01
+
+The third major release. v3.0.0 is a **security-hardening and
+distribution** release: it lands a complete, proof-of-concept-confirmed
+remediation of a 20-finding security audit (2 Critical, 7 High, 1 Medium,
+4 Low, 6 Info) and adopts the conventional URL-based Go module path so the
+library can be consumed with `go get`. Both compliance invariants were held
+throughout — the openCypher TCK execution gate stayed at **3 897/3 897**
+(16 006/16 006 steps) and every ACID property was preserved on every change.
+
+This release contains **two breaking changes**: the Go module import path
+changed, and `bolt/server.NewServer` now returns an `error` and fails closed
+when no authentication handler is configured. Both are covered, with
+copy-pasteable before/after snippets, in the
+[2.x → 3.x migration guide](docs/migration-2-to-3.md). The full narrative,
+the per-severity finding table, and the validation evidence are in
+[release-notes/v3.0.0.md](release-notes/v3.0.0.md).
+
+### Changed (breaking)
+
+- **Module import path** — the Go module path changed from `gograph` to
+  **`github.com/FlavioCFOliveira/GoGraph`** (#1239). Every external and
+  internal importer must rewrite `import "gograph/..."` to
+  `import "github.com/FlavioCFOliveira/GoGraph/..."`. This adopts the
+  conventional URL-based path that matches the GitHub repository, enabling
+  `go get` and external import. **Unchanged on purpose:** the `gograph`
+  package identifier, the `gograph-*` cache-directory names, the `rmp`
+  roadmap name, and the frozen historical benchmark captures. No
+  `/v3` major-version path suffix is added — the import base stays
+  `github.com/FlavioCFOliveira/GoGraph` (matching the v2.0.0 precedent).
+- **`bolt/server.NewServer` signature** — was
+  `func NewServer(eng, opts) *Server`; now
+  `func NewServer(eng, opts) (*Server, error)` (#1223, finding L1). A nil
+  `Options.Auth` previously installed `NoAuthHandler` silently, so an
+  `Options{}` shipped a fully open server. `NewServer` now **fails closed**:
+  a nil `Auth` returns the new `ErrNoAuthHandler` sentinel. To run without
+  authentication (development or testing) set `Auth: NoAuthHandler{}`
+  explicitly — the explicit value is itself the opt-in and still logs the
+  insecure-default warning. All in-tree callers (examples, tests, bench)
+  were updated.
+
+### Security
+
+The 2026 security audit identified 20 findings; all 20 are fixed in v3.0.0,
+each confirmed with a proof of concept and each landed without lowering the
+TCK count or weakening an ACID property.
+
+- **C1 (Critical)** — `bolt/packstream`: `Decoder.ReadValue` recursed one
+  stack frame per nesting level with no bound, so a single pre-auth `HELLO`
+  frame of repeated `0x91` markers triggered a fatal stack-overflow that
+  killed the process. Bounded to `maxValueDepth = 128` with the
+  `ErrNestingTooDeep` sentinel across all three recursive arms (#1218).
+- **C2 (Critical)** — `cypher/parser`: the AST visitor recursed one frame
+  per nesting level with no bound; a ~300 KB query of nested brackets
+  triggered a fatal stack-overflow reachable from `Engine.Run` and Bolt
+  `RunInTxAny`. `guardInput()` now runs first in `Parse`/`ParseStrict` with
+  `maxQueryBytes = 1<<20` and `maxNestingDepth = 256` (the latter via an
+  O(n) scanner that ignores brackets inside string literals and comments),
+  returning `*ParseError` instead of crashing (#1219).
+- **H1 (High)** — `store/csrfile`: `bindSlices` reinterpreted mmap bytes
+  using header counts/offsets with no validation, so a crafted header (with
+  a recomputed CRC) could panic on a bounds check or build an
+  `unsafe.Slice` view past the mmap via `uint64` overflow (OOB read /
+  disclosure). `Header.validate` now recomputes the canonical
+  overflow-safe layout and requires exact offset equality before the
+  `unsafe.Slice`, returning `ErrFileCorrupted` (#1226).
+- **H2 (High)** — `bolt/packstream`: the decoder allocated a slice/map
+  sized by a wire-controlled 32-bit length prefix before reading the bytes,
+  so a 5-byte marker could force a multi-gigabyte (bytes/string) or ~64 GiB
+  (list/map) allocation pre-auth. A per-message remaining-byte budget now
+  rejects any length/count exceeding the input with `ErrLengthExceedsInput`
+  before the allocation (#1221).
+- **H3 (High)** — `store/snapshot`: `ReadCSR` allocated slices sized by
+  unvalidated `uint64` counts from the file (gigabytes to terabytes) and
+  computed `weightBytes` with an overflowing multiply. `readCSRLimited`
+  now bounds every real load path by the manifest `FileEntry.Size`, with a
+  `1<<40` backstop and overflow-safe (`bits.Mul64`) weight sizing (#1227).
+- **H4 (High)** — `store/snapshot`: `ApplyCSRToGraph` read vertex/edge
+  offsets from the file with no monotonicity or range check, so a crafted
+  offset drove an out-of-bounds panic and a `start > end` pair underflowed
+  a metric counter. The offset array is now validated once (monotonic and
+  in range) before replay, returning `ErrCorrupted` (#1228).
+- **H5 (High)** — `store/snapshot`: `LoadIndexes`/`WriteIndexes` built
+  `filepath.Join(idxDir, name+".bin")` from the attacker-controllable
+  manifest index name, so `"../../../../tmp/pwned"` or an absolute path
+  escaped `idxDir` (arbitrary file read on recovery). `validateIndexName`
+  now rejects any name that is not its own `filepath.Base`, fails
+  `fs.ValidPath`, contains a separator or `".."`, or is absolute, failing
+  stop with `ErrManifestCorrupted` (#1229).
+- **H6 (High)** — `cypher/funcs`: `range()` pre-computed a capacity that
+  could overflow or be astronomically large, so `range(1, MaxInt64)`
+  panicked with `makeslice: cap out of range` and `range(1, 5e9)` allocated
+  tens of gigabytes and was OOM-killed — both reachable from any untrusted
+  query. The materialised element count is now capped at
+  `maxRangeElements = 1e8`, derived overflow-safely in `uint64`, returning a
+  typed `expr.EvalError` (`ArgumentError: NumberOutOfRange`) over the cap
+  (#1235).
+- **H7 (High)** — `bolt/server` + `cypher`: a recoverable panic in the Bolt
+  per-connection goroutine or in `Engine.Run`/`RunInTx` would unwind past
+  the library and crash the whole process. `recover()` boundaries were added
+  in `handleConn` (log + `bolt.server.conn.panics` metric + close one
+  connection) and in `Run`/`RunInTx` (`ErrInternalPanic` typed error + log +
+  panics metric). The `RunInTx` boundary also **rolls back the in-flight WAL
+  transaction**, so the store single-writer mutex is never leaked on panic —
+  preserving ACID (a subsequent write no longer deadlocks) (#1220).
+- **M1 (Medium)** — `bolt/server`: `ConnTimeout` defaulted to `0`, so no
+  I/O deadline was ever applied and the handshake could block forever
+  (Slowloris connection-slot exhaustion). `NewServer` now defaults
+  `ConnTimeout` to 30 s (idle, post-auth) and the unauthenticated handshake
+  is bounded by a 10 s `DefaultHandshakeTimeout` (#1222).
+- **L2 (Low)** — `store/wal`, `store/snapshot`, `store/csrfile`: WAL, CSR,
+  and snapshot component files were created world-/group-readable
+  (`0o644`/`0o666 & ~umask`). They are now created `0o600` (owner-only); the
+  atomic write+rename publish protocol and all durability semantics are
+  unchanged (#1230).
+- **L3 (Low)** — `bolt/server`: new exported `DefaultTLSConfig()` helper
+  returns a hardened baseline (TLS 1.2 floor, modern AEAD/ECDHE cipher
+  suites, TLS 1.3 auto-negotiated) for operators to start from. Behaviour is
+  unchanged for callers that pass their own config; a nil `TLSConfig` still
+  means plaintext (#1224).
+- **L4 (Low)** — `bolt/server`: `ROUTE` was accepted in `StateNegotiation`,
+  letting an unauthenticated client elicit a routing-table response. It is
+  now accepted only from `StateReady`/`StateTxReady` (verified compatible
+  with `neo4j-go-driver`, which always completes `HELLO`/`LOGON` first), and
+  the serve-loop decode-error `FAILURE` message is now sanitised instead of
+  returning the raw internal error string (#1225).
+- **I1 (Info)** — `store/csrfile`: `Reinterpret`'s `size*n` byte-requirement
+  multiply could wrap `int` for an untrusted `n`, so a wrapped-small product
+  could pass the length check and produce an out-of-bounds alias. The
+  product is now computed in 64-bit precision (`math/bits.Mul64`) and
+  saturates to `math.MaxInt` on overflow so the call takes the existing
+  "data too short" panic path (#1231).
+- **I2 (Info)** — `store/wal`: `Decode` allocated `make([]byte, plen)` (a
+  `uint32`, up to ~4 GiB) before the CRC check. A `maxFrameSize = 1<<30`
+  (1 GiB) bound now rejects an oversized `plen` with `ErrFrameTooLarge`
+  before the allocation (#1232).
+- **I3 (Info)** — `store/snapshot`, `store/recovery`: list-property decoders
+  pre-sized a slice with an untrusted `uint32` count (up to ~4.3e9). The
+  capacity hint is now clamped to `min(count, remaining/minElemBytes)`,
+  bounding a hostile count while pre-sizing legitimate lists exactly (#1233).
+- **I4 (Info)** — `store/snapshot`: component reads opened files with no
+  symlink defence, so an untrusted snapshot directory could ship a component
+  symlinked to `/etc/...`. `openSnapshotComponent` now opens with
+  `O_NOFOLLOW` on Unix (degrading to a plain open on Windows); every read
+  path is routed through it (#1234).
+- **I5 (Info)** — `cypher`: `Engine.Run`/`RunInTx` parsed synchronously
+  before consulting the context, so a cancelled context could not interrupt
+  an expensive parse. A `checkContext` guard now runs before
+  `parseAndAnalyse` / any `store.Begin`, returning
+  `context.Canceled`/`DeadlineExceeded` promptly (#1236).
+- **I6 (Info)** — `cypher/expr`: the `=~` operator recompiled its pattern on
+  every evaluated row. A process-wide bounded FIFO cache (capacity 1 024) of
+  compiled `*regexp.Regexp`, keyed by pattern string and guarded by a mutex,
+  removes the per-row recompilation; behaviour is byte-identical, including
+  the NULL-on-invalid-pattern mapping, and the bound prevents an untrusted
+  pattern from driving unbounded growth (#1237).
+
+### Fixed
+
+- The Critical and High parser/decoder/persistence findings above
+  (**C1, C2, H1–H6**) also fix concrete crash and out-of-memory bugs that a
+  hostile input could trigger: pre-auth stack overflows (C1, C2), OOB reads
+  on crafted CSR/snapshot files (H1, H4), and `makeslice`/OOM panics on
+  oversized PackStream frames, snapshot CSRs, and `range()` bounds (H2, H3,
+  H6).
+- **`bolt/server`** (#1220, H7): a recoverable panic in a per-connection
+  goroutine or in `Engine.RunInTx` no longer leaks the store single-writer
+  mutex; the in-flight WAL transaction is rolled back on the panic path, so a
+  subsequent write no longer deadlocks. A deadlock-freedom regression test
+  covers the write path.
+
+### Performance
+
+- **`cypher/expr`** (#1237, I6): the `=~` operator no longer recompiles its
+  pattern per row. `WHERE x =~ $p` over a large scan now compiles each
+  distinct pattern at most once (bounded FIFO cache), eliminating redundant
+  RE2 compilation on the hot path. Match results and NULL-on-invalid-pattern
+  semantics are unchanged.
+
 ## [2.0.0] — 2026-05-31
 
 The first major release since the 1.x line. v2.0.0 turns GoGraph from a

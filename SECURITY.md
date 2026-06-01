@@ -9,10 +9,11 @@ in GoGraph. It complements the runtime contracts documented in
 
 Security fixes are issued for the following release lines:
 
-| Version line | Status            | Receives security fixes |
-|--------------|-------------------|-------------------------|
-| v2.0.x       | Stable (current)  | Yes                     |
-| < v2.0       | Pre-release       | No — upgrade to v2.0.x  |
+| Version line | Status                | Receives security fixes |
+|--------------|-----------------------|-------------------------|
+| v3.0.x       | Stable (current)      | Yes                     |
+| v2.0.x       | Previous major        | No — upgrade to v3.0.x  |
+| < v2.0       | Pre-release / end-of-life | No — upgrade to v3.0.x |
 
 A single patch release covers each backported fix; we do not publish
 out-of-band security branches. The release process is documented in
