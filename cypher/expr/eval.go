@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"regexp"
 	"strings"
 
 	"gograph/cypher/ast"
@@ -1091,11 +1090,15 @@ func evalStringOp(op string, left, right Value) (Value, error) {
 	case "ENDS WITH":
 		return BoolValue(strings.HasSuffix(s, pattern)), nil
 	case "=~":
-		matched, err := regexp.MatchString(pattern, s)
+		// Compile via the bounded, concurrency-safe cache so a repeated
+		// pattern (e.g. WHERE x =~ $p over a large scan) compiles only once.
+		// Behaviour is identical to regexp.MatchString: an invalid pattern
+		// yields a compile error, which maps to NULL per openCypher.
+		re, err := regexCacheShared.compile(pattern)
 		if err != nil {
 			return Null, nil //nolint:nilerr // invalid pattern → NULL per openCypher
 		}
-		return BoolValue(matched), nil
+		return BoolValue(re.MatchString(s)), nil
 	}
 	return Null, nil
 }
