@@ -667,6 +667,26 @@ func decodeRecoveryPropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) 
 	}
 }
 
+// recoveryListElemMinBytes is the smallest number of bytes one PropList
+// element can occupy on the wire: a 1-byte kind plus a 4-byte
+// payload-length prefix (the payload itself may be zero bytes). It bounds
+// a list capacity hint against the remaining input.
+const recoveryListElemMinBytes = 5
+
+// recoveryListCapHint returns a safe capacity hint for a PropList decode
+// buffer. count is the untrusted element count from the wire; remaining
+// is the number of bytes left to parse. Because each element consumes at
+// least [recoveryListElemMinBytes] bytes, the hint is clamped to
+// min(count, remaining/recoveryListElemMinBytes), so a hostile count
+// cannot trigger a multi-gigabyte eager reservation.
+func recoveryListCapHint(count uint32, remaining int) int {
+	maxElems := remaining / recoveryListElemMinBytes
+	if int64(count) < int64(maxElems) {
+		return int(count)
+	}
+	return maxElems
+}
+
 // decodeRecoveryListProp parses a PropList value from buf (the kind byte has
 // already been consumed by [decodeRecoveryPropertyValue]).
 // Format matches [txn.encodeTxnListProp]:
@@ -679,7 +699,13 @@ func decodeRecoveryListProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 	}
 	count := binary.LittleEndian.Uint32(buf)
 	buf = buf[4:]
-	elems := make([]lpg.PropertyValue, 0, count)
+	// count is an untrusted uint32 (up to ~4.3e9). Each element needs at
+	// least recoveryListElemMinBytes on the wire, so at most
+	// len(buf)/recoveryListElemMinBytes elements can actually follow; clamp
+	// the capacity hint to that ceiling so a hostile count cannot drive a
+	// multi-GB eager reservation. The loop below still validates and bounds
+	// every element.
+	elems := make([]lpg.PropertyValue, 0, recoveryListCapHint(count, len(buf)))
 	for i := uint32(0); i < count; i++ {
 		if len(buf) < 5 { // kind(1) + payloadLen(4)
 			return lpg.PropertyValue{}, buf,

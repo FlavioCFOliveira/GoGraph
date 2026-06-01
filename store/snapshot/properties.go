@@ -786,6 +786,28 @@ func decodePropertyValue(kind lpg.PropertyKind, raw []byte) (lpg.PropertyValue, 
 	return lpg.PropertyValue{}, fmt.Errorf("%w: decode unknown kind %d", ErrPropertiesCorrupted, kind)
 }
 
+// listElemMinBytes is the smallest number of bytes one PropList element
+// can occupy on the wire: a 1-byte kind plus a 4-byte value-length
+// prefix (the value itself may be zero bytes). It is the divisor used to
+// bound a list capacity hint against the remaining input.
+const listElemMinBytes = 5
+
+// listCapHint returns a safe capacity hint for a PropList decode buffer.
+// count is the untrusted element count from the wire; remaining is the
+// number of bytes left to parse. Because each element consumes at least
+// [listElemMinBytes] bytes, no more than remaining/listElemMinBytes
+// elements can follow, so the hint is min(count, remaining/listElemMinBytes).
+// This prevents a hostile count (up to ~4.3e9) from triggering a
+// multi-gigabyte eager reservation while still pre-sizing accurately for
+// legitimate lists.
+func listCapHint(count uint32, remaining int) int {
+	maxElems := remaining / listElemMinBytes
+	if int64(count) < int64(maxElems) {
+		return int(count)
+	}
+	return maxElems
+}
+
 // decodeListPropertyValue decodes the PropList wire format produced by
 // [encodeListPropertyValue]:
 //
@@ -797,7 +819,13 @@ func decodeListPropertyValue(raw []byte) (lpg.PropertyValue, error) {
 	}
 	count := binary.LittleEndian.Uint32(raw)
 	raw = raw[4:]
-	elems := make([]lpg.PropertyValue, 0, count)
+	// count is an untrusted uint32 (up to ~4.3e9). Each element needs at
+	// least listElemMinBytes on the wire, so at most len(raw)/listElemMinBytes
+	// elements can actually follow; clamp the capacity hint to that ceiling
+	// so a hostile count cannot drive a multi-GB eager reservation. The loop
+	// below still validates and bounds every element, so a smaller-than-count
+	// capacity only costs a few re-grows for a genuinely large legitimate list.
+	elems := make([]lpg.PropertyValue, 0, listCapHint(count, len(raw)))
 	for i := uint32(0); i < count; i++ {
 		if len(raw) < 5 { // kind(1) + valueLen(4)
 			return lpg.PropertyValue{}, fmt.Errorf("%w: PropList: truncated element header at index %d",
