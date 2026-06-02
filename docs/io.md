@@ -3,12 +3,12 @@
 This document describes the data exchange formats GoGraph speaks
 and the compatibility matrix with common external tooling.
 
-## v1 type restriction
+## Type restriction
 
 All graph/io readers and writers (CSV, DOT, GraphML, JSON Lines) and
 the store/bulk Loader are concretely typed as
 `adjlist.AdjList[string, int64]`. Genericising over `[N comparable, W any]`
-is on the v1.x roadmap but is deferred: the parsers must
+is on the roadmap but is deferred: the parsers must
 serialise/deserialise N to bytes, which needs a typed `NodeCodec[N]`
 interface plus an implementation per N. Threading that interface
 across four file-format packages, the bulk loader, the recovery

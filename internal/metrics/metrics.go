@@ -15,7 +15,7 @@
 // cost. Callers that want the Prometheus backend implement the
 // [Backend] interface in their own code; the [Prometheus] helper
 // lives in a separate internal/metrics/prometheus subpackage when
-// added in v1.x.
+// added later.
 //
 // Wire-up. Every public blocking API in search/, search/centrality/,
 // search/community/, search/flow/, search/extern/,

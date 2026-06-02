@@ -72,7 +72,7 @@ Format-version bumps follow the bump-on-incompatible-change rule
 
 ## Pre-release
 
-Pre-release identifiers (e.g. `1.1.0-rc.1`) are tagged ahead of
+Pre-release identifiers (e.g. `1.0.0-rc.1`) are tagged ahead of
 each MINOR / MAJOR release; production users should pin a stable
 tag.
 
@@ -85,9 +85,10 @@ expected.
 
 ## Release gates
 
-### v2.0.0 stable
+### 1.0.0 stable
 
-v2.0.0 stable will be cut when **all** of the following conditions are met:
+The first stable `1.0.0` release will be cut from the current `0.x`
+baseline when **all** of the following conditions are met:
 
 1. **Execution-level TCK ≥ 95 %.** The openCypher TCK execution runner
    (`cypher/tck`) must pass at least 95 % of the scenarios it runs (i.e.
@@ -122,7 +123,7 @@ v2.0.0 stable will be cut when **all** of the following conditions are met:
 
 ### Pre-release candidates
 
-Pre-release candidate tags (`v2.0.0-rc1`, `v2.0.0-rc2`, …) are tagged as
+Pre-release candidate tags (`v1.0.0-rc1`, `v1.0.0-rc2`, …) are tagged as
 significant improvements become available, without waiting for all stable
 gates to be met. Each candidate documents its own conformance numbers and
 known limitations in the corresponding `release-notes/v<version>.md` file.

@@ -40,7 +40,7 @@ The commit issues exactly one fsync, so group-commit throughput is unchanged;
 bufio may flush a prefix of frames to the OS before the fsync, but that is
 benign because durability is gated on the fsync and an un-marked tail is
 discarded. Every store is a typed store on the v3 commit path; the legacy v1
-fmt-codec write path was removed in 2.0.0 (see "WAL payload schema" below), so
+fmt-codec write path was removed (see "WAL payload schema" below), so
 there is no non-durable, non-atomic per-op framing left in the module.
 
 `Tx.Rollback` neither writes to the WAL nor mutates the graph;
@@ -73,12 +73,12 @@ on the read path, while writes serialise.
 ## WAL payload schema
 
 Each WAL frame carries one op payload, distinguished by the first byte
-of the payload. The **v1 (legacy, untagged) record format was removed in
-2.0.0**, together with its `txn.NewStore` write API; it is no longer
+of the payload. The **v1 (legacy, untagged) record format was removed**,
+together with its `txn.NewStore` write API; it is no longer
 produced and is rejected on read (see below). Two layouts remain on the
 wire:
 
-| Version | First byte                  | Status in 2.0.0                                                  |
+| Version | First byte                  | Status                                                          |
 |---------|-----------------------------|-----------------------------------------------------------------|
 | v1      | any other first byte        | **Removed.** Never written; rejected on read with `recovery.ErrUnsupportedRecordVersion` (`txn.OpRecordV1` is a reserved sentinel — see below). |
 | v2      | `0xFE` (`txn.OpRecordV2`)   | Read-only legacy: still decoded so existing on-disk WALs replay, but no longer produced (superseded by v3). |
@@ -119,18 +119,15 @@ kind, which is the intended forward-compat behaviour: the typed
 weight payload cannot be inferred without the registered
 `WeightCodec`.
 
-### v1 (legacy, untagged) layout — removed in 2.0.0
+### v1 (legacy, untagged) layout — removed
 
 The v1 record format (an untagged `uint8 kind` followed by
-`fmt.Sprintf("%v")`-encoded endpoints) was removed in 2.0.0 along with the
+`fmt.Sprintf("%v")`-encoded endpoints) was removed along with the
 `txn.NewStore` constructor that produced it and the recovery read wrappers
 that decoded it. Those endpoints were only reliably reversible for the
 `string` type, so the format could never round-trip an arbitrary node key.
 A v1 frame found on disk is no longer parsed: `recovery.Decode` rejects any
 non-`0xFE`/`0xFD` leading byte with `recovery.ErrUnsupportedRecordVersion`.
-A v1 corpus must be migrated to v2 (replay + re-commit through a typed store)
-with a 1.x build **before** upgrading to 2.0.0; see
-[the 1.x → 2.x migration guide](migration-1-to-2.md).
 
 ### v2 (tagged, typed) layout
 
@@ -206,7 +203,7 @@ applied with `var zero W`) and reject non-zero weights with
 upgrade to `NewStoreWithOptions`.
 
 `recovery.Open` (and its context-aware twin `recovery.OpenCtx`) is the
-only recovery entry point in 2.0.0. The deprecated `OpenString`,
+only recovery entry point. The deprecated `OpenString`,
 `OpenWithCodec`, and `OpenWithOptions` wrappers were removed together with
 the v1 WAL format; pass the codecs explicitly via `recovery.Options`
 instead:
@@ -263,28 +260,18 @@ the cross-package import.
 
 The deprecated `recovery.OpenString`, `recovery.OpenWithCodec`, and
 `recovery.OpenWithOptions` wrappers (and their `*Ctx` variants) were
-removed in 2.0.0 along with the v1 WAL format. `recovery.Open[N, W]` /
+removed along with the v1 WAL format. `recovery.Open[N, W]` /
 `recovery.OpenCtx[N, W]` are the only entry points: pass the same two
 codecs the typed `Store` was built with via `recovery.Options[N, W]`.
 For example, the former `OpenString(dir)` call is replaced by
 `Open[string, int64](dir, recovery.Options[string, int64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec()})`.
 
-### Migrating a v1 corpus
+### The removed v1 corpus format
 
-The v1 WAL format and its read/write API were removed in 2.0.0, so there
-is no in-place v1 reader in this release. A v1 corpus must be migrated to
-a typed-codec v2 store **before** upgrading, using a 1.x build:
-
-1. With a 1.x build, replay the v1 log into an in-memory graph via the
-   (then-available) string-recovery wrapper.
-2. Construct a new store via `txn.NewStoreWithCodec` against a fresh WAL.
-3. Re-commit the recovered ops through the new store; subsequent frames
-   are typed-tagged.
-
-After this one-time conversion the store carries only tagged frames and
-opens cleanly under 2.0.0's `recovery.Open`. The same conversion is what
-a snapshot + WAL-truncation checkpoint performs, so the workflow does not
-require any new tooling. See [the 1.x → 2.x migration guide](migration-1-to-2.md).
+The v1 WAL format and its read/write API were removed, so there is no
+in-place v1 reader. A v1 corpus is not supported: the only formats that
+open are the tagged v2 and v3 frames produced by `txn.NewStoreWithCodec`
+and `txn.NewStoreWithOptions`.
 
 ### Migrating an unweighted v2 corpus to durable weights
 
@@ -324,7 +311,7 @@ three versions transparently:
 
 - **v1** — `csr.bin` only. Written by the legacy
   `snapshot.WriteSnapshotCSR` / `WriteSnapshotCSRCtx` helpers. The
-  on-disk shape is identical to v1.0.0 so existing fixtures keep
+  on-disk shape is unchanged so existing fixtures keep
   loading bit-for-bit.
 - **v2** — `csr.bin` + `labels.bin` + `properties.bin`. Written by
   `snapshot.WriteSnapshotFull` / `WriteSnapshotFullCtx` when the graph
@@ -812,8 +799,8 @@ new WAL frames between snapshot capture and WAL truncation:
    `store.checkpoint.truncate_skipped_not_self_sufficient`.
 7. Release the store mutex.
 
-Why this matters (audit gaps F2/F3, see `docs/acid-audit.md`): the
-v1.0 checkpoint wrote a *CSR-only* snapshot and then truncated the
+Why this matters (audit gaps F2/F3, see `docs/acid-audit.md`): an
+earlier checkpoint wrote a *CSR-only* snapshot and then truncated the
 WAL unconditionally. Because a CSR-only snapshot carries neither
 labels/properties nor a mapper, recovery after such a checkpoint
 lost every committed label and property and could not even

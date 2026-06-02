@@ -10,14 +10,12 @@ The first published release of **GoGraph**, a Go module for graph
 persistence, manipulation, and fast search that scales from in-memory
 graphs to graphs that exceed RAM.
 
-This release **restarts the project's versioning at a pre-1.0
-baseline**. Under Semantic Versioning, a `0.y.z` version signals that
-the public API is **not yet stable** and may change without a major
-bump while the module matures toward `1.0.0`. The two compliance
-invariants are nonetheless already in force at this version: the module
-is **100 % openCypher TCK-compliant at the execution level** and
-**100 % ACID-compliant**. Earlier internal numbering is intentionally
-abandoned; the full prior history is preserved in git.
+This release is published at a pre-1.0 baseline. Under Semantic
+Versioning, a `0.y.z` version signals that the public API is **not yet
+stable** and may change without a major bump while the module matures
+toward `1.0.0`. The two compliance invariants are nonetheless already
+in force at this version: the module is **100 % openCypher
+TCK-compliant at the execution level** and **100 % ACID-compliant**.
 
 Install with:
 
@@ -173,6 +171,6 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.1.0
   version you depend on.
 - **Module path.** The Go module path is
   `github.com/FlavioCFOliveira/GoGraph` with no `/vN` suffix, which is
-  Semantic-Import-Versioning-correct for a `0.x`/`1.x` line.
+  Semantic-Import-Versioning-correct for a `0.x` line.
 
 [0.1.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.1.0

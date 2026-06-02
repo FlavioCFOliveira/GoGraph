@@ -60,7 +60,7 @@ since been retired:
 - **`reSingleQuoteTemporalArg`** — temporal function calls like
   `date('2015-07-21')` or `duration('P5M1.5D')` where the single-quoted
   string contains digit–hyphen–digit or digit–dot–digit. Retired when
-  `normalizeSingleQuotes` shipped in v1.3.0 — all such queries now run.
+  `normalizeSingleQuotes` shipped — all such queries now run.
 - **`pattern predicates`** in `classifySkipByErrorType` — `size(<pattern>)`
   in RETURN. Retired in task #402 by the visitor's
   `containsBareRelChainPattern` check, which raises a `SemaError` (a
@@ -80,8 +80,8 @@ regressions can be traced back to the originating fix.
 
 | Skip reason | Final count | Syntax gap | Resolution status |
 |---|---:|---|---|
-| `single-quote-string` | 0 | Multi-word single-quoted strings tokenised as char literal + identifier. | **RESOLVED in v1.3.0** — `normalizeSingleQuotes` in `cypher/parser/normalize.go` rewrites `'…'` → `"…"` before ANTLR lexing. |
-| `varlen-explicit-bound` | 0 | `-[:T*N..M]->` numeric bounds emit ID tokens that the parser rejects. | **RESOLVED in v1.4.0** — `normalizeVarlenBounds` rewrites `*N..M` to `*-N..-M`; `visitRangeLit` absolute-values the result. |
+| `single-quote-string` | 0 | Multi-word single-quoted strings tokenised as char literal + identifier. | **RESOLVED** — `normalizeSingleQuotes` in `cypher/parser/normalize.go` rewrites `'…'` → `"…"` before ANTLR lexing. |
+| `varlen-explicit-bound` | 0 | `-[:T*N..M]->` numeric bounds emit ID tokens that the parser rejects. | **RESOLVED** — `normalizeVarlenBounds` rewrites `*N..M` to `*-N..-M`; `visitRangeLit` absolute-values the result. |
 | `chained-with` | 0 | Multiple `WITH` clauses in one query chain (`MATCH … WITH … MATCH … WITH …`). | **RESOLVED in task #376 (Sprint 38)** — `MultiPartQ()` in the generated parser was patched to consume `readingStatement*` segments interleaved with each WITH. |
 | `varlen-dotdot` | 0 | `-[:T..]->` — dotdot range without leading `*`. | **RESOLVED in Sprint 38** — `normalizeVarlenDotDot` inserts the missing `*` before each `..` inside relationship brackets. |
 | `zero-dot-float` | 0 | `0.5` — lexer splits `0` and `.5` into separate tokens. | **RESOLVED in Sprint 38** — `normalizeZeroDotFloat` rewrites `0.NNN` → `.NNN` before ANTLR lexing. |
@@ -99,7 +99,7 @@ regressions can be traced back to the originating fix.
 | `grammar-gap-literal` (invalid unicode operator character, em-dash in `42 — 41`) | 0 | Lexer's `ERRCHAR -> channel(HIDDEN)` hides the offending byte; the ANTLR error listener surfaces it as `unexpected "—"`. | **RESOLVED in task #402** — `InvalidUnicodeCharacter` is now listed in `parseTimeErrors`; the existing lexer surface error satisfies the TCK's compile-time expectation. |
 | `grammar-gap-literal` (pattern expression in projection / SET / `size()` argument) | 0 | Grammar accepts `relationshipsChainPattern` as an `atom`; spec rejects it outside `MATCH` / `EXISTS{…}` / `COUNT{…}` / pattern comprehensions. | **RESOLVED in task #402** — the visitor calls `containsBareRelChainPattern` on every projection item and SET right-hand side; if the expression sub-tree contains a `*ast.PathPattern` outside an opaque sub-query / pattern-comprehension context, a `SemaError` is raised. |
 
-### Note on single-quote-string resolution (v1.3.0)
+### Note on single-quote-string resolution
 
 The 579 `single-quote-string` scenarios are no longer skipped. A pre-processing
 step (`normalizeSingleQuotes` in `cypher/parser/normalize.go`) rewrites all
@@ -203,7 +203,7 @@ resolved; the table is preserved for historical context.
 | `NOT NOT expr` | Double negation | Parse error: grammar's `notExpression` rule disallowed `NOT` as operand of `NOT`. | **RESOLVED in Sprint 38** — `normalizeDoubleNot` applies double-negation elimination before lexing. |
 | Integer/float overflow | `SyntaxError` at parse time | Used to be `SemaError` from visitor's numeric literal handler. | **RESOLVED in Sprint 38** — `IntegerOverflow` / `FloatingPointOverflow` are now listed in `parseTimeErrors`, so a visitor overflow counts as a compile-time syntax error per the TCK. |
 | `2E-01` capital-E negative-exponent float | Valid float literal 0.2 | Lexer split `2E` as ID and `-01` as DIGIT, causing a parse error. | **RESOLVED in task #402 (Sprint 43)** — `normalizeFloatExpZeroPad` strips redundant leading zeros from any signed exponent. |
-| Multi-word single-quoted strings | Valid string literal | Parse error from the grammar tokeniser. | **RESOLVED in v1.3.0** — `normalizeSingleQuotes` rewrites `'…'` to `"…"`. |
+| Multi-word single-quoted strings | Valid string literal | Parse error from the grammar tokeniser. | **RESOLVED** — `normalizeSingleQuotes` rewrites `'…'` to `"…"`. |
 
 ---
 
@@ -288,13 +288,13 @@ the full closure record.
 | Sprint 33 | ~45 % execution | **PASSED** |
 | Sprint 34 | ~60 % execution | **PASSED** |
 | Sprint 35 | ~75 % execution | **PASSED** |
-| v2.0.0 gate | ≥ 80 % execution | **EXCEEDED — 100 % (3 897/3 897) achieved 2026-05-30** |
+| Stable gate | ≥ 80 % execution | **EXCEEDED — 100 % (3 897/3 897) achieved 2026-05-30** |
 
 ### Resolved items
 
-- **Grammar fixes (single-quoted strings)** — **RESOLVED in v1.3.0** via
+- **Grammar fixes (single-quoted strings)** — **RESOLVED** via
   `normalizeSingleQuotes` pre-processor; 579 scenarios unblocked.
-- **Grammar fixes (varlen-explicit-bound)** — **RESOLVED in v1.4.0** via
+- **Grammar fixes (varlen-explicit-bound)** — **RESOLVED** via
   `normalizeVarlenBounds`; 56 scenarios unblocked.
 - **Grammar fixes (chained-with)** — **RESOLVED in task #376 (Sprint 38)**
   via `MultiPartQ()` parser patch; 188 scenarios unblocked.

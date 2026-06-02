@@ -93,7 +93,7 @@ incomplete trailing transaction (no marker) is discarded. Backward compatible
 with v2: v2 frames have no marker and self-commit exactly as before, so v2
 on-disk WALs — and the cross-process SIGKILL/recovery fixtures — replay
 unchanged, and a mixed v2-then-v3 log is also correct. (The v1 WAL record
-format was removed in 2.0.0 (#929); a v1 frame is now rejected on read with
+format was removed (#929); a v1 frame is now rejected on read with
 `recovery.ErrUnsupportedRecordVersion`.) The bufio 64 KiB
 auto-flush is provably benign because durability is gated on the single fsync
 and recovery discards any op frames not followed by a durable marker. Tests
@@ -104,7 +104,7 @@ asserting the recovered graph is empty for every truncation before the marker
 and complete only for the whole WAL — never a prefix; the existing single-op
 `torn_tail_test.go` and all crash-injection scenarios still pass (single-op
 commits are trivially all-or-nothing as `[op][marker]` pairs). The legacy v1
-fmt-codec write path (former `txn.NewStore`) was removed in 2.0.0 (#929); every
+fmt-codec write path (former `txn.NewStore`) was removed (#929); every
 store now uses the v3 typed, durable-multi-op-atomic path.
 
 ### F2 — Checkpoint destroys committed labels/properties (Durability + Consistency)

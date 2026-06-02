@@ -19,7 +19,7 @@ import (
 
 // TestOpen_StringInt64 exercises the canonical [Open] entry point on
 // the same `(string, int64)` instantiation that the deprecated
-// [OpenString] wrapper has shipped since v1.0.0. The test:
+// [OpenString] wrapper historically shipped. The test:
 //
 //  1. commits a small graph carrying labels and typed properties
 //     through a typed Store (NewStoreWithOptions);
@@ -281,7 +281,7 @@ func TestOpen_Int64Float64(t *testing.T) {
 // instantiation that combines a non-built-in N (the canonical
 // [txn.NewUUIDCodec]) with a built-in W. UUIDs are a common
 // real-world node identifier, and routing them through the typed
-// codec path is the v1.1.1 capstone use-case.
+// codec path is the capstone use-case.
 func TestOpen_UUIDFloat64(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

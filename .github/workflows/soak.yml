@@ -1,8 +1,8 @@
 name: Soak
 
 # The 4-hour, 1024-connection Bolt soak test is the canonical
-# reliability gate before promoting a release candidate to v2.0.0
-# stable (see docs/semver.md). It is long-running, runner-expensive,
+# reliability gate before promoting a release candidate to stable
+# (see docs/semver.md). It is long-running, runner-expensive,
 # and not needed on every push, so we run it weekly and on demand.
 
 on:

@@ -140,7 +140,7 @@ func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src 
 	// Note: no final residue-drain pass. The canonical PPR invariant
 	// is that rank[i] + alpha-weighted residue accumulates the true
 	// stationary mass within Epsilon. Folding the residue with a
-	// (1-alpha) factor (as v1.0.0 did) double-counted the absorption
+	// (1-alpha) factor (as an earlier implementation did) double-counted the absorption
 	// and biased the rank vector. Leaving residue in place keeps
 	// rank monotonically convergent.
 	return rank, nil

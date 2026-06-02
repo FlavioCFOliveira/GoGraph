@@ -12,7 +12,6 @@ Security fixes are issued for the following release lines:
 | Version line | Status                    | Receives security fixes      |
 |--------------|---------------------------|------------------------------|
 | v0.1.x       | Current (pre-1.0)         | Yes                          |
-| 1.x – 3.x    | Abandoned numbering (reset to v0.1.0) | No — upgrade to v0.1.x |
 
 A single patch release covers each backported fix; we do not publish
 out-of-band security branches. The release process is documented in

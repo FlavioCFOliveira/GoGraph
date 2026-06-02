@@ -6,9 +6,8 @@ release. The intent is twofold:
 1. **Reproducibility** — the numbers in the README and release notes
    come from documented runs on documented hardware, not from
    one-off measurements.
-2. **Regression tracking** — a release-over-release comparison
-   (e.g. v1.1.0 vs v1.0.1) is one diff against the previous file
-   in this directory.
+2. **Regression tracking** — a release-over-release comparison is
+   one diff against the previous file in this directory.
 
 For **per-change** (rather than per-release) performance tracking, see
 [`history/`](history/): every optimisation is recorded by
@@ -33,10 +32,10 @@ contains:
 
 ## Releases
 
-- [v1.0.0.md](v1.0.0.md) — headline benchmark numbers for the v1.0.0
-  tag.
-- [v1.1.0.md](v1.1.0.md) — 30-minute reliability soak run for the
-  v1.1.0 tag (canonical 4-hour run tracked for the next release).
+Each release ships its own `<version>.md` file with headline
+benchmark numbers; the first such file lands with the initial
+release.
+
 - [SOAK.md](SOAK.md) — procedure and acceptance gate for the
   mixed-workload reliability soak.
 - [comparison.md](comparison.md) — cross-library performance

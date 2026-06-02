@@ -117,7 +117,7 @@ func TestCheckpoint_StopReleasesResources(t *testing.T) {
 }
 
 // TestCheckpoint_TruncatesWAL verifies that runCheckpoint actually
-// reduces the WAL file on disk (the v1.0.0 implementation only
+// reduces the WAL file on disk (an earlier implementation only
 // recorded a counter but never truncated, allowing the WAL to grow
 // unbounded). After a forced checkpoint the file size on disk must
 // drop, and Stats.WALTruncBytes must report the freed bytes.
@@ -248,7 +248,7 @@ func TestCheckpoint_TruncationMetric_Emits(t *testing.T) {
 }
 
 // TestCheckpoint_StopIdempotent asserts Stop is safe under serial
-// and concurrent re-entry. The v1.0.0 implementation called
+// and concurrent re-entry. An earlier implementation called
 // close(stopCh) directly and panicked on the second call.
 func TestCheckpoint_StopIdempotent(t *testing.T) {
 	t.Parallel()

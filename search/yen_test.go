@@ -51,7 +51,7 @@ func TestYen_KZero(t *testing.T) {
 
 // TestYenKShortest_Int32WeightsNoOverflow asserts Yen produces
 // correct shortest paths when the weight type is a 32-bit integer.
-// The v1.0.0 in-band Inf sentinel built by repeated doubling wrapped
+// An earlier in-band Inf sentinel built by repeated doubling wrapped
 // to 0 on int32 and silently corrupted unreachable distances.
 func TestYenKShortest_Int32WeightsNoOverflow(t *testing.T) {
 	t.Parallel()

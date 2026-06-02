@@ -60,11 +60,11 @@ const (
 	SkipSingleQuoteString SkipReason = "single-quote-string"
 
 	// SkipVarlenExplicitBound is retained for reference. The skip condition was
-	// resolved in v1.4.0 via normalizeVarlenBounds in cypher/parser/normalize.go,
+	// resolved via normalizeVarlenBounds in cypher/parser/normalize.go,
 	// which pre-processes unsigned integer range bounds into their negated form so
 	// that the ANTLR lexer emits DIGIT tokens instead of ID tokens.
 	//
-	//nolint:unused // retained for documentation; normalizeVarlenBounds resolves the gap in v1.4.0
+	//nolint:unused // retained for documentation; normalizeVarlenBounds resolves the gap
 	SkipVarlenExplicitBound SkipReason = "varlen-explicit-bound"
 
 	// SkipVarlenDotDot is retained for documentation. The skip condition was
@@ -211,11 +211,11 @@ var reAngleBracket = regexp.MustCompile(`<[a-zA-Z][a-zA-Z0-9_]*>`)
 // least one space, e.g. 'The Matrix'. These confuse the grammar because the
 // lexer treats the first word as a char literal and the rest as identifiers.
 //
-// As of v1.3.0 the parser pre-processes single-quoted strings via
+// The parser now pre-processes single-quoted strings via
 // normalizeSingleQuotes so these scenarios are no longer skipped. The regex is
 // retained here for reference and in case the pre-processor is ever removed.
 //
-//nolint:unused // retained for documentation; normalizeSingleQuotes resolves the gap in v1.3.0
+//nolint:unused // retained for documentation; normalizeSingleQuotes resolves the gap
 var reSingleQuoteSpace = regexp.MustCompile(`'[^']*\s+[^']*'`)
 
 // reSingleQuoteTemporalArg matches a temporal function call (date, time,
@@ -231,16 +231,16 @@ var reSingleQuoteSpace = regexp.MustCompile(`'[^']*\s+[^']*'`)
 // arithmetic operators, causing a spurious parse error.  This is the same root
 // cause as [reSingleQuoteSpace] but without spaces in the string content.
 //
-// As of v1.3.0 the parser pre-processes single-quoted strings via
+// The parser now pre-processes single-quoted strings via
 // normalizeSingleQuotes so these scenarios are no longer skipped. Retained for
 // reference in case the pre-processor is ever removed.
 //
-//nolint:unused // retained for documentation; normalizeSingleQuotes resolves the gap in v1.3.0
+//nolint:unused // retained for documentation; normalizeSingleQuotes resolves the gap
 var reSingleQuoteTemporalArg = regexp.MustCompile(`(?i)(?:date|time|localtime|datetime|localdatetime|duration)(?:\.[a-zA-Z]+)?\s*\('[^']*(?:\d[-:]\d|\d\.\d)`)
 
 // reVarlenBound matched variable-length relationship patterns with explicit
 // numeric bounds: -[:T*2]-> or -[:T*1..3]-> or -[*2]->.  Retained for
-// reference; normalizeVarlenBounds resolves the gap in v1.4.0.
+// reference; normalizeVarlenBounds resolves the gap.
 //
 //nolint:unused // retained for documentation
 var reVarlenBound = regexp.MustCompile(`\[[\w:]*\*(?:\d|\.\.\d)`)

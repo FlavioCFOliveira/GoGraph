@@ -47,7 +47,7 @@ jobs:
           # scripts/pre-release.sh to invoke. Without this the action runs
           # `golangci-lint run --version`, which fails on v2.x with
           # "unknown flag: --version" (run has no --version flag) — that
-          # broke the v3.0.0 release run.
+          # broke the release run.
           install-only: true
       - name: Pre-release gate (vet + build + test -race + lint + TCK)
         run: bash scripts/pre-release.sh "${GITHUB_REF_NAME}"

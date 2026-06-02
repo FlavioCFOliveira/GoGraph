@@ -43,7 +43,7 @@ import (
 // CountTriangles requires the full CSR in memory: the inner loop
 // random-accesses neighbour lists of arbitrary vertices. A
 // streaming variant for graphs that do not fit in RAM is not
-// provided in v2.x — the implementation cost is non-trivial
+// provided — the implementation cost is non-trivial
 // (reservoir sampling à la TRIEST, or a wedge-based estimator)
 // and no production caller has asked for it. If such a caller
 // surfaces, the natural seam is in search/extern/triangles.go

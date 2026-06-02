@@ -55,7 +55,7 @@ func (a *APSP[W]) N() int { return a.live }
 // diagonal scan; in the no-negative-cycle case the diagonal stays at 0.
 //
 // Reachability is tracked via a parallel found[] bitmap, not an
-// in-band +Inf sentinel — the v1.0.0 sentinel constructed by 60
+// in-band +Inf sentinel — an earlier sentinel constructed by 60
 // iterations of v++/v+=v wrapped on integer types and silently
 // corrupted distances. The bitmap is correct for every Weight type.
 //

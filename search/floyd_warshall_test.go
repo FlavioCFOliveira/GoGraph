@@ -73,7 +73,7 @@ func TestFloydWarshall_Unreachable(t *testing.T) {
 }
 
 // TestFloydWarshall_Int32WeightsNoOverflow asserts FW returns correct
-// distances on an int32-weighted graph. The v1.0.0 sentinel wrapped
+// distances on an int32-weighted graph. An earlier sentinel wrapped
 // on int32 and corrupted unreachable-pair detection.
 func TestFloydWarshall_Int32WeightsNoOverflow(t *testing.T) {
 	t.Parallel()

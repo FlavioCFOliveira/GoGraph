@@ -48,7 +48,7 @@ func TestPageRank_Empty(t *testing.T) {
 
 // TestPageRank_MassConservation_Star asserts that on a graph with a
 // dangling sink the total rank conserves to 1.0 within numerical
-// tolerance. This is the regression test for the v1.0.0 bug where
+// tolerance. This is the regression test for an earlier bug where
 // dangling-node mass leaked each iteration and the sink lost almost
 // all of its accumulated rank.
 func TestPageRank_MassConservation_Star(t *testing.T) {

@@ -5,7 +5,7 @@ sprints, with the benchstat-style before / after numbers that
 justify the change. Every entry is the artefact of a sprint task
 or a one-off fix that landed in main.
 
-## v1.0.0 (initial release)
+## Initial optimisation pass
 
 ### graph/adjlist — switched to copy-on-write with linear scan
 
@@ -21,7 +21,7 @@ unsorted adjacency layout currently in main.
 
 The hot-cache HasEdge result matches the documented AC (<50 ns).
 The AddEdge cost is dominated by the 2-slice copy on every write
-and is a known v1.x optimisation target (delta-log or in-place
+and is a known future optimisation target (delta-log or in-place
 atomic append).
 
 ### search/bfs — wavefront frontier
