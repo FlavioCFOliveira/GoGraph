@@ -29,7 +29,10 @@ func TestParseSynthKeySuffix(t *testing.T) {
 		{"valid one", "__cx_1", 1, true},
 		{"valid hex multi", "__cx_ff", 0xff, true},
 		{"max uint64 hex", "__cx_ffffffffffffffff", 0xffffffffffffffff, true},
-		{"non-hex middle (merge format)", "__cx_merge_1", 0, false},
+		{"merge form one", "__cx_merge_1", 1, true},
+		{"merge form hex multi", "__cx_merge_ff", 0xff, true},
+		{"merge prefix only", "__cx_merge_", 0, false},
+		{"merge form non-hex tail", "__cx_merge_xyz", 0, false},
 		{"non-hex tail char", "__cx_abz", 0, false},
 		{"different prefix", "__cy_1", 0, false},
 		{"trailing junk", "__cx_1.0", 0, false},
@@ -152,7 +155,7 @@ func TestSeedGlobalNodeCounter_LocalLogic(t *testing.T) {
 		}
 	})
 
-	t.Run("mix of synthetic and user keys advances past hex max", func(t *testing.T) {
+	t.Run("mix of create, merge and user keys advances past hex max", func(t *testing.T) {
 		var c atomic.Uint64
 		keys := map[graph.NodeID]string{
 			1:  "alice",
@@ -160,12 +163,12 @@ func TestSeedGlobalNodeCounter_LocalLogic(t *testing.T) {
 			10: "__cx_1",
 			11: "__cx_a",
 			12: "__cx_ff",
-			13: "__cx_merge_ffff", // ignored: not a CreateNode synthetic key
+			13: "__cx_merge_ffff", // counted: merge keys share globalNodeCounter
 			14: "__cy_1",          // ignored: wrong prefix
 		}
 		seedLocal(&c, keys)
-		if got := c.Load(); got != 0xff {
-			t.Fatalf("counter = %d, want %d", got, 0xff)
+		if got := c.Load(); got != 0xffff {
+			t.Fatalf("counter = %d, want %d", got, 0xffff)
 		}
 	})
 

@@ -61,6 +61,14 @@ var ErrPropertyValueIsNull = errors.New("exec: property value is null (skip)")
 // drift apart.
 const synthKeyPrefix = "__cx_"
 
+// mergeKeyInfix is the extra segment [Merge.freshNodeKey] inserts between
+// synthKeyPrefix and the hex counter, so merge-created keys take the form
+// "__cx_merge_<hex>" while CreateNode keys are "__cx_<hex>". Both operators
+// draw from the same [globalNodeCounter]; the infix only distinguishes the
+// originating operator. [parseSynthKeySuffix] strips it so the seeding scan
+// advances the shared counter past keys minted by EITHER operator on recovery.
+const mergeKeyInfix = "merge_"
+
 // globalNodeCounter provides a process-wide monotonic source for generated
 // node keys. Using an atomic counter avoids collisions if multiple Engine
 // instances operate on the same graph concurrently (though the single-writer
@@ -352,21 +360,25 @@ func seedGlobalNodeCounter(m GraphMutator) {
 }
 
 // parseSynthKeySuffix returns the numeric hex suffix of a synthetic node key
-// produced by [CreateNode.freshNodeKey] (form "__cx_<hex>"). It returns
-// (0, false) when key does not match the synthetic-key pattern, when the
-// suffix is empty, or when the suffix is not a valid hexadecimal uint64.
+// minted by either [CreateNode.freshNodeKey] (form "__cx_<hex>") or
+// [Merge.freshNodeKey] (form "__cx_merge_<hex>"). It returns (0, false) when
+// key does not match either synthetic-key pattern, when the suffix is empty,
+// or when the suffix is not a valid hexadecimal uint64.
 //
-// The parser deliberately rejects keys that share the __cx_ prefix but carry
-// a non-hex middle segment (notably the "__cx_merge_<hex>" keys produced by
-// the Merge operator). The seeding logic must not advance globalNodeCounter
-// from those keys: the Merge counter is the same global, but its key format
-// is intentionally distinct and is out of scope for the cross-process
-// counter-reset fix tracked under this change.
+// Both operators draw from the same [globalNodeCounter], so the seeding scan
+// must advance the counter past the maximum value found across BOTH key
+// forms. Recognising the "__cx_merge_<hex>" form is what stops a
+// one-process-per-command consumer from re-minting __cx_merge_1 on every
+// MERGE and silently collapsing distinct nodes across a store reopen.
 func parseSynthKeySuffix(key string) (uint64, bool) {
-	if !strings.HasPrefix(key, synthKeyPrefix) {
+	suffix, ok := strings.CutPrefix(key, synthKeyPrefix)
+	if !ok {
 		return 0, false
 	}
-	suffix := key[len(synthKeyPrefix):]
+	// Merge-created keys carry an extra "merge_" segment before the hex.
+	if rest, isMerge := strings.CutPrefix(suffix, mergeKeyInfix); isMerge {
+		suffix = rest
+	}
 	if suffix == "" {
 		return 0, false
 	}
