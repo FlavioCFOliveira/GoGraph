@@ -58,8 +58,14 @@ type Result[N comparable, W any] struct {
 	// NOT counted here: they were rebuilt-on-replay instead, which is
 	// metered separately via `store.snapshot.indexes.corrupted`.
 	SnapshotIndexes int
-	WALOps          int
-	TailErr         error
+	// SnapshotTombstones reports how many node tombstones were restored
+	// from the snapshot's tombstones.bin component before WAL replay. It is
+	// 0 for snapshots without the component (older snapshots, or any graph
+	// that never removed a node) and for the non-self-sufficient (v2) path,
+	// where tombstones are reconstructed by replaying OpRemoveNode instead.
+	SnapshotTombstones int
+	WALOps             int
+	TailErr            error
 }
 
 // Options carries the codecs used by [Open] and [OpenCtx]. Both
@@ -368,6 +374,18 @@ func openCodec[N comparable, W any](
 				metrics.IncCounter("store.recovery.openCodec.errors", 1)
 				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", err)
 			}
+			// Restore the snapshot tombstone set now that every snapshot
+			// node is interned (mapper) and materialised (CSR), and BEFORE
+			// the WAL is replayed: a WAL re-create (OpAddNode) for a
+			// tombstoned id then revives it chronologically, and a WAL
+			// delete re-tombstones idempotently. Only the self-sufficient
+			// path applies snapshot tombstones — on the WAL-authoritative
+			// v2 path (WAL never truncated) the deletions are reconstructed
+			// by replaying OpRemoveNode, so applying a possibly-stale
+			// snapshot set there could wrongly re-tombstone a re-created
+			// node.
+			snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones)
+			res.SnapshotTombstones = len(loaded.Tombstones.IDs)
 		}
 	}
 
@@ -588,6 +606,13 @@ func applyOpCodec[N comparable, W any](
 			for k := range g.NodeProperties(src) {
 				g.DelNodeProperty(src, k)
 			}
+			// Reconstruct the tombstone so the node is logically deleted
+			// after replay, not merely a label-stripped live node. Without
+			// this the deletion is non-durable: a re-opened store would
+			// resurrect the node as an undeletable ghost. A later OpAddNode
+			// for the same key revives it (g.AddNode clears the tombstone),
+			// so replay order is honoured.
+			g.RemoveNode(src)
 		case txn.OpRemoveNodeLabel:
 			g.RemoveNodeLabel(src, label)
 		case txn.OpSetNodeLabel:

@@ -6518,16 +6518,18 @@ func (a *lpgMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
-	_, existed := a.g.AdjList().Mapper().Lookup(n)
+	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
+	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
+	// tombstoned node (clears its tombstone), so checking afterwards would
+	// always observe the node live. Re-creating a removed key counts as a
+	// fresh creation for side-effect bookkeeping.
+	if existed && a.g.IsTombstoned(idBefore) {
+		existed = false
+	}
 	if err := a.g.AddNode(n); err != nil {
 		return 0, err
 	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
-	// Account for tombstone resurrection (re-creating a node with the
-	// same key) as a fresh creation for side-effect bookkeeping.
-	if existed && a.g.IsTombstoned(id) {
-		existed = false
-	}
 	if !existed {
 		a.g.IncrNodesAdded()
 	}
@@ -6824,15 +6826,19 @@ func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
-	_, existed := a.g.AdjList().Mapper().Lookup(n)
+	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
+	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
+	// tombstoned node, so checking afterwards would always observe it live.
+	// Re-creating a removed key counts as a fresh creation for side-effect
+	// bookkeeping.
+	if existed && a.g.IsTombstoned(idBefore) {
+		existed = false
+	}
 	if err := a.g.AddNode(n); err != nil {
 		return 0, err
 	}
 	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
-	if existed && a.g.IsTombstoned(id) {
-		existed = false
-	}
 	if !existed {
 		a.g.IncrNodesAdded()
 	}

@@ -1067,14 +1067,21 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 	case OpAddNode:
 		return g.AddNode(op.Src)
 	case OpRemoveNode:
-		// Logical removal: mapper entry is permanent; remove all labels and
-		// properties so the node is unreachable via label/property queries.
+		// Logical removal: the mapper entry is permanent, so removal is a
+		// tombstone. Strip all labels and properties so the node is
+		// unreachable via label/property queries, then tombstone it so it
+		// is excluded from live scans and counts. Tombstoning here keeps
+		// the in-memory state applied by a committed Tx identical to the
+		// state reconstructed by WAL replay (recovery.applyOpCodec does the
+		// same), so live and recovered graphs agree. A later OpAddNode for
+		// the same key revives it (g.AddNode clears the tombstone).
 		for _, lbl := range g.NodeLabels(op.Src) {
 			g.RemoveNodeLabel(op.Src, lbl)
 		}
 		for k := range g.NodeProperties(op.Src) {
 			g.DelNodeProperty(op.Src, k)
 		}
+		g.RemoveNode(op.Src)
 	case OpRemoveNodeLabel:
 		g.RemoveNodeLabel(op.Src, op.Label)
 	case OpSetNodeProperty:

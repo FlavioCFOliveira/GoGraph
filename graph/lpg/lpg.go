@@ -15,6 +15,7 @@
 package lpg
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -168,9 +169,15 @@ type Graph[N comparable, W any] struct {
 	// The underlying Mapper cannot release the index slot (NodeID stability
 	// is a hard contract), so removal is observable only via this set:
 	// every read path (Order, IsTombstoned, WalkLiveNodes) must filter
-	// tombstoned ids.
+	// tombstoned ids. A tombstone is cleared by revive (re-materialising
+	// the node), so the set holds exactly the currently-removed ids.
 	tombstoneMu sync.RWMutex
 	tombstones  map[graph.NodeID]struct{}
+	// tombstoneActive mirrors len(tombstones) as a lock-free gate. AddNode
+	// is a hot path; on the overwhelmingly common case of a graph that has
+	// never deleted a node this lets AddNode skip the tombstone lock and the
+	// mapper lookup entirely. It is mutated only under tombstoneMu.
+	tombstoneActive atomic.Int64
 
 	// nodesAddedCount / nodesRemovedCount / edgesAddedCount /
 	// edgesRemovedCount track per-direction counters used by the TCK
@@ -349,13 +356,57 @@ func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr = m }
 // matches the underlying [adjlist.AdjList.AddNode]: callers must
 // propagate [adjlist.ErrShardFull] when the responsible shard is at
 // [adjlist.Config.MaxShardCapacity].
-func (g *Graph[N, W]) AddNode(n N) error { return g.adj.AddNode(n) }
+//
+// AddNode also clears any tombstone on n: re-creating a node that was
+// previously removed via [Graph.RemoveNode] brings it back to life under
+// the same stable NodeID (resurrection). This is the single node-
+// materialising entry point through which a delete→recreate cycle flows —
+// in-process, on WAL replay, and on snapshot apply — so it is the one
+// place that must revive. [Graph.SetNodeLabel] does not revive: a
+// tombstoned node is never matched by a read clause, so a label can only
+// reach a removed key after AddNode has already revived it.
+func (g *Graph[N, W]) AddNode(n N) error {
+	if err := g.adj.AddNode(n); err != nil {
+		return err
+	}
+	// Fast path: no node has ever been removed, so there is nothing to
+	// revive. This keeps the common AddNode free of the tombstone lock and
+	// the mapper lookup below.
+	if g.tombstoneActive.Load() == 0 {
+		return nil
+	}
+	if id, ok := g.adj.Mapper().Lookup(n); ok {
+		g.revive(id)
+	}
+	return nil
+}
+
+// revive clears any tombstone on id, marking the node live again. It is
+// the inverse of [Graph.RemoveNode] and is invoked by [Graph.AddNode] when
+// a removed node is re-created. The clear is taken under tombstoneMu so it
+// is atomic against IsTombstoned / LiveOrder / TombstonedIDs readers.
+func (g *Graph[N, W]) revive(id graph.NodeID) {
+	g.tombstoneMu.Lock()
+	if g.tombstones != nil {
+		if _, ok := g.tombstones[id]; ok {
+			delete(g.tombstones, id)
+			g.tombstoneActive.Add(-1)
+		}
+	}
+	g.tombstoneMu.Unlock()
+}
 
 // AddEdge inserts a directed edge (mirrored when the graph is
 // undirected) from src to dst with weight w. The error contract
 // matches the underlying [adjlist.AdjList.AddEdge]: callers must
 // propagate [adjlist.ErrShardFull] when the responsible shard is at
 // [adjlist.Config.MaxShardCapacity].
+//
+// AddEdge does NOT revive a tombstoned endpoint: only [Graph.AddNode]
+// clears a tombstone. The contract is that callers materialise node
+// patterns via AddNode before linking them, so a live edge is never
+// created onto a logically-removed node. The query executor upholds
+// this (CREATE routes every endpoint through the mutator's AddNode).
 func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src, dst, w) }
 
 // SetNodeLabel attaches label to n, inserting n if needed. Returns
@@ -400,7 +451,62 @@ func (g *Graph[N, W]) RemoveNode(n N) {
 	if g.tombstones == nil {
 		g.tombstones = make(map[graph.NodeID]struct{})
 	}
-	g.tombstones[id] = struct{}{}
+	if _, dup := g.tombstones[id]; !dup {
+		g.tombstones[id] = struct{}{}
+		g.tombstoneActive.Add(1)
+	}
+	g.tombstoneMu.Unlock()
+}
+
+// TombstonedIDs returns the NodeIDs currently marked removed via
+// [Graph.RemoveNode], in ascending order. The result is a fresh slice the
+// caller owns; an empty (never-deleted) graph returns a zero-length slice.
+// Used by the snapshot writer to persist the tombstone set durably so node
+// deletions survive a store reopen.
+//
+// TombstonedIDs is safe for concurrent use.
+func (g *Graph[N, W]) TombstonedIDs() []graph.NodeID {
+	g.tombstoneMu.RLock()
+	out := make([]graph.NodeID, 0, len(g.tombstones))
+	for id := range g.tombstones {
+		out = append(out, id)
+	}
+	g.tombstoneMu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// TombstoneCount returns the number of NodeIDs currently marked removed.
+// It reads a lock-free counter, so it is cheap enough to gate the optional
+// emission of the snapshot tombstone component on every checkpoint.
+//
+// TombstoneCount is safe for concurrent use.
+func (g *Graph[N, W]) TombstoneCount() int { return int(g.tombstoneActive.Load()) }
+
+// RestoreTombstones marks every id in ids as removed, reconstructing the
+// tombstone set captured by [Graph.TombstonedIDs] at snapshot time. It is
+// the load-phase dual of [Graph.RemoveNode] used by snapshot recovery: it
+// re-tombstones by NodeID directly and does not require the natural key to
+// be resolvable. A later [Graph.AddNode] for the same id still revives it,
+// so a delete→recreate that straddles a snapshot resolves correctly.
+//
+// RestoreTombstones is intended for the one-shot snapshot-load phase of
+// recovery and is not safe to call concurrently with other mutations or
+// reads on g.
+func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
+	if len(ids) == 0 {
+		return
+	}
+	g.tombstoneMu.Lock()
+	if g.tombstones == nil {
+		g.tombstones = make(map[graph.NodeID]struct{}, len(ids))
+	}
+	for _, id := range ids {
+		if _, dup := g.tombstones[id]; !dup {
+			g.tombstones[id] = struct{}{}
+			g.tombstoneActive.Add(1)
+		}
+	}
 	g.tombstoneMu.Unlock()
 }
 

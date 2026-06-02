@@ -41,6 +41,11 @@ type LoadedSnapshot struct {
 	Properties PropertiesReadback
 	Mapper     MapperReadback
 	Indexes    []IndexReadback
+	// Tombstones is the node-removal set restored from tombstones.bin. It
+	// is empty for snapshots that carry no tombstones.bin entry (older
+	// snapshots, or any snapshot of a graph that never removed a node) —
+	// the backward-compatibility contract.
+	Tombstones TombstonesReadback
 }
 
 // WriteSnapshotFull is the v2/v3 high-level helper: it lays out a
@@ -255,6 +260,35 @@ func writeSnapshotFullCore[N comparable, W any](
 		return err
 	}
 
+	// tombstones.bin — the durable node-removal set. Emitted ONLY when the
+	// graph currently has at least one tombstoned node, so a snapshot of a
+	// graph that never deleted a node is byte-identical to one produced
+	// before this component existed (no behaviour change for the common
+	// case). Without this component a committed node deletion would not
+	// survive WAL truncation: the tombstone lives only in memory, and the
+	// CSR/labels/properties writers treat a removed node as a live,
+	// label-stripped one (the durability defect this fixes).
+	var tombSize int64
+	var tombCRC uint32
+	haveTombstones := g.TombstoneCount() > 0
+	if haveTombstones {
+		tombstonesPath := filepath.Join(tmp, TombstonesFile)
+		tombSize, tombCRC, err = writeAndSync(tombstonesPath, func(w io.Writer) (int64, uint32, error) {
+			return WriteTombstones(w, g)
+		})
+		if err != nil {
+			_ = os.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return err
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
 	// indexes/<name>.bin — one file per registered index that
 	// implements [index.Serializer]. Subscribers without serializer
 	// support are silently skipped (rebuild-on-restart contract).
@@ -289,6 +323,13 @@ func writeSnapshotFullCore[N comparable, W any](
 	if haveMapper {
 		manifestVersion = ManifestVersion
 		files = append(files, FileEntry{Name: MapperFile, Size: mapperSize, CRC32C: mapperCRC})
+	}
+	// The tombstones.bin entry is additive and does NOT change the manifest
+	// version: it is an optional component (like indexes/<name>.bin),
+	// present only when the graph has removed nodes. A reader that predates
+	// it ignores the unknown file name; this reader restores the set.
+	if haveTombstones {
+		files = append(files, FileEntry{Name: TombstonesFile, Size: tombSize, CRC32C: tombCRC})
 	}
 
 	m := Manifest{
@@ -467,7 +508,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		return LoadedSnapshot{}, err
 	}
 
-	csrEntry, labelsEntry, propsEntry, mapperEntry := findEntries(m.Files)
+	csrEntry, labelsEntry, propsEntry, mapperEntry, tombEntry := findEntries(m.Files)
 	if csrEntry == nil {
 		metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 		return LoadedSnapshot{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
@@ -521,6 +562,19 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		}
 	}
 
+	// tombstones.bin — optional node-removal set. Absent for older
+	// snapshots and for any graph that never deleted a node: the readback
+	// stays empty (backward compatibility). When present its CRC32C is
+	// verified exactly like the other components.
+	var tombParsed TombstonesReadback
+	if tombEntry != nil {
+		tombParsed, err = readVerifiedTombstones(filepath.Join(dir, TombstonesFile), tombEntry.CRC32C)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, err
+		}
+	}
+
 	// indexes/<name>.bin — best-effort load. Corruption surfaces as
 	// nil Bytes on the IndexReadback so the recovery path can rebuild
 	// from the LPG rather than aborting.
@@ -540,14 +594,16 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		Properties: propsParsed,
 		Mapper:     mapperParsed,
 		Indexes:    idxReadback,
+		Tombstones: tombParsed,
 	}, nil
 }
 
 // findEntries returns pointers to the csr.bin, labels.bin,
-// properties.bin and mapper.bin entries in files, or nil for any that
-// are absent. The slice is walked once and pointers index into the
-// original storage so the caller can inspect them without copying.
-func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry, mapperEntry *FileEntry) {
+// properties.bin, mapper.bin and tombstones.bin entries in files, or nil
+// for any that are absent. The slice is walked once and pointers index
+// into the original storage so the caller can inspect them without
+// copying.
+func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry, mapperEntry, tombEntry *FileEntry) {
 	for k := range files {
 		switch files[k].Name {
 		case CSRFile:
@@ -558,9 +614,11 @@ func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry, mapperEn
 			propsEntry = &files[k]
 		case MapperFile:
 			mapperEntry = &files[k]
+		case TombstonesFile:
+			tombEntry = &files[k]
 		}
 	}
-	return csrEntry, labelsEntry, propsEntry, mapperEntry
+	return csrEntry, labelsEntry, propsEntry, mapperEntry, tombEntry
 }
 
 // readVerifiedCSR opens path, runs the file bytes through CRC32C and
@@ -616,6 +674,32 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 	if got := hasher.Sum32(); got != expected {
 		return LabelsReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
 			ErrCorrupted, LabelsFile, got, expected)
+	}
+	return parsed, nil
+}
+
+// readVerifiedTombstones is the dual of [readVerifiedCSR] for
+// tombstones.bin.
+func readVerifiedTombstones(path string, expected uint32) (TombstonesReadback, error) {
+	f, err := openSnapshotComponent(path)
+	if err != nil {
+		return TombstonesReadback{}, err
+	}
+	// best-effort: read-only file, close err is non-actionable for callers.
+	defer func() { _ = f.Close() }()
+
+	hasher := crc32.New(castagnoli)
+	tee := io.TeeReader(f, hasher)
+	parsed, err := ReadTombstones(tee)
+	if err != nil {
+		return TombstonesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if _, err := io.Copy(io.Discard, tee); err != nil {
+		return TombstonesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if got := hasher.Sum32(); got != expected {
+		return TombstonesReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
+			ErrCorrupted, TombstonesFile, got, expected)
 	}
 	return parsed, nil
 }
