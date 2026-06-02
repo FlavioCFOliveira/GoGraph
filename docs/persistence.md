@@ -65,6 +65,7 @@ on the read path, while writes serialise.
     labels.bin       — serialised LPG labels (v2+ manifests only)
     properties.bin   — serialised LPG typed properties (v2+ manifests only)
     mapper.bin       — durable NodeID→key interning table (v3 manifests only)
+    tombstones.bin   — durable node-removal set (present only when ≥1 node is tombstoned)
     indexes/         — secondary indexes registered with index.Manager
       <name>.bin     — one file per registered serialisable index (v2+)
 ```
@@ -343,12 +344,58 @@ three versions transparently:
   no WAL replay required (audit gap F3). This is the shape the current
   checkpointer emits.
 
+`tombstones.bin` is an **optional, additive** component (like
+`indexes/`): it is emitted alongside the components above **only when
+the graph currently has at least one tombstoned node**, and it does
+**not** bump the manifest version — a manifest still reports v3. A
+snapshot of a graph that has never removed a node is therefore
+byte-identical to one produced before the component existed, and an
+older snapshot without it loads as an empty tombstone set. See
+[Node and edge deletion durability](#node-and-edge-deletion-durability).
+
 `snapshot.LoadManifest` accepts all three versions; a manifest whose
 version exceeds `ManifestVersion` (4 or higher) surfaces
 `snapshot.ErrManifestUnsupported`. The high-level
 `snapshot.LoadSnapshotFull` reads every shape and returns empty
-`LabelsReadback` / `PropertiesReadback` / `MapperReadback` for
-components that are absent.
+`LabelsReadback` / `PropertiesReadback` / `MapperReadback` /
+`TombstonesReadback` for components that are absent.
+
+### Node and edge deletion durability
+
+Node deletion is a **tombstone**, not a slot release: the `NodeID`→key
+mapper entry is permanent (NodeID stability is a hard contract), so
+`lpg.Graph.RemoveNode` records the removed `NodeID` in an in-memory
+tombstone set and the read paths (`IsTombstoned`, `LiveOrder`, the
+Cypher `AllNodesScan`) filter it. For that deletion to **survive a
+store reopen**, the tombstone set is round-tripped through persistence:
+
+- **Snapshot** — the checkpointer writes the sorted tombstone set to
+  `tombstones.bin` (magic + format version + sorted `uint64` ids +
+  CRC32C, validated like every other component) before truncating the
+  WAL. On load, `snapshot.ApplyTombstonesToGraph` restores the set
+  **after** the snapshot nodes are materialised (mapper + CSR) and
+  **before** WAL replay, so any WAL-tail mutation lands on top in
+  chronological order.
+- **WAL replay** — replaying an `OpRemoveNode` frame reconstructs the
+  tombstone (`g.RemoveNode`), not merely the label/property strip, in
+  both the in-memory `txn` apply and recovery, so live and recovered
+  state agree.
+- **Resurrection** — re-creating a removed key brings the node back to
+  life under the **same** stable `NodeID`: `lpg.Graph.AddNode` clears
+  the tombstone. A delete→recreate cycle therefore yields exactly one
+  live node, in-process, on WAL replay, and across a snapshot boundary.
+  (`SetNodeLabel` and `AddEdge` deliberately do **not** revive — only
+  `AddNode` does — so re-applying snapshot-era labels after WAL replay
+  cannot resurrect a node the WAL tail deleted.)
+
+Edge deletion has no tombstone (the adjacency entry is genuinely
+removed), but the per-pair edge label and property surfaces are kept
+hygienic the same way: `lpg.Graph.RemoveEdge` clears the per-pair
+labels/properties **once the endpoint pair is fully disconnected** (no
+remaining parallel edge), so re-creating an edge between the same
+endpoints does not resurrect the removed relationship's type or
+properties. While any parallel edge survives, the shared per-pair
+surface is left intact.
 
 ### `snapshot/manifest.json` (v1)
 
@@ -871,4 +918,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-05-30 against commit `9c31f06`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-02 against commit `12719dd`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

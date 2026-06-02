@@ -6,7 +6,53 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+Durability and correctness fixes. Both compliance invariants held: the
+openCypher TCK execution gate stayed at **3 897/3 897** and every ACID
+property was preserved on every change.
+
+### Added
+
+- **Durable node tombstones** — new `snapshot` component `tombstones.bin`
+  (`WriteTombstones` / `ReadTombstones` / `ApplyTombstonesToGraph` /
+  `TombstonesReadback` / `TombstonesFile` / `ErrTombstonesCorrupted`, plus
+  `LoadedSnapshot.Tombstones`). It is optional and additive — emitted only
+  when the graph has tombstoned nodes and does **not** bump the manifest
+  version, so snapshots stay byte-identical for graphs that never delete.
+- `lpg.Graph.TombstonedIDs`, `TombstoneCount`, and `RestoreTombstones` —
+  accessors and load-phase restore for the node-tombstone set.
+- `lpg.Graph.RemoveEdge` — the edge-deletion entry point used by the Cypher
+  executor and WAL replay; clears the per-pair edge labels/properties once
+  the endpoint pair is fully disconnected.
+- `recovery.Result.SnapshotTombstones` — count of tombstones restored from
+  the snapshot before WAL replay.
+
+### Fixed
+
+- **Node deletion is now durable across a store reopen.** Deleted nodes no
+  longer resurrect as label-stripped, undeletable "ghosts": the in-memory
+  tombstone set is persisted in the snapshot and reconstructed on WAL replay
+  (`OpRemoveNode` now re-tombstones, not merely strips labels/properties),
+  and re-creating a removed key revives the node under the same stable
+  `NodeID`. Acute for one-process-per-command callers that checkpoint and
+  truncate the WAL after every write.
+- **Recovery ordering.** On the self-sufficient (mapper.bin) path the
+  snapshot's labels and properties are now applied **before** WAL replay, so
+  a WAL-tail delete-then-recreate no longer carries stale snapshot labels or
+  clobbers the re-created property values.
+- **Edge deletion hygiene.** Removing an edge clears its per-pair labels and
+  properties once the endpoint pair is fully disconnected, so re-creating an
+  edge between the same endpoints no longer resurrects the removed
+  relationship's type or properties (multigraph-safe: a shared per-pair label
+  is kept until the last parallel edge is removed).
+- **`range()` int64 step overflow** (#1238) — an under-cap range whose last
+  element sits at the int64 boundary (e.g. `range(9223372036854775805,
+  9223372036854775807)`) no longer overflows the materialisation loop into a
+  non-terminating, OOM-ing append; it iterates the overflow-safe element count.
+- **Build tooling** (#1241) — repaired the malformed `staticcheck.conf` (an
+  invalid `[staticcheck "<path>"]` per-file table) so standalone
+  `staticcheck ./...` runs again, with directory-scoped overrides for the
+  documentation regexes and the generated parser; removed a dead test helper
+  it surfaced.
 
 ## [3.0.0] — 2026-06-01
 
