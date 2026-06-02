@@ -333,6 +333,10 @@ func openCodec[N comparable, W any](
 	var snapProps snapshot.PropertiesReadback
 	var snapIndexes []snapshot.IndexReadback
 	var haveSnapLabels, haveSnapProps bool
+	// snapshotSideAppliedEarly records that the snapshot's labels and
+	// properties were applied BEFORE WAL replay (the self-sufficient path);
+	// the deferred after-WAL apply below is then skipped for them.
+	var snapshotSideAppliedEarly bool
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
 		loaded, err := snapshot.LoadSnapshotFull(snapDir)
 		if err != nil {
@@ -386,6 +390,34 @@ func openCodec[N comparable, W any](
 			// node.
 			snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones)
 			res.SnapshotTombstones = len(loaded.Tombstones.IDs)
+
+			// Self-sufficient path: the mapper is fully restored, so every
+			// snapshot node is already interned. Apply the snapshot's labels
+			// and properties NOW — BEFORE WAL replay — so the WAL tail's
+			// mutations win chronologically. The snapshot is the committed
+			// state at checkpoint time; the WAL holds the deltas that came
+			// after. If the WAL tail deleted a node and re-created it with
+			// different labels/properties, applying the snapshot state first
+			// (then the WAL on top) yields the re-created state, whereas the
+			// old after-WAL order re-added the stale snapshot labels and
+			// clobbered the re-created properties (#1266). The mapper-less
+			// (v2) path below keeps applying these after WAL replay, where
+			// the WAL is what interns the nodes the snapshot records.
+			if haveSnapLabels {
+				if err := snapshot.ApplyLabelsToGraph(g, loaded.Labels); err != nil {
+					metrics.IncCounter("store.recovery.openCodec.errors", 1)
+					return res, fmt.Errorf("recovery: apply snapshot labels: %w", err)
+				}
+				res.SnapshotLabels = len(loaded.Labels.NodeLabels) + len(loaded.Labels.EdgeLabels)
+			}
+			if haveSnapProps {
+				if err := snapshot.ApplyPropertiesToGraph(g, loaded.Properties); err != nil {
+					metrics.IncCounter("store.recovery.openCodec.errors", 1)
+					return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
+				}
+				res.SnapshotProperties = len(loaded.Properties.NodeProperties) + len(loaded.Properties.EdgeProperties)
+			}
+			snapshotSideAppliedEarly = true
 		}
 	}
 
@@ -465,12 +497,14 @@ func openCodec[N comparable, W any](
 		}
 	}
 
-	// Apply snapshot-side labels after the WAL is fully applied so the
-	// mapper has every node interned that the WAL referenced. Snapshot
-	// label records whose NodeIDs the mapper cannot resolve are dropped
-	// (with metric) by ApplyLabelsToGraph, not surfaced as an error:
-	// this keeps recovery resilient against snapshot-without-WAL flows.
-	if haveSnapLabels {
+	// Mapper-less (v2) path only: apply snapshot-side labels after the WAL
+	// is fully applied so the mapper has every node interned that the WAL
+	// referenced. Snapshot label records whose NodeIDs the mapper cannot
+	// resolve are dropped (with metric) by ApplyLabelsToGraph, not surfaced
+	// as an error: this keeps recovery resilient against snapshot-without-
+	// WAL flows. The self-sufficient path applied these BEFORE WAL replay
+	// (snapshotSideAppliedEarly), so it is skipped here.
+	if haveSnapLabels && !snapshotSideAppliedEarly {
 		if err := snapshot.ApplyLabelsToGraph(g, snapLabels); err != nil {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			return res, fmt.Errorf("recovery: apply snapshot labels: %w", err)
@@ -480,7 +514,7 @@ func openCodec[N comparable, W any](
 	// Apply snapshot-side properties after labels for symmetry with
 	// the write order. Resilient skip-on-unresolved semantics mirror
 	// the labels apply path.
-	if haveSnapProps {
+	if haveSnapProps && !snapshotSideAppliedEarly {
 		if err := snapshot.ApplyPropertiesToGraph(g, snapProps); err != nil {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)

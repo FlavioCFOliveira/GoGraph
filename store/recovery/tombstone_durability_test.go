@@ -191,6 +191,97 @@ func TestRecovery_DeleteSurvivesCheckpointReopen(t *testing.T) {
 	}
 }
 
+// TestRecovery_SnapshotLabelDoesNotResurrectAcrossWALRelabel locks the
+// recovery-ordering consistency contract (#1266): when the snapshot holds a
+// node with label L1 / property p=1 and the WAL tail deletes it and
+// re-creates it with label L2 / property p=2 (no checkpoint between), the
+// recovered node must carry EXACTLY the WAL-tail state ({L2}, p=2), not the
+// stale snapshot state. RED before the fix: snapshot labels/properties were
+// re-applied AFTER WAL replay, so the deleted-then-recreated node ended up
+// carrying L1 (re-added) and p=1 (clobbering the WAL's p=2).
+func TestRecovery_SnapshotLabelDoesNotResurrectAcrossWALRelabel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "wal")
+
+	// open 1: CREATE X:L1 {p:1}; checkpoint (snapshot holds X:L1,p=1); close.
+	{
+		w, err := wal.Open(walPath)
+		if err != nil {
+			t.Fatalf("open1 wal.Open: %v", err)
+		}
+		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
+		tx := store.Begin()
+		mustTx(t, tx.AddNode("X"))
+		mustTx(t, tx.SetNodeLabel("X", "L1"))
+		mustTx(t, tx.SetNodeProperty("X", "p", lpg.Int64Value(1)))
+		mustTx(t, tx.Commit())
+		checkpointAndClose(t, dir, g, w)
+	}
+
+	// open 2: DELETE X, then re-CREATE X:L2 {p:2}; commit; NO checkpoint, so
+	// the snapshot stays at X:L1 and the WAL retains the delete+recreate.
+	{
+		res, err := Open[string, int64](dir, tombstoneRecoveryOpts())
+		if err != nil {
+			t.Fatalf("open2 recovery.Open: %v", err)
+		}
+		g := res.Graph
+		w, err := wal.Open(walPath)
+		if err != nil {
+			t.Fatalf("open2 wal.Open: %v", err)
+		}
+		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
+
+		del := store.Begin()
+		for _, lbl := range g.NodeLabels("X") {
+			mustTx(t, del.RemoveNodeLabel("X", lbl))
+		}
+		for k := range g.NodeProperties("X") {
+			mustTx(t, del.DelNodeProperty("X", k))
+		}
+		mustTx(t, del.RemoveNode("X"))
+		mustTx(t, del.Commit())
+
+		create := store.Begin()
+		mustTx(t, create.AddNode("X"))
+		mustTx(t, create.SetNodeLabel("X", "L2"))
+		mustTx(t, create.SetNodeProperty("X", "p", lpg.Int64Value(2)))
+		mustTx(t, create.Commit())
+
+		if err := w.Close(); err != nil { // close WITHOUT checkpoint
+			t.Fatalf("open2 wal.Close: %v", err)
+		}
+	}
+
+	// open 3: recover snapshot{X:L1,p=1} + WAL[delete; recreate L2,p=2].
+	{
+		res, err := Open[string, int64](dir, tombstoneRecoveryOpts())
+		if err != nil {
+			t.Fatalf("open3 recovery.Open: %v", err)
+		}
+		g := res.Graph
+		if got := g.LiveOrder(); got != 1 {
+			t.Fatalf("open3 LiveOrder = %d, want 1", got)
+		}
+		if !g.HasNodeLabel("X", "L2") {
+			t.Error("X must carry the WAL-tail label L2")
+		}
+		if g.HasNodeLabel("X", "L1") {
+			t.Error("X must NOT carry the stale snapshot label L1 after a WAL-tail re-create")
+		}
+		if labels := g.NodeLabels("X"); len(labels) != 1 {
+			t.Errorf("X labels = %v, want exactly [L2]", labels)
+		}
+		if v, ok := g.GetNodeProperty("X", "p"); !ok {
+			t.Error("X lost property p after recovery")
+		} else if got, _ := v.Int64(); got != 2 {
+			t.Errorf("X.p = %d, want 2 (WAL-tail value, not the stale snapshot 1)", got)
+		}
+	}
+}
+
 // TestRecovery_ReplayOrdering_AddRemoveAddLeavesLive proves the tombstone
 // lifecycle honours WAL order: create → delete → re-create across three
 // transactions replays to a single LIVE node. The re-create must un-
