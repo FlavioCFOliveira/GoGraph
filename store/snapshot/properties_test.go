@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 	"time"
 
@@ -911,17 +910,4 @@ func mustGetEdgeBytes(t *testing.T, g *lpg.Graph[string, int64], src, dst, key s
 	if !bytes.Equal(got, want) {
 		t.Fatalf("edge(%s,%s).%s = %x, want %x", src, dst, key, got, want)
 	}
-}
-
-// sortedKeys is a tiny helper used by future test additions that need
-// deterministic key iteration.
-//
-//nolint:unused // kept for future test additions
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
