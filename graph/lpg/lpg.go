@@ -460,6 +460,18 @@ func (g *Graph[N, W]) AddEdgeH(src, dst N, w W) (handle uint64, err error) {
 // CSR handle columns. See edge_handle.go for the full contract.
 func (g *Graph[N, W]) nextEdgeHandle() uint64 { return g.edgeHandleSeq.Add(1) }
 
+// NextEdgeHandle returns a fresh, never-reused stable edge handle from the
+// per-graph monotone counter (the exported form of [Graph.nextEdgeHandle]).
+// It is used by the transactional store ([store/txn]) to mint the handle
+// stamped onto a durable OpAddEdgeH WAL frame BEFORE the edge is applied,
+// so the same handle is written to the log and to the in-memory adjacency.
+// Handles start at 1; 0 is the reserved "no handle" sentinel. The counter
+// is re-seeded after recovery via [Graph.SeedEdgeHandle] so handles stay
+// monotone across a reopen.
+//
+// NextEdgeHandle is safe for concurrent use.
+func (g *Graph[N, W]) NextEdgeHandle() uint64 { return g.nextEdgeHandle() }
+
 // RemoveEdge removes one edge (src, dst) from the adjacency layer (and the
 // mirrored (dst, src) edge when the graph is undirected). When this leaves
 // the endpoint pair with NO remaining edge — the last parallel edge between

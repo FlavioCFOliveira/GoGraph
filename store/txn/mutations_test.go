@@ -36,7 +36,8 @@ func openTypedStringStore(t *testing.T) (store *Store[string, int64], walPath st
 }
 
 // openTypedWeightedStore opens a fresh typed string-keyed, int64-weighted
-// store with both codecs wired in. AddEdge buffers OpAddEdgeWeighted.
+// store with both codecs wired in. AddEdge buffers the handle-bearing
+// OpAddEdgeH.
 func openTypedWeightedStore(t *testing.T) (store *Store[string, int64], walPath string, cleanup func()) {
 	t.Helper()
 	dir := t.TempDir()
@@ -701,9 +702,10 @@ func TestTx_AllMutationKinds_FinishedErrors(t *testing.T) {
 }
 
 // TestTx_WeightedStore_AddEdgeWeighted_RoundTrip confirms that on a
-// store with a WeightCodec, AddEdge buffers OpAddEdgeWeighted and the
+// store with a WeightCodec, AddEdge buffers the handle-bearing
+// OpAddEdgeH (the Stage-2 successor of OpAddEdgeWeighted) and the
 // in-memory graph carries the weight after Commit. The frame on disk
-// must be a v2 OpAddEdgeWeighted record.
+// must be a v3-tagged OpAddEdgeH record.
 func TestTx_WeightedStore_AddEdgeWeighted_RoundTrip(t *testing.T) {
 	t.Parallel()
 	s, walPath, cleanup := openTypedWeightedStore(t)
@@ -730,12 +732,12 @@ func TestTx_WeightedStore_AddEdgeWeighted_RoundTrip(t *testing.T) {
 		t.Fatalf("weight = %d, want %d", got, want)
 	}
 
-	// Wire shape: two frames — the v3-tagged OpAddEdgeWeighted op followed
-	// by the v3 OpCommit marker that closes the transaction.
+	// Wire shape: two frames — the v3-tagged OpAddEdgeH op followed by the
+	// v3 OpCommit marker that closes the transaction.
 	if err := walFrameCountEquals(walPath, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := assertFirstFrameKind(walPath, OpRecordV3, byte(OpAddEdgeWeighted)); err != nil {
+	if err := assertFirstFrameKind(walPath, OpRecordV3, byte(OpAddEdgeH)); err != nil {
 		t.Fatal(err)
 	}
 }

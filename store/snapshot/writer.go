@@ -65,6 +65,17 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 //	[vertices]            (nVertices * 8 bytes)
 //	[edges]               (nEdges * 8 bytes)
 //	[weights]             (nEdges * weightSizeBytes bytes, when present)
+//	uint8  hasHandles      (OPTIONAL trailing block; 1 = handle array present)
+//	[handles]             (nEdges * 8 bytes, when hasHandles = 1)
+//
+// The trailing handles block (Stage 2 of the stable-edge-handle work) is
+// emitted ONLY when the source CSR carries a per-slot handle column
+// ([csr.CSR.HandlesSlice] != nil). A graph that never used AddEdgeH produces
+// no trailing block, so its csr.bin is byte-identical to one written before
+// this column existed — the v1 golden and the cross-process byte-equality
+// fixtures are unaffected. [readCSRLimited] detects the block by attempting
+// to read one more byte after the weights array: present → handles follow,
+// EOF → none (the backward-compatible read branch).
 func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteCSR")()
 	bw := bufio.NewWriterSize(w, 1<<20)
@@ -74,6 +85,7 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	weights := c.WeightsSlice()
+	handles := c.HandlesSlice()
 
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(verts))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
@@ -114,11 +126,26 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 			return 0, 0, err
 		}
 	}
+	// Optional trailing handle block. Emitted only when the CSR carries a
+	// handle column; absent otherwise so a handle-less graph's bytes match
+	// the pre-Stage-2 layout exactly.
+	handleBytes := int64(0)
+	if handles != nil {
+		if _, err := tee.Write([]byte{1}); err != nil {
+			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
+			return 0, 0, err
+		}
+		if err := binary.Write(tee, binary.LittleEndian, handles); err != nil {
+			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
+			return 0, 0, err
+		}
+		handleBytes = 1 + 8*int64(len(handles))
+	}
 	if err := bw.Flush(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
-	total := int64(8+8+2+8*len(verts)+8*len(edges)) + int64(int(wsize))*int64(len(edges))
+	total := int64(8+8+2+8*len(verts)+8*len(edges)) + int64(int(wsize))*int64(len(edges)) + handleBytes
 	return total, hasher.Sum32(), nil
 }
 
@@ -151,6 +178,12 @@ type CSRReadback struct {
 	HasWeights  bool
 	WeightSize  uint8
 	WeightBytes []byte
+	// Handles is the optional per-slot stable-edge-handle column, aligned
+	// slot-for-slot with Edges (handles[i] is the stable handle of the edge
+	// at edges[i]). It is nil when the snapshot predates the column or its
+	// source graph carried no handles; when non-nil it has the same length
+	// as Edges. See the trailing-block note on [WriteCSR].
+	Handles []uint64
 }
 
 // ReadCSR parses a CSR previously written by [WriteCSR] from r.
@@ -261,12 +294,37 @@ func readCSRLimited(r io.Reader, maxBytes int64) (CSRReadback, error) {
 			return CSRReadback{}, err
 		}
 	}
+	// Optional trailing handle block. Peek one byte: EOF means the snapshot
+	// predates the column (the backward-compatible read branch); a 1 byte
+	// means a handle array of exactly nE uint64s follows. Any other flag
+	// byte is a corrupt frame. The handle count equals the edge count, which
+	// readCSRLimited already bounded against the byte budget, so no extra cap
+	// check is needed.
+	var handles []uint64
+	flagByte, perr := br.ReadByte()
+	switch {
+	case errors.Is(perr, io.EOF):
+		// No trailing block: handle-less snapshot. Leave handles nil.
+	case perr != nil:
+		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+		return CSRReadback{}, perr
+	case flagByte == 1:
+		handles = make([]uint64, nE)
+		if err := binary.Read(br, binary.LittleEndian, handles); err != nil {
+			metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+			return CSRReadback{}, err
+		}
+	default:
+		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+		return CSRReadback{}, fmt.Errorf("%w: bad handle-block flag %#x", ErrCSRCorrupted, flagByte)
+	}
 	return CSRReadback{
 		Vertices:    verts,
 		Edges:       edges,
 		HasWeights:  hasW,
 		WeightSize:  wsize,
 		WeightBytes: weightBytes,
+		Handles:     handles,
 	}, nil
 }
 

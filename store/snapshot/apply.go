@@ -210,6 +210,24 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 					weight = decodeCSRWeight[W](rb.WeightBytes[off : off+weightSize])
 				}
 			}
+			// When the snapshot carries a handle column, re-insert the edge
+			// with its ORIGINAL stable handle so the recovered parallel edge
+			// keeps its per-CREATE identity (the per-handle type/properties
+			// the edgehandles.bin component reattaches resolve by this same
+			// handle). AddEdgeHIfAbsent is idempotent against a handle already
+			// present, and re-seeds the high-water counter (invariant I5) so a
+			// post-recovery edge creation never re-mints a live handle. A
+			// snapshot without a handle column (legacy, or a graph that never
+			// used AddEdgeH) falls back to the plain handle-less AddEdge.
+			if len(rb.Handles) > int(k) && rb.Handles[k] != 0 {
+				h := rb.Handles[k]
+				if _, err := g.AddEdgeHIfAbsent(srcN, dstN, weight, h); err != nil {
+					metrics.IncCounter("store.snapshot.ApplyCSR.addEdgeErrors", 1)
+					return fmt.Errorf("snapshot.ApplyCSRToGraph: AddEdgeH: %w", err)
+				}
+				g.SeedEdgeHandle(h + 1)
+				continue
+			}
 			if err := g.AddEdge(srcN, dstN, weight); err != nil {
 				metrics.IncCounter("store.snapshot.ApplyCSR.addEdgeErrors", 1)
 				return fmt.Errorf("snapshot.ApplyCSRToGraph: AddEdge: %w", err)

@@ -139,6 +139,39 @@ const (
 	// transaction, giving all-or-nothing atomicity (audit gap F1, see
 	// docs/acid-audit.md). OpCommit never appears in a v1/v2 frame.
 	OpCommit
+
+	// Stage-2 stable-edge-handle op kinds. They are appended AFTER OpCommit
+	// so every pre-existing OpKind value (and OpCommit itself) keeps its
+	// stable wire identity; a WAL written by an older binary never carries
+	// these kinds, and a reader that predates them surfaces them as unknown
+	// kinds. They carry an 8-byte little-endian handle appended after the
+	// body a same-kind handle-less op would carry (see the encode helpers).
+
+	// OpAddEdgeH buffers an AddEdge(src, dst, w) mutation carrying a durable
+	// stable per-edge handle (see graph/lpg/edge_handle.go). It is the
+	// handle-bearing successor of [OpAddEdgeWeighted]: the body is the
+	// weighted-edge body followed by the 8-byte handle. The handle is
+	// allocated from the graph's monotone handle counter when the op is
+	// buffered (so the value is stable in the WAL frame) and is replayed via
+	// [lpg.Graph.AddEdgeHIfAbsent] so a snapshot + full-WAL recovery does
+	// not double the edge. Emitted by [Tx.AddEdge] on a weight-codec store.
+	OpAddEdgeH
+	// OpSetEdgeLabelByHandle buffers a SetEdgeLabelByHandle(src, dst,
+	// handle, label) mutation, persisting one parallel edge's per-CREATE
+	// type so it survives recovery keyed to the stable handle rather than
+	// collapsing into the per-pair union. The body is the edge-with-label
+	// body followed by the 8-byte handle.
+	OpSetEdgeLabelByHandle
+	// OpSetEdgePropertyByHandle buffers a SetEdgePropertyByHandle(src, dst,
+	// handle, key, value) mutation, persisting one parallel edge's
+	// per-CREATE property. The body is the edge-property body followed by
+	// the 8-byte handle.
+	OpSetEdgePropertyByHandle
+	// OpRemoveEdgeInstanceByHandle buffers a RemoveEdgeInstanceByHandle(src,
+	// dst, handle) mutation, dropping one logical edge's per-handle metadata
+	// on DELETE while leaving sibling handles untouched. The body is the
+	// edge-no-tail body followed by the 8-byte handle.
+	OpRemoveEdgeInstanceByHandle
 )
 
 // Op-record version markers. The marker is a single byte written at
@@ -338,6 +371,11 @@ type Op[N comparable, W any] struct {
 	// Value is the typed property value for SetNodeProperty and SetEdgeProperty
 	// ops. It is the zero PropertyValue for all other op kinds.
 	Value lpg.PropertyValue
+	// Handle is the stable per-edge handle carried by the Stage-2
+	// handle-bearing op kinds ([OpAddEdgeH], [OpSetEdgeLabelByHandle],
+	// [OpSetEdgePropertyByHandle], [OpRemoveEdgeInstanceByHandle]). It is 0
+	// for every other op kind.
+	Handle uint64
 }
 
 // Tx is an in-progress transaction.
@@ -367,7 +405,14 @@ func (t *Tx[N, W]) AddEdge(src, dst N, w W) error {
 		t.ops = append(t.ops, Op[N, W]{Kind: OpAddEdge, Src: src, Dst: dst})
 		return nil
 	}
-	t.ops = append(t.ops, Op[N, W]{Kind: OpAddEdgeWeighted, Src: src, Dst: dst, Weight: w})
+	// Weight-codec store: emit a handle-bearing OpAddEdgeH so the edge keeps
+	// a stable per-edge identity across recovery (Stage 2). The handle is
+	// minted now, from the graph's monotone counter, so the value is fixed
+	// in the WAL frame before the commit fsync; replay re-inserts it via
+	// AddEdgeHIfAbsent (idempotent against a snapshot that already loaded
+	// it). The legacy zero-weight OpAddEdge path above is unchanged.
+	handle := t.store.g.NextEdgeHandle()
+	t.ops = append(t.ops, Op[N, W]{Kind: OpAddEdgeH, Src: src, Dst: dst, Weight: w, Handle: handle})
 	return nil
 }
 
@@ -462,6 +507,58 @@ func (t *Tx[N, W]) DelEdgeProperty(src, dst N, propKey string) error {
 		return ErrTxFinished
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDelEdgeProperty, Src: src, Dst: dst, Key: propKey})
+	return nil
+}
+
+// AddEdgeWithHandle buffers an [OpAddEdgeH] operation: an AddEdge(src, dst,
+// w) carrying the supplied durable stable per-edge handle. The handle must
+// be a value the caller minted from the graph's [lpg.Graph.NextEdgeHandle]
+// counter (or replayed from a durable record); it is written verbatim into
+// the WAL frame and re-inserted on recovery via
+// [lpg.Graph.AddEdgeHIfAbsent]. Used by the Cypher write path
+// (walMutatorAdapter) so a parallel CREATE's handle is durable; the direct
+// [Tx.AddEdge] path mints its own handle. Requires a weight codec.
+func (t *Tx[N, W]) AddEdgeWithHandle(src, dst N, w W, handle uint64) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	if t.store.wcodec == nil {
+		return ErrNoWeightCodec
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpAddEdgeH, Src: src, Dst: dst, Weight: w, Handle: handle})
+	return nil
+}
+
+// SetEdgeLabelByHandle buffers an [OpSetEdgeLabelByHandle] operation,
+// persisting `label` against one parallel edge's stable `handle` on the
+// (src, dst) pair so the per-CREATE type survives recovery.
+func (t *Tx[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, label string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeLabelByHandle, Src: src, Dst: dst, Handle: handle, Label: label})
+	return nil
+}
+
+// SetEdgePropertyByHandle buffers an [OpSetEdgePropertyByHandle] operation,
+// persisting key=value against one parallel edge's stable `handle` on the
+// (src, dst) pair.
+func (t *Tx[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, propKey string, value lpg.PropertyValue) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey, Value: value})
+	return nil
+}
+
+// RemoveEdgeInstanceByHandle buffers an [OpRemoveEdgeInstanceByHandle]
+// operation, dropping the per-handle label and property metadata for one
+// logical edge on DELETE while leaving sibling handles untouched.
+func (t *Tx[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveEdgeInstanceByHandle, Src: src, Dst: dst, Handle: handle})
 	return nil
 }
 
@@ -675,6 +772,34 @@ func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec
 		return encodeOpEdgeProperty(buf, op, codec)
 	case OpAddEdgeWeighted:
 		return encodeOpEdgeWeighted(buf, op, codec, wcodec)
+	case OpAddEdgeH:
+		// Weighted-edge body followed by the 8-byte stable handle.
+		var err error
+		if buf, err = encodeOpEdgeWeighted(buf, op, codec, wcodec); err != nil {
+			return nil, err
+		}
+		return binary.LittleEndian.AppendUint64(buf, op.Handle), nil
+	case OpSetEdgeLabelByHandle:
+		// Edge-with-label body followed by the 8-byte stable handle.
+		var err error
+		if buf, err = encodeOpEdgeWithLabel(buf, op, codec); err != nil {
+			return nil, err
+		}
+		return binary.LittleEndian.AppendUint64(buf, op.Handle), nil
+	case OpSetEdgePropertyByHandle:
+		// Edge-property body followed by the 8-byte stable handle.
+		var err error
+		if buf, err = encodeOpEdgeProperty(buf, op, codec); err != nil {
+			return nil, err
+		}
+		return binary.LittleEndian.AppendUint64(buf, op.Handle), nil
+	case OpRemoveEdgeInstanceByHandle:
+		// Edge-no-tail body followed by the 8-byte stable handle.
+		var err error
+		if buf, err = encodeOpEdgeNoTail(buf, op, codec); err != nil {
+			return nil, err
+		}
+		return binary.LittleEndian.AppendUint64(buf, op.Handle), nil
 	default: // OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel
 		return encodeOpEdgeWithLabel(buf, op, codec)
 	}
@@ -741,7 +866,7 @@ func encodeOpEdgeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Co
 	}
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
-	if op.Kind == OpSetEdgeProperty {
+	if op.Kind == OpSetEdgeProperty || op.Kind == OpSetEdgePropertyByHandle {
 		buf = encodePropertyValue(buf, op.Value)
 	}
 	return buf, nil
@@ -1060,6 +1185,19 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		return g.AddEdge(op.Src, op.Dst, zero)
 	case OpAddEdgeWeighted:
 		return g.AddEdge(op.Src, op.Dst, op.Weight)
+	case OpAddEdgeH:
+		// Handle-bearing add: idempotent against a slot already carrying
+		// this handle (the snapshot loaded it, or an earlier frame applied
+		// it), so snapshot + full-WAL recovery does not double the edge.
+		if _, err := g.AddEdgeHIfAbsent(op.Src, op.Dst, op.Weight, op.Handle); err != nil {
+			return err
+		}
+	case OpSetEdgeLabelByHandle:
+		g.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
+	case OpSetEdgePropertyByHandle:
+		g.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
+	case OpRemoveEdgeInstanceByHandle:
+		g.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
 	case OpSetNodeLabel:
 		return g.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:

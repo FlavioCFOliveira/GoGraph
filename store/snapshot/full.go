@@ -46,6 +46,13 @@ type LoadedSnapshot struct {
 	// snapshots, or any snapshot of a graph that never removed a node) —
 	// the backward-compatibility contract.
 	Tombstones TombstonesReadback
+	// EdgeHandles is the per-handle edge metadata restored from
+	// edgehandles.bin (each parallel edge's per-CREATE relationship type and
+	// properties keyed by its stable handle). It is empty for snapshots that
+	// carry no edgehandles.bin entry (older snapshots, or any snapshot of a
+	// graph that never used the handle-keyed metadata stores) — the
+	// backward-compatibility contract.
+	EdgeHandles EdgeHandlesReadback
 }
 
 // WriteSnapshotFull is the v2/v3 high-level helper: it lays out a
@@ -289,6 +296,33 @@ func writeSnapshotFullCore[N comparable, W any](
 		return err
 	}
 
+	// edgehandles.bin — the durable per-handle edge metadata (each parallel
+	// edge's per-CREATE relationship type and properties keyed by its stable
+	// handle). Emitted ONLY when the graph carries at least one such record,
+	// so a snapshot of a graph that never used the handle-keyed stores is
+	// byte-identical to one produced before this component existed. csr.bin
+	// already carries the handle COLUMN that re-stamps each recovered edge's
+	// identity; this component restores the per-handle TYPE/PROPERTIES that
+	// labels.bin / properties.bin deliberately collapse to a per-pair union.
+	// Without it a self-sufficient snapshot would recover parallel edges with
+	// the right handles but the wrong (unioned) per-edge type.
+	var edgeHandleSize int64
+	var edgeHandleCRC uint32
+	var haveEdgeHandles bool
+	edgeHandlesPath := filepath.Join(tmp, EdgeHandlesFile)
+	edgeHandleSize, edgeHandleCRC, haveEdgeHandles, err = writeEdgeHandlesComponent(edgeHandlesPath, g)
+	if err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
 	// indexes/<name>.bin — one file per registered index that
 	// implements [index.Serializer]. Subscribers without serializer
 	// support are silently skipped (rebuild-on-restart contract).
@@ -330,6 +364,14 @@ func writeSnapshotFullCore[N comparable, W any](
 	// it ignores the unknown file name; this reader restores the set.
 	if haveTombstones {
 		files = append(files, FileEntry{Name: TombstonesFile, Size: tombSize, CRC32C: tombCRC})
+	}
+	// The edgehandles.bin entry is likewise additive and does not change the
+	// manifest version: present only when the graph carries per-handle edge
+	// metadata. A reader that predates it ignores the unknown file name (and
+	// reads parallel-edge types from the per-pair union); this reader restores
+	// the per-handle types.
+	if haveEdgeHandles {
+		files = append(files, FileEntry{Name: EdgeHandlesFile, Size: edgeHandleSize, CRC32C: edgeHandleCRC})
 	}
 
 	m := Manifest{
@@ -455,6 +497,35 @@ func writeMapperWithCodec[N comparable, W any](
 	return mSize, mCRC, true, nil
 }
 
+// writeEdgeHandlesComponent writes the optional edgehandles.bin component for
+// g to path, returning (size, crc, emitted, err). When g carries no
+// per-handle edge metadata, [WriteEdgeHandles] emits nothing; this helper then
+// removes the (empty) file it created so the staging directory matches a
+// graph that never used handles, and reports emitted=false so the caller omits
+// the manifest entry. The byte-stable, version-tagged, CRC-covered shape
+// mirrors the tombstones.bin component.
+func writeEdgeHandlesComponent[N comparable, W any](path string, g *lpg.Graph[N, W]) (size int64, crc uint32, emitted bool, err error) {
+	var produced bool
+	size, crc, err = writeAndSync(path, func(w io.Writer) (int64, uint32, error) {
+		s, c, e, werr := WriteEdgeHandles(w, g)
+		if werr != nil {
+			return 0, 0, werr
+		}
+		produced = e
+		return s, c, nil
+	})
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if !produced {
+		// Nothing to persist: drop the empty file so the snapshot omits the
+		// component entirely (the absent-component backward-compat contract).
+		_ = os.Remove(path) // best-effort: empty optional component cleanup
+		return 0, 0, false, nil
+	}
+	return size, crc, true, nil
+}
+
 // writeAndSync creates path, hands the file handle to write, fsyncs
 // and closes the file. It returns the (size, crc) tuple computed by
 // write so the caller can record them in the manifest. The caller's
@@ -575,6 +646,19 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		}
 	}
 
+	// edgehandles.bin — optional per-handle edge metadata. Absent for older
+	// snapshots and for any graph that never used the handle-keyed stores:
+	// the readback stays empty (backward compatibility). When present its
+	// CRC32C is verified exactly like the other components.
+	var edgeHandlesParsed EdgeHandlesReadback
+	if ehEntry := findEntry(m.Files, EdgeHandlesFile); ehEntry != nil {
+		edgeHandlesParsed, err = readVerifiedEdgeHandles(filepath.Join(dir, EdgeHandlesFile), ehEntry.CRC32C)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, err
+		}
+	}
+
 	// indexes/<name>.bin — best-effort load. Corruption surfaces as
 	// nil Bytes on the IndexReadback so the recovery path can rebuild
 	// from the LPG rather than aborting.
@@ -588,14 +672,27 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	}
 
 	return LoadedSnapshot{
-		Manifest:   m,
-		CSR:        csrParsed,
-		Labels:     labelsParsed,
-		Properties: propsParsed,
-		Mapper:     mapperParsed,
-		Indexes:    idxReadback,
-		Tombstones: tombParsed,
+		Manifest:    m,
+		CSR:         csrParsed,
+		Labels:      labelsParsed,
+		Properties:  propsParsed,
+		Mapper:      mapperParsed,
+		Indexes:     idxReadback,
+		Tombstones:  tombParsed,
+		EdgeHandles: edgeHandlesParsed,
 	}, nil
+}
+
+// findEntry returns a pointer to the FileEntry named name, or nil when
+// absent. Used for optional additive components (edgehandles.bin) that are
+// not part of the fixed [findEntries] tuple.
+func findEntry(files []FileEntry, name string) *FileEntry {
+	for k := range files {
+		if files[k].Name == name {
+			return &files[k]
+		}
+	}
+	return nil
 }
 
 // findEntries returns pointers to the csr.bin, labels.bin,
@@ -674,6 +771,32 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 	if got := hasher.Sum32(); got != expected {
 		return LabelsReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
 			ErrCorrupted, LabelsFile, got, expected)
+	}
+	return parsed, nil
+}
+
+// readVerifiedEdgeHandles is the dual of [readVerifiedCSR] for
+// edgehandles.bin.
+func readVerifiedEdgeHandles(path string, expected uint32) (EdgeHandlesReadback, error) {
+	f, err := openSnapshotComponent(path)
+	if err != nil {
+		return EdgeHandlesReadback{}, err
+	}
+	// best-effort: read-only file, close err is non-actionable for callers.
+	defer func() { _ = f.Close() }()
+
+	hasher := crc32.New(castagnoli)
+	tee := io.TeeReader(f, hasher)
+	parsed, err := ReadEdgeHandles(tee)
+	if err != nil {
+		return EdgeHandlesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if _, err := io.Copy(io.Discard, tee); err != nil {
+		return EdgeHandlesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if got := hasher.Sum32(); got != expected {
+		return EdgeHandlesReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
+			ErrCorrupted, EdgeHandlesFile, got, expected)
 	}
 	return parsed, nil
 }

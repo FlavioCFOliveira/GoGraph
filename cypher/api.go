@@ -6974,12 +6974,14 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	return srcID, dstID, nil
 }
 
-// AddEdgeH mirrors [walMutatorAdapter.AddEdge] but allocates and returns a
-// stable per-edge handle on the in-memory graph. The handle is in-memory
-// only for this stage: the WAL frame written for the edge is the same
-// legacy AddEdge frame, so a recovered edge does not yet keep its handle
-// (the cross-reopen identity is a later stage). See
-// [graph/lpg/edge_handle.go] for the Stage 2 durability note.
+// AddEdgeH mirrors [walMutatorAdapter.AddEdge] but allocates a stable
+// per-edge handle on the in-memory graph and persists it: the WAL frame is
+// the handle-bearing [txn.OpAddEdgeH] carrying the SAME handle stamped onto
+// the adjacency slot, so a recovered parallel edge keeps its identity and
+// the per-handle type/properties below reattach to it on replay. Replay is
+// idempotent against a snapshot that already loaded the handle
+// ([lpg.Graph.AddEdgeHIfAbsent]), so snapshot + full-WAL recovery does not
+// double the edge. See graph/lpg/edge_handle.go for the durability contract.
 func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
@@ -6987,7 +6989,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	_ = a.tx.AddEdgeWithHandle(src, dst, w, handle) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -7192,23 +7194,27 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
 // EdgePropertiesByHandle / RemoveEdgeInstanceByHandle delegate to the
-// stable-handle keyed metadata stores on the underlying [lpg.Graph]. These
-// are in-memory only for this stage; the handle is not yet written to the
-// WAL (a later stage makes it durable).
+// stable-handle keyed metadata stores on the underlying [lpg.Graph] AND
+// buffer the matching durable WAL op so a recovered parallel edge keeps its
+// per-CREATE type and properties (Stage 2). The read-only accessors
+// (EdgeLabelsByHandle / EdgePropertiesByHandle) buffer nothing.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
 }
 func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) {
 	a.g.SetEdgePropertyByHandle(src, dst, handle, key, value)
+	_ = a.tx.SetEdgePropertyByHandle(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.

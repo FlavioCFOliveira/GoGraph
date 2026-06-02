@@ -321,7 +321,15 @@ func openCodec[N comparable, W any](
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
 ) (Result[N, W], error) {
-	g := lpg.New[N, W](adjlist.Config{Directed: true})
+	// Multigraph: true matches openCypher's property-graph model (CREATE of a
+	// relationship is additive — two CREATEs between the same ordered pair must
+	// yield two relationships) and the configuration the Cypher TCK harness
+	// uses. The WAL, snapshot and CSR layers already round-trip parallel edges
+	// with distinct per-instance types/properties, so a recovered graph must be
+	// multigraph or those parallel edges collapse to one on the next reopen —
+	// silent data loss for every consumer that recovers from disk. A graph that
+	// never created a parallel edge behaves identically under either mode.
+	g := lpg.New[N, W](adjlist.Config{Directed: true, Multigraph: true})
 	res := Result[N, W]{Graph: g}
 
 	if err := ctx.Err(); err != nil {
@@ -331,8 +339,9 @@ func openCodec[N comparable, W any](
 	snapDir := filepath.Join(dir, "snapshot")
 	var snapLabels snapshot.LabelsReadback
 	var snapProps snapshot.PropertiesReadback
+	var snapEdgeHandles snapshot.EdgeHandlesReadback
 	var snapIndexes []snapshot.IndexReadback
-	var haveSnapLabels, haveSnapProps bool
+	var haveSnapLabels, haveSnapProps, haveSnapEdgeHandles bool
 	// snapshotSideAppliedEarly records that the snapshot's labels and
 	// properties were applied BEFORE WAL replay (the self-sufficient path);
 	// the deferred after-WAL apply below is then skipped for them.
@@ -347,9 +356,11 @@ func openCodec[N comparable, W any](
 		res.SnapshotSchemaVersion = loaded.Manifest.Version
 		snapLabels = loaded.Labels
 		snapProps = loaded.Properties
+		snapEdgeHandles = loaded.EdgeHandles
 		snapIndexes = loaded.Indexes
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
+		haveSnapEdgeHandles = len(loaded.EdgeHandles.Records) > 0
 
 		// v3 snapshot: the mapper.bin payload re-seeds the in-memory
 		// interning table BEFORE WAL replay so the rest of the load
@@ -416,6 +427,16 @@ func openCodec[N comparable, W any](
 					return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
 				}
 				res.SnapshotProperties = len(loaded.Properties.NodeProperties) + len(loaded.Properties.EdgeProperties)
+			}
+			// Per-handle edge metadata: re-attach each parallel edge's
+			// per-CREATE type and properties keyed to the stable handle the
+			// CSR component already re-stamped onto the adjacency slot. Applied
+			// BEFORE WAL replay (self-sufficient path) so the WAL tail's
+			// per-handle mutations win chronologically, and seeded with the
+			// handle high-water counter so post-recovery edge creation never
+			// re-mints a live handle (invariant I5).
+			if haveSnapEdgeHandles {
+				snapshot.ApplyEdgeHandlesToGraph(g, loaded.EdgeHandles)
 			}
 			snapshotSideAppliedEarly = true
 		}
@@ -520,6 +541,15 @@ func openCodec[N comparable, W any](
 			return res, fmt.Errorf("recovery: apply snapshot properties: %w", err)
 		}
 		res.SnapshotProperties = len(snapProps.NodeProperties) + len(snapProps.EdgeProperties)
+	}
+	// Per-handle edge metadata on the mapper-less (v2) path: applied after the
+	// WAL replay so the mapper has interned every node the snapshot records.
+	// The handle-keyed stores are NodeID-keyed and do not require the edge to
+	// be present, so this is safe even when the v2 CSR carried no handle
+	// column. The self-sufficient path applied these before WAL replay
+	// (snapshotSideAppliedEarly), so it is skipped here.
+	if haveSnapEdgeHandles && !snapshotSideAppliedEarly {
+		snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles)
 	}
 	// Secondary indexes (label / hash / btree) are re-hydrated last so
 	// the live graph is fully populated when we ask the Manager for the
@@ -663,6 +693,18 @@ func applyOpCodec[N comparable, W any](
 			g.RemoveEdge(src, dst)
 		}
 
+	case txn.OpAddEdgeH:
+		return applyAddEdgeH(g, src, dst, rest, wcodec)
+
+	case txn.OpSetEdgeLabelByHandle:
+		return applySetEdgeLabelByHandle(g, src, dst, rest)
+
+	case txn.OpSetEdgePropertyByHandle:
+		return applySetEdgePropertyByHandle(g, src, dst, rest)
+
+	case txn.OpRemoveEdgeInstanceByHandle:
+		return applyRemoveEdgeInstanceByHandle(g, src, dst, rest)
+
 	case txn.OpSetNodeProperty, txn.OpDelNodeProperty,
 		txn.OpSetEdgeProperty, txn.OpDelEdgeProperty:
 		// uint16 key length + key bytes [+ property value for Set ops]
@@ -698,6 +740,136 @@ func applyOpCodec[N comparable, W any](
 			g.DelEdgeProperty(src, dst, key)
 		}
 	}
+	return true
+}
+
+// trailingHandle reads the 8-byte little-endian stable edge handle that the
+// Stage-2 handle-bearing op kinds append after their same-kind body. It
+// returns (handle, true) when exactly 8 bytes remain at the head of rest,
+// and (0, false) when the frame is truncated (no durable handle). The
+// caller treats false as a corrupt frame and stops replay.
+func trailingHandle(rest []byte) (uint64, bool) {
+	if len(rest) < 8 {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(rest[:8]), true
+}
+
+// applyAddEdgeH applies an [txn.OpAddEdgeH] frame. src and dst were already
+// codec-decoded by the caller; rest is the body after them: the
+// weighted-edge tail (weight + uint16 label) followed by the 8-byte stable
+// handle. The edge is inserted via [lpg.Graph.AddEdgeHIfAbsent] so a
+// snapshot that already loaded this handle (and any earlier replayed frame)
+// makes the replay idempotent — no doubled parallel edge. The handle
+// high-water counter is re-seeded so a post-recovery edge creation never
+// re-mints a live handle (invariant I5).
+//
+// A nil weight codec cannot decode the weight payload, so the frame is
+// rejected (the same fail-stop the OpAddEdgeWeighted path takes).
+func applyAddEdgeH[N comparable, W any](g *lpg.Graph[N, W], src, dst N, rest []byte, wcodec txn.WeightCodec[W]) bool {
+	if wcodec == nil {
+		metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
+		return false
+	}
+	weight, rest, err := wcodec.Decode(rest)
+	if err != nil {
+		return false
+	}
+	// uint16 label length (always 0 for an edge add) then label bytes.
+	if len(rest) < 2 {
+		return false
+	}
+	n := binary.LittleEndian.Uint16(rest)
+	rest = rest[2:]
+	if uint64(len(rest)) < uint64(n) {
+		return false
+	}
+	rest = rest[n:]
+	handle, ok := trailingHandle(rest)
+	if !ok {
+		return false
+	}
+	if _, err := g.AddEdgeHIfAbsent(src, dst, weight, handle); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.addEdgeErrors", 1)
+		return false
+	}
+	g.SeedEdgeHandle(handle + 1)
+	return true
+}
+
+// applySetEdgeLabelByHandle applies an [txn.OpSetEdgeLabelByHandle] frame.
+// rest is the body after the two decoded endpoints: a uint16-length-prefixed
+// label followed by the 8-byte stable handle. It rebuilds one parallel
+// edge's per-CREATE type keyed to its handle.
+func applySetEdgeLabelByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N, rest []byte) bool {
+	if len(rest) < 2 {
+		return false
+	}
+	n := binary.LittleEndian.Uint16(rest)
+	rest = rest[2:]
+	if uint64(len(rest)) < uint64(n) {
+		return false
+	}
+	label := string(rest[:n])
+	rest = rest[n:]
+	handle, ok := trailingHandle(rest)
+	if !ok {
+		return false
+	}
+	g.SetEdgeLabelByHandle(src, dst, handle, label)
+	g.SeedEdgeHandle(handle + 1)
+	return true
+}
+
+// applySetEdgePropertyByHandle applies an [txn.OpSetEdgePropertyByHandle]
+// frame. rest is the body after the two decoded endpoints: a
+// uint16-length-prefixed key, the encoded property value, then the 8-byte
+// stable handle. It rebuilds one parallel edge's per-CREATE property keyed
+// to its handle.
+func applySetEdgePropertyByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N, rest []byte) bool {
+	if len(rest) < 2 {
+		return false
+	}
+	kLen := binary.LittleEndian.Uint16(rest)
+	rest = rest[2:]
+	if uint64(len(rest)) < uint64(kLen) {
+		return false
+	}
+	key := string(rest[:kLen])
+	rest = rest[kLen:]
+	val, rest, verr := decodeRecoveryPropertyValue(rest)
+	if verr != nil {
+		return false
+	}
+	handle, ok := trailingHandle(rest)
+	if !ok {
+		return false
+	}
+	g.SetEdgePropertyByHandle(src, dst, handle, key, val)
+	g.SeedEdgeHandle(handle + 1)
+	return true
+}
+
+// applyRemoveEdgeInstanceByHandle applies an
+// [txn.OpRemoveEdgeInstanceByHandle] frame. rest is the body after the two
+// decoded endpoints: a uint16 label length (always 0) followed by the
+// 8-byte stable handle. It drops one logical edge's per-handle metadata.
+func applyRemoveEdgeInstanceByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N, rest []byte) bool {
+	if len(rest) < 2 {
+		return false
+	}
+	n := binary.LittleEndian.Uint16(rest)
+	rest = rest[2:]
+	if uint64(len(rest)) < uint64(n) {
+		return false
+	}
+	rest = rest[n:]
+	handle, ok := trailingHandle(rest)
+	if !ok {
+		return false
+	}
+	g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	g.SeedEdgeHandle(handle + 1)
 	return true
 }
 

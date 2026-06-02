@@ -216,8 +216,9 @@ func TestTxn_AddEdge_NoWeightCodec_NonzeroErr(t *testing.T) {
 
 // TestTxn_Options_NewStoreWithOptions_AccessorsAndV3Frame confirms
 // that NewStoreWithOptions records both codecs on the Store and that
-// a weighted commit produces a v3-tagged OpAddEdgeWeighted frame
-// followed by the v3 OpCommit marker.
+// a weighted commit produces a v3-tagged OpAddEdgeH frame (the
+// handle-bearing successor of OpAddEdgeWeighted that AddEdge now emits
+// on a weight-codec store) followed by the v3 OpCommit marker.
 func TestTxn_Options_NewStoreWithOptions_AccessorsAndV3Frame(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -262,8 +263,10 @@ func TestTxn_Options_NewStoreWithOptions_AccessorsAndV3Frame(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	// Two frames: the OpAddEdgeWeighted op then the OpCommit marker.
-	want := []byte{byte(OpAddEdgeWeighted), byte(OpCommit)}
+	// Two frames: the OpAddEdgeH op (Stage-2 handle-bearing successor of
+	// OpAddEdgeWeighted, now emitted by AddEdge on a weight-codec store) then
+	// the OpCommit marker.
+	want := []byte{byte(OpAddEdgeH), byte(OpCommit)}
 	if len(kinds) != len(want) {
 		t.Fatalf("frame count = %d, want %d", len(kinds), len(want))
 	}
@@ -276,9 +279,10 @@ func TestTxn_Options_NewStoreWithOptions_AccessorsAndV3Frame(t *testing.T) {
 
 // TestTxn_Options_ZeroWeightEmitsOpAddEdgeWeighted documents the
 // invariant on the weighted store: once a [WeightCodec] is wired in,
-// every AddEdge buffers an [OpAddEdgeWeighted] frame, including
+// every AddEdge buffers a handle-bearing [OpAddEdgeH] frame, including
 // zero-valued weights. This keeps the wire-level layout unambiguous
-// (every weighted store always writes the same shape).
+// (every weighted store always writes the same shape) and gives every
+// durable edge a stable per-edge handle.
 //
 // Forward-compatible replay of a pre-T8 WAL (where every AddEdge
 // frame is [OpAddEdge]) is exercised separately in the recovery
@@ -311,8 +315,8 @@ func TestTxn_Options_ZeroWeightEmitsOpAddEdgeWeighted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	// The first frame is the op (OpAddEdgeWeighted even for a zero weight);
-	// the trailing v3 OpCommit marker closes the transaction.
+	// The first frame is the op (OpAddEdgeH even for a zero weight); the
+	// trailing v3 OpCommit marker closes the transaction.
 	var kinds []byte
 	if err := r.Replay(func(f wal.Frame) error {
 		kinds = append(kinds, f.Payload[1])
@@ -320,7 +324,7 @@ func TestTxn_Options_ZeroWeightEmitsOpAddEdgeWeighted(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	want := []byte{byte(OpAddEdgeWeighted), byte(OpCommit)}
+	want := []byte{byte(OpAddEdgeH), byte(OpCommit)}
 	if len(kinds) != len(want) {
 		t.Fatalf("frame count = %d, want %d", len(kinds), len(want))
 	}
