@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 
@@ -278,6 +279,86 @@ func TestRecovery_SnapshotLabelDoesNotResurrectAcrossWALRelabel(t *testing.T) {
 			t.Error("X lost property p after recovery")
 		} else if got, _ := v.Int64(); got != 2 {
 			t.Errorf("X.p = %d, want 2 (WAL-tail value, not the stale snapshot 1)", got)
+		}
+	}
+}
+
+// TestRecovery_RemoveEdgeReplay_StripsStaleEdgeState locks the edge analogue
+// of the node-deletion durability contract (#1267): when the snapshot holds
+// an edge a->b with label EL1 and property old=1, and the WAL tail removes
+// that edge and re-adds it with label EL2 and property new=2 (no checkpoint
+// between), the recovered edge must carry EXACTLY the WAL-tail state (label
+// EL2, property new=2, no EL1, no old), not the resurrected snapshot state.
+func TestRecovery_RemoveEdgeReplay_StripsStaleEdgeState(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "wal")
+
+	// open 1: CREATE (a)-[:EL1 {old:1}]->(b); checkpoint; close.
+	{
+		w, err := wal.Open(walPath)
+		if err != nil {
+			t.Fatalf("open1 wal.Open: %v", err)
+		}
+		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
+		tx := store.Begin()
+		mustTx(t, tx.AddNode("a"))
+		mustTx(t, tx.AddNode("b"))
+		mustTx(t, tx.AddEdge("a", "b", 0))
+		mustTx(t, tx.SetEdgeLabel("a", "b", "EL1"))
+		mustTx(t, tx.SetEdgeProperty("a", "b", "old", lpg.Int64Value(1)))
+		mustTx(t, tx.Commit())
+		checkpointAndClose(t, dir, g, w)
+	}
+
+	// open 2: delete the edge, re-add it with a new label/property; commit;
+	// NO checkpoint, so the snapshot keeps EL1/old and the WAL retains the
+	// remove-then-re-add.
+	{
+		res, err := Open[string, int64](dir, tombstoneRecoveryOpts())
+		if err != nil {
+			t.Fatalf("open2 recovery.Open: %v", err)
+		}
+		g := res.Graph
+		w, err := wal.Open(walPath)
+		if err != nil {
+			t.Fatalf("open2 wal.Open: %v", err)
+		}
+		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
+		tx := store.Begin()
+		mustTx(t, tx.RemoveEdge("a", "b"))
+		mustTx(t, tx.AddEdge("a", "b", 0))
+		mustTx(t, tx.SetEdgeLabel("a", "b", "EL2"))
+		mustTx(t, tx.SetEdgeProperty("a", "b", "new", lpg.Int64Value(2)))
+		mustTx(t, tx.Commit())
+		if err := w.Close(); err != nil { // no checkpoint
+			t.Fatalf("open2 wal.Close: %v", err)
+		}
+	}
+
+	// open 3: recover snapshot{a-[:EL1{old:1}]->b} + WAL[remove; re-add EL2{new:2}].
+	{
+		res, err := Open[string, int64](dir, tombstoneRecoveryOpts())
+		if err != nil {
+			t.Fatalf("open3 recovery.Open: %v", err)
+		}
+		g := res.Graph
+		if !g.AdjList().HasEdge("a", "b") {
+			t.Fatal("edge a->b must exist after re-add")
+		}
+		labels := g.EdgeLabels("a", "b")
+		sort.Strings(labels)
+		if len(labels) != 1 || labels[0] != "EL2" {
+			t.Fatalf("edge labels = %v, want exactly [EL2] (no stale EL1)", labels)
+		}
+		if _, ok := g.GetEdgeProperty("a", "b", "old"); ok {
+			t.Error("stale snapshot edge property 'old' must not survive the remove+re-add")
+		}
+		if v, ok := g.GetEdgeProperty("a", "b", "new"); !ok {
+			t.Error("WAL-tail edge property 'new' missing")
+		} else if got, _ := v.Int64(); got != 2 {
+			t.Errorf("edge property new = %d, want 2", got)
 		}
 	}
 }

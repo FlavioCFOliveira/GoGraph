@@ -6555,12 +6555,15 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	return srcID, dstID, nil
 }
 
-// RemoveEdge removes the directed edge (src, dst).
+// RemoveEdge removes the directed edge (src, dst). The LPG edge removal
+// strips the per-pair edge labels/properties once the pair is fully
+// disconnected, so re-creating an edge between the same endpoints does not
+// resurrect the deleted relationship's type or properties.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	if a.g.AdjList().HasEdge(src, dst) {
 		a.g.IncrEdgesRemoved()
 	}
-	a.g.AdjList().RemoveEdge(src, dst)
+	a.g.RemoveEdge(src, dst)
 }
 
 // SetNodeLabel attaches label to n.
@@ -6865,12 +6868,15 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	return srcID, dstID, nil
 }
 
-// RemoveEdge removes the directed edge (src, dst).
+// RemoveEdge removes the directed edge (src, dst). The LPG edge removal
+// strips the per-pair edge labels/properties once the pair is fully
+// disconnected, so re-creating an edge between the same endpoints does not
+// resurrect the deleted relationship's type or properties.
 func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if a.g.AdjList().HasEdge(src, dst) {
 		a.g.IncrEdgesRemoved()
 	}
-	a.g.AdjList().RemoveEdge(src, dst)
+	a.g.RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
 }
 

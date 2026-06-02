@@ -1089,7 +1089,10 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 	case OpDelNodeProperty:
 		g.DelNodeProperty(op.Src, op.Key)
 	case OpRemoveEdge:
-		g.AdjList().RemoveEdge(op.Src, op.Dst)
+		// Use the LPG edge removal so a fully-disconnected pair also sheds
+		// its per-pair edge labels/properties (matching recovery replay),
+		// preventing a later re-add from resurrecting them.
+		g.RemoveEdge(op.Src, op.Dst)
 	case OpSetEdgeProperty:
 		return g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:

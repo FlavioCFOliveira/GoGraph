@@ -87,6 +87,101 @@ func TestSetNodeLabel_DoesNotRevive(t *testing.T) {
 	}
 }
 
+// TestRemoveEdge_StripsPerPairStateOnFullDisconnect locks the edge analogue
+// of tombstone hygiene: once RemoveEdge leaves the endpoint pair with no
+// remaining edge, the per-pair edge label and property surfaces are cleared
+// so a later re-add does not resurrect them.
+func TestRemoveEdge_StripsPerPairStateOnFullDisconnect(t *testing.T) {
+	t.Parallel()
+	g := New[string, int64](adjlist.Config{Directed: true})
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	g.SetEdgeLabel("a", "b", "REL")
+	if err := g.SetEdgeProperty("a", "b", "since", Int64Value(2020)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
+	if got := g.EdgeLabels("a", "b"); len(got) != 1 || got[0] != "REL" {
+		t.Fatalf("precondition EdgeLabels = %v, want [REL]", got)
+	}
+
+	g.RemoveEdge("a", "b")
+
+	if g.AdjList().HasEdge("a", "b") {
+		t.Fatal("edge a->b should be gone after RemoveEdge")
+	}
+	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
+		t.Fatalf("edge labels = %v, want empty after full disconnect", got)
+	}
+	if _, ok := g.GetEdgeProperty("a", "b", "since"); ok {
+		t.Fatal("edge property should be cleared after full disconnect")
+	}
+
+	// Re-create the pair: it must start clean, not resurrect REL/since.
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge (re-create): %v", err)
+	}
+	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
+		t.Fatalf("re-created edge labels = %v, want empty (no resurrection)", got)
+	}
+}
+
+// TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains locks the
+// multigraph safety guard: removing one of several parallel edges must NOT
+// strip the shared per-pair label, since surviving parallel edges still use
+// it. Only the final removal (full disconnect) clears it.
+func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
+	t.Parallel()
+	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge 1: %v", err)
+	}
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge 2: %v", err)
+	}
+	g.SetEdgeLabel("a", "b", "REL")
+
+	g.RemoveEdge("a", "b") // one parallel edge remains
+	if !g.AdjList().HasEdge("a", "b") {
+		t.Fatal("a parallel edge a->b should still exist")
+	}
+	if got := g.EdgeLabels("a", "b"); len(got) != 1 || got[0] != "REL" {
+		t.Fatalf("per-pair label = %v, want [REL] retained while a parallel edge remains", got)
+	}
+
+	g.RemoveEdge("a", "b") // now fully disconnected
+	if g.AdjList().HasEdge("a", "b") {
+		t.Fatal("edge a->b should be gone")
+	}
+	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
+		t.Fatalf("per-pair label = %v, want empty after the last parallel edge is removed", got)
+	}
+}
+
+// TestRemoveEdge_DirectedDoesNotStripReverseEdge guards against over-strip:
+// in a directed graph, removing a->b must not touch the distinct b->a edge.
+func TestRemoveEdge_DirectedDoesNotStripReverseEdge(t *testing.T) {
+	t.Parallel()
+	g := New[string, int64](adjlist.Config{Directed: true})
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge a->b: %v", err)
+	}
+	if err := g.AddEdge("b", "a", 0); err != nil {
+		t.Fatalf("AddEdge b->a: %v", err)
+	}
+	g.SetEdgeLabel("a", "b", "FWD")
+	g.SetEdgeLabel("b", "a", "REV")
+
+	g.RemoveEdge("a", "b")
+
+	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
+		t.Fatalf("a->b labels = %v, want empty", got)
+	}
+	if got := g.EdgeLabels("b", "a"); len(got) != 1 || got[0] != "REV" {
+		t.Fatalf("b->a labels = %v, want [REV] (the reverse directed edge must be untouched)", got)
+	}
+}
+
 // TestTombstonedIDs reports exactly the tombstoned set, sorted, and is empty
 // for a graph that never deleted a node. RED on the pre-fix code: the
 // accessor does not exist (compile failure locks the missing API).

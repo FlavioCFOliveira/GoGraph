@@ -657,7 +657,10 @@ func applyOpCodec[N comparable, W any](
 		case txn.OpSetEdgeLabel:
 			g.SetEdgeLabel(src, dst, label)
 		case txn.OpRemoveEdge:
-			g.AdjList().RemoveEdge(src, dst)
+			// LPG edge removal: a fully-disconnected pair also sheds its
+			// per-pair edge labels/properties, so a later OpAddEdge for the
+			// same endpoints does not resurrect the removed edge's labels.
+			g.RemoveEdge(src, dst)
 		}
 
 	case txn.OpSetNodeProperty, txn.OpDelNodeProperty,

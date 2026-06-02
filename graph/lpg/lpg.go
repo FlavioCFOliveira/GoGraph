@@ -409,6 +409,58 @@ func (g *Graph[N, W]) revive(id graph.NodeID) {
 // this (CREATE routes every endpoint through the mutator's AddNode).
 func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src, dst, w) }
 
+// RemoveEdge removes one edge (src, dst) from the adjacency layer (and the
+// mirrored (dst, src) edge when the graph is undirected). When this leaves
+// the endpoint pair with NO remaining edge — the last parallel edge between
+// them is gone — RemoveEdge also strips the per-pair edge labels and edge
+// properties, so re-creating an edge between the same endpoints later does
+// not resurrect the removed edge's labels or properties (the edge analogue
+// of node-tombstone hygiene). While any parallel edge between the pair
+// survives, the shared per-pair label and property surfaces are left intact.
+//
+// RemoveEdge is the edge-deletion entry point used by the Cypher executor
+// and WAL replay, so the in-memory state and the recovered state agree.
+// Callers that operate purely on adjacency (e.g. search algorithms) may keep
+// using [adjlist.AdjList.RemoveEdge] directly; that path does not touch
+// labels or properties.
+func (g *Graph[N, W]) RemoveEdge(src, dst N) {
+	g.adj.RemoveEdge(src, dst)
+	if g.adj.HasEdge(src, dst) {
+		return // parallel edge(s) remain: keep the shared per-pair surfaces
+	}
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return
+	}
+	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID})
+	if !g.adj.Directed() {
+		// The undirected edge is fully gone; clear the mirror direction's
+		// per-pair surfaces too (a label may have been set under either
+		// endpoint order).
+		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID})
+	}
+}
+
+// clearEdgePairState drops the per-pair edge-label and edge-property bags for
+// k. The coarse, src-keyed edge label index (g.edgeIdx) is intentionally left
+// untouched: it is read only as an over-approximation that the executor
+// verifies against the authoritative per-pair labels, so a stale entry can
+// cost at most a filtered-out candidate, never a wrong result.
+func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
+	lsh := g.edgeLabelShardFor(k)
+	lsh.mu.Lock()
+	delete(lsh.m, k)
+	lsh.mu.Unlock()
+	psh := g.edgePropShardFor(k)
+	psh.mu.Lock()
+	delete(psh.m, k)
+	psh.mu.Unlock()
+}
+
 // SetNodeLabel attaches label to n, inserting n if needed. Returns
 // the error from the underlying [adjlist.AdjList.AddNode] (which can
 // only happen via a future bounded-growth implementation); the
