@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-30  
 **Corpus:** openCypher TCK — opencypher/openCypher@main  
-**Module version:** GoGraph v3.0.0  
+**Module version:** GoGraph v0.1.0  
 
 > **RESOLVED — 100 % execution compliance achieved (2026-05-30).**
 > The execution-level TCK is fully green at 3 897/3 897 scenarios
