@@ -37,6 +37,16 @@ type GraphMutator interface {
 	// any error from the underlying graph implementation.
 	AddEdge(src, dst string, w float64) (srcID, dstID graph.NodeID, err error)
 
+	// AddEdgeH is [GraphMutator.AddEdge] with a stable per-edge handle
+	// allocated by the underlying graph and stamped onto the adjacency
+	// slot. The returned handle keys the *ByHandle metadata setters below
+	// so a parallel CREATE's type and properties are resolvable on the
+	// read path by an identity that survives sibling-edge deletion. Used
+	// by CreateRelationship; MERGE keeps using AddEdge (its read path
+	// falls back to the per-pair union). The handle is always non-zero on
+	// success.
+	AddEdgeH(src, dst string, w float64) (srcID, dstID graph.NodeID, handle uint64, err error)
+
 	// RemoveEdge removes the directed edge from src to dst (no-op if absent).
 	RemoveEdge(src, dst string)
 
@@ -138,6 +148,26 @@ type GraphMutator interface {
 	// a specific logical edge while leaving sibling instances
 	// untouched.
 	RemoveEdgeInstance(src, dst string, idx int64)
+
+	// SetEdgeLabelByHandle attaches `label` to the edge identified by the
+	// stable `handle` on the (src, dst) pair (see [GraphMutator.AddEdgeH]).
+	// The handle-keyed analogue of SetEdgeLabelAt; the read path resolves a
+	// parallel CREATE's type by this identity instead of a positional CSR
+	// index. No-op when handle is 0.
+	SetEdgeLabelByHandle(src, dst string, handle uint64, label string)
+	// EdgeLabelsByHandle returns the labels recorded for the edge
+	// identified by `handle` on the (src, dst) pair, or nil when none.
+	EdgeLabelsByHandle(src, dst string, handle uint64) []string
+	// SetEdgePropertyByHandle records `key`=`value` on the edge identified
+	// by the stable `handle` on the (src, dst) pair. No-op when handle is 0.
+	SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue)
+	// EdgePropertiesByHandle returns the property map recorded for the edge
+	// identified by `handle` on the (src, dst) pair, or nil when none.
+	EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue
+	// RemoveEdgeInstanceByHandle drops every per-handle label and property
+	// associated with (src, dst) at `handle`. Used by DELETE to discard a
+	// specific logical edge while leaving sibling handles untouched.
+	RemoveEdgeInstanceByHandle(src, dst string, handle uint64)
 
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.

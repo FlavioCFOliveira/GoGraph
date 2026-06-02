@@ -53,6 +53,7 @@ type stubMutator struct {
 	edgeLabels map[string]map[string]bool              // "src|dst" → label set
 	edgeProps  map[string]map[string]lpg.PropertyValue // "src|dst" → prop map
 	tombstones map[graph.NodeID]struct{}               // RemoveNode'd ids
+	handleSeq  uint64                                  // monotone source for AddEdgeH synthetic handles
 }
 
 func newStubMutator() *stubMutator {
@@ -94,6 +95,20 @@ func (s *stubMutator) AddEdge(src, dst string, _ float64) (srcID, dstID graph.No
 	}
 	s.edges[src][dst] = true
 	return
+}
+
+// AddEdgeH delegates to AddEdge and returns a synthetic monotone handle so
+// the write operators that call it have a non-zero value to thread.
+func (s *stubMutator) AddEdgeH(src, dst string, w float64) (srcID, dstID graph.NodeID, handle uint64, err error) {
+	srcID, dstID, err = s.AddEdge(src, dst, w)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	s.mu.Lock()
+	s.handleSeq++
+	handle = s.handleSeq
+	s.mu.Unlock()
+	return srcID, dstID, handle, nil
 }
 
 func (s *stubMutator) RemoveEdge(src, dst string) {
@@ -237,6 +252,17 @@ func (s *stubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg.Pro
 	return nil
 }
 func (s *stubMutator) RemoveEdgeInstance(string, string, int64) {}
+
+// The stable-handle keyed metadata stubs are inert for the same reason as
+// the *At stubs above.
+func (s *stubMutator) SetEdgeLabelByHandle(string, string, uint64, string) {}
+func (s *stubMutator) EdgeLabelsByHandle(string, string, uint64) []string  { return nil }
+func (s *stubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) {
+}
+func (s *stubMutator) EdgePropertiesByHandle(string, string, uint64) map[string]lpg.PropertyValue {
+	return nil
+}
+func (s *stubMutator) RemoveEdgeInstanceByHandle(string, string, uint64) {}
 
 // EdgeLabels returns the edge labels for (src, dst). Reads from the
 // edgeLabel set populated by SetEdgeLabel; returns nil when absent.

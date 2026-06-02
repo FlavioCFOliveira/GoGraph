@@ -147,7 +147,16 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: CreateRelationship: cannot resolve dst NodeID %d", dstID)
 	}
 
-	actualSrcID, actualDstID, err := op.mutator.AddEdge(srcLabel, dstLabel, 0)
+	// AddEdgeH allocates a stable per-edge handle and stamps it onto the
+	// adjacency slot. In multigraph storage (the openCypher TCK model) each
+	// CREATE is a distinct slot with a distinct handle, so the read path
+	// resolves this CREATE's type/properties by `handle` — an identity that
+	// survives the deletion of a parallel sibling, unlike the positional
+	// CSR-slot index the old read path re-derived. In simple-graph storage
+	// a duplicate (src, dst) is collapsed and the handle is not stored; the
+	// read path there falls back to the per-pair / per-CREATE-index union,
+	// which the *At writes below keep populated.
+	actualSrcID, actualDstID, handle, err := op.mutator.AddEdgeH(srcLabel, dstLabel, 0)
 	if err != nil {
 		return false, fmt.Errorf("exec: CreateRelationship AddEdge: %w", err)
 	}
@@ -162,6 +171,7 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	instanceIdx := op.mutator.IncEdgeCreateCount(srcLabel, dstLabel)
 	if op.relType != "" {
 		op.mutator.SetEdgeLabelAt(srcLabel, dstLabel, instanceIdx, op.relType)
+		op.mutator.SetEdgeLabelByHandle(srcLabel, dstLabel, handle, op.relType)
 	}
 
 	props := mergeProps(op.props, op.propsExprFn, childRow)
@@ -171,6 +181,7 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 			return false, fmt.Errorf("exec: CreateRelationship SetEdgeProperty %q: %w", p.key, err)
 		}
 		op.mutator.SetEdgePropertyAt(srcLabel, dstLabel, instanceIdx, p.key, p.value)
+		op.mutator.SetEdgePropertyByHandle(srcLabel, dstLabel, handle, p.key, p.value)
 	}
 
 	if op.relVar == "" {

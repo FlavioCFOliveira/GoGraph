@@ -32,6 +32,7 @@ type CSR[W any] struct {
 	vertices []uint64       // offsets, length len(vertices); vertices[i] = start of node-i out-neighbours, vertices[len-1] = total edges
 	edges    []graph.NodeID // length size; out-neighbours sorted by source
 	weights  []W            // parallel to edges; nil when the source graph carries no weight payload of interest
+	handles  []uint64       // parallel to edges; nil unless the source carries per-slot stable edge handles (see HandlesSlice)
 	order    uint64         // number of distinct nodes in the snapshot
 	size     uint64         // number of edges in the snapshot
 }
@@ -55,13 +56,23 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 	vertices := make([]uint64, maxID+1)
 
 	// Pass 1: count out-edges per source. Also accumulates total
-	// edge count so the edges slice can be allocated exactly once.
+	// edge count so the edges slice can be allocated exactly once, and
+	// detects whether the source adjacency carries per-slot stable edge
+	// handles so the handle column is allocated only when needed (lazy /
+	// opt-in, mirroring the hasWeights gate below). A non-multigraph
+	// graph that never called AddEdgeH carries no handles, so its CSR
+	// never pays for the extra column and the read path falls back to
+	// its prior positional behaviour.
 	var total uint64
+	var anyHandles bool
 	for id := uint64(0); id < maxID; id++ {
-		nb, _ := adj.LoadEntry(graph.NodeID(id))
+		nb, _, h := adj.LoadEntryH(graph.NodeID(id))
 		count := uint64(len(nb))
 		vertices[id] = total
 		total += count
+		if h != nil {
+			anyHandles = true
+		}
 	}
 	vertices[maxID] = total
 
@@ -70,11 +81,15 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 	if hasWeights[W]() {
 		weights = make([]W, total)
 	}
+	var handles []uint64
+	if anyHandles {
+		handles = make([]uint64, total)
+	}
 
 	// Pass 2: write out-edges. Two passes avoid the O(V) cost of a
 	// follow-up shift to compute offsets from edge writes.
 	for id := uint64(0); id < maxID; id++ {
-		nb, ws := adj.LoadEntry(graph.NodeID(id))
+		nb, ws, h := adj.LoadEntryH(graph.NodeID(id))
 		if len(nb) == 0 {
 			continue
 		}
@@ -83,12 +98,19 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 		if weights != nil {
 			copy(weights[start:], ws)
 		}
+		if handles != nil {
+			// h may be nil for a source whose edges predate the first
+			// AddEdgeH on this graph; copy leaves those slots at 0 (the
+			// "no handle" sentinel), keeping the column slot-aligned.
+			copy(handles[start:], h)
+		}
 	}
 
 	return &CSR[W]{
 		vertices: vertices,
 		edges:    edges,
 		weights:  weights,
+		handles:  handles,
 		order:    uint64(adj.Order()),
 		size:     total,
 	}
@@ -170,6 +192,18 @@ func (c *CSR[W]) VerticesSlice() []uint64 { return c.vertices }
 // WeightsSlice returns the underlying weights array, or nil if the
 // snapshot is unweighted. The slice must be treated as immutable.
 func (c *CSR[W]) WeightsSlice() []W { return c.weights }
+
+// HandlesSlice returns the underlying stable-edge-handle array, or nil
+// when the source graph carried no per-slot handles (a simple graph that
+// never used [adjlist.AdjList.AddEdgeH]). When non-nil the slice is the
+// same length as [CSR.EdgesSlice] and aligns slot-for-slot with it:
+// handles[pos] is the stable handle of the edge stored at edges[pos]. The
+// slice must be treated as immutable.
+//
+// A nil return is the read path's signal to fall back to its prior
+// positional per-instance inference, so callers must nil-check before
+// indexing.
+func (c *CSR[W]) HandlesSlice() []uint64 { return c.handles }
 
 // LiveMask returns a NodeID-indexed bitmap of length MaxNodeID() where
 // mask[i] is true iff NodeID i participates in at least one edge as
@@ -275,7 +309,14 @@ func (c *CSR[W]) BuildReverse() *CSR[W] {
 	if c.weights != nil {
 		revWeights = make([]W, totalEdges)
 	}
-	// Pass 2: scatter edges into their reversed slots.
+	var revHandles []uint64
+	if c.handles != nil {
+		revHandles = make([]uint64, totalEdges)
+	}
+	// Pass 2: scatter edges into their reversed slots. The stable handle
+	// travels with its edge: the reverse slot for edge (u, v) carries the
+	// same handle as the forward slot, so a logical edge keeps one
+	// identity across both adjacency directions.
 	cursor := make([]uint64, maxID)
 	for u := uint64(0); u+1 < uint64(len(c.vertices)); u++ {
 		for k := c.vertices[u]; k < c.vertices[u+1]; k++ {
@@ -285,6 +326,9 @@ func (c *CSR[W]) BuildReverse() *CSR[W] {
 			if revWeights != nil {
 				revWeights[pos] = c.weights[k]
 			}
+			if revHandles != nil {
+				revHandles[pos] = c.handles[k]
+			}
 			cursor[v]++
 		}
 	}
@@ -292,6 +336,7 @@ func (c *CSR[W]) BuildReverse() *CSR[W] {
 		vertices: revVerts,
 		edges:    revEdges,
 		weights:  revWeights,
+		handles:  revHandles,
 		order:    c.order,
 		size:     c.size,
 	}

@@ -165,6 +165,19 @@ type Graph[N comparable, W any] struct {
 	edgeInstanceLabelShards [propMapShards]edgeInstanceLabelShard
 	edgeInstancePropShards  [propMapShards]edgeInstancePropShard
 
+	// edgeHandleLabelShards / edgeHandlePropShards are the stable-handle
+	// keyed analogue of the *InstanceLabel/*InstanceProp stores above.
+	// Where the instance stores key per-CREATE metadata by the 1-based
+	// per-pair CREATE index — which the read path had to re-derive
+	// positionally from CSR slot order, breaking after a delete — these
+	// stores key by the immutable per-edge handle allocated by
+	// [Graph.AddEdgeH], so the read path resolves an edge's type and
+	// properties by an identity that survives sibling-edge deletion.
+	// Populated only in multigraph mode (one handle per CREATE); see
+	// edge_handle.go.
+	edgeHandleLabelShards [propMapShards]edgeHandleLabelShard
+	edgeHandlePropShards  [propMapShards]edgeHandlePropShard
+
 	// tombstones records NodeIDs that have been removed by RemoveNode.
 	// The underlying Mapper cannot release the index slot (NodeID stability
 	// is a hard contract), so removal is observable only via this set:
@@ -188,6 +201,15 @@ type Graph[N comparable, W any] struct {
 	nodesRemovedCount atomic.Uint64
 	edgesAddedCount   atomic.Uint64
 	edgesRemovedCount atomic.Uint64
+
+	// edgeHandleSeq is the source of stable per-edge handles for this
+	// graph. It is bumped once per logical edge creation by
+	// [Graph.AddEdgeH] / [Graph.nextEdgeHandle]; handles are monotone and
+	// never reused, even after the edge is deleted. See edge_handle.go for
+	// the full contract (and the Stage 2 note on durability). The first
+	// handle is 1 — 0 is reserved as the "no handle" sentinel in the
+	// adjlist/CSR handle columns.
+	edgeHandleSeq atomic.Uint64
 
 	idxMgr    *index.Manager
 	validator atomicValidator
@@ -409,6 +431,35 @@ func (g *Graph[N, W]) revive(id graph.NodeID) {
 // this (CREATE routes every endpoint through the mutator's AddNode).
 func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src, dst, w) }
 
+// AddEdgeH inserts a directed edge exactly like [Graph.AddEdge] but first
+// allocates a stable per-edge handle for it and stamps that handle onto
+// the adjacency slot (via [adjlist.AdjList.AddEdgeH]). It returns the
+// handle so the caller can key per-instance edge metadata
+// (SetEdgeLabelByHandle / SetEdgePropertyByHandle) by an identity that
+// survives sibling-edge deletion, instead of the positional CREATE index
+// that the old read path re-derived from CSR slot order.
+//
+// The returned handle is always non-zero. On the simple-graph collapse of
+// a duplicate (src, dst) the underlying adjacency no-ops the slot write
+// and the supplied handle is not stored, but a fresh handle value is still
+// consumed (monotonicity is a property of the counter, not of storage), so
+// callers must treat the handle as advisory in simple-graph mode and keep
+// using the per-pair / per-CREATE-index surfaces there. See edge_handle.go.
+//
+// AddEdgeH honours the same error and revival contract as [Graph.AddEdge].
+func (g *Graph[N, W]) AddEdgeH(src, dst N, w W) (handle uint64, err error) {
+	h := g.nextEdgeHandle()
+	if err := g.adj.AddEdgeH(src, dst, w, h); err != nil {
+		return 0, err
+	}
+	return h, nil
+}
+
+// nextEdgeHandle returns a fresh, never-reused stable edge handle. Handles
+// start at 1; 0 is the reserved "no handle" sentinel in the adjacency and
+// CSR handle columns. See edge_handle.go for the full contract.
+func (g *Graph[N, W]) nextEdgeHandle() uint64 { return g.edgeHandleSeq.Add(1) }
+
 // RemoveEdge removes one edge (src, dst) from the adjacency layer (and the
 // mirrored (dst, src) edge when the graph is undirected). When this leaves
 // the endpoint pair with NO remaining edge — the last parallel edge between
@@ -459,6 +510,19 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	psh.mu.Lock()
 	delete(psh.m, k)
 	psh.mu.Unlock()
+	// Drop the stable-handle keyed per-instance metadata for the pair too,
+	// matching the per-pair hygiene above: once the last edge between the
+	// endpoints is gone, no handle for the pair can be resolved again, so
+	// re-creating an edge between the same endpoints must not resurrect a
+	// removed edge's per-handle type or properties.
+	hlsh := g.edgeHandleLabelShardFor(k)
+	hlsh.mu.Lock()
+	delete(hlsh.m, k)
+	hlsh.mu.Unlock()
+	hpsh := g.edgeHandlePropShardFor(k)
+	hpsh.mu.Lock()
+	delete(hpsh.m, k)
+	hpsh.mu.Unlock()
 }
 
 // SetNodeLabel attaches label to n, inserting n if needed. Returns

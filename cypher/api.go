@@ -5185,10 +5185,32 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 			// state — only the type label benefits from
 			// per-instance specialisation (Match2 [6] / Match7 [29]
 			// / MatchWhere1 [11]).
-			instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(g, srcKey, dstKey, uint64(edgeIDVal))
-			if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
-				if perInstance := g.EdgeLabelsAt(srcKey, dstKey, instanceIdx); len(perInstance) > 0 {
-					ets = perInstance
+			//
+			// Stable-handle path first: read the explicit per-edge
+			// handle at this forward CSR position and resolve the type
+			// by it. This is delete-stable — unlike the positional
+			// instance idx (edgeInstanceIdxFor), it does not mis-map
+			// after a parallel sibling is deleted and the neighbour
+			// slice is compacted. Only applies when the storage
+			// direction was NOT inverted above (the handle column is
+			// keyed on the forward (srcKey, dstKey) pair). Falls back to
+			// the positional idx when no handle column is present or the
+			// slot's handle is 0 (a MERGE-created edge).
+			handled := false
+			if storageStart == srcID && storageEnd == dstID {
+				if h := edgeHandleAtFwdPos(g, srcKey, dstKey, uint64(edgeIDVal)); h != 0 {
+					if perHandle := g.EdgeLabelsByHandle(srcKey, dstKey, h); len(perHandle) > 0 {
+						ets = perHandle
+						handled = true
+					}
+				}
+			}
+			if !handled {
+				instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(g, srcKey, dstKey, uint64(edgeIDVal))
+				if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
+					if perInstance := g.EdgeLabelsAt(srcKey, dstKey, instanceIdx); len(perInstance) > 0 {
+						ets = perInstance
+					}
 				}
 			}
 			if len(ets) > 0 {
@@ -5207,6 +5229,50 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 		Type:       edgeType,
 		Properties: edgeProps,
 	}, true
+}
+
+// edgeHandleAtFwdPos returns the stable per-edge handle stored at forward
+// CSR position edgePos for the (srcKey, dstKey) pair, or 0 when: the graph
+// carries no handle column, edgePos is outside srcKey's adjacency range,
+// the slot at edgePos does not point at dstKey, or either endpoint is
+// unknown to the mapper. A 0 return signals the caller to fall back to the
+// positional per-instance idx path.
+//
+// Unlike edgeInstanceIdxFor this performs no positional counting: it reads
+// the handle directly from the CSR slot, which is why it remains correct
+// after a parallel sibling is deleted.
+func edgeHandleAtFwdPos(g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) uint64 {
+	adj := g.AdjList()
+	srcID, ok := adj.Mapper().Lookup(srcKey)
+	if !ok {
+		return 0
+	}
+	dstID, ok := adj.Mapper().Lookup(dstKey)
+	if !ok {
+		return 0
+	}
+	fwdCSR := csr.BuildFromAdjList(adj)
+	handles := fwdCSR.HandlesSlice()
+	if handles == nil {
+		return 0
+	}
+	verts := fwdCSR.VerticesSlice()
+	edges := fwdCSR.EdgesSlice()
+	if uint64(srcID)+1 >= uint64(len(verts)) {
+		return 0
+	}
+	start := verts[uint64(srcID)]
+	end := verts[uint64(srcID)+1]
+	if edgePos < start || edgePos >= end || edgePos >= uint64(len(edges)) {
+		return 0
+	}
+	// Guard: the slot must actually point at dstKey. Defends against a
+	// stale edgePos that survived a concurrent rebuild landing on a
+	// different neighbour.
+	if edges[edgePos] != dstID {
+		return 0
+	}
+	return handles[edgePos]
 }
 
 // edgeInstanceIdxFor returns the 1-based per-CREATE instance index that
@@ -6555,6 +6621,27 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	return srcID, dstID, nil
 }
 
+// AddEdgeH mirrors [lpgMutatorAdapter.AddEdge] but allocates and returns a
+// stable per-edge handle (see [exec.GraphMutator.AddEdgeH]).
+func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
+	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
+	handle, err := a.g.AddEdgeH(src, dst, w)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
+	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
+	if !srcExisted {
+		a.g.IncrNodesAdded()
+	}
+	if !dstExisted && src != dst {
+		a.g.IncrNodesAdded()
+	}
+	a.g.IncrEdgesAdded()
+	return srcID, dstID, handle, nil
+}
+
 // RemoveEdge removes the directed edge (src, dst). The LPG edge removal
 // strips the per-pair edge labels/properties once the pair is fully
 // disconnected, so re-creating an edge between the same endpoints does not
@@ -6737,6 +6824,25 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 	a.g.RemoveEdgeInstance(src, dst, idx)
 }
 
+// SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
+// EdgePropertiesByHandle / RemoveEdgeInstanceByHandle delegate to the
+// stable-handle keyed metadata stores on the underlying [lpg.Graph].
+func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
+	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+}
+func (a *lpgMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
+	return a.g.EdgeLabelsByHandle(src, dst, handle)
+}
+func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) {
+	a.g.SetEdgePropertyByHandle(src, dst, handle, key, value)
+}
+func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return a.g.EdgePropertiesByHandle(src, dst, handle)
+}
+func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
+	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+}
+
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 	var out []string
@@ -6866,6 +6972,32 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	}
 	a.g.IncrEdgesAdded()
 	return srcID, dstID, nil
+}
+
+// AddEdgeH mirrors [walMutatorAdapter.AddEdge] but allocates and returns a
+// stable per-edge handle on the in-memory graph. The handle is in-memory
+// only for this stage: the WAL frame written for the edge is the same
+// legacy AddEdge frame, so a recovered edge does not yet keep its handle
+// (the cross-reopen identity is a later stage). See
+// [graph/lpg/edge_handle.go] for the Stage 2 durability note.
+func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
+	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
+	handle, err := a.g.AddEdgeH(src, dst, w)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
+	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
+	if !srcExisted {
+		a.g.IncrNodesAdded()
+	}
+	if !dstExisted && src != dst {
+		a.g.IncrNodesAdded()
+	}
+	a.g.IncrEdgesAdded()
+	return srcID, dstID, handle, nil
 }
 
 // RemoveEdge removes the directed edge (src, dst). The LPG edge removal
@@ -7058,6 +7190,27 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 	a.g.RemoveEdgeInstance(src, dst, idx)
 }
 
+// SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
+// EdgePropertiesByHandle / RemoveEdgeInstanceByHandle delegate to the
+// stable-handle keyed metadata stores on the underlying [lpg.Graph]. These
+// are in-memory only for this stage; the handle is not yet written to the
+// WAL (a later stage makes it durable).
+func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
+	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+}
+func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
+	return a.g.EdgeLabelsByHandle(src, dst, handle)
+}
+func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) {
+	a.g.SetEdgePropertyByHandle(src, dst, handle, key, value)
+}
+func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return a.g.EdgePropertiesByHandle(src, dst, handle)
+}
+func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
+	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+}
+
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *walMutatorAdapter) OutNeighbours(n string) []string {
 	var out []string
@@ -7212,6 +7365,11 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 	fwdCSR := csr.BuildFromAdjList(adj)
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
+	// handles aligns slot-for-slot with edges when the graph carries
+	// stable per-edge handles (multigraph CREATEs). It is nil for a graph
+	// that never stamped a handle (simple-graph / MERGE-only), in which
+	// case every slot takes the positional fallback below.
+	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
 
 	// Pre-build a set of accepted types for O(1) lookup.
@@ -7236,17 +7394,12 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 		if !ok {
 			continue
 		}
-		// Per-dst parallel-occurrence counter so each parallel edge in
-		// multigraph mode maps to its own CREATE-instance idx (Match2
-		// [6] / Match7 [29]). Simple-graph mode collapses parallel
-		// CREATEs into a single CSR entry, so the counter stays at 1
-		// and the lookup naturally degrades to the per-pair union.
-		// First pass: count parallel CSR occurrences per dst so we
-		// can tell whether the storage is operating in multigraph
-		// (N_csr == N_create) or simple-graph (N_csr < N_create)
-		// mode for each pair. In simple-graph mode every CSR slot
-		// must surface the UNION of all CREATE instance labels; in
-		// multigraph mode each slot maps to exactly one instance.
+		// dstSeen drives only the positional fallback (handle-less /
+		// MERGE slots): it counts parallel CSR occurrences per dst so a
+		// fallback slot maps to its CREATE-instance idx. The
+		// handle-driven path below ignores it entirely. dstParallelTotal
+		// lets the fallback tell multigraph (N_csr == N_create) from
+		// simple-graph (N_csr < N_create) storage for each pair.
 		dstParallelTotal := make(map[graph.NodeID]int64, end-start)
 		for pos := start; pos < end; pos++ {
 			dstParallelTotal[edges[pos]]++
@@ -7259,18 +7412,31 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 				continue
 			}
 			dstSeen[dst]++
-			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
-			parallel := dstParallelTotal[dst]
 			var labels []string
-			if parallel >= totalCreates && totalCreates > 0 {
-				// Multigraph: one CSR slot per CREATE. Use the
-				// per-instance label set for this specific slot.
-				labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
+			if pos < uint64(len(handles)) && handles[pos] != 0 {
+				// Stable-handle path: resolve this slot's type by the
+				// explicit per-edge handle read directly from the CSR
+				// position. This is delete-stable — removing a parallel
+				// sibling compacts the neighbour slice but the surviving
+				// slot keeps its original handle, so the type no longer
+				// mis-maps the way the positional idx did (Match2 [6] /
+				// Match7 [29]).
+				labels = g.EdgeLabelsByHandle(srcStr, dstStr, handles[pos])
 			} else {
-				// Simple-graph (or no per-instance store): merge every
-				// instance's labels with the per-pair union so a
-				// filter targeting any CREATE's label still matches.
-				labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
+				// Fallback (handle column absent, or a MERGE-created slot
+				// with handle 0): keep the prior positional inference.
+				totalCreates := g.EdgeCreateCount(srcStr, dstStr)
+				parallel := dstParallelTotal[dst]
+				if parallel >= totalCreates && totalCreates > 0 {
+					// Multigraph: one CSR slot per CREATE. Use the
+					// per-instance label set for this specific slot.
+					labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
+				} else {
+					// Simple-graph (or no per-instance store): merge every
+					// instance's labels with the per-pair union so a
+					// filter targeting any CREATE's label still matches.
+					labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
+				}
 			}
 			if len(labels) == 0 {
 				labels = g.EdgeLabels(srcStr, dstStr)

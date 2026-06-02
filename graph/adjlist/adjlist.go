@@ -144,9 +144,19 @@ type shardSlots struct {
 // Adjacency is kept unsorted; HasEdge does a linear scan. For the
 // typical low average degree of property graphs (4-16) the branch-
 // prediction-friendly linear scan beats sorted binary search.
+//
+// handles is a parallel column carrying a stable per-edge-slot handle
+// (uint64) for each neighbour. It is populated only when a caller
+// supplies a handle via [AdjList.AddEdgeH]; the plain [AdjList.AddEdge]
+// path leaves handles nil so simple graphs that never need per-instance
+// edge identity pay no extra memory. When non-nil, handles is the same
+// length as neighbours and is carried verbatim across compaction in
+// [AdjList.removeOneEdge] — a surviving slot keeps its ORIGINAL handle
+// (handles are never renumbered or reused).
 type adjEntry[W any] struct {
 	neighbours []graph.NodeID
 	weights    []W
+	handles    []uint64 // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
 }
 
 // New returns an empty AdjList configured by cfg.
@@ -232,10 +242,37 @@ func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 // strict orphan-free behaviour should detect ErrShardFull and treat
 // the graph as saturated.
 func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
+	return a.addEdge(src, dst, w, 0, false)
+}
+
+// AddEdgeH is [AdjList.AddEdge] with an explicit, caller-supplied stable
+// edge handle. The handle is stored in the slot's parallel handle column
+// (see [adjEntry.handles]) so the read path can recover per-slot edge
+// identity without inferring it from CSR slot order. The handle is
+// carried verbatim across compaction on [AdjList.RemoveEdge]: a surviving
+// parallel slot keeps its original handle, and handles are never reused
+// or renumbered.
+//
+// For an undirected graph the mirrored (dst, src) slot receives the SAME
+// handle, so both directions of one logical edge share one identity.
+//
+// AddEdgeH honours the same [ErrShardFull] and all-or-nothing contract as
+// [AdjList.AddEdge]. In simple-graph mode a duplicate (src, dst) is still
+// a no-op and the supplied handle is ignored (the existing slot keeps its
+// original handle).
+func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
+	return a.addEdge(src, dst, w, handle, true)
+}
+
+// addEdge is the shared implementation of [AdjList.AddEdge] and
+// [AdjList.AddEdgeH]. When hasHandle is false the slot's handle column is
+// left untouched (nil for a fresh entry); when true the supplied handle is
+// stored parallel to the new neighbour.
+func (a *AdjList[N, W]) addEdge(src, dst N, w W, handle uint64, hasHandle bool) error {
 	srcID := a.mapper.Intern(src)
 	dstID := a.mapper.Intern(dst)
 
-	inserted, err := a.upsertEdge(srcID, dstID, w)
+	inserted, err := a.upsertEdge(srcID, dstID, w, handle, hasHandle)
 	if err != nil {
 		return err
 	}
@@ -247,7 +284,7 @@ func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
 	if a.cfg.Directed || srcID == dstID {
 		return nil
 	}
-	if _, err := a.upsertEdge(dstID, srcID, w); err != nil {
+	if _, err := a.upsertEdge(dstID, srcID, w, handle, hasHandle); err != nil {
 		// The forward edge has already been published; undo it to
 		// preserve the all-or-nothing contract of AddEdge on
 		// undirected graphs.
@@ -265,7 +302,7 @@ func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
 // snapshot is constructed fresh and swapped in via atomic.StorePointer
 // so concurrent readers always observe a consistent immutable
 // adjacency.
-func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W) (bool, error) {
+func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, handle uint64, hasHandle bool) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -274,10 +311,14 @@ func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W) (bool, error) {
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
-		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{
+		entry := &adjEntry[W]{
 			neighbours: []graph.NodeID{dst},
 			weights:    []W{w},
-		}); err != nil {
+		}
+		if hasHandle {
+			entry.handles = []uint64{handle}
+		}
+		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -295,7 +336,19 @@ func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W) (bool, error) {
 	copy(newW, current.weights)
 	newNb[len(current.neighbours)] = dst
 	newW[len(current.weights)] = w
-	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW}); err != nil {
+	// Carry the handle column forward only when this graph uses handles
+	// — either the existing entry already has one or this call supplies
+	// one. A previously handle-less entry that gains its first handle on
+	// a later append back-fills the earlier slots with 0 (the reserved
+	// "no handle" sentinel), so the column stays length-aligned with
+	// neighbours.
+	var newH []uint64
+	if hasHandle || current.handles != nil {
+		newH = make([]uint64, len(current.neighbours)+1)
+		copy(newH, current.handles) // copy is a no-op when current.handles is nil
+		newH[len(current.neighbours)] = handle
+	}
+	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -359,8 +412,21 @@ func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID) bool {
 	copy(newW, current.weights[:idx])
 	copy(newNb[idx:], current.neighbours[idx+1:])
 	copy(newW[idx:], current.weights[idx+1:])
+	// Compact the handle column in lock-step with neighbours/weights so
+	// every SURVIVING slot keeps its ORIGINAL handle. This is the core
+	// stable-identity invariant: removing one parallel edge must not
+	// renumber the handles of the edges that remain. The positional
+	// per-instance inference the old read path used broke precisely
+	// here, because the slot shift after a delete re-mapped the
+	// remaining slots to the wrong CREATE indices.
+	var newH []uint64
+	if current.handles != nil {
+		newH = make([]uint64, len(current.handles)-1)
+		copy(newH, current.handles[:idx])
+		copy(newH[idx:], current.handles[idx+1:])
+	}
 	// storeEntry cannot fail here: same slot, no growth required.
-	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW})
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH})
 	return true
 }
 
@@ -416,6 +482,21 @@ func (a *AdjList[N, W]) LoadEntry(id graph.NodeID) (neighbours []graph.NodeID, w
 		return nil, nil
 	}
 	return e.neighbours, e.weights
+}
+
+// LoadEntryH returns immutable snapshots of the neighbours, parallel
+// weights, and parallel stable handles of the node identified by id. The
+// handles slice is nil when this graph carries no per-slot handles (no
+// caller ever used [AdjList.AddEdgeH] for id); when non-nil it is the same
+// length as neighbours and handles[i] is the stable handle of the edge to
+// neighbours[i]. The returned slices are owned by the current adjacency
+// snapshot and must not be mutated by the caller.
+func (a *AdjList[N, W]) LoadEntryH(id graph.NodeID) (neighbours []graph.NodeID, weights []W, handles []uint64) {
+	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
+	if e == nil {
+		return nil, nil, nil
+	}
+	return e.neighbours, e.weights, e.handles
 }
 
 // loadEntry atomically reads the entry stored at intraIdx within s.

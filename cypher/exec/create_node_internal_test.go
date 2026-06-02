@@ -76,6 +76,9 @@ func (m *seedStubMutator) AddNode(string) (graph.NodeID, error) { panic("unused"
 func (m *seedStubMutator) AddEdge(string, string, float64) (graph.NodeID, graph.NodeID, error) {
 	panic("unused")
 }
+func (m *seedStubMutator) AddEdgeH(string, string, float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	panic("unused")
+}
 func (m *seedStubMutator) RemoveEdge(string, string)         { panic("unused") }
 func (m *seedStubMutator) SetNodeLabel(string, string) error { panic("unused") }
 func (m *seedStubMutator) RemoveNodeLabel(string, string)    { panic("unused") }
@@ -107,13 +110,21 @@ func (m *seedStubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.P
 func (m *seedStubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg.PropertyValue {
 	return nil
 }
-func (m *seedStubMutator) RemoveEdgeInstance(string, string, int64)  {}
-func (m *seedStubMutator) OutNeighbours(string) []string             { panic("unused") }
-func (m *seedStubMutator) InNeighbours(string) []string              { panic("unused") }
-func (m *seedStubMutator) OutDegree(string) int                      { panic("unused") }
-func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool) { panic("unused") }
-func (m *seedStubMutator) RemoveNode(string)                         { panic("unused") }
-func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool            { return false }
+func (m *seedStubMutator) RemoveEdgeInstance(string, string, int64)            {}
+func (m *seedStubMutator) SetEdgeLabelByHandle(string, string, uint64, string) {}
+func (m *seedStubMutator) EdgeLabelsByHandle(string, string, uint64) []string  { return nil }
+func (m *seedStubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) {
+}
+func (m *seedStubMutator) EdgePropertiesByHandle(string, string, uint64) map[string]lpg.PropertyValue {
+	return nil
+}
+func (m *seedStubMutator) RemoveEdgeInstanceByHandle(string, string, uint64) {}
+func (m *seedStubMutator) OutNeighbours(string) []string                     { panic("unused") }
+func (m *seedStubMutator) InNeighbours(string) []string                      { panic("unused") }
+func (m *seedStubMutator) OutDegree(string) int                              { panic("unused") }
+func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool)         { panic("unused") }
+func (m *seedStubMutator) RemoveNode(string)                                 { panic("unused") }
+func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool                    { return false }
 
 // Compile-time check: seedStubMutator must satisfy GraphMutator so the
 // production seedGlobalNodeCounter accepts it directly. If a future change
