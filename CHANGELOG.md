@@ -6,6 +6,10 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [3.0.1] — 2026-06-02
+
 Durability and correctness fixes. Both compliance invariants held: the
 openCypher TCK execution gate stayed at **3 897/3 897** and every ACID
 property was preserved on every change.
@@ -44,6 +48,10 @@ property was preserved on every change.
   edge between the same endpoints no longer resurrects the removed
   relationship's type or properties (multigraph-safe: a shared per-pair label
   is kept until the last parallel edge is removed).
+- **MERGE cross-type equality** (#1240) — the MERGE match phase now uses
+  openCypher cross-type value equality, so `MERGE (n:N {x: 1.0})` matches an
+  existing node whose stored `x` is the integer `1` instead of wrongly
+  creating a duplicate node. Closed a TCK coverage gap; TCK 3 897 held.
 - **`range()` int64 step overflow** (#1238) — an under-cap range whose last
   element sits at the int64 boundary (e.g. `range(9223372036854775805,
   9223372036854775807)`) no longer overflows the materialisation loop into a
