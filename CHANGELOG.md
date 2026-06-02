@@ -6,7 +6,60 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+Consumer-reported durability and multigraph-correctness fixes. Both
+compliance invariants held: the openCypher TCK execution gate stayed at
+**3 897/3 897** (0 undefined) and every ACID property was preserved.
+
+### Added
+
+- **Stable per-edge handle.** Every directed edge carries an immutable
+  `uint64` handle assigned at creation that is never reused or renumbered on
+  delete. Stored as a lazy, opt-in column on the adjacency list and the CSR
+  (simple graphs that never need per-edge identity pay nothing). This is
+  stage 1 of the planned uint64 Primary-Id subsystem: the later global
+  edge-Id is a column substitution, not a rewrite.
+- **Durable per-instance edge metadata.** New additive v3 WAL ops
+  (`OpAddEdgeH`, `OpSetEdgeLabelByHandle`, `OpSetEdgePropertyByHandle`,
+  `OpRemoveEdgeInstanceByHandle`) and a new optional snapshot component
+  `edgehandles.bin` persist each edge instance's handle, relationship type,
+  and properties. `csr.bin` gains an optional trailing handle block that is
+  byte-compatible with pre-handle snapshots.
+
+### Fixed
+
+- **MERGE no longer collapses distinct nodes across a store reopen**
+  (#1268). A one-process-per-command consumer minted the same synthetic
+  internal node key (`__cx_merge_1`) in every process, so the second MERGE
+  collided with the node replayed from the WAL / restored from the snapshot
+  and silently overwrote it — three `MERGE (n:Node {key:kN})` commands
+  collapsed to a single node. `Merge.Init` now seeds the process-global node
+  counter (once per process, like `CreateNode.Init`), and the seed scan
+  recognises `__cx_merge_<hex>` keys, so the counter advances past
+  merge-created nodes on every recovery. Distinct MERGEs now yield distinct
+  nodes across WAL-replay and snapshot recovery.
+- **Parallel and typed relationships now survive a store reopen** (#1270,
+  #1277, #1278). openCypher is a multigraph: two `CREATE`s of relationships
+  between the same ordered pair must yield two relationships, even with
+  different types. The in-memory engine already did this, but `recovery.Open`
+  rebuilt a simple graph and persistence recorded edge labels/properties only
+  per pair, so after a reopen `(a)-[:USES]->(b)` and `(a)-[:CALLS]->(b)`
+  collapsed to a single edge of the last type. The recovered/production graph
+  is now built as a multigraph, the per-instance type/properties are durable
+  by handle in both the WAL and the snapshot, and WAL replay is idempotent by
+  handle (re-applying an already-live handle is a no-op) — which also fixes a
+  latent snapshot-plus-full-WAL-replay edge-doubling that simple-graph
+  deduplication previously masked.
+
+### Note
+
+- This supersedes the partial "multigraph-safe" wording in the 3.0.1 edge
+  deletion entry: the recovered graph is now a true multigraph and parallel
+  edges (including parallel edges of different types) round-trip through both
+  the WAL and the snapshot with their distinct per-instance type and
+  properties intact.
+- Handle-targeted relationship `DELETE` of a specific parallel instance and
+  parallel-edge `id()`/`elementId()` identity are deferred to the uint64
+  edge-Id subsystem, where they become correct by construction.
 
 ## [3.0.1] — 2026-06-02
 
