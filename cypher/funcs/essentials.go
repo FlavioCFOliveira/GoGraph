@@ -605,15 +605,21 @@ func fnRange(args []expr.Value) (expr.Value, error) {
 		count = 0
 	}
 
+	// Materialise exactly count elements rather than looping on i <= end /
+	// i >= end. A comparison loop with `i += step` overflows int64 at the
+	// boundary (e.g. range(MaxInt64-2, MaxInt64): after the final element
+	// MaxInt64, i += 1 wraps to MinInt64 and the i <= end test stays true),
+	// which then marches across the entire int64 space — an unbounded append
+	// that hangs and OOMs the process. count is computed overflow-safely
+	// above, so iterating it exactly bounds the work. The increment on the
+	// final iteration may itself overflow, but its value is never read (the
+	// loop has already produced count elements) and int64 overflow is defined
+	// (two's-complement wrap) in Go, so it is harmless.
 	result := make(expr.ListValue, 0, count)
-	if step > 0 {
-		for i := start; i <= end; i += step {
-			result = append(result, expr.IntegerValue(i))
-		}
-	} else {
-		for i := start; i >= end; i += step {
-			result = append(result, expr.IntegerValue(i))
-		}
+	v := start
+	for n := uint64(0); n < count; n++ {
+		result = append(result, expr.IntegerValue(v))
+		v += step
 	}
 	return result, nil
 }

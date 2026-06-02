@@ -15,8 +15,10 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // callRange is a convenience wrapper that never fatals on error, so the
@@ -138,6 +140,72 @@ func TestFn_Range_SmallUnchanged(t *testing.T) {
 				if lv[i] != expr.IntegerValue(w) {
 					t.Fatalf("range(%v)[%d] = %v, want %d", tc.args, i, lv[i], w)
 				}
+			}
+		})
+	}
+}
+
+// TestFn_Range_Int64BoundaryNoOverflowLoop is the #1238 regression: an
+// UNDER-cap range whose last element sits at the int64 boundary must
+// materialise correctly and terminate. The pre-fix comparison loop
+// (`for i := start; i <= end; i += step`) overflowed on the final `i += step`
+// — e.g. range(MaxInt64-2, MaxInt64) appends MaxInt64 then i wraps to
+// MinInt64, the `i <= end` test stays true, and the loop marches across the
+// whole int64 space, appending unbounded elements until the process OOMs.
+// Each case is bounded by a timeout so a regression fails fast rather than
+// hanging the suite; the fixed code returns in microseconds.
+func TestFn_Range_Int64BoundaryNoOverflowLoop(t *testing.T) {
+	const maxI = int64(math.MaxInt64)
+	const minI = int64(math.MinInt64)
+	tests := []struct {
+		name string
+		args []expr.Value
+		want []int64
+	}{
+		{"asc_max_step1", []expr.Value{expr.IntegerValue(maxI - 2), expr.IntegerValue(maxI)}, []int64{maxI - 2, maxI - 1, maxI}},
+		{"asc_max_step2", []expr.Value{expr.IntegerValue(maxI - 4), expr.IntegerValue(maxI), expr.IntegerValue(2)}, []int64{maxI - 4, maxI - 2, maxI}},
+		{"desc_min_step1", []expr.Value{expr.IntegerValue(minI + 2), expr.IntegerValue(minI), expr.IntegerValue(-1)}, []int64{minI + 2, minI + 1, minI}},
+		{"desc_min_step2", []expr.Value{expr.IntegerValue(minI + 4), expr.IntegerValue(minI), expr.IntegerValue(-2)}, []int64{minI + 4, minI + 2, minI}},
+		{"single_at_max", []expr.Value{expr.IntegerValue(maxI), expr.IntegerValue(maxI)}, []int64{maxI}},
+		{"single_at_min", []expr.Value{expr.IntegerValue(minI), expr.IntegerValue(minI)}, []int64{minI}},
+	}
+	fn, ok := funcs.DefaultRegistry.Resolve("range")
+	if !ok {
+		t.Fatal("function \"range\" not found in registry")
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			type result struct {
+				v   expr.Value
+				err error
+			}
+			done := make(chan result, 1)
+			// Resolve happened on the test goroutine; the spawned goroutine
+			// only invokes fn so it never touches t (a t.Fatalf off the test
+			// goroutine would be testing misuse).
+			go func() {
+				v, err := fn(tc.args)
+				done <- result{v, err}
+			}()
+			select {
+			case r := <-done:
+				if r.err != nil {
+					t.Fatalf("range(%v) error = %v, want a %d-element list", tc.args, r.err, len(tc.want))
+				}
+				lv, ok := r.v.(expr.ListValue)
+				if !ok {
+					t.Fatalf("range(%v) = %T, want ListValue", tc.args, r.v)
+				}
+				if len(lv) != len(tc.want) {
+					t.Fatalf("range(%v) length = %d, want %d", tc.args, len(lv), len(tc.want))
+				}
+				for i, w := range tc.want {
+					if lv[i] != expr.IntegerValue(w) {
+						t.Fatalf("range(%v)[%d] = %v, want %d", tc.args, i, lv[i], w)
+					}
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("range(%v) did not return within 5s — int64 step overflow caused a non-terminating loop", tc.args)
 			}
 		})
 	}
