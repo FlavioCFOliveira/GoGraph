@@ -34,45 +34,55 @@ func BFS(r *csrfile.Reader, src graph.NodeID, visit func(node graph.NodeID, dept
 
 // BFSCtx is the context-aware variant of [BFS]. ctx.Err() is checked
 // once per BFS level; on cancellation returns the wrapped ctx.Err.
+//
+// The whole traversal runs inside [csrfile.Reader.Read], so the
+// mmap-aliased vertices/edges slices stay live for its entire
+// duration: a concurrent [csrfile.Reader.Close] blocks until the
+// traversal returns rather than unmapping the region mid-iteration.
+// If the Reader is already closed, BFSCtx returns
+// [csrfile.ErrReaderClosed] without touching the mapping.
 func BFSCtx(ctx context.Context, r *csrfile.Reader, src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
 	defer metrics.Time("search.extern.BFSCtx")()
-	verts := r.Vertices()
-	edges := r.Edges()
-	if uint64(src)+1 >= uint64(len(verts)) {
-		return nil
-	}
-
-	visited := newVisited(uint64(len(verts)) - 1)
-	cur := []graph.NodeID{src}
-	var next []graph.NodeID
-	visited.set(src)
-
-	depth := 0
-	for len(cur) > 0 {
-		if err := ctx.Err(); err != nil {
-			metrics.IncCounter("search.extern.BFSCtx.errors", 1)
-			return err
+	err := r.Read(func(verts []uint64, edges []graph.NodeID, _ []byte) error {
+		if uint64(src)+1 >= uint64(len(verts)) {
+			return nil
 		}
-		slices.Sort(cur)
-		for _, node := range cur {
-			if !visit(node, depth) {
-				return nil
+
+		visited := newVisited(uint64(len(verts)) - 1)
+		cur := []graph.NodeID{src}
+		var next []graph.NodeID
+		visited.set(src)
+
+		depth := 0
+		for len(cur) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			start := verts[uint64(node)]
-			end := verts[uint64(node)+1]
-			for k := start; k < end; k++ {
-				nb := edges[k]
-				if visited.get(nb) {
-					continue
+			slices.Sort(cur)
+			for _, node := range cur {
+				if !visit(node, depth) {
+					return nil
 				}
-				visited.set(nb)
-				next = append(next, nb)
+				start := verts[uint64(node)]
+				end := verts[uint64(node)+1]
+				for k := start; k < end; k++ {
+					nb := edges[k]
+					if visited.get(nb) {
+						continue
+					}
+					visited.set(nb)
+					next = append(next, nb)
+				}
 			}
+			cur, next = next, cur[:0]
+			depth++
 		}
-		cur, next = next, cur[:0]
-		depth++
+		return nil
+	})
+	if err != nil {
+		metrics.IncCounter("search.extern.BFSCtx.errors", 1)
 	}
-	return nil
+	return err
 }
 
 // visitedSet is a simple uint64-packed bitset; small, allocation-

@@ -2,10 +2,10 @@ package csrfile
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
+	"sync"
 	"unsafe"
 
 	"github.com/edsrzf/mmap-go"
@@ -29,10 +29,26 @@ const (
 // Reader is a read-only, mmap-backed view of a csrfile.
 //
 // All slices returned by [Reader.Vertices] / [Reader.Edges] /
-// [Reader.Weights] alias the underlying mmap region — they must not
-// be mutated and remain valid only while the Reader is open. Close
-// invalidates them.
+// [Reader.WeightsRaw] alias the underlying mmap region — they must
+// not be mutated and remain valid only for as long as the mapping is
+// live. [Reader.Close] unmaps the region, after which any retained
+// slice is a dangling view into freed memory; reading it is a
+// use-after-unmap fault, not a recoverable Go panic.
+//
+// Concurrency. A Reader is safe for concurrent use, but a long-lived
+// reader that binds the slices once and iterates them MUST do so
+// inside [Reader.Read]: Read holds an internal read lock for the
+// whole duration of the callback, and Close blocks until every
+// in-flight Read has returned before it unmaps. Calling the bare
+// accessors ([Reader.Vertices] etc.) and then iterating outside Read
+// races a concurrent Close and may fault the process; the accessors
+// are retained only for short, non-concurrent inspection.
 type Reader struct {
+	// mu guards mm and the bound slices against a concurrent Close.
+	// Read takes it for reading (callers may run in parallel); Close
+	// takes it for writing, so the Unmap cannot run while any Read is
+	// in flight and no reader can observe a half-released mapping.
+	mu          sync.RWMutex
 	f           *os.File
 	mm          mmap.MMap
 	header      Header
@@ -122,15 +138,50 @@ func (r *Reader) Header() Header { return r.header }
 
 // Vertices returns the offsets slice. Each entry is the start index
 // in [Reader.Edges] of that vertex's out-neighbours.
+//
+// The returned slice aliases the mmap region and is valid only until
+// [Reader.Close]. A consumer that iterates it concurrently with a
+// possible Close MUST use [Reader.Read] instead; see the Reader type
+// documentation.
 func (r *Reader) Vertices() []uint64 { return r.vertices }
 
-// Edges returns the edges slice.
+// Edges returns the edges slice. The returned slice aliases the mmap
+// region and is valid only until [Reader.Close]; long-lived or
+// concurrent iteration MUST use [Reader.Read].
 func (r *Reader) Edges() []graph.NodeID { return r.edges }
 
 // WeightsRaw returns the raw bytes of the weights section. Use
 // [Reader.WeightsUint64] / [Reader.WeightsFloat64] for typed views.
-// Returns nil when the file is unweighted.
+// Returns nil when the file is unweighted. The returned slice aliases
+// the mmap region and is valid only until [Reader.Close]; long-lived
+// or concurrent iteration MUST use [Reader.Read].
 func (r *Reader) WeightsRaw() []byte { return r.weightBytes }
+
+// Read invokes fn with the mmap-aliased vertices, edges and raw
+// weights slices while holding an internal read lock for the whole
+// duration of the call. The lock keeps the mapping live across the
+// entire callback, so fn may safely bind the slices once and iterate
+// them: a concurrent [Reader.Close] blocks until fn returns before it
+// unmaps, closing the use-after-unmap window that bare accessors plus
+// an external iteration would leave open.
+//
+// The slices passed to fn alias the read-only mmap region; fn must
+// not mutate them and must not retain them beyond its own return —
+// they are invalid once Read returns. weights is nil when the file is
+// unweighted.
+//
+// Read returns [ErrReaderClosed] if the Reader has already been
+// closed; otherwise it returns whatever fn returns. The read lock is
+// released even if fn panics. Read is safe for concurrent use; any
+// number of Read calls run in parallel.
+func (r *Reader) Read(fn func(vertices []uint64, edges []graph.NodeID, weights []byte) error) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.mm == nil {
+		return ErrReaderClosed
+	}
+	return fn(r.vertices, r.edges, r.weightBytes)
+}
 
 // WeightsUint64 returns the weights section as a []uint64 when
 // possible. Returns nil, false when the weight kind is not 8-byte
@@ -156,13 +207,32 @@ func (r *Reader) WeightsFloat64() ([]float64, bool) {
 // madvise; on other platforms the call returns nil and is a no-op
 // at the OS level (Go's mmap-go does not expose madvise on every
 // platform).
+//
+// SetHint holds the read lock across the OS call, so it cannot race
+// a concurrent [Reader.Close] (which would otherwise unmap the region
+// the madvise syscall is about to touch). It returns [ErrReaderClosed]
+// if the Reader is already closed. Safe for concurrent use.
 func (r *Reader) SetHint(pattern AccessPattern) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.mm == nil {
+		return ErrReaderClosed
+	}
 	return r.setHint(pattern)
 }
 
-// Close releases the mmap and underlying file. Any slice returned
-// by the Reader becomes invalid.
+// Close releases the mmap and underlying file. Any slice returned by
+// the Reader becomes invalid.
+//
+// Close acquires the Reader's write lock, so it blocks until every
+// in-flight [Reader.Read] has returned before unmapping — no reader
+// can be iterating the mapping at the moment it is released. Close is
+// idempotent: the second and later calls observe the already-released
+// mapping and return nil without unmapping twice. Close is safe to
+// call concurrently from multiple goroutines.
 func (r *Reader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.mm == nil {
 		return nil
 	}
@@ -172,12 +242,4 @@ func (r *Reader) Close() error {
 		err = cerr
 	}
 	return err
-}
-
-// ensureOpen returns an error when r is already closed.
-func (r *Reader) ensureOpen() error {
-	if r.mm == nil {
-		return errors.New("csrfile: reader closed")
-	}
-	return nil
 }

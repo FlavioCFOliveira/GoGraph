@@ -73,6 +73,14 @@ func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterati
 // PageRankCtx is the context-aware variant of [PageRank]. ctx.Err()
 // is checked at every iteration boundary; on cancellation returns
 // (nil, 0, wrapped ctx.Err()).
+//
+// The seeding and the power-iteration loop run inside
+// [csrfile.Reader.Read], so the mmap-aliased vertices/edges slices
+// stay live for the whole computation: a concurrent
+// [csrfile.Reader.Close] blocks until PageRankCtx returns rather than
+// unmapping the region mid-iteration. If the Reader is already
+// closed, PageRankCtx returns (nil, 0, [csrfile.ErrReaderClosed])
+// without touching the mapping.
 func PageRankCtx(ctx context.Context, r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	defer metrics.Time("search.extern.PageRankCtx")()
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
@@ -80,31 +88,38 @@ func PageRankCtx(ctx context.Context, r *csrfile.Reader, opts PageRankOptions) (
 		return nil, 0, ErrInvalidInput
 	}
 	opts = normaliseOptions(opts)
-	verts := r.Vertices()
-	edges := r.Edges()
-	if len(verts) <= 1 {
-		return nil, 0, nil
-	}
-	n := len(verts) - 1
-	cur, outdeg, isLive, live := seedRanks(verts, edges, n)
-	if live == 0 {
-		return cur, 0, nil
-	}
-	next := make([]float64, n)
-	teleport := (1.0 - opts.Damping) / float64(live)
-	for iter := 1; iter <= opts.MaxIterations; iter++ {
-		if cerr := ctx.Err(); cerr != nil {
-			metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
-			return nil, 0, cerr
+	err = r.Read(func(verts []uint64, edges []graph.NodeID, _ []byte) error {
+		if len(verts) <= 1 {
+			return nil
 		}
-		stepIteration(verts, edges, cur, next, outdeg, isLive, teleport, opts.Damping, live)
-		delta := l1Delta(cur, next)
-		cur, next = next, cur
-		if delta < opts.Tolerance {
-			return cur, iter, nil
+		n := len(verts) - 1
+		cur, outdeg, isLive, live := seedRanks(verts, edges, n)
+		if live == 0 {
+			ranks = cur
+			return nil
 		}
+		next := make([]float64, n)
+		teleport := (1.0 - opts.Damping) / float64(live)
+		for iter := 1; iter <= opts.MaxIterations; iter++ {
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+			stepIteration(verts, edges, cur, next, outdeg, isLive, teleport, opts.Damping, live)
+			delta := l1Delta(cur, next)
+			cur, next = next, cur
+			if delta < opts.Tolerance {
+				ranks, iterations = cur, iter
+				return nil
+			}
+		}
+		ranks, iterations = cur, opts.MaxIterations
+		return nil
+	})
+	if err != nil {
+		metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
+		return nil, 0, err
 	}
-	return cur, opts.MaxIterations, nil
+	return ranks, iterations, nil
 }
 
 func normaliseOptions(opts PageRankOptions) PageRankOptions {

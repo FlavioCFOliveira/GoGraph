@@ -64,6 +64,9 @@ var (
 	ErrFileCorrupted = errors.New("csrfile: file corrupted")
 	// ErrHeaderTooShort indicates a short read while parsing the header.
 	ErrHeaderTooShort = errors.New("csrfile: header too short")
+	// ErrReaderClosed indicates an operation was attempted on a Reader
+	// whose mmap has already been released by [Reader.Close].
+	ErrReaderClosed = errors.New("csrfile: reader closed")
 	// ErrHeaderInconsistent indicates the decoded header's counts and
 	// offsets do not match the single canonical on-disk layout for
 	// those counts (a malformed, hostile, or overflowing header). It
