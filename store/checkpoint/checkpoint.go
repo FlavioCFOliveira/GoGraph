@@ -36,6 +36,14 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
+// ErrCheckpointerStopped is returned by Trigger and TriggerCtx when the
+// checkpointer has stopped: its background loop has exited because Stop
+// was called or because the context passed to Start was cancelled. It is
+// a clean terminal signal, not a failure — a checkpoint cannot run once
+// the loop is gone, so the call returns promptly with this sentinel
+// instead of blocking forever on a result that will never arrive.
+var ErrCheckpointerStopped = errors.New("checkpoint: checkpointer stopped")
+
 // Config controls when the checkpointer fires.
 type Config struct {
 	// Dir is the snapshot directory and the location of the WAL.
@@ -92,6 +100,14 @@ type Checkpointer[N comparable, W any] struct {
 	stopCh    chan struct{}
 	triggerCh chan chan error
 	doneCh    chan struct{}
+	// stoppedCh is closed by the loop's deferred teardown once the loop
+	// has stopped reading triggerCh, regardless of why it exited (Stop
+	// closing stopCh, or the Start context being cancelled). It is the
+	// authoritative "the loop is gone" gate that TriggerCtx watches on
+	// every wait edge so a caller can never block forever on a result
+	// the departed loop will never deliver. stopCh alone is insufficient
+	// because the context-cancellation exit path leaves stopCh open.
+	stoppedCh chan struct{}
 	stopOnce  sync.Once
 
 	checkpoints  atomic.Uint64
@@ -198,6 +214,7 @@ func New[N comparable, W any](
 		stopCh:    make(chan struct{}),
 		triggerCh: make(chan chan error, 4),
 		doneCh:    make(chan struct{}),
+		stoppedCh: make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -230,9 +247,13 @@ func (c *Checkpointer[N, W]) Stop() {
 // Trigger requests a checkpoint and blocks until it completes,
 // returning its error. Equivalent to TriggerCtx(context.Background()).
 //
-// On a saturated trigger buffer (rare, but possible if many Trigger
-// calls race ahead of the loop) Trigger can block indefinitely;
-// prefer TriggerCtx in production code to bound the latency.
+// Once the checkpointer has stopped (Stop called, or the Start context
+// cancelled) Trigger returns [ErrCheckpointerStopped] promptly instead
+// of blocking: a checkpoint can no longer run, and the loop that would
+// answer the request is gone. While the loop is running, a saturated
+// trigger buffer (rare, but possible if many Trigger calls race ahead
+// of the loop) can still delay Trigger until the loop drains it; prefer
+// TriggerCtx in production code to bound that latency with a deadline.
 func (c *Checkpointer[N, W]) Trigger() error {
 	defer metrics.Time("store.checkpoint.Trigger")()
 	err := c.TriggerCtx(context.Background())
@@ -243,18 +264,42 @@ func (c *Checkpointer[N, W]) Trigger() error {
 }
 
 // TriggerCtx requests a checkpoint and blocks until it completes,
-// honouring ctx cancellation on every wait edge: queue-submit,
-// in-flight, and stop-signal. Returns ctx.Err() wrapped on
-// cancellation or deadline expiry.
+// honouring ctx cancellation on every wait edge (queue-submit and
+// result-wait) and returning [ErrCheckpointerStopped] promptly if the
+// checkpointer has stopped. Returns ctx.Err() wrapped on cancellation
+// or deadline expiry.
+//
+// Three independent guards make a permanent block impossible:
+//
+//  1. A non-blocking fast-path check of stoppedCh: once the loop has
+//     exited, the request is never buffered, so it cannot be orphaned.
+//  2. A stoppedCh arm on the buffered-submit select: a submit racing the
+//     loop's exit either lands in the buffer (then guard 3 applies) or
+//     observes the stop and returns the sentinel.
+//  3. A stoppedCh arm on the result-wait select: even a request buffered
+//     at the exact instant the loop departs is woken — the loop's
+//     teardown closes stoppedCh after it stops reading triggerCh, so a
+//     buffered request that the teardown's drain does not reach in time
+//     still completes here rather than waiting forever on a result the
+//     departed loop will never send.
 func (c *Checkpointer[N, W]) TriggerCtx(ctx context.Context) error {
 	defer metrics.Time("store.checkpoint.TriggerCtx")()
+	// Fast path: never enter the buffered send once the loop is gone, or
+	// the request could sit unread in the buffer until GC with no one to
+	// answer it.
+	select {
+	case <-c.stoppedCh:
+		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
+		return ErrCheckpointerStopped
+	default:
+	}
 	done := make(chan error, 1)
 	select {
 	case c.triggerCh <- done:
 		// Submitted; now wait for the result.
-	case <-c.stopCh:
+	case <-c.stoppedCh:
 		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
-		return errors.New("checkpoint: checkpointer stopped")
+		return ErrCheckpointerStopped
 	case <-ctx.Done():
 		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
 		return fmt.Errorf("checkpoint: trigger submit cancelled: %w", ctx.Err())
@@ -265,6 +310,13 @@ func (c *Checkpointer[N, W]) TriggerCtx(ctx context.Context) error {
 			metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
 		}
 		return err
+	case <-c.stoppedCh:
+		// The loop exited after we buffered our request. Its teardown
+		// drains the buffer and answers each entry with the sentinel
+		// (see loop); this arm is the race-free backstop for the entry
+		// that slips into the buffer at the exact boundary.
+		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
+		return ErrCheckpointerStopped
 	case <-ctx.Done():
 		metrics.IncCounter("store.checkpoint.TriggerCtx.errors", 1)
 		return fmt.Errorf("checkpoint: trigger wait cancelled: %w", ctx.Err())
@@ -285,7 +337,29 @@ func (c *Checkpointer[N, W]) Stats() Stats {
 }
 
 func (c *Checkpointer[N, W]) loop(ctx context.Context) {
-	defer close(c.doneCh)
+	// Teardown order matters. close(stoppedCh) first: it shuts the gate
+	// TriggerCtx watches, so new callers take the fast path or the
+	// stop arm instead of buffering into a channel no one will read, and
+	// any caller already parked on the result-wait edge is woken with the
+	// sentinel. Then drain whatever is already buffered and answer each
+	// pending request with ErrCheckpointerStopped so those callers return
+	// a clean stopped signal rather than relying solely on the wait-edge
+	// backstop. close(doneCh) last so Stop unblocks only after the gate is
+	// shut and the buffer is drained. Each done channel is buffered (cap
+	// 1), so answering never blocks even if the caller has already
+	// returned via the stoppedCh arm.
+	defer func() {
+		close(c.stoppedCh)
+		for {
+			select {
+			case done := <-c.triggerCh:
+				done <- ErrCheckpointerStopped
+			default:
+				close(c.doneCh)
+				return
+			}
+		}
+	}()
 	var ticker *time.Ticker
 	if c.cfg.Interval > 0 {
 		ticker = time.NewTicker(c.cfg.Interval)
