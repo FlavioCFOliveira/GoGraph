@@ -27,6 +27,19 @@ func uniqueIndexName(label, prop string) string {
 	return "__uniq__" + label + "." + prop
 }
 
+// UniqueIndexName returns the deterministic synthetic name of the hash index
+// that backs a UNIQUE constraint on (label, prop). It is exported so the engine
+// can re-create the same backing index when re-registering a constraint
+// recovered from disk, keeping the name in lockstep with the one the
+// CreateConstraint operator uses.
+func UniqueIndexName(label, prop string) string { return uniqueIndexName(label, prop) }
+
+// NewUniqueBackingIndex returns a fresh hash-index subscriber suitable as the
+// backing index of a UNIQUE constraint, identical to the one the
+// CreateConstraint operator installs. It is exported so the engine can install
+// the same backing index when re-registering a recovered constraint.
+func NewUniqueBackingIndex() index.Subscriber { return indexhash.New[string]() }
+
 // CreateConstraintOp is a Volcano DDL operator that registers a constraint.
 //
 // CreateConstraintOp is NOT safe for concurrent use.
@@ -99,12 +112,14 @@ func (op *CreateConstraintOp) Next(_ *Row) (bool, error) {
 			return false, fmt.Errorf("exec: CreateConstraint %q: create backing index: %w", op.name, err)
 		}
 		op.reg.RegisterUnique(op.label, op.prop, idxName)
+		op.reg.SetConstraintName(true, op.label, op.prop, op.name)
 
 	case ConstraintNotNull:
 		if op.ifNotExists && op.reg.HasNotNull(op.label, op.prop) {
 			return false, nil // IF NOT EXISTS — silently succeed; no schema change
 		}
 		op.reg.RegisterNotNull(op.label, op.prop)
+		op.reg.SetConstraintName(false, op.label, op.prop, op.name)
 
 	default:
 		return false, fmt.Errorf("exec: CreateConstraint: unknown constraint kind %d", op.kind)

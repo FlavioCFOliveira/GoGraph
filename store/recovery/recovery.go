@@ -19,6 +19,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -64,7 +65,17 @@ type Result[N comparable, W any] struct {
 	// that never removed a node) and for the non-self-sufficient (v2) path,
 	// where tombstones are reconstructed by replaying OpRemoveNode instead.
 	SnapshotTombstones int
-	WALOps             int
+	// Constraints reports the durable schema constraints recovered for the
+	// graph: the set declared in the snapshot's constraints.bin component
+	// (the checkpoint-survival path) reconciled with the CREATE/DROP
+	// CONSTRAINT ops replayed from the WAL tail (the post-snapshot path), so
+	// the result is the constraint set as of the last durable commit. The
+	// engine re-registers these on open and re-seeds each UNIQUE value-set by
+	// scanning [Result.Graph]; constraint definitions are engine schema, not
+	// graph topology, so they are surfaced here rather than applied to Graph.
+	// The slice is deterministically ordered (kind, label, property, name).
+	Constraints []ConstraintRecord
+	WALOps      int
 	// TailErr reports why WAL replay stopped before the end of the file,
 	// or nil when every frame was consumed at a clean EOF. Two outcomes
 	// are possible:
@@ -374,6 +385,158 @@ func decodeV2(payload []byte) (Op, error) {
 	return op, nil
 }
 
+// ConstraintRecord is one durable schema-constraint definition recovered from
+// the WAL ([txn.OpCreateConstraint]) or the snapshot's constraints.bin
+// component. It mirrors [txn.Op]'s constraint fields without the
+// graph-mutation payload. The engine maps it back to its own constraint
+// registry on open.
+type ConstraintRecord struct {
+	// Kind selects UNIQUE vs NOT NULL.
+	Kind txn.ConstraintKind
+	// Label is the constrained node label.
+	Label string
+	// Property is the constrained property key.
+	Property string
+	// Name is the user-defined constraint name.
+	Name string
+}
+
+// decodeConstraintBody parses the body of an [txn.OpCreateConstraint] /
+// [txn.OpDropConstraint] frame produced by [txn.appendOpConstraintBody]:
+//
+//	uint8  constraintKind
+//	uint16 labelLen || label
+//	uint16 propLen  || property
+//	uint16 nameLen  || name
+//
+// It returns the decoded record and ok=false when the body is truncated or
+// the trailing length prefixes overflow the buffer (a torn final write); the
+// replay loop treats a constraint op whose body cannot be walked the same way
+// it treats any other undecodable trailing op — a benign cut, not corruption.
+func decodeConstraintBody(kind txn.OpKind, body []byte) (ConstraintRecord, bool) {
+	if len(body) < 1 {
+		return ConstraintRecord{}, false
+	}
+	ck := txn.ConstraintKind(body[0])
+	rest := body[1:]
+	label, rest, ok := readU16String(rest)
+	if !ok {
+		return ConstraintRecord{}, false
+	}
+	prop, rest, ok := readU16String(rest)
+	if !ok {
+		return ConstraintRecord{}, false
+	}
+	name, _, ok := readU16String(rest)
+	if !ok {
+		return ConstraintRecord{}, false
+	}
+	_ = kind // kind is implied by the caller; the body tag is authoritative.
+	return ConstraintRecord{Kind: ck, Label: label, Property: prop, Name: name}, true
+}
+
+// readU16String reads a uint16 little-endian length prefix followed by that
+// many bytes from the head of buf, returning the string, the unread tail, and
+// ok=false when the prefix or the body runs past the end of buf.
+func readU16String(buf []byte) (s string, rest []byte, ok bool) {
+	if len(buf) < 2 {
+		return "", buf, false
+	}
+	n := int(binary.LittleEndian.Uint16(buf))
+	buf = buf[2:]
+	if len(buf) < n {
+		return "", buf, false
+	}
+	return string(buf[:n]), buf[n:], true
+}
+
+// constraintSet accumulates the recovered constraint definitions, reconciling
+// the snapshot-loaded set with the WAL-replayed CREATE/DROP CONSTRAINT ops by
+// (kind, label, property) key with last-writer-wins semantics: a later DROP
+// removes an earlier CREATE, and a later CREATE replaces an earlier one
+// (re-declaring with a new name). It is keyed so a UNIQUE and a NOT NULL
+// constraint on the same (label, property) are tracked independently, matching
+// the engine registry, which keys UNIQUE and NOT NULL in separate maps.
+type constraintSet struct {
+	byKey map[constraintSetKey]ConstraintRecord
+}
+
+// constraintSetKey identifies one constraint slot. Name is deliberately
+// excluded: re-declaring a constraint on the same (kind, label, property) with
+// a different name replaces the prior record rather than adding a second.
+type constraintSetKey struct {
+	kind     txn.ConstraintKind
+	label    string
+	property string
+}
+
+func newConstraintSet() *constraintSet {
+	return &constraintSet{byKey: make(map[constraintSetKey]ConstraintRecord)}
+}
+
+// applyCreate records a CREATE CONSTRAINT.
+func (s *constraintSet) applyCreate(rec ConstraintRecord) {
+	s.byKey[constraintSetKey{rec.Kind, rec.Label, rec.Property}] = rec
+}
+
+// applyDrop removes a constraint by its (kind, label, property) key.
+func (s *constraintSet) applyDrop(rec ConstraintRecord) {
+	delete(s.byKey, constraintSetKey{rec.Kind, rec.Label, rec.Property})
+}
+
+// snapshot returns the accumulated constraints in deterministic order
+// (kind, label, property, name).
+func (s *constraintSet) snapshot() []ConstraintRecord {
+	if len(s.byKey) == 0 {
+		return nil
+	}
+	out := make([]ConstraintRecord, 0, len(s.byKey))
+	for _, rec := range s.byKey {
+		out = append(out, rec)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.Label != b.Label {
+			return a.Label < b.Label
+		}
+		if a.Property != b.Property {
+			return a.Property < b.Property
+		}
+		return a.Name < b.Name
+	})
+	return out
+}
+
+// accumulateConstraintOp routes a decoded constraint op into cs. It returns
+// (true, true) when op is a constraint op that decoded cleanly, (true, false)
+// when op is a constraint op whose body is torn/undecodable (the caller treats
+// this like any other undecodable trailing op — a benign cut), and
+// (false, false) when op is not a constraint op at all (the caller applies it
+// to the graph as usual).
+func accumulateConstraintOp(cs *constraintSet, op *Op) (isConstraint, ok bool) {
+	switch op.Kind {
+	case txn.OpCreateConstraint:
+		rec, decoded := decodeConstraintBody(op.Kind, op.Body)
+		if !decoded {
+			return true, false
+		}
+		cs.applyCreate(rec)
+		return true, true
+	case txn.OpDropConstraint:
+		rec, decoded := decodeConstraintBody(op.Kind, op.Body)
+		if !decoded {
+			return true, false
+		}
+		cs.applyDrop(rec)
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // Open opens the store at dir for graphs keyed by N values and
 // weighted by W values, using opts.Codec for endpoint identifiers
 // and opts.WeightCodec for [txn.OpAddEdgeWeighted] frames. It is the
@@ -541,6 +704,14 @@ func openCodec[N comparable, W any](
 	// the deferred after-WAL apply below is then skipped for them.
 	var snapshotSideAppliedEarly bool
 
+	// cAcc accumulates schema constraints. It is seeded from the snapshot's
+	// constraints.bin component below (the checkpoint-survival source) and
+	// then reconciled with the CREATE/DROP CONSTRAINT ops the WAL replay loop
+	// feeds it, so the result is the constraint set as of the last durable
+	// commit even when a checkpoint truncated the WAL prefix that first
+	// declared a constraint.
+	cAcc := newConstraintSet()
+
 	// Load the snapshot manifest BEFORE constructing the live graph so the
 	// graph is reconstructed with the directed/multigraph shape the
 	// originating graph was created with. A manifest that predates the
@@ -576,6 +747,17 @@ func openCodec[N comparable, W any](
 		snapProps = loaded.Properties
 		snapEdgeHandles = loaded.EdgeHandles
 		snapIndexes = loaded.Indexes
+		// Seed the constraint accumulator with the snapshot's durable
+		// constraint set so a checkpoint that truncated the WAL prefix does
+		// not lose constraints; WAL ops replayed below layer on top.
+		for _, c := range loaded.Constraints.Specs {
+			cAcc.applyCreate(ConstraintRecord{
+				Kind:     txn.ConstraintKind(c.Kind),
+				Label:    c.Label,
+				Property: c.Property,
+				Name:     c.Name,
+			})
+		}
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
 		haveSnapEdgeHandles = len(loaded.EdgeHandles.Records) > 0
@@ -718,7 +900,7 @@ func openCodec[N comparable, W any](
 				// with a partial set — the marker is the last frame written.
 				ok := true
 				for i := range pending {
-					if !applyOpCodec(g, &pending[i], codec, wcodec) {
+					if !applyOrAccumulate(g, &pending[i], codec, wcodec, cAcc) {
 						ok = false
 						break
 					}
@@ -734,7 +916,7 @@ func openCodec[N comparable, W any](
 			// v2 frame: self-committing (one frame is one transaction). v1
 			// frames never reach here — Decode rejects them upstream with
 			// ErrUnsupportedRecordVersion.
-			if !applyOpCodec(g, &op, codec, wcodec) {
+			if !applyOrAccumulate(g, &op, codec, wcodec, cAcc) {
 				// A malformed v2 body (truncated endpoints, missing or
 				// overflowing trailing label/key length) failed to decode
 				// through the codec; stop replay so callers see the cut-off
@@ -748,6 +930,12 @@ func openCodec[N comparable, W any](
 			res.TailErr = tErr
 		}
 	}
+
+	// Finalise the recovered constraint set: the snapshot's durable
+	// constraints reconciled with the WAL-replayed CREATE/DROP CONSTRAINT ops.
+	// Runs whether or not a WAL was present so a snapshot-only directory still
+	// surfaces its constraints.
+	res.Constraints = cAcc.snapshot()
 
 	// Mapper-less (v2) path only: apply snapshot-side labels after the WAL
 	// is fully applied so the mapper has every node interned that the WAL
@@ -804,6 +992,27 @@ func openCodec[N comparable, W any](
 		return res, res.TailErr
 	}
 	return res, nil
+}
+
+// applyOrAccumulate routes a decoded op either to the constraint accumulator
+// cs (when it is a schema-DDL op, which mutates no graph state) or to the
+// graph via [applyOpCodec] (every mutation op). It returns true when the op
+// was handled and false only when the op's body is torn/undecodable, so the
+// caller surfaces the same cut-off boundary it would for any other undecodable
+// trailing op. Constraint ops are surfaced via [Result.Constraints] rather than
+// applied to g because a constraint definition is engine schema, not graph
+// topology.
+func applyOrAccumulate[N comparable, W any](
+	g *lpg.Graph[N, W],
+	op *Op,
+	codec txn.Codec[N],
+	wcodec txn.WeightCodec[W],
+	cs *constraintSet,
+) bool {
+	if isConstraint, ok := accumulateConstraintOp(cs, op); isConstraint {
+		return ok
+	}
+	return applyOpCodec(g, op, codec, wcodec)
 }
 
 // applyOpCodec applies a decoded op into g via codec. It returns

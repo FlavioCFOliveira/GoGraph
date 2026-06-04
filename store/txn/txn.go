@@ -219,6 +219,43 @@ const (
 	// on DELETE while leaving sibling handles untouched. The body is the
 	// edge-no-tail body followed by the 8-byte handle.
 	OpRemoveEdgeInstanceByHandle
+
+	// Schema-DDL op kinds. They are appended AFTER the Stage-2 handle ops so
+	// every pre-existing OpKind value keeps its stable wire identity; a WAL
+	// written by an older binary never carries these kinds, and a reader that
+	// predates them surfaces them as unknown kinds. Unlike every mutation kind
+	// above, a constraint op carries NO node-identifier endpoints — it is a
+	// schema record, so its body is three length-prefixed strings (label,
+	// property, name) preceded by a one-byte [ConstraintKind] tag, encoded
+	// independently of the node [Codec] (see [appendOpConstraintBody]). The
+	// recovery decoder surfaces the record via [store/recovery.Result] rather
+	// than applying it to the graph, because constraint definitions are engine
+	// schema, not graph topology.
+
+	// OpCreateConstraint buffers a CREATE CONSTRAINT schema change: it records
+	// that a UNIQUE or NOT NULL constraint named Name is declared on
+	// (Label).Property. It is replayed on recovery to re-register the
+	// constraint in the engine's registry. The op mutates no graph state.
+	OpCreateConstraint
+	// OpDropConstraint buffers a DROP CONSTRAINT schema change: it records that
+	// the constraint on (Label).Property (kind ConstraintKind) named Name is
+	// removed. It is replayed on recovery to suppress an earlier
+	// OpCreateConstraint for the same key. The op mutates no graph state.
+	OpDropConstraint
+)
+
+// ConstraintKind is the wire tag distinguishing UNIQUE from NOT NULL in an
+// [OpCreateConstraint] / [OpDropConstraint] body. The values are stable wire
+// identifiers and must not be reordered or reused; they mirror the engine-side
+// exec.ConstraintKind without importing that package (the store layer stays
+// decoupled from the Cypher executor).
+type ConstraintKind uint8
+
+const (
+	// ConstraintUnique tags a UNIQUE constraint.
+	ConstraintUnique ConstraintKind = iota
+	// ConstraintNotNull tags a NOT NULL constraint.
+	ConstraintNotNull
 )
 
 // Op-record version markers. The marker is a single byte written at
@@ -589,6 +626,16 @@ type Op[N comparable, W any] struct {
 	// [OpSetEdgePropertyByHandle], [OpRemoveEdgeInstanceByHandle]). It is 0
 	// for every other op kind.
 	Handle uint64
+	// ConstraintName is the user-defined constraint name carried by the
+	// schema-DDL op kinds ([OpCreateConstraint], [OpDropConstraint]). For
+	// those kinds Label holds the constrained node label and Key holds the
+	// constrained property; ConstraintKind selects UNIQUE vs NOT NULL. It is
+	// the empty string for every other op kind.
+	ConstraintName string
+	// ConstraintKind selects UNIQUE vs NOT NULL for the schema-DDL op kinds.
+	// It is the zero value ([ConstraintUnique]) and ignored for every other
+	// op kind.
+	ConstraintKind ConstraintKind
 }
 
 // Tx is an in-progress transaction.
@@ -772,6 +819,33 @@ func (t *Tx[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) error {
 		return ErrTxFinished
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveEdgeInstanceByHandle, Src: src, Dst: dst, Handle: handle})
+	return nil
+}
+
+// CreateConstraint buffers an [OpCreateConstraint] schema change recording that
+// a constraint of the given kind, named name, is declared on (label).property.
+// The op carries no node endpoints and mutates no graph state on
+// [Tx.Commit]; its sole effect is the durable WAL record that
+// [store/recovery.Open] replays to re-register the constraint in the engine's
+// registry, so a constraint created before a crash survives recovery
+// (Durability + Consistency).
+func (t *Tx[N, W]) CreateConstraint(kind ConstraintKind, label, property, name string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpCreateConstraint, ConstraintKind: kind, Label: label, Key: property, ConstraintName: name})
+	return nil
+}
+
+// DropConstraint buffers an [OpDropConstraint] schema change recording that the
+// constraint of the given kind, named name, on (label).property is removed. On
+// recovery the record suppresses an earlier [OpCreateConstraint] for the same
+// key. The op carries no node endpoints and mutates no graph state.
+func (t *Tx[N, W]) DropConstraint(kind ConstraintKind, label, property, name string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpDropConstraint, ConstraintKind: kind, Label: label, Key: property, ConstraintName: name})
 	return nil
 }
 
@@ -1028,9 +1102,38 @@ func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec
 			return nil, err
 		}
 		return binary.LittleEndian.AppendUint64(buf, op.Handle), nil
+	case OpCreateConstraint, OpDropConstraint:
+		// Schema record: a one-byte constraint-kind tag followed by three
+		// length-prefixed strings (label, property, name). No node codec is
+		// involved — a constraint carries no endpoints.
+		return appendOpConstraintBody(buf, op), nil
 	default: // OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel
 		return encodeOpEdgeWithLabel(buf, op, codec)
 	}
+}
+
+// appendOpConstraintBody appends the body of an [OpCreateConstraint] /
+// [OpDropConstraint] frame to buf:
+//
+//	uint8  constraintKind ([ConstraintKind])
+//	uint16 labelLen        || [labelLen]byte label
+//	uint16 propLen         || [propLen]byte property
+//	uint16 nameLen         || [nameLen]byte name
+//
+// The uint16 length prefixes match the label-encoding convention of the
+// sibling body encoders; a constraint label, property, or name longer than a
+// uint16 is rejected upstream (the whole query is capped at 1 MiB by the DML
+// guard, and a real identifier is a handful of bytes). The body is independent
+// of the node [Codec] because a constraint has no endpoints.
+func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) []byte {
+	buf = append(buf, byte(op.ConstraintKind))
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
+	buf = append(buf, op.Label...)
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
+	buf = append(buf, op.Key...)
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
+	buf = append(buf, op.ConstraintName...)
+	return buf
 }
 
 // encodeOpNodeOnly writes the [Src, zero, label] tail for OpKinds that

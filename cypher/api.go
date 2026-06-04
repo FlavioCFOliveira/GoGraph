@@ -90,6 +90,8 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
@@ -422,6 +424,34 @@ type EngineOptions struct {
 	// [Result.Err] (the aggregation buffers during materialisation inside the
 	// barrier, so the cap trips before the whole list is built).
 	MaxCollectItems int
+
+	// RecoveredConstraints, when non-empty, are the durable schema constraints
+	// recovered from disk (the [store/recovery.Result.Constraints] of the open
+	// that produced Store/Graph). The constructor re-registers each one in the
+	// engine's constraint registry and re-seeds every UNIQUE value-set by
+	// scanning the recovered graph, so a constraint declared before a crash is
+	// enforced again after recovery — without this, the registry is rebuilt
+	// empty on every open and duplicates are silently accepted (audit gap H1).
+	// A caller recovering a WAL-backed store from disk MUST pass these (or use
+	// [NewEngineWithStoreAndConstraints]); a store-less in-memory engine leaves
+	// the field nil.
+	RecoveredConstraints []ConstraintDef
+}
+
+// ConstraintDef is a durable constraint definition handed to the engine on
+// open so it can re-register a constraint recovered from disk. It mirrors
+// [store/recovery.ConstraintRecord] without coupling callers to the recovery
+// package's wire types; [ConstraintDefsFromRecovery] converts a recovery
+// result into this form.
+type ConstraintDef struct {
+	// Unique is true for a UNIQUE constraint, false for a NOT NULL constraint.
+	Unique bool
+	// Label is the constrained node label.
+	Label string
+	// Property is the constrained property key.
+	Property string
+	// Name is the user-defined constraint name.
+	Name string
 }
 
 // Engine is the public query engine. It binds a graph, a function registry,
@@ -525,6 +555,23 @@ func NewEngineWithStore(store *txn.Store[string, float64]) *Engine {
 	return NewEngineWithOptions(store.Graph(), EngineOptions{Store: store})
 }
 
+// NewEngineWithStoreAndConstraints creates a WAL-backed Engine that also
+// re-registers the schema constraints recovered from disk. It is the
+// recommended constructor for opening a persisted store: pass the
+// store/recovery.Result.Constraints surfaced by the open that produced store,
+// so a constraint declared before a crash is enforced again (audit gap H1).
+// Using the plain [NewEngineWithStore] on a recovered store leaves the
+// constraint registry empty and duplicates would be silently accepted.
+//
+// recovered is converted via [ConstraintDefsFromRecovery]; pass nil (or use
+// [NewEngineWithStore]) when there are no recovered constraints.
+func NewEngineWithStoreAndConstraints(store *txn.Store[string, float64], recovered []recovery.ConstraintRecord) *Engine {
+	return NewEngineWithOptions(store.Graph(), EngineOptions{
+		Store:                store,
+		RecoveredConstraints: ConstraintDefsFromRecovery(recovered),
+	})
+}
+
 // resolveMaxResultRows maps the public [EngineOptions.MaxResultRows] value to
 // the Engine's internal cap, where a positive value is an active limit and zero
 // disables it (the convention the [Result] drain checks with maxRows > 0):
@@ -578,6 +625,8 @@ func resolveMaxResultBytes(opt int64) int64 {
 // [txn.Store] in addition to g.
 //
 // If g has no [index.Manager] attached yet, a new empty one is installed.
+//
+//nolint:gocritic // public API: EngineOptions is passed by value to preserve every existing call site; the constructor only reads from it.
 func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *Engine {
 	ensureIndexManager(g)
 	reg := opts.Registry
@@ -605,7 +654,69 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
 		return e.constraintReg.ListConstraintRows()
 	})
+	// Re-register constraints recovered from disk and re-seed each UNIQUE
+	// value-set by scanning the recovered graph, so a constraint declared
+	// before a crash is enforced again after recovery (audit gap H1). Without
+	// this the registry is rebuilt empty on every open.
+	e.registerRecoveredConstraints(opts.RecoveredConstraints)
 	return e
+}
+
+// registerRecoveredConstraints re-registers each recovered constraint in the
+// engine's registry, re-creating the UNIQUE backing index, recording the
+// constraint name, and re-seeding the UNIQUE value-set from the recovered
+// graph's existing data. It is invoked once at construction from
+// [NewEngineWithOptions]. defs is the set surfaced by [store/recovery.Open];
+// an empty slice is a no-op (a store-less or fresh engine).
+//
+// Re-seeding ignores any pre-existing duplicate that the recovered data may
+// contain rather than failing the open: recovery must always succeed so the
+// store is serviceable, and a duplicate that predates the constraint is a
+// historical artefact the live enforcement path will still reject on the next
+// write. (CREATE CONSTRAINT itself, in contrast, rejects pre-existing
+// duplicates — but that is the creation path, not recovery.)
+func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
+	for i := range defs {
+		d := defs[i]
+		if d.Unique {
+			idxName := exec.UniqueIndexName(d.Label, d.Property)
+			// Best-effort backing index: ignore ErrIndexExists (a previous
+			// constraint or a recovered index already created it). Any other
+			// error leaves the value-set as the sole enforcement source, which
+			// still rejects duplicates.
+			_ = e.g.IndexManager().CreateIndex(idxName, exec.NewUniqueBackingIndex())
+			e.constraintReg.RegisterUnique(d.Label, d.Property, idxName)
+			e.constraintReg.SetConstraintName(true, d.Label, d.Property, d.Name)
+			values, _ := e.scanLabelProperty(d.Label, d.Property)
+			e.constraintReg.SeedUniqueValuesIgnoringDuplicates(d.Label, d.Property, values)
+		} else {
+			e.constraintReg.RegisterNotNull(d.Label, d.Property)
+			e.constraintReg.SetConstraintName(false, d.Label, d.Property, d.Name)
+		}
+	}
+}
+
+// ConstraintDefsFromRecovery converts the durable constraint set surfaced by
+// [store/recovery.Open] into the [ConstraintDef] slice the engine constructor
+// accepts via [EngineOptions.RecoveredConstraints]. Pass it the
+// store/recovery.Result.Constraints field. The recovery package's wire kind
+// (txn.ConstraintKind: 0 = UNIQUE, 1 = NOT NULL) is mapped to the boolean
+// [ConstraintDef.Unique].
+func ConstraintDefsFromRecovery(recovered []recovery.ConstraintRecord) []ConstraintDef {
+	if len(recovered) == 0 {
+		return nil
+	}
+	out := make([]ConstraintDef, 0, len(recovered))
+	for i := range recovered {
+		r := recovered[i]
+		out = append(out, ConstraintDef{
+			Unique:   r.Kind == txn.ConstraintUnique,
+			Label:    r.Label,
+			Property: r.Property,
+			Name:     r.Name,
+		})
+	}
+	return out
 }
 
 // ResultRowCap reports the effective per-query result-row cap this Engine
@@ -627,6 +738,59 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 // uses it to warn when handed an uncapped engine.
 func (e *Engine) ResultRowCap() int64 {
 	return e.maxResultRows
+}
+
+// Constraints returns a structured snapshot of every schema constraint
+// currently registered on the engine, in deterministic order (UNIQUE before
+// NOT NULL, then by label, property, name). It is the source a checkpointer
+// passes to [store/snapshot.WriteSnapshotFullWithConstraints] (via
+// [ConstraintSpecsForSnapshot]) so the constraint set survives a checkpoint
+// that truncates the WAL prefix which first declared a constraint (audit gap
+// H1, the checkpoint-survival half).
+//
+// Constraints is safe for concurrent use.
+func (e *Engine) Constraints() []ConstraintDef {
+	infos := e.constraintReg.Constraints()
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]ConstraintDef, 0, len(infos))
+	for i := range infos {
+		out = append(out, ConstraintDef{
+			Unique:   infos[i].KindUnique,
+			Label:    infos[i].Label,
+			Property: infos[i].Property,
+			Name:     infos[i].Name,
+		})
+	}
+	return out
+}
+
+// ConstraintSpecsForSnapshot converts the engine's current constraint set into
+// the [store/snapshot.ConstraintSpec] slice that
+// [store/snapshot.WriteSnapshotFullWithConstraints] (and its mapper-codec
+// variant) persists into a snapshot's constraints.bin component. A checkpointer
+// calls e.ConstraintSpecsForSnapshot() and hands the result to the writer so a
+// checkpoint + WAL truncate does not lose constraints.
+func (e *Engine) ConstraintSpecsForSnapshot() []snapshot.ConstraintSpec {
+	defs := e.Constraints()
+	if len(defs) == 0 {
+		return nil
+	}
+	out := make([]snapshot.ConstraintSpec, 0, len(defs))
+	for i := range defs {
+		kind := uint8(txn.ConstraintUnique)
+		if !defs[i].Unique {
+			kind = uint8(txn.ConstraintNotNull)
+		}
+		out = append(out, snapshot.ConstraintSpec{
+			Kind:     kind,
+			Label:    defs[i].Label,
+			Property: defs[i].Property,
+			Name:     defs[i].Name,
+		})
+	}
+	return out
 }
 
 // graphAwareRegistry overlays a small set of graph-bound functions on top of
@@ -1059,16 +1223,41 @@ func explainWithIndexesNode(
 	}
 }
 
-// runDDL executes a DDL statement (CREATE INDEX / DROP INDEX / …) eagerly.
-// DDL operators emit no rows and are fully executed during runDDL — callers
-// receive errors immediately rather than lazily during Result.Next.
+// guardDDLLength rejects an over-length DDL query with the same "query too
+// large" error the DML parse path raises, restoring the byte-length cap the
+// DDL route (ir.ParseDDL) bypasses (audit gap H7). It delegates to
+// [parser.CheckQueryLength] so the limit and message live in one place.
+func guardDDLLength(query string) error {
+	if err := parser.CheckQueryLength(query); err != nil {
+		return fmt.Errorf("cypher: DDL parse: %w", err)
+	}
+	return nil
+}
+
+// runDDL executes a DDL statement (CREATE INDEX / DROP INDEX / CREATE
+// CONSTRAINT / DROP CONSTRAINT) eagerly. DDL operators emit no rows and are
+// fully executed during runDDL — callers receive errors immediately rather
+// than lazily during Result.Next.
+//
+// A CREATE/DROP CONSTRAINT on a WAL-backed engine is made durable: after the
+// in-memory registry change succeeds, a typed constraint op is appended to the
+// WAL and fsynced, so the schema change survives a crash and is re-registered
+// by [store/recovery.Open] (audit gap H1). A CREATE CONSTRAINT also validates
+// the pre-existing data and seeds the UNIQUE value-set by scanning the graph,
+// so a constraint added to a non-empty dataset is enforced rather than silently
+// inert (audit gap H2).
 func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
+	// Apply the same byte-length guard the DML parse path enforces: DDL routes
+	// through ir.ParseDDL, which predates the parser's pre-parse guard, so an
+	// oversize DDL query would otherwise bypass the cap (audit gap H7).
+	if err := guardDDLLength(query); err != nil {
+		return nil, err
+	}
 	ddlPlan, err := ir.ParseDDL(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: DDL parse: %w", err)
 	}
 	idxMgr := e.g.IndexManager()
-	var op exec.Operator
 	switch p := ddlPlan.(type) {
 	case *ir.CreateIndex:
 		var kind exec.IndexKindExec
@@ -1078,32 +1267,22 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 		case ir.IndexTypeBTree:
 			kind = exec.ExecIndexBTree
 		}
-		op = exec.NewCreateIndexOp(p.Name, kind, p.IfNotExists, idxMgr, e.ClearPlanCache)
+		return e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, kind, p.IfNotExists, idxMgr, e.ClearPlanCache))
 	case *ir.DropIndex:
-		op = exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache)
+		return e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
 	case *ir.CreateConstraint:
-		var kind exec.ConstraintKind
-		switch p.Kind {
-		case ir.ConstraintUnique:
-			kind = exec.ConstraintUnique
-		case ir.ConstraintNotNull:
-			kind = exec.ConstraintNotNull
-		}
-		op = exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+		return e.runCreateConstraint(ctx, p, idxMgr)
 	case *ir.DropConstraint:
-		var kind exec.ConstraintKind
-		switch p.Kind {
-		case ir.ConstraintUnique:
-			kind = exec.ConstraintUnique
-		case ir.ConstraintNotNull:
-			kind = exec.ConstraintNotNull
-		}
-		op = exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+		return e.runDropConstraint(ctx, p, idxMgr)
 	default:
 		return nil, fmt.Errorf("cypher: unsupported DDL plan %T", ddlPlan)
 	}
-	// DDL operators emit zero rows; execute synchronously so errors surface at
-	// Run time rather than lazily during Result.Next.
+}
+
+// runDDLOp executes a single eager DDL operator (emitting zero rows) and
+// returns an empty Result. Errors surface at Run time rather than lazily
+// during Result.Next.
+func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error) {
 	if err := op.Init(ctx); err != nil {
 		return nil, fmt.Errorf("cypher: DDL init: %w", err)
 	}
@@ -1116,6 +1295,184 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 		return nil, fmt.Errorf("cypher: DDL close: %w", err)
 	}
 	return newResult(exec.Run(ctx, exec.NewArgument(), nil), nil, nil, nil, nil), nil
+}
+
+// emptyDDLResult returns the canonical zero-row Result that every DDL statement
+// yields once its side effect has been applied.
+func emptyDDLResult(ctx context.Context) *Result {
+	return newResult(exec.Run(ctx, exec.NewArgument(), nil), nil, nil, nil, nil)
+}
+
+// runCreateConstraint executes CREATE CONSTRAINT: it validates the pre-existing
+// data, registers the constraint and seeds its value-set, then (on a WAL-backed
+// engine) appends a durable constraint op so the schema change survives a
+// crash.
+func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint, idxMgr *index.Manager) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	kind := execConstraintKind(p.Kind)
+
+	// IF NOT EXISTS that absorbs an already-registered constraint is a silent
+	// no-op with no schema change and no WAL record — match the operator's
+	// existing semantics and skip validation/durability.
+	if p.IfNotExists && e.constraintAlreadyRegistered(kind, p.Label, p.Property) {
+		return emptyDDLResult(ctx), nil
+	}
+
+	// Validate the pre-existing data and seed the value-set BEFORE registering,
+	// so a constraint over already-violating data is rejected with nothing
+	// registered (audit gap H2).
+	values, anyNull := e.scanLabelProperty(p.Label, p.Property)
+	if err := validatePreExisting(kind, p.Label, p.Property, values, anyNull); err != nil {
+		return nil, err
+	}
+
+	// Register in memory via the operator (handles index creation + IF NOT
+	// EXISTS), then seed the UNIQUE value-set from the scanned values.
+	op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+	if _, err := e.runDDLOp(ctx, op); err != nil {
+		return nil, err
+	}
+	if kind == exec.ConstraintUnique {
+		if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, values); err != nil {
+			return nil, err
+		}
+	}
+
+	// Durability: append the constraint op to the WAL and fsync it, so the
+	// schema change survives a crash (audit gap H1).
+	if err := e.appendConstraintOp(ctx, txn.OpCreateConstraint, kind, p.Label, p.Property, p.Name); err != nil {
+		return nil, err
+	}
+	return emptyDDLResult(ctx), nil
+}
+
+// runDropConstraint executes DROP CONSTRAINT: it deregisters the constraint via
+// the operator, then (on a WAL-backed engine) appends a durable drop op so the
+// removal survives a crash.
+func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, idxMgr *index.Manager) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	kind := execConstraintKind(p.Kind)
+	op := exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+	if _, err := e.runDDLOp(ctx, op); err != nil {
+		return nil, err
+	}
+	if err := e.appendConstraintOp(ctx, txn.OpDropConstraint, kind, p.Label, p.Property, p.Name); err != nil {
+		return nil, err
+	}
+	return emptyDDLResult(ctx), nil
+}
+
+// execConstraintKind maps the IR constraint kind to the exec kind.
+func execConstraintKind(k ir.ConstraintKind) exec.ConstraintKind {
+	if k == ir.ConstraintNotNull {
+		return exec.ConstraintNotNull
+	}
+	return exec.ConstraintUnique
+}
+
+// constraintAlreadyRegistered reports whether a constraint of the given kind is
+// already registered for (label, prop).
+func (e *Engine) constraintAlreadyRegistered(kind exec.ConstraintKind, label, prop string) bool {
+	if kind == exec.ConstraintNotNull {
+		return e.constraintReg.HasNotNull(label, prop)
+	}
+	return e.constraintReg.HasUnique(label, prop)
+}
+
+// appendConstraintOp appends a durable CREATE/DROP CONSTRAINT op to the WAL on a
+// WAL-backed engine and fsyncs it. It is a no-op on a store-less in-memory
+// engine (no durability surface). The op carries no node endpoints; it serves
+// only to re-register (or suppress) the constraint on recovery. The single-op
+// transaction is committed WAL-only — the in-memory registry was already
+// updated by the operator — mirroring the eager-apply + CommitWALOnly pattern
+// the write path uses.
+func (e *Engine) appendConstraintOp(ctx context.Context, opKind txn.OpKind, kind exec.ConstraintKind, label, prop, name string) error {
+	if e.store == nil {
+		return nil
+	}
+	ck := txn.ConstraintUnique
+	if kind == exec.ConstraintNotNull {
+		ck = txn.ConstraintNotNull
+	}
+	tx, err := e.store.BeginCtx(ctx)
+	if err != nil {
+		return err
+	}
+	switch opKind {
+	case txn.OpCreateConstraint:
+		err = tx.CreateConstraint(ck, label, prop, name)
+	case txn.OpDropConstraint:
+		err = tx.DropConstraint(ck, label, prop, name)
+	default:
+		err = fmt.Errorf("cypher: appendConstraintOp: unexpected op kind %d", opKind)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	// CommitWALOnly: the registry change is already applied in memory; this only
+	// secures the durable record. A constraint op applies nothing to the graph,
+	// so a full Commit would be equivalent, but CommitWALOnly states the intent.
+	if cerr := tx.CommitWALOnly(); cerr != nil {
+		return cerr
+	}
+	return nil
+}
+
+// scanLabelProperty walks the live (non-tombstoned) nodes carrying label and
+// returns the values of their prop property and whether any such node lacks the
+// property (a null for the NOT NULL check). It is used both to validate
+// pre-existing data on CREATE CONSTRAINT and to re-seed a UNIQUE value-set on
+// recovery. The scan is O(N) over interned nodes; CREATE CONSTRAINT is a rare
+// schema operation, so the cost is acceptable and bounded by the graph size.
+func (e *Engine) scanLabelProperty(label, prop string) (values []lpg.PropertyValue, anyNull bool) {
+	mapper := e.g.AdjList().Mapper()
+	mapper.Walk(func(id graph.NodeID, key string) bool {
+		if e.g.IsTombstoned(id) {
+			return true
+		}
+		if !e.g.HasNodeLabel(key, label) {
+			return true
+		}
+		v, ok := e.g.GetNodeProperty(key, prop)
+		if !ok {
+			anyNull = true
+			return true
+		}
+		values = append(values, v)
+		return true
+	})
+	return values, anyNull
+}
+
+// validatePreExisting enforces the at-creation invariant for CREATE CONSTRAINT
+// over pre-existing data (Neo4j semantics): a UNIQUE constraint is rejected
+// when two existing nodes share a value; a NOT NULL constraint is rejected when
+// any node with the label lacks the property. On violation it returns an error
+// wrapping [exec.ErrConstraintViolation]; otherwise nil.
+func validatePreExisting(kind exec.ConstraintKind, label, prop string, values []lpg.PropertyValue, anyNull bool) error {
+	switch kind {
+	case exec.ConstraintNotNull:
+		if anyNull {
+			return fmt.Errorf("cypher: cannot create NOT NULL constraint on (:%s).%s: %w: pre-existing node has a null value",
+				label, prop, exec.ErrConstraintViolation)
+		}
+	case exec.ConstraintUnique:
+		// SeedUniqueValues performs the duplicate detection against the same
+		// canonical encoding the live check uses; reuse it here on a throwaway
+		// registry so the rejection semantics are identical.
+		probe := exec.NewConstraintRegistry()
+		probe.RegisterUnique(label, prop, "")
+		if err := probe.SeedUniqueValues(label, prop, values); err != nil {
+			return fmt.Errorf("cypher: cannot create UNIQUE constraint on (:%s).%s: %w",
+				label, prop, err)
+		}
+	}
+	return nil
 }
 
 // RunAny executes query with params expressed as map[string]any, automatically

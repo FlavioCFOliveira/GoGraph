@@ -53,6 +53,11 @@ type LoadedSnapshot struct {
 	// graph that never used the handle-keyed metadata stores) — the
 	// backward-compatibility contract.
 	EdgeHandles EdgeHandlesReadback
+	// Constraints is the durable schema constraint set restored from
+	// constraints.bin. It is empty for snapshots that carry no constraints.bin
+	// entry (older snapshots, or any snapshot taken with no constraints
+	// declared) — the backward-compatibility contract.
+	Constraints ConstraintsReadback
 }
 
 // WriteSnapshotFull is the v2/v3 high-level helper: it lays out a
@@ -133,7 +138,7 @@ func WriteSnapshotFullCtx[N comparable, W any](
 	// No codec: the mapper is persisted only for string-keyed graphs
 	// (the historical v3 behaviour). writeMapperIfStringKeyed performs
 	// the string-only probe.
-	return writeSnapshotFullCore(ctx, dir, c, g, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+	return writeSnapshotFullCore(ctx, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 		return writeMapperIfStringKeyed(c2, tmp, g)
 	})
 }
@@ -155,9 +160,65 @@ func WriteSnapshotFullWithMapperCodecCtx[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecCtx.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	return writeSnapshotFullCore(ctx, dir, c, g, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+	return writeSnapshotFullCore(ctx, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 		return writeMapperWithCodec(c2, tmp, g, codec)
 	})
+}
+
+// WriteSnapshotFullWithConstraints is [WriteSnapshotFull] plus a durable
+// constraints.bin component carrying the engine's schema constraint set. It is
+// the snapshot entry point a checkpointer must use when the engine has
+// constraints declared: without the component a checkpoint that truncated the
+// WAL prefix which first declared a constraint would lose that constraint
+// (a durability defect). The mapper.bin component is emitted for string-keyed
+// graphs exactly as [WriteSnapshotFull] does.
+//
+// constraints may be nil or empty, in which case no constraints.bin is written
+// and the output is byte-identical to [WriteSnapshotFull].
+func WriteSnapshotFullWithConstraints[N comparable, W any](
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	constraints []ConstraintSpec,
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraints")()
+	err := writeSnapshotFullCore(context.Background(), dir, c, g, constraints,
+		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+			return writeMapperIfStringKeyed(c2, tmp, g)
+		})
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithConstraints.errors", 1)
+	}
+	return err
+}
+
+// WriteSnapshotFullWithMapperCodecAndConstraints is the codec-aware variant of
+// [WriteSnapshotFullWithConstraints]: it threads codec into the mapper.bin
+// writer (so the snapshot is self-sufficient for any key type) AND persists the
+// constraint set. This is the entry point a checkpointer over a non-string
+// store uses when constraints are declared.
+//
+// codec must not be nil. constraints may be nil or empty (no constraints.bin).
+func WriteSnapshotFullWithMapperCodecAndConstraints[N comparable, W any](
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+	constraints []ConstraintSpec,
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints")()
+	if codec == nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
+		return errors.New("snapshot: nil mapper codec")
+	}
+	err := writeSnapshotFullCore(context.Background(), dir, c, g, constraints,
+		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+			return writeMapperWithCodec(c2, tmp, g, codec)
+		})
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
+	}
+	return err
 }
 
 // writeSnapshotFullCore is the shared implementation behind
@@ -168,12 +229,13 @@ func WriteSnapshotFullWithMapperCodecCtx[N comparable, W any](
 // err). When haveMapper is false the snapshot is stamped v2 (no
 // mapper.bin) exactly as before; when true it is stamped v3.
 //
-//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + manifest + atomic rename + ctx ticks
+//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + manifest + atomic rename + ctx ticks
 func writeSnapshotFullCore[N comparable, W any](
 	ctx context.Context,
 	dir string,
 	c *csr.CSR[W],
 	g *lpg.Graph[N, W],
+	constraints []ConstraintSpec,
 	writeMapper func(ctx context.Context, tmp string) (size int64, crc uint32, haveMapper bool, err error),
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -323,6 +385,34 @@ func writeSnapshotFullCore[N comparable, W any](
 		return err
 	}
 
+	// constraints.bin — the durable schema constraint set. Emitted ONLY when
+	// the caller supplies at least one constraint, so a snapshot of a graph
+	// with no constraints is byte-identical to one produced before this
+	// component existed. Without this component a constraint declared and
+	// committed before a checkpoint would not survive WAL truncation: the WAL
+	// op that declared it lives only in the truncated prefix, so the
+	// checkpoint must carry the constraint forward itself.
+	var constraintsSize int64
+	var constraintsCRC uint32
+	haveConstraints := len(constraints) > 0
+	if haveConstraints {
+		constraintsPath := filepath.Join(tmp, ConstraintsFile)
+		constraintsSize, constraintsCRC, err = writeAndSync(constraintsPath, func(w io.Writer) (int64, uint32, error) {
+			return WriteConstraints(w, constraints)
+		})
+		if err != nil {
+			_ = os.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return err
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
 	// indexes/<name>.bin — one file per registered index that
 	// implements [index.Serializer]. Subscribers without serializer
 	// support are silently skipped (rebuild-on-restart contract).
@@ -372,6 +462,13 @@ func writeSnapshotFullCore[N comparable, W any](
 	// the per-handle types.
 	if haveEdgeHandles {
 		files = append(files, FileEntry{Name: EdgeHandlesFile, Size: edgeHandleSize, CRC32C: edgeHandleCRC})
+	}
+	// The constraints.bin entry is likewise additive and does not change the
+	// manifest version: present only when constraints are declared. A reader
+	// that predates it ignores the unknown file name; this reader restores the
+	// set so a checkpoint + WAL truncate does not lose constraints.
+	if haveConstraints {
+		files = append(files, FileEntry{Name: ConstraintsFile, Size: constraintsSize, CRC32C: constraintsCRC})
 	}
 
 	// Persist the originating graph's directed/multigraph shape so
@@ -688,6 +785,19 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		}
 	}
 
+	// constraints.bin — optional schema constraint set. Absent for older
+	// snapshots and for any snapshot taken with no constraints declared: the
+	// readback stays empty (backward compatibility). When present its CRC32C
+	// is verified exactly like the other components.
+	var constraintsParsed ConstraintsReadback
+	if ccEntry := findEntry(m.Files, ConstraintsFile); ccEntry != nil {
+		constraintsParsed, err = readVerifiedConstraints(filepath.Join(dir, ConstraintsFile), ccEntry.CRC32C)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, err
+		}
+	}
+
 	// indexes/<name>.bin — best-effort load. Corruption surfaces as
 	// nil Bytes on the IndexReadback so the recovery path can rebuild
 	// from the LPG rather than aborting.
@@ -709,6 +819,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		Indexes:     idxReadback,
 		Tombstones:  tombParsed,
 		EdgeHandles: edgeHandlesParsed,
+		Constraints: constraintsParsed,
 	}, nil
 }
 
@@ -852,6 +963,32 @@ func readVerifiedTombstones(path string, expected uint32) (TombstonesReadback, e
 	if got := hasher.Sum32(); got != expected {
 		return TombstonesReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
 			ErrCorrupted, TombstonesFile, got, expected)
+	}
+	return parsed, nil
+}
+
+// readVerifiedConstraints is the dual of [readVerifiedCSR] for
+// constraints.bin.
+func readVerifiedConstraints(path string, expected uint32) (ConstraintsReadback, error) {
+	f, err := openSnapshotComponent(path)
+	if err != nil {
+		return ConstraintsReadback{}, err
+	}
+	// best-effort: read-only file, close err is non-actionable for callers.
+	defer func() { _ = f.Close() }()
+
+	hasher := crc32.New(castagnoli)
+	tee := io.TeeReader(f, hasher)
+	parsed, err := ReadConstraints(tee)
+	if err != nil {
+		return ConstraintsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if _, err := io.Copy(io.Discard, tee); err != nil {
+		return ConstraintsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if got := hasher.Sum32(); got != expected {
+		return ConstraintsReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
+			ErrCorrupted, ConstraintsFile, got, expected)
 	}
 	return parsed, nil
 }

@@ -36,6 +36,28 @@ const (
 	maxNestingDepth = 256
 )
 
+// CheckQueryLength returns a [*ParseError] when query exceeds the maximum
+// accepted query length (1 MiB), and nil otherwise. It is the byte-length half
+// of [guardInput], exported so the DDL parse path — which routes through
+// [github.com/FlavioCFOliveira/GoGraph/cypher/ir.ParseDDL] rather than this
+// package's [Parse] — enforces the SAME cap with the SAME error message,
+// keeping the limit defined in exactly one place ([maxQueryBytes]). The DDL
+// tokeniser is iterative, so the nesting half of the guard is not needed there.
+//
+// The returned error is a non-nil *ParseError when the limit is exceeded; the
+// typed nil is deliberately avoided (callers compare the interface against nil).
+func CheckQueryLength(query string) *ParseError {
+	if len(query) > maxQueryBytes {
+		return &ParseError{
+			Line:   1,
+			Column: 0,
+			Message: "query too large: " + itoa(len(query)) +
+				" bytes exceeds the limit of " + itoa(maxQueryBytes) + " bytes",
+		}
+	}
+	return nil
+}
+
 // guardInput validates a raw query string before lexing and parsing. It returns
 // a [*ParseError] when the query exceeds [maxQueryBytes] in length or when its
 // bracket nesting exceeds [maxNestingDepth]. It returns nil when the query is
@@ -48,13 +70,8 @@ const (
 // guardInput runs in O(n) time over the query bytes and allocates nothing on
 // the success path beyond the returned error value on rejection.
 func guardInput(query string) *ParseError {
-	if len(query) > maxQueryBytes {
-		return &ParseError{
-			Line:   1,
-			Column: 0,
-			Message: "query too large: " + itoa(len(query)) +
-				" bytes exceeds the limit of " + itoa(maxQueryBytes) + " bytes",
-		}
+	if err := CheckQueryLength(query); err != nil {
+		return err
 	}
 	if depth := maxBracketDepth(query); depth > maxNestingDepth {
 		return &ParseError{
