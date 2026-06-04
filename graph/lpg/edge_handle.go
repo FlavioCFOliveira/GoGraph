@@ -250,6 +250,49 @@ func (g *Graph[N, W]) EdgePropertiesByHandle(src, dst N, handle uint64) map[stri
 	return out
 }
 
+// FirstEdgeHandle returns the stable handle stamped on the FIRST adjacency
+// slot from src to dst — the slot a subsequent [Graph.RemoveEdge] would
+// remove, because [adjlist.AdjList.RemoveEdge] removes the lowest-indexed
+// occurrence and compacts the handle column in lock-step. The boolean
+// reports whether such a slot exists AND carries a non-zero handle; it is
+// false when either endpoint is unknown, no src→dst edge exists, or the
+// matched slot has the 0 "no handle" sentinel (a simple-graph or
+// pre-Stage-2 edge).
+//
+// It lets the write-query transaction-undo log capture the identity of the
+// exact parallel edge instance a DELETE is about to remove, so the inverse
+// can re-add that instance with its ORIGINAL handle (via
+// [Graph.AddEdgeHIfAbsent]) and the surviving siblings keep theirs — fully
+// reverting an "remove one parallel edge, then fail a later row" rollback
+// without renumbering any handle. See cypher/undo_record.go.
+//
+// FirstEdgeHandle reads an immutable adjacency snapshot ([adjlist.AdjList.LoadEntryH])
+// and allocates nothing; it is safe for concurrent use under the same
+// lock-free contract as [Graph.EdgeWeight].
+func (g *Graph[N, W]) FirstEdgeHandle(src, dst N) (uint64, bool) {
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return 0, false
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return 0, false
+	}
+	neighbours, _, handles := g.adj.LoadEntryH(srcID)
+	if handles == nil {
+		return 0, false
+	}
+	for i, nb := range neighbours {
+		if nb == dstID {
+			if i < len(handles) && handles[i] != 0 {
+				return handles[i], true
+			}
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
 // RemoveEdgeInstanceByHandle discards every per-handle label and property
 // for (src, dst) at handle so subsequent reads (EdgeLabelsByHandle /
 // EdgePropertiesByHandle) return empty. The handle-keyed analogue of

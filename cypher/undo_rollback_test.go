@@ -18,11 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -66,6 +68,28 @@ func walEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float6
 		t.Fatalf("wal.Open: %v", err)
 	}
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	return cypher.NewEngineWithStore(store), g, w, dir
+}
+
+// walMultigraphEngineWithGraph mirrors [walEngineWithGraph] but builds the
+// graph with adjlist.Config.Multigraph enabled — the openCypher TCK storage
+// model, in which each CREATE of a relationship between the same endpoints
+// becomes a distinct parallel slot carrying its own stable handle and its own
+// per-instance type/properties. The multigraph mode is what makes the
+// "remove one parallel edge, then fail a later row" interleaving of #1327
+// reachable; a simple graph collapses parallel CREATEs onto one slot.
+func walMultigraphEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64], *wal.Writer, string) {
+	t.Helper()
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -328,6 +352,183 @@ func TestRunInTx_DeleteThenFailRestoresEdge(t *testing.T) {
 			t.Errorf("restored edge property %q kind = %v, want %v", k, got.Kind(), want.Kind())
 		}
 	}
+}
+
+// TestRunInTx_ParallelEdgeRemovalThenFailRestoresPerHandleMetadata is the
+// acceptance-criteria test for #1327: the exotic multigraph removal-then-fail
+// interleaving. Two parallel (a)-[:R…]->(b) instances carry DISTINCT per-handle
+// types and properties. A RunInTx removes ONE instance on an early row, then
+// fails on a later row. On rollback BOTH the surviving instance and the removed
+// instance's per-handle type+properties must be fully restored — the removed
+// instance must come back with its ORIGINAL stable handle so the handle-keyed
+// read path resolves it to its own type, not to a surviving sibling.
+//
+// Before the #1327 fix the edge-removal undo re-added the instance with a plain
+// AddEdge (handle 0); the per-handle store survived but no live adjacency slot
+// carried the removed handle, so `type(r)` mis-mapped the re-added instance to
+// the survivor — an Atomicity gap: the rollback left a state that neither fully
+// contained nor fully excluded the removed instance.
+func TestRunInTx_ParallelEdgeRemovalThenFailRestoresPerHandleMetadata(t *testing.T) {
+	eng, g, w, _ := walMultigraphEngineWithGraph(t)
+	t.Cleanup(func() { _ = w.Close() })
+
+	// Seed two distinctly-typed parallel edges between the same ordered pair,
+	// each with its own property value, plus a node c so the failing statement
+	// has a later matched row to reach after the DELETE.
+	if _, err := eng.RunInTx(context.Background(),
+		`CREATE (a:N {key:'x'}),(b:N {key:'y'}),`+
+			`(a)-[:R1 {p:1}]->(b),(a)-[:R2 {p:2}]->(b)`, nil); err != nil {
+		t.Fatalf("seed parallels: %v", err)
+	}
+	if err := runWrite(t, eng, "CREATE (:N {key:'c'})"); err != nil {
+		t.Fatalf("seed c: %v", err)
+	}
+
+	srcKey, dstKey, ok := findEdgeBetweenKeys(g, "x", "y")
+	if !ok {
+		t.Fatal("precondition: the x→y parallel edges should exist")
+	}
+
+	// Snapshot the pre-delete per-handle metadata for the pair: handle → type,
+	// handle → p. This is the authoritative per-instance surface in multigraph
+	// mode; the rollback must reproduce it exactly.
+	wantByHandle := snapshotHandleMeta(g, srcKey, dstKey)
+	if len(wantByHandle) != 2 {
+		t.Fatalf("precondition: want 2 distinct handles, got %d (%v)", len(wantByHandle), wantByHandle)
+	}
+	wantCreateCount := g.EdgeCreateCount(srcKey, dstKey)
+
+	// Remove the :R1 instance on an early row, then fail on a later row: the
+	// validator rejects the `boom` write the second MATCH issues.
+	g.SetValidator(&nthSetRejector{key: "boom", rejN: 1})
+	err := runWrite(t, eng,
+		"MATCH (:N {key:'x'})-[r:R1]->(:N {key:'y'}) DELETE r WITH 1 AS _x MATCH (n:N) SET n.boom = 1")
+	if err == nil {
+		t.Fatal("expected the statement to error after removing the R1 instance, got nil")
+	}
+	g.SetValidator(nil)
+
+	// (1) Both parallel slots must be live again with their original handles
+	// and per-handle metadata — the removed instance fully restored, the
+	// survivor untouched.
+	gotByHandle := snapshotHandleMeta(g, srcKey, dstKey)
+	if len(gotByHandle) != len(wantByHandle) {
+		t.Fatalf("after rollback: %d live handles, want %d (want=%v got=%v)",
+			len(gotByHandle), len(wantByHandle), wantByHandle, gotByHandle)
+	}
+	for h, want := range wantByHandle {
+		got, present := gotByHandle[h]
+		if !present {
+			t.Errorf("removed instance handle %d not restored on rollback", h)
+			continue
+		}
+		if got.typ != want.typ {
+			t.Errorf("handle %d type = %q, want %q", h, got.typ, want.typ)
+		}
+		if got.p != want.p {
+			t.Errorf("handle %d property p = %d, want %d", h, got.p, want.p)
+		}
+	}
+
+	// (2) The handle-keyed read path must surface BOTH distinct types again.
+	// Pre-fix this returned the survivor's type twice.
+	if gotTypes := readParallelTypes(t, eng); len(gotTypes) != 2 ||
+		gotTypes[0] != "R1" || gotTypes[1] != "R2" {
+		t.Errorf("type(r) over parallels = %v, want [R1 R2] (handle path mis-mapped)", gotTypes)
+	}
+
+	// (3) The per-pair union must be intact: both types present, edge live, and
+	// the CREATE-multiplicity counter back at its pre-delete value.
+	if !g.AdjList().HasEdge(srcKey, dstKey) {
+		t.Fatal("pair has no live edge after rollback")
+	}
+	if got := g.EdgeCreateCount(srcKey, dstKey); got != wantCreateCount {
+		t.Errorf("EdgeCreateCount = %d after rollback, want %d", got, wantCreateCount)
+	}
+	if unionLabels := g.EdgeLabels(srcKey, dstKey); !sameStringSet(unionLabels, []string{"R1", "R2"}) {
+		t.Errorf("per-pair union labels = %v, want {R1, R2}", unionLabels)
+	}
+}
+
+// handleMeta is the per-handle metadata snapshot the parallel-edge rollback
+// test compares: the relationship type and the integer `p` property recorded
+// under one stable handle.
+type handleMeta struct {
+	typ string
+	p   int64
+}
+
+// snapshotHandleMeta returns, for the LIVE directed edges between srcKey and
+// dstKey, a map from each slot's stable handle to its per-handle type and `p`
+// property. It walks only handles that are live in the adjacency (via
+// [lpg.Graph.WalkEdgeHandles]), so it captures exactly the parallel instances
+// the read path can resolve — the property #1327 must preserve across a
+// removal-then-fail rollback.
+func snapshotHandleMeta(g *lpg.Graph[string, float64], srcKey, dstKey string) map[uint64]handleMeta {
+	srcID, _ := g.AdjList().Mapper().Lookup(srcKey)
+	dstID, _ := g.AdjList().Mapper().Lookup(dstKey)
+	out := make(map[uint64]handleMeta)
+	g.WalkEdgeHandles(func(tr lpg.EdgeHandleTriple) bool {
+		if tr.Src != srcID || tr.Dst != dstID {
+			return true
+		}
+		m := handleMeta{}
+		if labels := g.EdgeLabelsByHandle(srcKey, dstKey, tr.Handle); len(labels) > 0 {
+			m.typ = labels[0]
+		}
+		if props := g.EdgePropertiesByHandle(srcKey, dstKey, tr.Handle); props != nil {
+			if pv, ok := props["p"]; ok {
+				if i, ok := pv.Int64(); ok {
+					m.p = i
+				}
+			}
+		}
+		out[tr.Handle] = m
+		return true
+	})
+	return out
+}
+
+// readParallelTypes runs MATCH (x)-[r]->(y) RETURN type(r) and returns the
+// sorted relationship types, so the test can assert the handle-keyed read path
+// surfaces every restored parallel instance's own type.
+func readParallelTypes(t *testing.T, eng *cypher.Engine) []string {
+	t.Helper()
+	res, err := eng.Run(context.Background(),
+		`MATCH (:N {key:'x'})-[r]->(:N {key:'y'}) RETURN type(r) AS t`, nil)
+	if err != nil {
+		t.Fatalf("read parallel types: %v", err)
+	}
+	recs := drainRecords(t, res)
+	types := make([]string, 0, len(recs))
+	for _, row := range recs {
+		if s, ok := row["t"].(expr.StringValue); ok {
+			types = append(types, string(s))
+		}
+	}
+	sort.Strings(types)
+	return types
+}
+
+// findEdgeBetweenKeys resolves the synthetic node keys of the nodes whose
+// `key` property equals srcVal and dstVal, and reports whether a directed edge
+// connects them. Used to address the multigraph parallel edges by their real
+// internal keys (the synthetic identifiers, not the Cypher variables).
+func findEdgeBetweenKeys(g *lpg.Graph[string, float64], srcVal, dstVal string) (srcKey, dstKey string, found bool) {
+	g.AdjList().Mapper().Walk(func(_ graph.NodeID, key string) bool {
+		if v, ok := g.GetNodeProperty(key, "key"); ok {
+			if s, _ := v.String(); s == srcVal {
+				srcKey = key
+			} else if s == dstVal {
+				dstKey = key
+			}
+		}
+		return true
+	})
+	if srcKey == "" || dstKey == "" {
+		return "", "", false
+	}
+	return srcKey, dstKey, g.AdjList().HasEdge(srcKey, dstKey)
 }
 
 // TestRunInTx_FailedStatementPreservesPreexistingState guards the idempotent-

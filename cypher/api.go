@@ -7583,7 +7583,10 @@ func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // clearEdgePairState drops the pair's per-handle and per-instance metadata once
 // the last edge between the endpoints is gone. The exotic case (a per-handle
 // metadata set on an edge that a later failed row removes while a parallel edge
-// survives) is the deferred follow-up documented at recordRemoveEdge.
+// survives) is handled by the edge-removal undo itself: captureRemovedEdge
+// snapshots the removed slot's handle and its per-handle labels/properties, and
+// recordRemoveEdge re-adds the instance with that handle and restores them
+// (#1327).
 func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
 	a.g.SetEdgeLabelAt(src, dst, idx, label)
 }

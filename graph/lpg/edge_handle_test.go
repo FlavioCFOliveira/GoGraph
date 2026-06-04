@@ -186,6 +186,54 @@ func TestGraph_PairFullDelete_ClearsHandleStore(t *testing.T) {
 	}
 }
 
+// TestGraph_FirstEdgeHandle reports the handle of the FIRST src→dst slot —
+// the one RemoveEdge would remove — and tracks the compaction: after the
+// first parallel is removed, FirstEdgeHandle returns the next survivor's
+// handle.
+func TestGraph_FirstEdgeHandle(t *testing.T) {
+	t.Parallel()
+	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+
+	// Unknown pair: not present.
+	if h, ok := g.FirstEdgeHandle("a", "b"); ok || h != 0 {
+		t.Fatalf("FirstEdgeHandle on empty graph = (%d, %v), want (0, false)", h, ok)
+	}
+
+	h1, _ := g.AddEdgeH("a", "b", 0)
+	h2, _ := g.AddEdgeH("a", "b", 0)
+
+	// The first slot carries h1 (insertion order).
+	if h, ok := g.FirstEdgeHandle("a", "b"); !ok || h != h1 {
+		t.Fatalf("FirstEdgeHandle = (%d, %v), want (%d, true)", h, ok, h1)
+	}
+
+	// RemoveEdge drops the first slot (h1); the survivor h2 becomes first.
+	g.RemoveEdge("a", "b")
+	if h, ok := g.FirstEdgeHandle("a", "b"); !ok || h != h2 {
+		t.Fatalf("after one delete, FirstEdgeHandle = (%d, %v), want (%d, true)", h, ok, h2)
+	}
+
+	// Remove the last edge: pair empty again.
+	g.RemoveEdge("a", "b")
+	if h, ok := g.FirstEdgeHandle("a", "b"); ok || h != 0 {
+		t.Fatalf("after full delete, FirstEdgeHandle = (%d, %v), want (0, false)", h, ok)
+	}
+}
+
+// TestGraph_FirstEdgeHandle_NoHandleSlot verifies the 0-sentinel case: a
+// plain AddEdge (no handle) makes FirstEdgeHandle report (0, false).
+func TestGraph_FirstEdgeHandle_NoHandleSlot(t *testing.T) {
+	t.Parallel()
+	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+
+	if err := g.AddEdge("a", "b", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if h, ok := g.FirstEdgeHandle("a", "b"); ok || h != 0 {
+		t.Fatalf("FirstEdgeHandle on no-handle edge = (%d, %v), want (0, false)", h, ok)
+	}
+}
+
 // TestGraph_AddEdgeH_Concurrent verifies handle allocation is safe and
 // produces a contiguous, unique set under concurrent writers.
 func TestGraph_AddEdgeH_Concurrent(t *testing.T) {

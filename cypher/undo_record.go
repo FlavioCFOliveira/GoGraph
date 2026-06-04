@@ -207,22 +207,32 @@ func (m mutationUndo) recordDecEdgeCreateCount(src, dst string, had bool) {
 	m.undo.record(func() { m.g.IncEdgeCreateCount(src, dst) })
 }
 
-// removedEdgePreimage captures the per-pair state of an edge the statement is
-// about to remove, so RemoveEdge can be inverted: the edge is re-added with its
-// original weight and its per-pair labels, properties, and CREATE-multiplicity
-// counter are restored. This covers the realistic DELETE-then-fail interleaving
-// (e.g. `MATCH (n) SET n.x=1 DELETE n` failing on a later row, or a standalone
-// `DELETE r` followed by a failing clause).
+// removedEdgePreimage captures the state of an edge the statement is about to
+// remove, so RemoveEdge can be inverted: the edge is re-added with its original
+// weight and stable handle and its per-pair labels, properties, and
+// CREATE-multiplicity counter — plus the removed instance's per-HANDLE labels
+// and properties — are restored. This covers both the realistic DELETE-then-fail
+// interleaving (e.g. `MATCH (n) SET n.x=1 DELETE n` failing on a later row, or a
+// standalone `DELETE r` followed by a failing clause) and the exotic multigraph
+// removal-then-fail interleaving (#1327): removing ONE of several parallel edges
+// between the same endpoints and then failing a later row.
 //
-// NOTE (#1282 deferred follow-up): the per-HANDLE and per-CREATE-INSTANCE edge
-// metadata (SetEdgeLabelByHandle / SetEdgeLabelAt and their property analogues)
-// of a removed edge are NOT captured here. Restoring those exotic multigraph
-// pre-images on a removal-then-fail interleaving requires snapshotting the
-// handle/instance-keyed shards, which the orchestrator is tracking as a
-// separate task. recordRemoveEdge below restores the per-pair union (weight,
-// labels, properties, create-count), which is what every TCK-covered
-// DELETE-then-fail path observes; the design leaves room to add the per-handle
-// pre-image capture without reworking the call sites.
+// Per-HANDLE vs per-pair. [Graph.RemoveEdge] removes only the FIRST adjacency
+// slot for the pair; while a parallel sibling survives it leaves the per-pair
+// union, the per-handle store, and the per-CREATE-index store untouched. The
+// only thing it loses for the removed instance is the stable handle stamped on
+// its adjacency slot. The undo's re-add therefore restores that handle (so the
+// handle-keyed read path resolves the re-added instance to its OWN type and
+// properties rather than mis-mapping to a surviving sibling) and re-asserts the
+// per-handle labels/properties so the inverse is self-sufficient — it does not
+// rely on the handle store having survived the removal.
+//
+// The per-CREATE-INDEX store ([Graph.SetEdgeLabelAt] et al.) is the simple-graph
+// fallback and is keyed by CREATE order, not by adjacency slot; no removal path
+// (DELETE or this undo's re-add) ever mutates it, so it survives a
+// removal-then-fail rollback unchanged and needs no capture. In multigraph mode
+// — where this exotic interleaving lives — the per-handle store is the
+// authoritative per-instance surface (see graph/lpg/edge_handle.go).
 type removedEdgePreimage struct {
 	src, dst    string
 	weight      float64
@@ -230,12 +240,24 @@ type removedEdgePreimage struct {
 	labels      []string
 	props       map[string]lpg.PropertyValue
 	createCount int64
+	// handle is the stable handle of the FIRST src→dst adjacency slot — the
+	// one RemoveEdge will remove — or 0 when the edge carries no handle
+	// (simple-graph or pre-Stage-2 storage). On undo the edge is re-added with
+	// this handle so a removed parallel instance keeps its identity.
+	handle uint64
+	// handleLabels / handleProps are the removed instance's per-handle label
+	// and property pre-images, captured under handle. Restored on undo so the
+	// re-added instance resolves to its own metadata. Empty when handle is 0.
+	handleLabels []string
+	handleProps  map[string]lpg.PropertyValue
 }
 
-// captureRemovedEdge snapshots the per-pair state of edge (src, dst) before a
+// captureRemovedEdge snapshots the state of edge (src, dst) before a
 // RemoveEdge. It is called only when undo is active, on the cold DELETE path, so
-// its O(out-degree) weight scan and metadata copies never touch the read hot
-// path.
+// its O(out-degree) weight/handle scan and metadata copies never touch the read
+// hot path. In addition to the per-pair union it records the FIRST src→dst
+// slot's stable handle and that handle's per-instance label/property pre-images,
+// so a removed parallel edge can be re-added with its original identity (#1327).
 func (m mutationUndo) captureRemovedEdge(src, dst string) removedEdgePreimage {
 	pre := removedEdgePreimage{src: src, dst: dst}
 	if !m.g.AdjList().HasEdge(src, dst) {
@@ -248,31 +270,56 @@ func (m mutationUndo) captureRemovedEdge(src, dst string) removedEdgePreimage {
 	pre.labels = m.g.EdgeLabels(src, dst)
 	pre.props = m.g.EdgeProperties(src, dst)
 	pre.createCount = m.g.EdgeCreateCount(src, dst)
+	// Capture the per-handle identity of the exact slot RemoveEdge will drop
+	// (the first src→dst slot). When the edge carries a handle, snapshot that
+	// handle's per-instance labels and properties too, so the inverse re-adds
+	// the instance with its own metadata even if a future removal path clears
+	// the handle store.
+	if h, ok := m.g.FirstEdgeHandle(src, dst); ok {
+		pre.handle = h
+		pre.handleLabels = m.g.EdgeLabelsByHandle(src, dst, h)
+		pre.handleProps = m.g.EdgePropertiesByHandle(src, dst, h)
+	}
 	return pre
 }
 
 // recordRemoveEdge records the inverse of removing edge (src, dst) from the
 // captured pre-image. wasPresent reports that the adapter observed the edge and
 // incremented the edges-removed counter; a no-op removal records nothing. The
-// inverse re-adds the edge with its original weight, decrements the edges-
-// removed counter, then restores the per-pair labels, properties, and CREATE-
-// multiplicity counter (each via the same setters the forward path used, so the
-// restored state is byte-for-byte the pre-removal state for everything the
-// per-pair union covers).
+// inverse re-adds the edge with its original weight AND stable handle,
+// decrements the edges-removed counter, then restores the per-pair labels,
+// properties, and CREATE-multiplicity counter, and finally the removed
+// instance's per-handle labels and properties (each via the same setters the
+// forward path used, so the restored state is byte-for-byte the pre-removal
+// state for both the per-pair union and the per-handle instance surface).
 func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool) {
 	if !m.active() || !wasPresent || !pre.hadEdge {
 		return
 	}
 	m.undo.record(func() {
 		// Re-add the edge first so SetEdgeLabel/SetEdgeProperty (which require
-		// the edge to exist) reattach successfully.
-		_ = m.g.AddEdge(pre.src, pre.dst, pre.weight)
+		// the edge to exist) reattach successfully. Re-add WITH the captured
+		// handle ([Graph.AddEdgeHIfAbsent]) so a removed parallel instance keeps
+		// its stable identity — the adjacency slot would otherwise come back
+		// with the 0 sentinel and the handle-keyed read path would mis-map it
+		// to a surviving sibling. A 0 handle falls back to a plain AddEdge.
+		_, _ = m.g.AddEdgeHIfAbsent(pre.src, pre.dst, pre.weight, pre.handle)
 		m.g.DecrEdgesRemoved()
 		for _, lbl := range pre.labels {
 			m.g.SetEdgeLabel(pre.src, pre.dst, lbl)
 		}
 		for k, v := range pre.props {
 			_ = m.g.SetEdgeProperty(pre.src, pre.dst, k, v)
+		}
+		// Re-assert the removed instance's per-handle labels and properties.
+		// Idempotent when the handle store survived the removal (the common
+		// case: RemoveEdge keeps it while a sibling survives); authoritative
+		// when it did not. No-op when handle is 0.
+		for _, lbl := range pre.handleLabels {
+			m.g.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl)
+		}
+		for k, v := range pre.handleProps {
+			m.g.SetEdgePropertyByHandle(pre.src, pre.dst, pre.handle, k, v)
 		}
 		// Restore the CREATE-multiplicity counter to its captured value. The
 		// re-add above does not touch the counter (only IncEdgeCreateCount does),
