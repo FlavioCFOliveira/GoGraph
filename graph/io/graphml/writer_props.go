@@ -305,11 +305,25 @@ func ReadWithProps(r io.Reader) (*lpg.Graph[string, int64], int, error) {
 	return g, n, err
 }
 
-// ReadWithPropsCtx is the context-aware variant of [ReadWithProps].
+// ReadWithPropsCtx is the context-aware variant of [ReadWithProps]. The
+// input is capped at [DefaultMaxBytes]; use [ReadWithPropsCappedCtx] for
+// an explicit ceiling.
+func ReadWithPropsCtx(ctx context.Context, r io.Reader) (*lpg.Graph[string, int64], int, error) {
+	return ReadWithPropsCappedCtx(ctx, r, DefaultMaxBytes)
+}
+
+// ReadWithPropsCappedCtx is [ReadWithPropsCtx] with an explicit
+// input-size ceiling. When maxBytes > 0 the decoder fails with
+// [ErrInputTooLarge] the moment consumption exceeds the limit, before
+// the whole document is buffered; a value of zero or less disables the
+// cap.
 //
 //nolint:gocyclo // GraphML typed-property read: key index + node props + edge decode + ctx tick
-func ReadWithPropsCtx(ctx context.Context, r io.Reader) (*lpg.Graph[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadWithPropsCtx")()
+func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
+	defer metrics.Time("graph.io.graphml.ReadWithPropsCappedCtx")()
+	if maxBytes > 0 {
+		r = newLimitReader(r, maxBytes)
+	}
 	dec := xml.NewDecoder(r)
 	var doc docElement
 	if err := dec.Decode(&doc); err != nil {

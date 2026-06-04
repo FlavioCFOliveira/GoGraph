@@ -9,6 +9,7 @@ package graphml
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -16,6 +17,20 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
+
+// DefaultMaxBytes is the default ceiling, in bytes, on the amount of
+// input the default read entry points will consume before failing with
+// [ErrInputTooLarge]. It guards against memory exhaustion from untrusted
+// documents (a crafted multi-gigabyte GraphML file, for example). The
+// capped variants ([ReadIntoCappedCtx], [ReadWithPropsCappedCtx]) accept
+// an explicit ceiling; a value of zero or less disables the cap.
+const DefaultMaxBytes int64 = 1 << 30 // 1 GiB
+
+// ErrInputTooLarge is returned by the read functions when the input
+// stream exceeds the configured byte ceiling. The decoder fails as soon
+// as the limit is crossed, before the whole document is buffered, so
+// allocation stays bounded.
+var ErrInputTooLarge = errors.New("graphml: input exceeds maximum size")
 
 // keyDecl mirrors a <key> declaration in a GraphML document.
 type keyDecl struct {
@@ -73,11 +88,23 @@ func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
 
 // ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
 // is checked every 4096 edges; on cancellation returns
-// (partialAdj, edgesAdded, wrapped ctx.Err()).
+// (partialAdj, edgesAdded, wrapped ctx.Err()). The input is capped at
+// [DefaultMaxBytes]; use [ReadIntoCappedCtx] for an explicit ceiling.
+func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
+	return ReadIntoCappedCtx(ctx, r, DefaultMaxBytes)
+}
+
+// ReadIntoCappedCtx is [ReadIntoCtx] with an explicit input-size
+// ceiling. When maxBytes > 0 the decoder fails with [ErrInputTooLarge]
+// the moment consumption exceeds the limit, before the whole document
+// is buffered; a value of zero or less disables the cap.
 //
 //nolint:gocyclo // GraphML decode + key lookup + per-edge parse + ctx tick
-func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadIntoCtx")()
+func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
+	defer metrics.Time("graph.io.graphml.ReadIntoCappedCtx")()
+	if maxBytes > 0 {
+		r = newLimitReader(r, maxBytes)
+	}
 	dec := xml.NewDecoder(r)
 	var doc docElement
 	if err := dec.Decode(&doc); err != nil {

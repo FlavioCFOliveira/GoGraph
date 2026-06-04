@@ -19,6 +19,19 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
+// DefaultMaxBytes is the default ceiling, in bytes, on the amount of
+// input a reader will consume before failing with [ErrInputTooLarge].
+// It guards against memory exhaustion from untrusted files (a crafted
+// multi-gigabyte field, for example). A value of zero or less disables
+// the cap; see [Options.MaxBytes].
+const DefaultMaxBytes int64 = 1 << 30 // 1 GiB
+
+// ErrInputTooLarge is returned by [ReadInto] and [ReadIntoCtx] when the
+// input stream exceeds the configured [Options.MaxBytes] ceiling. The
+// reader fails as soon as the limit is crossed, before the offending
+// field is fully buffered, so allocation stays bounded.
+var ErrInputTooLarge = errors.New("csv: input exceeds maximum size")
+
 // Options controls Reader / Writer behaviour.
 type Options struct {
 	// Delimiter is the column separator; defaults to ','.
@@ -31,12 +44,17 @@ type Options struct {
 	Directed bool
 	// Multigraph allows parallel edges.
 	Multigraph bool
+	// MaxBytes caps the number of bytes read from the input before the
+	// reader fails with [ErrInputTooLarge]. [DefaultOptions] sets it to
+	// [DefaultMaxBytes]; a value of zero or less disables the cap.
+	MaxBytes int64
 }
 
 // DefaultOptions returns the minimal config: comma delimiter, '#'
-// comments, directed simple graph, no header.
+// comments, directed simple graph, no header, and the [DefaultMaxBytes]
+// input-size ceiling.
 func DefaultOptions() Options {
-	return Options{Delimiter: ',', Comment: '#', Directed: true}
+	return Options{Delimiter: ',', Comment: '#', Directed: true, MaxBytes: DefaultMaxBytes}
 }
 
 // ReadInto streams a CSV from r into an adjacency list, returning
@@ -64,6 +82,9 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 	}
 	if opts.Comment == 0 {
 		opts.Comment = '#'
+	}
+	if opts.MaxBytes > 0 {
+		r = newLimitReader(r, opts.MaxBytes)
 	}
 	c := csv.NewReader(r)
 	c.Comma = opts.Delimiter
