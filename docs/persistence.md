@@ -7,6 +7,7 @@ graph state and how it recovers it after a process crash.
 
 | Package             | Purpose                                                        |
 |---------------------|----------------------------------------------------------------|
+| `store`             | Composed teardown owner (`store.DB`): closes the WAL and checkpointer in the crash-safe order (see "Composed shutdown"). |
 | `store/wal`         | Write-Ahead Log: framed records, CRC32C-checksummed.          |
 | `store/snapshot`    | Immutable directory snapshots of the CSR view.                |
 | `store/txn`         | Transactional surface (`Store.Begin`, `Tx.Commit/Rollback`).  |
@@ -826,6 +827,106 @@ The lock-during-IO trade-off is acknowledged in `checkpoint.go`:
 for very large graphs this can stall writers and may be reworked
 later to a position-tracked truncate (capture LSN under lock, write
 snapshot lock-free, truncate up-to-LSN under lock).
+
+## Composed shutdown
+
+A WAL-backed store is assembled from independent pieces — a
+`wal.Writer`, a `txn.Store` (or a `cypher.Engine` over it), and,
+when steady-state WAL growth must be bounded, a background
+`checkpoint.Checkpointer`. Tearing them down has **one correct
+order**, and getting it wrong is a silent correctness bug rather than
+a visible crash.
+
+### Mandatory teardown order
+
+1. **(Optional) take a final checkpoint** while the checkpoint loop is
+   still running, so a clean shutdown folds the WAL tail into the
+   snapshot and the next open replays the minimum. This is best-effort:
+   already-committed transactions are durable in the WAL regardless of
+   whether the final checkpoint runs. It **must** precede step 2 — once
+   the loop is stopped a checkpoint can no longer be requested
+   (`checkpoint.Trigger` / `TriggerCtx` then return
+   `checkpoint.ErrCheckpointerStopped`).
+2. **Stop the checkpoint goroutine** (`checkpoint.Checkpointer.Stop`).
+   `Stop` blocks until the goroutine has exited, so once it returns no
+   checkpoint can still be in flight.
+3. **Close the WAL** (`wal.Writer.Close`), which flushes and fsyncs any
+   buffered tail before releasing the file.
+
+Stopping the checkpointer **before** closing the WAL is the invariant.
+If the order is reversed — WAL closed while the checkpoint loop is
+still alive — the loop's next `wal.Writer.Sync` / `wal.Writer.Truncate`
+runs against a closed writer, returns `wal.ErrWriterClosed`, and that
+error is **swallowed into the checkpointer's `Stats.LastError`** instead
+of surfacing to the caller; worse, the goroutine keeps running past the
+process's shutdown intent until its own ticker happens to observe a stop
+signal — a goroutine leak. The correct order makes both impossible: the
+loop is gone before the WAL is touched for the last time.
+
+Quiescing writers is a **separate** responsibility and comes first: a
+`txn.Store` transaction holds the store's single-writer semaphore from
+`Begin` until `Commit`/`Rollback`, and a `cypher.Engine` write holds it
+for the statement's duration. The shutdown sequence must stop admitting
+new writes and let the active one finish **before** step 2, so no
+transaction is mid-commit when the WAL is closed.
+
+### `store.DB` — the composed owner
+
+`store.DB` (package `github.com/FlavioCFOliveira/GoGraph/store`)
+bundles the WAL writer and the optional checkpointer and runs exactly
+that order in `DB.Close` / `DB.CloseCtx`, idempotently and safely under
+concurrent callers, so each embedder does not re-derive (and risk
+mis-ordering) the sequence:
+
+```go
+wlog, _ := wal.Open(walPath)
+st := txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
+eng := cypher.NewEngineWithStore(st)
+
+cp := checkpoint.New(cfg, g, wlog, &unusedMu,
+    checkpoint.WithCommitSerialiser[string, float64](st.RunUnderCommitLock),
+    checkpoint.WithMapperCodec[string, float64](st.Codec()))
+cp.Start(ctx)
+
+db := store.New(wlog,
+    store.WithCheckpointer(cp),   // omit for a WAL-only store
+    store.WithFinalCheckpoint())  // omit to skip the step-1 compaction
+defer db.Close()                  // step 1 (if enabled) → step 2 → step 3
+```
+
+`DB.Close` returns the WAL-close error — the one that matters for
+durability — and discards the best-effort final-checkpoint error. It
+runs the teardown exactly once: a second or racing `Close` (or a later
+`Close` after a `CloseCtx`) returns the same result and never produces a
+spurious `wal.ErrWriterClosed` from a double WAL close. `DB.CloseCtx`
+bounds only the optional final checkpoint with its context; the stop and
+the WAL close always run to completion so the goroutine is always joined
+and the file always released, even on context cancellation.
+
+`store.DB` satisfies `io.Closer`, so it drops into any owner that closes
+an `io.Closer` on shutdown.
+
+### Bolt server adoption
+
+A `bolt/server.Server` backed by a WAL-enabled engine takes the composed
+owner via `Options.Closer io.Closer` (typically a `*store.DB`).
+`Server.Shutdown` closes it **after** it has drained every active
+connection — so the WAL/checkpoint teardown runs only once no in-flight
+transaction can still be writing:
+
+```go
+db := store.New(wlog, store.WithCheckpointer(cp))
+srv, _ := server.NewServer(eng, server.Options{Auth: auth, Closer: db})
+// …
+_ = srv.Shutdown(ctx) // drains connections, THEN tears the durability stack down
+```
+
+The closer is **not** torn down on `Shutdown`'s drain-timeout or
+context-cancellation paths: an undrained connection may still hold an
+open transaction, and closing the WAL underneath it is exactly what the
+ordering rule forbids. In those cases the connections are abandoned and
+the closer is left for process exit. Because `store.DB.Close` is
+idempotent, a later process-exit close is harmless.
 
 ## Recovery procedure
 

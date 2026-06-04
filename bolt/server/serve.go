@@ -179,6 +179,17 @@ type Options struct {
 	// Logger is the structured logger for server events. When nil, the
 	// default slog handler is used.
 	Logger *slog.Logger
+
+	// Closer, when non-nil, is the store-level teardown owner for the
+	// durability stack backing this server's engine — typically a
+	// *[github.com/FlavioCFOliveira/GoGraph/store.DB] bundling the WAL writer
+	// and the background checkpointer. [Server.Shutdown] closes it AFTER it has
+	// drained every active connection, so it runs the one crash-safe teardown
+	// order (stop the checkpoint goroutine, then close the WAL) only once no
+	// in-flight transaction can still be writing. Leave it nil for a store-less
+	// engine or when the embedder tears the durability stack down itself; the
+	// server then closes nothing beyond its connections.
+	Closer io.Closer
 }
 
 // ErrNoAuthHandler is returned by [NewServer] when Options.Auth is nil. The
@@ -199,6 +210,7 @@ type Server struct {
 	opts   Options
 	sem    chan struct{} // capacity == MaxConnections
 	log    *slog.Logger
+	closer io.Closer // optional store-level teardown owner; closed after drain in Shutdown
 	mu     sync.Mutex
 	ln     net.Listener // guarded by mu; non-nil while Serve is running
 	wg     sync.WaitGroup
@@ -257,10 +269,11 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 		log.Warn("bolt: server backed by an engine with no result-row cap (cypher.EngineOptions.MaxResultRows is unlimited) — a single client query can materialise an unbounded result set and exhaust server memory; rebuild the engine with a finite MaxResultRows before exposing this server on a network")
 	}
 	return &Server{
-		eng:  eng,
-		opts: opts,
-		sem:  make(chan struct{}, opts.MaxConnections),
-		log:  log,
+		eng:    eng,
+		opts:   opts,
+		sem:    make(chan struct{}, opts.MaxConnections),
+		log:    log,
+		closer: opts.Closer,
 	}, nil
 }
 
@@ -356,6 +369,20 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 // Shutdown gracefully stops accepting new connections and waits for active
 // connections to finish. If connections do not finish within 30 seconds, it
 // closes the listener forcefully and returns an error.
+//
+// When the server was constructed with [Options.Closer] (the store-level
+// teardown owner for the durability stack, typically a
+// *[github.com/FlavioCFOliveira/GoGraph/store.DB]), Shutdown closes it AFTER
+// every active connection has drained — so the WAL/checkpoint teardown runs in
+// its crash-safe order only once no in-flight transaction can still be writing.
+// Closing it before the drain could let a still-executing write race the WAL
+// close. The closer is therefore NOT torn down on the timeout or
+// ctx-cancellation paths: an undrained connection may still hold a transaction,
+// so tearing the WAL down underneath it is exactly what must be avoided; in
+// those cases the connections are abandoned and the closer is left for the
+// process exit (the goroutine/handle reclamation is the OS's at that point).
+// The closer's error is joined with any drain error so a failed WAL close is
+// surfaced rather than swallowed.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	ln := s.ln
@@ -387,12 +414,32 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-done:
-		return nil
+		// Every connection has finished, so no transaction can still be
+		// writing: it is now safe to tear the durability stack down in its
+		// crash-safe order (the closer stops the checkpoint goroutine, then
+		// closes the WAL).
+		return s.closeOwned()
 	case <-time.After(drainTimeout):
 		return errors.New("bolt: shutdown: drain timeout exceeded")
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// closeOwned closes the optional store-level teardown owner ([Options.Closer]),
+// if any. It is called only from the fully-drained Shutdown path, where no
+// connection — and therefore no transaction — can still be writing, so the
+// closer's WAL teardown cannot race an in-flight write. A nil closer is a
+// no-op. The closer (a *store.DB) is itself idempotent, so a later process-exit
+// close is harmless.
+func (s *Server) closeOwned() error {
+	if s.closer == nil {
+		return nil
+	}
+	if err := s.closer.Close(); err != nil {
+		return fmt.Errorf("bolt: shutdown: close store: %w", err)
+	}
+	return nil
 }
 
 // handleConn runs the full Bolt lifecycle for one accepted connection.
