@@ -3,15 +3,37 @@
 //
 // An LPG decorates each node and each edge with a set of labels
 // (interned strings identifying classes/types) and a bag of typed
-// properties. This package provides the label half of that contract
-// (see [SetNodeLabel], [SetEdgeLabel]); typed properties are added
-// by subsequent tasks in the same sprint.
+// properties. This package provides labels (see [Graph.SetNodeLabel],
+// [Graph.SetEdgeLabel]) and typed properties (see [Graph.SetNodeProperty],
+// [Graph.SetEdgeProperty]).
 //
 // # Concurrency
 //
-// The Graph type is safe for concurrent use. Label operations are
-// guarded by their own RWMutexes; the underlying adjacency list
-// retains its own contracts.
+// The Graph type is safe for concurrent use: every individual operation
+// is internally synchronised — label and property shards by RWMutex,
+// adjacency by lock-free atomic per-shard snapshots, and the per-instance,
+// edge-create-count, and edge-handle stores by mutex — so no single
+// accessor races another.
+//
+// Transaction-atomic visibility, however, is OPT-IN. A committed
+// transaction may span several operations across several substructures
+// (adjacency, node/edge labels, node/edge properties, tombstones, the
+// roaring label bitmaps, and the secondary indexes). To observe a whole
+// transaction atomically — never a partial transaction, never a torn
+// cross-substructure view — reads must run inside [Graph.View] and writes
+// inside [Graph.ApplyAtomically], which flip a transaction's writes
+// visible as one step under a single visibility barrier:
+//
+//   - Per-operation atomicity holds for every accessor, always.
+//   - Partial-transaction-free reads hold ONLY inside [Graph.View].
+//   - Cross-substructure consistency (e.g. "if the edge exists, both of
+//     its endpoint labels exist") holds ONLY inside [Graph.View].
+//
+// A direct accessor call made outside [Graph.View] therefore observes a
+// consistent single operation, but may observe a multi-operation
+// transaction half-applied. The full model — and the tracked lock-free
+// per-shard snapshot that will make every read transaction-consistent
+// without the barrier — is described in docs/isolation-design.md.
 package lpg
 
 import (
