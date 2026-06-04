@@ -324,10 +324,73 @@ func (g *Graph[N, W]) View(fn func()) {
 // Validate causes the write to be rejected and the error returned to the
 // caller.
 //
+// When v also implements [NodeValidator] (as *schema.Schema does), whole-node
+// invariants such as required-property existence are enforced separately, at
+// the node-finalisation boundary, via [Graph.ValidateNode]. Per-property
+// typing is enforced eagerly here at each [Graph.SetNodeProperty]; existence
+// cannot be, because a node acquires its properties one mutation at a time and
+// is not complete until finalised.
+//
 // Pass nil to remove any previously installed validator.
 //
 // SetValidator is safe for concurrent use.
 func (g *Graph[N, W]) SetValidator(v SchemaValidator) { g.validator.store(v) }
+
+// ValidateNode enforces the installed validator's whole-node invariants
+// against the current, complete label and property set of the node interned
+// under n. It is the node-finalisation hook: a caller building a node (one
+// [Graph.AddNode], then any number of [Graph.SetNodeLabel] and
+// [Graph.SetNodeProperty] calls) invokes ValidateNode once the node is fully
+// populated to reject it when it violates a required-property/existence
+// constraint that the per-value [Graph.SetNodeProperty] check cannot detect.
+//
+// Enforcement is deliberately split from the mutation point. Per-property
+// typing is checked eagerly inside [Graph.SetNodeProperty] because a single
+// value can be judged in isolation; required-property existence cannot, since
+// a legitimate node receives its label before the property that the label
+// requires (for example CREATE (:User {email:'a@b'}) sets the User label
+// before the email property). Validating existence at the mutation point would
+// reject such a node mid-construction, so existence is enforced here instead,
+// once the node is finalised.
+//
+// ValidateNode returns nil when no validator is installed, when the installed
+// validator does not implement [NodeValidator], or when the node satisfies
+// every whole-node invariant. It does not mutate the graph; on a non-nil
+// return the caller is responsible for rolling back or discarding the
+// half-built node.
+//
+// ValidateNode is safe for concurrent use, under the same per-operation
+// snapshot contract as [Graph.NodeLabels] and [Graph.NodeProperties]: it reads
+// a consistent label set and a consistent property bag, but a writer mutating
+// the same node concurrently may change the node between the two reads. Build
+// a node to completion before finalising it.
+func (g *Graph[N, W]) ValidateNode(n N) error {
+	v := g.validator.load()
+	if v == nil {
+		return nil
+	}
+	nv, ok := v.(NodeValidator)
+	if !ok {
+		return nil
+	}
+	id, ok := g.adj.Mapper().Lookup(n)
+	if !ok {
+		// n was never interned: there is no node to validate. A caller
+		// finalising a node it built always has it interned (AddNode/Set*
+		// intern it), so this is the benign "nothing to check" case.
+		return nil
+	}
+	labels := g.NodeLabelsByID(id)
+	props := g.NodePropertiesByID(id)
+	if props == nil {
+		// NodePropertiesByID returns nil for a node with no recorded
+		// properties; NodeValidator expects a (possibly empty) map so a
+		// required-property check reports the property as missing rather than
+		// dereferencing nil.
+		props = map[string]PropertyValue{}
+	}
+	return nv.ValidateNode(labels, props)
+}
 
 // nodePropShardFor returns the shard responsible for NodeID id.
 func (g *Graph[N, W]) nodePropShardFor(id graph.NodeID) *nodePropShard {

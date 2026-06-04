@@ -1,12 +1,28 @@
 // Package schema declares the optional type schema for a labelled
-// property graph: which labels exist, which property keys exist, and
-// which [PropertyKind] each property carries.
+// property graph: which labels exist, which property keys exist, which
+// [lpg.PropertyKind] each property carries, and which properties each
+// label requires.
 //
-// The schema is advisory by default — callers may opt into runtime
-// validation via [Schema.Validate] before applying a write — but it
-// is also the surface a future persistence layer (Sprint 3) will
-// serialise alongside snapshots so opens can reject incompatible
-// data.
+// A *Schema is a runtime enforcement hook, not merely advisory. Install
+// one on a graph with [github.com/FlavioCFOliveira/GoGraph/graph/lpg.Graph.SetValidator]
+// and the two declared invariants are enforced on the write path:
+//
+//   - Per-property typing — [Schema.Validate] runs inside every
+//     SetNodeProperty / SetEdgeProperty call, rejecting a value whose kind
+//     disagrees with its declaration before the write is applied.
+//   - Required-property existence — [Schema.ValidateNode] runs when a node
+//     is finalised, via lpg.Graph.ValidateNode, rejecting a node that is
+//     missing a property its label requires (see [Schema.RequireProperty]).
+//
+// The split is deliberate: typing is decided from a single value at the
+// mutation point, but existence can only be decided once a node is complete
+// (a node acquires its label before the property that label requires), so
+// existence is enforced at the finalisation boundary rather than mid-build.
+//
+// Callers may also run [Schema.Validate] and [Schema.ValidateNode] directly,
+// before applying a write, to reject incompatible data early. The schema is
+// also the surface the persistence layer serialises alongside snapshots so
+// opens can reject incompatible data.
 package schema
 
 import (
@@ -137,6 +153,12 @@ func (s *Schema) Validate(propertyName string, value lpg.PropertyValue) error {
 // (label, property) pair has no effect. The label and property do not
 // need to be pre-registered — the requirement is stored regardless and
 // evaluated by [Schema.ValidateNode].
+//
+// When the schema is installed on a graph via
+// [github.com/FlavioCFOliveira/GoGraph/graph/lpg.Graph.SetValidator], the
+// requirement is enforced — not merely advisory — at the node-finalisation
+// boundary through lpg.Graph.ValidateNode: a finalised node missing the
+// required property is rejected with [ErrMissingRequired].
 func (s *Schema) RequireProperty(labelName, propertyName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
