@@ -339,15 +339,23 @@ type EngineOptions struct {
 	// clamped to the default by the constructor.
 	PlanCacheCapacity int
 
-	// MaxResultRows, when positive, limits the number of rows a single
-	// [Engine.Run] or [Engine.RunInTx] call may materialise. If a query
-	// produces more rows than MaxResultRows, the [Result] iterator returns
-	// [ErrResultRowsExceeded] from [Result.Next] when the limit is hit, and
-	// [Result.Err] reports the same error. Zero means no limit.
+	// MaxResultRows limits the number of rows a single [Engine.Run] or
+	// [Engine.RunInTx] call may materialise. If a query produces more rows than
+	// the limit, the [Result] iterator returns [ErrResultRowsExceeded] from
+	// [Result.Next] when the limit is hit, and [Result.Err] reports the same
+	// error.
 	//
-	// This circuit-breaker prevents unintentional Cartesian-product queries
-	// from exhausting available memory. Set it to a value appropriate for the
-	// operational environment (e.g. 1_000_000 for a shared multi-tenant server).
+	// The value is interpreted as follows:
+	//
+	//   - Zero (the default) selects [DefaultMaxResultRows], a finite cap that
+	//     prevents an unintentional whole-graph scan or Cartesian-product query
+	//     from materialising an unbounded number of rows — and holding the
+	//     graph's visibility barrier — until memory is exhausted.
+	//   - A positive value overrides the default. Set it to a value appropriate
+	//     for the operational environment (e.g. 1_000_000 for a shared
+	//     multi-tenant server).
+	//   - [MaxResultRowsUnlimited] (-1) disables the cap entirely; use it only
+	//     when memory is bounded by another means.
 	MaxResultRows int64
 }
 
@@ -440,6 +448,30 @@ func NewEngineWithStore(store *txn.Store[string, float64]) *Engine {
 	return NewEngineWithOptions(store.Graph(), EngineOptions{Store: store})
 }
 
+// resolveMaxResultRows maps the public [EngineOptions.MaxResultRows] value to
+// the Engine's internal cap, where a positive value is an active limit and zero
+// disables it (the convention the [Result] drain checks with maxRows > 0):
+//
+//   - 0 (the zero value)        → [DefaultMaxResultRows] (a finite default cap)
+//   - [MaxResultRowsUnlimited]  → 0 (unlimited, the explicit opt-out)
+//   - any positive value        → that value, verbatim
+//
+// Centralising the policy here means every constructor that routes through
+// [NewEngineWithOptions] — [NewEngine], [NewEngineWithRegistry], and the
+// WAL-backed [NewEngineWithStore] — inherits the finite default, closing the
+// previously-unbounded default that let a whole-graph MATCH materialise every
+// row inside the visibility barrier.
+func resolveMaxResultRows(opt int64) int64 {
+	switch opt {
+	case 0:
+		return DefaultMaxResultRows
+	case MaxResultRowsUnlimited:
+		return 0
+	default:
+		return opt
+	}
+}
+
 // NewEngineWithOptions creates an Engine backed by g with explicit options.
 // Zero-valued fields are filled with their documented defaults. When
 // opts.Store is non-nil, the Engine is bound to that WAL-enabled
@@ -466,7 +498,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		constraintReg: exec.NewConstraintRegistry(),
 		procReg:       procs.NewRegistry(),
 		cache:         newPlanCache(opts.PlanCacheCapacity),
-		maxResultRows: opts.MaxResultRows,
+		maxResultRows: resolveMaxResultRows(opts.MaxResultRows),
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
 		return e.constraintReg.ListConstraintRows()
@@ -1017,6 +1049,26 @@ func queryHasWritingClause(query string) bool {
 // permanent error: once set, subsequent Next calls return false.
 var ErrResultRowsExceeded = errors.New("cypher: result row limit exceeded")
 
+// DefaultMaxResultRows is the default upper bound on the number of rows a single
+// [Engine.Run] or [Engine.RunInTx] call materialises when [EngineOptions.MaxResultRows]
+// is left at its zero value. It bounds the worst case — an unintentional
+// whole-graph scan or Cartesian product — so the engine never materialises an
+// unbounded number of rows into memory inside the visibility barrier. It matches
+// the sibling pipeline-breaker caps ([exec.DefaultMaxSortRows], [exec.DefaultMaxDistinct])
+// and is set high enough that ordinary queries, the openCypher TCK, and all
+// examples stay well below it; callers that genuinely need an unbounded result
+// must opt out explicitly with [MaxResultRowsUnlimited].
+const DefaultMaxResultRows int64 = 10_000_000
+
+// MaxResultRowsUnlimited is the explicit opt-out sentinel for
+// [EngineOptions.MaxResultRows]: set the field to this value to disable the
+// row cap entirely and allow an unbounded result. It is distinct from the zero
+// value, which selects [DefaultMaxResultRows]. Use it only when the caller can
+// bound memory by another means (e.g. streaming the result and closing it
+// promptly), because an unbounded MATCH then materialises every row under the
+// graph's visibility barrier.
+const MaxResultRowsUnlimited int64 = -1
+
 // writingKeywordRE matches any writing-clause keyword as a standalone word.
 // The pattern uses a case-insensitive flag and a word boundary anchor so
 // fragments like "PRESET" or "NOMERGE" are not falsely classified.
@@ -1365,6 +1417,13 @@ func (r *Result) materialize() {
 			r.rowsErr = ErrResultRowsExceeded
 			break
 		}
+		// TODO(#1292 follow-up): the row count bounds the *number* of rows but
+		// not their aggregate size — a handful of nodes carrying very large
+		// properties can still dwarf a high row cap. A coarse aggregate-bytes
+		// budget would belong here, alongside the row check, mirroring the
+		// row-count caps the sibling pipeline breakers (Sort/Distinct/Aggregate)
+		// already enforce. Deferred to keep this barrier-held hot loop free of
+		// per-row size accounting until that cost is benchmarked.
 	}
 	r.matOn = true
 }
