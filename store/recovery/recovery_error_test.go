@@ -135,16 +135,26 @@ func TestOpen_CorruptedSnapshot(t *testing.T) {
 	}
 }
 
-func TestOpen_TornDecodeStopsCleanly(t *testing.T) {
+// TestOpen_UnknownRecordVersionStopsHard appends a CRC-valid WAL frame
+// whose transaction-record version byte is 0x01 — a legacy/unknown record
+// version that Decode rejects with ErrUnsupportedRecordVersion. Such a
+// frame is genuine corruption, not a crash-truncated tail, so the new
+// fail-stop contract (task #1289) surfaces it as the function error rather
+// than swallowing it into Result.TailErr while Open returns nil. The replay
+// still applies zero ops and does not panic.
+//
+// Before #1289 this test asserted Open returned nil; the per-op decode
+// failure surfaced only via Result.TailErr, which no production caller
+// inspected — exactly the fail-silent path #1289 closes.
+func TestOpen_UnknownRecordVersionStopsHard(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Append a single byte that is NOT a valid txn payload (no length
-	// prefixes follow), then Sync. Decode will fail on the first
-	// recovery attempt and the loop must break without panic.
+	// 0x01 == OpAddEdge as a leading byte: not OpRecordV2 (0xFE) or
+	// OpRecordV3 (0xFD), so Decode rejects it with ErrUnsupportedRecordVersion.
 	if err := w.Append([]byte{byte(txn.OpAddEdge)}); err != nil {
 		t.Fatal(err)
 	}
@@ -158,18 +168,18 @@ func TestOpen_TornDecodeStopsCleanly(t *testing.T) {
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
 	})
-	if err != nil {
-		t.Fatalf("Open with malformed payload = %v, want nil err", err)
+	if err == nil {
+		t.Fatal("Open with an unknown record version returned nil; genuine corruption must be surfaced")
+	}
+	if !errors.Is(err, ErrUnsupportedRecordVersion) {
+		t.Fatalf("Open error = %v, want errors.Is(err, ErrUnsupportedRecordVersion)", err)
+	}
+	if res.IsClean() {
+		t.Fatal("Result.IsClean() = true for an unknown record version, want false")
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (decode failed on first op)", res.WALOps)
 	}
-	// NB: the recovery core overwrites res.TailErr with the WAL reader's
-	// tail error at the end of the function, so a decode failure on a
-	// fully-framed payload is silently swallowed in the returned
-	// Result. We only assert that recovery does not panic and does not
-	// over-apply ops; surfacing the per-op decode failure to the
-	// caller is a separate concern tracked outside this test.
 }
 
 func TestOpen_PreCancelledContext(t *testing.T) {

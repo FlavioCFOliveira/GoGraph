@@ -481,10 +481,18 @@ func TestCrashInjection_TruncateMidPayload(t *testing.T) {
 	}
 }
 
-// TestCrashInjection_CorruptCRC flips one byte inside each frame's
-// payload, which forces a CRC32C mismatch. The WAL reader stops at
-// the corrupted frame and the recovered graph is the prefix of frames
-// that pre-date the corruption.
+// TestCrashInjection_CorruptCRC flips one byte inside each NON-tail
+// frame's payload, which forces a CRC32C mismatch. A CRC mismatch in an
+// already-durable (non-tail) frame is genuine corruption — not a
+// crash-truncated tail — so recovery is fail-stop: Open returns a non-nil
+// error that errors.Is(err, wal.ErrCRCMismatch) (task #1289). The WAL
+// reader still stops at the corrupted frame, and the committed prefix that
+// pre-dates the corruption is placed in Result.Graph for diagnostics.
+//
+// The final frame is excluded from the flip set: a single fat-transaction
+// workload ends in an OpCommit marker, and corrupting the marker (the last
+// frame) tears the batch rather than corrupting a committed frame, which
+// the torn-tail tests cover instead.
 func TestCrashInjection_CorruptCRC(t *testing.T) {
 	t.Parallel()
 	refDir := t.TempDir()
@@ -499,7 +507,9 @@ func TestCrashInjection_CorruptCRC(t *testing.T) {
 		t.Fatalf("not enough boundaries for CRC corruption: %d", len(boundaries))
 	}
 	cases := 0
-	for fi := 1; fi < len(boundaries)-1; fi += 2 {
+	// Stop before the final frame (len(boundaries)-1 is the last frame's
+	// end): corrupting the trailing frame is a torn tail, not corruption.
+	for fi := 1; fi < len(boundaries)-2; fi += 2 {
 		base := boundaries[fi]
 		next := boundaries[fi+1]
 		payloadStart := base + int64(wal.HeaderSize)
@@ -516,7 +526,22 @@ func TestCrashInjection_CorruptCRC(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "wal"), corrupted, 0o600); err != nil { //nolint:gosec // path under t.TempDir
 				t.Fatal(err)
 			}
-			_ = recoverProperties(t, dir)
+			res, err := Open[string, int64](dir, Options[string, int64]{
+				Codec:       txn.NewStringCodec(),
+				WeightCodec: txn.NewInt64WeightCodec(),
+			})
+			if err == nil {
+				t.Fatalf("Open returned nil for a non-tail CRC mismatch at frame %d; want a hard error", fi)
+			}
+			if !errors.Is(err, wal.ErrCRCMismatch) {
+				t.Fatalf("Open error = %v, want errors.Is(err, wal.ErrCRCMismatch)", err)
+			}
+			if res.IsClean() {
+				t.Fatalf("Result.IsClean() = true for a CRC mismatch at frame %d, want false", fi)
+			}
+			if res.Graph == nil {
+				t.Fatal("Result.Graph must be non-nil on corruption (diagnostics)")
+			}
 		})
 	}
 	if cases == 0 {

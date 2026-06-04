@@ -132,6 +132,12 @@ func run(w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("recovery.Open: %w", err)
 	}
+	// A corrupt WAL is fail-stop: recovery returns a non-nil error (handled
+	// above) and res.IsClean() reports false. Refuse to proceed onto a
+	// corrupt log rather than silently building on a damaged prefix.
+	if !res.IsClean() {
+		return fmt.Errorf("recovery: refusing to use a corrupt WAL: %w", res.TailErr)
+	}
 	fmt.Fprintf(w, "Recovered: WAL ops=%d, snapshot hit=%v, schema version=v%d, "+
 		"label records=%d, property records=%d.\n",
 		res.WALOps, res.SnapshotHit, res.SnapshotSchemaVersion,

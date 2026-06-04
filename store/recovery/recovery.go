@@ -65,7 +65,73 @@ type Result[N comparable, W any] struct {
 	// where tombstones are reconstructed by replaying OpRemoveNode instead.
 	SnapshotTombstones int
 	WALOps             int
-	TailErr            error
+	// TailErr reports why WAL replay stopped before the end of the file,
+	// or nil when every frame was consumed at a clean EOF. Two outcomes
+	// are possible:
+	//
+	//   - A benign torn tail ([wal.ErrTornFrame]) — the normal
+	//     crash-after-the-last-fsync case, or a CRC-valid but unparseable
+	//     trailing frame from an interrupted write. The committed prefix is
+	//     fully recovered and [Open]/[OpenCtx] return a nil function error;
+	//     [Result.IsClean] reports true.
+	//   - Genuine corruption inside an already-durable frame
+	//     ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
+	//     [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge], or
+	//     [ErrUnsupportedRecordVersion]). The committed prefix up to the bad
+	//     frame is still placed in Graph for diagnostics, but the same error
+	//     is returned as the function error and [Result.IsClean] reports
+	//     false, so a caller cannot accidentally append to a corrupt WAL.
+	TailErr error
+}
+
+// IsClean reports whether recovery completed without encountering genuine
+// on-disk corruption. It is true when [Result.TailErr] is nil or a benign
+// torn tail ([wal.ErrTornFrame]) — the states from which it is safe to
+// reopen the WAL for append — and false when TailErr is a
+// genuine-corruption sentinel ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
+// [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge], or
+// [ErrUnsupportedRecordVersion]).
+//
+// IsClean is the exact complement of the function-error contract: [Open]
+// and [OpenCtx] return a non-nil error if and only if IsClean is false.
+// Callers that recover-then-append should branch on IsClean (or on the
+// returned error) and refuse to append when it is false; appending to a
+// corrupt WAL would permanently embed the corruption and silently drop
+// every committed op that followed the bad frame.
+func (r Result[N, W]) IsClean() bool {
+	return !tailErrIsCorruption(r.TailErr)
+}
+
+// tailErrIsCorruption classifies a [Result.TailErr] value as genuine
+// on-disk corruption (true) versus a benign / absent stop condition
+// (false). It mirrors [wal.Reader.Replay], which surfaces every WAL-reader
+// error except [wal.ErrTornFrame] as a hard error, and additionally treats
+// recovery's own [ErrUnsupportedRecordVersion] as corruption.
+//
+// A nil error, a torn tail, and the CRC-valid-but-unparseable trailing-frame
+// markers raised by the codec apply path (a truncated v2 body, a missing
+// trailing label/key length) are all benign: each represents an interrupted
+// final write whose committed prefix is intact, identical to the durability
+// contract documented on [store/txn.Tx.Commit].
+func tailErrIsCorruption(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, wal.ErrTornFrame):
+		return false
+	case errors.Is(err, wal.ErrCRCMismatch),
+		errors.Is(err, wal.ErrBadMagic),
+		errors.Is(err, wal.ErrUnsupportedVersion),
+		errors.Is(err, wal.ErrFrameTooLarge),
+		errors.Is(err, ErrUnsupportedRecordVersion):
+		return true
+	default:
+		// CRC-valid-but-unparseable trailing frame (truncated v2 body,
+		// missing label/key length, short payload): benign, same as a torn
+		// tail — the committed prefix is intact.
+		return false
+	}
 }
 
 // Options carries the codecs used by [Open] and [OpenCtx]. Both
@@ -279,6 +345,19 @@ func decodeV2(payload []byte) (Op, error) {
 // Open is safe to call on a dir that contains only a snapshot, only
 // a WAL, both, or neither: missing components are tolerated and the
 // returned [Result.Graph] is a fresh empty graph when neither exists.
+//
+// A torn or truncated WAL tail — the normal state after a crash between
+// two fsyncs — is benign: Open recovers the committed prefix, returns a
+// nil error, and records the cut via [Result.TailErr] / [Result.IsClean].
+// Genuine corruption inside an already-durable frame ([wal.ErrCRCMismatch],
+// [wal.ErrBadMagic], [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge], or
+// a legacy/garbage record version surfaced as [ErrUnsupportedRecordVersion])
+// is fail-stop: Open returns that error (the committed prefix is still
+// placed in [Result.Graph] for diagnostics) and [Result.IsClean] reports
+// false. Callers that recover-then-append must branch on the returned error
+// or [Result.IsClean] and refuse to append onto a corrupt WAL, which would
+// otherwise permanently embed the corruption and drop every committed op
+// past the bad frame.
 func Open[N comparable, W any](dir string, opts Options[N, W]) (Result[N, W], error) {
 	defer metrics.Time("store.recovery.Open")()
 	res, err := OpenCtx[N, W](context.Background(), dir, opts)
@@ -558,6 +637,19 @@ func openCodec[N comparable, W any](
 	// dropped (the index is rebuilt lazily on the next mutation pass).
 	if len(snapIndexes) > 0 {
 		res.SnapshotIndexes = applySnapshotIndexes(g.IndexManager(), snapIndexes)
+	}
+	// Fail-stop on genuine corruption: a CRC mismatch, bad magic,
+	// unsupported frame/record version, or oversized length inside an
+	// already-durable frame means the WAL is damaged, not merely
+	// crash-truncated. Surface it as the function error (the committed
+	// prefix stays in res.Graph for diagnostics) so no caller can silently
+	// append onto the corruption and drop every op past the bad frame. A
+	// benign torn tail ([wal.ErrTornFrame]) and a CRC-valid-but-unparseable
+	// trailing frame are NOT corruption and return success — the normal
+	// crash-after-fsync recovery case (see [tailErrIsCorruption]).
+	if tailErrIsCorruption(res.TailErr) {
+		metrics.IncCounter("store.recovery.openCodec.corruptTail", 1)
+		return res, res.TailErr
 	}
 	return res, nil
 }

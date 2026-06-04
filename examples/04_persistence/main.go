@@ -129,6 +129,13 @@ func run(w io.Writer) error {
 		fmt.Fprintln(w, "recovery.Open:", err)
 		return nil
 	}
+	// A corrupt WAL is fail-stop: recovery returns a non-nil error (handled
+	// above) and res.IsClean() reports false. Refuse to build on a corrupt
+	// log rather than silently proceeding with a damaged prefix.
+	if !res.IsClean() {
+		fmt.Fprintln(w, "recovery: refusing to use a corrupt WAL:", res.TailErr)
+		return nil
+	}
 	fmt.Fprintf(w, "Recovered: WAL ops=%d, snapshot hit=%v, snapshot label records=%d, snapshot property records=%d.\n",
 		res.WALOps, res.SnapshotHit, res.SnapshotLabels, res.SnapshotProperties)
 	for _, c := range commits {

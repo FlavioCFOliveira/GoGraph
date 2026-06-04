@@ -77,6 +77,16 @@ func openStore(ctx context.Context, dir string) (*openedStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open: recover: %w", err)
 	}
+	// Fail-stop on a corrupt WAL: recovery surfaces genuine corruption (a CRC
+	// mismatch, bad magic, or unsupported record version inside an
+	// already-durable frame) via a non-nil error AND res.IsClean() == false.
+	// We must not open the WAL for append in that state — appending would
+	// permanently embed the corruption and silently drop every committed op
+	// past the bad frame. A benign torn tail (the normal crash case) leaves
+	// res.IsClean() == true and is safe to append onto.
+	if !res.IsClean() {
+		return nil, fmt.Errorf("open: refusing to append to a corrupt WAL: %w", res.TailErr)
+	}
 	walPath, _ := dataDirPaths(dir)
 	w, err := wal.Open(walPath)
 	if err != nil {

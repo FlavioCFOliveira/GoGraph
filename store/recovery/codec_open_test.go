@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"encoding/binary"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -9,14 +10,16 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// TestOpen_RejectsUnknownLeadingByte confirms that a frame whose
-// leading byte is neither the v2 nor the v3 magic tag is rejected by
-// the generic typed [Open] path: such a frame is parsed as a legacy
-// untagged record, and the fmt.Sprintf-derived endpoints have no
-// inverse through a typed codec, so the op does not apply. The frame
-// is hand-built here (a leading non-magic kind byte followed by a
-// well-formed length-prefixed body) so the assertion is independent
-// of any v1 encoder.
+// TestOpen_RejectsUnknownLeadingByte confirms that a CRC-valid frame whose
+// transaction-record version byte is neither the v2 nor the v3 magic tag is
+// rejected by the generic typed [Open] path. Such a byte denotes a legacy
+// untagged record (or garbage); the fmt.Sprintf-derived endpoints have no
+// inverse through a typed codec, so Decode rejects it with
+// ErrUnsupportedRecordVersion. Per the fail-stop contract (task #1289) this
+// is genuine corruption — not a torn tail — so Open surfaces it as a hard
+// error and applies no ops. The frame is hand-built (a leading non-magic
+// kind byte followed by a well-formed length-prefixed body) so the
+// assertion is independent of any v1 encoder.
 func TestOpen_RejectsUnknownLeadingByte(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -45,17 +48,17 @@ func TestOpen_RejectsUnknownLeadingByte(t *testing.T) {
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
 	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
+	if err == nil {
+		t.Fatal("Open returned nil for an unknown record version; genuine corruption must be surfaced")
+	}
+	if !errors.Is(err, ErrUnsupportedRecordVersion) {
+		t.Fatalf("Open error = %v, want errors.Is(err, ErrUnsupportedRecordVersion)", err)
+	}
+	if res.IsClean() {
+		t.Fatal("Result.IsClean() = true for an unknown record version, want false")
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (legacy-tagged frame must not apply through Open)", res.WALOps)
-	}
-	// The recovery loop stops at the undecodable frame and records the
-	// cut-off via TailErr; we assert the load-bearing contract — no ops
-	// applied — rather than the exact error text.
-	if res.TailErr == nil {
-		t.Fatal("TailErr = nil, want a non-nil cut-off error for the rejected frame")
 	}
 }
 

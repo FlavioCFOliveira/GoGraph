@@ -850,9 +850,37 @@ containing the rebuilt `*lpg.Graph[N, W]` plus:
 - `SnapshotIndexes int` — how many secondary indexes were
   re-hydrated from `indexes/<name>.bin` payloads.
 - `WALOps int` — how many WAL ops were applied.
-- `TailErr error` — `wal.ErrTornFrame` is normal (clean tail
-  truncation after a crash); `wal.ErrCRCMismatch` indicates real
-  corruption and must be surfaced.
+- `TailErr error` — why WAL replay stopped before the end of the
+  file, or nil at a clean EOF. A benign torn tail
+  (`wal.ErrTornFrame`) is the normal crash-after-fsync state and is
+  tolerated; genuine corruption inside an already-durable frame
+  (`wal.ErrCRCMismatch`, `wal.ErrBadMagic`,
+  `wal.ErrUnsupportedVersion`, `wal.ErrFrameTooLarge`, or
+  `recovery.ErrUnsupportedRecordVersion`) is surfaced.
+
+On genuine corruption, `recovery.Open` / `OpenCtx` are **fail-stop**:
+the function returns that error (the committed prefix is still placed
+in `Result.Graph` for diagnostics) instead of returning nil and
+hiding the damage in `TailErr`. A benign torn tail returns a nil
+error and the committed prefix. The boolean helper
+`Result.IsClean()` is the exact complement of this contract — it
+returns false if and only if the function returned an error — so a
+recover-then-append caller can branch on either signal:
+
+```go
+res, err := recovery.Open[int64, float64](dir, opts)
+if err != nil {
+    return err // corrupt WAL: do not append onto it
+}
+// equivalently: if !res.IsClean() { ... }
+w, err := wal.Open(walPath) // safe to append: clean or benign torn tail
+```
+
+Appending to a corrupt WAL would permanently embed the corruption and
+silently drop every committed op that followed the bad frame, so the
+safe behaviour — refusing to append — is the default. Every shipped
+example under `examples/` that recovers then reopens the WAL for
+append checks this signal before doing so.
 
 Component apply order during open is fixed. When the snapshot is v3
 (carries `mapper.bin`) the mapper is restored first and the snapshot
