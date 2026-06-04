@@ -102,3 +102,38 @@ func ExampleGraph_RemoveEdge() {
 	// before delete: true
 	// after re-create: false
 }
+
+// ExampleGraph_View shows the recommended way to read a graph that may be
+// mutated concurrently: wrap a multi-op transaction in [lpg.Graph.ApplyAtomically]
+// and the reads that must observe it whole in [lpg.Graph.View]. Per-operation
+// accessors are always individually atomic, but only View guarantees a reader
+// never sees a multi-op transaction half-applied — here, the edge without its
+// endpoint labels. Inside View the cross-substructure invariant "the edge exists
+// ⇔ both endpoint labels exist" always holds.
+func ExampleGraph_View() {
+	g := lpg.New[string, int](adjlist.Config{Directed: true})
+
+	// One transaction establishes a cross-substructure invariant: the edge
+	// alice→bob and both endpoint :Hot labels become visible together.
+	_ = g.ApplyAtomically(func() error {
+		_ = g.AddEdge("alice", "bob", 0)
+		_ = g.SetNodeLabel("alice", "Hot")
+		_ = g.SetNodeLabel("bob", "Hot")
+		return nil
+	})
+
+	// A consistent read pins the whole transaction for its duration.
+	g.View(func() {
+		edge := g.AdjList().HasEdge("alice", "bob")
+		srcHot := g.HasNodeLabel("alice", "Hot")
+		dstHot := g.HasNodeLabel("bob", "Hot")
+		// The invariant "edge ⇔ src:Hot ⇔ dst:Hot": all three observations
+		// agree, so the set of distinct values has size one.
+		consistent := edge == srcHot && srcHot == dstHot
+		fmt.Println("edge:", edge, "src:Hot:", srcHot, "dst:Hot:", dstHot)
+		fmt.Println("invariant holds:", consistent)
+	})
+	// Output:
+	// edge: true src:Hot: true dst:Hot: true
+	// invariant holds: true
+}

@@ -333,7 +333,22 @@ func (s *Store[N, W]) Codec() Codec[N] { return s.codec }
 // return as read-only.
 func (s *Store[N, W]) WeightCodec() WeightCodec[W] { return s.wcodec }
 
-// Graph returns the underlying graph.
+// Graph returns the underlying mutable graph.
+//
+// Reads through the returned [lpg.Graph] are partial-transaction-free and
+// cross-substructure-consistent ONLY when performed inside [lpg.Graph.View].
+// A direct accessor call made outside View (HasNodeLabel, NodeProperties,
+// AdjList().Neighbours, NodeIndex().Scan, and the like) remains per-operation
+// atomic, but may observe a multi-operation transaction half-applied — for
+// example the edge of an edge-plus-labels write before its endpoint labels.
+// An embedding application that reads this graph concurrently with committing
+// transactions must therefore wrap its reads in [lpg.Graph.View] to obtain the
+// no-partial-transaction guarantee; writes go through the [Tx] API, which
+// applies them under the same [lpg.Graph.ApplyAtomically] barrier.
+//
+// See the lpg package documentation and docs/isolation-design.md for the full
+// opt-in contract and the tracked lock-free per-shard snapshot that will make
+// every read transaction-consistent without the barrier.
 func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 
 // RunUnderCommitLock runs fn while holding the store's single-writer
