@@ -44,8 +44,9 @@ type Distinct struct {
 	maxDistinct int
 
 	// Runtime state.
-	ctx  context.Context  //nolint:containedctx // stored for per-Next ctx check
-	seen map[uint64][]Row // hash → list of rows (collision chain)
+	ctx           context.Context  //nolint:containedctx // stored for per-Next ctx check
+	seen          map[uint64][]Row // hash → list of rows (collision chain)
+	distinctCount int              // number of distinct rows STORED across all buckets
 }
 
 // NewDistinct creates a Distinct operator.
@@ -63,6 +64,7 @@ func NewDistinct(child Operator, maxDistinct int) *Distinct {
 func (op *Distinct) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.seen = make(map[uint64][]Row)
+	op.distinctCount = 0
 	return op.child.Init(ctx)
 }
 
@@ -91,12 +93,14 @@ func (op *Distinct) Next(out *Row) (bool, error) {
 			continue // duplicate — discard
 		}
 
-		// New distinct row.
-		if len(op.seen) >= op.maxDistinct && len(bucket) == 0 {
-			// New hash key (new distinct row) would exceed the cap.
-			return false, ErrDistinctMemoryExceeded
-		}
-		if len(bucket) == 0 && countDistinctKeys(op.seen) >= op.maxDistinct {
+		// New distinct row. The cap counts retained distinct ROWS, not hash
+		// buckets: a bucket is a collision chain that can hold many distinct
+		// rows, so keying the cap off the bucket count would let adversarial
+		// inputs engineered to collide on [expr.HashRow] retain more than
+		// maxDistinct rows in a single chain before tripping (a bounded-
+		// resources violation). Storing this row would push the count past the
+		// cap.
+		if op.distinctCount >= op.maxDistinct {
 			return false, ErrDistinctMemoryExceeded
 		}
 
@@ -104,6 +108,7 @@ func (op *Distinct) Next(out *Row) (bool, error) {
 		cp := make(Row, len(*out))
 		copy(cp, *out)
 		op.seen[h] = append(bucket, cp)
+		op.distinctCount++
 		*out = cp
 		return true, nil
 	}
@@ -128,10 +133,4 @@ func rowInBucket(row Row, bucket []Row) bool {
 		}
 	}
 	return false
-}
-
-// countDistinctKeys returns the number of distinct hash keys in the seen map.
-// Used to enforce the memory cap without double-counting collision chains.
-func countDistinctKeys(seen map[uint64][]Row) int {
-	return len(seen)
 }

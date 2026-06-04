@@ -858,6 +858,94 @@ func TestDistinct_ContextCancellation(t *testing.T) {
 	}
 }
 
+// collidingValue is a test Value whose Hash() is a constant, so every
+// collidingValue lands in the SAME bucket of Distinct.seen, while Equal()
+// still distinguishes them by id. It models an adversarial input engineered to
+// collide on expr.HashRow.
+type collidingValue int64
+
+func (collidingValue) Kind() expr.Kind { return expr.KindInteger }
+
+// Hash returns a fixed constant so all instances collide into one bucket.
+func (collidingValue) Hash() uint64 { return 0xC0111DE }
+
+// Equal compares by id, so distinct ids are genuinely distinct rows.
+func (v collidingValue) Equal(other expr.Value) expr.Value {
+	o, ok := other.(collidingValue)
+	return expr.BoolValue(ok && v == o)
+}
+
+func (v collidingValue) String() string { return "collide" }
+
+// makeCollidingRows builds n single-column rows that are mutually distinct
+// (ids 0..n-1) yet all hash to the same bucket.
+func makeCollidingRows(n int) []exec.Row {
+	rows := make([]exec.Row, n)
+	for i := range rows {
+		rows[i] = exec.Row{collidingValue(i)}
+	}
+	return rows
+}
+
+// TestDistinct_MemoryCapCountsRowsNotBuckets is the regression test for the
+// bounded-resources fix: the Distinct cap must count retained distinct ROWS,
+// not hash BUCKETS. Pre-fix the cap keyed off len(seen)/bucket count guarded by
+// len(bucket)==0, so distinct rows colliding into one bucket never tripped it
+// and the collision chain grew unbounded. This test feeds maxDistinct+k
+// mutually-distinct rows that all land in ONE bucket and asserts the cap trips
+// at maxDistinct storage.
+func TestDistinct_MemoryCapCountsRowsNotBuckets(t *testing.T) {
+	const (
+		maxDistinct = 4
+		k           = 6
+	)
+
+	// Sanity: all input rows must collide into a single hash bucket.
+	rows := makeCollidingRows(maxDistinct + k)
+	h0 := expr.HashRow(rows[0])
+	for i, r := range rows {
+		if got := expr.HashRow(r); got != h0 {
+			t.Fatalf("row %d hash=%#x, want all-equal %#x (collision not forced)", i, got, h0)
+		}
+	}
+
+	op := exec.NewDistinct(newSliceOperator(rows...), maxDistinct)
+	result, err := exec.Drain(context.Background(), op)
+	if !errors.Is(err, exec.ErrDistinctMemoryExceeded) {
+		// Pre-fix: with all rows colliding, the bucket-count cap never trips,
+		// so Drain returns nil error and retains maxDistinct+k > maxDistinct
+		// rows — exactly the unbounded-chain defect.
+		t.Fatalf("want ErrDistinctMemoryExceeded with %d colliding rows and cap %d, got err=%v, %d rows retained",
+			maxDistinct+k, maxDistinct, err, len(result))
+	}
+	// The cap must trip exactly at maxDistinct STORED rows, never more.
+	if len(result) > maxDistinct {
+		t.Fatalf("Distinct retained %d rows before tripping the cap, want at most %d", len(result), maxDistinct)
+	}
+}
+
+// TestDistinct_ColliderControl is the dedup-still-works control: under the cap,
+// distinct colliding rows pass through correctly and exact duplicates are
+// removed, proving the collision path keeps full distinctness semantics.
+func TestDistinct_ColliderControl(t *testing.T) {
+	rows := []exec.Row{
+		{collidingValue(1)},
+		{collidingValue(2)},
+		{collidingValue(1)}, // exact duplicate of row 0 (same bucket, equal)
+		{collidingValue(3)},
+		{collidingValue(2)}, // exact duplicate of row 1
+	}
+	// cap comfortably above the 3 distinct rows so the cap never interferes.
+	op := exec.NewDistinct(newSliceOperator(rows...), 100)
+	result, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(result) != 3 {
+		t.Fatalf("got %d distinct rows, want 3 (dedup over a forced-collision bucket)", len(result))
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Task 256 — Union / UnionAll
 // ─────────────────────────────────────────────────────────────────────────────
