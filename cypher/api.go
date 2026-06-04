@@ -7109,12 +7109,19 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	unlockWriter := e.lockWriter()
 	defer unlockWriter()
 
-	// The WAL transaction is opened OUTSIDE the visibility barrier: Begin()
-	// takes the store's single-writer mutex and must not nest under visMu.
-	// The mutator adapter only captures references; no graph reads happen yet.
+	// The WAL transaction is opened OUTSIDE the visibility barrier: BeginCtx
+	// takes the store's single-writer lock and must not nest under visMu. The
+	// acquire is context-aware: under write contention a caller with a
+	// deadline gets back the context error the instant ctx is cancelled or
+	// expires, instead of blocking on the lock for the holder's full duration
+	// (backpressure honoured at the engine↔txn seam, task #1301). The mutator
+	// adapter only captures references; no graph reads happen yet.
 	var mutator exec.GraphMutator
 	if e.store != nil {
-		walTx = e.store.Begin()
+		walTx, err = e.store.BeginCtx(ctx)
+		if err != nil {
+			return nil, err
+		}
 		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo}
 	} else {
 		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo}

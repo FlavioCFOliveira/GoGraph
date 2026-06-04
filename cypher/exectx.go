@@ -167,13 +167,23 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 		undo:         &undoLog{},
 		unlockWriter: unlockWriter,
 	}
-	// Open the WAL transaction on a WAL-backed engine. Store.Begin takes the
-	// store's single-writer mutex (so the store-less writer mutex above is a
-	// no-op in this wiring) and holds it until Commit/Rollback. Begin is the
-	// non-context variant; the context bound is enforced per statement in Exec
-	// and by the deadline the Bolt layer derives onto ctx.
+	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx takes the
+	// store's single-writer lock (so the store-less writer mutex above is a
+	// no-op in this wiring) and holds it until Commit/Rollback. The acquire is
+	// context-aware: under write contention a caller whose ctx is cancelled or
+	// whose deadline elapses gets back the context error instead of blocking on
+	// the lock for the holder's full duration (task #1301). On that error the
+	// store-less writer mutex acquired above must be released before returning,
+	// or it would leak; the per-statement context bound is otherwise enforced in
+	// Exec and by the deadline the Bolt layer derives onto ctx.
 	if e.store != nil {
-		tx.walTx = e.store.Begin()
+		walTx, beginErr := e.store.BeginCtx(ctx)
+		if beginErr != nil {
+			unlockWriter()
+			cmetrics.IncCounter("cypher.BeginTx.errors", 1)
+			return nil, beginErr
+		}
+		tx.walTx = walTx
 	}
 	cmetrics.IncCounter("cypher.BeginTx.opened", 1)
 	return tx, nil

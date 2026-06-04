@@ -46,7 +46,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -295,14 +294,30 @@ type Options[N comparable, W any] struct {
 // writer lock that serialises transactions.
 //
 // Concurrency: any number of goroutines may call Begin/BeginCtx;
-// transactions serialise on the store mutex, so only one Tx is
+// transactions serialise on a single-writer semaphore, so only one Tx is
 // active at any moment. Reads on the underlying lpg.Graph remain
 // concurrent and lock-free per the lpg/adjlist contracts.
 // [Store.RunUnderCommitLock] runs a closure while holding that same
-// commit mutex, so a background checkpointer can exclude the commit
+// commit semaphore, so a background checkpointer can exclude the commit
 // window while it snapshots and truncates the WAL.
+//
+// The single-writer lock is a buffered channel of capacity one used as a
+// binary semaphore rather than a [sync.Mutex], so the acquire is
+// cancellable: [Store.BeginCtx] selects the acquire against ctx.Done() and
+// returns the context error without blocking for the holder's full
+// duration. A [sync.Mutex] cannot honour a deadline while it is contended;
+// the semaphore can, which is what makes the engine write path
+// ([cypher.Engine.RunInTx]) respect a caller's deadline under write
+// contention. Capacity one preserves exact mutual exclusion: a second
+// acquire blocks (or fails with ctx) until the holder releases, so the
+// single-writer contract is identical to the previous mutex.
 type Store[N comparable, W any] struct {
-	mu     sync.Mutex
+	// sem is the single-writer semaphore: a buffered channel of capacity
+	// one. A send acquires the writer (Begin / BeginCtx / RunUnderCommitLock);
+	// a receive releases it (Tx.release / RunUnderCommitLock's defer). It is
+	// allocated once at construction ([newStore]); a zero-value Store is not
+	// usable. See [Store.acquire] / [Store.release].
+	sem    chan struct{}
 	g      *lpg.Graph[N, W]
 	wal    *wal.Writer
 	codec  codecHolder[N]
@@ -312,9 +327,9 @@ type Store[N comparable, W any] struct {
 	// Commit/CommitWALOnly increments it once and stamps the
 	// value into every v3 op frame and the trailing [OpCommit] marker, so
 	// recovery can group a transaction's frames and apply them atomically.
-	// It is incremented only while the store mutex is held (the single-
-	// writer lock acquired in Begin), so the atomic type is for safe
-	// publication rather than contended access.
+	// It is incremented only while the single-writer semaphore is held (the
+	// lock acquired in Begin), so the atomic type is for safe publication
+	// rather than contended access.
 	txnSeq atomic.Uint64
 
 	// maxTxnOps is the per-transaction op cap enforced in the commit/append
@@ -379,6 +394,7 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithCodecCapped")()
 	return &Store[N, W]{
+		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
 		codec:     codec,
@@ -421,6 +437,7 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithOptionsCapped")()
 	return &Store[N, W]{
+		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
 		codec:     opts.Codec,
@@ -464,8 +481,35 @@ func (s *Store[N, W]) MaxTxnOps() int { return s.maxTxnOps }
 // every read transaction-consistent without the barrier.
 func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 
+// acquire takes the single-writer semaphore, honouring ctx. It first
+// fails fast if ctx is already done (so an already-cancelled caller never
+// acquires even when the semaphore is free — the select below would
+// otherwise pick a ready case pseudo-randomly), then blocks on a send into
+// the capacity-one channel, racing it against ctx.Done(). On cancellation
+// it returns ctx.Err() WITHOUT having acquired, so there is nothing to
+// release. A nil return means the writer is held and the caller must
+// eventually call [Store.release] exactly once.
+func (s *Store[N, W]) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case s.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// release frees the single-writer semaphore. It must be called exactly
+// once for every successful [Store.acquire]; calling it without a prior
+// successful acquire would let a second writer in and break mutual
+// exclusion. The receive cannot block: the channel holds exactly one token
+// while the writer is held.
+func (s *Store[N, W]) release() { <-s.sem }
+
 // RunUnderCommitLock runs fn while holding the store's single-writer
-// commit mutex — the SAME mutex [Store.Begin] acquires and
+// commit lock — the SAME semaphore [Store.Begin] acquires and
 // [Tx.Commit]/[Tx.CommitWALOnly]/[Tx.Rollback] release. While fn runs no
 // transaction can be between Begin and its commit/rollback: neither a new
 // in-memory apply (the [lpg.Graph.ApplyAtomically] window opened inside a
@@ -473,45 +517,54 @@ func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 //
 // This is the serialisation seam a background checkpointer needs to take a
 // consistent snapshot and truncate the WAL atomically against the commit
-// path: the store mutex is otherwise private, so an external checkpointer
+// path: the store lock is otherwise private, so an external checkpointer
 // wired only with its own mutex would never exclude the engine's eager
 // write+commit window (see store/checkpoint and docs/acid-audit.md F3.5).
 //
-// fn must not call [Store.Begin]/[Store.BeginCtx] or open a transaction on
-// this store (the mutex is not re-entrant — that would deadlock). fn MAY
-// read the graph through [lpg.Graph.View]; the resulting lock order is
-// store-mutex → visMu, which matches the engine's own order
-// (Begin acquires the store mutex, then ApplyAtomically acquires visMu), so
-// no new deadlock is introduced. fn's error is returned unwrapped.
+// The acquire is uncancellable (it uses a background context), matching the
+// previous mutex semantics: a checkpointer that takes this lock blocks until
+// the active writer releases. fn must not call [Store.Begin]/[Store.BeginCtx]
+// or open a transaction on this store (the lock is not re-entrant — that
+// would deadlock). fn MAY read the graph through [lpg.Graph.View]; the
+// resulting lock order is store-lock → visMu, which matches the engine's own
+// order (Begin acquires the store lock, then ApplyAtomically acquires visMu),
+// so no new deadlock is introduced. fn's error is returned unwrapped.
 //
 // Concurrency: safe to call from any goroutine; it serialises against every
 // transaction on the store.
 func (s *Store[N, W]) RunUnderCommitLock(fn func() error) error {
 	defer metrics.Time("store.txn.RunUnderCommitLock")()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// acquire(context.Background()) cannot fail, so the held token is
+	// guaranteed and the deferred release is always paired with it.
+	_ = s.acquire(context.Background())
+	defer s.release()
 	return fn()
 }
 
 // Begin opens a new transaction. The returned Tx holds the
-// store's single-writer mutex until Commit or Rollback runs.
+// store's single-writer lock until Commit or Rollback runs. The acquire is
+// uncancellable; callers that need a deadline must use [Store.BeginCtx].
 func (s *Store[N, W]) Begin() *Tx[N, W] {
 	defer metrics.Time("store.txn.Begin")()
 	tx, _ := s.BeginCtx(context.Background())
 	return tx
 }
 
-// BeginCtx is the context-aware variant of [Store.Begin]. ctx.Err()
-// is checked before acquiring the store mutex; on cancellation returns
-// (nil, wrapped ctx.Err). Once the lock is held the transaction
-// proceeds; further ctx checks happen at the caller's discretion.
+// BeginCtx is the context-aware variant of [Store.Begin]. The single-writer
+// lock is a capacity-one semaphore, so the acquire itself is cancellable:
+// BeginCtx selects the acquire against ctx.Done() and returns (nil, ctx.Err())
+// the instant ctx is cancelled or its deadline elapses — even while another
+// writer holds the lock — rather than blocking for the holder's full
+// duration. This is what lets a deadline-bearing engine write
+// ([cypher.Engine.RunInTx]) honour its deadline under write contention. On a
+// nil error the returned Tx holds the lock until Commit or Rollback runs;
+// once held, further ctx checks happen at the caller's discretion.
 func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
 	defer metrics.Time("store.txn.BeginCtx")()
-	if err := ctx.Err(); err != nil {
+	if err := s.acquire(ctx); err != nil {
 		metrics.IncCounter("store.txn.BeginCtx.errors", 1)
 		return nil, err
 	}
-	s.mu.Lock()
 	return &Tx[N, W]{store: s}, nil
 }
 
@@ -839,9 +892,15 @@ func (t *Tx[N, W]) Rollback() error {
 	return nil
 }
 
+// release marks the transaction finished and frees the store's
+// single-writer lock. It is called exactly once per transaction, from the
+// deferred release in [Tx.Commit] / [Tx.CommitWALOnly] and from
+// [Tx.Rollback]; the finished guard in those entry points ensures the
+// underlying [Store.release] runs once, so the capacity-one semaphore is
+// never over-released (which would let a second writer in).
 func (t *Tx[N, W]) release() {
 	t.finished = true
-	t.store.mu.Unlock()
+	t.store.release()
 }
 
 // encodeOpTyped serialises one op to a v2 (tagged) WAL payload using
