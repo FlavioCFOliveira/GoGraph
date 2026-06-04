@@ -580,7 +580,7 @@ func TestAggregateFactory_AllBranches(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.fn+"_"+tc.argument, func(t *testing.T) {
-			f, err := aggregateFactory(tc.fn, tc.argument, expr.Null)
+			f, err := aggregateFactory(tc.fn, tc.argument, expr.Null, funcs.DefaultMaxCollectItems)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error")

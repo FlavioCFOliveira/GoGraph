@@ -27,17 +27,80 @@ package funcs
 // regardless. When no non-NULL values have been accumulated, the result is NULL
 // (except count(*) / count(x) which return 0).
 //
+// # Per-group element budget
+//
+// The buffering aggregators — [CollectAgg], [PercentileContAgg], and
+// [PercentileDiscAgg] — retain every accepted value in one group. Each has a
+// per-group element budget ([DefaultMaxCollectItems] by default): once the
+// budget is exceeded, [Aggregator.Step] returns [ErrCollectItemsExceeded]
+// instead of growing the buffer without bound. The streaming aggregators
+// (count/sum/avg/min/max and the Welford-online standard deviations) hold O(1)
+// state and never trip the budget. Construct a buffering aggregator with an
+// explicit budget via its NewXAggN constructor; the zero-argument NewXAgg
+// constructors use [DefaultMaxCollectItems].
+//
 // # Concurrency
 //
 // Aggregator instances are NOT safe for concurrent use. Each pipeline goroutine
 // owns its own set of instances, one per group per column.
 
 import (
+	"errors"
 	"math"
 	"sort"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-aggregator element budget
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DefaultMaxCollectItems is the default upper bound on the number of values a
+// single buffering aggregator ([CollectAgg], [PercentileContAgg],
+// [PercentileDiscAgg]) will retain in one group before [Aggregator.Step]
+// returns [ErrCollectItemsExceeded].
+//
+// Unlike the group-count cap enforced by EagerAggregation, this budget bounds
+// the size of any one group's buffer. A grouping-key-free aggregate such as
+// `RETURN collect(n)` produces exactly one group, so the group-count cap never
+// fires; without a per-aggregator budget, `MATCH (n) RETURN collect(n)` would
+// build an N-element list with no bound — exhausting memory and holding the
+// graph's visibility barrier — on a sufficiently large graph.
+//
+// The value matches the sibling pipeline-breaker caps (the engine's
+// DefaultMaxResultRows and exec.DefaultMaxGroups / exec.DefaultMaxDistinct): high
+// enough that ordinary queries — and the entire openCypher TCK — never reach it,
+// yet finite so an unbounded scan fails fast with a typed error instead of an
+// out-of-memory crash.
+const DefaultMaxCollectItems = 10_000_000
+
+// ErrCollectItemsExceeded is returned by [Aggregator.Step] when a buffering
+// aggregator's per-group element count exceeds its configured budget. It is the
+// aggregator-level analogue of the group-count cap enforced by EagerAggregation.
+var ErrCollectItemsExceeded = errors.New("funcs: aggregator per-group element budget exceeded")
+
+// maxItems is the per-aggregator element budget shared by the buffering
+// aggregators. The convention matches the internal pipeline-breaker caps: a
+// positive value is an active limit and zero disables the cap (the explicit
+// opt-out). Resolving the public zero-is-default ergonomic is the caller's
+// responsibility — the budget-carrying factory constructors take the already
+// resolved value.
+type maxItems struct {
+	limit int // >0 active; 0 disables the cap
+}
+
+// maxItemsCap wraps a resolved budget value. A positive value is an active cap;
+// zero disables it.
+func maxItemsCap(limit int) maxItems { return maxItems{limit: limit} }
+
+// exceeded reports whether the buffer already holds enough values that
+// appending one more would push it past the budget. It is called by Step before
+// the append so the typed error trips at the boundary rather than after the
+// buffer has already grown.
+func (m maxItems) exceeded(have int) bool {
+	return m.limit > 0 && have >= m.limit
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Aggregator interface
@@ -56,7 +119,14 @@ type Aggregator interface {
 
 	// Step incorporates a single input value into the running accumulation.
 	// NULL handling is defined per aggregator (most skip NULLs).
-	Step(v expr.Value)
+	//
+	// Step returns a non-nil error when the input cannot be accepted without
+	// violating a resource bound — specifically, a buffering aggregator returns
+	// [ErrCollectItemsExceeded] once its per-group element budget is exceeded.
+	// The streaming aggregators hold O(1) state and always return nil. A
+	// non-nil error aborts the enclosing aggregation: the caller must propagate
+	// it rather than continue stepping.
+	Step(v expr.Value) error
 
 	// Result returns the final aggregated value for the group. It must be called
 	// exactly once after all Step calls for the group, and before any reuse.
@@ -88,10 +158,11 @@ func NewCountAgg() AggregatorFactory {
 func (a *CountAgg) Init() { a.n = 0 }
 
 // Step increments the counter for non-NULL values.
-func (a *CountAgg) Step(v expr.Value) {
+func (a *CountAgg) Step(v expr.Value) error {
 	if !expr.IsNull(v) {
 		a.n++
 	}
+	return nil
 }
 
 // Result returns the count as an IntegerValue.
@@ -118,7 +189,7 @@ func NewCountStarAgg() AggregatorFactory {
 func (a *CountStarAgg) Init() { a.n = 0 }
 
 // Step increments the counter unconditionally.
-func (a *CountStarAgg) Step(_ expr.Value) { a.n++ }
+func (a *CountStarAgg) Step(_ expr.Value) error { a.n++; return nil }
 
 // Result returns the count as an IntegerValue.
 func (a *CountStarAgg) Result() expr.Value { return expr.IntegerValue(a.n) }
@@ -153,7 +224,7 @@ func (a *SumAgg) Init() {
 
 // Step adds v to the running sum, skipping NULLs. Promotes to float on the
 // first FloatValue encountered.
-func (a *SumAgg) Step(v expr.Value) {
+func (a *SumAgg) Step(v expr.Value) error {
 	switch val := v.(type) {
 	case expr.IntegerValue:
 		a.hasAny = true
@@ -173,6 +244,7 @@ func (a *SumAgg) Step(v expr.Value) {
 		}
 	}
 	// NULLs and non-numeric values are silently skipped.
+	return nil
 }
 
 // Result returns NULL if no non-NULL values were accumulated, otherwise the
@@ -208,7 +280,7 @@ func NewAvgAgg() AggregatorFactory {
 func (a *AvgAgg) Init() { a.sum = 0; a.n = 0 }
 
 // Step adds v to the running total, skipping NULLs and non-numeric values.
-func (a *AvgAgg) Step(v expr.Value) {
+func (a *AvgAgg) Step(v expr.Value) error {
 	switch val := v.(type) {
 	case expr.IntegerValue:
 		a.sum += float64(int64(val))
@@ -217,6 +289,7 @@ func (a *AvgAgg) Step(v expr.Value) {
 		a.sum += float64(val)
 		a.n++
 	}
+	return nil
 }
 
 // Result returns NULL if no non-NULL values were accumulated, otherwise a
@@ -249,13 +322,14 @@ func NewMinAgg() AggregatorFactory {
 func (a *MinAgg) Init() { a.min = nil }
 
 // Step updates the minimum if v is non-NULL and less than the current minimum.
-func (a *MinAgg) Step(v expr.Value) {
+func (a *MinAgg) Step(v expr.Value) error {
 	if expr.IsNull(v) {
-		return
+		return nil
 	}
 	if a.min == nil || expr.Compare(v, a.min) < 0 {
 		a.min = v
 	}
+	return nil
 }
 
 // Result returns NULL if no non-NULL values were accumulated, otherwise the
@@ -288,13 +362,14 @@ func NewMaxAgg() AggregatorFactory {
 func (a *MaxAgg) Init() { a.max = nil }
 
 // Step updates the maximum if v is non-NULL and greater than the current maximum.
-func (a *MaxAgg) Step(v expr.Value) {
+func (a *MaxAgg) Step(v expr.Value) error {
 	if expr.IsNull(v) {
-		return
+		return nil
 	}
 	if a.max == nil || expr.Compare(v, a.max) > 0 {
 		a.max = v
 	}
+	return nil
 }
 
 // Result returns NULL if no non-NULL values were accumulated, otherwise the
@@ -310,26 +385,46 @@ func (a *MaxAgg) Result() expr.Value {
 // CollectAgg — collect(expr), builds a ListValue, NULL-skipping
 // ─────────────────────────────────────────────────────────────────────────────
 
-// CollectAgg collects non-NULL values into an ordered [expr.ListValue].
+// CollectAgg collects non-NULL values into an ordered [expr.ListValue]. The
+// per-group element count is bounded by a budget (see [DefaultMaxCollectItems]);
+// once exceeded, [CollectAgg.Step] returns [ErrCollectItemsExceeded].
 //
 // CollectAgg is NOT safe for concurrent use.
 type CollectAgg struct {
-	items expr.ListValue
+	items  expr.ListValue
+	budget maxItems
 }
 
-// NewCollectAgg returns an AggregatorFactory for CollectAgg.
+// NewCollectAgg returns an AggregatorFactory for CollectAgg using the default
+// per-group element budget ([DefaultMaxCollectItems]).
 func NewCollectAgg() AggregatorFactory {
-	return func() Aggregator { a := &CollectAgg{}; a.Init(); return a }
+	return NewCollectAggN(DefaultMaxCollectItems)
+}
+
+// NewCollectAggN returns an AggregatorFactory for CollectAgg with an explicit
+// per-group element budget. A positive limit is an active cap; zero disables
+// the cap (the explicit opt-out). Callers thread the resolved budget here; the
+// public zero-is-default ergonomic lives at the engine boundary.
+func NewCollectAggN(limit int) AggregatorFactory {
+	return func() Aggregator { a := &CollectAgg{budget: maxItemsCap(limit)}; a.Init(); return a }
 }
 
 // Init resets the collection.
 func (a *CollectAgg) Init() { a.items = nil }
 
-// Step appends v to the collection if it is non-NULL.
-func (a *CollectAgg) Step(v expr.Value) {
-	if !expr.IsNull(v) {
-		a.items = append(a.items, v)
+// Step appends v to the collection if it is non-NULL. It returns
+// [ErrCollectItemsExceeded] when the append would push the buffer past the
+// configured budget, so the cap trips at the boundary rather than after the
+// buffer has grown.
+func (a *CollectAgg) Step(v expr.Value) error {
+	if expr.IsNull(v) {
+		return nil
 	}
+	if a.budget.exceeded(len(a.items)) {
+		return ErrCollectItemsExceeded
+	}
+	a.items = append(a.items, v)
+	return nil
 }
 
 // Result returns a [expr.ListValue] containing all accumulated non-NULL values,
@@ -367,15 +462,16 @@ func NewStdDevAgg() AggregatorFactory {
 func (a *StdDevAgg) Init() { a.n = 0; a.mean = 0; a.m2 = 0 }
 
 // Step incorporates v via Welford's online update, skipping NULLs.
-func (a *StdDevAgg) Step(v expr.Value) {
+func (a *StdDevAgg) Step(v expr.Value) error {
 	f, ok := toFloat64(v)
 	if !ok {
-		return
+		return nil
 	}
 	a.n++
 	delta := f - a.mean
 	a.mean += delta / float64(a.n)
 	a.m2 += delta * (f - a.mean)
+	return nil
 }
 
 // Result returns NULL if n < 2, otherwise FloatValue(sqrt(M2/(n-1))).
@@ -410,15 +506,16 @@ func NewStdDevPAgg() AggregatorFactory {
 func (a *StdDevPAgg) Init() { a.n = 0; a.mean = 0; a.m2 = 0 }
 
 // Step incorporates v via Welford's online update, skipping NULLs.
-func (a *StdDevPAgg) Step(v expr.Value) {
+func (a *StdDevPAgg) Step(v expr.Value) error {
 	f, ok := toFloat64(v)
 	if !ok {
-		return
+		return nil
 	}
 	a.n++
 	delta := f - a.mean
 	a.mean += delta / float64(a.n)
 	a.m2 += delta * (f - a.mean)
+	return nil
 }
 
 // Result returns NULL if n == 0, otherwise FloatValue(sqrt(M2/n)).
@@ -443,22 +540,39 @@ func (a *StdDevPAgg) Result() expr.Value {
 type PercentileContAgg struct {
 	p      float64
 	values []float64
+	budget maxItems
 }
 
 // NewPercentileContAgg returns an AggregatorFactory for PercentileContAgg with
-// the given percentile p (in [0.0, 1.0]).
+// the given percentile p (in [0.0, 1.0]) and the default per-group element
+// budget ([DefaultMaxCollectItems]).
 func NewPercentileContAgg(p float64) AggregatorFactory {
-	return func() Aggregator { a := &PercentileContAgg{p: p}; a.Init(); return a }
+	return NewPercentileContAggN(p, DefaultMaxCollectItems)
+}
+
+// NewPercentileContAggN returns an AggregatorFactory for PercentileContAgg with
+// the given percentile p and an explicit per-group element budget. A positive
+// limit is an active cap; zero disables it.
+func NewPercentileContAggN(p float64, limit int) AggregatorFactory {
+	return func() Aggregator { a := &PercentileContAgg{p: p, budget: maxItemsCap(limit)}; a.Init(); return a }
 }
 
 // Init resets the accumulated values.
 func (a *PercentileContAgg) Init() { a.values = a.values[:0] }
 
-// Step appends v to the list, skipping NULLs and non-numerics.
-func (a *PercentileContAgg) Step(v expr.Value) {
-	if f, ok := toFloat64(v); ok {
-		a.values = append(a.values, f)
+// Step appends v to the list, skipping NULLs and non-numerics. It returns
+// [ErrCollectItemsExceeded] when the append would push the buffer past the
+// configured budget.
+func (a *PercentileContAgg) Step(v expr.Value) error {
+	f, ok := toFloat64(v)
+	if !ok {
+		return nil
 	}
+	if a.budget.exceeded(len(a.values)) {
+		return ErrCollectItemsExceeded
+	}
+	a.values = append(a.values, f)
+	return nil
 }
 
 // Result sorts the values and applies linear interpolation. Returns NULL if
@@ -502,12 +616,25 @@ type PercentileDiscAgg struct {
 	values    []float64
 	allInt    bool
 	hasValues bool
+	budget    maxItems
 }
 
 // NewPercentileDiscAgg returns an AggregatorFactory for PercentileDiscAgg with
-// the given percentile p (in [0.0, 1.0]).
+// the given percentile p (in [0.0, 1.0]) and the default per-group element
+// budget ([DefaultMaxCollectItems]).
 func NewPercentileDiscAgg(p float64) AggregatorFactory {
-	return func() Aggregator { a := &PercentileDiscAgg{p: p}; a.Init(); return a }
+	return NewPercentileDiscAggN(p, DefaultMaxCollectItems)
+}
+
+// NewPercentileDiscAggN returns an AggregatorFactory for PercentileDiscAgg with
+// the given percentile p and an explicit per-group element budget. A positive
+// limit is an active cap; zero disables it.
+func NewPercentileDiscAggN(p float64, limit int) AggregatorFactory {
+	return func() Aggregator {
+		a := &PercentileDiscAgg{p: p, budget: maxItemsCap(limit)}
+		a.Init()
+		return a
+	}
 }
 
 // Init resets the accumulated values.
@@ -517,17 +644,26 @@ func (a *PercentileDiscAgg) Init() {
 	a.hasValues = false
 }
 
-// Step appends v to the list, skipping NULLs and non-numerics.
-func (a *PercentileDiscAgg) Step(v expr.Value) {
+// Step appends v to the list, skipping NULLs and non-numerics. It returns
+// [ErrCollectItemsExceeded] when the append would push the buffer past the
+// configured budget.
+func (a *PercentileDiscAgg) Step(v expr.Value) error {
 	switch n := v.(type) {
 	case expr.IntegerValue:
+		if a.budget.exceeded(len(a.values)) {
+			return ErrCollectItemsExceeded
+		}
 		a.values = append(a.values, float64(int64(n)))
 		a.hasValues = true
 	case expr.FloatValue:
+		if a.budget.exceeded(len(a.values)) {
+			return ErrCollectItemsExceeded
+		}
 		a.values = append(a.values, float64(n))
 		a.allInt = false
 		a.hasValues = true
 	}
+	return nil
 }
 
 // Result sorts the values and picks the element at the floor of p*(n-1).

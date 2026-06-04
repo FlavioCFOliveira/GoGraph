@@ -295,6 +295,14 @@ type buildOpts struct {
 	// general eval which interprets `n` as the original NodeValue rather
 	// than the pre-projected n.num.
 	preprojectedCols map[string]struct{}
+	// maxCollectItems carries the Engine's per-group element budget for
+	// buffering aggregators (collect / percentileCont / percentileDisc) into
+	// buildEagerAggregation. The encoding mirrors EngineOptions.MaxCollectItems:
+	// 0 means "unset" (apply DefaultMaxCollectItems), a negative value is the
+	// explicit opt-out (no cap), and a positive value is an active budget. Only
+	// the Engine-internal build paths set it; the public BuildPlanWithMutator
+	// path leaves it zero and so inherits the finite default.
+	maxCollectItems int
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -357,6 +365,28 @@ type EngineOptions struct {
 	//   - [MaxResultRowsUnlimited] (-1) disables the cap entirely; use it only
 	//     when memory is bounded by another means.
 	MaxResultRows int64
+
+	// MaxCollectItems bounds the number of values a single buffering aggregator
+	// — collect(), collect(DISTINCT …), percentileCont(), percentileDisc() —
+	// retains in one group. A grouping-key-free aggregate such as
+	// `RETURN collect(n)` forms exactly one group, so the group-count cap never
+	// fires; without this per-aggregator budget, `MATCH (n) RETURN collect(n)`
+	// would build an unbounded list inside the graph's visibility barrier.
+	//
+	// The value is interpreted as follows:
+	//
+	//   - Zero (the default) selects [funcs.DefaultMaxCollectItems], a finite cap
+	//     that prevents an unbounded collect/percentile buffer from exhausting
+	//     memory and holding the visibility barrier.
+	//   - A positive value overrides the default.
+	//   - [MaxCollectItemsUnlimited] (-1) disables the cap entirely; use it only
+	//     when memory is bounded by another means.
+	//
+	// When the budget is exceeded the aggregator returns
+	// [funcs.ErrCollectItemsExceeded], which the executor surfaces through
+	// [Result.Err] (the aggregation buffers during materialisation inside the
+	// barrier, so the cap trips before the whole list is built).
+	MaxCollectItems int
 }
 
 // Engine is the public query engine. It binds a graph, a function registry,
@@ -382,6 +412,12 @@ type Engine struct {
 	procReg       *procs.Registry
 	cache         *planCache
 	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
+	// maxCollectItems is the per-group element budget for buffering aggregators,
+	// threaded into every plan build via buildOpts. The encoding mirrors the
+	// public EngineOptions.MaxCollectItems field (0 → default, <0 → no cap,
+	// >0 → active) rather than the resolved internal form, because
+	// buildEagerAggregation performs the final resolution at the build boundary.
+	maxCollectItems int
 
 	// writeMu is the engine-level single-writer serialisation used ONLY when
 	// the engine is store-less (store == nil). A WAL-backed engine instead
@@ -492,13 +528,14 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// function-produced values.
 	reg = newGraphAwareRegistry(reg, g)
 	e := &Engine{
-		g:             g,
-		store:         opts.Store,
-		reg:           reg,
-		constraintReg: exec.NewConstraintRegistry(),
-		procReg:       procs.NewRegistry(),
-		cache:         newPlanCache(opts.PlanCacheCapacity),
-		maxResultRows: resolveMaxResultRows(opts.MaxResultRows),
+		g:               g,
+		store:           opts.Store,
+		reg:             reg,
+		constraintReg:   exec.NewConstraintRegistry(),
+		procReg:         procs.NewRegistry(),
+		cache:           newPlanCache(opts.PlanCacheCapacity),
+		maxResultRows:   resolveMaxResultRows(opts.MaxResultRows),
+		maxCollectItems: opts.MaxCollectItems,
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
 		return e.constraintReg.ListConstraintRows()
@@ -842,7 +879,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
 		// predicates can be evaluated against the live graph (task-961).
 		patEval := newPatternEvaluator(e.g)
-		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx}
+		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
 			buildErr = err
@@ -1068,6 +1105,15 @@ const DefaultMaxResultRows int64 = 10_000_000
 // promptly), because an unbounded MATCH then materialises every row under the
 // graph's visibility barrier.
 const MaxResultRowsUnlimited int64 = -1
+
+// MaxCollectItemsUnlimited is the explicit opt-out sentinel for
+// [EngineOptions.MaxCollectItems]: set the field to this value to disable the
+// per-group element budget entirely and allow an unbounded buffering aggregator
+// (collect / percentile). It is distinct from the zero value, which selects
+// [funcs.DefaultMaxCollectItems]. Use it only when memory is bounded by another
+// means, because an unbounded `collect(n)` over a whole-graph scan then
+// materialises every value into one list under the graph's visibility barrier.
+const MaxCollectItemsUnlimited = -1
 
 // writingKeywordRE matches any writing-clause keyword as a standalone word.
 // The pattern uses a case-insensitive flag and a word boundary anchor so
@@ -1721,12 +1767,19 @@ func BuildPlanWithMutator(
 	params map[string]expr.Value,
 	mutator exec.GraphMutator,
 ) (op exec.Operator, cols []string, err error) {
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil)
+	// The public entry point applies the finite default per-group element budget
+	// (maxCollectItems == 0 → DefaultMaxCollectItems in buildEagerAggregation) so
+	// a collect on this path is never unbounded either.
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0)
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
 // BuildPlanWithMutator that also threads constraint enforcement through write
 // operators. constraintReg and idxMgr may both be nil (no enforcement).
+//
+// maxCollectItems carries the Engine's per-group element budget for buffering
+// aggregators into the write-path build, using the EngineOptions.MaxCollectItems
+// encoding (0 → default, <0 → no cap, >0 → active).
 func buildPlanWithMutatorFull(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -1736,6 +1789,7 @@ func buildPlanWithMutatorFull(
 	mutator exec.GraphMutator,
 	constraintReg *exec.ConstraintRegistry,
 	idxMgr *index.Manager,
+	maxCollectItems int,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -1747,7 +1801,7 @@ func buildPlanWithMutatorFull(
 	// of `CREATE (n) RETURN n.x` — ProduceResults → Projection → CreateNode
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
-	bopts := &buildOpts{}
+	bopts := &buildOpts{maxCollectItems: maxCollectItems}
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -3713,6 +3767,25 @@ func buildEagerAggregation(
 	capturedReg := reg
 	capturedBopts := bopts
 
+	// Per-group element budget for buffering aggregators (collect / percentile).
+	// The Engine threads its budget decision through bopts.maxCollectItems using
+	// the same encoding as EngineOptions.MaxCollectItems:
+	//
+	//   0  → unset; apply the finite DefaultMaxCollectItems (also the value seen
+	//        by the public BuildPlanWithMutator path, so collect is never
+	//        unbounded there either)
+	//   <0 → the explicit opt-out; pass 0 to the factory so the cap is disabled
+	//   >0 → an active budget, used verbatim
+	maxCollectItems := funcs.DefaultMaxCollectItems
+	if bopts != nil {
+		switch {
+		case bopts.maxCollectItems < 0:
+			maxCollectItems = 0 // funcs convention: 0 disables the cap
+		case bopts.maxCollectItems > 0:
+			maxCollectItems = bopts.maxCollectItems
+		}
+	}
+
 	// Build pre-projection items:
 	//   positions 0..len(GroupBy)-1  → group-by key columns
 	//   positions len(GroupBy)..end  → aggregate argument columns
@@ -3763,7 +3836,7 @@ func buildEagerAggregation(
 		if secondArgIsRowDependent {
 			return nil, fmt.Errorf("cypher: ArgumentError.NumberOutOfRange: percentile argument of %s must be a constant in [0.0, 1.0], got a row-dependent expression", aggExpr.Function)
 		}
-		factory, ferr := aggregateFactory(aggExpr.Function, aggExpr.Argument, secondArg)
+		factory, ferr := aggregateFactory(aggExpr.Function, aggExpr.Argument, secondArg, maxCollectItems)
 		if ferr != nil {
 			return nil, fmt.Errorf("cypher: %w", ferr)
 		}
@@ -3927,21 +4000,27 @@ func (d *distinctAggregator) Init() {
 	d.seen = map[uint64][]expr.Value{}
 }
 
-func (d *distinctAggregator) Step(v expr.Value) {
+func (d *distinctAggregator) Step(v expr.Value) error {
 	if expr.IsNull(v) {
 		// NULL is filtered by every standard aggregator's Step; preserve
 		// that behaviour and skip the dedup bookkeeping too.
-		d.inner.Step(v)
-		return
+		return d.inner.Step(v)
 	}
 	h := v.Hash()
 	for _, prev := range d.seen[h] {
 		if expr.IsTruthy(prev.Equal(v)) {
-			return
+			return nil
 		}
 	}
+	// Forward to the inner aggregator first; only record the value as "seen"
+	// once it has been accepted. When the inner aggregator rejects the value
+	// (e.g. its per-group element budget is exceeded), the typed error
+	// propagates and the dedup set is left unchanged.
+	if err := d.inner.Step(v); err != nil {
+		return err
+	}
 	d.seen[h] = append(d.seen[h], v)
-	d.inner.Step(v)
+	return nil
 }
 
 func (d *distinctAggregator) Result() expr.Value { return d.inner.Result() }
@@ -3987,7 +4066,11 @@ func newAggregationEval(
 // [funcs.AggregatorFactory]. An empty argument string means count(*).
 // secondArg is the evaluated percentile parameter for two-arg
 // aggregates; pass NULL for single-arg aggregates.
-func aggregateFactory(fn, argument string, secondArg expr.Value) (funcs.AggregatorFactory, error) {
+//
+// maxItems is the resolved per-group element budget for the buffering
+// aggregators (collect, percentileCont, percentileDisc): a positive value is an
+// active cap and zero disables it. The streaming aggregators ignore it.
+func aggregateFactory(fn, argument string, secondArg expr.Value, maxItems int) (funcs.AggregatorFactory, error) {
 	lower := strings.ToLower(fn)
 	switch lower {
 	case "count":
@@ -4004,7 +4087,7 @@ func aggregateFactory(fn, argument string, secondArg expr.Value) (funcs.Aggregat
 	case "max":
 		return funcs.NewMaxAgg(), nil
 	case "collect":
-		return funcs.NewCollectAgg(), nil
+		return funcs.NewCollectAggN(maxItems), nil
 	case "stdev":
 		return funcs.NewStdDevAgg(), nil
 	case "stdevp":
@@ -4014,13 +4097,13 @@ func aggregateFactory(fn, argument string, secondArg expr.Value) (funcs.Aggregat
 		if err != nil {
 			return nil, err
 		}
-		return funcs.NewPercentileContAgg(p), nil
+		return funcs.NewPercentileContAggN(p, maxItems), nil
 	case "percentiledisc":
 		p, err := validPercentileParam(secondArg)
 		if err != nil {
 			return nil, err
 		}
-		return funcs.NewPercentileDiscAgg(p), nil
+		return funcs.NewPercentileDiscAggN(p, maxItems), nil
 	default:
 		return nil, fmt.Errorf("unknown aggregate function %q", fn)
 	}
@@ -6856,7 +6939,7 @@ func (e *Engine) execUnderBarrier(
 		defer replayUndoOnPanic(undo)
 		walker := &lpgNodeWalker{g: e.g}
 		labelSrc := &lpgLabelResolver{g: e.g}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager())
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems)
 		if berr != nil {
 			buildErr = berr
 			return nil

@@ -25,7 +25,11 @@ func newAgg(factory funcs.AggregatorFactory) funcs.Aggregator {
 func feedAll(agg funcs.Aggregator, vals ...expr.Value) expr.Value {
 	agg.Init()
 	for _, v := range vals {
-		agg.Step(v)
+		// These value/NULL-handling tests feed small inputs that never reach a
+		// buffering aggregator's element budget, so Step must not error here.
+		if err := agg.Step(v); err != nil {
+			panic("feedAll: unexpected Step error: " + err.Error())
+		}
 	}
 	return agg.Result()
 }
@@ -76,7 +80,9 @@ func TestCountAgg_InitReset(t *testing.T) {
 	feedAll(agg, expr.IntegerValue(1), expr.IntegerValue(2))
 	// Re-init and feed again.
 	agg.Init()
-	agg.Step(expr.IntegerValue(9))
+	if err := agg.Step(expr.IntegerValue(9)); err != nil {
+		t.Fatalf("Step: unexpected error: %v", err)
+	}
 	if result := agg.Result(); result != expr.IntegerValue(1) {
 		t.Errorf("after re-init: got %v, want 1", result)
 	}
