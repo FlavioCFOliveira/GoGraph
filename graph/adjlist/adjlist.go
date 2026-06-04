@@ -568,14 +568,12 @@ func growShardLocked[W any](s *adjShard[W], minLen uint64, maxCap int) error {
 	}
 	next := &shardSlots{slots: make([]unsafe.Pointer, newLen)}
 	if old != nil {
-		// Copy is safe because the caller holds s.mu, preventing other
-		// writers, and unsafe.Pointer values are plain words. Readers
-		// still observing the old slice continue to see consistent
-		// per-slot snapshots until they next reload slotsRef.
-		for i, p := range old.slots {
-			next.slots[i] = atomic.LoadPointer(&old.slots[i])
-			_ = p
-		}
+		// A plain copy is safe: the caller holds s.mu, so no concurrent
+		// StorePointer can target old.slots, and unsafe.Pointer values
+		// are plain words. Readers still observing the old slice continue
+		// to see consistent per-slot snapshots until they next reload
+		// slotsRef.
+		copy(next.slots, old.slots)
 	}
 	s.slotsRef.Store(next)
 	return nil

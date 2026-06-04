@@ -49,11 +49,25 @@ func (g *Generation[W]) CSR() *csr.CSR[W] { return g.csr }
 func (g *Generation[W]) Refcount() int64 { return g.refcount.Load() }
 
 // Publisher owns the current generation and serialises publication
-// of new ones. It is safe for concurrent reads (Acquire/Release) and
-// for at most one publisher (Publish/PublishWithDrain).
+// of new ones. It is safe for concurrent reads (Acquire/Release) from
+// any number of goroutines, and for any number of concurrent
+// publishers (Publish/PublishWithDrain): publishMu serialises the
+// load-prev/store-next swap so every superseded generation is observed
+// as exactly one publisher's predecessor and is therefore drained on.
+// The read path (Acquire/Release/Current/CSR) never takes publishMu
+// and stays fully lock-free.
 type Publisher[W any] struct {
-	current atomic.Pointer[Generation[W]]
-	closed  atomic.Bool
+	// publishMu serialises publishers so the prev/next swap is atomic
+	// with respect to other publishers. It is never taken on the read
+	// path. Off the read hot path, this costs readers nothing.
+	publishMu sync.Mutex
+	current   atomic.Pointer[Generation[W]]
+	closed    atomic.Bool
+	// onDrain, when non-nil, is invoked with the predecessor each
+	// PublishWithDrain captured, immediately after that predecessor's
+	// drain completes. It is a white-box test seam for verifying the
+	// single-publisher contract and is nil (zero cost) in production.
+	onDrain func(prev *Generation[W])
 }
 
 // newGeneration constructs a Generation with its sync.Cond wired up.
@@ -86,7 +100,24 @@ func (p *Publisher[W]) Acquire() *Generation[W] {
 		if g == p.current.Load() {
 			return g
 		}
-		g.refcount.Add(-1)
+		// The generation was superseded between the load and the
+		// increment, so g may already be a publisher's prev. Roll back
+		// through releaseRef so the zero-edge is signalled; a plain
+		// refcount.Add(-1) here would lose the wakeup and hang a
+		// concurrent PublishWithDrain waiting on g.
+		releaseRef(g)
+	}
+}
+
+// releaseRef decrements g's refcount and broadcasts on its drain
+// condition when the count reaches zero, so a [Publisher.PublishWithDrain]
+// parked on g wakes. It is the single zero-edge signalling point shared
+// by Release and the Acquire rollback.
+func releaseRef[W any](g *Generation[W]) {
+	if g.refcount.Add(-1) == 0 && g.drainCond != nil {
+		g.drainMu.Lock()
+		g.drainCond.Broadcast()
+		g.drainMu.Unlock()
 	}
 }
 
@@ -96,11 +127,7 @@ func (p *Publisher[W]) Release(g *Generation[W]) {
 	if g == nil {
 		return
 	}
-	if g.refcount.Add(-1) == 0 && g.drainCond != nil {
-		g.drainMu.Lock()
-		g.drainCond.Broadcast()
-		g.drainMu.Unlock()
-	}
+	releaseRef(g)
 }
 
 // Publish atomically swaps in a fresh generation built from c and
@@ -108,11 +135,20 @@ func (p *Publisher[W]) Release(g *Generation[W]) {
 // Publisher has been closed. The previous generation is not reclaimed
 // until its refcount drains to zero (which happens naturally as
 // readers Release).
+//
+// Publish is safe for concurrent use with other Publish,
+// PublishWithDrain, and Close calls: the load-prev/store-next swap is
+// serialised so generations are never lost.
 func (p *Publisher[W]) Publish(c *csr.CSR[W]) (*Generation[W], error) {
+	next := newGeneration(c)
+	p.publishMu.Lock()
+	defer p.publishMu.Unlock()
+	// Re-check closed under publishMu so a concurrent Close cannot
+	// interleave between the check and the swap and resurrect a
+	// superseded generation.
 	if p.closed.Load() {
 		return nil, ErrClosed
 	}
-	next := newGeneration(c)
 	p.current.Store(next)
 	return next, nil
 }
@@ -126,13 +162,25 @@ func (p *Publisher[W]) Publish(c *csr.CSR[W]) (*Generation[W], error) {
 //
 // A timeout of zero disables the deadline; PublishWithDrain then
 // blocks indefinitely.
+//
+// PublishWithDrain is safe for concurrent use with other publishers
+// and with Close: each concurrent publisher captures a distinct
+// predecessor under publishMu, so every superseded generation is
+// drained on by exactly one caller and none is silently leaked.
 func (p *Publisher[W]) PublishWithDrain(c *csr.CSR[W], timeout time.Duration) (*Generation[W], error) {
+	next := newGeneration(c)
+	// Hold publishMu only across the load-prev/store-next swap so each
+	// concurrent publisher captures a distinct predecessor and drains on
+	// exactly that one. The drain wait below runs outside the lock so a
+	// slow reader never serialises other publishers.
+	p.publishMu.Lock()
 	if p.closed.Load() {
+		p.publishMu.Unlock()
 		return nil, ErrClosed
 	}
 	prev := p.current.Load()
-	next := newGeneration(c)
 	p.current.Store(next)
+	p.publishMu.Unlock()
 	if prev == nil {
 		return next, nil
 	}
@@ -161,6 +209,9 @@ func (p *Publisher[W]) PublishWithDrain(c *csr.CSR[W], timeout time.Duration) (*
 		prev.drainCond.Wait()
 	}
 	prev.drainMu.Unlock()
+	if p.onDrain != nil {
+		p.onDrain(prev)
+	}
 	return next, nil
 }
 
@@ -172,12 +223,19 @@ func (p *Publisher[W]) PublishWithDrain(c *csr.CSR[W], timeout time.Duration) (*
 // Close is safe to call from any goroutine. Calling Close more than
 // once is safe; subsequent calls are no-ops.
 func (p *Publisher[W]) Close() {
+	// Take publishMu so the close transition is mutually exclusive with
+	// in-flight publishers: a publisher either swaps in its generation
+	// before we mark closed, or observes closed and aborts — never
+	// resurrects a generation after we have swapped in nil.
+	p.publishMu.Lock()
 	if !p.closed.CompareAndSwap(false, true) {
+		p.publishMu.Unlock()
 		return // already closed
 	}
 	// Atomically replace the current generation with nil so that new
 	// Acquire calls see a closed publisher and return nil immediately.
 	prev := p.current.Swap(nil)
+	p.publishMu.Unlock()
 	if prev == nil {
 		return
 	}

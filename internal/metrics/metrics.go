@@ -55,14 +55,24 @@ func (noopBackend) ObserveLatency(string, time.Duration) {}
 // lock-free and visible to all goroutines.
 var backendPtr atomic.Pointer[Backend]
 
-// initOnce stores the default no-op backend on first access.
+// current returns the active backend, lazily installing the no-op
+// default on first access. It is nil-safe under concurrency: a
+// SetBackend(nil) racing between the CompareAndSwap and the reload can
+// leave backendPtr nil again, so the final value is dereferenced only
+// when non-nil and otherwise falls back to a fresh no-op backend rather
+// than dereferencing a nil pointer.
 func current() Backend {
 	if p := backendPtr.Load(); p != nil {
 		return *p
 	}
 	def := Backend(noopBackend{})
 	backendPtr.CompareAndSwap(nil, &def)
-	return *backendPtr.Load()
+	if p := backendPtr.Load(); p != nil {
+		return *p
+	}
+	// A concurrent SetBackend(nil) reset the pointer between the CAS and
+	// this reload. Fall back to a no-op backend; never dereference nil.
+	return noopBackend{}
 }
 
 // SetBackend swaps the global metrics sink. Pass nil to restore the
