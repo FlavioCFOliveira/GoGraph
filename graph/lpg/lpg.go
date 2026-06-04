@@ -250,6 +250,13 @@ type Graph[N comparable, W any] struct {
 	// immutable CSR analytics path does not go through these methods and
 	// stays lock-free.
 	visMu sync.RWMutex
+
+	// barrier enforces that no single goroutine re-enters visMu via
+	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
+	// nested acquisition from a goroutine already inside the barrier would
+	// deadlock the engine; the guard converts that silent hang into an immediate
+	// panic. See reentrancy.go for the mechanism and cost.
+	barrier barrierGuard
 }
 
 // ApplyAtomically runs fn while holding the graph's transaction-visibility
@@ -260,11 +267,20 @@ type Graph[N comparable, W any] struct {
 // fn is the in-memory apply of one durable transaction; callers invoke it
 // only after the transaction's WAL frames are fsynced.
 //
-// ApplyAtomically must not be called re-entrantly, and the mutations inside
-// fn must not call [Graph.View] (the RWMutex is not re-entrant). The graph's
+// ApplyAtomically must not be called re-entrantly, and the mutations inside fn
+// must not call [Graph.View] or [Graph.ApplyAtomically] (the RWMutex is not
+// re-entrant, so a nested acquisition from this goroutine would deadlock). That
+// invariant is enforced: a nested call from a goroutine already inside the
+// barrier panics with a clear message instead of deadlocking. The panic
+// indicates a programmer error and is not recovered by this package. The graph's
 // per-shard write methods that fn calls take their own shard locks beneath
 // visMu, which is safe because visMu is acquired only here and in View.
+//
+// Concurrent calls from DIFFERENT goroutines are unaffected: they serialise on
+// visMu as before, and the guard never trips on them.
 func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
+	gid := g.barrier.enterWriter() // panics on re-entry from this goroutine
+	defer g.barrier.exitWriter(gid)
 	g.visMu.Lock()
 	defer g.visMu.Unlock()
 	return fn()
@@ -284,10 +300,19 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 // concurrency contract) but may observe a partially-applied multi-op
 // transaction; View is what closes that window.
 //
-// fn must not perform writes and must not call [Graph.ApplyAtomically]
-// (the RWMutex is not re-entrant); nested View calls are permitted only
-// when no writer is contending, so callers should not nest View.
+// fn must not perform writes and must not call [Graph.ApplyAtomically] or
+// [Graph.View] (the RWMutex is not re-entrant). A nested [Graph.View] would
+// deadlock the instant any writer queues behind the outer read lock, and a
+// nested [Graph.ApplyAtomically] always deadlocks; both are enforced — a nested
+// call from a goroutine already inside the barrier panics with a clear message
+// instead of deadlocking. The panic indicates a programmer error and is not
+// recovered by this package.
+//
+// Concurrent View readers from DIFFERENT goroutines do not block one another and
+// never trip the guard; only a same-goroutine nested acquisition does.
 func (g *Graph[N, W]) View(fn func()) {
+	gid := g.barrier.enterReader() // panics on re-entry from this goroutine
+	defer g.barrier.exitReader(gid)
 	g.visMu.RLock()
 	defer g.visMu.RUnlock()
 	fn()
@@ -360,6 +385,7 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	for i := range g.edgeCreateCountShards {
 		g.edgeCreateCountShards[i].m = make(map[edgeKey]int64)
 	}
+	g.barrier.init()
 	return g
 }
 
