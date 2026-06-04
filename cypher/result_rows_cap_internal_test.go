@@ -78,3 +78,34 @@ func TestNewEngineWithOptions_RowCapWiring(t *testing.T) {
 		})
 	}
 }
+
+// TestEngine_ResultRowCap_MirrorsInternalField is the contract test for the
+// exported accessor the Bolt server uses to detect an uncapped engine (#1293):
+// ResultRowCap must return the resolved internal cap verbatim — a positive value
+// when capped and zero when the engine was built unlimited. The black-box
+// signature cannot read maxResultRows, so this white-box test pins the mirror.
+func TestEngine_ResultRowCap_MirrorsInternalField(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+
+	cases := []struct {
+		name string
+		opt  int64
+		want int64
+	}{
+		{"default is finite", 0, DefaultMaxResultRows},
+		{"unlimited opt-out reports zero", MaxResultRowsUnlimited, 0},
+		{"explicit override reported verbatim", 100, 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := NewEngineWithOptions(g, EngineOptions{MaxResultRows: tc.opt})
+			if got := eng.ResultRowCap(); got != tc.want {
+				t.Fatalf("ResultRowCap() = %d, want %d", got, tc.want)
+			}
+			if eng.ResultRowCap() != eng.maxResultRows {
+				t.Fatalf("ResultRowCap() = %d must mirror internal maxResultRows = %d",
+					eng.ResultRowCap(), eng.maxResultRows)
+			}
+		})
+	}
+}

@@ -543,6 +543,27 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	return e
 }
 
+// ResultRowCap reports the effective per-query result-row cap this Engine
+// enforces, after [EngineOptions.MaxResultRows] has been resolved by the
+// constructor:
+//
+//   - A positive value is the active cap. A single [Engine.Run] or
+//     [Engine.RunInTx] call materialising more than this many rows trips
+//     [ErrResultRowsExceeded] during the in-barrier drain, before the surplus
+//     rows are ever handed to the caller.
+//   - Zero means the cap is disabled (the engine was built with
+//     [MaxResultRowsUnlimited]). Such an engine offers no upper bound on the
+//     rows a single query materialises, so an embedder exposing it to untrusted
+//     callers — for example behind the Bolt server — should bound memory by
+//     another means.
+//
+// The accessor lets an embedder that receives a pre-built Engine observe its
+// memory-safety posture without reaching into unexported state; the Bolt server
+// uses it to warn when handed an uncapped engine.
+func (e *Engine) ResultRowCap() int64 {
+	return e.maxResultRows
+}
+
 // graphAwareRegistry overlays a small set of graph-bound functions on top of
 // a delegate FunctionRegistry. The overlay currently covers startnode and
 // endnode: both look up the bound RelationshipValue's StartID / EndID in the

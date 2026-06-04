@@ -802,6 +802,13 @@ func (s *Session) sanitiseErr(err error) string {
 	if isCypherUserError(err) {
 		return err.Error()
 	}
+	// Bounded-resource guards (result-row cap, aggregator element budget) carry a
+	// message that names the limit and discloses nothing sensitive; forward it so
+	// the client learns the query was rejected for exceeding a configured cap
+	// rather than seeing the opaque internal-error text.
+	if isResourceLimitErr(err) {
+		return err.Error()
+	}
 	// All other errors (internal engine, storage, unexpected): generic + session ID.
 	return fmt.Sprintf("An internal error occurred. See server logs for details (session: %s).", s.id)
 }

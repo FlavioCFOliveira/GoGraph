@@ -247,6 +247,15 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 		// Admit every client but warn loudly that authentication is disabled.
 		log.Warn("bolt: server started with no authentication (Options.Auth is NoAuthHandler) — every client is admitted without credential validation; set Options.Auth to a real AuthHandler before exposing this server on a network")
 	}
+	if eng != nil && eng.ResultRowCap() == 0 {
+		// The engine was built with cypher.MaxResultRowsUnlimited, so a single
+		// authenticated RUN/PULL of a Cartesian product or whole-graph MATCH can
+		// materialise an unbounded result set inside the engine's visibility
+		// barrier and exhaust memory before the first RECORD is chunked out. Warn
+		// loudly: the server cannot retrofit a bound onto a pre-built engine, so
+		// the operator must rebuild it with a finite cypher.EngineOptions.MaxResultRows.
+		log.Warn("bolt: server backed by an engine with no result-row cap (cypher.EngineOptions.MaxResultRows is unlimited) — a single client query can materialise an unbounded result set and exhaust server memory; rebuild the engine with a finite MaxResultRows before exposing this server on a network")
+	}
 	return &Server{
 		eng:  eng,
 		opts: opts,

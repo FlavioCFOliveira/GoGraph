@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
@@ -82,6 +84,30 @@ func TestFailureCode(t *testing.T) {
 			name: "procs.ErrProcNotFound",
 			err:  fmt.Errorf("call: %w", procs.ErrProcNotFound),
 			want: "Neo.ClientError.Procedure.ProcedureNotFound",
+		},
+		{
+			// task #1293: the engine's result-row cap maps to the resource-limit
+			// code, matching the per-connection in-flight cursor cap.
+			name: "cypher.ErrResultRowsExceeded",
+			err:  cypher.ErrResultRowsExceeded,
+			want: "Neo.ClientError.General.LimitExceeded",
+		},
+		{
+			name: "cypher.ErrResultRowsExceeded wrapped",
+			err:  fmt.Errorf("drain: %w", cypher.ErrResultRowsExceeded),
+			want: "Neo.ClientError.General.LimitExceeded",
+		},
+		{
+			// task #1294: the buffering-aggregator element budget maps to the same
+			// resource-limit code; it reaches the Bolt layer via Result.Err().
+			name: "funcs.ErrCollectItemsExceeded",
+			err:  funcs.ErrCollectItemsExceeded,
+			want: "Neo.ClientError.General.LimitExceeded",
+		},
+		{
+			name: "funcs.ErrCollectItemsExceeded wrapped",
+			err:  fmt.Errorf("aggregate: %w", funcs.ErrCollectItemsExceeded),
+			want: "Neo.ClientError.General.LimitExceeded",
 		},
 		{
 			name: "ErrAuthFailed",
