@@ -456,10 +456,24 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
+	// Make the staging directory's own inode durable BEFORE the publish
+	// rename so the dirents linking csr.bin and manifest.json into it
+	// survive a crash even on a filesystem that does not flush a renamed
+	// directory's child dirents as part of the rename. Mirrors the
+	// canonical crash-safe ordering documented on the v2/v3 path
+	// ([writeSnapshotFullCore]): write+fsync components -> fsync staging
+	// dir -> rename -> fsync parent. No-op on Windows (see [dirFsync]).
+	if err := dirFsync(tmp); err != nil {
+		_ = os.RemoveAll(tmp) // best-effort: staging cleanup, fsync err preserved
+		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
+		return fmt.Errorf("snapshot: staging dir fsync: %w", err)
+	}
+	notePublishStep("staging-fsync", tmp)
 	if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
+	notePublishStep("rename", tmp)
 	if err := os.Rename(tmp, dir); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish rename: %w", err)

@@ -413,10 +413,29 @@ func writeSnapshotFullCore[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
+	// Make the staging directory's own inode durable BEFORE the publish
+	// rename: each component file was fsync'd individually, but fsync(2)
+	// on a file does not guarantee that the dirent linking it into the
+	// staging directory is durable. On a filesystem that does not flush a
+	// renamed directory's child dirents as part of the rename, a crash
+	// after the rename (and after the checkpointer truncates the WAL)
+	// could otherwise leave the published snapshot directory present but
+	// its components missing or zero-length — total loss of every
+	// transaction folded into the checkpoint. The canonical crash-safe
+	// ordering is therefore: write+fsync components -> fsync staging dir
+	// -> rename -> fsync parent. No-op on platforms without a directory
+	// fsync primitive (Windows). See [dirFsync].
+	if err := dirFsync(tmp); err != nil {
+		_ = os.RemoveAll(tmp) // best-effort: staging cleanup, fsync err preserved
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return fmt.Errorf("snapshot: staging dir fsync: %w", err)
+	}
+	notePublishStep("staging-fsync", tmp)
 	if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
+	notePublishStep("rename", tmp)
 	if err := os.Rename(tmp, dir); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish rename: %w", err)
