@@ -332,8 +332,11 @@ func verifyGraphalyticsChecksum(path string, ds GraphalyticsDataset) error {
 	if gotMD5 != ds.MD5 {
 		return fmt.Errorf("%w: %s (md5 got %s, want %s)", ErrGraphalyticsChecksumMismatch, path, gotMD5, ds.MD5)
 	}
-	// Surface the realised SHA-256 so the user can pin it.
-	fmt.Fprintf(os.Stderr, "shapegen: Graphalytics %s sha256=%s — pin in GraphalyticsDatasets to enforce SHA-256 going forward.\n", ds.Name, gotSHA)
+	// Surface the realised SHA-256 so an operator can harvest it from
+	// the next clean soak run and back-populate GraphalyticsDatasets.
+	// The "realisedSHA256" token is kept stable and greppable for
+	// mechanical extraction (dataset=<name> realisedSHA256=<hex>).
+	fmt.Fprintf(os.Stderr, "shapegen: Graphalytics dataset=%s realisedSHA256=%s — pin in GraphalyticsDatasets to enforce SHA-256 going forward.\n", ds.Name, gotSHA)
 	return nil
 }
 
