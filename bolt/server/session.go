@@ -184,31 +184,28 @@ func randomID() string {
 // FAILED and HandleMessage returns a single *proto.Failure response. The
 // caller is responsible for encoding and sending all returned messages.
 func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
-	// Propagate context cancellation before doing any work.
+	// Propagate context cancellation before doing any work. failWith routes
+	// through enterFailed, which reclaims any open explicit transaction even on
+	// this early-return path that never reaches dispatch (#1312).
 	if err := ctx.Err(); err != nil {
 		return s.failWith("Neo.TransientError.General.RequestInterrupted", err.Error()), nil
 	}
 
-	responses, err := s.dispatch(ctx, msg)
-
-	// If the message left the session in FAILED with an explicit transaction
-	// still open, roll that transaction back NOW rather than waiting for the
-	// client's RESET. Entering FAILED means no further RUN/COMMIT can run until
-	// RESET, so the transaction is doomed; holding its writes (and the engine
-	// writer serialisation) until RESET would block every other writer and leave
-	// a partial transaction visible. Rolling back here unwinds the in-memory
-	// writes and releases the writer mutex promptly (#1309). RESET/GOODBYE roll
-	// the transaction back on their own paths and never reach this branch with a
-	// non-nil tx.
-	if s.state == StateFailed && s.tx != nil {
-		s.abortTx()
-	}
-	return responses, err
+	// Every transition into FAILED reclaims any open explicit transaction at the
+	// transition itself (see enterFailed): no further RUN/COMMIT can run in
+	// FAILED, and RESET would discard the transaction anyway, so its writes — and
+	// the engine writer serialisation it holds — must be released NOW rather than
+	// lingering for the whole FAILED→RESET window (#1312). Reclaiming is funnelled
+	// through enterFailed so it holds for every FAILED entry, including paths that
+	// do not pass through here (the context-cancellation early return above) or
+	// that set FAILED inline in a handler (the in-flight cap, a PULL cursor error,
+	// a failed COMMIT). RESET/GOODBYE and the connection-teardown Close roll the
+	// transaction back on their own idempotent paths.
+	return s.dispatch(ctx, msg)
 }
 
 // dispatch routes msg to the correct per-state handler. It is the inner switch
-// of [Session.HandleMessage]; the outer method adds the post-dispatch
-// FAILED-with-open-transaction rollback.
+// of [Session.HandleMessage].
 func (s *Session) dispatch(ctx context.Context, msg any) ([]any, error) {
 	switch m := msg.(type) {
 	case *proto.Hello:
@@ -283,6 +280,9 @@ func (s *Session) handleHello(m *proto.Hello) ([]any, error) {
 
 	id, err := s.auth.Authenticate(scheme, principal, credentials)
 	if err != nil {
+		// HELLO is legal only in NEGOTIATION, before any BEGIN, so no transaction
+		// or cursor can be open here; a raw state set is correct (no enterFailed
+		// reclaim is needed, unlike the FAILED entries reachable post-BEGIN).
 		s.state = StateFailed
 		s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
@@ -316,7 +316,9 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 
 	id, err := s.auth.Authenticate(scheme, principal, credentials)
 	if err != nil {
-		s.state = StateFailed
+		// LOGON re-authentication is legal in TX_READY, so a failed auth here can
+		// leave an explicit transaction open; enterFailed reclaims it (#1312).
+		s.enterFailed()
 		s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 	}
@@ -394,7 +396,10 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	// long-running transaction can accumulate an unbounded number
 	// of cursors, each holding operator state.
 	if n := s.inFlightCount(); n >= s.maxInFlight {
-		s.state = StateFailed
+		// The cap is only reachable inside an explicit transaction (it counts
+		// cursors appended to tx.results); enterFailed reclaims that transaction
+		// so the writer serialisation is not held until RESET (#1312).
+		s.enterFailed()
 		return []any{&proto.Failure{
 			Code:    "Neo.ClientError.General.LimitExceeded",
 			Message: fmt.Sprintf("bolt: per-connection in-flight cursor cap reached (cap=%d, open=%d); commit/rollback or pull/discard before issuing more queries", s.maxInFlight, n),
@@ -464,7 +469,11 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		}
 		return s.failTransition(m)
 	}
-	s.state = next
+	// A statement that failed to execute inside an explicit transaction computes
+	// next == StateFailed; transitionTo routes that through enterFailed so the
+	// transaction is rolled back and the writer serialisation released NOW rather
+	// than held until the client's RESET (#1312).
+	s.transitionTo(next)
 
 	if runErr != nil {
 		s.log.Error("bolt: query execution failed", slog.String("session", s.id), slog.String("err", runErr.Error()))
@@ -508,9 +517,9 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 
 	for n <= 0 || fetched < n {
 		if ctx.Err() != nil {
-			s.drainResult()
-			s.peeked = nil
-			s.state = StateFailed
+			// enterFailed drains the cursor and rolls back any open explicit
+			// transaction (TX_STREAMING), releasing the writer serialisation (#1312).
+			s.enterFailed()
 			return []any{&proto.Failure{
 				Code:    "Neo.TransientError.General.RequestInterrupted",
 				Message: ctx.Err().Error(),
@@ -529,9 +538,9 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	}
 
 	if err := s.result.Err(); err != nil {
-		s.drainResult()
-		s.peeked = nil
-		s.state = StateFailed
+		// enterFailed drains the cursor and rolls back any open explicit
+		// transaction (TX_STREAMING), releasing the writer serialisation (#1312).
+		s.enterFailed()
 		s.log.Error("bolt: result stream error", slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{
 			Code:    FailureCode(err),
@@ -649,7 +658,10 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// READY with no open transaction.
 	tx, err := newTx(ctx, s.eng, mode, effective)
 	if err != nil {
-		s.state = StateFailed
+		// newTx failed before acquiring any resources (s.tx is still nil), so
+		// enterFailed has no transaction to reclaim here; it is used for the single
+		// FAILED-entry invariant (#1312).
+		s.enterFailed()
 		s.log.Error("bolt: begin transaction failed", slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{
 			Code:    FailureCode(err),
@@ -679,7 +691,12 @@ func (s *Session) handleCommit() ([]any, error) {
 	// Commit the transaction if one is active.
 	if s.tx != nil {
 		if err := s.tx.Commit(); err != nil {
-			s.state = StateFailed
+			// A failed Commit already released the engine writer serialisation and
+			// finished the engine transaction (cypher.ExplicitTx.Commit defers
+			// release even on error). enterFailed clears the now-finished s.tx; its
+			// abortTx→Rollback is a clean ErrTxFinished no-op, never a double
+			// rollback (#1312).
+			s.enterFailed()
 			s.log.Error("bolt: commit failed", slog.String("session", s.id), slog.String("err", err.Error()))
 			return []any{&proto.Failure{
 				Code:    FailureCode(err),
@@ -756,19 +773,80 @@ func (s *Session) drainResult() {
 	}
 }
 
-// failTransition moves the session to FAILED and returns a FAILURE response
-// for an illegal state transition.
-func (s *Session) failTransition(msg any) ([]any, error) {
+// enterFailed is the single funnel for every transition into FAILED. It moves
+// the session to FAILED and, if an explicit transaction is still open, rolls it
+// back NOW via [Session.abortTx] rather than waiting for the client's RESET.
+//
+// Entering FAILED means no further RUN/COMMIT can run until RESET, and RESET
+// itself discards the transaction; a FAILED session can therefore never legally
+// resume the open transaction. Holding its writes — and the engine's
+// single-writer serialisation the transaction acquired at BEGIN — for the whole
+// FAILED→RESET window would block every other writer and keep a partial
+// transaction live for that entire window (or forever, if the client never
+// sends RESET and the connection is not torn down). Reclaiming at the FAILED
+// transition releases the writer serialisation immediately (#1312).
+//
+// abortTx is idempotent: a subsequent RESET (or the connection-teardown
+// [Session.Close]) finds tx already nil and does not double-roll-back. Every
+// transition into FAILED is routed through this one helper, so "entering FAILED
+// reclaims any open transaction" is an invariant of the state machine rather
+// than a property of a single call site. The routes are:
+//   - the two failure helpers [Session.failTransition] and [Session.failWith]
+//     (illegal messages, the context-cancellation early return, an unrecognised
+//     message);
+//   - the handler-inline FAILED entries (the in-flight cursor cap, a PULL cursor
+//     error or context-cancellation, a failed LOGON re-authentication, a failed
+//     COMMIT);
+//   - [Session.transitionTo], for a statement that failed to execute and whose
+//     [Transition]-computed next state is therefore StateFailed.
+//
+// In particular the context-cancellation early return in [Session.HandleMessage]
+// — which never reaches a handler — still reclaims the transaction.
+func (s *Session) enterFailed() {
 	s.state = StateFailed
+	// Entering FAILED invalidates any in-flight cursor: no PULL/DISCARD can
+	// continue until RESET. Drain it unconditionally (this also discards a
+	// pending peek row) so an auto-commit stream's cursor is closed promptly, not
+	// only on RESET/teardown.
+	s.drainResult()
+	// Roll back any open explicit transaction so the engine writer serialisation
+	// it holds is released NOW. abortTx is idempotent (a nil tx is a no-op) and
+	// drains the cursor again harmlessly.
+	if s.tx != nil {
+		s.abortTx()
+	}
+}
+
+// transitionTo applies the next state computed by [Transition] for a legal
+// message. A statement that FAILED to execute (a RUN/PULL/COMMIT/ROLLBACK whose
+// operation returned an error) is a legal transition whose computed next state
+// is StateFailed; routing that case through [Session.enterFailed] reclaims any
+// open explicit transaction, so this — like the failure helpers and the
+// handler-inline FAILED entries — preserves the "entering FAILED reclaims the
+// open transaction" invariant (#1312). Every other computed state is applied
+// verbatim.
+func (s *Session) transitionTo(next State) {
+	if next == StateFailed {
+		s.enterFailed()
+		return
+	}
+	s.state = next
+}
+
+// failTransition moves the session to FAILED (reclaiming any open transaction)
+// and returns a FAILURE response for an illegal state transition.
+func (s *Session) failTransition(msg any) ([]any, error) {
+	s.enterFailed()
 	return []any{&proto.Failure{
 		Code:    "Neo.ClientError.Request.Invalid",
 		Message: fmt.Sprintf("illegal message %T in state %s", msg, s.state),
 	}}, nil
 }
 
-// failWith moves the session to FAILED and returns a FAILURE response.
+// failWith moves the session to FAILED (reclaiming any open transaction) and
+// returns a FAILURE response.
 func (s *Session) failWith(code, message string) []any {
-	s.state = StateFailed
+	s.enterFailed()
 	return []any{&proto.Failure{Code: code, Message: message}}
 }
 
