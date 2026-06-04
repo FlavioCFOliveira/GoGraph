@@ -100,10 +100,20 @@ func TestRunInTx_SetReturn(t *testing.T) {
 }
 
 // TestRunInTx_DeleteReturn verifies that DELETE with RETURN drives the
-// pipeline and removes the node from the graph. Per openCypher 9 §3.5.8
-// (Return2 [15]) accessing a deleted node's properties in the same
-// statement is EntityNotFound: DeletedEntityAccess; the test asserts
-// that the engine surfaces this and that the node is gone afterwards.
+// pipeline. Per openCypher 9 §3.5.8 (Return2 [15]) accessing a deleted node's
+// properties in the same statement is EntityNotFound: DeletedEntityAccess; the
+// test asserts the engine surfaces this error.
+//
+// Because that error is raised at runtime DURING the statement, the statement
+// fails as a whole, and per the ACID Atomicity invariant (task #1282) a failed
+// write statement is all-or-nothing: its eager in-memory mutations — including
+// the DELETE — are rolled back. The node therefore SURVIVES (count == 1). This
+// is the corrected semantics: before #1282 the in-memory delete leaked while
+// the WAL transaction rolled back, an in-memory-vs-durable divergence. The
+// openCypher TCK does not assert side effects for these error scenarios
+// (Return2 [15]/[16] assert only the raised error), so both this atomic
+// rollback and the older leak pass the TCK; atomicity is what dictates the
+// rollback.
 func TestRunInTx_DeleteReturn(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	eng := cypher.NewEngine(g)
@@ -120,6 +130,7 @@ func TestRunInTx_DeleteReturn(t *testing.T) {
 	// the EntityNotFound only when the result is drained — both shapes
 	// are observed across drivers. Accept either path: a non-nil err
 	// here, or a nil err followed by a draining error.
+	failed := err != nil
 	if err == nil {
 		for res2.Next() {
 			// drain
@@ -129,6 +140,10 @@ func TestRunInTx_DeleteReturn(t *testing.T) {
 		if drainErr == nil {
 			t.Fatalf("DELETE+RETURN u.foo: expected DeletedEntityAccess error, got success")
 		}
+		failed = true
+	}
+	if !failed {
+		t.Fatal("expected the DELETE+RETURN statement to fail with DeletedEntityAccess")
 	}
 
 	res3, err := eng.Run(ctx, `MATCH (u:User) RETURN count(u) AS n`, nil)
@@ -139,11 +154,12 @@ func TestRunInTx_DeleteReturn(t *testing.T) {
 	if len(countRows) != 1 {
 		t.Fatalf("count yielded %d rows", len(countRows))
 	}
+	// The failed statement rolled back atomically, so the node is restored.
 	// count() may surface as expr.IntegerValue, int64 or int depending on
-	// engine version; compare via %v which renders both as "0".
+	// engine version; compare via %v which renders all as "1".
 	if got := countRows[0]["n"]; got == nil {
 		t.Fatalf("count missing")
-	} else if s := fmtAny(got); s != "0" {
-		t.Fatalf("count after delete = %s, want 0", s)
+	} else if s := fmtAny(got); s != "1" {
+		t.Fatalf("count after failed delete = %s, want 1 (statement rolled back atomically)", s)
 	}
 }

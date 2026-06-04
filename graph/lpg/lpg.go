@@ -418,6 +418,23 @@ func (g *Graph[N, W]) revive(id graph.NodeID) {
 	g.tombstoneMu.Unlock()
 }
 
+// Revive clears any tombstone on the node interned under key n, marking it
+// live again. It is the exported, key-addressed inverse of [Graph.RemoveNode]
+// used by the Cypher executor's transaction-undo path to restore a node that a
+// failed write query had tombstoned. No-op when n was never interned or is not
+// currently tombstoned. The clear is taken under the same lock as
+// [Graph.IsTombstoned]/[Graph.LiveOrder], so it is atomic against those
+// readers.
+//
+// Revive is safe for concurrent use.
+func (g *Graph[N, W]) Revive(n N) {
+	id, ok := g.adj.Mapper().Lookup(n)
+	if !ok {
+		return
+	}
+	g.revive(id)
+}
+
 // AddEdge inserts a directed edge (mirrored when the graph is
 // undirected) from src to dst with weight w. The error contract
 // matches the underlying [adjlist.AdjList.AddEdge]: callers must
@@ -535,6 +552,35 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	hpsh.mu.Lock()
 	delete(hpsh.m, k)
 	hpsh.mu.Unlock()
+}
+
+// EdgeWeight returns the weight of the first edge from src to dst and true when
+// such an edge exists, or the zero weight and false otherwise. When several
+// parallel edges connect the pair it returns the weight of the first slot, which
+// is sufficient for the executor's transaction-undo path: it captures the weight
+// of an edge before a failed write query removes it so the inverse [Graph.AddEdge]
+// restores the same weight.
+//
+// EdgeWeight performs an O(out-degree) scan of src's adjacency and allocates
+// nothing. It is safe for concurrent use under the same lock-free adjacency
+// snapshot contract as [adjlist.AdjList.LoadEntry].
+func (g *Graph[N, W]) EdgeWeight(src, dst N) (W, bool) {
+	var zero W
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return zero, false
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return zero, false
+	}
+	nbs, ws := g.adj.LoadEntry(srcID)
+	for i, nb := range nbs {
+		if nb == dstID {
+			return ws[i], true
+		}
+	}
+	return zero, false
 }
 
 // SetNodeLabel attaches label to n, inserting n if needed. Returns
@@ -691,6 +737,30 @@ func (g *Graph[N, W]) IncrEdgesAdded() { g.edgesAddedCount.Add(1) }
 // IncrEdgesRemoved records that one edge was removed.
 func (g *Graph[N, W]) IncrEdgesRemoved() { g.edgesRemovedCount.Add(1) }
 
+// DecrNodesAdded / DecrNodesRemoved / DecrEdgesAdded / DecrEdgesRemoved are the
+// exact inverses of the Incr* counters above. They exist for one purpose: the
+// Cypher executor's transaction-undo path replays the inverse of every eagerly
+// applied mutation when a write query errors or panics, and the per-query side-
+// effect deltas the openCypher TCK asserts ([Graph.SideEffectCounters]) must
+// not retain the increments of a rolled-back statement. Each subtracts one from
+// the matching monotone counter.
+//
+// These must only be called to invert a prior Incr* on the same graph; they do
+// not floor at zero, so a stray over-decrement would underflow the unsigned
+// counter. The undo log guarantees one Decr per recorded Incr.
+//
+// Decr* are safe for concurrent use.
+func (g *Graph[N, W]) DecrNodesAdded() { g.nodesAddedCount.Add(^uint64(0)) }
+
+// DecrNodesRemoved subtracts one from the removed-node counter.
+func (g *Graph[N, W]) DecrNodesRemoved() { g.nodesRemovedCount.Add(^uint64(0)) }
+
+// DecrEdgesAdded subtracts one from the added-edge counter.
+func (g *Graph[N, W]) DecrEdgesAdded() { g.edgesAddedCount.Add(^uint64(0)) }
+
+// DecrEdgesRemoved subtracts one from the removed-edge counter.
+func (g *Graph[N, W]) DecrEdgesRemoved() { g.edgesRemovedCount.Add(^uint64(0)) }
+
 // RemoveNodeLabel detaches name from n. No-op if absent.
 func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 	id, ok := g.adj.Mapper().Lookup(n)
@@ -829,4 +899,44 @@ func (g *Graph[N, W]) HasEdgeLabel(src, dst N, name string) bool {
 	}
 	_, ok = bag[lid]
 	return ok
+}
+
+// RemoveEdgeLabel detaches name from the directed edge (src, dst). It is the
+// exported inverse of [Graph.SetEdgeLabel] used by the Cypher executor's
+// transaction-undo path to strip a label a failed write query had attached.
+// No-op when either endpoint is unknown, name was never interned, or the label
+// is not present on the pair. Unlike [Graph.SetEdgeLabel] it does not require
+// the edge to still exist in the adjacency, so it can also undo a label that
+// was set on an edge later removed within the same failed statement.
+//
+// Like [Graph.clearEdgePairState], the coarse src-keyed edge label index
+// (g.edgeIdx) is intentionally left untouched: it is read only as an
+// over-approximation the executor verifies against the authoritative per-pair
+// labels, so a stale entry can cost at most a filtered-out candidate, never a
+// wrong result.
+//
+// RemoveEdgeLabel is safe for concurrent use.
+func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return
+	}
+	lid, ok := g.reg.Lookup(name)
+	if !ok {
+		return
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.Lock()
+	if bag, ok2 := sh.m[k]; ok2 {
+		delete(bag, lid)
+		if len(bag) == 0 {
+			delete(sh.m, k)
+		}
+	}
+	sh.mu.Unlock()
 }

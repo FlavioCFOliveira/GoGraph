@@ -1216,6 +1216,17 @@ type Result struct {
 	// transaction whose graph change is visible but whose index change is not.
 	bufHandled bool
 
+	// undo holds the inverse of every in-memory mutation this write query
+	// applied eagerly. On a failed drain it is replayed in reverse inside the
+	// same ApplyAtomically window as the graph writes (commitIndexUnderBarrier),
+	// so the live graph is restored before any reader can observe the partial
+	// transaction (Atomicity). nil for read queries. See undo.go.
+	undo *undoLog
+	// undoErr is set non-nil when the undo replay above itself failed (an
+	// inverse panicked), so the graph may be inconsistent. Err surfaces it
+	// wrapped in [ErrUndoFailed] alongside the triggering pipeline error.
+	undoErr error
+
 	// maxRows, when positive, caps the total number of rows Next() may return.
 	// Set from EngineOptions.MaxResultRows at result construction time.
 	maxRows  int64
@@ -1294,24 +1305,49 @@ func (r *Result) materialize() {
 // post-materialise iteration error — on success the buffered index.Changes are
 // applied; on a failed write they are discarded — and closeLocked then leaves
 // the buffer alone.
+//
+// On the failed-write branch it ALSO rolls back the in-memory graph by replaying
+// the transaction-undo log (undo.go) in reverse, in this same barrier window, so
+// the rows the statement eagerly applied before the error never become visible to
+// a concurrent [lpg.Graph.View] reader or the next query (Atomicity, task #1282).
+// The undo runs before the index rollback so the secondary indexes are dropped
+// only after the graph entries they describe are gone. A success commits the
+// graph (nothing to undo) and discards the log. If the undo replay itself fails,
+// undoErr is recorded so [Result.Err] surfaces [ErrUndoFailed].
 func (r *Result) commitIndexUnderBarrier() {
 	if r.buf == nil || r.bufHandled {
 		return
 	}
 	if r.rs.Err() != nil {
+		if r.undo != nil && !r.undo.replay() {
+			r.undoErr = wrapUndoFailure(nil)
+		}
 		r.buf.Rollback()
 	} else {
 		r.buf.Commit(r.idxMgr)
+		// Success: the transaction is keeping its writes; drop the undo log so
+		// its closures (and their captured pre-images) are released for GC.
+		r.undo = nil
 	}
 	r.bufHandled = true
 }
 
 // Err returns the first error encountered during iteration, or nil.
+//
+// When the query was a write that failed and the subsequent in-memory undo
+// replay ALSO failed (an inverse panicked, [ErrUndoFailed]), Err returns the
+// pipeline error wrapped together with ErrUndoFailed so the caller learns both
+// that the statement failed and that the rollback could not fully restore the
+// graph; either is matchable with [errors.Is].
 func (r *Result) Err() error {
 	if r.rowsErr != nil {
 		return r.rowsErr
 	}
-	return r.rs.Err()
+	pipeErr := r.rs.Err()
+	if r.undoErr != nil {
+		return wrapUndoFailure(pipeErr)
+	}
+	return pipeErr
 }
 
 // Columns returns the ordered list of output column names.
@@ -6504,15 +6540,23 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 
 	buf := &exec.IndexBuffer{}
 
+	// undo records the inverse of every in-memory mutation this write statement
+	// applies eagerly, so the live graph can be rolled back inside the barrier
+	// on a pipeline error or panic (task #1282, Atomicity). It is allocated for
+	// every write transaction but its backing slice grows lazily on the first
+	// recorded mutation, so a write that mutates nothing (or a read misrouted
+	// here) pays nothing.
+	undo := &undoLog{}
+
 	// The WAL transaction is opened OUTSIDE the visibility barrier: Begin()
 	// takes the store's single-writer mutex and must not nest under visMu.
 	// The mutator adapter only captures references; no graph reads happen yet.
 	var mutator exec.GraphMutator
 	if e.store != nil {
 		walTx = e.store.Begin()
-		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf}
+		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo}
 	} else {
-		mutator = &lpgMutatorAdapter{g: e.g, buf: buf}
+		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo}
 	}
 
 	// Build the physical operator tree AND execute the whole write statement
@@ -6534,6 +6578,16 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		buildErr error
 	)
 	_ = e.g.ApplyAtomically(func() error {
+		// Roll the in-memory graph back BEFORE this panic leaves the barrier.
+		// ApplyAtomically releases visMu with a deferred Unlock in its own
+		// frame, so a deferred recover registered here in the closure runs
+		// while visMu is STILL held: the undo replay restores the live graph
+		// before any concurrent Graph.View reader can observe the partial
+		// transaction. The panic is then re-raised so the outer
+		// recoverWriteQueryPanic still rolls back walTx (releasing the single-
+		// writer mutex) and converts it to ErrInternalPanic. A naive recover in
+		// RunInTx itself would run after the Unlock above — too late (#1282).
+		defer replayUndoOnPanic(undo)
 		walker := &lpgNodeWalker{g: e.g}
 		labelSrc := &lpgLabelResolver{g: e.g}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager())
@@ -6543,9 +6597,13 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		}
 		rs := exec.Run(ctx, op, cols)
 		r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows)
+		r.undo = undo
 		r.materialize()
 		// Flip the secondary indexes inside the same barrier as the graph
 		// writes so index seeks never observe a partial transaction (F3.4).
+		// On the error branch this also replays the undo log to roll the
+		// in-memory graph back, so the visible state never contains the
+		// partial transaction (#1282).
 		r.commitIndexUnderBarrier()
 		return nil
 	})
@@ -6567,10 +6625,20 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 //
 // When buf is non-nil every mutation is also enqueued as an index.Change.
 // buf is nil for read-only adapter instances.
+//
+// The embedded mutationUndo records the inverse of each mutation when undo is
+// non-nil (write transactions via [Engine.RunInTx]), so a failed statement's
+// eager in-memory writes are rolled back inside the visibility barrier (#1282).
+// undo is nil for read-only adapter instances, making every record* a no-op.
 type lpgMutatorAdapter struct {
-	g   *lpg.Graph[string, float64]
-	buf *exec.IndexBuffer // nil for read-only
+	g    *lpg.Graph[string, float64]
+	buf  *exec.IndexBuffer // nil for read-only
+	undo *undoLog          // nil for read-only / non-transactional
 }
+
+// rec returns the inverse-recording helper bound to this adapter's graph and
+// undo log.
+func (a *lpgMutatorAdapter) rec() mutationUndo { return mutationUndo{g: a.g, undo: a.undo} }
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
 // when the key has not been interned yet.
@@ -6599,6 +6667,7 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if !existed {
 		a.g.IncrNodesAdded()
 	}
+	a.rec().recordAddNode(n, !existed)
 	return id, nil
 }
 
@@ -6618,6 +6687,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 		a.g.IncrNodesAdded()
 	}
 	a.g.IncrEdgesAdded()
+	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	return srcID, dstID, nil
 }
 
@@ -6639,6 +6709,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 		a.g.IncrNodesAdded()
 	}
 	a.g.IncrEdgesAdded()
+	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	return srcID, dstID, handle, nil
 }
 
@@ -6647,17 +6718,27 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // disconnected, so re-creating an edge between the same endpoints does not
 // resurrect the deleted relationship's type or properties.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
-	if a.g.AdjList().HasEdge(src, dst) {
+	present := a.g.AdjList().HasEdge(src, dst)
+	r := a.rec()
+	var pre removedEdgePreimage
+	if r.active() {
+		pre = r.captureRemovedEdge(src, dst)
+	}
+	if present {
 		a.g.IncrEdgesRemoved()
 	}
 	a.g.RemoveEdge(src, dst)
+	r.recordRemoveEdge(&pre, present)
 }
 
 // SetNodeLabel attaches label to n.
 func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
+	r := a.rec()
+	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
 	}
+	r.recordSetNodeLabel(n, label, hadLabel)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
@@ -6670,7 +6751,10 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 
 // RemoveNodeLabel detaches label from n.
 func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
+	r := a.rec()
+	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	a.g.RemoveNodeLabel(n, label)
+	r.recordRemoveNodeLabel(n, label, hadLabel)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
@@ -6686,10 +6770,12 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 	if !ok {
 		return
 	}
-	if !a.g.IsTombstoned(id) {
+	wasLive := !a.g.IsTombstoned(id)
+	if wasLive {
 		a.g.IncrNodesRemoved()
 	}
 	a.g.RemoveNode(n)
+	a.rec().recordRemoveNode(n, wasLive)
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -6699,9 +6785,16 @@ func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetNodeProperty(n, key)
+	}
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
+	r.recordSetNodeProperty(n, key, prev, had)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -6715,7 +6808,14 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 
 // DelNodeProperty removes the named property from n.
 func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetNodeProperty(n, key)
+	}
 	a.g.DelNodeProperty(n, key)
+	r.recordDelNodeProperty(n, key, prev, had)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelNodeProperty,
@@ -6742,7 +6842,10 @@ func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
 func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	r := a.rec()
+	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.g.SetEdgeLabel(src, dst, label)
+	r.recordSetEdgeLabel(src, dst, label, hadLabel)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
@@ -6755,9 +6858,16 @@ func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
 func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	}
 	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
+	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -6772,7 +6882,14 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
 func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	}
 	a.g.DelEdgeProperty(src, dst, key)
+	r.recordDelEdgeProperty(src, dst, key, prev, had)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -6798,12 +6915,19 @@ func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *lpgMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
-	return a.g.IncEdgeCreateCount(src, dst)
+	n := a.g.IncEdgeCreateCount(src, dst)
+	a.rec().recordIncEdgeCreateCount(src, dst)
+	return n
 }
 func (a *lpgMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
-func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) { a.g.DecEdgeCreateCount(src, dst) }
+func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	r := a.rec()
+	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
+	a.g.DecEdgeCreateCount(src, dst)
+	r.recordDecEdgeCreateCount(src, dst, had)
+}
 
 // SetEdgeLabelAt / EdgeLabelsAt / SetEdgePropertyAt / EdgePropertiesAt /
 // RemoveEdgeInstance delegate to the per-instance metadata stores on
@@ -6919,11 +7043,22 @@ func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // walMutatorAdapter is NOT safe for concurrent use. The store mutex is held
 // from [txn.Store.Begin] (in RunInTx) until [txn.Tx.CommitWALOnly] or
 // [txn.Tx.Rollback] (in Result.Close).
+//
+// The undo log records the inverse of each in-memory mutation so a failed
+// statement's eager writes to the live graph are rolled back inside the
+// visibility barrier (#1282). It is independent of the WAL transaction and the
+// index buffer, which roll back through their own mechanisms; the undo log
+// closes only the in-memory-vs-durable divergence.
 type walMutatorAdapter struct {
-	g   *lpg.Graph[string, float64]
-	tx  *txn.Tx[string, float64]
-	buf *exec.IndexBuffer // nil for read-only (never reached via RunInTx)
+	g    *lpg.Graph[string, float64]
+	tx   *txn.Tx[string, float64]
+	buf  *exec.IndexBuffer // nil for read-only (never reached via RunInTx)
+	undo *undoLog          // nil for read-only (never reached via RunInTx)
 }
+
+// rec returns the inverse-recording helper bound to this adapter's graph and
+// undo log.
+func (a *walMutatorAdapter) rec() mutationUndo { return mutationUndo{g: a.g, undo: a.undo} }
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
@@ -6951,6 +7086,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if !existed {
 		a.g.IncrNodesAdded()
 	}
+	a.rec().recordAddNode(n, !existed)
 	return id, nil
 }
 
@@ -6971,6 +7107,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 		a.g.IncrNodesAdded()
 	}
 	a.g.IncrEdgesAdded()
+	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	return srcID, dstID, nil
 }
 
@@ -6999,6 +7136,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 		a.g.IncrNodesAdded()
 	}
 	a.g.IncrEdgesAdded()
+	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	return srcID, dstID, handle, nil
 }
 
@@ -7007,18 +7145,28 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // disconnected, so re-creating an edge between the same endpoints does not
 // resurrect the deleted relationship's type or properties.
 func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
-	if a.g.AdjList().HasEdge(src, dst) {
+	present := a.g.AdjList().HasEdge(src, dst)
+	r := a.rec()
+	var pre removedEdgePreimage
+	if r.active() {
+		pre = r.captureRemovedEdge(src, dst)
+	}
+	if present {
 		a.g.IncrEdgesRemoved()
 	}
 	a.g.RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
+	r.recordRemoveEdge(&pre, present)
 }
 
 // SetNodeLabel attaches label to n.
 func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
+	r := a.rec()
+	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
 	}
+	r.recordSetNodeLabel(n, label, hadLabel)
 	_ = a.tx.SetNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -7032,7 +7180,10 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 
 // RemoveNodeLabel detaches label from n.
 func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
+	r := a.rec()
+	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	a.g.RemoveNodeLabel(n, label)
+	r.recordRemoveNodeLabel(n, label, hadLabel)
 	_ = a.tx.RemoveNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -7049,10 +7200,12 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 	if !ok {
 		return
 	}
-	if !a.g.IsTombstoned(id) {
+	wasLive := !a.g.IsTombstoned(id)
+	if wasLive {
 		a.g.IncrNodesRemoved()
 	}
 	a.g.RemoveNode(n)
+	a.rec().recordRemoveNode(n, wasLive)
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -7062,9 +7215,16 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetNodeProperty(n, key)
+	}
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
+	r.recordSetNodeProperty(n, key, prev, had)
 	_ = a.tx.SetNodeProperty(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -7079,7 +7239,14 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 
 // DelNodeProperty removes the named property from n.
 func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetNodeProperty(n, key)
+	}
 	a.g.DelNodeProperty(n, key)
+	r.recordDelNodeProperty(n, key, prev, had)
 	_ = a.tx.DelNodeProperty(n, key) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -7107,7 +7274,10 @@ func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
 func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	r := a.rec()
+	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.g.SetEdgeLabel(src, dst, label)
+	r.recordSetEdgeLabel(src, dst, label, hadLabel)
 	_ = a.tx.SetEdgeLabel(src, dst, label) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -7121,9 +7291,16 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
 func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	}
 	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
+	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	_ = a.tx.SetEdgeProperty(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -7139,7 +7316,14 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
 func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	}
 	a.g.DelEdgeProperty(src, dst, key)
+	r.recordDelEdgeProperty(src, dst, key, prev, had)
 	_ = a.tx.DelEdgeProperty(src, dst, key) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -7166,16 +7350,32 @@ func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *walMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
-	return a.g.IncEdgeCreateCount(src, dst)
+	n := a.g.IncEdgeCreateCount(src, dst)
+	a.rec().recordIncEdgeCreateCount(src, dst)
+	return n
 }
 func (a *walMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
-func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) { a.g.DecEdgeCreateCount(src, dst) }
+func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	r := a.rec()
+	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
+	a.g.DecEdgeCreateCount(src, dst)
+	r.recordDecEdgeCreateCount(src, dst, had)
+}
 
 // SetEdgeLabelAt / EdgeLabelsAt / SetEdgePropertyAt / EdgePropertiesAt /
 // RemoveEdgeInstance delegate to the per-instance metadata stores on
 // the underlying [lpg.Graph].
+//
+// These per-instance / per-handle setters intentionally record NO separate undo
+// entry: CreateRelationship is their only caller and always invokes them on a
+// handle/instance it allocated via AddEdgeH in the SAME operator, so the matching
+// recordAddEdge inverse already removes that edge — and [Graph.RemoveEdge] →
+// clearEdgePairState drops the pair's per-handle and per-instance metadata once
+// the last edge between the endpoints is gone. The exotic case (a per-handle
+// metadata set on an edge that a later failed row removes while a parallel edge
+// survives) is the deferred follow-up documented at recordRemoveEdge.
 func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
 	a.g.SetEdgeLabelAt(src, dst, idx, label)
 }
