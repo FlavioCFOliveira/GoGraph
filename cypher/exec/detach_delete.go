@@ -165,12 +165,32 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	outgoing := op.mutator.OutNeighbours(nodeKey)
 	incoming := op.mutator.InNeighbours(nodeKey)
 
+	// The per-Next ctx check above is per node; a supernode's incident-edge
+	// sweep is O(degree) under the visibility barrier, so poll ctx.Err()
+	// every 4096 edges (canonical stride) to keep a high-degree DETACH
+	// DELETE interruptible. Returning an error here propagates out of
+	// Next; the surrounding write path (ApplyAtomically barrier +
+	// recoverWriteQueryPanic) rolls the transaction back and releases the
+	// single-writer mutex.
+	swept := 0
 	// Remove all outgoing edges.
 	for _, dst := range outgoing {
+		if swept&0xFFF == 0 {
+			if err := op.ctx.Err(); err != nil {
+				return false, err
+			}
+		}
+		swept++
 		op.mutator.RemoveEdge(nodeKey, dst)
 	}
 	// Remove all incoming edges.
 	for _, src := range incoming {
+		if swept&0xFFF == 0 {
+			if err := op.ctx.Err(); err != nil {
+				return false, err
+			}
+		}
+		swept++
 		op.mutator.RemoveEdge(src, nodeKey)
 	}
 
@@ -199,6 +219,12 @@ func (op *DetachDelete) Close() error {
 // Relationships are deleted implicitly via the incident-edge sweep, so
 // duplicate or path-internal edges are handled automatically.
 func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
+	// One counter spans every node in the path: a path through a
+	// supernode still sweeps O(degree) edges in this single Next(), so
+	// poll ctx.Err() every 4096 edges (canonical stride). An error is
+	// returned to Next, which the write path rolls back under the
+	// visibility barrier.
+	swept := 0
 	for _, n := range p.Nodes {
 		nodeKey, resolved := op.mutator.ResolveNodeLabel(graph.NodeID(n.ID))
 		if !resolved {
@@ -207,9 +233,21 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 		outgoing := op.mutator.OutNeighbours(nodeKey)
 		incoming := op.mutator.InNeighbours(nodeKey)
 		for _, dst := range outgoing {
+			if swept&0xFFF == 0 {
+				if err := op.ctx.Err(); err != nil {
+					return err
+				}
+			}
+			swept++
 			op.mutator.RemoveEdge(nodeKey, dst)
 		}
 		for _, src := range incoming {
+			if swept&0xFFF == 0 {
+				if err := op.ctx.Err(); err != nil {
+					return err
+				}
+			}
+			swept++
 			op.mutator.RemoveEdge(src, nodeKey)
 		}
 		for _, lbl := range op.mutator.NodeLabels(nodeKey) {

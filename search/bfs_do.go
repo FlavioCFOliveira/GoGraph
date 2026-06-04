@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -29,20 +30,40 @@ import (
 // zero-allocation per call.
 func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
 	defer metrics.Time("search.BFSDirectionOpt")()
-	bfsDoCore(c, src, visit, nil)
+	_ = bfsDoCore(context.Background(), c, src, visit, nil)
 }
 
-// bfsDoCore is the shared body of [BFSDirectionOpt]. The obs callback
-// is invoked once per step with (depth, isBottomUp) and is the test
-// hook that validates the Beamer alpha/beta regime; production
-// callers go through [BFSDirectionOpt] which passes obs=nil, so the
-// observer branch is dead-code-eliminated by the compiler at the
-// call site.
-func bfsDoCore[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool, obs func(depth int, isBottomUp bool)) {
+// BFSDirectionOptCtx is the context-aware variant of [BFSDirectionOpt].
+// ctx.Err() is checked at the top of the direction-switch driver loop
+// (once per step) and at 4096-node granularity inside the bottom-up
+// scan; on cancellation the traversal stops and returns the wrapped
+// ctx.Err() without further visit invocations. The result for a
+// non-cancelled context is identical to [BFSDirectionOpt].
+//
+// Because the bottom-up phase performs a full O(V) scan per step, the
+// per-step driver check alone leaves a large uninterruptible window on
+// power-law graphs; the in-scan 4096-node check bounds cancellation
+// latency within that phase as well.
+func BFSDirectionOptCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
+	defer metrics.Time("search.BFSDirectionOptCtx")()
+	return bfsDoCore(ctx, c, src, visit, nil)
+}
+
+// bfsDoCore is the shared body of [BFSDirectionOpt] and
+// [BFSDirectionOptCtx]. The obs callback is invoked once per step with
+// (depth, isBottomUp) and is the test hook that validates the Beamer
+// alpha/beta regime; production callers go through [BFSDirectionOpt] /
+// [BFSDirectionOptCtx] which pass obs=nil, so the observer branch is
+// dead-code-eliminated by the compiler at the call site.
+//
+// ctx.Err() is consulted at the top of the driver loop and inside the
+// bottom-up scan; it returns the first observed cancellation error and
+// nil otherwise.
+func bfsDoCore[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool, obs func(depth int, isBottomUp bool)) error {
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	if uint64(src)+1 >= uint64(len(verts)) {
-		return
+		return nil
 	}
 	maxID := uint64(c.MaxNodeID())
 	words := int((maxID + 63) / 64)
@@ -70,6 +91,12 @@ func bfsDoCore[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.Nod
 	const beta uint64 = 24
 	inBottomUp := false
 	for len(cur) > 0 {
+		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.BFSDirectionOptCtx.errors", 1)
+			scr.curList = cur
+			scr.nextList = next
+			return err
+		}
 		var frontierEdges uint64
 		for _, n := range cur {
 			frontierEdges += verts[uint64(n)+1] - verts[uint64(n)]
@@ -81,25 +108,32 @@ func bfsDoCore[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.Nod
 			inBottomUp = false
 		}
 		var stopped bool
+		var stepErr error
 		if inBottomUp {
 			if obs != nil {
 				obs(depth, true)
 			}
-			cur, next, stopped = bottomUpStep(verts, edges, visited, frontier, maxID, cur, next, &depth, visit)
+			cur, next, stopped, stepErr = bottomUpStep(ctx, verts, edges, visited, frontier, maxID, cur, next, &depth, visit)
 		} else {
 			if obs != nil {
 				obs(depth, false)
 			}
 			cur, next, stopped = topDownStep(verts, edges, visited, cur, next, &depth, visit)
 		}
+		if stepErr != nil {
+			scr.curList = cur
+			scr.nextList = next
+			return stepErr
+		}
 		if stopped {
 			scr.curList = cur
 			scr.nextList = next
-			return
+			return nil
 		}
 	}
 	scr.curList = cur
 	scr.nextList = next
+	return nil
 }
 
 func edgesUnvisited(verts, visited []uint64) uint64 {
@@ -153,6 +187,7 @@ func topDownStep(
 // cur is the next frontier (list) and the returned next is the old
 // cur truncated to zero — same swap convention as topDownStep.
 func bottomUpStep(
+	ctx context.Context,
 	verts []uint64,
 	edges []graph.NodeID,
 	visited []uint64,
@@ -161,10 +196,10 @@ func bottomUpStep(
 	cur, next []graph.NodeID,
 	depth *int,
 	visit func(graph.NodeID, int) bool,
-) (newCur, newNext []graph.NodeID, stopped bool) {
+) (newCur, newNext []graph.NodeID, stopped bool, err error) {
 	for _, n := range cur {
 		if !visit(n, *depth) {
-			return cur, next, true
+			return cur, next, true, nil
 		}
 	}
 	// Build the frontier bitmap from cur. The bitmap is reused from
@@ -178,7 +213,16 @@ func bottomUpStep(
 		frontier[uint64(n)>>6] |= 1 << (uint64(n) & 63)
 	}
 	next = next[:0]
+	// The unvisited-node scan is O(V) per bottom-up step; poll ctx.Err()
+	// every 4096 scanned nodes (mirrors the search package's canonical
+	// stride) so cancellation latency inside the scan is bounded.
 	for id := uint64(0); id < maxID; id++ {
+		if id&0xFFF == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				metrics.IncCounter("search.BFSDirectionOptCtx.errors", 1)
+				return cur, next, false, cerr
+			}
+		}
 		word := id >> 6
 		bit := uint64(1) << (id & 63)
 		if visited[word]&bit != 0 {
@@ -196,7 +240,7 @@ func bottomUpStep(
 		}
 	}
 	*depth++
-	return next, cur[:0], false
+	return next, cur[:0], false, nil
 }
 
 // bfsDoScratch bundles the BFS-DO per-call working storage so it can

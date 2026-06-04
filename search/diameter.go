@@ -31,8 +31,11 @@ func Diameter[W any](c *csr.CSR[W]) (lo, hi int, exact bool) {
 }
 
 // DiameterCtx is the context-aware variant of [Diameter]. ctx.Err()
-// is checked once per BFS sweep; on cancellation returns
-// (0, 0, false, wrapped ctx.Err()).
+// is checked once per BFS sweep and before each per-vertex
+// eccentricity BFS inside an iFUB level (a single level can hold O(V)
+// vertices, each costing a full O(V+E) BFS, so a per-level check alone
+// leaves an O(V*(V+E)) uninterruptible window); on cancellation returns
+// the bounds reached so far together with the wrapped ctx.Err().
 //
 //nolint:gocyclo // 2-sweep + iFUB refinement: precondition checks + sweeps + level walk
 func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact bool, err error) {
@@ -110,6 +113,13 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 		for v := 0; v < n; v++ {
 			if distFromU[v] != k {
 				continue
+			}
+			// Each vertex at this level costs a full O(V+E) BFS, so
+			// poll before every sweep rather than once per level —
+			// this bounds cancellation latency to a single inner BFS.
+			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.DiameterCtx.errors", 1)
+				return lo, hi, false, err
 			}
 			_, distV := bfsFarthest(verts, edges, graph.NodeID(v), distInner)
 			ecc := 0

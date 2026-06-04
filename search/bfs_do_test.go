@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"math/rand/v2"
 	"testing"
 
@@ -185,7 +186,7 @@ func TestBFSDirectionOpt_BetaSwitchBack(t *testing.T) {
 		}{depth, isBottomUp})
 	}
 
-	bfsDoCore(c, src, func(_ graph.NodeID, _ int) bool { return true }, obs)
+	_ = bfsDoCore(context.Background(), c, src, func(_ graph.NodeID, _ int) bool { return true }, obs)
 
 	if len(steps) < 3 {
 		t.Fatalf("expected >= 3 BFS-DO steps, got %d", len(steps))

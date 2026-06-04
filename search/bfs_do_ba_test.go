@@ -11,6 +11,7 @@ package search
 //     that the Beamer alpha/beta regime fired on this power-law topology.
 
 import (
+	"context"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -47,7 +48,7 @@ func TestBFSDirectionOpt_BA_MatchesBFSAndSwitches(t *testing.T) {
 			sawBottomUp = true
 		}
 	}
-	bfsDoCore(c, srcID, func(node graph.NodeID, d int) bool {
+	_ = bfsDoCore(context.Background(), c, srcID, func(node graph.NodeID, d int) bool {
 		doDist[node] = d
 		return true
 	}, obs)

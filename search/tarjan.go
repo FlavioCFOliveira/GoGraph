@@ -33,7 +33,11 @@ func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
 
 // TarjanSCCCtx is the context-aware variant of [TarjanSCC]. ctx.Err()
 // is checked at every restart of the outer DFS loop (i.e. before each
-// new root); on cancellation returns (nil, wrapped ctx.Err()).
+// new root) and every 4096 work-stack steps inside the inner DFS loop;
+// on cancellation returns (nil, wrapped ctx.Err()). The inner check is
+// required because a single strongly connected component (e.g. one
+// giant cycle) is explored from a single root, so the whole O(V+E)
+// traversal would otherwise be one uninterruptible outer iteration.
 func TarjanSCCCtx[W any](ctx context.Context, c *csr.CSR[W]) ([][]graph.NodeID, error) {
 	defer metrics.Time("search.TarjanSCCCtx")()
 	maxID := uint64(c.MaxNodeID())
@@ -62,6 +66,10 @@ func TarjanSCCCtx[W any](ctx context.Context, c *csr.CSR[W]) ([][]graph.NodeID, 
 	var out [][]graph.NodeID
 
 	var work []tarjanFrame
+	// popCount drives the inner-loop ctx poll at the canonical 4096
+	// stride; it spans every root so one giant SCC explored from a
+	// single root is still cancellable mid-traversal.
+	popCount := 0
 
 	for start := uint64(0); start < maxID; start++ {
 		if !live[start] || index[start] != unvisited {
@@ -80,6 +88,13 @@ func TarjanSCCCtx[W any](ctx context.Context, c *csr.CSR[W]) ([][]graph.NodeID, 
 		work = append(work, tarjanFrame{v: graph.NodeID(start), next: verts[start]})
 
 		for len(work) > 0 {
+			if popCount&0xFFF == 0 {
+				if err := ctx.Err(); err != nil {
+					metrics.IncCounter("search.TarjanSCCCtx.errors", 1)
+					return nil, err
+				}
+			}
+			popCount++
 			top := &work[len(work)-1]
 			vIdx := uint64(top.v)
 			if top.next < verts[vIdx+1] {

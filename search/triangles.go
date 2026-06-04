@@ -58,8 +58,12 @@ func CountTriangles[W any](c *csr.CSR[W]) (total int64, perNode []int64) {
 }
 
 // CountTrianglesCtx is the context-aware variant of [CountTriangles].
-// ctx.Err() is checked every 4096 outer-loop iterations; on
-// cancellation returns (0, nil, wrapped ctx.Err()).
+// ctx.Err() is checked every 4096 candidate-pair iterations of the
+// inner neighbour-pair loop; on cancellation returns
+// (0, nil, wrapped ctx.Err()). The counter advances on inner work
+// rather than per outer vertex because the inner pair-loop is
+// O(deg(v)^2): at a star-hub vertex (degree in the millions) a single
+// outer iteration would otherwise run O(V^2) with no ctx check.
 //
 //nolint:gocyclo // canonical degree-ordered node-iterator triangle count
 func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, perNode []int64, err error) {
@@ -106,13 +110,6 @@ func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, 
 	perNode = make([]int64, n)
 	loops := 0
 	for v := 0; v < n; v++ {
-		loops++
-		if loops&0xFFF == 0 {
-			if cerr := ctx.Err(); cerr != nil {
-				metrics.IncCounter("search.CountTrianglesCtx.errors", 1)
-				return 0, nil, cerr
-			}
-		}
 		// Collect the higher-ranked neighbours of v.
 		nb := adjBuf[verts[v]:verts[v+1]]
 		// For each pair (u, w) where rank[u] > rank[v] and rank[w] > rank[v]
@@ -124,6 +121,16 @@ func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, 
 			}
 			uAdj := adjBuf[verts[u]:verts[u+1]]
 			for j := i + 1; j < len(nb); j++ {
+				// Poll on inner work: the pair-loop is O(deg(v)^2), so
+				// counting candidate pairs (not outer vertices) bounds
+				// cancellation latency at a high-degree hub.
+				if loops&0xFFF == 0 {
+					if cerr := ctx.Err(); cerr != nil {
+						metrics.IncCounter("search.CountTrianglesCtx.errors", 1)
+						return 0, nil, cerr
+					}
+				}
+				loops++
 				w := nb[j]
 				if rank[w] <= rank[v] {
 					continue
