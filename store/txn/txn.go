@@ -250,6 +250,9 @@ type Options[N comparable, W any] struct {
 // transactions serialise on the store mutex, so only one Tx is
 // active at any moment. Reads on the underlying lpg.Graph remain
 // concurrent and lock-free per the lpg/adjlist contracts.
+// [Store.RunUnderCommitLock] runs a closure while holding that same
+// commit mutex, so a background checkpointer can exclude the commit
+// window while it snapshots and truncates the WAL.
 type Store[N comparable, W any] struct {
 	mu     sync.Mutex
 	g      *lpg.Graph[N, W]
@@ -332,6 +335,35 @@ func (s *Store[N, W]) WeightCodec() WeightCodec[W] { return s.wcodec }
 
 // Graph returns the underlying graph.
 func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
+
+// RunUnderCommitLock runs fn while holding the store's single-writer
+// commit mutex — the SAME mutex [Store.Begin] acquires and
+// [Tx.Commit]/[Tx.CommitWALOnly]/[Tx.Rollback] release. While fn runs no
+// transaction can be between Begin and its commit/rollback: neither a new
+// in-memory apply (the [lpg.Graph.ApplyAtomically] window opened inside a
+// transaction) nor a new WAL frame append can race fn.
+//
+// This is the serialisation seam a background checkpointer needs to take a
+// consistent snapshot and truncate the WAL atomically against the commit
+// path: the store mutex is otherwise private, so an external checkpointer
+// wired only with its own mutex would never exclude the engine's eager
+// write+commit window (see store/checkpoint and docs/acid-audit.md F3.5).
+//
+// fn must not call [Store.Begin]/[Store.BeginCtx] or open a transaction on
+// this store (the mutex is not re-entrant — that would deadlock). fn MAY
+// read the graph through [lpg.Graph.View]; the resulting lock order is
+// store-mutex → visMu, which matches the engine's own order
+// (Begin acquires the store mutex, then ApplyAtomically acquires visMu), so
+// no new deadlock is introduced. fn's error is returned unwrapped.
+//
+// Concurrency: safe to call from any goroutine; it serialises against every
+// transaction on the store.
+func (s *Store[N, W]) RunUnderCommitLock(fn func() error) error {
+	defer metrics.Time("store.txn.RunUnderCommitLock")()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fn()
+}
 
 // Begin opens a new transaction. The returned Tx holds the
 // store's single-writer mutex until Commit or Rollback runs.

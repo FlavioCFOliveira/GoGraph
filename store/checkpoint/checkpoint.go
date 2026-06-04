@@ -3,10 +3,18 @@
 // Without this the WAL would grow unbounded during steady-state
 // operation.
 //
-// The checkpointer is non-blocking for writers: it takes the
-// snapshot under the same store mutex used by [store/txn.Tx], holds
-// it only for the brief moment needed to swap files, then releases
-// it for the next transaction.
+// The checkpointer takes the snapshot and truncates the WAL under the
+// store's commit serialisation, so no transaction can be mid-apply or
+// mid-commit during that window: the snapshot is a consistent
+// transaction-boundary image and the truncation never drops a frame
+// committed after the snapshot. Wire it with [WithCommitSerialiser]
+// ([txn.Store.RunUnderCommitLock]) when the store is driven by the Cypher
+// engine, whose commit mutex is private and is therefore NOT the storeMu an
+// external checkpointer is constructed with (see docs/acid-audit.md F3.5).
+// The serialisation is held for the whole snapshot write, so the checkpointer
+// blocks writers for the duration of the disk I/O; a non-blocking,
+// watermark-bounded truncate is the documented future optimisation
+// (docs/isolation-design.md, "Checkpoint and recovery").
 package checkpoint
 
 import (
@@ -61,6 +69,19 @@ type Checkpointer[N comparable, W any] struct {
 	g       *lpg.Graph[N, W]
 	wlog    *wal.Writer
 	storeMu *sync.Mutex
+	// serialise, when non-nil, runs the whole snapshot+truncate critical
+	// section under the store's real commit serialisation
+	// ([txn.Store.RunUnderCommitLock]) instead of the raw storeMu. It is
+	// the correct seam for an engine-driven store, whose commit mutex is
+	// private and therefore never the same object as storeMu: holding it
+	// excludes the engine's eager write+WAL-commit window so the snapshot
+	// can never capture a partially-applied transaction and the WAL
+	// truncation can never drop a frame committed after the snapshot
+	// (see WithCommitSerialiser and docs/acid-audit.md F3.5). When nil the
+	// checkpointer falls back to locking storeMu directly (the historical
+	// behaviour, correct only when storeMu IS the commit mutex, e.g. a
+	// caller that serialises its own writes under storeMu).
+	serialise func(func() error) error
 	// codec, when non-nil, serialises the NodeID->key mapper into a
 	// self-sufficient snapshot for ANY key type N (see WithMapperCodec).
 	// When nil the checkpointer falls back to the string-only mapper:
@@ -106,11 +127,52 @@ func WithMapperCodec[N comparable, W any](codec txn.Codec[N]) Option[N, W] {
 	}
 }
 
+// WithCommitSerialiser makes the checkpointer run its entire
+// snapshot-capture + WAL-truncate critical section under serialise instead
+// of locking the raw storeMu passed to [New]. Pass the owning store's
+// [txn.Store.RunUnderCommitLock]:
+//
+//	cp := checkpoint.New(cfg, store.Graph(), wlog, &unusedMu,
+//		checkpoint.WithCommitSerialiser[string, float64](store.RunUnderCommitLock),
+//		checkpoint.WithMapperCodec[string, float64](store.Codec()))
+//
+// Why this matters: the engine write path (cypher.Engine over a txn.Store)
+// applies its in-memory mutations and appends its WAL frames while holding
+// the store's PRIVATE commit mutex, from txn.Store.Begin until the
+// transaction's commit in cypher Result.Close. That mutex is not the storeMu
+// an external checkpointer is constructed with, so without this option the
+// checkpointer never excludes the commit window: it can build the snapshot
+// from a half-applied transaction, and it can truncate a WAL frame committed
+// after the snapshot was taken — both violations of the ACID guarantees
+// (docs/acid-audit.md F3.5). Running the critical section under
+// RunUnderCommitLock closes both windows because no transaction can be
+// between Begin and commit while serialise holds the commit mutex.
+//
+// The snapshot is additionally taken inside [lpg.Graph.View] regardless of
+// this option, so the captured adjacency is always barrier-consistent; the
+// serialiser is what additionally makes the truncate safe and the snapshot
+// transaction-boundary aligned for the engine wiring.
+//
+// A nil serialiser is ignored (the checkpointer keeps locking storeMu).
+func WithCommitSerialiser[N comparable, W any](serialise func(func() error) error) Option[N, W] {
+	return func(c *Checkpointer[N, W]) {
+		if serialise != nil {
+			c.serialise = serialise
+		}
+	}
+}
+
 // New returns a Checkpointer; call Start to launch the goroutine.
 //
-// storeMu must be the same mutex the transaction layer holds during
-// commit; the checkpointer acquires it briefly to take a consistent
-// snapshot of the graph state.
+// storeMu is the serialisation the checkpointer holds across the
+// snapshot+truncate window WHEN no [WithCommitSerialiser] is supplied. It is
+// correct only when the caller performs every write while holding this same
+// mutex. For a [txn.Store] driven by the Cypher engine the commit mutex is
+// private and unreachable, so storeMu can never be that mutex; such callers
+// MUST pass [WithCommitSerialiser]([txn.Store.RunUnderCommitLock]), which
+// supersedes storeMu and excludes the engine's eager write+commit window
+// (docs/acid-audit.md F3.5). When a serialiser is supplied storeMu is unused
+// and may be any mutex (a throwaway is fine).
 //
 // Pass [WithMapperCodec] to make non-string-keyed snapshots
 // self-sufficient so the WAL can be truncated for every key type; see
@@ -263,18 +325,41 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 		c.lastDuration.Store(uint64(time.Since(start).Nanoseconds()))
 	}()
 
-	// Hold storeMu around the entire snapshot+truncate window so that
-	// no transaction commits new WAL frames between the snapshot
-	// capture and the truncation. The trade-off is that the lock is
-	// held during disk I/O for the duration of the snapshot write;
-	// for very large graphs this can stall writers and may be
-	// reworked later to a position-tracked truncate (capture LSN
-	// under lock, write snapshot lock-free, truncate up-to-LSN under
-	// lock). For v1 the simple correctness-first path is preferred.
+	// Run the entire snapshot+truncate window under the store's commit
+	// serialisation so that no transaction commits new WAL frames — and no
+	// transaction's in-memory apply runs — between the snapshot capture and
+	// the truncation. When a commit serialiser is wired (WithCommitSerialiser,
+	// the engine path) the window holds the store's PRIVATE commit mutex,
+	// which the engine actually takes from Begin to commit; without one we
+	// fall back to locking the raw storeMu (correct only when the caller
+	// serialises its own writes under that same mutex). Either way the
+	// snapshot itself is captured inside Graph.View so the adjacency is
+	// barrier-consistent even if the serialisation is misconfigured.
+	//
+	// The trade-off is that the serialisation is held during disk I/O for the
+	// duration of the snapshot write; for very large graphs this can stall
+	// writers and may be reworked later to a position-tracked truncate
+	// (capture LSN under lock, write snapshot lock-free, truncate up-to-LSN
+	// under lock). For v1 the simple correctness-first path is preferred.
+	if c.serialise != nil {
+		return c.serialise(c.runCheckpointLocked)
+	}
 	c.storeMu.Lock()
 	defer c.storeMu.Unlock()
+	return c.runCheckpointLocked()
+}
 
-	cs := csr.BuildFromAdjList(c.g.AdjList())
+// runCheckpointLocked performs the snapshot capture and WAL truncation. It
+// MUST be called with the store's commit serialisation held (either via
+// c.serialise or with c.storeMu locked) so no transaction can be mid-apply
+// or mid-commit while it runs. The CSR is built inside [lpg.Graph.View] so
+// the captured adjacency reflects a single transaction-boundary state with
+// no partially-applied transaction visible.
+func (c *Checkpointer[N, W]) runCheckpointLocked() error {
+	var cs *csr.CSR[W]
+	c.g.View(func() {
+		cs = csr.BuildFromAdjList(c.g.AdjList())
+	})
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
 	// Durability invariant (audit gaps F2/F3): the snapshot MUST be a
 	// self-sufficient image of the committed state — CSR adjacency PLUS

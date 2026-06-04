@@ -200,9 +200,28 @@ transaction**:
 - **Secondary indexes** (F3.4): the `index.Manager` buffer is committed inside
   the same write barrier, so index seeks never observe a partial transaction;
   the live roaring label bitmaps already update there.
-- **Checkpoint/recovery** (F3.5): the checkpointer holds the store mutex, which
-  serialises it against the apply, so it snapshots a consistent
-  transaction-boundary state (recovery proven by F2).
+- **Checkpoint/recovery** (F3.5): the checkpointer runs its whole
+  snapshot-capture + WAL-truncate window under the store's commit
+  serialisation (`txn.Store.RunUnderCommitLock`, wired via
+  `checkpoint.WithCommitSerialiser`), and additionally builds the CSR inside
+  `lpg.Graph.View`. The earlier claim that the externally-supplied `storeMu`
+  serialised the checkpoint against the engine apply was FALSE for the engine
+  path: the engine holds the store's *private* commit mutex from
+  `txn.Store.Begin` until the transaction commits in `cypher.Result.Close`
+  (with the eager `ApplyAtomically` apply and the WAL `Append` both inside
+  that window), and that mutex was never the same object as the `storeMu` an
+  external checkpointer was constructed with. So the old wiring excluded
+  nothing: the checkpoint could build the CSR mid-apply (a partial-transaction
+  snapshot) and could truncate a WAL frame committed after the snapshot — and
+  `wal.Writer.Truncate` discards the whole WAL prefix — losing that committed
+  transaction. Running the window under the real commit mutex closes both: no
+  transaction can be between `Begin` and commit while the checkpointer holds
+  it, so the snapshot is a consistent transaction-boundary image and the
+  truncation never drops a committed frame (recovery proven by F2). Verified
+  under `-race` by `cypher.TestCheckpoint_SnapshotUnderBarrier_NoPartialTransaction`,
+  which asserts both the partial-transaction invariant (every edge keeps both
+  endpoints in the snapshot-only graph) and the no-committed-transaction-lost
+  invariant.
 
 Proven under `-race` by the invariant battery, all power-checked:
 `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (property atomicity,

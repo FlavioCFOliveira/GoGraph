@@ -254,13 +254,23 @@ Delivered:
   visible but whose index change is not. The live roaring label bitmaps already
   update inside the same window (`SetNodeLabel`/`SetEdgeLabel` run there). Lock
   order `visMu → index` matches the read side (`View → index`), so no deadlock.
-- **F3.5 (satisfied by existing serialization).** The checkpointer holds the
-  store mutex for its whole snapshot+truncate window, and `Tx.Commit`/`RunInTx`
-  hold that same mutex from `Begin` to commit (with the apply nested inside), so
-  a checkpoint never runs during an apply and captures a consistent
-  transaction-boundary snapshot; F2 proved recovery reconstructs the full state
-  from it. The non-blocking LSN/watermark checkpoint (read a pinned view without
-  holding the store mutex) is the deferred optimisation.
+- **F3.5 (fixed by routing the checkpoint through the commit mutex).** The
+  checkpointer now runs its whole snapshot+truncate window under
+  `txn.Store.RunUnderCommitLock` (wired via `checkpoint.WithCommitSerialiser`)
+  and builds the CSR inside `lpg.Graph.View`. `Tx.Commit`/`RunInTx` hold the
+  store's commit mutex from `Begin` to commit (with the eager apply and the WAL
+  append nested inside), so while the checkpoint holds that same mutex no
+  transaction can be mid-apply or mid-commit: the snapshot is a consistent
+  transaction-boundary image and the truncate never drops a frame committed
+  after the snapshot (`wal.Writer.Truncate` discards the whole prefix). The
+  earlier text claimed the *externally-supplied* `storeMu` already provided
+  this — false for the engine path, whose commit mutex is private and was never
+  that object, so the old wiring excluded neither window (consistency nor
+  truncate-safety). Lock order is store-mutex → visMu, matching the engine
+  (`Begin` takes the store mutex, then `ApplyAtomically` takes visMu), so no
+  deadlock. F2 proved recovery reconstructs the full state from the snapshot.
+  The non-blocking LSN/watermark checkpoint (read a pinned view without holding
+  the store mutex for the whole I/O) remains the deferred optimisation.
 - **F3.6 (done).** Isolation proven by the invariant battery under `-race`:
   `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (property atomicity,
   power-checked), `lpg.TestIsolation_CrossSubstructure_EdgeImpliesLabels`
