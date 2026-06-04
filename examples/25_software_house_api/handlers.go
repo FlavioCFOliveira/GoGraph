@@ -39,10 +39,12 @@ type queryResponse struct {
 }
 
 // handleQuery runs an arbitrary Cypher statement (read or write) through
-// Engine.RunAny. Writers take the exclusive lock, readers the shared lock;
-// the lock is held across RunAny, the full drain, and Close, because a
-// write holds the store's single-writer mutex until the result is closed
-// and a reader's plan-building must not observe a concurrent write.
+// Engine.RunAny. Writers take the exclusive hold, readers the shared hold;
+// the hold is kept across RunAny, the full drain, and Result.Close, because
+// a write holds the store's single-writer mutex until the result is closed
+// and a reader's plan-building must not observe a concurrent write. A
+// request that arrives after the store has been closed is rejected with
+// 503 rather than admitted onto the closing WAL.
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxQueryBodyBytes)
 	var req queryRequest
@@ -60,13 +62,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isWriteQuery(req.Query) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-	} else {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
+	release, err := s.ds.acquire(isWriteQuery(req.Query))
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
+		return
 	}
+	defer release()
 
 	res, err := s.ds.engine.RunAny(r.Context(), req.Query, req.Params)
 	if err != nil {
@@ -121,12 +122,17 @@ func writeQueryError(w http.ResponseWriter, err error) {
 	}
 }
 
-// handleSeed loads the deterministic fixture under the exclusive lock (it
+// handleSeed loads the deterministic fixture under the exclusive hold (it
 // is a bulk write). It is idempotent: the response reports whether data
-// was actually written.
+// was actually written. A seed that arrives after the store has been
+// closed is rejected with 503.
 func (s *Server) handleSeed(w http.ResponseWriter, _ *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	release, err := s.ds.acquire(true)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
+		return
+	}
+	defer release()
 
 	seeded, err := seedFixture(s.ds.txnStore)
 	if err != nil {
@@ -144,13 +150,18 @@ type statsResponse struct {
 }
 
 // handleStats counts nodes per type label and edges per relationship type.
-// The whole sweep runs under a single shared lock so the counts form one
+// The whole sweep runs under a single shared hold so the counts form one
 // consistent snapshot and no concurrent write can mutate the structures
-// the count queries read.
+// the count queries read. A request that arrives after the store has been
+// closed is rejected with 503.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	release, err := s.ds.acquire(false)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
+		return
+	}
+	defer release()
 
 	nodes := make(map[string]int64, len(nodeTypeLabels))
 	for _, lbl := range nodeTypeLabels {

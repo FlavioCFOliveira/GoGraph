@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -15,15 +14,15 @@ import (
 // Concurrency: the Cypher engine's read execution is lock-free over an
 // immutable snapshot, but its plan- and filter-building phase reads the
 // live adjacency offsets and interning tables, which a concurrent write
-// mutates. The mu RWMutex therefore serialises writes against reads: read
-// requests take RLock and run in parallel; write requests (and the seed)
-// take Lock and run exclusively. mu is always the outermost lock, acquired
-// before any engine call, so it cannot invert with the store's internal
-// single-writer mutex.
+// mutates. The serialisation that makes this safe lives in the dataStore,
+// not the Server: every handler enters through dataStore.acquire (a shared
+// hold for readers, an exclusive hold for writers), held across the whole
+// engine call. Because Close takes the same exclusive hold, the store owns
+// the complete read/write/close contract and a write can never be
+// mid-commit when the WAL is released.
 type Server struct {
 	ds   *dataStore
 	http *http.Server
-	mu   sync.RWMutex
 }
 
 // newServer wires the routes and configures a bounded *http.Server. All
@@ -62,10 +61,13 @@ func (s *Server) ListenAndServe() error {
 }
 
 // Shutdown gracefully drains in-flight requests, then flushes durable
-// state. The ordering — drain, snapshot, close WAL — guarantees the
-// snapshot is built from a quiescent graph (no concurrent write is
-// applying) and that any buffered WAL tail is fsynced. The snapshot is an
-// optimisation; durability is already guaranteed at each commit.
+// state. The ordering — drain, snapshot, close WAL — lets in-flight clients
+// receive their responses and builds the final snapshot from a quiescent
+// graph. Crash-safety no longer depends on this ordering: dataStore.Close
+// takes the store's exclusive hold itself, so it quiesces any straggler
+// write before releasing the WAL even if shutdown ordering changes. The
+// snapshot is an optimisation; durability is already guaranteed at each
+// commit.
 func (s *Server) Shutdown(ctx context.Context) error {
 	var errs []error
 	if err := s.http.Shutdown(ctx); err != nil {

@@ -78,13 +78,21 @@
 // engine's read execution is lock-free over an immutable snapshot and
 // write commits are atomic; however, its plan- and filter-building phase
 // reads the live adjacency offsets and interning tables, which a
-// concurrent write mutates. The server therefore serialises access with an
-// RWMutex: read queries take a shared lock and run in parallel, while write
-// queries and the seed take the exclusive lock. The mutex is the outermost
-// lock — acquired before any engine call — so it cannot invert with the
-// store's internal single-writer mutex. The guarantee delivered is
-// snapshot-isolation reads with serialised writes: a reader never observes
-// a partially-applied write, and writers never overlap.
+// concurrent write mutates. The store therefore serialises access with an
+// RWMutex it owns: read queries take a shared hold and run in parallel,
+// while write queries and the seed take the exclusive hold. The hold is the
+// outermost lock — acquired before any engine call and kept across the row
+// drain and Result.Close — so it cannot invert with the store's internal
+// single-writer mutex. The guarantee delivered is snapshot-isolation reads
+// with serialised writes: a reader never observes a partially-applied
+// write, and writers never overlap.
+//
+// Close participates in the same serialisation: it takes the exclusive hold
+// before releasing the WAL, so it cannot close the WAL underneath an
+// in-flight write that is about to fsync its commit (which would leave that
+// write applied in memory but lost from the WAL). Once Close has taken the
+// hold it marks the store closed, so any later request is cleanly rejected
+// with 503 rather than admitted onto the closing WAL.
 //
 // # Lifecycle and flags
 //
@@ -93,8 +101,10 @@
 //
 // On SIGINT or SIGTERM the server stops accepting connections, lets
 // in-flight requests finish, writes a final snapshot, and closes the WAL,
-// in that order. It exits 0 on a clean run, 1 on a runtime failure, and 2
-// on a usage error.
+// in that order. That ordering lets clients receive their responses;
+// crash-safety does not depend on it, because Close quiesces any straggler
+// write itself before releasing the WAL. The process exits 0 on a clean
+// run, 1 on a runtime failure, and 2 on a usage error.
 //
 // # Example session
 //

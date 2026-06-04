@@ -283,12 +283,21 @@ CSR, labels, properties and mapper images).
 ## Concurrency
 
 The store is opened once and shared by all handlers. Read queries run in
-parallel; write queries and the seed are serialised. The server takes a
-`sync.RWMutex` (read lock for readers, write lock for writers) as the outermost
-lock because the engine's plan-building phase reads live graph structures that a
-concurrent write mutates — see the note in `server.go`. The result is
-snapshot-isolation reads with serialised writes; `server_concurrency_test.go`
-exercises it under `-race`.
+parallel; write queries and the seed are serialised. The store owns a
+`sync.RWMutex` (a shared hold for readers, an exclusive hold for writers) as the
+outermost lock because the engine's plan-building phase reads live graph
+structures that a concurrent write mutates — see the note in `store.go`. The
+hold is kept across the engine call, the row drain, and `Result.Close`. The
+result is snapshot-isolation reads with serialised writes;
+`server_concurrency_test.go` exercises it under `-race`.
+
+`Close` takes the same exclusive hold before releasing the WAL, so it quiesces
+any in-flight write rather than closing the WAL underneath a commit that is
+about to fsync — which would otherwise leave that write applied in memory but
+lost from the WAL. After `Close` takes the hold it marks the store closed, so a
+request that arrives during shutdown is cleanly rejected with `503` instead of
+being admitted onto the closing WAL. `close_quiesce_test.go` proves the
+quiesce-and-reject contract under `-race`.
 
 ---
 
@@ -301,6 +310,8 @@ go test -race ./examples/25_software_house_api/...      # race detector
 
 Coverage: deterministic seed and the full query catalogue (`seed_test.go`),
 every endpoint and error path (`server_test.go`), concurrent readers/writers
-(`server_concurrency_test.go`), in-process reopen (`lifecycle_test.go`), and a
-real process restart under both SIGTERM and `kill -9` (`cross_process_test.go`).
-`go.uber.org/goleak` guards against goroutine leaks via `main_test.go`.
+(`server_concurrency_test.go`), the Close quiesce-and-reject contract against a
+concurrent write (`close_quiesce_test.go`), in-process reopen
+(`lifecycle_test.go`), and a real process restart under both SIGTERM and
+`kill -9` (`cross_process_test.go`). `go.uber.org/goleak` guards against
+goroutine leaks via `main_test.go`.
