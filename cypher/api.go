@@ -1182,10 +1182,12 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 // The finalizer is a fail-stop diagnostic, NOT a substitute for an explicit
 // Close. In particular, the finalizer runs at an unpredictable time after
 // the leak (it depends on the GC schedule) and CANNOT report errors back to
-// the caller. WAL-backed write transactions held open until finalisation
-// still commit lazily — a window during which other writers may be blocked
-// on the store mutex. Callers that need predictable resource release MUST
-// call Close themselves.
+// the caller. For a write [Result] from [Engine.RunInTx] the WAL transaction
+// is already committed (fsynced) or rolled back under the barrier before
+// RunInTx returns (#1281), so the store's single-writer mutex is released at
+// that point — a leaked, unclosed Result leaks only the ResultSet, not the
+// write lock. Callers that need predictable resource release MUST still call
+// Close themselves.
 //
 // Result is NOT safe for concurrent use.
 type Result struct {
@@ -1216,9 +1218,19 @@ type Result struct {
 	// transaction whose graph change is visible but whose index change is not.
 	bufHandled bool
 
+	// walHandled is set once the WAL transaction has been committed (fsynced)
+	// or rolled back inside the write query's ApplyAtomically window (#1281,
+	// durable-then-visible). When set, closeLocked must NOT touch r.tx again —
+	// the durability decision was already made and finalised under the barrier,
+	// so the WAL fsync happens-before the mutations become observable to a
+	// concurrent Graph.View reader. It is the WAL analogue of bufHandled. For a
+	// read query, or a write whose WAL commit is still deferred to Close (none,
+	// post-#1281), it stays false and closeLocked owns the commit/rollback.
+	walHandled bool
+
 	// undo holds the inverse of every in-memory mutation this write query
 	// applied eagerly. On a failed drain it is replayed in reverse inside the
-	// same ApplyAtomically window as the graph writes (commitIndexUnderBarrier),
+	// same ApplyAtomically window as the graph writes (commitUnderBarrier),
 	// so the live graph is restored before any reader can observe the partial
 	// transaction (Atomicity). nil for read queries. See undo.go.
 	undo *undoLog
@@ -1226,6 +1238,14 @@ type Result struct {
 	// inverse panicked), so the graph may be inconsistent. Err surfaces it
 	// wrapped in [ErrUndoFailed] alongside the triggering pipeline error.
 	undoErr error
+	// walErr is set non-nil when the in-barrier WAL fsync (CommitWALOnly)
+	// failed for an otherwise-successful write (#1281, durable-then-visible).
+	// The eager in-memory mutations have ALREADY been rolled back (undo
+	// replayed) and the WAL transaction rolled back, both under the barrier, so
+	// the failed write is neither visible nor durable. RunInTx surfaces walErr
+	// to the caller instead of returning the Result; Err also reports it so a
+	// caller that somehow holds the Result still learns the write did not land.
+	walErr error
 
 	// maxRows, when positive, caps the total number of rows Next() may return.
 	// Set from EngineOptions.MaxResultRows at result construction time.
@@ -1296,40 +1316,101 @@ func (r *Result) materialize() {
 	r.matOn = true
 }
 
-// commitIndexUnderBarrier flips the secondary-index buffer for a write query
-// inside the same ApplyAtomically window as the graph writes, so the indexes
-// become visible atomically with the graph (audit gap F3.4): an index-seek
-// read can never observe a transaction whose graph change is visible but whose
-// index change is not. It is a no-op for read queries (buf == nil) and is
-// idempotent (bufHandled). The commit/rollback decision uses the
-// post-materialise iteration error — on success the buffered index.Changes are
-// applied; on a failed write they are discarded — and closeLocked then leaves
-// the buffer alone.
+// commitUnderBarrier finalises a write query's transaction inside the same
+// [lpg.Graph.ApplyAtomically] window in which its mutations were applied,
+// enforcing the durable-then-visible ordering ACID Durability requires
+// (#1281). The visibility barrier (visMu) is still held when this runs, so
+// whatever decision it makes — keep the writes or roll them back — becomes
+// observable to a concurrent [lpg.Graph.View] reader as a single atomic step,
+// and the WAL fsync that gates "keep" happens-before that visibility flip.
 //
-// On the failed-write branch it ALSO rolls back the in-memory graph by replaying
-// the transaction-undo log (undo.go) in reverse, in this same barrier window, so
-// the rows the statement eagerly applied before the error never become visible to
-// a concurrent [lpg.Graph.View] reader or the next query (Atomicity, task #1282).
-// The undo runs before the index rollback so the secondary indexes are dropped
-// only after the graph entries they describe are gone. A success commits the
-// graph (nothing to undo) and discards the log. If the undo replay itself fails,
-// undoErr is recorded so [Result.Err] surfaces [ErrUndoFailed].
-func (r *Result) commitIndexUnderBarrier() {
-	if r.buf == nil || r.bufHandled {
+// It is a no-op for read queries (buf == nil and tx == nil) and is idempotent
+// (bufHandled / walHandled). The keep/roll-back decision uses the
+// post-materialise iteration error:
+//
+//   - Failed write (drain error). Replay the transaction-undo log (undo.go) to
+//     roll the live in-memory graph back to its pre-statement state, then roll
+//     back the secondary-index buffer and the WAL transaction. The undo runs
+//     before the index rollback so the indexes are dropped only after the graph
+//     entries they describe are gone. Nothing was made durable. If the undo
+//     replay itself fails, undoErr is recorded so [Result.Err] surfaces
+//     [ErrUndoFailed].
+//
+//   - Successful write. fsync the WAL FIRST (CommitWALOnly) so durability is
+//     secured before the writes are allowed to remain visible past the barrier.
+//     Only when the fsync succeeds is the index buffer committed and the undo
+//     log dropped — the transaction is now durable AND visible as one step. If
+//     the fsync FAILS, the in-memory writes are NOT durable, so they must not
+//     stay visible: the undo log is replayed (rolling the graph back), the index
+//     buffer is rolled back, the WAL transaction is rolled back, and walErr is
+//     recorded. RunInTx then surfaces walErr instead of the Result, so a write
+//     whose durability could not be guaranteed is reported as a failure rather
+//     than acknowledged as a non-durable success.
+//
+// Pre-#1281 the WAL fsync happened later, in [Result.Close], AFTER visMu was
+// released — a window in which a concurrent reader could observe (and act on) a
+// write that a crash before Close would lose. Moving the fsync in here closes
+// that window. The documented trade-off (docs/isolation-design.md: the barrier
+// is correctness-first) is that the fsync now runs while visMu is held,
+// briefly excluding transactional readers for the duration of the disk sync;
+// the lock-free per-shard snapshot is the tracked performance end-state, and
+// the read/analytics CSR path does not go through this barrier.
+func (r *Result) commitUnderBarrier() {
+	if r.bufHandled && r.walHandled {
 		return
 	}
 	if r.rs.Err() != nil {
-		if r.undo != nil && !r.undo.replay() {
-			r.undoErr = wrapUndoFailure(nil)
+		r.rollbackUnderBarrier()
+		return
+	}
+	// Success path: durability before visibility. fsync the WAL before the
+	// index commit so the transaction is durable the instant its writes are
+	// allowed to remain observable past the barrier.
+	if r.tx != nil {
+		if werr := r.tx.CommitWALOnly(); werr != nil {
+			cmetrics.IncCounter("cypher.RunInTx.wal.commitErrors", 1)
+			// The fsync failed: roll the not-durable write back so it never
+			// stays visible, then surface the error from RunInTx.
+			r.walErr = werr
+			r.rollbackUnderBarrier()
+			return
 		}
-		r.buf.Rollback()
-	} else {
+		r.walHandled = true
+	}
+	if r.buf != nil {
 		r.buf.Commit(r.idxMgr)
-		// Success: the transaction is keeping its writes; drop the undo log so
-		// its closures (and their captured pre-images) are released for GC.
-		r.undo = nil
 	}
 	r.bufHandled = true
+	// Mark the WAL handled even when tx == nil (a store-less engine has no WAL to
+	// commit) so the idempotency guard above trips on a second call.
+	r.walHandled = true
+	// Success: the transaction is keeping its writes; drop the undo log so its
+	// closures (and their captured pre-images) are released for GC.
+	r.undo = nil
+}
+
+// rollbackUnderBarrier undoes a write query's eager in-memory mutations,
+// secondary-index buffer, and WAL transaction, all while the visibility barrier
+// is still held, so the rolled-back transaction never becomes observable to a
+// concurrent [lpg.Graph.View] reader (#1282 for the in-memory undo, #1281 for
+// the WAL rollback). It is shared by the drain-error and fsync-failure branches
+// of commitUnderBarrier. The undo runs first so the secondary indexes are
+// dropped only after the graph entries they describe are gone; the WAL
+// transaction is rolled back last (it holds no in-memory state). [txn.Tx.Rollback]
+// is idempotent against an already-finished transaction, so a tx whose
+// CommitWALOnly already ran (and failed) is not double-released.
+func (r *Result) rollbackUnderBarrier() {
+	if r.undo != nil && !r.undo.replay() {
+		r.undoErr = wrapUndoFailure(nil)
+	}
+	if r.buf != nil {
+		r.buf.Rollback()
+	}
+	if r.tx != nil {
+		_ = r.tx.Rollback() // release store mutex; in-memory state already restored
+	}
+	r.bufHandled = true
+	r.walHandled = true
 }
 
 // Err returns the first error encountered during iteration, or nil.
@@ -1339,9 +1420,17 @@ func (r *Result) commitIndexUnderBarrier() {
 // pipeline error wrapped together with ErrUndoFailed so the caller learns both
 // that the statement failed and that the rollback could not fully restore the
 // graph; either is matchable with [errors.Is].
+//
+// When the in-barrier WAL fsync failed (#1281), Err returns that error. RunInTx
+// already surfaces it directly and does not hand such a Result back, so this is
+// a defensive backstop for any caller that nonetheless holds the Result: it
+// reports that the write did not become durable (and was therefore rolled back).
 func (r *Result) Err() error {
 	if r.rowsErr != nil {
 		return r.rowsErr
+	}
+	if r.walErr != nil {
+		return r.walErr
 	}
 	pipeErr := r.rs.Err()
 	if r.undoErr != nil {
@@ -1357,12 +1446,16 @@ func (r *Result) Columns() []string { return r.cols }
 func (r *Result) IsClosed() bool { return r.closed.Load() }
 
 // Close releases all resources held by the result set.
-// When the result was created by [Engine.RunInTx], Close also:
-//  1. Commits or rolls back buffered index changes (always).
-//  2. When the engine is WAL-backed ([NewEngineWithStore]), WAL-syncs the
-//     buffered ops via [txn.Tx.CommitWALOnly] on success, or calls
-//     [txn.Tx.Rollback] on error. Mutations have already been applied to the
-//     in-memory graph eagerly; CommitWALOnly only persists them to the WAL.
+//
+// For a write [Result] created by [Engine.RunInTx], the buffered index changes
+// and the WAL transaction were already committed (durably, fsync first) or
+// rolled back inside the write query's [lpg.Graph.ApplyAtomically] window
+// (commitUnderBarrier, #1281). Close therefore only releases the underlying
+// ResultSet for such a result — the durability and visibility decision is made
+// and finalised before RunInTx returns, never deferred to Close. The
+// commit/rollback branches below survive only as a fallback for a Result that
+// reached Close without that in-barrier finalisation (e.g. one that was never
+// materialised), preserving the historical contract for that path.
 //
 // Close is idempotent: a second invocation returns nil without re-entering
 // the underlying ResultSet. The finalizer safety net also relies on this
@@ -1386,14 +1479,19 @@ func (r *Result) closeLocked() error {
 		// Fallback path: the index buffer was not flipped under the barrier
 		// (e.g. a Result that was never materialised). Commit/roll back here as
 		// before. Materialised write queries flip it inside ApplyAtomically via
-		// commitIndexUnderBarrier (bufHandled), so this branch is skipped.
+		// commitUnderBarrier (bufHandled), so this branch is skipped.
 		if err != nil || r.rs.Err() != nil {
 			r.buf.Rollback()
 		} else {
 			r.buf.Commit(r.idxMgr)
 		}
 	}
-	if r.tx != nil {
+	if r.tx != nil && !r.walHandled {
+		// Fallback path only: a materialised write query has already fsynced
+		// (durable-then-visible) or rolled back its WAL transaction under the
+		// barrier (walHandled, #1281), so this branch is skipped for it and the
+		// WAL fsync never happens after visMu is released. It survives for a
+		// Result that reached Close without in-barrier finalisation.
 		if err != nil || r.rs.Err() != nil {
 			_ = r.tx.Rollback() // release store mutex; in-memory state already dirty
 		} else {
@@ -6566,10 +6664,14 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// stops a concurrent reader from observing a torn snapshot and stops a
 	// concurrent writer from growing the node space mid-build. Holding visMu
 	// also makes every eager mutation flip visible to Graph.View readers
-	// atomically (audit gap F3, docs/isolation-design.md); materialising
-	// releases the lock before the caller iterates, and the transaction's WAL
-	// commit happens later in Result.Close (durability is independent of the
-	// visibility flip).
+	// atomically (audit gap F3, docs/isolation-design.md).
+	//
+	// The transaction's WAL fsync (CommitWALOnly) ALSO runs inside this barrier,
+	// before it is released, via commitUnderBarrier: the write is made durable
+	// BEFORE its mutations are allowed to remain visible past the barrier, so a
+	// reader never observes (and acts on) a write that a crash before the fsync
+	// would lose (#1281, Durability). materialising and the commit both happen
+	// under visMu; the lock is released only after, before the caller iterates.
 	//
 	// build runs under visMu.Lock; nothing here may call g.View/g.ApplyAtomically
 	// (visMu is non-re-entrant — see lpg.Graph.View/ApplyAtomically).
@@ -6599,12 +6701,14 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows)
 		r.undo = undo
 		r.materialize()
-		// Flip the secondary indexes inside the same barrier as the graph
-		// writes so index seeks never observe a partial transaction (F3.4).
-		// On the error branch this also replays the undo log to roll the
-		// in-memory graph back, so the visible state never contains the
-		// partial transaction (#1282).
-		r.commitIndexUnderBarrier()
+		// Finalise the transaction inside the same barrier as the graph writes:
+		// on success fsync the WAL FIRST and then commit the secondary indexes,
+		// so the transaction becomes durable-then-visible as one atomic step
+		// (#1281) and an index seek never observes a partial transaction (F3.4);
+		// on a drain error (or an fsync failure) replay the undo log and roll
+		// the index buffer and WAL transaction back, so the visible state never
+		// contains the partial — or non-durable — transaction (#1281, #1282).
+		r.commitUnderBarrier()
 		return nil
 	})
 	if buildErr != nil {
@@ -6612,6 +6716,17 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 			_ = walTx.Rollback()
 		}
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
+	// An in-barrier WAL fsync failure rolls the write back (in-memory undo
+	// replayed, index buffer and WAL transaction rolled back, all under the
+	// barrier) and records walErr: report it as a failed statement rather than
+	// hand back a Result for a write that is neither visible nor durable
+	// (#1281, Durability). The Result is discarded; its ResultSet/finalizer are
+	// harmless on the now-empty graph, but close it eagerly to release promptly.
+	if r != nil && r.walErr != nil {
+		werr := r.walErr
+		_ = r.Close()
+		return nil, fmt.Errorf("cypher: commit WAL: %w", werr)
 	}
 	return r, nil
 }
