@@ -90,7 +90,7 @@ func TestRecovery_Open_CustomCodec(t *testing.T) {
 
 	// Recover via Open, converting the txn.Options used by the writer
 	// into the field-identical recovery.Options.
-	res, err := Open[string, float64](dir, Options[string, float64](opts))
+	res, err := Open[string, float64](dir, OptionsFromTxn(opts))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

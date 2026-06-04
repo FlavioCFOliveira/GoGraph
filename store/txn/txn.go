@@ -59,6 +59,54 @@ import (
 // already been committed or rolled back.
 var ErrTxFinished = errors.New("txn: transaction already finished")
 
+// ErrTransactionTooLarge is returned by [Tx.Commit] / [Tx.CommitWALOnly]
+// when the transaction has buffered more than the store's per-transaction
+// op cap (see [DefaultMaxTxnOps] and the maxTxnOps argument of
+// [NewStoreWithCodecCapped] / [NewStoreWithOptionsCapped]). The check runs
+// in the commit/append path BEFORE any WAL frame is written, so a
+// rejected transaction is never made durable — nothing partial reaches
+// disk and the caller's in-memory rollback (the Cypher write path's undo
+// log, #1282) restores the pre-transaction state.
+//
+// The cap exists for ACID Durability and the "bounded resources" mandate:
+// recovery buffers an entire transaction's ops in memory before applying
+// them on the [OpCommit] marker, so a producer that could durably commit
+// an arbitrarily large transaction could write a WAL that recovery cannot
+// replay without unbounded allocation. The producer cap is therefore
+// always <= the recovery cap (both default to [DefaultMaxTxnOps]) so any
+// transaction that commits durably is guaranteed to replay; see
+// [store/recovery.ErrTransactionTooLarge] for the recovery-side bound.
+var ErrTransactionTooLarge = errors.New("txn: transaction exceeds the per-transaction op cap")
+
+// DefaultMaxTxnOps is the default upper bound on the number of ops a single
+// transaction may buffer before [Tx.Commit] / [Tx.CommitWALOnly] rejects it
+// with [ErrTransactionTooLarge]. It is applied by [NewStoreWithCodec] and
+// [NewStoreWithOptions] (the uncapped constructors pass it implicitly), and
+// is the same value [store/recovery] uses as its default recovery-side cap,
+// so the producer and recovery agree: any transaction the producer commits
+// durably is guaranteed to fit within the recovery buffer and replay.
+//
+// The bound caps the worst case — a single transaction whose op frames
+// recovery must buffer in memory before the [OpCommit] marker, or a
+// crafted/corrupt marker-less run of valid frames — so neither the producer
+// nor recovery allocates proportionally to an unbounded op count. It is set
+// high enough that ordinary transactions, the openCypher TCK (tiny
+// transactions), and every example stay well below it (it matches the
+// engine's sibling pipeline-breaker caps such as [DefaultMaxResultRows],
+// with headroom above them so a result-row-capped write still replays);
+// callers that genuinely need an unbounded transaction must opt out
+// explicitly with [MaxTxnOpsUnlimited].
+const DefaultMaxTxnOps = 16_000_000
+
+// MaxTxnOpsUnlimited is the explicit opt-out sentinel for the maxTxnOps
+// argument of [NewStoreWithCodecCapped] / [NewStoreWithOptionsCapped]: pass
+// this value to disable the per-transaction op cap entirely. It is distinct
+// from zero, which selects [DefaultMaxTxnOps]. Use it only when the caller
+// can bound transaction size by another means, because an unbounded
+// transaction then forces recovery to buffer every op frame in memory
+// before applying the batch on its [OpCommit] marker.
+const MaxTxnOpsUnlimited = -1
+
 // ErrCommittedNotApplied is returned by [Tx.Commit] when the transaction
 // was made durable (its op frames and [OpCommit] marker were written and
 // fsynced) but a later in-memory apply step failed — today only reachable
@@ -268,6 +316,35 @@ type Store[N comparable, W any] struct {
 	// writer lock acquired in Begin), so the atomic type is for safe
 	// publication rather than contended access.
 	txnSeq atomic.Uint64
+
+	// maxTxnOps is the per-transaction op cap enforced in the commit/append
+	// path: a transaction buffering more than this many ops is rejected with
+	// [ErrTransactionTooLarge] BEFORE any WAL frame is written, so it is
+	// never made durable. The value is normalised at construction time
+	// ([resolveMaxTxnOps]): 0 (the uncapped constructors' implicit value)
+	// becomes [DefaultMaxTxnOps], and [MaxTxnOpsUnlimited] becomes 0 here,
+	// meaning "no cap". It is set once in the constructor and read-only
+	// thereafter, so it needs no synchronisation. Keeping the producer cap
+	// <= the recovery cap guarantees every durably-committed transaction
+	// replays within recovery's buffer (audit gap: bounded resources).
+	maxTxnOps int
+}
+
+// resolveMaxTxnOps normalises the maxTxnOps constructor argument to the
+// internal convention used by [Store.maxTxnOps]: 0 (the implicit value the
+// uncapped constructors pass) selects [DefaultMaxTxnOps]; [MaxTxnOpsUnlimited]
+// (-1) selects 0, meaning "no cap"; any other positive value is taken
+// verbatim. This mirrors the engine's sibling pipeline-breaker cap
+// resolvers (e.g. cypher.resolveMaxResultRows).
+func resolveMaxTxnOps(maxTxnOps int) int {
+	switch maxTxnOps {
+	case 0:
+		return DefaultMaxTxnOps
+	case MaxTxnOpsUnlimited:
+		return 0
+	default:
+		return maxTxnOps
+	}
 }
 
 // NewStoreWithCodec returns a Store wrapping g and wal that encodes
@@ -287,10 +364,25 @@ type Store[N comparable, W any] struct {
 // durable weighted edges should use [NewStoreWithOptions].
 func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N]) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithCodec")()
+	return NewStoreWithCodecCapped(g, wlog, codec, 0)
+}
+
+// NewStoreWithCodecCapped is [NewStoreWithCodec] with an explicit
+// per-transaction op cap. maxTxnOps follows the standard convention: 0
+// selects [DefaultMaxTxnOps], [MaxTxnOpsUnlimited] disables the cap, and any
+// other positive value is the cap verbatim. A transaction buffering more
+// than the resolved cap is rejected by [Tx.Commit] / [Tx.CommitWALOnly] with
+// [ErrTransactionTooLarge] before any WAL frame is written.
+//
+// codec must not be nil. The returned store has no [WeightCodec]; see
+// [NewStoreWithCodec] for the weight-handling contract.
+func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
+	defer metrics.Time("store.txn.NewStoreWithCodecCapped")()
 	return &Store[N, W]{
-		g:     g,
-		wal:   wlog,
-		codec: codec,
+		g:         g,
+		wal:       wlog,
+		codec:     codec,
+		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
 }
 
@@ -315,11 +407,25 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 // Passing the legacy fmt codec via opts.Codec is undefined behaviour.
 func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W]) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithOptions")()
+	return NewStoreWithOptionsCapped(g, wlog, opts, 0)
+}
+
+// NewStoreWithOptionsCapped is [NewStoreWithOptions] with an explicit
+// per-transaction op cap. maxTxnOps follows the standard convention: 0
+// selects [DefaultMaxTxnOps], [MaxTxnOpsUnlimited] disables the cap, and any
+// other positive value is the cap verbatim. A transaction buffering more
+// than the resolved cap is rejected by [Tx.Commit] / [Tx.CommitWALOnly] with
+// [ErrTransactionTooLarge] before any WAL frame is written.
+//
+// opts.Codec and opts.WeightCodec must not be nil.
+func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
+	defer metrics.Time("store.txn.NewStoreWithOptionsCapped")()
 	return &Store[N, W]{
-		g:      g,
-		wal:    wlog,
-		codec:  opts.Codec,
-		wcodec: opts.WeightCodec,
+		g:         g,
+		wal:       wlog,
+		codec:     opts.Codec,
+		wcodec:    opts.WeightCodec,
+		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
 }
 
@@ -332,6 +438,13 @@ func (s *Store[N, W]) Codec() Codec[N] { return s.codec }
 // if the store was constructed without one. Callers should treat the
 // return as read-only.
 func (s *Store[N, W]) WeightCodec() WeightCodec[W] { return s.wcodec }
+
+// MaxTxnOps returns the resolved per-transaction op cap enforced by
+// [Tx.Commit] / [Tx.CommitWALOnly], or 0 when the cap is disabled
+// ([MaxTxnOpsUnlimited]). The uncapped constructors resolve to
+// [DefaultMaxTxnOps]. A transaction buffering more than a non-zero cap is
+// rejected with [ErrTransactionTooLarge] before any WAL frame is written.
+func (s *Store[N, W]) MaxTxnOps() int { return s.maxTxnOps }
 
 // Graph returns the underlying mutable graph.
 //
@@ -689,6 +802,15 @@ func (t *Tx[N, W]) appendAndSync() error {
 		// Empty commit: preserve the historical no-op-with-Sync behaviour
 		// (flush any prior buffered tail) without writing a lone marker.
 		return t.store.wal.Sync()
+	}
+	// Bounded resources / Durability: reject an over-cap transaction BEFORE
+	// writing any frame, so a transaction recovery could not replay without
+	// unbounded buffering is never made durable. The producer cap is <= the
+	// recovery cap, so every transaction that passes here is guaranteed to
+	// fit recovery's buffer (see [ErrTransactionTooLarge], [DefaultMaxTxnOps]).
+	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
+		metrics.IncCounter("store.txn.appendAndSync.txnTooLarge", 1)
+		return fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
 	}
 	seq := t.store.txnSeq.Add(1)
 	for _, op := range t.ops {

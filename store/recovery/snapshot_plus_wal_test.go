@@ -102,7 +102,7 @@ func TestRecovery_SnapshotPlusWALReplay(t *testing.T) {
 	}
 
 	// Phase 4: recovery.
-	res, err := Open[string, int64](dir, Options[string, int64](opts))
+	res, err := Open[string, int64](dir, OptionsFromTxn(opts))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

@@ -75,7 +75,7 @@ func TestRecovery_UnreadableWAL(t *testing.T) {
 	defer func() { _ = os.Chmod(walPath, 0o600) }() //nolint:gosec // test cleanup
 
 	// 4. Recovery must fail with a non-nil error.
-	_, err = Open[string, int64](dir, Options[string, int64](opts))
+	_, err = Open[string, int64](dir, OptionsFromTxn(opts))
 	if err == nil {
 		t.Fatal("Open with unreadable WAL: want error, got nil")
 	}

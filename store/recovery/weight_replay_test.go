@@ -69,7 +69,7 @@ func TestTxn_RoundtripWeightedEdge_Recovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Recover phase.
-		res, err := Open[string, int64](dir, Options[string, int64](opts))
+		res, err := Open[string, int64](dir, OptionsFromTxn(opts))
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -106,7 +106,7 @@ func TestTxn_RoundtripWeightedEdge_Recovery(t *testing.T) {
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
-		res, err := Open[string, float64](dir, Options[string, float64](opts))
+		res, err := Open[string, float64](dir, OptionsFromTxn(opts))
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -158,7 +158,7 @@ func TestTxn_ForwardCompat_PreT8WALReplays(t *testing.T) {
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
 	}
-	res, err := Open[string, int64](dir, Options[string, int64](opts))
+	res, err := Open[string, int64](dir, OptionsFromTxn(opts))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

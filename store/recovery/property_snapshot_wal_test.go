@@ -136,7 +136,7 @@ func TestRecovery_PropertyBased_SnapshotWAL(t *testing.T) {
 		}
 
 		// Recover.
-		res, err := Open[string, int64](dir, Options[string, int64](opts))
+		res, err := Open[string, int64](dir, OptionsFromTxn(opts))
 		if err != nil {
 			rt.Fatalf("Open: %v (truncate=%v)", err, doTruncate)
 		}

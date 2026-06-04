@@ -76,11 +76,12 @@ type Result[N comparable, W any] struct {
 	//     [Result.IsClean] reports true.
 	//   - Genuine corruption inside an already-durable frame
 	//     ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
-	//     [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge], or
-	//     [ErrUnsupportedRecordVersion]). The committed prefix up to the bad
-	//     frame is still placed in Graph for diagnostics, but the same error
-	//     is returned as the function error and [Result.IsClean] reports
-	//     false, so a caller cannot accidentally append to a corrupt WAL.
+	//     [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
+	//     [ErrUnsupportedRecordVersion], or [ErrTransactionTooLarge]). The
+	//     committed prefix up to the bad frame is still placed in Graph for
+	//     diagnostics, but the same error is returned as the function error
+	//     and [Result.IsClean] reports false, so a caller cannot accidentally
+	//     append to a corrupt WAL.
 	TailErr error
 }
 
@@ -89,8 +90,8 @@ type Result[N comparable, W any] struct {
 // torn tail ([wal.ErrTornFrame]) — the states from which it is safe to
 // reopen the WAL for append — and false when TailErr is a
 // genuine-corruption sentinel ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
-// [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge], or
-// [ErrUnsupportedRecordVersion]).
+// [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
+// [ErrUnsupportedRecordVersion], or [ErrTransactionTooLarge]).
 //
 // IsClean is the exact complement of the function-error contract: [Open]
 // and [OpenCtx] return a non-nil error if and only if IsClean is false.
@@ -106,7 +107,8 @@ func (r Result[N, W]) IsClean() bool {
 // on-disk corruption (true) versus a benign / absent stop condition
 // (false). It mirrors [wal.Reader.Replay], which surfaces every WAL-reader
 // error except [wal.ErrTornFrame] as a hard error, and additionally treats
-// recovery's own [ErrUnsupportedRecordVersion] as corruption.
+// recovery's own [ErrUnsupportedRecordVersion] and [ErrTransactionTooLarge]
+// as corruption.
 //
 // A nil error, a torn tail, and the CRC-valid-but-unparseable trailing-frame
 // markers raised by the codec apply path (a truncated v2 body, a missing
@@ -124,7 +126,8 @@ func tailErrIsCorruption(err error) bool {
 		errors.Is(err, wal.ErrBadMagic),
 		errors.Is(err, wal.ErrUnsupportedVersion),
 		errors.Is(err, wal.ErrFrameTooLarge),
-		errors.Is(err, ErrUnsupportedRecordVersion):
+		errors.Is(err, ErrUnsupportedRecordVersion),
+		errors.Is(err, ErrTransactionTooLarge):
 		return true
 	default:
 		// CRC-valid-but-unparseable trailing frame (truncated v2 body,
@@ -134,22 +137,49 @@ func tailErrIsCorruption(err error) bool {
 	}
 }
 
-// Options carries the codecs used by [Open] and [OpenCtx]. Both
-// fields are required: Codec serialises endpoint identifiers and
-// WeightCodec serialises edge weights for [txn.OpAddEdgeWeighted]
-// records.
+// Options carries the codecs used by [Open] and [OpenCtx] plus the
+// per-transaction op cap. Codec (endpoint identifiers) and WeightCodec (edge
+// weights for [txn.OpAddEdgeWeighted] records) are required and must not be
+// nil; MaxTxnOps is optional and defaults to a finite bound.
 //
-// Options is the recovery-side mirror of [txn.Options]: keeping the
-// recovery-argument type local to the recovery package spares callers
-// the awkward cross-package import of `txn.Options` purely to feed
-// the open path. The two structs share the same shape so callers
-// holding a [txn.Options] can pass `Options(opts)` (Go allows the
-// conversion because the underlying types match field-for-field).
+// Keeping the recovery-argument type local to the recovery package spares
+// callers the awkward cross-package import of `txn.Options` purely to feed
+// the open path. Codec and WeightCodec mirror [txn.Options] field-for-field,
+// so a caller holding a [txn.Options] can build a recovery [Options] from it
+// with [OptionsFromTxn] (or the equivalent literal); MaxTxnOps is
+// recovery-specific and has no [txn.Options] counterpart (the producer cap is
+// set on the [txn.Store] at construction, not via [txn.Options]).
 type Options[N comparable, W any] struct {
 	// Codec serialises endpoint identifiers. Must not be nil.
 	Codec txn.Codec[N]
 	// WeightCodec serialises edge weights. Must not be nil.
 	WeightCodec txn.WeightCodec[W]
+	// MaxTxnOps bounds the number of ops recovery buffers for a single v3
+	// transaction before its [txn.OpCommit] marker. A transaction whose
+	// buffered op count exceeds the resolved cap fails recovery with
+	// [ErrTransactionTooLarge] rather than allocating proportionally to an
+	// unbounded marker-less run (a legitimately huge transaction OR a
+	// crafted/corrupt WAL tail).
+	//
+	// The value follows the standard convention: 0 (the zero value every
+	// existing caller carries) selects [txn.DefaultMaxTxnOps], the same
+	// default the producer uses, so producer and recovery agree; a negative
+	// value ([txn.MaxTxnOpsUnlimited]) disables the cap; any other positive
+	// value is the cap verbatim. It must be >= the producer cap so every
+	// durably-committed transaction replays.
+	MaxTxnOps int
+}
+
+// OptionsFromTxn builds a recovery [Options] from a [txn.Options], copying the
+// two codecs and leaving [Options.MaxTxnOps] at its zero value (which resolves
+// to [txn.DefaultMaxTxnOps], the producer's default, so producer and recovery
+// agree). It replaces the direct `Options(opts)` struct conversion that worked
+// while the two types were field-for-field identical; that conversion no
+// longer compiles now that recovery [Options] carries the recovery-specific
+// MaxTxnOps field. Callers that need a non-default recovery cap set MaxTxnOps
+// on the returned value.
+func OptionsFromTxn[N comparable, W any](opts txn.Options[N, W]) Options[N, W] {
+	return Options[N, W]{Codec: opts.Codec, WeightCodec: opts.WeightCodec}
 }
 
 // applySnapshotIndexes feeds every readback in rb into the live
@@ -236,6 +266,29 @@ type Op struct {
 // replay loop surfaces the wrapped error via [Result.TailErr] and stops
 // at the offending frame.
 var ErrUnsupportedRecordVersion = errors.New("recovery: unsupported WAL record version")
+
+// ErrTransactionTooLarge is returned by [Open] / [OpenCtx] when a v3
+// transaction buffers more than the recovery op cap (see [Options.MaxTxnOps]
+// and [txn.DefaultMaxTxnOps]) before its [txn.OpCommit] marker is read.
+//
+// Recovery buffers an in-flight transaction's ops in memory and applies
+// them only on the durable [txn.OpCommit] marker, so an unbounded
+// marker-less run of valid-CRC v3 frames — a legitimately huge transaction
+// OR a crafted/corrupt WAL tail — would otherwise force recovery to
+// allocate proportionally to the run before discarding it (an
+// OOM-on-restart / decompression-bomb-class hazard). The cap stops the run
+// the instant the buffered op count exceeds it, so recovery never allocates
+// past the bound. It is the recovery-side dual of
+// [store/txn.ErrTransactionTooLarge]; the producer cap is <= the recovery
+// cap, so any transaction a producer commits durably is guaranteed to fit
+// and replay — this sentinel only fires on an over-cap transaction that was
+// never legitimately produced (corruption or an out-of-band WAL).
+//
+// Like the other genuine-corruption sentinels it is fail-stop: it is
+// surfaced as the function error, classified by [Result.IsClean] as not
+// clean, and the committed prefix that pre-dates the run stays in
+// [Result.Graph] for diagnostics.
+var ErrTransactionTooLarge = errors.New("recovery: v3 transaction exceeds the per-transaction op cap")
 
 // Decode parses one payload back into an [Op]. The parser peeks the
 // first byte to select the decoder:
@@ -381,11 +434,29 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil weight codec")
 	}
-	res, err := openCodec[N, W](ctx, dir, opts.Codec, opts.WeightCodec)
+	res, err := openCodec[N, W](ctx, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
 	if err != nil {
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 	}
 	return res, err
+}
+
+// resolveRecoveryMaxTxnOps normalises the [Options.MaxTxnOps] field to the
+// internal convention used by [openCodec]: 0 (the zero value every existing
+// caller carries) selects [txn.DefaultMaxTxnOps] — matching the producer
+// default so the two caps agree; [txn.MaxTxnOpsUnlimited] (-1) selects 0,
+// meaning "no cap"; any other positive value is taken verbatim. It mirrors
+// the producer-side txn.resolveMaxTxnOps so a recovery built from a
+// [txn.Options]-shaped caller inherits the identical finite default.
+func resolveRecoveryMaxTxnOps(maxTxnOps int) int {
+	switch maxTxnOps {
+	case 0:
+		return txn.DefaultMaxTxnOps
+	case txn.MaxTxnOpsUnlimited:
+		return 0
+	default:
+		return maxTxnOps
+	}
 }
 
 // defaultRecoveryConfig is the adjacency-list configuration used to
@@ -440,12 +511,18 @@ func recoveryGraphConfig(gc *snapshot.GraphConfig) adjlist.Config {
 // [txn.OpAddEdgeWeighted] records by decoding the typed weight payload
 // before applying.
 //
+// maxTxnOps is the resolved recovery op cap (0 means "no cap"): when a v3
+// transaction buffers more than maxTxnOps ops before its OpCommit marker,
+// replay stops with [ErrTransactionTooLarge] rather than buffering an
+// unbounded marker-less run.
+//
 //nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
 func openCodec[N comparable, W any](
 	ctx context.Context,
 	dir string,
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
+	maxTxnOps int,
 ) (Result[N, W], error) {
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.recovery.openCodec.errors", 1)
@@ -620,6 +697,19 @@ func openCodec[N comparable, W any](
 			}
 			if op.Version == txn.OpRecordV3 {
 				if op.Kind != txn.OpCommit {
+					// Bound the in-flight transaction buffer: stop the instant
+					// the buffered op count would exceed the cap, BEFORE
+					// appending (and before copying another op body), so a
+					// marker-less run — a legitimately huge transaction OR a
+					// crafted/corrupt valid-CRC tail — can never drive recovery
+					// to allocate proportionally to the run. Fail-stop, like the
+					// other genuine-corruption sentinels (tailErrIsCorruption).
+					if maxTxnOps > 0 && len(pending) >= maxTxnOps {
+						metrics.IncCounter("store.recovery.openCodec.txnTooLarge", 1)
+						res.TailErr = fmt.Errorf("%w: buffered %d ops with no commit marker (cap %d)",
+							ErrTransactionTooLarge, len(pending), maxTxnOps)
+						break
+					}
 					pending = append(pending, op)
 					continue
 				}
