@@ -64,6 +64,17 @@ func (g *Graph[N, W]) IncEdgeCreateCount(src, dst N) int64 {
 // EdgeCreateCount returns the CREATE multiplicity counter for the
 // directed edge (src, dst), or 0 when no CREATE was recorded.
 //
+// This counter is guarded by its own per-shard mutex and is only
+// per-operation atomic: it is NOT cross-store consistent with the
+// adjacency layer, [Graph.EdgeLabelsAt], or [Graph.EdgePropertiesAt]
+// outside a transaction barrier. A reader that correlates this count
+// with the populated per-instance indices (or any other substructure)
+// while a multi-CREATE multigraph transaction is committing can observe
+// a partial cross-store state — e.g. the count already at 2 while only
+// one instance has been populated. To read a consistent cross-store
+// view, bracket the correlated reads in [Graph.View] (writers commit
+// under [Graph.ApplyAtomically]); see docs/isolation-design.md.
+//
 // EdgeCreateCount is safe for concurrent use.
 func (g *Graph[N, W]) EdgeCreateCount(src, dst N) int64 {
 	srcID, ok := g.adj.Mapper().Lookup(src)

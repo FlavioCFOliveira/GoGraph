@@ -60,6 +60,17 @@ func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value
 // of the directed edge (src, dst). Returns nil when the instance was
 // never written or when either endpoint is unknown.
 //
+// This per-instance store is guarded by its own per-shard mutex and is
+// only per-operation atomic: it is NOT cross-store consistent with
+// [Graph.EdgeCreateCount], [Graph.EdgeLabelsAt], or the adjacency layer
+// outside a transaction barrier. A reader correlating the count of
+// populated instance indices with [Graph.EdgeCreateCount] while a
+// multi-CREATE multigraph transaction commits can observe a partial
+// cross-store state (count ahead of the populated indices). To read a
+// consistent cross-store view, bracket the correlated reads in
+// [Graph.View] (writers commit under [Graph.ApplyAtomically]); see
+// docs/isolation-design.md.
+//
 // EdgePropertiesAt is safe for concurrent use.
 func (g *Graph[N, W]) EdgePropertiesAt(src, dst N, idx int64) map[string]PropertyValue {
 	if idx <= 0 {

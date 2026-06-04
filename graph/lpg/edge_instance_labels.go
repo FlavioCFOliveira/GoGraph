@@ -77,6 +77,16 @@ func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
 // labelled, when either endpoint is unknown, or when no per-instance
 // store has been initialised for this pair.
 //
+// This per-instance store is guarded by its own per-shard mutex and is
+// only per-operation atomic: it is NOT cross-store consistent with
+// [Graph.EdgeCreateCount], [Graph.EdgePropertiesAt], or the adjacency
+// layer outside a transaction barrier. A reader correlating this with
+// [Graph.EdgeCreateCount] while a multi-CREATE multigraph transaction
+// commits can observe a partial cross-store state. To read a consistent
+// cross-store view, bracket the correlated reads in [Graph.View]
+// (writers commit under [Graph.ApplyAtomically]); see
+// docs/isolation-design.md.
+//
 // EdgeLabelsAt is safe for concurrent use.
 func (g *Graph[N, W]) EdgeLabelsAt(src, dst N, idx int64) []string {
 	if idx <= 0 {

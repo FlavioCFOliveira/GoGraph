@@ -124,6 +124,14 @@ func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name strin
 // handle was never labelled, either endpoint is unknown, or no handle
 // store has been initialised for this pair.
 //
+// Like the (src, dst, idx) instance stores, this handle store is guarded
+// by its own per-shard mutex and is only per-operation atomic: it is NOT
+// cross-store consistent with [Graph.EdgeCreateCount],
+// [Graph.EdgePropertiesByHandle], or the adjacency layer outside a
+// transaction barrier. To read a consistent cross-store view, bracket
+// the correlated reads in [Graph.View] (writers commit under
+// [Graph.ApplyAtomically]); see docs/isolation-design.md.
+//
 // EdgeLabelsByHandle is safe for concurrent use.
 func (g *Graph[N, W]) EdgeLabelsByHandle(src, dst N, handle uint64) []string {
 	if handle == 0 {
@@ -199,6 +207,14 @@ func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key str
 // EdgePropertiesByHandle returns the property map recorded for the edge
 // identified by handle on the (src, dst) pair. Returns nil when handle is
 // 0, the handle was never written, or either endpoint is unknown.
+//
+// Like the (src, dst, idx) instance stores, this handle store is guarded
+// by its own per-shard mutex and is only per-operation atomic: it is NOT
+// cross-store consistent with [Graph.EdgeCreateCount],
+// [Graph.EdgeLabelsByHandle], or the adjacency layer outside a
+// transaction barrier. To read a consistent cross-store view, bracket
+// the correlated reads in [Graph.View] (writers commit under
+// [Graph.ApplyAtomically]); see docs/isolation-design.md.
 //
 // EdgePropertiesByHandle is safe for concurrent use.
 func (g *Graph[N, W]) EdgePropertiesByHandle(src, dst N, handle uint64) map[string]PropertyValue {
