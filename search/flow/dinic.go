@@ -52,6 +52,10 @@ func (g *Network) AddEdge(src, dst, capacity int) {
 // MaxFlow runs Dinic's algorithm from src to sink and returns the
 // total flow. Complexity O(V^2 * E) general; O(E * sqrt(V)) on
 // unit-capacity networks.
+//
+// If the network's capacities could overflow the int64 flow
+// accumulation (see [ErrCapacityOverflow]), MaxFlow returns 0 rather
+// than a wrapped value; use [MaxFlowCtx] to receive the typed error.
 func MaxFlow(g *Network, src, sink int) int {
 	defer metrics.Time("search.flow.MaxFlow")()
 	out, _ := MaxFlowCtx(context.Background(), g, src, sink)
@@ -64,8 +68,16 @@ func MaxFlow(g *Network, src, sink int) int {
 // cancellation latency stays bounded even on a dense network whose
 // phases dominate the wall time. On cancellation returns
 // (totalSoFar, wrapped ctx.Err()).
+//
+// Before any work it validates that the capacities cannot overflow the
+// int64 flow accumulation, returning (0, [ErrCapacityOverflow]) when
+// they could; see [ErrCapacityOverflow] for the exact bound.
 func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.MaxFlowCtx")()
+	if err := validateCapacities(g, src); err != nil {
+		metrics.IncCounter("search.flow.MaxFlowCtx.errors", 1)
+		return 0, err
+	}
 	level := make([]int, g.N())
 	iter := make([]int, g.N())
 	stack := make([]int, 0, g.N())
@@ -84,7 +96,7 @@ func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 		for {
 			var f int
 			var aerr error
-			f, stack, aerr = augmentFlow(ctx, g, src, sink, 1<<62, level, iter, stack)
+			f, stack, aerr = augmentFlow(ctx, g, src, sink, capInf, level, iter, stack)
 			if aerr != nil {
 				metrics.IncCounter("search.flow.MaxFlowCtx.errors", 1)
 				return total, aerr

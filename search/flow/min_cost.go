@@ -61,6 +61,11 @@ func (g *CostNetwork) AddCostEdge(src, dst, capacity, cost int) {
 // and O(F * E log V) for general networks where F is the resulting
 // flow magnitude — adequate for assignment-style problems with
 // modest source/sink counts.
+//
+// If the network's capacities or capacity-times-cost products could
+// overflow the int64 flow/cost accumulation (see
+// [ErrCapacityOverflow]), MinCostMaxFlow returns (0, 0) rather than
+// wrapped values; use [MinCostMaxFlowCtx] to receive the typed error.
 func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
 	defer metrics.Time("search.flow.MinCostMaxFlow")()
 	out, c, _ := MinCostMaxFlowCtx(context.Background(), g, src, sink)
@@ -75,12 +80,21 @@ func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
 // negative cycle is reachable from src, returns
 // (0, 0, [ErrNegativeCycle]) without performing any augmentation.
 //
+// Before any work it validates that the capacities cannot overflow the
+// int64 flow accumulation and that the worst-case total cost
+// (source-cut capacity times the largest absolute per-unit cost) fits
+// int64, returning (0, 0, [ErrCapacityOverflow]) otherwise.
+//
 //nolint:gocyclo // canonical SSP with potentials: BF bootstrap + per-iteration Dijkstra + augmentation
 func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (totalFlow, totalCost int, err error) {
 	defer metrics.Time("search.flow.MinCostMaxFlowCtx")()
 	n := g.N()
 	if n == 0 || src == sink {
 		return 0, 0, nil
+	}
+	if verr := validateCostCapacities(g, src); verr != nil {
+		metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)
+		return 0, 0, verr
 	}
 	potential := make([]int, n)
 	// Bootstrap potentials if any arc has negative cost. With purely
@@ -102,7 +116,7 @@ func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (tota
 			return totalFlow, totalCost, cerr
 		}
 		// Dijkstra on reduced costs.
-		const inf = 1 << 62
+		const inf = capInf
 		for i := range dist {
 			dist[i] = inf
 			parentEdge[i] = -1
@@ -197,7 +211,7 @@ func hasNegativeCost(g *CostNetwork) bool {
 //nolint:gocyclo // canonical Bellman-Ford: V-1 relaxation passes + one cycle-detection pass + cleanup
 func bellmanFordBootstrap(g *CostNetwork, src int) ([]int, error) {
 	n := g.N()
-	const inf = 1 << 62
+	const inf = capInf
 	dist := make([]int, n)
 	for i := range dist {
 		dist[i] = inf

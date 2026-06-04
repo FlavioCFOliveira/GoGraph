@@ -140,6 +140,20 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 // by a small tolerance. Integer Weight types reproduce
 // [FloydWarshall] exactly.
 //
+// Integer-Weight overflow precondition. Johnson is the most
+// overflow-exposed shortest-path routine here: the potential h(v) is a
+// cumulative shortest-path distance, the reweight w(u,v) + h(u) - h(v)
+// and the recover d'(u,v) - h[u] + h[v] each combine three such terms,
+// and the inner Dijkstra accumulates over the reweighted graph. For an
+// integer Weight type the caller must ensure that every intermediate
+// (the deepest potential, the reweighted-path distance, and the
+// recovered distance) fits W; otherwise the arithmetic wraps and the
+// reported distances are silently wrong. The NaN/+-Inf gate covers only
+// floating-point W. A development build with -tags gograph_debug adds an
+// assertion to both the Bellman-Ford reweighting pass and the reweighted
+// per-source Dijkstra that panics on a cumulative-distance wraparound;
+// the production hot path carries no such check.
+//
 // Concurrency: JohnsonAPSP is safe for any number of concurrent
 // invocations on a shared, immutable CSR.
 //
@@ -337,6 +351,10 @@ func bellmanFordVirtualSource[W Weight](ctx context.Context, c *csr.CSR[W], h []
 		for k := start; k < end; k++ {
 			nb := uint64(edges[k])
 			cand := dv + weights[k]
+			// Debug builds (-tags gograph_debug) trap an integer
+			// cumulative-distance overflow in Johnson's reweighting
+			// pass here; a no-op otherwise.
+			assertNoRelaxOverflow(dv, weights[k], cand)
 			if cand < h[nb] {
 				h[nb] = cand
 				if !inQueue[nb] {

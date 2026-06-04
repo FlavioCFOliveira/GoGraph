@@ -14,6 +14,11 @@ import (
 // The network's edges are mutated in place (the residual capacities
 // are decremented and the reverse edges incremented); callers
 // needing to re-run the algorithm should rebuild the network.
+//
+// If the network's capacities could overflow the int64 excess
+// accumulation (see [ErrCapacityOverflow]), PushRelabelMaxFlow returns
+// 0 rather than a wrapped value; use [PushRelabelMaxFlowCtx] to receive
+// the typed error.
 func PushRelabelMaxFlow(g *Network, src, sink int) int {
 	defer metrics.Time("search.flow.PushRelabelMaxFlow")()
 	out, _ := PushRelabelMaxFlowCtx(context.Background(), g, src, sink)
@@ -26,12 +31,20 @@ func PushRelabelMaxFlow(g *Network, src, sink int) int {
 // is the excess accumulated at sink — a valid lower bound on the
 // true max-flow.
 //
+// Before any work it validates that the capacities cannot overflow the
+// int64 excess accumulation, returning (0, [ErrCapacityOverflow]) when
+// they could.
+//
 //nolint:gocyclo // textbook FIFO push-relabel with gap heuristic
 func PushRelabelMaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.PushRelabelMaxFlowCtx")()
 	n := g.N()
 	if n == 0 || src == sink {
 		return 0, nil
+	}
+	if err := validateCapacities(g, src); err != nil {
+		metrics.IncCounter("search.flow.PushRelabelMaxFlowCtx.errors", 1)
+		return 0, err
 	}
 	height := make([]int, n)
 	excess := make([]int, n)

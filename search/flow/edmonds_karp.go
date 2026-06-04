@@ -12,6 +12,11 @@ import (
 // [MaxFlow]'s Dinic-based bound for general networks but simpler in
 // structure — useful as a reference implementation and a baseline
 // for property testing.
+//
+// If the network's capacities could overflow the int64 flow
+// accumulation (see [ErrCapacityOverflow]), EdmondsKarp returns 0
+// rather than a wrapped value; use [EdmondsKarpCtx] to receive the
+// typed error.
 func EdmondsKarp(g *Network, src, sink int) int {
 	defer metrics.Time("search.flow.EdmondsKarp")()
 	out, _ := EdmondsKarpCtx(context.Background(), g, src, sink)
@@ -22,8 +27,16 @@ func EdmondsKarp(g *Network, src, sink int) int {
 // ctx.Err() is checked at every BFS rebuild (the outer augmenting-
 // path boundary); on cancellation returns (totalSoFar, wrapped
 // ctx.Err()).
+//
+// Before any work it validates that the capacities cannot overflow the
+// int64 flow accumulation, returning (0, [ErrCapacityOverflow]) when
+// they could.
 func EdmondsKarpCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.EdmondsKarpCtx")()
+	if err := validateCapacities(g, src); err != nil {
+		metrics.IncCounter("search.flow.EdmondsKarpCtx.errors", 1)
+		return 0, err
+	}
 	n := g.N()
 	parentEdge := make([]int, n)
 	queue := make([]int, 0, n)
@@ -59,7 +72,7 @@ func EdmondsKarpCtx(ctx context.Context, g *Network, src, sink int) (int, error)
 			return total, nil
 		}
 		// Walk back from sink to src to find the bottleneck.
-		push := 1 << 62
+		push := capInf
 		for v := sink; v != src; {
 			e := parentEdge[v]
 			if g.cap[e] < push {

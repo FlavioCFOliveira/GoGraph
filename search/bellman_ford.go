@@ -32,6 +32,17 @@ var ErrNegativeCycle = errors.New("search: negative cycle reachable from source"
 // [ErrInvalidInput] otherwise; integer Weight types skip the
 // validation pass entirely.
 //
+// Integer-Weight overflow precondition. The cumulative distance is
+// accumulated in W's own arithmetic with no overflow guard on the hot
+// path. For an integer Weight type the caller must ensure that the
+// cumulative weight of the longest path relaxed fits W; otherwise the
+// addition wraps and the relaxation (and negative-cycle detection)
+// compares wrapped values, yielding a silently incorrect result. The
+// NaN/+-Inf gate covers only floating-point W. A development build with
+// -tags gograph_debug adds an assertion to the relaxation loop that
+// panics on such a wraparound; the production hot loop carries no such
+// check.
+//
 // For hot loops where the caller can amortise buffer allocation,
 // prefer the zero-allocation primitive [BellmanFordInto].
 func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
@@ -176,6 +187,9 @@ func bellmanFordCore[W Weight](
 		for k := start; k < end; k++ {
 			nb := uint64(edges[k])
 			cand := dv + weights[k]
+			// Debug builds (-tags gograph_debug) trap an integer
+			// cumulative-distance overflow here; a no-op otherwise.
+			assertNoRelaxOverflow(dv, weights[k], cand)
 			if !found[nb] || cand < dist[nb] {
 				dist[nb] = cand
 				parent[nb] = v

@@ -70,6 +70,14 @@ func (a *APSP[W]) N() int { return a.live }
 // §25.2 post-pass: any live vertex whose self-distance has been
 // relaxed below zero lies on a negative cycle.
 //
+// Integer-Weight overflow precondition. The DP accumulates path
+// distances in W's own arithmetic (dist[i,k] + dist[k,j]) with no
+// overflow guard on the hot path. For an integer Weight type the caller
+// must ensure that the longest shortest path's cumulative weight fits W;
+// otherwise the addition wraps and both the relaxation and the post-DP
+// negative-cycle scan compare wrapped values, yielding a silently
+// incorrect matrix. The NaN/+-Inf gate covers only floating-point W.
+//
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR; allocates its own working buffers per call.
 func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {

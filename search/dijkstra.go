@@ -160,6 +160,16 @@ type dijkstraState[W Weight] struct {
 // Working storage is pooled across calls so steady-state workloads
 // reach zero allocations per inner-loop iteration.
 //
+// Integer-Weight overflow precondition. The cumulative distance is
+// accumulated in W's own arithmetic with no overflow guard on the hot
+// path. For an integer Weight type the caller must ensure that the
+// cumulative weight of the longest shortest path explored fits W;
+// otherwise the addition wraps and the relaxation comparison yields a
+// silently incorrect path. The NaN/+-Inf gate above covers only
+// floating-point W. A development build with -tags gograph_debug adds
+// an assertion to [BellmanFord] and [JohnsonAPSP] that panics on such a
+// wraparound; the production hot loop carries no such check.
+//
 // For hot loops where the caller can amortise buffer allocation
 // (e.g. Yen's k-shortest-paths), prefer the zero-allocation primitive
 // [DijkstraInto].
@@ -369,6 +379,12 @@ func dijkstraCoreWithWeights[W Weight](
 		for k := start; k < end; k++ {
 			nb := edges[k]
 			cand := top.dist + weights[k]
+			// Debug builds (-tags gograph_debug) trap an integer
+			// cumulative-distance overflow in Johnson's reweighted
+			// inner Dijkstra here; a no-op otherwise. (The plain
+			// dijkstraCore path is intentionally not instrumented; see
+			// its godoc precondition.)
+			assertNoRelaxOverflow(top.dist, weights[k], cand)
 			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
 				dist[uint64(nb)] = cand
 				parent[uint64(nb)] = top.node
