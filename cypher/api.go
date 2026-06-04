@@ -379,6 +379,28 @@ type EngineOptions struct {
 	//     when memory is bounded by another means.
 	MaxResultRows int64
 
+	// MaxResultBytes is a coarse aggregate-BYTE budget on a single [Engine.Run]
+	// or [Engine.RunInTx] result, complementing [MaxResultRows]. The row cap
+	// bounds the number of rows; a small number of rows carrying very large
+	// values (a node with megabyte-scale string properties) can still consume
+	// large memory inside the visibility barrier under that cap. When the
+	// cumulative *estimated* encoded size of the materialised rows exceeds this
+	// budget, [Result.Err] reports [ErrResultBytesExceeded].
+	//
+	// The estimate is intentionally coarse and cheap (O(columns) per row, no
+	// allocation, no serialisation): a fixed per-value overhead plus the lengths
+	// of string/[]byte payloads and the element counts of lists/maps. It is a
+	// guard against pathological memory use, not an exact accounting of heap
+	// bytes.
+	//
+	// The value is interpreted as follows:
+	//
+	//   - Zero (the default) selects [DefaultMaxResultBytes], a finite budget.
+	//   - A positive value overrides the default (a byte count).
+	//   - [MaxResultBytesUnlimited] (-1) disables the budget entirely; use it
+	//     only when memory is bounded by another means.
+	MaxResultBytes int64
+
 	// MaxCollectItems bounds the number of values a single buffering aggregator
 	// — collect(), collect(DISTINCT …), percentileCont(), percentileDisc() —
 	// retains in one group. A grouping-key-free aggregate such as
@@ -425,6 +447,12 @@ type Engine struct {
 	procReg       *procs.Registry
 	cache         *planCache
 	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
+	// maxResultBytes is the aggregate-byte budget for a single result, threaded
+	// to the Result drain alongside maxResultRows. Zero means no budget (the
+	// convention the drain checks with maxBytes > 0); the public
+	// EngineOptions.MaxResultBytes field is mapped onto it by resolveMaxResultBytes
+	// (0 → DefaultMaxResultBytes, MaxResultBytesUnlimited → 0, positive verbatim).
+	maxResultBytes int64
 	// maxCollectItems is the per-group element budget for buffering aggregators,
 	// threaded into every plan build via buildOpts. The encoding mirrors the
 	// public EngineOptions.MaxCollectItems field (0 → default, <0 → no cap,
@@ -521,6 +549,29 @@ func resolveMaxResultRows(opt int64) int64 {
 	}
 }
 
+// resolveMaxResultBytes maps the public [EngineOptions.MaxResultBytes] value to
+// the Engine's internal aggregate-byte budget, where a positive value is an
+// active budget and zero disables it (the convention the [Result] drain checks
+// with maxBytes > 0):
+//
+//   - 0 (the zero value)         → [DefaultMaxResultBytes] (a finite default)
+//   - [MaxResultBytesUnlimited]  → 0 (unlimited, the explicit opt-out)
+//   - any positive value         → that value, verbatim
+//
+// It mirrors [resolveMaxResultRows] so every constructor that routes through
+// [NewEngineWithOptions] inherits the finite default byte budget alongside the
+// finite default row cap.
+func resolveMaxResultBytes(opt int64) int64 {
+	switch opt {
+	case 0:
+		return DefaultMaxResultBytes
+	case MaxResultBytesUnlimited:
+		return 0
+	default:
+		return opt
+	}
+}
+
 // NewEngineWithOptions creates an Engine backed by g with explicit options.
 // Zero-valued fields are filled with their documented defaults. When
 // opts.Store is non-nil, the Engine is bound to that WAL-enabled
@@ -548,6 +599,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		procReg:         procs.NewRegistry(),
 		cache:           newPlanCache(opts.PlanCacheCapacity),
 		maxResultRows:   resolveMaxResultRows(opts.MaxResultRows),
+		maxResultBytes:  resolveMaxResultBytes(opts.MaxResultBytes),
 		maxCollectItems: opts.MaxCollectItems,
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
@@ -923,7 +975,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 			return
 		}
 		rs := exec.Run(ctx, op, cols)
-		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows)
+		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
 		r.materialize()
 	})
 	if buildErr != nil {
@@ -1142,6 +1194,35 @@ const DefaultMaxResultRows int64 = 10_000_000
 // promptly), because an unbounded MATCH then materialises every row under the
 // graph's visibility barrier.
 const MaxResultRowsUnlimited int64 = -1
+
+// ErrResultBytesExceeded is returned by [Result.Err] when the cumulative
+// estimated encoded size of the materialised rows exceeds
+// [EngineOptions.MaxResultBytes]. It complements [ErrResultRowsExceeded]: the
+// row cap bounds the *number* of rows, but a handful of rows carrying very large
+// values (a node with megabyte-scale string properties) can dwarf a high row
+// count, so the byte budget bounds that residual case. Like the row cap it is a
+// permanent error tripped inside the visibility barrier during materialisation,
+// before the surplus reaches the caller.
+var ErrResultBytesExceeded = errors.New("cypher: result byte budget exceeded")
+
+// DefaultMaxResultBytes is the default upper bound on the aggregate estimated
+// encoded size of the rows a single [Engine.Run] or [Engine.RunInTx] call
+// materialises when [EngineOptions.MaxResultBytes] is left at its zero value.
+// It is a coarse budget against the worst case the row cap alone cannot catch —
+// a result that stays under [DefaultMaxResultRows] yet carries enough bytes per
+// row to exhaust memory inside the visibility barrier. The default (1 GiB) is
+// set high enough that ordinary queries, the openCypher TCK, and all examples
+// stay well below it; callers that genuinely need an unbounded result size must
+// opt out explicitly with [MaxResultBytesUnlimited].
+const DefaultMaxResultBytes int64 = 1 << 30 // 1 GiB
+
+// MaxResultBytesUnlimited is the explicit opt-out sentinel for
+// [EngineOptions.MaxResultBytes]: set the field to this value to disable the
+// aggregate-byte budget entirely. It is distinct from the zero value, which
+// selects [DefaultMaxResultBytes]. Use it only when memory is bounded by another
+// means, because an unbounded wide-row result then materialises every byte under
+// the graph's visibility barrier.
+const MaxResultBytesUnlimited int64 = -1
 
 // MaxCollectItemsUnlimited is the explicit opt-out sentinel for
 // [EngineOptions.MaxCollectItems]: set the field to this value to disable the
@@ -1439,7 +1520,17 @@ type Result struct {
 	// Set from EngineOptions.MaxResultRows at result construction time.
 	maxRows  int64
 	rowCount int64 // incremented by Next(); never reset
-	rowsErr  error // set to ErrResultRowsExceeded when the cap is hit
+	rowsErr  error // ErrResultRowsExceeded or ErrResultBytesExceeded when a cap trips
+
+	// maxBytes, when positive, caps the cumulative estimated encoded size of the
+	// materialised rows (EngineOptions.MaxResultBytes). It complements maxRows:
+	// the row cap bounds the row count, the byte budget bounds the residual
+	// wide-row case a high row cap cannot catch. Both are enforced in
+	// materialize() under the visibility barrier. rowsErr is shared by both caps
+	// (set to ErrResultBytesExceeded when the byte budget trips) because it is the
+	// "result was truncated by a bounded-resource guard" signal Next/Err already
+	// honour.
+	maxBytes int64
 
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
@@ -1494,21 +1585,143 @@ func (r *Result) Record() exec.Record {
 // encountered during the drain are recorded on the ResultSet and surfaced via
 // Result.Err(); Close still commits/rolls back.
 func (r *Result) materialize() {
+	var byteCount int64
 	for r.rs.Next() {
-		r.matRows = append(r.matRows, r.rs.TakeRecord())
+		rec := r.rs.TakeRecord()
+		r.matRows = append(r.matRows, rec)
 		if r.maxRows > 0 && int64(len(r.matRows)) > r.maxRows {
 			r.rowsErr = ErrResultRowsExceeded
 			break
 		}
-		// TODO(#1292 follow-up): the row count bounds the *number* of rows but
-		// not their aggregate size — a handful of nodes carrying very large
-		// properties can still dwarf a high row cap. A coarse aggregate-bytes
-		// budget would belong here, alongside the row check, mirroring the
-		// row-count caps the sibling pipeline breakers (Sort/Distinct/Aggregate)
-		// already enforce. Deferred to keep this barrier-held hot loop free of
-		// per-row size accounting until that cost is benchmarked.
+		// Aggregate-byte budget (#1328): the row cap bounds the *number* of rows
+		// but a handful of rows carrying very large values (a node with
+		// megabyte-scale string properties) can still dwarf a high row cap. A
+		// coarse, allocation-free size estimate (estimateRecordSize: O(columns)
+		// per row, no serialisation) accumulates here alongside the row check and
+		// trips ErrResultBytesExceeded when the budget is exceeded. byteCount can
+		// saturate for a pathological result, which only makes the budget trip
+		// sooner — never miss — so the additions are deliberately unguarded against
+		// overflow. The only per-row cost is one map lookup per column to reach the
+		// value; benchstat shows that is allocation-free and within noise of the
+		// un-accounted drain on a representative scalar-projection result (see
+		// BenchmarkResultMaterialize* in result_bytes_cap_bench_test.go).
+		if r.maxBytes > 0 {
+			byteCount += estimateRecordSize(r.cols, rec)
+			if byteCount > r.maxBytes {
+				r.rowsErr = ErrResultBytesExceeded
+				break
+			}
+		}
 	}
 	r.matOn = true
+}
+
+// perValueOverhead is the flat byte charge attributed to every value regardless
+// of kind, covering the interface header, kind tag, and (for scalars) the small
+// fixed payload of an integer / float / bool / temporal / point value. It is a
+// coarse constant, not a measurement: the byte budget is a guard against
+// pathological memory use, not an exact heap accounting.
+const perValueOverhead int64 = 16
+
+// estimateRecordSize returns a coarse, allocation-free estimate of the encoded
+// size of one result row, summing estimateValueSize over the row's column
+// values. It is the per-row term of the aggregate-byte budget (#1328) and is
+// called once per materialised row inside the visibility barrier, so cheapness
+// is load-bearing.
+//
+// It iterates the ordered column list (a slice) and indexes the record map by
+// column name, rather than ranging the map directly. A map range pays Go's
+// per-iteration iterator setup (a randomised hash-seed init) on every call; over
+// a multi-row drain that fixed cost dominates the trivial per-value arithmetic
+// and measurably regresses the common small-result path. Ranging the cols slice
+// and doing one map lookup per column avoids that setup and keeps the accounting
+// within noise of the un-accounted drain (verified by BenchmarkResultMaterialize*
+// in result_bytes_cap_bench_test.go). cols always lists exactly the record's
+// keys, so the two traversals are equivalent. The estimate never allocates or
+// serialises.
+func estimateRecordSize(cols []string, rec exec.Record) int64 {
+	var total int64
+	for _, k := range cols {
+		total += estimateValueSize(rec[k])
+	}
+	return total
+}
+
+// estimateValueSize returns a coarse, allocation-free byte estimate for a single
+// column value. It takes any because a materialised [exec.Record] is a
+// map[string]interface{} (its values are [expr.Value] instances boxed as the
+// empty interface); a type switch over the empty interface adds no allocation
+// because the operand is already an interface value.
+//
+// The estimate is deliberately cheap: a fixed per-value overhead plus the
+// lengths of variable-size payloads (string bytes, list and map element counts,
+// node/relationship/path element counts). It NEVER fully encodes or serialises
+// the value — String() would allocate, defeating the point of a barrier-held
+// budget. The structural types (node/relationship/path) are unfolded inline
+// rather than recursing through the any boundary so iterating their by-value
+// element slices ([]NodeValue, []RelationshipValue) does not box each element.
+// List and map elements are already [expr.Value] interface values, so recursing
+// on them is a no-op conversion. Cypher values are acyclic, so the recursion is
+// bounded and the whole estimate is O(total elements in the row), allocation-free.
+func estimateValueSize(v any) int64 {
+	switch t := v.(type) {
+	case expr.StringValue:
+		return perValueOverhead + int64(len(t))
+	case expr.ListValue:
+		// Per-element overhead (carried by each element's own estimate) plus the
+		// recursive size of each element, so a long list of tiny scalars still
+		// counts against the budget rather than estimating near zero.
+		total := perValueOverhead
+		for _, e := range t {
+			total += estimateValueSize(e)
+		}
+		return total
+	case expr.MapValue:
+		return estimateMapSize(t)
+	case expr.NodeValue:
+		return estimateNodeSize(t)
+	case expr.RelationshipValue:
+		return estimateRelSize(t)
+	case expr.PathValue:
+		total := perValueOverhead
+		for i := range t.Nodes {
+			total += estimateNodeSize(t.Nodes[i])
+		}
+		for i := range t.Relationships {
+			total += estimateRelSize(t.Relationships[i])
+		}
+		return total
+	default:
+		// Integer, Float, Bool, Null, the temporal / point scalars, and any
+		// non-expr.Value a caller might place in a Record: a fixed, small
+		// footprint covered entirely by the per-value overhead.
+		return perValueOverhead
+	}
+}
+
+// estimateMapSize sums the per-value overhead, key lengths, and recursive value
+// sizes of a property map. Split out so the node/relationship paths can reuse it
+// without re-boxing the map through estimateValueSize's any parameter.
+func estimateMapSize(m expr.MapValue) int64 {
+	total := perValueOverhead
+	for k, e := range m {
+		total += int64(len(k)) + estimateValueSize(e)
+	}
+	return total
+}
+
+// estimateNodeSize accounts a node's label byte-lengths plus its property map.
+func estimateNodeSize(n expr.NodeValue) int64 {
+	total := perValueOverhead
+	for _, lbl := range n.Labels {
+		total += int64(len(lbl))
+	}
+	return total + estimateMapSize(n.Properties)
+}
+
+// estimateRelSize accounts a relationship's type byte-length plus its property map.
+func estimateRelSize(r expr.RelationshipValue) int64 {
+	return perValueOverhead + int64(len(r.Type)) + estimateMapSize(r.Properties)
 }
 
 // commitUnderBarrier finalises a write query's transaction inside the same
@@ -1610,6 +1823,12 @@ func (r *Result) rollbackUnderBarrier() {
 
 // Err returns the first error encountered during iteration, or nil.
 //
+// When a bounded-resource guard truncated the result during materialisation, Err
+// returns the guard's sentinel: [ErrResultRowsExceeded] when the row cap
+// ([EngineOptions.MaxResultRows]) was hit, or [ErrResultBytesExceeded] when the
+// aggregate-byte budget ([EngineOptions.MaxResultBytes]) was hit. Either is
+// matchable with [errors.Is].
+//
 // When the query was a write that failed and the subsequent in-memory undo
 // replay ALSO failed (an inverse panicked, [ErrUndoFailed]), Err returns the
 // pipeline error wrapped together with ErrUndoFailed so the caller learns both
@@ -1708,8 +1927,8 @@ func (r *Result) closeLocked() error {
 // trailing projection). In that case newResult drains the underlying
 // [exec.ResultSet] eagerly so the writes execute and the iterator becomes
 // immediately exhausted — TCK-conformant write-only semantics.
-func newResultWithLimit(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64], maxRows int64) *Result {
-	r := &Result{rs: rs, cols: cols, buf: buf, idxMgr: idxMgr, tx: tx, maxRows: maxRows}
+func newResultWithLimit(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64], maxRows, maxBytes int64) *Result {
+	r := &Result{rs: rs, cols: cols, buf: buf, idxMgr: idxMgr, tx: tx, maxRows: maxRows, maxBytes: maxBytes}
 	if len(cols) == 0 {
 		for rs.Next() {
 			// discard the row; write side effects execute as a side effect
@@ -1720,7 +1939,7 @@ func newResultWithLimit(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer
 }
 
 func newResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64]) *Result {
-	return newResultWithLimit(rs, cols, buf, idxMgr, tx, 0)
+	return newResultWithLimit(rs, cols, buf, idxMgr, tx, 0, 0)
 }
 
 // finalizeResult is the runtime.SetFinalizer callback invoked by the GC
@@ -6987,7 +7206,7 @@ func (e *Engine) execUnderBarrier(
 		rs := exec.Run(ctx, op, cols)
 		if commit {
 			// Autocommit: the Result owns the transaction and finalises it here.
-			r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows)
+			r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes)
 			r.undo = undo
 			r.materialize()
 			r.commitUnderBarrier()
@@ -6999,7 +7218,7 @@ func (e *Engine) execUnderBarrier(
 		// the handle's later Commit / Rollback is authoritative. Materialise under
 		// the barrier so the statement observes a consistent snapshot and its
 		// eager writes flip visible atomically with the rest of the open tx.
-		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows)
+		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
 		r.materialize()
 		return nil
 	})

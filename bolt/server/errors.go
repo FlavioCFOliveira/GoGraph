@@ -80,9 +80,10 @@ func FailureCode(err error) string {
 }
 
 // isResourceLimitErr reports whether err is one of the engine's bounded-resource
-// guards: the per-query result-row cap ([cypher.ErrResultRowsExceeded]) or a
+// guards: the per-query result-row cap ([cypher.ErrResultRowsExceeded]), the
+// per-query aggregate-byte budget ([cypher.ErrResultBytesExceeded]), or a
 // buffering aggregator's per-group element budget ([funcs.ErrCollectItemsExceeded]).
-// Both are tripped inside the graph's visibility barrier during materialisation,
+// All are tripped inside the graph's visibility barrier during materialisation,
 // before any surplus rows reach the Bolt stream, so the server rejects the query
 // cleanly rather than letting it exhaust memory.
 //
@@ -93,5 +94,6 @@ func FailureCode(err error) string {
 // internal-error text.
 func isResourceLimitErr(err error) bool {
 	return errors.Is(err, cypher.ErrResultRowsExceeded) ||
+		errors.Is(err, cypher.ErrResultBytesExceeded) ||
 		errors.Is(err, funcs.ErrCollectItemsExceeded)
 }

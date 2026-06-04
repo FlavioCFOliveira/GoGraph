@@ -98,6 +98,19 @@ func TestFailureCode(t *testing.T) {
 			want: "Neo.ClientError.General.LimitExceeded",
 		},
 		{
+			// task #1328: the engine's aggregate-byte budget maps to the same
+			// resource-limit code as the row cap; it reaches the Bolt layer via
+			// Result.Err() (tripped inside the visibility barrier on materialise).
+			name: "cypher.ErrResultBytesExceeded",
+			err:  cypher.ErrResultBytesExceeded,
+			want: "Neo.ClientError.General.LimitExceeded",
+		},
+		{
+			name: "cypher.ErrResultBytesExceeded wrapped",
+			err:  fmt.Errorf("drain: %w", cypher.ErrResultBytesExceeded),
+			want: "Neo.ClientError.General.LimitExceeded",
+		},
+		{
 			// task #1294: the buffering-aggregator element budget maps to the same
 			// resource-limit code; it reaches the Bolt layer via Result.Err().
 			name: "funcs.ErrCollectItemsExceeded",
