@@ -18,7 +18,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
-	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 const (
@@ -334,10 +333,20 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		select {
 		case s.sem <- struct{}{}:
 		default:
+			// Refused because the MaxConnections semaphore is full. Count it so an
+			// operator can correlate a connection flood: a rejected connection never
+			// becomes live, so the accepted/closed gauge alone cannot reveal it.
+			incCounter(metricConnRejected)
 			s.log.Warn("bolt: max connections reached, rejecting", slog.String("remote", conn.RemoteAddr().String()))
 			_ = conn.Close() //nolint:errcheck // best-effort close on rejection path
 			continue
 		}
+
+		// The connection is admitted past the semaphore and will start a handler
+		// goroutine below. Count it as accepted; the matching closed increment in
+		// the goroutine's deferred cleanup balances the live-connection derivation
+		// (accepted − closed) back to zero on every exit path.
+		incCounter(metricConnAccepted)
 
 		if s.opts.TLSConfig != nil {
 			conn = tls.Server(conn, s.opts.TLSConfig)
@@ -346,6 +355,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		s.wg.Add(1)
 		go func(c net.Conn) {
 			defer func() {
+				// Pair the accepted increment: the live-connection gauge is derived
+				// as accepted − closed, so this runs on EVERY exit (clean close,
+				// read/write error, idle timeout, recovered panic) to keep the
+				// derivation balanced and free of a phantom live connection.
+				incCounter(metricConnClosed)
 				<-s.sem
 				s.wg.Done()
 			}()
@@ -467,7 +481,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// and the Cypher parser.
 	defer func() {
 		if r := recover(); r != nil {
-			metrics.IncCounter("bolt.server.conn.panics", 1)
+			incCounter(metricConnPanics)
 			s.log.Error("bolt: recovered panic in connection handler; closing connection",
 				slog.String("remote", remote),
 				slog.Any("panic", r),

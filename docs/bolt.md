@@ -238,9 +238,38 @@ package. The default backend is a no-op; install a `metrics.Backend`
 implementation to activate collection. See [docs/metrics.md](metrics.md) for
 the full metric inventory.
 
-The Bolt server itself does not emit dedicated server-level metrics (connection
-count, session count). Those are tracked at the application level via the
-`MaxConnections` semaphore channel capacity exposed in `Options`.
+The Bolt server emits the following server-level counters, which give an
+operator the signals needed to correlate a connection flood or a transaction
+leak:
+
+| Metric | Meaning |
+|---|---|
+| `bolt.server.conn.accepted` | Connections admitted past the `MaxConnections` semaphore (one per per-connection handler goroutine started). |
+| `bolt.server.conn.closed` | Per-connection handler goroutines that have exited, for any reason. |
+| `bolt.server.conn.rejected` | Connections refused because the `MaxConnections` semaphore was already full. |
+| `bolt.server.tx.opened` | Explicit transactions opened by a `BEGIN` that acquired the engine writer serialisation. |
+| `bolt.server.tx.closed` | Explicit transactions that ended — committed, rolled back, discarded by `RESET`/`GOODBYE`, or rolled back on connection teardown. |
+| `bolt.server.tx.abandoned` | Explicit transactions still open at an abnormal disconnect (the client dropped the connection, hit the idle timeout, or the handler recovered a panic) without sending `COMMIT`, `ROLLBACK`, or `RESET`. A strict subset of `tx.closed`. |
+| `bolt.server.conn.panics` | Recovered panics in a connection handler goroutine (defence-in-depth boundary). |
+
+Two of these quantities are conceptually gauges — the number of live
+connections and the number of open transactions. The `metrics.Backend`
+interface exposes only a monotonic, non-decrementing counter (`IncCounter`), so
+each gauge is emitted as a pair of counters and the live value is the
+derivation:
+
+```
+live connections   = bolt.server.conn.accepted − bolt.server.conn.closed
+open transactions  = bolt.server.tx.opened     − bolt.server.tx.closed
+```
+
+This is the standard Prometheus "created/closed → in-use = created − closed"
+pattern. Each pair is balanced by construction: every increment of an
+opened-side counter has exactly one matching increment of its closed-side
+counter on every exit path (clean close, read/write error, idle timeout,
+recovered panic), so each derived gauge returns to zero once the server is
+quiescent. A derivation that stays persistently above zero is itself the leak
+signal — a phantom live connection or an unreleased open transaction.
 
 ### Health check
 

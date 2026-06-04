@@ -58,6 +58,19 @@ type Session struct {
 	// tx is the active explicit transaction, non-nil when txActive is true.
 	tx *Tx
 
+	// txAccounted records whether the currently-open explicit transaction has
+	// been counted by [metricTxOpened] but not yet counted closed by
+	// [metricTxClosed]. It guards the open-transaction gauge derivation
+	// (opened − closed) so that exactly one tx.closed is emitted per tx.opened,
+	// regardless of which of the several teardown paths (COMMIT, ROLLBACK,
+	// RESET, GOODBYE, FAILED-reclaim, connection teardown) ends the transaction.
+	// It is set by [Session.txOpened] and cleared by the first [Session.txClosed]
+	// for that transaction; a second close on the same transaction (e.g. the
+	// idempotent teardown rollback after a prior COMMIT) finds it already false
+	// and is a no-op. The Session is single-threaded per connection, so the flag
+	// needs no synchronisation.
+	txAccounted bool
+
 	// stmtTimeout is extracted from RUN extra metadata ("timeout" key, ms).
 	stmtTimeout time.Duration
 
@@ -238,6 +251,34 @@ func (s *Session) dispatch(ctx context.Context, msg any) ([]any, error) {
 	}
 }
 
+// txOpened records that an explicit transaction has just been opened. It
+// increments the [metricTxOpened] counter (the opened side of the
+// open-transaction gauge derivation opened − closed) and arms [Session.txClosed]
+// via the txAccounted flag so the transaction is counted closed exactly once.
+// It is called once from [Session.handleBegin] at the single point a BEGIN
+// successfully acquires the transaction.
+func (s *Session) txOpened() {
+	s.txAccounted = true
+	incCounter(metricTxOpened)
+}
+
+// txClosed records that the currently-open explicit transaction has ended,
+// incrementing the [metricTxClosed] counter (the closed side of the
+// open-transaction gauge derivation) exactly once per [Session.txOpened]. It is
+// idempotent: it increments only when txAccounted is set, then clears the flag,
+// so the several teardown paths that may run for one transaction (a handler
+// closing it followed by the idempotent connection-teardown rollback) emit a
+// single tx.closed. It is called from every path that ends an explicit
+// transaction: COMMIT, ROLLBACK, RESET, GOODBYE, the FAILED-reclaim
+// ([Session.abortTx]), and the connection teardown ([Session.Close]).
+func (s *Session) txClosed() {
+	if !s.txAccounted {
+		return
+	}
+	s.txAccounted = false
+	incCounter(metricTxClosed)
+}
+
 // abortTx drains any open result cursor and rolls back the session's explicit
 // transaction, clearing all transaction state. It is the shared teardown for the
 // FAILED-with-open-transaction path (post-dispatch) and the connection-teardown
@@ -251,6 +292,11 @@ func (s *Session) abortTx() {
 		_ = s.tx.Rollback() //nolint:errcheck // best-effort rollback on failure/teardown; error not actionable
 		s.tx = nil
 	}
+	// Count the transaction closed (idempotent: a no-op when a prior COMMIT/
+	// ROLLBACK/RESET/GOODBYE already counted it). This keeps the open-transaction
+	// gauge balanced when abortTx is the path that ends the transaction (a FAILED
+	// reclaim or a connection teardown that found the transaction still open).
+	s.txClosed()
 	s.txActive = false
 }
 
@@ -261,7 +307,19 @@ func (s *Session) abortTx() {
 // connection handler's deferred cleanup on every exit path (clean close, read or
 // write error, panic). Idempotent: a second call, or a call on a session with no
 // open transaction, is a no-op.
+//
+// An explicit transaction still open at this point is an abnormal disconnect —
+// the client dropped the connection (or hit an idle timeout, or the handler
+// panicked) without sending COMMIT, ROLLBACK, or RESET. Close counts it as
+// [metricTxAbandoned] before the rollback so an operator can distinguish a
+// leaked transaction reclaimed here from one ended in an orderly way. This is
+// the only site that emits tx.abandoned: a FAILED-transition reclaim (#1312)
+// goes through [Session.abortTx] directly and is an in-session state change, not
+// a disconnect, so it is not counted abandoned.
 func (s *Session) Close() {
+	if s.tx != nil {
+		incCounter(metricTxAbandoned)
+	}
 	s.abortTx()
 }
 
@@ -360,6 +418,8 @@ func (s *Session) handleReset() ([]any, error) {
 	if s.tx != nil {
 		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on reset
 		s.tx = nil
+		// Orderly end: count the transaction closed. Idempotent via txAccounted.
+		s.txClosed()
 	}
 
 	next, err := Transition(s.state, &proto.Reset{}, true)
@@ -377,6 +437,8 @@ func (s *Session) handleGoodbye() ([]any, error) {
 	if s.tx != nil {
 		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on goodbye
 		s.tx = nil
+		// Orderly end: count the transaction closed. Idempotent via txAccounted.
+		s.txClosed()
 	}
 	s.state = StateDefunct
 	// No response is sent for GOODBYE.
@@ -679,6 +741,10 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	s.state = next
 	s.txActive = true
 	s.tx = tx
+	// Count the transaction opened (the opened side of the open-transaction gauge
+	// derivation opened − closed). The matching txClosed runs on whichever path
+	// ends it, keeping the derived gauge balanced.
+	s.txOpened()
 	return []any{&proto.Success{Metadata: map[string]packstream.Value{}}}, nil
 }
 
@@ -704,6 +770,9 @@ func (s *Session) handleCommit() ([]any, error) {
 			}}, nil
 		}
 		s.tx = nil
+		// Orderly end: count the transaction closed (the closed side of the
+		// open-transaction gauge derivation). Idempotent via txAccounted.
+		s.txClosed()
 	}
 
 	next, err := Transition(s.state, m, true)
@@ -728,6 +797,8 @@ func (s *Session) handleRollback() ([]any, error) {
 	if s.tx != nil {
 		_ = s.tx.Rollback() //nolint:errcheck // rollback errors are not actionable; best-effort cleanup
 		s.tx = nil
+		// Orderly end: count the transaction closed. Idempotent via txAccounted.
+		s.txClosed()
 	}
 
 	next, err := Transition(s.state, m, true)
