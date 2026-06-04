@@ -192,6 +192,15 @@ func (a *AdjList[N, W]) Directed() bool { return a.cfg.Directed }
 // Multigraph reports whether parallel edges are allowed.
 func (a *AdjList[N, W]) Multigraph() bool { return a.cfg.Multigraph }
 
+// Config returns the [Config] the AdjList was constructed with. The
+// configuration is fixed at [New] and never mutated thereafter, so
+// Config is safe to call concurrently with any other operation and
+// always returns the same value for the lifetime of the AdjList. It is
+// used by the snapshot writer to persist the originating graph's
+// directed/multigraph shape so recovery can reconstruct the same
+// variant instead of guessing.
+func (a *AdjList[N, W]) Config() Config { return a.cfg }
+
 // AddNode inserts n if not already present. The node enters the
 // adjacency list lazily on its first outgoing edge; AddNode only
 // interns the value with the Mapper, which is sufficient for

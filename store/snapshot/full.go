@@ -374,6 +374,12 @@ func writeSnapshotFullCore[N comparable, W any](
 		files = append(files, FileEntry{Name: EdgeHandlesFile, Size: edgeHandleSize, CRC32C: edgeHandleCRC})
 	}
 
+	// Persist the originating graph's directed/multigraph shape so
+	// recovery reconstructs the same variant instead of hardcoding one.
+	// The full writer always has the live graph in hand, so every NEW
+	// full snapshot carries this; the legacy CSR-only writer cannot (it
+	// has no graph) and omits it, falling back to the recovery default.
+	cfg := g.Config()
 	m := Manifest{
 		Version:   manifestVersion,
 		CreatedAt: time.Now().UTC(),
@@ -381,6 +387,10 @@ func writeSnapshotFullCore[N comparable, W any](
 		Size:      c.Size(),
 		Files:     files,
 		Indexes:   idxEntries,
+		GraphConfig: &GraphConfig{
+			Directed:   cfg.Directed,
+			Multigraph: cfg.Multigraph,
+		},
 	}
 
 	manifestPath := filepath.Join(tmp, "manifest.json")

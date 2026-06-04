@@ -59,6 +59,28 @@ type FileEntry struct {
 	CRC32C uint32 `json:"crc32c"`
 }
 
+// GraphConfig is the JSON-persisted shape of the originating graph's
+// adjacency-list configuration. It mirrors the directed/multigraph
+// flags of [adjlist.Config] without importing that package, so the
+// snapshot manifest stays decoupled from the graph backend. The
+// snapshot writer fills it from the live graph; recovery reads it to
+// reconstruct the same variant.
+//
+// Only the shape-defining flags are persisted. [adjlist.Config.MaxShardCapacity]
+// is deliberately omitted: it is a runtime growth bound, not a property
+// of the stored graph, and re-imposing it at recovery time could make
+// recovery itself fail with [adjlist.ErrShardFull] while replaying data
+// that legitimately exceeds the cap. A recovered graph is therefore
+// always reconstructed unbounded.
+type GraphConfig struct {
+	// Directed records whether AddEdge was a directed insertion in the
+	// originating graph.
+	Directed bool `json:"directed"`
+	// Multigraph records whether the originating graph allowed parallel
+	// edges between the same ordered endpoint pair.
+	Multigraph bool `json:"multigraph"`
+}
+
 // Manifest is the JSON-encoded index of a snapshot directory.
 //
 // Indexes is the secondary-index sub-manifest: it carries one
@@ -66,13 +88,24 @@ type FileEntry struct {
 // field is omitted from the JSON form when empty so v2 manifests
 // produced before this extension are byte-identical to the ones
 // produced by current builds when no indexes are registered.
+//
+// GraphConfig records the originating graph's directed/multigraph
+// shape. It is a pointer with omitempty so it is dropped from the JSON
+// form entirely when nil — every snapshot written before this field
+// existed (and the CSR-only legacy writer, which has no live graph to
+// read) is therefore byte-identical to what it would have been. A
+// reader that finds the field absent must default the configuration to
+// the historical recovery behaviour ([adjlist.Config]{Directed: true,
+// Multigraph: true}); see [store/recovery.Open]. Only NEW snapshots
+// produced by the full writer carry the real config.
 type Manifest struct {
-	Version   int              `json:"version"`
-	CreatedAt time.Time        `json:"created_at"`
-	Order     uint64           `json:"order"`
-	Size      uint64           `json:"size"`
-	Files     []FileEntry      `json:"files"`
-	Indexes   []IndexFileEntry `json:"indexes,omitempty"`
+	Version     int              `json:"version"`
+	CreatedAt   time.Time        `json:"created_at"`
+	Order       uint64           `json:"order"`
+	Size        uint64           `json:"size"`
+	Files       []FileEntry      `json:"files"`
+	Indexes     []IndexFileEntry `json:"indexes,omitempty"`
+	GraphConfig *GraphConfig     `json:"graph_config,omitempty"`
 }
 
 // WriteManifest writes m to w in canonical (pretty-printed) JSON.

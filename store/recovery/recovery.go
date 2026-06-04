@@ -388,6 +388,53 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 	return res, err
 }
 
+// defaultRecoveryConfig is the adjacency-list configuration used to
+// reconstruct a graph when no persisted shape is available: no snapshot,
+// a snapshot-load failure (diagnostic graph only), or a snapshot whose
+// manifest predates the persisted config field.
+//
+// Multigraph: true is the historical recovery behaviour. It matches
+// openCypher's property-graph model (CREATE of a relationship is
+// additive — two CREATEs between the same ordered pair must yield two
+// relationships) and the configuration the Cypher TCK harness uses. The
+// WAL, snapshot and CSR layers already round-trip parallel edges with
+// distinct per-instance types/properties, so a graph recovered from a
+// config-less snapshot must be multigraph or those parallel edges
+// collapse to one on the next reopen — silent data loss for every
+// consumer that recovers a pre-config snapshot from disk. A graph that
+// never created a parallel edge behaves identically under either mode,
+// so this default is also safe for simple graphs whose snapshots predate
+// the persisted config.
+func defaultRecoveryConfig() adjlist.Config {
+	return adjlist.Config{Directed: true, Multigraph: true}
+}
+
+// recoveryGraphConfig resolves the adjacency-list configuration to
+// reconstruct a graph from a snapshot manifest's persisted graph config
+// (pass [snapshot.Manifest.GraphConfig]). When gc is non-nil (every NEW
+// full snapshot carries it), its directed/multigraph flags are honoured
+// exactly, so a graph created SIMPLE (Multigraph: false) is recovered
+// SIMPLE and a graph created MULTIGRAPH is recovered MULTIGRAPH — the same
+// AddEdge semantics before and after a snapshot round-trip. When gc is nil
+// (an older snapshot, or one written by the CSR-only legacy writer) the
+// historical [defaultRecoveryConfig] is used so pre-existing snapshots
+// replay byte-for-byte as they did before this field existed.
+//
+// MaxShardCapacity is never restored from the manifest: it is a runtime
+// growth bound, not a property of the stored graph, and re-imposing it
+// could make recovery itself fail with [adjlist.ErrShardFull] while
+// replaying data that legitimately exceeds the cap. The recovered graph
+// is always unbounded.
+func recoveryGraphConfig(gc *snapshot.GraphConfig) adjlist.Config {
+	if gc == nil {
+		return defaultRecoveryConfig()
+	}
+	return adjlist.Config{
+		Directed:   gc.Directed,
+		Multigraph: gc.Multigraph,
+	}
+}
+
 // openCodec is the shared core of [Open] and [OpenCtx]. wcodec is nil
 // for the codec-only path; when non-nil the function honours
 // [txn.OpAddEdgeWeighted] records by decoding the typed weight payload
@@ -400,20 +447,11 @@ func openCodec[N comparable, W any](
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
 ) (Result[N, W], error) {
-	// Multigraph: true matches openCypher's property-graph model (CREATE of a
-	// relationship is additive — two CREATEs between the same ordered pair must
-	// yield two relationships) and the configuration the Cypher TCK harness
-	// uses. The WAL, snapshot and CSR layers already round-trip parallel edges
-	// with distinct per-instance types/properties, so a recovered graph must be
-	// multigraph or those parallel edges collapse to one on the next reopen —
-	// silent data loss for every consumer that recovers from disk. A graph that
-	// never created a parallel edge behaves identically under either mode.
-	g := lpg.New[N, W](adjlist.Config{Directed: true, Multigraph: true})
-	res := Result[N, W]{Graph: g}
-
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.recovery.openCodec.errors", 1)
-		return res, err
+		// No snapshot has been loaded yet, so the diagnostic graph uses the
+		// default reconstruction config (see recoveryGraphConfig).
+		return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())}, err
 	}
 	snapDir := filepath.Join(dir, "snapshot")
 	var snapLabels snapshot.LabelsReadback
@@ -425,12 +463,36 @@ func openCodec[N comparable, W any](
 	// properties were applied BEFORE WAL replay (the self-sufficient path);
 	// the deferred after-WAL apply below is then skipped for them.
 	var snapshotSideAppliedEarly bool
+
+	// Load the snapshot manifest BEFORE constructing the live graph so the
+	// graph is reconstructed with the directed/multigraph shape the
+	// originating graph was created with. A manifest that predates the
+	// persisted config (or the CSR-only legacy writer, which has no graph to
+	// read) leaves Manifest.GraphConfig nil; recoveryGraphConfig then returns
+	// the historical default {Directed: true, Multigraph: true} so existing
+	// snapshots — including the additive-CREATE openCypher engine snapshots
+	// that depend on multigraph — replay exactly as before.
+	var loaded snapshot.LoadedSnapshot
+	haveManifest := false
 	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
-		loaded, err := snapshot.LoadSnapshotFull(snapDir)
+		loaded, err = snapshot.LoadSnapshotFull(snapDir)
 		if err != nil {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
-			return res, fmt.Errorf("recovery: snapshot open: %w", err)
+			// On a snapshot-load failure no config is available; build the
+			// diagnostic graph with the default reconstruction config.
+			return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())},
+				fmt.Errorf("recovery: snapshot open: %w", err)
 		}
+		haveManifest = true
+	}
+
+	// Reconstruct the graph with the persisted shape (or the default when no
+	// manifest / no persisted config). The config is fixed for the lifetime
+	// of the recovered graph.
+	g := lpg.New[N, W](recoveryGraphConfig(loaded.Manifest.GraphConfig))
+	res := Result[N, W]{Graph: g}
+
+	if haveManifest {
 		res.SnapshotHit = true
 		res.SnapshotSchemaVersion = loaded.Manifest.Version
 		snapLabels = loaded.Labels

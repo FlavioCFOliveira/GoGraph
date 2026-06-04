@@ -392,6 +392,14 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 // AdjList returns the underlying adjacency-list backend.
 func (g *Graph[N, W]) AdjList() *adjlist.AdjList[N, W] { return g.adj }
 
+// Config returns the [adjlist.Config] the graph was constructed with.
+// It delegates to the underlying [adjlist.AdjList.Config]; the
+// configuration is fixed at [New] and never mutated, so Config is safe
+// to call concurrently with any other operation and always returns the
+// same value for the lifetime of the graph. The snapshot writer reads
+// it to persist the directed/multigraph shape into the manifest.
+func (g *Graph[N, W]) Config() adjlist.Config { return g.adj.Config() }
+
 // Registry returns the underlying label registry.
 func (g *Graph[N, W]) Registry() *LabelRegistry { return g.reg }
 
