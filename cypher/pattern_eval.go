@@ -36,6 +36,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	lpg "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -45,11 +46,40 @@ import (
 // snapshot is required.
 type patternEvaluator struct {
 	g *lpg.Graph[string, float64]
+	// maxCollectItems bounds the size of the result list a single
+	// [ast.PatternComprehension] may build, sharing the buffering-aggregator
+	// budget so the cap is consistent and configurable through the same knob
+	// (EngineOptions.MaxCollectItems). It is the already-resolved value: a
+	// positive number is an active ceiling and zero disables the cap (the
+	// explicit opt-out). See [resolvePatternCompBudget].
+	maxCollectItems int
 }
 
-// newPatternEvaluator constructs the evaluator for one query run.
-func newPatternEvaluator(g *lpg.Graph[string, float64]) *patternEvaluator {
-	return &patternEvaluator{g: g}
+// newPatternEvaluator constructs the evaluator for one query run. The
+// maxCollectItems argument carries the Engine's per-query element budget using
+// the EngineOptions.MaxCollectItems encoding (0 → DefaultMaxCollectItems, <0 →
+// no cap, >0 → that exact budget); it is resolved once here so the hot append
+// path compares against a single non-negative ceiling.
+func newPatternEvaluator(g *lpg.Graph[string, float64], maxCollectItems int) *patternEvaluator {
+	return &patternEvaluator{g: g, maxCollectItems: resolvePatternCompBudget(maxCollectItems)}
+}
+
+// resolvePatternCompBudget maps the EngineOptions.MaxCollectItems encoding to
+// the resolved ceiling stored on patternEvaluator, matching the resolution
+// buildEagerAggregation applies to the buffering aggregators (#1294):
+//
+//   - 0  → unset; apply the finite [funcs.DefaultMaxCollectItems]
+//   - <0 → the explicit opt-out; 0 disables the cap entirely
+//   - >0 → an active budget, used verbatim
+func resolvePatternCompBudget(maxCollectItems int) int {
+	switch {
+	case maxCollectItems < 0:
+		return 0 // opt-out: 0 disables the cap
+	case maxCollectItems > 0:
+		return maxCollectItems
+	default:
+		return funcs.DefaultMaxCollectItems
+	}
 }
 
 // EvalPattern implements [expr.PatternEvaluator].
@@ -79,7 +109,18 @@ func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.Pattern
 	}
 	pp := pc.Pattern
 	results := expr.ListValue{}
+	appended := 0
 	err := pe.enumeratePatternMatches(ctx, pp, row, func(innerRow expr.RowContext) error {
+		// Honour cancellation per appended result, not only per start-node /
+		// candidate-hop: a comprehension over a supernode anchor enumerates a
+		// match per neighbour, so a huge result list must be abortable
+		// mid-build. The 4096 stride (firing at appended == 0) matches the
+		// ctx-check cadence the exec pipeline breakers use.
+		if appended%4096 == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+		}
 		if pc.Predicate != nil {
 			pv, perr := expr.EvalWith(ctx, pc.Predicate, innerRow, params, reg, nil, pe)
 			if perr != nil {
@@ -97,7 +138,15 @@ func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.Pattern
 			}
 			projVal = v
 		}
+		// Bound the result list with the same element budget as collect()
+		// (#1294): an anchor with a very high degree would otherwise grow this
+		// list without limit, exhausting memory while the visibility barrier is
+		// held. A zero budget is the explicit opt-out (no cap).
+		if pe.maxCollectItems > 0 && appended >= pe.maxCollectItems {
+			return funcs.ErrCollectItemsExceeded
+		}
 		results = append(results, projVal)
+		appended++
 		return nil
 	})
 	if err != nil {

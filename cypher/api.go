@@ -321,6 +321,19 @@ func evalRow(bopts *buildOpts, e ast.Expression, row expr.RowContext, params map
 	return expr.EvalWith(ctx, e, row, params, reg, bopts.subEval, bopts.patEval)
 }
 
+// rollUpItemsFromBopts returns the per-list element budget a RollUpApply
+// operator should enforce, in the EngineOptions.MaxCollectItems encoding
+// ([exec.NewRollUpApplyN] resolves 0 → default, <0 → unlimited, >0 → verbatim).
+// A nil bopts (and the public BuildPlanWithMutator path, where maxCollectItems
+// is 0) yields the finite default, so a pattern comprehension is never built
+// unbounded — matching how the buffering aggregators are bounded (#1294, #1298).
+func rollUpItemsFromBopts(bopts *buildOpts) int {
+	if bopts == nil {
+		return 0 // resolves to funcs.DefaultMaxCollectItems
+	}
+	return bopts.maxCollectItems
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Engine
 // ─────────────────────────────────────────────────────────────────────────────
@@ -898,8 +911,11 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// inner pipelines against the current outer row (task-396).
 		subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, e.g)
 		// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
-		// predicates can be evaluated against the live graph (task-961).
-		patEval := newPatternEvaluator(e.g)
+		// predicates can be evaluated against the live graph (task-961). It
+		// receives the Engine's per-query element budget so a pattern
+		// comprehension over a supernode anchor cannot build an unbounded
+		// result list — the same bound collect() enforces (#1294, #1298).
+		patEval := newPatternEvaluator(e.g, e.maxCollectItems)
 		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
@@ -3322,8 +3338,11 @@ func buildOperator(
 		// listEval is left nil — the inner subplan ends with a
 		// Projection that puts the comprehension's projected value at
 		// the row's first column, which is the default collection
-		// extractor.
-		return exec.NewRollUpApply(outer, inner, arg, nil), nil
+		// extractor. The collected list shares the buffering-aggregator
+		// element budget (EngineOptions.MaxCollectItems) so a pattern
+		// comprehension over a supernode anchor cannot build an unbounded
+		// in-memory list — the same bound collect() enforces (#1294, #1298).
+		return exec.NewRollUpApplyN(outer, inner, arg, nil, rollUpItemsFromBopts(bopts)), nil
 
 	case *ir.Argument:
 		// Argument is the leaf of an Apply-family inner plan. At runtime the exec
