@@ -7,15 +7,18 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 )
 
-// TestBreakpoint_NoOp verifies that Breakpoint is a no-op when
-// GOGRAPH_CRASH_AT is unset or does not match the supplied name. This
-// is the contract production code (store/wal, store/checkpoint) relies
-// on: an inline Breakpoint call must never kill the process outside the
-// crash-injection harness.
+// TestBreakpoint_NoOp verifies that Breakpoint does not kill the process
+// when GOGRAPH_CRASH_AT is unset or does not match the supplied name.
+// This holds in BOTH build modes (the enabled hook only fires on an
+// exact match), so this test is build-tag agnostic.
 //
-// The matching-name self-kill path cannot be exercised in-process (it
-// SIGKILLs the test binary); it is covered end-to-end by the
-// subprocess crash-injection tests in store/recovery.
+// The untagged build additionally guarantees that even an EXACTLY
+// matching value is inert; that stronger, tag-specific assertion lives
+// in breakpoint_disabled_inert_test.go so it never runs under
+// -tags gograph_crashinject (where a match would SIGKILL the binary).
+// The matching-name self-kill path is covered end-to-end by the
+// subprocess tests in breakpoint_selfkill_test.go (tagged) and the
+// store/recovery crash-injection suite.
 func TestBreakpoint_NoOp(t *testing.T) {
 	prev, had := os.LookupEnv(crashpoint.EnvCrashAt)
 	if err := os.Unsetenv(crashpoint.EnvCrashAt); err != nil {

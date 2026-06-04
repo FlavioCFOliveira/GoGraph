@@ -1,4 +1,13 @@
+//go:build gograph_crashinject
+
 package recovery
+
+// These durability proofs drive the crashinject-helper to SIGKILL itself
+// at a checkpoint breakpoint, so they are compiled only under the
+// gograph_crashinject build tag. Without the tag the helper embeds the
+// production no-op crashpoint.Breakpoint and never crashes, which would
+// make the SIGKILL assertions below fail. Run the crash battery with:
+// go test -tags gograph_crashinject ./store/recovery/...
 
 import (
 	"os"

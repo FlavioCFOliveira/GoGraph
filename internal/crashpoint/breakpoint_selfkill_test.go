@@ -1,4 +1,12 @@
+//go:build gograph_crashinject
+
 package crashpoint_test
+
+// This file exercises the SIGKILL self-kill path of Breakpoint, which
+// exists only under the gograph_crashinject build tag. Without the tag
+// Breakpoint is the production no-op (crashpoint_disabled.go), so this
+// file — including its TestMain child hook — is excluded from the
+// default `go test` build. Run it with: go test -tags gograph_crashinject.
 
 import (
 	"errors"

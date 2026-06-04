@@ -211,8 +211,16 @@ func buildHelperOnce(t testing.TB) (string, error) {
 			helperBinErr = fmt.Errorf("locate module root: %w", err)
 			return
 		}
-		binPath := filepath.Join(os.TempDir(), "gograph-crashinject-helper")
-		args := []string{"build", "-o", binPath, "./cmd/crashinject-helper"}
+		binPath := filepath.Join(os.TempDir(), "gograph-crashinject-helper"+helperBinSuffix)
+		// helperBuildTags carries -tags gograph_crashinject only when this
+		// package was itself compiled with that tag, so the helper's embedded
+		// crashpoint.Breakpoint matches the parent's expectation (active hook
+		// under the tag, production no-op without it). It is empty otherwise.
+		// Capacity: "build" + the tag flags + "-o" + binPath + the package.
+		args := make([]string, 0, 1+len(helperBuildTags)+3)
+		args = append(args, "build")
+		args = append(args, helperBuildTags...)
+		args = append(args, "-o", binPath, "./cmd/crashinject-helper")
 		// args is a hard-coded build invocation; only binPath comes from
 		// os.TempDir which is process-local. Not user-tainted.
 		cmd := exec.Command("go", args...) //nolint:gosec // G204: hard-coded `go build` against project path
