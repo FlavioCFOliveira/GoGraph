@@ -3396,7 +3396,7 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		return exec.NewEager(child), nil
+		return exec.NewEager(child, 0), nil
 
 	case *ir.Limit:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -3423,7 +3423,7 @@ func buildOperator(
 		// LIMIT begins consuming. Closes Create6 [10] and similar
 		// SKIP/LIMIT-truncated CREATE scenarios.
 		if ir.ContainsWrite(p.Child) {
-			return exec.NewLimit(exec.NewEager(child), count)
+			return exec.NewLimit(exec.NewEager(child, 0), count)
 		}
 		return exec.NewLimit(child, count)
 

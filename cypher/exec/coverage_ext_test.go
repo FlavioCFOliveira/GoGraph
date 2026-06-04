@@ -133,7 +133,7 @@ func TestEager_EmitsAllRows(t *testing.T) {
 		{expr.IntegerValue(3)},
 	}
 	child := newStaticOp(rows...)
-	eager := exec.NewEager(child)
+	eager := exec.NewEager(child, 0)
 
 	ctx := context.Background()
 	if err := eager.Init(ctx); err != nil {
@@ -170,7 +170,7 @@ func TestEager_EmitsAllRows(t *testing.T) {
 
 func TestEager_EmptyChild(t *testing.T) {
 	t.Parallel()
-	eager := exec.NewEager(newStaticOp())
+	eager := exec.NewEager(newStaticOp(), 0)
 	if err := eager.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestEager_ContextCancelDuringIteration(t *testing.T) {
 	for i := range rows {
 		rows[i] = exec.Row{expr.IntegerValue(int64(i))}
 	}
-	eager := exec.NewEager(newStaticOp(rows...))
+	eager := exec.NewEager(newStaticOp(rows...), 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := eager.Init(ctx); err != nil {
@@ -213,7 +213,7 @@ func TestEager_ContextCancelDuringIteration(t *testing.T) {
 func TestEager_InitChildError(t *testing.T) {
 	t.Parallel()
 	sentinel := errors.New("child init boom")
-	eager := exec.NewEager(&errInitOp{err: sentinel})
+	eager := exec.NewEager(&errInitOp{err: sentinel}, 0)
 	err := eager.Init(context.Background())
 	if !errors.Is(err, sentinel) {
 		t.Errorf("Init error = %v, want %v", err, sentinel)
