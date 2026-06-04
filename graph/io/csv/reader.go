@@ -71,8 +71,14 @@ func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, 
 }
 
 // ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
-// is checked every 4096 rows; on cancellation returns (partialAdj,
-// rowsConsumed, wrapped ctx.Err()).
+// is checked every 4096 rows.
+//
+// On any error — a parse error, context cancellation, or the
+// [ErrInputTooLarge] cap — the returned graph is nil; the import is
+// all-or-nothing at the in-memory level, so a caller cannot accidentally
+// commit a half-built graph. The typed error (parse error, ctx.Err(), or
+// [ErrInputTooLarge]) is returned unchanged; only the graph value is
+// discarded.
 //
 //nolint:gocyclo // csv decode + opt defaults + per-row parse + ctx tick
 func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
@@ -102,7 +108,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 		if rows&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				metrics.IncCounter("graph.io.csv.ReadIntoCtx.errors", 1)
-				return a, rows, err
+				return nil, rows, err
 			}
 		}
 		rec, err := c.Read()

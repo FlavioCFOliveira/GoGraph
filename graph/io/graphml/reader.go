@@ -87,9 +87,14 @@ func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
 }
 
 // ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
-// is checked every 4096 edges; on cancellation returns
-// (partialAdj, edgesAdded, wrapped ctx.Err()). The input is capped at
-// [DefaultMaxBytes]; use [ReadIntoCappedCtx] for an explicit ceiling.
+// is checked every 4096 edges. The input is capped at [DefaultMaxBytes];
+// use [ReadIntoCappedCtx] for an explicit ceiling.
+//
+// On any error — a parse error, context cancellation, or the
+// [ErrInputTooLarge] cap — the returned graph is nil; the import is
+// all-or-nothing at the in-memory level, so a caller cannot accidentally
+// commit a half-built graph. The typed error is returned unchanged; only
+// the graph value is discarded.
 func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
 	return ReadIntoCappedCtx(ctx, r, DefaultMaxBytes)
 }
@@ -98,6 +103,9 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 // ceiling. When maxBytes > 0 the decoder fails with [ErrInputTooLarge]
 // the moment consumption exceeds the limit, before the whole document
 // is buffered; a value of zero or less disables the cap.
+//
+// On any error the returned graph is nil (see [ReadIntoCtx]); the import
+// is all-or-nothing at the in-memory level.
 //
 //nolint:gocyclo // GraphML decode + key lookup + per-edge parse + ctx tick
 func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
@@ -120,7 +128,7 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjli
 	for _, n := range g.Nodes {
 		if err := a.AddNode(n.ID); err != nil {
 			metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
-			return a, 0, fmt.Errorf("graphml: AddNode(%q): %w", n.ID, err)
+			return nil, 0, fmt.Errorf("graphml: AddNode(%q): %w", n.ID, err)
 		}
 	}
 	added := 0
@@ -128,7 +136,7 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjli
 		if added&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
-				return a, added, err
+				return nil, added, err
 			}
 		}
 		var w int64
@@ -137,14 +145,14 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjli
 				v, perr := strconv.ParseInt(d.Value, 10, 64)
 				if perr != nil {
 					metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
-					return a, added, fmt.Errorf("graphml: edge (%q,%q) weight %q: %w", e.Source, e.Target, d.Value, perr)
+					return nil, added, fmt.Errorf("graphml: edge (%q,%q) weight %q: %w", e.Source, e.Target, d.Value, perr)
 				}
 				w = v
 			}
 		}
 		if err := a.AddEdge(e.Source, e.Target, w); err != nil {
 			metrics.IncCounter("graph.io.graphml.ReadIntoCtx.errors", 1)
-			return a, added, fmt.Errorf("graphml: AddEdge(%q, %q): %w", e.Source, e.Target, err)
+			return nil, added, fmt.Errorf("graphml: AddEdge(%q, %q): %w", e.Source, e.Target, err)
 		}
 		added++
 	}

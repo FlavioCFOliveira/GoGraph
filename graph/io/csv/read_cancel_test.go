@@ -12,8 +12,9 @@ import (
 )
 
 // TestCSVRead_CtxCancelMidStream verifies that ReadIntoCtx honours
-// context cancellation and deadline expiry, returning partial results
-// and the appropriate sentinel error.
+// context cancellation and deadline expiry, returning the appropriate
+// sentinel error and a nil graph (the import is all-or-nothing at the
+// in-memory level, so no partial graph escapes on cancellation).
 //
 // Goroutine-leak verification is handled by the package-level TestMain.
 func TestCSVRead_CtxCancelMidStream(t *testing.T) {
@@ -30,9 +31,9 @@ func TestCSVRead_CtxCancelMidStream(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("want context.Canceled, got %v", err)
 		}
-		// Partial result must be non-nil even when cancelled at row 0.
-		if a == nil {
-			t.Fatal("expected non-nil partial adjacency list")
+		// The graph must be nil on cancellation — no partial escapes.
+		if a != nil {
+			t.Errorf("graph = %v, want nil on cancellation", a)
 		}
 	})
 
@@ -63,9 +64,9 @@ func TestCSVRead_CtxCancelMidStream(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("want context.DeadlineExceeded, got %v", err)
 		}
-		// Partial adjacency list must be non-nil.
-		if a == nil {
-			t.Fatal("expected non-nil partial adjacency list on deadline exceeded")
+		// The graph must be nil on deadline expiry — no partial escapes.
+		if a != nil {
+			t.Errorf("graph = %v, want nil on deadline exceeded", a)
 		}
 	})
 }

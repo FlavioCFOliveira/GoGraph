@@ -72,9 +72,14 @@ func ReadInto(r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64],
 }
 
 // ReadIntoCtx is the context-aware variant of [ReadInto]. ctx.Err()
-// is checked every 4096 rows; on cancellation returns
-// (partialAdj, rowsConsumed, wrapped ctx.Err()). The input is capped at
-// [DefaultMaxBytes]; use [ReadIntoCappedCtx] for an explicit ceiling.
+// is checked every 4096 rows. The input is capped at [DefaultMaxBytes];
+// use [ReadIntoCappedCtx] for an explicit ceiling.
+//
+// On any error — a parse error, context cancellation, or the
+// [ErrInputTooLarge] cap — the returned graph is nil; the import is
+// all-or-nothing at the in-memory level, so a caller cannot accidentally
+// commit a half-built graph. The typed error is returned unchanged; only
+// the graph value is discarded.
 func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64], int, error) {
 	return ReadIntoCappedCtx(ctx, r, cfg, DefaultMaxBytes)
 }
@@ -98,7 +103,7 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, max
 		if rows&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
-				return a, rows, err
+				return nil, rows, err
 			}
 		}
 		rows++
@@ -168,6 +173,12 @@ func ReadWithProps(r io.Reader, cfg adjlist.Config) (*lpg.Graph[string, int64], 
 // ctx.Err() is checked every 4096 rows. The input is capped at
 // [DefaultMaxBytes]; use [ReadWithPropsCappedCtx] for an explicit
 // ceiling.
+//
+// On any error — a parse error, context cancellation, or the
+// [ErrInputTooLarge] cap — the returned graph is nil; the import is
+// all-or-nothing at the in-memory level, so a caller cannot accidentally
+// commit a half-built graph. The typed error is returned unchanged; only
+// the graph value is discarded.
 func ReadWithPropsCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*lpg.Graph[string, int64], int, error) {
 	return ReadWithPropsCappedCtx(ctx, r, cfg, DefaultMaxBytes)
 }
@@ -192,7 +203,7 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config
 		if rows&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
-				return g, rows, err
+				return nil, rows, err
 			}
 		}
 		rows++

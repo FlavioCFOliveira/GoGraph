@@ -308,6 +308,12 @@ func ReadWithProps(r io.Reader) (*lpg.Graph[string, int64], int, error) {
 // ReadWithPropsCtx is the context-aware variant of [ReadWithProps]. The
 // input is capped at [DefaultMaxBytes]; use [ReadWithPropsCappedCtx] for
 // an explicit ceiling.
+//
+// On any error — a parse error, context cancellation, or the
+// [ErrInputTooLarge] cap — the returned graph is nil; the import is
+// all-or-nothing at the in-memory level, so a caller cannot accidentally
+// commit a half-built graph. The typed error is returned unchanged; only
+// the graph value is discarded.
 func ReadWithPropsCtx(ctx context.Context, r io.Reader) (*lpg.Graph[string, int64], int, error) {
 	return ReadWithPropsCappedCtx(ctx, r, DefaultMaxBytes)
 }
@@ -317,6 +323,9 @@ func ReadWithPropsCtx(ctx context.Context, r io.Reader) (*lpg.Graph[string, int6
 // [ErrInputTooLarge] the moment consumption exceeds the limit, before
 // the whole document is buffered; a value of zero or less disables the
 // cap.
+//
+// On any error the returned graph is nil (see [ReadWithPropsCtx]); the
+// import is all-or-nothing at the in-memory level.
 //
 //nolint:gocyclo // GraphML typed-property read: key index + node props + edge decode + ctx tick
 func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
@@ -350,7 +359,7 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 	for _, n := range gr.Nodes {
 		if err := g.AddNode(n.ID); err != nil {
 			metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-			return g, 0, fmt.Errorf("graphml: AddNode(%q): %w", n.ID, err)
+			return nil, 0, fmt.Errorf("graphml: AddNode(%q): %w", n.ID, err)
 		}
 		// Re-use the nodeElement's inline Data field when the XML
 		// decoder populates it (the docElement struct unmarshals
@@ -367,11 +376,11 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 			pv, err := deserialisePropertyValue(decl.AttrType, d.Value)
 			if err != nil {
 				metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-				return g, 0, fmt.Errorf("graphml: node %q key %q: %w", n.ID, decl.AttrName, err)
+				return nil, 0, fmt.Errorf("graphml: node %q key %q: %w", n.ID, decl.AttrName, err)
 			}
 			if err := g.SetNodeProperty(n.ID, decl.AttrName, pv); err != nil {
 				metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-				return g, 0, fmt.Errorf("graphml: SetNodeProperty(%q, %q): %w", n.ID, decl.AttrName, err)
+				return nil, 0, fmt.Errorf("graphml: SetNodeProperty(%q, %q): %w", n.ID, decl.AttrName, err)
 			}
 		}
 	}
@@ -382,7 +391,7 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 		if added&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-				return g, added, err
+				return nil, added, err
 			}
 		}
 		var w int64
@@ -391,14 +400,14 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 				v, err := strconv.ParseInt(d.Value, 10, 64)
 				if err != nil {
 					metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-					return g, added, fmt.Errorf("graphml: edge (%q,%q) weight %q: %w", e.Source, e.Target, d.Value, err)
+					return nil, added, fmt.Errorf("graphml: edge (%q,%q) weight %q: %w", e.Source, e.Target, d.Value, err)
 				}
 				w = v
 			}
 		}
 		if err := g.AdjList().AddEdge(e.Source, e.Target, w); err != nil {
 			metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-			return g, added, fmt.Errorf("graphml: AddEdge(%q, %q): %w", e.Source, e.Target, err)
+			return nil, added, fmt.Errorf("graphml: AddEdge(%q, %q): %w", e.Source, e.Target, err)
 		}
 		added++
 	}
