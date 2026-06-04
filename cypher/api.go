@@ -38,6 +38,27 @@
 // updates on a single sync.Mutex; the cached *planCacheEntry is immutable
 // once published, so callers operate on the returned pointer without further
 // synchronisation.
+//
+// Write queries serialise on a single-writer lock: the backing [txn.Store]'s
+// writer mutex when the engine is WAL-backed ([NewEngineWithStore]), or the
+// engine's own writer mutex when it is store-less ([NewEngine]). Autocommit
+// [Engine.RunInTx] holds that lock for one statement; an explicit transaction
+// ([Engine.BeginTx]) holds it from BEGIN until COMMIT/ROLLBACK, so concurrent
+// writers block until it finishes (write-write isolation). Reads ([Engine.Run])
+// never take the writer lock. The lock order is writer-lock (outermost) → the
+// graph visibility barrier (visMu, inside [lpg.Graph.ApplyAtomically]); both
+// wirings share it, so no deadlock is possible across them.
+//
+// # Transactions
+//
+// [Engine.RunInTx] is autocommit: each call is its own all-or-nothing,
+// durable-then-visible transaction. [Engine.BeginTx] opens an explicit,
+// multi-statement transaction ([ExplicitTx]) whose statements commit or roll
+// back together — the engine substrate for the Bolt BEGIN/RUN/COMMIT/ROLLBACK
+// protocol. Both apply writes eagerly to the in-memory graph and roll back via
+// the in-memory undo log on error; a concurrent reader can therefore observe an
+// open transaction's not-yet-committed writes (read-uncommitted for readers).
+// See [ExplicitTx] (exectx.go) for the full transaction and isolation contract.
 package cypher
 
 import (
@@ -50,6 +71,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -352,6 +374,37 @@ type Engine struct {
 	procReg       *procs.Registry
 	cache         *planCache
 	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
+
+	// writeMu is the engine-level single-writer serialisation used ONLY when
+	// the engine is store-less (store == nil). A WAL-backed engine instead
+	// serialises every write on the store's own single-writer mutex (taken in
+	// [txn.Store.Begin] and released by Commit/Rollback), so this mutex is left
+	// untouched in that wiring to avoid a redundant second lock.
+	//
+	// It provides write-write isolation for the store-less engine in two
+	// places: (a) every autocommit [Engine.RunInTx] statement holds it for the
+	// statement's duration; (b) an explicit transaction ([Engine.BeginTx])
+	// holds it from BEGIN until COMMIT or ROLLBACK, so a concurrent writer
+	// blocks until the transaction finishes — the same isolation the store
+	// mutex gives the WAL-backed wiring. The lock order is writeMu (outermost)
+	// → visMu (inside [lpg.Graph.ApplyAtomically]), matching the WAL-backed
+	// store-mutex → visMu order, so the two wirings share one deadlock-free
+	// ordering. readers ([Engine.Run] / [lpg.Graph.View]) never take it.
+	writeMu sync.Mutex
+}
+
+// lockWriter acquires the engine's write serialisation appropriate to its
+// wiring and returns the matching unlock closure. For a store-less engine it
+// locks [Engine.writeMu]; for a WAL-backed engine the store mutex is taken by
+// the caller's [txn.Store.Begin], so lockWriter is a no-op there and the
+// returned closure does nothing. The returned unlock is idempotent-safe to
+// call exactly once on the write path's single exit.
+func (e *Engine) lockWriter() func() {
+	if e.store != nil {
+		return func() {}
+	}
+	e.writeMu.Lock()
+	return e.writeMu.Unlock
 }
 
 // NewEngine creates an Engine backed by g. The default built-in function
@@ -6646,6 +6699,15 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// here) pays nothing.
 	undo := &undoLog{}
 
+	// Serialise store-less autocommit writes on the engine writer mutex so they
+	// honour the same single-writer contract an explicit transaction relies on:
+	// without it, a store-less autocommit write could race an open explicit
+	// transaction's writer-mutex hold (#1280 write-write isolation). For a
+	// WAL-backed engine lockWriter is a no-op (Begin below takes the store
+	// mutex), so the lock is taken at most once on either wiring.
+	unlockWriter := e.lockWriter()
+	defer unlockWriter()
+
 	// The WAL transaction is opened OUTSIDE the visibility barrier: Begin()
 	// takes the store's single-writer mutex and must not nest under visMu.
 	// The mutator adapter only captures references; no graph reads happen yet.
@@ -6657,60 +6719,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo}
 	}
 
-	// Build the physical operator tree AND execute the whole write statement
-	// under the write visibility barrier (#1077). The physical build snapshots
-	// live mutable graph structures (the forward CSR in buildEdgeTypeFilter,
-	// per-edge label lookups); running it inside Graph.ApplyAtomically (visMu)
-	// stops a concurrent reader from observing a torn snapshot and stops a
-	// concurrent writer from growing the node space mid-build. Holding visMu
-	// also makes every eager mutation flip visible to Graph.View readers
-	// atomically (audit gap F3, docs/isolation-design.md).
-	//
-	// The transaction's WAL fsync (CommitWALOnly) ALSO runs inside this barrier,
-	// before it is released, via commitUnderBarrier: the write is made durable
-	// BEFORE its mutations are allowed to remain visible past the barrier, so a
-	// reader never observes (and acts on) a write that a crash before the fsync
-	// would lose (#1281, Durability). materialising and the commit both happen
-	// under visMu; the lock is released only after, before the caller iterates.
-	//
-	// build runs under visMu.Lock; nothing here may call g.View/g.ApplyAtomically
-	// (visMu is non-re-entrant — see lpg.Graph.View/ApplyAtomically).
-	var (
-		r        *Result
-		buildErr error
-	)
-	_ = e.g.ApplyAtomically(func() error {
-		// Roll the in-memory graph back BEFORE this panic leaves the barrier.
-		// ApplyAtomically releases visMu with a deferred Unlock in its own
-		// frame, so a deferred recover registered here in the closure runs
-		// while visMu is STILL held: the undo replay restores the live graph
-		// before any concurrent Graph.View reader can observe the partial
-		// transaction. The panic is then re-raised so the outer
-		// recoverWriteQueryPanic still rolls back walTx (releasing the single-
-		// writer mutex) and converts it to ErrInternalPanic. A naive recover in
-		// RunInTx itself would run after the Unlock above — too late (#1282).
-		defer replayUndoOnPanic(undo)
-		walker := &lpgNodeWalker{g: e.g}
-		labelSrc := &lpgLabelResolver{g: e.g}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager())
-		if berr != nil {
-			buildErr = berr
-			return nil
-		}
-		rs := exec.Run(ctx, op, cols)
-		r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows)
-		r.undo = undo
-		r.materialize()
-		// Finalise the transaction inside the same barrier as the graph writes:
-		// on success fsync the WAL FIRST and then commit the secondary indexes,
-		// so the transaction becomes durable-then-visible as one atomic step
-		// (#1281) and an index seek never observes a partial transaction (F3.4);
-		// on a drain error (or an fsync failure) replay the undo log and roll
-		// the index buffer and WAL transaction back, so the visible state never
-		// contains the partial — or non-durable — transaction (#1281, #1282).
-		r.commitUnderBarrier()
-		return nil
-	})
+	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
@@ -6729,6 +6738,90 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		return nil, fmt.Errorf("cypher: commit WAL: %w", werr)
 	}
 	return r, nil
+}
+
+// execUnderBarrier builds the physical operator tree for plan and runs the
+// whole statement to a materialised [Result] inside one [lpg.Graph.ApplyAtomically]
+// (visMu) acquisition — the shared core of both the autocommit [Engine.RunInTx]
+// path and the explicit-transaction [ExplicitTx.Exec] path.
+//
+// Running build + drain under visMu stops a concurrent reader observing a torn
+// snapshot and stops a concurrent writer growing the node space mid-build
+// (#1077), and makes every eager mutation flip visible to [lpg.Graph.View]
+// readers atomically (audit gap F3, docs/isolation-design.md). build runs under
+// visMu.Lock, so nothing in it may call g.View / g.ApplyAtomically (visMu is
+// non-re-entrant).
+//
+// commit selects the transaction-finalisation behaviour:
+//
+//   - commit == true (autocommit RunInTx): the statement is its own transaction.
+//     The Result carries buf, walTx, and undo, and commitUnderBarrier runs at the
+//     end of the barrier so the WAL is fsynced FIRST and the index buffer
+//     committed (durable-then-visible, #1281), or — on a drain error or fsync
+//     failure — the undo log is replayed and the index/WAL rolled back, all
+//     inside the barrier (#1282). The caller inspects r.walErr.
+//
+//   - commit == false (explicit-tx Exec): the statement is one of several in a
+//     larger transaction owned by an [ExplicitTx]. The eager mutations are
+//     applied (and recorded into the SHARED undo, buf, and walTx the handle
+//     owns) but NOT committed: the returned Result is a pure read-back of the
+//     materialised rows with NO transaction authority (its buf and tx are nil
+//     and its undo is unset), so closing it never commits or rolls back. The
+//     handle's Commit / Rollback finalises buf, walTx, and the accumulated undo
+//     exactly once, later. A per-statement drain error is surfaced via the
+//     Result but does NOT trigger a rollback here — the Bolt session decides
+//     whether to roll the whole transaction back (#1309).
+//
+// In BOTH modes a panic raised mid-statement is handled by replayUndoOnPanic
+// inside the barrier: it replays the (possibly multi-statement) accumulated
+// undo while visMu is still held — so no reader observes the partial
+// transaction — and re-raises so the caller's own recover (recoverWriteQueryPanic)
+// rolls back walTx, releases the writer serialisation, and converts the panic to
+// [ErrInternalPanic]. After such a panic the undo log is emptied (replay is
+// idempotent), so a subsequent handle Rollback is a clean no-op against it.
+func (e *Engine) execUnderBarrier(
+	ctx context.Context,
+	plan ir.LogicalPlan,
+	queryReg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	mutator exec.GraphMutator,
+	buf *exec.IndexBuffer,
+	undo *undoLog,
+	walTx *txn.Tx[string, float64],
+	commit bool,
+) (r *Result, buildErr error) {
+	_ = e.g.ApplyAtomically(func() error {
+		// Roll the in-memory graph back BEFORE this panic leaves the barrier; see
+		// the type-level note above and replayUndoOnPanic for why this must run
+		// while visMu is still held.
+		defer replayUndoOnPanic(undo)
+		walker := &lpgNodeWalker{g: e.g}
+		labelSrc := &lpgLabelResolver{g: e.g}
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager())
+		if berr != nil {
+			buildErr = berr
+			return nil
+		}
+		rs := exec.Run(ctx, op, cols)
+		if commit {
+			// Autocommit: the Result owns the transaction and finalises it here.
+			r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows)
+			r.undo = undo
+			r.materialize()
+			r.commitUnderBarrier()
+			return nil
+		}
+		// Explicit-tx statement: build a read-back-only Result (no buf, no tx, no
+		// undo) so closing it never commits or rolls back. The mutator still
+		// recorded every mutation into the handle's shared buf / walTx / undo, so
+		// the handle's later Commit / Rollback is authoritative. Materialise under
+		// the barrier so the statement observes a consistent snapshot and its
+		// eager writes flip visible atomically with the rest of the open tx.
+		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows)
+		r.materialize()
+		return nil
+	})
+	return r, buildErr
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

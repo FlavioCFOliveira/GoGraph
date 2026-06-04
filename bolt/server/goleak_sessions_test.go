@@ -72,12 +72,21 @@ func TestGoleak_Sessions_AllTransitions(t *testing.T) {
 	// Give the server a moment to enter Accept before connecting clients.
 	time.Sleep(10 * time.Millisecond)
 
-	// Drive numSessions concurrent sessions.
+	// Drive numSessions concurrent sessions. Every fourth session exercises the
+	// BEGIN→RUN→disconnect path (#1309): it opens an explicit transaction, issues
+	// a write, and drops the connection WITHOUT COMMIT/ROLLBACK, so handleConn's
+	// deferred teardown must roll the transaction back and release the engine
+	// writer serialisation. A leaked goroutine or mutex would surface as a goleak
+	// failure (or a hung Serve) at teardown.
 	done := make(chan struct{}, numSessions)
 	for i := range numSessions {
 		i := i
 		go func() {
 			defer func() { done <- struct{}{} }()
+			if i%4 == 0 {
+				sessionBeginDisconnect(t, addr)
+				return
+			}
 			sessionAllTransitions(t, addr, i)
 		}()
 	}
@@ -175,6 +184,22 @@ func sessionAllTransitions(t *testing.T, addr string, _ int) {
 
 	// READY → GOODBYE → DEFUNCT
 	c.goodbye(t)
+}
+
+// sessionBeginDisconnect drives the #1309 BEGIN→RUN→disconnect path: it opens an
+// explicit transaction, issues a write, and drops the connection without
+// COMMIT/ROLLBACK. handleConn's deferred teardown must roll the transaction back
+// and release the engine writer serialisation so neither a goroutine nor a lock
+// is leaked.
+func sessionBeginDisconnect(t *testing.T, addr string) {
+	t.Helper()
+	c := newBoltTestClient(t, addr)
+	c.negotiate(t)
+	c.hello(t)
+	c.begin(t)
+	c.run(t, "CREATE (:GoleakDrop {v:1})", nil)
+	// Drop the connection mid-transaction — no PULL, COMMIT, ROLLBACK, or GOODBYE.
+	c.close(t)
 }
 
 // goLeakWriteTestPair generates a self-signed ECDSA P-256 certificate and key

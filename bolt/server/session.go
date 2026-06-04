@@ -84,6 +84,16 @@ type Session struct {
 	// this value. See [Options.MaxInFlightPerConnection] for the
 	// rationale.
 	maxInFlight int
+
+	// defaultTxTimeout is the bounded transaction timeout applied to an explicit
+	// transaction (BEGIN) when the client supplies no tx_timeout. A finite value
+	// guarantees the engine writer serialisation an explicit transaction holds
+	// can never be retained indefinitely (a client that BEGINs and then stalls
+	// would otherwise block every other writer forever). Seeded from
+	// [Options.DefaultTxTimeout] / [DefaultTxTimeout]. Zero means no default
+	// bound (a client BEGIN with no tx_timeout is then unbounded — not used by
+	// the production server, which always installs a finite default).
+	defaultTxTimeout time.Duration
 }
 
 // newSession constructs an idle Session backed by eng, starting in
@@ -93,13 +103,14 @@ type Session struct {
 // (e.g. unit tests).
 func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session {
 	return &Session{
-		id:          randomID(),
-		eng:         eng,
-		auth:        auth,
-		state:       StateNegotiation,
-		localAddr:   localAddr,
-		log:         slog.Default(),
-		maxInFlight: DefaultMaxInFlightPerConnection,
+		id:               randomID(),
+		eng:              eng,
+		auth:             auth,
+		state:            StateNegotiation,
+		localAddr:        localAddr,
+		log:              slog.Default(),
+		maxInFlight:      DefaultMaxInFlightPerConnection,
+		defaultTxTimeout: DefaultTxTimeout,
 	}
 }
 
@@ -119,6 +130,17 @@ func (s *Session) setMaxStmtTimeout(d time.Duration) {
 func (s *Session) setMaxInFlight(n int) {
 	if n > 0 {
 		s.maxInFlight = n
+	}
+}
+
+// setDefaultTxTimeout sets the bounded transaction timeout applied to an
+// explicit transaction when the client supplies no tx_timeout. Non-positive
+// values are ignored, leaving the default in place. Intended for the server
+// bootstrap path so the operator-configured [Options.DefaultTxTimeout] takes
+// effect.
+func (s *Session) setDefaultTxTimeout(d time.Duration) {
+	if d > 0 {
+		s.defaultTxTimeout = d
 	}
 }
 
@@ -167,6 +189,27 @@ func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
 		return s.failWith("Neo.TransientError.General.RequestInterrupted", err.Error()), nil
 	}
 
+	responses, err := s.dispatch(ctx, msg)
+
+	// If the message left the session in FAILED with an explicit transaction
+	// still open, roll that transaction back NOW rather than waiting for the
+	// client's RESET. Entering FAILED means no further RUN/COMMIT can run until
+	// RESET, so the transaction is doomed; holding its writes (and the engine
+	// writer serialisation) until RESET would block every other writer and leave
+	// a partial transaction visible. Rolling back here unwinds the in-memory
+	// writes and releases the writer mutex promptly (#1309). RESET/GOODBYE roll
+	// the transaction back on their own paths and never reach this branch with a
+	// non-nil tx.
+	if s.state == StateFailed && s.tx != nil {
+		s.abortTx()
+	}
+	return responses, err
+}
+
+// dispatch routes msg to the correct per-state handler. It is the inner switch
+// of [Session.HandleMessage]; the outer method adds the post-dispatch
+// FAILED-with-open-transaction rollback.
+func (s *Session) dispatch(ctx context.Context, msg any) ([]any, error) {
 	switch m := msg.(type) {
 	case *proto.Hello:
 		return s.handleHello(m)
@@ -185,7 +228,7 @@ func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
 	case *proto.Discard:
 		return s.handleDiscard(m)
 	case *proto.Begin:
-		return s.handleBegin(m)
+		return s.handleBegin(ctx, m)
 	case *proto.Commit:
 		return s.handleCommit()
 	case *proto.Rollback:
@@ -196,6 +239,33 @@ func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
 		return s.failWith("Neo.ClientError.Request.Invalid",
 			fmt.Sprintf("unrecognised message type %T", msg)), nil
 	}
+}
+
+// abortTx drains any open result cursor and rolls back the session's explicit
+// transaction, clearing all transaction state. It is the shared teardown for the
+// FAILED-with-open-transaction path (post-dispatch) and the connection-teardown
+// path ([Session.Close]). It is best-effort and idempotent: a nil tx is a no-op,
+// and rolling back an already-finished engine transaction returns promptly. After
+// abortTx the session holds no transaction and the engine writer serialisation is
+// released.
+func (s *Session) abortTx() {
+	s.drainResult()
+	if s.tx != nil {
+		_ = s.tx.Rollback() //nolint:errcheck // best-effort rollback on failure/teardown; error not actionable
+		s.tx = nil
+	}
+	s.txActive = false
+}
+
+// Close tears the session down on connection teardown: it drains any open cursor
+// and rolls back any open explicit transaction so the engine writer serialisation
+// is released immediately rather than lingering until the GC finalises the
+// leaked Result/transaction (#1309). It is safe to call exactly once from the
+// connection handler's deferred cleanup on every exit path (clean close, read or
+// write error, panic). Idempotent: a second call, or a call on a session with no
+// open transaction, is a no-op.
+func (s *Session) Close() {
+	s.abortTx()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -527,7 +597,7 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 	}}}, nil
 }
 
-func (s *Session) handleBegin(m *proto.Begin) ([]any, error) {
+func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error) {
 	if s.state != StateReady {
 		return s.failTransition(m)
 	}
@@ -539,12 +609,6 @@ func (s *Session) handleBegin(m *proto.Begin) ([]any, error) {
 		}}, nil
 	}
 
-	next, err := Transition(s.state, m, true)
-	if err != nil {
-		return s.failTransition(m)
-	}
-	s.state = next
-
 	// Log incoming bookmarks for observability.
 	if bms := ExtractBookmarks(m.Extra); len(bms) > 0 {
 		s.log.Debug("bolt: BEGIN bookmarks received",
@@ -552,12 +616,22 @@ func (s *Session) handleBegin(m *proto.Begin) ([]any, error) {
 			slog.Any("bookmarks", bms))
 	}
 
-	// Extract optional transaction timeout from extra metadata.
-	var txTimeout time.Duration
+	// Determine the effective transaction timeout. A finite bound is mandatory:
+	// the explicit transaction holds the engine's single-writer serialisation
+	// from BEGIN until COMMIT/ROLLBACK, so a client that BEGINs and then stalls
+	// would otherwise block every other writer indefinitely (#1302). Precedence:
+	// the client-supplied tx_timeout if present, else the server default
+	// (defaultTxTimeout). The server-side statement cap (maxStmtTimeout), when
+	// set, clamps the result so a client can never request a longer hold than the
+	// operator permits.
+	effective := s.defaultTxTimeout
 	if v, ok := m.Extra["tx_timeout"]; ok {
 		if ms, ok := v.(int64); ok && ms > 0 {
-			txTimeout = time.Duration(ms) * time.Millisecond
+			effective = time.Duration(ms) * time.Millisecond
 		}
+	}
+	if s.maxStmtTimeout > 0 && (effective <= 0 || effective > s.maxStmtTimeout) {
+		effective = s.maxStmtTimeout
 	}
 
 	// Determine transaction mode (default: "w").
@@ -568,8 +642,31 @@ func (s *Session) handleBegin(m *proto.Begin) ([]any, error) {
 		}
 	}
 
+	// Open the engine transaction rooted at the CONNECTION context (so a dropped
+	// connection or a server shutdown cancels an in-flight statement) bounded by
+	// the effective timeout. BeginTx acquires the engine writer serialisation; a
+	// failure here (e.g. an already-cancelled context) leaves the session in
+	// READY with no open transaction.
+	tx, err := newTx(ctx, s.eng, mode, effective)
+	if err != nil {
+		s.state = StateFailed
+		s.log.Error("bolt: begin transaction failed", slog.String("session", s.id), slog.String("err", err.Error()))
+		return []any{&proto.Failure{
+			Code:    FailureCode(err),
+			Message: s.sanitiseErr(err),
+		}}, nil
+	}
+
+	next, transErr := Transition(s.state, m, true)
+	if transErr != nil {
+		// Roll back the just-opened transaction so the writer serialisation is not
+		// leaked on the (unreachable in practice) illegal-transition path.
+		_ = tx.Rollback() //nolint:errcheck // best-effort cleanup; error not actionable
+		return s.failTransition(m)
+	}
+	s.state = next
 	s.txActive = true
-	s.tx = newTx(context.Background(), s.eng, mode, txTimeout)
+	s.tx = tx
 	return []any{&proto.Success{Metadata: map[string]packstream.Value{}}}, nil
 }
 

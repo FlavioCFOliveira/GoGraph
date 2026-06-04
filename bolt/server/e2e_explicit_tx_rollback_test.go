@@ -1,20 +1,21 @@
 package server_test
 
-// e2e_explicit_tx_rollback_test.go — T825: Explicit transaction rollback.
+// e2e_explicit_tx_rollback_test.go — T825 / #1280: Explicit transaction rollback.
 //
-// Known server limitations — eager mutation model:
+// With true engine-level explicit transactions ([cypher.ExplicitTx]), a Bolt
+// transaction's writes accumulate in one engine transaction and are unwound
+// together by ROLLBACK via the in-memory undo log (#1282). The previously
+// skipped acceptance criteria now hold:
 //
-//   The in-memory cypher engine applies graph mutations eagerly (at RUN time).
-//   Rollback closes the open result cursors and cancels the transaction context,
-//   but it does NOT undo mutations already applied to the graph (see
-//   bolt/server/tx.go Rollback docstring: "graph mutations are already applied
-//   eagerly"). Therefore:
+//   - AC#1: after ROLLBACK the same session observes zero rows for the
+//     rolled-back writes.
+//   - AC#2: another session observes zero rows for the same writes.
 //
-//     - AC#1 (post-Rollback MATCH in same session returns zero rows) cannot be
-//       satisfied — the writes are already in the graph and remain visible.
-//     - AC#2 (other sessions see zero rows) cannot be satisfied for the same reason.
-//
-//   This test is skipped for ACs #1–2 and documents the actual behaviour.
+// The test server is wired with the store-less engine (cypher.NewEngine), so
+// durability does not apply (nothing is persisted); ROLLBACK's in-memory undo is
+// what these assertions exercise. The WAL-backed durable-rollback path (a fresh
+// recovery.Open observing the rolled-back node absent) is covered by the engine
+// regression test cypher.TestExplicitTx_Rollback_DurableAbsent.
 
 import (
 	"context"
@@ -24,8 +25,8 @@ import (
 )
 
 // TestE2E_ExplicitTxRollback opens an explicit transaction, executes writes,
-// and rolls back. ACs #1–2 are skipped because the in-memory engine does not
-// support transactional rollback of already-applied mutations.
+// and rolls back, then asserts neither the rolling-back session nor a second
+// session observes the rolled-back nodes.
 func TestE2E_ExplicitTxRollback(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
@@ -38,10 +39,10 @@ func TestE2E_ExplicitTxRollback(t *testing.T) {
 		t.Fatalf("BeginTransaction: %v", err)
 	}
 
-	// Write inside the transaction.
+	// Two writes inside the transaction.
 	r1, err := tx.Run(ctx, `CREATE (n:RollbackNode {v: 1})`, nil)
 	if err != nil {
-		t.Fatalf("tx.Run: %v", err)
+		t.Fatalf("tx.Run (1): %v", err)
 	}
 	if _, err := r1.Consume(ctx); err != nil {
 		t.Fatalf("r1.Consume: %v", err)
@@ -49,7 +50,7 @@ func TestE2E_ExplicitTxRollback(t *testing.T) {
 
 	r2, err := tx.Run(ctx, `CREATE (n:RollbackNode {v: 2})`, nil)
 	if err != nil {
-		t.Fatalf("tx.Run: %v", err)
+		t.Fatalf("tx.Run (2): %v", err)
 	}
 	if _, err := r2.Consume(ctx); err != nil {
 		t.Fatalf("r2.Consume: %v", err)
@@ -60,21 +61,14 @@ func TestE2E_ExplicitTxRollback(t *testing.T) {
 		t.Fatalf("tx.Rollback: %v", err)
 	}
 
-	// KNOWN GAP: The in-memory engine applies mutations eagerly and does not
-	// implement transactional undo. After Rollback the graph still contains the
-	// written nodes. ACs #1 and #2 (zero rows post-rollback) cannot be satisfied
-	// until a write-buffered or MVCC implementation is introduced.
-	t.Skip("KNOWN GAP: in-memory engine applies mutations eagerly — Rollback does not undo " +
-		"graph writes. AC#1 (same-session sees zero rows) and AC#2 (other sessions see zero rows) " +
-		"cannot be satisfied. Skipping post-rollback visibility assertions.")
-
-	// AC#1: Same session sees zero rows after rollback.
+	// AC#1: the same session sees zero rows after rollback — the two eager writes
+	// were unwound by the engine's accumulated undo log.
 	rows1 := runRead(ctx, t, session, `MATCH (n:RollbackNode) RETURN count(n) AS cnt`, nil)
 	if cnt, _ := rows1[0]["cnt"].(int64); cnt != 0 {
 		t.Errorf("same-session post-rollback: count = %d, want 0", cnt)
 	}
 
-	// AC#2: Other session sees zero rows.
+	// AC#2: a second session also sees zero rows.
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session2.Close(ctx) //nolint:errcheck
 

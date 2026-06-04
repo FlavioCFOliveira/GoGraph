@@ -7,11 +7,21 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
-// TestSession_InFlightCursorCap_FirstCursorSurvivesRejection verifies AC2 of
-// T737: after the second RUN is rejected with LimitExceeded, the first cursor
-// that was already accumulated in tx.results is still present and the in-flight
-// count remains 1. The rejection must not close or evict the first cursor.
-func TestSession_InFlightCursorCap_FirstCursorSurvivesRejection(t *testing.T) {
+// TestSession_InFlightCursorCap_RejectionAbortsDoomedTx verifies the
+// per-connection in-flight cursor cap (T737) together with the #1309
+// FAILED-with-open-transaction rollback. A second RUN over an explicit
+// transaction whose cap is 1 is rejected with LimitExceeded and moves the
+// session to FAILED; because only RESET can escape FAILED (and would roll the
+// transaction back anyway), the now-doomed transaction is rolled back
+// immediately so its in-memory writes are unwound and the engine writer
+// serialisation is released without waiting for the client's RESET. The
+// in-flight count therefore drops to 0 (the transaction is gone), and the cap
+// rejection itself still surfaces as the typed LimitExceeded FAILURE.
+//
+// This supersedes the pre-#1280 behaviour in which a cap rejection left the open
+// transaction (and the cursor it had accumulated) intact until RESET — under
+// true explicit transactions that would leak the global write lock.
+func TestSession_InFlightCursorCap_RejectionAbortsDoomedTx(t *testing.T) {
 	t.Parallel()
 	sess := newReadySession(t)
 	sess.setMaxInFlight(1) // explicit cap=1 so the second RUN is rejected
@@ -53,13 +63,16 @@ func TestSession_InFlightCursorCap_FirstCursorSurvivesRejection(t *testing.T) {
 		t.Fatalf("failure code = %q; want LimitExceeded", fail.Code)
 	}
 
-	// AC2: first cursor must still be present in tx.results. The in-flight count
-	// reflects what is still registered in the transaction; a count of 1 proves
-	// the cursor was not evicted or closed by the rejection logic.
-	//
-	// Note: handleRun moves state to FAILED on cap breach, so we access the
-	// internal counter directly rather than via another HandleMessage call.
-	if got := sess.inFlightCount(); got != 1 {
-		t.Fatalf("inFlightCount after rejection = %d; want 1 (first cursor must survive)", got)
+	// The cap breach moved the session to FAILED, which now rolls back the doomed
+	// transaction (#1309): the writer serialisation is released and the
+	// transaction is cleared, so the in-flight count drops to 0.
+	if sess.state != StateFailed {
+		t.Fatalf("state after rejection = %v; want FAILED", sess.state)
+	}
+	if sess.tx != nil {
+		t.Fatal("explicit transaction must be rolled back and cleared after a cap-breach FAILED")
+	}
+	if got := sess.inFlightCount(); got != 0 {
+		t.Fatalf("inFlightCount after rejection = %d; want 0 (doomed tx rolled back)", got)
 	}
 }

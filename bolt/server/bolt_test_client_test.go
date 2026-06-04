@@ -232,6 +232,8 @@ func (c *boltTestClient) recvSuccess(t *testing.T) *proto.Success {
 // It registers a t.Cleanup that cancels the server context and drains the
 // Serve goroutine. Goroutine leak checking is handled by goleak.Find in
 // TestMain after all servers have been shut down.
+//
+//nolint:gocritic // hugeParam: test helper takes Options by value to mirror the public NewServer signature; not a hot path.
 func startTestServer(t *testing.T, opts server.Options) string {
 	t.Helper()
 	eng := newEngine(t)

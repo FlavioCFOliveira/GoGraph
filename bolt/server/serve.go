@@ -54,6 +54,21 @@ const (
 	// connections more aggressively.
 	DefaultConnTimeout = 30 * time.Second
 
+	// DefaultTxTimeout is the default value applied to Options.DefaultTxTimeout
+	// when the caller leaves it at zero. It bounds an explicit transaction
+	// (opened by BEGIN) when the client supplies no tx_timeout of its own. A
+	// finite default is mandatory: an explicit transaction holds the engine's
+	// single-writer serialisation from BEGIN until COMMIT/ROLLBACK, so a client
+	// that issues BEGIN and then stalls — never sending COMMIT, ROLLBACK, or even
+	// RESET — would otherwise block every other writer on the server forever, a
+	// liveness denial of service (#1302). The default of 30 s is generous enough
+	// not to disturb a legitimate interactive transaction while still guaranteeing
+	// the global write lock is reclaimed if a transaction is abandoned. Operators
+	// may set a larger value for long-lived batch transactions or a smaller one
+	// to reclaim the writer lock more aggressively; the per-statement
+	// MaxStatementTimeout, when set, additionally clamps it.
+	DefaultTxTimeout = 30 * time.Second
+
 	// DefaultHandshakeTimeout is the deadline that bounds the unauthenticated
 	// version-negotiation handshake — the cheapest phase for an attacker to
 	// abuse, since it requires no valid protocol bytes (a client may open a
@@ -125,6 +140,16 @@ type Options struct {
 	// server-side cap (client controls its own timeout).
 	MaxStatementTimeout time.Duration
 
+	// DefaultTxTimeout is the bounded timeout applied to an explicit transaction
+	// (opened by BEGIN) when the client supplies no tx_timeout. It guarantees the
+	// engine's single-writer serialisation, which an explicit transaction holds
+	// from BEGIN until COMMIT/ROLLBACK, can never be held indefinitely by an
+	// abandoned transaction (#1302). Zero or negative values default to
+	// [DefaultTxTimeout] (30 s). A client-supplied tx_timeout takes precedence;
+	// MaxStatementTimeout, when set, additionally clamps the effective value. Set
+	// a larger value for long-lived batch transactions.
+	DefaultTxTimeout time.Duration
+
 	// TLSConfig, when non-nil, wraps accepted connections with TLS using
 	// the given configuration verbatim. nil means plain TCP (no TLS).
 	//
@@ -193,6 +218,8 @@ type Server struct {
 // NoAuthHandler value is itself the opt-in — self-documenting at the call site
 // and impossible to set by accident. When Options.Auth is any other
 // (real) handler it is used as-is.
+//
+//nolint:gocritic // hugeParam: Options is passed by value intentionally; NewServer is the public constructor and the by-value signature is its stable contract.
 func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 	if opts.MaxConnections <= 0 {
 		opts.MaxConnections = defaultMaxConnections
@@ -202,6 +229,9 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 	}
 	if opts.ConnTimeout <= 0 {
 		opts.ConnTimeout = DefaultConnTimeout
+	}
+	if opts.DefaultTxTimeout <= 0 {
+		opts.DefaultTxTimeout = DefaultTxTimeout
 	}
 	log := opts.Logger
 	if log == nil {
@@ -449,6 +479,20 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess := newSession(s.eng, s.opts.Auth, localAddr)
 	sess.setMaxInFlight(s.opts.MaxInFlightPerConnection)
 	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)
+	sess.setDefaultTxTimeout(s.opts.DefaultTxTimeout)
+
+	// Tear the session down on EVERY exit path — clean GOODBYE, client
+	// disconnect, read/write error, idle timeout, or a recovered panic. If an
+	// explicit transaction is still open (the client sent BEGIN but never COMMIT,
+	// ROLLBACK, or RESET before the connection dropped), Close rolls it back,
+	// unwinding its in-memory writes and releasing the engine's single-writer
+	// serialisation IMMEDIATELY. Without this the open transaction — and the
+	// global write lock it holds — would linger until the GC finalised the leaked
+	// Result/transaction, during which every other writer would block (#1309).
+	// Close is registered here (after the conn.Close and panic-recover defers, so
+	// it runs BEFORE them on unwind: roll back the transaction, then let the panic
+	// boundary log, then close the socket) and is idempotent.
+	defer sess.Close()
 
 	// ── 3. Message loop ──────────────────────────────────────────────────
 	for {
