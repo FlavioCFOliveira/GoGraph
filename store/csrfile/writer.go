@@ -15,10 +15,23 @@ import (
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
-// WriteToFile serialises c into the path atomically: data lands in
-// path + ".tmp" first, the file is fsync'd, and only then renamed
-// onto path. Concurrent readers see either the previous file or the
-// new file, never a partial write.
+// WriteToFile serialises c into the path atomically and durably: data
+// lands in path + ".tmp" first, the temp file's contents are fsync'd,
+// the file is renamed onto path, and finally the PARENT directory is
+// fsync'd so the rename's directory entry survives a crash. Concurrent
+// readers see either the previous file or the new file, never a partial
+// write.
+//
+// On return with a nil error the published file is crash-durable: it
+// survives process crash, host crash, and kill -9. This guarantee
+// matters because WriteToFile is the bulk loader's sole durability
+// mechanism — the bulk path bypasses the WAL, so there is no replay and
+// no later checkpoint of this artefact to recover a lost rename. Without
+// the parent-directory fsync, a crash within the kernel's writeback
+// window after a successful return could lose the rename's directory
+// entry and with it the entire bulk load. The parent fsync is a no-op on
+// platforms without a directory-fsync primitive (Windows); see
+// [parentDirFsync].
 //
 // W must be one of the supported weight kinds (int32/uint32/float32
 // for 4-byte; int/uint/int64/uint64/float64/uintptr for 8-byte) or
@@ -85,6 +98,17 @@ func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 		_ = os.Remove(tmp) // best-effort: tmp file cleanup, rename err preserved
 		return Header{}, fmt.Errorf("csrfile: publish rename: %w", err)
 	}
+	notePublishStep("rename", path)
+	// Make the rename durable: fsync the parent directory so the new
+	// directory entry survives a crash within the journal writeback
+	// window. tmp is created alongside path (path + ".tmp"), so it shares
+	// the parent directory and this single post-rename fsync covers both
+	// the unlink of tmp and the link of path. No-op on platforms that
+	// lack a directory-fsync primitive (Windows); see [parentDirFsync].
+	if err := parentDirFsync(path); err != nil {
+		return Header{}, fmt.Errorf("csrfile: publish parent fsync: %w", err)
+	}
+	notePublishStep("parent-fsync", path)
 	return header, nil
 }
 
