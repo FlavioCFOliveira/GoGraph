@@ -56,6 +56,30 @@ Specify → Implement → Test → Document
 
 No step may be skipped or reordered.
 
+### Self-contained development
+
+Every development cycle must be **self-contained**: never deliver only part of a task. Each cycle must produce a complete, usable result.
+
+- When work uncovers a need that was not foreseen during planning, resolve it **within the same cycle** — add the necessary new tasks and complete them as promptly as possible, rather than deferring them.
+- All code is **full-fledged**. Never use `t.Skip` or placeholder stubs to pass off **unfinished or unimplemented** work as "done". This does not forbid deliberate, sanctioned skips: the soak/nightly layer gates (`testlayers.RequireSoak`/`RequireNightly`, which skip when their layer is inactive) and genuine environment-precondition skips (for example, when an optional external tool is absent) are expected wherever the test-layer rules below call for them.
+- When you encounter a pre-existing bug, fix small, clear, in-scope defects immediately and then resume the work you were doing. For a bug that is large, risky, or would materially widen the scope of the current task, follow the [Decision autonomy](#decision-autonomy) rule and ask the user how to proceed before acting.
+
+### Production-grade by default
+
+Across the entire cycle — analysis → planning → development → testing — the result must be **production-grade**. Apply your full knowledge and effort so that every change yields code ready to run in production, never a prototype or a partial solution.
+
+### Never guess — evidence over assumption
+
+Base every action **exclusively on verified knowledge**; never guess the intended answer.
+
+- When the project **Knowledge Graph** holds the answer, consult it first (see [Knowledge Graph](#knowledge-graph)).
+- When your knowledge is insufficient, research the answer in **official or authoritative sources** — specifications, peer-reviewed papers, books, or recognised authorities in the field — before deciding.
+- This generalises the openCypher conformance rule: never claim behaviour from memory.
+
+### Measure to decide
+
+Whenever you must assess **performance**, **completeness**, or **correctness**, gather evidence from the project and decide **empirically** — never by intuition. Benchmarks, test results, profiles, and Knowledge Graph queries are the basis for every such decision. This is the umbrella principle; the benchmarking mandates in [Performance-First Engineering](#performance-first-engineering) are its concrete, authoritative application to performance work.
+
 ---
 
 ## Planning and Task Execution
@@ -64,9 +88,11 @@ No step may be skipped or reordered.
 
 Use the `rmp` CLI (available system-wide) as the **sole source of truth** for all planning and task tracking in this project. No other tool or method should be used for this purpose.
 
+The same `rmp` instance also hosts the project **Knowledge Graph** (see [Knowledge Graph](#knowledge-graph)) — the authoritative model of what the project *is* (its components, features, and provenance), distinct from rmp's role as the source of truth for *planning and tasks*. Consult it throughout planning to understand the components involved, their relationships, and the scope and impact of the proposed work.
+
 ### Planning
 
-Before writing any code, analyse the proposed scope and determine whether multiple development phases are needed. Each phase must deliver a solid, standalone deliverable.
+Before writing any code, analyse the proposed scope and determine whether multiple development phases are needed. Each phase must deliver a solid, standalone deliverable. Use the **Knowledge Graph** to map the affected components, their dependencies, and the blast radius of the change before committing to a plan.
 
 **Phase/sprint definition (first pass):**
 Define the phases (sprints in `rmp`) and the objective of each sprint before enumerating individual tasks.
@@ -80,22 +106,47 @@ For every task, document clearly:
 
 When the work spans multiple sprints, complete the full sprint list first, then populate tasks sprint by sprint.
 
+Use the **Knowledge Graph** to identify the **foundational and highest-leverage tasks** — those that unblock the most downstream work or carry the widest impact — and sequence the plan to tackle them first.
+
 ### Execution
 
-Task execution is the natural continuation of planning. Before starting any work, use `rmp` to:
+Task execution is the natural continuation of planning. For each unit of work, follow this sequence using `rmp`:
 
-1. Check whether any open task is already in progress and continue it.
+1. Check whether any open task is already in progress and, if so, continue it.
 2. Identify the next task to start.
-3. Read and fully understand the task description, requirements, and acceptance criteria.
-
-During execution:
-- Verify **all** acceptance criteria are satisfied before closing a task.
-- Close the task with a concise summary of what was done.
-- After closing a task and before moving to the next, create a **git commit** following conventional commit conventions, describing what was done.
+3. Read and fully understand the task — its objective, functional and technical requirements, and acceptance criteria — consulting the **Knowledge Graph** to gauge its scope and impact.
+4. Implement the task, then verify that **all** acceptance criteria are satisfied before considering it done.
+5. Close the task with a concise summary of what was done.
+6. Create a **git commit** following conventional-commit conventions and describing what was done, before moving to the next task.
+7. Update the **Knowledge Graph** to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
 
 **Sequencing rules:**
 - Sprints are always executed **sequentially**.
 - Tasks within a sprint may run in **parallel** only when there is clear justification (no shared state, no dependency between them).
+
+---
+
+## Knowledge Graph
+
+Maintain a project **Knowledge Graph (KG)** using the graph features of `rmp` (its built-in *Groadmap* graph). The KG is the authoritative, queryable model of the project, and you must keep it as current as possible. To **locate and understand project structure** — components, features, tests, and provenance — query the graph first and fall back to reading source files only when the graph cannot answer. This is a navigation shortcut, not authority over the code: for any question of *actual behaviour* — above all openCypher conformance — the primary sources still govern, so consult the specification, the relevant TCK feature files, and the source itself as the [Compliance Mandates](#compliance-mandates) require.
+
+### What the graph must capture
+
+The Knowledge Graph **must hold everything useful to know about the project**, including:
+
+- **Features** — what they are, where they are specified, and where they are implemented.
+- **Tests** — which tests exist and what each one verifies.
+- **Components** — the building blocks of the module, how they relate, and the dependencies between them.
+- **Provenance** — the git commit in which each feature was specified, the commit in which it was implemented, and the commit in which it was tested.
+- **Planning** — the `rmp` sprints and tasks, and how they map onto components and features.
+
+Create whatever node and edge types best serve the project and your work; use the graph together with sprints and tasks to coordinate development.
+
+### Keeping the graph current
+
+- **Update the graph at every git commit.** Record the change on the affected nodes and edges, and stamp each with the **commit hash and date**.
+- Treat the graph as the **authoritative model of the project**: when it contradicts your *assumptions*, trust the verified graph over memory. The code itself remains the ground truth for what is *actually implemented* — when the graph and the code disagree, the code wins and you reconcile the graph to it.
+- As you discover new relationships while working, store them in the graph so the project's knowledge compounds over time.
 
 ---
 
