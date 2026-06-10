@@ -13,21 +13,25 @@ import (
 )
 
 // installPublishTrace wires publishTraceHook to record the publish-step
-// events for the staging directory wantStaging, and unregisters the hook
-// on test cleanup so it never leaks into another test. Events for any
-// OTHER staging directory (a concurrent publisher in a parallel test) are
-// dropped, so the recorded slice contains only this test's own steps.
+// events for the live snapshot directory liveDir, and unregisters the
+// hook on test cleanup so it never leaks into another test. The publish
+// protocol emits events against liveDir's two derived locations — the
+// staging directory liveDir+".tmp" ("staging-fsync", "rename") and the
+// backup directory liveDir+".bak" ("archive") — so both are accepted.
+// Events for any OTHER publish (a concurrent publisher in a parallel
+// test) are dropped, so the recorded slice contains only this test's own
+// steps.
 //
 // publishTraceHook is process-global, so a test that installs a recorder
 // must NOT run with t.Parallel(): two recorders would clobber each
 // other's slot via Store. Concurrent NON-tracing publishers are fine —
 // notePublishStep loads the pointer atomically and the filter discards
 // their foreign-path events.
-func installPublishTrace(t *testing.T, wantStaging string) *[]string {
+func installPublishTrace(t *testing.T, liveDir string) *[]string {
 	t.Helper()
 	var events []string
 	hook := func(event, path string) {
-		if path != wantStaging {
+		if path != liveDir+".tmp" && path != liveDir+".bak" {
 			return // foreign publisher (parallel test): not ours
 		}
 		events = append(events, event)
@@ -38,16 +42,17 @@ func installPublishTrace(t *testing.T, wantStaging string) *[]string {
 }
 
 // assertStagingFsyncBeforeRename verifies the recorded publish trace is
-// exactly the canonical crash-safe ordering for the staging directory:
-// a "staging-fsync" of the staging dir, immediately followed by its
-// "rename". Pre-fix code never fsyncs the staging directory, so the
-// "staging-fsync" event is absent and this assertion fails — the
-// regression guard.
+// exactly the canonical crash-safe ordering: a "staging-fsync" of the
+// staging dir, then the "archive" of the live snapshot to its backup
+// location, then the publish "rename". Pre-fix code never fsyncs the
+// staging directory (the "staging-fsync" event is absent) and never
+// archives the live snapshot (the "archive" event is absent), so this
+// assertion fails on either regression — the regression guard.
 func assertStagingFsyncBeforeRename(t *testing.T, events []string) {
 	t.Helper()
-	want := []string{"staging-fsync", "rename"}
+	want := []string{"staging-fsync", "archive", "rename"}
 	if len(events) != len(want) {
-		t.Fatalf("publish trace = %v; want exactly %v (staging-dir fsync must precede the publish rename)", events, want)
+		t.Fatalf("publish trace = %v; want exactly %v (staging-dir fsync, then live-snapshot archive, then publish rename)", events, want)
 	}
 	for i := range want {
 		if events[i] != want[i] {
@@ -79,7 +84,7 @@ func TestWriteSnapshotFull_StagingDirFsyncBeforeRename(t *testing.T) {
 	// Not parallel: installs the process-global publish-trace recorder.
 	root := t.TempDir()
 	dir := filepath.Join(root, "snap")
-	steps := installPublishTrace(t, dir+".tmp")
+	steps := installPublishTrace(t, dir)
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	adj := g.AdjList()
@@ -113,7 +118,7 @@ func TestWriteSnapshotCSR_StagingDirFsyncBeforeRename(t *testing.T) {
 	// Not parallel: installs the process-global publish-trace recorder.
 	root := t.TempDir()
 	dir := filepath.Join(root, "snap")
-	steps := installPublishTrace(t, dir+".tmp")
+	steps := installPublishTrace(t, dir)
 
 	c := buildTinyCSR(t)
 	if err := WriteSnapshotCSR(dir, c); err != nil {

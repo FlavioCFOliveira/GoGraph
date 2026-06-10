@@ -21,6 +21,13 @@ import "sync/atomic"
 //	    components and the grandparent never fsyncs the staging dir, so
 //	    this event would never fire.
 //
+//	("archive", bak) — emitted immediately before os.Rename(dir, bak)
+//	    atomically archives the current live snapshot to the dir+".bak"
+//	    backup location. The archive step is what closes the
+//	    RemoveAll->Rename total-loss window: at every instant of the
+//	    publish at least one complete snapshot exists on disk, and
+//	    recovery promotes a stranded backup back to the live name.
+//
 //	("rename", tmp) — emitted immediately before os.Rename(tmp, dir)
 //	    publishes the staging directory.
 //

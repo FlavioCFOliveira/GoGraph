@@ -705,6 +705,35 @@ func openCodec[N comparable, W any](
 		return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())}, err
 	}
 	snapDir := filepath.Join(dir, "snapshot")
+
+	// Interrupted-publish repair. The snapshot writers publish via a
+	// crash-atomic three-step swap — archive(live -> live+".bak"), then
+	// rename(staging -> live), then drop the backup (see store/snapshot).
+	// A crash inside that window leaves the live directory absent and the
+	// previous snapshot stranded at snapshot.bak; the WAL holds only the
+	// deltas committed after that snapshot, so WITHOUT promotion every
+	// checkpointed transaction would be silently lost. Promote the backup
+	// before probing for the manifest below. The stale staging directory
+	// is always safe to drop: it is rewritten from scratch on every
+	// checkpoint and only ever duplicates state that is fully
+	// reconstructable from the (promoted) snapshot plus the WAL.
+	snapBak := snapDir + ".bak"
+	_ = os.RemoveAll(snapDir + ".tmp") // best-effort: stale staging cleanup
+	if _, statErr := os.Stat(filepath.Join(snapDir, "manifest.json")); errors.Is(statErr, os.ErrNotExist) {
+		if _, bakErr := os.Stat(filepath.Join(snapBak, "manifest.json")); bakErr == nil {
+			if renErr := os.Rename(snapBak, snapDir); renErr != nil {
+				// Fail-stop, never fail-silent: the backup is the only
+				// surviving copy of the checkpointed state; proceeding
+				// without it would silently recover an empty graph.
+				metrics.IncCounter("store.recovery.openCodec.errors", 1)
+				return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())},
+					fmt.Errorf("recovery: promote snapshot backup: %w", renErr)
+			}
+			// Promoted; the normal snapshot load below proceeds as if the
+			// publish had never been interrupted.
+		}
+	}
+
 	var snapLabels snapshot.LabelsReadback
 	var snapProps snapshot.PropertiesReadback
 	var snapEdgeHandles snapshot.EdgeHandlesReadback

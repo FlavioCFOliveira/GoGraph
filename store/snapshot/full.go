@@ -538,12 +538,34 @@ func writeSnapshotFullCore[N comparable, W any](
 		return fmt.Errorf("snapshot: staging dir fsync: %w", err)
 	}
 	notePublishStep("staging-fsync", tmp)
-	if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// Crash-atomic publish. The previous RemoveAll(dir) -> Rename(tmp, dir)
+	// sequence had a fatal window: a crash between the two calls left NO
+	// live snapshot on disk while the staging directory was stranded under
+	// its .tmp name — and because an earlier checkpoint had already
+	// truncated the WAL, recovery would silently rebuild an empty graph
+	// (total loss of every checkpointed transaction). Instead, atomically
+	// archive the live snapshot to dir+".bak", rename the staging
+	// directory into place, and drop the backup only after the publish
+	// rename has been made durable. Both renames are atomic, so at every
+	// instant at least one complete snapshot exists on disk; recovery
+	// promotes a stranded backup back to the live name (see
+	// store/recovery).
+	bak := dir + ".bak"
+	// Clean up a stale backup from a prior interrupted publish (idempotent;
+	// recovery may already have promoted or discarded it).
+	_ = os.RemoveAll(bak) // best-effort: stale backup cleanup
+	notePublishStep("archive", bak)
+	// Atomically archive the current live snapshot. When dir does not yet
+	// exist (first checkpoint), Rename fails with os.ErrNotExist — fine.
+	if err := os.Rename(dir, bak); err != nil && !errors.Is(err, os.ErrNotExist) {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
-		return err
+		return fmt.Errorf("snapshot: archive live snapshot: %w", err)
 	}
 	notePublishStep("rename", tmp)
 	if err := os.Rename(tmp, dir); err != nil {
+		// Restore: undo the archive so the caller retries against an
+		// intact live snapshot.
+		_ = os.Rename(bak, dir) // best-effort: archive restore, rename err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish rename: %w", err)
 	}
@@ -555,6 +577,10 @@ func writeSnapshotFullCore[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish parent fsync: %w", err)
 	}
+	// Drop the backup only AFTER the parent-dir fsync: a crash after the
+	// publish rename but before the fsync may lose the new dirent, and the
+	// backup is then the only surviving copy of the previous snapshot.
+	_ = os.RemoveAll(bak) // best-effort: happy-path backup cleanup
 	return nil
 }
 
