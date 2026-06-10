@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -296,6 +298,135 @@ func TestSync_NoDelay(t *testing.T) {
 	ff := tempFaultFile(t, testfs.Faults{})
 	if err := ff.Sync(); err != nil {
 		t.Fatalf("Sync: %v", err)
+	}
+}
+
+// TestFailSyncAfter verifies that the first N Sync calls succeed,
+// every subsequent call returns ErrSyncFailed (wrapping syscall.EIO),
+// and the bytes written since the last successful Sync are discarded.
+func TestFailSyncAfter(t *testing.T) {
+	ff := tempFaultFile(t, testfs.Faults{FailSyncAfter: 1})
+
+	if _, err := ff.Write([]byte("tx1")); err != nil {
+		t.Fatalf("Write tx1: %v", err)
+	}
+	if err := ff.Sync(); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	if _, err := ff.Write([]byte("tx2")); err != nil {
+		t.Fatalf("Write tx2: %v", err)
+	}
+	err := ff.Sync()
+	if !errors.Is(err, testfs.ErrSyncFailed) {
+		t.Fatalf("second Sync: err=%v; want ErrSyncFailed", err)
+	}
+	if !errors.Is(err, syscall.EIO) {
+		t.Errorf("second Sync: err=%v does not wrap syscall.EIO", err)
+	}
+
+	// The un-synced suffix must be gone: only tx1 survives.
+	if _, err := ff.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	got, err := io.ReadAll(ff)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "tx1" {
+		t.Errorf("file content = %q, want %q (unsynced suffix not discarded)", got, "tx1")
+	}
+
+	// Every later Sync keeps failing.
+	if err := ff.Sync(); !errors.Is(err, testfs.ErrSyncFailed) {
+		t.Errorf("third Sync: err=%v; want ErrSyncFailed", err)
+	}
+}
+
+// TestFailSyncAfter_Concurrent verifies the fault trips atomically:
+// with FailSyncAfter=N, exactly N of M concurrent Sync calls succeed
+// and the rest observe ErrSyncFailed.
+func TestFailSyncAfter_Concurrent(t *testing.T) {
+	const limit = 3
+	const callers = 16
+
+	ff := tempFaultFile(t, testfs.Faults{FailSyncAfter: limit})
+
+	var succeeded atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			switch err := ff.Sync(); {
+			case err == nil:
+				succeeded.Add(1)
+			case !errors.Is(err, testfs.ErrSyncFailed):
+				t.Errorf("Sync: unexpected error %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := succeeded.Load(); got != limit {
+		t.Errorf("successful Syncs = %d, want %d", got, limit)
+	}
+}
+
+// TestReturnEIOOnSync verifies that every Sync fails immediately and
+// that nothing written since open survives the fault.
+func TestReturnEIOOnSync(t *testing.T) {
+	ff := tempFaultFile(t, testfs.Faults{ReturnEIOOnSync: true})
+
+	if _, err := ff.Write([]byte("never durable")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := ff.Sync(); !errors.Is(err, testfs.ErrSyncFailed) {
+		t.Fatalf("Sync: err=%v; want ErrSyncFailed", err)
+	}
+
+	if _, err := ff.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	got, err := io.ReadAll(ff)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("file content = %q, want empty (no Sync ever succeeded)", got)
+	}
+}
+
+// TestReturnEIOOnSync_PreservesPreexistingContent verifies that the
+// discard rolls back to the size at open — not to zero — when the
+// file already holds previously-durable data.
+func TestReturnEIOOnSync_PreservesPreexistingContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "preexisting.bin")
+	if err := os.WriteFile(path, []byte("durable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ff, err := testfs.New(path, testfs.Faults{ReturnEIOOnSync: true})
+	if err != nil {
+		t.Fatalf("testfs.New: %v", err)
+	}
+	t.Cleanup(func() { _ = ff.Close() })
+
+	if _, err := ff.Seek(0, io.SeekEnd); err != nil {
+		t.Fatalf("Seek end: %v", err)
+	}
+	if _, err := ff.Write([]byte("+lost")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := ff.Sync(); !errors.Is(err, testfs.ErrSyncFailed) {
+		t.Fatalf("Sync: err=%v; want ErrSyncFailed", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "durable" {
+		t.Errorf("file content = %q, want %q (pre-open prefix must survive)", got, "durable")
 	}
 }
 

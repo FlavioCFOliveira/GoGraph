@@ -12,6 +12,12 @@
 //     [syscall.ENOSPC] regardless of bytes written.
 //   - [Faults.FsyncDelay] — sleeps for the given duration before
 //     each Sync call (simulates a slow or stalled fsync).
+//   - [Faults.FailSyncAfter] — lets the first N Sync calls succeed,
+//     then fails every subsequent call with [ErrSyncFailed] and
+//     discards the un-synced suffix of the file (simulates an
+//     fsync(2) failure where the kernel drops the dirty pages).
+//   - [Faults.ReturnEIOOnSync] — makes every Sync call fail with
+//     [ErrSyncFailed] under the same discard semantics.
 //   - [Faults.CorruptOnRead] — when non-nil, is called with the
 //     current file offset and the number of bytes about to be read;
 //     returning true flips the first byte of the result (simulates
@@ -77,6 +83,24 @@ type Faults struct {
 	// call. Zero disables the delay.
 	FsyncDelay time.Duration
 
+	// FailSyncAfter causes Sync to fail once the given number of
+	// calls have succeeded: the first FailSyncAfter Sync calls are
+	// honoured, every subsequent call returns [ErrSyncFailed]. When
+	// the fault fires, the bytes written since the last successful
+	// Sync are discarded (the file is truncated back to its
+	// durably-synced size). This mirrors the post-"fsyncgate" kernel
+	// contract — after fsync(2) reports an error the previously-dirty
+	// pages are marked clean and their content must be assumed lost —
+	// so the file is left holding exactly the durable prefix a crash
+	// would preserve. Zero disables this mode; use
+	// [Faults.ReturnEIOOnSync] to fail every call.
+	FailSyncAfter int
+
+	// ReturnEIOOnSync causes every Sync call to return
+	// [ErrSyncFailed] immediately, with the same
+	// discard-unsynced-suffix semantics as [Faults.FailSyncAfter].
+	ReturnEIOOnSync bool
+
 	// CorruptOnRead, when non-nil, is called with the current file
 	// offset and the number of bytes about to be read. Returning true
 	// flips the MSB of the first byte in the result buffer to simulate
@@ -88,6 +112,12 @@ type Faults struct {
 // has been reached. It wraps [io.ErrShortWrite] so callers that
 // already handle short writes behave correctly.
 var ErrPartialWrite = fmt.Errorf("testfs: write budget exhausted: %w", io.ErrShortWrite)
+
+// ErrSyncFailed is returned by Sync once a sync fault mode
+// ([Faults.FailSyncAfter] or [Faults.ReturnEIOOnSync]) fires. It
+// wraps [syscall.EIO] so callers that classify fsync errors by errno
+// behave as they would for a real I/O failure.
+var ErrSyncFailed = fmt.Errorf("testfs: sync fault injected: %w", syscall.EIO)
 
 // FaultFile wraps an *os.File with configurable fault injection.
 // Zero-value is invalid; always create via [New].
@@ -103,6 +133,15 @@ type FaultFile struct {
 	written int64
 	// offset mirrors the logical position tracked for CorruptOnRead.
 	offset int64
+	// syncCount counts successful Sync calls (FailSyncAfter bookkeeping).
+	syncCount int
+	// syncedSize is the file size covered by the last successful Sync
+	// (or the size at open); a firing sync fault truncates back to it.
+	syncedSize int64
+	// syncBaseErr records a Stat failure at construction via Wrap;
+	// surfaced when a sync fault fires and the durable prefix is
+	// therefore unknown.
+	syncBaseErr error
 }
 
 // New opens or creates the file at path (flags: O_RDWR|O_CREATE)
@@ -112,14 +151,41 @@ func New(path string, faults Faults) (*FaultFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("testfs: open %q: %w", path, err)
 	}
-	return &FaultFile{f: f, faults: faults}, nil
+	ff := &FaultFile{f: f, faults: faults}
+	if err := ff.captureSyncBaseline(); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return ff, nil
 }
 
 // Wrap creates a FaultFile over an already-open *os.File. The
 // caller must not use f directly after this call; FaultFile takes
 // exclusive ownership.
 func Wrap(f *os.File, faults Faults) *FaultFile {
-	return &FaultFile{f: f, faults: faults}
+	ff := &FaultFile{f: f, faults: faults}
+	if err := ff.captureSyncBaseline(); err != nil {
+		// Wrap cannot return an error; surface the failure from the
+		// first firing sync fault instead of guessing a baseline.
+		ff.syncBaseErr = err
+	}
+	return ff
+}
+
+// captureSyncBaseline records the current file size as the durable
+// prefix that a firing sync fault rolls back to. Only the sync fault
+// modes consume it, so the zero-fault wrapper stays a pure
+// pass-through.
+func (ff *FaultFile) captureSyncBaseline() error {
+	if ff.faults.FailSyncAfter <= 0 && !ff.faults.ReturnEIOOnSync {
+		return nil
+	}
+	fi, err := ff.f.Stat()
+	if err != nil {
+		return fmt.Errorf("testfs: stat for sync baseline: %w", err)
+	}
+	ff.syncedSize = fi.Size()
+	return nil
 }
 
 // Write implements io.Writer. It respects Faults.ReturnENOSPC and
@@ -188,7 +254,10 @@ func (ff *FaultFile) Seek(offset int64, whence int) (int64, error) {
 }
 
 // Sync flushes to durable storage. It sleeps for Faults.FsyncDelay
-// before delegating to the OS.
+// before delegating to the OS. When a sync fault mode fires
+// ([Faults.ReturnEIOOnSync], or [Faults.FailSyncAfter] exhausted)
+// the un-synced suffix of the file is discarded and [ErrSyncFailed]
+// is returned instead of delegating.
 func (ff *FaultFile) Sync() error {
 	ff.mu.Lock()
 	defer ff.mu.Unlock()
@@ -200,7 +269,48 @@ func (ff *FaultFile) Sync() error {
 		time.Sleep(ff.faults.FsyncDelay)
 		ff.mu.Lock()
 	}
-	return ff.f.Sync()
+
+	if ff.faults.ReturnEIOOnSync ||
+		(ff.faults.FailSyncAfter > 0 && ff.syncCount >= ff.faults.FailSyncAfter) {
+		return ff.failSyncLocked()
+	}
+
+	if err := ff.f.Sync(); err != nil {
+		return err
+	}
+	ff.syncCount++
+	if ff.faults.FailSyncAfter > 0 {
+		// Track the durable prefix so a later firing fault knows how
+		// far to roll back. Done only when the mode is armed to keep
+		// the zero-fault path a pure pass-through.
+		fi, err := ff.f.Stat()
+		if err != nil {
+			return fmt.Errorf("testfs: stat after sync: %w", err)
+		}
+		ff.syncedSize = fi.Size()
+	}
+	return nil
+}
+
+// failSyncLocked implements a firing sync fault: the un-synced
+// suffix is discarded before the error is returned. Discarding
+// mirrors the post-"fsyncgate" kernel contract — after fsync(2)
+// reports an error the previously-dirty pages are marked clean and
+// their content must be assumed lost — so the file is left holding
+// exactly the durable prefix a crash would preserve, which is the
+// state crash-recovery tests need to observe.
+func (ff *FaultFile) failSyncLocked() error {
+	if ff.syncBaseErr != nil {
+		return errors.Join(ErrSyncFailed, ff.syncBaseErr)
+	}
+	if err := ff.f.Truncate(ff.syncedSize); err != nil {
+		return errors.Join(ErrSyncFailed, fmt.Errorf("testfs: discard unsynced suffix: %w", err))
+	}
+	if _, err := ff.f.Seek(ff.syncedSize, io.SeekStart); err != nil {
+		return errors.Join(ErrSyncFailed, fmt.Errorf("testfs: reposition after discard: %w", err))
+	}
+	ff.offset = ff.syncedSize
+	return ErrSyncFailed
 }
 
 // Truncate resizes the file to size bytes.
