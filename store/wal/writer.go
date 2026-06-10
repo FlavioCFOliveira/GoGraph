@@ -50,9 +50,17 @@ type Writer struct {
 
 // Open opens or creates the WAL file at path for append-only
 // writing. The file is created with mode 0o600 (owner read/write
-// only) if it does not already exist; existing data is preserved and
-// new frames are appended. The restrictive mode keeps the full graph
-// mutation stream from being world-readable.
+// only) if it does not already exist; existing complete frames are
+// preserved and new frames are appended after them. The restrictive
+// mode keeps the full graph mutation stream from being world-readable.
+//
+// When the existing file ends in a benign torn frame ([ErrTornFrame] —
+// the crash-mid-write-after-last-fsync case), Open truncates the file
+// to the last durable frame boundary and fsyncs it before returning,
+// so new frames are never appended after torn junk that every reader
+// would stop at; see discardTornTail. Files whose scan stops at
+// genuine corruption (for example [ErrCRCMismatch] or [ErrBadMagic])
+// are left byte-for-byte intact.
 func Open(path string) (*Writer, error) {
 	defer metrics.Time("store.wal.Open")()
 	// Detect whether this call creates the file. A newly-created WAL file
@@ -86,11 +94,74 @@ func Open(path string) (*Writer, error) {
 			metrics.IncCounter("store.wal.Open.errors", 1)
 			return nil, fmt.Errorf("wal: fsync parent dir of %q: %w", path, syncErr)
 		}
+	} else if err := discardTornTail(f); err != nil {
+		_ = f.Close()
+		metrics.IncCounter("store.wal.Open.errors", 1)
+		return nil, fmt.Errorf("wal: open %q: discard torn tail: %w", path, err)
 	}
 	return &Writer{
 		f:  f,
 		bw: bufio.NewWriterSize(f, 64*1024),
 	}, nil
+}
+
+// discardTornTail scans an existing WAL file from offset 0 and, when
+// the scan stops at a benign torn frame ([ErrTornFrame]) before the
+// physical end of the file, truncates the file to the last durable
+// frame boundary and fsyncs the result so the discard is itself
+// durable.
+//
+// Without this, reopening a WAL whose previous writer crashed mid-frame
+// would append new frames AFTER the torn junk: O_APPEND writes land at
+// the physical end of the file, but every reader stops at the first
+// torn frame, so each transaction committed after the reopen — whose
+// Sync already acknowledged durability — would be permanently
+// unreachable on the next replay. That is a Durability violation, and
+// truncating first closes it: the torn bytes were never part of any
+// acknowledged commit, so discarding them loses nothing.
+//
+// Genuine corruption inside an already-durable frame ([ErrCRCMismatch],
+// [ErrBadMagic], [ErrUnsupportedVersion], [ErrFrameTooLarge]) is left
+// untouched: the bytes are preserved for diagnosis, and the recovery
+// layer (store/recovery) fail-stops with the same sentinel before any
+// well-behaved caller reaches Open for append.
+//
+// The scan reads the whole file once; Open is called once at startup,
+// never on the commit hot path.
+func discardTornTail(f *os.File) error {
+	r := NewReader(f, nil) // nil closer: Open retains ownership of f
+	//nolint:revive // empty-block: the loop intentionally discards every
+	// frame — iterating to exhaustion is what populates TailOffset and
+	// TailError, which are the only outputs this scan needs.
+	for range r.Frames() {
+	}
+	if tErr := r.TailError(); tErr != nil && !errors.Is(tErr, ErrTornFrame) {
+		// Not a benign torn tail: preserve the bytes and let the recovery
+		// layer surface the corruption. Reposition at the end so the
+		// handle's offset matches the append position.
+		_, err := f.Seek(0, io.SeekEnd)
+		return err
+	}
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	tail := r.TailOffset()
+	if tail >= size {
+		return nil // every byte is a complete frame; nothing to discard
+	}
+	if err := f.Truncate(tail); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	// Reposition at the new end of file. O_APPEND writes always land at
+	// the physical end regardless of the handle's offset; the seek keeps
+	// the offset consistent for non-append operations such as
+	// [Writer.Truncate]'s size probe.
+	_, err = f.Seek(tail, io.SeekStart)
+	return err
 }
 
 // Append writes one frame with the given opaque payload to the

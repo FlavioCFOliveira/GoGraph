@@ -94,6 +94,17 @@ type Result[N comparable, W any] struct {
 	//     and [Result.IsClean] reports false, so a caller cannot accidentally
 	//     append to a corrupt WAL.
 	TailErr error
+	// WALTailOffset is the byte offset of the last durable frame boundary
+	// in the WAL. It equals the WAL file size when every frame was
+	// consumed cleanly, and the boundary of the last fully-consumed frame
+	// when replay stopped early — for a benign torn tail
+	// ([wal.ErrTornFrame]) that is the start of the torn frame. It is 0
+	// when the directory has no WAL file. Callers that reopen the WAL for
+	// append must truncate the file to this offset first so new frames are
+	// not written after torn-tail junk that every subsequent reader would
+	// stop at ([wal.Open] performs that truncation itself for benign torn
+	// tails).
+	WALTailOffset int64
 }
 
 // IsClean reports whether recovery completed without encountering genuine
@@ -929,6 +940,7 @@ func openCodec[N comparable, W any](
 		if tErr := r.TailError(); tErr != nil {
 			res.TailErr = tErr
 		}
+		res.WALTailOffset = r.TailOffset()
 	}
 
 	// Finalise the recovered constraint set: the snapshot's durable
