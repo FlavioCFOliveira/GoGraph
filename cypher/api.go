@@ -1245,7 +1245,10 @@ func guardDDLLength(query string) error {
 // by [store/recovery.Open] (audit gap H1). A CREATE CONSTRAINT also validates
 // the pre-existing data and seeds the UNIQUE value-set by scanning the graph,
 // so a constraint added to a non-empty dataset is enforced rather than silently
-// inert (audit gap H2).
+// inert (audit gap H2). The whole constraint sequence runs under the engine's
+// writer serialisation, and a registration whose WAL append fails is unwound,
+// so the in-memory registry never diverges from the durable state (task
+// #1341: registered ⇔ durable).
 func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 	// Apply the same byte-length guard the DML parse path enforces: DDL routes
 	// through ir.ParseDDL, which predates the parser's pre-parse guard, so an
@@ -1307,22 +1310,67 @@ func emptyDDLResult(ctx context.Context) *Result {
 // data, registers the constraint and seeds its value-set, then (on a WAL-backed
 // engine) appends a durable constraint op so the schema change survives a
 // crash.
+//
+// The whole validate → register → seed → WAL-append sequence runs under the
+// engine's writer serialisation (task #1341): for a WAL-backed engine the
+// store's single-writer lock — taken by opening the very transaction that
+// carries the durable constraint op — and for a store-less engine
+// [Engine.writeMu]. Without it a concurrent writer could commit a duplicate
+// value between the validation scan and the value-set seed, leaving a UNIQUE
+// constraint active over already-violating data that the value-set never saw.
 func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint, idxMgr *index.Manager) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	kind := execConstraintKind(p.Kind)
 
+	if e.store == nil {
+		// Store-less: writeMu is the same single-writer mutex every store-less
+		// RunInTx write holds for its duration, so the sequence below is
+		// atomic against concurrent writers. Lock order writeMu → visMu
+		// (inside scanLabelProperty's View) matches the write path.
+		e.writeMu.Lock()
+		defer e.writeMu.Unlock()
+		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
+	}
+	// WAL-backed: open the transaction that will carry the durable constraint
+	// op BEFORE the validation scan. BeginCtx takes the store's single-writer
+	// lock — the same one every RunInTx write holds — so the whole sequence
+	// excludes concurrent writers. The durable op must be committed on THIS
+	// transaction: a nested Begin (the previous appendConstraintOp design)
+	// would deadlock on the non-reentrant single-writer semaphore.
+	tx, err := e.store.BeginCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, rerr := e.createConstraintLocked(ctx, p, kind, idxMgr, tx)
+	// Release the single-writer lock when the sequence ended before reaching
+	// the commit (validation or registration error). After CommitWALOnly —
+	// on success OR failure — the tx is already finished and this Rollback is
+	// a guarded no-op (ErrTxFinished), never a double release; the error is
+	// deliberately ignored for that reason.
+	_ = tx.Rollback()
+	return res, rerr
+}
+
+// createConstraintLocked runs the CREATE CONSTRAINT sequence. The caller holds
+// the engine's writer serialisation; tx is the open transaction that carries
+// the durable constraint op on a WAL-backed engine (nil on a store-less one).
+func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstraint, kind exec.ConstraintKind, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	// IF NOT EXISTS that absorbs an already-registered constraint is a silent
 	// no-op with no schema change and no WAL record — match the operator's
-	// existing semantics and skip validation/durability.
+	// existing semantics and skip validation/durability. Checked under the
+	// writer lock so two concurrent IF NOT EXISTS creations cannot both miss
+	// it and register twice.
 	if p.IfNotExists && e.constraintAlreadyRegistered(kind, p.Label, p.Property) {
 		return emptyDDLResult(ctx), nil
 	}
 
 	// Validate the pre-existing data and seed the value-set BEFORE registering,
 	// so a constraint over already-violating data is rejected with nothing
-	// registered (audit gap H2).
+	// registered (audit gap H2). The scan runs inside the graph's visibility
+	// barrier (see scanLabelProperty), so it cannot observe a half-applied
+	// transaction.
 	values, anyNull := e.scanLabelProperty(p.Label, p.Property)
 	if err := validatePreExisting(kind, p.Label, p.Property, values, anyNull); err != nil {
 		return nil, err
@@ -1336,32 +1384,92 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 	}
 	if kind == exec.ConstraintUnique {
 		if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, values); err != nil {
-			return nil, err
+			// Unreachable in practice: with writers excluded the seed
+			// re-checks the same values validatePreExisting already accepted.
+			// Unwind defensively so a failure can never leave a
+			// half-registered constraint behind.
+			return nil, e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 		}
 	}
 
-	// Durability: append the constraint op to the WAL and fsync it, so the
-	// schema change survives a crash (audit gap H1).
-	if err := e.appendConstraintOp(ctx, txn.OpCreateConstraint, kind, p.Label, p.Property, p.Name); err != nil {
-		return nil, err
+	// Durability: append the constraint op to the WAL of the serialising
+	// transaction and fsync it, so the schema change survives a crash (audit
+	// gap H1). On failure the in-memory registration is unwound: the
+	// constraint would otherwise stay enforced in this session while silently
+	// vanishing on the next reopen (task #1341 (b) — registered ⇔ durable).
+	if tx != nil {
+		if err := commitConstraintTx(tx, txn.OpCreateConstraint, kind, p.Label, p.Property, p.Name); err != nil {
+			return nil, e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
+		}
 	}
 	return emptyDDLResult(ctx), nil
 }
 
+// unwindConstraintRegistration deregisters a just-registered constraint after
+// a failure later in the CREATE CONSTRAINT sequence (WAL append or value-set
+// seed), by running the inverse DROP CONSTRAINT operator with the same
+// identity: it drops the UNIQUE backing index, removes the registry entry
+// (and its value-set), and invalidates the plan cache. It returns cause, the
+// original failure, optionally joined with the unwind's own error (which is
+// unreachable right after a successful registration under the writer lock).
+//
+// The unwind runs with an uncancellable context: it must complete even when
+// the caller's ctx is already done, or a cancelled CREATE CONSTRAINT could
+// leave a phantom constraint enforced in memory with no durable record.
+func (e *Engine) unwindConstraintRegistration(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
+	op := exec.NewDropConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
+	if _, uerr := e.runDDLOp(context.Background(), op); uerr != nil {
+		return errors.Join(cause, fmt.Errorf("cypher: unwind constraint registration: %w", uerr))
+	}
+	return cause
+}
+
 // runDropConstraint executes DROP CONSTRAINT: it deregisters the constraint via
 // the operator, then (on a WAL-backed engine) appends a durable drop op so the
-// removal survives a crash.
+// removal survives a crash. Like runCreateConstraint, the whole sequence runs
+// under the engine's writer serialisation (task #1341).
 func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, idxMgr *index.Manager) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	kind := execConstraintKind(p.Kind)
+
+	if e.store == nil {
+		e.writeMu.Lock()
+		defer e.writeMu.Unlock()
+		return e.dropConstraintLocked(ctx, p, kind, idxMgr, nil)
+	}
+	tx, err := e.store.BeginCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, rerr := e.dropConstraintLocked(ctx, p, kind, idxMgr, tx)
+	// Guarded no-op after CommitWALOnly (success or failure); releases the
+	// single-writer lock on the earlier error paths. See runCreateConstraint.
+	_ = tx.Rollback()
+	return res, rerr
+}
+
+// dropConstraintLocked runs the DROP CONSTRAINT sequence under the writer
+// serialisation held by the caller; tx is the serialising transaction on a
+// WAL-backed engine (nil on a store-less one).
+//
+// No re-registration unwind exists on the WAL-failure path today, and none is
+// needed: the DDL parser produces DROP CONSTRAINT plans with empty
+// label/property (see ir.parseDropConstraint), so the operator can only reach
+// the WAL append via the IF EXISTS absorb branch, which performs no schema
+// change — there is nothing to restore. A future DROP-by-name executor that
+// really deregisters must re-register (and re-seed) on this failure path,
+// mirroring unwindConstraintRegistration on the CREATE path.
+func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint, kind exec.ConstraintKind, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	op := exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg, e.ClearPlanCache)
 	if _, err := e.runDDLOp(ctx, op); err != nil {
 		return nil, err
 	}
-	if err := e.appendConstraintOp(ctx, txn.OpDropConstraint, kind, p.Label, p.Property, p.Name); err != nil {
-		return nil, err
+	if tx != nil {
+		if err := commitConstraintTx(tx, txn.OpDropConstraint, kind, p.Label, p.Property, p.Name); err != nil {
+			return nil, err
+		}
 	}
 	return emptyDDLResult(ctx), nil
 }
@@ -1383,44 +1491,35 @@ func (e *Engine) constraintAlreadyRegistered(kind exec.ConstraintKind, label, pr
 	return e.constraintReg.HasUnique(label, prop)
 }
 
-// appendConstraintOp appends a durable CREATE/DROP CONSTRAINT op to the WAL on a
-// WAL-backed engine and fsyncs it. It is a no-op on a store-less in-memory
-// engine (no durability surface). The op carries no node endpoints; it serves
-// only to re-register (or suppress) the constraint on recovery. The single-op
-// transaction is committed WAL-only — the in-memory registry was already
-// updated by the operator — mirroring the eager-apply + CommitWALOnly pattern
-// the write path uses.
-func (e *Engine) appendConstraintOp(ctx context.Context, opKind txn.OpKind, kind exec.ConstraintKind, label, prop, name string) error {
-	if e.store == nil {
-		return nil
-	}
+// commitConstraintTx buffers the durable CREATE/DROP CONSTRAINT op on tx and
+// commits it WAL-only. tx is the same transaction whose Begin provides the
+// DDL's writer serialisation (task #1341), so the durable record is secured
+// without releasing the lock between registration and append. The commit
+// finishes the tx — on success AND on sync failure — releasing the
+// single-writer lock; the caller's guarded Rollback is then a no-op. The op
+// carries no node endpoints and applies nothing to the graph: the in-memory
+// registry was already updated by the operator, mirroring the eager-apply +
+// CommitWALOnly pattern the write path uses.
+func commitConstraintTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind exec.ConstraintKind, label, prop, name string) error {
 	ck := txn.ConstraintUnique
 	if kind == exec.ConstraintNotNull {
 		ck = txn.ConstraintNotNull
 	}
-	tx, err := e.store.BeginCtx(ctx)
-	if err != nil {
-		return err
-	}
+	var err error
 	switch opKind {
 	case txn.OpCreateConstraint:
 		err = tx.CreateConstraint(ck, label, prop, name)
 	case txn.OpDropConstraint:
 		err = tx.DropConstraint(ck, label, prop, name)
 	default:
-		err = fmt.Errorf("cypher: appendConstraintOp: unexpected op kind %d", opKind)
+		err = fmt.Errorf("cypher: commitConstraintTx: unexpected op kind %d", opKind)
 	}
 	if err != nil {
-		_ = tx.Rollback()
+		// Buffering failed; the tx is still open — the caller's deferred
+		// Rollback releases the single-writer lock.
 		return err
 	}
-	// CommitWALOnly: the registry change is already applied in memory; this only
-	// secures the durable record. A constraint op applies nothing to the graph,
-	// so a full Commit would be equivalent, but CommitWALOnly states the intent.
-	if cerr := tx.CommitWALOnly(); cerr != nil {
-		return cerr
-	}
-	return nil
+	return tx.CommitWALOnly()
 }
 
 // scanLabelProperty walks the live (non-tombstoned) nodes carrying label and
@@ -1441,37 +1540,49 @@ func (e *Engine) appendConstraintOp(ctx context.Context, opKind txn.OpKind, kind
 // only snapshots the (id, key) pairs under the shard locks; phase 2 resolves
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
+//
+// Both phases run inside [lpg.Graph.View] (task #1341): the scan observes a
+// consistent snapshot in which no in-flight transaction is half-applied —
+// every transaction committed via [lpg.Graph.ApplyAtomically] is visible
+// either entirely or not at all. Holding the visibility read lock across the
+// Walk is deadlock-free with respect to the #1339 scenario: every writer
+// mutates only inside ApplyAtomically (visMu.Lock), so while View's read lock
+// is held no [graph.Mapper.Intern] can be queued on a shard. Callers must not
+// already be inside View/ApplyAtomically (the barrier is not re-entrant; the
+// lpg barrier guard panics on misuse).
 func (e *Engine) scanLabelProperty(label, prop string) (values []lpg.PropertyValue, anyNull bool) {
 	mapper := e.g.AdjList().Mapper()
 
-	// Phase 1 — snapshot the interned nodes. The callback must not touch any
-	// other graph state (see the deadlock note above).
 	type nodeRef struct {
 		id  graph.NodeID
 		key string
 	}
-	refs := make([]nodeRef, 0, mapper.Len())
-	mapper.Walk(func(id graph.NodeID, key string) bool {
-		refs = append(refs, nodeRef{id: id, key: key})
-		return true
-	})
+	e.g.View(func() {
+		// Phase 1 — snapshot the interned nodes. The callback must not touch
+		// any other graph state (see the deadlock note above).
+		refs := make([]nodeRef, 0, mapper.Len())
+		mapper.Walk(func(id graph.NodeID, key string) bool {
+			refs = append(refs, nodeRef{id: id, key: key})
+			return true
+		})
 
-	// Phase 2 — resolve graph state with no shard lock held.
-	for i := range refs {
-		r := refs[i]
-		if e.g.IsTombstoned(r.id) {
-			continue
+		// Phase 2 — resolve graph state with no shard lock held.
+		for i := range refs {
+			r := refs[i]
+			if e.g.IsTombstoned(r.id) {
+				continue
+			}
+			if !e.g.HasNodeLabel(r.key, label) {
+				continue
+			}
+			v, ok := e.g.GetNodeProperty(r.key, prop)
+			if !ok {
+				anyNull = true
+				continue
+			}
+			values = append(values, v)
 		}
-		if !e.g.HasNodeLabel(r.key, label) {
-			continue
-		}
-		v, ok := e.g.GetNodeProperty(r.key, prop)
-		if !ok {
-			anyNull = true
-			continue
-		}
-		values = append(values, v)
-	}
+	})
 	return values, anyNull
 }
 
