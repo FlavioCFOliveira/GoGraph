@@ -105,7 +105,8 @@ func (m *seedStubMutator) EdgeCreateCount(string, string) int64         { return
 func (m *seedStubMutator) DecEdgeCreateCount(string, string)            {}
 func (m *seedStubMutator) SetEdgeLabelAt(string, string, int64, string) {}
 func (m *seedStubMutator) EdgeLabelsAt(string, string, int64) []string  { return nil }
-func (m *seedStubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) {
+func (m *seedStubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) error {
+	return nil
 }
 func (m *seedStubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg.PropertyValue {
 	return nil
@@ -113,7 +114,8 @@ func (m *seedStubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg
 func (m *seedStubMutator) RemoveEdgeInstance(string, string, int64)            {}
 func (m *seedStubMutator) SetEdgeLabelByHandle(string, string, uint64, string) {}
 func (m *seedStubMutator) EdgeLabelsByHandle(string, string, uint64) []string  { return nil }
-func (m *seedStubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) {
+func (m *seedStubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) error {
+	return nil
 }
 func (m *seedStubMutator) EdgePropertiesByHandle(string, string, uint64) map[string]lpg.PropertyValue {
 	return nil

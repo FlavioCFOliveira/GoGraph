@@ -20,20 +20,27 @@ type edgeInstancePropShard struct {
 }
 
 // SetEdgePropertyAt records the property `key`=`value` for the directed
-// edge instance (src, dst) at the supplied 1-based CREATE index.
+// edge instance (src, dst) at the supplied 1-based CREATE index. Returns
+// any error returned by the installed [SchemaValidator]; when the validator
+// rejects the write the graph state is left unchanged.
 //
 // SetEdgePropertyAt is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value PropertyValue) {
+func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value PropertyValue) error {
+	if v := g.validator.load(); v != nil {
+		if err := v.Validate(key, value); err != nil {
+			return err
+		}
+	}
 	if idx <= 0 {
-		return
+		return nil
 	}
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
-		return
+		return nil
 	}
 	dstID, ok := g.adj.Mapper().Lookup(dst)
 	if !ok {
-		return
+		return nil
 	}
 	pid := g.pkeys.Intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
@@ -54,6 +61,7 @@ func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value
 		byIdx[idx] = bag
 	}
 	bag[pid] = value
+	return nil
 }
 
 // EdgePropertiesAt returns the property map recorded at instance `idx`

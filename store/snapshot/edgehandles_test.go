@@ -39,7 +39,9 @@ func TestEdgeHandles_RoundTrip(t *testing.T) {
 	}
 	h1, _ := g.AddEdgeH("x", "y", 1)
 	g.SetEdgeLabelByHandle("x", "y", h1, "USES")
-	g.SetEdgePropertyByHandle("x", "y", h1, "w", lpg.Int64Value(7))
+	if err := g.SetEdgePropertyByHandle("x", "y", h1, "w", lpg.Int64Value(7)); err != nil {
+		t.Fatalf("SetEdgePropertyByHandle: %v", err)
+	}
 	h2, _ := g.AddEdgeH("x", "y", 1)
 	g.SetEdgeLabelByHandle("x", "y", h2, "CALLS")
 

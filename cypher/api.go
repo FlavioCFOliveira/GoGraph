@@ -8415,8 +8415,8 @@ func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label str
 func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
 	return a.g.EdgeLabelsAt(src, dst, idx)
 }
-func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) {
-	a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
+	return a.g.SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesAt(src, dst, idx)
@@ -8434,8 +8434,8 @@ func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 func (a *lpgMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
 }
-func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) {
-	a.g.SetEdgePropertyByHandle(src, dst, handle, key, value)
+func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
+	return a.g.SetEdgePropertyByHandle(src, dst, handle, key, value)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
@@ -8878,8 +8878,8 @@ func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label str
 func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
 	return a.g.EdgeLabelsAt(src, dst, idx)
 }
-func (a *walMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) {
-	a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+func (a *walMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
+	return a.g.SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesAt(src, dst, idx)
@@ -8901,9 +8901,12 @@ func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
 }
-func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) {
-	a.g.SetEdgePropertyByHandle(src, dst, handle, key, value)
+func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
+	if err := a.g.SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
+		return err
+	}
 	_ = a.tx.SetEdgePropertyByHandle(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	return nil
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)

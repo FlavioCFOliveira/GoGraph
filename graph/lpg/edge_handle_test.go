@@ -132,7 +132,9 @@ func TestGraph_EdgePropertiesByHandle_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
 	}
-	g.SetEdgePropertyByHandle("a", "b", h, "weight", Int64Value(7))
+	if err := g.SetEdgePropertyByHandle("a", "b", h, "weight", Int64Value(7)); err != nil {
+		t.Fatalf("SetEdgePropertyByHandle: %v", err)
+	}
 
 	props := g.EdgePropertiesByHandle("a", "b", h)
 	if props == nil {

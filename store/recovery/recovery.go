@@ -1514,7 +1514,8 @@ func applySetEdgePropertyByHandle[N comparable, W any](g *lpg.Graph[N, W], src, 
 	if !ok {
 		return false
 	}
-	g.SetEdgePropertyByHandle(src, dst, handle, key, val)
+	// Value was validated at the original write; ignore the error on recovery replay.
+	_ = g.SetEdgePropertyByHandle(src, dst, handle, key, val)
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }

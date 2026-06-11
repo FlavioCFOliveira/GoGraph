@@ -246,7 +246,8 @@ func (s *stubMutator) EdgeCreateCount(string, string) int64         { return 0 }
 func (s *stubMutator) DecEdgeCreateCount(string, string)            {}
 func (s *stubMutator) SetEdgeLabelAt(string, string, int64, string) {}
 func (s *stubMutator) EdgeLabelsAt(string, string, int64) []string  { return nil }
-func (s *stubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) {
+func (s *stubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) error {
+	return nil
 }
 func (s *stubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg.PropertyValue {
 	return nil
@@ -257,7 +258,8 @@ func (s *stubMutator) RemoveEdgeInstance(string, string, int64) {}
 // the *At stubs above.
 func (s *stubMutator) SetEdgeLabelByHandle(string, string, uint64, string) {}
 func (s *stubMutator) EdgeLabelsByHandle(string, string, uint64) []string  { return nil }
-func (s *stubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) {
+func (s *stubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) error {
+	return nil
 }
 func (s *stubMutator) EdgePropertiesByHandle(string, string, uint64) map[string]lpg.PropertyValue {
 	return nil

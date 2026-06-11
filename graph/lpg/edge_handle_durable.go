@@ -296,6 +296,11 @@ func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle u
 // NodeID-keyed dual of [Graph.SetEdgePropertyByHandle] used by the
 // snapshot/WAL recovery path. No-op when handle is 0.
 //
+// This method is intentionally called only by the snapshot/WAL recovery
+// path and bypasses the SchemaValidator: values replayed here were
+// validated at the time of the original write and must not fail during
+// recovery.
+//
 // SetEdgePropertyByHandleID is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue) {
 	if handle == 0 {

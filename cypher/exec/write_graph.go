@@ -137,8 +137,9 @@ type GraphMutator interface {
 	// per-CREATE labels.
 	EdgeLabelsAt(src, dst string, idx int64) []string
 	// SetEdgePropertyAt records `key`=`value` on the directed edge
-	// instance (src, dst) at the supplied 1-based CREATE index.
-	SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue)
+	// instance (src, dst) at the supplied 1-based CREATE index. Returns
+	// any error returned by the installed SchemaValidator.
+	SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error
 	// EdgePropertiesAt returns the property map recorded at instance
 	// `idx` of the directed edge (src, dst), or nil when no
 	// per-CREATE map was captured.
@@ -160,7 +161,8 @@ type GraphMutator interface {
 	EdgeLabelsByHandle(src, dst string, handle uint64) []string
 	// SetEdgePropertyByHandle records `key`=`value` on the edge identified
 	// by the stable `handle` on the (src, dst) pair. No-op when handle is 0.
-	SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue)
+	// Returns any error returned by the installed SchemaValidator.
+	SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error
 	// EdgePropertiesByHandle returns the property map recorded for the edge
 	// identified by `handle` on the (src, dst) pair, or nil when none.
 	EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue

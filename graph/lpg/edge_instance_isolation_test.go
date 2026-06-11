@@ -80,9 +80,13 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 			}
 			i1 := g.IncEdgeCreateCount("a", "b")
 			g.SetEdgeLabelAt("a", "b", i1, "R")
-			g.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1))
+			if err := g.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
+				return err
+			}
 			g.SetEdgeLabelByHandle("a", "b", h1, "R")
-			g.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1))
+			if err := g.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
+				return err
+			}
 
 			if beforeSecond != nil {
 				beforeSecond()
@@ -94,9 +98,13 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 			}
 			i2 := g.IncEdgeCreateCount("a", "b")
 			g.SetEdgeLabelAt("a", "b", i2, "R")
-			g.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2))
+			if err := g.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
+				return err
+			}
 			g.SetEdgeLabelByHandle("a", "b", h2, "R")
-			g.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2))
+			if err := g.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
+				return err
+			}
 			return nil
 		})
 	}
@@ -161,8 +169,12 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 				return err
 			}
 			i1 := g2.IncEdgeCreateCount("a", "b")
-			g2.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1))
-			g2.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1))
+			if err := g2.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
+				return err
+			}
+			if err := g2.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
+				return err
+			}
 			if beforeSecond != nil {
 				beforeSecond()
 			}
@@ -171,8 +183,12 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 				return err
 			}
 			i2 := g2.IncEdgeCreateCount("a", "b")
-			g2.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2))
-			g2.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2))
+			if err := g2.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
+				return err
+			}
+			if err := g2.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
+				return err
+			}
 			return nil
 		})
 	}

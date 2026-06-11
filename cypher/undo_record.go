@@ -319,7 +319,8 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 			m.g.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl)
 		}
 		for k, v := range pre.handleProps {
-			m.g.SetEdgePropertyByHandle(pre.src, pre.dst, pre.handle, k, v)
+			// Restoring a value that passed validation at the original write; ignore the error.
+			_ = m.g.SetEdgePropertyByHandle(pre.src, pre.dst, pre.handle, k, v)
 		}
 		// Restore the CREATE-multiplicity counter to its captured value. The
 		// re-add above does not touch the counter (only IncEdgeCreateCount does),

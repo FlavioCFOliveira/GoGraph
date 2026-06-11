@@ -1608,7 +1608,8 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 	case OpSetEdgeLabelByHandle:
 		g.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
 	case OpSetEdgePropertyByHandle:
-		g.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
+		// Value was validated at the original write; ignore the error on replay.
+		_ = g.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
 	case OpRemoveEdgeInstanceByHandle:
 		g.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
 	case OpSetNodeLabel:

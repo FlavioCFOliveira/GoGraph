@@ -168,20 +168,27 @@ func (g *Graph[N, W]) EdgeLabelsByHandle(src, dst N, handle uint64) []string {
 
 // SetEdgePropertyByHandle records key=value for the edge identified by
 // handle on the (src, dst) pair. No-op when handle is 0 or when either
-// endpoint is unknown to the mapper.
+// endpoint is unknown to the mapper. Returns any error returned by the
+// installed [SchemaValidator]; when the validator rejects the write the
+// graph state is left unchanged.
 //
 // SetEdgePropertyByHandle is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key string, value PropertyValue) {
+func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key string, value PropertyValue) error {
+	if v := g.validator.load(); v != nil {
+		if err := v.Validate(key, value); err != nil {
+			return err
+		}
+	}
 	if handle == 0 {
-		return
+		return nil
 	}
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
-		return
+		return nil
 	}
 	dstID, ok := g.adj.Mapper().Lookup(dst)
 	if !ok {
-		return
+		return nil
 	}
 	pid := g.pkeys.Intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
@@ -202,6 +209,7 @@ func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key str
 		byHandle[handle] = bag
 	}
 	bag[pid] = value
+	return nil
 }
 
 // EdgePropertiesByHandle returns the property map recorded for the edge

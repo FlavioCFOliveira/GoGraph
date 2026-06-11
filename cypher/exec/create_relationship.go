@@ -180,8 +180,12 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		if err := op.mutator.SetEdgeProperty(srcLabel, dstLabel, p.key, p.value); err != nil {
 			return false, fmt.Errorf("exec: CreateRelationship SetEdgeProperty %q: %w", p.key, err)
 		}
-		op.mutator.SetEdgePropertyAt(srcLabel, dstLabel, instanceIdx, p.key, p.value)
-		op.mutator.SetEdgePropertyByHandle(srcLabel, dstLabel, handle, p.key, p.value)
+		if err := op.mutator.SetEdgePropertyAt(srcLabel, dstLabel, instanceIdx, p.key, p.value); err != nil {
+			return false, fmt.Errorf("exec: CreateRelationship SetEdgePropertyAt %q: %w", p.key, err)
+		}
+		if err := op.mutator.SetEdgePropertyByHandle(srcLabel, dstLabel, handle, p.key, p.value); err != nil {
+			return false, fmt.Errorf("exec: CreateRelationship SetEdgePropertyByHandle %q: %w", p.key, err)
+		}
 	}
 
 	if op.relVar == "" {
