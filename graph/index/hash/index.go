@@ -40,6 +40,94 @@ var seed = maphash.MakeSeed()
 // them.
 type Index[V comparable] struct {
 	shards [shardCount]hashShard[V]
+
+	// binding, when non-nil, ties the index to one (label, property)
+	// pair of a live node graph so [Index.Apply] can translate
+	// [index.Change] events into typed Insert / Delete calls. It is set
+	// once by [NewBound] before the index is shared and never mutated
+	// afterwards, so Apply reads it without synchronisation.
+	binding *Binding[V]
+}
+
+// Binding ties an [Index] to a single (label, property) pair of a live
+// node graph. A bound index (see [NewBound]) maintains itself from the
+// [index.Manager] change fan-out: property writes insert/delete typed
+// keys, and label add/remove events attach/detach a node's current
+// value. An unbound index (see [New]) ignores the fan-out entirely and
+// is maintained by explicit [Index.Insert] / [Index.Delete] calls.
+//
+// The identifier fields carry interned IDs from the owning graph's
+// registries; the callbacks close over the graph so this package stays
+// free of a dependency on any concrete graph implementation. Because
+// changes are fanned out at commit time — after the transaction's
+// mutations were applied eagerly to the graph — the callbacks observe
+// the transaction's FINAL state, which is exactly the state the index
+// must converge to.
+type Binding[V comparable] struct {
+	// PropertyID is the interned property-key identifier this index
+	// covers. Property changes whose Change.Property differs are
+	// ignored.
+	PropertyID uint32
+
+	// LabelID is the interned label identifier this index is scoped
+	// to. Label changes whose Change.Label differs are ignored. Note
+	// that interned IDs start at zero, so this field alone cannot mark
+	// an unscoped binding; bindings are always label-scoped.
+	LabelID uint32
+
+	// Label and Property are the source names behind PropertyID and
+	// LabelID. They let a query planner match the index against a
+	// (label, property) predicate without access to the registries.
+	Label, Property string
+
+	// Project converts a Change.OldValue / Change.NewValue payload to
+	// the index key type. ok is false when the payload is absent or
+	// not indexable (wrong kind), in which case the event is skipped
+	// for that direction.
+	Project func(v any) (V, bool)
+
+	// Eligible reports whether the node should currently be present in
+	// the index: it must be live (not deleted) and carry the bound
+	// label, evaluated against the graph's final state.
+	Eligible func(node graph.NodeID) bool
+
+	// CurrentValue returns the node's current value for the bound
+	// property, projected to the key type. ok is false when the node
+	// is not live, lacks the property, or the value is not indexable.
+	// It is consulted on label add/remove events, which carry no
+	// property payload.
+	CurrentValue func(node graph.NodeID) (V, bool)
+}
+
+// errBindingIncomplete is returned by [NewBound] when a required
+// Binding field is missing.
+var errBindingIncomplete = fmt.Errorf("%w: incomplete hash index binding", index.ErrIndexValueTypeUnsupported)
+
+// NewBound returns an empty hash index bound to b. Unlike [New], the
+// returned index has a functional [Index.Apply]: it subscribes to the
+// node property and label changes selected by b and keeps itself
+// consistent with the graph. Returns an error when b is missing its
+// Label, Property, or any of the three callbacks.
+func NewBound[V comparable](b Binding[V]) (*Index[V], error) {
+	if b.Label == "" || b.Property == "" ||
+		b.Project == nil || b.Eligible == nil || b.CurrentValue == nil {
+		return nil, errBindingIncomplete
+	}
+	idx := New[V]()
+	idx.binding = &b
+	return idx, nil
+}
+
+// BoundNode returns the (label, property) pair this index is bound to,
+// with ok reporting whether the index is bound at all. Query planners
+// use it to decide whether the index may serve a predicate: a bound
+// index covers exactly its (label, property) pair, while an unbound
+// index carries no coverage metadata.
+func (i *Index[V]) BoundNode() (label, property string, ok bool) {
+	if i.binding == nil {
+		return "", "", false
+	}
+	return i.binding.Label, i.binding.Property, true
 }
 
 type hashShard[V comparable] struct {
@@ -151,16 +239,73 @@ func (i *Index[V]) DistinctValues() uint64 {
 // Kind returns "hash" — satisfies [index.Subscriber].
 func (*Index[V]) Kind() string { return "hash" }
 
-// Apply is a no-op for the generic hash index. The Manager fans
-// every change to every subscriber, but the hash index cannot
-// reliably interpret arbitrary [index.Change] values without
-// caller-supplied bindings (property key + value-type coercion).
-// Callers that need automatic fan-out into a hash index should wrap
-// the index in a thin shim that does the projection.
+// Apply maintains a bound index (see [NewBound]) from the
+// [index.Manager] change fan-out; it is a no-op for an unbound index
+// (see [New]), which cannot reliably interpret arbitrary
+// [index.Change] values without the caller-supplied binding (property
+// key + value-type coercion).
+//
+// For a bound index the rules are, per change:
+//
+//   - SetNodeProperty on the bound property: the old value (when
+//     present and projectable) is deleted unconditionally, and the new
+//     value is inserted when the node is eligible in the graph's final
+//     state. The unconditional old-value delete is what clears a stale
+//     entry even when a label removal in the same batch is replayed
+//     before the property change.
+//   - DelNodeProperty on the bound property: the old value is deleted.
+//   - Add/RemoveNodeLabel on the bound label: the node's CURRENT
+//     property value is inserted / deleted. Because changes are
+//     applied at commit time the current value is the transaction's
+//     final value, so an interleaved property change in the same batch
+//     converges to the same final state regardless of replay order.
+//
+// Apply is idempotent (bitmap add/remove) and safe for concurrent use
+// with readers; writers are serialised upstream by the engine's
+// single-writer transaction contract. Edge changes and changes for
+// other properties/labels are ignored.
 //
 // On recovery from a corrupted snapshot, the index is left empty;
 // callers re-populate via [Index.Insert] from the live LPG.
-func (*Index[V]) Apply(index.Change) {}
+func (i *Index[V]) Apply(c index.Change) {
+	b := i.binding
+	if b == nil {
+		return
+	}
+	switch c.Op {
+	case index.OpSetNodeProperty:
+		if c.Property != b.PropertyID {
+			return
+		}
+		if old, ok := b.Project(c.OldValue); ok {
+			i.Delete(old, c.Node)
+		}
+		if nv, ok := b.Project(c.NewValue); ok && b.Eligible(c.Node) {
+			i.Insert(nv, c.Node)
+		}
+	case index.OpDelNodeProperty:
+		if c.Property != b.PropertyID {
+			return
+		}
+		if old, ok := b.Project(c.OldValue); ok {
+			i.Delete(old, c.Node)
+		}
+	case index.OpAddNodeLabel:
+		if c.Label != b.LabelID {
+			return
+		}
+		if v, ok := b.CurrentValue(c.Node); ok && b.Eligible(c.Node) {
+			i.Insert(v, c.Node)
+		}
+	case index.OpRemoveNodeLabel:
+		if c.Label != b.LabelID {
+			return
+		}
+		if v, ok := b.CurrentValue(c.Node); ok {
+			i.Delete(v, c.Node)
+		}
+	}
+}
 
 // hashMagic is the four-byte magic at the head of a serialised hash
 // index ('SHSH' little-endian — 0x48534853).

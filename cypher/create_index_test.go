@@ -6,8 +6,8 @@ package cypher_test
 // idempotence tests already live in write_engine_test.go; this file adds:
 //   - TestCreateIndex_AppearInManager: index registered under expected name.
 //   - TestCreateIndex_ExistingDataPopulated: index created after data is
-//     inserted does NOT auto-populate from existing nodes (explicit contract
-//     documentation — population requires a separate CALL or manual walk).
+//     inserted IS backfilled from the existing nodes (task #1340); the full
+//     backfill battery lives in create_index_backfill_test.go.
 //   - TestCreateIndex_ExplainShowsNodeByIndexSeek: EXPLAIN confirms seek plan.
 
 import (
@@ -62,11 +62,11 @@ func TestCreateIndex_AppearInManager(t *testing.T) {
 	}
 }
 
-// TestCreateIndex_ExistingDataPopulated documents that an index created after
-// nodes already exist is registered but NOT auto-populated with pre-existing
-// data. Population requires an explicit walk (as done in newPersonGraph in
-// index_seek_test.go). This test pins the current behavior so any future change
-// to add auto-population is deliberate and visible.
+// TestCreateIndex_ExistingDataPopulated verifies that an index created after
+// nodes already exist is registered AND backfilled from the pre-existing data
+// (task #1340): a query on the indexed predicate finds the seeded nodes. The
+// full backfill battery (updates, deletes, label changes, wrong-label
+// fallback, concurrency) lives in create_index_backfill_test.go.
 func TestCreateIndex_ExistingDataPopulated(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
@@ -98,15 +98,25 @@ func TestCreateIndex_ExistingDataPopulated(t *testing.T) {
 	if len(names) == 0 {
 		t.Fatal("expected index in manager after CREATE INDEX")
 	}
+
+	// The pre-existing nodes are backfilled: the indexed predicate finds them.
+	for _, name := range []string{"WidgetA", "WidgetB"} {
+		qres, err := eng.Run(ctx, `MATCH (n:Product {sku: "`+name+`"}) RETURN n.sku`, nil)
+		if err != nil {
+			t.Fatalf("MATCH %s: %v", name, err)
+		}
+		rows := collectRecords(t, qres)
+		_ = qres.Close()
+		if len(rows) != 1 {
+			t.Fatalf("backfilled node %s: want 1 row, got %d", name, len(rows))
+		}
+	}
 }
 
 // TestCreateIndex_ExplainShowsNodeByIndexSeek verifies that after a CREATE
 // INDEX, a MATCH query filtered on the indexed property shows NodeByIndexSeek
-// (not LabelScan) in EXPLAIN — provided the index has been manually populated.
-//
-// Auto-population of pre-existing nodes is not implemented; the index is
-// populated here via the Cypher write path (CREATE node after index exists),
-// which triggers the change fan-out mechanism.
+// (not LabelScan) in EXPLAIN. The node is inserted after the index exists, so
+// the change fan-out (the bound index's Apply, task #1340) populates it.
 func TestCreateIndex_ExplainShowsNodeByIndexSeek(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})

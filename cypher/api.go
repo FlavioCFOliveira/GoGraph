@@ -1260,14 +1260,14 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 	idxMgr := e.g.IndexManager()
 	switch p := ddlPlan.(type) {
 	case *ir.CreateIndex:
-		var kind exec.IndexKindExec
-		switch p.Type {
-		case ir.IndexTypeHash:
-			kind = exec.ExecIndexHash
-		case ir.IndexTypeBTree:
-			kind = exec.ExecIndexBTree
+		if p.Type == ir.IndexTypeBTree {
+			return e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
 		}
-		return e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, kind, p.IfNotExists, idxMgr, e.ClearPlanCache))
+		// Hash indexes take the engine-level path: a bound index backfilled
+		// from the pre-existing data under the writer serialisation, so the
+		// planner's NodeByIndexSeek rewrite never serves an empty index
+		// (task #1340).
+		return e.runCreateHashIndex(ctx, p, idxMgr)
 	case *ir.DropIndex:
 		return e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
 	case *ir.CreateConstraint:
@@ -5174,7 +5174,7 @@ func buildIndexSeekOperator(
 	names := idxMgr.ListIndexes()
 	for _, name := range names {
 		sub, err := idxMgr.GetIndex(name)
-		if err != nil || sub.Kind() != "hash" {
+		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, p.Label, p.Property) {
 			continue
 		}
 		if op, ok := tryNewHashSeek(sub, seekVal); ok {
@@ -5207,7 +5207,7 @@ func tryBuildIndexSeekFromSelection(
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, seekVal); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
@@ -5256,6 +5256,33 @@ func extractSeekFromSelection(
 	return nil, "", nil
 }
 
+// boundNodeIndex is satisfied by hash indexes created with [hash.NewBound],
+// which carry the (label, property) pair they cover.
+type boundNodeIndex interface {
+	BoundNode() (label, property string, ok bool)
+}
+
+// indexCoversNode reports whether sub may serve an equality seek for the
+// (label, propKey) predicate. A bound index covers exactly its declared
+// (label, property) pair — serving any other predicate would return the
+// wrong rows, because the NodeByIndexSeek rewrite replaces the label scan
+// and the filter entirely. An index without coverage metadata (a manually
+// registered Go-API index) is accepted, preserving the historical
+// name-convention contract for that wiring. Matching is case-sensitive:
+// openCypher labels and property keys are case-sensitive even though the
+// auto-generated index NAME is lowercased.
+func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
+	b, ok := sub.(boundNodeIndex)
+	if !ok {
+		return true
+	}
+	bl, bp, bound := b.BoundNode()
+	if !bound {
+		return true
+	}
+	return bl == label && bp == propKey
+}
+
 // tryNamedHashSeek looks up the auto-named hash index for a (label,
 // propKey) pair and returns the seek operator + true when present
 // and applicable to seekVal.
@@ -5265,19 +5292,19 @@ func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr
 	}
 	wantName := strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_hash"
 	sub, err := idxMgr.GetIndex(wantName)
-	if err != nil || sub.Kind() != "hash" {
+	if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 		return nil, false
 	}
 	return tryNewHashSeek(sub, seekVal)
 }
 
 // tryAnyHashSeek iterates every registered index and returns the
-// first hash index that can serve seekVal. It is the fallback when
-// the named-index lookup misses.
-func tryAnyHashSeek(idxMgr *index.Manager, seekVal expr.Value) (exec.Operator, bool) {
+// first hash index that both covers the (label, propKey) predicate and can
+// serve seekVal. It is the fallback when the named-index lookup misses.
+func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value) (exec.Operator, bool) {
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
-		if err != nil || sub.Kind() != "hash" {
+		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 			continue
 		}
 		if op, ok := tryNewHashSeek(sub, seekVal); ok {
@@ -5481,18 +5508,21 @@ func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, 
 	}
 	if label != "" {
 		wantName := strings.ToLower(label) + "_" + strings.ToLower(property) + "_hash"
-		if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" {
+		if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" &&
+			indexCoversNode(sub, label, property) {
 			if k, ok := hashIndexKind(sub); ok {
 				return k, true
 			}
 		}
 	}
-	// Fallback: scan registered indexes, matching tryAnyHashSeek's reach. With
-	// no label to disambiguate we accept the first usable hash index, which is
-	// the same index that fallback seek would bind.
+	// Fallback: scan registered indexes, matching tryAnyHashSeek's reach
+	// (including its coverage gate, so the param-type resolver and the seek
+	// stay bound to the same index). With no label to disambiguate we accept
+	// the first usable hash index, which is the same index that fallback seek
+	// would bind.
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
-		if err != nil || sub.Kind() != "hash" {
+		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, property) {
 			continue
 		}
 		if k, ok := hashIndexKind(sub); ok {
@@ -7776,13 +7806,19 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 	}
 }
 
-// RemoveNode tombstones n in the underlying graph.
+// RemoveNode tombstones n in the underlying graph. When the secondary-index
+// fan-out is active, the node's properties and labels are first enqueued as
+// removal changes so subscribed indexes drop every entry describing the node
+// (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *lpgMutatorAdapter) RemoveNode(n string) {
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
 	}
 	wasLive := !a.g.IsTombstoned(id)
+	if wasLive && indexFanoutActive(a.g, a.buf) {
+		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
+	}
 	if wasLive {
 		a.g.IncrNodesRemoved()
 	}
@@ -7798,9 +7834,10 @@ func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 // SetNodeProperty sets the named property on n.
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
 	r := a.rec()
+	fanout := indexFanoutActive(a.g, a.buf)
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
+	if r.active() || fanout {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
@@ -7808,12 +7845,16 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	}
 	r.recordSetNodeProperty(n, key, prev, had)
 	if a.buf != nil {
-		a.buf.Enqueue(index.Change{
+		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
 			Node:     a.resolveID(n),
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
 			NewValue: value,
-		})
+		}
+		if had {
+			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		}
+		a.buf.Enqueue(ch)
 	}
 	return nil
 }
@@ -7821,19 +7862,24 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 // DelNodeProperty removes the named property from n.
 func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 	r := a.rec()
+	fanout := indexFanoutActive(a.g, a.buf)
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
+	if r.active() || fanout {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	a.g.DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
 	if a.buf != nil {
-		a.buf.Enqueue(index.Change{
+		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     a.resolveID(n),
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
-		})
+		}
+		if had {
+			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		}
+		a.buf.Enqueue(ch)
 	}
 }
 
@@ -8206,13 +8252,19 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 	}
 }
 
-// RemoveNode tombstones n in the underlying graph.
+// RemoveNode tombstones n in the underlying graph. When the secondary-index
+// fan-out is active, the node's properties and labels are first enqueued as
+// removal changes so subscribed indexes drop every entry describing the node
+// (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *walMutatorAdapter) RemoveNode(n string) {
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
 	}
 	wasLive := !a.g.IsTombstoned(id)
+	if wasLive && indexFanoutActive(a.g, a.buf) {
+		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
+	}
 	if wasLive {
 		a.g.IncrNodesRemoved()
 	}
@@ -8228,9 +8280,10 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 // SetNodeProperty sets the named property on n.
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
 	r := a.rec()
+	fanout := indexFanoutActive(a.g, a.buf)
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
+	if r.active() || fanout {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
@@ -8239,12 +8292,16 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	r.recordSetNodeProperty(n, key, prev, had)
 	_ = a.tx.SetNodeProperty(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
-		a.buf.Enqueue(index.Change{
+		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
 			Node:     a.resolveID(n),
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
 			NewValue: value,
-		})
+		}
+		if had {
+			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		}
+		a.buf.Enqueue(ch)
 	}
 	return nil
 }
@@ -8252,20 +8309,25 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 // DelNodeProperty removes the named property from n.
 func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	r := a.rec()
+	fanout := indexFanoutActive(a.g, a.buf)
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
+	if r.active() || fanout {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	a.g.DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
 	_ = a.tx.DelNodeProperty(n, key) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
-		a.buf.Enqueue(index.Change{
+		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     a.resolveID(n),
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
-		})
+		}
+		if had {
+			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		}
+		a.buf.Enqueue(ch)
 	}
 }
 

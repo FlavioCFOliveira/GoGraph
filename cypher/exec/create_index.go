@@ -11,6 +11,14 @@ package exec
 //
 // The created subscriber is registered with the manager and will be included in
 // the next snapshot via store/snapshot.WriteIndexes.
+//
+// Note: the Cypher engine routes hash CREATE INDEX through its own path
+// (Engine.runCreateHashIndex, task #1340), which builds a BOUND hash index —
+// backfilled from pre-existing data and self-maintaining via the change
+// fan-out — under the engine's writer serialisation. This operator remains
+// the btree route and a building block for embedders driving the exec layer
+// directly; the indexes it creates are unbound (empty until populated by
+// explicit Insert calls).
 
 import (
 	"context"
