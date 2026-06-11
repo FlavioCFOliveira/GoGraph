@@ -74,6 +74,14 @@ const (
 	// rather than a disconnect. metricTxAbandoned is a strict subset of
 	// metricTxClosed: an abandoned transaction is also counted closed.
 	metricTxAbandoned = "bolt.server.tx.abandoned"
+
+	// metricTxTimedOut counts explicit transactions reaped by the serve loop
+	// because they exceeded their wall-clock deadline while the connection was
+	// kept alive (idle, or by no-op pings). The reap rolls the transaction back
+	// — releasing the engine's global writer lock — and moves the session to
+	// FAILED (task #1346). It is a strict subset of metricTxClosed: a timed-out
+	// transaction is also counted closed by the rollback path.
+	metricTxTimedOut = "bolt.server.tx.timedout"
 )
 
 // incCounter forwards to the shared metrics backend. It exists as a single

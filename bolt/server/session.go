@@ -66,6 +66,17 @@ type Session struct {
 	// txActive indicates that an explicit transaction is open (BEGIN called).
 	txActive bool
 
+	// txDeadline is the absolute wall-clock deadline of the open explicit
+	// transaction, set by [Session.handleBegin] from the effective transaction
+	// timeout (zero when no finite timeout applies, or when no transaction is
+	// open). The serve loop arms a reaper that closes the connection at this
+	// instant so an idle-but-open transaction cannot hold the engine's global
+	// writer lock indefinitely while the client keeps the connection alive with
+	// no-op messages (task #1346). It is read only by the serve loop after
+	// [Session.HandleMessage] returns, on the same goroutine, so it needs no
+	// synchronisation.
+	txDeadline time.Time
+
 	// tx is the active explicit transaction, non-nil when txActive is true.
 	tx *Tx
 
@@ -789,6 +800,16 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	s.state = next
 	s.txActive = true
 	s.tx = tx
+	// Record the transaction's absolute wall-clock deadline so the serve loop can
+	// reap an idle-but-open transaction at the timeout even if the client keeps
+	// the connection alive with no-op messages (task #1346). A non-positive
+	// effective timeout (never produced by the production server, which installs
+	// a finite default) leaves the deadline zero, i.e. no reaper.
+	if effective > 0 {
+		s.txDeadline = time.Now().Add(effective)
+	} else {
+		s.txDeadline = time.Time{}
+	}
 	// Count the transaction opened (the opened side of the open-transaction gauge
 	// derivation opened − closed). The matching txClosed runs on whichever path
 	// ends it, keeping the derived gauge balanced.
@@ -929,6 +950,20 @@ func (s *Session) drainResult() {
 //
 // In particular the context-cancellation early return in [Session.HandleMessage]
 // — which never reaches a handler — still reclaims the transaction.
+// reapTimedOutTx rolls back an explicit transaction that has exceeded its
+// wall-clock deadline while the connection was kept alive (idle, or by no-op
+// pings), releasing the engine's global writer lock, and moves the session to
+// FAILED so the client's next message receives a FAILURE and must RESET. It is
+// invoked by the serve loop on a read-deadline timeout, on the session's own
+// goroutine, so it never races the single-threaded session. enterFailed drains
+// any cursor and rolls back the transaction (clearing txActive); txDeadline is
+// cleared here so the serve loop stops tightening the read deadline. (task #1346)
+func (s *Session) reapTimedOutTx() {
+	incCounter(metricTxTimedOut)
+	s.enterFailed()
+	s.txDeadline = time.Time{}
+}
+
 func (s *Session) enterFailed() {
 	s.state = StateFailed
 	// Entering FAILED invalidates any in-flight cursor: no PULL/DISCARD can

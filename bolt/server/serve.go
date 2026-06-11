@@ -566,10 +566,28 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 	// ── 3. Message loop ──────────────────────────────────────────────────
 	for {
-		// Reset the per-message I/O deadline.
+		// Reset the per-message I/O deadline (idle ConnTimeout, read + write).
 		if s.opts.ConnTimeout > 0 {
 			if err := conn.SetDeadline(time.Now().Add(s.opts.ConnTimeout)); err != nil {
 				s.log.Debug("bolt: SetDeadline failed, closing",
+					slog.String("remote", remote),
+					slog.String("err", err.Error()))
+				return
+			}
+		}
+		// While an explicit transaction is open with a finite deadline, tighten the
+		// READ deadline to that deadline so an idle-but-open transaction is reaped
+		// at its wall-clock timeout regardless of how often the client pings with
+		// no-op messages (the idle ConnTimeout reset above would otherwise let a
+		// pinging client hold the engine's global writer lock indefinitely — a
+		// server-wide write DoS, task #1346). The write deadline keeps the idle
+		// ConnTimeout. When the tightened read deadline fires with the transaction
+		// past its deadline, the reap below rolls the transaction back in this loop
+		// (on this goroutine — no race with the single-threaded session) and the
+		// connection survives for the client to RESET.
+		if sess.txActive && !sess.txDeadline.IsZero() {
+			if err := conn.SetReadDeadline(sess.txDeadline); err != nil {
+				s.log.Debug("bolt: SetReadDeadline failed, closing",
 					slog.String("remote", remote),
 					slog.String("err", err.Error()))
 				return
@@ -579,6 +597,17 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		// Read raw chunked message.
 		raw, err := cr.ReadMessage()
 		if err != nil {
+			// A read timeout while an explicit transaction has exceeded its
+			// deadline is a transaction-timeout, not an idle disconnect: reap the
+			// transaction (roll it back, releasing the engine writer lock, and move
+			// to FAILED) and continue serving so the client may RESET. The reap runs
+			// on this goroutine, so it never races the single-threaded session.
+			if isTimeout(err) && sess.txActive && !sess.txDeadline.IsZero() && !time.Now().Before(sess.txDeadline) {
+				s.log.Warn("bolt: explicit transaction timed out while idle; rolled back to release the writer lock",
+					slog.String("remote", remote))
+				sess.reapTimedOutTx()
+				continue
+			}
 			if errors.Is(err, io.EOF) {
 				s.log.Debug("bolt: connection closed by client", slog.String("remote", remote))
 			} else if !isConnClosed(err) {
@@ -671,6 +700,14 @@ func sendResponse(cw *proto.ChunkedWriter, msg any) error {
 
 // isTemporary reports whether an Accept error is transient.
 func isTemporary(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// isTimeout reports whether err is an I/O deadline (timeout) error, e.g. the
+// read deadline set before each message firing. It is used to distinguish a
+// transaction-timeout reap from a hard read error in the message loop.
+func isTimeout(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
 }
