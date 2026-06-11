@@ -279,10 +279,19 @@ type Graph[N comparable, W any] struct {
 // Concurrent calls from DIFFERENT goroutines are unaffected: they serialise on
 // visMu as before, and the guard never trips on them.
 func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
-	gid := g.barrier.enterWriter() // panics on re-entry from this goroutine
-	defer g.barrier.exitWriter(gid)
+	// Guard ordering (#1286, #1355): the re-entrancy CHECK runs before Lock so
+	// a nested call panics instead of deadlocking, but the writer STAMP is
+	// taken only after Lock succeeds — a writer queued on visMu must never
+	// overwrite the active writer's identity, or the active writer's nested
+	// View/ApplyAtomically would sail past the guard into the deadlock. The
+	// clear is deferred after the deferred Unlock, so on the unwind (LIFO) the
+	// stamp is removed while the lock is still held and only ever by its
+	// owner.
+	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
 	g.visMu.Lock()
+	g.barrier.stampWriter(gid)
 	defer g.visMu.Unlock()
+	defer g.barrier.clearWriter(gid)
 	return fn()
 }
 

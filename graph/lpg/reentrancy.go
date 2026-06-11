@@ -36,11 +36,23 @@ import (
 // step per acquisition is acceptable; there is no per-row overhead and no
 // allocation on the common (non-nested) path:
 //
-//   - The serialised writer's identity is a single [sync/atomic] int64 set on
-//     entry and cleared on exit. Both [Graph.View] and [Graph.ApplyAtomically]
+//   - The serialised writer's identity is a single [sync/atomic] int64,
+//     stamped immediately AFTER visMu.Lock succeeds and cleared (a CAS on the
+//     goroutine's own id) immediately BEFORE visMu.Unlock, so it is exactly
+//     "the goroutine currently HOLDING visMu in write mode" — never a writer
+//     merely queued on the lock. Both [Graph.View] and [Graph.ApplyAtomically]
 //     check it with one atomic load — no lock, no allocation — which catches
 //     every nesting that involves the writer (writer→writer, writer→reader,
-//     reader→writer).
+//     reader→writer). The entry-side check still runs BEFORE Lock, so the
+//     panic fires instead of the lock deadlocking. A writer queued on visMu is
+//     deliberately registered nowhere: between its entry check and blocking on
+//     Lock it executes no user code, and while blocked it cannot call
+//     anything, so no same-goroutine nested acquisition can originate from it.
+//     (Task #1355: the previous stamp-before-Lock let a queued writer
+//     overwrite the active writer's id, so the active writer's nested
+//     View/ApplyAtomically sailed past the guard into the deadlock the guard
+//     exists to prevent; the exit-side unconditional Store(0) likewise erased
+//     the other writer's stamp.)
 //   - Concurrent [Graph.View] readers are tracked in a small map keyed by
 //     goroutine id, guarded by a dedicated mutex (NOT visMu). The mutex is held
 //     only for the O(1) insert/remove at the RLock/RUnlock boundary, never while
@@ -54,10 +66,14 @@ import (
 // legitimate concurrent (different-goroutine) View readers and an
 // ApplyAtomically writer.
 type barrierGuard struct {
-	// writerGID is the goroutine id of the goroutine currently inside
-	// ApplyAtomically, or 0 when no writer holds the barrier. The barrier
-	// serialises writers, so at most one id is live at a time and a plain
-	// atomic suffices.
+	// writerGID is the goroutine id of the goroutine currently HOLDING visMu
+	// in write mode, or 0 when no writer holds it. It is stamped by
+	// [barrierGuard.stampWriter] only after visMu.Lock succeeds and cleared by
+	// [barrierGuard.clearWriter] before visMu.Unlock, so it is exclusively
+	// owned by the lock holder: a writer queued on visMu never appears here
+	// and can never clobber the active writer's id (#1355). visMu serialises
+	// writers, so at most one id is live at a time and a plain atomic
+	// suffices.
 	writerGID atomic.Int64
 
 	// readerMu guards readers. It is independent of visMu and is held only for
@@ -91,12 +107,18 @@ func reentrancyMessage(nested, held string) string {
 		nested, held)
 }
 
-// enterWriter marks the calling goroutine as the in-barrier writer, panicking
-// if the goroutine already holds the barrier in any role. It is called by
+// checkWriter verifies that the calling goroutine does not already hold the
+// barrier in any role, panicking on re-entry. It is called by
 // [Graph.ApplyAtomically] BEFORE acquiring visMu.Lock, so the panic fires
-// instead of the lock deadlocking. The returned gid must be passed to
-// exitWriter (via defer) to clear the mark even if fn panics.
-func (bg *barrierGuard) enterWriter() int64 {
+// instead of the lock deadlocking. It does NOT mark the goroutine: the writer
+// stamp is taken by [barrierGuard.stampWriter] only once visMu.Lock has been
+// acquired, so a writer that merely QUEUES on visMu can never overwrite the
+// active writer's identity (#1355). The window between this check and the
+// stamp needs no registration: the goroutine executes no user code there, and
+// while blocked on Lock it cannot call anything, so no same-goroutine nested
+// acquisition can originate from it. The returned gid must be passed to
+// stampWriter after Lock and to clearWriter (via defer) before Unlock.
+func (bg *barrierGuard) checkWriter() int64 {
 	gid := goID()
 	if gid == 0 {
 		// Runtime line unparseable: fail open (no enforcement), never crash.
@@ -114,19 +136,33 @@ func (bg *barrierGuard) enterWriter() int64 {
 	if bg.writerGID.Load() == gid {
 		panic(reentrancyMessage("ApplyAtomically", "ApplyAtomically"))
 	}
-	bg.writerGID.Store(gid)
 	return gid
 }
 
-// exitWriter clears the writer mark set by enterWriter. gid==0 means enterWriter
-// failed open and there is nothing to clear. It runs from a defer in
-// [Graph.ApplyAtomically], so it executes even when fn panics — mirroring the
-// deferred visMu.Unlock — and therefore never strands a stale writer id.
-func (bg *barrierGuard) exitWriter(gid int64) {
+// stampWriter records gid as the goroutine holding visMu in write mode. It
+// must be called by [Graph.ApplyAtomically] immediately AFTER visMu.Lock
+// succeeds, so the stamp is exclusively owned by the lock holder for its whole
+// tenure. gid==0 means checkWriter failed open and nothing is recorded.
+func (bg *barrierGuard) stampWriter(gid int64) {
 	if gid == 0 {
 		return
 	}
-	bg.writerGID.Store(0)
+	bg.writerGID.Store(gid)
+}
+
+// clearWriter clears the writer stamp set by stampWriter. gid==0 means
+// checkWriter failed open and there is nothing to clear. It runs from a defer
+// in [Graph.ApplyAtomically] registered AFTER the deferred visMu.Unlock, so it
+// executes first on the unwind (LIFO) — the stamp is cleared while the lock is
+// still held, even when fn panics, and therefore never strands a stale writer
+// id. The CAS guarantees the call only ever clears this goroutine's OWN stamp,
+// never another writer's (#1355); in correct code it always succeeds, because
+// the stamp is exclusively owned by the lock holder between Lock and Unlock.
+func (bg *barrierGuard) clearWriter(gid int64) {
+	if gid == 0 {
+		return
+	}
+	bg.writerGID.CompareAndSwap(gid, 0)
 }
 
 // enterReader marks the calling goroutine as an in-barrier reader, panicking if
