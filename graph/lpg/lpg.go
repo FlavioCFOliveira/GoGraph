@@ -203,9 +203,10 @@ type Graph[N comparable, W any] struct {
 	// tombstones records NodeIDs that have been removed by RemoveNode.
 	// The underlying Mapper cannot release the index slot (NodeID stability
 	// is a hard contract), so removal is observable only via this set:
-	// every read path (Order, IsTombstoned, WalkLiveNodes) must filter
-	// tombstoned ids. A tombstone is cleared by revive (re-materialising
-	// the node), so the set holds exactly the currently-removed ids.
+	// every logical read path (LiveOrder, IsTombstoned, and every
+	// TombstonedIDs consumer) must filter tombstoned ids. A tombstone is
+	// cleared by revive (re-materialising the node), so the set holds
+	// exactly the currently-removed ids.
 	tombstoneMu sync.RWMutex
 	tombstones  map[graph.NodeID]struct{}
 	// tombstoneActive mirrors len(tombstones) as a lock-free gate. AddNode
@@ -737,7 +738,7 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 }
 
 // RemoveNode marks the node n as removed. Subsequent reads through
-// IsTombstoned / WalkLiveNodes treat n as absent. The underlying
+// IsTombstoned / LiveOrder / TombstonedIDs treat n as absent. The underlying
 // Mapper retains the slot (NodeID stability is a hard contract), but
 // label, property, and adjacency reads on the tombstoned id remain
 // safe; callers should also strip labels / properties / incident
