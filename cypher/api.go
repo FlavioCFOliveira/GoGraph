@@ -2101,6 +2101,14 @@ func estimateRelSize(r expr.RelationshipValue) int64 {
 //     replay itself fails, undoErr is recorded so [Result.Err] surfaces
 //     [ErrUndoFailed].
 //
+//   - Truncated write (rowsErr: a bounded-resource guard — [ErrResultRowsExceeded]
+//     or [ErrResultBytesExceeded] — stopped the drain early, #1338). Treated
+//     exactly like a drain error: the rows pulled before the trip already
+//     applied their mutations eagerly, so committing here would fsync a PARTIAL
+//     transaction while the caller receives the cap sentinel — an Atomicity
+//     violation. The whole statement is rolled back instead; the sentinel still
+//     surfaces via [Result.Err].
+//
 //   - Successful write. fsync the WAL FIRST (CommitWALOnly) so durability is
 //     secured before the writes are allowed to remain visible past the barrier.
 //     Only when the fsync succeeds is the index buffer committed and the undo
@@ -2124,7 +2132,7 @@ func (r *Result) commitUnderBarrier() {
 	if r.bufHandled && r.walHandled {
 		return
 	}
-	if r.rs.Err() != nil {
+	if r.rs.Err() != nil || r.rowsErr != nil {
 		r.rollbackUnderBarrier()
 		return
 	}
@@ -2184,7 +2192,9 @@ func (r *Result) rollbackUnderBarrier() {
 // returns the guard's sentinel: [ErrResultRowsExceeded] when the row cap
 // ([EngineOptions.MaxResultRows]) was hit, or [ErrResultBytesExceeded] when the
 // aggregate-byte budget ([EngineOptions.MaxResultBytes]) was hit. Either is
-// matchable with [errors.Is].
+// matchable with [errors.Is]. For an autocommit write statement a tripped guard
+// is a failed statement: its eager mutations were rolled back atomically inside
+// the barrier and nothing was made durable (#1338).
 //
 // When the query was a write that failed and the subsequent in-memory undo
 // replay ALSO failed (an inverse panicked, [ErrUndoFailed]), Err returns the
@@ -2250,8 +2260,10 @@ func (r *Result) closeLocked() error {
 		// Fallback path: the index buffer was not flipped under the barrier
 		// (e.g. a Result that was never materialised). Commit/roll back here as
 		// before. Materialised write queries flip it inside ApplyAtomically via
-		// commitUnderBarrier (bufHandled), so this branch is skipped.
-		if err != nil || r.rs.Err() != nil {
+		// commitUnderBarrier (bufHandled), so this branch is skipped. A tripped
+		// bounded-resource guard (rowsErr) counts as a failure, mirroring
+		// commitUnderBarrier (#1338): a truncated write must never commit.
+		if err != nil || r.rs.Err() != nil || r.rowsErr != nil {
 			r.buf.Rollback()
 		} else {
 			r.buf.Commit(r.idxMgr)
@@ -2262,8 +2274,9 @@ func (r *Result) closeLocked() error {
 		// (durable-then-visible) or rolled back its WAL transaction under the
 		// barrier (walHandled, #1281), so this branch is skipped for it and the
 		// WAL fsync never happens after visMu is released. It survives for a
-		// Result that reached Close without in-barrier finalisation.
-		if err != nil || r.rs.Err() != nil {
+		// Result that reached Close without in-barrier finalisation. As above,
+		// rowsErr is failure: a partial transaction must not be made durable.
+		if err != nil || r.rs.Err() != nil || r.rowsErr != nil {
 			_ = r.tx.Rollback() // release store mutex; in-memory state already dirty
 		} else {
 			if werr := r.tx.CommitWALOnly(); werr != nil {

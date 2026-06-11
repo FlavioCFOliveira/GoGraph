@@ -30,6 +30,8 @@ Counts as of commit `dd20de6` (2026-06-02): **11,418 nodes**, **14,778 edges**.
 | `Example` | A runnable godoc `func ExampleXxx` (name prefix `Example`). | `name`, `pkg`, `file` |
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
+| `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
+| `Commit` | A git commit that delivered one or more tasks. | `hash` (short 7-char), `fullHash`, `message`, `sprintId` (int) |
 
 ### Enumerated property values
 
@@ -65,6 +67,8 @@ All edges carry `gitCommit` and `gitDate`.
 | `HAS_METHOD` | `(Type)-[:HAS_METHOD]->(Method)` | A method's receiver type, matched within the same package (`Method.recv == Type.name`). |
 | `IMPLEMENTS` | `(Package)-[:IMPLEMENTS]->(Feature)` | A package realises a curated feature (path-prefix rules below). |
 | `SPECIFIED_IN` | `(Feature)-[:SPECIFIED_IN]->(Spec)` | A feature is documented in a specification file. |
+| `CONTAINS` | `(Sprint)-[:CONTAINS]->(Commit)` | A sprint contains a commit that delivered work within it. |
+| `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
 
 ### Counts by edge type (commit `dd20de6`)
 
