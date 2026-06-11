@@ -1103,55 +1103,29 @@ func authErrorCode(err error) string {
 // logged server-side by the caller using the session ID for correlation.
 //
 // Mapping:
-//   - Auth errors → "Authentication failed."
-//   - Cypher syntax/sema errors → the error text (already a user-facing message).
+//   - Auth errors → "Authentication failed." (never reveal the cause).
+//   - Client-fault errors (parse/semantic/type errors, constraint violations,
+//     resource caps, transaction-too-large, index/procedure misuse — see
+//     [isClientFaultErr]) → the error text, which is the client's own
+//     diagnostic (task #1353).
 //   - All other errors → a generic message with a session ID for log correlation.
 func (s *Session) sanitiseErr(err error) string {
 	if err == nil {
 		return ""
 	}
 	// Auth errors: never reveal the underlying cause to the client.
-	if errors.Is(err, ErrSchemeUnknown) {
+	if errors.Is(err, ErrSchemeUnknown) || errors.Is(err, ErrAuthFailed) {
 		return "Authentication failed."
 	}
-	// Syntax and semantic errors are already composed as user-facing messages.
-	if isCypherUserError(err) {
-		return err.Error()
-	}
-	// Bounded-resource guards (result-row cap, aggregator element budget) carry a
-	// message that names the limit and discloses nothing sensitive; forward it so
-	// the client learns the query was rejected for exceeding a configured cap
-	// rather than seeing the opaque internal-error text.
-	if isResourceLimitErr(err) {
+	// Client-fault errors carry diagnostics about the client's own request
+	// (the parse position, the undefined variable, the violated constraint,
+	// the tripped cap) — replacing them with the generic internal-error text
+	// would break debuggability without protecting anything internal.
+	if isClientFaultErr(err) {
 		return err.Error()
 	}
 	// All other errors (internal engine, storage, unexpected): generic + session ID.
 	return fmt.Sprintf("An internal error occurred. See server logs for details (session: %s).", s.id)
-}
-
-// isCypherUserError reports whether err is a Cypher syntax or semantic error
-// that is safe to forward verbatim to the client.
-func isCypherUserError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// Heuristic: Cypher user errors start with their Bolt error code prefix or
-	// contain "SyntaxError" / "SemanticError" in their message. This is safer
-	// than a type assertion because the cypher package is not imported here.
-	for _, prefix := range []string{
-		"Neo.ClientError.Statement.",
-		"Neo.ClientError.Schema.",
-		"SyntaxError",
-		"SemanticError",
-		"TypeError",
-		"ArgumentError",
-	} {
-		if len(msg) >= len(prefix) && msg[:len(prefix)] == prefix {
-			return true
-		}
-	}
-	return false
 }
 
 // extractString retrieves a string value from a packstream map by key.

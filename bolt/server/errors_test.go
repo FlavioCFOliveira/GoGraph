@@ -7,10 +7,13 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -46,14 +49,82 @@ func TestFailureCode(t *testing.T) {
 			want: "Neo.ClientError.Statement.SemanticError",
 		},
 		{
+			// task #1353: the engine returns *sema.SemanticError (not
+			// *parser.SemaError) for scope violations; the Category field is
+			// TCK-pinned and selects the statement code.
+			name: "sema.SemanticError SyntaxError category",
+			err:  &sema.SemanticError{Category: sema.CategorySyntaxError, SubType: "UndefinedVariable"},
+			want: "Neo.ClientError.Statement.SyntaxError",
+		},
+		{
+			name: "sema.SemanticError TypeError category",
+			err:  &sema.SemanticError{Category: sema.CategoryTypeError, SubType: "InvalidArgumentType"},
+			want: "Neo.ClientError.Statement.TypeError",
+		},
+		{
+			name: "sema.SemanticError unknown category",
+			err:  &sema.SemanticError{Category: "SomethingElse", SubType: "X"},
+			want: "Neo.ClientError.Statement.SemanticError",
+		},
+		{
+			// task #1353: runtime evaluation type errors, wrapped by the
+			// executor exactly as exec.Project does.
+			name: "expr.EvalError InvalidArgumentType wrapped",
+			err:  fmt.Errorf("exec: Project item %q eval: %w", "l[1.5]", &expr.EvalError{Msg: "InvalidArgumentType: list index must be Integer, got Float"}),
+			want: "Neo.ClientError.Statement.TypeError",
+		},
+		{
+			name: "expr.EvalError MapElementAccessByNonString",
+			err:  &expr.EvalError{Msg: "MapElementAccessByNonString: map key must be String, got Integer"},
+			want: "Neo.ClientError.Statement.TypeError",
+		},
+		{
+			name: "expr.EvalError EntityNotFound",
+			err:  &expr.EvalError{Msg: "EntityNotFound: DeletedEntityAccess: cannot read labels of deleted node"},
+			want: "Neo.ClientError.Statement.EntityNotFound",
+		},
+		{
+			// Evaluator-internal failures stay on the internal-error fallback.
+			name: "expr.EvalError internal",
+			err:  &expr.EvalError{Msg: "unsupported expression type *ast.Foo"},
+			want: "Neo.DatabaseError.General.UnknownError",
+		},
+		{
+			// task #1353: per-transaction op cap, wrapped exactly as the
+			// engine's commit path does.
+			name: "txn.ErrTransactionTooLarge wrapped",
+			err:  fmt.Errorf("cypher: commit WAL: %w", txn.ErrTransactionTooLarge),
+			want: "Neo.ClientError.General.TransactionOutOfMemoryError",
+		},
+		{
+			// task #1353: untyped engine errors carrying a TCK category in the
+			// message (built with fmt.Errorf in cypher/api.go).
+			name: "plain SemanticError message shape",
+			err:  fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE pattern contains a null property literal"),
+			want: "Neo.ClientError.Statement.SemanticError",
+		},
+		{
+			name: "plain ArgumentError message shape",
+			err:  fmt.Errorf("cypher: ArgumentError.NumberOutOfRange: percentile argument of 2.0 must be between 0.0 and 1.0"),
+			want: "Neo.ClientError.Statement.ArgumentError",
+		},
+		{
+			name: "plain SyntaxError message shape rewrapped",
+			err:  fmt.Errorf("cypher: build plan: %w", fmt.Errorf("cypher: SyntaxError.NegativeIntegerArgument: LIMIT requires a non-negative integer, got -1")),
+			want: "Neo.ClientError.Statement.SyntaxError",
+		},
+		{
+			// task #1353: constraint violations map to the official Neo4j
+			// taxonomy code (previously the non-taxonomy
+			// "ConstraintViolationOnCreate").
 			name: "ConstraintViolationError UNIQUE",
 			err:  &exec.ConstraintViolationError{Kind: "UNIQUE", Label: "Person", Property: "email"},
-			want: "Neo.ClientError.Schema.ConstraintViolationOnCreate",
+			want: "Neo.ClientError.Schema.ConstraintValidationFailed",
 		},
 		{
 			name: "ConstraintViolationError NOT_NULL",
 			err:  &exec.ConstraintViolationError{Kind: "NOT_NULL", Label: "Person", Property: "name"},
-			want: "Neo.ClientError.Schema.ConstraintViolationOnCreate",
+			want: "Neo.ClientError.Schema.ConstraintValidationFailed",
 		},
 		{
 			name: "context.DeadlineExceeded",
