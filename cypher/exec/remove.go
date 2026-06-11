@@ -40,7 +40,8 @@ type RemoveProperty struct {
 	relCols     *RelCols // non-nil when entityVar is a relationship
 	child       Operator
 	mutator     GraphMutator
-	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
+	reg         *ConstraintRegistry // nil means no registry maintenance
+	ctx         context.Context     //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewRemoveProperty creates a RemoveProperty operator.
@@ -57,6 +58,14 @@ func NewRemoveProperty(
 		child:       child,
 		mutator:     mutator,
 	}
+}
+
+// WithConstraintRegistry attaches a ConstraintRegistry so RemoveProperty
+// releases unique-constraint value reservations when a node property is
+// removed. Returns op for chaining.
+func (op *RemoveProperty) WithConstraintRegistry(reg *ConstraintRegistry) *RemoveProperty {
+	op.reg = reg
+	return op
 }
 
 // WithRelCols marks entityVar as a relationship variable and records the row
@@ -104,6 +113,13 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 		if ent.isRel {
 			op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey)
 		} else {
+			// Release the constrained value before removing the property so
+			// the slot is freed in the registry.
+			if op.reg != nil {
+				if oldVal, had := op.mutator.NodeProperties(ent.nodeKey)[op.propertyKey]; had {
+					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(ent.nodeKey), op.propertyKey, oldVal)
+				}
+			}
 			op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey)
 		}
 	}

@@ -6,8 +6,10 @@ package exec
 // constraint in the ConstraintRegistry.
 //
 // For UNIQUE constraints a hash index named "__uniq__<label>.<prop>" is also
-// created in index.Manager. The synthetic name is deterministic so that
-// CheckSetProperty can look it up without extra metadata.
+// created in index.Manager. The engine supplies a pre-built bound subscriber
+// (via WithBackingIndex) so the index self-maintains from the change fan-out
+// at commit time. When no subscriber is supplied, a plain unbound index is
+// created as a safe fallback (e.g. in tests that do not have a live graph).
 //
 // For NOT NULL constraints only the registry entry is needed; no backing index
 // is created.
@@ -34,10 +36,11 @@ func uniqueIndexName(label, prop string) string {
 // CreateConstraint operator uses.
 func UniqueIndexName(label, prop string) string { return uniqueIndexName(label, prop) }
 
-// NewUniqueBackingIndex returns a fresh hash-index subscriber suitable as the
-// backing index of a UNIQUE constraint, identical to the one the
-// CreateConstraint operator installs. It is exported so the engine can install
-// the same backing index when re-registering a recovered constraint.
+// NewUniqueBackingIndex returns a fresh unbound hash-index subscriber. It is
+// kept for callers (tests, recovery) that do not have a live graph and
+// therefore cannot build a bound index. The engine's write path always
+// supplies a bound subscriber via [CreateConstraintOp.WithBackingIndex] so
+// the index self-maintains from the change fan-out.
 func NewUniqueBackingIndex() index.Subscriber { return indexhash.New[string]() }
 
 // CreateConstraintOp is a Volcano DDL operator that registers a constraint.
@@ -51,6 +54,7 @@ type CreateConstraintOp struct {
 	ifNotExists    bool
 	mgr            *index.Manager
 	reg            *ConstraintRegistry
+	backingIndex   index.Subscriber // optional pre-built bound subscriber for UNIQUE
 	onSchemaChange func()
 	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
 	done           bool
@@ -82,6 +86,16 @@ func NewCreateConstraintOp(
 	}
 }
 
+// WithBackingIndex supplies a pre-built index subscriber to use as the UNIQUE
+// constraint's backing hash index instead of creating a fresh unbound index.
+// The engine passes a bound index (built and backfilled from the live graph)
+// so the index self-maintains from the change fan-out at commit time. Returns
+// op for chaining.
+func (op *CreateConstraintOp) WithBackingIndex(sub index.Subscriber) *CreateConstraintOp {
+	op.backingIndex = sub
+	return op
+}
+
 // Init implements Operator.
 func (op *CreateConstraintOp) Init(ctx context.Context) error {
 	op.ctx = ctx
@@ -104,7 +118,10 @@ func (op *CreateConstraintOp) Next(_ *Row) (bool, error) {
 	switch op.kind {
 	case ConstraintUnique:
 		idxName := uniqueIndexName(op.label, op.prop)
-		sub := indexhash.New[string]()
+		sub := op.backingIndex
+		if sub == nil {
+			sub = indexhash.New[string]()
+		}
 		if err := op.mgr.CreateIndex(idxName, sub); err != nil {
 			if op.ifNotExists && errors.Is(err, index.ErrIndexExists) {
 				return false, nil // IF NOT EXISTS — silently succeed; no schema change

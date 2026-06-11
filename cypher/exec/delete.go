@@ -69,7 +69,8 @@ type DeleteNode struct {
 	mutator        GraphMutator
 	targetEvalFn   TargetEvalFn
 	relEndpointsFn RelEndpointFn
-	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	reg            *ConstraintRegistry // nil means no registry maintenance
+	ctx            context.Context     //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -84,6 +85,27 @@ func NewDeleteNode(
 		schema:  schema,
 		child:   child,
 		mutator: mutator,
+	}
+}
+
+// WithConstraintRegistry attaches a ConstraintRegistry so DeleteNode releases
+// unique-constraint value reservations when a node is deleted. Returns op for
+// chaining.
+func (op *DeleteNode) WithConstraintRegistry(reg *ConstraintRegistry) *DeleteNode {
+	op.reg = reg
+	return op
+}
+
+// releaseNodeConstraintValues releases unique-constraint value reservations
+// for every constrained property of nodeKey. It is called immediately before
+// the node's labels and properties are stripped so the registry no longer
+// treats the values as "in use". A nil reg is a no-op.
+func (op *DeleteNode) releaseNodeConstraintValues(nodeKey string, labels []string) {
+	if op.reg == nil {
+		return
+	}
+	for k, pv := range op.mutator.NodeProperties(nodeKey) {
+		op.reg.ReleasePropertyValue(labels, k, pv)
 	}
 }
 
@@ -183,7 +205,9 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				for _, src := range op.mutator.InNeighbours(nodeKey) {
 					op.mutator.RemoveEdge(src, nodeKey)
 				}
-				for _, lbl := range op.mutator.NodeLabels(nodeKey) {
+				pathNodeLabels := op.mutator.NodeLabels(nodeKey)
+				op.releaseNodeConstraintValues(nodeKey, pathNodeLabels)
+				for _, lbl := range pathNodeLabels {
 					op.mutator.RemoveNodeLabel(nodeKey, lbl)
 				}
 				for k := range op.mutator.NodeProperties(nodeKey) {
@@ -302,6 +326,9 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				deletedProps[k] = v
 			}
 		}
+		// Release every constrained property value so the slot is no longer
+		// treated as "in use" after the node is gone.
+		op.releaseNodeConstraintValues(nodeKey, deletedLabels)
 	}
 	// Remove all labels.
 	for _, lbl := range op.mutator.NodeLabels(nodeKey) {

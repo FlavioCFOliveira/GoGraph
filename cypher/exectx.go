@@ -370,12 +370,22 @@ func (tx *ExplicitTx) Rollback() (err error) {
 // only after the graph entries they describe are gone; the WAL transaction is
 // rolled back last (it holds no in-memory state). [txn.Tx.Rollback] is idempotent
 // against an already-finished transaction.
+//
+// After undo replay, the constraint registry's UNIQUE value-sets are reseeded
+// from the restored graph so that any values recorded during the rolled-back
+// statements do not produce phantom reservations (#1342).
 func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 	undoOK = true
 	if tx.undo != nil && !tx.undo.replay() {
 		undoOK = false
 	}
 	tx.undo = nil
+	// Reseed the constraint registry from the restored graph. Runs after undo
+	// so the graph is back to its pre-transaction state before the value-sets
+	// are rebuilt.
+	if tx.eng.constraintReg != nil {
+		reseedConstraintsInsideBarrier(tx.eng.constraintReg, tx.eng.g)
+	}
 	if tx.buf != nil {
 		tx.buf.Rollback()
 	}

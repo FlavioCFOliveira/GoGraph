@@ -308,6 +308,13 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				return evalErr
 			}
 			if isNull {
+				if op.reg != nil {
+					// Release the old value if it was constrained before
+					// removing the property; SET n.k = null is a removal.
+					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
+						op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
+					}
+				}
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
 				return nil
 			}
@@ -318,6 +325,14 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				labels := op.mutator.NodeLabels(nodeKey)
 				if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
 					return cerr
+				}
+			}
+			// Capture and release the old value BEFORE overwriting it, so
+			// the old slot is freed in the registry regardless of whether
+			// the new value is equal.
+			if op.reg != nil {
+				if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
+					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
 				}
 			}
 			if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
@@ -339,6 +354,11 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		if parseErr != nil {
 			if errors.Is(parseErr, ErrPropertyValueIsNull) {
 				// openCypher: SET n.k = null removes the property k from n.
+				if op.reg != nil {
+					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
+						op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
+					}
+				}
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
 				return nil
 			}
@@ -348,6 +368,12 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			labels := op.mutator.NodeLabels(nodeKey)
 			if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
 				return cerr
+			}
+		}
+		// Release the old constrained value before overwriting.
+		if op.reg != nil {
+			if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
+				op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
 			}
 		}
 		if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
@@ -369,8 +395,16 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				}
 			}
 		}
+		// For merge mode (SET n += {…}), read existing props once so we can
+		// release any old constrained value before overwriting it.
+		existingMerge := op.mutator.NodeProperties(nodeKey)
 		labels := op.mutator.NodeLabels(nodeKey)
 		for _, p := range op.parsedMap {
+			if op.reg != nil {
+				if oldVal, had := existingMerge[p.key]; had {
+					op.reg.ReleasePropertyValue(labels, p.key, oldVal)
+				}
+			}
 			if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 				return serr
 			}
@@ -390,6 +424,13 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		}
 	}
 	existing := op.mutator.NodeProperties(nodeKey)
+	// Release all existing constrained values that are being replaced.
+	if op.reg != nil {
+		labels := op.mutator.NodeLabels(nodeKey)
+		for k, oldVal := range existing {
+			op.reg.ReleasePropertyValue(labels, k, oldVal)
+		}
+	}
 	for k := range existing {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}

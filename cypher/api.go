@@ -680,11 +680,18 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 		d := defs[i]
 		if d.Unique {
 			idxName := exec.UniqueIndexName(d.Label, d.Property)
-			// Best-effort backing index: ignore ErrIndexExists (a previous
-			// constraint or a recovered index already created it). Any other
-			// error leaves the value-set as the sole enforcement source, which
-			// still rejects duplicates.
-			_ = e.g.IndexManager().CreateIndex(idxName, exec.NewUniqueBackingIndex())
+			// Build a bound index so it self-maintains from commit-time change
+			// events. Fall back to an unbound index when binding fails (e.g. the
+			// graph is not yet populated). Ignore ErrIndexExists: a previous
+			// constraint or a recovered plain index already claimed the name.
+			var sub index.Subscriber
+			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, d.Label, d.Property); bidxErr == nil {
+				e.backfillNodeHashIndex(boundIdx, d.Label, d.Property)
+				sub = boundIdx
+			} else {
+				sub = exec.NewUniqueBackingIndex()
+			}
+			_ = e.g.IndexManager().CreateIndex(idxName, sub)
 			e.constraintReg.RegisterUnique(d.Label, d.Property, idxName)
 			e.constraintReg.SetConstraintName(true, d.Label, d.Property, d.Name)
 			values, _ := e.scanLabelProperty(d.Label, d.Property)
@@ -1376,9 +1383,24 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		return nil, err
 	}
 
-	// Register in memory via the operator (handles index creation + IF NOT
-	// EXISTS), then seed the UNIQUE value-set from the scanned values.
+	// For UNIQUE constraints, build a bound hash index that self-maintains from
+	// the index.Manager change fan-out (emitted at commit time by the mutator
+	// adapters). A bound index keeps the backing store in sync with every CREATE,
+	// DELETE, SET, and REMOVE, so NodeByIndexSeek queries always see the live
+	// state and checkUniqueViolation never reports stale "ghost" cardinality for
+	// deleted values (#1342). The bound index is backfilled from the live graph
+	// before it is registered so pre-existing nodes are covered immediately.
 	op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+	if kind == exec.ConstraintUnique {
+		boundIdx, bidxErr := newBoundNodeHashIndex(e.g, p.Label, p.Property)
+		if bidxErr == nil {
+			e.backfillNodeHashIndex(boundIdx, p.Label, p.Property)
+			op.WithBackingIndex(boundIdx)
+		}
+		// On binding error fall through: the operator uses an unbound index as a
+		// safe fallback. The value-set (seeded below) remains the primary
+		// enforcement source; the secondary check is cosmetic.
+	}
 	if _, err := e.runDDLOp(ctx, op); err != nil {
 		return nil, err
 	}
@@ -2001,6 +2023,15 @@ type Result struct {
 	// inverse panicked), so the graph may be inconsistent. Err surfaces it
 	// wrapped in [ErrUndoFailed] alongside the triggering pipeline error.
 	undoErr error
+
+	// constraintReg and g are set for write queries that carry constraint
+	// enforcement. After a rollback (undo replay), the registry's UNIQUE
+	// value-sets may still contain values that were added during the now-
+	// rolled-back transaction. rollbackUnderBarrier calls ReseedFromGraph to
+	// rebuild the value-sets from the restored graph state. Both are nil for
+	// read queries and write queries on an engine with no active constraints.
+	constraintReg *exec.ConstraintRegistry
+	g             *lpg.Graph[string, float64]
 	// walErr is set non-nil when the in-barrier WAL fsync (CommitWALOnly)
 	// failed for an otherwise-successful write (#1281, durable-then-visible).
 	// The eager in-memory mutations have ALREADY been rolled back (undo
@@ -2309,9 +2340,22 @@ func (r *Result) commitUnderBarrier() {
 // transaction is rolled back last (it holds no in-memory state). [txn.Tx.Rollback]
 // is idempotent against an already-finished transaction, so a tx whose
 // CommitWALOnly already ran (and failed) is not double-released.
+//
+// After the in-memory undo replay, the graph is restored to its pre-transaction
+// state. The constraint registry's UNIQUE value-sets may, however, still contain
+// values recorded during the rolled-back transaction. If both constraintReg and g
+// are set, the registry is reseeded from the restored graph so those phantom
+// reservations do not falsely reject subsequent valid writes (#1342).
 func (r *Result) rollbackUnderBarrier() {
 	if r.undo != nil && !r.undo.replay() {
 		r.undoErr = wrapUndoFailure(nil)
+	}
+	// Reseed the constraint registry from the restored graph. Must run AFTER
+	// undo replay (so the graph is back to its pre-transaction state) and
+	// BEFORE releasing the buffer/WAL (so the value-sets are consistent with
+	// what's visible once the barrier drops).
+	if r.constraintReg != nil && r.g != nil {
+		reseedConstraintsInsideBarrier(r.constraintReg, r.g)
 	}
 	if r.buf != nil {
 		r.buf.Rollback()
@@ -2321,6 +2365,52 @@ func (r *Result) rollbackUnderBarrier() {
 	}
 	r.bufHandled = true
 	r.walHandled = true
+}
+
+// reseedConstraintsInsideBarrier rebuilds every UNIQUE value-set in reg from
+// the live graph g. It is called inside the write visibility barrier
+// (ApplyAtomically) immediately after an undo-log replay, so g reflects the
+// pre-transaction state and the registry must be brought into sync with it.
+//
+// Because this runs inside the barrier (no concurrent writers, no ongoing
+// View), it accesses graph state directly via the Mapper.Walk / GetNodeProperty
+// APIs without going through lpg.Graph.View (which would deadlock the
+// re-entrant barrier). The walk snapshot pattern mirrors scanLabelProperty in
+// api.go but is barrier-safe: it holds no shard locks at the point it reads
+// label/property state, because the barrier itself excludes concurrent Intern
+// calls.
+func reseedConstraintsInsideBarrier(reg *exec.ConstraintRegistry, g *lpg.Graph[string, float64]) {
+	mapper := g.AdjList().Mapper()
+
+	// Snapshot (id, key) pairs first to avoid deadlocking the shard read lock
+	// with a nested Lookup inside the Walk callback.
+	type nodeRef struct {
+		id  graph.NodeID
+		key string
+	}
+	refs := make([]nodeRef, 0, mapper.Len())
+	mapper.Walk(func(id graph.NodeID, key string) bool {
+		refs = append(refs, nodeRef{id: id, key: key})
+		return true
+	})
+
+	reg.ReseedFromGraph(func(label, prop string) []lpg.PropertyValue {
+		var out []lpg.PropertyValue
+		for i := range refs {
+			ref := refs[i]
+			if g.IsTombstoned(ref.id) {
+				continue
+			}
+			if !g.HasNodeLabel(ref.key, label) {
+				continue
+			}
+			v, ok := g.GetNodeProperty(ref.key, prop)
+			if ok {
+				out = append(out, v)
+			}
+		}
+		return out
+	})
 }
 
 // Err returns the first error encountered during iteration, or nil.
@@ -2442,6 +2532,17 @@ func newResultWithLimit(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer
 		}
 	}
 	runtime.SetFinalizer(r, finalizeResult)
+	return r
+}
+
+// newWriteResult is newResultWithLimit for write (autocommit) queries. In
+// addition to the base fields it records the constraint registry and graph so
+// that rollbackUnderBarrier can reseed the UNIQUE value-sets after undo replay
+// (#1342: phantom reservations after DELETE/rollback/SET).
+func newWriteResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64], maxRows, maxBytes int64, reg *exec.ConstraintRegistry, g *lpg.Graph[string, float64]) *Result {
+	r := newResultWithLimit(rs, cols, buf, idxMgr, tx, maxRows, maxBytes)
+	r.constraintReg = reg
+	r.g = g
 	return r
 }
 
@@ -2836,6 +2937,9 @@ func buildOperatorWrite(
 		}
 		schemaCopy := copySchema(schema)
 		rp := exec.NewRemoveProperty(p.EntityVar, p.PropertyKey, schemaCopy, child, mutator)
+		if constraintReg != nil {
+			rp.WithConstraintRegistry(constraintReg)
+		}
 		if bopts != nil {
 			if info, isRel := bopts.edgeVarMeta[p.EntityVar]; isRel {
 				rp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
@@ -2884,6 +2988,9 @@ func buildOperatorWrite(
 			}
 		}
 		dn := exec.NewDeleteNode(p.NodeVar, schemaCopy, child, mutator)
+		if constraintReg != nil {
+			dn.WithConstraintRegistry(constraintReg)
+		}
 		if deleteRelEndpoints != nil {
 			dn.WithRelEndpoints(deleteRelEndpoints)
 		}
@@ -2921,6 +3028,9 @@ func buildOperatorWrite(
 		}
 		schemaCopy := copySchema(schema)
 		dd := exec.NewDetachDelete(p.NodeVar, schemaCopy, child, mutator)
+		if constraintReg != nil {
+			dd.WithConstraintRegistry(constraintReg)
+		}
 		needTargetEval := false
 		if p.TargetExpr != nil {
 			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
@@ -7750,7 +7860,9 @@ func (e *Engine) execUnderBarrier(
 		rs := exec.Run(ctx, op, cols)
 		if commit {
 			// Autocommit: the Result owns the transaction and finalises it here.
-			r = newResultWithLimit(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes)
+			// Use newWriteResult so that rollbackUnderBarrier can reseed the
+			// constraint registry's UNIQUE value-sets after an undo replay (#1342).
+			r = newWriteResult(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes, e.constraintReg, e.g)
 			r.undo = undo
 			r.materialize()
 			r.commitUnderBarrier()

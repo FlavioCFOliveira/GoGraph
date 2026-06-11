@@ -39,7 +39,8 @@ type DetachDelete struct {
 	child        Operator
 	mutator      GraphMutator
 	targetEvalFn TargetEvalFn
-	ctx          context.Context //nolint:containedctx // stored for per-Next ctx check
+	reg          *ConstraintRegistry // nil means no registry maintenance
+	ctx          context.Context     //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewDetachDelete creates a DetachDelete operator.
@@ -55,6 +56,14 @@ func NewDetachDelete(
 		child:   child,
 		mutator: mutator,
 	}
+}
+
+// WithConstraintRegistry attaches a ConstraintRegistry so DetachDelete
+// releases unique-constraint value reservations when a node is deleted.
+// Returns op for chaining.
+func (op *DetachDelete) WithConstraintRegistry(reg *ConstraintRegistry) *DetachDelete {
+	op.reg = reg
+	return op
 }
 
 // WithTargetEvalFn attaches a per-row evaluator for non-variable DETACH
@@ -195,7 +204,15 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	}
 
 	// Strip all labels.
-	for _, lbl := range op.mutator.NodeLabels(nodeKey) {
+	nodeLabels := op.mutator.NodeLabels(nodeKey)
+	// Release all constrained property values before stripping the node so
+	// the registry no longer treats them as "in use".
+	if op.reg != nil {
+		for k, pv := range op.mutator.NodeProperties(nodeKey) {
+			op.reg.ReleasePropertyValue(nodeLabels, k, pv)
+		}
+	}
+	for _, lbl := range nodeLabels {
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
 	}
 	// Strip all properties.
@@ -250,7 +267,13 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 			swept++
 			op.mutator.RemoveEdge(src, nodeKey)
 		}
-		for _, lbl := range op.mutator.NodeLabels(nodeKey) {
+		pathLabels := op.mutator.NodeLabels(nodeKey)
+		if op.reg != nil {
+			for k, pv := range op.mutator.NodeProperties(nodeKey) {
+				op.reg.ReleasePropertyValue(pathLabels, k, pv)
+			}
+		}
+		for _, lbl := range pathLabels {
 			op.mutator.RemoveNodeLabel(nodeKey, lbl)
 		}
 		for k := range op.mutator.NodeProperties(nodeKey) {

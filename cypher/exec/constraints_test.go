@@ -96,14 +96,18 @@ func TestConstraintRegistry_CheckSetProperty_Unique_Violation(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	mgr := index.NewManager()
 	idx := indexhash.New[string]()
-	// Pre-populate the index with the value that will conflict.
-	idx.Insert("alice@example.com", 1)
 	if err := mgr.CreateIndex("__uniq__Person.email", idx); err != nil {
 		t.Fatal(err)
 	}
 
 	reg := exec.NewConstraintRegistry()
 	reg.RegisterUnique("Person", "email", "__uniq__Person.email")
+	// Seed the primary value-set (mirrors the production flow: SeedUniqueValues
+	// is always called after RegisterUnique). The primary value-set is
+	// authoritative — the secondary hash-index check is skipped when a non-nil
+	// value-set is present (#1342), so the violation must be detected via the
+	// primary source.
+	reg.SeedUniqueValuesIgnoringDuplicates("Person", "email", []lpg.PropertyValue{lpg.StringValue("alice@example.com")})
 
 	err := reg.CheckSetProperty([]string{"Person"}, "email", lpg.StringValue("alice@example.com"), mgr)
 	if err == nil {

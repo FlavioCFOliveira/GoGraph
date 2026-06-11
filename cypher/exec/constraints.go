@@ -339,6 +339,15 @@ func (r *ConstraintRegistry) HasNotNull(label, prop string) bool {
 // unique-constraint index lookups (hash index Cardinality check) as a
 // secondary source; the primary source is the registry's own value set.
 //
+// The primary value-set is authoritative: when it is present (non-nil) and
+// does not contain value, the secondary hash-index check is skipped. The
+// value-set is seeded from the live graph at constraint creation and kept
+// current by RecordPropertySet / ReleasePropertyValue / ReseedFromGraph, so
+// an absent primary "not present" signal means the value is genuinely free.
+// The secondary check is consulted only when the primary set has not been
+// initialised (nil), covering the narrow window before SeedUniqueValues is
+// called.
+//
 // Returns *ConstraintViolationError (which wraps ErrConstraintViolation) on
 // the first violation found; nil when all constraints pass.
 func (r *ConstraintRegistry) CheckSetProperty(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
@@ -374,12 +383,23 @@ func (r *ConstraintRegistry) CheckSetProperty(labels []string, prop string, valu
 							Detail:   fmt.Sprintf("value %q already exists", strVal),
 						}
 					}
+					// Primary value-set is present and definitively reports the
+					// value as absent — it is maintained by RecordPropertySet /
+					// ReleasePropertyValue / ReseedFromGraph and is seeded from
+					// the live graph, so its "not present" signal is
+					// authoritative. Skip the secondary (hash-index cardinality)
+					// check for this label: the backing UNIQUE index is an
+					// unbound hash index that does not self-maintain from the
+					// change fan-out, so its cardinality can carry stale ghost
+					// entries for values that were deleted, rolled back, or
+					// overwritten (#1342).
+					continue
 				}
+				// Null value: UNIQUE does not constrain nulls; fall through.
 			}
 
-			// Secondary: also check via the hash index cardinality (covers
-			// values that were inserted before this Engine instance started, e.g.
-			// via direct index manipulation in tests).
+			// Secondary: also check via the hash index cardinality. Only
+			// reached when the primary value-set is nil (not yet seeded).
 			if mgr != nil {
 				sub, err := mgr.GetIndex(indexName)
 				if err == nil {
@@ -415,6 +435,76 @@ func (r *ConstraintRegistry) RecordPropertySet(labels []string, prop string, val
 		}
 	}
 	r.mu.Unlock()
+}
+
+// ReleasePropertyValue removes a value from the unique value-set so it is no
+// longer treated as "in use" by the constraint. It must be called whenever a
+// previously recorded value is no longer present in the graph: on node
+// deletion, on REMOVE of a constrained property, and when SET replaces an
+// existing constrained value with a new one (releasing the old value).
+//
+// ReleasePropertyValue is a no-op when the value was not present in the
+// value-set, or when no unique constraint exists for (label, prop). It is
+// safe for concurrent use.
+func (r *ConstraintRegistry) ReleasePropertyValue(labels []string, prop string, value lpg.PropertyValue) {
+	strVal, ok := propertyValueToString(value)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	for _, label := range labels {
+		key := constraintKey(label, prop)
+		if vs := r.valueSets[key]; vs != nil {
+			delete(vs, strVal)
+		}
+	}
+	r.mu.Unlock()
+}
+
+// ReseedFromGraph clears every UNIQUE value-set and rebuilds it from the
+// provided (label, prop) → values mapping. It is called after an in-memory
+// transaction undo (rollback) so the registry reflects the restored graph
+// state rather than the rolled-back writes.
+//
+// The caller supplies a scanFn that, given a label and property key, returns
+// the property values currently carried by all live nodes with that label.
+// ReseedFromGraph acquires the registry write lock only once per constraint,
+// so the scan itself must NOT hold the registry lock.
+func (r *ConstraintRegistry) ReseedFromGraph(scanFn func(label, prop string) []lpg.PropertyValue) {
+	r.mu.RLock()
+	// Snapshot the registered constraints so we can iterate them without
+	// holding the write lock during the (potentially expensive) scan.
+	type constraintKey struct{ label, prop string }
+	keys := make([]constraintKey, 0, len(r.unique))
+	for k := range r.unique {
+		label, prop := splitConstraintKey(k)
+		keys = append(keys, constraintKey{label, prop})
+	}
+	r.mu.RUnlock()
+
+	for _, ck := range keys {
+		values := scanFn(ck.label, ck.prop)
+		seed := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			if sv, ok := propertyValueToString(v); ok {
+				seed[sv] = struct{}{}
+			}
+		}
+		r.mu.Lock()
+		k := ck.label + "." + ck.prop
+		if vs := r.valueSets[k]; vs != nil {
+			// Replace the value-set contents in-place so we keep the map header
+			// (avoids an extra allocation) and concurrent readers see the update
+			// as a single atomic swap of the whole set's contents.
+			for oldKey := range vs {
+				delete(vs, oldKey)
+			}
+			for newKey := range seed {
+				vs[newKey] = struct{}{}
+			}
+		}
+		r.mu.Unlock()
+	}
 }
 
 // propertyValueToString converts a PropertyValue to a canonical string key
