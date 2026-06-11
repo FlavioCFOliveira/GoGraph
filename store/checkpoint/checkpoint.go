@@ -96,6 +96,14 @@ type Checkpointer[N comparable, W any] struct {
 	// non-string snapshots are then not self-sufficient and the WAL is
 	// retained rather than truncated.
 	codec txn.Codec[N]
+	// constraintsFn, when non-nil, is called once per checkpoint run to
+	// collect the current constraint set for persistence in
+	// constraints.bin (see WithConstraintSpecs). When nil no
+	// constraints.bin component is emitted, which is only safe when the
+	// owning engine declares no schema constraints: a checkpoint that
+	// truncates the WAL prefix which first declared a constraint would
+	// otherwise silently lose it.
+	constraintsFn func() []snapshot.ConstraintSpec
 
 	stopCh    chan struct{}
 	triggerCh chan chan error
@@ -139,6 +147,37 @@ func WithMapperCodec[N comparable, W any](codec txn.Codec[N]) Option[N, W] {
 	return func(c *Checkpointer[N, W]) {
 		if codec != nil {
 			c.codec = codec
+		}
+	}
+}
+
+// WithConstraintSpecs supplies a callback the checkpointer invokes at
+// each checkpoint to capture the current schema constraints for
+// persistence in the snapshot's constraints.bin component. Wire
+// cypher's Engine.ConstraintSpecsForSnapshot here so constraints survive
+// a checkpoint that truncates the WAL prefix that first declared them:
+//
+//	cp := checkpoint.New(cfg, store.Graph(), wlog, &unusedMu,
+//		checkpoint.WithCommitSerialiser[string, float64](store.RunUnderCommitLock),
+//		checkpoint.WithMapperCodec[string, float64](store.Codec()),
+//		checkpoint.WithConstraintSpecs[string, float64](eng.ConstraintSpecsForSnapshot))
+//
+// Why this matters: the engine persists each CREATE CONSTRAINT as a WAL
+// op, so a plain reopen replays it. A checkpoint, however, folds the WAL
+// into a snapshot and truncates the log — without this option the
+// snapshot carries no constraint set, so after one checkpoint + restart
+// every constraint is silently unenforced and duplicates are accepted
+// with no error (a Consistency violation).
+//
+// The callback runs under the checkpoint's commit serialisation (see
+// WithCommitSerialiser), so the captured set is transaction-boundary
+// consistent with the snapshot it is persisted into.
+//
+// A nil callback is ignored (no constraints.bin emitted).
+func WithConstraintSpecs[N comparable, W any](fn func() []snapshot.ConstraintSpec) Option[N, W] {
+	return func(c *Checkpointer[N, W]) {
+		if fn != nil {
+			c.constraintsFn = fn
 		}
 	}
 }
@@ -450,11 +489,21 @@ func (c *Checkpointer[N, W]) runCheckpointLocked() error {
 	// runCheckpoint guards against data loss below by refusing to
 	// truncate when the snapshot cannot stand alone. See
 	// docs/acid-audit.md (F2/F3).
-	if err := c.writeSnapshot(snapDir, cs); err != nil {
+	//
+	// The same self-sufficiency rule covers schema constraints: when the
+	// engine has constraints declared (WithConstraintSpecs), the snapshot
+	// must carry them in constraints.bin BEFORE the WAL prefix that first
+	// declared them is truncated, or every constraint silently vanishes
+	// on the next restart (#1334).
+	var constraints []snapshot.ConstraintSpec
+	if c.constraintsFn != nil {
+		constraints = c.constraintsFn()
+	}
+	if err := c.writeSnapshot(snapDir, cs, constraints); err != nil {
 		c.setErr(err)
 		return err
 	}
-	selfSufficient, err := snapshotIsSelfSufficient(snapDir)
+	selfSufficient, err := snapshotIsSelfSufficient(snapDir, len(constraints) > 0)
 	if err != nil {
 		c.setErr(err)
 		return err
@@ -471,8 +520,9 @@ func (c *Checkpointer[N, W]) runCheckpointLocked() error {
 	crashpoint.Breakpoint("checkpoint.post-snapshot-pre-truncate")
 	if !selfSufficient {
 		// The snapshot cannot reconstruct the graph on its own (no
-		// mapper.bin for this key type), so truncating the WAL would lose
-		// committed data. Skip truncation: the WAL is retained and replayed
+		// mapper.bin for this key type, or a declared constraint set that
+		// did not land in constraints.bin), so truncating the WAL would
+		// lose committed data. Skip truncation: the WAL is retained and replayed
 		// on top of the snapshot at recovery, preserving Durability at the
 		// cost of unbounded WAL growth for this key type. Surfaced via a
 		// metric so operators can detect the degraded mode.
@@ -505,12 +555,16 @@ func (c *Checkpointer[N, W]) runCheckpointLocked() error {
 // graph state to snapDir. When a mapper codec is configured
 // ([WithMapperCodec]) it threads the codec so mapper.bin is emitted for
 // every key type; otherwise it uses the string-only writer (mapper.bin
-// for string keys, v2 without a mapper for other key types).
-func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W]) error {
+// for string keys, v2 without a mapper for other key types). constraints
+// is the schema constraint set collected via [WithConstraintSpecs] for
+// this run; when non-empty it is persisted as the snapshot's
+// constraints.bin component (nil or empty emits no constraints.bin, and
+// the output is byte-identical to the constraint-unaware writers).
+func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W], constraints []snapshot.ConstraintSpec) error {
 	if c.codec != nil {
-		return snapshot.WriteSnapshotFullWithMapperCodec(snapDir, cs, c.g, c.codec)
+		return snapshot.WriteSnapshotFullWithMapperCodecAndConstraints(snapDir, cs, c.g, c.codec, constraints)
 	}
-	return snapshot.WriteSnapshotFull(snapDir, cs, c.g)
+	return snapshot.WriteSnapshotFullWithConstraints(snapDir, cs, c.g, constraints)
 }
 
 func (c *Checkpointer[N, W]) setErr(err error) {
@@ -532,18 +586,36 @@ func (c *Checkpointer[N, W]) setErr(err error) {
 // that lacks the mapper would destroy committed data, since the NodeID->key
 // mapping lived only in the now-erased WAL frames (audit gap F2).
 //
+// needConstraints additionally requires the snapshot to carry a
+// constraints.bin component: when the engine has schema constraints
+// declared, the WAL prefix being truncated holds the constraint ops, so
+// a snapshot without the durable constraint set cannot stand alone —
+// truncating after it would silently drop every constraint on the next
+// restart (#1334).
+//
 // Detection is by manifest content, not version number, so it stays
 // correct if the version scheme evolves: the snapshot is self-sufficient
-// iff its manifest lists [snapshot.MapperFile].
-func snapshotIsSelfSufficient(dir string) (bool, error) {
+// iff its manifest lists [snapshot.MapperFile] (and
+// [snapshot.ConstraintsFile] when needConstraints is set).
+func snapshotIsSelfSufficient(dir string, needConstraints bool) (bool, error) {
 	m, err := snapshot.ReadManifestFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
 		return false, fmt.Errorf("checkpoint: read snapshot manifest: %w", err)
 	}
+	var hasMapper, hasConstraints bool
 	for _, f := range m.Files {
-		if f.Name == snapshot.MapperFile {
-			return true, nil
+		switch f.Name {
+		case snapshot.MapperFile:
+			hasMapper = true
+		case snapshot.ConstraintsFile:
+			hasConstraints = true
 		}
 	}
-	return false, nil
+	if !hasMapper {
+		return false, nil
+	}
+	if needConstraints && !hasConstraints {
+		return false, nil
+	}
+	return true, nil
 }

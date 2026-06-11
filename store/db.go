@@ -149,7 +149,8 @@ func WithFinalCheckpoint() Option {
 //	eng := cypher.NewEngineWithStore(st)
 //	cp := checkpoint.New(cfg, g, wlog, &unusedMu,
 //		checkpoint.WithCommitSerialiser[string, float64](st.RunUnderCommitLock),
-//		checkpoint.WithMapperCodec[string, float64](st.Codec()))
+//		checkpoint.WithMapperCodec[string, float64](st.Codec()),
+//		checkpoint.WithConstraintSpecs[string, float64](eng.ConstraintSpecsForSnapshot))
 //	cp.Start(ctx)
 //	db := store.New(wlog, store.WithCheckpointer(cp), store.WithFinalCheckpoint())
 //	defer db.Close() // or db.CloseCtx(ctx) to bound the final checkpoint
