@@ -62,7 +62,8 @@ func TestAuth_CorrectCredentials_Ready(t *testing.T) {
 
 // TestAuth_WrongCredentials_Unauthorized covers T698 AC2–AC3:
 //  1. Wrong credentials → *proto.Failure with code "Neo.ClientError.Security.Unauthorized".
-//  2. Session state after failure is FAILED (implementation uses FAILED, not DEFUNCT).
+//  2. Session state after a failed HELLO is DEFUNCT: the connection terminates
+//     so a credential-less client cannot reuse it (task #1345).
 //
 // Goroutine cleanliness (AC5) is enforced globally by goleak in TestMain.
 func TestAuth_WrongCredentials_Unauthorized(t *testing.T) {
@@ -91,15 +92,16 @@ func TestAuth_WrongCredentials_Unauthorized(t *testing.T) {
 	if f.Code != "Neo.ClientError.Security.Unauthorized" {
 		t.Errorf("failure code: got %q, want Neo.ClientError.Security.Unauthorized", f.Code)
 	}
-	// AC3: session is FAILED after the failure.
-	if sess.state != StateFailed {
-		t.Fatalf("state after auth failure: got %v, want FAILED", sess.state)
+	// AC3: session is DEFUNCT after a failed HELLO (the connection terminates).
+	if sess.state != StateDefunct {
+		t.Fatalf("state after auth failure: got %v, want DEFUNCT", sess.state)
 	}
 }
 
 // TestAuth_SchemeUnknown_FailureCode covers T704 AC1–AC3:
 //  1. Unknown auth scheme → *proto.Failure with "Neo.ClientError.Security.AuthProviderFailed".
-//  2. Session state is FAILED after the failure.
+//  2. Session state after a failed HELLO is DEFUNCT; after a failed LOGON it is
+//     FAILED (an authenticated session recoverable via RESET) (task #1345).
 //  3. Wire response is exactly one Failure (no subsequent messages at the
 //     session-handler level; connection close is the transport layer's job).
 func TestAuth_SchemeUnknown_FailureCode(t *testing.T) {
@@ -132,9 +134,9 @@ func TestAuth_SchemeUnknown_FailureCode(t *testing.T) {
 		if f.Code != "Neo.ClientError.Security.AuthProviderFailed" {
 			t.Errorf("failure code: got %q, want Neo.ClientError.Security.AuthProviderFailed", f.Code)
 		}
-		// AC2: session is FAILED.
-		if sess.state != StateFailed {
-			t.Fatalf("state: got %v, want FAILED", sess.state)
+		// AC2: a failed HELLO terminates the connection (DEFUNCT).
+		if sess.state != StateDefunct {
+			t.Fatalf("state: got %v, want DEFUNCT", sess.state)
 		}
 	})
 

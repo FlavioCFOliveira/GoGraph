@@ -106,6 +106,15 @@ func Transition(current State, msg any, success bool) (State, error) {
 		if !success {
 			return StateFailed, nil
 		}
+		// RESET issued before the connection has left the pre-HELLO phase must
+		// not advance to READY: it returns to NEGOTIATION so a HELLO is still
+		// required. The authoritative authentication gate lives in the session
+		// layer ([Session.handleReset] consults [Session.authenticated]); this
+		// keeps the transport state machine itself from minting READY out of the
+		// pre-authentication phase as a second line of defence. (task #1345)
+		if current == StateConnected || current == StateNegotiation {
+			return StateNegotiation, nil
+		}
 		return StateReady, nil
 	}
 

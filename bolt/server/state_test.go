@@ -96,6 +96,22 @@ func TestTransition(t *testing.T) {
 			success:   true,
 			wantState: StateReady,
 		},
+		// Pre-authentication RESET must not mint READY: it returns to NEGOTIATION
+		// so a HELLO is still required (task #1345).
+		{
+			name:      "NEGOTIATION+Reset→NEGOTIATION",
+			current:   StateNegotiation,
+			msg:       &proto.Reset{},
+			success:   true,
+			wantState: StateNegotiation,
+		},
+		{
+			name:      "CONNECTED+Reset→NEGOTIATION",
+			current:   StateConnected,
+			msg:       &proto.Reset{},
+			success:   true,
+			wantState: StateNegotiation,
+		},
 		// ── GOODBYE from various states ──────────────────────────────────────
 		{
 			name:      "READY+Goodbye→DEFUNCT",

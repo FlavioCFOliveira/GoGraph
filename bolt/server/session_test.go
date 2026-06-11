@@ -209,7 +209,8 @@ func TestSession_StatementTimeout(t *testing.T) {
 }
 
 // TestSession_AuthFailure verifies that a HELLO with wrong credentials returns
-// FAILURE and leaves the session in FAILED state.
+// FAILURE and terminates the connection (DEFUNCT), so a credential-less client
+// cannot reuse it (task #1345).
 func TestSession_AuthFailure(t *testing.T) {
 	t.Parallel()
 	eng := newTestEngine(t)
@@ -228,8 +229,8 @@ func TestSession_AuthFailure(t *testing.T) {
 	if _, ok := msgs[0].(*proto.Failure); !ok {
 		t.Fatalf("expected *proto.Failure, got %T", msgs[0])
 	}
-	if sess.state != StateFailed {
-		t.Fatalf("state after auth failure: got %v, want FAILED", sess.state)
+	if sess.state != StateDefunct {
+		t.Fatalf("state after auth failure: got %v, want DEFUNCT", sess.state)
 	}
 }
 

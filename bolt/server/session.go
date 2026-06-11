@@ -30,6 +30,17 @@ type Session struct {
 	// identity is populated after a successful HELLO/LOGON.
 	identity Identity
 
+	// authenticated reports whether this connection has completed a successful
+	// HELLO or LOGON and has not since been de-authorized by LOGOFF. It is the
+	// authoritative authentication gate, set true only on a successful
+	// Authenticate and cleared on LOGOFF; query-bearing handlers (RUN, BEGIN,
+	// ROUTE) and RESET consult it so that no credential-less connection can
+	// reach a query-executing state. It is tracked as an explicit flag rather
+	// than inferred from identity, because a NoAuthHandler legitimately yields a
+	// zero-value Identity for a client that sent no principal — which must still
+	// count as authenticated. (task #1345)
+	authenticated bool
+
 	// eng is the Cypher engine that executes queries.
 	eng *cypher.Engine
 
@@ -338,14 +349,21 @@ func (s *Session) handleHello(m *proto.Hello) ([]any, error) {
 
 	id, err := s.auth.Authenticate(scheme, principal, credentials)
 	if err != nil {
-		// HELLO is legal only in NEGOTIATION, before any BEGIN, so no transaction
-		// or cursor can be open here; a raw state set is correct (no enterFailed
-		// reclaim is needed, unlike the FAILED entries reachable post-BEGIN).
-		s.state = StateFailed
+		// A failed HELLO terminates the connection: the client never reached an
+		// authenticated state, so there is nothing to recover and no reason to
+		// keep the socket open for a second attempt on the same connection. The
+		// FAILURE is written by the serve loop before it observes DEFUNCT and
+		// closes, so the client still learns why. Making the connection DEFUNCT
+		// (rather than FAILED) also removes the historical "failed HELLO → RESET
+		// → READY" bypass at its root. HELLO is legal only in NEGOTIATION before
+		// any BEGIN, so no transaction or cursor can be open here; a raw state
+		// set is correct (no enterFailed reclaim is needed). (task #1345)
+		s.state = StateDefunct
 		s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 	}
 	s.identity = id
+	s.authenticated = true
 
 	next, transErr := Transition(s.state, m, true)
 	if transErr != nil {
@@ -381,6 +399,7 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 	}
 	s.identity = id
+	s.authenticated = true
 
 	next, transErr := Transition(s.state, m, true)
 	if transErr != nil {
@@ -402,6 +421,9 @@ func (s *Session) handleLogoff() ([]any, error) {
 	}
 	s.state = next
 	s.identity = Identity{}
+	// LOGOFF de-authorizes the connection: a subsequent RUN/BEGIN/ROUTE must be
+	// rejected until a fresh LOGON (or RESET+HELLO) re-authenticates. (task #1345)
+	s.authenticated = false
 	return []any{&proto.Success{Metadata: map[string]packstream.Value{}}}, nil
 }
 
@@ -422,12 +444,24 @@ func (s *Session) handleReset() ([]any, error) {
 		s.txClosed()
 	}
 
+	s.txActive = false
+
+	// RESET must never grant access that authentication has not. A connection
+	// that has not completed a successful HELLO/LOGON (RESET sent as the first
+	// message, or RESET after LOGOFF or a failed re-auth) returns to NEGOTIATION
+	// — it awaits a successful HELLO and does NOT reach READY. Only an
+	// authenticated connection clears, via the state machine, to READY. This
+	// closes the pre-auth RESET authentication-bypass. (task #1345)
+	if !s.authenticated {
+		s.state = StateNegotiation
+		return []any{&proto.Success{Metadata: map[string]packstream.Value{}}}, nil
+	}
+
 	next, err := Transition(s.state, &proto.Reset{}, true)
 	if err != nil {
 		return s.failTransition(&proto.Reset{})
 	}
 	s.state = next
-	s.txActive = false
 
 	return []any{&proto.Success{Metadata: map[string]packstream.Value{}}}, nil
 }
@@ -446,6 +480,15 @@ func (s *Session) handleGoodbye() ([]any, error) {
 }
 
 func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
+	// Authentication gate: a connection that has not completed a successful
+	// HELLO/LOGON (or was de-authorized by LOGOFF) must never execute a query,
+	// even if it has somehow reached a READY/TX_READY state. This is the
+	// defence-in-depth complement to the state-machine and RESET fixes for the
+	// pre-auth bypass (task #1345). failTransition moves the session to FAILED
+	// and emits a FAILURE, so the client is told the message was rejected.
+	if !s.authenticated {
+		return s.failTransition(m)
+	}
 	if s.state != StateReady && s.state != StateTxReady {
 		return s.failTransition(m)
 	}
@@ -669,6 +712,11 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 }
 
 func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error) {
+	// Authentication gate (see handleRun): an unauthenticated connection must
+	// not open a transaction. (task #1345)
+	if !s.authenticated {
+		return s.failTransition(m)
+	}
 	if s.state != StateReady {
 		return s.failTransition(m)
 	}
@@ -822,6 +870,14 @@ func (s *Session) handleRoute(m *proto.Route) ([]any, error) {
 	// The driver's bolt4/bolt5 GetRoutingTable both assert the Ready state
 	// before sending ROUTE, so a legitimate driver is never in StateNegotiation
 	// when it sends ROUTE.
+	//
+	// Authentication gate (see handleRun): an unauthenticated connection must
+	// not receive a routing table. Checking authentication first also keeps a
+	// pre-HELLO ROUTE rejected with the same failTransition response as before
+	// (the connection is in NEGOTIATION, !authenticated). (task #1345)
+	if !s.authenticated {
+		return s.failTransition(m)
+	}
 	if s.state != StateReady && s.state != StateTxReady {
 		return s.failTransition(m)
 	}

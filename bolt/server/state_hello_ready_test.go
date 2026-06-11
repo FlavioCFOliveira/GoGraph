@@ -15,7 +15,7 @@ import (
 //
 //   - Success in NEGOTIATION state → READY (the only target state in this
 //     implementation; no separate Authentication state exists).
-//   - Failure (bad credentials) → FAILED and a *proto.Failure response.
+//   - Failure (bad credentials) → DEFUNCT and a *proto.Failure response (task #1345).
 //   - Race-clean (t.Parallel on every sub-test).
 //
 // Note: this implementation has no StateAuthentication state.
@@ -82,9 +82,10 @@ func TestHelloReady_BothOutcomes(t *testing.T) {
 		if f.Code != "Neo.ClientError.Security.Unauthorized" {
 			t.Errorf("failure code: got %q, want Neo.ClientError.Security.Unauthorized", f.Code)
 		}
-		// Implementation sets FAILED (not DEFUNCT) on auth failure.
-		if sess.state != StateFailed {
-			t.Fatalf("state after HELLO failure: got %v, want FAILED", sess.state)
+		// A failed HELLO terminates the connection (DEFUNCT) so a credential-less
+		// client cannot reuse it (task #1345).
+		if sess.state != StateDefunct {
+			t.Fatalf("state after HELLO failure: got %v, want DEFUNCT", sess.state)
 		}
 	})
 

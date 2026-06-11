@@ -142,6 +142,11 @@ func TestReset_DrainsCursorAndRollsBackTx(t *testing.T) {
 	t.Run("reset_from_failed_returns_to_ready", func(t *testing.T) {
 		t.Parallel()
 		sess := newSession(newTestEngine(t), NoAuthHandler{}, "")
+		// Model a post-authentication session that failed a statement: RESET from
+		// FAILED returns an AUTHENTICATED connection to READY. (An unauthenticated
+		// FAILED session instead returns to NEGOTIATION — see the pre-auth bypass
+		// regression in auth_bypass_reset_test.go, task #1345.)
+		sess.authenticated = true
 		sess.state = StateFailed
 
 		msgs, err := sess.HandleMessage(context.Background(), &proto.Reset{})
