@@ -904,6 +904,11 @@ func openCodec[N comparable, W any](
 		// writer), so a transaction's frames are contiguous and never
 		// interleave with another's; an un-marked tail at end of input is
 		// an incomplete transaction and is discarded for atomicity (F1).
+		// The buffer may also hold the orphaned ops of a PRIOR transaction
+		// whose OpCommit was never written (its commit failed between the
+		// data frames and the marker, and the WAL kept growing); those are
+		// discarded on the next marker by the TxnSeq suffix filter below,
+		// never merged into the committed transaction.
 		var pending []Op
 		for f := range r.Frames() {
 			if res.WALOps&0xFFF == 0 {
@@ -938,9 +943,27 @@ func openCodec[N comparable, W any](
 				// Durable transaction boundary: apply the buffered ops as a
 				// unit. A crash that tore the batch never reaches a marker
 				// with a partial set — the marker is the last frame written.
+				//
+				// Atomicity guard: a marker commits ONLY the ops carrying
+				// its own TxnSeq. The buffer may still hold ops from a prior
+				// transaction whose marker was never written (commit failed
+				// after the data frames, before the OpCommit); flushing them
+				// here would resurrect an aborted transaction fused into
+				// this one. Commits are serialised, so the committed ops are
+				// a contiguous suffix of the buffer: discard the orphaned
+				// prefix whose TxnSeq does not match the marker's.
+				commitSeq := op.TxnSeq
+				start := 0
+				for start < len(pending) && pending[start].TxnSeq != commitSeq {
+					start++
+				}
+				if start > 0 {
+					metrics.IncCounter("store.recovery.openCodec.orphanedOps", uint64(start))
+				}
+				committed := pending[start:]
 				ok := true
-				for i := range pending {
-					if !applyOrAccumulate(g, &pending[i], codec, wcodec, cAcc) {
+				for i := range committed {
+					if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc) {
 						ok = false
 						break
 					}
