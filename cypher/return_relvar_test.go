@@ -23,7 +23,7 @@ import (
 
 // TestEngine_ReturnRelationshipVar verifies that MATCH (a)-[r:LIKES]->(b) RETURN r
 // emits exactly one row whose "r" column is an expr.RelationshipValue with the
-// correct Type, Properties, and non-zero endpoint IDs.
+// correct Type, Properties, and endpoint IDs matching id(a)/id(b).
 func TestEngine_ReturnRelationshipVar(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
@@ -33,8 +33,11 @@ func TestEngine_ReturnRelationshipVar(t *testing.T) {
 	// Seed: two nodes + one LIKES relationship with since=2020.
 	drainRunInTx(t, eng, `CREATE (a:A {id: 1})-[r:LIKES {since: 2020}]->(b:B {id: 2})`)
 
-	// Query: RETURN the bare relationship variable.
-	res, err := eng.RunInTxAny(ctx, `MATCH (a)-[r:LIKES]->(b) RETURN r`, nil)
+	// Query: RETURN the bare relationship variable alongside the endpoint IDs,
+	// so the StartID/EndID assertions below compare against the real node IDs.
+	// Node IDs come from a shared counter and 0 is a valid ID, so a non-zero
+	// check would be flaky under parallel test scheduling.
+	res, err := eng.RunInTxAny(ctx, `MATCH (a)-[r:LIKES]->(b) RETURN r, id(a) AS ida, id(b) AS idb`, nil)
 	if err != nil {
 		t.Fatalf("RunInTxAny: %v", err)
 	}
@@ -66,11 +69,19 @@ func TestEngine_ReturnRelationshipVar(t *testing.T) {
 		t.Errorf("RelationshipValue.Properties[%q] = %d, want 2020", "since", int64(since))
 	}
 
-	if rv.StartID == 0 {
-		t.Errorf("RelationshipValue.StartID is zero")
+	ida, ok := rows[0]["ida"].(expr.IntegerValue)
+	if !ok {
+		t.Fatalf("id(a) must be expr.IntegerValue, got %T (%v)", rows[0]["ida"], rows[0]["ida"])
 	}
-	if rv.EndID == 0 {
-		t.Errorf("RelationshipValue.EndID is zero")
+	idb, ok := rows[0]["idb"].(expr.IntegerValue)
+	if !ok {
+		t.Fatalf("id(b) must be expr.IntegerValue, got %T (%v)", rows[0]["idb"], rows[0]["idb"])
+	}
+	if rv.StartID != uint64(ida) {
+		t.Errorf("RelationshipValue.StartID = %d, want id(a) = %d", rv.StartID, int64(ida))
+	}
+	if rv.EndID != uint64(idb) {
+		t.Errorf("RelationshipValue.EndID = %d, want id(b) = %d", rv.EndID, int64(idb))
 	}
 	if rv.StartID == rv.EndID {
 		t.Errorf("RelationshipValue.StartID (%d) == EndID (%d), expected distinct endpoints",
