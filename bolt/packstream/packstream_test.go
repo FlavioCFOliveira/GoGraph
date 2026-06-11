@@ -459,7 +459,9 @@ func TestWriteMapHeaderNegative(t *testing.T) {
 }
 
 // TestListHeaderList32 exercises the List32 encoder/decoder (n > 65535).
-// Only the 5-byte header is encoded; no items are serialised.
+// ReadListHeader validates the count against the bytes still available, so
+// the n declared elements (one NULL byte each) are serialised after the
+// 5-byte header to make the message structurally complete.
 func TestListHeaderList32(t *testing.T) {
 	const n = 65536
 	var buf bytes.Buffer
@@ -470,6 +472,7 @@ func TestListHeaderList32(t *testing.T) {
 	if err := enc.Flush(); err != nil {
 		t.Fatal(err)
 	}
+	buf.Write(bytes.Repeat([]byte{0xC0}, n)) // n NULL elements
 	dec := packstream.NewDecoder(&buf)
 	got, err := dec.ReadListHeader()
 	if err != nil {
@@ -481,6 +484,10 @@ func TestListHeaderList32(t *testing.T) {
 }
 
 // TestMapHeaderMap32 exercises the Map32 encoder/decoder (n > 65535).
+// ReadMapHeader validates the count against the bytes still available (two
+// per entry), so the n declared entries (empty-string key + NULL value) are
+// serialised after the 5-byte header to make the message structurally
+// complete.
 func TestMapHeaderMap32(t *testing.T) {
 	const n = 65536
 	var buf bytes.Buffer
@@ -491,6 +498,7 @@ func TestMapHeaderMap32(t *testing.T) {
 	if err := enc.Flush(); err != nil {
 		t.Fatal(err)
 	}
+	buf.Write(bytes.Repeat([]byte{0x80, 0xC0}, n)) // n entries: "" -> NULL
 	dec := packstream.NewDecoder(&buf)
 	got, err := dec.ReadMapHeader()
 	if err != nil {
