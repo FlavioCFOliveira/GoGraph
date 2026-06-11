@@ -1163,7 +1163,8 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 //
 // The format mirrors [ir.Explain] but annotates Selection→LabelScan pairs that
 // would be rewritten to index seeks at execution time.
-func (e *Engine) Explain(query string, params map[string]expr.Value) (string, error) {
+func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, err error) {
+	defer recoverQueryPanic(&err, "cypher.Explain", "cypher.Explain.panics")
 	if ir.IsDDL(query) {
 		return "(DDL — no query plan)", nil
 	}
@@ -1191,6 +1192,9 @@ func explainWithIndexesNode(
 	prefix string,
 	isRoot, isLast bool,
 ) {
+	if plan == nil {
+		return
+	}
 	var connector, childCont string
 	if isRoot {
 		connector = ""

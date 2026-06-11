@@ -41,6 +41,14 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 	_, _, _, hasAgg := detectAggregation(w.Projection)
 
 	if w.Where != nil && !hasAgg {
+		// When WITH is the first clause (no preceding reading clause) child is
+		// nil — there is no scan leaf yet. Seed a single-row Argument so the
+		// WHERE Selection has a valid, non-nil child. The Argument emits exactly
+		// one empty row, which is the correct behaviour for a leading WITH: the
+		// literal expressions in the projection are evaluated once per that row.
+		if child == nil {
+			child = NewArgument(nil)
+		}
 		pred := rewriteWithProjectionAliases(w.Where.Predicate, w.Projection)
 		var err error
 		child, err = t.translateExistsPredicate(pred, child)

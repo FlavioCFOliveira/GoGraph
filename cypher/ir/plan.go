@@ -563,11 +563,21 @@ func NewSelectionExpr(predicate string, predExpr ast.Expression, child LogicalPl
 }
 
 // Children implements LogicalPlan.
-func (s *Selection) Children() []LogicalPlan { return []LogicalPlan{s.Child} }
+func (s *Selection) Children() []LogicalPlan {
+	if s.Child == nil {
+		return nil
+	}
+	return []LogicalPlan{s.Child}
+}
 
 // Vars implements LogicalPlan. Selection does not introduce new variables; it
 // passes through the child's variables.
-func (s *Selection) Vars() []string { return s.Child.Vars() }
+func (s *Selection) Vars() []string {
+	if s.Child == nil {
+		return nil
+	}
+	return s.Child.Vars()
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
