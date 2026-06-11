@@ -234,7 +234,7 @@ type Graph[N comparable, W any] struct {
 	// adjlist/CSR handle columns.
 	edgeHandleSeq atomic.Uint64
 
-	idxMgr    *index.Manager
+	idxMgr    atomicIndexManager
 	validator atomicValidator
 
 	// visMu is the transaction-visibility barrier (audit gap F3,
@@ -489,19 +489,18 @@ func (g *Graph[N, W]) EdgeIndex() *label.Index { return g.edgeIdx }
 // snapshot-durable indexes must register them via [index.Manager.CreateIndex]
 // on a manager set via [Graph.SetIndexManager].
 //
-// IndexManager is safe for concurrent use.
-func (g *Graph[N, W]) IndexManager() *index.Manager { return g.idxMgr }
+// IndexManager is safe for concurrent use; the pointer is loaded with
+// sequential consistency.
+func (g *Graph[N, W]) IndexManager() *index.Manager { return g.idxMgr.load() }
 
 // SetIndexManager installs m as the manager of secondary indexes on
 // this graph. Passing nil detaches the current manager. The Graph
 // retains a borrowed reference to m; the caller owns m's lifetime.
 //
-// SetIndexManager is intended to be called during graph construction
-// (before any concurrent mutators are spawned). It is safe to call
-// from any goroutine, but readers that captured g.IndexManager()
-// before the swap continue to see the previous value until they
-// re-read.
-func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr = m }
+// SetIndexManager is safe for concurrent use; the pointer is stored
+// with sequential consistency. Goroutines that call [Graph.IndexManager]
+// after this store returns will observe m (or a later value).
+func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr.store(m) }
 
 // AddNode inserts n if not already present. The error contract
 // matches the underlying [adjlist.AdjList.AddNode]: callers must
