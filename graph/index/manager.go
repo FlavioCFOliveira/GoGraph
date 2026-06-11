@@ -159,8 +159,12 @@ func (m *Manager) DropIndex(name string) error {
 	return nil
 }
 
-// GetIndex returns the subscriber registered under name.
+// GetIndex returns the subscriber registered under name. It is safe to call
+// on a nil Manager and returns ErrIndexNotFound in that case.
 func (m *Manager) GetIndex(name string) (Subscriber, error) {
+	if m == nil {
+		return nil, fmt.Errorf("%w: %q", ErrIndexNotFound, name)
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	sub, ok := m.indexes[name]
@@ -171,8 +175,12 @@ func (m *Manager) GetIndex(name string) (Subscriber, error) {
 }
 
 // ListIndexes returns the names of every currently registered index
-// in unspecified order.
+// in unspecified order. It is safe to call on a nil Manager and returns
+// nil in that case.
 func (m *Manager) ListIndexes() []string {
+	if m == nil {
+		return nil
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]string, 0, len(m.indexes))
@@ -182,8 +190,12 @@ func (m *Manager) ListIndexes() []string {
 	return out
 }
 
-// Count returns the number of currently registered indexes.
+// Count returns the number of currently registered indexes. It is safe to
+// call on a nil Manager and returns 0 in that case.
 func (m *Manager) Count() int {
+	if m == nil {
+		return 0
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.indexes)

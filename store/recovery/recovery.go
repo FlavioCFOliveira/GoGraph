@@ -75,7 +75,14 @@ type Result[N comparable, W any] struct {
 	// graph topology, so they are surfaced here rather than applied to Graph.
 	// The slice is deterministically ordered (kind, label, property, name).
 	Constraints []ConstraintRecord
-	WALOps      int
+	// Indexes reports the durable index definitions recovered from the WAL
+	// ([txn.OpCreateIndex] / [txn.OpDropIndex] ops). The engine re-registers
+	// and re-backfills these on open so a user-created index survives a crash
+	// and a restart (Durability). Index definitions are engine schema, not
+	// graph topology, so they are surfaced here rather than applied to Graph.
+	// The slice is deterministically ordered (by name).
+	Indexes []IndexRecord
+	WALOps  int
 	// TailErr reports why WAL replay stopped before the end of the file,
 	// or nil when every frame was consumed at a clean EOF. Two outcomes
 	// are possible:
@@ -555,6 +562,110 @@ func accumulateConstraintOp(cs *constraintSet, op *Op) (isConstraint, ok bool) {
 	}
 }
 
+// IndexRecord is one durable index definition recovered from the WAL
+// ([txn.OpCreateIndex]). It mirrors [txn.Op]'s index fields without the
+// graph-mutation payload. The engine re-registers and re-backfills these on
+// open so user-created indexes survive a crash and restart.
+type IndexRecord struct {
+	// Kind selects hash vs btree.
+	Kind txn.IndexKind
+	// Name is the user-defined index name.
+	Name string
+	// Label is the indexed node label.
+	Label string
+	// Property is the indexed property key.
+	Property string
+}
+
+// decodeIndexBody parses the body of an [txn.OpCreateIndex] /
+// [txn.OpDropIndex] frame produced by [txn.appendOpIndexBody]:
+//
+//	uint8  indexKind ([txn.IndexKind])
+//	uint16 nameLen  || name
+//	uint16 labelLen || label
+//	uint16 propLen  || property
+//
+// It returns the decoded record and ok=false when the body is truncated
+// (a torn final write — treated as a benign cut, not corruption).
+func decodeIndexBody(body []byte) (IndexRecord, bool) {
+	if len(body) < 1 {
+		return IndexRecord{}, false
+	}
+	ik := txn.IndexKind(body[0])
+	rest := body[1:]
+	name, rest, ok := readU16String(rest)
+	if !ok {
+		return IndexRecord{}, false
+	}
+	label, rest, ok := readU16String(rest)
+	if !ok {
+		return IndexRecord{}, false
+	}
+	prop, _, ok := readU16String(rest)
+	if !ok {
+		return IndexRecord{}, false
+	}
+	return IndexRecord{Kind: ik, Name: name, Label: label, Property: prop}, true
+}
+
+// indexSet accumulates recovered index definitions, reconciling CREATE/DROP ops
+// by name with last-writer-wins semantics: a DROP removes a CREATE of the same
+// name, and a later CREATE replaces an earlier one.
+type indexSet struct {
+	byName map[string]IndexRecord
+}
+
+func newIndexSet() *indexSet {
+	return &indexSet{byName: make(map[string]IndexRecord)}
+}
+
+func (s *indexSet) applyCreate(rec IndexRecord) {
+	s.byName[rec.Name] = rec
+}
+
+func (s *indexSet) applyDrop(name string) {
+	delete(s.byName, name)
+}
+
+// snapshot returns the accumulated index definitions in deterministic order
+// (by name).
+func (s *indexSet) snapshot() []IndexRecord {
+	if len(s.byName) == 0 {
+		return nil
+	}
+	out := make([]IndexRecord, 0, len(s.byName))
+	for _, rec := range s.byName {
+		out = append(out, rec)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// accumulateIndexOp routes a decoded index op into is. It returns
+// (true, true) when op is an index op that decoded cleanly, (true, false) when
+// the body is torn/undecodable (benign cut), and (false, false) when op is not
+// an index op.
+func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
+	switch op.Kind {
+	case txn.OpCreateIndex:
+		rec, decoded := decodeIndexBody(op.Body)
+		if !decoded {
+			return true, false
+		}
+		is.applyCreate(rec)
+		return true, true
+	case txn.OpDropIndex:
+		rec, decoded := decodeIndexBody(op.Body)
+		if !decoded {
+			return true, false
+		}
+		is.applyDrop(rec.Name)
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // Open opens the store at dir for graphs keyed by N values and
 // weighted by W values, using opts.Codec for endpoint identifiers
 // and opts.WeightCodec for [txn.OpAddEdgeWeighted] frames. It is the
@@ -756,6 +867,12 @@ func openCodec[N comparable, W any](
 	// commit even when a checkpoint truncated the WAL prefix that first
 	// declared a constraint.
 	cAcc := newConstraintSet()
+
+	// iAcc accumulates durable index definitions from CREATE/DROP INDEX ops
+	// in the WAL. Unlike constraints, indexes have no snapshot component today;
+	// the entire durable set comes from WAL ops replayed here. The engine
+	// re-registers and re-backfills them on open.
+	iAcc := newIndexSet()
 
 	// Load the snapshot manifest BEFORE constructing the live graph so the
 	// graph is reconstructed with the directed/multigraph shape the
@@ -968,7 +1085,7 @@ func openCodec[N comparable, W any](
 				committed := pending[start:]
 				ok := true
 				for i := range committed {
-					if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc) {
+					if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc) {
 						ok = false
 						break
 					}
@@ -984,7 +1101,7 @@ func openCodec[N comparable, W any](
 			// v2 frame: self-committing (one frame is one transaction). v1
 			// frames never reach here — Decode rejects them upstream with
 			// ErrUnsupportedRecordVersion.
-			if !applyOrAccumulate(g, &op, codec, wcodec, cAcc) {
+			if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc) {
 				// A malformed v2 body (truncated endpoints, missing or
 				// overflowing trailing label/key length) failed to decode
 				// through the codec; stop replay so callers see the cut-off
@@ -1005,6 +1122,10 @@ func openCodec[N comparable, W any](
 	// Runs whether or not a WAL was present so a snapshot-only directory still
 	// surfaces its constraints.
 	res.Constraints = cAcc.snapshot()
+
+	// Finalise the recovered index definitions from WAL-replayed
+	// CREATE/DROP INDEX ops.
+	res.Indexes = iAcc.snapshot()
 
 	// Mapper-less (v2) path only: apply snapshot-side labels after the WAL
 	// is fully applied so the mapper has every node interned that the WAL
@@ -1077,8 +1198,12 @@ func applyOrAccumulate[N comparable, W any](
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
 	cs *constraintSet,
+	is *indexSet,
 ) bool {
 	if isConstraint, ok := accumulateConstraintOp(cs, op); isConstraint {
+		return ok
+	}
+	if isIdx, ok := accumulateIndexOp(is, op); isIdx {
 		return ok
 	}
 	return applyOpCodec(g, op, codec, wcodec)

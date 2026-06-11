@@ -436,6 +436,31 @@ type EngineOptions struct {
 	// [NewEngineWithStoreAndConstraints]); a store-less in-memory engine leaves
 	// the field nil.
 	RecoveredConstraints []ConstraintDef
+	// RecoveredIndexes, when non-empty, are the durable index definitions
+	// recovered from the WAL (the [store/recovery.Result.Indexes] of the open
+	// that produced Store/Graph). The constructor re-registers and re-backfills
+	// each one in the index.Manager so a user-created index survives a crash and
+	// a restart — without this, every CREATE INDEX is silently absent after
+	// recovery and the planner would serve 0-row results for indexed queries
+	// (audit gap: CREATE INDEX not durable). A caller recovering a WAL-backed
+	// store from disk MUST pass these (or use [NewEngineWithStoreAndSchema]);
+	// a store-less in-memory engine leaves the field nil.
+	RecoveredIndexes []IndexDef
+}
+
+// IndexDef is a durable index definition handed to the engine on open so it
+// can re-register an index recovered from disk. It mirrors
+// [store/recovery.IndexRecord] without coupling callers to the recovery
+// package's wire types; [IndexDefsFromRecovery] converts a recovery result.
+type IndexDef struct {
+	// Hash is true for a hash index, false for a btree index.
+	Hash bool
+	// Name is the user-defined index name.
+	Name string
+	// Label is the indexed node label.
+	Label string
+	// Property is the indexed property key.
+	Property string
 }
 
 // ConstraintDef is a durable constraint definition handed to the engine on
@@ -572,6 +597,27 @@ func NewEngineWithStoreAndConstraints(store *txn.Store[string, float64], recover
 	})
 }
 
+// NewEngineWithStoreAndSchema creates a WAL-backed Engine that re-registers
+// both the schema constraints and the secondary index definitions recovered
+// from disk. It is the recommended constructor when opening a persisted store
+// that may contain user-created indexes (task #1343). Pass the
+// store/recovery.Result fields directly:
+//
+//	cypher.NewEngineWithStoreAndSchema(store, res.Constraints, res.Indexes)
+//
+// Using [NewEngineWithStoreAndConstraints] on a store that also has indexes
+// leaves the index manager populated only from the WAL-replayed index change
+// events (not from the durable index definitions), so the planner's
+// NodeByIndexSeek rewrites may serve an empty index immediately after restart.
+// This constructor closes that gap by calling [registerRecoveredIndexes].
+func NewEngineWithStoreAndSchema(store *txn.Store[string, float64], constraints []recovery.ConstraintRecord, indexes []recovery.IndexRecord) *Engine {
+	return NewEngineWithOptions(store.Graph(), EngineOptions{
+		Store:                store,
+		RecoveredConstraints: ConstraintDefsFromRecovery(constraints),
+		RecoveredIndexes:     IndexDefsFromRecovery(indexes),
+	})
+}
+
 // resolveMaxResultRows maps the public [EngineOptions.MaxResultRows] value to
 // the Engine's internal cap, where a positive value is an active limit and zero
 // disables it (the convention the [Result] drain checks with maxRows > 0):
@@ -659,6 +705,12 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// before a crash is enforced again after recovery (audit gap H1). Without
 	// this the registry is rebuilt empty on every open.
 	e.registerRecoveredConstraints(opts.RecoveredConstraints)
+	// Re-register index definitions recovered from disk so a user-created
+	// index survives a crash and a restart (task #1343). This call must
+	// come after registerRecoveredConstraints because UNIQUE constraints
+	// also create an index entry; registerRecoveredIndexes silently absorbs
+	// ErrIndexExists for any name already claimed by the constraint path.
+	e.registerRecoveredIndexes(opts.RecoveredIndexes)
 	return e
 }
 
@@ -721,6 +773,26 @@ func ConstraintDefsFromRecovery(recovered []recovery.ConstraintRecord) []Constra
 			Label:    r.Label,
 			Property: r.Property,
 			Name:     r.Name,
+		})
+	}
+	return out
+}
+
+// IndexDefsFromRecovery converts [store/recovery.Result.Indexes] into the
+// engine's [IndexDef] slice so callers need not import the recovery package
+// when constructing a [NewEngineWithOptions] with [EngineOptions.RecoveredIndexes].
+func IndexDefsFromRecovery(recovered []recovery.IndexRecord) []IndexDef {
+	if len(recovered) == 0 {
+		return nil
+	}
+	out := make([]IndexDef, 0, len(recovered))
+	for i := range recovered {
+		r := recovered[i]
+		out = append(out, IndexDef{
+			Hash:     r.Kind == txn.IndexKindHash,
+			Name:     r.Name,
+			Label:    r.Label,
+			Property: r.Property,
 		})
 	}
 	return out
@@ -798,6 +870,18 @@ func (e *Engine) ConstraintSpecsForSnapshot() []snapshot.ConstraintSpec {
 		})
 	}
 	return out
+}
+
+// ListIndexes returns the names of every secondary index currently registered
+// on the engine, in unspecified order. The list reflects the live in-memory
+// state: it includes every index created via CREATE INDEX and excludes any
+// dropped via DROP INDEX. It is safe for concurrent use.
+//
+// This is a thin wrapper over [index.Manager.ListIndexes]: the test suite and
+// embedders that need to inspect the engine's schema without importing the
+// graph/index package can use this method directly.
+func (e *Engine) ListIndexes() []string {
+	return e.g.IndexManager().ListIndexes()
 }
 
 // graphAwareRegistry overlays a small set of graph-bound functions on top of
@@ -1275,15 +1359,16 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 	switch p := ddlPlan.(type) {
 	case *ir.CreateIndex:
 		if p.Type == ir.IndexTypeBTree {
-			return e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
+			return e.runCreateBTreeIndex(ctx, p, idxMgr)
 		}
 		// Hash indexes take the engine-level path: a bound index backfilled
 		// from the pre-existing data under the writer serialisation, so the
 		// planner's NodeByIndexSeek rewrite never serves an empty index
-		// (task #1340).
+		// (task #1340). WAL durability is threaded through runCreateHashIndex
+		// (task #1343).
 		return e.runCreateHashIndex(ctx, p, idxMgr)
 	case *ir.DropIndex:
-		return e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
+		return e.runDropIndex(ctx, p, idxMgr)
 	case *ir.CreateConstraint:
 		return e.runCreateConstraint(ctx, p, idxMgr)
 	case *ir.DropConstraint:
@@ -1315,6 +1400,87 @@ func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error
 // yields once its side effect has been applied.
 func emptyDDLResult(ctx context.Context) *Result {
 	return newResult(exec.Run(ctx, exec.NewArgument(), nil), nil, nil, nil, nil)
+}
+
+// runCreateBTreeIndex executes CREATE INDEX for the btree kind via the generic
+// DDL operator, then (on a WAL-backed engine) appends a durable CREATE INDEX
+// op so the index definition survives a crash and is re-registered on the next
+// open (task #1343). The writer serialisation for the btree path is provided
+// by the transaction opened here — the same single-writer mutex every
+// RunInTx write holds — so no concurrent write can race the registration.
+func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idxMgr *index.Manager) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if e.store == nil {
+		e.writeMu.Lock()
+		defer e.writeMu.Unlock()
+		return e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
+	}
+	tx, err := e.store.BeginCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, rerr := func() (*Result, error) {
+		res, err := e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
+		if err != nil {
+			return nil, err
+		}
+		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindBTree, p.Label, p.Property, p.Name); err != nil {
+			// Unwind: the operator already registered the index; drop it so
+			// the in-memory state matches the (empty) durable state.
+			_ = idxMgr.DropIndex(p.Name)
+			return nil, err
+		}
+		return res, nil
+	}()
+	_ = tx.Rollback() // guarded no-op after CommitWALOnly
+	return res, rerr
+}
+
+// runDropIndex executes DROP INDEX via the generic DDL operator, then (on a
+// WAL-backed engine) appends a durable DROP INDEX op so the removal survives a
+// crash (task #1343). The writer serialisation mirrors runCreateBTreeIndex.
+//
+// An IF EXISTS that absorbs a missing index emits no WAL record — the index
+// did not exist, so there is no durable state to remove. The existence check
+// runs BEFORE the operator (under the writer lock) so the decision is
+// race-free.
+func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *index.Manager) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if e.store == nil {
+		e.writeMu.Lock()
+		defer e.writeMu.Unlock()
+		return e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
+	}
+	tx, err := e.store.BeginCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, rerr := func() (*Result, error) {
+		// Check existence under the writer lock (pre-op) to decide whether to
+		// append a WAL DROP record after the operator runs. IF EXISTS absorbs a
+		// missing index silently; there is nothing durable to remove in that case.
+		_, existsErr := idxMgr.GetIndex(p.Name)
+		indexExisted := existsErr == nil
+
+		res, err := e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
+		if err != nil {
+			return nil, err
+		}
+		if !indexExisted {
+			// IF EXISTS no-op: nothing was dropped, nothing to record.
+			return res, nil
+		}
+		if err := commitIndexTx(tx, txn.OpDropIndex, 0, "", "", p.Name); err != nil {
+			return nil, err
+		}
+		return res, nil
+	}()
+	_ = tx.Rollback() // guarded no-op after CommitWALOnly
+	return res, rerr
 }
 
 // runCreateConstraint executes CREATE CONSTRAINT: it validates the pre-existing
@@ -1539,6 +1705,32 @@ func commitConstraintTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind exe
 		err = tx.DropConstraint(ck, label, prop, name)
 	default:
 		err = fmt.Errorf("cypher: commitConstraintTx: unexpected op kind %d", opKind)
+	}
+	if err != nil {
+		// Buffering failed; the tx is still open — the caller's deferred
+		// Rollback releases the single-writer lock.
+		return err
+	}
+	return tx.CommitWALOnly()
+}
+
+// commitIndexTx buffers the durable CREATE/DROP INDEX op on tx and commits it
+// WAL-only. tx is the same transaction whose Begin provides the DDL's writer
+// serialisation, so the durable record is secured without releasing the lock
+// between registration and append. The commit finishes the tx — on success
+// AND on sync failure — releasing the single-writer lock; the caller's
+// guarded Rollback is then a no-op. The op carries no node endpoints and
+// applies nothing to the graph: the in-memory index manager was already
+// updated, mirroring the constraint durability pattern (task #1343).
+func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.IndexKind, label, prop, name string) error {
+	var err error
+	switch opKind {
+	case txn.OpCreateIndex:
+		err = tx.CreateIndex(kind, label, prop, name)
+	case txn.OpDropIndex:
+		err = tx.DropIndex(name)
+	default:
+		err = fmt.Errorf("cypher: commitIndexTx: unexpected op kind %d", opKind)
 	}
 	if err != nil {
 		// Buffering failed; the tx is still open — the caller's deferred

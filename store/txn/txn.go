@@ -242,6 +242,16 @@ const (
 	// removed. It is replayed on recovery to suppress an earlier
 	// OpCreateConstraint for the same key. The op mutates no graph state.
 	OpDropConstraint
+	// OpCreateIndex buffers a CREATE INDEX schema change: it records that a
+	// secondary index named Name of the given IndexKind is built on
+	// (Label).Property. It is replayed on recovery to re-register and re-backfill
+	// the index in the index.Manager, so a user-created index survives a crash
+	// and a restart (Durability + Consistency). The op mutates no graph state.
+	OpCreateIndex
+	// OpDropIndex buffers a DROP INDEX schema change: it records that the named
+	// index is removed. It is replayed on recovery to suppress an earlier
+	// OpCreateIndex for the same name. The op mutates no graph state.
+	OpDropIndex
 )
 
 // ConstraintKind is the wire tag distinguishing UNIQUE from NOT NULL in an
@@ -256,6 +266,20 @@ const (
 	ConstraintUnique ConstraintKind = iota
 	// ConstraintNotNull tags a NOT NULL constraint.
 	ConstraintNotNull
+)
+
+// IndexKind is the wire tag distinguishing hash from btree in an
+// [OpCreateIndex] / [OpDropIndex] body. The values are stable wire identifiers
+// and must not be reordered or reused; they mirror the IR-side ir.IndexType
+// without importing that package (the store layer stays decoupled from the
+// Cypher executor).
+type IndexKind uint8
+
+const (
+	// IndexKindHash is a hash-based exact-match index.
+	IndexKindHash IndexKind = iota
+	// IndexKindBTree is a B-tree range index.
+	IndexKindBTree
 )
 
 // Op-record version markers. The marker is a single byte written at
@@ -636,6 +660,10 @@ type Op[N comparable, W any] struct {
 	// It is the zero value ([ConstraintUnique]) and ignored for every other
 	// op kind.
 	ConstraintKind ConstraintKind
+	// IndexKind selects hash vs btree for the index schema-DDL op kinds
+	// ([OpCreateIndex], [OpDropIndex]). It is the zero value ([IndexKindHash])
+	// and ignored for every other op kind.
+	IndexKind IndexKind
 }
 
 // Tx is an in-progress transaction.
@@ -848,6 +876,32 @@ func (t *Tx[N, W]) DropConstraint(kind ConstraintKind, label, property, name str
 		return ErrTxFinished
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDropConstraint, ConstraintKind: kind, Label: label, Key: property, ConstraintName: name})
+	return nil
+}
+
+// CreateIndex buffers an [OpCreateIndex] schema change recording that a
+// secondary index named name of the given kind is declared on
+// (label).property. The op carries no node endpoints and mutates no graph
+// state on [Tx.Commit]; its sole effect is the durable WAL record that
+// [store/recovery.Open] replays to re-register and re-backfill the index,
+// so a user-created index survives a crash and a restart.
+func (t *Tx[N, W]) CreateIndex(kind IndexKind, label, property, name string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpCreateIndex, IndexKind: kind, Label: label, Key: property, ConstraintName: name})
+	return nil
+}
+
+// DropIndex buffers an [OpDropIndex] schema change recording that the named
+// index is removed. On recovery the record suppresses an earlier
+// [OpCreateIndex] for the same name. The op carries no node endpoints and
+// mutates no graph state.
+func (t *Tx[N, W]) DropIndex(name string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpDropIndex, ConstraintName: name})
 	return nil
 }
 
@@ -1109,6 +1163,11 @@ func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec
 		// length-prefixed strings (label, property, name). No node codec is
 		// involved — a constraint carries no endpoints.
 		return appendOpConstraintBody(buf, op), nil
+	case OpCreateIndex, OpDropIndex:
+		// Index schema record: a one-byte index-kind tag followed by three
+		// length-prefixed strings (name, label, property). No node codec is
+		// involved — an index definition carries no endpoints.
+		return appendOpIndexBody(buf, op), nil
 	default: // OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel
 		return encodeOpEdgeWithLabel(buf, op, codec)
 	}
@@ -1135,6 +1194,27 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) []byte
 	buf = append(buf, op.Key...)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
+	return buf
+}
+
+// appendOpIndexBody appends the body of an [OpCreateIndex] / [OpDropIndex]
+// frame to buf:
+//
+//	uint8  indexKind  ([IndexKind])
+//	uint16 nameLen    || [nameLen]byte  name
+//	uint16 labelLen   || [labelLen]byte label
+//	uint16 propLen    || [propLen]byte  property
+//
+// The body is independent of the node [Codec] because an index definition
+// carries no endpoints.
+func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) []byte {
+	buf = append(buf, byte(op.IndexKind))
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
+	buf = append(buf, op.ConstraintName...)
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
+	buf = append(buf, op.Label...)
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
+	buf = append(buf, op.Key...)
 	return buf
 }
 

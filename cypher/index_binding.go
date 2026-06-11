@@ -33,8 +33,10 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	indexbtree "github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
 	indexhash "github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
 // projectStringPropValue projects an index.Change value payload (an
@@ -177,26 +179,45 @@ func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuf
 	}
 }
 
-// lockWriterForDDL acquires the engine's writer serialisation for a schema
-// operation that must be atomic against concurrent write transactions (the
-// CREATE INDEX backfill + registration). For a WAL-backed engine the store's
-// single-writer mutex is taken by opening (and later rolling back) an empty
-// transaction — the same mutex every RunInTx / BeginTx write holds for its
-// duration; for a store-less engine it is [Engine.writeMu], mirroring
-// [Engine.lockWriter]. The returned unlock must be called exactly once.
+// registerRecoveredIndexes re-creates each durable index that was recovered
+// from the WAL (or from the snapshot) and registers it on the engine's
+// [index.Manager] so the planner's NodeByIndexSeek rewrites stay effective
+// after a restart. It is invoked once at construction from
+// [NewEngineWithOptions]. An empty slice is a no-op (store-less or fresh engine).
 //
-// The rollback of the op-less transaction is a pure mutex release: no op was
-// appended, so nothing reaches the WAL and nothing is undone.
-func (e *Engine) lockWriterForDDL(ctx context.Context) (unlock func(), err error) {
-	if e.store != nil {
-		tx, berr := e.store.BeginCtx(ctx)
-		if berr != nil {
-			return nil, berr
+// Hash indexes are reconstructed as bound indexes backfilled from the live
+// graph, matching the behaviour of the original CREATE INDEX (task #1340).
+// BTree indexes are registered as fresh, empty subscribers — the BTree
+// implementation self-maintains from future change events. [index.ErrIndexExists]
+// is silently absorbed so that a snapshot that already wired the index does
+// not conflict with the WAL replay that also carries a CREATE INDEX op for
+// the same name.
+func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
+	idxMgr := e.g.IndexManager()
+	for i := range defs {
+		d := defs[i]
+		if d.Hash {
+			// Build a bound hash index and backfill it from the recovered graph
+			// so index seeks on the re-opened engine return the correct rows.
+			// Binding failures (e.g. an empty graph) fall back to an unbound
+			// index; the index will be correct for future writes but empty for
+			// pre-existing data — the worst outcome is a NodeByIndexSeek miss
+			// that is equivalent to the pre-fix behaviour.
+			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, d.Label, d.Property); bidxErr == nil {
+				e.backfillNodeHashIndex(boundIdx, d.Label, d.Property)
+				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
+			} else {
+				sub := indexhash.New[string]()
+				_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
+			}
+		} else {
+			// BTree index: register a fresh btree subscriber. The BTree
+			// implementation self-maintains from the change fan-out;
+			// rebuilding from existing data is deferred (rebuild-on-restart).
+			sub := indexbtree.New[string]()
+			_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
 		}
-		return func() { _ = tx.Rollback() }, nil
 	}
-	e.writeMu.Lock()
-	return e.writeMu.Unlock, nil
 }
 
 // runCreateHashIndex executes CREATE INDEX for the hash kind: it builds a
@@ -204,6 +225,13 @@ func (e *Engine) lockWriterForDDL(ctx context.Context) (unlock func(), err error
 // backfills it from the pre-existing data, and registers it — all under the
 // engine's writer serialisation so no concurrent write can race between the
 // backfill scan and the registration (task #1340).
+//
+// On a WAL-backed engine the successful registration is also made durable: the
+// CREATE INDEX op is appended to the WAL and fsynced before the function
+// returns, so the index definition survives a crash and is re-registered by
+// [store/recovery.Open] (task #1343). A WAL-append failure unwinds the
+// in-memory registration (DropIndex) to keep the index manager and the durable
+// state consistent (registered ⇔ durable).
 //
 // IF NOT EXISTS that absorbs an already-registered name is a silent no-op
 // with no schema change and no plan-cache invalidation, matching the
@@ -213,12 +241,28 @@ func (e *Engine) runCreateHashIndex(ctx context.Context, p *ir.CreateIndex, idxM
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	unlock, err := e.lockWriterForDDL(ctx)
+	if e.store == nil {
+		e.writeMu.Lock()
+		defer e.writeMu.Unlock()
+		return e.createHashIndexLocked(ctx, p, idxMgr, nil)
+	}
+	// WAL-backed: open the serialising transaction before the backfill scan so
+	// no concurrent write can slip between the scan and the registration.
+	tx, err := e.store.BeginCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer unlock()
+	res, rerr := e.createHashIndexLocked(ctx, p, idxMgr, tx)
+	// Guarded no-op after CommitWALOnly (success or failure); releases the
+	// single-writer lock on earlier error paths. See runCreateConstraint.
+	_ = tx.Rollback()
+	return res, rerr
+}
 
+// createHashIndexLocked executes the CREATE INDEX sequence under the writer
+// serialisation held by the caller; tx is the serialising transaction on a
+// WAL-backed engine (nil on a store-less one).
+func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	// Duplicate-name fast path: skip the O(N) backfill scan. The error shape
 	// matches the historical CreateIndexOp path ("exec: CreateIndex %q:"
 	// wrapping the manager's ErrIndexExists) so callers matching with
@@ -249,5 +293,20 @@ func (e *Engine) runCreateHashIndex(ctx context.Context, p *ir.CreateIndex, idxM
 	// Real schema mutation: invalidate cached plans built before the index
 	// existed (mirrors CreateIndexOp's onSchemaChange contract).
 	e.ClearPlanCache()
+
+	// Durability: append the CREATE INDEX op to the WAL and fsync so the index
+	// definition survives a crash (task #1343). On failure unwind the in-memory
+	// registration: the index would otherwise stay active in this session while
+	// silently vanishing on the next reopen (registered ⇔ durable invariant).
+	if tx != nil {
+		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindHash, p.Label, p.Property, p.Name); err != nil {
+			// Best-effort unwind: drop the just-registered index. Errors are
+			// joined but the original cause is always returned.
+			if derr := idxMgr.DropIndex(p.Name); derr != nil {
+				return nil, errors.Join(err, fmt.Errorf("cypher: unwind CREATE INDEX registration: %w", derr))
+			}
+			return nil, err
+		}
+	}
 	return emptyDDLResult(ctx), nil
 }
