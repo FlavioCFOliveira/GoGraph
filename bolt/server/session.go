@@ -63,6 +63,19 @@ type Session struct {
 	// result.Next() call.
 	peeked *[]packstream.Value
 
+	// records, when non-nil, is the per-connection sink that [Session.handlePull]
+	// streams RECORD messages to as it iterates the result cursor, instead of
+	// accumulating them in the returned response slice. The serve loop installs
+	// a sink that encodes and writes each record to the client connection
+	// immediately under the per-message write deadline, so a large PULL is
+	// never duplicated into a second in-memory copy and a slow reader exerts
+	// TCP backpressure on the producing loop (task #1350). When nil (a Session
+	// driven directly through [Session.HandleMessage], without a serve loop),
+	// handlePull falls back to buffering the records in the returned slice.
+	// The sink is invoked only from the session's single message-handling
+	// goroutine, so it needs no synchronisation.
+	records recordSink
+
 	// txActive indicates that an explicit transaction is open (BEGIN called).
 	txActive bool
 
@@ -179,6 +192,28 @@ func (s *Session) setDefaultTxTimeout(d time.Duration) {
 	}
 }
 
+// recordSink consumes one RECORD message produced by [Session.handlePull],
+// encoding and writing it to the client connection immediately. A non-nil
+// error reports a failed or timed-out write; the failure is terminal for the
+// connection — a partially written chunked message cannot be resumed — so the
+// caller stops streaming and surfaces [errRecordWrite].
+type recordSink func(*proto.Record) error
+
+// errRecordWrite is the sentinel error returned by [Session.HandleMessage]
+// when the installed record sink failed mid-stream. After a partial chunked
+// write the connection framing is unrecoverable, so the serve loop must tear
+// the connection down without attempting to write any further message.
+var errRecordWrite = errors.New("bolt: record stream write failed")
+
+// setRecordSink installs the per-connection record sink that
+// [Session.handlePull] streams RECORD messages to (task #1350). It must be
+// set before the session processes its first message and never changed
+// afterwards; the session invokes the sink only from its single
+// message-handling goroutine.
+func (s *Session) setRecordSink(sink recordSink) {
+	s.records = sink
+}
+
 // inFlightCount returns the number of Result cursors registered against this
 // session that count toward the per-connection cap.
 //
@@ -218,6 +253,13 @@ func randomID() string {
 // On an illegal state transition or internal error the session moves to
 // FAILED and HandleMessage returns a single *proto.Failure response. The
 // caller is responsible for encoding and sending all returned messages.
+//
+// When a record sink is installed (see [Session.setRecordSink]), the RECORD
+// messages of a PULL are written through the sink as the cursor is iterated
+// and are NOT part of the returned slice, which then carries only the
+// trailing SUCCESS or FAILURE. A sink write failure is surfaced as an error
+// wrapping [errRecordWrite]: the connection framing is unrecoverable and the
+// caller must tear the connection down without writing anything further.
 func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
 	// Propagate context cancellation before doing any work. failWith routes
 	// through enterFailed, which reclaims any open explicit transaction even on
@@ -624,10 +666,30 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	var responses []any
 	fetched := int64(0)
 
+	// emit hands one RECORD to the streaming sink when one is installed (the
+	// serve loop's encode-and-write-now path, task #1350), falling back to
+	// buffering it in the response slice for sessions driven directly through
+	// HandleMessage. Streaming per row adds no write amplification — the
+	// buffered path also issued one chunked write per RECORD after the handler
+	// returned; only the timing changes — and the blocking write is the
+	// backpressure that keeps a slow reader from forcing the whole page into
+	// memory. A sink error is terminal: the wire may hold a partial chunk.
+	emit := func(row []packstream.Value) error {
+		rec := &proto.Record{Data: row}
+		if s.records != nil {
+			return s.records(rec)
+		}
+		responses = append(responses, rec)
+		return nil
+	}
+
 	// Emit the pre-fetched row from a previous partial PULL, if any.
 	if s.peeked != nil {
-		responses = append(responses, &proto.Record{Data: *s.peeked})
+		row := *s.peeked
 		s.peeked = nil
+		if err := emit(row); err != nil {
+			return s.abortStream(err)
+		}
 		fetched++
 	}
 
@@ -649,7 +711,9 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		for i, col := range s.columns {
 			row[i] = exprToPackstream(rec[col])
 		}
-		responses = append(responses, &proto.Record{Data: row})
+		if err := emit(row); err != nil {
+			return s.abortStream(err)
+		}
 		fetched++
 	}
 
@@ -909,6 +973,18 @@ func (s *Session) handleRoute(m *proto.Route) ([]any, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// abortStream handles a record-sink write failure mid-PULL: the client
+// connection can no longer carry a well-formed message (the failed write may
+// have left a partial chunk on the wire), so the session enters FAILED —
+// draining the cursor and rolling back any open explicit transaction, which
+// releases the engine writer serialisation NOW (#1312) — and the error is
+// surfaced wrapped in [errRecordWrite] so the serve loop tears the connection
+// down without writing anything further.
+func (s *Session) abortStream(err error) ([]any, error) {
+	s.enterFailed()
+	return nil, fmt.Errorf("%w: %w", errRecordWrite, err)
+}
 
 // drainResult closes and nils the current result cursor if one is open. It
 // also discards any pre-fetched peek row.

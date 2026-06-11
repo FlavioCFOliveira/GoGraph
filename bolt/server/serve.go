@@ -551,6 +551,24 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)
 	sess.setDefaultTxTimeout(s.opts.DefaultTxTimeout)
 
+	// Stream RECORD messages incrementally: handlePull hands each record to
+	// this sink, which encodes and writes it to the connection immediately
+	// under the per-message write deadline — so a large PULL is written row by
+	// row instead of being duplicated into a second in-memory copy, and a slow
+	// reader exerts backpressure (the producing loop blocks on the TCP write)
+	// until the write deadline trips for THIS connection only (task #1350).
+	// Flushing per record adds no write amplification: the buffered path also
+	// issued one chunked write per RECORD after the handler returned. A write
+	// failure was already logged by writeResponse; returning errRecordWrite
+	// makes handlePull stop streaming and the message loop below tear the
+	// connection down.
+	sess.setRecordSink(func(rec *proto.Record) error {
+		if !s.writeResponse(cw, conn, rec, remote) {
+			return errRecordWrite
+		}
+		return nil
+	})
+
 	// Per-connection cancellable context. Cancelling it stops any in-flight
 	// statement promptly (the engine honours context cancellation per result
 	// row), so a long-running RUN/PULL no longer keeps consuming CPU/memory
@@ -699,6 +717,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			// disappearing silently.
 			responses, handlerErr := sess.HandleMessage(connCtx, msg)
 			if handlerErr != nil {
+				// A failed record-stream write means the wire may hold a partial
+				// chunked message: no further well-formed message can be sent.
+				// Tear the connection down; the write error was already logged
+				// by writeResponse and the session has reclaimed its cursor and
+				// any open transaction (see Session.abortStream).
+				if errors.Is(handlerErr, errRecordWrite) {
+					return
+				}
 				s.log.Error("bolt: handler error",
 					slog.String("remote", remote),
 					slog.String("err", handlerErr.Error()))
