@@ -35,13 +35,19 @@ func OpenWith(f walFile) (*Writer, error) {
 		return nil, fmt.Errorf("wal: OpenWith: nil file")
 	}
 	// Seek to the end so Append is truly append-only even when the
-	// caller opened the file without O_APPEND.
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+	// caller opened the file without O_APPEND. The resulting position
+	// doubles as the durable baseline: bytes already in the file at
+	// open time are presumed durable, so a later sync failure rolls
+	// the file back exactly here.
+	pos, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("wal: OpenWith: seek to end: %w", err)
 	}
 	return &Writer{
-		f:  f,
-		bw: bufio.NewWriterSize(f, 64*1024),
+		f:            f,
+		bw:           bufio.NewWriterSize(f, 64*1024),
+		durableSize:  pos,
+		appendedSize: pos,
 	}, nil
 }

@@ -82,8 +82,10 @@ func TestWALFault_ENOSPC(t *testing.T) {
 
 // TestWALFault_ENOSPCAfterKFrames verifies that a partial write
 // budget (FailWritesAfterBytes) that expires mid-frame causes the
-// reader to see exactly the complete frames before the fault, with a
-// non-nil TailError for the torn trailing frame.
+// reader to see exactly the complete frames synced before the fault.
+// The failed Sync poisons the writer (task #1333) and physically
+// discards the partially-flushed trailing frame, so the recovered
+// tail is clean and subsequent appends are rejected.
 //
 // Frame geometry with 40-byte payloads:
 //
@@ -92,8 +94,8 @@ func TestWALFault_ENOSPC(t *testing.T) {
 // With FailWritesAfterBytes=100:
 //   - Frame 1 occupies bytes 0–53 (54 bytes); fits within 100.
 //   - Frame 2 starts at byte 54; the budget is exhausted at byte 100,
-//     cutting the second frame 46 bytes in (header + 32 bytes of
-//     payload, CRC check will fail).
+//     cutting the second frame's flush 46 bytes in. The failed Sync
+//     truncates the file back to byte 54 (the durable prefix).
 func TestWALFault_ENOSPCAfterKFrames(t *testing.T) {
 	t.Parallel()
 
@@ -127,9 +129,15 @@ func TestWALFault_ENOSPCAfterKFrames(t *testing.T) {
 	}
 
 	payload2 := bytes.Repeat([]byte{0xBB}, payloadSize)
-	_ = w.Append(payload2) // expected to fail at or before Sync
-	_ = w.Sync()           // tolerate error
-	_ = w.Close()
+	_ = w.Append(payload2) // buffered: no error until the flush in Sync
+	if err := w.Sync(); err == nil {
+		t.Fatal("Sync after frame2 = nil; want a write-budget error")
+	}
+	// The failed Sync poisons the writer: further appends are rejected.
+	if err := w.Append(payload2); err == nil {
+		t.Error("Append after failed Sync = nil; want sticky error (writer must be poisoned)")
+	}
+	_ = w.Close() // unclean shutdown: surfaces the sticky error
 
 	r, err := wal.OpenReader(walPath)
 	if err != nil {
@@ -150,13 +158,9 @@ func TestWALFault_ENOSPCAfterKFrames(t *testing.T) {
 		t.Errorf("frame 1 payload mismatch: got %d bytes, want %d", len(decoded[0].Payload), payloadSize)
 	}
 
-	// TailError must be non-nil: the partial second frame is torn.
-	tailErr := r.TailError()
-	if tailErr == nil {
-		t.Error("TailError() = nil; want ErrTornFrame/ErrBadMagic/ErrCRCMismatch for the torn second frame")
-	} else if !errors.Is(tailErr, wal.ErrTornFrame) &&
-		!errors.Is(tailErr, wal.ErrBadMagic) &&
-		!errors.Is(tailErr, wal.ErrCRCMismatch) {
-		t.Errorf("TailError() = %v; want one of ErrTornFrame/ErrBadMagic/ErrCRCMismatch", tailErr)
+	// The poison discarded the partially-flushed second frame: the
+	// recovered tail must be clean.
+	if tailErr := r.TailError(); tailErr != nil {
+		t.Errorf("TailError() = %v; want nil (poison must discard the partial suffix)", tailErr)
 	}
 }

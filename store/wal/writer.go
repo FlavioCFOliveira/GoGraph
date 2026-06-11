@@ -23,10 +23,14 @@ var ErrWriterClosed = errors.New("wal: writer is closed")
 // are read with [sync/atomic.LoadUint64], so they may race slightly
 // behind in-flight operations but never observe a torn value.
 type Stats struct {
-	Frames     uint64 // total frames appended
-	Bytes      uint64 // total bytes appended (header + payload)
-	Syncs      uint64 // total Sync calls
-	SyncFailed uint64 // Sync calls that returned an error
+	Frames uint64 // total frames appended
+	Bytes  uint64 // total bytes appended (header + payload)
+	Syncs  uint64 // total Sync calls
+	// SyncFailed counts Sync calls that failed at the flush/fsync
+	// I/O layer. Calls rejected because the writer was already
+	// poisoned by an earlier failure are not counted (mirroring how
+	// context-cancelled calls are not counted).
+	SyncFailed uint64
 }
 
 // Writer is a single-writer append-only log file. Callers append
@@ -36,11 +40,41 @@ type Stats struct {
 //
 // Writer is safe for concurrent calls to [Writer.Append] / Sync /
 // Stats; all mutations serialise on an internal mutex.
+//
+// A Writer fail-stops on commit failure: the first flush or fsync
+// error in [Writer.Sync] permanently poisons the writer. The
+// un-synced suffix of the file — which may hold the flushed frames
+// (including the commit marker) of the very transaction whose Sync
+// just failed — is physically discarded, and every subsequent
+// Append/Sync returns the original error. Without the poison, a
+// later transaction's successful fsync would make the failed
+// transaction's frames durable even though its commit was never
+// acknowledged, and recovery would replay it: a phantom commit
+// violating Atomicity and Durability. A poisoned Writer accepts only
+// [Writer.Close]; the owner must discard it and re-open the WAL,
+// which re-validates the tail.
 type Writer struct {
 	mu     sync.Mutex
 	f      walFile
 	bw     *bufio.Writer
 	closed atomic.Bool
+
+	// syncErr is the sticky poison error: set under mu by the first
+	// flush/fsync failure in SyncCtx and never cleared. While non-nil
+	// every AppendCtx/SyncCtx call returns it without touching the
+	// file.
+	syncErr error
+	// durableSize is the file size, in bytes, covered by the last
+	// successful fsync (or the size observed at open). Guarded by mu.
+	// It is the truncation target when a sync failure must discard
+	// the un-synced suffix.
+	durableSize int64
+	// appendedSize is durableSize plus every frame byte accepted by
+	// AppendCtx since the last successful fsync — the logical file
+	// size once the buffer is flushed. Guarded by mu. Tracking it
+	// incrementally keeps the commit hot path free of size-probing
+	// seek syscalls.
+	appendedSize int64
 
 	frames     atomic.Uint64
 	bytes      atomic.Uint64
@@ -99,9 +133,21 @@ func Open(path string) (*Writer, error) {
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: discard torn tail: %w", path, err)
 	}
+	// Record the opening size as the durable baseline: every byte
+	// already in the file at open time is presumed durable (a benign
+	// torn tail was discarded and fsynced above), so a later sync
+	// failure rolls the file back exactly here.
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		_ = f.Close()
+		metrics.IncCounter("store.wal.Open.errors", 1)
+		return nil, fmt.Errorf("wal: open %q: probe size: %w", path, err)
+	}
 	return &Writer{
-		f:  f,
-		bw: bufio.NewWriterSize(f, 64*1024),
+		f:            f,
+		bw:           bufio.NewWriterSize(f, 64*1024),
+		durableSize:  size,
+		appendedSize: size,
 	}, nil
 }
 
@@ -167,6 +213,10 @@ func discardTornTail(f *os.File) error {
 // Append writes one frame with the given opaque payload to the
 // underlying file. The frame is buffered in process memory; call
 // [Writer.Sync] to durably commit.
+//
+// On a writer poisoned by an earlier Sync failure, Append rejects
+// the frame and returns the original sync error; see the [Writer]
+// type documentation.
 func (w *Writer) Append(payload []byte) error {
 	defer metrics.Time("store.wal.Append")()
 	err := w.AppendCtx(context.Background(), payload)
@@ -195,11 +245,24 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return err
 	}
+	if w.syncErr != nil {
+		// Poisoned by an earlier Sync failure: accepting more frames
+		// would buffer them after a discarded (never-acknowledged)
+		// suffix. Fail-stop with the original error.
+		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
+		return w.syncErr
+	}
 	n, err := Encode(w.bw, Frame{Payload: payload})
 	if err != nil {
+		// A partial frame may now sit in the buffer (and, when the
+		// buffer spilled, partially in the file). bufio's sticky error
+		// guarantees the next Flush fails, so SyncCtx poisons the
+		// writer and discards the partial bytes before any later sync
+		// could acknowledge them.
 		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return err
 	}
+	w.appendedSize += int64(n)
 	w.frames.Add(1)
 	w.bytes.Add(uint64(n))
 	return nil
@@ -209,6 +272,11 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 // [os.File.Sync] so the data reaches durable storage before
 // returning. It must be invoked at every transaction commit
 // boundary.
+//
+// The first flush or fsync failure permanently poisons the writer:
+// the un-synced suffix of the file is discarded and every subsequent
+// Append/Sync returns the original error; see the [Writer] type
+// documentation.
 func (w *Writer) Sync() error {
 	defer metrics.Time("store.wal.Sync")()
 	err := w.SyncCtx(context.Background())
@@ -237,18 +305,51 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
+	if w.syncErr != nil {
+		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
+		return w.syncErr
+	}
 	if err := w.bw.Flush(); err != nil {
-		w.syncFailed.Add(1)
+		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
 	if err := w.f.Sync(); err != nil {
-		w.syncFailed.Add(1)
+		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
+	w.durableSize = w.appendedSize
 	w.syncs.Add(1)
 	return nil
+}
+
+// poison marks the writer permanently failed after a commit-path
+// flush or fsync error and physically discards the un-synced suffix
+// of the file. Callers must hold w.mu.
+//
+// The truncation is the load-bearing step: after a failed fsync the
+// kernel may keep or drop the dirty pages (post-"fsyncgate" both
+// behaviours exist in the wild), and the flushed-but-unacknowledged
+// frames — including the failed transaction's commit marker — would
+// otherwise be made durable by the next successful fsync of this
+// file, resurrecting a transaction whose commit was rolled back by
+// the caller. Truncating to the last durably-synced size makes both
+// kernel behaviours equivalent: the failed suffix can never reach a
+// reader.
+func (w *Writer) poison(err error) {
+	w.syncFailed.Add(1)
+	// Best-effort: if the truncate itself fails (the device is in
+	// distress), the sticky error below still fail-stops every future
+	// Append/Sync on this writer, and Close re-attempts the discard
+	// while skipping its usual fsync, so the suffix is never durably
+	// acknowledged through this handle.
+	_ = w.f.Truncate(w.durableSize)
+	// Drop any buffered bytes (and bufio's own sticky error): nothing
+	// further will be written through this writer.
+	w.bw.Reset(w.f)
+	w.appendedSize = w.durableSize
+	w.syncErr = err
 }
 
 // Stats returns a snapshot of the writer's lifetime counters.
@@ -299,6 +400,12 @@ func (w *Writer) Truncate() (int64, error) {
 		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return sz, err
 	}
+	// The file is physically empty from this point on; keep the
+	// durable/appended bookkeeping in lockstep even if a later step in
+	// this method fails, so a subsequent sync-failure rollback never
+	// truncates to a stale (pre-Truncate) size.
+	w.durableSize = 0
+	w.appendedSize = 0
 	// Crash-injection point: the file has just been shrunk to zero on
 	// disk but the truncation has not yet been fully finalised (seek +
 	// metadata sync + buffer reset). A crash here models a tear in the
@@ -323,6 +430,12 @@ func (w *Writer) Truncate() (int64, error) {
 
 // Close flushes any buffered frames, calls Sync once, and releases
 // the underlying file.
+//
+// On a writer poisoned by an earlier Sync failure, Close skips the
+// flush and fsync — fsyncing here could make the discarded-but-not-
+// yet-truncated suffix of a failed commit durable — re-attempts the
+// suffix discard, releases the file, and returns the sticky error so
+// callers know the shutdown was not clean.
 func (w *Writer) Close() error {
 	defer metrics.Time("store.wal.Close")()
 	if !w.closed.CompareAndSwap(false, true) {
@@ -331,6 +444,16 @@ func (w *Writer) Close() error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.syncErr != nil {
+		// Second-chance discard: poison's own truncate may have failed
+		// on a device in transient distress. Best-effort — the sticky
+		// error is returned regardless, and no fsync is issued through
+		// this handle, so the failed suffix is never acknowledged.
+		_ = w.f.Truncate(w.durableSize)
+		_ = w.f.Close() // best-effort: the poison error takes precedence
+		metrics.IncCounter("store.wal.Close.errors", 1)
+		return w.syncErr
+	}
 	if err := w.bw.Flush(); err != nil {
 		_ = w.f.Close() // best-effort: already on error path, flush err preserved
 		metrics.IncCounter("store.wal.Close.errors", 1)

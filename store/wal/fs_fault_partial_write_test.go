@@ -2,7 +2,6 @@ package wal_test
 
 import (
 	"bytes"
-	"errors"
 	"path/filepath"
 	"testing"
 
@@ -15,24 +14,29 @@ import (
 // cut-off offsets and verifies the number of complete frames the
 // reader recovers in each case.
 //
+// Under the sync-failure poison contract (task #1333) the Sync whose
+// flush trips the write budget physically discards the un-synced
+// suffix and permanently poisons the writer, so the recovered file
+// always ends at the last durably-synced frame boundary with a clean
+// tail. Torn bytes that survive on disk (the crash case, where no
+// writer is alive to scrub them) are exercised by
+// crash_header_test.go, crash_payload_test.go and
+// torn_offsets_test.go.
+//
 // Frame geometry with 40-byte payloads:
 //
 //	HeaderSize (14) + 40 = 54 bytes per frame
 //
 // Cut-off cases:
 //
-//	offset=10  → frame 1 header torn (10 < 14); 0 complete frames
-//	offset=54  → frame 1 complete; frame 2 starts at 54 and is cut
-//	             immediately (0 bytes of frame 2 reach disk for
-//	             FailWritesAfterBytes=54 semantics: the 55th byte is
-//	             refused, so only bytes 0–53 are written); 1 complete
-//	             frame, TailError nil (clean EOF at frame boundary)
-//	             — note: whether TailError is nil or a torn-frame
-//	             error depends on whether the writer attempted a
-//	             partial frame 2 header. We assert ≥1 complete frame.
-//	offset=81  → frame 1 complete (bytes 0–53); frame 2 partially
-//	             written (bytes 54–80, i.e. 27 bytes); 1 complete
-//	             frame, TailError non-nil.
+//	offset=10  → frame 1's own flush is cut (10 < 54): Sync #1 fails
+//	             and rolls the file back to 0 bytes; 0 complete frames
+//	offset=54  → frame 1 synced; frame 2's flush is refused at byte 0
+//	             (budget exactly exhausted): Sync #2 fails, file stays
+//	             at the 54-byte boundary; 1 complete frame
+//	offset=81  → frame 1 synced; frame 2's flush is cut after 27
+//	             bytes: Sync #2 fails and rolls the file back to byte
+//	             54; 1 complete frame
 func TestWALFault_PartialWrite_MultipleOffsets(t *testing.T) {
 	t.Parallel()
 
@@ -41,32 +45,24 @@ func TestWALFault_PartialWrite_MultipleOffsets(t *testing.T) {
 	const frameSize = 14 + payloadSize
 
 	cases := []struct {
-		name           string
-		budget         int64
-		wantFrames     int
-		wantTailErrNil bool // true → TailError must be nil (clean EOF)
+		name       string
+		budget     int64
+		wantFrames int
 	}{
 		{
-			name:       "offset=10 (header torn)",
+			name:       "offset=10 (cut inside frame 1)",
 			budget:     10,
 			wantFrames: 0,
-			// No complete frame; reader hits torn frame immediately.
-			wantTailErrNil: false,
 		},
 		{
 			name:       "offset=54 (exact frame boundary)",
 			budget:     frameSize, // 54
 			wantFrames: 1,
-			// Cut at exact boundary: first frame complete, second
-			// frame has 0 bytes (clean EOF). TailError nil.
-			wantTailErrNil: true,
 		},
 		{
 			name:       "offset=81 (mid-second-frame)",
 			budget:     81,
 			wantFrames: 1,
-			// Frame 1 complete; frame 2 cut after 27 bytes → torn.
-			wantTailErrNil: false,
 		},
 	}
 
@@ -92,13 +88,20 @@ func TestWALFault_PartialWrite_MultipleOffsets(t *testing.T) {
 				t.Fatalf("wal.OpenWith: %v", err)
 			}
 
-			// Append two frames; errors are tolerated — the fault may
-			// fire during Append or during Sync.
+			// Append two frames; intermediate errors are tolerated —
+			// the budget fault fires during one of the two Sync
+			// flushes (or, once poisoned, the second round is
+			// rejected outright).
 			_ = w.Append(payload1)
 			_ = w.Sync()
 			_ = w.Append(payload2)
 			_ = w.Sync()
-			_ = w.Close()
+			// Whichever Sync tripped the budget poisoned the writer:
+			// every further append must be rejected.
+			if err := w.Append(payload2); err == nil {
+				t.Error("Append after failed Sync = nil; want sticky error (writer must be poisoned)")
+			}
+			_ = w.Close() // unclean shutdown: surfaces the sticky error
 
 			r, err := wal.OpenReader(walPath)
 			if err != nil {
@@ -120,19 +123,10 @@ func TestWALFault_PartialWrite_MultipleOffsets(t *testing.T) {
 				t.Errorf("decoded %d frame(s), want %d", len(decoded), tc.wantFrames)
 			}
 
-			tailErr := r.TailError()
-			if tc.wantTailErrNil {
-				if tailErr != nil {
-					t.Errorf("TailError() = %v, want nil (clean EOF at frame boundary)", tailErr)
-				}
-			} else {
-				if tailErr == nil {
-					t.Errorf("TailError() = nil; want a torn-frame error for budget=%d", tc.budget)
-				} else if !errors.Is(tailErr, wal.ErrTornFrame) &&
-					!errors.Is(tailErr, wal.ErrBadMagic) &&
-					!errors.Is(tailErr, wal.ErrCRCMismatch) {
-					t.Errorf("TailError() = %v; want ErrTornFrame/ErrBadMagic/ErrCRCMismatch", tailErr)
-				}
+			// The poison discarded every partially-flushed byte: the
+			// recovered tail must always be clean.
+			if tailErr := r.TailError(); tailErr != nil {
+				t.Errorf("TailError() = %v, want nil (poison must discard the partial suffix, budget=%d)", tailErr, tc.budget)
 			}
 		})
 	}
