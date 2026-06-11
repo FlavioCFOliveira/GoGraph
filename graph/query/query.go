@@ -27,6 +27,16 @@ import (
 // Engine bundles an [lpg.Graph] with its CSR snapshot for read-only
 // query execution. The CSR is used for adjacency traversal; the LPG
 // is used for label / property lookups.
+//
+// Removed nodes are invisible: every working-set construction step
+// (seeding, label intersection, [Pattern.Out] expansion) prunes
+// NodeIDs that [lpg.Graph.IsTombstoned] reports as removed, so
+// [Pattern.Cardinality], [Pattern.Collect], and [Pattern.NodeIDs]
+// never observe deleted state. Each pattern step reads the tombstone
+// set at the moment it executes; the Engine takes no lock across
+// steps, so callers that mutate the graph concurrently with query
+// construction must serialise externally (the same quiescence the CSR
+// snapshot already requires).
 type Engine[N comparable, W any] struct {
 	g   *lpg.Graph[N, W]
 	csr *csr.CSR[W]
@@ -135,8 +145,9 @@ type Pattern[N comparable, W any] struct {
 	bm     *roaring64.Bitmap // current working set (NodeIDs)
 }
 
-// Match opens a new MATCH expression seeded with every node in the
-// graph.
+// Match opens a new MATCH expression seeded with every live node in
+// the graph: interned NodeIDs only (never the ghost slots the sharded
+// id packing leaves in [0, MaxNodeID)), minus the tombstoned set.
 func (e *Engine[N, W]) Match() *Pattern[N, W] {
 	return &Pattern[N, W]{engine: e}
 }
@@ -159,7 +170,10 @@ func (p *Pattern[N, W]) Vertex(preds ...Predicate[N, W]) *Pattern[N, W] {
 // seedFromPreds builds the initial working set. When at least one
 // predicate is a WithLabel, we intersect the corresponding bitmaps
 // directly from the LPG NodeIndex — orders-of-magnitude faster than
-// scanning every node in the graph.
+// scanning every node in the graph. Either way the seed is pruned of
+// tombstoned (removed) NodeIDs, so a deleted node never enters the
+// working set even when its labels were not stripped from the
+// NodeIndex before removal.
 func (p *Pattern[N, W]) seedFromPreds(preds []Predicate[N, W]) *roaring64.Bitmap {
 	var labelIDs []uint32
 	for _, pr := range preds {
@@ -172,17 +186,58 @@ func (p *Pattern[N, W]) seedFromPreds(preds []Predicate[N, W]) *roaring64.Bitmap
 		}
 	}
 	if len(labelIDs) > 0 {
-		return p.engine.g.NodeIndex().Intersect(labelIDs...)
+		bm := p.engine.g.NodeIndex().Intersect(labelIDs...)
+		p.engine.pruneTombstones(bm)
+		return bm
 	}
-	// No label predicate: seed with all NodeIDs in the CSR snapshot.
-	// AddRange is O(1) amortised per container compared to the
-	// per-bit Add loop which is O(MaxNodeID) — measurable on
-	// million-node graphs.
+	return p.engine.seedAllLive()
+}
+
+// seedChunkSize is the flush threshold for the Mapper.Walk → AddMany
+// buffer used by seedAllLive. 4096 ids (32 KiB) keeps the intermediate
+// allocation bounded regardless of graph size while amortising the
+// per-call overhead of roaring AddMany.
+const seedChunkSize = 4096
+
+// seedAllLive returns a bitmap holding every interned, non-tombstoned
+// NodeID in the graph. The Mapper packs NodeIDs as (intra<<8)|shard
+// across 256 shards, so the id space is sparse: Mapper.MaxNodeID()
+// rounds up to maxIntra*256 and a blanket [0, MaxNodeID) range would
+// count never-interned ghost slots (a 3-node graph would seed 256
+// ids). Walking the Mapper enumerates exactly the interned ids in
+// O(V) instead.
+//
+// The Walk callback only appends to a local buffer and never re-enters
+// the Mapper or takes any lpg lock, satisfying Mapper.Walk's
+// re-entrancy contract; tombstone pruning runs after Walk returns.
+func (e *Engine[N, W]) seedAllLive() *roaring64.Bitmap {
 	bm := roaring64.New()
-	if maxID := uint64(p.engine.csr.MaxNodeID()); maxID > 0 {
-		bm.AddRange(0, maxID)
+	buf := make([]uint64, 0, seedChunkSize)
+	e.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ N) bool {
+		buf = append(buf, uint64(id))
+		if len(buf) == seedChunkSize {
+			bm.AddMany(buf)
+			buf = buf[:0]
+		}
+		return true
+	})
+	if len(buf) > 0 {
+		bm.AddMany(buf)
 	}
+	e.pruneTombstones(bm)
 	return bm
+}
+
+// pruneTombstones removes every tombstoned NodeID from bm in place.
+// The lock-free TombstoneCount gate keeps the common never-deleted
+// case free of the tombstone lock and the TombstonedIDs allocation.
+func (e *Engine[N, W]) pruneTombstones(bm *roaring64.Bitmap) {
+	if e.g.TombstoneCount() == 0 {
+		return
+	}
+	for _, id := range e.g.TombstonedIDs() {
+		bm.Remove(uint64(id))
+	}
 }
 
 // filterByPreds removes NodeIDs that fail any predicate. When
@@ -211,7 +266,9 @@ func (p *Pattern[N, W]) filterByPreds(bm *roaring64.Bitmap, preds []Predicate[N,
 }
 
 // Out expands the working set to the out-neighbours of every node
-// in it.
+// in it. Neighbours that have been tombstoned since the CSR snapshot
+// was built are pruned: the snapshot still stores their incident
+// edges, but a removed node must never re-enter the working set.
 func (p *Pattern[N, W]) Out() *Pattern[N, W] {
 	if p.bm == nil {
 		p.bm = roaring64.New()
@@ -230,6 +287,7 @@ func (p *Pattern[N, W]) Out() *Pattern[N, W] {
 			next.Add(uint64(edges[k]))
 		}
 	}
+	p.engine.pruneTombstones(next)
 	p.bm = next
 	return p
 }
