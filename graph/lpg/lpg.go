@@ -680,6 +680,23 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	hpsh.mu.Lock()
 	delete(hpsh.m, k)
 	hpsh.mu.Unlock()
+	// Drop the per-CREATE-instance label, property, and multiplicity-counter
+	// stores. Without these, re-creating an edge between the same endpoints
+	// after RemoveEdge would resurrect the removed edge's per-instance labels
+	// and properties, and the CREATE counter would resume from its old value
+	// rather than starting fresh at 1.
+	ilsh := g.edgeInstanceLabelShardFor(k)
+	ilsh.mu.Lock()
+	delete(ilsh.m, k)
+	ilsh.mu.Unlock()
+	ipsh := g.edgeInstancePropShardFor(k)
+	ipsh.mu.Lock()
+	delete(ipsh.m, k)
+	ipsh.mu.Unlock()
+	ccsh := g.edgeCreateCountShardFor(k)
+	ccsh.mu.Lock()
+	delete(ccsh.m, k)
+	ccsh.mu.Unlock()
 }
 
 // EdgeWeight returns the weight of the first edge from src to dst and true when
