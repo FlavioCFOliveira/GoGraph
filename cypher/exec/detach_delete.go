@@ -170,8 +170,10 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 
-	// Snapshot outgoing and incoming neighbours before mutation.
-	outgoing := op.mutator.OutNeighbours(nodeKey)
+	// Snapshot incoming neighbours before mutation (required for directed
+	// graphs: RemoveAllEdgesFrom only removes outgoing edges from the
+	// adjacency layer; incoming edges from other nodes pointing at nodeKey
+	// must still be removed one-by-one via RemoveEdge).
 	incoming := op.mutator.InNeighbours(nodeKey)
 
 	// The per-Next ctx check above is per node; a supernode's incident-edge
@@ -181,18 +183,16 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// Next; the surrounding write path (ApplyAtomically barrier +
 	// recoverWriteQueryPanic) rolls the transaction back and releases the
 	// single-writer mutex.
-	swept := 0
-	// Remove all outgoing edges.
-	for _, dst := range outgoing {
-		if swept&0xFFF == 0 {
-			if err := op.ctx.Err(); err != nil {
-				return false, err
-			}
-		}
-		swept++
-		op.mutator.RemoveEdge(nodeKey, dst)
+
+	// Remove all outgoing edges in O(degree) via the bulk path.
+	if err := op.ctx.Err(); err != nil {
+		return false, err
 	}
-	// Remove all incoming edges.
+	op.mutator.RemoveAllEdgesFrom(nodeKey)
+
+	// Remove all incoming edges (directed-graph case: not covered by
+	// RemoveAllEdgesFrom; undirected mirrors are already gone).
+	swept := 0
 	for _, src := range incoming {
 		if swept&0xFFF == 0 {
 			if err := op.ctx.Err(); err != nil {
@@ -247,17 +247,18 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 		if !resolved {
 			continue
 		}
-		outgoing := op.mutator.OutNeighbours(nodeKey)
+		// Snapshot incoming before the bulk outgoing removal.
 		incoming := op.mutator.InNeighbours(nodeKey)
-		for _, dst := range outgoing {
-			if swept&0xFFF == 0 {
-				if err := op.ctx.Err(); err != nil {
-					return err
-				}
+
+		// Remove all outgoing edges in O(degree) via the bulk path.
+		if swept&0xFFF == 0 {
+			if err := op.ctx.Err(); err != nil {
+				return err
 			}
-			swept++
-			op.mutator.RemoveEdge(nodeKey, dst)
 		}
+		op.mutator.RemoveAllEdgesFrom(nodeKey)
+		swept++ // count the bulk call as one unit for ctx-check pacing
+
 		for _, src := range incoming {
 			if swept&0xFFF == 0 {
 				if err := op.ctx.Err(); err != nil {

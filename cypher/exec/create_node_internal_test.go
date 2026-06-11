@@ -123,6 +123,7 @@ func (m *seedStubMutator) EdgePropertiesByHandle(string, string, uint64) map[str
 func (m *seedStubMutator) RemoveEdgeInstanceByHandle(string, string, uint64) {}
 func (m *seedStubMutator) OutNeighbours(string) []string                     { panic("unused") }
 func (m *seedStubMutator) InNeighbours(string) []string                      { panic("unused") }
+func (m *seedStubMutator) RemoveAllEdgesFrom(string)                         { panic("unused") }
 func (m *seedStubMutator) OutDegree(string) int                              { panic("unused") }
 func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool)         { panic("unused") }
 func (m *seedStubMutator) RemoveNode(string)                                 { panic("unused") }

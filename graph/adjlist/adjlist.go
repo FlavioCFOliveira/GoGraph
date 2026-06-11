@@ -373,24 +373,48 @@ func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, handle uint64, ha
 	return a.upsertEdgeLocked(src, dst, w, handle, hasHandle)
 }
 
+// growCap returns the next backing-array capacity to use when appending to a
+// slice of length cur. Growth is geometric (×2) with a minimum of 4, giving
+// amortised O(1) appends and O(log d) large allocations for a degree-d hub.
+func growCap(cur int) int {
+	if cur < 4 {
+		return 4
+	}
+	return cur * 2
+}
+
 // upsertEdgeLocked is the lock-free body of [AdjList.upsertEdge]. The
 // caller must already hold the shard mutex for src (i.e.
 // a.shards[src&shardMask].mu). This variant exists so that [AdjList.addEdge]
 // can acquire multiple shard locks at once — for undirected multigraph
 // cross-shard pairs — and perform both appends inside the combined critical
 // section.
+//
+// Append strategy: when the current backing array has spare capacity the new
+// entry reuses the SAME backing array (new slice headers only, no allocation).
+// This is safe because concurrent readers of the old entry iterate only
+// [0:len], and the write to position len is sequenced before the atomic
+// storeEntry (Go memory model: write before release-store; acquire-load by
+// readers). When the array is full a new one is allocated with geometric
+// capacity (growCap), amortising the copy cost to O(log d) large allocations
+// per degree-d hub.
 func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint64, hasHandle bool) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
+		// First entry for this node: allocate with geometric initial capacity.
+		c := growCap(0) // == 4
 		entry := &adjEntry[W]{
-			neighbours: []graph.NodeID{dst},
-			weights:    []W{w},
+			neighbours: make([]graph.NodeID, 1, c),
+			weights:    make([]W, 1, c),
 		}
+		entry.neighbours[0] = dst
+		entry.weights[0] = w
 		if hasHandle {
-			entry.handles = []uint64{handle}
+			entry.handles = make([]uint64, 1, c)
+			entry.handles[0] = handle
 		}
 		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry); err != nil {
 			return false, err
@@ -404,12 +428,44 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint
 			}
 		}
 	}
-	newNb := make([]graph.NodeID, len(current.neighbours)+1)
-	newW := make([]W, len(current.weights)+1)
+
+	oldLen := len(current.neighbours)
+	newLen := oldLen + 1
+
+	// Fast path: the current backing array has spare capacity. Reuse it by
+	// writing the new element at position oldLen and publishing new slice
+	// headers that expose it. No large allocation; O(1) per call.
+	if cap(current.neighbours) >= newLen {
+		nb := current.neighbours[:newLen]
+		ws := current.weights[:newLen]
+		nb[oldLen] = dst
+		ws[oldLen] = w
+
+		var hs []uint64
+		if hasHandle || current.handles != nil {
+			if current.handles != nil && cap(current.handles) >= newLen {
+				hs = current.handles[:newLen]
+			} else {
+				hs = make([]uint64, newLen, growCap(len(current.handles)))
+				copy(hs, current.handles)
+			}
+			hs[oldLen] = handle
+		}
+		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs}); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// Slow path: backing array is full — allocate with geometric capacity and
+	// copy existing data. This happens only O(log d) times for a degree-d hub.
+	newCap := growCap(oldLen)
+	newNb := make([]graph.NodeID, newLen, newCap)
+	newW := make([]W, newLen, newCap)
 	copy(newNb, current.neighbours)
 	copy(newW, current.weights)
-	newNb[len(current.neighbours)] = dst
-	newW[len(current.weights)] = w
+	newNb[oldLen] = dst
+	newW[oldLen] = w
 	// Carry the handle column forward only when this graph uses handles
 	// — either the existing entry already has one or this call supplies
 	// one. A previously handle-less entry that gains its first handle on
@@ -418,9 +474,9 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint
 	// neighbours.
 	var newH []uint64
 	if hasHandle || current.handles != nil {
-		newH = make([]uint64, len(current.neighbours)+1)
+		newH = make([]uint64, newLen, newCap)
 		copy(newH, current.handles) // copy is a no-op when current.handles is nil
-		newH[len(current.neighbours)] = handle
+		newH[oldLen] = handle
 	}
 	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH}); err != nil {
 		return false, err
@@ -467,6 +523,62 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 	}
 }
 
+// RemoveAllEdgesFrom removes all edges incident from src in O(d) time for a
+// degree-d hub, instead of the O(d²) cost of d sequential [AdjList.RemoveEdge]
+// calls.
+//
+// For directed graphs the method zeroes src's adjacency slot atomically and
+// decrements the edge counter by the number of removed edges. For undirected
+// graphs it additionally removes the mirror entry (src from each dst's list)
+// with one removeOneEdge call per neighbour; those calls are each O(degree-of-
+// dst), which is O(1) for typical star topologies.
+//
+// Concurrent readers observe either the full pre-deletion state or the post-
+// deletion state; no partial state is ever visible (the src slot is published
+// atomically, and each mirror removal is a separate atomic store).
+//
+// RemoveAllEdgesFrom is safe for concurrent use.
+func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
+	srcID, ok := a.mapper.Lookup(src)
+	if !ok {
+		return
+	}
+
+	s := &a.shards[srcID&shardMask]
+	intraIdx := uint64(srcID) >> shardBits
+
+	s.mu.Lock()
+	old := loadEntry[W](s, intraIdx)
+	if old == nil || len(old.neighbours) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	// Publish nil atomically: readers after this store see an empty adjacency
+	// for src. storeEntry cannot fail here because the slot already exists.
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, nil)
+	removed := len(old.neighbours)
+	// Copy neighbour IDs before releasing the lock so the mirror-removal loop
+	// below is not affected by concurrent writes to the shard.
+	dsts := make([]graph.NodeID, removed)
+	copy(dsts, old.neighbours)
+	s.mu.Unlock()
+
+	// Adjust the edge counter atomically. The two's-complement trick
+	// (^uint64(removed-1)) is equivalent to -removed for unsigned arithmetic.
+	a.size.Add(^uint64(removed - 1))
+
+	if a.cfg.Directed {
+		return // no mirrors to clean up for directed graphs
+	}
+	// Undirected: remove src from each dst's list. Self-loops are already
+	// cleared by the slot zeroing above and must not be processed again.
+	for _, dstID := range dsts {
+		if dstID != srcID {
+			a.removeOneEdge(dstID, srcID)
+		}
+	}
+}
+
 // removeOneEdgeWithHandle publishes a new adjacency snapshot for src that
 // omits one occurrence of dst (first match). Returns (true, handle) when an
 // edge was removed, where handle is the handle value stored in the removed
@@ -498,8 +610,10 @@ func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID) (removed 
 	}
 	if len(current.neighbours) == 1 {
 		// storeEntry cannot fail here because the slot already exists
-		// in the shard's slot array; no growth is required.
-		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{})
+		// in the shard's slot array; no growth is required. Publish nil
+		// instead of an empty struct to avoid a small allocation on each
+		// last-edge removal; loadEntry handles nil slots correctly.
+		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, nil)
 		return true, removedH
 	}
 	newEntry := compactEntry(current, idx)
@@ -538,7 +652,7 @@ func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID) {
 		return
 	}
 	if len(current.neighbours) == 1 {
-		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{})
+		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, nil)
 		return
 	}
 	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, compactEntry(current, idx))
@@ -572,7 +686,7 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 		return false
 	}
 	if len(current.neighbours) == 1 {
-		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{})
+		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, nil)
 		return true
 	}
 	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, compactEntry(current, idx))
@@ -597,7 +711,7 @@ func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, c
 		return false
 	}
 	if len(current.neighbours) == 1 {
-		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{})
+		_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, nil)
 		return true
 	}
 	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, compactEntry(current, idx))

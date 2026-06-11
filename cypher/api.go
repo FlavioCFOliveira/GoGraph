@@ -8478,6 +8478,30 @@ func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
 	return result
 }
 
+// RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.
+// Per-edge undo entries are recorded before the bulk removal so the undo log
+// can reverse the operation edge-by-edge on rollback.
+func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	r := a.rec()
+	// Snapshot outgoing neighbours for undo recording and side-effect counting.
+	outgoing := a.OutNeighbours(n)
+	for _, dst := range outgoing {
+		present := a.g.AdjList().HasEdge(n, dst)
+		var pre removedEdgePreimage
+		if r.active() {
+			pre = r.captureRemovedEdge(n, dst)
+		}
+		if present {
+			a.g.IncrEdgesRemoved()
+		}
+		r.recordRemoveEdge(&pre, present)
+	}
+	// Snapshot incoming neighbours for directed graphs: outgoing-only bulk
+	// removal won't remove edges pointing at n; those are handled by the
+	// detach_delete caller's InNeighbours loop via individual RemoveEdge calls.
+	a.g.RemoveAllEdgesFrom(n)
+}
+
 // OutDegree returns the number of outgoing edges from n.
 func (a *lpgMutatorAdapter) OutDegree(n string) int {
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
@@ -8947,6 +8971,30 @@ func (a *walMutatorAdapter) InNeighbours(n string) []string {
 		return true
 	})
 	return result
+}
+
+// RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.
+// Per-edge undo entries and WAL records are emitted before the bulk adjacency
+// removal, exactly mirroring what d sequential RemoveEdge calls would produce.
+func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	r := a.rec()
+	// Snapshot outgoing neighbours for undo recording, WAL emission, and
+	// side-effect counting before the bulk removal clears the adjacency.
+	outgoing := a.OutNeighbours(n)
+	for _, dst := range outgoing {
+		present := a.g.AdjList().HasEdge(n, dst)
+		var pre removedEdgePreimage
+		if r.active() {
+			pre = r.captureRemovedEdge(n, dst)
+		}
+		if present {
+			a.g.IncrEdgesRemoved()
+		}
+		_ = a.tx.RemoveEdge(n, dst) //nolint:errcheck // ErrTxFinished impossible here
+		r.recordRemoveEdge(&pre, present)
+	}
+	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
+	a.g.RemoveAllEdgesFrom(n)
 }
 
 // OutDegree returns the number of outgoing edges from n.

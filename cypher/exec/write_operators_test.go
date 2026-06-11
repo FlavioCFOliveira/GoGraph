@@ -382,6 +382,20 @@ func (s *stubMutator) IsTombstoned(id graph.NodeID) bool {
 	return ok
 }
 
+// RemoveAllEdgesFrom removes all outgoing edges from n (delegates to RemoveEdge).
+func (s *stubMutator) RemoveAllEdgesFrom(n string) {
+	// Collect dsts first to avoid mutating while iterating.
+	s.mu.Lock()
+	dsts := make([]string, 0, len(s.edges[n]))
+	for dst := range s.edges[n] {
+		dsts = append(dsts, dst)
+	}
+	s.mu.Unlock()
+	for _, dst := range dsts {
+		s.RemoveEdge(n, dst)
+	}
+}
+
 // nodeCount returns the number of interned nodes.
 func (s *stubMutator) nodeCount() int {
 	s.mu.Lock()

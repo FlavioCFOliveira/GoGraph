@@ -653,6 +653,45 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 	}
 }
 
+// RemoveAllEdgesFrom removes all edges incident from src in O(d) time for a
+// degree-d hub, rather than the O(d²) cost of d sequential [Graph.RemoveEdge]
+// calls. After clearing the adjacency layer it also clears the per-pair edge
+// state (labels, properties, handles, instance records, CREATE counters) for
+// every endpoint pair that src was involved in, exactly as [Graph.RemoveEdge]
+// does for each individual edge.
+//
+// For directed graphs the outgoing edges are removed and their forward per-pair
+// state is cleared. For undirected graphs the mirror entries are also removed
+// and both directions' per-pair state are cleared.
+//
+// RemoveAllEdgesFrom is safe for concurrent use.
+func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return
+	}
+	// Snapshot the outgoing neighbours BEFORE the bulk removal so we know
+	// which per-pair state buckets to clear afterwards.
+	nbs, _ := g.adj.LoadEntry(srcID)
+	if len(nbs) == 0 {
+		return
+	}
+	dstIDs := make([]graph.NodeID, len(nbs))
+	copy(dstIDs, nbs)
+
+	// Bulk-remove from the adjacency layer. For undirected graphs this also
+	// removes the mirror entries from each dst's list.
+	g.adj.RemoveAllEdgesFrom(src)
+
+	// Clear per-pair state for every affected endpoint pair.
+	for _, dstID := range dstIDs {
+		g.clearEdgePairState(edgeKey{src: srcID, dst: dstID})
+		if !g.adj.Directed() {
+			g.clearEdgePairState(edgeKey{src: dstID, dst: srcID})
+		}
+	}
+}
+
 // clearEdgePairState drops the per-pair edge-label and edge-property bags for
 // k. The coarse, src-keyed edge label index (g.edgeIdx) is intentionally left
 // untouched: it is read only as an over-approximation that the executor

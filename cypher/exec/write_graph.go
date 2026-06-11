@@ -181,6 +181,17 @@ type GraphMutator interface {
 	// returned slice.
 	InNeighbours(n string) []string
 
+	// RemoveAllEdgesFrom removes all edges incident from n in O(degree) time
+	// and returns the outgoing neighbour keys that were removed. For undirected
+	// graphs the mirror entries are also removed. The per-pair edge state
+	// (labels, properties, handle metadata, CREATE counters) is cleared for
+	// every removed pair, exactly as a sequence of RemoveEdge calls would do.
+	//
+	// Callers that also need to roll back undo-log entries or emit WAL records
+	// must capture the neighbours via OutNeighbours before calling this method;
+	// RemoveAllEdgesFrom does not emit WAL records on its own.
+	RemoveAllEdgesFrom(n string)
+
 	// OutDegree returns the number of outgoing edges from n.
 	OutDegree(n string) int
 
