@@ -12,6 +12,21 @@
 //
 // All operations are safe for concurrent use; a single [sync.RWMutex]
 // guards the array.
+//
+// # Key ordering
+//
+// Keys are ordered by the TOTAL order of [cmp.Compare] / [cmp.Less],
+// not by the raw < operator. The two orders agree everywhere except
+// IEEE 754 NaN: under the total order a floating-point NaN key is
+// less than every other value (including math.Inf(-1)), every NaN bit
+// pattern compares equal to every other NaN, and ±0.0 are one key.
+// Raw < is only a partial order over floats — every comparison with
+// NaN is false — so a single NaN insert used to break the monotone
+// predicate that [sort.Search] requires and silently corrupted the
+// index for ordinary keys (task #1354). With the total order the
+// sorted invariant holds for every representable input: NaN is a
+// regular, deduplicated key that Lookup/Delete address and that no
+// range with a non-NaN lower bound ever returns.
 package btree
 
 import (
@@ -59,6 +74,10 @@ func New[V cmp.Ordered]() *Index[V] { return &Index[V]{} }
 // (value, node) pairs in O(n log n) time. The pairs slice is left
 // untouched. Calling BulkLoad on a non-empty index discards previous
 // data. Returns [ErrMismatchedLengths] when len(values) != len(nodes).
+// Values are sorted and deduplicated under the total order described
+// in the package documentation, so NaN inputs collapse into one
+// leading entry instead of corrupting (or, before task #1354, hanging)
+// the load.
 func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 	if len(values) != len(nodes) {
 		return ErrMismatchedLengths
@@ -71,12 +90,16 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 	for k := range values {
 		pairs[k] = pair{v: values[k], n: nodes[k]}
 	}
-	sort.Slice(pairs, func(a, b int) bool { return pairs[a].v < pairs[b].v })
+	// cmp.Less / cmp.Compare (not raw < / ==): the sort comparator must
+	// be a total order or NaN inputs land in unspecified positions, and
+	// the grouping loop below would never advance past a NaN pair
+	// (NaN == NaN is false), appending empty entries forever.
+	sort.Slice(pairs, func(a, b int) bool { return cmp.Less(pairs[a].v, pairs[b].v) })
 	out := make([]entry[V], 0, len(pairs))
 	for k := 0; k < len(pairs); {
 		j := k
 		bm := roaring64.New()
-		for j < len(pairs) && pairs[j].v == pairs[k].v {
+		for j < len(pairs) && equalKeys(pairs[j].v, pairs[k].v) {
 			bm.Add(uint64(pairs[j].n))
 			j++
 		}
@@ -89,12 +112,46 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 	return nil
 }
 
-// Insert records that node carries value.
+// isNaN reports whether v is an IEEE 754 NaN — the only value that
+// differs from itself. For non-floating-point instantiations the
+// comparison is constant-false and the compiler eliminates it.
+//
+//nolint:gocritic // dupSubExpr: v != v is the canonical generic NaN test (mirrors stdlib cmp.isNaN).
+func isNaN[V cmp.Ordered](v V) bool { return v != v }
+
+// equalKeys reports whether two keys are equal under the total order:
+// IEEE == everywhere, except that any two NaNs are equal.
+func equalKeys[V cmp.Ordered](a, b V) bool {
+	if isNaN(a) || isNaN(b) {
+		return isNaN(a) && isNaN(b)
+	}
+	return a == b
+}
+
+// Lower-bound search strategy (shared by every method below): the
+// entries array is strictly ascending under the [cmp.Compare] total
+// order, so the optional NaN entry — the minimum of that order, with
+// all NaN bit patterns deduplicated — can only sit at index 0. A NaN
+// probe therefore needs no search: its lower bound is always 0, which
+// each call site gets for free from the zero value of idx/start. For
+// a non-NaN probe the raw >= predicate coincides with the total order
+// over this array — it is false for the leading NaN entry exactly as
+// it is for smaller real keys — so the hot sort.Search loop keeps the
+// single-comparison probe the pre-#1354 code had, with no per-probe
+// NaN checks and no extra call frame.
+
+// Insert records that node carries value. Keys follow the total
+// order described in the package documentation, so a floating-point
+// NaN is a valid key: it sorts before every other value and all NaN
+// bit patterns share one entry.
 func (i *Index[V]) Insert(value V, node graph.NodeID) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	idx := sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	if idx < len(i.entries) && i.entries[idx].value == value {
+	var idx int
+	if !isNaN(value) {
+		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
+	}
+	if idx < len(i.entries) && equalKeys(i.entries[idx].value, value) {
 		i.entries[idx].bm.Add(uint64(node))
 		return
 	}
@@ -107,12 +164,16 @@ func (i *Index[V]) Insert(value V, node graph.NodeID) {
 
 // Delete removes node from the set associated with value. No-op when
 // absent. The (value, bitmap) entry is removed when its bitmap
-// becomes empty.
+// becomes empty. Like [Index.Insert], value is matched under the
+// total order, so Delete addresses a NaN-keyed entry.
 func (i *Index[V]) Delete(value V, node graph.NodeID) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	idx := sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	if idx >= len(i.entries) || i.entries[idx].value != value {
+	var idx int
+	if !isNaN(value) {
+		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
+	}
+	if idx >= len(i.entries) || !equalKeys(i.entries[idx].value, value) {
 		return
 	}
 	i.entries[idx].bm.Remove(uint64(node))
@@ -125,16 +186,21 @@ func (i *Index[V]) Delete(value V, node graph.NodeID) {
 // not less than lo and not greater than hi, plus that value. The
 // second return value reports whether any match exists. It is the
 // allocation-free way to peek the first row of a range scan; the
-// full union of matches is available via [Index.Range].
+// full union of matches is available via [Index.Range]. Bounds
+// compare under the total order, so lo = NaN admits a NaN key while
+// any non-NaN lo excludes it.
 func (i *Index[V]) RangeFirst(lo, hi V) (V, graph.NodeID, bool) {
 	var zeroV V
-	if hi < lo {
+	if cmp.Less(hi, lo) {
 		return zeroV, 0, false
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	start := sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
-	if start >= len(i.entries) || i.entries[start].value > hi {
+	var start int
+	if !isNaN(lo) {
+		start = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
+	}
+	if start >= len(i.entries) || cmp.Less(hi, i.entries[start].value) {
 		return zeroV, 0, false
 	}
 	first := i.entries[start].bm.Minimum()
@@ -142,40 +208,53 @@ func (i *Index[V]) RangeFirst(lo, hi V) (V, graph.NodeID, bool) {
 }
 
 // Range returns a Roaring bitmap that is the union of the per-value
-// bitmaps for every key v with lo <= v <= hi. The returned bitmap is
-// freshly allocated; the caller owns it.
+// bitmaps for every key v with lo <= v <= hi under the total order.
+// The returned bitmap is freshly allocated; the caller owns it. A NaN
+// key is below every other value, so any range with a non-NaN lo —
+// including Range(math.Inf(-1), math.Inf(1)) — never returns it.
 func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 	out := roaring64.New()
-	if hi < lo {
+	if cmp.Less(hi, lo) {
 		return out
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	start := sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
-	for k := start; k < len(i.entries) && i.entries[k].value <= hi; k++ {
+	var start int
+	if !isNaN(lo) {
+		start = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
+	}
+	for k := start; k < len(i.entries) && !cmp.Less(hi, i.entries[k].value); k++ {
 		out.Or(i.entries[k].bm)
 	}
 	return out
 }
 
 // Lookup returns a clone of the bitmap associated with value, or an
-// empty bitmap when value is unknown.
+// empty bitmap when value is unknown. Matching uses the total order,
+// so Lookup(NaN) returns the NaN entry when one exists.
 func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	idx := sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	if idx >= len(i.entries) || i.entries[idx].value != value {
+	var idx int
+	if !isNaN(value) {
+		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
+	}
+	if idx >= len(i.entries) || !equalKeys(i.entries[idx].value, value) {
 		return roaring64.New()
 	}
 	return i.entries[idx].bm.Clone()
 }
 
-// Cardinality returns the number of NodeIDs associated with value.
+// Cardinality returns the number of NodeIDs associated with value,
+// matched under the total order (see [Index.Lookup]).
 func (i *Index[V]) Cardinality(value V) uint64 {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	idx := sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	if idx >= len(i.entries) || i.entries[idx].value != value {
+	var idx int
+	if !isNaN(value) {
+		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
+	}
+	if idx >= len(i.entries) || !equalKeys(i.entries[idx].value, value) {
 		return 0
 	}
 	return i.entries[idx].bm.GetCardinality()
@@ -392,6 +471,17 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 // extra sort pass; the loader is therefore O(n) instead of
 // [Index.BulkLoad]'s O(n log n).
 //
+// Keys must be STRICTLY ascending under the [cmp.Compare] total order
+// — the only shape [Index.Serialize] produces. A payload that
+// violates it fails fail-stop with [index.ErrIndexCorrupted] rather
+// than load an index whose binary searches would silently miss live
+// keys. In particular, a float64 payload written before the
+// total-order fix (task #1354) that carries a NaN key after a real
+// key, or duplicate NaN entries, is rejected; the index is derived
+// data, so the caller recovers by rebuilding it from the primary
+// graph. A single NaN entry in the leading position is the legitimate
+// post-fix encoding and loads normally.
+//
 //nolint:gocyclo // index deserialize: header + per-entry decode + per-step bounds checks
 func (i *Index[V]) Deserialize(r io.Reader) error {
 	all, err := io.ReadAll(r)
@@ -452,8 +542,8 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		if derr != nil {
 			return derr
 		}
-		if hasPrev && v < prev {
-			return fmt.Errorf("%w: keys not in ascending order",
+		if hasPrev && cmp.Compare(v, prev) <= 0 {
+			return fmt.Errorf("%w: keys not in strictly ascending order",
 				index.ErrIndexCorrupted)
 		}
 		prev = v

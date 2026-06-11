@@ -183,61 +183,62 @@ func TestBTree_Float_InfLookup(t *testing.T) {
 	})
 }
 
-// TestBTree_Float_NaNBehaviour documents and verifies the observed NaN
-// handling in the BTree index.  The test is designed to pass regardless
-// of whether NaN is treated as present or absent — it only enforces that
-// the index does not panic.
+// TestBTree_Float_NaNBehaviour verifies the NaN key contract of the
+// BTree index (task #1354). Keys are ordered by the cmp.Compare total
+// order, under which a NaN is a first-class key:
 //
-// Observed behaviour (verified empirically):
+//  1. Insert(NaN, 99) stores a regular entry that sorts before every
+//     other value, including math.Inf(-1). The sorted invariant the
+//     binary searches depend on holds, so the finite and infinite
+//     keys inserted before and after remain fully queryable.
 //
-//  1. Insert(NaN, 99) succeeds without panic.
-//     sort.Search uses "entries[k].value >= NaN", which is false for every k
-//     (IEEE 754: any comparison involving NaN returns false), so Search
-//     returns len(entries) and NaN is appended at the end as a new entry.
+//  2. Lookup(NaN) addresses that entry: every NaN bit pattern
+//     compares equal to every other NaN under cmp.Compare, so the key
+//     is retrievable, and repeated NaN inserts deduplicate into the
+//     single entry instead of growing without bound.
 //
-//  2. Lookup(NaN) returns an empty bitmap.
-//     sort.Search finds no entry where entries[k].value >= NaN (always false),
-//     so it returns len(entries), which is out of bounds → empty result.
-//     The dedup check "entries[idx].value == NaN" is never reached.
-//
-//  3. Range(math.Inf(-1), math.Inf(+1)) does NOT include NaN.
-//     The loop condition "entries[k].value <= +Inf" is false for NaN
-//     (IEEE 754: NaN <= anything = false), so the NaN entry at the end is
-//     never visited.  All 9 base nodeIDs (0–8) are still returned; NaN
-//     (nodeID 99) is absent from the result.
-//
-//  4. NaN entries are never deduplicated: NaN != NaN is true, so each
-//     Insert(NaN, ...) creates a separate entry.  Callers must avoid
-//     repeated NaN insertions to prevent unbounded growth.
+//  3. Range(math.Inf(-1), math.Inf(+1)) does NOT include NaN: the NaN
+//     entry sorts below the -Inf lower bound. All 9 base nodeIDs are
+//     returned; the NaN-keyed nodes are absent.
 func TestBTree_Float_NaNBehaviour(t *testing.T) {
 	t.Parallel()
 
 	idx := buildBaseIndex(t)
 
-	// Step 1: insert NaN — must not panic.
+	// Step 1: insert NaN — a regular key under the total order.
 	nan := math.NaN()
 	idx.Insert(nan, 99)
 
-	// Step 2: Lookup(NaN) must return an empty bitmap (no panic, no match).
-	bm := idx.Lookup(nan)
-	if bm.GetCardinality() != 0 {
-		// Document unexpected cardinality without failing hard — the contract
-		// only guarantees no panic; NaN lookup semantics are best-effort.
-		t.Logf("Lookup(NaN) cardinality = %d (expected 0 based on observed behaviour)", bm.GetCardinality())
+	// Base corpus has 8 distinct entries (±0.0 merged); NaN adds one.
+	if got := idx.DistinctValues(); got != 9 {
+		t.Fatalf("DistinctValues after NaN insert = %d, want 9", got)
 	}
 
-	// Step 3: Range(-Inf, +Inf) still returns all 9 base nodeIDs; nodeID 99
-	// (NaN) is not reachable via the loop condition.
+	// Step 2: Lookup(NaN) addresses the NaN entry.
+	bm := idx.Lookup(nan)
+	if bm.GetCardinality() != 1 || !bm.Contains(99) {
+		t.Fatalf("Lookup(NaN) = cardinality %d, want exactly nodeID 99", bm.GetCardinality())
+	}
+
+	// Repeated NaN inserts (any bit pattern) deduplicate into the entry.
+	idx.Insert(math.Float64frombits(0x7FF8000000000001), 100)
+	if got := idx.DistinctValues(); got != 9 {
+		t.Fatalf("DistinctValues after second NaN insert = %d, want 9 (dedup)", got)
+	}
+	if got := idx.Cardinality(nan); got != 2 {
+		t.Fatalf("Cardinality(NaN) = %d, want 2", got)
+	}
+
+	// Step 3: Range(-Inf, +Inf) returns all 9 base nodeIDs and no
+	// NaN-keyed node — NaN sorts below the -Inf lower bound.
 	full := idx.Range(math.Inf(-1), math.Inf(+1))
 	for id := uint64(0); id < 9; id++ {
 		if !full.Contains(id) {
 			t.Errorf("Range(-Inf,+Inf) after NaN insert: missing nodeID %d", id)
 		}
 	}
-	if full.Contains(99) {
-		t.Log("Range(-Inf,+Inf): nodeID 99 (NaN) is present — unexpected but not a hard failure")
-	} else {
-		t.Log("Range(-Inf,+Inf): nodeID 99 (NaN) correctly absent (NaN<=+Inf is false)")
+	if full.Contains(99) || full.Contains(100) {
+		t.Error("Range(-Inf,+Inf): NaN-keyed nodes must be absent (NaN < -Inf in the total order)")
 	}
 }
 
