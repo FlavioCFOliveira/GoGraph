@@ -1429,23 +1429,49 @@ func (e *Engine) appendConstraintOp(ctx context.Context, opKind txn.OpKind, kind
 // pre-existing data on CREATE CONSTRAINT and to re-seed a UNIQUE value-set on
 // recovery. The scan is O(N) over interned nodes; CREATE CONSTRAINT is a rare
 // schema operation, so the cost is acceptable and bounded by the graph size.
+//
+// The scan is two-phase to preserve liveness under concurrent writers (task
+// #1339): [graph.Mapper.Walk] holds each shard's read lock while iterating
+// that shard, and [lpg.Graph.HasNodeLabel] / [lpg.Graph.GetNodeProperty]
+// re-enter [graph.Mapper.Lookup] on the very same shard the walked key lives
+// in. With a concurrent writer's [graph.Mapper.Intern] queued on that shard's
+// write lock, sync.RWMutex stops admitting new readers, so a nested Lookup
+// issued from inside the Walk callback blocks forever — deadlocking the
+// writer, the scan, and every future operation on the shard. Phase 1 therefore
+// only snapshots the (id, key) pairs under the shard locks; phase 2 resolves
+// tombstone, label, and property state after every shard lock is released. The
+// keys are interned and immutable, so resolving them outside the walk is safe.
 func (e *Engine) scanLabelProperty(label, prop string) (values []lpg.PropertyValue, anyNull bool) {
 	mapper := e.g.AdjList().Mapper()
+
+	// Phase 1 — snapshot the interned nodes. The callback must not touch any
+	// other graph state (see the deadlock note above).
+	type nodeRef struct {
+		id  graph.NodeID
+		key string
+	}
+	refs := make([]nodeRef, 0, mapper.Len())
 	mapper.Walk(func(id graph.NodeID, key string) bool {
-		if e.g.IsTombstoned(id) {
-			return true
-		}
-		if !e.g.HasNodeLabel(key, label) {
-			return true
-		}
-		v, ok := e.g.GetNodeProperty(key, prop)
-		if !ok {
-			anyNull = true
-			return true
-		}
-		values = append(values, v)
+		refs = append(refs, nodeRef{id: id, key: key})
 		return true
 	})
+
+	// Phase 2 — resolve graph state with no shard lock held.
+	for i := range refs {
+		r := refs[i]
+		if e.g.IsTombstoned(r.id) {
+			continue
+		}
+		if !e.g.HasNodeLabel(r.key, label) {
+			continue
+		}
+		v, ok := e.g.GetNodeProperty(r.key, prop)
+		if !ok {
+			anyNull = true
+			continue
+		}
+		values = append(values, v)
+	}
 	return values, anyNull
 }
 

@@ -291,6 +291,16 @@ func (m *Mapper[N]) Resolve(id NodeID) (N, bool) {
 // also block (the read lock is held for the duration of the inner
 // loop). Use Walk for bulk export where many Resolves would
 // otherwise dominate; prefer Resolve for individual lookups.
+//
+// The callback must not re-enter this Mapper — directly or through
+// any structure layered above it (Lookup, Intern, Resolve, Len) —
+// while a concurrent writer may be running: a key walked in shard S
+// re-locks shard S on Lookup, and once a writer's Intern queues on
+// that shard's write lock, sync.RWMutex admits no new readers, so
+// the nested read lock deadlocks the callback, the writer, and every
+// future operation on the shard. Snapshot the (NodeID, value) pairs
+// inside the callback and resolve any dependent state after Walk
+// returns instead (see cypher task #1339).
 func (m *Mapper[N]) Walk(fn func(NodeID, N) bool) {
 	for shardIdx := uint64(0); shardIdx < mapperShardCount; shardIdx++ {
 		s := &m.shards[shardIdx]
