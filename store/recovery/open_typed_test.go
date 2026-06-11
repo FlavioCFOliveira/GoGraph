@@ -460,7 +460,10 @@ func TestOpen_StringInt64_SnapshotSchemaVersion(t *testing.T) {
 }
 
 // TestOpen_NilCodecRejected mirrors [TestOpenWithOptions_NilCodec]
-// for the canonical [Open] entry point.
+// for the canonical [Open] entry point: a nil endpoint Codec is
+// rejected, while a nil WeightCodec is accepted — it selects the
+// codec-only frame layout, mirroring a producer built with
+// [txn.NewStoreWithCodec].
 func TestOpen_NilCodecRejected(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -471,7 +474,7 @@ func TestOpen_NilCodecRejected(t *testing.T) {
 	}
 	if _, err := Open[string, int64](dir, Options[string, int64]{
 		Codec: txn.NewStringCodec(),
-	}); err == nil {
-		t.Fatal("Open with nil weight codec must error")
+	}); err != nil {
+		t.Fatalf("Open with nil weight codec (codec-only mode) must succeed, got: %v", err)
 	}
 }

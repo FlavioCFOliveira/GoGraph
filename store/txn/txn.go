@@ -647,30 +647,32 @@ type Tx[N comparable, W any] struct {
 
 // AddEdge buffers an AddEdge(src, dst, w) operation on the graph.
 //
-// If the store was constructed with a [WeightCodec] (via
-// [NewStoreWithOptions]), the operation is recorded as an
-// [OpAddEdgeWeighted] frame carrying w on commit. If the store has no
-// weight codec, AddEdge accepts a zero-value w (which buffers an
-// [OpAddEdge] frame, producing a zero-weight edge on replay) and
+// The operation is always recorded as a handle-bearing [OpAddEdgeH]
+// frame, so the edge keeps a stable per-edge identity across recovery
+// and replays idempotently over a snapshot that already restored it
+// (no doubled parallel edge on a multigraph). If the store was
+// constructed with a [WeightCodec] (via [NewStoreWithOptions]) the
+// frame carries w; a store without a weight codec (built with
+// [NewStoreWithCodec]) accepts only a zero-value w — the frame omits
+// the weight bytes and replay produces a zero-weight edge — and AddEdge
 // returns [ErrNoWeightCodec] for any non-zero w. Callers needing
 // durable weighted edges must use [NewStoreWithOptions].
 func (t *Tx[N, W]) AddEdge(src, dst N, w W) error {
 	if t.finished {
 		return ErrTxFinished
 	}
+	// The handle is minted now, from the graph's monotone counter, so the
+	// value is fixed in the WAL frame before the commit fsync; replay
+	// re-inserts it via AddEdgeHIfAbsent (idempotent against a snapshot
+	// that already loaded it).
 	if t.store.wcodec == nil {
 		if !isZero(w) {
 			return ErrNoWeightCodec
 		}
-		t.ops = append(t.ops, Op[N, W]{Kind: OpAddEdge, Src: src, Dst: dst})
+		handle := t.store.g.NextEdgeHandle()
+		t.ops = append(t.ops, Op[N, W]{Kind: OpAddEdgeH, Src: src, Dst: dst, Handle: handle})
 		return nil
 	}
-	// Weight-codec store: emit a handle-bearing OpAddEdgeH so the edge keeps
-	// a stable per-edge identity across recovery (Stage 2). The handle is
-	// minted now, from the graph's monotone counter, so the value is fixed
-	// in the WAL frame before the commit fsync; replay re-inserts it via
-	// AddEdgeHIfAbsent (idempotent against a snapshot that already loaded
-	// it). The legacy zero-weight OpAddEdge path above is unchanged.
 	handle := t.store.g.NextEdgeHandle()
 	t.ops = append(t.ops, Op[N, W]{Kind: OpAddEdgeH, Src: src, Dst: dst, Weight: w, Handle: handle})
 	return nil

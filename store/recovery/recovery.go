@@ -160,9 +160,12 @@ func tailErrIsCorruption(err error) bool {
 }
 
 // Options carries the codecs used by [Open] and [OpenCtx] plus the
-// per-transaction op cap. Codec (endpoint identifiers) and WeightCodec (edge
-// weights for [txn.OpAddEdgeWeighted] records) are required and must not be
-// nil; MaxTxnOps is optional and defaults to a finite bound.
+// per-transaction op cap. Codec (endpoint identifiers) is required and must
+// not be nil; WeightCodec (edge weights for [txn.OpAddEdgeWeighted] and
+// weighted [txn.OpAddEdgeH] records) mirrors the producer store — nil for a
+// codec-only store ([txn.NewStoreWithCodec]), non-nil for a weight-codec
+// store ([txn.NewStoreWithOptions]); MaxTxnOps is optional and defaults to a
+// finite bound.
 //
 // Keeping the recovery-argument type local to the recovery package spares
 // callers the awkward cross-package import of `txn.Options` purely to feed
@@ -174,7 +177,11 @@ func tailErrIsCorruption(err error) bool {
 type Options[N comparable, W any] struct {
 	// Codec serialises endpoint identifiers. Must not be nil.
 	Codec txn.Codec[N]
-	// WeightCodec serialises edge weights. Must not be nil.
+	// WeightCodec serialises edge weights. It must mirror the producer
+	// store's configuration: nil for a codec-only store
+	// ([txn.NewStoreWithCodec], whose frames carry no weight bytes and
+	// replay with the zero value of W), non-nil for a weight-codec store
+	// ([txn.NewStoreWithOptions]).
 	WeightCodec txn.WeightCodec[W]
 	// MaxTxnOps bounds the number of ops recovery buffers for a single v3
 	// transaction before its [txn.OpCommit] marker. A transaction whose
@@ -561,9 +568,11 @@ func accumulateConstraintOp(cs *constraintSet, op *Op) (isConstraint, ok bool) {
 // before the call returns (see [TestRecovery_IndexesSurviveRestart_WiredEarly]
 // for the recommended startup ordering).
 //
-// Both opts.Codec and opts.WeightCodec must be non-nil. Pre-T8 WALs
-// that contain only [txn.OpAddEdge] frames replay identically to the
-// codec-only path: the apply phase writes the zero value of W for
+// opts.Codec must be non-nil. opts.WeightCodec mirrors the producer
+// store: nil for a codec-only store ([txn.NewStoreWithCodec]), non-nil
+// for a weight-codec store ([txn.NewStoreWithOptions]). Pre-T8 WALs
+// that contain only [txn.OpAddEdge] frames replay identically under
+// either setting: the apply phase writes the zero value of W for
 // each unweighted record. Mixed WALs preserve weights for
 // [txn.OpAddEdgeWeighted] frames and apply zero for the unweighted
 // ones — the forward-compatibility contract documented at
@@ -603,10 +612,6 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 	if opts.Codec == nil {
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")
-	}
-	if opts.WeightCodec == nil {
-		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
-		return Result[N, W]{}, errors.New("recovery: nil weight codec")
 	}
 	res, err := openCodec[N, W](ctx, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
 	if err != nil {
@@ -1273,40 +1278,62 @@ func trailingHandle(rest []byte) (uint64, bool) {
 }
 
 // applyAddEdgeH applies an [txn.OpAddEdgeH] frame. src and dst were already
-// codec-decoded by the caller; rest is the body after them: the
-// weighted-edge tail (weight + uint16 label) followed by the 8-byte stable
-// handle. The edge is inserted via [lpg.Graph.AddEdgeHIfAbsent] so a
-// snapshot that already loaded this handle (and any earlier replayed frame)
-// makes the replay idempotent — no doubled parallel edge. The handle
-// high-water counter is re-seeded so a post-recovery edge creation never
-// re-mints a live handle (invariant I5).
+// codec-decoded by the caller; rest is the body after them: an optional
+// weight (present only when the producer store had a [txn.WeightCodec]),
+// then a uint16-length-prefixed label (always empty for an edge add),
+// then the 8-byte stable handle. The edge is inserted via
+// [lpg.Graph.AddEdgeHIfAbsent] so a snapshot that already loaded this
+// handle (and any earlier replayed frame) makes the replay idempotent —
+// no doubled parallel edge. The handle high-water counter is re-seeded so
+// a post-recovery edge creation never re-mints a live handle (invariant I5).
 //
-// A nil weight codec cannot decode the weight payload, so the frame is
-// rejected (the same fail-stop the OpAddEdgeWeighted path takes).
+// A nil wcodec mirrors a codec-only producer ([txn.NewStoreWithCodec]):
+// the frame carries no weight bytes and the edge replays with the zero
+// value of W. A non-nil wcodec first tries the weighted layout; when that
+// does not parse exactly — the frame was written by a codec-only store but
+// is being recovered by a caller that passes a weight codec (every caller
+// had to before nil was accepted) — it falls back to the weight-less
+// layout. The two layouts cannot be confused: the exact-consume check in
+// edgeHTail leaves a weight-less frame with fewer bytes after a weight
+// decode than the mandatory label-prefix + handle tail requires.
 func applyAddEdgeH[N comparable, W any](g *lpg.Graph[N, W], src, dst N, rest []byte, wcodec txn.WeightCodec[W]) bool {
-	if wcodec == nil {
-		metrics.IncCounter("store.recovery.applyOp.fallbackZeroWeight", 1)
-		return false
+	if wcodec != nil {
+		if weight, tail, err := wcodec.Decode(rest); err == nil {
+			if handle, ok := edgeHTail(tail); ok {
+				return insertEdgeH(g, src, dst, weight, handle)
+			}
+		}
+		// Weighted layout rejected; fall through to the codec-only layout.
 	}
-	weight, rest, err := wcodec.Decode(rest)
-	if err != nil {
-		return false
-	}
-	// uint16 label length (always 0 for an edge add) then label bytes.
-	if len(rest) < 2 {
-		return false
-	}
-	n := binary.LittleEndian.Uint16(rest)
-	rest = rest[2:]
-	if uint64(len(rest)) < uint64(n) {
-		return false
-	}
-	rest = rest[n:]
-	handle, ok := trailingHandle(rest)
+	var zero W
+	handle, ok := edgeHTail(rest)
 	if !ok {
 		return false
 	}
-	if _, err := g.AddEdgeHIfAbsent(src, dst, weight, handle); err != nil {
+	return insertEdgeH(g, src, dst, zero, handle)
+}
+
+// edgeHTail parses the mandatory tail of an [txn.OpAddEdgeH] body: a
+// uint16-length-prefixed label followed by the 8-byte stable handle. The
+// tail must consume rest exactly — an OpAddEdgeH body ends at the handle —
+// which is what lets [applyAddEdgeH] discriminate the weighted layout from
+// the weight-less codec-only layout deterministically.
+func edgeHTail(rest []byte) (uint64, bool) {
+	if len(rest) < 2 {
+		return 0, false
+	}
+	n := binary.LittleEndian.Uint16(rest)
+	rest = rest[2:]
+	if uint64(len(rest)) != uint64(n)+8 {
+		return 0, false
+	}
+	return trailingHandle(rest[n:])
+}
+
+// insertEdgeH performs the idempotent handle-stamped edge insert shared by
+// both [applyAddEdgeH] layouts and re-seeds the handle high-water counter.
+func insertEdgeH[N comparable, W any](g *lpg.Graph[N, W], src, dst N, w W, handle uint64) bool {
+	if _, err := g.AddEdgeHIfAbsent(src, dst, w, handle); err != nil {
 		metrics.IncCounter("store.recovery.applyOp.addEdgeErrors", 1)
 		return false
 	}

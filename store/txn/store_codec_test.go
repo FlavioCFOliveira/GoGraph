@@ -56,8 +56,10 @@ func TestNewStoreWithCodec_EmitsV3(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	// Two frames: the OpAddEdge op then the OpCommit marker.
-	want := []byte{byte(OpAddEdge), byte(OpCommit)}
+	// Two frames: the handle-bearing OpAddEdgeH op (the codec-only
+	// AddEdge path mints a stable handle so replay over a snapshot is
+	// idempotent) then the OpCommit marker.
+	want := []byte{byte(OpAddEdgeH), byte(OpCommit)}
 	if len(kinds) != len(want) {
 		t.Fatalf("frame count = %d, want %d", len(kinds), len(want))
 	}
