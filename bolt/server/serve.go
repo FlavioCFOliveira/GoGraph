@@ -182,12 +182,18 @@ type Options struct {
 	// Closer, when non-nil, is the store-level teardown owner for the
 	// durability stack backing this server's engine — typically a
 	// *[github.com/FlavioCFOliveira/GoGraph/store.DB] bundling the WAL writer
-	// and the background checkpointer. [Server.Shutdown] closes it AFTER it has
+	// and the background checkpointer. The server closes it AFTER it has
 	// drained every active connection, so it runs the one crash-safe teardown
 	// order (stop the checkpoint goroutine, then close the WAL) only once no
-	// in-flight transaction can still be writing. Leave it nil for a store-less
-	// engine or when the embedder tears the durability stack down itself; the
-	// server then closes nothing beyond its connections.
+	// in-flight transaction can still be writing. Both documented stop
+	// mechanisms reach that teardown: [Server.Shutdown] closes it on its
+	// drain-success branch, and [Server.Serve] closes it on its own exit path
+	// once its connection drain completes (e.g. when the Serve context is
+	// cancelled). The close is guarded by a [sync.Once] inside the server, so
+	// the closer's Close runs exactly once regardless of which path wins or
+	// whether both run; it need not be idempotent itself. Leave it nil for a
+	// store-less engine or when the embedder tears the durability stack down
+	// itself; the server then closes nothing beyond its connections.
 	Closer io.Closer
 }
 
@@ -209,11 +215,19 @@ type Server struct {
 	opts   Options
 	sem    chan struct{} // capacity == MaxConnections
 	log    *slog.Logger
-	closer io.Closer // optional store-level teardown owner; closed after drain in Shutdown
-	mu     sync.Mutex
-	ln     net.Listener // guarded by mu; non-nil while Serve is running
-	wg     sync.WaitGroup
-	cancel context.CancelFunc // guarded by mu; stops the accept loop
+	closer io.Closer // optional store-level teardown owner; closed after drain by Serve's exit path or Shutdown
+	// closeOnce guards the one-and-only Close of closer: Serve's drained-exit
+	// path and Shutdown's drain-success branch may both reach closeOwned (ctx
+	// cancellation plus an explicit Shutdown, or a double Shutdown), and the
+	// closer must be torn down exactly once, race-free. closeErr caches the
+	// result so every caller observes the same outcome; sync.Once's
+	// happens-before guarantee makes the cached read race-free.
+	closeOnce sync.Once
+	closeErr  error
+	mu        sync.Mutex
+	ln        net.Listener // guarded by mu; non-nil while Serve is running
+	wg        sync.WaitGroup
+	cancel    context.CancelFunc // guarded by mu; stops the accept loop
 }
 
 // NewServer creates a Server backed by eng. Zero-value Options fields are
@@ -279,7 +293,19 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 // Serve accepts connections from ln until ctx is cancelled or Shutdown is
 // called. It blocks until all active connections have closed. The provided
 // ln is closed by Serve when the accept loop exits.
-func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+//
+// Once every connection has drained, Serve also closes the owned
+// [Options.Closer] (the store-level teardown owner for the durability stack,
+// typically a *[github.com/FlavioCFOliveira/GoGraph/store.DB]), so stopping
+// the server by cancelling ctx tears the WAL/checkpoint stack down in its
+// crash-safe order exactly as [Server.Shutdown] does — no checkpoint goroutine
+// or WAL handle outlives Serve. The close happens strictly after the drain, so
+// it can never race an in-flight write, and it is once-guarded, so a
+// subsequent (or concurrent) Shutdown does not close the closer again. A
+// failed close is returned (joined with any accept error) rather than
+// swallowed. After Serve returns, the durability stack is closed: the Server
+// must not be reused to serve writes again.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) (err error) {
 	acceptCtx, cancel := context.WithCancel(ctx)
 
 	s.mu.Lock()
@@ -301,6 +327,15 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		cancel()       // signals the close goroutine to run
 		closeWG.Wait() // wait for the close goroutine to finish
 		s.wg.Wait()    // wait for all connection goroutines to finish
+		// Every connection has finished, so no transaction can still be
+		// writing: tear the owned durability stack down in its crash-safe
+		// order (stop the checkpoint goroutine, then close the WAL). This is
+		// the same post-drain point Shutdown's drain-success branch reaches;
+		// the once-guard in closeOwned keeps the two paths from double-closing.
+		// Without this, stopping the server via ctx cancellation (a documented
+		// mechanism) leaked the checkpoint goroutine and never closed the WAL
+		// (#1351). A close failure must surface, not be swallowed.
+		err = errors.Join(err, s.closeOwned())
 		s.mu.Lock()
 		s.ln = nil
 		s.cancel = nil
@@ -393,10 +428,15 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 // close. The closer is therefore NOT torn down on the timeout or
 // ctx-cancellation paths: an undrained connection may still hold a transaction,
 // so tearing the WAL down underneath it is exactly what must be avoided; in
-// those cases the connections are abandoned and the closer is left for the
-// process exit (the goroutine/handle reclamation is the OS's at that point).
-// The closer's error is joined with any drain error so a failed WAL close is
-// surfaced rather than swallowed.
+// those cases the connections are abandoned. A still-running [Server.Serve]
+// remains blocked on the same drain, and when the abandoned connections do
+// eventually finish (idle timeout, transaction reap, client exit), Serve's own
+// exit path performs the post-drain close — so the closer is torn down as soon
+// as a full drain truly completes, and is left for process exit only if it
+// never does. The close is once-guarded: whichever of Serve or Shutdown drains
+// first runs it, and the other observes the same cached result, so the closer
+// is never closed twice (including on a double Shutdown). A failed WAL close
+// is surfaced rather than swallowed.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	ln := s.ln
@@ -441,19 +481,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // closeOwned closes the optional store-level teardown owner ([Options.Closer]),
-// if any. It is called only from the fully-drained Shutdown path, where no
-// connection — and therefore no transaction — can still be writing, so the
-// closer's WAL teardown cannot race an in-flight write. A nil closer is a
-// no-op. The closer (a *store.DB) is itself idempotent, so a later process-exit
-// close is harmless.
+// if any. It is called only from fully-drained stop paths — Serve's deferred
+// exit cleanup (after its connection WaitGroup drains) and Shutdown's
+// drain-success branch — where no connection, and therefore no transaction,
+// can still be writing, so the closer's WAL teardown cannot race an in-flight
+// write. A nil closer is a no-op. The close body runs exactly once under
+// s.closeOnce (the two paths can both be reached: ctx cancellation plus an
+// explicit Shutdown, or a double Shutdown); every call returns the same cached
+// result, with sync.Once's happens-before edge making the cached read
+// race-free. closeOwned is safe for concurrent use.
 func (s *Server) closeOwned() error {
 	if s.closer == nil {
 		return nil
 	}
-	if err := s.closer.Close(); err != nil {
-		return fmt.Errorf("bolt: shutdown: close store: %w", err)
-	}
-	return nil
+	s.closeOnce.Do(func() {
+		if err := s.closer.Close(); err != nil {
+			s.closeErr = fmt.Errorf("bolt: close owned store: %w", err)
+		}
+	})
+	return s.closeErr
 }
 
 // handleConn runs the full Bolt lifecycle for one accepted connection.

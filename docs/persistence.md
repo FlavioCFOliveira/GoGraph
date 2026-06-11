@@ -909,24 +909,36 @@ an `io.Closer` on shutdown.
 ### Bolt server adoption
 
 A `bolt/server.Server` backed by a WAL-enabled engine takes the composed
-owner via `Options.Closer io.Closer` (typically a `*store.DB`).
-`Server.Shutdown` closes it **after** it has drained every active
-connection — so the WAL/checkpoint teardown runs only once no in-flight
-transaction can still be writing:
+owner via `Options.Closer io.Closer` (typically a `*store.DB`). The
+server closes it **after** it has drained every active connection — so
+the WAL/checkpoint teardown runs only once no in-flight transaction can
+still be writing. Both documented stop mechanisms reach that teardown:
+`Server.Shutdown` closes it on its drain-success branch, and
+`Server.Serve` closes it on its own exit path once its connection drain
+completes (e.g. when the `Serve` context is cancelled):
 
 ```go
 db := store.New(wlog, store.WithCheckpointer(cp))
 srv, _ := server.NewServer(eng, server.Options{Auth: auth, Closer: db})
 // …
 _ = srv.Shutdown(ctx) // drains connections, THEN tears the durability stack down
+// — or, equivalently, cancel the ctx passed to srv.Serve: once Serve's
+// drain completes, its exit path performs the same post-drain teardown.
 ```
+
+The close is once-guarded inside the server: whichever of `Serve` or
+`Shutdown` drains first runs it, and the other observes the same cached
+result, so the closer is never closed twice (including on a double
+`Shutdown`) and need not be idempotent itself.
 
 The closer is **not** torn down on `Shutdown`'s drain-timeout or
 context-cancellation paths: an undrained connection may still hold an
 open transaction, and closing the WAL underneath it is exactly what the
-ordering rule forbids. In those cases the connections are abandoned and
-the closer is left for process exit. Because `store.DB.Close` is
-idempotent, a later process-exit close is harmless.
+ordering rule forbids. In those cases the connections are abandoned; a
+still-running `Serve` remains blocked on the same drain and performs the
+post-drain close when the abandoned connections eventually finish (idle
+timeout, transaction reap, client exit). Only if a full drain never
+completes is the closer left for process exit.
 
 ## Recovery procedure
 
