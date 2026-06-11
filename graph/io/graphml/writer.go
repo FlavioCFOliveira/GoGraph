@@ -75,7 +75,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	if err := encodeNodes(enc, a, maxID); err != nil {
 		return err
 	}
-	if err := encodeEdges(enc, a, maxID); err != nil {
+	if err := encodeEdges(enc, a, maxID, nil); err != nil {
 		return err
 	}
 	if err := enc.EncodeToken(graphStart.End()); err != nil {
@@ -99,7 +99,11 @@ func encodeNodes(enc *xml.Encoder, a *adjlist.AdjList[string, int64], _ uint64) 
 	return encErr
 }
 
-func encodeEdges(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint64) error {
+// encodeEdges emits one <edge> element per adjacency slot whose both
+// endpoints are interned and not in dead. dead holds the tombstoned
+// NodeIDs of an [lpg.Graph]-backed export (nil when the caller has no
+// tombstone knowledge, e.g. the plain adjacency writer).
+func encodeEdges(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint64, dead map[graph.NodeID]struct{}) error {
 	// Pre-resolve every live name in one shard-batched pass so the
 	// inner edge loop pays no per-node Mapper.Resolve cost.
 	names := make([]string, maxID)
@@ -109,6 +113,13 @@ func encodeEdges(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint
 		live[uint64(id)] = true
 		return true
 	})
+	// Tombstoned endpoints are logically removed: clear them from the
+	// live set so neither direction of an incident edge is emitted.
+	for id := range dead {
+		if uint64(id) < maxID {
+			live[uint64(id)] = false
+		}
+	}
 	for id := uint64(0); id < maxID; id++ {
 		if !live[id] {
 			continue

@@ -94,6 +94,10 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 // JSON Lines. Output order is: all node records, then all edge
 // records, then all property records. This ordering ensures that
 // [ReadWithProps] can reconstruct the graph in a single pass.
+//
+// Tombstoned nodes — those removed via [lpg.Graph.RemoveNode] — are
+// excluded, together with every edge and property record referencing
+// them, so an export→import round trip never resurrects deleted data.
 func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) (int, error) {
 	defer metrics.Time("graph.io.jsonl.WriteWithProps")()
 	n, err := WriteWithPropsCtx(context.Background(), w, g)
@@ -126,6 +130,16 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		live[uint64(id)] = true
 		return true
 	})
+	// The Mapper retains tombstoned (logically removed) ids for NodeID
+	// stability; exporting them would resurrect deleted nodes on
+	// re-import. Clear them from the live set once so the node, edge,
+	// and property phases below skip the node and every incident edge
+	// at zero per-record cost.
+	for _, id := range g.TombstonedIDs() {
+		if uint64(id) < maxID {
+			live[uint64(id)] = false
+		}
+	}
 
 	// Phase 1: node records.
 	for id := uint64(0); id < maxID; id++ {

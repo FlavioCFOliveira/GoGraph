@@ -109,6 +109,11 @@ type propKeyDecl struct {
 // of the first value seen for that key. Properties are serialised as
 // <data> child elements of their respective <node> elements.
 // Edge weights are written with the standard id="w" key.
+//
+// Tombstoned nodes — those removed via [lpg.Graph.RemoveNode] — are
+// excluded, together with every incident edge and every <key>
+// declaration only their properties would justify, so an export→import
+// round trip never resurrects deleted data.
 func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) error {
 	defer metrics.Time("graph.io.graphml.WriteWithProps")()
 	err := WriteWithPropsCtx(context.Background(), w, g)
@@ -131,11 +136,26 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 
 	a := g.AdjList()
 
+	// The Mapper retains tombstoned (logically removed) ids for NodeID
+	// stability; exporting them would resurrect deleted nodes on
+	// re-import. Build the removed set once so every pass below skips
+	// them — and their incident edges — with an O(1) lookup.
+	var dead map[graph.NodeID]struct{}
+	if ids := g.TombstonedIDs(); len(ids) > 0 {
+		dead = make(map[graph.NodeID]struct{}, len(ids))
+		for _, id := range ids {
+			dead[id] = struct{}{}
+		}
+	}
+
 	// First pass: collect all property keys and their GraphML types
 	// by walking every node's property bag.
 	// keyMeta maps property-key name → propKeyDecl (first-seen type wins).
 	keyMeta := make(map[string]propKeyDecl)
-	a.Mapper().Walk(func(_ graph.NodeID, name string) bool {
+	a.Mapper().Walk(func(id graph.NodeID, name string) bool {
+		if _, gone := dead[id]; gone {
+			return true
+		}
 		props := g.NodeProperties(name)
 		for k, v := range props {
 			if _, seen := keyMeta[k]; !seen {
@@ -214,7 +234,10 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 
 	// Emit <node> elements with <data> children for each property.
 	var encErr error
-	a.Mapper().Walk(func(_ graph.NodeID, name string) bool {
+	a.Mapper().Walk(func(id graph.NodeID, name string) bool {
+		if _, gone := dead[id]; gone {
+			return true
+		}
 		nodeStart := xml.StartElement{Name: xml.Name{Local: "node"},
 			Attr: []xml.Attr{{Name: xml.Name{Local: "id"}, Value: name}}}
 		if encErr = enc.EncodeToken(nodeStart); encErr != nil {
@@ -244,8 +267,8 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	}
 
 	// Emit <edge> elements using the same batched-name pattern as the
-	// plain writer.
-	if err := encodeEdges(enc, a, uint64(a.MaxNodeID())); err != nil {
+	// plain writer, skipping any edge incident to a tombstoned node.
+	if err := encodeEdges(enc, a, uint64(a.MaxNodeID()), dead); err != nil {
 		return err
 	}
 
