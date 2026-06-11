@@ -551,133 +551,223 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)
 	sess.setDefaultTxTimeout(s.opts.DefaultTxTimeout)
 
-	// Tear the session down on EVERY exit path — clean GOODBYE, client
-	// disconnect, read/write error, idle timeout, or a recovered panic. If an
-	// explicit transaction is still open (the client sent BEGIN but never COMMIT,
-	// ROLLBACK, or RESET before the connection dropped), Close rolls it back,
-	// unwinding its in-memory writes and releasing the engine's single-writer
-	// serialisation IMMEDIATELY. Without this the open transaction — and the
-	// global write lock it holds — would linger until the GC finalised the leaked
-	// Result/transaction, during which every other writer would block (#1309).
-	// Close is registered here (after the conn.Close and panic-recover defers, so
-	// it runs BEFORE them on unwind: roll back the transaction, then let the panic
-	// boundary log, then close the socket) and is idempotent.
-	defer sess.Close()
+	// Per-connection cancellable context. Cancelling it stops any in-flight
+	// statement promptly (the engine honours context cancellation per result
+	// row), so a long-running RUN/PULL no longer keeps consuming CPU/memory
+	// after the client has vanished. It is cancelled on teardown AND as soon as
+	// the reader goroutine below observes the client has gone — even while this
+	// goroutine is blocked executing a statement (task #1348).
+	connCtx, cancelConn := context.WithCancel(ctx)
+
+	// The reader goroutine owns the connection read side and reports each framed
+	// message (or the terminal read error) to the message loop. msgCh is
+	// unbuffered, so the reader runs at most one message ahead of processing;
+	// readerDone is closed when it exits.
+	msgCh := make(chan readResultT)
+	readerDone := make(chan struct{})
+
+	// Tear the connection down on EVERY exit path — clean GOODBYE, client
+	// disconnect, read/write error, idle timeout, or a recovered panic. The
+	// order matters: cancel the connection context first (stopping any in-flight
+	// statement and signalling the reader), then close the socket (unblocking a
+	// reader stuck in ReadMessage), then JOIN the reader goroutine (so it is
+	// never left running at teardown — goleak-clean), then roll back any open
+	// explicit transaction via sess.Close. Rolling back releases the engine's
+	// single-writer serialisation immediately rather than leaving it for GC to
+	// reclaim from a leaked transaction (#1309). sess.Close is idempotent.
+	defer func() {
+		cancelConn()
+		_ = conn.Close() //nolint:errcheck // close error is not actionable on teardown
+		<-readerDone
+		sess.Close()
+	}()
+
+	go func() {
+		defer close(readerDone)
+		pprof.SetGoroutineLabels(
+			pprof.WithLabels(connCtx,
+				pprof.Labels("component", "bolt-server-reader", "remote", remote)),
+		)
+		for {
+			// Idle ConnTimeout bound on the read. The transaction-timeout reaper
+			// is handled by the message loop's timer below, so the reader only
+			// enforces the idle bound here.
+			if s.opts.ConnTimeout > 0 {
+				if err := conn.SetReadDeadline(time.Now().Add(s.opts.ConnTimeout)); err != nil {
+					cancelConn()
+					sendRead(connCtx, msgCh, readResultT{err: err})
+					return
+				}
+			}
+			raw, err := cr.ReadMessage()
+			if err != nil {
+				// Cancel the connection context so an in-flight statement in the
+				// message loop stops promptly, then report the error.
+				cancelConn()
+				sendRead(connCtx, msgCh, readResultT{err: err})
+				return
+			}
+			if !sendRead(connCtx, msgCh, readResultT{raw: raw}) {
+				return // connection torn down; stop reading
+			}
+		}
+	}()
 
 	// ── 3. Message loop ──────────────────────────────────────────────────
-	for {
-		// Reset the per-message I/O deadline (idle ConnTimeout, read + write).
-		if s.opts.ConnTimeout > 0 {
-			if err := conn.SetDeadline(time.Now().Add(s.opts.ConnTimeout)); err != nil {
-				s.log.Debug("bolt: SetDeadline failed, closing",
-					slog.String("remote", remote),
-					slog.String("err", err.Error()))
-				return
+	//
+	// txTimer reaps an idle-but-open explicit transaction at its wall-clock
+	// deadline so it cannot hold the engine writer lock past the timeout while a
+	// client keeps the connection alive with no-op messages (task #1346). It is
+	// armed when a transaction with a finite deadline is open and stopped when
+	// the transaction ends. The reap runs on THIS goroutine (no race with the
+	// single-threaded session) and the connection survives so the client may
+	// RESET — preserving the #1302 behaviour that a statement issued after the
+	// timeout still receives a typed FAILURE.
+	var txTimer *time.Timer
+	var txTimerC <-chan time.Time
+	syncTxTimer := func() {
+		switch {
+		case sess.txActive && !sess.txDeadline.IsZero():
+			if txTimer == nil {
+				d := time.Until(sess.txDeadline)
+				if d < 0 {
+					d = 0
+				}
+				txTimer = time.NewTimer(d)
+				txTimerC = txTimer.C
 			}
-		}
-		// While an explicit transaction is open with a finite deadline, tighten the
-		// READ deadline to that deadline so an idle-but-open transaction is reaped
-		// at its wall-clock timeout regardless of how often the client pings with
-		// no-op messages (the idle ConnTimeout reset above would otherwise let a
-		// pinging client hold the engine's global writer lock indefinitely — a
-		// server-wide write DoS, task #1346). The write deadline keeps the idle
-		// ConnTimeout. When the tightened read deadline fires with the transaction
-		// past its deadline, the reap below rolls the transaction back in this loop
-		// (on this goroutine — no race with the single-threaded session) and the
-		// connection survives for the client to RESET.
-		if sess.txActive && !sess.txDeadline.IsZero() {
-			if err := conn.SetReadDeadline(sess.txDeadline); err != nil {
-				s.log.Debug("bolt: SetReadDeadline failed, closing",
-					slog.String("remote", remote),
-					slog.String("err", err.Error()))
-				return
-			}
-		}
-
-		// Read raw chunked message.
-		raw, err := cr.ReadMessage()
-		if err != nil {
-			// A read timeout while an explicit transaction has exceeded its
-			// deadline is a transaction-timeout, not an idle disconnect: reap the
-			// transaction (roll it back, releasing the engine writer lock, and move
-			// to FAILED) and continue serving so the client may RESET. The reap runs
-			// on this goroutine, so it never races the single-threaded session.
-			if isTimeout(err) && sess.txActive && !sess.txDeadline.IsZero() && !time.Now().Before(sess.txDeadline) {
-				s.log.Warn("bolt: explicit transaction timed out while idle; rolled back to release the writer lock",
-					slog.String("remote", remote))
-				sess.reapTimedOutTx()
-				continue
-			}
-			if errors.Is(err, io.EOF) {
-				s.log.Debug("bolt: connection closed by client", slog.String("remote", remote))
-			} else if !isConnClosed(err) {
-				s.log.Warn("bolt: read error",
-					slog.String("remote", remote),
-					slog.String("err", err.Error()))
-			}
-			return
-		}
-
-		// Decode request from PackStream bytes.
-		dec := packstream.NewDecoder(bytes.NewReader(raw))
-		msg, decErr := proto.DecodeRequest(dec)
-		if decErr != nil {
-			// Send FAILURE for a malformed or undecodable message. The raw
-			// decode error (e.g. "proto: unknown request tag 0x..") leaks
-			// internal framing/protocol detail, so route it through the same
-			// sanitiser used for every other client-visible failure
-			// (session.sanitiseErr): the real cause is logged server-side with
-			// the session ID for correlation, while the client receives a
-			// generic message under the Neo.ClientError.Request.Invalid code.
-			// Behaviour is otherwise unchanged: the loop continues (the Bolt
-			// state machine leaves the session free to send a fresh message or
-			// RESET); the connection is not torn down here.
-			s.log.Warn("bolt: decode error",
-				slog.String("remote", remote),
-				slog.String("err", decErr.Error()))
-			_ = sendResponse(cw, &proto.Failure{
-				Code:    "Neo.ClientError.Request.Invalid",
-				Message: sess.sanitiseErr(decErr),
-			})
-			continue
-		}
-
-		// Dispatch to session. HandleMessage's error return is reserved
-		// for internal-only failures (currently none: every handler
-		// returns (responses, nil), even on the FAILED-state path —
-		// they surface client-visible errors via *proto.Failure inside
-		// 'responses'). The defensive branch below is kept so a future
-		// internal-failure path does not silently disappear into the
-		// success branch; if HandleMessage ever does return a non-nil
-		// error, the loop logs it and synthesises a Bolt FAILURE so
-		// the client is not left waiting on a half-completed message.
-		responses, handlerErr := sess.HandleMessage(ctx, msg)
-		if handlerErr != nil {
-			s.log.Error("bolt: handler error",
-				slog.String("remote", remote),
-				slog.String("err", handlerErr.Error()))
-			_ = sendResponse(cw, &proto.Failure{
-				Code:    "Neo.DatabaseError.General.UnknownError",
-				Message: handlerErr.Error(),
-			})
-		}
-
-		// Send all response messages.
-		for _, resp := range responses {
-			if err := sendResponse(cw, resp); err != nil {
-				s.log.Warn("bolt: write error",
-					slog.String("remote", remote),
-					slog.String("err", err.Error()))
-				return
-			}
-		}
-
-		// Exit the loop when the session transitions to DEFUNCT.
-		if sess.state == StateDefunct {
-			s.log.Debug("bolt: session defunct, closing", slog.String("remote", remote))
-			return
+		case txTimer != nil:
+			txTimer.Stop()
+			txTimer = nil
+			txTimerC = nil
 		}
 	}
+
+	for {
+		select {
+		case <-connCtx.Done():
+			// Server shutdown or teardown: stop serving. The reader observes the
+			// same cancellation and exits; the deferred cleanup joins it.
+			return
+		case <-txTimerC:
+			// The open transaction reached its wall-clock deadline.
+			txTimer = nil
+			txTimerC = nil
+			if sess.txActive {
+				s.log.Warn("bolt: explicit transaction timed out; rolled back to release the writer lock",
+					slog.String("remote", remote))
+				sess.reapTimedOutTx()
+			}
+			continue
+		case res := <-msgCh:
+			if res.err != nil {
+				if errors.Is(res.err, io.EOF) {
+					s.log.Debug("bolt: connection closed by client", slog.String("remote", remote))
+				} else if !isConnClosed(res.err) && !isTimeout(res.err) {
+					s.log.Warn("bolt: read error",
+						slog.String("remote", remote),
+						slog.String("err", res.err.Error()))
+				}
+				return
+			}
+
+			// Decode request from PackStream bytes.
+			dec := packstream.NewDecoder(bytes.NewReader(res.raw))
+			msg, decErr := proto.DecodeRequest(dec)
+			if decErr != nil {
+				// Send a sanitised FAILURE for a malformed/undecodable message; the
+				// raw decode error leaks internal framing detail, so route it
+				// through the same sanitiser as every other client-visible failure.
+				// The connection is not torn down: the client may send a fresh
+				// message or RESET.
+				s.log.Warn("bolt: decode error",
+					slog.String("remote", remote),
+					slog.String("err", decErr.Error()))
+				if !s.writeResponse(cw, conn, &proto.Failure{
+					Code:    "Neo.ClientError.Request.Invalid",
+					Message: sess.sanitiseErr(decErr),
+				}, remote) {
+					return
+				}
+				continue
+			}
+
+			// Dispatch to session. HandleMessage's error return is reserved for
+			// internal-only failures (currently none: handlers surface
+			// client-visible errors via *proto.Failure in 'responses'). The
+			// defensive branch keeps a future internal-failure path from
+			// disappearing silently.
+			responses, handlerErr := sess.HandleMessage(connCtx, msg)
+			if handlerErr != nil {
+				s.log.Error("bolt: handler error",
+					slog.String("remote", remote),
+					slog.String("err", handlerErr.Error()))
+				if !s.writeResponse(cw, conn, &proto.Failure{
+					Code:    "Neo.DatabaseError.General.UnknownError",
+					Message: handlerErr.Error(),
+				}, remote) {
+					return
+				}
+			}
+
+			// Send all response messages.
+			done := false
+			for _, resp := range responses {
+				if !s.writeResponse(cw, conn, resp, remote) {
+					done = true
+					break
+				}
+			}
+			if done {
+				return
+			}
+
+			// Re-arm or stop the transaction-timeout reaper to match the new state.
+			syncTxTimer()
+
+			// Exit the loop when the session transitions to DEFUNCT.
+			if sess.state == StateDefunct {
+				s.log.Debug("bolt: session defunct, closing", slog.String("remote", remote))
+				return
+			}
+		}
+	}
+}
+
+// readResultT is one outcome of a reader-goroutine read handed to the message
+// loop: a framed message (raw, err == nil) or the terminal read error (err).
+type readResultT struct {
+	raw []byte
+	err error
+}
+
+// sendRead delivers a read result to the message loop, or returns false if the
+// connection context was cancelled first (the loop has gone away). It is the
+// reader goroutine's single hand-off point.
+func sendRead(ctx context.Context, ch chan<- readResultT, res readResultT) bool {
+	select {
+	case ch <- res:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// writeResponse sets the per-message write deadline (idle ConnTimeout) and
+// writes one response, logging and returning false on a write error so the
+// caller tears the connection down. It centralises the write-deadline handling
+// the per-read deadline (now owned by the reader goroutine) no longer covers.
+func (s *Server) writeResponse(cw *proto.ChunkedWriter, conn net.Conn, msg any, remote string) bool {
+	if s.opts.ConnTimeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(s.opts.ConnTimeout)) //nolint:errcheck // a write error below tears the conn down anyway
+	}
+	if err := sendResponse(cw, msg); err != nil {
+		s.log.Warn("bolt: write error",
+			slog.String("remote", remote),
+			slog.String("err", err.Error()))
+		return false
+	}
+	return true
 }
 
 // sendResponse encodes a single proto response message and writes it as a
