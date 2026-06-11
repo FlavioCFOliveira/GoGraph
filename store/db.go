@@ -39,15 +39,22 @@
 //
 // # Quiescing writers
 //
-// [DB.Close] does NOT itself drain in-flight transactions: a [txn.Store]
-// transaction holds the store's single-writer semaphore from Begin until
-// Commit/Rollback, and a [cypher.Engine] write holds it for the statement, so
+// A [txn.Store] transaction holds the store's single-writer semaphore from
+// Begin until Commit/Rollback, and a [cypher.Engine] write holds it for the
+// statement. [DB.Close] called concurrently with an in-flight commit would
+// otherwise race [wal.Writer.Close] (flush + fsync + refuse appends) against
+// the commit's append/sync, risking a transaction whose frames were flushed
+// durable by Close while its Commit returned an error — in-memory/durable
+// divergence at shutdown. Wire [WithQuiesce] with
+// [txn.Store.RunUnderCommitLock] so step 3 (the WAL close) runs while holding
+// the store's commit lock: the in-flight commit finishes first, and any commit
+// that starts afterwards gets a clean [wal.ErrWriterClosed].
+//
+// Without [WithQuiesce], [DB.Close] does NOT drain in-flight transactions and
 // the embedder is responsible for stopping new writes and letting the active
 // one finish before calling Close (a Bolt server does this by draining its
 // connections in [bolt/server.Server.Shutdown] before tearing down the DB).
-// Close tears down the durability machinery; it is the caller's job to ensure
-// no transaction is mid-commit when it runs. See docs/persistence.md
-// ("Composed shutdown").
+// See docs/persistence.md ("Composed shutdown").
 package store
 
 import (
@@ -97,7 +104,8 @@ type Checkpointer interface {
 // the same result.
 type DB struct {
 	wal            *wal.Writer
-	cp             Checkpointer // nil when the DB owns no checkpointer
+	cp             Checkpointer             // nil when the DB owns no checkpointer
+	quiesce        func(func() error) error // nil when the embedder quiesces writers itself
 	finalCheckpt   bool
 	closeOnce      sync.Once
 	closeErr       error
@@ -119,6 +127,33 @@ func WithCheckpointer(cp Checkpointer) Option {
 	return func(d *DB) {
 		if cp != nil {
 			d.cp = cp
+		}
+	}
+}
+
+// WithQuiesce supplies a callback that [DB.Close] uses to drain in-flight
+// writers before closing the WAL: step 3 of the teardown runs the WAL close
+// inside fn, so an in-flight [txn.Tx.Commit]/[txn.Tx.CommitWALOnly] finishes
+// (or a pending one starts and finishes) before the writer is flushed and
+// closed, and no commit can interleave between the flush and the close. Pass
+// [txn.Store.RunUnderCommitLock] — the store's single-writer commit lock is
+// exactly the mutual exclusion required. Any commit that begins after the
+// close releases the lock receives [wal.ErrWriterClosed], the correct error
+// for post-close calls.
+//
+// Holding the lock across the WAL close is safe: [wal.Writer.Close] is a
+// short flush+fsync+close sequence, and fn must not begin a transaction on
+// the same store (see [txn.Store.RunUnderCommitLock]; the DB only ever passes
+// the WAL close as fn, which opens no transaction).
+//
+// Without this option [DB.Close] does not quiesce writers — safe only when
+// the embedder guarantees no concurrent commits at shutdown. A nil fn is
+// ignored (the DB keeps not quiescing), so a caller can pass a possibly-nil
+// callback without a guard.
+func WithQuiesce(fn func(func() error) error) Option {
+	return func(d *DB) {
+		if fn != nil {
+			d.quiesce = fn
 		}
 	}
 }
@@ -152,7 +187,10 @@ func WithFinalCheckpoint() Option {
 //		checkpoint.WithMapperCodec[string, float64](st.Codec()),
 //		checkpoint.WithConstraintSpecs[string, float64](eng.ConstraintSpecsForSnapshot))
 //	cp.Start(ctx)
-//	db := store.New(wlog, store.WithCheckpointer(cp), store.WithFinalCheckpoint())
+//	db := store.New(wlog,
+//		store.WithCheckpointer(cp),
+//		store.WithFinalCheckpoint(),
+//		store.WithQuiesce(st.RunUnderCommitLock))
 //	defer db.Close() // or db.CloseCtx(ctx) to bound the final checkpoint
 func New(w *wal.Writer, opts ...Option) *DB {
 	d := &DB{wal: w}
@@ -232,9 +270,21 @@ func (d *DB) closeOnce0(ctx context.Context) error {
 	if d.cp != nil {
 		d.cp.Stop()
 	}
-	// Step 3: close the WAL. Now that the loop is gone this is the last access
-	// to the writer, so ErrWriterClosed can only arise from a genuine
-	// double-close by the embedder (which the sync.Once already prevents for
-	// DB.Close itself).
+	// Step 3: close the WAL. Now that the loop is gone the only remaining
+	// writers are in-flight transactions; when a quiesce callback is wired
+	// ([WithQuiesce] with [txn.Store.RunUnderCommitLock]) hold the store's
+	// commit lock around the close so any in-flight CommitWALOnly/appendAndSync
+	// finishes before we flush+close the fd, and no new commit can start
+	// between the flush and the close. A commit that starts after we release
+	// (having closed the WAL) gets wal.ErrWriterClosed — the correct error for
+	// post-close calls. Without the callback this is the last access to the
+	// writer only when the embedder guarantees no concurrent commits, so
+	// ErrWriterClosed can only arise from a genuine double-close by the
+	// embedder (which the sync.Once already prevents for DB.Close itself).
+	if d.quiesce != nil {
+		return d.quiesce(func() error {
+			return d.wal.Close()
+		})
+	}
 	return d.wal.Close()
 }
