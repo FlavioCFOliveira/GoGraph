@@ -2,7 +2,6 @@ package graphml
 
 import (
 	"bytes"
-	"encoding/base64"
 	"math"
 	"testing"
 	"time"
@@ -96,27 +95,25 @@ func TestGraphML_TypedPropsRoundtrip(t *testing.T) {
 		t.Errorf("flag: got %v, want BoolValue(true)", v)
 	}
 
-	// stamp (time → StringValue; deserialized as string, not time, because
-	// the reader returns StringValue for attr.type="string" without
-	// further heuristics).
+	// stamp (PropTime → PropTime; attr.type="time" preserves the kind).
 	if v, ok := gotProps["stamp"]; !ok {
 		t.Error("missing property 'stamp'")
 	} else {
-		want := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
-		s, ok2 := v.String()
-		if !ok2 || s != want {
-			t.Errorf("stamp: got %v (kind=%v), want StringValue(%q)", v, v.Kind(), want)
+		want := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+		ts, ok2 := v.Time()
+		if !ok2 || !ts.Equal(want) {
+			t.Errorf("stamp: got %v (kind=%v), want TimeValue(%v)", v, v.Kind(), want)
 		}
 	}
 
-	// blob (bytes → StringValue base64; same note as stamp).
+	// blob (PropBytes → PropBytes; attr.type="bytes" preserves the kind).
 	if v, ok := gotProps["blob"]; !ok {
 		t.Error("missing property 'blob'")
 	} else {
-		wantBase64 := base64.StdEncoding.EncodeToString([]byte{0xDE, 0xAD, 0xBE, 0xEF})
-		s, ok2 := v.String()
-		if !ok2 || s != wantBase64 {
-			t.Errorf("blob: got %v, want StringValue(%q)", v, wantBase64)
+		want := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+		b, ok2 := v.Bytes()
+		if !ok2 || len(b) != len(want) || b[0] != want[0] || b[1] != want[1] || b[2] != want[2] || b[3] != want[3] {
+			t.Errorf("blob: got %v (kind=%v), want BytesValue(%v)", v, v.Kind(), want)
 		}
 	}
 }

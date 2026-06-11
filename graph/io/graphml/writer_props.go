@@ -3,6 +3,7 @@ package graphml
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -16,7 +17,11 @@ import (
 )
 
 // graphMLAttrType maps a [lpg.PropertyKind] to the GraphML attr.type
-// string used in a <key> declaration.
+// string used in a <key> declaration. The standard GraphML types are
+// used for Int64, Float64, Bool, and String. For Time, Bytes, and List
+// we use non-standard but self-describing type tags ("time", "bytes",
+// "list") so that the round-trip restores the original PropertyKind
+// rather than silently degrading to PropString.
 func graphMLAttrType(k lpg.PropertyKind) string {
 	switch k {
 	case lpg.PropInt64:
@@ -25,8 +30,14 @@ func graphMLAttrType(k lpg.PropertyKind) string {
 		return "double"
 	case lpg.PropBool:
 		return "boolean"
-	case lpg.PropTime, lpg.PropBytes, lpg.PropString:
+	case lpg.PropString:
 		return "string"
+	case lpg.PropTime:
+		return "time"
+	case lpg.PropBytes:
+		return "bytes"
+	case lpg.PropList:
+		return "list"
 	default:
 		return "string"
 	}
@@ -59,6 +70,16 @@ func serialisePropertyValue(v lpg.PropertyValue) string {
 	case lpg.PropBytes:
 		b, _ := v.Bytes()
 		return base64.StdEncoding.EncodeToString(b)
+	case lpg.PropList:
+		elems, _ := v.List()
+		// Encode as a JSON array of [kindString, encodedValueString] pairs.
+		// This mirrors the JSONL wire format so the two encoders stay in sync.
+		pairs := make([][2]string, len(elems))
+		for i, elem := range elems {
+			pairs[i] = [2]string{graphMLAttrType(elem.Kind()), serialisePropertyValue(elem)}
+		}
+		b, _ := json.Marshal(pairs)
+		return string(b)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
@@ -66,6 +87,11 @@ func serialisePropertyValue(v lpg.PropertyValue) string {
 
 // deserialisePropertyValue converts the text s to a [lpg.PropertyValue]
 // according to the GraphML attr.type in attrType.
+//
+// Standard types ("long", "int", "double", "float", "boolean", "string") are
+// handled as per the GraphML specification. Non-standard type tags written by
+// [graphMLAttrType] ("time", "bytes", "list") are decoded back to their
+// original PropertyKind so that round-trips are lossless.
 func deserialisePropertyValue(attrType, s string) (lpg.PropertyValue, error) {
 	switch attrType {
 	case "long", "int":
@@ -89,9 +115,35 @@ func deserialisePropertyValue(attrType, s string) (lpg.PropertyValue, error) {
 		default:
 			return lpg.PropertyValue{}, fmt.Errorf("graphml: parse boolean %q: unrecognised value", s)
 		}
+	case "time":
+		t, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("graphml: parse time %q: %w", s, err)
+		}
+		return lpg.TimeValue(t), nil
+	case "bytes":
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("graphml: parse bytes %q: %w", s, err)
+		}
+		return lpg.BytesValue(b), nil
+	case "list":
+		// The value is a JSON array of [attrTypeString, encodedValueString] pairs.
+		var pairs [][2]string
+		if err := json.Unmarshal([]byte(s), &pairs); err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("graphml: parse list %q: %w", s, err)
+		}
+		elems := make([]lpg.PropertyValue, len(pairs))
+		for i, p := range pairs {
+			elem, err := deserialisePropertyValue(p[0], p[1])
+			if err != nil {
+				return lpg.PropertyValue{}, fmt.Errorf("graphml: list[%d]: %w", i, err)
+			}
+			elems[i] = elem
+		}
+		return lpg.ListValue(elems), nil
 	default:
-		// "string" or any unknown type — attempt temporal/bytes heuristics
-		// only when the stored metadata hints at them; default is plain string.
+		// "string" or any unknown type — treat as plain string.
 		return lpg.StringValue(s), nil
 	}
 }

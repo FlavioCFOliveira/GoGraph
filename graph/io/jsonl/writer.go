@@ -219,6 +219,10 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 // encodePropertyValue serialises pv into a (kind, value) pair of strings
 // suitable for embedding in a [Record]. The inverse operation is
 // [decodePropertyValue] in reader.go.
+//
+// For PropList the value field is a JSON array where each element is a
+// two-element JSON array [kindString, encodedValueString]. Nested lists
+// are encoded recursively.
 func encodePropertyValue(pv lpg.PropertyValue) (kind, value string) {
 	switch pv.Kind() {
 	case lpg.PropString:
@@ -239,6 +243,16 @@ func encodePropertyValue(pv lpg.PropertyValue) (kind, value string) {
 	case lpg.PropBytes:
 		b, _ := pv.Bytes()
 		return "bytes", base64.StdEncoding.EncodeToString(b)
+	case lpg.PropList:
+		elems, _ := pv.List()
+		// Encode as a JSON array of [kindString, encodedValueString] pairs.
+		pairs := make([][2]string, len(elems))
+		for i, elem := range elems {
+			k, v := encodePropertyValue(elem)
+			pairs[i] = [2]string{k, v}
+		}
+		b, _ := json.Marshal(pairs)
+		return "list", string(b)
 	default:
 		// Zero or unknown kind: emit as empty string; readers will fail
 		// gracefully on the unknown kind tag.

@@ -306,6 +306,21 @@ func decodePropertyValue(kind, value string) (lpg.PropertyValue, error) {
 			return lpg.PropertyValue{}, fmt.Errorf("bytes: %w", err)
 		}
 		return lpg.BytesValue(b), nil
+	case "list":
+		// The value is a JSON array of [kindString, encodedValueString] pairs.
+		var pairs [][2]string
+		if err := json.Unmarshal([]byte(value), &pairs); err != nil {
+			return lpg.PropertyValue{}, fmt.Errorf("list: %w", err)
+		}
+		elems := make([]lpg.PropertyValue, len(pairs))
+		for i, p := range pairs {
+			elem, err := decodePropertyValue(p[0], p[1])
+			if err != nil {
+				return lpg.PropertyValue{}, fmt.Errorf("list[%d]: %w", i, err)
+			}
+			elems[i] = elem
+		}
+		return lpg.ListValue(elems), nil
 	default:
 		return lpg.PropertyValue{}, fmt.Errorf("unknown property kind %q", kind)
 	}
