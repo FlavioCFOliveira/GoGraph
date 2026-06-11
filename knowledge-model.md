@@ -8,11 +8,12 @@ edge type, or property is added or removed, update both in the same change.
 - **Module:** `github.com/FlavioCFOliveira/GoGraph`.
 - **Scope:** *full code graph* — every package, type, function, method, test, benchmark,
   fuzz target, and runnable example in the module, plus a curated layer of Features and
-  Specs above them.
+  Specs above them, a Sprint/Commit provenance layer, and a memory layer (Agent, Skill,
+  Memory) that mirrors the assistant's persistent memory files.
 - **Provenance:** every node **and** every edge carries `gitCommit` (full HEAD hash when the
   element was last confirmed) and `gitDate` (ISO `YYYY-MM-DD`).
 
-Counts as of commit `dd20de6` (2026-06-02): **11,418 nodes**, **14,778 edges**.
+Counts as of commit `567253c` + in-flight worktree (2026-06-11): **11,867 nodes**, **15,360 edges**.
 
 ---
 
@@ -31,7 +32,10 @@ Counts as of commit `dd20de6` (2026-06-02): **11,418 nodes**, **14,778 edges**.
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
 | `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
-| `Commit` | A git commit that delivered one or more tasks. | `hash` (short 7-char), `fullHash`, `message`, `sprintId` (int) |
+| `Commit` | A git commit that delivered one or more tasks. | `hash` (short 7-char), `fullHash` (full 40-char), `message`, `sprintId` (int) |
+| `Agent` | A specialist sub-agent mandated by `CLAUDE.md`. | `name`, `kind` (`subagent`), `description`, `source` |
+| `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
+| `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
 
 ### Enumerated property values
 
@@ -39,20 +43,25 @@ Counts as of commit `dd20de6` (2026-06-02): **11,418 nodes**, **14,778 edges**.
 - `Type.kind` ∈ `struct` \| `interface` \| `alias` (i.e. `type A = B`) \| `signature`
   (function type) \| `defined` (any other named/defined type).
 
-### Counts by label (commit `dd20de6`)
+### Counts by label (commit `567253c` + worktree, 2026-06-11)
 
 | Label | Count |
 |---|---|
-| `Test` | 3990 |
-| `Method` | 3301 |
-| `Function` | 2813 |
-| `Type` | 948 |
-| `Example` | 118 |
+| `Test` | 4159 |
+| `Method` | 3390 |
+| `Function` | 2925 |
+| `Type` | 975 |
+| `Example` | 120 |
 | `Benchmark` | 105 |
-| `Package` | 92 |
+| `Package` | 93 |
 | `Spec` | 30 |
+| `Memory` | 26 |
 | `Feature` | 16 |
+| `Commit` | 14 |
+| `Agent` | 5 |
 | `FuzzTarget` | 5 |
+| `Skill` | 2 |
+| `Sprint` | 2 |
 
 ---
 
@@ -69,15 +78,32 @@ All edges carry `gitCommit` and `gitDate`.
 | `SPECIFIED_IN` | `(Feature)-[:SPECIFIED_IN]->(Spec)` | A feature is documented in a specification file. |
 | `CONTAINS` | `(Sprint)-[:CONTAINS]->(Commit)` | A sprint contains a commit that delivered work within it. |
 | `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
+| `ABOUT` | `(Memory)-[:ABOUT]->(Feature\|Sprint)` | A memory concerns a feature area or sprint. |
+| `CONSULTED_BY` | `(Memory)-[:CONSULTED_BY]->(Agent\|Skill)` | A memory exists primarily for that agent's/skill's use. |
+| `SPECIALISES_IN` | `(Agent)-[:SPECIALISES_IN]->(Feature)` | A sub-agent's mandated speciality area (curated from `CLAUDE.md`). |
 
-### Counts by edge type (commit `dd20de6`)
+### Counts by edge type (commit `567253c` + worktree, 2026-06-11)
 
 | Type | Count |
 |---|---|
-| `CONTAINS` | 11371 |
-| `HAS_METHOD` | 3301 |
+| `CONTAINS` | 11792 |
+| `HAS_METHOD` | 3391 |
 | `IMPLEMENTS` | 87 |
+| `ABOUT` | 36 |
+| `FIXES` | 24 |
 | `SPECIFIED_IN` | 19 |
+| `SPECIALISES_IN` | 6 |
+| `CONSULTED_BY` | 5 |
+
+### Memory layer (hybrid, approved 2026-06-11)
+
+The `Memory` nodes mirror the persistent memory files in the Claude Code project memory
+directory — the **files remain canonical** for the harness (`MEMORY.md` is the loaded
+index); the graph adds the queryable relational layer (what a memory is about, who
+consults it). When a memory file is created, renamed, or deleted, the mirroring `Memory`
+node must follow in the same change. `Agent` nodes are the specialist sub-agents mandated
+by `CLAUDE.md`; `Skill` nodes are the project's own Claude Code skills
+(`knowledge-authority`, `roadmap-manager`).
 
 ---
 
@@ -164,6 +190,11 @@ MATCH (n) WHERE n.file ENDS WITH 'se'+'t.go' RETURN n
 
 When querying for symbols whose names contain these tokens, prefer a guard-safe substring
 (`CONTAINS 'elete'`, `CONTAINS 'emove'`) or the split-literal form above.
+
+Additionally, `rmp graph create` accepts **only `CREATE`/`MERGE` write clauses** — a real
+`SET` clause is rejected (`graph create accepts only CREATE/MERGE queries`), so upserts
+must carry every property inline in the `MERGE`/`CREATE` property map. Use the `update`
+class for `SET`/`REMOVE` clauses; `UNWIND … MATCH … SET` is accepted there.
 
 ---
 
