@@ -81,3 +81,63 @@ func TestReadInto_CapWithHeadroom(t *testing.T) {
 		t.Fatalf("under cap: n=%d err=%v, want n=1 err=nil", n, err)
 	}
 }
+
+// TestReadInto_AtCap_ExactFit asserts that an input whose byte length
+// equals MaxBytes exactly is accepted.  The decoder issues a final Read
+// after consuming all bytes to discover EOF; before the limitReader fix
+// that call returned ErrInputTooLarge instead of io.EOF, causing a false
+// rejection of a legal payload.
+func TestReadInto_AtCap_ExactFit(t *testing.T) {
+	t.Parallel()
+
+	input := "a,b\n" // 4 bytes — two fields, one edge
+	opts := csv.DefaultOptions()
+	opts.MaxBytes = int64(len(input)) // cap == payload length exactly
+
+	g, n, err := csv.ReadInto(strings.NewReader(input), opts)
+	if err != nil {
+		t.Fatalf("at-cap input rejected: err=%v, want nil", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows=%d, want 1", n)
+	}
+	if g == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadInto_BelowCap_ExactFit confirms an input strictly under the cap
+// succeeds (regression pin — was already working).
+func TestReadInto_BelowCap_ExactFit(t *testing.T) {
+	t.Parallel()
+
+	input := "a,b\n" // 4 bytes
+	opts := csv.DefaultOptions()
+	opts.MaxBytes = int64(len(input)) + 1
+
+	g, n, err := csv.ReadInto(strings.NewReader(input), opts)
+	if err != nil {
+		t.Fatalf("below-cap input rejected: err=%v, want nil", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows=%d, want 1", n)
+	}
+	if g == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadInto_AboveCap_ExactFit confirms an input one byte over the cap
+// fails with ErrInputTooLarge (regression pin — was already working).
+func TestReadInto_AboveCap_ExactFit(t *testing.T) {
+	t.Parallel()
+
+	input := "a,b\n" // 4 bytes
+	opts := csv.DefaultOptions()
+	opts.MaxBytes = int64(len(input)) - 1 // cap 1 byte shorter than input
+
+	_, _, err := csv.ReadInto(strings.NewReader(input), opts)
+	if !errors.Is(err, csv.ErrInputTooLarge) {
+		t.Fatalf("above-cap input accepted: err=%v, want ErrInputTooLarge", err)
+	}
+}

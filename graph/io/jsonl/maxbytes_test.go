@@ -100,3 +100,79 @@ func TestReadIntoCappedCtx_Disabled(t *testing.T) {
 		t.Fatal("graph is nil")
 	}
 }
+
+// exactDoc is a minimal JSONL document: one node record followed by a
+// newline.  Its byte length is used as the cap in the at-cap boundary tests.
+const exactDoc = "{\"type\":\"node\",\"id\":\"a\"}\n" // 25 bytes
+
+// TestReadIntoCappedCtx_AtCap asserts that an input whose byte length
+// equals maxBytes exactly is accepted.  Before the limitReader fix the
+// decoder's final EOF-probe Read returned ErrInputTooLarge, causing a
+// false rejection.
+func TestReadIntoCappedCtx_AtCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactDoc)) // cap == payload length exactly
+	a, n, err := jsonl.ReadIntoCappedCtx(context.Background(),
+		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+	if err != nil {
+		t.Fatalf("at-cap input rejected: err=%v, want nil", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows=%d, want 1", n)
+	}
+	if a == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadWithPropsCappedCtx_AtCap is the property-graph analogue of
+// [TestReadIntoCappedCtx_AtCap].
+func TestReadWithPropsCappedCtx_AtCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactDoc))
+	g, n, err := jsonl.ReadWithPropsCappedCtx(context.Background(),
+		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+	if err != nil {
+		t.Fatalf("at-cap input rejected: err=%v, want nil", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows=%d, want 1", n)
+	}
+	if g == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadIntoCappedCtx_BelowCap confirms input strictly under the cap
+// succeeds (regression pin).
+func TestReadIntoCappedCtx_BelowCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactDoc)) + 1
+	a, n, err := jsonl.ReadIntoCappedCtx(context.Background(),
+		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+	if err != nil {
+		t.Fatalf("below-cap input rejected: err=%v, want nil", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows=%d, want 1", n)
+	}
+	if a == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadIntoCappedCtx_AboveCap confirms input over the cap returns
+// ErrInputTooLarge (regression pin).
+func TestReadIntoCappedCtx_AboveCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactDoc)) - 1
+	_, _, err := jsonl.ReadIntoCappedCtx(context.Background(),
+		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+	if !errors.Is(err, jsonl.ErrInputTooLarge) {
+		t.Fatalf("above-cap input accepted: err=%v, want ErrInputTooLarge", err)
+	}
+}

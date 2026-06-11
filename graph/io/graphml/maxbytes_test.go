@@ -105,3 +105,70 @@ func TestReadIntoCappedCtx_Disabled(t *testing.T) {
 		t.Fatal("graph is nil")
 	}
 }
+
+// exactGraphMLDoc is a minimal valid GraphML document containing one node.
+// Its byte length is used as the cap in the at-cap boundary tests.
+const exactGraphMLDoc = `<?xml version="1.0"?><graphml><graph edgedefault="directed"><node id="a"/></graph></graphml>`
+
+// TestReadIntoCappedCtx_AtCap asserts that a document whose byte length
+// equals maxBytes exactly is accepted.  Before the limitReader fix the
+// XML decoder's trailing EOF-probe Read returned ErrInputTooLarge, causing
+// a false rejection of a perfectly legal document.
+func TestReadIntoCappedCtx_AtCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactGraphMLDoc)) // cap == payload length exactly
+	a, _, err := graphml.ReadIntoCappedCtx(context.Background(),
+		strings.NewReader(exactGraphMLDoc), capBytes)
+	if err != nil {
+		t.Fatalf("at-cap document rejected: err=%v, want nil", err)
+	}
+	if a == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadWithPropsCappedCtx_AtCap is the property-graph analogue of
+// [TestReadIntoCappedCtx_AtCap].
+func TestReadWithPropsCappedCtx_AtCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactGraphMLDoc))
+	g, _, err := graphml.ReadWithPropsCappedCtx(context.Background(),
+		strings.NewReader(exactGraphMLDoc), capBytes)
+	if err != nil {
+		t.Fatalf("at-cap document rejected: err=%v, want nil", err)
+	}
+	if g == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadIntoCappedCtx_BelowCap confirms a document strictly under the
+// cap is accepted (regression pin).
+func TestReadIntoCappedCtx_BelowCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactGraphMLDoc)) + 1
+	a, _, err := graphml.ReadIntoCappedCtx(context.Background(),
+		strings.NewReader(exactGraphMLDoc), capBytes)
+	if err != nil {
+		t.Fatalf("below-cap document rejected: err=%v, want nil", err)
+	}
+	if a == nil {
+		t.Fatal("graph is nil")
+	}
+}
+
+// TestReadIntoCappedCtx_AboveCap confirms a document one byte over the
+// cap returns ErrInputTooLarge (regression pin).
+func TestReadIntoCappedCtx_AboveCap(t *testing.T) {
+	t.Parallel()
+
+	capBytes := int64(len(exactGraphMLDoc)) - 1
+	_, _, err := graphml.ReadIntoCappedCtx(context.Background(),
+		strings.NewReader(exactGraphMLDoc), capBytes)
+	if !errors.Is(err, graphml.ErrInputTooLarge) {
+		t.Fatalf("above-cap document accepted: err=%v, want ErrInputTooLarge", err)
+	}
+}

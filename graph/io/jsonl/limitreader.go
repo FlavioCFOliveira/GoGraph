@@ -24,20 +24,25 @@ func newLimitReader(r io.Reader, maxBytes int64) *limitReader {
 // returns [ErrInputTooLarge] as soon as the cumulative byte count would
 // exceed the configured ceiling, surfacing any bytes read up to that
 // point alongside the error.
+//
+// When the final Read call arrives after the budget is exactly consumed,
+// the underlying reader is probed once: a clean EOF passes through as
+// (0, io.EOF), while any remaining data returns (0, ErrInputTooLarge).
 func (l *limitReader) Read(p []byte) (int, error) {
 	if l.remaining <= 0 {
+		// Budget exhausted: probe one byte to distinguish "fits exactly"
+		// (io.EOF → pass through) from "exceeds cap" (ErrInputTooLarge).
+		var probe [1]byte
+		n, err := l.r.Read(probe[:])
+		if n == 0 && err == io.EOF {
+			return 0, io.EOF
+		}
 		return 0, ErrInputTooLarge
 	}
-	// Read at most one byte beyond the remaining budget so that an input
-	// exactly equal to the cap succeeds, while the first excess byte is
-	// detected and rejected.
-	if int64(len(p)) > l.remaining+1 {
-		p = p[:l.remaining+1]
+	if int64(len(p)) > l.remaining {
+		p = p[:l.remaining]
 	}
 	n, err := l.r.Read(p)
 	l.remaining -= int64(n)
-	if l.remaining < 0 {
-		return n, ErrInputTooLarge
-	}
 	return n, err
 }
