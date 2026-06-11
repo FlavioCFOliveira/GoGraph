@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"math"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
@@ -120,13 +119,17 @@ func TestDecodedBudgetCumulativeAcrossNesting(t *testing.T) {
 func TestDecodedBudgetListAtBoundaryDecodes(t *testing.T) {
 	maxN := (packstream.MaxDecodedCollectionBytesForTest() - packstream.CollectionCostForTest()) /
 		packstream.ListElemCostForTest()
-	if maxN > maxMessageBytes-5 || maxN > math.MaxUint32 {
+	// The message-cap guard also bounds the uint32 conversion below:
+	// maxN <= maxMessageBytes-5 (16 MiB - 5), far below MaxUint32 on every
+	// platform. (A `maxN > math.MaxUint32` clause would not even compile on
+	// a 32-bit build, where the constant overflows int.)
+	if maxN > maxMessageBytes-5 {
 		t.Fatalf("boundary count %d no longer fits a single message; re-derive this test", maxN)
 	}
 
 	frame := make([]byte, 0, maxN+5)
 	frame = append(frame, markerList32)
-	frame = appendUint32(frame, uint32(maxN)) //nolint:gosec // G115: bounded by the math.MaxUint32 guard above.
+	frame = appendUint32(frame, uint32(maxN)) //nolint:gosec // G115: bounded by the message-cap guard above.
 	frame = append(frame, bytes.Repeat([]byte{markerNull}, maxN)...)
 
 	dec := packstream.NewDecoder(bytes.NewReader(frame))

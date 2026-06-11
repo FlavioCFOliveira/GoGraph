@@ -36,6 +36,13 @@ import (
 // The byte budget bounds what a prefix may claim, but not how much memory a
 // structurally valid message decodes into; that amplification is bounded
 // separately by the decoded-memory budget. See [ErrDecodedMemoryExceeded].
+//
+// Independently of the budgets, any 32-bit length/count prefix above
+// math.MaxInt32 is rejected with this error while the value is still
+// unsigned: Go sizes allocations with int, and on a 32-bit platform such a
+// prefix would otherwise wrap to a negative int, slip past the budget
+// comparisons above, and panic the subsequent make() with "len out of
+// range". See wire32MaxLen.
 var ErrLengthExceedsInput = errors.New("packstream: declared length exceeds remaining input")
 
 // ErrDecodedMemoryExceeded is returned by the decoder when the cumulative
@@ -290,6 +297,38 @@ func (d *Decoder) readFull(p []byte) (int, error) {
 	return n, err
 }
 
+// wire32MaxLen is the absolute maximum the decoder accepts for any
+// wire-declared 32-bit length/count prefix, enforced while the value is
+// still unsigned. PackStream length prefixes are unsigned 32-bit, but Go
+// slice lengths and map size hints are int: on a 32-bit platform a prefix
+// in [2^31, 2^32) converts to a NEGATIVE int, which compares below every
+// `n > budget` guard and panics the subsequent make() with "len out of
+// range". Capping the prefix at MaxInt32 before the conversion makes decode
+// behaviour identical on 32- and 64-bit builds, and rejects nothing
+// legitimate: no legal Bolt message comes near 2 GiB (the chunked transport
+// caps messages at 16 MiB). The 8- and 16-bit prefixes (at most 255 and
+// 65535) always fit a Go int — int is at least 32 bits — so only the 32-bit
+// prefix needs this pre-conversion validation.
+const wire32MaxLen = math.MaxInt32
+
+// readLen32 reads a 4-byte big-endian length/count prefix and validates it
+// against wire32MaxLen while still unsigned, BEFORE any conversion to int.
+// A prefix above the cap is rejected with ErrLengthExceedsInput, so the
+// returned int is always in [0, MaxInt32] on every platform and safe for
+// the signed budget comparisons, the decoded-memory charge, and the make()
+// that follow. kind names the value class for the error message.
+func (d *Decoder) readLen32(kind string) (int, error) {
+	if _, err := d.readFull(d.buf[:4]); err != nil {
+		return 0, err
+	}
+	v := binary.BigEndian.Uint32(d.buf[:4])
+	if v > wire32MaxLen {
+		return 0, fmt.Errorf("%w: %s length prefix %d exceeds maximum %d",
+			ErrLengthExceedsInput, kind, v, wire32MaxLen)
+	}
+	return int(v), nil
+}
+
 // peekByte returns the next byte without consuming it.
 func (d *Decoder) peekByte() (byte, error) {
 	b, err := d.r.Peek(1)
@@ -471,10 +510,9 @@ func (d *Decoder) ReadBytes() ([]byte, error) {
 		}
 		n = int(binary.BigEndian.Uint16(d.buf[:2]))
 	case markerBytes32:
-		if _, err := d.readFull(d.buf[:4]); err != nil {
+		if n, err = d.readLen32("Bytes"); err != nil {
 			return nil, err
 		}
-		n = int(binary.BigEndian.Uint32(d.buf[:4]))
 	default:
 		return nil, fmt.Errorf("packstream: expected Bytes marker, got 0x%02X", b)
 	}
@@ -512,10 +550,9 @@ func (d *Decoder) ReadString() (string, error) {
 		}
 		n = int(binary.BigEndian.Uint16(d.buf[:2]))
 	case b == markerStr32:
-		if _, err := d.readFull(d.buf[:4]); err != nil {
+		if n, err = d.readLen32("String"); err != nil {
 			return "", err
 		}
-		n = int(binary.BigEndian.Uint32(d.buf[:4]))
 	default:
 		return "", fmt.Errorf("packstream: expected String marker, got 0x%02X", b)
 	}
@@ -563,10 +600,9 @@ func (d *Decoder) ReadListHeader() (int, error) {
 		}
 		n = int(binary.BigEndian.Uint16(d.buf[:2]))
 	case b == markerList32:
-		if _, err := d.readFull(d.buf[:4]); err != nil {
+		if n, err = d.readLen32("List"); err != nil {
 			return 0, err
 		}
-		n = int(binary.BigEndian.Uint32(d.buf[:4]))
 	default:
 		return 0, fmt.Errorf("packstream: expected List marker, got 0x%02X", b)
 	}
@@ -610,10 +646,9 @@ func (d *Decoder) ReadMapHeader() (int, error) {
 		}
 		n = int(binary.BigEndian.Uint16(d.buf[:2]))
 	case b == markerMap32:
-		if _, err := d.readFull(d.buf[:4]); err != nil {
+		if n, err = d.readLen32("Map"); err != nil {
 			return 0, err
 		}
-		n = int(binary.BigEndian.Uint32(d.buf[:4]))
 	default:
 		return 0, fmt.Errorf("packstream: expected Map marker, got 0x%02X", b)
 	}
