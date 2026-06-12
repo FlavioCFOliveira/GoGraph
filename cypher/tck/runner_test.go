@@ -2106,14 +2106,60 @@ func TestTCKExecution(t *testing.T) {
 			scenarioSummaryRE.String())
 	}
 	undefined := parseUndefinedCount(raw)
-	t.Logf("TCK execution: %d scenarios, %d passed, %d undefined (baseline=%d)", total, passed, undefined, tckExecutionBaseline)
+	tckGateCheck(t, total, passed, undefined)
+}
+
+// tckGateError is the minimal interface needed by tckGateCheck for testability.
+type tckGateError interface {
+	Errorf(format string, args ...any)
+	Helper()
+	Logf(format string, args ...any)
+}
+
+// tckGateCheck encodes the TCK execution gate assertions. Called by
+// TestOpenCypherTCK and unit-tested independently.
+func tckGateCheck(t tckGateError, total, passed, undefined int) {
+	t.Helper()
+	failed := total - passed - undefined
+	t.Logf("TCK execution: %d scenarios, %d passed, %d failed, %d undefined (baseline=%d)",
+		total, passed, failed, undefined, tckExecutionBaseline)
 	if passed < tckExecutionBaseline {
 		t.Errorf("TCK execution regression: %d scenarios passed, baseline=%d", passed, tckExecutionBaseline)
 	}
 	if undefined > 0 {
 		t.Errorf("TCK execution: %d scenario(s) have undefined step definitions — register step handlers for all new TCK steps", undefined)
 	}
+	if passed != total {
+		t.Errorf("TCK execution: %d/%d scenarios passed — all scenarios must pass (no failed or pending steps allowed)", passed, total)
+	}
 }
+
+// TestTCKGateCheck_DetectsFailedScenarios is the gate test for task #1380.
+//
+// It verifies that tckGateCheck fires Errorf when total > passed (one scenario
+// failed) even when passed >= tckExecutionBaseline.
+//
+//	Before fix: tckGateCheck only checks passed >= baseline, so
+//	            (total=3898, passed=3897, undefined=0) → no Errorf call →
+//	            errProbe.errored stays false → this test's final assertion FAILS.
+//	After fix:  tckGateCheck also checks passed != total, so
+//	            (total=3898, passed=3897, undefined=0) → Errorf IS called →
+//	            errProbe.errored = true → this test's final assertion PASSES.
+func TestTCKGateCheck_DetectsFailedScenarios(t *testing.T) {
+	t.Parallel()
+	probe := &errProbe{}
+	tckGateCheck(probe, 3898, 3897, 0)
+	if !probe.errored {
+		t.Error("tckGateCheck did not fire Errorf for total=3898 passed=3897 undefined=0 — passed!=total check is missing")
+	}
+}
+
+// errProbe is a tckGateError that records whether Errorf was ever called.
+type errProbe struct{ errored bool }
+
+func (p *errProbe) Errorf(_ string, _ ...any) { p.errored = true }
+func (p *errProbe) Helper()                   {}
+func (p *errProbe) Logf(_ string, _ ...any)   {}
 
 // parseScenarioSummary extracts (total, passed, ok) from the formatter output
 // emitted by godog's Base.Summary(). Returns ok=false if no summary line is
