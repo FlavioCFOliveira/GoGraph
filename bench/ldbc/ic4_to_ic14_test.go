@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package ldbc — T734: LDBC SNB IC4-IC14 batch soak via Bolt e2e.
 //

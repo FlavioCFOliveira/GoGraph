@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress — T591: hot-shard write storm (64 goroutines, soak).
 //

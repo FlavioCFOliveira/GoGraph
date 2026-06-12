@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 package extern
 

@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress — T663: plan-cache thrash 1e5 queries (soak).
 //

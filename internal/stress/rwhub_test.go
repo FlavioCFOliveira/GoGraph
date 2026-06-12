@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress — T602: reader-writer hub overlap (100 readers + 16 writers, soak).
 //

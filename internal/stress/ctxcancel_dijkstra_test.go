@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress — T636: ctx-cancel mid-Dijkstra 1M-node (soak).
 //

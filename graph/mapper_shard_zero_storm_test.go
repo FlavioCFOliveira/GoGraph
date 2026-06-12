@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package graph_test hosts integration tests that cannot live in
 // package graph itself due to the graph → shapegen → graph import cycle.

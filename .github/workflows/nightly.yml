@@ -88,11 +88,13 @@ jobs:
         # Run a focused benchmark with CPU profiling to detect hot-path
         # regressions across nightly builds. The profile is uploaded as
         # an artefact for offline flamegraph analysis.
+        # -tags=soak,nightly matches the test run above so the same set
+        # of packages is compiled; benchmarks in soak files are included.
         # The || true is intentional: benchmark failure must not mask the
         # test failure surfaced by the step above.
         if: always()
         run: |
-          go test -bench=. -benchmem -count=1 -tags=nightly \
+          go test -bench=. -benchmem -count=1 -tags=soak,nightly \
             -cpuprofile=/tmp/nightly-cpu.prof \
             -memprofile=/tmp/nightly-mem.prof \
             ./... > /tmp/nightly-bench.txt 2>&1 || true

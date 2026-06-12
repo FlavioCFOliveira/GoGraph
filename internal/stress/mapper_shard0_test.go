@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress — T608: mapper shard-0 storm (1e6 keys, soak).
 //

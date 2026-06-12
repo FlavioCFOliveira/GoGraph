@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package main_test — Bolt + Cypher mixed soak test.
 //

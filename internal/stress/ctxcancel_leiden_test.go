@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress — T653: ctx-cancel mid-Leiden LFR 10k (soak).
 //

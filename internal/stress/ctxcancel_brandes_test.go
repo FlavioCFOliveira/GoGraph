@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress — T646: ctx-cancel mid-Brandes 50k BA scale-free (soak).
 //

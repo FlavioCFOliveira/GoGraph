@@ -60,8 +60,20 @@ test-soak: ## [layer: soak]    short + soak — race detector, -tags=soak
 	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak $(PACKAGES)
 
 .PHONY: test-nightly
-test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=nightly
-	$(GO) test $(RACE_FLAGS) -count=1 -tags=nightly $(PACKAGES)
+test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=soak,nightly
+	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak,nightly $(PACKAGES)
+
+.PHONY: test-crashinject
+test-crashinject: ## Run crash-injection battery (requires gograph_crashinject build tag; may need elevated process limits)
+	$(GO) test -tags=gograph_crashinject -count=1 -timeout=10m \
+		./internal/crashinject/... \
+		./internal/crashpoint/... \
+		./store/recovery/...
+
+.PHONY: check-soak-build
+check-soak-build: ## Verify all soak-tagged files compile and pass go vet under -tags=soak
+	$(GO) build -tags=soak $(PACKAGES)
+	$(GO) vet -tags=soak $(PACKAGES)
 
 .PHONY: cover
 cover: ## Run tests with coverage

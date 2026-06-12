@@ -1,4 +1,4 @@
-//go:build soak
+//go:build soak || nightly
 
 // Package stress provides soak-layer concurrency stress tests.
 // Activated with -tags=soak.
