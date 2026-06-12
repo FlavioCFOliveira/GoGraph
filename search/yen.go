@@ -96,6 +96,9 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 
 	edgeIdx := buildEdgeIndex[W](c)
 
+	seen := make(map[string]struct{}, k*4)
+	seen[pathBytes(first)] = struct{}{}
+
 	type candRef struct {
 		start, end int
 		cost       W
@@ -124,9 +127,16 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 				continue
 			}
 			rootCost := pathCostFast[W](c.WeightsSlice(), edgeIdx, rootPath)
+			fullPath := make([]graph.NodeID, 0, len(rootPath)-1+len(cand.Nodes))
+			fullPath = append(fullPath, rootPath[:len(rootPath)-1]...)
+			fullPath = append(fullPath, cand.Nodes...)
+			key := pathBytes(fullPath)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
 			candStart := len(candArena)
-			candArena = append(candArena, rootPath[:len(rootPath)-1]...)
-			candArena = append(candArena, cand.Nodes...)
+			candArena = append(candArena, fullPath...)
 			candidates = append(candidates, candRef{
 				start: candStart,
 				end:   len(candArena),
@@ -143,6 +153,7 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 		best := candidates[0]
 		nodes := make([]graph.NodeID, best.end-best.start)
 		copy(nodes, candArena[best.start:best.end])
+		seen[pathBytes(nodes)] = struct{}{}
 		result = append(result, YenPath[W]{Nodes: nodes, Cost: best.cost})
 		candidates = candidates[1:]
 	}
@@ -359,4 +370,28 @@ func pathCostFast[W Weight](weights []W, edgeIdx map[edgeKey]uint64, path []grap
 		}
 	}
 	return cost
+}
+
+// pathBytes encodes a node-ID sequence as a string suitable for use as
+// a map key. Each NodeID (uint64) is encoded in little-endian order;
+// the resulting string contains no null bytes beyond the encoding itself,
+// making it collision-free for distinct NodeID sequences.
+func pathBytes(nodes []graph.NodeID) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+	const sz = 8 // sizeof(graph.NodeID) == sizeof(uint64)
+	b := make([]byte, len(nodes)*sz)
+	for i, n := range nodes {
+		v := uint64(n)
+		b[i*sz+0] = byte(v)
+		b[i*sz+1] = byte(v >> 8)
+		b[i*sz+2] = byte(v >> 16)
+		b[i*sz+3] = byte(v >> 24)
+		b[i*sz+4] = byte(v >> 32)
+		b[i*sz+5] = byte(v >> 40)
+		b[i*sz+6] = byte(v >> 48)
+		b[i*sz+7] = byte(v >> 56)
+	}
+	return string(b)
 }
