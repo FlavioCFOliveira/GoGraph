@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 )
@@ -186,4 +187,304 @@ func CheckParams(inferred map[string]expr.Kind, params map[string]expr.Value) er
 		}
 	}
 	return nil
+}
+
+// ErrParamMissing is returned by [CheckParamPresence] when a parameter
+// referenced in the query has no corresponding entry in the params map supplied
+// at execution time. The name field carries the parameter name without the
+// leading '$'.
+type ErrParamMissing struct {
+	// Name is the Cypher parameter name (without the leading $).
+	Name string
+}
+
+// Error implements the error interface.
+func (e *ErrParamMissing) Error() string {
+	return "cypher: ParameterMissing: MissingParameter: expected parameter $" + e.Name
+}
+
+// CollectParamNames walks a parsed query AST and returns the deduplicated,
+// sorted set of every parameter name referenced in it (the bare name, without
+// the leading '$'). The returned slice is always non-nil; an empty slice means
+// no parameters are referenced.
+//
+// This is used by the engine to validate that every parameter the query
+// references is present in the caller-supplied params map before execution
+// begins, so callers receive a typed [*ErrParamMissing] instead of silently
+// treating the missing parameter as NULL.
+func CollectParamNames(q ast.Query) []string {
+	seen := make(map[string]struct{})
+	collectParamNamesQuery(q, seen)
+	if len(seen) == 0 {
+		return []string{}
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	// Deterministic order: sort so the first missing parameter reported is
+	// predictable and tests can rely on it.
+	sortStrings(names)
+	return names
+}
+
+// CheckParamPresence validates that every parameter name in refs is present in
+// params. It returns a [*ErrParamMissing] for the first missing name found, or
+// nil when all are present. refs is obtained from [CollectParamNames].
+func CheckParamPresence(refs []string, params map[string]expr.Value) error {
+	for _, name := range refs {
+		if _, ok := params[name]; !ok {
+			return &ErrParamMissing{Name: name}
+		}
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AST walker — internal helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func collectParamNamesQuery(q ast.Query, seen map[string]struct{}) {
+	switch v := q.(type) {
+	case *ast.SingleQuery:
+		collectParamNamesSingle(v, seen)
+	case *ast.MultiQuery:
+		for _, part := range v.Parts {
+			collectParamNamesSingle(part, seen)
+		}
+	}
+}
+
+func collectParamNamesSingle(q *ast.SingleQuery, seen map[string]struct{}) {
+	if q == nil {
+		return
+	}
+	for _, c := range q.ReadingClauses {
+		collectParamNamesReadingClause(c, seen)
+	}
+	for _, c := range q.UpdatingClauses {
+		collectParamNamesUpdatingClause(c, seen)
+	}
+	if q.Return != nil {
+		collectParamNamesProjection(q.Return.Projection, seen)
+	}
+}
+
+func collectParamNamesReadingClause(c ast.ReadingClause, seen map[string]struct{}) {
+	switch v := c.(type) {
+	case *ast.Match:
+		collectParamNamesPattern(v.Pattern, seen)
+		if v.Where != nil {
+			collectParamNamesExpr(v.Where.Predicate, seen)
+		}
+	case *ast.OptionalMatch:
+		collectParamNamesPattern(v.Pattern, seen)
+		if v.Where != nil {
+			collectParamNamesExpr(v.Where.Predicate, seen)
+		}
+	case *ast.Unwind:
+		collectParamNamesExpr(v.Expr, seen)
+	case *ast.Call:
+		for _, a := range v.Args {
+			collectParamNamesExpr(a, seen)
+		}
+	case *ast.With:
+		collectParamNamesProjection(v.Projection, seen)
+		if v.Where != nil {
+			collectParamNamesExpr(v.Where.Predicate, seen)
+		}
+	}
+}
+
+func collectParamNamesUpdatingClause(c ast.UpdatingClause, seen map[string]struct{}) {
+	switch v := c.(type) {
+	case *ast.Create:
+		collectParamNamesPattern(v.Pattern, seen)
+	case *ast.Merge:
+		collectParamNamesPathPattern(v.Pattern, seen)
+		for _, item := range v.OnMatch {
+			collectParamNamesSetItem(item, seen)
+		}
+		for _, item := range v.OnCreate {
+			collectParamNamesSetItem(item, seen)
+		}
+	case *ast.Set:
+		for _, item := range v.Items {
+			collectParamNamesSetItem(item, seen)
+		}
+	case *ast.Delete:
+		for _, e := range v.Expressions {
+			collectParamNamesExpr(e, seen)
+		}
+	case *ast.DetachDelete:
+		for _, e := range v.Expressions {
+			collectParamNamesExpr(e, seen)
+		}
+	case *ast.Remove:
+		for _, item := range v.Items {
+			// RemoveItem.Target is the property expression or variable.
+			collectParamNamesExpr(item.Target, seen)
+		}
+	case *ast.Call:
+		for _, a := range v.Args {
+			collectParamNamesExpr(a, seen)
+		}
+	}
+}
+
+func collectParamNamesProjection(p *ast.Projection, seen map[string]struct{}) {
+	if p == nil {
+		return
+	}
+	for _, item := range p.Items {
+		collectParamNamesExpr(item.Expr, seen)
+	}
+	for _, o := range p.OrderBy {
+		collectParamNamesExpr(o.Expr, seen)
+	}
+	collectParamNamesExpr(p.Skip, seen)
+	collectParamNamesExpr(p.Limit, seen)
+}
+
+func collectParamNamesPattern(pat *ast.Pattern, seen map[string]struct{}) {
+	if pat == nil {
+		return
+	}
+	for _, pp := range pat.Paths {
+		collectParamNamesPathPattern(pp, seen)
+	}
+}
+
+func collectParamNamesPathPattern(pp *ast.PathPattern, seen map[string]struct{}) {
+	if pp == nil {
+		return
+	}
+	el := pp.Head
+	for el != nil {
+		if el.Node != nil && el.Node.Properties != nil {
+			collectParamNamesExpr(el.Node.Properties, seen)
+		}
+		if el.Relationship != nil && el.Relationship.Properties != nil {
+			collectParamNamesExpr(el.Relationship.Properties, seen)
+		}
+		el = el.Next
+	}
+}
+
+func collectParamNamesSetItem(item *ast.SetItem, seen map[string]struct{}) {
+	if item == nil {
+		return
+	}
+	if item.Value != nil {
+		collectParamNamesExpr(item.Value, seen)
+	}
+}
+
+// collectParamNamesExpr recursively collects *ast.Parameter names from e.
+func collectParamNamesExpr(e ast.Expression, seen map[string]struct{}) {
+	if e == nil {
+		return
+	}
+	switch v := e.(type) {
+	case *ast.Parameter:
+		seen[v.Name] = struct{}{}
+
+	case *ast.BinaryOp:
+		collectParamNamesExpr(v.Left, seen)
+		collectParamNamesExpr(v.Right, seen)
+
+	case *ast.UnaryOp:
+		collectParamNamesExpr(v.Operand, seen)
+
+	case *ast.Property:
+		collectParamNamesExpr(v.Receiver, seen)
+
+	case *ast.FunctionInvocation:
+		for _, a := range v.Args {
+			collectParamNamesExpr(a, seen)
+		}
+
+	case *ast.ListLiteral:
+		for _, el := range v.Elements {
+			collectParamNamesExpr(el, seen)
+		}
+
+	case *ast.MapLiteral:
+		for _, val := range v.Values {
+			collectParamNamesExpr(val, seen)
+		}
+
+	case *ast.MapProjection:
+		collectParamNamesExpr(v.Subject, seen)
+		for _, item := range v.Items {
+			if item.Value != nil {
+				collectParamNamesExpr(item.Value, seen)
+			}
+		}
+
+	case *ast.CaseExpression:
+		collectParamNamesExpr(v.Subject, seen)
+		for _, alt := range v.Alternatives {
+			collectParamNamesExpr(alt.Condition, seen)
+			collectParamNamesExpr(alt.Consequent, seen)
+		}
+		collectParamNamesExpr(v.ElseExpr, seen)
+
+	case *ast.ListComprehension:
+		collectParamNamesExpr(v.Source, seen)
+		collectParamNamesExpr(v.Predicate, seen)
+		collectParamNamesExpr(v.Projection, seen)
+
+	case *ast.PatternComprehension:
+		collectParamNamesPathPattern(v.Pattern, seen)
+		collectParamNamesExpr(v.Predicate, seen)
+		collectParamNamesExpr(v.Projection, seen)
+
+	case *ast.SubscriptExpr:
+		collectParamNamesExpr(v.Expr, seen)
+		collectParamNamesExpr(v.Index, seen)
+
+	case *ast.SliceExpr:
+		collectParamNamesExpr(v.Expr, seen)
+		collectParamNamesExpr(v.From, seen)
+		collectParamNamesExpr(v.To, seen)
+
+	case *ast.LabelPredicate:
+		collectParamNamesExpr(v.Receiver, seen)
+
+	case *ast.ExistsSubquery:
+		collectParamNamesPattern(v.Pattern, seen)
+		if v.Where != nil {
+			collectParamNamesExpr(v.Where.Predicate, seen)
+		}
+		if v.Query != nil {
+			collectParamNamesSingle(v.Query, seen)
+		}
+
+	case *ast.CountSubquery:
+		collectParamNamesPattern(v.Pattern, seen)
+		if v.Query != nil {
+			collectParamNamesSingle(v.Query, seen)
+		}
+
+	// Leaves: literals and variables carry no parameter references.
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.BoolLiteral, *ast.NullLiteral, *ast.Variable,
+		*ast.OverflowIntLit:
+		// nothing
+	}
+}
+
+// sortStrings is a portable ascending sort for a string slice.
+func sortStrings(s []string) {
+	// insertion sort is fine for the small param-name sets expected in practice.
+	for i := 1; i < len(s); i++ {
+		key := s[i]
+		j := i - 1
+		for j >= 0 && s[j] > key {
+			s[j+1] = s[j]
+			j--
+		}
+		s[j+1] = key
+	}
 }

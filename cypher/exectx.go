@@ -297,6 +297,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 		return nil, entry.semaErr
 	}
 	plan := entry.plan
+	if err := checkParamPresence(entry.paramRefs, params); err != nil {
+		return nil, err
+	}
 	if err := tx.eng.checkParamTypes(plan, params); err != nil {
 		return nil, err
 	}
