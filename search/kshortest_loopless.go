@@ -3,11 +3,28 @@ package search
 import (
 	"container/heap"
 	"context"
+	"errors"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
+
+// ErrResourceBudgetExceeded is returned by [KShortestPathsLooplessCtxWithOpts]
+// when the MaxPops or MaxQueueBytes limit is reached before k paths are found.
+var ErrResourceBudgetExceeded = errors.New("search: resource budget exceeded")
+
+// KShortestPathsLooplessOpts configures optional resource guards for
+// [KShortestPathsLooplessCtxWithOpts]. Zero values mean no limit.
+type KShortestPathsLooplessOpts struct {
+	// MaxPops is the maximum number of priority-queue pops allowed.
+	// When reached, the call returns (partial, ErrResourceBudgetExceeded).
+	MaxPops int
+	// MaxQueueBytes is the approximate maximum bytes the priority queue
+	// may hold. Approximated as sum(len(path)) * 8 across all live
+	// entries; when exceeded the call returns (partial, ErrResourceBudgetExceeded).
+	MaxQueueBytes int64
+}
 
 // KShortestPathsLoopless computes up to k loopless shortest paths
 // from src to dst in c using a best-first expansion over the implicit
@@ -16,26 +33,16 @@ import (
 // k-shortest path. The loopless guard excludes any expansion whose
 // neighbour is already present in the popped path.
 //
-// # K bounds and memory growth
+// # Complexity and resource budget
 //
-// Each pop expands one path of length up to V, so a worst-case
-// run does O(k * V * Δ) work and stores O(k * V) words in the
-// priority queue. Practical guidance:
+// The algorithm expands the implicit loopless-path tree in best-first
+// order. In the worst case it must pop every prefix path cheaper than
+// the k-th s-t shortest path; that set can be exponential in V.
+// Concrete example: a diamond-chain of depth D plus a single expensive
+// s-t shortcut forces 2^D pops even for k=2.
 //
-//   - k <= 100: queue stays comfortably below a megabyte even on
-//     million-edge graphs.
-//   - k <= 10 000: queue grows to roughly k * diameter * word_size
-//     bytes; budget accordingly and pre-allocate.
-//   - k unbounded (`enumerate all simple paths until exhaustion`):
-//     this implementation will exhaust because the path count can
-//     be exponential in V (think dense graphs); cap k explicitly
-//     to keep the queue bounded.
-//
-// For graphs where k is comparable to the number of simple paths
-// the routine matches Yen's asymptotic behaviour without paying
-// the k spur-Dijkstra rounds; on sparse graphs with few
-// alternative routes [YenKShortest] is typically faster in
-// practice.
+// Use ctx cancellation or [KShortestPathsLooplessCtxWithOpts] with a
+// MaxPops/MaxQueueBytes bound when operating on arbitrary graphs.
 //
 // This is NOT the heap-of-heaps construction of Eppstein 1998 ("Finding
 // the k Shortest Paths", SIAM J. Comput.). That algorithm builds an
@@ -62,9 +69,33 @@ func KShortestPathsLoopless[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k in
 // [KShortestPathsLoopless]. ctx.Err() is checked every 4096 heap pops;
 // on cancellation returns (nil, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical best-first k-shortest with NaN/Inf gate + loopless guard
+// For an explicit resource cap use [KShortestPathsLooplessCtxWithOpts].
 func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
 	defer metrics.Time("search.KShortestPathsLooplessCtx")()
+	return KShortestPathsLooplessCtxWithOpts(ctx, c, src, dst, k, KShortestPathsLooplessOpts{})
+}
+
+// KShortestPathsLooplessCtxWithOpts is the context-aware, resource-bounded
+// variant of [KShortestPathsLoopless].
+//
+// ctx.Err() is checked every 4096 heap pops; on cancellation returns
+// (partial, wrapped ctx.Err()).
+//
+// opts.MaxPops, when positive, caps the total number of priority-queue
+// pops. opts.MaxQueueBytes, when positive, caps the approximate memory
+// held by the priority queue (estimated as sum of path lengths × 8 bytes).
+// When either limit is reached the call returns any paths found so far
+// together with [ErrResourceBudgetExceeded].
+//
+//nolint:gocyclo // canonical best-first k-shortest with NaN/Inf gate + loopless guard + resource caps
+func KShortestPathsLooplessCtxWithOpts[W Weight](
+	ctx context.Context,
+	c *csr.CSR[W],
+	src, dst graph.NodeID,
+	k int,
+	opts KShortestPathsLooplessOpts,
+) ([]YenPath[W], error) {
+	defer metrics.Time("search.KShortestPathsLooplessCtxWithOpts")()
 	if k <= 0 {
 		return nil, nil
 	}
@@ -80,23 +111,30 @@ func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src
 	// Float Weight types: NaN / +/-Inf silently corrupts cost-ordered
 	// PQ comparisons. Fail fast; integer W short-circuits in O(1).
 	if anyFloatInvalid(weights) {
-		metrics.IncCounter("search.KShortestPathsLooplessCtx.errors", 1)
+		metrics.IncCounter("search.KShortestPathsLooplessCtxWithOpts.errors", 1)
 		return nil, ErrInvalidInput
 	}
 	pq := &looplessPQ[W]{}
 	heap.Init(pq)
-	heap.Push(pq, looplessItem[W]{cost: 0, path: []graph.NodeID{src}})
+	seedPath := []graph.NodeID{src}
+	heap.Push(pq, looplessItem[W]{cost: 0, path: seedPath})
+	pq.totalPathLen += int64(len(seedPath))
 	result := make([]YenPath[W], 0, k)
 	tick := 0
 	for pq.Len() > 0 && len(result) < k {
 		tick++
 		if tick&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
-				metrics.IncCounter("search.KShortestPathsLooplessCtx.errors", 1)
-				return nil, err
+				metrics.IncCounter("search.KShortestPathsLooplessCtxWithOpts.errors", 1)
+				return partialOrNil(result), err
 			}
 		}
+		// MaxPops guard: checked after each pop.
+		if opts.MaxPops > 0 && tick > opts.MaxPops {
+			return partialOrNil(result), ErrResourceBudgetExceeded
+		}
 		top := heap.Pop(pq).(looplessItem[W]) //nolint:errcheck // PQ types are statically known
+		pq.totalPathLen -= int64(len(top.path))
 		last := top.path[len(top.path)-1]
 		if last == dst {
 			result = append(result, YenPath[W]{Nodes: top.path, Cost: top.cost})
@@ -116,13 +154,25 @@ func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src
 			newPath := make([]graph.NodeID, len(top.path)+1)
 			copy(newPath, top.path)
 			newPath[len(newPath)-1] = nb
-			heap.Push(pq, looplessItem[W]{cost: top.cost + w, path: newPath})
+			item := looplessItem[W]{cost: top.cost + w, path: newPath}
+			heap.Push(pq, item)
+			pq.totalPathLen += int64(len(newPath))
+		}
+		// MaxQueueBytes guard: checked after the expansion of each pop.
+		if opts.MaxQueueBytes > 0 && pq.totalPathLen*8 > opts.MaxQueueBytes {
+			return partialOrNil(result), ErrResourceBudgetExceeded
 		}
 	}
-	if len(result) == 0 {
-		return nil, nil
+	return partialOrNil(result), nil
+}
+
+// partialOrNil returns results if non-empty, nil otherwise.
+// Callers that find no paths should return nil, not an empty slice.
+func partialOrNil[W Weight](results []YenPath[W]) []YenPath[W] {
+	if len(results) == 0 {
+		return nil
 	}
-	return result, nil
+	return results
 }
 
 // pathContains reports whether p contains v. Linear scan; for the
@@ -145,16 +195,25 @@ type looplessItem[W Weight] struct {
 
 // looplessPQ is the heap-interface adapter — kept private so callers
 // can't accidentally bypass the loopless guard.
-type looplessPQ[W Weight] []looplessItem[W]
+//
+// totalPathLen tracks the sum of path lengths across all live items;
+// used by KShortestPathsLooplessCtxWithOpts to estimate queue memory.
+// The caller is responsible for updating totalPathLen around Push/Pop
+// calls (done in KShortestPathsLooplessCtxWithOpts directly so the
+// heap.Interface delegates remain allocation-free).
+type looplessPQ[W Weight] struct {
+	items        []looplessItem[W]
+	totalPathLen int64
+}
 
-func (h looplessPQ[W]) Len() int           { return len(h) }
-func (h looplessPQ[W]) Less(i, j int) bool { return h[i].cost < h[j].cost }
-func (h looplessPQ[W]) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *looplessPQ[W]) Push(x any)        { *h = append(*h, x.(looplessItem[W])) } //nolint:errcheck // statically known
+func (h looplessPQ[W]) Len() int           { return len(h.items) }
+func (h looplessPQ[W]) Less(i, j int) bool { return h.items[i].cost < h.items[j].cost }
+func (h looplessPQ[W]) Swap(i, j int)      { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *looplessPQ[W]) Push(x any)        { h.items = append(h.items, x.(looplessItem[W])) } //nolint:errcheck // statically known
 func (h *looplessPQ[W]) Pop() any {
-	old := *h
+	old := h.items
 	n := len(old)
 	item := old[n-1]
-	*h = old[:n-1]
+	h.items = old[:n-1]
 	return item
 }
