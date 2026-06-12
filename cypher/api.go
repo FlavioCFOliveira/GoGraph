@@ -8728,6 +8728,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 	}
 	a.g.RemoveNode(n)
 	a.rec().recordRemoveNode(n, wasLive)
+	_ = a.tx.RemoveNode(n) //nolint:errcheck // ErrTxFinished impossible here; not-found is safe to ignore
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
