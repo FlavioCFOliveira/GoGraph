@@ -335,7 +335,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 			if werr := tx.walTx.CommitWALOnly(); werr != nil {
 				cmetrics.IncCounter("cypher.ExplicitTx.wal.commitErrors", 1)
 				walErr = werr
-				tx.rollbackInBarrierLocked()
+				if undoOK := tx.rollbackInBarrierLocked(); !undoOK {
+					walErr = wrapUndoFailure(walErr)
+				}
 				return nil
 			}
 		}
