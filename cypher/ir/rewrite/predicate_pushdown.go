@@ -15,8 +15,12 @@ import (
 //
 //   - Selection above Projection: push when all predicate variables are in the
 //     projected output.
-//   - Selection above Limit / Skip / Sort: always push (they do not change the
-//     set of available variables).
+//   - Selection above Sort: always push (sort does not change the set of
+//     available variables and filter-then-sort produces the same rows as
+//     sort-then-filter).
+//   - Selection above Limit / Skip: NEVER push (openCypher applies LIMIT/SKIP
+//     before the WHERE predicate in a WITH clause; pushing the filter below
+//     the limit/skip changes the result cardinality).
 //   - Selection above Eager: NEVER push (Eager is a hard barrier).
 //   - Selection above another Selection: push the outer predicate past the inner
 //     selection so predicates accumulate close to the scan.
@@ -50,17 +54,13 @@ func (PredicatePushdown) Apply(plan ir.LogicalPlan) (ir.LogicalPlan, bool) {
 		newProj := ir.NewProjection(child.Items, newSel)
 		return newProj, true
 
-	// ── Limit: always push ───────────────────────────────────────────────────
+	// ── Limit: do NOT push — filter-after-limit ≠ filter-before-limit ───────
 	case *ir.Limit:
-		newSel := ir.NewSelection(sel.Predicate, child.Child)
-		newLimit := ir.NewLimit(child.Count, newSel)
-		return newLimit, true
+		return plan, false
 
-	// ── Skip: always push ────────────────────────────────────────────────────
+	// ── Skip: do NOT push — filter-after-skip ≠ filter-before-skip ──────────
 	case *ir.Skip:
-		newSel := ir.NewSelection(sel.Predicate, child.Child)
-		newSkip := ir.NewSkip(child.Count, newSel)
-		return newSkip, true
+		return plan, false
 
 	// ── Sort: always push ────────────────────────────────────────────────────
 	case *ir.Sort:

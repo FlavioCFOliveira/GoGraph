@@ -252,30 +252,46 @@ func TestPredicatePushdownPastProjection(t *testing.T) {
 	assertType(t, child0(child0(out)), "AllNodesScan")
 }
 
-func TestPredicatePushdownPastLimit(t *testing.T) {
+// TestPredicatePushdownNotPastLimit is the gate test for task #1381.
+// Selection(pred, Limit(n, X)) must NOT be pushed to Limit(n, Selection(pred, X)):
+// filter-after-limit ≠ filter-before-limit (different cardinalities in openCypher).
+//
+// Gate semantics:
+//
+//	Before fix: Apply returns changed=true (pushdown fired) → test fails (asserts !changed)
+//	After fix:  Apply returns changed=false (no pushdown)   → test passes
+func TestPredicatePushdownNotPastLimit(t *testing.T) {
 	lim := ir.NewLimit(10, scan("n"))
 	sel := ir.NewSelection("n.name = 'Alice'", lim)
 
 	rule := rewrite.PredicatePushdown{}
 	out, changed := rule.Apply(sel)
-	if !changed {
-		t.Fatal("expected rule to fire")
+	if changed {
+		t.Fatal("predicate must NOT be pushed past a Limit barrier (filter-after-limit != filter-before-limit)")
 	}
-	assertType(t, out, "Limit")
-	assertType(t, child0(out), "Selection")
+	// Plan must remain Selection(Limit(...)) — unchanged.
+	assertType(t, out, "Selection")
+	assertType(t, child0(out), "Limit")
 }
 
-func TestPredicatePushdownPastSkip(t *testing.T) {
+// TestPredicatePushdownNotPastSkip is the gate test for task #1381.
+// Selection(pred, Skip(n, X)) must NOT be pushed to Skip(n, Selection(pred, X)).
+//
+// Gate semantics:
+//
+//	Before fix: changed=true → test fails
+//	After fix:  changed=false → test passes
+func TestPredicatePushdownNotPastSkip(t *testing.T) {
 	sk := ir.NewSkip(5, scan("n"))
 	sel := ir.NewSelection("n.active = true", sk)
 
 	rule := rewrite.PredicatePushdown{}
 	out, changed := rule.Apply(sel)
-	if !changed {
-		t.Fatal("expected rule to fire")
+	if changed {
+		t.Fatal("predicate must NOT be pushed past a Skip barrier (filter-after-skip != filter-before-skip)")
 	}
-	assertType(t, out, "Skip")
-	assertType(t, child0(out), "Selection")
+	assertType(t, out, "Selection")
+	assertType(t, child0(out), "Skip")
 }
 
 func TestPredicatePushdownPastSort(t *testing.T) {
