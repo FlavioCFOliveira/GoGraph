@@ -677,7 +677,13 @@ func fnToInteger(args []expr.Value) (expr.Value, error) {
 		return v, nil
 	case expr.FloatValue:
 		f := math.Trunc(float64(v))
-		if math.IsNaN(f) || math.IsInf(f, 0) || f > float64(math.MaxInt64) || f < float64(math.MinInt64) {
+		// float64(math.MaxInt64) rounds UP to 2^63 = 9223372036854775808.0, so
+		// the naive `f > float64(math.MaxInt64)` misses exactly 2^63 itself.
+		// Use a named constant for the rounded value and guard with >=.
+		// -maxInt64Float == float64(math.MinInt64) exactly, so `f < -maxInt64Float`
+		// rejects only values strictly below MinInt64 (MinInt64 itself is valid).
+		const maxInt64Float = 9223372036854775808.0 // 2^63; float64(math.MaxInt64) rounds to this
+		if math.IsNaN(f) || math.IsInf(f, 0) || f >= maxInt64Float || f < -maxInt64Float {
 			return nil, &expr.EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: float value %v is out of range for integer conversion", float64(v))}
 		}
 		return expr.IntegerValue(int64(f)), nil
@@ -691,7 +697,9 @@ func fnToInteger(args []expr.Value) (expr.Value, error) {
 		// openCypher: toInteger(<floatString>) drops the fractional part.
 		if f, err := strconv.ParseFloat(s, 64); err == nil {
 			ft := math.Trunc(f)
-			if math.IsNaN(ft) || math.IsInf(ft, 0) || ft > float64(math.MaxInt64) || ft < float64(math.MinInt64) {
+			// Same boundary fix as the FloatValue path: use >= maxInt64Float.
+			const maxInt64Float = 9223372036854775808.0
+			if math.IsNaN(ft) || math.IsInf(ft, 0) || ft >= maxInt64Float || ft < -maxInt64Float {
 				return nil, &expr.EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: float value %v is out of range for integer conversion", f)}
 			}
 			return expr.IntegerValue(int64(ft)), nil

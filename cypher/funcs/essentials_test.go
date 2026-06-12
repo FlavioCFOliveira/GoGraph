@@ -257,6 +257,71 @@ func TestFn_ToInteger(t *testing.T) {
 	}
 }
 
+func TestFn_ToInteger_OverflowBoundary(t *testing.T) {
+	t.Parallel()
+
+	// float64(math.MaxInt64) rounds UP to 2^63, so the old `f > float64(MaxInt64)`
+	// guard admitted 2^63 silently.  The fix uses `f >= 2^63`.
+
+	t.Run("float_2^63_overflows", func(t *testing.T) {
+		t.Parallel()
+		const twoPow63 = 9223372036854775808.0 // 2^63
+		_, err := call(t, "tointeger", expr.FloatValue(twoPow63))
+		if err == nil {
+			t.Fatal("expected ArithmeticOverflow for toInteger(2^63 float), got nil")
+		}
+		var e *expr.EvalError
+		if !errors.As(err, &e) {
+			t.Fatalf("expected *expr.EvalError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("float_MinInt64_valid", func(t *testing.T) {
+		t.Parallel()
+		// float64(math.MinInt64) == -2^63 exactly; int64(-2^63) == MinInt64. Must succeed.
+		const minInt64Float = -9223372036854775808.0
+		v, err := call(t, "tointeger", expr.FloatValue(minInt64Float))
+		if err != nil {
+			t.Fatalf("unexpected error for toInteger(-2^63 float): %v", err)
+		}
+		got, ok := v.(expr.IntegerValue)
+		if !ok {
+			t.Fatalf("expected IntegerValue, got %T", v)
+		}
+		const minInt64 = -9223372036854775808
+		if int64(got) != minInt64 {
+			t.Fatalf("expected MinInt64 (%d), got %d", int64(minInt64), int64(got))
+		}
+	})
+
+	t.Run("string_2^63_overflows", func(t *testing.T) {
+		t.Parallel()
+		// "9223372036854775808" is 2^63 — fails ParseInt, falls to ParseFloat which
+		// rounds to 2^63; the fixed guard catches it.
+		_, err := call(t, "tointeger", expr.StringValue("9223372036854775808"))
+		if err == nil {
+			t.Fatal("expected ArithmeticOverflow for toInteger('2^63 string'), got nil")
+		}
+		var e *expr.EvalError
+		if !errors.As(err, &e) {
+			t.Fatalf("expected *expr.EvalError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("string_MaxInt64_valid", func(t *testing.T) {
+		t.Parallel()
+		// "9223372036854775807" == MaxInt64 — succeeds via ParseInt fast path.
+		v, err := call(t, "tointeger", expr.StringValue("9223372036854775807"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		const maxInt64 = 9223372036854775807
+		if got := int64(v.(expr.IntegerValue)); got != maxInt64 {
+			t.Fatalf("expected MaxInt64 (%d), got %d", int64(maxInt64), got)
+		}
+	})
+}
+
 func TestFn_ToFloat(t *testing.T) {
 	tests := []struct {
 		input expr.Value
