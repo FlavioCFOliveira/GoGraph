@@ -17,7 +17,9 @@ import (
 
 func textOf(r *prometheus.Registry) string {
 	var sb strings.Builder
-	r.WriteText(&sb)
+	if err := r.WriteText(&sb); err != nil {
+		panic("WriteText: " + err.Error())
+	}
 	return sb.String()
 }
 
@@ -276,5 +278,59 @@ func TestRegistry_SanitizeHistogram(t *testing.T) {
 	}
 	if strings.Contains(text, "search/BFS") {
 		t.Errorf("unsanitized name leaked into histogram output\nFull:\n%s", text)
+	}
+}
+
+// ---- WriteText error propagation tests -------------------------------------
+
+// failAfterWriter returns an error after the first N bytes have been written.
+type failAfterWriter struct {
+	n       int
+	written int
+}
+
+func (f *failAfterWriter) Write(p []byte) (int, error) {
+	if f.written >= f.n {
+		return 0, fmt.Errorf("write quota exhausted after %d bytes", f.n)
+	}
+	remain := f.n - f.written
+	if len(p) > remain {
+		f.written += remain
+		return remain, fmt.Errorf("write quota exhausted after %d bytes", f.n)
+	}
+	f.written += len(p)
+	return len(p), nil
+}
+
+// TestWriteText_ReturnsWriteError confirms that WriteText propagates a
+// write error rather than silently swallowing it.
+func TestWriteText_ReturnsWriteError(t *testing.T) {
+	t.Parallel()
+
+	r := prometheus.New()
+	r.IncCounter("requests", 100)
+
+	// Allow only a few bytes — enough to start writing but not to finish.
+	w := &failAfterWriter{n: 5}
+	err := r.WriteText(w)
+	if err == nil {
+		t.Fatal("WriteText returned nil; want a write error from the failing writer")
+	}
+}
+
+// TestWriteText_NoErrorOnSuccess confirms that WriteText returns nil when
+// the writer succeeds.
+func TestWriteText_NoErrorOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	r := prometheus.New()
+	r.IncCounter("ok_counter", 1)
+
+	var sb strings.Builder
+	if err := r.WriteText(&sb); err != nil {
+		t.Fatalf("WriteText returned unexpected error: %v", err)
+	}
+	if sb.Len() == 0 {
+		t.Fatal("WriteText wrote nothing to the writer")
 	}
 }

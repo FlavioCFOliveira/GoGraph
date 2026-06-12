@@ -206,7 +206,7 @@ func bucketLabel(d time.Duration) string {
 // each sorted alphabetically by name so the output is deterministic.
 // The first write error, if any, is returned; partial output may have been
 // written before the error occurred.
-func (r *Registry) WriteText(w io.Writer) {
+func (r *Registry) WriteText(w io.Writer) error {
 	ew := &errWriter{w: w}
 
 	// Snapshot counter names under read-lock.
@@ -263,6 +263,7 @@ func (r *Registry) WriteText(w io.Writer) {
 		ew.printf("%s_sum %g\n", name, sumSec)
 		ew.printf("%s_count %d\n", name, snap.inf)
 	}
+	return ew.err
 }
 
 const contentType = "text/plain; version=0.0.4; charset=utf-8"
@@ -270,9 +271,14 @@ const contentType = "text/plain; version=0.0.4; charset=utf-8"
 // Handler returns an http.Handler that serves all collected metrics in
 // Prometheus text exposition format on every GET request. The response
 // carries Content-Type: text/plain; version=0.0.4; charset=utf-8.
+//
+// If writing the response body fails (e.g. a broken connection), the
+// handler responds with HTTP 500 and the error message in the body.
 func (r *Registry) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", contentType)
-		r.WriteText(w)
+		if err := r.WriteText(w); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 }
