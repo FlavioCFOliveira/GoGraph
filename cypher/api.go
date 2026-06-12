@@ -1590,8 +1590,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// single-writer lock for WAL-backed engines, writeMu for store-less) which
 	// is taken before visMu everywhere in the write path — the ApplyAtomically
 	// call below takes visMu, matching that established ordering.
-	var barrierErr error
-	barrierErr = e.g.ApplyAtomically(func() error {
+	barrierErr := e.g.ApplyAtomically(func() error {
 		// For UNIQUE constraints, build a bound hash index that self-maintains
 		// from the index.Manager change fan-out (emitted at commit time by the
 		// mutator adapters). A bound index keeps the backing store in sync with

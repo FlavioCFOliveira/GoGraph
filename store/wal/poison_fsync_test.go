@@ -17,8 +17,8 @@ import (
 // It is not safe for concurrent use; all tests that use it are serial
 // relative to the Writer under test (the Writer serialises on mu).
 type syncCountFile struct {
-	inner    *testfs.FaultFile
-	syncs    atomic.Int64
+	inner     *testfs.FaultFile
+	syncs     atomic.Int64
 	truncates atomic.Int64
 }
 
