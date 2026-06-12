@@ -2,6 +2,7 @@ package parser
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/antlr4-go/antlr/v4"
 
@@ -125,6 +126,44 @@ func tokenName(t int, litNames, symNames []string) string {
 	return ""
 }
 
+// applyNormalizers applies the full text-rewriting pipeline to query before
+// lexing. Both [Parse] and [ParseStrict] call this helper so that neither
+// diverges from the other on valid input.
+//
+// The pipeline order is load-bearing: each rewrite produces output that
+// subsequent rewrites consume. Do not reorder without verifying the TCK suite.
+func applyNormalizers(query string) string {
+	query = normalizeSingleQuotes(query)
+	query = normalizeDoubleNot(query)
+	query = normalizeCallNoParen(query)
+	query = normalizeNegHexOct(query)
+	query = normalizeFloatExpZeroPad(query)
+	query = normalizeArithmeticMinus(query)
+	// normalizeVarlenDotDot is intentionally NOT applied here: openCypher
+	// requires a leading `*` on every variable-length relationship pattern
+	// (`-[*]-`, `-[*..n]-`, `-[*n..m]-`), and the TCK Match4 [9] gates
+	// against accepting `-[:T..]-` without the star. Keeping the helper
+	// defined and unit-tested in this package documents the rewrite that
+	// used to run but is no longer in the pipeline.
+	query = normalizeVarlenBounds(query)
+	query = normalizeZeroDotFloat(query)
+	query = normalizeLeadingDotFloat(query)
+	return query
+}
+
+// recoverParseScript calls p.Script() and converts any runtime panic into a
+// *ParseError. Incomplete WITH clauses and certain pipe-in-arg expressions
+// drive ANTLR's DefaultErrorStrategy into an unchecked type assertion in
+// antlr4-go v4.13.1; without this guard the process crashes.
+func recoverParseScript(p *gen.CypherParser) (tree gen.IScriptContext, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = &ParseError{Message: fmt.Sprintf("parser panic: %v", r)}
+		}
+	}()
+	return p.Script(), nil
+}
+
 // Parse lexes and parses a Cypher query string and converts the resulting
 // parse tree into a typed AST node. It returns the first error encountered.
 //
@@ -148,21 +187,7 @@ func Parse(query string) (ast.Query, error) {
 		return nil, err
 	}
 
-	query = normalizeSingleQuotes(query)
-	query = normalizeDoubleNot(query)
-	query = normalizeCallNoParen(query)
-	query = normalizeNegHexOct(query)
-	query = normalizeFloatExpZeroPad(query)
-	query = normalizeArithmeticMinus(query)
-	// normalizeVarlenDotDot is intentionally NOT applied here: openCypher
-	// requires a leading `*` on every variable-length relationship pattern
-	// (`-[*]-`, `-[*..n]-`, `-[*n..m]-`), and the TCK Match4 [9] gates
-	// against accepting `-[:T..]-` without the star. Keeping the helper
-	// defined and unit-tested in this package documents the rewrite that
-	// used to run but is no longer in the pipeline.
-	query = normalizeVarlenBounds(query)
-	query = normalizeZeroDotFloat(query)
-	query = normalizeLeadingDotFloat(query)
+	query = applyNormalizers(query)
 
 	// Lex.
 	lexErrListener := &errorListener{}
@@ -179,7 +204,10 @@ func Parse(query string) (ast.Query, error) {
 	p.AddErrorListener(parseErrListener)
 	p.BuildParseTrees = true
 
-	tree := p.Script()
+	tree, panicErr := recoverParseScript(p)
+	if panicErr != nil {
+		return nil, panicErr
+	}
 
 	// Report lex errors first.
 	if len(lexErrListener.errs) > 0 {
@@ -234,12 +262,7 @@ func ParseStrict(query string) (ast.Query, []error) {
 		return nil, []error{err}
 	}
 
-	query = normalizeSingleQuotes(query)
-	query = normalizeDoubleNot(query)
-	query = normalizeCallNoParen(query)
-	query = normalizeNegHexOct(query)
-	query = normalizeFloatExpZeroPad(query)
-	query = normalizeVarlenBounds(query)
+	query = applyNormalizers(query)
 
 	// Lex.
 	lexErrListener := &errorListener{}
@@ -256,7 +279,10 @@ func ParseStrict(query string) (ast.Query, []error) {
 	p.AddErrorListener(parseErrListener)
 	p.BuildParseTrees = true
 
-	tree := p.Script()
+	tree, panicErr := recoverParseScript(p)
+	if panicErr != nil {
+		return nil, []error{panicErr}
+	}
 
 	// Collect all errors: lex errors first, then parse errors.
 	if n := len(lexErrListener.errs) + len(parseErrListener.errs); n > 0 {
