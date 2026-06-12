@@ -44,13 +44,11 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// csCountProp returns the number of :T nodes whose prop equals "dup". It
-// deliberately projects the property and counts client-side instead of using
-// `WHERE n.<prop> = 'dup'`: an equality predicate on a (label, prop) under a
-// UNIQUE constraint is rewritten by the planner to a NodeByIndexSeek over the
-// constraint's backing hash index, which is never populated — so the seek
-// silently returns zero rows (pre-existing planner coverage gap, same class
-// as #1340; tracked separately). The label-scan projection below is immune.
+// csCountProp returns the number of :T nodes whose prop equals "dup".
+// It projects the property and counts client-side so the function remains
+// correct regardless of which plan (NodeByIndexSeek or NodeByLabelScan)
+// the engine selects — the equality-seek path is separately exercised in
+// constraint_index_seek_test.go (task #1407).
 func csCountProp(t *testing.T, eng *cypher.Engine, prop string) int {
 	t.Helper()
 	q := fmt.Sprintf(`MATCH (n:T) RETURN n.%s AS v`, prop)
