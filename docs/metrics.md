@@ -5,15 +5,18 @@ GoGraph's public blocking APIs. It is the authoritative companion
 to the `internal/metrics` package and the CLAUDE.md mandate on
 "latency histograms on every public blocking API".
 
-The metrics are emitted through the `internal/metrics.Backend`
-interface. The default backend is a no-op; the cost of an
+The metrics are emitted through the [`metrics.Backend`][pubmetrics]
+interface, exposed by the public `github.com/FlavioCFOliveira/GoGraph/metrics`
+package. The default backend is a no-op; the cost of an
 unconfigured metric site is two atomic loads and one `time.Now()`
 pair (~50ns per call site). Installing a `Backend` via
 `metrics.SetBackend` activates dispatch. A Prometheus-compatible
 backend lives outside the dependency graph: any consumer that
-implements the `Backend` interface can wire `gograph` into its own
+implements the `Backend` interface can wire GoGraph into its own
 `prometheus.Registry` without forcing `prometheus/client_golang`
 into the module graph.
+
+[pubmetrics]: https://pkg.go.dev/github.com/FlavioCFOliveira/GoGraph/metrics
 
 ## Naming convention
 
@@ -321,19 +324,18 @@ fails loudly when a wired symbol stops emitting its expected name.
 
 ## Backend integration
 
-The default backend is a stateless no-op (`internal/metrics`
-`noopBackend{}`). The module ships a ready-to-use Prometheus
-text-exposition-format backend in `internal/metrics/prometheus` with
-no external dependencies:
+The default backend is a stateless no-op. The module ships a
+ready-to-use Prometheus text-exposition-format backend through the
+public `github.com/FlavioCFOliveira/GoGraph/metrics` package with no
+external dependencies:
 
 ```go
 import (
     "net/http"
-    "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
-    prom "github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus"
+    "github.com/FlavioCFOliveira/GoGraph/metrics"
 )
 
-reg := prom.New()
+reg := metrics.NewPrometheusRegistry()
 metrics.SetBackend(reg)
 
 // Expose /metrics endpoint:
@@ -351,12 +353,20 @@ implement the `Backend` interface directly and install it via
 `metrics.SetBackend`:
 
 ```go
-func (p *myBackend) IncCounter(name string, delta uint64) { /* ... */ }
-func (p *myBackend) ObserveLatency(name string, d time.Duration) { /* ... */ }
+import (
+    "time"
+    "github.com/FlavioCFOliveira/GoGraph/metrics"
+)
+
+type myBackend struct{}
+
+func (b *myBackend) IncCounter(name string, delta uint64)        { /* ... */ }
+func (b *myBackend) ObserveLatency(name string, d time.Duration) { /* ... */ }
+
 metrics.SetBackend(&myBackend{})
 ```
 
-`SetBackend(nil)` restores the no-op default. Backend swaps are
+`metrics.SetBackend(nil)` restores the no-op default. Backend swaps are
 lock-free (`atomic.Pointer`), so a single global swap is safe even
 under concurrent load.
 
