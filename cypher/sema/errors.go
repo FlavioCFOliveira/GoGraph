@@ -97,6 +97,15 @@ const (
 	// requires every non-Variable WITH item to have an explicit alias
 	// so the downstream scope can name it.
 	KindNoExpressionAlias ErrorKind = "NO_EXPRESSION_ALIAS"
+
+	// KindExpressionTooDeep is reported when a binary or unary operator chain
+	// is so deeply nested that the recursive checkExpr walk would overflow the
+	// Go goroutine stack. Operators such as '*' and '-' are excluded from the
+	// pre-parse [parser.countBinaryOpTokens] guard (they appear structurally in
+	// relationship arrows and varlen path patterns), so they can produce
+	// arbitrarily deep BinaryOp AST spines that must be bounded here instead.
+	// The limit [maxExprDepth] is generous for any legitimate Cypher expression.
+	KindExpressionTooDeep ErrorKind = "EXPRESSION_TOO_DEEP"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -142,6 +151,17 @@ func ScopeLeakError(name string, pos ast.Position) *ScopeError {
 		Kind:    KindScopeLeak,
 		Pos:     pos,
 		Message: fmt.Sprintf("variable %q is not visible outside its declaring scope", name),
+	}
+}
+
+// tooDeepExprError constructs a KindExpressionTooDeep ScopeError for an
+// operator chain that exceeds [maxExprDepth] levels of BinaryOp/UnaryOp
+// nesting, which would otherwise drive unbounded Go stack recursion.
+func tooDeepExprError(pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindExpressionTooDeep,
+		Pos:     pos,
+		Message: fmt.Sprintf("operator chain too deep (max %d binary operators)", maxExprDepth),
 	}
 }
 
@@ -337,6 +357,12 @@ const (
 	// WITH item that is not a bare Variable and lacks an explicit
 	// alias.
 	SubTypeNoExpressionAlias = "NoExpressionAlias"
+
+	// SubTypeExpressionTooDeep is the sub-type for a query whose operator
+	// chain nesting exceeds [maxExprDepth] in the semantic-analysis pass.
+	// There is no matching openCypher TCK category; this is an implementation
+	// limit surfaced as SyntaxError to signal that the query is malformed.
+	SubTypeExpressionTooDeep = "ExpressionTooDeep"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -412,6 +438,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindAmbiguousAggregationExpression, Category: CategorySyntaxError, SubType: SubTypeAmbiguousAggregationExpression},
 	{Kind: KindNoVariablesInScope, Category: CategorySyntaxError, SubType: SubTypeNoVariablesInScope},
 	{Kind: KindNoExpressionAlias, Category: CategorySyntaxError, SubType: SubTypeNoExpressionAlias},
+	{Kind: KindExpressionTooDeep, Category: CategorySyntaxError, SubType: SubTypeExpressionTooDeep},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]

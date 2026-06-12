@@ -99,10 +99,22 @@ func Analyse(q ast.Query) []ScopeError {
 	return a.errs
 }
 
+// maxExprDepth is the maximum number of nested BinaryOp/UnaryOp levels that
+// checkExpr will recurse into. Operators such as '*' and '-' are deliberately
+// excluded from the pre-parse [parser.countBinaryOpTokens] guard (they appear
+// structurally in relationship arrows and varlen path patterns), so an
+// adversarial query can build an arbitrarily deep BinaryOp spine with those
+// operators and drive checkExpr into a Go stack overflow. The depth budget is
+// checked at every BinaryOp/UnaryOp entry to stop the recursion before the
+// goroutine stack is exhausted. 1 000 is far above any legitimate Cypher
+// expression while remaining well within Go's default stack growth limit.
+const maxExprDepth = 1000
+
 // analyser holds the mutable state accumulated during the single-pass walk.
 type analyser struct {
-	scope *Scope
-	errs  []ScopeError
+	scope     *Scope
+	errs      []ScopeError
+	exprDepth int // current nesting depth of checkExpr BinaryOp/UnaryOp recursion
 }
 
 func (a *analyser) error(e *ScopeError) {
@@ -1331,6 +1343,12 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		a.checkExpr(v.Receiver)
 
 	case *ast.BinaryOp:
+		a.exprDepth++
+		if a.exprDepth > maxExprDepth {
+			a.exprDepth--
+			a.error(tooDeepExprError(v.Pos))
+			return
+		}
 		if isLogicalOperator(v.Operator) {
 			if kind, bad := nonBooleanLiteralKind(v.Left); bad {
 				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
@@ -1348,14 +1366,22 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		}
 		a.checkExpr(v.Left)
 		a.checkExpr(v.Right)
+		a.exprDepth--
 
 	case *ast.UnaryOp:
+		a.exprDepth++
+		if a.exprDepth > maxExprDepth {
+			a.exprDepth--
+			a.error(tooDeepExprError(v.Pos))
+			return
+		}
 		if isLogicalOperator(v.Operator) {
 			if kind, bad := nonBooleanLiteralKind(v.Operand); bad {
 				a.error(invalidBooleanOperandError(v.Operator, kind, v.Pos))
 			}
 		}
 		a.checkExpr(v.Operand)
+		a.exprDepth--
 
 	case *ast.FunctionInvocation:
 		qualified := v.Name
