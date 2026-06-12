@@ -1421,16 +1421,35 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if e.store == nil {
 		e.writeMu.Lock()
 		defer e.writeMu.Unlock()
-		return e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
+		// Run the registration inside the visibility barrier so concurrent
+		// readers via Graph.View never observe a partially-registered index.
+		var res *Result
+		barrierErr := e.g.ApplyAtomically(func() error {
+			r, err := e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
+			if err != nil {
+				return err
+			}
+			res = r
+			return nil
+		})
+		return res, barrierErr
 	}
 	tx, err := e.store.BeginCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	res, rerr := func() (*Result, error) {
-		res, err := e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
-		if err != nil {
-			return nil, err
+		// Wrap registration inside the visibility barrier: readers calling
+		// Graph.View must never observe a BTree index in a partially-registered
+		// state. commitIndexTx is left outside the barrier because it does
+		// not touch the in-memory graph — it only appends a WAL frame.
+		var r *Result
+		if barrierErr := e.g.ApplyAtomically(func() error {
+			var err error
+			r, err = e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
+			return err
+		}); barrierErr != nil {
+			return nil, barrierErr
 		}
 		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindBTree, p.Label, p.Property, p.Name); err != nil {
 			// Unwind: the operator already registered the index; drop it so
@@ -1438,7 +1457,7 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 			_ = idxMgr.DropIndex(p.Name)
 			return nil, err
 		}
-		return res, nil
+		return r, nil
 	}()
 	_ = tx.Rollback() // guarded no-op after CommitWALOnly
 	return res, rerr
@@ -1559,35 +1578,59 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		return nil, err
 	}
 
-	// For UNIQUE constraints, build a bound hash index that self-maintains from
-	// the index.Manager change fan-out (emitted at commit time by the mutator
-	// adapters). A bound index keeps the backing store in sync with every CREATE,
-	// DELETE, SET, and REMOVE, so NodeByIndexSeek queries always see the live
-	// state and checkUniqueViolation never reports stale "ghost" cardinality for
-	// deleted values (#1342). The bound index is backfilled from the live graph
-	// before it is registered so pre-existing nodes are covered immediately.
-	op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
-	if kind == exec.ConstraintUnique {
-		boundIdx, bidxErr := newBoundNodeHashIndex(e.g, p.Label, p.Property)
-		if bidxErr == nil {
-			e.backfillNodeHashIndex(boundIdx, p.Label, p.Property)
-			op.WithBackingIndex(boundIdx)
+	// Registration, backfill, and value-set seed run inside the visibility
+	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
+	// the constraint or its backing index in a partially-constructed state.
+	// The visibility barrier is not re-entrant, so nothing inside the closure
+	// may call Graph.View or Graph.ApplyAtomically; both scanLabelProperty
+	// (which calls View) and commitConstraintTx (which only appends a WAL
+	// frame) are therefore outside the closure.
+	//
+	// Lock ordering: the caller holds the engine's writer serialisation (store's
+	// single-writer lock for WAL-backed engines, writeMu for store-less) which
+	// is taken before visMu everywhere in the write path — the ApplyAtomically
+	// call below takes visMu, matching that established ordering.
+	var barrierErr error
+	barrierErr = e.g.ApplyAtomically(func() error {
+		// For UNIQUE constraints, build a bound hash index that self-maintains
+		// from the index.Manager change fan-out (emitted at commit time by the
+		// mutator adapters). A bound index keeps the backing store in sync with
+		// every CREATE, DELETE, SET, and REMOVE, so NodeByIndexSeek queries
+		// always see the live state and checkUniqueViolation never reports stale
+		// "ghost" cardinality for deleted values (#1342). The bound index is
+		// backfilled from the live graph before it is registered so pre-existing
+		// nodes are covered immediately.
+		//
+		// backfillNodeHashIndex reads graph state directly (no View/Apply) and
+		// is safe to call inside the barrier. newBoundNodeHashIndex only
+		// interacts with index.Manager metadata, also safe.
+		op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+		if kind == exec.ConstraintUnique {
+			boundIdx, bidxErr := newBoundNodeHashIndex(e.g, p.Label, p.Property)
+			if bidxErr == nil {
+				e.backfillNodeHashIndex(boundIdx, p.Label, p.Property)
+				op.WithBackingIndex(boundIdx)
+			}
+			// On binding error fall through: the operator uses an unbound
+			// index as a safe fallback. The value-set (seeded below) remains
+			// the primary enforcement source; the secondary check is cosmetic.
 		}
-		// On binding error fall through: the operator uses an unbound index as a
-		// safe fallback. The value-set (seeded below) remains the primary
-		// enforcement source; the secondary check is cosmetic.
-	}
-	if _, err := e.runDDLOp(ctx, op); err != nil {
-		return nil, err
-	}
-	if kind == exec.ConstraintUnique {
-		if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, values); err != nil {
-			// Unreachable in practice: with writers excluded the seed
-			// re-checks the same values validatePreExisting already accepted.
-			// Unwind defensively so a failure can never leave a
-			// half-registered constraint behind.
-			return nil, e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
+		if _, err := e.runDDLOp(ctx, op); err != nil {
+			return err
 		}
+		if kind == exec.ConstraintUnique {
+			if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, values); err != nil {
+				// Unreachable in practice: with writers excluded the seed
+				// re-checks the same values validatePreExisting already
+				// accepted. Unwind defensively so a failure can never leave a
+				// half-registered constraint behind.
+				return e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
+			}
+		}
+		return nil
+	})
+	if barrierErr != nil {
+		return nil, barrierErr
 	}
 
 	// Durability: append the constraint op to the WAL of the serialising
@@ -7985,7 +8028,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo}
 	}
 
-	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true)
+	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
@@ -8055,8 +8098,9 @@ func (e *Engine) execUnderBarrier(
 	undo *undoLog,
 	walTx *txn.Tx[string, float64],
 	commit bool,
+	applyFn func(func() error) error,
 ) (r *Result, buildErr error) {
-	_ = e.g.ApplyAtomically(func() error {
+	_ = applyFn(func() error {
 		// Roll the in-memory graph back BEFORE this panic leaves the barrier; see
 		// the type-level note above and replayUndoOnPanic for why this must run
 		// while visMu is still held.
