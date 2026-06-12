@@ -55,8 +55,8 @@ func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPa
 }
 
 // YenKShortestCtx is the context-aware variant of [YenKShortest].
-// ctx.Err() is checked at every spur iteration; on cancellation
-// returns (nil, wrapped ctx.Err()).
+// ctx.Err() is checked at every spur iteration AND inside each inner
+// Dijkstra; on cancellation returns (nil, wrapped ctx.Err()).
 //
 // Memory: the implementation allocates one O(V) scratch set
 // (dist/parent/found/visited/excluded) and one O(E) edge-index map
@@ -122,7 +122,11 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 			rootPath := prevPath[:spurIdx+1]
 			clear(banned)
 			fillBannedEdges(banned, result, rootPath, spurIdx)
-			cand, ok := dijkstraAvoidingInto(ctx, c, spurNode, dst, banned, rootPath[:len(rootPath)-1], scr)
+			cand, ok, spurErr := dijkstraAvoidingInto(ctx, c, spurNode, dst, banned, rootPath[:len(rootPath)-1], scr)
+			if spurErr != nil {
+				metrics.IncCounter("search.YenKShortestCtx.errors", 1)
+				return nil, spurErr
+			}
 			if !ok {
 				continue
 			}
@@ -212,8 +216,10 @@ func fillBannedEdges[W Weight](banned map[edgeKey]struct{}, paths []YenPath[W], 
 
 // dijkstraAvoidingInto runs point-to-point Dijkstra from spur to dst
 // while skipping banned edges and excluded intermediate nodes, using
-// the caller-provided scratch. On success it returns a YenPath whose
-// Nodes slice aliases scr.pathBuf (valid only until the next call);
+// the caller-provided scratch. On success it returns (path, true, nil).
+// When dst is unreachable it returns (zero, false, nil). When ctx is
+// cancelled it returns (zero, false, ctx.Err()). The Nodes slice of a
+// successful path aliases scr.pathBuf (valid only until the next call);
 // the caller must copy if the result needs to outlive the next spur
 // iteration.
 //
@@ -225,7 +231,7 @@ func dijkstraAvoidingInto[W Weight](
 	banned map[edgeKey]struct{},
 	rootInterior []graph.NodeID,
 	scr *yenScratch[W],
-) (YenPath[W], bool) {
+) (YenPath[W], bool, error) {
 	var zeroPath YenPath[W]
 	var zero W
 
@@ -258,7 +264,7 @@ func dijkstraAvoidingInto[W Weight](
 	for scr.heap.len() > 0 {
 		if popCount&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
-				return zeroPath, false
+				return zeroPath, false, err
 			}
 		}
 		popCount++
@@ -294,7 +300,7 @@ func dijkstraAvoidingInto[W Weight](
 		}
 	}
 	if !scr.found[uint64(dst)] {
-		return zeroPath, false
+		return zeroPath, false, nil
 	}
 	length := 1
 	for cur := dst; cur != spur; {
@@ -312,7 +318,7 @@ func dijkstraAvoidingInto[W Weight](
 		cur = scr.parent[uint64(cur)]
 	}
 	scr.pathBuf[0] = spur
-	return YenPath[W]{Nodes: scr.pathBuf, Cost: scr.dist[uint64(dst)]}, true
+	return YenPath[W]{Nodes: scr.pathBuf, Cost: scr.dist[uint64(dst)]}, true, nil
 }
 
 // reconstructYenPath walks parents from dst back to src to materialise
