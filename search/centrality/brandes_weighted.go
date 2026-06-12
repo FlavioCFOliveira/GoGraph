@@ -8,21 +8,21 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
-	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 // WeightedBetweenness computes the weighted betweenness centrality
 // of every NodeID in c using Dijkstra-augmented Brandes (Brandes
 // 2001 §3, weighted variant). Edge weights must be finite and
-// non-negative.
+// strictly positive.
 //
 // Complexity is O(V * (E log V)) for binary-heap-backed Dijkstra
 // per source. The result is not normalised; callers wanting the
 // classical 1 / ((n-1)(n-2)) factor can divide externally.
 //
 // Input contract. Returns [ErrInvalidInput] when any edge weight is
-// NaN or +/-Inf; returns the global sentinel [search.ErrNegativeWeight]
-// when any edge weight is strictly negative.
+// NaN or +/-Inf; returns [ErrNonPositiveWeight] when any edge weight
+// is zero or negative (zero-weight edges can silently corrupt path
+// counts σ when two predecessors settle at equal distance).
 //
 // Concurrency: WeightedBetweenness is safe to invoke concurrently
 // on a shared CSR.
@@ -52,9 +52,9 @@ func WeightedBetweennessCtx(ctx context.Context, c *csr.CSR[float64]) ([]float64
 			metrics.IncCounter("search.centrality.WeightedBetweennessCtx.errors", 1)
 			return nil, ErrInvalidInput
 		}
-		if w < 0 {
+		if w <= 0 {
 			metrics.IncCounter("search.centrality.WeightedBetweennessCtx.errors", 1)
-			return nil, search.ErrNegativeWeight
+			return nil, ErrNonPositiveWeight
 		}
 	}
 	sigma := make([]float64, n)

@@ -15,6 +15,17 @@ import (
 // the rank vector; validating once at entry is mandatory.
 var ErrInvalidInput = errors.New("centrality: input option contains NaN or Inf")
 
+// ErrNonPositiveWeight is returned by [WeightedBetweenness] and
+// [WeightedBetweennessCtx] when any edge weight is zero or negative.
+// Brandes' weighted variant builds a predecessor DAG ordered by
+// shortest-path distance using Dijkstra; zero-weight edges connect
+// two nodes at equal distance, which can cause a node to be settled
+// (and its σ consumed downstream) before a later-settled equal-distance
+// predecessor has accumulated its contribution — making σ inconsistent
+// and silently corrupting the centrality values. Strictly positive
+// weights are therefore required.
+var ErrNonPositiveWeight = errors.New("centrality: edge weight must be strictly positive")
+
 // hasInvalidFloat returns true when any of values is NaN or +/-Inf.
 func hasInvalidFloat(values ...float64) bool {
 	for _, v := range values {
