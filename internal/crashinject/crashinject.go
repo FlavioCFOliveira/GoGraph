@@ -84,8 +84,17 @@ type Out struct {
 	// Signal is the signal that terminated the child, or nil.
 	Signal os.Signal
 
-	// Killed reports whether the child was terminated by SIGKILL.
+	// Killed reports whether the child was terminated by SIGKILL at a
+	// [Breakpoint] (i.e. a genuine crash-injection self-kill).
+	// It is false when the child was killed by a context timeout or
+	// cancellation; use [Out.TimedOut] to distinguish that case.
 	Killed bool
+
+	// TimedOut reports whether the context deadline elapsed before the
+	// child exited. When true, Killed is false even if the child was
+	// ultimately terminated by SIGKILL (the kill was issued by
+	// exec.CommandContext, not by a crashpoint self-kill).
+	TimedOut bool
 
 	// Dir is the crash artefact directory used by the child. Callers
 	// inspect artefacts left there after Run returns.
@@ -157,6 +166,12 @@ func Run(t testing.TB, scenario string, opts Opts) (Out, error) {
 
 	runErr := cmd.Run()
 
+	// Capture whether the context expired before inspecting the exit
+	// status. exec.CommandContext kills with SIGKILL on timeout, which
+	// is byte-identical to a crashpoint self-kill at the OS level. We
+	// must distinguish the two using the context's final state.
+	ctxTimedOut := ctx.Err() != nil
+
 	out := Out{
 		Stdout: stdoutBuf.Bytes(),
 		Stderr: stderrBuf.Bytes(),
@@ -171,7 +186,13 @@ func Run(t testing.TB, scenario string, opts Opts) (Out, error) {
 		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 			if ws.Signaled() {
 				out.Signal = ws.Signal()
-				out.Killed = ws.Signal() == syscall.SIGKILL
+				if ws.Signal() == syscall.SIGKILL && ctxTimedOut {
+					// The kill was issued by exec.CommandContext due to
+					// the deadline, not by a crashpoint self-kill.
+					out.TimedOut = true
+				} else {
+					out.Killed = ws.Signal() == syscall.SIGKILL
+				}
 				return out, nil
 			}
 			out.ExitCode = ws.ExitStatus()
@@ -202,7 +223,11 @@ func isExitError(err error, target **exec.ExitError) bool {
 }
 
 // buildHelperOnce compiles cmd/crashinject-helper exactly once per
-// test run and caches the binary path.
+// test process and caches the binary path. The binary is placed in a
+// process-unique temporary directory (created via os.MkdirTemp) so
+// that concurrent test processes never share a file path and cannot
+// race on the same binary (ETXTBSY on Linux, partial-write on others).
+// The temporary directory is removed when the triggering test ends.
 func buildHelperOnce(t testing.TB) (string, error) {
 	t.Helper()
 	helperBinOnce.Do(func() {
@@ -211,7 +236,20 @@ func buildHelperOnce(t testing.TB) (string, error) {
 			helperBinErr = fmt.Errorf("locate module root: %w", err)
 			return
 		}
-		binPath := filepath.Join(os.TempDir(), "gograph-crashinject-helper"+helperBinSuffix)
+		// Per-process unique directory eliminates cross-process file-path
+		// collisions that cause ETXTBSY on Linux or partially-written
+		// binaries on other platforms. The directory is intentionally not
+		// cleaned up during the test run: removing it after the first test
+		// that triggered the build would invalidate the cached path for all
+		// subsequent tests in the same process. OS temp-dir cleanup (reboot /
+		// tmpwatch / launchd) reclaims the directory between runs.
+		dir, err := os.MkdirTemp("", "gograph-crashinject-*")
+		if err != nil {
+			helperBinErr = fmt.Errorf("crashinject helper tmpdir: %w", err)
+			return
+		}
+
+		binPath := filepath.Join(dir, "crashinject-helper"+helperBinSuffix)
 		// helperBuildTags carries -tags gograph_crashinject only when this
 		// package was itself compiled with that tag, so the helper's embedded
 		// crashpoint.Breakpoint matches the parent's expectation (active hook
@@ -221,8 +259,8 @@ func buildHelperOnce(t testing.TB) (string, error) {
 		args = append(args, "build")
 		args = append(args, helperBuildTags...)
 		args = append(args, "-o", binPath, "./cmd/crashinject-helper")
-		// args is a hard-coded build invocation; only binPath comes from
-		// os.TempDir which is process-local. Not user-tainted.
+		// args is a hard-coded build invocation; binPath is inside a
+		// process-local os.MkdirTemp directory. Not user-tainted.
 		cmd := exec.Command("go", args...) //nolint:gosec // G204: hard-coded `go build` against project path
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
