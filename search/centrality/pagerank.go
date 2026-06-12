@@ -10,10 +10,19 @@ import (
 )
 
 // ErrInvalidInput is returned by centrality algorithms when their
-// float options carry NaN or +/-Inf. Non-finite inputs propagate
-// through the power iteration / push loops and silently corrupt
+// float options contain an invalid value: NaN, +/-Inf, or an
+// out-of-range parameter (e.g. Damping outside (0,1), negative
+// Tolerance/Epsilon). Non-finite or out-of-range inputs propagate
+// through the power-iteration and push loops and silently corrupt
 // the rank vector; validating once at entry is mandatory.
-var ErrInvalidInput = errors.New("centrality: input option contains NaN or Inf")
+var ErrInvalidInput = errors.New("centrality: input option is invalid (NaN, Inf, or out of range)")
+
+// ErrMaxStepsExceeded is returned by [PersonalisedPushPageRank] and
+// [PersonalisedPushPageRankCtx] when the MaxSteps budget is reached
+// before the residue converges to Epsilon. The returned rank vector
+// is the partial result accumulated so far and does NOT satisfy the
+// ε-approximation guarantee.
+var ErrMaxStepsExceeded = errors.New("centrality: MaxSteps budget exhausted before convergence")
 
 // ErrNonPositiveWeight is returned by [WeightedBetweenness] and
 // [WeightedBetweennessCtx] when any edge weight is zero or negative.
@@ -85,6 +94,16 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	defer metrics.Time("search.centrality.PageRankCtx")()
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
+		return nil, 0, ErrInvalidInput
+	}
+	// Zero is the Go zero-value sentinel meaning "use the default".
+	// Only explicitly out-of-range values are rejected.
+	if opts.Damping != 0 && (opts.Damping <= 0 || opts.Damping >= 1) {
+		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
+		return nil, 0, ErrInvalidInput
+	}
+	if opts.Tolerance < 0 {
 		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
 		return nil, 0, ErrInvalidInput
 	}

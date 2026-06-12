@@ -60,6 +60,16 @@ func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src 
 		metrics.IncCounter("search.centrality.PersonalisedPushPageRankCtx.errors", 1)
 		return nil, ErrInvalidInput
 	}
+	// Zero is the Go zero-value sentinel meaning "use the default".
+	// Only explicitly out-of-range values are rejected.
+	if opts.Damping != 0 && (opts.Damping <= 0 || opts.Damping >= 1) {
+		metrics.IncCounter("search.centrality.PersonalisedPushPageRankCtx.errors", 1)
+		return nil, ErrInvalidInput
+	}
+	if opts.Epsilon < 0 {
+		metrics.IncCounter("search.centrality.PersonalisedPushPageRankCtx.errors", 1)
+		return nil, ErrInvalidInput
+	}
 	if opts.Damping == 0 {
 		opts.Damping = 0.85
 	}
@@ -155,6 +165,15 @@ func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src 
 	// (1-alpha) factor (as an earlier implementation did) double-counted the absorption
 	// and biased the rank vector. Leaving residue in place keeps
 	// rank monotonically convergent.
+	//
+	// Signal budget exhaustion when the worklist is not fully drained.
+	// The caller receives the partial rank accumulated so far together
+	// with ErrMaxStepsExceeded so it can decide whether to use or
+	// discard the approximate result.
+	if steps >= opts.MaxSteps && qh < len(queue) {
+		metrics.IncCounter("search.centrality.PersonalisedPushPageRankCtx.errors", 1)
+		return rank, ErrMaxStepsExceeded
+	}
 	return rank, nil
 }
 

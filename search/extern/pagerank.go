@@ -11,8 +11,9 @@ import (
 )
 
 // ErrInvalidInput is returned by extern algorithms when their float
-// options carry NaN or +/-Inf.
-var ErrInvalidInput = errors.New("extern: input option contains NaN or Inf")
+// options contain an invalid value: NaN, +/-Inf, or an out-of-range
+// parameter (e.g. Damping outside (0,1), negative Tolerance).
+var ErrInvalidInput = errors.New("extern: input option is invalid (NaN, Inf, or out of range)")
 
 func hasInvalidFloat(values ...float64) bool {
 	for _, v := range values {
@@ -84,6 +85,16 @@ func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterati
 func PageRankCtx(ctx context.Context, r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	defer metrics.Time("search.extern.PageRankCtx")()
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+		metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
+		return nil, 0, ErrInvalidInput
+	}
+	// Zero is the Go zero-value sentinel meaning "use the default".
+	// Only explicitly out-of-range values are rejected.
+	if opts.Damping != 0 && (opts.Damping <= 0 || opts.Damping >= 1) {
+		metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
+		return nil, 0, ErrInvalidInput
+	}
+	if opts.Tolerance < 0 {
 		metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
 		return nil, 0, ErrInvalidInput
 	}
