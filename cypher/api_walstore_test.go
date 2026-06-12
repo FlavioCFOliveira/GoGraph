@@ -310,12 +310,14 @@ func TestResult_Close_ErrorPathRollsBack(t *testing.T) {
 // TestRunInTx_WAL_ParamTypeError verifies that RunInTx on a WAL-backed engine
 // surfaces a sema.ParamTypeError before any transaction is opened — so the
 // store mutex is never acquired and a follow-up RunInTx works immediately.
+// An index is installed so the resolver has an authoritative String signal for
+// (Person, name); without it the type is unknown and the param would be accepted.
 func TestRunInTx_WAL_ParamTypeError(t *testing.T) {
 	t.Parallel()
-	eng, _, _ := newWALStoreEngine(t)
+	eng, g, _ := newWALStoreEngine(t)
 
-	// Seed schema so the planner can infer $p as KindString from n.name = $p.
 	drainOK(t, eng, `CREATE (n:Person {name: "seed"})`)
+	installPersonNameIndex(g) // String hash index proves n.name is KindString.
 
 	params := map[string]expr.Value{"p": expr.IntegerValue(99)}
 	_, err := eng.RunInTx(context.Background(), `MATCH (n:Person) WHERE n.name = $p RETURN n`, params)

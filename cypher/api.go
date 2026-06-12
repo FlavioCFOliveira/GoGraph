@@ -5910,33 +5910,27 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndex
 }
 
 // indexedPropKind returns the declared key kind of the hash index that backs
-// (label, property), suitable for a [sema.PropTypeResolver]. It mirrors the
-// index-discovery order used by tryBuildIndexSeekFromSelection: the auto-named
-// "<label>_<property>_hash" index first, then any registered hash index as a
-// fallback. ok is false when no hash index is found or its key type is not one
-// of the kinds the seek path supports.
-//
-// Only hash indexes carry a Go-typed key the engine can map to an expr.Kind;
-// label and btree indexes return ("", false) and leave the parameter type at
-// its conservative default.
+// (label, property), suitable for a [sema.PropTypeResolver]. It tries the
+// auto-named "<label>_<property>_hash" index first, then falls back to any
+// registered hash index that covers the (label, property) predicate (the same
+// coverage gate used by tryAnyHashSeek). ok is false when label is empty — a
+// label-less scan has no basis to pick the relevant index — or when no
+// covering hash index is found. Only hash indexes carry a Go-typed key the
+// engine can map to an expr.Kind; label and btree indexes return (0, false).
 func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, bool) {
-	if idxMgr == nil || property == "" {
+	if idxMgr == nil || label == "" || property == "" {
 		return 0, false
 	}
-	if label != "" {
-		wantName := strings.ToLower(label) + "_" + strings.ToLower(property) + "_hash"
-		if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" &&
-			indexCoversNode(sub, label, property) {
-			if k, ok := hashIndexKind(sub); ok {
-				return k, true
-			}
+	wantName := strings.ToLower(label) + "_" + strings.ToLower(property) + "_hash"
+	if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" &&
+		indexCoversNode(sub, label, property) {
+		if k, ok := hashIndexKind(sub); ok {
+			return k, true
 		}
 	}
-	// Fallback: scan registered indexes, matching tryAnyHashSeek's reach
-	// (including its coverage gate, so the param-type resolver and the seek
-	// stay bound to the same index). With no label to disambiguate we accept
-	// the first usable hash index, which is the same index that fallback seek
-	// would bind.
+	// Fallback: scan all registered indexes with the same coverage gate used by
+	// tryAnyHashSeek. Only runs when label is known, so we cannot pick the wrong
+	// index for an unrelated label.
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, property) {

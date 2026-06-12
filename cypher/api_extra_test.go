@@ -483,14 +483,17 @@ func TestRunInTxAny_Basic(t *testing.T) {
 }
 
 func TestRun_ParamTypeMismatch_Error(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{})
-	eng := cypher.NewEngine(g)
+	// The engine can only enforce param types when an index provides an
+	// authoritative type signal. Build a graph with a String hash index on
+	// (Person, name) — the index proves n.name is String, so an Integer param
+	// is a genuine type mismatch.
+	g, eng := newPersonGraph(2, true) // installs person_name_hash (String)
+	_ = g
 
-	// WHERE n.id = $p infers $p as KindString; supplying an integer should fail.
 	params := map[string]expr.Value{"p": expr.IntegerValue(42)}
-	_, err := eng.Run(context.Background(), "MATCH (n) WHERE n.id = $p RETURN n", params)
+	_, err := eng.Run(context.Background(), "MATCH (n:Person) WHERE n.name = $p RETURN n", params)
 	if err == nil {
-		t.Fatal("expected type mismatch error for integer param where string expected")
+		t.Fatal("expected type mismatch error for integer param where string index expected")
 	}
 	var pte *sema.ParamTypeError
 	if !errors.As(err, &pte) {

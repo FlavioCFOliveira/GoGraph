@@ -10,25 +10,26 @@ import (
 )
 
 func TestInferParamTypes_EqualityPredicate(t *testing.T) {
-	// Simulate Selection(AllNodesScan, "(n.id = $pid)") as produced by the translator.
+	// No resolver: type unknown, parameter must be omitted.
 	scan := ir.NewAllNodesScan("n")
 	sel := ir.NewSelection("(n.id = $pid)", scan)
 	root := ir.NewProduceResults([]string{"n"}, sel)
 
 	got := sema.InferParamTypes(root)
-	if got["pid"] != expr.KindString {
-		t.Errorf("expected KindString for $pid, got %v (map=%v)", got["pid"], got)
+	if _, present := got["pid"]; present {
+		t.Errorf("expected $pid omitted when type unknown, got map=%v", got)
 	}
 }
 
 func TestInferParamTypes_ReversedOperands(t *testing.T) {
+	// No resolver: type unknown, parameter must be omitted.
 	scan := ir.NewAllNodesScan("n")
 	sel := ir.NewSelection("($name = n.email)", scan)
 	root := ir.NewProduceResults([]string{"n"}, sel)
 
 	got := sema.InferParamTypes(root)
-	if got["name"] != expr.KindString {
-		t.Errorf("expected KindString for $name, got %v", got["name"])
+	if _, present := got["name"]; present {
+		t.Errorf("expected $name omitted when type unknown, got map=%v", got)
 	}
 }
 
@@ -71,27 +72,28 @@ func TestInferParamTypesWithResolver_ResolverKindWins(t *testing.T) {
 	}
 }
 
-func TestInferParamTypesWithResolver_NilResolverDefaultsToString(t *testing.T) {
+func TestInferParamTypesWithResolver_NilResolverOmitsParam(t *testing.T) {
+	// Nil resolver: type unknown, parameter must be omitted (not defaulted to String).
 	scan := ir.NewNodeByLabelScan("n", "Account")
 	sel := ir.NewSelection("(n.id = $pid)", scan)
 	root := ir.NewProduceResults([]string{"n"}, sel)
 
 	got := sema.InferParamTypesWithResolver(root, nil)
-	if got["pid"] != expr.KindString {
-		t.Errorf("expected KindString default for $pid, got %v", got["pid"])
+	if _, present := got["pid"]; present {
+		t.Errorf("expected $pid omitted for nil resolver, got map=%v", got)
 	}
 }
 
-func TestInferParamTypesWithResolver_ResolverMissDefaultsToString(t *testing.T) {
+func TestInferParamTypesWithResolver_ResolverMissOmitsParam(t *testing.T) {
+	// Resolver returns ok=false: type unknown, parameter must be omitted.
 	scan := ir.NewNodeByLabelScan("n", "Account")
 	sel := ir.NewSelection("(n.id = $pid)", scan)
 	root := ir.NewProduceResults([]string{"n"}, sel)
 
-	// Resolver knows nothing about (Account, id): fall back to String.
 	resolve := func(string, string) (expr.Kind, bool) { return 0, false }
 	got := sema.InferParamTypesWithResolver(root, resolve)
-	if got["pid"] != expr.KindString {
-		t.Errorf("expected KindString fallback for $pid, got %v", got["pid"])
+	if _, present := got["pid"]; present {
+		t.Errorf("expected $pid omitted when resolver returns ok=false, got map=%v", got)
 	}
 }
 
@@ -154,5 +156,120 @@ func TestParamTypeError_Message(t *testing.T) {
 	// Verify the message cites the param name.
 	if len(msg) < 5 {
 		t.Errorf("error message too short: %q", msg)
+	}
+}
+
+// TestCheckParams_NonStringParams is the gate test for the fix that omits
+// parameters of unknown type rather than defaulting them to KindString.
+// Before the fix, Integer/Float/Bool params on unindexed properties would be
+// rejected because recordParam defaulted to KindString.
+func TestCheckParams_NonStringParams(t *testing.T) {
+	// resolveString returns KindString only for (Person, name); all others unknown.
+	resolveString := func(label, prop string) (expr.Kind, bool) {
+		if label == "Person" && prop == "name" {
+			return expr.KindString, true
+		}
+		return 0, false
+	}
+
+	buildPlan := func(pred, label string) ir.LogicalPlan {
+		var child ir.LogicalPlan
+		if label != "" {
+			child = ir.NewNodeByLabelScan("n", label)
+		} else {
+			child = ir.NewAllNodesScan("n")
+		}
+		sel := ir.NewSelection(pred, child)
+		return ir.NewProduceResults([]string{"n"}, sel)
+	}
+
+	tests := []struct {
+		name      string
+		pred      string
+		label     string
+		param     string
+		value     expr.Value
+		wantErr   bool
+		wantInMap bool // whether the param should appear in the inferred map at all
+	}{
+		// Unindexed properties: type unknown → param omitted → accepted freely.
+		{
+			name:      "integer param on unindexed prop accepted",
+			pred:      "(n.age = $v)",
+			label:     "Person",
+			param:     "v",
+			value:     expr.IntegerValue(30),
+			wantErr:   false,
+			wantInMap: false,
+		},
+		{
+			name:      "float param on unindexed prop accepted",
+			pred:      "(n.score = $v)",
+			label:     "Person",
+			param:     "v",
+			value:     expr.FloatValue(3.14),
+			wantErr:   false,
+			wantInMap: false,
+		},
+		{
+			name:      "bool param on unindexed prop accepted",
+			pred:      "(n.active = $v)",
+			label:     "Person",
+			param:     "v",
+			value:     expr.BoolValue(true),
+			wantErr:   false,
+			wantInMap: false,
+		},
+		// No label → resolver cannot identify index → param omitted → accepted.
+		{
+			name:      "integer param on label-less scan accepted",
+			pred:      "(n.age = $v)",
+			label:     "",
+			param:     "v",
+			value:     expr.IntegerValue(99),
+			wantErr:   false,
+			wantInMap: false,
+		},
+		// Indexed String property: resolver returns KindString → Integer param rejected.
+		{
+			name:      "integer param on indexed string prop rejected",
+			pred:      "(n.name = $v)",
+			label:     "Person",
+			param:     "v",
+			value:     expr.IntegerValue(42),
+			wantErr:   true,
+			wantInMap: true,
+		},
+		// Indexed String property: matching String param accepted.
+		{
+			name:      "string param on indexed string prop accepted",
+			pred:      "(n.name = $v)",
+			label:     "Person",
+			param:     "v",
+			value:     expr.StringValue("Alice"),
+			wantErr:   false,
+			wantInMap: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := buildPlan(tc.pred, tc.label)
+			inferred := sema.InferParamTypesWithResolver(plan, resolveString)
+
+			_, inMap := inferred[tc.param]
+			if inMap != tc.wantInMap {
+				t.Errorf("param %q in inferred map = %v, want %v (map=%v)", tc.param, inMap, tc.wantInMap, inferred)
+			}
+
+			params := map[string]expr.Value{tc.param: tc.value}
+			err := sema.CheckParams(inferred, params)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected type error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
 	}
 }

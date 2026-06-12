@@ -19,9 +19,10 @@ import (
 // data stored under that property. The only authoritative, declared type signal
 // the engine has is an index on (label, prop) — an int64 hash index proves the
 // property is Integer, a string hash index proves String, and so on. Callers
-// therefore supply a PropTypeResolver that maps (label, prop) to the indexed
-// key kind; when the resolver knows the type it wins. Absent any index, the
-// kind falls back to KindString, the most common property-lookup key type.
+// supply a PropTypeResolver that maps (label, prop) to the indexed key kind;
+// only when the resolver returns ok=true is the parameter recorded. Parameters
+// whose type cannot be determined are omitted from the map and thus accepted
+// unconditionally by CheckParams.
 //
 // Callers use the returned map with CheckParams to validate that the params map
 // supplied at Run time is type-compatible before query execution.
@@ -56,22 +57,21 @@ type PropTypeResolver func(label, property string) (kind expr.Kind, ok bool)
 // InferParamTypes walks plan looking for Selection nodes whose predicate is an
 // equality comparison involving a parameter reference ($name) and a property
 // access (n.prop). It returns a map from parameter name (without $) to the
-// expected expr.Kind, defaulting to KindString for every property-vs-parameter
-// equality.
+// expected expr.Kind. Parameters whose type cannot be determined are omitted.
 //
 // It is equivalent to InferParamTypesWithResolver(plan, nil) and is retained
-// for callers (and tests) that have no index information to offer.
+// for callers that have no index information to offer.
 func InferParamTypes(plan ir.LogicalPlan) map[string]expr.Kind {
 	return InferParamTypesWithResolver(plan, nil)
 }
 
 // InferParamTypesWithResolver behaves like InferParamTypes but consults resolve
 // to determine the expected kind of a parameter compared against a property.
-// When resolve reports a known kind for the (scanLabel, prop) pair it is used;
-// otherwise the kind falls back to KindString. A nil resolve always falls back.
+// A parameter is recorded only when resolve returns ok=true; when resolve is
+// nil or returns false the parameter is omitted (type unknown, accepted freely).
 //
-// When the same parameter appears in multiple incompatible contexts the first
-// encountered wins. Parameters used in non-inferrable positions are omitted.
+// When the same parameter appears in multiple inferrable contexts the first
+// recorded kind wins. Parameters used in non-inferrable positions are omitted.
 func InferParamTypesWithResolver(plan ir.LogicalPlan, resolve PropTypeResolver) map[string]expr.Kind {
 	result := make(map[string]expr.Kind)
 	inferFromPlan(plan, resolve, result)
@@ -146,20 +146,22 @@ func propKeyOf(operand string) (key string, ok bool) {
 	return operand[i+1:], true
 }
 
-// recordParam records name → kind, resolving the kind from the (label, prop)
-// pair when the resolver knows it and defaulting to KindString otherwise. The
-// first kind recorded for a given name wins.
+// recordParam records name → kind only when resolve returns an authoritative
+// kind for (label, prop). When resolve is nil or returns ok=false the parameter
+// is left out of out so CheckParams accepts it unconditionally. The first kind
+// recorded for a given name wins.
 func recordParam(out map[string]expr.Kind, name, label, prop string, resolve PropTypeResolver) {
 	if _, seen := out[name]; seen {
 		return
 	}
-	kind := expr.KindString
-	if resolve != nil {
-		if k, ok := resolve(label, prop); ok {
-			kind = k
-		}
+	if resolve == nil {
+		return
 	}
-	out[name] = kind
+	k, ok := resolve(label, prop)
+	if !ok {
+		return
+	}
+	out[name] = k
 }
 
 // CheckParams validates that every parameter in inferred also appears in
