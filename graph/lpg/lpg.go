@@ -544,6 +544,11 @@ func (g *Graph[N, W]) revive(id graph.NodeID) {
 		}
 	}
 	g.tombstoneMu.Unlock()
+	// Re-add id to all label bitmaps for labels that survived in the
+	// node's label bag. RemoveNode strips those bitmaps when tombstoning;
+	// revive must restore them so label-index consumers observe the node
+	// again without requiring a SetNodeLabel call for each old label.
+	g.restoreLabelBitmaps(id)
 }
 
 // Revive clears any tombstone on the node interned under key n, marking it
@@ -814,6 +819,50 @@ func (g *Graph[N, W]) RemoveNode(n N) {
 		g.tombstoneActive.Add(1)
 	}
 	g.tombstoneMu.Unlock()
+	// Strip id from every label bitmap so label-index consumers see the
+	// node as absent without consulting IsTombstoned (task #1409,
+	// option a). This is a no-op when the caller already removed labels
+	// via RemoveNodeLabel (the Cypher executor delete path), and
+	// correct when RemoveNode is called directly via the Go API without
+	// prior label removal.
+	g.stripLabelBitmaps(id)
+}
+
+// stripLabelBitmaps removes id from every label bitmap that records it.
+// Called by RemoveNode to keep nodeIdx exact so consumers outside the
+// Cypher executor do not need to consult IsTombstoned (task #1409).
+func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID) {
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	bag := sh.m[id]
+	lids := make([]LabelID, 0, len(bag))
+	for lid := range bag {
+		lids = append(lids, lid)
+	}
+	sh.mu.RUnlock()
+	for _, lid := range lids {
+		g.nodeIdx.Remove(uint32(lid), id)
+	}
+}
+
+// restoreLabelBitmaps re-adds id to every label bitmap for labels still
+// in the node's label bag. It is the inverse of [Graph.stripLabelBitmaps],
+// called when a tombstoned node is revived via [Graph.AddNode]: the label
+// bag survives tombstoning (only the bitmap is stripped), so reviving the
+// node must restore those entries so label-index consumers observe the
+// node again (task #1409).
+func (g *Graph[N, W]) restoreLabelBitmaps(id graph.NodeID) {
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	bag := sh.m[id]
+	lids := make([]LabelID, 0, len(bag))
+	for lid := range bag {
+		lids = append(lids, lid)
+	}
+	sh.mu.RUnlock()
+	for _, lid := range lids {
+		g.nodeIdx.Add(uint32(lid), id)
+	}
 }
 
 // TombstonedIDs returns the NodeIDs currently marked removed via
