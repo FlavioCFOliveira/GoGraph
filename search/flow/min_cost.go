@@ -89,8 +89,9 @@ func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
 func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (totalFlow, totalCost int, err error) {
 	defer metrics.Time("search.flow.MinCostMaxFlowCtx")()
 	n := g.N()
-	if n == 0 || src == sink {
-		return 0, 0, nil
+	if verr := validateEndpoints(n, src, sink); verr != nil {
+		metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)
+		return 0, 0, verr
 	}
 	if verr := validateCostCapacities(g, src); verr != nil {
 		metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)

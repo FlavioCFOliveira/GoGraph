@@ -39,8 +39,9 @@ func PushRelabelMaxFlow(g *Network, src, sink int) int {
 func PushRelabelMaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.PushRelabelMaxFlowCtx")()
 	n := g.N()
-	if n == 0 || src == sink {
-		return 0, nil
+	if err := validateEndpoints(n, src, sink); err != nil {
+		metrics.IncCounter("search.flow.PushRelabelMaxFlowCtx.errors", 1)
+		return 0, err
 	}
 	if err := validateCapacities(g, src); err != nil {
 		metrics.IncCounter("search.flow.PushRelabelMaxFlowCtx.errors", 1)

@@ -33,6 +33,10 @@ func EdmondsKarp(g *Network, src, sink int) int {
 // they could.
 func EdmondsKarpCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.EdmondsKarpCtx")()
+	if err := validateEndpoints(g.N(), src, sink); err != nil {
+		metrics.IncCounter("search.flow.EdmondsKarpCtx.errors", 1)
+		return 0, err
+	}
 	if err := validateCapacities(g, src); err != nil {
 		metrics.IncCounter("search.flow.EdmondsKarpCtx.errors", 1)
 		return 0, err

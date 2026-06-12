@@ -34,6 +34,35 @@ const capInf = 1 << 62
 // swallows [ErrNegativeCycle].
 var ErrCapacityOverflow = errors.New("flow: edge capacities or costs overflow int64")
 
+// ErrInvalidEndpoints is returned by the context-aware flow entry points
+// ([MaxFlowCtx], [EdmondsKarpCtx], [PushRelabelMaxFlowCtx],
+// [MinCostMaxFlowCtx]) when src or sink is outside [0, N()) or when
+// src == sink. A well-formed s-t flow requires two distinct nodes that
+// lie within the network.
+//
+// The non-context entry points ([MaxFlow], [EdmondsKarp],
+// [PushRelabelMaxFlow], [MinCostMaxFlow]) cannot surface an error in
+// their signature; on a violation they return the zero result
+// (0, or (0, 0) for min-cost).
+var ErrInvalidEndpoints = errors.New("flow: src and sink must be distinct nodes within the network")
+
+// validateEndpoints checks that src and sink are valid, distinct node
+// indices for network g. It returns [ErrInvalidEndpoints] when any of
+// the following holds:
+//
+//   - src < 0 or src >= n
+//   - sink < 0 or sink >= n
+//   - src == sink
+//
+// validateEndpoints must be called before [validateCapacities] so that
+// OOB src values never reach the source-cut walk.
+func validateEndpoints(n, src, sink int) error {
+	if src < 0 || src >= n || sink < 0 || sink >= n || src == sink {
+		return ErrInvalidEndpoints
+	}
+	return nil
+}
+
 // validateCapacities checks that a [Network]'s capacities cannot drive
 // the max-flow accumulation past int64. It enforces two conditions:
 //
@@ -59,7 +88,9 @@ func validateCapacities(g *Network, src int) error {
 		}
 	}
 	if src < 0 || src >= len(g.heads) {
-		return nil // out-of-range src is handled by the callers' own guards
+		// Out-of-range src is rejected before we reach here by
+		// validateEndpoints; this branch stays as a no-op safety net.
+		return nil
 	}
 	sum := 0
 	for _, e := range g.heads[src] {

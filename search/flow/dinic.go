@@ -74,6 +74,10 @@ func MaxFlow(g *Network, src, sink int) int {
 // they could; see [ErrCapacityOverflow] for the exact bound.
 func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.MaxFlowCtx")()
+	if err := validateEndpoints(g.N(), src, sink); err != nil {
+		metrics.IncCounter("search.flow.MaxFlowCtx.errors", 1)
+		return 0, err
+	}
 	if err := validateCapacities(g, src); err != nil {
 		metrics.IncCounter("search.flow.MaxFlowCtx.errors", 1)
 		return 0, err
