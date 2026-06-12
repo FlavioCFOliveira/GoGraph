@@ -475,6 +475,145 @@ integer-keyed index is rejected.
 
 ---
 
+## Explicit transactions
+
+`RunInTx` is autocommit: each call is its own transaction. To span **several
+statements** in one all-or-nothing transaction, open an explicit transaction
+with `Engine.BeginTx`:
+
+```go
+func (e *Engine) BeginTx(ctx context.Context) (*cypher.ExplicitTx, error)
+```
+
+`BeginTx` acquires the engine's writer serialisation (the WAL store's
+single-writer lock when the engine is WAL-backed, the engine writer mutex when
+it is store-less) and holds it for the lifetime of the returned handle. If `ctx`
+is already cancelled or its deadline has elapsed, `BeginTx` returns promptly
+without acquiring any lock, wrapping the context error.
+
+The returned `*ExplicitTx` exposes:
+
+| Method | Signature | Purpose |
+|---|---|---|
+| `Exec` | `Exec(query string, params map[string]expr.Value) (*Result, error)` | Run one statement; its writes accumulate in the transaction. |
+| `ExecAny` | `ExecAny(query string, params map[string]any) (*Result, error)` | As `Exec`, converting native Go params via `BindParams`. |
+| `Commit` | `Commit() error` | Make every accumulated write durable and visible, then release the writer serialisation. |
+| `Rollback` | `Rollback() error` | Unwind every accumulated write, then release the writer serialisation. |
+
+The caller MUST finish the handle with exactly one `Commit` or `Rollback`. Until
+then the writer serialisation is held and concurrent writers block (write-write
+isolation). Each `Exec` applies its writes eagerly to the in-memory graph and
+records the inverse into a transaction-wide undo log; `Commit` fsyncs the WAL
+**once** for the whole transaction (durable-then-visible) and discards the undo
+log, while `Rollback` replays the undo log in reverse to restore the
+pre-transaction state.
+
+```go
+tx, err := eng.BeginTx(ctx)
+if err != nil {
+    // handle
+}
+if _, err := tx.Exec(
+    "CREATE (n:Person {name: $name})",
+    map[string]expr.Value{"name": expr.StringValue("Alice")},
+); err != nil {
+    _ = tx.Rollback()
+    // handle
+}
+if _, err := tx.Exec(
+    "CREATE (n:Person {name: $name})",
+    map[string]expr.Value{"name": expr.StringValue("Bob")},
+); err != nil {
+    _ = tx.Rollback()
+    // handle
+}
+if err := tx.Commit(); err != nil {
+    // both CREATEs were rolled back; handle the durability error
+}
+```
+
+Notes on behaviour, all enforced by the implementation:
+
+- **DDL is rejected inside a transaction.** A `CREATE`/`DROP INDEX` or
+  `CREATE`/`DROP CONSTRAINT` statement returns an error from `Exec`; schema
+  changes are not transactional and must be issued outside an explicit
+  transaction (autocommit).
+- **Read statements are permitted** and observe the transaction's current
+  state.
+- A statement that raises a runtime error is returned directly from `Exec`,
+  wrapped in `*cypher.ErrStatementPipeline`; the partial writes remain in the
+  undo log, so the caller decides whether to `Rollback`.
+- After `Commit` or `Rollback` the handle is finished; any further `Exec`,
+  `Commit`, or `Rollback` returns `cypher.ErrTxFinished`.
+- If the `Commit` WAL fsync fails, the transaction is rolled back and the fsync
+  error is returned: a transaction whose durability cannot be guaranteed is
+  reported as failed, never acknowledged.
+
+**Concurrency contract.** An `ExplicitTx` is **not** safe for concurrent use: it
+is owned by a single caller and its methods must be called in sequence. Distinct
+`ExplicitTx` handles — and an `ExplicitTx` running alongside autocommit
+`RunInTx` calls on the same engine — are safe to use concurrently; they
+serialise on the writer mutex. `Closing` a `Result` returned by `Exec` releases
+only that result's iterator state; it never commits or rolls the transaction
+back.
+
+This API is the engine substrate for the Bolt `BEGIN` / `RUN` / `COMMIT` /
+`ROLLBACK` protocol (see [docs/bolt.md](bolt.md)).
+
+---
+
+## Resource budgets
+
+A single `Run` / `RunInTx` (and each `ExplicitTx.Exec`) materialises its result
+under the graph's visibility barrier. To stop an unintentional whole-graph scan
+or Cartesian-product query from exhausting memory, the engine applies **finite
+default caps** to every result. These caps are configured through
+`cypher.EngineOptions` and wired by `cypher.NewEngineWithOptions`.
+
+| Option | Default constant | Default value | Unbounded sentinel |
+|---|---|---|---|
+| `MaxResultRows` | `DefaultMaxResultRows` | `10_000_000` rows | `MaxResultRowsUnlimited` (`-1`) |
+| `MaxResultBytes` | `DefaultMaxResultBytes` | `1 << 30` (1 GiB) | `MaxResultBytesUnlimited` (`-1`) |
+| `MaxCollectItems` | `funcs.DefaultMaxCollectItems` | `10_000_000` items | `MaxCollectItemsUnlimited` (`-1`) |
+
+For every option the zero value (the default) selects the corresponding finite
+`Default*` cap, a positive value overrides it, and the `-1` sentinel disables
+the cap entirely.
+
+- **`MaxResultRows`** limits the number of rows a single call may materialise.
+  When exceeded, `Result.Next` returns `false` and `Result.Err` reports
+  `cypher.ErrResultRowsExceeded`.
+- **`MaxResultBytes`** is a coarse aggregate-byte budget complementing the row
+  cap: a handful of rows carrying very large values (a node with megabyte-scale
+  string properties) can dwarf a high row count. The estimate is intentionally
+  cheap (`O(columns)` per row, no allocation, no serialisation). When the
+  cumulative estimated encoded size exceeds the budget, `Result.Err` reports
+  `cypher.ErrResultBytesExceeded`.
+- **`MaxCollectItems`** bounds the number of values a single buffering
+  aggregator — `collect()`, `collect(DISTINCT …)`, `percentileCont()`,
+  `percentileDisc()` — retains in one group. When exceeded the aggregator
+  returns `funcs.ErrCollectItemsExceeded`, surfaced through `Result.Err`.
+
+```go
+eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{
+    MaxResultRows:   1_000_000,                  // override the default cap
+    MaxResultBytes:  cypher.MaxResultBytesUnlimited, // opt out of the byte budget
+    MaxCollectItems: cypher.MaxCollectItemsUnlimited, // opt out of the collect cap
+})
+```
+
+**Behavioural implication.** Because the defaults are *finite*, a query that
+previously appeared to stream an unbounded result now stops with a typed error
+once it crosses `DefaultMaxResultRows` (or `DefaultMaxResultBytes`, or
+`funcs.DefaultMaxCollectItems`). A caller that genuinely needs an unbounded
+result must opt out explicitly with the relevant `-1` sentinel, and must then
+bound memory by another means (for example, streaming and closing the `Result`
+promptly), because an unbounded `MATCH` otherwise materialises every row under
+the graph's visibility barrier. All three caps trip **inside** the barrier
+during materialisation, before the surplus reaches the caller.
+
+---
+
 ## Known limitations
 
 The following constructs are not yet supported:
@@ -501,7 +640,24 @@ the full divergence taxonomy, see [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md).
 - [docs/benchmarks/cypher.md](benchmarks/cypher.md) — IC1–IC14 benchmark results
 - [docs/metrics.md](metrics.md) — observability metrics exposed by the engine
 
+---
+
+## Release-time documentation checklist
+
+At each release, re-review the four reference documents against the `CHANGELOG`
+"Added" and "Changed" sections so that no behaviour-changing feature ships
+undocumented:
+
+- [docs/persistence.md](persistence.md)
+- [docs/cypher.md](cypher.md) (this document)
+- [docs/bolt.md](bolt.md)
+- [docs/test-battery.md](test-battery.md)
+
+Pay particular attention to changes that alter *observed behaviour* — new APIs,
+new default limits, and new typed errors — since a user who hits such a change
+consults the reference first.
+
 
 ---
 
-*Last reviewed: 2026-05-30 against commit `7236360`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-12 against commit `ec76e6f`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
