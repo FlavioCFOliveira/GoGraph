@@ -29,7 +29,7 @@
 // # Concurrency
 //
 // Assert and UpdateRequested are safe for concurrent use; the
-// flag is read once at package init time and never modified.
+// flag value is read through the registered *flag.Flag at call time.
 package goldens
 
 import (
@@ -42,17 +42,17 @@ import (
 	"testing"
 )
 
-// updateFlag is the -update command-line flag registered at init.
+// updateFlag holds the *flag.Flag for the -update flag.
 // We do not use flag.Bool because the package may be imported by
 // many test binaries; registering once is sufficient.
-var updateFlag = func() *bool {
+var updateFlag = func() *flag.Flag {
 	// flag.Lookup guards against double-registration when multiple
 	// test packages import goldens in the same binary.
 	if f := flag.Lookup("update"); f != nil {
-		v, _ := f.Value.(interface{ Get() any }).Get().(bool)
-		return &v
+		return f
 	}
-	return flag.Bool("update", false, "overwrite golden files with current output")
+	_ = flag.Bool("update", false, "overwrite golden files with current output")
+	return flag.Lookup("update")
 }()
 
 // UpdateRequested reports whether the test binary was started with
@@ -63,10 +63,12 @@ func UpdateRequested() bool {
 	if os.Getenv("GOGRAPH_UPDATE_GOLDENS") == "1" {
 		return true
 	}
-	// updateFlag is nil only if the flag package was not yet
-	// initialised, which cannot happen after package init.
-	if updateFlag != nil && *updateFlag {
-		return true
+	if updateFlag != nil {
+		getter, ok := updateFlag.Value.(interface{ Get() any })
+		if ok {
+			v, _ := getter.Get().(bool)
+			return v
+		}
 	}
 	return false
 }

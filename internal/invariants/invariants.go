@@ -225,6 +225,10 @@ func toFloat64[W search.Weight](v W) float64 {
 // Order (vertex count), Size (edge count), or edge set. On failure
 // the message identifies the first discrepancy found. Edge weights
 // are intentionally ignored; only topology is compared.
+//
+// For multigraphs, per-(u,v) edge counts are compared so that
+// differing multiplicities (e.g. u→v×2 vs u→v×1) are detected even
+// when Order and Size are equal.
 func AssertShapeEqual[N comparable, W any](t testing.TB, a, b *lpg.Graph[N, W]) {
 	t.Helper()
 	aa, ba := a.AdjList(), b.AdjList()
@@ -240,14 +244,49 @@ func AssertShapeEqual[N comparable, W any](t testing.TB, a, b *lpg.Graph[N, W]) 
 		return
 	}
 
-	// Every edge in a must exist in b.
-	aa.Mapper().Walk(func(_ graph.NodeID, n N) bool {
-		for nb := range aa.Neighbours(n) {
-			if !ba.HasEdge(n, nb) {
-				t.Errorf("invariants.AssertShapeEqual: edge (%v → %v) present in a but missing from b",
-					n, nb)
+	ma, mb := aa.Mapper(), ba.Mapper()
+
+	// edgeCounts builds a map from destination key N to the number of
+	// parallel edges from src (identified by NodeID) in adj.
+	edgeCounts := func(adj *adjlist.AdjList[N, W], srcID graph.NodeID) map[N]int {
+		nbs, _ := adj.LoadEntry(srcID)
+		if len(nbs) == 0 {
+			return nil
+		}
+		counts := make(map[N]int, len(nbs))
+		for _, dstID := range nbs {
+			dst, ok := adj.Mapper().Resolve(dstID)
+			if !ok {
+				continue
+			}
+			counts[dst]++
+		}
+		return counts
+	}
+
+	ma.Walk(func(idA graph.NodeID, n N) bool {
+		idB, ok := mb.Lookup(n)
+		if !ok {
+			t.Errorf("invariants.AssertShapeEqual: node %v present in a but missing from b", n)
+			return false
+		}
+		ca := edgeCounts(aa, idA)
+		cb := edgeCounts(ba, idB)
+
+		for dst, countA := range ca {
+			if countB := cb[dst]; countA != countB {
+				t.Errorf("invariants.AssertShapeEqual: edge (%v → %v): count in a=%d, count in b=%d",
+					n, dst, countA, countB)
 				return false
 			}
+		}
+		for dst, countB := range cb {
+			if ca[dst] == 0 {
+				t.Errorf("invariants.AssertShapeEqual: edge (%v → %v) present in b but missing from a",
+					n, dst)
+				return false
+			}
+			_ = countB
 		}
 		return true
 	})

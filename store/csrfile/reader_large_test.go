@@ -1,6 +1,6 @@
 //go:build soak
 
-package csrfile
+package csrfile_test
 
 import (
 	"path/filepath"
@@ -10,6 +10,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
+	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
 // TestReader_LargeFile_RMAT generates a ~8M-edge RMAT graph (scale=20,
@@ -27,7 +28,7 @@ func TestReader_LargeFile_RMAT(t *testing.T) {
 		t.Fatalf("Finalise: %v", err)
 	}
 
-	r, err := Open(outPath)
+	r, err := csrfile.Open(outPath)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
