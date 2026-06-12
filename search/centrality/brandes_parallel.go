@@ -17,8 +17,13 @@ import (
 // parallelised across sources. Each worker goroutine processes a
 // disjoint range of source vertices, accumulating into its own
 // private centrality buffer; the final reduction sums these buffers
-// into the returned slice. Output is bit-identical to [Betweenness]
-// (the order of additions is deterministic).
+// into the returned slice.
+//
+// Output is deterministic for a fixed numWorkers value. Due to
+// non-associative floating-point addition, the result may differ from
+// [Betweenness] by up to ~1e-12 per node when numWorkers > 1; the
+// two agree within this numerical tolerance. For exact bit-identity
+// with the serial result, use [Betweenness] directly.
 //
 // numWorkers <= 0 picks runtime.GOMAXPROCS(0). For tiny graphs (V
 // below ~1024) the parallel overhead dominates and the serial
