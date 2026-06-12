@@ -1,0 +1,66 @@
+name: Crash Injection
+
+# Runs the deterministic crash-injection battery on every push/PR to main.
+# These tests use the `gograph_crashinject` build tag to compile the
+# subprocess-based harness that kills a child process mid-write and verifies
+# WAL, snapshot, and checkpoint durability on recovery.
+#
+# Coverage exemption: internal/crashpoint is excluded from cover_gate.sh
+# because its breakpoints are only exercised via the crash-injection tag.
+# This job is the gate that ensures those tests actually run.
+#
+# See internal/crashinject/ and internal/crashpoint/ for the harness design.
+# See docs/test-layers.md for the layer specification.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crash-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  crash-injection:
+    name: crash-injection battery
+    runs-on: ubuntu-latest
+    # Crash tests spawn subprocesses and send SIGKILL; give them a generous
+    # window. Ten minutes is well above the current battery runtime but leaves
+    # room for future additions without a workflow change.
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Module integrity (download + verify)
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Build (crashinject tag)
+        # Confirm the tag compiles cleanly before running tests.
+        run: go build -tags=gograph_crashinject ./...
+
+      - name: Run crash-injection battery
+        # make test-crashinject compiles and runs:
+        #   ./internal/crashinject/...  — subprocess round-trip harness
+        #   ./internal/crashpoint/...   — breakpoint self-kill tests
+        #   ./store/recovery/...        — WAL/snapshot recovery under crash
+        #
+        # No `continue-on-error`: a failure here must block the merge.
+        # The harness spawns child processes with kill-9 patterns; no sudo
+        # is required on ubuntu-latest because the process is already owned
+        # by the runner user.
+        run: make test-crashinject
