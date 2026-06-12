@@ -251,6 +251,10 @@ func containsAggregate(e ast.Expression) bool { //nolint:gocyclo // per-AST-node
 				return true
 			}
 		}
+	case *ast.ReduceExpr:
+		if containsAggregate(n.Init) || containsAggregate(n.Source) || containsAggregate(n.Projection) {
+			return true
+		}
 	case *ast.ListComprehension:
 		// The Source expression sits in the outer scope — its
 		// aggregates DO count toward the surrounding projection. The
@@ -329,6 +333,12 @@ func extractAggregatesFromExpr(e ast.Expression, aggs *[]AggregateExpr, counter 
 		for i, a := range n.Args {
 			cp.Args[i] = extractAggregatesFromExpr(a, aggs, counter)
 		}
+		return &cp
+	case *ast.ReduceExpr:
+		cp := *n
+		cp.Init = extractAggregatesFromExpr(n.Init, aggs, counter)
+		cp.Source = extractAggregatesFromExpr(n.Source, aggs, counter)
+		cp.Projection = extractAggregatesFromExpr(n.Projection, aggs, counter)
 		return &cp
 	case *ast.ListComprehension:
 		cp := *n

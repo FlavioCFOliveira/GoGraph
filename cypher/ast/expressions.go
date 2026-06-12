@@ -392,3 +392,27 @@ func (s *SliceExpr) String() string {
 	out += "]"
 	return out
 }
+
+// ReduceExpr is a reduce expression: reduce(acc = init, x IN list | expr).
+// AccVar is the accumulator variable name, Init is the initial value expression,
+// ElemVar is the loop variable name, Source is the list expression, and
+// Projection is the accumulation expression evaluated on each iteration.
+type ReduceExpr struct {
+	Pos        Position
+	EndPos     Position
+	AccVar     string
+	Init       Expression
+	ElemVar    string
+	Source     Expression
+	Projection Expression
+}
+
+func (*ReduceExpr) astNode()  {}
+func (*ReduceExpr) exprNode() {}
+
+// String returns the Cypher reduce expression.
+func (r *ReduceExpr) String() string {
+	return "reduce(" + r.AccVar + " = " + r.Init.String() +
+		", " + r.ElemVar + " IN " + r.Source.String() +
+		" | " + r.Projection.String() + ")"
+}

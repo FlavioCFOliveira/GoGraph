@@ -1883,6 +1883,9 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 	if fw := ctx.FilterWith(); fw != nil {
 		return v.visit(fw)
 	}
+	if re := ctx.ReduceExpression(); re != nil {
+		return v.visit(re)
+	}
 	if rcp := ctx.RelationshipsChainPattern(); rcp != nil {
 		return v.visit(rcp)
 	}
@@ -2298,6 +2301,48 @@ func (v *visitor) VisitFilterWith(ctx *gen.FilterWithContext) interface{} {
 		EndPos: endPositionOf(ctx),
 		Name:   funcName,
 		Args:   []ast.Expression{lc},
+	}
+}
+
+// VisitReduceExpression handles reduce(acc = init, x IN list | expr).
+func (v *visitor) VisitReduceExpression(ctx *gen.ReduceExpressionContext) interface{} {
+	sym := ctx.Symbol()
+	if sym == nil {
+		return unsupported(ctx, "reduceExpression", "missing accumulator symbol")
+	}
+	accVar := symbolText(sym)
+
+	exprs := ctx.AllExpression()
+	if len(exprs) < 2 {
+		return unsupported(ctx, "reduceExpression", "missing init or projection expression")
+	}
+	initExpr, err := asExpr(v.visit(exprs[0]))
+	if err != nil {
+		return &SemaError{Rule: "reduceExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+
+	fe := ctx.FilterExpression()
+	if fe == nil {
+		return unsupported(ctx, "reduceExpression", "missing filterExpression")
+	}
+	elemVar, src, _, ferr := v.visitFilterExpression(fe)
+	if ferr != nil {
+		return ferr
+	}
+
+	projExpr, err := asExpr(v.visit(exprs[1]))
+	if err != nil {
+		return &SemaError{Rule: "reduceExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+
+	return &ast.ReduceExpr{
+		Pos:        positionOf(ctx),
+		EndPos:     endPositionOf(ctx),
+		AccVar:     accVar,
+		Init:       initExpr,
+		ElemVar:    elemVar,
+		Source:     src,
+		Projection: projExpr,
 	}
 }
 
@@ -3032,6 +3077,10 @@ func containsBareRelChainPattern(expr ast.Expression) bool {
 			}
 		}
 		return false
+	case *ast.ReduceExpr:
+		return containsBareRelChainPattern(e.Init) ||
+			containsBareRelChainPattern(e.Source) ||
+			containsBareRelChainPattern(e.Projection)
 	case *ast.ListComprehension:
 		return containsBareRelChainPattern(e.Source) ||
 			containsBareRelChainPattern(e.Predicate) ||

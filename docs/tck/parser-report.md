@@ -168,3 +168,45 @@ parentheses are optional, matching the behaviour of the standalone
 `Call` rule. This pairs with the `normalizeCallNoParen` pre-processor
 which inserts `()` when YIELD follows directly; the parser patch covers
 the rarer case where YIELD is absent.
+
+### E. `reduce()` expression (task #1426)
+
+`reduce(acc = init, x IN list | expr)` is a dedicated openCypher construct
+that does not parse correctly as a `FunctionInvocation`: the `|` (STICK)
+token between the iterator expression and the projection expression is not
+valid inside `expressionChain`, and a function call's argument list has no
+notion of the accumulator binding.
+
+Rather than modify the ATN, a hand-written `ReduceExpression()` parser
+function was added to `cypher_parser.go` together with a short-circuit in
+`Atom()` that fires before the switch statement:
+
+```go
+// atomReduceFix: intercept ID "reduce"/"REDUCE" + LPAREN before the
+// FunctionInvocation (alt 10) or Symbol (alt 11) case can run.
+if (atomAlt == 10 || atomAlt == 11) && isReduceToken(p.GetTokenStream().LT(1)) &&
+    p.GetTokenStream().LT(2).GetTokenType() == CypherParserLPAREN {
+    atomAlt = 100
+}
+```
+
+The `isReduceToken` helper (case-insensitive ID comparison) and the
+`ReduceExpression()` function live at the **end** of `cypher_parser.go`.
+The visitor interfaces (`cypherparser_visitor.go`, `cypherparser_base_visitor.go`,
+`cypherparser_listener.go`, `cypherparser_base_listener.go`) have matching
+`VisitReduceExpression` / `Enter|ExitReduceExpression` methods added.
+
+`ReduceExpression()` manually consumes: ID ("reduce") → LPAREN →
+`Symbol()` (accumulator variable) → ASSIGN → `Expression()` (init) →
+COMMA → `FilterExpression()` (iterator variable + source list) →
+STICK → `Expression()` (projection) → RPAREN.
+
+When you regenerate, you must:
+1. Restore `isReduceToken` and `ReduceExpression()` at the bottom of
+   `cypher_parser.go`, together with the `IReduceExpressionContext`
+   interface and `ReduceExpressionContext` struct.
+2. Re-apply the `(atomAlt == 10 || atomAlt == 11) && isReduceToken(...)` intercept inside `Atom()`.
+3. Re-add `VisitReduceExpression` to `cypherparser_visitor.go` and
+   its default implementation to `cypherparser_base_visitor.go`.
+4. Re-add `EnterReduceExpression` / `ExitReduceExpression` to
+   `cypherparser_listener.go` and `cypherparser_base_listener.go`.

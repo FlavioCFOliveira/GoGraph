@@ -297,6 +297,7 @@ atom
     | listComprehension
     | patternComprehension
     | filterWith
+    | reduceExpression
     | relationshipsChainPattern
     | parenthesizedExpression
     | functionInvocation
@@ -348,6 +349,10 @@ parenthesizedExpression
 
 filterWith
     : (ALL | ANY | NONE | SINGLE) LPAREN filterExpression RPAREN
+    ;
+
+reduceExpression
+    : REDUCE LPAREN symbol ASSIGN expression COMMA filterExpression STICK expression RPAREN
     ;
 
 patternComprehension
@@ -441,6 +446,7 @@ symbol
     | ANY
     | NONE
     | SINGLE
+    | REDUCE
     ;
 
 reservedWord

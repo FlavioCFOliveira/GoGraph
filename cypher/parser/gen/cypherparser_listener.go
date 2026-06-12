@@ -217,6 +217,9 @@ type CypherParserListener interface {
 	// EnterFilterWith is called when entering the filterWith production.
 	EnterFilterWith(c *FilterWithContext)
 
+	// EnterReduceExpression is called when entering the reduceExpression production.
+	EnterReduceExpression(c *ReduceExpressionContext)
+
 	// EnterPatternComprehension is called when entering the patternComprehension production.
 	EnterPatternComprehension(c *PatternComprehensionContext)
 
@@ -486,6 +489,9 @@ type CypherParserListener interface {
 
 	// ExitFilterWith is called when exiting the filterWith production.
 	ExitFilterWith(c *FilterWithContext)
+
+	// ExitReduceExpression is called when exiting the reduceExpression production.
+	ExitReduceExpression(c *ReduceExpressionContext)
 
 	// ExitPatternComprehension is called when exiting the patternComprehension production.
 	ExitPatternComprehension(c *PatternComprehensionContext)

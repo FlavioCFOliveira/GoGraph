@@ -1309,16 +1309,20 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		// StringLiteral / ListLiteral / BoolLiteral receiver is
 		// statically invalid (`RETURN 'str'.foo`, `RETURN [].foo`,
 		// `RETURN true.foo`). MapLiteral is excluded because maps DO
-		// admit property access (`RETURN {k: 1}.k`). IntLiteral and
-		// FloatLiteral receivers are intentionally NOT flagged here —
-		// the parser reconstructs float literals like `1.0` from an
-		// IntLiteral atom followed by a numeric "Name" accessor, but
-		// very long floats may slip through that reconstruction and
-		// reach sema as IntLiteral.someDigits, which is a valid
-		// (round-trip-tolerant) float literal in the source rather
-		// than a property access.
+		// admit property access (`RETURN {k: 1}.k`).
+		//
+		// IntLiteral and FloatLiteral receivers: the parser reconstructs
+		// float literals like `1.0` from an IntLiteral atom followed by a
+		// single all-digit "Name" accessor (visitPropertyExpression T937).
+		// When that reconstruction fires the visitor emits a *ast.FloatLiteral
+		// — not a *ast.Property — so a *ast.Property node whose receiver is
+		// *ast.IntLiteral or *ast.FloatLiteral that reaches sema CANNOT be a
+		// float literal reconstruction. Any such node is a genuine property
+		// access on a numeric literal (e.g. `RETURN (5).foo` or `RETURN 5.foo`
+		// where `foo` is a non-digit identifier), which is a type error (#1430).
 		switch v.Receiver.(type) {
-		case *ast.StringLiteral, *ast.ListLiteral, *ast.BoolLiteral:
+		case *ast.StringLiteral, *ast.ListLiteral, *ast.BoolLiteral,
+			*ast.IntLiteral, *ast.FloatLiteral:
 			a.error(invalidBooleanOperandError(".", "non-graph", v.Pos))
 		}
 		// Transitive check: when the receiver is a Variable whose
@@ -1432,6 +1436,23 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		a.checkExpr(v.Expr)
 		a.checkExpr(v.From)
 		a.checkExpr(v.To)
+
+	case *ast.ReduceExpr:
+		// Source and init are evaluated in the outer scope.
+		a.checkExpr(v.Init)
+		a.checkExpr(v.Source)
+		// AccVar and ElemVar are local to the reduce body.
+		inner := a.scope.Child()
+		saved := a.scope
+		a.scope = inner
+		if err := a.scope.Define(v.AccVar, v.Pos, "any"); err != nil {
+			a.error(err)
+		}
+		if err := a.scope.Define(v.ElemVar, v.Pos, "any"); err != nil {
+			a.error(err)
+		}
+		a.checkExpr(v.Projection)
+		a.scope = saved
 
 	case *ast.ListComprehension:
 		// Source is evaluated in the outer scope.
@@ -1866,6 +1887,8 @@ func positionOf(e ast.Expression) ast.Position {
 		return v.Pos
 	case *ast.CaseExpression:
 		return v.Pos
+	case *ast.ReduceExpr:
+		return v.Pos
 	case *ast.ListComprehension:
 		return v.Pos
 	case *ast.PatternComprehension:
@@ -2007,6 +2030,10 @@ func collectFreeVarsOutsideProjectedAggs(e ast.Expression, projectedExprs map[st
 				walk(alt.Consequent)
 			}
 			walk(v.ElseExpr)
+		case *ast.ReduceExpr:
+			walk(v.Init)
+			walk(v.Source)
+			walk(v.Projection)
 		case *ast.ListComprehension:
 			walk(v.Source)
 			walk(v.Predicate)
@@ -2069,6 +2096,10 @@ func collectVariables(e ast.Expression) []string {
 				walk(alt.Consequent)
 			}
 			walk(v.ElseExpr)
+		case *ast.ReduceExpr:
+			walk(v.Init)
+			walk(v.Source)
+			walk(v.Projection)
 		case *ast.ListComprehension:
 			walk(v.Source)
 			walk(v.Predicate)
@@ -2091,6 +2122,11 @@ func aggInsideComprehension(e ast.Expression) bool {
 		return false
 	}
 	switch v := e.(type) {
+	case *ast.ReduceExpr:
+		if containsAggregation(v.Projection) {
+			return true
+		}
+		return aggInsideComprehension(v.Init) || aggInsideComprehension(v.Source)
 	case *ast.ListComprehension:
 		if containsAggregation(v.Projection) || containsAggregation(v.Predicate) {
 			return true
@@ -2202,6 +2238,10 @@ func containsAggregation(e ast.Expression) bool {
 				return true
 			}
 		}
+	case *ast.ReduceExpr:
+		return containsAggregation(v.Init) ||
+			containsAggregation(v.Source) ||
+			containsAggregation(v.Projection)
 	case *ast.ListComprehension:
 		return containsAggregation(v.Source) ||
 			containsAggregation(v.Predicate) ||

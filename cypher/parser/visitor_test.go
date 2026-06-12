@@ -1135,6 +1135,63 @@ func corpus() []corpusEntry {
 		},
 
 		// ----------------------------------------------------------------
+		// reduce()
+		// ----------------------------------------------------------------
+		{
+			name:  "reduce_sum",
+			query: "RETURN reduce(acc = 0, x IN [1, 2, 3] | acc + x)",
+			check: func(t *testing.T, q ast.Query) {
+				sq := mustSingle(t, q)
+				re, ok := sq.Return.Projection.Items[0].Expr.(*ast.ReduceExpr)
+				if !ok {
+					t.Fatalf("expected *ast.ReduceExpr, got %T", sq.Return.Projection.Items[0].Expr)
+				}
+				if re.AccVar != "acc" {
+					t.Errorf("AccVar: got %q want %q", re.AccVar, "acc")
+				}
+				if re.ElemVar != "x" {
+					t.Errorf("ElemVar: got %q want %q", re.ElemVar, "x")
+				}
+				if re.Init == nil {
+					t.Fatal("Init must not be nil")
+				}
+				if re.Source == nil {
+					t.Fatal("Source must not be nil")
+				}
+				if re.Projection == nil {
+					t.Fatal("Projection must not be nil")
+				}
+			},
+		},
+		{
+			name:  "reduce_string_concat",
+			query: `RETURN reduce(s = '', x IN ['a', 'b', 'c'] | s + x)`,
+			check: func(t *testing.T, q ast.Query) {
+				sq := mustSingle(t, q)
+				re, ok := sq.Return.Projection.Items[0].Expr.(*ast.ReduceExpr)
+				if !ok {
+					t.Fatalf("expected *ast.ReduceExpr, got %T", sq.Return.Projection.Items[0].Expr)
+				}
+				if re.AccVar != "s" {
+					t.Errorf("AccVar: got %q want %q", re.AccVar, "s")
+				}
+				if re.ElemVar != "x" {
+					t.Errorf("ElemVar: got %q want %q", re.ElemVar, "x")
+				}
+			},
+		},
+		{
+			name:  "reduce_uppercase_keyword",
+			query: "RETURN REDUCE(acc = 0, x IN [1] | acc + x)",
+			check: func(t *testing.T, q ast.Query) {
+				sq := mustSingle(t, q)
+				if _, ok := sq.Return.Projection.Items[0].Expr.(*ast.ReduceExpr); !ok {
+					t.Fatalf("expected *ast.ReduceExpr, got %T", sq.Return.Projection.Items[0].Expr)
+				}
+			},
+		},
+
+		// ----------------------------------------------------------------
 		// Pattern comprehension
 		// ----------------------------------------------------------------
 		{

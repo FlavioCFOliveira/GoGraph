@@ -4,6 +4,7 @@ package gen // CypherParser
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/antlr4-go/antlr/v4"
@@ -12,6 +13,7 @@ import (
 // Suppress unused import errors
 var _ = fmt.Printf
 var _ = strconv.Itoa
+var _ = strings.EqualFold
 var _ = sync.Once{}
 
 type CypherParser struct {
@@ -79,7 +81,7 @@ func cypherparserParserInit() {
 		"listComprehension", "filterExpression", "countAll", "expressionChain",
 		"caseExpression", "parameter", "literal", "rangeLit", "boolLit", "numLit",
 		"stringLit", "charLit", "listLit", "mapLit", "mapPair", "name", "symbol",
-		"reservedWord",
+		"reservedWord", "reduceExpression",
 	}
 	staticData.PredictionContextCache = antlr.NewPredictionContextCache()
 	staticData.serializedATN = []int32{
@@ -692,6 +694,7 @@ const (
 	CypherParserRULE_name                      = 87
 	CypherParserRULE_symbol                    = 88
 	CypherParserRULE_reservedWord              = 89
+	CypherParserRULE_reduceExpression          = 90
 )
 
 // IScriptContext is an interface to support dynamic dispatch.
@@ -11121,6 +11124,7 @@ type IAtomContext interface {
 	ListComprehension() IListComprehensionContext
 	PatternComprehension() IPatternComprehensionContext
 	FilterWith() IFilterWithContext
+	ReduceExpression() IReduceExpressionContext
 	RelationshipsChainPattern() IRelationshipsChainPatternContext
 	ParenthesizedExpression() IParenthesizedExpressionContext
 	FunctionInvocation() IFunctionInvocationContext
@@ -11276,6 +11280,22 @@ func (s *AtomContext) FilterWith() IFilterWithContext {
 	return t.(IFilterWithContext)
 }
 
+func (s *AtomContext) ReduceExpression() IReduceExpressionContext {
+	var t antlr.RuleContext
+	for _, ctx := range s.GetChildren() {
+		if _, ok := ctx.(IReduceExpressionContext); ok {
+			t = ctx.(antlr.RuleContext)
+			break
+		}
+	}
+
+	if t == nil {
+		return nil
+	}
+
+	return t.(IReduceExpressionContext)
+}
+
 func (s *AtomContext) RelationshipsChainPattern() IRelationshipsChainPatternContext {
 	var t antlr.RuleContext
 	for _, ctx := range s.GetChildren() {
@@ -11420,6 +11440,15 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
 	if atomAlt == 11 && isNumericIDToken(p.GetTokenStream().LT(1)) {
 		atomAlt = 1
 	}
+	// atomReduceFix: reduce(acc = init, x IN list | expr) is parsed as a dedicated
+	// production. The REDUCE keyword lexes as ID (no keyword token in the ATN).
+	// AdaptivePredict may pick FunctionInvocation (10) or Symbol (11) depending on
+	// look-ahead; intercept both when the ID text is "reduce"/"REDUCE" followed by
+	// LPAREN and redirect to the hand-written ReduceExpression() rule (alt 100).
+	if (atomAlt == 10 || atomAlt == 11) && isReduceToken(p.GetTokenStream().LT(1)) &&
+		p.GetTokenStream().LT(2).GetTokenType() == CypherParserLPAREN {
+		atomAlt = 100
+	}
 
 	switch atomAlt {
 	case 1:
@@ -11511,6 +11540,13 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
 		{
 			p.SetState(612)
 			p.SubqueryCount()
+		}
+
+	case 100:
+		// atomReduceFix: hand-written alternative for reduce(acc = init, x IN list | expr).
+		p.EnterOuterAlt(localctx, 100)
+		{
+			p.ReduceExpression()
 		}
 
 	case antlr.ATNInvalidAltNumber:
@@ -13575,6 +13611,276 @@ errorExit:
 	}
 	p.ExitRule()
 	return localctx
+}
+
+// IReduceExpressionContext is an interface to support dynamic dispatch.
+// It represents a reduce(acc = init, x IN list | expr) expression.
+type IReduceExpressionContext interface {
+	antlr.ParserRuleContext
+
+	// GetParser returns the parser.
+	GetParser() antlr.Parser
+
+	// Getter signatures
+	LPAREN() antlr.TerminalNode
+	Symbol() ISymbolContext
+	ASSIGN() antlr.TerminalNode
+	AllExpression() []IExpressionContext
+	Expression(i int) IExpressionContext
+	COMMA() antlr.TerminalNode
+	FilterExpression() IFilterExpressionContext
+	STICK() antlr.TerminalNode
+	RPAREN() antlr.TerminalNode
+
+	// IsReduceExpressionContext differentiates from other interfaces.
+	IsReduceExpressionContext()
+}
+
+type ReduceExpressionContext struct {
+	antlr.BaseParserRuleContext
+	parser antlr.Parser
+}
+
+func NewEmptyReduceExpressionContext() *ReduceExpressionContext {
+	var p = new(ReduceExpressionContext)
+	antlr.InitBaseParserRuleContext(&p.BaseParserRuleContext, nil, -1)
+	p.RuleIndex = CypherParserRULE_reduceExpression
+	return p
+}
+
+func InitEmptyReduceExpressionContext(p *ReduceExpressionContext) {
+	antlr.InitBaseParserRuleContext(&p.BaseParserRuleContext, nil, -1)
+	p.RuleIndex = CypherParserRULE_reduceExpression
+}
+
+func (*ReduceExpressionContext) IsReduceExpressionContext() {}
+
+func NewReduceExpressionContext(parser antlr.Parser, parent antlr.ParserRuleContext, invokingState int) *ReduceExpressionContext {
+	var p = new(ReduceExpressionContext)
+	antlr.InitBaseParserRuleContext(&p.BaseParserRuleContext, parent, invokingState)
+	p.parser = parser
+	p.RuleIndex = CypherParserRULE_reduceExpression
+	return p
+}
+
+func (s *ReduceExpressionContext) GetParser() antlr.Parser { return s.parser }
+
+func (s *ReduceExpressionContext) LPAREN() antlr.TerminalNode {
+	return s.GetToken(CypherParserLPAREN, 0)
+}
+
+func (s *ReduceExpressionContext) Symbol() ISymbolContext {
+	var t antlr.RuleContext
+	for _, ctx := range s.GetChildren() {
+		if _, ok := ctx.(ISymbolContext); ok {
+			t = ctx.(antlr.RuleContext)
+			break
+		}
+	}
+	if t == nil {
+		return nil
+	}
+	return t.(ISymbolContext)
+}
+
+func (s *ReduceExpressionContext) ASSIGN() antlr.TerminalNode {
+	return s.GetToken(CypherParserASSIGN, 0)
+}
+
+func (s *ReduceExpressionContext) AllExpression() []IExpressionContext {
+	children := s.GetChildren()
+	len := 0
+	for _, ctx := range children {
+		if _, ok := ctx.(IExpressionContext); ok {
+			len++
+		}
+	}
+	tst := make([]IExpressionContext, len)
+	i := 0
+	for _, ctx := range children {
+		if t, ok := ctx.(IExpressionContext); ok {
+			tst[i] = t.(IExpressionContext)
+			i++
+		}
+	}
+	return tst
+}
+
+func (s *ReduceExpressionContext) Expression(i int) IExpressionContext {
+	var t antlr.RuleContext
+	j := 0
+	for _, ctx := range s.GetChildren() {
+		if _, ok := ctx.(IExpressionContext); ok {
+			if j == i {
+				t = ctx.(antlr.RuleContext)
+				break
+			}
+			j++
+		}
+	}
+	if t == nil {
+		return nil
+	}
+	return t.(IExpressionContext)
+}
+
+func (s *ReduceExpressionContext) COMMA() antlr.TerminalNode {
+	return s.GetToken(CypherParserCOMMA, 0)
+}
+
+func (s *ReduceExpressionContext) FilterExpression() IFilterExpressionContext {
+	var t antlr.RuleContext
+	for _, ctx := range s.GetChildren() {
+		if _, ok := ctx.(IFilterExpressionContext); ok {
+			t = ctx.(antlr.RuleContext)
+			break
+		}
+	}
+	if t == nil {
+		return nil
+	}
+	return t.(IFilterExpressionContext)
+}
+
+func (s *ReduceExpressionContext) STICK() antlr.TerminalNode {
+	return s.GetToken(CypherParserSTICK, 0)
+}
+
+func (s *ReduceExpressionContext) RPAREN() antlr.TerminalNode {
+	return s.GetToken(CypherParserRPAREN, 0)
+}
+
+func (s *ReduceExpressionContext) GetRuleContext() antlr.RuleContext {
+	return s
+}
+
+func (s *ReduceExpressionContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string {
+	return antlr.TreesStringTree(s, ruleNames, recog)
+}
+
+func (s *ReduceExpressionContext) EnterRule(listener antlr.ParseTreeListener) {
+	if listenerT, ok := listener.(CypherParserListener); ok {
+		listenerT.EnterReduceExpression(s)
+	}
+}
+
+func (s *ReduceExpressionContext) ExitRule(listener antlr.ParseTreeListener) {
+	if listenerT, ok := listener.(CypherParserListener); ok {
+		listenerT.ExitReduceExpression(s)
+	}
+}
+
+func (s *ReduceExpressionContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+	switch t := visitor.(type) {
+	case CypherParserVisitor:
+		return t.VisitReduceExpression(s)
+	default:
+		return t.VisitChildren(s)
+	}
+}
+
+// ReduceExpression parses: reduce(acc = init, x IN list | expr)
+// This is a hand-written parser function (not ATN-driven) because the REDUCE
+// keyword lexes as ID and the '|' inside the argument list is not valid in the
+// standard expressionChain production. It is called from Atom() when the
+// current token is an ID whose text is "reduce" (case-insensitive) followed by
+// a LPAREN.
+func (p *CypherParser) ReduceExpression() (localctx IReduceExpressionContext) {
+	localctx = NewReduceExpressionContext(p, p.GetParserRuleContext(), p.GetState())
+	p.EnterRule(localctx, 180, CypherParserRULE_reduceExpression)
+
+	p.EnterOuterAlt(localctx, 1)
+
+	// Consume the REDUCE identifier token (lexed as ID).
+	{
+		tok := p.GetTokenStream().LT(1)
+		p.GetTokenStream().Consume()
+		localctx.AddTokenNode(tok) //nolint:staticcheck // generated-parser pattern
+	}
+
+	// LPAREN
+	{
+		p.Match(CypherParserLPAREN)
+		if p.HasError() {
+			goto errorExit
+		}
+	}
+
+	// Symbol: accumulator variable name
+	{
+		p.Symbol()
+	}
+
+	// ASSIGN '='
+	{
+		p.Match(CypherParserASSIGN)
+		if p.HasError() {
+			goto errorExit
+		}
+	}
+
+	// Expression: initial value
+	{
+		p.Expression()
+	}
+
+	// COMMA ','
+	{
+		p.Match(CypherParserCOMMA)
+		if p.HasError() {
+			goto errorExit
+		}
+	}
+
+	// FilterExpression: "x IN list" (with optional WHERE)
+	{
+		p.FilterExpression()
+	}
+
+	// STICK '|'
+	{
+		p.Match(CypherParserSTICK)
+		if p.HasError() {
+			goto errorExit
+		}
+	}
+
+	// Expression: the map/accumulation expression
+	{
+		p.Expression()
+	}
+
+	// RPAREN ')'
+	{
+		p.Match(CypherParserRPAREN)
+		if p.HasError() {
+			goto errorExit
+		}
+	}
+
+errorExit:
+	if p.HasError() {
+		v := p.GetError()
+		localctx.SetException(v)
+		p.GetErrorHandler().ReportError(p, v)
+		p.GetErrorHandler().Recover(p, v)
+		p.SetError(nil)
+	}
+	p.ExitRule()
+	return localctx
+}
+
+// isReduceToken reports whether tok is an ID token whose text is "reduce"
+// (case-insensitive). Used by the atomReduceFix in Atom().
+func isReduceToken(tok antlr.Token) bool {
+	if tok == nil {
+		return false
+	}
+	if tok.GetTokenType() != CypherParserID {
+		return false
+	}
+	text := tok.GetText()
+	return strings.EqualFold(text, "reduce")
 }
 
 // IPatternComprehensionContext is an interface to support dynamic dispatch.

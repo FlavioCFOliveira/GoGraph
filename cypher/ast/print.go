@@ -413,6 +413,8 @@ func (p printer) expr(e Expression) string {
 		return p.listComprehension(v)
 	case *PatternComprehension:
 		return p.patternComprehension(v)
+	case *ReduceExpr:
+		return v.String()
 	case *MapProjection:
 		return p.mapProjection(v)
 	case *ExistsSubquery:

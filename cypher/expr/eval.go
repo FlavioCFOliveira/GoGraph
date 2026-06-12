@@ -326,6 +326,9 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 		}
 		return patEval.EvalPatternComp(ctx, n, row, params, reg)
 
+	case *ast.ReduceExpr:
+		return evalReduceExpr(n, row, params, reg)
+
 	default:
 		return nil, &EvalError{Msg: fmt.Sprintf("unsupported expression type %T", e)}
 	}
@@ -1403,6 +1406,39 @@ func quantifierResult(name string, c quantifierCounts) Value {
 		return BoolValue(c.trueCount == 1)
 	}
 	return Null
+}
+
+// evalReduceExpr handles the *ast.ReduceExpr AST node produced by the parser
+// for reduce(acc = init, x IN list | expr). This is the primary eval path.
+func evalReduceExpr(n *ast.ReduceExpr, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	acc, err := evalExpr(n.Init, row, params, reg)
+	if err != nil {
+		return nil, err
+	}
+	src, err := evalExpr(n.Source, row, params, reg)
+	if err != nil {
+		return nil, err
+	}
+	if IsNull(src) {
+		return Null, nil
+	}
+	list, ok := src.(ListValue)
+	if !ok {
+		return acc, nil
+	}
+	for _, elem := range list {
+		innerRow := make(RowContext, len(row)+2)
+		for k, v := range row {
+			innerRow[k] = v
+		}
+		innerRow[n.AccVar] = acc
+		innerRow[n.ElemVar] = elem
+		acc, err = evalExpr(n.Projection, innerRow, params, reg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return acc, nil
 }
 
 // evalReduce handles reduce(acc = init, x IN list | expr).

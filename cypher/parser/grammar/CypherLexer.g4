@@ -127,6 +127,7 @@ SCALAR     : 'SCALAR';
 OF         : 'OF';
 ADD        : 'ADD';
 DROP       : 'DROP';
+REDUCE     : 'REDUCE';
 
 ID: LetterOrDigit+;
 

@@ -287,6 +287,10 @@ func (v *BaseCypherParserVisitor) VisitFilterWith(ctx *FilterWithContext) interf
 	return v.VisitChildren(ctx)
 }
 
+func (v *BaseCypherParserVisitor) VisitReduceExpression(ctx *ReduceExpressionContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BaseCypherParserVisitor) VisitPatternComprehension(ctx *PatternComprehensionContext) interface{} {
 	return v.VisitChildren(ctx)
 }

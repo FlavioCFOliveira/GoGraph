@@ -443,6 +443,12 @@ func (s *BaseCypherParserListener) EnterFilterWith(ctx *FilterWithContext) {}
 // ExitFilterWith is called when production filterWith is exited.
 func (s *BaseCypherParserListener) ExitFilterWith(ctx *FilterWithContext) {}
 
+// EnterReduceExpression is called when production reduceExpression is entered.
+func (s *BaseCypherParserListener) EnterReduceExpression(ctx *ReduceExpressionContext) {}
+
+// ExitReduceExpression is called when production reduceExpression is exited.
+func (s *BaseCypherParserListener) ExitReduceExpression(ctx *ReduceExpressionContext) {}
+
 // EnterPatternComprehension is called when production patternComprehension is entered.
 func (s *BaseCypherParserListener) EnterPatternComprehension(ctx *PatternComprehensionContext) {}
 

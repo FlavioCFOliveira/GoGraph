@@ -319,6 +319,16 @@ func (t *translator) extractNestedPatternComprehensions(
 		cp := *n
 		cp.Values = newVals
 		return &cp, curPlan, nil
+	case *ast.ReduceExpr:
+		// Recurse only into Source (same reasoning as ListComprehension: Init and
+		// Projection are evaluated inside the iteration scope and cannot hoist).
+		src, plan2, err := t.extractNestedPatternComprehensions(n.Source, plan, counter)
+		if err != nil {
+			return nil, plan, err
+		}
+		cp := *n
+		cp.Source = src
+		return &cp, plan2, nil
 	case *ast.ListComprehension:
 		// Only the Source sits in the outer scope where a hoisted
 		// RollUpApply on plan would correlate correctly. Predicate and

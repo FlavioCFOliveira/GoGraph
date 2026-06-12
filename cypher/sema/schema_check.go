@@ -293,6 +293,11 @@ func (c *schemaChecker) expr(e ast.Expression) {
 		c.expr(v.From)
 		c.expr(v.To)
 
+	case *ast.ReduceExpr:
+		c.expr(v.Init)
+		c.expr(v.Source)
+		c.expr(v.Projection)
+
 	case *ast.ListComprehension:
 		c.expr(v.Source)
 		c.expr(v.Predicate)
