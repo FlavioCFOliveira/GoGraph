@@ -1010,6 +1010,24 @@ func (e *Engine) checkParamTypes(plan ir.LogicalPlan, params map[string]expr.Val
 	return sema.CheckParams(sema.InferParamTypesWithResolver(plan, resolve), params)
 }
 
+// checkParamPresence validates that every parameter name referenced by the
+// query is present in the caller-supplied params map. refs is the deduplicated
+// list collected at parse time ([sema.CollectParamNames]); params may be nil
+// (treated as empty). A missing parameter is reported as [*sema.ErrParamMissing]
+// rather than silently resolving to NULL (#1431).
+func checkParamPresence(refs []string, params map[string]expr.Value) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	if params == nil {
+		if len(refs) > 0 {
+			return &sema.ErrParamMissing{Name: refs[0]}
+		}
+		return nil
+	}
+	return sema.CheckParamPresence(refs, params)
+}
+
 // ErrInternalPanic wraps a recoverable panic that occurred while planning or
 // executing a query on behalf of a single caller. The engine's query
 // entrypoints ([Engine.Run], [Engine.RunInTx], [Engine.RunAny],
@@ -1185,7 +1203,10 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	}
 	plan := entry.plan
 
-	// ── 1b. Parameter type check ─────────────────────────────────────────────
+	// ── 1b. Parameter presence + type check ─────────────────────────────────
+	if err := checkParamPresence(entry.paramRefs, params); err != nil {
+		return nil, err
+	}
 	if err := e.checkParamTypes(plan, params); err != nil {
 		return nil, err
 	}
@@ -2124,8 +2145,9 @@ func bindNumeric(v any) (expr.Value, bool) {
 // is non-nil so that [Engine.Explain] can render the plan tree for
 // diagnostic purposes without re-parsing.
 type planCacheEntry struct {
-	plan    ir.LogicalPlan
-	semaErr *sema.SemanticError
+	plan      ir.LogicalPlan
+	semaErr   *sema.SemanticError
+	paramRefs []string // parameter names referenced by the query, collected at parse time
 }
 
 // planFor returns the cached logical plan for query, or parses, translates,
@@ -2158,11 +2180,12 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
 	}
 	semaErr := sema.MapToBolt(sema.Analyse(astNode))
+	paramRefs := sema.CollectParamNames(astNode)
 	plan, err := ir.FromAST(astNode)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: translate: %w", err)
 	}
-	entry := &planCacheEntry{plan: plan, semaErr: semaErr}
+	entry := &planCacheEntry{plan: plan, semaErr: semaErr, paramRefs: paramRefs}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
 }
@@ -2771,8 +2794,14 @@ func (r *Result) closeLocked() error {
 func newResultWithLimit(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr *index.Manager, tx *txn.Tx[string, float64], maxRows, maxBytes int64) *Result {
 	r := &Result{rs: rs, cols: cols, buf: buf, idxMgr: idxMgr, tx: tx, maxRows: maxRows, maxBytes: maxBytes}
 	if len(cols) == 0 {
+		var rowCount int64
 		for rs.Next() {
 			// discard the row; write side effects execute as a side effect
+			rowCount++
+			if maxRows > 0 && rowCount > maxRows {
+				r.rowsErr = ErrResultRowsExceeded
+				break
+			}
 		}
 	}
 	runtime.SetFinalizer(r, finalizeResult)
@@ -6982,6 +7011,10 @@ func exprReferencesVarName(e ast.Expression, target string) bool {
 				return true
 			}
 		}
+	case *ast.ReduceExpr:
+		return exprReferencesVarName(n.Init, target) ||
+			exprReferencesVarName(n.Source, target) ||
+			exprReferencesVarName(n.Projection, target)
 	case *ast.ListComprehension:
 		return exprReferencesVarName(n.Source, target) ||
 			exprReferencesVarName(n.Predicate, target) ||
@@ -7986,6 +8019,9 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	}
 	plan := entry.plan
 
+	if err := checkParamPresence(entry.paramRefs, params); err != nil {
+		return nil, err
+	}
 	if err := e.checkParamTypes(plan, params); err != nil {
 		return nil, err
 	}
