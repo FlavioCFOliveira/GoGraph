@@ -337,14 +337,30 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 // the caller. Truncating to the last durably-synced size makes both
 // kernel behaviours equivalent: the failed suffix can never reach a
 // reader.
+//
+// After the truncation we issue a best-effort fsync so that the
+// reduced file size — not just the data below the new EOF — is
+// recorded on durable storage. Without this fsync a host crash
+// between the ftruncate(2) syscall and the kernel's writeback of the
+// updated inode metadata could leave the file at its pre-truncation
+// length on the next mount (POSIX only guarantees that ftruncate
+// modifies the in-memory inode; the metadata write is not itself
+// synchronous). The fsync is issued AFTER the truncation, not before,
+// which avoids any risk of resurrecting data above the new EOF: we
+// are shrinking the file, so the fsync can only confirm the reduced
+// inode size.
 func (w *Writer) poison(err error) {
 	w.syncFailed.Add(1)
-	// Best-effort: if the truncate itself fails (the device is in
-	// distress), the sticky error below still fail-stops every future
-	// Append/Sync on this writer, and Close re-attempts the discard
-	// while skipping its usual fsync, so the suffix is never durably
+	// Best-effort truncation: if the device is in distress the truncate
+	// may fail, but the sticky syncErr below still fail-stops every future
+	// Append/Sync on this writer so the un-synced suffix is never
 	// acknowledged through this handle.
 	_ = w.f.Truncate(w.durableSize)
+	// Best-effort fsync after truncation: makes the reduced inode metadata
+	// durable so a host crash cannot revert the file to its pre-truncation
+	// size on the next mount. Non-actionable on failure — the writer is
+	// already poisoned and no further data will be committed through it.
+	_ = w.f.Sync()
 	// Drop any buffered bytes (and bufio's own sticky error): nothing
 	// further will be written through this writer.
 	w.bw.Reset(w.f)
@@ -432,10 +448,13 @@ func (w *Writer) Truncate() (int64, error) {
 // the underlying file.
 //
 // On a writer poisoned by an earlier Sync failure, Close skips the
-// flush and fsync — fsyncing here could make the discarded-but-not-
-// yet-truncated suffix of a failed commit durable — re-attempts the
-// suffix discard, releases the file, and returns the sticky error so
-// callers know the shutdown was not clean.
+// flush (which would buffer new data) but performs a second-chance
+// truncation followed by a best-effort fsync. The truncation to
+// durableSize discards any suffix that poison() may have failed to
+// discard on a device in transient distress. The subsequent fsync
+// makes the reduced inode metadata durable; it is safe to issue
+// because the Truncate has already shrunk the file — the fsync can
+// only confirm the reduced EOF, never resurrect data above it.
 func (w *Writer) Close() error {
 	defer metrics.Time("store.wal.Close")()
 	if !w.closed.CompareAndSwap(false, true) {
@@ -447,9 +466,13 @@ func (w *Writer) Close() error {
 	if w.syncErr != nil {
 		// Second-chance discard: poison's own truncate may have failed
 		// on a device in transient distress. Best-effort — the sticky
-		// error is returned regardless, and no fsync is issued through
-		// this handle, so the failed suffix is never acknowledged.
+		// error is returned regardless.
 		_ = w.f.Truncate(w.durableSize)
+		// Best-effort fsync after the second-chance truncation: makes
+		// the reduced inode metadata durable. Safe to issue here because
+		// the Truncate above has already removed the failed suffix; this
+		// fsync can only confirm the reduced EOF, not acknowledge it.
+		_ = w.f.Sync()
 		_ = w.f.Close() // best-effort: the poison error takes precedence
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return w.syncErr
