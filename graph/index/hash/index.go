@@ -148,8 +148,31 @@ func (i *Index[V]) shard(v V) *hashShard[V] {
 	return &i.shards[maphash.Comparable(seed, v)&shardMask]
 }
 
-// Insert records that node carries the given value.
+// nanKey reports whether v is a float32 or float64 IEEE 754 NaN.
+// Go maps use the language == operator: NaN != NaN is always true, so
+// inserting a NaN key creates an entry that can never be looked up or
+// deleted, causing unbounded accumulation (task #1408). The Insert,
+// Delete and Lookup methods skip NaN values entirely to prevent this.
+//
+//nolint:gocritic // dupSubExpr: f != f is the canonical generic NaN test.
+func nanKey[V comparable](v V) bool {
+	switch f := any(v).(type) {
+	case float64:
+		return f != f
+	case float32:
+		return f != f
+	}
+	return false
+}
+
+// Insert records that node carries the given value. Insert is a no-op
+// when value is a float32 or float64 NaN: Go map equality is language-
+// fixed (NaN != NaN), so a NaN map key can never be looked up or
+// deleted; skipping it prevents unbounded accumulation (task #1408).
 func (i *Index[V]) Insert(value V, node graph.NodeID) {
+	if nanKey(value) {
+		return
+	}
 	s := i.shard(value)
 	s.mu.Lock()
 	bm, ok := s.entries[value]
@@ -162,8 +185,11 @@ func (i *Index[V]) Insert(value V, node graph.NodeID) {
 }
 
 // Delete removes node from the set associated with value. No-op if
-// absent.
+// absent or if value is a NaN (see [Index.Insert] for the rationale).
 func (i *Index[V]) Delete(value V, node graph.NodeID) {
+	if nanKey(value) {
+		return
+	}
 	s := i.shard(value)
 	s.mu.Lock()
 	if bm, ok := s.entries[value]; ok {
@@ -176,10 +202,14 @@ func (i *Index[V]) Delete(value V, node graph.NodeID) {
 }
 
 // Lookup returns a clone of the Roaring bitmap of NodeIDs that carry
-// the given value, or an empty bitmap when the value is unknown.
+// the given value, or an empty bitmap when the value is unknown or is
+// a NaN (see [Index.Insert] for the rationale).
 // Clone avoids returning the live bitmap to the caller, which could
 // otherwise be mutated by concurrent writers.
 func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
+	if nanKey(value) {
+		return roaring64.New()
+	}
 	s := i.shard(value)
 	s.mu.RLock()
 	bm, ok := s.entries[value]
