@@ -50,16 +50,47 @@ jobs:
         run: go build ./...
 
       - name: Test (nightly layer + race)
-        # GODEBUG=gctrace=1 surfaces memory growth during long-running
-        # tests so heap leaks are visible in the uploaded logs.
-        run: GODEBUG=gctrace=1 make test-nightly 2>&1 | tee /tmp/nightly-test.log
-        # Continue so the upload step runs even when tests fail.
-        continue-on-error: true
+        # GODEBUG=gctrace=1 surfaces memory growth during long-running tests.
+        #
+        # pipefail ensures `make test-nightly` exit code is not masked by
+        # `tee`. Without it, bash only checks tee's exit code (always 0),
+        # so any failure — including OOM kills (exit 137) and signal
+        # terminations — passes silently when the log contains no ^FAIL line.
+        #
+        # `continue-on-error: true` is intentionally absent: the step must
+        # fail visibly so GitHub marks the job red immediately, rather than
+        # deferring detection to a later "Fail if tests failed" step that
+        # can only catch ^FAIL lines (not OOM kills or silent crashes).
+        # The upload steps use `if: always()` so artefacts are preserved
+        # regardless of whether this step succeeds or fails.
+        shell: bash
+        run: |
+          set -o pipefail
+          GODEBUG=gctrace=1 make test-nightly 2>&1 | tee /tmp/nightly-test.log
+
+      - name: Verify test log contains passing signal
+        # Secondary guard: even if `make test-nightly` exits 0 but
+        # the log is empty or contains no "^ok " lines (e.g. all
+        # packages were skipped or the runner ran out of memory before
+        # any package finished), surface the anomaly as a failure.
+        #
+        # This guards against a rare but real case where pipefail
+        # cannot help: `make` itself exits 0 due to a bug in the
+        # Makefile target while no tests actually ran.
+        if: success()
+        run: |
+          if ! grep -q "^ok " /tmp/nightly-test.log 2>/dev/null; then
+            echo "::error::Nightly test log contains no passing 'ok' lines — no packages ran or all were skipped"
+            exit 1
+          fi
 
       - name: CPU profile (nightly regression workload)
         # Run a focused benchmark with CPU profiling to detect hot-path
         # regressions across nightly builds. The profile is uploaded as
         # an artefact for offline flamegraph analysis.
+        # The || true is intentional: benchmark failure must not mask the
+        # test failure surfaced by the step above.
+        if: always()
         run: |
           go test -bench=. -benchmem -count=1 -tags=nightly \
             -cpuprofile=/tmp/nightly-cpu.prof \
@@ -85,11 +116,3 @@ jobs:
             /tmp/nightly-cpu.prof
             /tmp/nightly-mem.prof
             /tmp/nightly-bench.txt
-
-      - name: Fail if tests failed
-        # Re-surface the test failure after uploads have completed.
-        run: |
-          if grep -q "^FAIL" /tmp/nightly-test.log 2>/dev/null; then
-            echo "::error::Nightly test layer reported failures — see nightly-test-logs artefact"
-            exit 1
-          fi

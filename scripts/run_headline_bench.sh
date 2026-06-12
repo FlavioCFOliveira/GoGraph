@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Runs the headline benchmarks used by the CI regression gate.
-# Each benchmark is run with -count=5 so benchstat has enough samples
-# for a confidence interval; -benchmem is included so allocation
-# regressions show up alongside ns/op deltas.
+# Each benchmark is run with -count=6 — benchstat requires at least 6
+# samples to compute a confidence interval; fewer produce "need >= 6
+# samples" warnings and suppress the percentage delta entirely.
+# -benchmem is included so allocation regressions show alongside ns/op.
 
 set -euo pipefail
 
@@ -26,4 +27,4 @@ PACKAGES=(
   "./search/centrality/..."
 )
 
-go test -run='^$' -bench="$REGEX" -benchmem -count=5 "${PACKAGES[@]}"
+go test -run='^$' -bench="$REGEX" -benchmem -count=6 "${PACKAGES[@]}"
