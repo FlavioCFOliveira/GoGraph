@@ -1,19 +1,33 @@
 #!/usr/bin/env bash
-# check_doc_freshness.sh — sanity-check the 'Last reviewed: <date>
-# against commit <sha>' footer in the key reference docs.
+# check_doc_freshness.sh — enforce the "Last reviewed: <date> against
+# commit <sha>" footer on the key reference docs, and ensure that footer
+# is actually re-stamped whenever the doc is changed.
 #
-# Fails the build when:
-#   * any tracked doc in the list below is missing the footer, or
+# Fails the build when, for any gated doc:
+#   * the footer is missing, or
 #   * the footer's commit SHA is not reachable from HEAD (typo /
 #     rebase noise), or
-#   * the footer's commit SHA is older than $MAX_COMMITS_BEHIND
-#     commits behind HEAD (default 200). The threshold is high
-#     enough that legitimate doc-only updates do not need to
-#     re-stamp the footer every release; it catches obvious neglect
-#     such as a year-old commit reference.
+#   * the footer's commit SHA is older than $MAX_COMMITS_BEHIND commits
+#     behind HEAD (default 200) — catches an obviously abandoned stamp,
+#     or
+#   * the most recent commit that modified the doc did NOT also modify
+#     the footer line.
+#
+# The last rule is the one that gives the footer its promised teeth.
+# Before it existed, a doc could be substantively rewritten while the
+# footer kept an old (still-reachable, still-within-threshold) SHA and
+# the gate stayed green — exactly what happened to docs/bolt.md, which
+# was rewritten on 2026-06-04 with a 2026-05-30 stamp left in place.
+#
+# Re-stamping is unambiguous and chicken-and-egg-free: a correct change
+# edits the footer line in the SAME commit that edits the body, and a
+# pure re-stamp (a footer-only commit) trivially satisfies the rule
+# because that commit, by definition, touches the footer line.
 #
 # Invoke from the repo root:
 #   bash scripts/check_doc_freshness.sh
+#
+# Override the staleness threshold with MAX_COMMITS_BEHIND=<n>.
 #
 # The script is intentionally self-contained so it can run from any
 # CI worker without project-specific helpers.
@@ -30,6 +44,18 @@ DOCS=(
 )
 
 MAX_COMMITS_BEHIND="${MAX_COMMITS_BEHIND:-200}"
+
+# footer_touched_in <commit> <doc> — succeeds when <commit>'s diff for
+# <doc> adds or removes a line carrying the "Last reviewed:" footer
+# marker. The +++/--- diff path headers are excluded so a file path that
+# happens to contain the marker cannot produce a false positive.
+footer_touched_in() {
+  local commit="$1" doc="$2"
+  git show --format= --unified=0 "$commit" -- "$doc" 2>/dev/null \
+    | grep -E '^[+-]' \
+    | grep -vE '^(\+\+\+|---) ' \
+    | grep -q 'Last reviewed:'
+}
 
 fail=0
 for doc in "${DOCS[@]}"; do
@@ -64,7 +90,19 @@ for doc in "${DOCS[@]}"; do
     fail=1
     continue
   fi
-  echo "doc-freshness OK: $doc ($ahead commits behind HEAD)"
+
+  # Re-stamp enforcement: the most recent commit that changed the doc
+  # must also have changed the footer line. This closes the gap where a
+  # doc is edited but its footer is left stale.
+  last_commit="$(git log -1 --format=%H -- "$doc" 2>/dev/null || true)"
+  if [[ -n "$last_commit" ]] && ! footer_touched_in "$last_commit" "$doc"; then
+    short="$(git rev-parse --short "$last_commit")"
+    echo "::error file=$doc::doc-freshness: $doc was last changed in commit $short, which did not update the 'Last reviewed: ... against commit <sha>' footer. Re-read the doc against current code and re-stamp the footer in the same commit."
+    fail=1
+    continue
+  fi
+
+  echo "doc-freshness OK: $doc ($ahead commits behind HEAD; footer re-stamped in last change ${last_commit:0:7})"
 done
 
 if (( fail != 0 )); then

@@ -402,4 +402,4 @@ and update the "Last reviewed" footer at the bottom of this file.
 
 ---
 
-*Last reviewed: 2026-05-30 against commit `7236360`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
+*Last reviewed: 2026-06-12 against commit `ec76e6f`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
