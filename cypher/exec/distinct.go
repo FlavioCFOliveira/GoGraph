@@ -85,10 +85,10 @@ func (op *Distinct) Next(out *Row) (bool, error) {
 			return false, nil
 		}
 
-		h := expr.HashRow(*out)
+		h := expr.HashRowEquivalent(*out)
 		bucket := op.seen[h]
 
-		// Check for collision-safe equality within the bucket.
+		// Check for collision-safe equivalence within the bucket.
 		if rowInBucket(*out, bucket) {
 			continue // duplicate — discard
 		}
@@ -124,8 +124,9 @@ func (op *Distinct) Close() error {
 // helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// rowInBucket returns true iff row equals any entry in bucket (full equality
-// check for collision resolution).
+// rowInBucket returns true iff row is equivalent to any entry in bucket
+// (full equivalence check for collision resolution, using openCypher
+// CIP2016-06-14 grouping semantics).
 func rowInBucket(row Row, bucket []Row) bool {
 	for _, seen := range bucket {
 		if rowsEqual(seen, row) {

@@ -240,10 +240,10 @@ func (op *EagerAggregation) getOrCreate(row Row) (*groupEntry, error) {
 		}
 	}
 
-	h := expr.HashRow(keyVals)
+	h := expr.HashRowEquivalent(keyVals)
 	bucket := op.groups[h]
 
-	// Linear search within the bucket for equality.
+	// Linear search within the bucket for equivalence.
 	for _, e := range bucket {
 		if rowsEqual(e.keyVals, keyVals) {
 			return e, nil
@@ -267,8 +267,9 @@ func (op *EagerAggregation) getOrCreate(row Row) (*groupEntry, error) {
 }
 
 // rowsEqual returns true iff a and b have the same length and each element pair
-// is equal per openCypher semantics (IsTruthy of Equal). NULL == NULL for
-// grouping purposes (unlike predicate 3VL).
+// is equivalent per openCypher grouping/DISTINCT semantics (CIP2016-06-14):
+// null ≡ null, NaN ≡ NaN, and these rules apply recursively inside lists and
+// maps. Used by both Distinct and EagerAggregation for collision resolution.
 func rowsEqual(a, b []expr.Value) bool {
 	if len(a) != len(b) {
 		return false
@@ -281,16 +282,10 @@ func rowsEqual(a, b []expr.Value) bool {
 	return true
 }
 
-// valuesEqualForGrouping compares two values for group-key purposes. Unlike
-// predicate equality, NULL == NULL here (so that NULL groups together with
-// NULL).
+// valuesEqualForGrouping compares two values for group-key purposes using
+// openCypher equivalence semantics (CIP2016-06-14): null ≡ null, NaN ≡ NaN,
+// and these rules apply recursively inside lists and maps.
+// Unlike predicate equality (Equal / IsTruthy), this is always two-valued.
 func valuesEqualForGrouping(a, b expr.Value) bool {
-	aN, bN := expr.IsNull(a), expr.IsNull(b)
-	if aN && bN {
-		return true
-	}
-	if aN || bN {
-		return false
-	}
-	return expr.IsTruthy(a.Equal(b))
+	return expr.Equivalent(a, b)
 }
