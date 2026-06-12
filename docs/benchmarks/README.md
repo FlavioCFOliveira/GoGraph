@@ -33,9 +33,13 @@ contains:
 ## Releases
 
 Each release ships its own `<version>.md` file with headline
-benchmark numbers; the first such file lands with the initial
-release.
+benchmark and load-test numbers. Per-release files begin at
+[`v0.2.0`](v0.2.0.md); the convention was introduced in that release,
+so no `v0.1.0.md` exists.
 
+- [v0.2.0.md](v0.2.0.md) — headline benchmarks and the
+  concurrency-level load-test sweep (1/8/64/256/1024 goroutines) for
+  the v0.2.0 release.
 - [SOAK.md](SOAK.md) — procedure and acceptance gate for the
   mixed-workload reliability soak.
 - [comparison.md](comparison.md) — cross-library performance

@@ -171,6 +171,18 @@ release-preflight: ## Pre-flight checks that gate `make release` — CHANGELOG e
 	  || { echo "release-preflight: CHANGELOG.md is missing a '## [$$v_no_prefix]' entry — promote the Unreleased section first"; exit 1; }
 	@test -f "release-notes/$$VERSION.md" \
 	  || { echo "release-preflight: release-notes/$$VERSION.md does not exist — draft the long-form notes first"; exit 1; }
+	@echo "release-preflight: checking README 'Current release' names $$VERSION…"
+	@pat="Current release: \`$$VERSION\`"; grep -qF "$$pat" README.md \
+	  || { echo "release-preflight: README.md 'Current release' does not name $$VERSION — update the Status block"; exit 1; }
+	@echo "release-preflight: checking SECURITY.md supported-versions table names $$VERSION's release line…"
+	@minor_line=$$(echo "$$VERSION" | sed -E 's/^v([0-9]+)\.([0-9]+)\..*/v\1.\2.x/'); \
+	  grep -qF "$$minor_line" SECURITY.md \
+	  || { echo "release-preflight: SECURITY.md supported-versions table does not mention $$minor_line — update the table"; exit 1; }
+	@echo "release-preflight: checking per-release benchmark report docs/benchmarks/$$VERSION.md exists…"
+	@test -f "docs/benchmarks/$$VERSION.md" \
+	  || { echo "release-preflight: docs/benchmarks/$$VERSION.md does not exist — record the per-release benchmark/load-test numbers first"; exit 1; }
+	@echo "release-preflight: checking a green soak run exists for the release commit…"
+	@VERSION="$$VERSION" bash scripts/release_soak_gate.sh
 	@echo "release-preflight: running golangci-lint…"
 	@$(MAKE) lint
 	@echo "release-preflight: running coverage gate…"

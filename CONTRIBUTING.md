@@ -61,14 +61,16 @@ body of a memory-mapped region.
 
 ## Validation pipeline
 
-Every change must pass `make ci`:
+Every change must pass `make ci`, which runs:
 
+- `go mod tidy` (fails on `go.mod` / `go.sum` drift)
 - `gofmt`
 - `go vet ./...`
 - `go build ./...`
-- `go test ./...`
-- `go test -race ./...`
+- the short test layer under the race detector (`go test -race ./...`)
 - `golangci-lint run ./...`
+- the coverage gate (`cover-gate`): **≥ 85 % aggregate** and
+  **≥ 75 % per-package** statement coverage
 
 Benchmarks must be run for hot-path changes; the per-package
 README or task summary should record the measured numbers.

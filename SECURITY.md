@@ -11,28 +11,28 @@ Security fixes are issued for the following release lines:
 
 | Version line | Status                    | Receives security fixes      |
 |--------------|---------------------------|------------------------------|
-| v0.1.x       | Current (pre-1.0)         | Yes                          |
+| v0.2.x       | Current (pre-1.0)         | Yes                          |
+| v0.1.x       | Superseded by v0.2.x      | No                           |
 
-A single patch release covers each backported fix; we do not publish
-out-of-band security branches. The release process is documented in
+While the module is pre-1.0, only the latest minor line (`v0.y.x`)
+receives security fixes; upgrade to the current line to stay covered.
+A single patch release covers each fix; we do not publish out-of-band
+security branches. The release process is documented in
 [docs/release.md](docs/release.md).
 
 ## Reporting a vulnerability
 
 **Do not** open a public GitHub Issue for a suspected vulnerability.
-Use either of the private channels below:
+Report it privately through **GitHub Security Advisories**:
 
-1. **Preferred — GitHub Security Advisories.**
-   <https://github.com/xumiga/gograph/security/advisories/new>
-   The form lets you describe the issue, attach a proof of concept,
-   and propose a fix. Maintainers are notified privately and the
-   advisory is published only after a fix has been released.
+<https://github.com/FlavioCFOliveira/GoGraph/security/advisories/new>
 
-2. **Email.** Send a signed message to `security@xumiga.example`
-   (substitute your organisation's published security mailbox when
-   forking). PGP-encrypted email is welcome; the public key for the
-   maintainer team is published at
-   `https://xumiga.example/.well-known/security-pgp-key.txt`.
+The form lets you describe the issue, attach a proof of concept, and
+propose a fix. Maintainers are notified privately and the advisory is
+published only after a fix has been released. If you cannot use GitHub
+Security Advisories, open a regular GitHub issue that contains **no
+vulnerability details** — only a request for a maintainer to open a
+private advisory and make contact.
 
 Please include in your report:
 
@@ -92,7 +92,7 @@ Out of scope:
 
 ## Credit
 
-We acknowledge reporters in the published advisory, the CHANGELOG.md
-entry for the release that ships the fix, and (when consented) on the
-README's contributors list. Anonymous reports are accepted; we will
-honour requests to omit a name from the public record.
+We acknowledge reporters in the published advisory and in the
+CHANGELOG.md entry for the release that ships the fix (when consented).
+Anonymous reports are accepted; we will honour requests to omit a name
+from the public record.

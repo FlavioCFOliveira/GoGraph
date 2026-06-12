@@ -5,7 +5,7 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.1.0`.** This is the project's **first release**,
+**Current release: `v0.2.0`.** This is the project's **second release**,
 published at a pre-1.0 baseline: under Semantic Versioning a `0.y.z`
 version signals that the public API is **not yet stable** and may change
 without a major bump while the module matures toward `1.0.0`. The five major
@@ -15,9 +15,9 @@ module is **100 % openCypher TCK-compliant at the execution level**
 (**3 897/3 897 scenarios, 16 006/16 006 steps**) and **100 % ACID-compliant**;
 CI is green (build, test, race, lint, vet, TCK, govulncheck). The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.1.0`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.2.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.1.0.md](release-notes/v0.1.0.md) for the full release
+[release-notes/v0.2.0.md](release-notes/v0.2.0.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)
@@ -32,7 +32,7 @@ narrative.
   rotation across readers/writers.
 - `github.com/FlavioCFOliveira/GoGraph/graph/lpg` — Labelled Property Graph model (vertex and
   edge labels, typed properties; `PropertyValue` covers string,
-  int64, float64, bool, time.Time, []byte).
+  int64, float64, bool, time.Time, []byte, and list ([]PropertyValue)).
 - `github.com/FlavioCFOliveira/GoGraph/graph/lpg/schema` — optional type schema with `Validate`.
 - `github.com/FlavioCFOliveira/GoGraph/graph/index` — `Manager` coordinating named indexes and
   fanning out `Change` events to subscribers.
@@ -200,9 +200,11 @@ workflow. Sprint planning lives in the local `rmp` CLI roadmap. The
 make ci
 ```
 
-The pipeline includes `go mod tidy`, `gofmt`, `go vet`, `go build`,
-`go test`, `go test -race`, and `golangci-lint run`. Every change must
-pass it before being committed.
+The pipeline runs `go mod tidy`, `gofmt`, `go vet`, `go build`, the
+short test layer under the race detector (`go test -race`),
+`golangci-lint run`, and the coverage gate (`cover-gate`), which
+enforces **≥ 85 % aggregate** and **≥ 75 % per-package** statement
+coverage. Every change must pass it before being committed.
 
 ## Performance
 
