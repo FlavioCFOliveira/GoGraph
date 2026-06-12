@@ -7,6 +7,7 @@ package funcs_test
 // PercentileCont, PercentileDisc — correct values, NULL handling, type promotion.
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -156,6 +157,68 @@ func TestSumAgg(t *testing.T) {
 		result := feedAll(newAgg(funcs.NewSumAgg()))
 		if !expr.IsNull(result) {
 			t.Errorf("got %v, want NULL", result)
+		}
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SumAgg overflow
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSumAgg_IntegerOverflow(t *testing.T) {
+	t.Parallel()
+
+	// stepAll feeds vals one by one, returning the first Step error encountered.
+	stepAll := func(factory funcs.AggregatorFactory, vals ...expr.Value) error {
+		agg := factory()
+		agg.Init()
+		for _, v := range vals {
+			if err := agg.Step(v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	t.Run("positive_overflow", func(t *testing.T) {
+		t.Parallel()
+		err := stepAll(funcs.NewSumAgg(),
+			expr.IntegerValue(math.MaxInt64),
+			expr.IntegerValue(1),
+		)
+		if err == nil {
+			t.Fatal("expected ArithmeticOverflow error for MaxInt64+1 sum, got nil")
+		}
+		var e *expr.EvalError
+		if !errors.As(err, &e) {
+			t.Fatalf("expected *expr.EvalError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("negative_overflow", func(t *testing.T) {
+		t.Parallel()
+		err := stepAll(funcs.NewSumAgg(),
+			expr.IntegerValue(math.MinInt64),
+			expr.IntegerValue(-1),
+		)
+		if err == nil {
+			t.Fatal("expected ArithmeticOverflow error for MinInt64+(-1) sum, got nil")
+		}
+		var e *expr.EvalError
+		if !errors.As(err, &e) {
+			t.Fatalf("expected *expr.EvalError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("normal_sum_unaffected", func(t *testing.T) {
+		t.Parallel()
+		err := stepAll(funcs.NewSumAgg(),
+			expr.IntegerValue(1),
+			expr.IntegerValue(2),
+			expr.IntegerValue(3),
+		)
+		if err != nil {
+			t.Fatalf("unexpected error for sum(1,2,3): %v", err)
 		}
 	})
 }

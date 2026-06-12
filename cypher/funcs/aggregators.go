@@ -46,6 +46,7 @@ package funcs
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 
@@ -223,7 +224,8 @@ func (a *SumAgg) Init() {
 }
 
 // Step adds v to the running sum, skipping NULLs. Promotes to float on the
-// first FloatValue encountered.
+// first FloatValue encountered. Returns [expr.EvalError] with an
+// ArithmeticOverflow message if an integer accumulation would overflow int64.
 func (a *SumAgg) Step(v expr.Value) error {
 	switch val := v.(type) {
 	case expr.IntegerValue:
@@ -231,7 +233,17 @@ func (a *SumAgg) Step(v expr.Value) error {
 		if a.isF {
 			a.fSum += float64(int64(val))
 		} else {
-			a.iSum += int64(val)
+			iv := int64(val)
+			// Overflow detection mirrors the evalIntArith '+' guard: if val and
+			// iSum have the same sign and adding would cross the int64 boundary,
+			// the result is not representable.
+			if iv > 0 && a.iSum > math.MaxInt64-iv {
+				return &expr.EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: sum() result exceeds Int64 range (positive overflow at %d + %d)", a.iSum, iv)}
+			}
+			if iv < 0 && a.iSum < math.MinInt64-iv {
+				return &expr.EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: sum() result exceeds Int64 range (negative overflow at %d + %d)", a.iSum, iv)}
+			}
+			a.iSum += iv
 		}
 	case expr.FloatValue:
 		a.hasAny = true
