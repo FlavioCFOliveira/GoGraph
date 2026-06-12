@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -1915,8 +1916,17 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 		// openCypher identifiers cannot begin with a digit, so the
 		// reinterpretation is unambiguous.
 		if name != "" && name[0] >= '0' && name[0] <= '9' && looksLikeExponentFloat(name) {
-			if f, ferr := strconv.ParseFloat(name, 64); ferr == nil {
+			f, ferr := strconv.ParseFloat(name, 64)
+			if ferr == nil {
 				return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
+			}
+			// ErrRange means the literal is a well-formed exponent float that
+			// overflows IEEE-754 double precision. Surface a FloatingPointOverflow
+			// compile-time error per the openCypher TCK (Literals5 [27]).
+			// Falling through to the Variable branch would turn "1e309" into a
+			// variable named "1e309", which is both wrong and deceptive.
+			if errors.Is(ferr, strconv.ErrRange) {
+				return &SemaError{Rule: "atom", Pos: positionOf(ctx), Message: "floating-point literal out of range: " + name}
 			}
 		}
 
@@ -2439,6 +2449,11 @@ func (v *visitor) VisitNumLit(ctx *gen.NumLitContext) interface{} {
 	if strings.ContainsAny(text, ".eEfFdD") {
 		f, err := strconv.ParseFloat(text, 64)
 		if err != nil {
+			// Distinguish overflow (FloatingPointOverflow per openCypher TCK
+			// Literals5 [27]) from a malformed literal (generic SemaError).
+			if errors.Is(err, strconv.ErrRange) {
+				return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: "floating-point literal out of range: " + text}
+			}
 			return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: "invalid number: " + text}
 		}
 		return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
