@@ -81,6 +81,16 @@ type IndexReadback struct {
 // On any I/O error the partial directory under dir/IndexesDir is
 // removed (best effort) so the caller does not need to clean up.
 //
+// After all index files are written, WriteIndexes calls [dirFsync] on
+// idxDir. On POSIX, fsyncing an individual file only makes that file's
+// data and inode durable; the directory entry (dirent) that links the
+// file name to the inode is not guaranteed to be durable until the
+// parent directory is fsynced. Without this call, a crash between the
+// individual file fsyncs and the kernel's directory-writeback window
+// could leave the indexes/ directory entry for one or more index files
+// absent on the next mount, making those indexes appear missing to
+// recovery even though their data is intact on disk.
+//
 //nolint:gocyclo // per-index write + per-index serialize + per-index sync
 func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 	defer metrics.Time("store.snapshot.WriteIndexes")()
@@ -125,6 +135,21 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 			return nil, fmt.Errorf("snapshot: index %q: %w", name, werr)
 		}
 		out = append(out, IndexFileEntry{Name: name, Size: size, CRC32C: crc})
+	}
+	// Fsync the indexes/ directory itself after all files are written.
+	// Individual file fsyncs make each file's data and inode durable, but
+	// do not guarantee that the directory entries (dirents) linking the
+	// file names to their inodes are flushed. A crash without this
+	// dirFsync could leave one or more .bin files absent in the directory
+	// listing on the next mount even though their data survived. dirFsync
+	// is called after the loop — once for all files — to amortise the
+	// directory open/fsync/close cost across every index written.
+	if len(out) > 0 {
+		if err := dirFsync(idxDir); err != nil {
+			_ = os.RemoveAll(idxDir)
+			metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
+			return nil, fmt.Errorf("snapshot: fsync indexes dir %q: %w", idxDir, err)
+		}
 	}
 	metrics.IncCounter("store.snapshot.indexes.loaded", uint64(len(out)))
 	return out, nil
