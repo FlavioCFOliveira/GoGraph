@@ -15,6 +15,7 @@ package adjlist_test
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -47,26 +48,33 @@ func buildHub(n int) (*adjlist.AdjList[string, float64], string) {
 // degree-1k case. A naive exact-fit allocate-and-copy path would scale at
 // ~100× per decade; the geometric pre-allocation path scales at ~10–12×.
 func TestHub_AddEdge_AmortisedSublinear(t *testing.T) {
-	t.Parallel()
+	// Not parallel: the ratio check measures wall-clock time. Under
+	// 'go test -race ./...' the race detector adds ~10× non-uniform
+	// overhead; t.Parallel() plus cross-package test parallelism
+	// inflates the tiny 1k baseline and makes the ratio flaky. Removing
+	// t.Parallel() gives the goroutines a quiet core, keeping the
+	// ratio below the wide tolerance even under -race.
 
 	const (
 		small = 1_000
 		large = 10_000
-		ratio = 20 // maximum tolerated ratio: anything < this confirms sub-quadratic
-		reps  = 5  // repeat each measurement and take the minimum to reduce noise
+		// ratio: geometric pre-alloc scales at ~10–12×; quadratic at ~100×.
+		// Wide tolerance (40) absorbs race-detector non-uniformity while
+		// still catching a quadratic regression.
+		ratio = 40
+		reps  = 7 // take the median over more reps to reduce noise
 	)
 
 	measure := func(n int) time.Duration {
-		best := time.Duration(1<<62 - 1)
-		for range reps {
+		samples := make([]time.Duration, reps)
+		for i := range reps {
 			start := time.Now()
 			buildHub(n)
-			elapsed := time.Since(start)
-			if elapsed < best {
-				best = elapsed
-			}
+			samples[i] = time.Since(start)
 		}
-		return best
+		// Median: sort in place and pick the middle element.
+		sort.Slice(samples, func(a, b int) bool { return samples[a] < samples[b] })
+		return samples[reps/2]
 	}
 
 	// Warm up to avoid first-run JIT effects.
