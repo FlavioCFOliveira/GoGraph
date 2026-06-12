@@ -1471,6 +1471,16 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		*ast.BoolLiteral, *ast.NullLiteral, *ast.Parameter:
 		// nothing
 
+	// OverflowIntLit should have been consumed by the parser's
+	// visitPropertyExpression before reaching sema. If one escapes,
+	// emit an IntegerOverflow error as a defence-in-depth measure.
+	case *ast.OverflowIntLit:
+		a.error(&ScopeError{
+			Kind:    KindInvalidArgumentType,
+			Pos:     v.Pos,
+			Message: "integer literal out of range: " + v.Text,
+		})
+
 	default:
 		// Unknown expression type — no action; do not panic.
 	}

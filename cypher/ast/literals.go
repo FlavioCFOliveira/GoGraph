@@ -83,6 +83,24 @@ func (n *BoolLiteral) String() string {
 	return "false"
 }
 
+// OverflowIntLit is a sentinel for decimal integer tokens that exceed the
+// int64 range. In most expression contexts it becomes an IntegerOverflow
+// compile error; in the special case where a fractional accessor follows
+// (e.g. NNN.0 lexed as NNN + . + 0), visitPropertyExpression promotes it to
+// a FloatLiteral instead.
+type OverflowIntLit struct {
+	Pos    Position
+	EndPos Position
+	// Text holds the raw decimal digits including any leading sign character.
+	Text string
+}
+
+func (*OverflowIntLit) astNode()  {}
+func (*OverflowIntLit) exprNode() {}
+
+// String returns the raw decimal text of the overflowing integer.
+func (o *OverflowIntLit) String() string { return o.Text }
+
 // NullLiteral is the literal null.
 type NullLiteral struct {
 	Pos    Position

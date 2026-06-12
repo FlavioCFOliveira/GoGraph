@@ -1785,17 +1785,25 @@ func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (a
 					return &ast.FloatLiteral{Pos: intLit.Pos, EndPos: endPositionOf(ctx), Value: f}, nil
 				}
 			}
-			// When the integer part overflows int64, VisitNumberLit
-			// fell back to *ast.FloatLiteral that already holds the
-			// rounded representation of the whole-number prefix. The
-			// subsequent `.0` (or `.0e9`) accessor cannot add precision
-			// the float64 cannot already represent, so the FloatLiteral
-			// IS the correct decoded value. Treat the accessor as the
-			// closing of a float literal, not a property projection.
-			if floatLit, ok := base.(*ast.FloatLiteral); ok {
-				return &ast.FloatLiteral{Pos: floatLit.Pos, EndPos: endPositionOf(ctx), Value: floatLit.Value}, nil
+			// When the integer part overflows int64, VisitNumLit returns an
+			// OverflowIntLit sentinel. The subsequent `.0` (or `.0e9`)
+			// accessor is the fractional part of a long float literal —
+			// reconstruct the float64 by parsing the full "NNN.frac" form.
+			if ovfLit, ok := base.(*ast.OverflowIntLit); ok {
+				f, ferr := strconv.ParseFloat(ovfLit.Text+"."+key, 64)
+				if ferr == nil {
+					return &ast.FloatLiteral{Pos: ovfLit.Pos, EndPos: endPositionOf(ctx), Value: f}, nil
+				}
 			}
 		}
+	}
+
+	// An OverflowIntLit that was NOT consumed by the float-reconstruction
+	// block above is a pure integer literal whose value exceeds int64 range.
+	// Surface it as an IntegerOverflow compile error per openCypher.
+	if ovf, ok := base.(*ast.OverflowIntLit); ok {
+		return nil, &SemaError{Rule: "numLit", Pos: ovf.Pos,
+			Message: "integer literal out of range: " + ovf.Text}
 	}
 
 	for _, n := range names {
@@ -2453,12 +2461,10 @@ func (v *visitor) VisitNumLit(ctx *gen.NumLitContext) interface{} {
 			digitLen = len(text) - 1
 		}
 		if digitLen > 19 {
-			// Treat as a float literal (the query author likely wrote NNN.0 but
-			// the lexer consumed only the integer part).
-			f, floatErr := strconv.ParseFloat(text, 64)
-			if floatErr == nil {
-				return &ast.FloatLiteral{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Value: f}
-			}
+			// Return a sentinel so visitPropertyExpression can reconstruct a
+			// float literal when a fractional accessor follows (e.g. NNN.0).
+			// In every other context the sentinel surfaces as IntegerOverflow.
+			return &ast.OverflowIntLit{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Text: text}
 		}
 		return &SemaError{Rule: "numLit", Pos: positionOf(ctx), Message: "integer literal out of range: " + text}
 	}

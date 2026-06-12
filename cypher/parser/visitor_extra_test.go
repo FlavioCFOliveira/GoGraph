@@ -117,36 +117,34 @@ func TestVisitNumLitHexOverflowReportsSemaError(t *testing.T) {
 
 // TestVisitNumLitDecimalOverflow covers the decimal-overflow branch where the
 // literal has at most 19 digits — the visitor surfaces a SemaError because
-// the long-float fallback only activates above 19 digits.
+// the OverflowIntLit sentinel path only activates above 19 digits.
 func TestVisitNumLitDecimalOverflow(t *testing.T) {
 	t.Parallel()
 
 	// 9223372036854775808 is INT64_MAX + 1 and has exactly 19 digits.
-	// Prefix with '-' so DIGIT lexes it; the actual numeric value still
-	// overflows because |value| > INT64_MAX/2.
+	// Prefix with '-' so DIGIT lexes it; the actual numeric value is exactly
+	// INT64_MIN, which is representable, so it must parse cleanly.
 	q := "RETURN -9223372036854775808"
 	_, err := Parse(q)
-	// This particular value is exactly INT64_MIN, which is representable.
-	// We are testing that it parses cleanly.
 	if err != nil {
 		t.Fatalf("Parse(%q): unexpected error %v", q, err)
 	}
 
-	// A clearly overflowing 19-digit positive literal that begins with a digit
-	// > 9 cannot exist (a digit must be 0..9), so use a 20-digit literal that
-	// also hits the > 19 fallback path returning a FloatLiteral.
+	// A 20-digit pure integer literal (no fractional part) exceeds int64
+	// range.  After the #1384 fix the visitor returns a SemaError with the
+	// "integer literal out of range" message instead of silently rounding to
+	// a float64.
 	q2 := "RETURN -99999999999999999999"
-	got, err := Parse(q2)
-	if err != nil {
-		t.Fatalf("Parse(%q): unexpected error %v", q2, err)
+	_, err = Parse(q2)
+	if err == nil {
+		t.Fatalf("Parse(%q): expected IntegerOverflow error, got nil", q2)
 	}
-	sq, ok := got.(*ast.SingleQuery)
-	if !ok {
-		t.Fatalf("expected *ast.SingleQuery, got %T", got)
+	var se *SemaError
+	if !errors.As(err, &se) {
+		t.Fatalf("Parse(%q): expected *SemaError, got %T: %v", q2, err, err)
 	}
-	if _, ok := sq.Return.Projection.Items[0].Expr.(*ast.FloatLiteral); !ok {
-		t.Errorf("expected FloatLiteral fallback for 20-digit literal, got %T",
-			sq.Return.Projection.Items[0].Expr)
+	if !strings.Contains(se.Message, "integer literal out of range") {
+		t.Fatalf("Parse(%q): expected 'integer literal out of range', got: %v", q2, se.Message)
 	}
 }
 
@@ -500,6 +498,48 @@ func TestRoundTripParsePrintParse(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Gate tests — #1384: pure integer literals >19 digits must raise IntegerOverflow
+// -----------------------------------------------------------------------------
+
+// TestVisitNumLit_LargeIntegerRaisesIntegerOverflow is the gate test for #1384.
+// RETURN 10000000000000000000000 AS n must raise IntegerOverflow, not silently
+// accept the integer as a rounded float64.
+//
+// Gate semantics:
+//
+//	Before fix: Parse succeeds → test fails (expected error, got nil)
+//	After fix:  Parse returns *SemaError "integer literal out of range" → test passes
+func TestVisitNumLit_LargeIntegerRaisesIntegerOverflow(t *testing.T) {
+	t.Parallel()
+
+	// 23 digits, no decimal point — overflows int64, must not be silently rounded.
+	_, err := Parse("RETURN 10000000000000000000000 AS n")
+	if err == nil {
+		t.Fatal("expected IntegerOverflow error for 23-digit integer literal, got nil")
+	}
+	var se *SemaError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected *SemaError, got %T: %v", err, err)
+	}
+	if !strings.Contains(se.Message, "integer literal out of range") {
+		t.Fatalf("expected 'integer literal out of range' in message, got: %v", se.Message)
+	}
+}
+
+// TestVisitNumLit_LongFloatLiteralAccepted verifies that a float literal whose
+// integer part exceeds 19 digits (ANTLR splits NNN and .frac) still succeeds.
+// This is a non-regression test: it must pass both before and after the #1384 fix.
+func TestVisitNumLit_LongFloatLiteralAccepted(t *testing.T) {
+	t.Parallel()
+
+	// 23-digit integer part + .0 — this is a valid float literal in openCypher.
+	_, err := Parse("RETURN 10000000000000000000000.0 AS n")
+	if err != nil {
+		t.Fatalf("expected long float literal to parse successfully, got: %v", err)
 	}
 }
 
