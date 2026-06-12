@@ -14,6 +14,7 @@ package cypher_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -24,11 +25,22 @@ import (
 // TestEngine_ReturnRelationshipVar verifies that MATCH (a)-[r:LIKES]->(b) RETURN r
 // emits exactly one row whose "r" column is an expr.RelationshipValue with the
 // correct Type, Properties, and endpoint IDs matching id(a)/id(b).
+//
+// Sequential (no t.Parallel): the test creates its own isolated graph and
+// engine so there is no shared mutable state between runs, but running it in
+// the sequential phase avoids co-scheduling with memory-intensive parallel
+// tests. Under the race detector the combined heap of many large parallel tests
+// can cause the runner to be OOM-killed, making the most-recently-scheduled
+// test appear to fail non-deterministically. Serial execution is the simplest
+// defence against that phenomenon.
 func TestEngine_ReturnRelationshipVar(t *testing.T) {
-	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	eng := cypher.NewEngine(g)
-	ctx := context.Background()
+	// Per-test deadline: if the engine somehow gets stuck under heavy system
+	// load, the test should fail with a clear timeout message rather than
+	// blocking indefinitely and confusing the failure report.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// Seed: two nodes + one LIKES relationship with since=2020.
 	drainRunInTx(t, eng, `CREATE (a:A {id: 1})-[r:LIKES {since: 2020}]->(b:B {id: 2})`)

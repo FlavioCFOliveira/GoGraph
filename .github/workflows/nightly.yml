@@ -1,8 +1,14 @@
 name: Nightly
 
-# Runs the nightly test layer daily at 03:00 UTC. This layer includes
-# the short layer and the soak layer, plus long-running tests guarded
-# by //go:build nightly or testlayers.RequireNightly(t).
+# Runs the CI-safe nightly test layer daily at 03:00 UTC. This layer
+# includes the short and soak layers, plus long-running tests guarded by
+# //go:build nightly or testlayers.RequireNightly(t), with the exception
+# of search/extern (RMAT scale-20, DIMACS9 full) which require more RAM
+# than GitHub free runners provide under the race detector.
+#
+# For a full nightly run including search/extern, use the manual
+# heavy-nightly.yml workflow (workflow_dispatch only) on a machine with
+# ≥ 16 GB RAM.
 #
 # See docs/test-layers.md for the layer specification and Makefile
 # target reference.
@@ -29,7 +35,9 @@ jobs:
   nightly:
     name: nightly layer (race)
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    # test-nightly-ci targets 50 min on a 2-CPU runner; 90 min gives ample
+    # headroom for slower hardware without tying up the runner for 6 hours.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -66,7 +74,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          GODEBUG=gctrace=1 make test-nightly 2>&1 | tee /tmp/nightly-test.log
+          GODEBUG=gctrace=1 make test-nightly-ci 2>&1 | tee /tmp/nightly-test.log
 
       - name: Verify test log contains passing signal
         # Secondary guard: even if `make test-nightly` exits 0 but
@@ -88,16 +96,16 @@ jobs:
         # Run a focused benchmark with CPU profiling to detect hot-path
         # regressions across nightly builds. The profile is uploaded as
         # an artefact for offline flamegraph analysis.
-        # -tags=soak,nightly matches the test run above so the same set
-        # of packages is compiled; benchmarks in soak files are included.
-        # The || true is intentional: benchmark failure must not mask the
-        # test failure surfaced by the step above.
+        # Mirrors the test-nightly-ci package set (excludes search/extern)
+        # so this step does not OOM the runner. The || true is intentional:
+        # benchmark failure must not mask the test failure above.
         if: always()
         run: |
+          CI_PKGS=$(go list -tags=soak,nightly ./... | grep -v 'search/extern$')
           go test -bench=. -benchmem -count=1 -tags=soak,nightly \
             -cpuprofile=/tmp/nightly-cpu.prof \
             -memprofile=/tmp/nightly-mem.prof \
-            ./... > /tmp/nightly-bench.txt 2>&1 || true
+            $CI_PKGS > /tmp/nightly-bench.txt 2>&1 || true
 
       - name: Upload test logs
         if: always()

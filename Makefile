@@ -60,8 +60,27 @@ test-soak: ## [layer: soak]    short + soak — race detector, -tags=soak
 	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak $(PACKAGES)
 
 .PHONY: test-nightly
-test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=soak,nightly
+test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=soak,nightly (full; includes large-scale tests)
 	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak,nightly $(PACKAGES)
+
+# test-nightly-ci: CI-safe nightly subset for scheduled GitHub Actions runs.
+#
+# Excluded: ./search/extern/... contains large-scale graph tests (RMAT
+# scale-20 ~1 M vertices / ~8-16 M edges, DIMACS9 full 24 M vertices /
+# 60 M edges) that exceed the 7 GB RAM budget of GitHub free runners under
+# the race detector. All other nightly-layer packages — including the
+# shapegen SNAP test (which self-skips when offline) — are included.
+#
+# Use test-nightly (no -ci suffix) for a complete local run or on machines
+# with ≥ 16 GB RAM. The manual-heavy.yml workflow (workflow_dispatch only)
+# covers the excluded packages.
+NIGHTLY_CI_PKGS := $(filter-out \
+	github.com/FlavioCFOliveira/GoGraph/search/extern, \
+	$(shell $(GO) list -tags=soak,nightly ./...))
+
+.PHONY: test-nightly-ci
+test-nightly-ci: ## [layer: nightly-ci] CI-safe nightly subset — excludes search/extern (>7 GB under race)
+	$(GO) test $(RACE_FLAGS) -count=1 -timeout=50m -tags=soak,nightly $(NIGHTLY_CI_PKGS)
 
 .PHONY: test-crashinject
 test-crashinject: ## Run crash-injection battery (requires gograph_crashinject build tag; may need elevated process limits)

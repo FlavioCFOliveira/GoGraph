@@ -1,0 +1,109 @@
+name: CI Alert
+
+# Opens a GitHub issue when the Nightly or Soak workflow fails or is
+# cancelled. If an issue with the same title is already open, a comment
+# is added instead of opening a duplicate.
+#
+# Permissions required:
+#   issues: write  — to create issues and post comments
+#   actions: read  — to read workflow run metadata
+
+on:
+  workflow_run:
+    workflows:
+      - Nightly
+      - Soak
+    types:
+      - completed
+
+permissions:
+  issues: write
+  actions: read
+
+jobs:
+  alert:
+    name: Open or comment on failure issue
+    runs-on: ubuntu-latest
+    # Only act on failure or cancellation — skip successful runs.
+    if: >
+      github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled'
+
+    steps:
+      - name: Compute issue title
+        id: title
+        env:
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_DATE: ${{ github.event.workflow_run.created_at }}
+        run: |
+          # Trim the date portion from the ISO-8601 timestamp (YYYY-MM-DD).
+          DATE="${RUN_DATE%%T*}"
+          TITLE="Scheduled CI failure: ${WORKFLOW_NAME} on ${DATE}"
+          echo "value=${TITLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Find existing open issue with the same title
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ steps.title.outputs.value }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Search for an open issue whose title matches exactly.
+          # `gh issue list` returns tab-separated: number, state, title, labels.
+          ISSUE_NUMBER=$(gh issue list \
+            --repo "$REPO" \
+            --state open \
+            --search "\"${TITLE}\" in:title" \
+            --json number,title \
+            --jq ".[] | select(.title == \"${TITLE}\") | .number" \
+            | head -1)
+          echo "number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build issue / comment body
+        id: body
+        env:
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_DATE: ${{ github.event.workflow_run.created_at }}
+          REPO: ${{ github.repository }}
+        run: |
+          DATE="${RUN_DATE%%T*}"
+          cat > /tmp/body.md <<EOF
+          **Workflow:** ${WORKFLOW_NAME}
+          **Conclusion:** ${CONCLUSION}
+          **Branch:** ${BRANCH}
+          **Commit:** ${SHA}
+          **Date:** ${DATE}
+          **Run:** [View logs](${RUN_URL})
+
+          Investigate the run linked above, fix the root cause, and close this
+          issue once the next scheduled run completes green.
+          EOF
+          echo "path=/tmp/body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Open new issue
+        if: steps.find.outputs.number == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ steps.title.outputs.value }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh issue create \
+            --repo "$REPO" \
+            --title "$TITLE" \
+            --body-file /tmp/body.md \
+            --label "ci-failure"
+
+      - name: Add comment to existing issue
+        if: steps.find.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.find.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "$REPO" \
+            --body-file /tmp/body.md

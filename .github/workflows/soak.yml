@@ -6,10 +6,9 @@ name: Soak
 # and not needed on every push, so we run it weekly and on demand.
 
 on:
-  schedule:
-    # Sunday 02:00 UTC — 4 hours of runtime fits comfortably in the
-    # default 6-hour GitHub Actions job timeout window.
-    - cron: "0 2 * * 0"
+  # Manual dispatch only — the 4-hour Bolt soak is too long and
+  # resource-intensive for scheduled GitHub free-runner runs.
+  # Trigger it manually before promoting a release candidate.
   workflow_dispatch:
     inputs:
       duration:

@@ -84,12 +84,15 @@ func csCountProp(t *testing.T, eng *cypher.Engine, prop string) int {
 // scan→register→seed window, leaving the constraint active over two
 // duplicates that the value-set never saw.
 //
-// The bulk :T seed widens the validation scan (O(N) over the label) so the
-// pre-fix race window is wide enough to hit; the invariant itself is
-// timing-independent, so the test is deterministic after the fix.
-func runCreateConstraintTOCTOU(t *testing.T, eng *cypher.Engine, iters int) {
+// bulkSeed is the number of filler :T nodes created before the race loop.
+// A larger bulkSeed widens the validation scan (O(N) over the label) so the
+// pre-fix race window is wide enough to hit reliably. The correctness
+// invariant is timing-independent so smaller values still prove correctness;
+// they are used under testing.Short to keep CI runtime bounded.
+func runCreateConstraintTOCTOU(t *testing.T, eng *cypher.Engine, iters, bulkSeed int) {
 	t.Helper()
-	if err := cdRunOne(t, eng, `UNWIND range(1, 4000) AS x CREATE (:T {filler: x})`); err != nil {
+	seedQ := fmt.Sprintf(`UNWIND range(1, %d) AS x CREATE (:T {filler: x})`, bulkSeed)
+	if err := cdRunOne(t, eng, seedQ); err != nil {
 		t.Fatalf("bulk seed: %v", err)
 	}
 	for i := 0; i < iters; i++ {
@@ -134,11 +137,21 @@ func runCreateConstraintTOCTOU(t *testing.T, eng *cypher.Engine, iters int) {
 
 // TestCreateConstraint_ConcurrentDuplicate_InMemory is the #1341 (a) gate on
 // a store-less engine: the writer serialisation is Engine.writeMu.
+//
+// The full 80-iteration run widens the scan window via a 4 000-node bulk seed
+// to reliably expose the TOCTOU window on slow hardware. Under testing.Short
+// (e.g. make smoke, or CI with -short) the seed is reduced to 200 nodes and
+// only 10 iterations are executed — enough to exercise the correctness
+// invariant without saturating a 2-CPU GitHub runner under the race detector.
 func TestCreateConstraint_ConcurrentDuplicate_InMemory(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	runCreateConstraintTOCTOU(t, eng, 80)
+	iters, seed := 80, 4_000
+	if testing.Short() {
+		iters, seed = 10, 200
+	}
+	runCreateConstraintTOCTOU(t, eng, iters, seed)
 }
 
 // TestCreateConstraint_ConcurrentDuplicate_WALBacked is the #1341 (a) gate on
@@ -159,7 +172,11 @@ func TestCreateConstraint_ConcurrentDuplicate_WALBacked(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, cdStoreOpts())
 	eng := cypher.NewEngineWithStore(store)
-	runCreateConstraintTOCTOU(t, eng, 25)
+	iters, seed := 25, 4_000
+	if testing.Short() {
+		iters, seed = 5, 200
+	}
+	runCreateConstraintTOCTOU(t, eng, iters, seed)
 }
 
 // TestCreateConstraint_WALAppendFailureUnwindsRegistration is the #1341 (b)
