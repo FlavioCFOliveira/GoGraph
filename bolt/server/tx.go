@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -79,9 +80,30 @@ func newTx(ctx context.Context, eng *cypher.Engine, mode string, timeout time.Du
 // result cursor, and returns it to the caller for streaming. The statement's
 // writes accumulate in the engine transaction and become durable/visible only on
 // Commit.
+//
+// Runtime pipeline errors (where the query compiled and executed under the
+// visibility barrier but the execution pipeline failed — e.g. a constraint
+// violation or a type error mid-pipeline) are wrapped in a zero-row
+// [cypher.Result] whose Err() carries the error. This preserves the Bolt v5
+// state-machine contract: the session stays in TX_STREAMING so the driver can
+// drain the cursor via PULL (where the FAILURE surfaces), rather than receiving
+// a FAILURE directly from RUN. Build-phase errors (context cancellation,
+// parse/sema/plan failures, DDL rejection) are propagated as a non-nil error
+// return so the server enters FAILED at RUN time.
 func (tx *Tx) Run(query string, params map[string]any) (*cypher.Result, error) {
 	result, err := tx.engTx.ExecAny(query, params)
 	if err != nil {
+		// [cypher.ExplicitTx.Exec] now wraps runtime pipeline errors in
+		// [cypher.ErrStatementPipeline] (#1378). Surface those via the cursor
+		// (TX_STREAMING→FAILED at PULL time) to preserve the Bolt v5 driver's
+		// state-machine expectations. All other errors (build phase, context,
+		// DDL) propagate as runErr so the session enters FAILED at RUN time.
+		var pipeErr *cypher.ErrStatementPipeline
+		if errors.As(err, &pipeErr) {
+			result = cypher.NewErrResult(pipeErr.Unwrap())
+			tx.results = append(tx.results, result)
+			return result, nil
+		}
 		return nil, err
 	}
 	tx.results = append(tx.results, result)

@@ -772,6 +772,21 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 		return s.failTransition(m)
 	}
 
+	// Defense-in-depth: if the open cursor already carries a statement error,
+	// treat DISCARD like a failure so the client is notified rather than
+	// receiving a spurious SUCCESS. enterFailed drains the cursor and reclaims
+	// any open explicit transaction.
+	if s.result != nil {
+		if stmtErr := s.result.Err(); stmtErr != nil {
+			s.drainResult()
+			s.enterFailed()
+			return []any{&proto.Failure{
+				Code:    FailureCode(stmtErr),
+				Message: s.sanitiseErr(stmtErr),
+			}}, nil
+		}
+	}
+
 	s.drainResult()
 
 	next, err := Transition(s.state, m, true)

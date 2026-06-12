@@ -2746,6 +2746,21 @@ func newResult(rs *exec.ResultSet, cols []string, buf *exec.IndexBuffer, idxMgr 
 	return newResultWithLimit(rs, cols, buf, idxMgr, tx, 0, 0)
 }
 
+// NewErrResult returns a zero-row [Result] whose [Result.Err] reports err
+// immediately. It is intended for callers that need to represent a failed
+// query as a Result rather than as an error return — for example, the Bolt
+// server layer, which needs to store a per-statement error in a cursor so it
+// surfaces at PULL time rather than at RUN time, preserving the Bolt v5
+// state-machine contract that a TX_STREAMING cursor is always drained before
+// the session transitions back to TX_READY or FAILED.
+//
+// Next always returns false and Err returns err.
+func NewErrResult(err error) *Result {
+	r := newResult(exec.Run(context.Background(), exec.NewArgument(), nil), nil, nil, nil, nil)
+	r.rowsErr = err
+	return r
+}
+
 // finalizeResult is the runtime.SetFinalizer callback invoked by the GC
 // when an unclosed Result becomes unreachable. It increments the leak
 // counter and runs the same close path Close() would, ignoring its error

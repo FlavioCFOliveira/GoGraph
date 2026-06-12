@@ -85,6 +85,27 @@ import (
 // [errors.Is].
 var ErrTxFinished = errors.New("cypher: explicit transaction already finished")
 
+// ErrStatementPipeline wraps a runtime pipeline error from [ExplicitTx.Exec].
+// It signals that the query was compiled and ran to completion inside the
+// visibility barrier but the execution pipeline failed (e.g. a constraint
+// violation, a type error mid-pipeline, a validation error). The partial
+// in-memory writes remain in the transaction's accumulated undo log; the
+// caller (or the Bolt server layer) may decide whether to roll the whole
+// transaction back.
+//
+// Callers that need to distinguish pipeline errors from compile-time or
+// build errors use [errors.As] to unwrap this type; the wrapped error is the
+// original pipeline error (matchable via [errors.Is] against sentinel errors
+// such as [exec.ErrConstraintViolation]).
+type ErrStatementPipeline struct{ Err error }
+
+// Error implements the error interface.
+func (e *ErrStatementPipeline) Error() string { return e.Err.Error() }
+
+// Unwrap returns the underlying pipeline error so [errors.Is] and [errors.As]
+// traversal works correctly.
+func (e *ErrStatementPipeline) Unwrap() error { return e.Err }
+
 // ExplicitTx is an open engine-level transaction spanning one or more
 // statements. Obtain one from [Engine.BeginTx]; execute statements with
 // [ExplicitTx.Exec] / [ExplicitTx.ExecAny]; finish with exactly one call to
@@ -200,10 +221,11 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 // transaction (autocommit). A read-only statement is permitted and simply
 // observes the transaction's current state.
 //
-// A statement that raises a runtime error returns that error AND leaves the
-// transaction open: the per-statement writes remain in the accumulated undo log,
-// so the caller (the Bolt session) decides whether to roll the whole transaction
-// back. A statement that panics is converted to an error wrapping
+// A statement that raises a runtime error is returned directly as the error
+// return of Exec. The per-statement writes remain in the accumulated undo log,
+// so the caller (the Bolt session) can roll the whole transaction back via
+// [ExplicitTx.Rollback] after inspecting the error. A statement that panics is
+// converted to an error wrapping
 // [ErrInternalPanic]; the in-memory writes of the whole transaction are rolled
 // back inside the visibility barrier, the writer serialisation is released, and
 // the handle is marked finished (a subsequent Rollback is then a no-op).
@@ -259,6 +281,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false)
 	if buildErr != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
+	if stmtErr := r.Err(); stmtErr != nil {
+		return nil, &ErrStatementPipeline{Err: stmtErr}
 	}
 	return r, nil
 }
