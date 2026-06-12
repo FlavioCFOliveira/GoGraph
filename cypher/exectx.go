@@ -85,6 +85,12 @@ import (
 // [errors.Is].
 var ErrTxFinished = errors.New("cypher: explicit transaction already finished")
 
+// ErrTxPoisoned is returned by [ExplicitTx.Commit] when a prior
+// [ExplicitTx.Exec] call returned an [ErrStatementPipeline] error. A poisoned
+// transaction cannot be committed — its partial writes must be unwound by
+// calling [ExplicitTx.Rollback] instead. Matchable with [errors.Is].
+var ErrTxPoisoned = errors.New("cypher: transaction poisoned by a prior failed Exec statement — call Rollback")
+
 // ErrStatementPipeline wraps a runtime pipeline error from [ExplicitTx.Exec].
 // It signals that the query was compiled and ran to completion inside the
 // visibility barrier but the execution pipeline failed (e.g. a constraint
@@ -150,6 +156,12 @@ type ExplicitTx struct {
 	// finishing call, or any later Exec, is rejected with [ErrTxFinished] and the
 	// writer serialisation is never released twice.
 	finished bool
+
+	// failed is set when an Exec call returns an [ErrStatementPipeline] error.
+	// A poisoned transaction cannot be committed (Commit returns [ErrTxPoisoned]);
+	// the caller must call Rollback to unwind the partial writes accumulated in
+	// the undo log.
+	failed bool
 }
 
 // BeginTx opens an explicit, multi-statement transaction bound to ctx and
@@ -283,6 +295,7 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
 	if stmtErr := r.Err(); stmtErr != nil {
+		tx.failed = true
 		return nil, &ErrStatementPipeline{Err: stmtErr}
 	}
 	return r, nil
@@ -313,11 +326,15 @@ func (tx *ExplicitTx) ExecAny(query string, params map[string]any) (*Result, err
 // durability could not be guaranteed is reported as failed, never acknowledged.
 //
 // Commit returns [ErrTxFinished] if the transaction was already committed or
-// rolled back.
+// rolled back, and [ErrTxPoisoned] if a prior [ExplicitTx.Exec] call returned
+// an [ErrStatementPipeline] error (call [ExplicitTx.Rollback] instead).
 func (tx *ExplicitTx) Commit() (err error) {
 	defer cmetrics.Time("cypher.ExplicitTx.Commit")()
 	if tx.finished {
 		return ErrTxFinished
+	}
+	if tx.failed {
+		return ErrTxPoisoned
 	}
 	// A panic during the in-barrier finalisation must still release the writer
 	// serialisation and roll back the WAL transaction; convert it to an error.
