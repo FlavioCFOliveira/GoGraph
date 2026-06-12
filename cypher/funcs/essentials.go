@@ -676,7 +676,11 @@ func fnToInteger(args []expr.Value) (expr.Value, error) {
 	case expr.IntegerValue:
 		return v, nil
 	case expr.FloatValue:
-		return expr.IntegerValue(int64(math.Trunc(float64(v)))), nil
+		f := math.Trunc(float64(v))
+		if math.IsNaN(f) || math.IsInf(f, 0) || f > float64(math.MaxInt64) || f < float64(math.MinInt64) {
+			return nil, &expr.EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: float value %v is out of range for integer conversion", float64(v))}
+		}
+		return expr.IntegerValue(int64(f)), nil
 	case expr.StringValue:
 		s := strings.TrimSpace(string(v))
 		// Direct integer parse first — the common case for "42", "-7", etc.
@@ -686,7 +690,11 @@ func fnToInteger(args []expr.Value) (expr.Value, error) {
 		// Fall back to float parse so "2.9" → 2 (truncate toward zero), per
 		// openCypher: toInteger(<floatString>) drops the fractional part.
 		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			return expr.IntegerValue(int64(math.Trunc(f))), nil
+			ft := math.Trunc(f)
+			if math.IsNaN(ft) || math.IsInf(ft, 0) || ft > float64(math.MaxInt64) || ft < float64(math.MinInt64) {
+				return nil, &expr.EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: float value %v is out of range for integer conversion", f)}
+			}
+			return expr.IntegerValue(int64(ft)), nil
 		}
 		return expr.Null, nil // non-parseable → NULL
 	case expr.BoolValue:
@@ -779,6 +787,10 @@ func fnAbs(args []expr.Value) (expr.Value, error) {
 	switch v := args[0].(type) {
 	case expr.IntegerValue:
 		n := int64(v)
+		if n == math.MinInt64 {
+			// -MinInt64 is not representable as int64 — overflow.
+			return nil, &expr.EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: integer overflow in abs(%d)", n)}
+		}
 		if n < 0 {
 			return expr.IntegerValue(-n), nil
 		}

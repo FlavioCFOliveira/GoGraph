@@ -1031,10 +1031,26 @@ func evalTemporalArith(op string, left, right Value) (Value, bool) {
 func evalIntArith(op string, a, b int64) (Value, error) {
 	switch op {
 	case "+":
+		// Overflow if both operands have the same sign and the result flips.
+		if (b > 0 && a > math.MaxInt64-b) || (b < 0 && a < math.MinInt64-b) {
+			return Null, &EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: integer overflow in %d + %d", a, b)}
+		}
 		return IntegerValue(a + b), nil
 	case "-":
+		// Overflow if b and a have opposite signs and the result flips.
+		if (b > 0 && a < math.MinInt64+b) || (b < 0 && a > math.MaxInt64+b) {
+			return Null, &EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: integer overflow in %d - %d", a, b)}
+		}
 		return IntegerValue(a - b), nil
 	case "*":
+		if a != 0 && b != 0 {
+			// Use division to detect overflow; handles MinInt64 correctly because
+			// we check both directions before committing.
+			result := a * b
+			if result/a != b {
+				return Null, &EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: integer overflow in %d * %d", a, b)}
+			}
+		}
 		return IntegerValue(a * b), nil
 	case "/":
 		if b == 0 {
@@ -1184,6 +1200,9 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg Fu
 		}
 		switch v := operand.(type) {
 		case IntegerValue:
+			if int64(v) == math.MinInt64 {
+				return Null, &EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: integer overflow in -%d", int64(v))}
+			}
 			return IntegerValue(-int64(v)), nil
 		case FloatValue:
 			return FloatValue(-float64(v)), nil
