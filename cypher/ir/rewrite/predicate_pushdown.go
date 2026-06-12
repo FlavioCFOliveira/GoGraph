@@ -41,12 +41,22 @@ func (PredicatePushdown) Apply(plan ir.LogicalPlan) (ir.LogicalPlan, bool) {
 
 	switch child := sel.Child.(type) {
 	// ── Eager barrier: never push ────────────────────────────────────────────
+	// Algebraic legality: Eager is a hard pipeline barrier. Pushing a filter
+	// below it changes the input cardinality fed to Eager, violating the
+	// semantics of aggregation and write operators that depend on it.
 	case *ir.Eager:
 		return plan, false
 
-	// ── Projection: push only when all predicate vars are in scope ───────────
+	// ── Projection: push only when all predicate vars are available BEFORE ───
+	// ── the projection, i.e. in child.Child.Vars() not child.Vars().        ──
+	// Algebraic legality: Selection(p, Projection(items, X)) →
+	// Projection(items, Selection(p, X)) is valid only when every variable
+	// referenced by p is produced by X (child.Child), NOT by aliases that
+	// Projection introduces (e.g. WITH a.x AS y — alias 'y' is not bound in X).
+	// Using child.Vars() (the OUTPUT vars) would permit pushing a predicate on
+	// 'y' below the projection, where 'y' is unbound, producing incorrect results.
 	case *ir.Projection:
-		if !predicateVarsInScope(sel.Predicate, child.Vars()) {
+		if !predicateVarsInScope(sel.Predicate, child.Child.Vars()) {
 			return plan, false
 		}
 		// Move Selection below Projection.
@@ -55,20 +65,30 @@ func (PredicatePushdown) Apply(plan ir.LogicalPlan) (ir.LogicalPlan, bool) {
 		return newProj, true
 
 	// ── Limit: do NOT push — filter-after-limit ≠ filter-before-limit ───────
+	// Algebraic legality: openCypher evaluates LIMIT before WHERE in a WITH
+	// clause; pushing the filter below Limit changes result cardinality.
 	case *ir.Limit:
 		return plan, false
 
 	// ── Skip: do NOT push — filter-after-skip ≠ filter-before-skip ──────────
+	// Algebraic legality: same reasoning as Limit — SKIP is applied before the
+	// predicate in openCypher semantics.
 	case *ir.Skip:
 		return plan, false
 
 	// ── Sort: always push ────────────────────────────────────────────────────
+	// Algebraic legality: sort does not change the set of available variables
+	// and filter-then-sort produces the same rows as sort-then-filter (Sort is
+	// transparent to row identity).
 	case *ir.Sort:
 		newSel := ir.NewSelection(sel.Predicate, child.Child)
 		newSort := ir.NewSort(child.SortItems, newSel)
 		return newSort, true
 
 	// ── Selection: swap so outer predicate sinks below inner ─────────────────
+	// Algebraic legality: Selection is commutative — the conjunction of two
+	// independent predicates can be evaluated in any order. Swapping accumulates
+	// predicates close to the scan with repeated driver passes.
 	case *ir.Selection:
 		// Turn Selection(pred1, Selection(pred2, X))
 		// into Selection(pred2, Selection(pred1, X))
@@ -89,13 +109,17 @@ func (PredicatePushdown) Apply(plan ir.LogicalPlan) (ir.LogicalPlan, bool) {
 // identifiers against the scope.
 //
 // Because the expression IR uses opaque strings at this stage, we adopt a
-// conservative approach: extract alpha-numeric tokens and check that the
-// dot-prefix variable names (e.g. "n" from "n.name") are in scope. A predicate
-// with no extractable variable tokens is considered safe to push.
+// conservative, fail-closed approach: extract alpha-numeric tokens and check
+// that the dot-prefix variable names (e.g. "n" from "n.name") are in scope.
+// When no variable tokens can be extracted, the function returns false (not
+// safe to push): without evidence that all referenced variables are in scope
+// we must not push the predicate.
 func predicateVarsInScope(predicate string, scope []string) bool {
 	vars := extractVarNames(predicate)
 	if len(vars) == 0 {
-		return true
+		// Fail-closed: no extractable variable names means we cannot confirm
+		// that the predicate is safe to push past the operator.
+		return false
 	}
 	scopeSet := make(map[string]struct{}, len(scope))
 	for _, v := range scope {

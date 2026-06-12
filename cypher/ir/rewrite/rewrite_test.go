@@ -331,6 +331,42 @@ func TestPredicatePushdownNotPastProjectionOutOfScope(t *testing.T) {
 	}
 }
 
+// TestPredicatePushdownNotPastProjectionAlias is the gate test for task #1429.
+//
+// The plan is:
+//
+//	Selection("y > 5", Projection([a.x AS y], AllNodesScan(a)))
+//
+// The predicate references alias 'y', which is introduced BY the Projection and
+// is therefore NOT available in the Projection's input (AllNodesScan outputs
+// only 'a'). The rule must guard on child.Child.Vars() (the input vars), not
+// child.Vars() (the output vars), so the pushdown is correctly rejected.
+//
+// Gate semantics:
+//
+//	Before fix (uses child.Vars()): 'y' is in the projection output → pushdown
+//	fires → plan becomes Projection([a.x AS y], Selection("y>5", Scan(a))), but
+//	'y' is unbound inside Scan(a) → semantically wrong.
+//	After fix (uses child.Child.Vars()): 'y' is NOT in Scan(a).Vars() →
+//	pushdown correctly refused → changed=false.
+func TestPredicatePushdownNotPastProjectionAlias(t *testing.T) {
+	// Build: Selection("y > 5", Projection([a.x AS y], AllNodesScan(a)))
+	// Projection introduces alias 'y' from expression 'a.x'.
+	items := []ir.ProjectionItem{{Name: "y", Expression: "a.x"}}
+	proj := ir.NewProjection(items, scan("a"))
+	sel := ir.NewSelection("y > 5", proj)
+
+	rule := rewrite.PredicatePushdown{}
+	out, changed := rule.Apply(sel)
+	if changed {
+		t.Fatalf("predicate on projection-introduced alias 'y' must NOT be pushed below the Projection; got plan: %T", out)
+	}
+	// Plan shape must remain Selection(Projection(Scan)).
+	assertType(t, out, "Selection")
+	assertType(t, child0(out), "Projection")
+	assertType(t, child0(child0(out)), "AllNodesScan")
+}
+
 func TestPredicatePushdownSwapSelections(t *testing.T) {
 	// Selection(pred1, Selection(pred2, X)) → Selection(pred2, Selection(pred1, X))
 	inner := ir.NewSelection("n.age > 18", scan("n"))
