@@ -103,6 +103,11 @@ func Open(path string) (*Reader, error) {
 
 	r := &Reader{f: f, mm: mm, header: h}
 	r.bindSlices()
+	if err := r.validateCSRSemantics(); err != nil {
+		_ = mm.Unmap() // best-effort: already on error path, semantic err preserved
+		_ = f.Close()  // best-effort: already on error path, semantic err preserved
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -131,6 +136,62 @@ func (r *Reader) bindSlices() {
 		size := uint64(r.header.Weight.Size()) * r.header.NEdges
 		r.weightBytes = r.mm[off : off+size]
 	}
+}
+
+// validateCSRSemantics checks the three semantic invariants every CSR
+// consumer assumes after bindSlices has succeeded:
+//
+//  1. The vertex offset array is monotone non-decreasing.
+//  2. The sentinel — vertices[NVertices-1], which records the total edge
+//     count — does not exceed NEdges (the edge array's actual length).
+//  3. Every edge target is a valid vertex index (< NVertices-1).
+//
+// The vertex array stored on disk uses the sentinel-inclusive form: it
+// has NVertices entries (not NVertices+1), where the last entry equals
+// the total edge count. Equivalently, NVertices = V+1, with V being the
+// actual number of vertices; edge targets are in [0, V) = [0, NVertices-1).
+//
+// Called once in Open, immediately after bindSlices; O(V+E).
+func (r *Reader) validateCSRSemantics() error {
+	nv := r.header.NVertices // sentinel-inclusive length: actual vertices = nv-1
+	ne := r.header.NEdges
+	verts := r.vertices
+	edges := r.edges
+	if nv == 0 {
+		return nil
+	}
+	// Invariant 1 + 2: monotone offsets and sentinel bound.
+	// verts has length nv; verts[nv-1] is the sentinel == total edge count.
+	for i := uint64(1); i < nv; i++ {
+		if verts[i] < verts[i-1] {
+			return fmt.Errorf("%w: vertex offset [%d]=%d < [%d]=%d (non-monotone)",
+				ErrFileCorrupted, i, verts[i], i-1, verts[i-1])
+		}
+	}
+	if verts[nv-1] > ne {
+		return fmt.Errorf("%w: sentinel offset [%d]=%d exceeds edge count %d",
+			ErrFileCorrupted, nv-1, verts[nv-1], ne)
+	}
+	// Invariant 3: every edge target is a valid vertex index.
+	// Actual vertices occupy indices [0, nv-1); targets must be < nv-1.
+	if nv < 2 {
+		// nv == 1 means zero actual vertices; no edge can have a valid target.
+		// (NEdges == 0 is guaranteed by Invariant 2 when nv == 1, so this
+		// loop body is unreachable — but check explicitly for safety.)
+		if len(edges) > 0 {
+			return fmt.Errorf("%w: edge[0]=%d: no valid vertices (NVertices=%d)",
+				ErrFileCorrupted, edges[0], nv)
+		}
+		return nil
+	}
+	actualV := nv - 1 // number of real vertices
+	for k, dst := range edges {
+		if uint64(dst) >= actualV {
+			return fmt.Errorf("%w: edge[%d]=%d >= vertex count %d",
+				ErrFileCorrupted, k, dst, actualV)
+		}
+	}
+	return nil
 }
 
 // Header returns the parsed file header.
