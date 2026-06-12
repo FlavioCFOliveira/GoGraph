@@ -18,6 +18,13 @@ import (
 // already been closed.
 var ErrWriterClosed = errors.New("wal: writer is closed")
 
+// ErrWALLocked is returned by [Open] when another process already holds
+// the exclusive OS-level lock on the WAL directory. It signals that the
+// WAL is in active use and the caller must not open a second writer
+// against it — doing so would silently interleave frames and corrupt the
+// log.
+var ErrWALLocked = errors.New("wal: WAL directory is locked by another process")
+
 // Stats is a snapshot of a [Writer]'s lifetime counters. Counters
 // are monotonic; subtract two snapshots to compute deltas. Values
 // are read with [sync/atomic.LoadUint64], so they may race slightly
@@ -59,6 +66,13 @@ type Writer struct {
 	bw     *bufio.Writer
 	closed atomic.Bool
 
+	// lockFile is the open handle of the WAL directory LOCK file whose
+	// flock(2) / O_EXCL lifetime is tied to this Writer. It is non-nil
+	// only for Writers created via [Open] (not [OpenWith], which is used
+	// exclusively by tests that supply synthetic walFile implementations).
+	// Released by Close via releaseLock.
+	lockFile *os.File
+
 	// syncErr is the sticky poison error: set under mu by the first
 	// flush/fsync failure in SyncCtx and never cleared. While non-nil
 	// every AppendCtx/SyncCtx call returns it without touching the
@@ -97,6 +111,22 @@ type Writer struct {
 // are left byte-for-byte intact.
 func Open(path string) (*Writer, error) {
 	defer metrics.Time("store.wal.Open")()
+
+	// Acquire an exclusive OS-level lock on the WAL directory before
+	// touching any WAL data. The lock is held for the lifetime of this
+	// Writer and released by Close. Without it two processes opening the
+	// same path would silently interleave WAL frames, corrupting the log.
+	//
+	// acquireLock creates (or opens) a "LOCK" sentinel file in the same
+	// directory as path and calls flock(2)/O_EXCL on it; see lock_unix.go
+	// and lock_other.go for the per-platform implementation.
+	lockPath := path + ".lock"
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		metrics.IncCounter("store.wal.Open.errors", 1)
+		return nil, err // ErrWALLocked or a wrapped OS error
+	}
+
 	// Detect whether this call creates the file. A newly-created WAL file
 	// needs a parent-directory fsync so its directory entry is durable;
 	// without it, a crash inside the kernel writeback window could lose the
@@ -115,6 +145,7 @@ func Open(path string) (*Writer, error) {
 	// are unchanged; only the create mode is tightened.
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // caller-supplied path is by-design
 	if err != nil {
+		releaseLock(lockFile)
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: %w", path, err)
 	}
@@ -125,11 +156,13 @@ func Open(path string) (*Writer, error) {
 		// directory fsync would be wasted work on the commit hot path.
 		if syncErr := parentDirFsync(path); syncErr != nil {
 			_ = f.Close()
+			releaseLock(lockFile)
 			metrics.IncCounter("store.wal.Open.errors", 1)
 			return nil, fmt.Errorf("wal: fsync parent dir of %q: %w", path, syncErr)
 		}
 	} else if err := discardTornTail(f); err != nil {
 		_ = f.Close()
+		releaseLock(lockFile)
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: discard torn tail: %w", path, err)
 	}
@@ -140,11 +173,13 @@ func Open(path string) (*Writer, error) {
 	size, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		_ = f.Close()
+		releaseLock(lockFile)
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: probe size: %w", path, err)
 	}
 	return &Writer{
 		f:            f,
+		lockFile:     lockFile,
 		bw:           bufio.NewWriterSize(f, 64*1024),
 		durableSize:  size,
 		appendedSize: size,
@@ -474,22 +509,37 @@ func (w *Writer) Close() error {
 		// fsync can only confirm the reduced EOF, not acknowledge it.
 		_ = w.f.Sync()
 		_ = w.f.Close() // best-effort: the poison error takes precedence
+		if w.lockFile != nil {
+			releaseLock(w.lockFile)
+		}
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return w.syncErr
 	}
 	if err := w.bw.Flush(); err != nil {
 		_ = w.f.Close() // best-effort: already on error path, flush err preserved
+		if w.lockFile != nil {
+			releaseLock(w.lockFile)
+		}
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
 	if err := w.f.Sync(); err != nil {
 		_ = w.f.Close() // best-effort: already on error path, sync err preserved
+		if w.lockFile != nil {
+			releaseLock(w.lockFile)
+		}
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
 	if err := w.f.Close(); err != nil {
+		if w.lockFile != nil {
+			releaseLock(w.lockFile)
+		}
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
+	}
+	if w.lockFile != nil {
+		releaseLock(w.lockFile)
 	}
 	return nil
 }
