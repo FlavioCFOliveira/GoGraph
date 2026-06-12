@@ -38,8 +38,13 @@ type Tx struct {
 	cancel context.CancelFunc
 
 	// mode is "w" for write transactions and "r" for read-only. Both currently
-	// run through the same engine transaction; the distinction is reserved for
-	// future read-only enforcement.
+	// run through the same engine transaction (cypher.ExplicitTx), which applies
+	// writes eagerly: reads issued by a concurrent Engine.Run between an Exec and
+	// the corresponding Commit/Rollback can observe not-yet-committed writes
+	// (read-uncommitted isolation — dirty reads are possible). The distinction
+	// between read and write modes is reserved for future read-only enforcement
+	// once snapshot isolation is implemented; see docs/isolation-design.md for the
+	// tracked end-state.
 	mode string
 }
 
