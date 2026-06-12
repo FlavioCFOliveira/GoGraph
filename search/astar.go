@@ -25,7 +25,9 @@ var ErrNoPath = errors.New("search: no path between endpoints")
 // [ErrNegativeWeight] if any edge weight in c is strictly negative.
 // For floating-point Weight types it validates that no edge weight
 // is NaN or +/-Inf and returns [ErrInvalidInput] otherwise; integer
-// Weight types skip that pass.
+// Weight types skip that pass. For floating-point Weight types it also
+// validates that h never returns NaN or ±Inf at each push; a poisoned
+// heuristic returns [ErrInvalidInput] rather than a spurious [ErrNoPath].
 //
 // For hot loops, prefer the zero-allocation primitive [AStarInto].
 func AStar[W Weight](
@@ -43,7 +45,10 @@ func AStar[W Weight](
 
 // AStarCtx is the context-aware variant of [AStar]. ctx.Err() is
 // checked every 4096 heap pops; on cancellation returns
-// (nil, zero, wrapped ctx.Err()).
+// (nil, zero, wrapped ctx.Err()). For floating-point Weight types it
+// also validates that h never returns NaN or ±Inf at each push; a
+// poisoned heuristic returns [ErrInvalidInput] rather than a spurious
+// [ErrNoPath].
 func AStarCtx[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -150,9 +155,13 @@ func aStarCore[W Weight](
 
 	edges := c.EdgesSlice()
 
+	hSrc := h(src)
+	if floatInvalid(hSrc) {
+		return zero, ErrInvalidInput
+	}
 	found[uint64(src)] = true
 	parent[uint64(src)] = src
-	heap.push(h(src), src)
+	heap.push(hSrc, src)
 
 	popCount := 0
 	for heap.len() > 0 {
@@ -177,10 +186,14 @@ func aStarCore[W Weight](
 			nb := edges[k]
 			cand := gCurrent + weights[k]
 			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
+				hNb := h(nb)
+				if floatInvalid(hNb) {
+					return zero, ErrInvalidInput
+				}
 				dist[uint64(nb)] = cand
 				parent[uint64(nb)] = top.node
 				found[uint64(nb)] = true
-				heap.push(cand+h(nb), nb)
+				heap.push(cand+hNb, nb)
 			}
 		}
 	}
