@@ -44,7 +44,10 @@ import (
 // instead of blocking forever on a result that will never arrive.
 var ErrCheckpointerStopped = errors.New("checkpoint: checkpointer stopped")
 
-// Config controls when the checkpointer fires.
+// Config controls when the checkpointer fires. It is a plain configuration
+// value read once when the [Checkpointer] is constructed; it is safe for
+// concurrent read use once constructed, but must not be mutated after being
+// passed to the constructor.
 type Config struct {
 	// Dir is the snapshot directory and the location of the WAL.
 	Dir string
@@ -59,7 +62,9 @@ type Config struct {
 }
 
 // Stats is a monotonic snapshot of the checkpointer's lifetime
-// counters.
+// counters. It is returned by value as a self-contained copy with no
+// shared mutable state, so a Stats value is immutable in effect and safe
+// for concurrent reads by multiple goroutines.
 type Stats struct {
 	Checkpoints    uint64
 	WALTruncBytes  uint64

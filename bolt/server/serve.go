@@ -94,7 +94,11 @@ var handshakeTimeout atomic.Int64
 
 func init() { handshakeTimeout.Store(int64(DefaultHandshakeTimeout)) }
 
-// Options configures a Server.
+// Options configures a Server. It is a plain configuration value read once
+// by [NewServer]; it is safe for concurrent read use once constructed, but
+// must not be mutated after being passed to NewServer. The referenced
+// TLSConfig, Auth, Logger, and Closer carry their own concurrency
+// contracts.
 type Options struct {
 	// MaxConnections is the upper bound on concurrent accepted connections.
 	// Zero or negative values default to 1024.

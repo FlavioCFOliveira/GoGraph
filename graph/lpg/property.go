@@ -28,6 +28,13 @@ const (
 // 64-bit platform regardless of the inhabited variant. The zero
 // value is invalid; values are constructed via the typed
 // constructors ([StringValue], [Int64Value], etc.).
+//
+// A PropertyValue is immutable after construction and is copied by value, so
+// it is safe for concurrent reads by multiple goroutines without external
+// locking. The one caveat is the slice-bearing variants: [PropertyValue.Bytes]
+// and [PropertyValue.List] return slices that alias the value's backing store,
+// so callers must not mutate the returned slice (doing so would mutate the
+// otherwise-immutable value and break the concurrency guarantee).
 type PropertyValue struct {
 	kind PropertyKind
 	v    any

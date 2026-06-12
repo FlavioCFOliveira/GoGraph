@@ -7,6 +7,17 @@
 // op that reached the WAL is replayed during Open; ops that did not
 // fsync are dropped — exactly the durability contract documented on
 // Tx.Commit.
+//
+// # Concurrency
+//
+// Recovery is a one-shot bootstrap step run by a single goroutine before
+// the graph is published for serving. [Open] / [OpenCtx] take no internal
+// lock and are not meant to run concurrently with each other on the same
+// directory. The [Options] passed in must be populated before the call
+// and not mutated during it; the [Result] returned is read-only once Open
+// returns, so it is safe for concurrent reads thereafter — but its
+// embedded [Result.Graph] carries its own concurrency contract (see
+// [lpg.Graph]).
 package recovery
 
 import (
@@ -31,7 +42,10 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// Result reports what Open found.
+// Result reports what Open found. It is populated once by [Open] /
+// [OpenCtx] and then treated as read-only, so it is safe for concurrent
+// reads without external locking; its embedded [Result.Graph] follows the
+// separate [lpg.Graph] concurrency contract.
 type Result[N comparable, W any] struct {
 	Graph       *lpg.Graph[N, W]
 	SnapshotHit bool
@@ -181,6 +195,10 @@ func tailErrIsCorruption(err error) bool {
 // with [OptionsFromTxn] (or the equivalent literal); MaxTxnOps is
 // recovery-specific and has no [txn.Options] counterpart (the producer cap is
 // set on the [txn.Store] at construction, not via [txn.Options]).
+//
+// Options is a plain configuration value: populate it once and pass it to
+// [Open] / [OpenCtx]. It is safe for concurrent read use once constructed;
+// do not mutate it while a recovery call that received it is in flight.
 type Options[N comparable, W any] struct {
 	// Codec serialises endpoint identifiers. Must not be nil.
 	Codec txn.Codec[N]

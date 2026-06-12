@@ -43,6 +43,13 @@ var ErrIndexValueTypeUnsupported = errors.New("index: value type not supported f
 // receive change events from the [Manager]. The Apply method must
 // be idempotent: replays of the same change must not produce
 // duplicate state.
+//
+// Implementations must be safe for concurrent use: the [Manager] fans
+// changes out to Apply while query goroutines read the same index
+// concurrently, so a concrete index synchronises its own state
+// internally (the built-in hash and label indexes hold an RWMutex). The
+// Manager itself does not serialise an index's reads against its Apply
+// calls.
 type Subscriber interface {
 	Apply(Change)
 	// Kind returns a short stable identifier of the underlying index

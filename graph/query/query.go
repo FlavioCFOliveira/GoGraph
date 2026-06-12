@@ -12,6 +12,17 @@
 // A future iteration will plug in [graph/index.Manager] so the
 // planner can choose between hash, btree, and full-scan plans based
 // on cardinality estimates.
+//
+// # Concurrency
+//
+// An [Engine] is read-only and takes no lock across pattern steps, so it
+// is safe for concurrent use by multiple goroutines only while the
+// underlying [lpg.Graph] and CSR snapshot are quiescent (no concurrent
+// mutation); this is the same quiescence the CSR snapshot already
+// requires. A [Pattern] is a single MATCH expression under construction:
+// it is mutated in place by each builder call ([Pattern.Vertex],
+// [Pattern.Out]) and is NOT safe for concurrent use — a Pattern is
+// owned by one goroutine.
 package query
 
 import (
@@ -139,7 +150,10 @@ func equalValue(a, b lpg.PropertyValue) bool {
 	return false
 }
 
-// Pattern is a single MATCH expression under construction.
+// Pattern is a single MATCH expression under construction. Its working set
+// (the current NodeID bitmap) is mutated in place by each builder call
+// ([Pattern.Vertex], [Pattern.Out]), so a Pattern is NOT safe for
+// concurrent use: a Pattern is owned by one goroutine.
 type Pattern[N comparable, W any] struct {
 	engine *Engine[N, W]
 	bm     *roaring64.Bitmap // current working set (NodeIDs)

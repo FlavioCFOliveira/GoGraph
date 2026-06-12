@@ -666,7 +666,13 @@ type Op[N comparable, W any] struct {
 	IndexKind IndexKind
 }
 
-// Tx is an in-progress transaction.
+// Tx is an in-progress transaction. It holds the store's single-writer
+// lock from [Store.Begin] / [Store.BeginCtx] until [Tx.Commit] or
+// [Tx.Rollback] runs, and buffers its mutations in an unsynchronised
+// slice. A Tx is therefore NOT safe for concurrent use: it is owned by
+// the single goroutine that opened it, which must drive every operation
+// and the terminal Commit/Rollback. Distinct transactions are serialised
+// by the single-writer lock, so they never run concurrently.
 type Tx[N comparable, W any] struct {
 	store    *Store[N, W]
 	ops      []Op[N, W]

@@ -37,6 +37,10 @@ var ErrEagerMemoryExceeded = errors.New("exec: eager memory cap exceeded")
 // Eager is a pipeline-breaking barrier. Init drains every row from the child
 // into an internal buffer; Next then re-emits the buffered rows in insertion
 // order.
+//
+// Eager is NOT safe for concurrent use: it holds unsynchronised buffer and
+// cursor state mutated across Init/Next/Close, so a single goroutine must
+// drive one operator tree, like every other [Operator].
 type Eager struct {
 	child   Operator
 	maxRows int

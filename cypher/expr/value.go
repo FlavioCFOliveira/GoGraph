@@ -449,6 +449,11 @@ func (v MapValue) Equal(other Value) Value {
 // NodeValue represents a graph node at runtime. ID is the storage-layer node
 // identifier. Labels and Properties are the node's metadata as returned by the
 // persistence layer.
+//
+// Like every [Value], a NodeValue is treated as immutable after construction:
+// callers must not mutate its Labels slice or Properties map once it has been
+// produced by an operator. Under that contract concurrent reads are safe
+// without external locking.
 type NodeValue struct {
 	ID         uint64
 	Labels     []string
@@ -499,6 +504,11 @@ func (v NodeValue) Equal(other Value) Value {
 
 // RelationshipValue represents a graph relationship at runtime. ID is the
 // storage-layer edge identifier. StartID and EndID are the endpoint node IDs.
+//
+// Like every [Value], a RelationshipValue is treated as immutable after
+// construction: callers must not mutate its Properties map once it has been
+// produced by an operator. Under that contract concurrent reads are safe
+// without external locking.
 type RelationshipValue struct {
 	ID         uint64
 	StartID    uint64
@@ -547,6 +557,11 @@ func (v RelationshipValue) Equal(other Value) Value {
 // PathValue represents an alternating sequence of nodes and relationships.
 // Nodes has length len(Relationships)+1. An empty path contains exactly one
 // node and no relationships.
+//
+// Like every [Value], a PathValue is treated as immutable after construction:
+// callers must not mutate its Nodes or Relationships slices once it has been
+// produced by an operator. Under that contract concurrent reads are safe
+// without external locking.
 type PathValue struct {
 	Nodes         []NodeValue
 	Relationships []RelationshipValue

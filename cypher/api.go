@@ -344,6 +344,12 @@ func rollUpItemsFromBopts(bopts *buildOpts) int {
 // the default function registry ([funcs.DefaultRegistry]), no WAL-backed
 // store, and the default plan cache capacity ([DefaultPlanCacheCapacity]).
 // Use [NewEngineWithOptions] to construct an Engine from this struct.
+//
+// EngineOptions is a plain configuration value read once by the constructor.
+// It is safe for concurrent read use once constructed; do not mutate it
+// after passing it to [NewEngineWithOptions] (the constructor copies the
+// fields it needs, but the shared Registry and Store it references carry
+// their own concurrency contracts).
 type EngineOptions struct {
 	// Registry, when non-nil, overrides the default built-in function
 	// registry used to resolve scalar function calls.
