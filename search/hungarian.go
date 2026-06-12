@@ -3,16 +3,17 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"runtime"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
-// ErrInvalidInput is returned by algorithms that detect NaN or +/-Inf
-// in float-valued input arrays. The sentinel is shared across the
-// search and centrality packages so callers can errors.Is against it
-// uniformly.
+// ErrInvalidInput is returned by algorithms that detect invalid input:
+// NaN or +/-Inf in float-valued arrays, or constraint violations such as
+// n > m in [Hungarian]. The sentinel is shared across the search and
+// centrality packages so callers can errors.Is against it uniformly.
 var ErrInvalidInput = errors.New("search: input contains NaN or Inf")
 
 // Assignment is the result of [Hungarian]: the minimum total cost
@@ -54,6 +55,12 @@ type Assignment struct {
 // across iterations and a single non-finite value silently corrupts
 // the entire run, so validation is mandatory.
 //
+// Returns [ErrInvalidInput] when n > m. The Kuhn-Munkres augmenting-path
+// formulation requires at least as many columns as rows; when n > m the
+// inner loop exhausts all m columns without finding a free slot and spins
+// forever. To assign rows to columns when n > m, transpose the cost matrix
+// to m×n, call Hungarian, and re-map the result.
+//
 // v1 limitation. Hungarian is float64-only; the [Weight] constraint
 // supports both integer and float types, but Hungarian's dual-update
 // step requires a representable "infinity" sentinel that Go's generics
@@ -71,14 +78,22 @@ func Hungarian(cost []float64, n, m int) (Assignment, error) {
 }
 
 // HungarianCtx is the context-aware variant of [Hungarian]. ctx.Err()
-// is checked at every row-augmenting iteration; on cancellation
-// returns (zero Assignment, wrapped ctx.Err()).
+// is checked both at every row-augmenting iteration and inside the inner
+// augmenting-path loop, so cancellation is honoured promptly even on
+// large matrices. On cancellation returns (zero Assignment, wrapped ctx.Err()).
+//
+// Returns [ErrInvalidInput] when n > m. See [Hungarian] for details and
+// the transposition workaround.
 //
 //nolint:gocyclo // textbook Hungarian: validation + dual update + augment
 func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, error) {
 	defer metrics.Time("search.HungarianCtx")()
 	if n == 0 || m == 0 {
 		return Assignment{RowToCol: make([]int, n)}, nil
+	}
+	if n > m {
+		metrics.IncCounter("search.HungarianCtx.errors", 1)
+		return Assignment{}, fmt.Errorf("search: Hungarian requires n <= m (got n=%d, m=%d): %w", n, m, ErrInvalidInput)
 	}
 	if len(cost) != n*m {
 		metrics.IncCounter("search.HungarianCtx.errors", 1)
@@ -113,6 +128,10 @@ func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, er
 			minv[k] = inf
 		}
 		for {
+			if err := ctx.Err(); err != nil {
+				metrics.IncCounter("search.HungarianCtx.errors", 1)
+				return Assignment{}, err
+			}
 			used[j0] = true
 			i0 := p[j0]
 			delta := inf
