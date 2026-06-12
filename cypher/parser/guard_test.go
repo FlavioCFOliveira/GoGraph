@@ -200,6 +200,147 @@ func TestMaxBracketDepth(t *testing.T) {
 	}
 }
 
+// TestGuardRejectsDeepCASENesting is the gate test for task #1383.
+// A query with more than maxCASEKeywords CASE keywords must be rejected with a
+// *ParseError before any recursive parsing begins.
+//
+// Gate semantics:
+//
+//	Before fix: countCASEKeywords is absent; the query has bracket depth 0 and
+//	            is under 1 MiB, so guardInput returns nil → Parse succeeds →
+//	            the test's expectation of a *ParseError FAILS.
+//	After fix:  countCASEKeywords fires; Parse returns *ParseError → PASSES.
+func TestGuardRejectsDeepCASENesting(t *testing.T) {
+	// Build: RETURN CASE WHEN CASE WHEN … THEN 1 END THEN 2 END (300 levels)
+	// 300 > maxCASEKeywords (256) so the guard must fire.
+	const depth = 300
+	var b strings.Builder
+	b.WriteString("RETURN ")
+	for i := 0; i < depth; i++ {
+		b.WriteString("CASE WHEN ")
+	}
+	b.WriteString("true")
+	for i := 0; i < depth; i++ {
+		b.WriteString(" THEN 1 END")
+	}
+
+	q := b.String()
+	_, err := Parse(q)
+	pe := asParseError(t, err)
+	if !strings.Contains(pe.Message, "CASE") {
+		t.Fatalf("expected a CASE-depth error, got: %v", pe)
+	}
+}
+
+// TestGuardRejectsLongOperatorChain is the gate test for task #1383.
+// A query with more than maxBinaryOpTokens binary operators must be rejected.
+//
+// Gate semantics:
+//
+//	Before fix: countBinaryOpTokens absent; no error → Parse succeeds →
+//	            test FAILS.
+//	After fix:  countBinaryOpTokens fires → *ParseError → PASSES.
+func TestGuardRejectsLongOperatorChain(t *testing.T) {
+	// Build: RETURN true AND true AND true AND … (600 AND operators)
+	// 600 > maxBinaryOpTokens (512) so the guard must fire.
+	const n = 600
+	var b strings.Builder
+	b.WriteString("RETURN true")
+	for i := 0; i < n; i++ {
+		b.WriteString(" AND true")
+	}
+
+	q := b.String()
+	_, err := Parse(q)
+	pe := asParseError(t, err)
+	if !strings.Contains(pe.Message, "operator") {
+		t.Fatalf("expected an operator-count error, got: %v", pe)
+	}
+}
+
+// TestGuardAllowsLegitimateComplexQuery verifies the guard does NOT reject a
+// legitimate query with a small number of CASE expressions and operators.
+func TestGuardAllowsLegitimateComplexQuery(t *testing.T) {
+	// 5 CASE + 10 AND operators — well under any limit.
+	q := `RETURN CASE WHEN true THEN 1 ELSE 2 END AND
+                  CASE WHEN false THEN 3 ELSE 4 END AND
+                  1 = 1 AND 2 = 2 AND 3 = 3 AS result`
+	if err := guardInput(q); err != nil {
+		t.Fatalf("guard rejected a legitimate query: %v", err)
+	}
+}
+
+// TestCountCASEKeywords exercises countCASEKeywords on small inputs.
+func TestCountCASEKeywords(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		count int
+	}{
+		{name: "empty", in: "", count: 0},
+		{name: "no_case", in: "RETURN 1", count: 0},
+		{name: "one_case", in: "RETURN CASE WHEN true THEN 1 END", count: 1},
+		{name: "two_cases", in: "RETURN CASE WHEN CASE WHEN true THEN 1 END THEN 2 END", count: 2},
+		{name: "case_lowercase", in: "return case when true then 1 end", count: 1},
+		{name: "case_mixed", in: "RETURN Case WHEN true THEN 1 End", count: 1},
+		{name: "case_in_string_skipped", in: "RETURN 'CASE' AS s", count: 0},
+		{name: "case_in_double_string_skipped", in: `RETURN "CASE" AS s`, count: 0},
+		{name: "case_in_line_comment_skipped", in: "RETURN 1 // CASE\n AS n", count: 0},
+		{name: "case_in_block_comment_skipped", in: "RETURN /* CASE */ 1", count: 0},
+		{name: "case_in_backtick_skipped", in: "RETURN 1 AS `CASE`", count: 0},
+		{name: "notcase_prefix_skipped", in: "RETURN LOWERCASE", count: 0},
+		{name: "notcase_suffix_skipped", in: "RETURN CASEWORK", count: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := countCASEKeywords(tc.in); got != tc.count {
+				t.Fatalf("countCASEKeywords(%q) = %d, want %d", tc.in, got, tc.count)
+			}
+		})
+	}
+}
+
+// TestCountBinaryOpTokens exercises countBinaryOpTokens on small inputs.
+func TestCountBinaryOpTokens(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		count int
+	}{
+		{name: "empty", in: "", count: 0},
+		{name: "no_ops", in: "RETURN 1 AS n", count: 0},
+		{name: "plus", in: "RETURN 1 + 2", count: 1},
+		// '-' and '*' are deliberately not counted — they appear in relationship
+		// patterns '(a)-[r]->(b)' and VLE patterns '[:REL*1..n]' respectively,
+		// and counting them would produce false positives on large CREATE/MATCH
+		// queries, breaking TCK conformance.
+		{name: "minus_not_counted", in: "RETURN 1 - 2", count: 0},
+		{name: "times_not_counted", in: "RETURN 1 * 2", count: 0},
+		{name: "divide", in: "RETURN 1 / 2", count: 1},
+		{name: "mod", in: "RETURN 1 % 2", count: 1},
+		{name: "power", in: "RETURN 2 ^ 3", count: 1},
+		{name: "and", in: "RETURN true AND false", count: 1},
+		{name: "or", in: "RETURN true OR false", count: 1},
+		{name: "xor", in: "RETURN true XOR false", count: 1},
+		{name: "not", in: "RETURN NOT true", count: 1},
+		{name: "and_lowercase", in: "RETURN true and false", count: 1},
+		{name: "chain_three_and", in: "RETURN a AND b AND c", count: 2},
+		{name: "and_in_string_skipped", in: "RETURN 'AND' AS s", count: 0},
+		{name: "or_in_comment_skipped", in: "RETURN 1 // OR\n AS n", count: 0},
+		{name: "divide_comment_not_counted", in: "RETURN /* divide */ 1", count: 0},
+		{name: "not_word_boundary_skipped", in: "RETURN ANDROID", count: 0},
+		{name: "div_not_comment", in: "RETURN 4 / 2", count: 1},
+		{name: "line_comment_div", in: "// a / b\nRETURN 1", count: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := countBinaryOpTokens(tc.in); got != tc.count {
+				t.Fatalf("countBinaryOpTokens(%q) = %d, want %d", tc.in, got, tc.count)
+			}
+		})
+	}
+}
+
 // TestItoa pins the dependency-free integer formatter used in guard messages.
 func TestItoa(t *testing.T) {
 	cases := map[int]string{

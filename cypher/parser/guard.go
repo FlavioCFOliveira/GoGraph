@@ -34,6 +34,20 @@ const (
 	// any real query while keeping the worst-case parse recursion well within
 	// the goroutine stack.
 	maxNestingDepth = 256
+
+	// maxCASEKeywords is the maximum number of CASE keywords accepted in a single
+	// query. Each CASE creates a recursive call in checkExpr so deep nesting —
+	// possible without any brackets — can overflow the Go stack. 256 is far above
+	// any legitimate Cypher query's needs.
+	maxCASEKeywords = maxNestingDepth // 256
+
+	// maxBinaryOpTokens is the maximum number of binary infix operator tokens
+	// (AND, OR, XOR, NOT, +, /, %, ^) accepted in a single query. Long
+	// left-recursive chains create a left-deep BinaryOp AST whose checkExpr
+	// recursion depth equals the operator count. 512 is generous for any real query.
+	// Note: '-' and '*' are excluded — they appear structurally in relationship
+	// arrows and variable-length path patterns respectively.
+	maxBinaryOpTokens = 512
 )
 
 // CheckQueryLength returns a [*ParseError] when query exceeds the maximum
@@ -59,13 +73,16 @@ func CheckQueryLength(query string) *ParseError {
 }
 
 // guardInput validates a raw query string before lexing and parsing. It returns
-// a [*ParseError] when the query exceeds [maxQueryBytes] in length or when its
-// bracket nesting exceeds [maxNestingDepth]. It returns nil when the query is
-// within both bounds.
+// a [*ParseError] when the query exceeds [maxQueryBytes] in length, when its
+// bracket nesting exceeds [maxNestingDepth], when its CASE keyword count exceeds
+// [maxCASEKeywords], or when its binary operator token count exceeds
+// [maxBinaryOpTokens]. It returns nil when the query is within all bounds.
 //
-// The nesting check is performed by [maxBracketDepth], which ignores brackets
-// that appear inside string literals, escaped identifiers, and comments so that
-// a legitimate query such as RETURN '(((' AS s is never rejected.
+// The nesting check is performed by [maxBracketDepth], the CASE check by
+// [countCASEKeywords], and the operator check by [countBinaryOpTokens]. All
+// three scanners ignore content inside string literals, escaped identifiers, and
+// comments so that a legitimate query such as RETURN '(((' AS s is never
+// rejected.
 //
 // guardInput runs in O(n) time over the query bytes and allocates nothing on
 // the success path beyond the returned error value on rejection.
@@ -79,6 +96,22 @@ func guardInput(query string) *ParseError {
 			Column: 0,
 			Message: "query nesting too deep: bracket depth " + itoa(depth) +
 				" exceeds the limit of " + itoa(maxNestingDepth),
+		}
+	}
+	if count := countCASEKeywords(query); count > maxCASEKeywords {
+		return &ParseError{
+			Line:   1,
+			Column: 0,
+			Message: "query nesting too deep: CASE keyword count " + itoa(count) +
+				" exceeds the limit of " + itoa(maxCASEKeywords),
+		}
+	}
+	if count := countBinaryOpTokens(query); count > maxBinaryOpTokens {
+		return &ParseError{
+			Line:   1,
+			Column: 0,
+			Message: "query expression too complex: binary operator count " + itoa(count) +
+				" exceeds the limit of " + itoa(maxBinaryOpTokens),
 		}
 	}
 	return nil
@@ -184,6 +217,266 @@ func maxBracketDepth(query string) int {
 		}
 	}
 	return maxDepth
+}
+
+// isIdentByte reports whether b is a letter, digit, or underscore — the
+// characters that may appear inside a Cypher identifier. It is used by the
+// keyword scanners to enforce word boundaries without any Unicode awareness:
+// all Cypher ASCII keywords are bounded by non-identifier bytes, and multi-byte
+// UTF-8 continuation bytes (>= 0x80) never collide with the ASCII ranges
+// tested here.
+func isIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') ||
+		b == '_'
+}
+
+// countCASEKeywords returns the number of CASE keywords (case-insensitive) in
+// query that appear in normal code context — outside string literals, escaped
+// identifiers, and comments. Each CASE creates a recursive call in checkExpr,
+// so a query with more than [maxCASEKeywords] CASE tokens can drive unbounded
+// recursion without any bracket nesting.
+//
+// Word-boundary semantics: a four-byte sequence c/C a/A s/S e/E is counted
+// only when the byte immediately before the 'C' is not an identifier character
+// (or the 'C' is at position 0) and the byte immediately after the 'E' is not
+// an identifier character (or 'E' is the last byte).
+//
+// The scan shares the same lexical-state machine as [maxBracketDepth] and runs
+// in O(n) time with no heap allocation.
+func countCASEKeywords(query string) int {
+	state := stateNormal
+	count := 0
+
+	for i := 0; i < len(query); i++ {
+		c := query[i]
+		switch state {
+		case stateNormal:
+			switch c {
+			case '\'':
+				state = stateSingle
+			case '"':
+				state = stateDouble
+			case '`':
+				state = stateBacktick
+			case '/':
+				if i+1 < len(query) {
+					switch query[i+1] {
+					case '/':
+						state = stateLineComment
+						i++
+					case '*':
+						state = stateBlockComment
+						i++
+					}
+				}
+			default:
+				// Fast path: only inspect when current byte is 'C' or 'c'.
+				if c != 'C' && c != 'c' {
+					continue
+				}
+				// Need at least 4 bytes remaining (C A S E).
+				if i+3 >= len(query) {
+					continue
+				}
+				// Check 'A'/'a', 'S'/'s', 'E'/'e'.
+				c1, c2, c3 := query[i+1], query[i+2], query[i+3]
+				if (c1 != 'A' && c1 != 'a') ||
+					(c2 != 'S' && c2 != 's') ||
+					(c3 != 'E' && c3 != 'e') {
+					continue
+				}
+				// Check left word boundary.
+				if i > 0 && isIdentByte(query[i-1]) {
+					continue
+				}
+				// Check right word boundary.
+				if i+4 < len(query) && isIdentByte(query[i+4]) {
+					continue
+				}
+				count++
+				i += 3 // skip 'A', 'S', 'E'
+			}
+		case stateSingle:
+			switch c {
+			case '\\':
+				i++
+			case '\'':
+				state = stateNormal
+			}
+		case stateDouble:
+			switch c {
+			case '\\':
+				i++
+			case '"':
+				state = stateNormal
+			}
+		case stateBacktick:
+			if c == '`' {
+				state = stateNormal
+			}
+		case stateLineComment:
+			if c == '\n' || c == '\r' {
+				state = stateNormal
+			}
+		case stateBlockComment:
+			if c == '*' && i+1 < len(query) && query[i+1] == '/' {
+				state = stateNormal
+				i++
+			}
+		}
+	}
+	return count
+}
+
+// matchKeywordOp reports whether query[i:] begins with the keyword operator kw
+// (case-insensitive) at a word boundary on both sides, and returns the number
+// of extra bytes to skip (len(kw)-1) so the caller can advance i past the
+// keyword. It returns -1 when there is no match.
+//
+// prevIsIdent must be true when query[i-1] is an identifier byte (i.e. the
+// left boundary is NOT clear); the caller passes this to avoid re-computing it.
+func matchKeywordOp(query string, i int, prevIsIdent bool, kw string) int {
+	n := len(kw)
+	if i+n-1 >= len(query) {
+		return -1
+	}
+	// Match kw case-insensitively.
+	for j := 0; j < n; j++ {
+		b := query[i+j]
+		k := kw[j]
+		// Lowercase b for comparison.
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != k {
+			return -1
+		}
+	}
+	// Left boundary.
+	if prevIsIdent {
+		return -1
+	}
+	// Right boundary.
+	if i+n < len(query) && isIdentByte(query[i+n]) {
+		return -1
+	}
+	return n - 1 // bytes to advance beyond the first char
+}
+
+// countBinaryOpTokens returns the number of binary infix operator tokens in
+// query that appear in normal code context — outside string literals, escaped
+// identifiers, and comments. Counted tokens are:
+//
+//   - Keyword operators: AND, OR, XOR, NOT (case-insensitive, word-bounded)
+//   - Symbol operators:  +  /  %  ^
+//
+// Note: '-' and '*' are deliberately excluded. In Cypher '-' is overwhelmingly
+// used in relationship arrows '(a)-[r]->(b)' and '*' is used in variable-length
+// path patterns '[:REL*1..n]'. Counting them would produce false positives on
+// legitimate large CREATE/MATCH queries, breaking TCK conformance. The recursion
+// risk targeted here is expression-level BinaryOp chains (AND/OR/XOR/NOT/+/%/^),
+// which do not suffer from this ambiguity.
+//
+// Long left-recursive chains of these operators build left-deep BinaryOp AST
+// nodes whose checkExpr recursion depth equals the operator count. A query with
+// more than [maxBinaryOpTokens] such tokens can therefore drive unbounded
+// recursion with no bracket nesting.
+//
+// The scan shares the same lexical-state machine as [maxBracketDepth] and runs
+// in O(n) time with no heap allocation.
+func countBinaryOpTokens(query string) int {
+	state := stateNormal
+	count := 0
+
+	for i := 0; i < len(query); i++ {
+		c := query[i]
+		switch state {
+		case stateNormal:
+			count, i, state = countBinaryOpNormal(query, i, c, count, state)
+		case stateSingle:
+			switch c {
+			case '\\':
+				i++
+			case '\'':
+				state = stateNormal
+			}
+		case stateDouble:
+			switch c {
+			case '\\':
+				i++
+			case '"':
+				state = stateNormal
+			}
+		case stateBacktick:
+			if c == '`' {
+				state = stateNormal
+			}
+		case stateLineComment:
+			if c == '\n' || c == '\r' {
+				state = stateNormal
+			}
+		case stateBlockComment:
+			if c == '*' && i+1 < len(query) && query[i+1] == '/' {
+				state = stateNormal
+				i++
+			}
+		}
+	}
+	return count
+}
+
+// countBinaryOpNormal handles one byte in stateNormal for [countBinaryOpTokens].
+// It returns updated (count, i, state).
+func countBinaryOpNormal(query string, i int, c byte, count int, state scanState) (int, int, scanState) {
+	prevIsIdent := i > 0 && isIdentByte(query[i-1])
+	switch c {
+	case '\'':
+		state = stateSingle
+	case '"':
+		state = stateDouble
+	case '`':
+		state = stateBacktick
+	case '/':
+		if i+1 < len(query) {
+			switch query[i+1] {
+			case '/':
+				state = stateLineComment
+				i++
+				return count, i, state
+			case '*':
+				state = stateBlockComment
+				i++
+				return count, i, state
+			}
+		}
+		// '/' not followed by '/' or '*' — divide operator.
+		count++
+	case '+', '%', '^':
+		count++
+	case 'A', 'a':
+		if skip := matchKeywordOp(query, i, prevIsIdent, "and"); skip >= 0 {
+			count++
+			i += skip
+		}
+	case 'O', 'o':
+		if skip := matchKeywordOp(query, i, prevIsIdent, "or"); skip >= 0 {
+			count++
+			i += skip
+		}
+	case 'X', 'x':
+		if skip := matchKeywordOp(query, i, prevIsIdent, "xor"); skip >= 0 {
+			count++
+			i += skip
+		}
+	case 'N', 'n':
+		if skip := matchKeywordOp(query, i, prevIsIdent, "not"); skip >= 0 {
+			count++
+			i += skip
+		}
+	}
+	return count, i, state
 }
 
 // itoa renders a non-negative int as decimal without importing strconv, keeping
