@@ -84,8 +84,12 @@ func TestIntArith_Overflow(t *testing.T) {
 		{name: "0*MaxInt64", op: "*", a: 0, b: math.MaxInt64, wantVal: 0},
 		{name: "MinInt64*1", op: "*", a: math.MinInt64, b: 1, wantVal: math.MinInt64},
 		{name: "MinInt64*0", op: "*", a: math.MinInt64, b: 0, wantVal: 0},
-		// Division and modulo: no overflow checks — division by zero → NULL, not error.
+		// Division: MinInt64 / -1 overflows; all other inputs are safe.
+		{name: "MinInt64/(-1) overflows", op: "/", a: math.MinInt64, b: -1, wantErr: true},
+		{name: "100/(-1) ok", op: "/", a: 100, b: -1, wantVal: -100},
 		{name: "10/3", op: "/", a: 10, b: 3, wantVal: 3},
+		// Modulo: MinInt64 % -1 is defined (result 0); no overflow.
+		{name: "MinInt64%(-1) ok", op: "%", a: math.MinInt64, b: -1, wantVal: 0},
 		{name: "10%3", op: "%", a: 10, b: 3, wantVal: 1},
 	}
 

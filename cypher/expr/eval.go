@@ -1056,6 +1056,9 @@ func evalIntArith(op string, a, b int64) (Value, error) {
 		if b == 0 {
 			return Null, nil // division by zero → NULL in Cypher
 		}
+		if a == math.MinInt64 && b == -1 {
+			return Null, &EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: %d / -1 is not representable as Int64", a)}
+		}
 		return IntegerValue(a / b), nil
 	case "%":
 		if b == 0 {
