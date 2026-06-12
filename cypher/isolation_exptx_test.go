@@ -1,53 +1,40 @@
 package cypher_test
 
-// isolation_exptx_test.go — gate test encoding the known read-uncommitted
-// isolation gap for explicit transactions (#1376).
+// isolation_exptx_test.go — regression gate for ExplicitTx read-committed
+// isolation (task #1412, isolation option b: whole-tx visMu.Lock).
 //
-// # Known gap: read-uncommitted for readers during ExplicitTx
+// # Isolation contract after task #1412
 //
-// Engine.Run (read) uses Graph.View which acquires the graph visibility barrier
-// as a reader. ExplicitTx.Exec applies writes EAGERLY inside
-// Graph.ApplyAtomically (write-side of the same barrier) before the transaction
-// is committed or rolled back. Because the eager write completes before the
-// transaction ends, a concurrent Engine.Run issued between Exec and
-// Commit/Rollback can observe the not-yet-committed write (dirty read).
+// [Engine.BeginTx] now acquires the graph's transaction-visibility write lock
+// (visMu via [lpg.Graph.LockBarrier]) for the whole lifetime of the explicit
+// transaction. A concurrent [Engine.Run] or [lpg.Graph.View] call acquires the
+// read-side of the same lock, so it BLOCKS while the explicit transaction is open
+// and is released only once [ExplicitTx.Commit] or [ExplicitTx.Rollback] is
+// called. Readers therefore observe either the pre-transaction state or the fully
+// committed/rolled-back state — never an intermediate dirty write.
 //
-// This is the documented isolation scope for explicit transactions: write-write
-// Isolation is guaranteed (the writer mutex held from BeginTx until
-// Commit/Rollback serialises concurrent writers), but readers are NOT isolated
-// from in-flight writes.
+// The tests in this file cover:
+//   - Readers block during an open ExplicitTx and observe the post-Commit state.
+//   - After Rollback, readers observe the pre-transaction state (0 nodes).
+//   - Across multiple Exec calls within one ExplicitTx, no intermediate count is
+//     ever observable by a concurrent reader (atomic multi-statement visibility).
 //
-// The end-state design (per-shard lock-free snapshot / deferred apply) that
-// would close this gap is tracked in docs/isolation-design.md.
-//
-// # What this file asserts
-//
-//   - After Exec (before Commit/Rollback) a concurrent Engine.Run observes
-//     count == 1 (the dirty write IS visible — documenting the read-uncommitted
-//     behaviour).
-//   - After Rollback the same Engine.Run observes count == 0 (the undo log
-//     retracts the dirty write — documenting the rollback-retraction property).
-//
-// The test is intentionally asserting the CURRENT gap, not the desired isolation.
-// If snapshot isolation is ever implemented and this test's "pre-rollback" check
-// changes from 1 to 0, the assertion must be updated to reflect the new contract.
-//
-// Layer: short. Race-clean.
+// Layer: short. Race-clean (go test -race must pass).
 
 import (
 	"context"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// countTxNodes runs MATCH (n:Tx) RETURN count(n) AS c via Engine.Run and returns
-// the integer count. It fatals if the query fails or the result is not a single
-// row with a numeric "c" column.
+// countTxNodes runs MATCH (n:Tx) RETURN count(n) AS c via Engine.Run and
+// returns the integer count. It fatals on query or iteration errors.
 func countTxNodes(t *testing.T, eng *cypher.Engine) int64 {
 	t.Helper()
 	res, err := eng.Run(context.Background(), `MATCH (n:Tx) RETURN count(n) AS c`, nil)
@@ -70,143 +57,242 @@ func countTxNodes(t *testing.T, eng *cypher.Engine) int64 {
 	if !ok {
 		t.Fatalf("countTxNodes: column 'c' absent in %v", rec)
 	}
-	switch v := raw.(type) {
-	case int64:
-		return v
-	default:
-		// Coerce via fmt for robustness against engine integer boxing changes.
-		var n int64
-		if _, err := fmt.Sscan(fmt.Sprintf("%v", raw), &n); err != nil {
-			t.Fatalf("countTxNodes: cannot parse count value %T(%v): %v", raw, raw, err)
-		}
-		return n
-	}
+	return parseCount(t, raw)
 }
 
-// TestExplicitTx_Isolation_ReadUncommitted encodes the current read-uncommitted
-// contract for explicit transactions.
-//
-// KNOWN GAP: this test deliberately asserts a dirty read IS visible (count==1
-// after Exec but before Commit). When snapshot isolation is implemented
-// (docs/isolation-design.md), the pre-rollback count will be 0 and this
-// assertion must be updated to reflect the closed gap.
-func TestExplicitTx_Isolation_ReadUncommitted(t *testing.T) {
+// parseCount extracts an int64 from a count-query result value. Engine count
+// aggregates return expr.IntegerValue (a named int64 type), so a plain int64
+// type-assertion would silently fail; we use fmt.Sscan for robustness.
+func parseCount(t *testing.T, raw any) int64 {
+	t.Helper()
+	var n int64
+	if _, err := fmt.Sscan(fmt.Sprintf("%v", raw), &n); err != nil {
+		t.Fatalf("parseCount: cannot parse %T(%v): %v", raw, raw, err)
+	}
+	return n
+}
+
+// countTxNodesQuery runs the count query, returns count and any error (no
+// fatals — suitable for use in goroutines where t.Fatal is forbidden).
+func countTxNodesQuery(ctx context.Context, eng *cypher.Engine) (int64, error) {
+	res, err := eng.Run(ctx, `MATCH (n:Tx) RETURN count(n) AS c`, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer res.Close()
+	if !res.Next() {
+		return 0, fmt.Errorf("no row returned")
+	}
+	rec := res.Record()
+	raw, ok := rec["c"]
+	if !ok {
+		return 0, fmt.Errorf("column 'c' absent: %v", rec)
+	}
+	var n int64
+	if _, err := fmt.Sscan(fmt.Sprintf("%v", raw), &n); err != nil {
+		return 0, fmt.Errorf("cannot parse count %T(%v): %w", raw, raw, err)
+	}
+	return n, nil
+}
+
+// TestExplicitTx_Isolation_ReadCommitted verifies that the isolation contract
+// after task #1412 is read-committed: concurrent Engine.Run readers block while
+// an ExplicitTx is open and never observe uncommitted writes.
+func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	eng := cypher.NewEngine(g)
-	ctx := context.Background()
+	t.Run("reader_blocks_until_commit", func(t *testing.T) {
+		t.Parallel()
 
-	t.Run("dirty_read_visible_before_commit", func(t *testing.T) {
-		// Verify starting state: no :Tx nodes.
+		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		eng := cypher.NewEngine(g)
+
+		// Pre-condition: empty graph.
 		if n := countTxNodes(t, eng); n != 0 {
-			t.Fatalf("pre-test :Tx count = %d, want 0 (stale state)", n)
+			t.Fatalf("pre-test :Tx count = %d, want 0", n)
 		}
 
-		tx, err := eng.BeginTx(ctx)
+		tx, err := eng.BeginTx(context.Background())
 		if err != nil {
 			t.Fatalf("BeginTx: %v", err)
 		}
 
-		// CREATE inside the explicit transaction — eagerly applied, not yet committed.
+		// CREATE inside the open transaction — applied eagerly to the live graph.
 		res, err := tx.Exec(`CREATE (:Tx) RETURN count(*) AS c`, nil)
 		if err != nil {
+			_ = tx.Rollback()
 			t.Fatalf("Exec CREATE: %v", err)
-		}
-		for res.Next() { //nolint:revive // drain
-		}
-		if err := res.Err(); err != nil {
-			t.Fatalf("drain Exec result: %v", err)
 		}
 		_ = res.Close()
 
-		// At this point the explicit transaction holds the writer mutex AND has
-		// applied the write eagerly to the live graph. A concurrent Engine.Run
-		// (reader, using Graph.View) must observe the dirty write because the
-		// write is already visible in the live graph and Engine.Run acquires only
-		// a read-lock on the visibility barrier.
-		//
-		// KNOWN GAP (read-uncommitted): the node created above is NOT yet
-		// committed — it is a dirty read. See docs/isolation-design.md for the
-		// tracked end-state that will close this gap.
-
-		// readDone carries (count, error) from the concurrent reader goroutine.
+		// Concurrent reader: launched while the transaction is still open.
+		// Because ExplicitTx now holds visMu.Lock, Engine.Run blocks on visMu.RLock
+		// inside Graph.View and cannot proceed until Commit releases the lock.
 		type readResult struct {
 			count int64
-			err   string
+			err   error
 		}
-		readDone := make(chan readResult, 1)
+		readCh := make(chan readResult, 1)
+		readerStarted := make(chan struct{})
 
-		// execDone signals that Exec has returned and the dirty write is live.
-		// The goroutine is started AFTER Exec so the sync point is the channel
-		// send itself, not a race on goroutine scheduling.
-		var launchOnce sync.Once
-		startRead := make(chan struct{})
+		go func() {
+			// Signal that this goroutine is about to call Engine.Run. It closes
+			// the channel BEFORE the call so the main goroutine knows the reader
+			// is about to contend on visMu.
+			close(readerStarted)
+			// This call blocks on visMu.RLock until the ExplicitTx releases visMu
+			// via Commit → release → UnlockBarrier.
+			cnt, err := countTxNodesQuery(context.Background(), eng)
+			readCh <- readResult{count: cnt, err: err}
+		}()
 
-		launchOnce.Do(func() {
-			go func() {
-				// Wait until the caller signals that Exec has completed and the
-				// dirty write is in the live graph.
-				<-startRead
-				n := int64(-1)
-				var errStr string
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							errStr = fmt.Sprintf("panic: %v", r)
-						}
-					}()
-					innerRes, innerErr := eng.Run(context.Background(), `MATCH (n:Tx) RETURN count(n) AS c`, nil)
-					if innerErr != nil {
-						errStr = innerErr.Error()
-						return
-					}
-					defer func() { _ = innerRes.Close() }()
-					if !innerRes.Next() {
-						errStr = "no row from count query"
-						return
-					}
-					rec := innerRes.Record()
-					raw, ok := rec["c"]
-					if !ok {
-						errStr = fmt.Sprintf("column 'c' absent: %v", rec)
-						return
-					}
-					switch v := raw.(type) {
-					case int64:
-						n = v
-					default:
-						fmt.Sscan(fmt.Sprintf("%v", raw), &n) //nolint:errcheck // best-effort int parse
-					}
-				}()
-				readDone <- readResult{count: n, err: errStr}
-			}()
-		})
+		// Wait for the goroutine to be scheduled, then give it time to reach the
+		// visMu.RLock contention point before proceeding with the commit.
+		<-readerStarted
+		time.Sleep(20 * time.Millisecond)
 
-		// Signal the reader to proceed now that the dirty write is live.
-		close(startRead)
-
-		// Collect the concurrent read result BEFORE rolling back.
-		rr := <-readDone
-		if rr.err != "" {
-			t.Fatalf("concurrent reader error: %s", rr.err)
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
 		}
 
-		// KNOWN GAP assertion: the dirty write IS visible before commit.
-		// If snapshot isolation is implemented, this will become 0 and the test
-		// must be updated to assert 0 here instead.
-		if rr.count != 1 {
-			t.Errorf("pre-rollback concurrent read count = %d, want 1 (read-uncommitted gap: dirty write must be visible)", rr.count)
+		select {
+		case rr := <-readCh:
+			if rr.err != nil {
+				t.Fatalf("concurrent Engine.Run: %v", rr.err)
+			}
+			// The reader ran after Commit (it was blocked) and must see the committed node.
+			if rr.count != 1 {
+				t.Errorf("reader observed %d nodes after Commit; want 1", rr.count)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("concurrent reader did not complete within 3 s after Commit")
 		}
+	})
 
-		// Roll back the transaction: the undo log retracts the eager write.
+	t.Run("reader_sees_zero_after_rollback", func(t *testing.T) {
+		t.Parallel()
+
+		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		eng := cypher.NewEngine(g)
+
+		tx, err := eng.BeginTx(context.Background())
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		res, err := tx.Exec(`CREATE (:Tx) RETURN count(*) AS c`, nil)
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("Exec CREATE: %v", err)
+		}
+		_ = res.Close()
+
+		type readResult struct {
+			count int64
+			err   error
+		}
+		readCh := make(chan readResult, 1)
+		readerStarted := make(chan struct{})
+
+		go func() {
+			close(readerStarted)
+			cnt, err := countTxNodesQuery(context.Background(), eng)
+			readCh <- readResult{count: cnt, err: err}
+		}()
+
+		<-readerStarted
+		time.Sleep(20 * time.Millisecond)
+
 		if err := tx.Rollback(); err != nil {
 			t.Fatalf("Rollback: %v", err)
 		}
 
-		// Post-rollback: the dirty write is gone. Engine.Run must now see 0.
-		if n := countTxNodes(t, eng); n != 0 {
-			t.Errorf("post-rollback :Tx count = %d, want 0 (rollback-retraction: undo log must remove the dirty write)", n)
+		select {
+		case rr := <-readCh:
+			if rr.err != nil {
+				t.Fatalf("concurrent Engine.Run: %v", rr.err)
+			}
+			// After rollback the undo log removes the write; reader must see 0.
+			if rr.count != 0 {
+				t.Errorf("reader observed %d nodes after Rollback; want 0", rr.count)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("concurrent reader did not complete within 3 s after Rollback")
+		}
+	})
+
+	t.Run("multi_exec_never_leaks_intermediate_state", func(t *testing.T) {
+		t.Parallel()
+
+		// This sub-test verifies that across multiple Exec calls within one
+		// ExplicitTx, a polling concurrent reader never observes an intermediate
+		// count (e.g. exactly 1 node when 2 are committed atomically). Valid
+		// observations are 0 (before Commit) or 2 (after Commit).
+
+		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		eng := cypher.NewEngine(g)
+
+		var (
+			mu           sync.Mutex
+			observations []int64
+		)
+
+		stopReader := make(chan struct{})
+		readerStopped := make(chan struct{})
+
+		go func() {
+			defer close(readerStopped)
+			for {
+				select {
+				case <-stopReader:
+					return
+				default:
+				}
+				cnt, err := countTxNodesQuery(context.Background(), eng)
+				if err != nil {
+					continue
+				}
+				mu.Lock()
+				observations = append(observations, cnt)
+				mu.Unlock()
+			}
+		}()
+
+		tx, err := eng.BeginTx(context.Background())
+		if err != nil {
+			close(stopReader)
+			t.Fatalf("BeginTx: %v", err)
+		}
+
+		for _, q := range []string{
+			`CREATE (:Tx {name:'A'}) RETURN count(*) AS c`,
+			`CREATE (:Tx {name:'B'}) RETURN count(*) AS c`,
+		} {
+			r, execErr := tx.Exec(q, nil)
+			if execErr != nil {
+				_ = tx.Rollback()
+				close(stopReader)
+				t.Fatalf("Exec: %v", execErr)
+			}
+			_ = r.Close()
+			// Brief pause: the reader goroutine must not see intermediate state.
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		if err := tx.Commit(); err != nil {
+			close(stopReader)
+			t.Fatalf("Commit: %v", err)
+		}
+
+		close(stopReader)
+		<-readerStopped
+
+		mu.Lock()
+		defer mu.Unlock()
+		// Valid counts: 0 (before or during tx) or 2 (after commit). Never 1.
+		for _, cnt := range observations {
+			if cnt == 1 {
+				t.Errorf("concurrent reader observed intermediate state: count=1 (want only 0 or 2)")
+			}
 		}
 	})
 }

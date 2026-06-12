@@ -44,17 +44,18 @@ package cypher
 // back alongside it. Commit fsyncs the WAL once, commits the index buffer, and
 // discards the undo log.
 //
-// # Isolation scope (read-uncommitted for readers)
+// # Isolation scope (read-committed)
 //
-// Because writes are applied eagerly, a concurrent [lpg.Graph.View] / [Engine.Run]
-// READER can observe an open transaction's not-yet-committed writes
-// (read-uncommitted for readers). The guarantees this type DOES provide are
-// write-write Isolation (the writer mutex held BEGIN→COMMIT) and atomic Rollback
-// (the undo log). Full reader isolation requires deferred apply / the lock-free
-// per-shard snapshot tracked as the end-state in docs/isolation-design.md, and is
-// deliberately out of scope here: deferred apply would contradict the eager-apply
-// undo design (#1282) and carries high openCypher-TCK risk. See that document for
-// the tracked end-state.
+// [Engine.BeginTx] acquires the graph's transaction-visibility write lock
+// ([lpg.Graph.LockBarrier]) for the whole lifetime of the transaction — from BEGIN
+// until COMMIT or ROLLBACK. While the lock is held, concurrent [lpg.Graph.View]
+// and [Engine.Run] readers block entirely rather than observing uncommitted writes,
+// so the transaction provides READ-COMMITTED isolation from the readers' perspective:
+// a reader either observes the state before the transaction began (while the tx is
+// open) or the fully committed state after it ends. Writes within the transaction
+// itself (across multiple [ExplicitTx.Exec] calls) are visible to the subsequent
+// statements in the same transaction because they share the live in-memory graph.
+// (task #1412, isolation option b)
 //
 // # Concurrency contract
 //
@@ -119,9 +120,11 @@ func (e *ErrStatementPipeline) Unwrap() error { return e.Err }
 //
 // See the package file exectx.go for the full transaction, durability, and
 // concurrency contract. In brief: writes accumulate and become durable together
-// on Commit (WAL-backed) or unwind together on Rollback; the handle holds the
-// engine's writer serialisation for its whole lifetime (write-write Isolation);
-// it is NOT safe for concurrent use by multiple goroutines.
+// on Commit (WAL-backed) or unwind together on Rollback; the handle holds both
+// the engine's writer serialisation and the graph's transaction-visibility write
+// lock (visMu) for its whole lifetime — write-write Isolation for writers, and
+// read-committed Isolation for concurrent readers (which block until the
+// transaction ends); it is NOT safe for concurrent use by multiple goroutines.
 type ExplicitTx struct {
 	eng *Engine
 
@@ -162,6 +165,15 @@ type ExplicitTx struct {
 	// the caller must call Rollback to unwind the partial writes accumulated in
 	// the undo log.
 	failed bool
+
+	// barrierHeld is true when BeginTx has acquired the graph's
+	// transaction-visibility write lock (visMu) for the whole lifetime of this
+	// transaction (task #1412, isolation option b). When true, each Exec routes
+	// its in-barrier work through [lpg.Graph.ApplyInsideLocked] (which assumes
+	// the lock is already held) instead of [lpg.Graph.ApplyAtomically] (which
+	// would re-acquire and panic on re-entrancy). Commit and Rollback release
+	// visMu via [lpg.Graph.UnlockBarrier] after their own in-barrier work.
+	barrierHeld bool
 }
 
 // BeginTx opens an explicit, multi-statement transaction bound to ctx and
@@ -182,7 +194,8 @@ type ExplicitTx struct {
 // [context.DeadlineExceeded]).
 //
 // See exectx.go for the full transaction and concurrency contract, including the
-// documented read-uncommitted-for-readers isolation scope.
+// read-committed isolation scope: concurrent readers block while this transaction
+// is open and observe only the committed state once it ends (task #1412).
 func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	defer cmetrics.Time("cypher.BeginTx")()
 	if err := checkContext(ctx); err != nil {
@@ -218,6 +231,14 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 		}
 		tx.walTx = walTx
 	}
+	// Hold the visibility barrier for the whole transaction so concurrent readers
+	// never observe uncommitted writes (task #1412, isolation option b). The
+	// barrier is acquired AFTER walTx is open (store single-writer mutex is outer,
+	// visMu is inner) to preserve the established lock ordering. On the error paths
+	// above, unlockWriter() is called before returning — no barrier has been
+	// acquired yet, so there is nothing to release on those paths.
+	tx.eng.g.LockBarrier()
+	tx.barrierHeld = true
 	cmetrics.IncCounter("cypher.BeginTx.opened", 1)
 	return tx, nil
 }
@@ -290,7 +311,13 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo}
 	}
 
-	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false)
+	// Route through ApplyInsideLocked when the barrier is held for the whole tx
+	// lifetime (barrierHeld=true), since ApplyAtomically would panic on re-entry.
+	applyFn := tx.eng.g.ApplyAtomically
+	if tx.barrierHeld {
+		applyFn = tx.eng.g.ApplyInsideLocked
+	}
+	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn)
 	if buildErr != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
@@ -342,7 +369,11 @@ func (tx *ExplicitTx) Commit() (err error) {
 	defer tx.release()
 
 	var walErr error
-	_ = tx.eng.g.ApplyAtomically(func() error {
+	applyFn := tx.eng.g.ApplyAtomically
+	if tx.barrierHeld {
+		applyFn = tx.eng.g.ApplyInsideLocked
+	}
+	_ = applyFn(func() error {
 		// Durability before visibility: fsync the WAL FIRST so the whole
 		// transaction is durable the instant its writes are allowed to remain
 		// observable past the barrier (#1281). Only then commit the secondary
@@ -394,7 +425,11 @@ func (tx *ExplicitTx) Rollback() (err error) {
 	defer tx.release()
 
 	undoOK := true
-	_ = tx.eng.g.ApplyAtomically(func() error {
+	applyFn := tx.eng.g.ApplyAtomically
+	if tx.barrierHeld {
+		applyFn = tx.eng.g.ApplyInsideLocked
+	}
+	_ = applyFn(func() error {
 		undoOK = tx.rollbackInBarrierLocked()
 		return nil
 	})
@@ -440,14 +475,24 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 }
 
 // release finishes the handle and releases the engine writer serialisation
-// exactly once. On a store-less engine unlockWriter unlocks [Engine.writeMu]; on
-// a WAL-backed engine it is a no-op (the store mutex is released by walTx's own
+// exactly once. When barrierHeld is true it also releases the
+// transaction-visibility write lock (visMu via [lpg.Graph.UnlockBarrier]) BEFORE
+// releasing the engine writer serialisation, preserving the acquisition order
+// (writer lock outer → visMu inner → release visMu inner → release writer outer).
+// On a store-less engine unlockWriter unlocks [Engine.writeMu]; on a WAL-backed
+// engine it is a no-op (the store mutex is released by walTx's own
 // Commit/Rollback). Idempotent via the finished flag.
 func (tx *ExplicitTx) release() {
 	if tx.finished {
 		return
 	}
 	tx.finished = true
+	// Release the visibility barrier BEFORE the writer serialisation (inverse
+	// acquisition order: writer outer, visMu inner).
+	if tx.barrierHeld {
+		tx.eng.g.UnlockBarrier()
+		tx.barrierHeld = false
+	}
 	if tx.unlockWriter != nil {
 		tx.unlockWriter()
 	}

@@ -296,6 +296,57 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	return fn()
 }
 
+// LockBarrier acquires the graph's transaction-visibility write lock and stamps
+// the calling goroutine as the barrier holder, identical to [Graph.ApplyAtomically]
+// but split into a manual acquire/release pair for callers that need to hold the
+// barrier across multiple operations (e.g. an explicit multi-statement transaction
+// that must block concurrent readers for its whole lifetime, task #1412).
+//
+// The caller MUST release the lock with exactly one paired call to
+// [Graph.UnlockBarrier], even if an error or panic occurs — failing to do so
+// deadlocks the engine. The typical pattern is:
+//
+//	g.LockBarrier()
+//	defer g.UnlockBarrier()
+//
+// While the lock is held, any operation inside the barrier that needs to run
+// under the same lock (e.g. [Engine.execUnderBarrier] called from an in-flight
+// Exec) MUST use [Graph.ApplyInsideLocked] instead of [Graph.ApplyAtomically];
+// calling ApplyAtomically from the goroutine that holds the barrier via
+// LockBarrier panics (re-entrancy guard).
+//
+// LockBarrier must not be called from a goroutine already inside the barrier
+// (ApplyAtomically or a previous LockBarrier); it panics instead of deadlocking.
+func (g *Graph[N, W]) LockBarrier() {
+	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
+	g.visMu.Lock()
+	g.barrier.stampWriter(gid)
+}
+
+// UnlockBarrier releases the transaction-visibility write lock acquired via
+// [Graph.LockBarrier]. It MUST be called from the same goroutine that called
+// LockBarrier, and exactly once per LockBarrier call. After this call completes,
+// concurrent [Graph.View] readers may proceed and [Graph.ApplyAtomically] may be
+// called again from any goroutine.
+func (g *Graph[N, W]) UnlockBarrier() {
+	gid := goID()
+	g.barrier.clearWriter(gid)
+	g.visMu.Unlock()
+}
+
+// ApplyInsideLocked is the barrier-already-held variant of [Graph.ApplyAtomically].
+// It runs fn directly without acquiring or releasing visMu — the caller MUST already
+// hold the barrier via [Graph.LockBarrier]. The re-entrancy guard is NOT re-checked
+// (the caller's stamp stays in effect) and the lock is NOT released afterward.
+//
+// This method exists solely to satisfy callers that hold the barrier for the
+// lifetime of an explicit transaction (task #1412) and need to run a sub-operation
+// (e.g. one Exec statement) under the same already-held lock. Calling this
+// method without first calling LockBarrier yields undefined behaviour.
+func (g *Graph[N, W]) ApplyInsideLocked(fn func() error) error {
+	return fn()
+}
+
 // View runs fn while holding the graph's transaction-visibility read lock,
 // so fn observes a consistent snapshot of the graph in which no in-flight
 // transaction is partially applied: any transaction committed via
