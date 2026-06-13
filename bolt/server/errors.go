@@ -83,6 +83,17 @@ func FailureCode(err error) string {
 		}
 	}
 
+	// An unsupported parameter type ([cypher.ErrUnsupportedParamType], wrapped
+	// by [cypher.BindParams] as "cypher: BindParams: key %q: …"). The request
+	// carried a value the engine cannot bind — a CLIENT fault — so it maps to
+	// the official Neo4j type-error code rather than falling through to the
+	// server-fault UnknownError. isClientFaultErr (derived from this function)
+	// then forwards the message, which names only the offending Go type and
+	// discloses nothing internal (task #1435).
+	if errors.Is(err, cypher.ErrUnsupportedParamType) {
+		return "Neo.ClientError.Statement.TypeError"
+	}
+
 	// A write transaction that exceeds the store's per-transaction op cap
 	// ([txn.ErrTransactionTooLarge], wrapped as "cypher: commit WAL: %w"). The
 	// cap is deterministic — retrying the same transaction fails again — so

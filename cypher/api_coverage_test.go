@@ -9,6 +9,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -119,6 +120,11 @@ func TestBindParams_UnsupportedType(t *testing.T) {
 	_, err := cypher.BindParams(params)
 	if err == nil {
 		t.Fatal("expected error for complex128 param type")
+	}
+	// The error must wrap the typed sentinel so front-ends can classify it as a
+	// client fault (task #1435).
+	if !errors.Is(err, cypher.ErrUnsupportedParamType) {
+		t.Fatalf("error %v does not wrap cypher.ErrUnsupportedParamType", err)
 	}
 }
 

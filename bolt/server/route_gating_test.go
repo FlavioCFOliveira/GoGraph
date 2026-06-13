@@ -112,9 +112,15 @@ func TestServe_DecodeError_Sanitised(t *testing.T) {
 	if strings.Contains(f.Message, "proto:") || strings.Contains(f.Message, "unknown request tag") {
 		t.Errorf("decode-error message leaks internal framing detail: %q", f.Message)
 	}
-	// It must be the sanitiser's generic internal-error message.
-	if !strings.Contains(f.Message, "An internal error occurred") {
-		t.Errorf("decode-error message is not the sanitised generic message: %q", f.Message)
+	// A decode failure is a CLIENT fault (a malformed/undecodable frame), so the
+	// message must be honest about that rather than the generic internal-error
+	// text, which wrongly implies a server bug (task #1435). The fixed string
+	// names the fault without leaking framing internals.
+	if strings.Contains(f.Message, "An internal error occurred") {
+		t.Errorf("decode-error message wrongly uses the internal-error text: %q", f.Message)
+	}
+	if f.Message != "malformed Bolt message" {
+		t.Errorf("decode-error message: got %q, want %q", f.Message, "malformed Bolt message")
 	}
 	t.Logf("decode-error sanitised: code=%q message=%q", f.Code, f.Message)
 

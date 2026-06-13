@@ -744,17 +744,24 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			dec := packstream.NewDecoder(bytes.NewReader(res.raw))
 			msg, decErr := proto.DecodeRequest(dec)
 			if decErr != nil {
-				// Send a sanitised FAILURE for a malformed/undecodable message; the
-				// raw decode error leaks internal framing detail, so route it
-				// through the same sanitiser as every other client-visible failure.
-				// The connection is not torn down: the client may send a fresh
-				// message or RESET.
+				// A message that fails to decode is a CLIENT fault (a malformed or
+				// truncated PackStream frame). The status code already says so
+				// (Neo.ClientError.Request.Invalid); the message must match that
+				// classification rather than the generic internal-error text the
+				// sanitiser produces for unrecognised errors — the raw decode error
+				// would leak internal framing detail, but the generic
+				// internal-error text wrongly implies a server bug. A fixed,
+				// non-sensitive string ("malformed Bolt message") is honest about
+				// the fault and discloses nothing internal (task #1435). The real
+				// decode error is logged server-side for correlation. The
+				// connection is not torn down: the client may send a fresh message
+				// or RESET.
 				s.log.Warn("bolt: decode error",
 					slog.String("remote", remote),
 					slog.String("err", decErr.Error()))
 				if !s.writeResponse(cw, conn, &proto.Failure{
 					Code:    "Neo.ClientError.Request.Invalid",
-					Message: sess.sanitiseErr(decErr),
+					Message: "malformed Bolt message",
 				}, remote) {
 					return
 				}

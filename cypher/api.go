@@ -2031,6 +2031,17 @@ func (e *Engine) RunInTxAny(ctx context.Context, query string, params map[string
 	return e.RunInTx(ctx, query, converted)
 }
 
+// ErrUnsupportedParamType is the sentinel wrapped by [BindParams] when a
+// parameter value's Go type cannot be converted to an [expr.Value] (for
+// example, a Bolt Point or temporal Struct sent as a raw parameter). It is a
+// CLIENT fault — the request carried a value the engine cannot bind — so a
+// front-end can classify it via [errors.Is] and map it to the appropriate
+// client-error status (the Bolt server maps it to
+// Neo.ClientError.Statement.TypeError). The wrapped message names only the
+// offending Go type, which is the caller's own input and discloses nothing
+// about internal server state.
+var ErrUnsupportedParamType = errors.New("cypher: unsupported parameter type")
+
 // BindParams converts a map[string]any to map[string]expr.Value using the
 // following type mapping:
 //
@@ -2044,7 +2055,8 @@ func (e *Engine) RunInTxAny(ctx context.Context, query string, params map[string
 //   - map[string]any            → expr.MapValue (recursively converted)
 //   - expr.Value                → passed through unchanged
 //
-// Returns an error for unsupported types.
+// Returns an error wrapping [ErrUnsupportedParamType] for any value whose Go
+// type is not in the list above.
 func BindParams(params map[string]any) (map[string]expr.Value, error) {
 	if len(params) == 0 {
 		return nil, nil
@@ -2097,7 +2109,7 @@ func bindAny(v any) (expr.Value, error) {
 		if num, ok := bindNumeric(v); ok {
 			return num, nil
 		}
-		return nil, fmt.Errorf("unsupported parameter type %T", v)
+		return nil, fmt.Errorf("%w %T", ErrUnsupportedParamType, v)
 	}
 }
 
