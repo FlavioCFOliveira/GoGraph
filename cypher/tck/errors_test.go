@@ -15,42 +15,54 @@ import (
 // syntaxErrorAtCompileTime asserts that w.err is a compile-time SyntaxError
 // of the named kind. A *parser.ParseError or *parser.SemaError satisfies this.
 func (w *world) syntaxErrorAtCompileTime(_ context.Context, errType string) error {
-	return w.assertSyntaxError(errType)
+	err := w.assertSyntaxError(errType)
+	recordFidelity("SyntaxError", errType, w.err)
+	return err
 }
 
 // syntaxErrorAtRuntime asserts that w.err is a runtime SyntaxError.
 func (w *world) syntaxErrorAtRuntime(_ context.Context, errType string) error {
-	return w.assertSyntaxError(errType)
+	err := w.assertSyntaxError(errType)
+	recordFidelity("SyntaxError", errType, w.err)
+	return err
 }
 
 // typeErrorAtRuntime asserts that w.err is a TypeError at runtime.
 func (w *world) typeErrorAtRuntime(_ context.Context, errType string) error {
-	return w.assertError(errType)
+	err := w.assertError(errType)
+	recordFidelity("TypeError", errType, w.err)
+	return err
 }
 
 // typeErrorAtAnyTime asserts that w.err is a TypeError at any point in execution.
 func (w *world) typeErrorAtAnyTime(_ context.Context, errType string) error {
-	return w.assertError(errType)
+	err := w.assertError(errType)
+	recordFidelity("TypeError", errType, w.err)
+	return err
 }
 
 // typeErrorAtCompileTime asserts that w.err is a TypeError detected at
 // compile time.
 func (w *world) typeErrorAtCompileTime(_ context.Context, errType string) error {
-	return w.assertError(errType)
+	err := w.assertError(errType)
+	recordFidelity("TypeError", errType, w.err)
+	return err
 }
 
 // genericErrorAtRuntime handles error steps for error categories not
 // covered by a dedicated step (e.g. ArgumentError, EntityNotFound, etc.).
 func (w *world) genericErrorAtRuntime(_ context.Context, errCategory, errType string) error {
-	_ = errCategory // unused — we just verify any error was raised
-	return w.assertError(errType)
+	err := w.assertError(errType)
+	recordFidelity(errCategory, errType, w.err)
+	return err
 }
 
 // genericErrorAtCompileTime handles error steps for error categories detected
 // at compile time other than SyntaxError.
 func (w *world) genericErrorAtCompileTime(_ context.Context, errCategory, errType string) error {
-	_ = errCategory
-	return w.assertError(errType)
+	err := w.assertError(errType)
+	recordFidelity(errCategory, errType, w.err)
+	return err
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

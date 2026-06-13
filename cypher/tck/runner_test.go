@@ -2088,6 +2088,7 @@ func TestTCKExecution(t *testing.T) {
 		Options:             opts,
 	}
 
+	resetFidelity()
 	status := suite.Run()
 	if status != 0 {
 		t.Logf("TCK execution: some scenarios failed or were pending (status=%d); see progress output above", status)
@@ -2097,6 +2098,15 @@ func TestTCKExecution(t *testing.T) {
 	// population and its pass count is not comparable to the baseline.
 	if testing.Short() {
 		return
+	}
+
+	// Error-type fidelity gate (#1443): additive to the result gate above —
+	// it ratchets the count of error scenarios that raise the EXACT expected
+	// openCypher error type, without affecting the result-pass gate.
+	tckFidelityGateCheck(t, summariseFidelity())
+	tckVocabularyGateCheck(t)
+	if testing.Verbose() {
+		logFidelityBreakdown(t)
 	}
 
 	raw := buf.Bytes()
