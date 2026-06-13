@@ -62,7 +62,7 @@ func TestPathValueRapid_RoundTrip(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		pv := genPathValue().Draw(rt, "pv")
 
-		got := exprValueToPackstream(pv)
+		got := exprValueToPackstream(pv, 5)
 		m, ok := got.(map[string]packstream.Value)
 		if !ok {
 			rt.Fatalf("expected map[string]packstream.Value, got %T", got)
@@ -138,7 +138,7 @@ func TestPathValueShape_Pn(t *testing.T) {
 			}
 			pv := expr.PathValue{Nodes: nodes, Relationships: rels}
 
-			got := exprValueToPackstream(pv)
+			got := exprValueToPackstream(pv, 5)
 			m, ok := got.(map[string]packstream.Value)
 			if !ok {
 				t.Fatalf("expected map, got %T", got)
@@ -181,7 +181,7 @@ func TestPathValueShape_Cn(t *testing.T) {
 			}
 			pv := expr.PathValue{Nodes: nodes, Relationships: rels}
 
-			got := exprValueToPackstream(pv)
+			got := exprValueToPackstream(pv, 5)
 			m, ok := got.(map[string]packstream.Value)
 			if !ok {
 				t.Fatalf("expected map, got %T", got)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
@@ -142,6 +143,13 @@ type Session struct {
 	// bound (a client BEGIN with no tx_timeout is then unbounded — not used by
 	// the production server, which always installs a finite default).
 	defaultTxTimeout time.Duration
+
+	// boltVersion is the Bolt protocol version negotiated during the handshake.
+	// It is set once by setBoltVersion immediately after proto.Negotiate and is
+	// read-only thereafter. Used by exprToPackstream to select the correct
+	// PackStream encoding for temporal types (e.g. DateTime tag 0x46 for v4.4,
+	// 0x49 for v5.0+).
+	boltVersion proto.Version
 }
 
 // newSession constructs an idle Session backed by eng, starting in
@@ -190,6 +198,14 @@ func (s *Session) setDefaultTxTimeout(d time.Duration) {
 	if d > 0 {
 		s.defaultTxTimeout = d
 	}
+}
+
+// setBoltVersion records the Bolt protocol version agreed during handshake.
+// Must be called once, immediately after proto.Negotiate, before any messages
+// are processed. The version governs temporal-value encoding in RECORD messages
+// (task #1434).
+func (s *Session) setBoltVersion(v proto.Version) {
+	s.boltVersion = v
 }
 
 // recordSink consumes one RECORD message produced by [Session.handlePull],
@@ -712,7 +728,7 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		rec := s.result.Record()
 		row := make([]packstream.Value, len(s.columns))
 		for i, col := range s.columns {
-			row[i] = exprToPackstream(rec[col])
+			row[i] = exprToPackstream(rec[col], s.boltVersion.Major)
 		}
 		if err := emit(row); err != nil {
 			return s.abortStream(err)
@@ -742,7 +758,7 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 			rec := s.result.Record()
 			row := make([]packstream.Value, len(s.columns))
 			for i, col := range s.columns {
-				row[i] = exprToPackstream(rec[col])
+				row[i] = exprToPackstream(rec[col], s.boltVersion.Major)
 			}
 			s.peeked = &row
 			hasMore = true
@@ -1168,18 +1184,21 @@ func stringsToValues(ss []string) []packstream.Value {
 
 // exprToPackstream converts an expr.Value (or any interface{} from exec.Record)
 // to a packstream.Value suitable for inclusion in a RECORD message.
+// boltMajor is the negotiated Bolt protocol major version; it governs the
+// encoding of temporal types (e.g. DateTime tag selection, task #1434).
 //
 // Handles: nil, expr.Null, expr.IntegerValue, expr.FloatValue, expr.BoolValue,
 // expr.StringValue, expr.NodeValue, expr.RelationshipValue, expr.ListValue,
-// expr.MapValue. Unknown types are converted to their string representation.
-func exprToPackstream(v any) packstream.Value {
+// expr.MapValue, and all six temporal expr.Value kinds. Unknown types are
+// converted to their string representation.
+func exprToPackstream(v any, boltMajor uint8) packstream.Value {
 	if v == nil {
 		return nil
 	}
 
 	switch x := v.(type) {
 	case expr.Value:
-		return exprValueToPackstream(x)
+		return exprValueToPackstream(x, boltMajor)
 	case int64:
 		return x
 	case float64:
@@ -1194,9 +1213,12 @@ func exprToPackstream(v any) packstream.Value {
 }
 
 // exprValueToPackstream converts a typed expr.Value to packstream.Value.
+// boltMajor is the negotiated Bolt major version; for temporal values the
+// correct PackStream Struct tag depends on whether the client speaks Bolt v4.4
+// or v5.0+ (task #1434).
 //
 //nolint:gocyclo,cyclop // dispatch over all expr.Value kinds; complexity is irreducible
-func exprValueToPackstream(v expr.Value) packstream.Value {
+func exprValueToPackstream(v expr.Value, boltMajor uint8) packstream.Value {
 	if v == nil {
 		return nil
 	}
@@ -1213,7 +1235,7 @@ func exprValueToPackstream(v expr.Value) packstream.Value {
 	case expr.NodeValue:
 		props := make(map[string]packstream.Value, len(x.Properties))
 		for k, pv := range x.Properties {
-			props[k] = exprValueToPackstream(pv)
+			props[k] = exprValueToPackstream(pv, boltMajor)
 		}
 		labels := make([]packstream.Value, len(x.Labels))
 		for i, l := range x.Labels {
@@ -1227,7 +1249,7 @@ func exprValueToPackstream(v expr.Value) packstream.Value {
 	case expr.RelationshipValue:
 		props := make(map[string]packstream.Value, len(x.Properties))
 		for k, pv := range x.Properties {
-			props[k] = exprValueToPackstream(pv)
+			props[k] = exprValueToPackstream(pv, boltMajor)
 		}
 		return map[string]packstream.Value{
 			"id":         int64(x.ID),
@@ -1239,11 +1261,11 @@ func exprValueToPackstream(v expr.Value) packstream.Value {
 	case expr.PathValue:
 		nodes := make([]packstream.Value, len(x.Nodes))
 		for i, n := range x.Nodes {
-			nodes[i] = exprValueToPackstream(n)
+			nodes[i] = exprValueToPackstream(n, boltMajor)
 		}
 		rels := make([]packstream.Value, len(x.Relationships))
 		for i, r := range x.Relationships {
-			rels[i] = exprValueToPackstream(r)
+			rels[i] = exprValueToPackstream(r, boltMajor)
 		}
 		return map[string]packstream.Value{
 			"nodes":         nodes,
@@ -1252,9 +1274,50 @@ func exprValueToPackstream(v expr.Value) packstream.Value {
 	case expr.MapValue:
 		m := make(map[string]packstream.Value, len(x))
 		for k, mv := range x {
-			m[k] = exprValueToPackstream(mv)
+			m[k] = exprValueToPackstream(mv, boltMajor)
 		}
 		return m
+
+	// ── Temporal types (task #1434) ──────────────────────────────────────────
+	// PackStream Struct tags and field layouts per the Bolt protocol and the
+	// neo4j-go-driver v5 hydrator (internal/bolt/hydrator.go), which is the
+	// authoritative decoder contract:
+	//   DateValue          → 'D' 0x44  [epochDay int64]
+	//   LocalTimeValue     → 't' 0x74  [nanosOfDay int64]
+	//   TimeValue          → 'T' 0x54  [nanosOfDay int64, tzOffsetSec int64]
+	//   LocalDateTimeValue → 'd' 0x64  [epochSecond int64, nano int64]
+	//   DurationValue      → 'E' 0x45  [months int64, days int64, seconds int64, nanos int64]
+	//
+	// DateTimeValue depends on the negotiated version (UTC mode for Bolt v5.0+,
+	// legacy mode for v4.4) and on whether the zone carries an IANA name:
+	//   v5.0+ offset zone  → 'I' 0x49  [utcEpochSec int64, nano int64, tzOffsetSec int64]
+	//   v5.0+ named zone   → 'i' 0x69  [utcEpochSec int64, nano int64, tzId string]
+	//   v4.4  offset zone  → 'F' 0x46  [localEpochSec int64, nano int64, tzOffsetSec int64]
+	//   v4.4  named zone   → 'f' 0x66  [localEpochSec int64, nano int64, tzId string]
+	// (legacy "local" seconds are the wall-clock instant expressed as if UTC,
+	//  i.e. utcEpochSec + tzOffsetSec — see hydrator.dateTimeOffset).
+	case expr.DateValue:
+		epochDay := x.ToTime().Unix() / 86400
+		return packstream.Struct{Tag: 0x44, Fields: []packstream.Value{epochDay}}
+	case expr.LocalTimeValue:
+		return packstream.Struct{Tag: 0x74, Fields: []packstream.Value{x.Nanos}}
+	case expr.TimeValue:
+		return packstream.Struct{Tag: 0x54, Fields: []packstream.Value{x.Nanos, int64(x.OffsetSec)}}
+	case expr.LocalDateTimeValue:
+		return packstream.Struct{Tag: 0x64, Fields: []packstream.Value{
+			x.T.Unix(),
+			int64(x.T.Nanosecond()),
+		}}
+	case expr.DateTimeValue:
+		return dateTimeToPackstream(x, boltMajor)
+	case expr.DurationValue:
+		return packstream.Struct{Tag: 0x45, Fields: []packstream.Value{
+			x.Months,
+			x.Days,
+			x.Seconds,
+			int64(x.Nanos),
+		}}
+
 	default:
 		// expr.Null, expr.nullValue, or any unknown value kind.
 		if x == nil || x == expr.Null {
@@ -1262,4 +1325,34 @@ func exprValueToPackstream(v expr.Value) packstream.Value {
 		}
 		return x.String()
 	}
+}
+
+// dateTimeToPackstream encodes a [expr.DateTimeValue] as the PackStream Struct
+// the negotiated Bolt version expects. Bolt v5.0+ uses the UTC convention (the
+// epoch second is the true UTC instant); Bolt v4.4 uses the legacy convention
+// (the seconds field is the wall-clock instant expressed as if UTC). A zone
+// carrying an IANA name (detected the same way as [expr.DateTimeValue.String],
+// i.e. the location name contains "/") is encoded as a named-zone Struct; any
+// other zone (UTC or fixed offset) is encoded as an offset Struct (task #1434).
+func dateTimeToPackstream(x expr.DateTimeValue, boltMajor uint8) packstream.Value {
+	utcEpochSec := x.T.Unix()
+	nano := int64(x.T.Nanosecond())
+	_, offsetSec := x.T.Zone()
+	locName := x.T.Location().String()
+	named := strings.Contains(locName, "/")
+
+	if boltMajor >= 5 {
+		// UTC mode: the seconds field is the true UTC epoch second.
+		if named {
+			return packstream.Struct{Tag: 0x69, Fields: []packstream.Value{utcEpochSec, nano, locName}}
+		}
+		return packstream.Struct{Tag: 0x49, Fields: []packstream.Value{utcEpochSec, nano, int64(offsetSec)}}
+	}
+	// Legacy mode (v4.4 and earlier without the UTC patch): the seconds field is
+	// the local wall-clock instant expressed as if it were UTC.
+	localEpochSec := utcEpochSec + int64(offsetSec)
+	if named {
+		return packstream.Struct{Tag: 0x66, Fields: []packstream.Value{localEpochSec, nano, locName}}
+	}
+	return packstream.Struct{Tag: 0x46, Fields: []packstream.Value{localEpochSec, nano, int64(offsetSec)}}
 }

@@ -66,7 +66,7 @@ func TestRelValueRapid_RoundTrip(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		rv := genRelationshipValue().Draw(rt, "rv")
 
-		got := exprValueToPackstream(rv)
+		got := exprValueToPackstream(rv, 5)
 		m, ok := got.(map[string]packstream.Value)
 		if !ok {
 			rt.Fatalf("expected map[string]packstream.Value, got %T", got)
@@ -142,7 +142,7 @@ func TestRelValueTypeName_Boundaries(t *testing.T) {
 				Type:       typeName,
 				Properties: expr.MapValue{},
 			}
-			got := exprValueToPackstream(rv)
+			got := exprValueToPackstream(rv, 5)
 			m, ok := got.(map[string]packstream.Value)
 			if !ok {
 				t.Fatalf("expected map, got %T", got)

@@ -753,7 +753,7 @@ func TestExprToPackstream_Primitives(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := exprToPackstream(tc.in)
+			got := exprToPackstream(tc.in, 5)
 			if tc.name == "default" {
 				// Default case converts to fmt.Sprintf("%v", v).
 				if _, ok := got.(string); !ok {
@@ -776,7 +776,7 @@ func TestExprValueToPackstream_NodeValue(t *testing.T) {
 			"name": expr.StringValue("Alice"),
 		},
 	}
-	got := exprValueToPackstream(nv)
+	got := exprValueToPackstream(nv, 5)
 	m, ok := got.(map[string]packstream.Value)
 	if !ok {
 		t.Fatalf("expected map, got %T", got)
@@ -800,7 +800,7 @@ func TestExprValueToPackstream_RelationshipValue(t *testing.T) {
 			"since": expr.IntegerValue(2020),
 		},
 	}
-	got := exprValueToPackstream(rv)
+	got := exprValueToPackstream(rv, 5)
 	m, ok := got.(map[string]packstream.Value)
 	if !ok {
 		t.Fatalf("expected map, got %T", got)
@@ -821,7 +821,7 @@ func TestExprValueToPackstream_PathValue(t *testing.T) {
 		Nodes:         []expr.NodeValue{n1, n2},
 		Relationships: []expr.RelationshipValue{r1},
 	}
-	got := exprValueToPackstream(pv)
+	got := exprValueToPackstream(pv, 5)
 	m, ok := got.(map[string]packstream.Value)
 	if !ok {
 		t.Fatalf("expected map, got %T", got)
@@ -841,7 +841,7 @@ func TestExprValueToPackstream_MapValue(t *testing.T) {
 		"x": expr.IntegerValue(99),
 		"y": expr.StringValue("z"),
 	}
-	got := exprValueToPackstream(mv)
+	got := exprValueToPackstream(mv, 5)
 	m, ok := got.(map[string]packstream.Value)
 	if !ok {
 		t.Fatalf("expected map, got %T", got)
@@ -853,7 +853,7 @@ func TestExprValueToPackstream_MapValue(t *testing.T) {
 
 func TestExprValueToPackstream_Null(t *testing.T) {
 	// Passing the typed nil expr.Null value should return nil.
-	got := exprValueToPackstream(nil)
+	got := exprValueToPackstream(nil, 5)
 	if got != nil {
 		t.Errorf("expected nil, got %v", got)
 	}

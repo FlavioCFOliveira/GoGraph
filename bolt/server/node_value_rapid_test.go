@@ -63,7 +63,7 @@ func TestNodeValueRapid_RoundTrip(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		nv := genNodeValue().Draw(rt, "nv")
 
-		got := exprValueToPackstream(nv)
+		got := exprValueToPackstream(nv, 5)
 		m, ok := got.(map[string]packstream.Value)
 		if !ok {
 			rt.Fatalf("expected map[string]packstream.Value, got %T", got)
@@ -131,7 +131,7 @@ func TestNodeValueRapid_LabelOrderPreserved(t *testing.T) {
 		Labels:     []string{"Z", "A", "M", "B"},
 		Properties: expr.MapValue{},
 	}
-	got := exprValueToPackstream(nv)
+	got := exprValueToPackstream(nv, 5)
 	m := got.(map[string]packstream.Value)     //nolint:forcetypeassert // known type
 	labels := m["labels"].([]packstream.Value) //nolint:forcetypeassert // known type
 	want := []string{"Z", "A", "M", "B"}

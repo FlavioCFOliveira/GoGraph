@@ -597,6 +597,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	s.mu.Unlock()
 	sess := newSession(s.eng, s.opts.Auth, localAddr)
+	sess.setBoltVersion(ver)
 	sess.setMaxInFlight(s.opts.MaxInFlightPerConnection)
 	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)
 	sess.setDefaultTxTimeout(s.opts.DefaultTxTimeout)
