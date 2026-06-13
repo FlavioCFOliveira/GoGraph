@@ -68,6 +68,10 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		live[uint64(id)] = true
 		return true
 	})
+	// appeared[id] records whether a vertex was emitted as the source or
+	// target of any visible edge; vertices that never appear are written
+	// as bare node statements below so isolated nodes are not lost.
+	appeared := make([]bool, maxID)
 	for id := uint64(0); id < maxID; id++ {
 		if err := ctx.Err(); err != nil {
 			_ = bw.Flush()
@@ -96,6 +100,25 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 				metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 				return err
 			}
+			appeared[id] = true
+			appeared[uint64(n)] = true
+		}
+	}
+	// Emit a bare node statement for every live vertex that no edge
+	// referenced, so isolated vertices (no incident edges) survive the
+	// write. DOT and Graphviz both accept bare node statements.
+	for id := uint64(0); id < maxID; id++ {
+		if err := ctx.Err(); err != nil {
+			_ = bw.Flush()
+			metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
+			return err
+		}
+		if !live[id] || appeared[id] {
+			continue
+		}
+		if _, err := bw.WriteString(fmt.Sprintf("  %s;\n", quote(names[id]))); err != nil {
+			metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
+			return err
 		}
 	}
 	if _, err := bw.WriteString("}\n"); err != nil {
