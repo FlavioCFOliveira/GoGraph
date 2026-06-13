@@ -116,7 +116,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		if !live[id] || appeared[id] {
 			continue
 		}
-		if _, err := bw.WriteString(fmt.Sprintf("  %s;\n", quote(names[id]))); err != nil {
+		if _, err := fmt.Fprintf(bw, "  %s;\n", quote(names[id])); err != nil {
 			metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 			return err
 		}
