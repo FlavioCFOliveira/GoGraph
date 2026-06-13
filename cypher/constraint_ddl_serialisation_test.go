@@ -21,7 +21,9 @@ package cypher_test
 // index) before surfacing the error, so the in-memory registry never diverges
 // from the durable state: registered ⇔ durable.
 //
-// Layer: short. goleak-clean (engines/graphs/WAL are local and closed).
+// Layer: the two ConcurrentDuplicate stress tests are soak-gated (#1460); the
+// WAL-append-failure test stays short. goleak-clean (engines/graphs/WAL are
+// local and closed).
 
 import (
 	"context"
@@ -39,6 +41,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testfs"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -142,6 +145,7 @@ func runCreateConstraintTOCTOU(t *testing.T, eng *cypher.Engine, iters, bulkSeed
 // only 10 iterations are executed — enough to exercise the correctness
 // invariant without saturating a 2-CPU GitHub runner under the race detector.
 func TestCreateConstraint_ConcurrentDuplicate_InMemory(t *testing.T) {
+	testlayers.RequireSoak(t) // concurrency stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
@@ -156,6 +160,7 @@ func TestCreateConstraint_ConcurrentDuplicate_InMemory(t *testing.T) {
 // a WAL-backed engine: the writer serialisation is the store's single-writer
 // transaction, which the durable constraint op commits on.
 func TestCreateConstraint_ConcurrentDuplicate_WALBacked(t *testing.T) {
+	testlayers.RequireSoak(t) // concurrency stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))

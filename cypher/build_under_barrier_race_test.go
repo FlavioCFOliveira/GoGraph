@@ -18,7 +18,7 @@ package cypher_test
 // NodeID space on every iteration. Under `go test -race` it must show no panic
 // and no data race.
 //
-// Layer: short. Race-clean.
+// Layer: soak (concurrency stress, #1460). Race-clean.
 
 import (
 	"context"
@@ -31,6 +31,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -42,6 +43,7 @@ import (
 // the writers issue RunInTx CREATEs that intern brand-new node keys, growing
 // the live adjacency's MaxNodeID on every iteration.
 func TestRun_ConcurrentReadWrite_NoBuildTear(t *testing.T) {
+	testlayers.RequireSoak(t) // concurrency stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 
 	w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))

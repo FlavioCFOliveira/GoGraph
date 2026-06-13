@@ -18,6 +18,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // TestIsolation_Cypher_NoPartialWriteObservable runs one writer that, in a
@@ -26,6 +27,7 @@ import (
 // visibility a reader could observe the new a.v and the old b.v. The barrier
 // guarantees the two SETs flip together. Run under -race.
 func TestIsolation_Cypher_NoPartialWriteObservable(t *testing.T) {
+	testlayers.RequireSoak(t) // concurrency isolation stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})

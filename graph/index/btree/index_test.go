@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 func TestIndex_InsertAndRange(t *testing.T) {
@@ -105,6 +106,7 @@ func TestIndex_RangeProperty(t *testing.T) {
 }
 
 func TestIndex_Concurrent(t *testing.T) {
+	testlayers.RequireSoak(t) // 64-worker race stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 	idx := New[int]()
 	const workers = 64

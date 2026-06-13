@@ -18,7 +18,8 @@ package cypher_test
 // reproduction spawns a genuinely separate OS process per MERGE, which is what
 // this test does via internal/subproc.
 //
-// Layer: short. Race-clean (no shared state across the process boundary).
+// Layer: soak (cross-process reopen, #1460). Race-clean (no shared state
+// across the process boundary).
 
 import (
 	"context"
@@ -31,6 +32,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -168,6 +170,7 @@ func runMergeReopen(t *testing.T, persist string) {
 // TestMerge_CrossProcessReopen_WAL exercises pure WAL-replay recovery: each
 // process appends to and fsyncs the WAL but never snapshots or truncates.
 func TestMerge_CrossProcessReopen_WAL(t *testing.T) {
+	testlayers.RequireSoak(t) // cross-process reopen → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 	runMergeReopen(t, "wal")
 }
@@ -175,6 +178,7 @@ func TestMerge_CrossProcessReopen_WAL(t *testing.T) {
 // TestMerge_CrossProcessReopen_Snapshot exercises self-sufficient snapshot
 // recovery: each process writes a full snapshot and truncates the WAL.
 func TestMerge_CrossProcessReopen_Snapshot(t *testing.T) {
+	testlayers.RequireSoak(t) // cross-process reopen → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 	runMergeReopen(t, "snap")
 }

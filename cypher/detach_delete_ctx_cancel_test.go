@@ -11,7 +11,8 @@ package cypher_test
 // a context error from the write entrypoint, leaving the graph unchanged
 // (atomic rollback under the visibility barrier).
 //
-// Layer: short. Race-clean.
+// Layer: the CancelDuringSweep stress test is soak-gated (#1460); the
+// LiveContext test stays short. Race-clean.
 
 import (
 	"context"
@@ -23,6 +24,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // cancelAfterNErr reports cancelled once Err() has been called more than n
@@ -87,6 +89,7 @@ func countHubEdges(t *testing.T, eng *cypher.Engine) int {
 // returns a context error from RunInTx and leaves every edge intact (the write
 // is rolled back atomically under the barrier).
 func TestRunInTx_DetachDelete_CancelDuringSweep_ReturnsCtxError(t *testing.T) {
+	testlayers.RequireSoak(t) // 20k-leaf cancellation stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 	const leaves = 20_000
 	eng := seedHub(t, leaves)

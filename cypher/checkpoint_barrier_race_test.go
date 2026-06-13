@@ -40,6 +40,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -115,6 +116,7 @@ func copySnapshotDir(t *testing.T, srcSnap, dstRoot string) {
 // committed CREATEs, then after the race takes one final checkpoint, reopens
 // from the snapshot alone, and asserts Size == committed (Durability).
 func TestCheckpoint_SnapshotUnderBarrier_NoPartialTransaction(t *testing.T) {
+	testlayers.RequireSoak(t) // concurrency stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 
 	dir := t.TempDir()
