@@ -211,6 +211,13 @@ func liveHeapBytes() int64 {
 // guarantees a buffered handlePull has finished materialising its response
 // slice before the measurement is accepted; while it is still appending,
 // consecutive readings differ by megabytes and reset the stability counter.
+//
+// maxWaitTime is a generous ceiling, not a performance bound: stabilisation
+// normally completes in 1–2 s. On a heavily-loaded shared CI runner under GC
+// pressure the heap can take much longer to settle, so the ceiling is set high
+// enough that it fires only on a genuine non-stabilising regression, never on
+// transient scheduler/GC stalls. The fast path (return on stability) is
+// unaffected, so raising it does not lengthen a healthy run.
 func waitStableHeapDelta(t *testing.T, base int64) int64 {
 	t.Helper()
 	const (
@@ -218,7 +225,7 @@ func waitStableHeapDelta(t *testing.T, base int64) int64 {
 		tolerance   = 256 << 10 // 256 KiB
 		needStable  = 4
 		minElapsed  = time.Second
-		maxWaitTime = 30 * time.Second
+		maxWaitTime = 90 * time.Second
 	)
 	start := time.Now()
 	prev := liveHeapBytes()

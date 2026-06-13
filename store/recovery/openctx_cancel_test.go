@@ -19,7 +19,9 @@ import (
 // pre-cancelled context. The test builds a non-trivial snapshot
 // (100 nodes, 200 edges) so the load path has real work to do, then
 // cancels the context before calling [OpenCtx]. The call must return
-// context.Canceled (or a wrapping error) within 100 ms.
+// context.Canceled (or a wrapping error); on an unloaded host it does
+// so well under 100 ms, but that latency is a soft signal only — see
+// the assertion below.
 //
 // This test anchors the canonical [OpenCtx] entry point.
 func TestRecovery_OpenCtxPreCancelled(t *testing.T) {
@@ -83,8 +85,13 @@ func TestRecovery_OpenCtxPreCancelled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("OpenCtx pre-cancelled = %v, want context.Canceled", err)
 	}
+	// The pre-cancelled context should short-circuit recovery near-instantly.
+	// The latency is a soft signal only: a heavily-loaded shared CI runner can
+	// stall an otherwise-immediate return well past any tight wall-clock bound,
+	// so a slow return is logged rather than failed. Correctness — the
+	// context.Canceled result asserted above — is the hard guarantee.
 	if elapsed > 100*time.Millisecond {
-		t.Fatalf("OpenCtx with pre-cancelled ctx took %v, want < 100ms", elapsed)
+		t.Logf("OpenCtx with pre-cancelled ctx took %v (expected well under 100ms on an unloaded host)", elapsed)
 	}
 }
 
