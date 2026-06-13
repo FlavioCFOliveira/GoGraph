@@ -614,10 +614,13 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		result, runErr = s.tx.Run(m.Query, params)
 	} else {
 		// Autocommit mode (or defensive fallback when txActive is unexpectedly
-		// false in StateTxReady): route through RunInTxAny so that write queries
-		// (CREATE, MERGE, SET, DELETE) are handled by the write-aware planner.
-		// Read-only queries pass through the same code path without side-effects.
-		result, runErr = s.eng.RunInTxAny(runCtx, m.Query, params)
+		// false in StateTxReady): route through RunAny so that reads take the
+		// lock-free Engine.Run path and only writes acquire the single-writer
+		// lock via Engine.RunInTx. Routing all autocommit queries through
+		// RunInTxAny would block a read-only session behind any open explicit
+		// write transaction, violating the 'readers do not block writers where
+		// avoidable' mandate (task #1432).
+		result, runErr = s.eng.RunAny(runCtx, m.Query, params)
 	}
 
 	next, transErr := Transition(s.state, m, runErr == nil)
