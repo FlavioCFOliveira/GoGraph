@@ -106,6 +106,18 @@ const (
 	// arbitrarily deep BinaryOp AST spines that must be bounded here instead.
 	// The limit [maxExprDepth] is generous for any legitimate Cypher expression.
 	KindExpressionTooDeep ErrorKind = "EXPRESSION_TOO_DEEP"
+
+	// KindTypeMismatch is reported for static type mismatches in clauses that
+	// require a specific operand type:
+	//   - SET/REMOVE of a label on a non-node receiver (`SET r:Foo` where r is
+	//     a relationship): relationships have a single immutable type and no
+	//     labels in the openCypher data model.
+	//   - A whole-entity SET (`SET n = …` / `SET n += …`) whose right-hand side
+	//     is a statically-known non-null, non-map literal (integer, float,
+	//     string, boolean, list): the RHS must be a map, node, or relationship.
+	// openCypher/Neo4j classify both as TypeError, so this kind maps to
+	// [CategoryTypeError] (unlike the scope violations, which are SyntaxError).
+	KindTypeMismatch ErrorKind = "TYPE_MISMATCH"
 )
 
 // ScopeError is the error type produced by the scope-analysis pass.
@@ -283,6 +295,29 @@ func invalidIntegerArgumentError(clause, gotKind string, pos ast.Position) *Scop
 	}
 }
 
+// labelOnNonNodeError constructs a KindTypeMismatch ScopeError for a
+// SET/REMOVE label item whose target is not a node (e.g. a relationship).
+// Relationships have a single immutable type and carry no labels.
+func labelOnNonNodeError(name, gotType string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindTypeMismatch,
+		Pos:     pos,
+		Message: fmt.Sprintf("Type mismatch: expected Node but was %s (cannot set or remove a label on %q)", gotType, name),
+	}
+}
+
+// invalidSetEntityRHSError constructs a KindTypeMismatch ScopeError for a
+// whole-entity SET (`SET n = …` / `SET n += …`) whose right-hand side is a
+// statically-known non-null, non-map literal. The RHS must evaluate to a map,
+// node, or relationship.
+func invalidSetEntityRHSError(gotType string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindTypeMismatch,
+		Pos:     pos,
+		Message: fmt.Sprintf("Type mismatch: expected Map, Node or Relationship but was %s", gotType),
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bolt-compatible mapping (TCK error categories)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -439,6 +474,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindNoVariablesInScope, Category: CategorySyntaxError, SubType: SubTypeNoVariablesInScope},
 	{Kind: KindNoExpressionAlias, Category: CategorySyntaxError, SubType: SubTypeNoExpressionAlias},
 	{Kind: KindExpressionTooDeep, Category: CategorySyntaxError, SubType: SubTypeExpressionTooDeep},
+	{Kind: KindTypeMismatch, Category: CategoryTypeError, SubType: SubTypeInvalidArgumentType},
 }
 
 // MapToBolt converts a slice of [ScopeError]s into a single [*SemanticError]

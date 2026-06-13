@@ -155,7 +155,9 @@ func (op *SetAllProperties) WithParams(params map[string]expr.Value) (*SetAllPro
 		}
 	}
 	if op.paramName != "" {
-		op.parseParamMap()
+		if err := op.parseParamMap(); err != nil {
+			return nil, err
+		}
 	}
 	return op, nil
 }
@@ -192,32 +194,73 @@ func (op *SetAllProperties) parseMapNow(params map[string]expr.Value) error {
 }
 
 // parseParamMap reads op.paramName from op.params and stores its entries in
-// op.parsedMap. A non-map parameter or a missing binding produces an empty
-// parsed map (no-op at exec time).
-func (op *SetAllProperties) parseParamMap() {
+// op.parsedMap. It returns:
+//   - a TypeError when the parameter is bound to a non-null, non-map value
+//     (`SET n = $scalar` must not silently clear the target's properties);
+//   - an InvalidPropertyType error when a map value is itself a map or a list
+//     of maps (not a storable property value).
+//
+// A null parameter behaves like a null literal right-hand side: `SET n = $p`
+// clears all properties (isReplace), `SET n += $p` is a no-op — both achieved
+// by leaving the parsed map empty. A missing binding is left to the engine's
+// parameter-presence check.
+func (op *SetAllProperties) parseParamMap() error {
 	if op.params == nil {
-		return
+		return nil
 	}
 	v, ok := op.params[op.paramName]
 	if !ok {
-		return
+		return nil
+	}
+	if v == nil || expr.IsNull(v) {
+		return nil
 	}
 	mv, isMap := v.(expr.MapValue)
 	if !isMap {
-		// Not a map-typed parameter; no-op.
-		return
+		return fmt.Errorf("TypeError: SET %s with $%s: expected a Map but was %s", op.entityVar, op.paramName, v.Kind())
 	}
 	for k, vv := range mv {
-		if expr.IsNull(vv) {
+		if vv == nil || expr.IsNull(vv) {
 			op.nullKeys = append(op.nullKeys, k)
 			continue
 		}
-		pv, perr := valueToPropertyValue(vv)
+		if !exprValueIsStorable(vv) {
+			return fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property", op.entityVar, k)
+		}
+		// A list of primitives is a legal property value; route it through the
+		// list encoder (valueToPropertyValue handles only scalars). Other
+		// unconvertible kinds remain a defensive skip.
+		var pv lpg.PropertyValue
+		var perr error
+		if lst, isList := vv.(expr.ListValue); isList {
+			pv, perr = exprListToLPGList(lst)
+		} else {
+			pv, perr = valueToPropertyValue(vv)
+		}
 		if perr != nil {
 			continue
 		}
 		op.parsedMap = append(op.parsedMap, propLiteral{key: k, value: pv})
 	}
+	return nil
+}
+
+// exprValueIsStorable reports whether v can be stored as a property value: a
+// primitive, or a list whose elements are all (transitively) storable. A map,
+// or a list containing a map, is not storable. Mirrors the package-level
+// isStorableProperty check for the parameter-map ingestion path.
+func exprValueIsStorable(v expr.Value) bool {
+	switch x := v.(type) {
+	case expr.MapValue:
+		return false
+	case expr.ListValue:
+		for _, el := range x {
+			if !exprValueIsStorable(el) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Init initialises the operator and its child.
@@ -464,6 +507,15 @@ func parseMapWithNulls(s string, params map[string]expr.Value) (props []propLite
 		key = strings.Trim(key, "`")
 		valStr := strings.TrimSpace(part[colonIdx+1:])
 
+		// A map, or a list that transitively contains a map, is not a storable
+		// property value (openCypher: property values are primitives or
+		// homogeneous lists of primitives). Reject with InvalidPropertyType
+		// rather than silently dropping the key — matching the single-property
+		// form `SET n.k = {…}` (Set1 [10]).
+		if valueStringIsNonStorable(valStr) {
+			return nil, nil, fmt.Errorf("InvalidPropertyType: value for key %q is a map or a list of maps, which cannot be stored as a property", key)
+		}
+
 		pv, perr := parsePropValueWithParams(valStr, params)
 		if perr != nil {
 			if errors.Is(perr, ErrPropertyValueIsNull) {
@@ -476,6 +528,35 @@ func parseMapWithNulls(s string, params map[string]expr.Value) (props []propLite
 		props = append(props, propLiteral{key: key, value: pv})
 	}
 	return props, nullKeys, nil
+}
+
+// valueStringIsNonStorable reports whether a SET-map value source string
+// denotes a structural type that cannot be stored as a property value: a map
+// literal, or a list that (transitively) contains a map. Property values are
+// restricted to primitives or homogeneous lists of primitives, so these must
+// surface as InvalidPropertyType rather than being silently dropped.
+//
+// Detection is structural and quote-aware: a value beginning with '{' is a map
+// literal (a quoted string value begins with a double or single quote, never a
+// brace or bracket), and a '['-delimited list is recursed into via
+// [splitMapItems], which respects string and nesting boundaries.
+func valueStringIsNonStorable(valStr string) bool {
+	valStr = strings.TrimSpace(valStr)
+	if len(valStr) >= 2 && valStr[0] == '{' && valStr[len(valStr)-1] == '}' {
+		return true // map literal
+	}
+	if len(valStr) >= 2 && valStr[0] == '[' && valStr[len(valStr)-1] == ']' {
+		inner := strings.TrimSpace(valStr[1 : len(valStr)-1])
+		if inner == "" {
+			return false
+		}
+		for _, el := range splitMapItems(inner) {
+			if valueStringIsNonStorable(el) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // valueToPropertyValue converts an expr.Value to an lpg.PropertyValue when a

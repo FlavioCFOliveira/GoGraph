@@ -820,32 +820,94 @@ func (a *analyser) mergeClause(m *ast.Merge) {
 	a.checkPathPatternParameterProps(m.Pattern)
 	// ON CREATE / ON MATCH SET items reference existing variables.
 	for _, si := range m.OnCreate {
-		a.checkExpr(si.Target)
-		if si.Value != nil {
-			a.checkExpr(si.Value)
-		}
+		a.checkSetItem(si)
 	}
 	for _, si := range m.OnMatch {
-		a.checkExpr(si.Target)
-		if si.Value != nil {
-			a.checkExpr(si.Value)
-		}
+		a.checkSetItem(si)
 	}
 }
 
 func (a *analyser) setClause(s *ast.Set) {
 	for _, item := range s.Items {
-		a.checkExpr(item.Target)
-		if item.Value != nil {
-			a.checkExpr(item.Value)
-		}
+		a.checkSetItem(item)
+	}
+}
+
+// checkSetItem validates one SET assignment beyond plain scope analysis:
+//   - For a label form (`SET n:Label`) the receiver must be a node, never a
+//     relationship (relationships have no labels).
+//   - For a whole-entity form (`SET n = …` / `SET n += …`) a statically-known
+//     non-null, non-map literal right-hand side is a TypeError.
+//
+// Shared by [setClause] and the MERGE ON CREATE / ON MATCH actions.
+func (a *analyser) checkSetItem(item *ast.SetItem) {
+	a.checkExpr(item.Target)
+	if item.Value != nil {
+		a.checkExpr(item.Value)
+	}
+	if len(item.Labels) > 0 {
+		a.checkLabelTargetIsNode(item.Target, item.Pos)
+		return
+	}
+	// Whole-entity assignment is identified by a Variable target (the
+	// single-property form has a *ast.Property target and is value-checked at
+	// runtime via InvalidPropertyType).
+	if _, isVar := item.Target.(*ast.Variable); isVar {
+		a.checkWholeEntitySetRHS(item.Value)
 	}
 }
 
 func (a *analyser) removeClause(r *ast.Remove) {
 	for _, item := range r.Items {
 		a.checkExpr(item.Target)
+		if len(item.Labels) > 0 {
+			a.checkLabelTargetIsNode(item.Target, item.Pos)
+		}
 	}
+}
+
+// checkLabelTargetIsNode reports a TypeError when a SET/REMOVE label item
+// targets a relationship variable. Labels are a node-only concept in the
+// openCypher data model; Neo4j reports "Type mismatch: expected Node but was
+// Relationship". Only a definitively relationship-typed variable is flagged;
+// variables of unknown static type are left for runtime to avoid false
+// positives.
+func (a *analyser) checkLabelTargetIsNode(target ast.Expression, pos ast.Position) {
+	v, ok := target.(*ast.Variable)
+	if !ok {
+		return
+	}
+	sym, ok := a.scope.Lookup(v.Name)
+	if !ok {
+		return // undefined variable: reported separately by checkExpr
+	}
+	if sym.Type == "relationship" {
+		a.error(labelOnNonNodeError(v.Name, "Relationship", pos))
+	}
+}
+
+// checkWholeEntitySetRHS reports a TypeError when the right-hand side of a
+// whole-entity SET (`SET n = …` / `SET n += …`) is a statically-known
+// non-null, non-map literal. A null literal is legal (it clears the property
+// set for `=`, no-ops for `+=`); a map literal is legal; variables (entity
+// copy) and parameters are deferred to runtime.
+func (a *analyser) checkWholeEntitySetRHS(value ast.Expression) {
+	var got string
+	switch value.(type) {
+	case *ast.IntLiteral:
+		got = "Integer"
+	case *ast.FloatLiteral:
+		got = "Float"
+	case *ast.StringLiteral:
+		got = "String"
+	case *ast.BoolLiteral:
+		got = "Boolean"
+	case *ast.ListLiteral:
+		got = "List"
+	default:
+		return
+	}
+	a.error(invalidSetEntityRHSError(got, positionOf(value)))
 }
 
 func (a *analyser) deleteClause(d *ast.Delete) {

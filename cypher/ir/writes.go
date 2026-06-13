@@ -496,6 +496,13 @@ func newSetAllForValue(entityVar string, value ast.Expression, isReplace bool, c
 		return NewSetAllPropertiesFromParam(entityVar, v.Name, isReplace, child)
 	case *ast.MapLiteral:
 		return NewSetAllPropertiesFromMap(entityVar, v.String(), isReplace, child)
+	case *ast.NullLiteral:
+		// `SET n = null` clears all properties (equivalent to `SET n = {}`);
+		// `SET n += null` is a no-op. Routing through an empty map literal
+		// gives both behaviours: isReplace=true clears, isReplace=false
+		// writes nothing. (Non-null, non-map literals are rejected earlier as
+		// a TypeError in the semantic-analysis pass.)
+		return NewSetAllPropertiesFromMap(entityVar, "{}", isReplace, child)
 	default:
 		return NewSetAllPropertiesFromMap(entityVar, value.String(), isReplace, child)
 	}
