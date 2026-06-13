@@ -174,6 +174,15 @@ be checked in a single test body with all failures accumulated.
 BFS from `src` and returns `map[graph.NodeID]int` for use with
 `AssertDistanceBound`.
 
+Each checker is exercised on real generator output by
+`internal/shapegen/invariants_battery_test.go` (the four topology checkers
+run on known-topology shapes — path, even cycle, star, directed path,
+balanced binary tree; `AssertDistanceBound` runs on a unit-weighted path,
+since the shapegen catalogue uses a sentinel edge weight of 0). A meta-test,
+`internal/invariants.TestInvariantsHasExternalImporter`, fails if the package
+ever loses its last external consumer, so the checkers cannot silently revert
+to paper coverage.
+
 ---
 
 ## Fault-injection packages
