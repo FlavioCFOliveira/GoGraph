@@ -29,6 +29,16 @@
 //	                 shrunk to zero on disk). Recovery must reconstruct
 //	                 the full state from the self-sufficient snapshot
 //	                 alone (the WAL is empty).
+//
+//	recovery.snapshot-promote-post-rename-pre-fsync
+//	               — builds the interrupted-publish on-disk state (a
+//	                 stranded snapshot.bak with the live snapshot name
+//	                 absent) and then runs recovery, which crashes AFTER
+//	                 it renames the backup back onto the live name but
+//	                 BEFORE it fsyncs the parent directory. Recovery from
+//	                 the resulting artefacts must reconstruct the full
+//	                 committed state — the promotion is idempotent and
+//	                 crash-safe across a second crash at this point.
 package main
 
 import (
@@ -45,6 +55,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashinject"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
+	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -89,6 +100,8 @@ func run() int {
 		runWALMidFrame(dir)
 	case "checkpoint.post-snapshot-pre-truncate", "checkpoint.mid-truncate":
 		runCheckpointCrash(dir, scenario)
+	case "recovery.snapshot-promote-post-rename-pre-fsync":
+		runRecoveryPromoteCrash(dir)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
 		return 1
@@ -183,6 +196,114 @@ func runCheckpointCrash(dir, scenario string) {
 	// Reached only on the non-crash self-test path
 	// (GOGRAPH_CRASH_AT != scenario).
 	fmt.Printf("runCheckpointCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
+}
+
+// runRecoveryPromoteCrash builds the interrupted-publish on-disk state
+// and then drives recovery.Open, which crashes at the
+// recovery.snapshot-promote-post-rename-pre-fsync breakpoint: AFTER the
+// stranded snapshot backup (snapshot.bak) has been renamed back onto the
+// live snapshot name but BEFORE recovery fsyncs the parent directory to
+// make that rename durable.
+//
+// The setup mirrors runCheckpointCrash so the snapshot is self-sufficient
+// (WithMapperCodec persists the int64 mapper): it commits the seed
+// workload, checkpoints it (the WAL prefix is truncated, so the seed data
+// then lives ONLY in the snapshot), commits one WAL-only "post" edge,
+// closes the WAL, then stages the crash window by archiving the live
+// snapshot to snapshot.bak with the live name absent and a stale staging
+// directory stranded — exactly the state recovery's interrupted-publish
+// repair promotes from.
+//
+// On recovery the promotion rename runs, the breakpoint SIGKILLs the
+// process, and the artefacts are left in GOGRAPH_CRASH_DIR. The parent
+// test re-runs recovery over them and asserts every committed transaction
+// (checkpointed seed + WAL-only post) survives — recovery is idempotent
+// and crash-safe across the promotion point, the second-crash-during-
+// recovery property the parent-dir fsync hardens.
+func runRecoveryPromoteCrash(dir string) {
+	walPath := filepath.Join(dir, "wal")
+	snapDir := filepath.Join(dir, "snapshot")
+
+	w, err := wal.Open(walPath)
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+
+	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	opts := txn.Options[int64, int64]{
+		Codec:       txn.NewInt64Codec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	}
+	store := txn.NewStoreWithOptions[int64, int64](g, w, opts)
+
+	tx := store.Begin()
+	for _, e := range checkpointSeedEdges {
+		if err := tx.AddEdge(e.src, e.dst, e.weight); err != nil {
+			log.Fatalf("AddEdge(%d->%d): %v", e.src, e.dst, err)
+		}
+	}
+	if err := tx.SetNodeLabel(1, "Root"); err != nil {
+		log.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := tx.SetNodeProperty(2, "weight", lpg.Int64Value(42)); err != nil {
+		log.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Fatalf("Commit(seed): %v", err)
+	}
+
+	// Checkpoint: self-sufficient snapshot written, WAL truncated. The seed
+	// workload now lives ONLY in snapshot/.
+	var mu sync.Mutex
+	cp := checkpoint.New[int64, int64](
+		checkpoint.Config{Dir: dir},
+		g, w, &mu,
+		checkpoint.WithMapperCodec[int64, int64](store.Codec()),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cp.Start(ctx)
+	if err := cp.Trigger(); err != nil {
+		cp.Stop()
+		cancel()
+		log.Fatalf("checkpoint Trigger: %v", err)
+	}
+	cp.Stop()
+	cancel()
+
+	// One WAL-only "post" edge committed after the checkpoint.
+	txPost := store.Begin()
+	if err := txPost.AddEdge(3, 4, 400); err != nil {
+		log.Fatalf("AddEdge(post 3->4): %v", err)
+	}
+	if err := txPost.Commit(); err != nil {
+		log.Fatalf("Commit(post): %v", err)
+	}
+	if err := w.Close(); err != nil {
+		log.Fatalf("wal.Close: %v", err)
+	}
+
+	// Stage the interrupted-publish crash window: live snapshot archived to
+	// snapshot.bak, live name absent, stale staging directory stranded.
+	//nolint:gosec // G703: snapDir derives from GOGRAPH_CRASH_DIR (the crash harness) or MkdirTemp, not user input; this is a test-only helper binary.
+	if err := os.Rename(snapDir, snapDir+".bak"); err != nil {
+		log.Fatalf("stage crash: rename live snapshot to backup: %v", err)
+	}
+	//nolint:gosec // G703: snapDir derives from GOGRAPH_CRASH_DIR (the crash harness) or MkdirTemp, not user input; this is a test-only helper binary.
+	if err := os.MkdirAll(snapDir+".tmp", 0o750); err != nil {
+		log.Fatalf("stage crash: create stale staging dir: %v", err)
+	}
+
+	// Recovery promotes the backup and, at the breakpoint between the
+	// promotion rename and the parent-dir fsync, SIGKILLs the process under
+	// the crash harness. On the non-crash self-test path it returns
+	// normally.
+	if _, err := recovery.Open[int64, int64](dir, recovery.OptionsFromTxn(opts)); err != nil {
+		log.Fatalf("recovery.Open: %v", err)
+	}
+
+	// Reached only on the non-crash self-test path
+	// (GOGRAPH_CRASH_AT != recovery.snapshot-promote-post-rename-pre-fsync).
+	fmt.Println("runRecoveryPromoteCrash: completed without crash")
 }
 
 // runWALMidFrame writes one complete WAL frame to a file in dir,

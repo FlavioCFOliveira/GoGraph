@@ -36,6 +36,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -863,8 +864,33 @@ func openCodec[N comparable, W any](
 				return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())},
 					fmt.Errorf("recovery: promote snapshot backup: %w", renErr)
 			}
-			// Promoted; the normal snapshot load below proceeds as if the
-			// publish had never been interrupted.
+			// Crash-injection point sitting between the promotion rename and
+			// the parent-dir fsync below. A second crash here (after the
+			// rename, before the fsync) is the exact window the fsync exists
+			// to close; the crash battery drives it via this breakpoint and
+			// asserts recovery is idempotent and loses nothing across it.
+			// Compiled out (no-op) in every released binary.
+			crashpoint.Breakpoint("recovery.snapshot-promote-post-rename-pre-fsync")
+			// Make the promotion rename durable: fsync the parent directory
+			// so the promoted snapshot's directory entry survives a crash
+			// within the kernel writeback window. The checkpoint that
+			// produced this stranded backup has already truncated the WAL
+			// prefix, so the snapshot is the only durable copy of the
+			// pre-checkpoint state — losing the rename's dirent would
+			// silently discard every checkpointed transaction. This mirrors
+			// the parent-dir fsync the snapshot publish path issues after
+			// its own publish rename. No-op on platforms without a
+			// directory-fsync primitive (Windows).
+			if fsErr := parentDirFsync(snapDir); fsErr != nil {
+				// Fail-stop: the promotion is not durable, so continuing
+				// risks the silent-total-loss outcome on a subsequent crash.
+				metrics.IncCounter("store.recovery.openCodec.errors", 1)
+				return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())},
+					fmt.Errorf("recovery: fsync promoted snapshot parent dir: %w", fsErr)
+			}
+			metrics.IncCounter("store.recovery.snapshot.promoteParentFsync", 1)
+			// Promoted and made durable; the normal snapshot load below
+			// proceeds as if the publish had never been interrupted.
 		}
 	}
 
