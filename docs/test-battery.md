@@ -262,6 +262,7 @@ deterministically torn state for the parent to inspect.
 | `wal.mid-frame` | helper | Writes one complete WAL frame, appends a partial second-frame header, then SIGKILL; `wal.Reader` must report `ErrTornFrame` |
 | `checkpoint.post-snapshot-pre-truncate` | `store/checkpoint` | Commits an int64-keyed workload, then drives a codec-aware checkpoint that crashes after the self-sufficient snapshot is durable but before the WAL is truncated; recovery rebuilds state from the snapshot plus the still-intact WAL |
 | `checkpoint.mid-truncate` | `store/wal` | Same workload and checkpoint, but the crash lands mid-truncation (the WAL file is already shrunk to zero); recovery rebuilds state from the self-sufficient snapshot alone |
+| `recovery.snapshot-promote-post-rename-pre-fsync` | `store/recovery` | Commits and checkpoints a self-sufficient int64-keyed snapshot, then stages the interrupted-publish state (the live snapshot archived to `snapshot.bak`) and drives `recovery.Open`, which crashes after promoting `.bak` back onto the live snapshot name via rename but before the parent-directory fsync; a second recovery must still observe the promoted snapshot (the rename and its dirent are durably re-promoted) — guards A1-F4 (#1454) |
 
 ### `internal/subproc`
 
@@ -414,4 +415,4 @@ and update the "Last reviewed" footer at the bottom of this file.
 
 ---
 
-*Last reviewed: 2026-06-12 against commit `ec76e6f`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
+*Last reviewed: 2026-06-13 against commit `f72fa2b`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
