@@ -215,6 +215,17 @@ func fnCount(args []expr.Value) (expr.Value, error) {
 // Graph accessors
 // ─────────────────────────────────────────────────────────────────────────────
 
+// fnID implements the Cypher id() scalar: the integer identity of a node or
+// relationship (NULL for NULL input).
+//
+// Stability contract: a node's id() is its interned NodeID and is STABLE across
+// a store reopen (persisted via the mapper). A relationship's id() is its
+// positional index in the current CSR adjacency — unique and forward/reverse
+// consistent WITHIN a query (it doubles as the relationship-isomorphism key) —
+// but NOT guaranteed stable across a reopen or CSR rebuild. The durable
+// per-edge handle is intentionally not surfaced here, and elementId() is not
+// implemented. openCypher treats the concrete id() value as
+// implementation-defined; the TCK does not constrain it.
 func fnID(args []expr.Value) (expr.Value, error) {
 	if err := requireArity("id", args, 1); err != nil {
 		return nil, err

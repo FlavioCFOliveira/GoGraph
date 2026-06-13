@@ -632,6 +632,28 @@ The openCypher TCK execution suite is fully green: all 3897 scenarios pass
 (100%), enforced by `tckExecutionBaseline` in `cypher/tck/runner_test.go`. For
 the full divergence taxonomy, see [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md).
 
+### Element identity: `id()` and `elementId()`
+
+`id()` returns an integer identifier for a node or relationship, with an
+important stability asymmetry between the two:
+
+- **Node `id()` is stable across a store reopen** — it is the node's interned
+  `NodeID`, persisted via the snapshot/WAL mapper, so a node resolves to the
+  same `id()` after recovery.
+- **Relationship `id()` is stable only *within* a single graph snapshot** — it
+  is the relationship's positional index in the current CSR adjacency (the same
+  value the engine uses as the relationship-isomorphism key to reject a repeated
+  edge within a query). It is **not** guaranteed to survive a store reopen or a
+  CSR rebuild (for example, a relationship delete can renumber positions). Do
+  **not** persist a relationship `id()` and expect to resolve the same
+  relationship after a restart.
+- **`elementId()` is not implemented.**
+
+Both values are valid identifiers *within* a query — `id(r)` is unique per
+relationship in a result and consistent whether the edge is traversed forwards
+or backwards. openCypher treats the concrete `id()` value, and its cross-reopen
+stability, as implementation-defined; the TCK does not constrain it.
+
 ---
 
 ## See also
@@ -660,4 +682,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-06-12 against commit `ec76e6f`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-13 against commit `37adcc2`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
