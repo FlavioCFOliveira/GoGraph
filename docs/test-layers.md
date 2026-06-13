@@ -16,6 +16,24 @@ There is no way to run a deeper layer alone, by design — a regression
 in the short layer must surface before the longer suites are even
 considered.
 
+### Enforcing the short-layer budget
+
+The `< 60 s per package` budget is enforced, not merely documented. The
+`timing-budget` CI job (`.github/workflows/ci.yml`) runs the short layer
+with `-json` and pipes it through `scripts/pkg_time_budget.sh`, which
+parses per-package wall-clock and:
+
+- emits a `::warning::` for any package over `SOFT_BUDGET` (60 s) so creep
+  is visible in the job summary before it becomes a breach, and
+- fails the job for any package over `HARD_BUDGET` (240 s, i.e. 4× the
+  budget) — a genuine runaway, not a package merely near the line on a slow
+  runner.
+
+Run it locally with `make test-short-timings` (override `SOFT_BUDGET` /
+`HARD_BUDGET` to tighten the check). When a package approaches the budget,
+split it or move its slow cases to the `soak` layer rather than relaxing
+the threshold.
+
 ## How a test selects its layer
 
 Two mechanisms are supported. Prefer the first whenever practical.

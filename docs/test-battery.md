@@ -294,12 +294,15 @@ in `TestMain` to gate conditional generation logic.
 
 | Layer | Build tag | Env var | Make target | Budget |
 |---|---|---|---|---|
-| **short** | _(default)_ | — | `make test-short` | < 60 s/pkg |
+| **short** | _(default)_ | — | `make test-short` | < 60 s/pkg (enforced) |
 | **soak** | `-tags=soak` | `SOAK_FULL=1` | `make test-soak` | minutes |
 | **nightly** | `-tags=nightly` | `GOGRAPH_NIGHTLY=1` | `make test-nightly` | hours |
 
 Each layer is a strict superset: `nightly` always includes `soak` and
-`short`. See [docs/test-layers.md](test-layers.md) for the full
+`short`. The short-layer `< 60 s/pkg` budget is enforced by the
+`timing-budget` CI job via `make test-short-timings`
+(`scripts/pkg_time_budget.sh`): a warning above 60 s/pkg, a hard failure
+above 240 s/pkg. See [docs/test-layers.md](test-layers.md) for the full
 specification, CI workflow table, and Makefile targets.
 
 ### Runnable godoc examples
