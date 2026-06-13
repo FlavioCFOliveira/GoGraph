@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -37,9 +38,17 @@ func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
 // HopcroftKarpCtx is the context-aware variant of [HopcroftKarp].
 // ctx.Err() is checked at every phase boundary (BFS-layer + DFS-augment
 // pair); on cancellation returns (zero Matching, wrapped ctx.Err()).
+//
+// Returns [ErrInvalidInput] (wrapped) when nLeft is negative or exceeds
+// c.MaxNodeID(), which would cause an index-out-of-range panic in the inner
+// loop (the sibling [HungarianCtx] validates its analogous bound the same way).
 func HopcroftKarpCtx[W any](ctx context.Context, c *csr.CSR[W], nLeft int) (Matching, error) {
 	defer metrics.Time("search.HopcroftKarpCtx")()
 	maxID := int(c.MaxNodeID())
+	if nLeft < 0 || nLeft > maxID {
+		return Matching{}, fmt.Errorf("search: HopcroftKarp: nLeft %d exceeds MaxNodeID %d: %w",
+			nLeft, maxID, ErrInvalidInput)
+	}
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 

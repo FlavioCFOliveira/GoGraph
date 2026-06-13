@@ -1,6 +1,7 @@
 package search
 
 import (
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"testing"
@@ -214,5 +215,57 @@ func TestHopcroftKarp_SingleEdge(t *testing.T) {
 	m := HopcroftKarp(c, int(c.MaxNodeID()))
 	if m.Size != 1 {
 		t.Fatalf("single-edge bipartite matching = %d, want 1", m.Size)
+	}
+}
+
+// TestHopcroftKarp_nLeftExceedsMaxNodeID_ReturnsErrInvalidInput verifies that
+// passing nLeft > MaxNodeID() returns ErrInvalidInput instead of panicking.
+// Regression gate for the index-out-of-range panic in bfsLayer (task #1433).
+func TestHopcroftKarp_nLeftExceedsMaxNodeID_ReturnsErrInvalidInput(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	if err := a.AddEdge("L", "R", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	c := csr.BuildFromAdjList(a)
+	maxID := int(c.MaxNodeID())
+
+	cases := []struct {
+		name  string
+		nLeft int
+	}{
+		{"MaxNodeID+1", maxID + 1},
+		{"MaxNodeID+2", maxID + 2},
+		{"large", 1_000_000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := HopcroftKarpCtx(t.Context(), c, tc.nLeft)
+			if err == nil {
+				t.Fatalf("nLeft=%d: expected error, got nil", tc.nLeft)
+			}
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("nLeft=%d: got %v, want wrapping ErrInvalidInput", tc.nLeft, err)
+			}
+		})
+	}
+}
+
+// TestHopcroftKarp_nLeftNegative_ReturnsErrInvalidInput verifies that a
+// negative nLeft is also rejected (task #1433).
+func TestHopcroftKarp_nLeftNegative_ReturnsErrInvalidInput(t *testing.T) {
+	t.Parallel()
+	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	if err := a.AddEdge("L", "R", struct{}{}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	c := csr.BuildFromAdjList(a)
+	_, err := HopcroftKarpCtx(t.Context(), c, -1)
+	if err == nil {
+		t.Fatal("nLeft=-1: expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("nLeft=-1: got %v, want wrapping ErrInvalidInput", err)
 	}
 }
