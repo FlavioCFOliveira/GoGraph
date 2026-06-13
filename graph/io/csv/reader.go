@@ -8,6 +8,7 @@
 package csv
 
 import (
+	"bufio"
 	"context"
 	"encoding/csv"
 	"errors"
@@ -110,7 +111,15 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 	if opts.MaxBytes > 0 {
 		r = newLimitReader(r, opts.MaxBytes)
 	}
-	c := csv.NewReader(r)
+	// Strip a leading UTF-8 BOM (EF BB BF), emitted by Excel and other
+	// Windows spreadsheet tools, before handing the stream to encoding/csv.
+	// Left in place it would prefix the first node id with U+FEFF, so the
+	// same logical id written without a BOM would silently fail to match.
+	br := bufio.NewReader(r)
+	if bom, _ := br.Peek(3); len(bom) == 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF {
+		_, _ = br.Discard(3)
+	}
+	c := csv.NewReader(br)
 	c.Comma = opts.Delimiter
 	c.Comment = opts.Comment
 	c.FieldsPerRecord = -1
