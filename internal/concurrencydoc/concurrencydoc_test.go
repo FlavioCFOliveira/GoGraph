@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-// baselineMax is the maximum number of exported types (across the six public
-// trees scanned by Scan) that may carry NO concurrency clause. It is the
+// baselineMax is the maximum number of exported types (across every public
+// package scanned by Scan — the whole repository minus the non-public
+// excludedTopLevel dirs) that may carry NO concurrency clause. It is the
 // RATCHET: it was measured immediately after task #1400 documented the 15
 // heavy-hitter types, and it must only ever be lowered.
 //

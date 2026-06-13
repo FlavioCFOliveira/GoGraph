@@ -29,16 +29,21 @@ import (
 	"strings"
 )
 
-// scanTrees lists the source-tree roots, relative to the repository root,
-// whose packages the gate scans. These are exactly the six public trees
-// named by the CLAUDE.md concurrency mandate.
-var scanTrees = []string{
-	"graph",
-	"store",
-	"cypher",
-	"bolt",
-	"search",
-	"ds",
+// excludedTopLevel lists repository top-level directories whose packages are
+// NOT part of the public library API, so they are excluded from the
+// concurrency-doc scan. Everything else under the repository root is treated
+// as public and IS scanned — deriving the universe this way (rather than the
+// old hardcoded six-tree list) means a NEW top-level public package, e.g. the
+// `metrics` package the old list missed, is covered automatically. The
+// invariant "scanned packages == public packages from `go list`" is verified
+// by TestScanUniverseMatchesGoList.
+var excludedTopLevel = map[string]struct{}{
+	"internal": {}, // test/CI support, not public API
+	"examples": {}, // runnable examples, not library API
+	"cmd":      {}, // command binaries, not library API
+	"bench":    {}, // benchmark harnesses, not library API
+	"dist":     {}, // build artefacts
+	"bin":      {}, // build artefacts
 }
 
 // skipDirComponents lists path components that mark a directory whose
@@ -100,6 +105,13 @@ func (t TypeInfo) Qualified() string {
 type ScanResult struct {
 	// Types holds every exported type discovered, sorted by Qualified().
 	Types []TypeInfo
+	// Packages holds the repository-relative import path (slash-separated,
+	// e.g. "graph/lpg", "metrics", or "." for the module root) of every
+	// scanned package — that is, every non-excluded directory that contains
+	// at least one non-test .go file. It records the scan's UNIVERSE
+	// independently of whether a package declared exported types, so the gate
+	// can prove its universe matches the public-package set. Sorted.
+	Packages []string
 	// SkippedDirs records directories that failed to parse and were
 	// skipped (with the reason), so the scan never panics on an
 	// unparseable tree and the test can surface the skip.
@@ -160,8 +172,11 @@ func RepoRoot(start string) (string, error) {
 }
 
 // Scan enumerates every exported type in every non-generated, non-test
-// package under the six public trees rooted at repoRoot, classifying each
-// as documented-for-concurrency or not.
+// public package rooted at repoRoot, classifying each as
+// documented-for-concurrency or not. The universe is the whole repository
+// minus the excludedTopLevel directories (internal/examples/cmd/bench/…) and
+// the skipDirComponents (gen/testdata), so any public package — present or
+// future — is covered, not just the historical six trees.
 //
 // The scan never panics: a directory whose Go files fail to parse is skipped
 // and recorded in ScanResult.SkippedDirs rather than aborting the whole scan.
@@ -169,40 +184,39 @@ func Scan(repoRoot string) (*ScanResult, error) {
 	res := &ScanResult{}
 	seen := make(map[string]struct{}) // qualified name -> dedup guard
 
-	for _, tree := range scanTrees {
-		treeRoot := filepath.Join(repoRoot, tree)
-		if _, err := os.Stat(treeRoot); err != nil {
-			// A tree that does not exist is not an error: the layout may
-			// change. Skip it.
-			continue
+	walkErr := filepath.WalkDir(repoRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// Record and continue; do not abort the whole walk.
+			res.SkippedDirs = append(res.SkippedDirs, fmt.Sprintf("%s: walk error: %v", path, err))
+			return nil //nolint:nilerr // a per-entry walk error must not abort the scan
 		}
-		walkErr := filepath.WalkDir(treeRoot, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				// Record and continue; do not abort the whole walk.
-				res.SkippedDirs = append(res.SkippedDirs, fmt.Sprintf("%s: walk error: %v", path, err))
-				return nil //nolint:nilerr // a per-entry walk error must not abort the scan
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			base := d.Name()
-			if _, skip := skipDirComponents[base]; skip {
-				return filepath.SkipDir
-			}
-			if strings.HasPrefix(base, ".") && path != treeRoot {
-				return filepath.SkipDir
-			}
-			scanPackageDir(repoRoot, path, seen, res)
+		if !d.IsDir() {
 			return nil
-		})
-		if walkErr != nil {
-			return nil, fmt.Errorf("concurrencydoc: walking %q: %w", treeRoot, walkErr)
 		}
+		base := d.Name()
+		// At the repository root, prune the non-public top-level directories.
+		if filepath.Dir(path) == repoRoot {
+			if _, excluded := excludedTopLevel[base]; excluded {
+				return filepath.SkipDir
+			}
+		}
+		if _, skip := skipDirComponents[base]; skip {
+			return filepath.SkipDir
+		}
+		if strings.HasPrefix(base, ".") && path != repoRoot {
+			return filepath.SkipDir
+		}
+		scanPackageDir(repoRoot, path, seen, res)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("concurrencydoc: walking %q: %w", repoRoot, walkErr)
 	}
 
 	sort.Slice(res.Types, func(i, j int) bool {
 		return res.Types[i].Qualified() < res.Types[j].Qualified()
 	})
+	sort.Strings(res.Packages)
 	sort.Strings(res.SkippedDirs)
 	return res, nil
 }
@@ -255,6 +269,11 @@ func scanPackageDir(repoRoot, dir string, seen map[string]struct{}, res *ScanRes
 	if strings.HasSuffix(docPkg.Name, "_test") {
 		return
 	}
+
+	// Record the package in the scanned universe (independently of whether it
+	// declares exported types) so the gate can prove its universe matches the
+	// public-package set from `go list`.
+	res.Packages = append(res.Packages, rel)
 
 	pkgDocHasMarker := hasConcurrencyMarker(docPkg.Doc)
 	for _, t := range docPkg.Types {
