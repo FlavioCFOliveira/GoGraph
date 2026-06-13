@@ -47,6 +47,25 @@ const DefaultMaxBytes int64 = 1 << 30 // 1 GiB
 // so allocation stays bounded.
 var ErrInputTooLarge = errors.New("jsonl: input exceeds maximum size")
 
+// ErrLineTooLong is returned when a single JSON-Lines record exceeds the
+// 16 MiB scanner token limit. It wraps the underlying [bufio.ErrTooLong]
+// so callers can distinguish a single over-long line (this sentinel) from
+// the aggregate byte cap ([ErrInputTooLarge]) with [errors.Is]; the
+// condition is bounded and non-silent.
+var ErrLineTooLong = errors.New("jsonl: line exceeds maximum size")
+
+// translateScanErr maps the [bufio.Scanner] "token too long" error to the
+// typed [ErrLineTooLong] sentinel so callers can match it with
+// [errors.Is]. Every other error — including the byte-cap
+// [ErrInputTooLarge] surfaced through limitReader, and [io.EOF] — passes
+// through unchanged.
+func translateScanErr(err error) error {
+	if errors.Is(err, bufio.ErrTooLong) {
+		return fmt.Errorf("%w: %w", ErrLineTooLong, err)
+	}
+	return err
+}
+
 // Record is the wire shape of a JSON-Lines event.
 type Record struct {
 	Type   string `json:"type"`
@@ -151,7 +170,7 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, max
 	}
 	if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
 		metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
-		return nil, rows, err
+		return nil, rows, translateScanErr(err)
 	}
 	return a, rows, nil
 }
@@ -265,7 +284,7 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config
 	}
 	if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
 		metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
-		return nil, rows, err
+		return nil, rows, translateScanErr(err)
 	}
 	return g, rows, nil
 }
