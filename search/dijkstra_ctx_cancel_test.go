@@ -99,9 +99,23 @@ func TestDijkstraCtx_Cancel_DuringTraversal(t *testing.T) {
 	}
 }
 
-// TestDijkstraCtx_Cancel_LargeGraph is the soak-layer variant. It
-// builds a 1 M-node directed path (larger than any CPU L3 cache) and
-// verifies that cancellation is honoured within 50 ms.
+// TestDijkstraCtx_Cancel_LargeGraph is the soak-layer variant. It builds a
+// 1 M-node directed path (larger than any CPU L3 cache) and verifies that
+// cancellation is honoured at scale: the traversal aborts at the
+// deterministic ctx.Err() poll boundary rather than scanning all 1 M nodes.
+//
+// It reuses the cancelAfterFirstCheck mechanism of the mid-traversal variant
+// — deterministic, with no dependence on wall-clock timing or goroutine
+// scheduling. The earlier version asserted shutdown within an absolute 50 ms
+// window; that wall-clock bound flaked under -race on loaded CI runners
+// (observed: 386 ms > 50 ms), failing the Nightly job for a scheduling
+// artefact rather than a real regression. Promptness is now guaranteed
+// structurally: cancelAfterFirstCheck forces a return at the second poll
+// (~8192 pops), independent of graph size, so a regression that ignored
+// cancellation would scan all 1 M nodes and return a nil error — caught by
+// the errors.Is check. The generous wall-clock ceiling is only a
+// belt-and-braces guard against such a runaway, set far above any plausible
+// scheduling jitter so it cannot itself flake.
 func TestDijkstraCtx_Cancel_LargeGraph(t *testing.T) {
 	testlayers.RequireSoak(t)
 	t.Parallel()
@@ -109,12 +123,7 @@ func TestDijkstraCtx_Cancel_LargeGraph(t *testing.T) {
 	const n = 1_000_000
 	c := buildDirectedPath(n)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(1 * time.Millisecond)
-		cancel()
-	}()
-	defer cancel()
+	ctx := &cancelAfterFirstCheck{Context: context.Background()}
 
 	start := time.Now()
 	_, err := DijkstraCtx(ctx, c, 0)
@@ -123,8 +132,7 @@ func TestDijkstraCtx_Cancel_LargeGraph(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	const maxShutdown = 50 * time.Millisecond
-	if elapsed > maxShutdown {
-		t.Fatalf("shutdown too slow: %v > %v", elapsed, maxShutdown)
+	if elapsed > 30*time.Second {
+		t.Fatalf("cancellation ignored: 1 M-node traversal not aborted (%v)", elapsed)
 	}
 }
