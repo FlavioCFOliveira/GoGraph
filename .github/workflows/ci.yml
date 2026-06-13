@@ -171,7 +171,18 @@ jobs:
         # no µs/ms/ns token in the diff output.  CSV parsing is format-stable.
         # Threshold is +10 %: a PR must not regress a headline benchmark by
         # more than 10 % relative to its merge base.
-        run: bash scripts/bench_gate.sh /tmp/bench-base.txt /tmp/bench-head.txt 10 | tee /tmp/bench-diff.txt
+        #
+        # shell: bash + `set -o pipefail` are explicit, not implicit: the
+        # `gate | tee` shape masks the gate's exit code under any shell that
+        # does not enable pipefail (tee always exits 0). GitHub's default
+        # Linux/macOS run shell happens to set pipefail today, but a later
+        # `defaults.run.shell:` or step-level `shell:` without it would
+        # silently un-gate the regression check. This mirrors the discipline
+        # nightly.yml applies for the same reason (see 9a52bc6).
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/bench_gate.sh /tmp/bench-base.txt /tmp/bench-head.txt 10 | tee /tmp/bench-diff.txt
       - name: Upload diff
         if: always()
         uses: actions/upload-artifact@v7
