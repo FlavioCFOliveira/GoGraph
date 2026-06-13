@@ -94,9 +94,17 @@ test-crashinject: ## Run crash-injection battery (requires gograph_crashinject b
 		./store/recovery/...
 
 .PHONY: check-soak-build
-check-soak-build: ## Verify all soak-tagged files compile and pass go vet under -tags=soak
+check-soak-build: ## Verify soak- AND nightly-tagged files compile and vet clean (PR-time guard for the deferred test layers)
+	# The short layer (go test ./..., no tags) never compiles soak/nightly
+	# files, so a compile break in those ACID-gating tests would otherwise
+	# surface only in the next scheduled run, decoupled from the offending PR.
+	# -tags=soak covers `soak` and `soak || nightly` files; -tags=soak,nightly
+	# additionally covers `nightly`-only files. Running both also catches any
+	# `soak && !nightly` file.
 	$(GO) build -tags=soak $(PACKAGES)
 	$(GO) vet -tags=soak $(PACKAGES)
+	$(GO) build -tags=soak,nightly $(PACKAGES)
+	$(GO) vet -tags=soak,nightly $(PACKAGES)
 
 .PHONY: cover
 cover: ## Run tests with coverage

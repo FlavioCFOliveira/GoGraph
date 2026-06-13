@@ -59,6 +59,13 @@ jobs:
         run: go build ./...
       - name: Vet
         run: go vet ./...
+      - name: Compile soak/nightly layers (deferred-layer guard)
+        # The short layer compiles none of the soak/nightly-tagged test files,
+        # so a compile break in those ACID-gating tests would otherwise pass
+        # every PR gate and surface only in the next scheduled run. This step
+        # builds and vets the module under -tags=soak and -tags=soak,nightly
+        # so the break is caught on the PR that introduces it.
+        run: make check-soak-build
       - name: Test (short layer + race)
         run: make test-short
       - name: TCK conformance report

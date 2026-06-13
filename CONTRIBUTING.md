@@ -72,6 +72,14 @@ Every change must pass `make ci`, which runs:
 - the coverage gate (`cover-gate`): **≥ 85 % aggregate** and
   **≥ 75 % per-package** statement coverage
 
+In addition, PR CI compiles the deferred test layers via
+`make check-soak-build` (build + `go vet` under `-tags=soak` and
+`-tags=soak,nightly`). The short layer never compiles `soak`/`nightly`-tagged
+files, so without this guard a compile break in those long-running ACID and
+crash-safety tests would pass every PR gate and surface only in the next
+scheduled run. Run `make check-soak-build` locally before opening a PR that
+touches any `//go:build soak` or `//go:build nightly` file.
+
 Benchmarks must be run for hot-path changes; the per-package
 README or task summary should record the measured numbers.
 
