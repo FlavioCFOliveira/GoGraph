@@ -175,7 +175,7 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 	goreleaser release --snapshot --clean --skip=publish
 
 .PHONY: release-preflight
-release-preflight: ## Pre-flight checks that gate `make release` — CHANGELOG entry, release-notes file, lint, coverage, bench regression
+release-preflight: ## Canonical release gate (both `make release` and release.yml call this) — release-accuracy + soak + coverage + bench + the full correctness gate (scripts/pre-release.sh)
 	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@echo "release-preflight: VERSION=$$VERSION"
 	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
@@ -195,8 +195,6 @@ release-preflight: ## Pre-flight checks that gate `make release` — CHANGELOG e
 	  || { echo "release-preflight: docs/benchmarks/$$VERSION.md does not exist — record the per-release benchmark/load-test numbers first"; exit 1; }
 	@echo "release-preflight: checking a green soak run exists for the release commit…"
 	@VERSION="$$VERSION" bash scripts/release_soak_gate.sh
-	@echo "release-preflight: running golangci-lint…"
-	@$(MAKE) lint
 	@echo "release-preflight: running coverage gate…"
 	@$(MAKE) cover-gate
 	@if [ -x scripts/run_headline_bench.sh ]; then \
@@ -205,6 +203,8 @@ release-preflight: ## Pre-flight checks that gate `make release` — CHANGELOG e
 	else \
 	  echo "release-preflight: scripts/run_headline_bench.sh not present — skipping bench gate"; \
 	fi
+	@echo "release-preflight: running the correctness gate (scripts/pre-release.sh: vet + build + test -race + golangci-lint + TCK)…"
+	@bash scripts/pre-release.sh "$$VERSION"
 	@echo "release-preflight: all checks passed"
 
 .PHONY: release

@@ -162,11 +162,18 @@ git push origin vX.Y.Z
 ```
 
 The `Release` workflow at `.github/workflows/release.yml` triggers
-on the tag push and runs goreleaser with `GITHUB_TOKEN` from the
-default actions secret. The result is a **draft** release on
+on the tag push and runs `VERSION=<tag> make release-preflight` —
+**the same canonical gate the local `make release` path runs** (see the
+gate list below) — before invoking goreleaser with `GITHUB_TOKEN` from
+the default actions secret. The result is a **draft** release on
 GitHub — review the artefact list (source tarballs, soak-harness
 binaries for linux/darwin × amd64/arm64, checksums) and publish
 manually.
+
+Both the workflow and the local fallback share one source of truth —
+`make release-preflight` — so neither path can publish while bypassing a
+release gate. (Before #1444 the workflow ran only `scripts/pre-release.sh`
+and silently skipped the release-accuracy and soak gates.)
 
 ## Local fallback
 
@@ -179,18 +186,27 @@ VERSION=vX.Y.Z make release
 ```
 
 The local `release` target requires `goreleaser` on the PATH and a
-clean working tree. It also depends on the `release-preflight` target,
-which enforces the following gates BEFORE goreleaser is invoked:
+clean working tree. It also depends on the `release-preflight` target —
+the single canonical gate also invoked by `.github/workflows/release.yml`
+— which enforces ALL of the following BEFORE goreleaser is invoked:
 
 1. `VERSION` is set.
 2. CHANGELOG.md contains a `## [VERSION]` entry (the Unreleased
    section must have been promoted).
 3. release-notes/VERSION.md exists.
-4. `make lint` is clean (golangci-lint).
-5. `make cover-gate` is green (aggregate ≥ 85 %, per-package ≥ 75 %).
-6. `scripts/run_headline_bench.sh` exits zero when present (informational
+4. README.md "Current release" names `VERSION`.
+5. SECURITY.md supported-versions table names `VERSION`'s `vX.Y.x` line.
+6. docs/benchmarks/VERSION.md exists (per-release benchmark/load-test
+   numbers).
+7. A green soak run exists for the release commit
+   (`scripts/release_soak_gate.sh`, #1399).
+8. `make cover-gate` is green (aggregate ≥ 85 %, per-package ≥ 75 %).
+9. `scripts/run_headline_bench.sh` exits zero when present (informational
    per-tag run; the canonical comparison gate is the PR-time
    `benchstat regression gate` in `.github/workflows/ci.yml`).
+10. The correctness gate `scripts/pre-release.sh` passes: `go vet`,
+    `go build`, `go test -race ./...`, `golangci-lint run ./...`, and the
+    TCK conformance check (overall-rate ≥ 90 %).
 
 Each failure exits non-zero with a one-line explanation of what is
 missing. Run `make release-preflight` on its own to dry-run the gates

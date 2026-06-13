@@ -31,14 +31,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # Pre-flight gate: refuse to publish a release if the release
-      # commit fails the same checks the CI workflow enforces on
-      # main. Branch protection on main (documented in
-      # docs/release.md) is the upstream guard; this is the
-      # downstream safety net. The canonical implementation lives in
-      # scripts/pre-release.sh so 'make release' and the release.yml
-      # workflow agree on what the gate actually means.
-      - name: Install golangci-lint (needed by pre-release.sh)
+      # Release gate: refuse to publish unless the release commit passes the
+      # SAME canonical gate the local `make release` path runs —
+      # `make release-preflight`. That target is the single source of truth:
+      # it enforces the release-accuracy checks (CHANGELOG ## [x.y.z],
+      # release-notes/VERSION.md, README current-release, SECURITY.md version
+      # table, docs/benchmarks/VERSION.md), the mandatory soak gate
+      # (release_soak_gate.sh, #1399), the coverage gate, the headline bench
+      # gate, AND the correctness gate (scripts/pre-release.sh: vet + build +
+      # test -race + golangci-lint + TCK). Previously this workflow ran only
+      # pre-release.sh, silently bypassing every accuracy/soak gate added in
+      # cce0bc4 — see #1444.
+      - name: Install golangci-lint (needed by the correctness gate)
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
@@ -49,8 +53,12 @@ jobs:
           # "unknown flag: --version" (run has no --version flag) — that
           # broke the release run.
           install-only: true
-      - name: Pre-release gate (vet + build + test -race + lint + TCK)
-        run: bash scripts/pre-release.sh "${GITHUB_REF_NAME}"
+      - name: Release pre-flight gate (release-accuracy + soak + coverage + bench + correctness)
+        # GITHUB_TOKEN lets release_soak_gate.sh query GitHub Actions for a
+        # green soak run on the release commit via the gh CLI.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: VERSION="${GITHUB_REF_NAME}" make release-preflight
       - name: Install cyclonedx-gomod (SBOM generator)
         run: |
           # Pinned via the @latest indirection plus the lockfile in
