@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -185,6 +186,92 @@ func TestAllKindsRoundtrip_GraphML(t *testing.T) {
 			continue
 		}
 		checkPropValue(t, "GraphML/"+c.key, c.value, got)
+	}
+}
+
+// TestNonFiniteFloats_RoundTripAndLexical verifies that NaN, +Inf, and
+// -Inf float properties round-trip through both encoders, and that GraphML
+// emits the portable xs:double lexical forms (INF / -INF / NaN) rather
+// than Go's non-conformant "+Inf"/"-Inf" text (#1440).
+func TestNonFiniteFloats_RoundTripAndLexical(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		key string
+		val float64
+	}{
+		{"pinf", math.Inf(1)},
+		{"ninf", math.Inf(-1)},
+		{"nan", math.NaN()},
+	}
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := g.AddNode("n"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	for _, c := range cases {
+		if err := g.SetNodeProperty("n", c.key, lpg.Float64Value(c.val)); err != nil {
+			t.Fatalf("SetNodeProperty(%q): %v", c.key, err)
+		}
+	}
+
+	assertFloat := func(t *testing.T, label string, want float64, got lpg.PropertyValue) {
+		t.Helper()
+		if got.Kind() != lpg.PropFloat64 {
+			t.Fatalf("%s: kind = %v, want PropFloat64", label, got.Kind())
+		}
+		gf, _ := got.Float64()
+		switch {
+		case math.IsNaN(want):
+			if !math.IsNaN(gf) {
+				t.Errorf("%s: got %v, want NaN", label, gf)
+			}
+		case gf != want:
+			t.Errorf("%s: got %v, want %v", label, gf, want)
+		}
+	}
+
+	// GraphML: lexical conformance + round-trip.
+	var gbuf bytes.Buffer
+	if err := graphml.WriteWithProps(&gbuf, g); err != nil {
+		t.Fatalf("GraphML WriteWithProps: %v", err)
+	}
+	gout := gbuf.String()
+	for _, form := range []string{"INF", "-INF", "NaN"} {
+		if !strings.Contains(gout, form) {
+			t.Errorf("GraphML output missing xs:double form %q:\n%s", form, gout)
+		}
+	}
+	if strings.Contains(gout, "Inf") { // Go's "+Inf"/"-Inf" both contain "Inf"
+		t.Errorf("GraphML output contains non-portable Go Inf text:\n%s", gout)
+	}
+	g2, _, err := graphml.ReadWithProps(bytes.NewReader(gbuf.Bytes()))
+	if err != nil {
+		t.Fatalf("GraphML ReadWithProps: %v", err)
+	}
+	for _, c := range cases {
+		got, ok := g2.GetNodeProperty("n", c.key)
+		if !ok {
+			t.Errorf("GraphML round-trip: property %q missing", c.key)
+			continue
+		}
+		assertFloat(t, "GraphML/"+c.key, c.val, got)
+	}
+
+	// JSONL: documented contract round-trip (Go strconv string form).
+	var jbuf bytes.Buffer
+	if _, err := jsonl.WriteWithProps(&jbuf, g); err != nil {
+		t.Fatalf("JSONL WriteWithProps: %v", err)
+	}
+	g3, _, err := jsonl.ReadWithProps(strings.NewReader(jbuf.String()), adjlist.Config{Directed: true})
+	if err != nil {
+		t.Fatalf("JSONL ReadWithProps: %v", err)
+	}
+	for _, c := range cases {
+		got, ok := g3.GetNodeProperty("n", c.key)
+		if !ok {
+			t.Errorf("JSONL round-trip: property %q missing", c.key)
+			continue
+		}
+		assertFloat(t, "JSONL/"+c.key, c.val, got)
 	}
 }
 

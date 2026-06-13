@@ -223,6 +223,15 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 // For PropList the value field is a JSON array where each element is a
 // two-element JSON array [kindString, encodedValueString]. Nested lists
 // are encoded recursively.
+//
+// PropFloat64 is written with Go's strconv 'g' format, so the non-finite
+// values appear as the strings "+Inf", "-Inf", and "NaN". Because the
+// value is always carried as a JSON string (never a bare JSON number),
+// this sidesteps JSON's prohibition on non-finite numerics and round-trips
+// losslessly within GoGraph ([decodePropertyValue] parses them back via
+// strconv.ParseFloat). External consumers expecting a numeric float should
+// be aware these three values are non-numeric string tokens; see
+// docs/io.md.
 func encodePropertyValue(pv lpg.PropertyValue) (kind, value string) {
 	switch pv.Kind() {
 	case lpg.PropString:

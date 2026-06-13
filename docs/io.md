@@ -93,6 +93,24 @@ The reader/writer accept the `Record` shape and the writer
 suppresses HTML escaping so the output matches conventional JSON
 tooling.
 
+## Non-finite float properties
+
+Float (`PropFloat64`) property values may be `NaN`, `+Inf`, or `-Inf`.
+The two encoders handle them as follows:
+
+- **GraphML** emits the XML-Schema `xs:double` lexical forms `NaN`,
+  `INF`, and `-INF` inside the `attr.type="double"` `<data>` element, so
+  conformant external parsers (NetworkX, the Java GraphML stack) accept
+  them. The reader parses all three back via `strconv.ParseFloat`.
+- **JSON Lines** carries every float as a JSON *string* (never a bare
+  JSON number), so it is not bound by JSON's prohibition on non-finite
+  numerics. Non-finite values are written with Go's `strconv` form —
+  `"NaN"`, `"+Inf"`, `"-Inf"` — and round-trip losslessly within GoGraph.
+  External consumers reading the value as a numeric float must treat
+  these three tokens specially.
+
+Both encoders round-trip every non-finite value exactly within GoGraph.
+
 ## Tooling compatibility matrix
 
 | Tool                | CSV | GraphML | DOT | JSON Lines |

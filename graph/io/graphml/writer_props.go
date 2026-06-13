@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -94,8 +95,11 @@ func graphMLAttrType(k lpg.PropertyKind) string {
 
 // serialisePropertyValue serialises v to its GraphML text representation.
 // For PropTime: RFC3339Nano. For PropBytes: base64 standard encoding.
-// For PropFloat64: 'g' format preserving NaN/Inf. Other kinds fall back to
-// fmt.Sprintf.
+// For PropFloat64: 'g' format, with the non-finite values rendered as the
+// XML-Schema xs:double lexical forms "INF", "-INF", and "NaN" so that
+// conformant GraphML parsers (NetworkX, the Java stack) accept them — Go's
+// native "+Inf"/"-Inf" text is rejected by xs:double. Other kinds fall
+// back to fmt.Sprintf.
 func serialisePropertyValue(v lpg.PropertyValue) string {
 	switch v.Kind() {
 	case lpg.PropString:
@@ -106,6 +110,14 @@ func serialisePropertyValue(v lpg.PropertyValue) string {
 		return strconv.FormatInt(i, 10)
 	case lpg.PropFloat64:
 		f, _ := v.Float64()
+		switch {
+		case math.IsNaN(f):
+			return "NaN"
+		case math.IsInf(f, 1):
+			return "INF"
+		case math.IsInf(f, -1):
+			return "-INF"
+		}
 		return strconv.FormatFloat(f, 'g', -1, 64)
 	case lpg.PropBool:
 		b, _ := v.Bool()
