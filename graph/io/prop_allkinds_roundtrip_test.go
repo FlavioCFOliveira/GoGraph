@@ -10,6 +10,7 @@ package io_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -184,5 +185,56 @@ func TestAllKindsRoundtrip_GraphML(t *testing.T) {
 			continue
 		}
 		checkPropValue(t, "GraphML/"+c.key, c.value, got)
+	}
+}
+
+// TestControlAndBinaryStrings_NoSilentCorruption verifies that a string
+// property carrying bytes XML 1.0 cannot represent is never silently
+// corrupted to U+FFFD. GraphML must fail fast with the typed
+// graphml.ErrInvalidXMLChar (fail-stop, integrity preserved); JSONL must
+// round-trip the exact bytes whenever they are valid UTF-8 (#1437).
+func TestControlAndBinaryStrings_NoSilentCorruption(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		raw           string
+		jsonlLossless bool // valid UTF-8 → JSONL must round-trip exactly
+	}{
+		{"c0-controls", "ctrl\x01\x02\x1f", true},
+		{"nul-byte", "a\x00b", true},
+		{"invalid-utf8", "bin\xff\xfe", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := buildGraph(t, []propCase{{"payload", lpg.StringValue(tc.raw)}})
+
+			// GraphML: typed error, and never a silent U+FFFD substitution.
+			var gbuf bytes.Buffer
+			err := graphml.WriteWithProps(&gbuf, g)
+			if !errors.Is(err, graphml.ErrInvalidXMLChar) {
+				t.Fatalf("GraphML WriteWithProps err = %v, want ErrInvalidXMLChar", err)
+			}
+			if strings.ContainsRune(gbuf.String(), '�') {
+				t.Errorf("GraphML emitted a U+FFFD substitution: %q", gbuf.String())
+			}
+
+			// JSONL: lossless for valid-UTF-8 inputs.
+			if tc.jsonlLossless {
+				var jbuf bytes.Buffer
+				if _, err := jsonl.WriteWithProps(&jbuf, g); err != nil {
+					t.Fatalf("JSONL WriteWithProps: %v", err)
+				}
+				g2, _, err := jsonl.ReadWithProps(strings.NewReader(jbuf.String()), adjlist.Config{Directed: true})
+				if err != nil {
+					t.Fatalf("JSONL ReadWithProps: %v", err)
+				}
+				got, ok := g2.GetNodeProperty("n", "payload")
+				if !ok {
+					t.Fatal("JSONL round-trip: property payload missing")
+				}
+				checkPropValue(t, "JSONL/"+tc.name, lpg.StringValue(tc.raw), got)
+			}
+		})
 	}
 }

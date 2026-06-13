@@ -5,16 +5,65 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
+
+// ErrInvalidXMLChar is returned by [WriteWithProps] and [WriteWithPropsCtx]
+// when a node id, property key, or string property value contains a
+// character that XML 1.0 cannot represent — the C0 control characters
+// other than tab, newline, and carriage return (U+0000–U+0008, U+000B,
+// U+000C, U+000E–U+001F), or an invalid UTF-8 byte.
+//
+// Go's [encoding/xml] silently substitutes such characters with the
+// Unicode replacement character (U+FFFD), which destroys the original
+// bytes irreversibly. To preserve integrity the writer fails fast with
+// this typed error rather than emitting corrupted output; callers needing
+// to carry arbitrary bytes through a property should use the JSONL
+// encoder, which escapes control characters losslessly, or store the
+// payload as a [lpg.BytesValue].
+var ErrInvalidXMLChar = errors.New("graphml: value contains a character not representable in XML 1.0")
+
+// xmlValidChar reports whether r is in the XML 1.0 Char production, the
+// exact set [encoding/xml] would emit verbatim. Characters outside it are
+// replaced with U+FFFD by the encoder, so the writer rejects them.
+func xmlValidChar(r rune) bool {
+	return r == 0x09 || r == 0x0A || r == 0x0D ||
+		(r >= 0x20 && r <= 0xD7FF) ||
+		(r >= 0xE000 && r <= 0xFFFD) ||
+		(r >= 0x10000 && r <= 0x10FFFF)
+}
+
+// validateXMLText returns [ErrInvalidXMLChar] if s contains any rune that
+// XML 1.0 cannot represent, or an invalid UTF-8 byte (which the encoder
+// would also coerce to U+FFFD). A literal, well-formed U+FFFD already
+// present in s is permitted — it is valid XML and round-trips faithfully.
+func validateXMLText(s string) error {
+	for i, r := range s {
+		if r == utf8.RuneError {
+			// Ranging yields RuneError both for a genuine U+FFFD (3 bytes)
+			// and for an invalid UTF-8 byte (1 byte). Only the latter is
+			// lossy, so distinguish them by the decoded width.
+			if _, size := utf8.DecodeRuneInString(s[i:]); size == 1 {
+				return fmt.Errorf("%w: invalid UTF-8 at byte offset %d", ErrInvalidXMLChar, i)
+			}
+			continue
+		}
+		if !xmlValidChar(r) {
+			return fmt.Errorf("%w: U+%04X at byte offset %d", ErrInvalidXMLChar, r, i)
+		}
+	}
+	return nil
+}
 
 // graphMLAttrType maps a [lpg.PropertyKind] to the GraphML attr.type
 // string used in a <key> declaration. The standard GraphML types are
@@ -251,6 +300,10 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	// lexicographically to avoid map-iteration non-determinism.
 	propKeyNames := sortedKeys(keyMeta)
 	for _, kn := range propKeyNames {
+		if err := validateXMLText(kn); err != nil {
+			metrics.IncCounter("graph.io.graphml.WriteWithPropsCtx.errors", 1)
+			return fmt.Errorf("graphml: property key %q: %w", kn, err)
+		}
 		decl := keyMeta[kn]
 		if err := enc.EncodeElement(struct {
 			XMLName  xml.Name `xml:"key"`
@@ -290,6 +343,10 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		if _, gone := dead[id]; gone {
 			return true
 		}
+		if encErr = validateXMLText(name); encErr != nil {
+			encErr = fmt.Errorf("graphml: node id %q: %w", name, encErr)
+			return false
+		}
 		nodeStart := xml.StartElement{Name: xml.Name{Local: "node"},
 			Attr: []xml.Attr{{Name: xml.Name{Local: "id"}, Value: name}}}
 		if encErr = enc.EncodeToken(nodeStart); encErr != nil {
@@ -301,7 +358,12 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 			if !ok {
 				continue
 			}
-			encErr = encodeDataElem(enc, propKeyID(kn), serialisePropertyValue(v))
+			sv := serialisePropertyValue(v)
+			if encErr = validateXMLText(sv); encErr != nil {
+				encErr = fmt.Errorf("graphml: node %q property %q: %w", name, kn, encErr)
+				return false
+			}
+			encErr = encodeDataElem(enc, propKeyID(kn), sv)
 			if encErr != nil {
 				return false
 			}
@@ -310,6 +372,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		return encErr == nil
 	})
 	if encErr != nil {
+		metrics.IncCounter("graph.io.graphml.WriteWithPropsCtx.errors", 1)
 		return encErr
 	}
 
