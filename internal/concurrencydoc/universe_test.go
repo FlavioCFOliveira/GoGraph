@@ -1,6 +1,7 @@
 package concurrencydoc
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"sort"
@@ -125,7 +126,12 @@ func runGo(t *testing.T, dir string, args ...string) string {
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("go %s: %v", strings.Join(args, " "), err)
+		var stderr string
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			stderr = string(ee.Stderr)
+		}
+		t.Fatalf("go %s: %v\n%s", strings.Join(args, " "), err, stderr)
 	}
 	return strings.TrimSpace(string(out))
 }
