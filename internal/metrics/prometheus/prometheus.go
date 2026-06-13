@@ -110,17 +110,36 @@ func New() *Registry {
 	}
 }
 
-// sanitize converts Prometheus-incompatible characters in metric names to
-// underscores. The set {'.', '-', '/'} is replaced; all other characters
-// are passed through unchanged.
+// sanitize converts an arbitrary string into a valid Prometheus metric
+// name. A valid name matches [a-zA-Z_:][a-zA-Z0-9_:]*: every character
+// outside [a-zA-Z0-9_:] is replaced with '_', a leading digit is prefixed
+// with '_', and an empty result becomes "_".
+//
+// Applying this at the IncCounter / ObserveLatency boundary means a name
+// can never carry a newline, brace, quote, or space into the exposition
+// output, so a hostile or buggy caller cannot inject forged series or
+// break a scrape — even though Registry is now a public type alias whose
+// methods accept caller-supplied names.
 func sanitize(name string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '.', '-', '/':
-			return '_'
+	var b strings.Builder
+	b.Grow(len(name) + 1)
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_', r == ':':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				b.WriteByte('_') // a name may not start with a digit
+			}
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
 		}
-		return r
-	}, name)
+	}
+	if b.Len() == 0 {
+		return "_"
+	}
+	return b.String()
 }
 
 // getOrCreateCounter returns the existing counter for name, or creates one.
