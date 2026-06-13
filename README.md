@@ -5,7 +5,7 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.2.0`.** This is the project's **second release**,
+**Current release: `v0.3.0`.** This is the project's **third release**,
 published at a pre-1.0 baseline: under Semantic Versioning a `0.y.z`
 version signals that the public API is **not yet stable** and may change
 without a major bump while the module matures toward `1.0.0`. The five major
@@ -17,9 +17,9 @@ every change is gated by the project's CI suite (build, vet, race, lint,
 `govulncheck`, TCK conformance, and the deterministic crash-injection
 battery). The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.2.0`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.3.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.2.0.md](release-notes/v0.2.0.md) for the full release
+[release-notes/v0.3.0.md](release-notes/v0.3.0.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)

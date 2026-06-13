@@ -4,6 +4,192 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-06-13
+
+The third published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release: it is additive over `v0.2.0` and its headline work is a deep
+**reliability and robustness hardening pass** drawn from three
+successive code audits, alongside four additive features. No exported
+identifier was removed or renamed. Both compliance invariants continue
+to hold without regression: the module is **100 % openCypher
+TCK-compliant at the execution level** (3 897 / 3 897 scenarios) and
+**100 % ACID-compliant**.
+
+The hardening spans the Cypher engine (correctness and robustness:
+`reduce()`, openCypher equivalence semantics for `DISTINCT` and
+grouping, parser-panic and arithmetic-overflow guards,
+`ParameterMissing`, type-error fidelity, and `SET`-clause spec
+fidelity), the engine, Bolt protocol, and search layers (Bolt
+autocommit read-path lock removal, `HopcroftKarp` input validation,
+PackStream temporal wire encoding, and client-fault classification),
+the import/export and observability surface (CSV/GraphML token-OOM
+ceilings, fail-stop on XML-illegal characters, Prometheus name
+sanitisation, portable non-finite-number encoding, CSV byte-order-mark
+stripping, and a JSON Lines line cap), the durability path (a
+recovery-promotion parent-directory `fsync` and a checkpoint
+constraint-survival fail-safe), and the test-battery and release-gate
+infrastructure.
+
+Under Semantic Versioning, a `0.y.z` version signals that the public Go
+API is **not yet stable** and may change while the module matures toward
+`1.0.0`. Pin the exact version you depend on. This release introduces no
+breaking change and tightens only one consumer-visible default (the
+CSV/GraphML import byte ceiling); consumers should read the **Upgrade
+notes** in [release-notes/v0.3.0.md](release-notes/v0.3.0.md).
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.3.0
+```
+
+### Added
+
+- **`reduce()` list-folding expression** — the `reduce(acc = init, x IN
+  list | expr)` accumulator expression is now wired through the Cypher
+  grammar, the AST (`*ast.ReduceExpr`), semantic analysis, and the
+  evaluator, so list folding is reachable from the public API. A null
+  source list yields null, per the openCypher specification (#1426).
+- **PackStream temporal wire encoding over Bolt** — the six Cypher
+  temporal value kinds (`Date`, `LocalTime`, `Time`, `LocalDateTime`,
+  `DateTime`, `Duration`) are now encoded as the canonical PackStream
+  temporal Structs the neo4j-go-driver hydrator expects, instead of
+  falling through to plain strings. `DateTime` encoding is Bolt-version-
+  and time-zone-aware (the UTC convention on Bolt v5.0+, the legacy
+  wall-clock convention on v4.4), so a real driver receives
+  `neo4j.Date` / `neo4j.Duration` / `time.Time` values that support
+  `.AsTime()` and temporal arithmetic (#1434).
+- **Public `metrics` facade package** — a new top-level `metrics`
+  package re-exports the previously internal metrics types via type
+  aliases (`metrics.Backend`, `metrics.Registry`,
+  `metrics.SetBackend`, `metrics.NewPrometheusRegistry`), so the
+  observability wire-up documented in `docs/metrics.md` is now
+  compilable from outside the module. A single implementation is
+  retained behind the aliases.
+- **Filesystem fsync-failure fault modes for testing** — the internal
+  `testfs` fault library gains `Faults.FailSyncAfter` and
+  `Faults.ReturnEIOOnSync`, both surfacing a new `ErrSyncFailed`
+  sentinel and discarding the unsynced suffix, so durability tests can
+  assert that an unacknowledged commit leaves no trace without a full
+  crash-injection harness.
+- **Additive TCK error-type fidelity gate** — a new conformance gate
+  asserts that the engine raises the correct openCypher error *type*
+  (not only that the scenario fails), built on the existing semantic
+  error vocabulary. The execution result count is unchanged at
+  3 897 / 3 897 (#1443).
+
+### Changed
+
+- **CSV and GraphML single-token import RAM is bounded.** The default
+  import byte ceiling for the CSV and GraphML decoders is lowered to
+  **128 MiB** (from 1 GiB) to cap the peak memory a single oversized
+  token can pin while a record is assembled. The ceiling remains
+  configurable, and `MaxBytes <= 0` still means unlimited (#1436).
+- **`reduce()` is now a first-class expression** rather than an
+  unreachable evaluator: queries that use `reduce(...)` now parse and
+  execute instead of being rejected at parse time (#1426).
+- **The `cypher/ir/rewrite` package documents its experimental status**
+  and is guarded by an import-graph test, clarifying that it is not part
+  of the stable public surface.
+
+### Fixed
+
+- **Cypher correctness and robustness.**
+  - `DISTINCT` and grouping now compare by openCypher **equivalence**
+    rather than equality, so `NaN ≡ NaN` and nested nulls are grouped
+    correctly (CIP2016-06-14) (#1420).
+  - The parser no longer crashes the process on malformed input:
+    `p.Script()` is wrapped in `recover()` for malformed `WITH`-clause
+    and pipe-in-argument queries (#1422), and the pre-parse guard is
+    extended to `CASE` nesting and binary-operator chains.
+  - Deep operator chains can no longer overflow the stack during
+    semantic analysis: `checkExpr` carries a recursion depth budget
+    (#1424).
+  - A query parameter that is referenced but not supplied now raises
+    `ParameterMissing` instead of evaluating to a silent null (#1431).
+  - Numeric-literal property access such as `(5).foo` raises
+    `InvalidArgumentType` (#1430).
+  - Integer and floating-point overflow are detected and reported as
+    typed errors throughout: `sum()` accumulation (#1427), `MinInt64 /
+    -1` integer division (#1419), `toInteger()` boundary rounding at
+    `2^63` (#1428), pure integer literals over 19 digits, and
+    exponent-form float literals that overflow `float64` (#1421).
+  - The `Parse` and `ParseStrict` entry points now share one normaliser
+    pipeline, eliminating a divergence on valid float literals (#1423).
+  - `MaxResultRows` is applied to write-only queries, returning
+    `ErrResultRowsExceeded` and rolling the write back atomically
+    (#1425).
+  - A leading `WITH ... WHERE` is seeded with a single-row argument so
+    it no longer crashes.
+- **SET-clause spec fidelity** (#1455, #1456, #1457, #1458) — four
+  silent-divergence defects now fail loud and correct: setting or
+  removing a **label on a relationship** is rejected with a `TypeError`
+  (closing a latent hazard that reinterpreted an edge-position counter
+  as a node id and could mislabel the wrong node); `SET n = null` clears
+  all properties, `SET n += null` is a no-op, and a non-null non-map RHS
+  (`SET n = 5`) is a compile-time `TypeError`; a nested map property
+  raises `InvalidPropertyType`; and a non-map parameter to `SET n = $p`
+  raises a `TypeError`.
+- **Cypher DELETE no longer resurrects nodes.** The Cypher mutator
+  adapter's `RemoveNode` now emits an `OpRemoveNode` WAL frame, so a
+  node deleted through Cypher stays deleted across a store reopen
+  instead of returning as a ghost on WAL replay (#1411).
+- **Transaction isolation and atomicity.**
+  - An explicit transaction holds the visibility lock for its whole
+    lifetime, so concurrent readers block during an open transaction —
+    closing a read-uncommitted isolation gap (#1412).
+  - `ExplicitTx.Commit` is rejected after a failed `Exec`, preventing a
+    partial transaction from becoming durable (#1413), and surfaces
+    `ErrUndoFailed` when undo replay fails on a WAL `fsync` error.
+  - DDL index and constraint registration and backfill now run inside
+    the visibility barrier (#1417).
+- **Engine, protocol, and search robustness.**
+  - Bolt **autocommit reads use `RunAny`, not `RunInTxAny`**, so a
+    read-only autocommit statement no longer takes the single-writer
+    lock (#1432).
+  - `HopcroftKarp` validates `nLeft` and returns `ErrInvalidInput`
+    instead of panicking on malformed bipartite input (#1433).
+  - Bolt and Cypher now **classify client-fault conditions** as client
+    errors rather than server errors (#1435).
+- **Import / export (`graph/io`).**
+  - The GraphML writer **fails stop on XML-illegal characters** in
+    string properties instead of silently emitting `U+FFFD`, on both
+    write paths, and validates node ids on the plain `Write` path too
+    (#1437).
+  - The JSON Lines reader returns a typed `ErrLineTooLong` for an
+    oversized single line (#1442).
+  - The CSV reader strips a leading UTF-8 byte-order mark so spreadsheet
+    exports parse correctly (#1441).
+  - GraphML emits portable `xs:double` `NaN` / `INF` / `-INF`, and the
+    non-finite contract for JSON Lines is documented (#1440).
+  - The DOT writer emits bare node statements so isolated vertices are
+    no longer dropped (#1439).
+- **Observability.** The Prometheus exposition writer **sanitises
+  metric names** to the valid grammar, closing an exposition-injection
+  vector through the public metrics facade (#1438), and `WriteText`
+  returns its accumulated write error.
+- **Durability.**
+  - Recovery **`fsync`s the parent directory** after promoting a
+    snapshot backup, so a crash between the promotion rename and the
+    directory flush cannot lose the promoted snapshot (A1-F4, #1454).
+  - A checkpoint gates WAL truncation on `Graph.HasConstraints`, so
+    declared constraints survive a checkpoint even when the embedder
+    has not wired `checkpoint.WithConstraintSpecs` (#1464).
+  - The WAL acquires an exclusive OS file lock on `Open` to prevent
+    multi-process WAL corruption (#1416), `fsync`s after `ftruncate` in
+    `poison()` (#1414), and the snapshot writer `fsync`s the `indexes`
+    subdirectory after writing index files (#1415).
+
+### Performance
+
+- **Adjacency-list hub operations** (`graph/adjlist`) — `AddEdge` is now
+  amortised **O(1)** and `RemoveAllEdgesFrom` **O(d)** for high-degree
+  (hub) nodes, replacing the previous quadratic behaviour, via geometric
+  pre-allocation with in-place append reuse and a single-lock bulk
+  removal path. A degree-10 000 hub is now roughly 11.6× slower than a
+  degree-1 000 hub, where it was previously 50–100× slower.
+
 ## [0.2.0] — 2026-06-05
 
 The second published release of **GoGraph**, a Go module for graph
@@ -364,5 +550,6 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.1.0
   `github.com/FlavioCFOliveira/GoGraph` with no `/vN` suffix, which is
   Semantic-Import-Versioning-correct for a `0.x` line.
 
+[0.3.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.0
 [0.2.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.2.0
 [0.1.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.1.0
