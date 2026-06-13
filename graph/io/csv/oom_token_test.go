@@ -37,6 +37,10 @@ func (e *endlessQuotedField) Read(p []byte) (int, error) {
 // ceiling — the decoder must not be able to drive RAM beyond a small
 // multiple of the cap (mirrors the jsonl bounded-heap gate).
 func TestReadInto_SingleTokenBounded(t *testing.T) {
+	// Deliberately serial (no t.Parallel): the heap-growth assertion reads
+	// process-global runtime.MemStats, so a concurrent allocator in the
+	// package would add noise. The ErrInputTooLarge/nil-graph checks are
+	// the deterministic gate; the heap bound is a wide-margin sanity check.
 	const capBytes = 4 << 20 // 4 MiB explicit cap
 
 	opts := csv.DefaultOptions()

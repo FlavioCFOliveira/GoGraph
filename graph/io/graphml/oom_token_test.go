@@ -37,6 +37,9 @@ func (e *endlessReader) Read(p []byte) (int, error) {
 // not cap a single token, so the only guard is the byte cap; this pins
 // that the cap keeps allocation to a small multiple of itself (#1436).
 func TestReadIntoCapped_SingleTokenBounded(t *testing.T) {
+	// Deliberately serial (no t.Parallel): the heap-growth assertion reads
+	// process-global runtime.MemStats. The ErrInputTooLarge/nil-graph
+	// checks are the deterministic gate; the heap bound is a sanity check.
 	const capBytes = 4 << 20 // 4 MiB explicit cap
 
 	// "<graphml><graph><node id="xxxx… — the attribute value never closes.

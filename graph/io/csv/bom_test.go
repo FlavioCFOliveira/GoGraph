@@ -1,6 +1,7 @@
 package csv_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -42,5 +43,23 @@ func TestReadInto_NoBOMUnaffected(t *testing.T) {
 	}
 	if _, ok := a.Mapper().Lookup("src"); !ok {
 		t.Errorf("node id %q not found", "src")
+	}
+}
+
+// TestReadInto_BOMProbeRespectsTinyCap confirms the BOM probe (a Peek(3))
+// does not defeat a byte cap smaller than the 3-byte BOM: a 2-byte cap on
+// a 2-byte input still fails with ErrInputTooLarge rather than slipping
+// through the swallowed Peek error (#1441 / review m2).
+func TestReadInto_BOMProbeRespectsTinyCap(t *testing.T) {
+	t.Parallel()
+
+	opts := csv.DefaultOptions()
+	opts.MaxBytes = 2
+	a, _, err := csv.ReadInto(strings.NewReader("a,b,c\n"), opts)
+	if !errors.Is(err, csv.ErrInputTooLarge) {
+		t.Fatalf("err = %v, want ErrInputTooLarge", err)
+	}
+	if a != nil {
+		t.Errorf("graph = %v, want nil on cap error", a)
 	}
 }

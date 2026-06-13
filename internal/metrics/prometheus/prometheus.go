@@ -120,6 +120,13 @@ func New() *Registry {
 // output, so a hostile or buggy caller cannot inject forged series or
 // break a scrape — even though Registry is now a public type alias whose
 // methods accept caller-supplied names.
+//
+// This is stricter than the previous mapping (which replaced only
+// {'.','-','/'}): any other out-of-charset byte — a leading digit, a
+// non-ASCII rune — now also maps to '_'. The in-tree metric names are
+// all ASCII dotted identifiers, so the rendered output is unchanged for
+// them; callers must not rely on the old verbatim passthrough of other
+// characters.
 func sanitize(name string) string {
 	var b strings.Builder
 	b.Grow(len(name) + 1)

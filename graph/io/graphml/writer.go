@@ -139,6 +139,11 @@ func encodeEdges(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint
 }
 
 func encodeNode(enc *xml.Encoder, id string) error {
+	// Fail fast on node ids XML 1.0 cannot represent rather than letting
+	// encoding/xml silently coerce them to U+FFFD (see ErrInvalidXMLChar).
+	if err := validateXMLText(id); err != nil {
+		return fmt.Errorf("graphml: node id %q: %w", id, err)
+	}
 	return enc.EncodeElement(struct {
 		XMLName xml.Name `xml:"node"`
 		ID      string   `xml:"id,attr"`
