@@ -759,6 +759,10 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 			e.constraintReg.SetConstraintName(false, d.Label, d.Property, d.Name)
 		}
 	}
+	// Mirror the recovered constraint set onto the graph so a post-recovery
+	// checkpoint knows constraints exist even when the embedder did not wire
+	// checkpoint.WithConstraintSpecs (#1464).
+	e.syncConstraintCount()
 }
 
 // ConstraintDefsFromRecovery converts the durable constraint set surfaced by
@@ -876,6 +880,18 @@ func (e *Engine) ConstraintSpecsForSnapshot() []snapshot.ConstraintSpec {
 		})
 	}
 	return out
+}
+
+// syncConstraintCount mirrors the engine's current schema-constraint count onto
+// the graph (Graph.SetActiveConstraintCount) so the checkpointer can tell — via
+// Graph.HasConstraints — whether a snapshot must carry constraints.bin before
+// the WAL is truncated. It is called under the engine's single-writer lock
+// after every constraint registration, drop, unwind, and recovery re-seed.
+// Sourcing the value from the live registry (not an inc/dec delta) keeps it
+// from ever under-counting a durably-registered constraint — the only
+// direction that could cause silent constraint loss across a checkpoint (#1464).
+func (e *Engine) syncConstraintCount() {
+	e.g.SetActiveConstraintCount(int64(e.constraintReg.Count()))
 }
 
 // ListIndexes returns the names of every secondary index currently registered
@@ -1580,6 +1596,11 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 // the engine's writer serialisation; tx is the open transaction that carries
 // the durable constraint op on a WAL-backed engine (nil on a store-less one).
 func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstraint, kind exec.ConstraintKind, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
+	// Keep Graph.HasConstraints in sync with the registry on every exit path
+	// (success, IF NOT EXISTS no-op, validation error, or unwind), under the
+	// single-writer lock the caller holds — so a concurrent checkpoint can never
+	// observe a stale "no constraints" count and truncate the WAL (#1464).
+	defer e.syncConstraintCount()
 	// IF NOT EXISTS that absorbs an already-registered constraint is a silent
 	// no-op with no schema change and no WAL record — match the operator's
 	// existing semantics and skip validation/durability. Checked under the
@@ -1723,6 +1744,7 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 // really deregisters must re-register (and re-seed) on this failure path,
 // mirroring unwindConstraintRegistration on the CREATE path.
 func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint, kind exec.ConstraintKind, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
+	defer e.syncConstraintCount() // keep Graph.HasConstraints in sync on every exit, under the writer lock (#1464)
 	op := exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg, e.ClearPlanCache)
 	if _, err := e.runDDLOp(ctx, op); err != nil {
 		return nil, err

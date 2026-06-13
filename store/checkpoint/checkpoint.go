@@ -508,7 +508,14 @@ func (c *Checkpointer[N, W]) runCheckpointLocked() error {
 		c.setErr(err)
 		return err
 	}
-	selfSufficient, err := snapshotIsSelfSufficient(snapDir, len(constraints) > 0)
+	// Source needConstraints from the graph's own constraint count, NOT from
+	// len(constraints): the latter is empty whenever the embedder never wired
+	// WithConstraintSpecs, which would wrongly judge the snapshot self-sufficient
+	// and truncate the WAL prefix that declared the constraints — silently losing
+	// every constraint on reopen (#1464). HasConstraints is the engine-maintained
+	// truth, so a missing constraints.bin now correctly forces the fail-safe
+	// no-truncate branch below.
+	selfSufficient, err := snapshotIsSelfSufficient(snapDir, c.g.HasConstraints())
 	if err != nil {
 		c.setErr(err)
 		return err

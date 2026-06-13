@@ -215,6 +215,15 @@ type Graph[N comparable, W any] struct {
 	// mapper lookup entirely. It is mutated only under tombstoneMu.
 	tombstoneActive atomic.Int64
 
+	// constraintActive mirrors the cypher engine's schema-constraint count as a
+	// lock-free gate. The checkpointer reads it (via HasConstraints) to decide
+	// whether a snapshot must carry constraints.bin before the WAL prefix that
+	// first declared the constraints can be truncated; without it an embedder
+	// that forgets checkpoint.WithConstraintSpecs would silently lose every
+	// schema constraint on the next reopen (#1464). It is maintained by
+	// Engine.syncConstraintCount under the engine's single-writer lock.
+	constraintActive atomic.Int64
+
 	// nodesAddedCount / nodesRemovedCount / edgesAddedCount /
 	// edgesRemovedCount track per-direction counters used by the TCK
 	// side-effect comparator. Net Order() / Size() can't distinguish a
@@ -940,6 +949,24 @@ func (g *Graph[N, W]) TombstonedIDs() []graph.NodeID {
 //
 // TombstoneCount is safe for concurrent use.
 func (g *Graph[N, W]) TombstoneCount() int { return int(g.tombstoneActive.Load()) }
+
+// HasConstraints reports whether the cypher engine currently has any schema
+// constraint registered on this graph. It reads a lock-free counter maintained
+// by the engine (SetActiveConstraintCount), so it is cheap enough for the
+// checkpointer to consult on every checkpoint to gate the constraints.bin
+// self-sufficiency requirement (#1464).
+//
+// HasConstraints is safe for concurrent use.
+func (g *Graph[N, W]) HasConstraints() bool { return g.constraintActive.Load() > 0 }
+
+// SetActiveConstraintCount records the number of schema constraints currently
+// registered, for HasConstraints to report. The cypher engine calls it under
+// its single-writer lock after every constraint registration, drop, and
+// recovery re-seed, so the value never under-counts a durably-registered
+// constraint that a concurrent checkpoint might otherwise miss.
+//
+// SetActiveConstraintCount is safe for concurrent use.
+func (g *Graph[N, W]) SetActiveConstraintCount(n int64) { g.constraintActive.Store(n) }
 
 // RestoreTombstones marks every id in ids as removed, reconstructing the
 // tombstone set captured by [Graph.TombstonedIDs] at snapshot time. It is

@@ -208,6 +208,17 @@ func (r *ConstraintRegistry) Constraints() []ConstraintInfo {
 	return out
 }
 
+// Count returns the number of registered constraints (UNIQUE + NOT NULL). It is
+// a cheap, allocation-free alternative to len(Constraints()) that the engine
+// uses to mirror the count onto the graph for the checkpointer (#1464).
+//
+// Count is safe for concurrent use.
+func (r *ConstraintRegistry) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.unique) + len(r.notNull)
+}
+
 // SeedUniqueValues populates the value-set of an already-registered UNIQUE
 // constraint on (label, prop) from the property values of the nodes that
 // currently carry the label. It is the post-creation seed that makes a
