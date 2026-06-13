@@ -106,6 +106,22 @@ check "50% improvement passes" pass \
 check "missing head file exits non-zero" fail \
   bash "$GATE" "$TMPDIR/base.txt" "$TMPDIR/nonexistent.txt" 10
 
+# ── Test 6: benchmark vanished from head (empty head) must FAIL ───────────────
+# Reproduces the silent un-gating: with no comparison row benchstat emits zero
+# deltas, so a pre-#1447 gate exited 0. The disappearance guard must fail.
+: > "$TMPDIR/head_empty.txt"  # head ran no benchmarks at all
+check "headline benchmark vanished (empty head) FAILs" fail \
+  bash "$GATE" "$TMPDIR/base.txt" "$TMPDIR/head_empty.txt" 10
+
+# ── Test 7: headline benchmark renamed in head must FAIL ──────────────────────
+# A rename leaves the baseline name absent from head even though benchstat
+# succeeds on the (differently-named) head data — the hot path is no longer
+# gated. The superset check must catch it.
+sed 's/BenchmarkDijkstra_PostWarmup/BenchmarkDijkstra_Renamed/g' \
+  "$TMPDIR/base.txt" > "$TMPDIR/head_renamed.txt"
+check "headline benchmark renamed in head FAILs" fail \
+  bash "$GATE" "$TMPDIR/base.txt" "$TMPDIR/head_renamed.txt" 10
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo
 echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"

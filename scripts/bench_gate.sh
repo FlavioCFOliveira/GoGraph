@@ -54,6 +54,30 @@ if [[ -z "$BENCHSTAT" || ! -x "$BENCHSTAT" ]]; then
   exit 2
 fi
 
+# Disappearance guard: a benchmark that is present in the baseline but
+# absent from the head run produces NO comparison row, so the threshold
+# check below would see zero deltas and pass — silently un-gating every
+# future regression in that hot path. Verify the set of benchmark names in
+# the head output is a SUPERSET of the baseline's: any baseline benchmark
+# missing from head fails the gate (covers both deletion and rename).
+#
+# Names are taken from the raw `go test -bench` lines (e.g.
+# "BenchmarkDijkstra_PostWarmup-8   1000 ...") with the trailing
+# "-<GOMAXPROCS>" suffix stripped so the comparison is parallelism-agnostic.
+bench_names() {
+  grep -oE '^Benchmark[^[:space:]]+' "$1" 2>/dev/null | sed -E 's/-[0-9]+$//' | sort -u
+}
+
+MISSING=0
+missing_list="$(comm -23 <(bench_names "$BASE") <(bench_names "$HEAD"))"
+if [[ -n "$missing_list" ]]; then
+  while IFS= read -r bm; do
+    [[ -z "$bm" ]] && continue
+    echo "DISAPPEARED: ${bm} ran in the baseline but is absent from the head output (renamed or removed?)"
+    MISSING=$((MISSING + 1))
+  done <<< "$missing_list"
+fi
+
 # Produce human-readable diff for the log first.
 echo "── benchstat comparison ──"
 "$BENCHSTAT" "$BASE" "$HEAD" || true
@@ -97,6 +121,11 @@ while IFS=',' read -r name _base_val _base_ci _head_val _head_ci vsbase _pval; d
     REGRESSIONS=$((REGRESSIONS + 1))
   fi
 done <<< "$CSV_OUT"
+
+if (( MISSING > 0 )); then
+  echo "::error::${MISSING} baseline headline benchmark(s) disappeared from the head run — the regression gate cannot cover them; restore the benchmark or update run_headline_bench.sh"
+  exit 1
+fi
 
 if (( REGRESSIONS > 0 )); then
   echo "::error::${REGRESSIONS} headline benchmark(s) regressed beyond +${THRESHOLD}% — see diff above"
