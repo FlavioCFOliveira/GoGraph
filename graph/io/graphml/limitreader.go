@@ -6,8 +6,14 @@ import "io"
 // once total consumption would exceed maxBytes. Unlike [io.LimitReader],
 // which reports a clean EOF at the limit (silently truncating the input),
 // limitReader permits exactly maxBytes bytes and returns the error on the
-// byte that crosses the ceiling. This lets the XML decoder abort before
-// the whole document is buffered, keeping allocation bounded.
+// byte that crosses the ceiling.
+//
+// The cap bounds bytes drawn from the source, not the decoder's working
+// set: [encoding/xml] may buffer a single unterminated token up to
+// maxBytes before the limit trips, so peak transient RAM is a multiple of
+// maxBytes (see [DefaultMaxBytes]). The cap's role is to stop a hostile
+// stream from being read without end, not to make per-token allocation
+// equal to the cap.
 //
 // maxBytes must be greater than zero; callers gate the wrap on that condition.
 type limitReader struct {
