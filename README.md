@@ -13,7 +13,9 @@ subsystems below are functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
 (**3 897/3 897 scenarios, 16 006/16 006 steps**) and **100 % ACID-compliant**;
-CI is green (build, test, race, lint, vet, TCK, govulncheck). The module uses
+every change is gated by the project's CI suite (build, vet, race, lint,
+`govulncheck`, TCK conformance, and the deterministic crash-injection
+battery). The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
 fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.2.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
