@@ -57,6 +57,11 @@ COVER_PKG_FLOOR_EXEMPT=${COVER_PKG_FLOOR_EXEMPT:-'github.com/FlavioCFOliveira/Go
 export LC_ALL=C
 
 echo "==> generating coverage profile: ${COVER_PROFILE}"
+# The instrumented test run's stdout (per-package ok/FAIL summary and any
+# "--- FAIL" detail) is captured to a log instead of discarded, so that a test
+# failure during profile generation is surfaced in CI rather than swallowed
+# (a silent ">/dev/null" previously hid the cause of any failure here).
+COVER_TEST_LOG=${COVER_TEST_LOG:-"${COVER_PROFILE}.testlog"}
 # -coverpkg=./... attributes coverage of EVERY package to whichever test
 # exercises it, not just that package's own _test.go files. The query engine
 # (cypher/...) is validated overwhelmingly by the openCypher TCK suite and the
@@ -65,7 +70,13 @@ echo "==> generating coverage profile: ${COVER_PROFILE}"
 # Crediting cross-package coverage is the accurate measure of how well the
 # library is tested. The trade-off is a slower instrumented run, hence the
 # generous timeout.
-"${GO}" test -coverpkg=./... -coverprofile="${COVER_PROFILE}" -covermode=atomic -timeout=20m ./... >/dev/null
+if ! "${GO}" test -coverpkg=./... -coverprofile="${COVER_PROFILE}" -covermode=atomic -timeout=20m ./... >"${COVER_TEST_LOG}" 2>&1; then
+  echo "cover_gate: 'go test' failed during coverage profile generation; failing output:" >&2
+  grep -E '(^--- FAIL|^FAIL[[:space:]]|panic:|fatal error:|_test\.go:[0-9]+:|signal:|DATA RACE)' "${COVER_TEST_LOG}" | tail -80 >&2 || true
+  echo "---- last 40 lines of go test output ----" >&2
+  tail -40 "${COVER_TEST_LOG}" >&2
+  exit 1
+fi
 
 echo "==> filtering non-library packages: ${COVER_EXCLUDE}"
 {
