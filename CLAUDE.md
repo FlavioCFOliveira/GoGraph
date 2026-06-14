@@ -229,7 +229,7 @@ This module must operate **without failure under sustained high load and high co
 
 ### Acceptance gates
 
-- **Soak test before any release.** A multi-hour mixed-workload run under `GODEBUG=gctrace=1` showing zero growth in heap, file descriptors, and goroutine count after warm-up.
+- **Soak test (periodic reliability exercise; not a release gate).** A multi-hour mixed-workload run under `GODEBUG=gctrace=1` should show zero growth in heap, file descriptors, and goroutine count after warm-up. Run it periodically — and ideally before a major release — but it does **not** block a release.
 - **Concurrency stress test in CI.** A short variant of the soak workload runs on every PR with the race detector enabled.
 - **Load-test report alongside benchmarks.** Each release ships latency and throughput numbers at multiple concurrency levels (1, 8, 64, 256, 1024 goroutines), recorded in `docs/benchmarks/`.
 

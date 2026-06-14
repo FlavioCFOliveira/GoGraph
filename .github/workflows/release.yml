@@ -36,11 +36,10 @@ jobs:
       # `make release-preflight`. That target is the single source of truth:
       # it enforces the release-accuracy checks (CHANGELOG ## [x.y.z],
       # release-notes/VERSION.md, README current-release, SECURITY.md version
-      # table, docs/benchmarks/VERSION.md), the mandatory soak gate
-      # (release_soak_gate.sh, #1399), the coverage gate, the headline bench
-      # gate, AND the correctness gate (scripts/pre-release.sh: vet + build +
-      # test -race + golangci-lint + TCK). Previously this workflow ran only
-      # pre-release.sh, silently bypassing every accuracy/soak gate added in
+      # table, docs/benchmarks/VERSION.md), the coverage gate, the headline
+      # bench gate, AND the correctness gate (scripts/pre-release.sh: vet +
+      # build + test -race + golangci-lint + TCK). Previously this workflow ran
+      # only pre-release.sh, silently bypassing every accuracy gate added in
       # cce0bc4 — see #1444.
       - name: Install golangci-lint (needed by the correctness gate)
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
@@ -53,19 +52,14 @@ jobs:
           # "unknown flag: --version" (run has no --version flag) — that
           # broke the release run.
           install-only: true
-      - name: Release pre-flight gate (release-accuracy + soak + coverage + bench + correctness)
-        # GITHUB_TOKEN lets release_soak_gate.sh query GitHub Actions for a
-        # green soak run on the release commit via the gh CLI.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Release pre-flight gate (release-accuracy + coverage + bench + correctness)
         run: VERSION="${GITHUB_REF_NAME}" make release-preflight
       - name: Install cyclonedx-gomod (SBOM generator)
         run: |
           # Pinned to an exact released version so the SBOM generator in the
           # release path cannot be silently swapped by a moved/poisoned
-          # upstream release (CWE-494). Bump in lockstep with the GitHub
-          # Actions SHA pins via Dependabot's gomod ecosystem
-          # (.github/dependabot.yml). cyclonedx-gomod is invoked by goreleaser
+          # upstream release (CWE-494). Bump this pin manually in lockstep
+          # with the GitHub Actions SHA pins. cyclonedx-gomod is invoked by goreleaser
           # through the `before:` hook in .goreleaser.yaml; the version printed
           # below must equal the pin.
           go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0

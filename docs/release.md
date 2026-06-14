@@ -173,7 +173,7 @@ manually.
 Both the workflow and the local fallback share one source of truth —
 `make release-preflight` — so neither path can publish while bypassing a
 release gate. (Before #1444 the workflow ran only `scripts/pre-release.sh`
-and silently skipped the release-accuracy and soak gates.)
+and silently skipped the release-accuracy gates.)
 
 ## Local fallback
 
@@ -198,15 +198,13 @@ the single canonical gate also invoked by `.github/workflows/release.yml`
 5. SECURITY.md supported-versions table names `VERSION`'s `vX.Y.x` line.
 6. docs/benchmarks/VERSION.md exists (per-release benchmark/load-test
    numbers).
-7. A green soak run exists for the release commit
-   (`scripts/release_soak_gate.sh`, #1399).
-8. `make cover-gate` is green (aggregate ≥ 85 %, per-package ≥ 75 %).
-9. `scripts/run_headline_bench.sh` exits zero when present (informational
+7. `make cover-gate` is green (aggregate ≥ 85 %, per-package ≥ 75 %).
+8. `scripts/run_headline_bench.sh` exits zero when present (informational
    per-tag run; the canonical comparison gate is the PR-time
    `benchstat regression gate` in `.github/workflows/ci.yml`).
-10. The correctness gate `scripts/pre-release.sh` passes: `go vet`,
-    `go build`, `go test -race ./...`, `golangci-lint run ./...`, and the
-    TCK conformance check (overall-rate ≥ 90 %).
+9. The correctness gate `scripts/pre-release.sh` passes: `go vet`,
+   `go build`, `go test -race ./...`, `golangci-lint run ./...`, and the
+   TCK conformance check (overall-rate ≥ 90 %).
 
 Each failure exits non-zero with a one-line explanation of what is
 missing. Run `make release-preflight` on its own to dry-run the gates

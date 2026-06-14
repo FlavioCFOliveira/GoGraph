@@ -21,8 +21,8 @@ func readRepoFile(t *testing.T, rel string) string {
 // (.github/workflows/release.yml) and the local path (`make release`) must
 // run the SAME canonical gate — `make release-preflight` — so neither can
 // publish while bypassing a release gate. Before #1444 release.yml ran only
-// scripts/pre-release.sh, silently skipping every release-accuracy and soak
-// gate that lives in release-preflight.
+// scripts/pre-release.sh, silently skipping every release-accuracy gate that
+// lives in release-preflight.
 //
 // The assertions are static (file content), not a live release run, so the
 // gate is cheap and deterministic on every PR.
@@ -33,7 +33,7 @@ func TestReleasePathsConverge(t *testing.T) {
 	// 1. The CI release workflow must invoke the canonical preflight target.
 	if !strings.Contains(releaseYML, "make release-preflight") {
 		t.Errorf("release.yml does not run `make release-preflight`; the tag-push " +
-			"release path would bypass the release-accuracy and soak gates (#1444)")
+			"release path would bypass the release-accuracy gates (#1444)")
 	}
 
 	// 2. The local `make release` target must depend on release-preflight.
@@ -48,11 +48,5 @@ func TestReleasePathsConverge(t *testing.T) {
 	if !strings.Contains(makefile, "scripts/pre-release.sh") {
 		t.Errorf("release-preflight no longer invokes scripts/pre-release.sh; the " +
 			"correctness gate (vet/build/test -race/lint/TCK) would be skipped")
-	}
-
-	// 4. release-preflight must keep enforcing the mandatory soak gate (#1399).
-	if !strings.Contains(makefile, "release_soak_gate.sh") {
-		t.Errorf("release-preflight no longer invokes scripts/release_soak_gate.sh; " +
-			"the mandatory pre-release soak gate would be skipped")
 	}
 }

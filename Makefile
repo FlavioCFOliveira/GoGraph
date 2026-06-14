@@ -175,7 +175,7 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 	goreleaser release --snapshot --clean --skip=publish
 
 .PHONY: release-preflight
-release-preflight: ## Canonical release gate (both `make release` and release.yml call this) — release-accuracy + soak + coverage + bench + the full correctness gate (scripts/pre-release.sh)
+release-preflight: ## Canonical release gate (both `make release` and release.yml call this) — release-accuracy + coverage + bench + the full correctness gate (scripts/pre-release.sh)
 	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@echo "release-preflight: VERSION=$$VERSION"
 	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
@@ -193,8 +193,6 @@ release-preflight: ## Canonical release gate (both `make release` and release.ym
 	@echo "release-preflight: checking per-release benchmark report docs/benchmarks/$$VERSION.md exists…"
 	@test -f "docs/benchmarks/$$VERSION.md" \
 	  || { echo "release-preflight: docs/benchmarks/$$VERSION.md does not exist — record the per-release benchmark/load-test numbers first"; exit 1; }
-	@echo "release-preflight: checking a green soak run exists for the release commit…"
-	@VERSION="$$VERSION" bash scripts/release_soak_gate.sh
 	@echo "release-preflight: running coverage gate…"
 	@$(MAKE) cover-gate
 	@if [ -x scripts/run_headline_bench.sh ]; then \

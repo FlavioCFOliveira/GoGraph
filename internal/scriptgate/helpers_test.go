@@ -1,6 +1,6 @@
 // Package scriptgate runs the self-contained shell gate tests under
 // `go test`, so the release/CI shell gates (check_doc_freshness.sh,
-// release_soak_gate.sh, bench_gate.sh, and the nightly failure-detection
+// bench_gate.sh, and the nightly failure-detection
 // logic) are continuously exercised by the normal test suite rather than
 // living as orphaned, run-by-hand scripts.
 //
