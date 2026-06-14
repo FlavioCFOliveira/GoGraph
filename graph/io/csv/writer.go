@@ -71,7 +71,15 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if uint64(n) >= maxID || !live[uint64(n)] {
 				continue
 			}
-			if err := cw.Write([]string{src, names[uint64(n)], strconv.FormatInt(ws[i], 10)}); err != nil {
+			srcCell := src
+			dstCell := names[uint64(n)]
+			weightCell := strconv.FormatInt(ws[i], 10)
+			if opts.SanitizeFormulae {
+				srcCell = sanitizeFormulaCell(srcCell)
+				dstCell = sanitizeFormulaCell(dstCell)
+				weightCell = sanitizeFormulaCell(weightCell)
+			}
+			if err := cw.Write([]string{srcCell, dstCell, weightCell}); err != nil {
 				metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 				return written, err
 			}
@@ -84,4 +92,25 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		return written, err
 	}
 	return written, nil
+}
+
+// sanitizeFormulaCell neutralises a spreadsheet formula-injection payload
+// (OWASP CSV injection, CWE-1236) by prefixing a single apostrophe when the
+// cell's first byte is one of the formula-trigger characters honoured by
+// Excel, LibreOffice Calc, and Google Sheets: '=', '+', '-', '@', TAB
+// (0x09), or CR (0x0D). Spreadsheets render an apostrophe-prefixed cell as
+// literal text rather than evaluating it as a formula. An empty cell is
+// returned unchanged. This is applied on the write path only when
+// [Options.SanitizeFormulae] is set; see that field for the round-trip
+// trade-off.
+func sanitizeFormulaCell(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	default:
+		return s
+	}
 }

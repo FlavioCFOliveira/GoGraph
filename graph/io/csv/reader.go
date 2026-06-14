@@ -67,6 +67,25 @@ type Options struct {
 	// reader fails with [ErrInputTooLarge]. [DefaultOptions] sets it to
 	// [DefaultMaxBytes]; a value of zero or less disables the cap.
 	MaxBytes int64
+
+	// SanitizeFormulae, when true, neutralises spreadsheet formula
+	// injection (OWASP CSV injection, CWE-1236) on the write path. A cell
+	// whose first character is one of '=', '+', '-', '@', TAB (0x09), or
+	// CR (0x0D) is treated as a live formula by Excel, LibreOffice Calc,
+	// and Google Sheets when the exported file is opened, enabling DDE
+	// command execution or data exfiltration in the context of the human
+	// who opens it. With this option set, [Write] and [WriteCtx] prefix
+	// each such cell with a single apostrophe ('), the de-facto neutraliser
+	// those spreadsheets honour, so the value is rendered as text.
+	//
+	// It is OFF by default to preserve the lossless round-trip: an
+	// apostrophe-prefixed cell no longer re-imports byte-identically
+	// through [ReadInto], so a graph written with the default options round
+	// -trips exactly while one written with sanitisation enabled does not.
+	// Enable it only when the destination is a spreadsheet and faithful
+	// re-import is not required. This flag affects the writer only; the
+	// reader ignores it.
+	SanitizeFormulae bool
 }
 
 // DefaultOptions returns the minimal config: comma delimiter, '#'
