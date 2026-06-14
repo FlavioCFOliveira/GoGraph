@@ -19,6 +19,18 @@ tasks **#1490–#1496**, grouped into sprint **187**. A reproducible security
 test battery accompanies this report; see
 [Security test battery](#security-test-battery).
 
+> **Remediation status (2026-06-14).** All seven findings have been **fixed**
+> on branch `security/sec-2026-06-14c-audit` and merged to `main`. Every
+> contained "current-behaviour" demonstration in the battery was converted into
+> a strict secure-behaviour regression assertion. The integrated tree is green:
+> `go build ./...` clean, the **openCypher TCK holds at 3897/3897**
+> (`tckExecutionBaseline` untouched, fidelity baseline 121), `go test -race`
+> reports 0 races across all touched packages, `golangci-lint`/`staticcheck`/
+> `govulncheck` are clean, and the ACID crash behaviour is preserved (the store
+> fix is decode-only). Remediation commits: `73f5d03` (substring/percentileCont/
+> replace), `103a557` (Bolt reader panic boundary), `df360f3` (tzdata SHA-256
+> pin), on top of the in-cycle `6c9c15b`.
+
 ## Engagement scope and rules
 
 - **Target.** The entire GoGraph Go module (~135 kLOC across ~70 packages):
@@ -51,13 +63,13 @@ Critical finding was found. No prior fix had regressed.**
 
 | # | Severity | CWE | Surface | Title | Status |
 |---|----------|-----|---------|-------|--------|
-| [#1492](#1492-high--substring-integer-overflow-panic) | **High** | CWE-190 → CWE-129 | Cypher | `substring()` integer-overflow panic on huge length arg | OPEN |
-| [#1493](#1493-medium--percentilecont-nan-bypasses-01-validation) | Medium | CWE-704 + CWE-129 | Cypher | `percentileCont()` NaN bypasses `[0,1]` validation (platform-dependent index panic) | OPEN |
-| [#1494](#1494-medium--replace-empty-search-quadratic-amplification) | Medium | CWE-789 | Cypher | `replace(s,'',r)` quadratic output amplification, unbudgeted | OPEN |
+| [#1492](#1492-high--substring-integer-overflow-panic) | **High** | CWE-190 → CWE-129 | Cypher | `substring()` integer-overflow panic on huge length arg | **FIXED** |
+| [#1493](#1493-medium--percentilecont-nan-bypasses-01-validation) | Medium | CWE-704 + CWE-129 | Cypher | `percentileCont()` NaN bypasses `[0,1]` validation (platform-dependent index panic) | **FIXED** |
+| [#1494](#1494-medium--replace-empty-search-quadratic-amplification) | Medium | CWE-789 | Cypher | `replace(s,'',r)` quadratic output amplification, unbudgeted | **FIXED** |
 | [#1490](#1490-low-fixed--txn-proplist-decoder-unclamped-capacity) | Low | CWE-789 | Store | `decodeTxnListProp` unclamped capacity hint (latent OOM) | **FIXED** |
-| [#1491](#1491-low--bolt-reader-goroutine-panic-recovery-gap) | Low | CWE-248/755 | Bolt | Bolt reader goroutine has no panic-recovery boundary | OPEN |
+| [#1491](#1491-low--bolt-reader-goroutine-panic-recovery-gap) | Low | CWE-248/755 | Bolt | Bolt reader goroutine has no panic-recovery boundary | **FIXED** |
 | [#1495](#1495-low-fixed--stale-goreleaser-dependabot-reference) | Low | CWE-1104 | Supply chain | Stale `.goreleaser.yaml` Dependabot reference | **FIXED** |
-| [#1496](#1496-low--tzdata-fixture-script-no-sha-pin) | Low | CWE-494 | Supply chain | `gen_tck_tzdata.sh` downloads tzdata with no SHA-256 pin | OPEN |
+| [#1496](#1496-low--tzdata-fixture-script-no-sha-pin) | Low | CWE-494 | Supply chain | `gen_tck_tzdata.sh` downloads tzdata with no SHA-256 pin | **FIXED** |
 
 Two findings discovered with clear, low-risk fixes (#1490, #1495) were
 remediated in-cycle together with their regression gates; the remaining five
@@ -253,8 +265,26 @@ behaviour once each is remediated.
 
 ## Remediation status
 
-Two findings (#1490, #1495) are fixed in-cycle with regression gates. The
-remaining five (#1492 High, #1493/#1494 Medium, #1491/#1496 Low) are filed in
-sprint 187 and await scheduled remediation; none is exploitable into a Critical
-outcome on the default-configured, authenticated deployment, and each has a
-contained regression test pinning its current behaviour.
+**All seven findings are fixed and merged to `main`.** Two (#1490, #1495) were
+fixed in-cycle during the audit; the remaining five (#1492 High, #1493/#1494
+Medium, #1491/#1496 Low) were remediated immediately after, with every battery
+test flipped from a contained "current-behaviour" check to a strict
+secure-behaviour regression assertion. The fixes:
+
+- **#1492** — `fnSubstring` end bound computed overflow-safely; returns the
+  conforming truncated tail, no panic, no error.
+- **#1493** — `validPercentileParam` rejects non-finite `p` (typed
+  `NumberOutOfRange`); `PercentileContAgg.Result` clamps the index like the
+  discrete aggregator.
+- **#1494** — `fnReplace` computes the worst-case output size overflow-safely
+  and returns a typed `NumberOutOfRange` budget error before allocating.
+- **#1491** — the Bolt reader goroutine now carries a `defer/recover` boundary
+  mirroring `handleConn` (log + panic metric + connection cancel), with
+  `close(readerDone)` preserved as the first deferred call.
+- **#1496** — `gen_tck_tzdata.sh` SHA-256-pins the IANA tzdata tarball and
+  aborts on mismatch or an unpinned version.
+
+Gate on the integrated tree: `go build ./...` clean; openCypher **TCK 3897/3897**
+(`tckExecutionBaseline` untouched); `go test -race` 0 races on all touched
+packages; `golangci-lint`/`staticcheck`/`govulncheck` clean; ACID crash
+behaviour preserved. Both compliance mandates hold.
