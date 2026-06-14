@@ -284,6 +284,14 @@ const btreeMagic uint32 = 0x52544253
 // btree index.
 const btreeFormatVersion uint32 = 1
 
+// btreeCapHintMax caps the eager slice reservation in Deserialize so a
+// hostile entryCount (up to the 1<<40 implausibility ceiling) cannot drive
+// a multi-terabyte allocation before the per-entry reads have a chance to
+// fail on a truncated file. It mirrors the safe sibling ceiling used by
+// store/snapshot/tombstones.bin and constraints.bin (1<<20). A legitimately
+// large index is unaffected: the slice grows via append.
+const btreeCapHintMax uint64 = 1 << 20
+
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
 // encodeOrdered serialises one cmp.Ordered value to bytes. The
@@ -522,7 +530,11 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 			index.ErrIndexCorrupted, entryCount)
 	}
 
-	out := make([]entry[V], 0, entryCount)
+	hint := entryCount
+	if hint > btreeCapHintMax {
+		hint = btreeCapHintMax
+	}
+	out := make([]entry[V], 0, hint)
 	var prev V
 	hasPrev := false
 	for e := uint64(0); e < entryCount; e++ {
