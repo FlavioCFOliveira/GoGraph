@@ -84,6 +84,20 @@ func NewChunkedReaderWithLimit(r io.Reader, maxMessageBytes int) *ChunkedReader 
 // bytes of the next message have arrived. Any other I/O error is wrapped and
 // returned.
 //
+// A standalone uint16(0) chunk that does NOT terminate an in-progress message
+// (i.e. a 00 00 arriving with no preceding payload chunk) is a Bolt 4.1+ NOOP
+// keep-alive: per the Bolt Protocol Manual a conformant peer MUST silently
+// discard it (zero PackStream bytes, never decoded, never answered). Such a
+// NOOP is skipped here at the framing layer — ReadMessage loops past it and
+// reads the next real message — so the serve loop never sees a spurious
+// zero-length message to (mis)decode. A uint16(0) that legitimately TERMINATES
+// a non-empty message is ordinary end-of-message chunking and is unaffected.
+// Skipping the NOOP at this layer (rather than in the serve loop) keeps
+// chunk-reassembly self-contained: the reader's contract becomes "every
+// returned message has at least one payload byte", which matches real Bolt
+// messages (always at least a struct header byte) and leaves callers free of
+// NOOP-awareness.
+//
 // Returns [ErrMessageTooLarge] when the cumulative payload of the message in
 // flight would exceed the reader's MaxMessageBytes cap. The check is performed
 // against the prospective total (current msg length + incoming chunkLen)
@@ -109,10 +123,14 @@ func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 
 		chunkLen := int(binary.BigEndian.Uint16(header[:]))
 		if chunkLen == 0 {
-			// End-of-message sentinel.
 			if msg == nil {
-				msg = []byte{}
+				// Standalone 00 00 with no in-progress message body: a Bolt
+				// 4.1+ NOOP keep-alive. Silently discard it and read the next
+				// message rather than returning a (spurious) zero-length
+				// message the serve loop would fail to decode.
+				continue
 			}
+			// End-of-message sentinel terminating a real (non-empty) message.
 			return msg, nil
 		}
 		if chunkLen > maxChunkSize {

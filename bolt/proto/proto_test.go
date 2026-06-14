@@ -426,7 +426,13 @@ func TestChunkingRoundTrip(t *testing.T) {
 		name string
 		size int
 	}{
-		{"empty", 0},
+		// An empty message (size 0) is intentionally NOT a round-trip case:
+		// WriteMessage emits only a bare 00 00 sentinel for it, which is wire-
+		// identical to a Bolt 4.1+ NOOP keep-alive. ReadMessage now silently
+		// discards such a standalone 00 00 (see TestChunkingNOOPSilentlyDiscarded
+		// and #1485), so an empty message does not survive the round trip — by
+		// design, because real Bolt messages always carry at least a struct
+		// header byte.
 		{"one_byte", 1},
 		{"max_single_chunk", 65534},
 		{"exact_max_chunk", 65535},
@@ -470,6 +476,59 @@ func TestChunkingCorruptShortPayload(t *testing.T) {
 	_, err := cr.ReadMessage()
 	if err == nil {
 		t.Fatal("expected error for truncated chunk, got nil")
+	}
+}
+
+// TestChunkingNOOPSilentlyDiscarded pins the #1485 framing contract: a
+// standalone 00 00 chunk (a NOOP keep-alive with no preceding payload) is
+// skipped by ReadMessage rather than surfaced as a zero-length message.
+func TestChunkingNOOPSilentlyDiscarded(t *testing.T) {
+	// A bare NOOP followed by a real one-byte message. ReadMessage must skip
+	// the NOOP and return the real message.
+	var buf bytes.Buffer
+	buf.Write([]byte{0x00, 0x00}) // NOOP
+	cw := proto.NewChunkedWriter(&buf)
+	if err := cw.WriteMessage([]byte{0xAB}); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+
+	cr := proto.NewChunkedReader(&buf)
+	got, err := cr.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage after NOOP: %v", err)
+	}
+	if !bytes.Equal(got, []byte{0xAB}) {
+		t.Errorf("ReadMessage after NOOP = %v; want [0xAB] (NOOP must be skipped, not returned)", got)
+	}
+}
+
+// TestChunkingMultipleNOOPsThenMessage verifies that several consecutive NOOPs
+// are all discarded before the next real message is returned.
+func TestChunkingMultipleNOOPsThenMessage(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}) // three NOOPs
+	cw := proto.NewChunkedWriter(&buf)
+	if err := cw.WriteMessage([]byte("hi")); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+
+	cr := proto.NewChunkedReader(&buf)
+	got, err := cr.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage after NOOPs: %v", err)
+	}
+	if !bytes.Equal(got, []byte("hi")) {
+		t.Errorf("ReadMessage after NOOPs = %q; want %q", got, "hi")
+	}
+}
+
+// TestChunkingNOOPOnlyThenEOF verifies that a NOOP with nothing after it is
+// skipped and the reader then reports a clean io.EOF (not an empty message).
+func TestChunkingNOOPOnlyThenEOF(t *testing.T) {
+	cr := proto.NewChunkedReader(bytes.NewReader([]byte{0x00, 0x00}))
+	_, err := cr.ReadMessage()
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("ReadMessage on NOOP-only stream = %v; want io.EOF", err)
 	}
 }
 
