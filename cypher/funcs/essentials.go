@@ -28,6 +28,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
@@ -554,6 +555,28 @@ func errRangeTooLarge(quotient uint64) error {
 		maxRangeElements, quotient, maxRangeElements)}
 }
 
+// maxReplaceOutputBytes bounds the byte size a single replace() call may
+// materialise. It is kept equal to expr.DefaultMaxStringEvalBytes (1 GiB) so
+// replace() obeys the same per-evaluation string ceiling as the "+" / reduce()
+// paths, which charge that budget directly. replace() runs via the generic
+// function dispatch (cypher/expr/eval.go), which never charges the byte budget,
+// so the bound is enforced here instead. It guards the empty-search quadratic
+// amplification — replace($a, ”, $b) inserts $b between every rune of $a, so
+// the output grows to (runeCount($a)+1)*len($b) — which O(1) query text with
+// large string PARAMETERS (parameters bypass the 1 MiB query-text guard) could
+// drive to a multi-terabyte allocation and OOM-kill the process (#1494).
+const maxReplaceOutputBytes = expr.DefaultMaxStringEvalBytes
+
+// errReplaceTooLarge builds the typed error returned when a replace() call would
+// materialise more than maxReplaceOutputBytes output bytes. The message shape
+// mirrors errRangeTooLarge / expr.errStringTooLarge so callers map it to a query
+// error, never a panic or an out-of-memory crash.
+func errReplaceTooLarge() error {
+	return &expr.EvalError{Msg: fmt.Sprintf(
+		"ArgumentError: NumberOutOfRange: replace() would produce more than %d string bytes, exceeding the maximum of %d",
+		maxReplaceOutputBytes, maxReplaceOutputBytes)}
+}
+
 // fnRange returns a list of integers: range(start, end) or range(start, end, step).
 // Start and end are inclusive. A negative step traverses downward.
 func fnRange(args []expr.Value) (expr.Value, error) {
@@ -1025,9 +1048,19 @@ func fnSubstring(args []expr.Value) (expr.Value, error) {
 		if length < 0 {
 			length = 0
 		}
-		end := start + length
-		if end > len(runes) {
+		// Compute the end bound overflow-safely. start ∈ [0, len(runes)] and
+		// length ≥ 0 at this point, so len(runes)-start ≥ 0 cannot underflow.
+		// A naive `start + length` overflows int to a negative value for a huge
+		// length (e.g. substring('hello', 2, MaxInt64)); the negative end would
+		// slip past the `end > len(runes)` clamp and panic in the slice. Clamping
+		// length to the available tail instead matches Neo4j/openCypher, which
+		// return the truncated tail for an over-large length (a value query, not
+		// an out-of-range error).
+		var end int
+		if length > len(runes)-start {
 			end = len(runes)
+		} else {
+			end = start + length
 		}
 		return expr.StringValue(string(runes[start:end])), nil
 	}
@@ -1049,7 +1082,53 @@ func fnReplace(args []expr.Value) (expr.Value, error) {
 	original := string(args[0].(expr.StringValue)) //nolint:forcetypeassert // type-checked above
 	search := string(args[1].(expr.StringValue))   //nolint:forcetypeassert // type-checked above
 	replace := string(args[2].(expr.StringValue))  //nolint:forcetypeassert // type-checked above
+	if err := checkReplaceBudget(original, search, replace); err != nil {
+		return nil, err
+	}
 	return expr.StringValue(strings.ReplaceAll(original, search, replace)), nil
+}
+
+// checkReplaceBudget bounds the worst-case output of strings.ReplaceAll BEFORE
+// it allocates, returning a typed [expr.EvalError] (NumberOutOfRange) when the
+// output would exceed maxReplaceOutputBytes. All arithmetic is overflow-safe
+// (int64, bounded against the cap at each step), so a crafted input can never
+// wrap to a small positive size and slip past the check.
+//
+//   - Empty search: ReplaceAll inserts replace before each rune and once at the
+//     end, so output = len(original) + (runeCount(original)+1)*len(replace).
+//   - Non-empty search: at most floor(len(original)/len(search)) replacements,
+//     so output ≤ len(original) + occurrences*len(replace) (occurrences is an
+//     upper bound: each match consumes ≥ len(search) bytes of the original).
+//
+// The legitimate path (small inputs / no amplification) returns nil and the
+// behaviour of replace() is unchanged.
+func checkReplaceBudget(original, search, replace string) error {
+	const cap64 = int64(maxReplaceOutputBytes)
+	var occurrences int64
+	if search == "" {
+		occurrences = int64(utf8.RuneCountInString(original)) + 1
+	} else {
+		occurrences = int64(len(original) / len(search))
+	}
+	// out = len(original) + occurrences*len(replace), computed so neither term
+	// nor the sum can overflow undetected: bail as soon as a partial result
+	// exceeds the cap.
+	out := int64(len(original))
+	if out > cap64 {
+		return errReplaceTooLarge()
+	}
+	if lr := int64(len(replace)); lr > 0 && occurrences > 0 {
+		// occurrences*lr must not overflow: compare against the remaining budget
+		// using division rather than multiplication.
+		if occurrences > (cap64-out)/lr {
+			return errReplaceTooLarge()
+		}
+		out += occurrences * lr
+	}
+	if out > cap64 {
+		return errReplaceTooLarge()
+	}
+	return nil
 }
 
 func fnSplit(args []expr.Value) (expr.Value, error) {

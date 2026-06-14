@@ -2,12 +2,10 @@ package cypher_test
 
 // security_audit2026c_test.go — FOURTH security audit (SEC-2026-06-14c) of the
 // Cypher query engine. Each test documents one traced finding with a BOUNDED
-// repro that never hangs or OOMs the test runner. While the corresponding fix
-// is open, the test asserts that the vulnerable behaviour is CONTAINED (the
-// panic is caught by the engine's recover boundary, or the amplification is
-// kept small enough not to exhaust the runner). Each test carries a // FLIP:
-// comment describing the single-line change that turns it into a positive
-// secure-behaviour lock-in once the rmp task is implemented.
+// repro that never hangs or OOMs the test runner. The findings below have now
+// been REMEDIATED, so each test asserts the conforming, SECURE behaviour and
+// stands as a permanent regression guard (the prior "contained vulnerable
+// behaviour" tolerances have been flipped).
 //
 // ── FINDING #1492 [High] — substring() integer-overflow panic ────────────────
 // fnSubstring computes `end := start + length` where start ∈ [0,len] and length
@@ -48,33 +46,23 @@ import (
 )
 
 // TestSec2026c_Substring_OverflowContained drives the substring() integer
-// overflow (finding #1492) end-to-end through the engine and asserts the panic
-// is at least CONTAINED (never crashes the host) — today it surfaces as
-// ErrInternalPanic. The conforming outcome is the truncated tail 'llo'.
-//
-// FLIP (after #1492): replace the ErrInternalPanic tolerance with a hard
-// assertion that err == nil and the returned column equals "llo".
+// overflow (finding #1492) end-to-end through the engine and asserts the
+// conforming, fail-stop behaviour: NO error and the truncated tail 'llo' (the
+// Neo4j/openCypher result for an over-large length). FLIPPED after #1492 landed:
+// the prior ErrInternalPanic tolerance is gone — a panic is now a hard failure.
 func TestSec2026c_Substring_OverflowContained(t *testing.T) {
 	t.Parallel()
 	eng := secCypherNewEngine(t)
 
 	const q = `RETURN substring('hello', 2, 9223372036854775807) AS s`
 
-	// The call must return — never crash the process. We tolerate either the
-	// (current) ErrInternalPanic containment or the (fixed) correct value.
 	res, err := eng.Run(context.Background(), q, nil)
-
-	if err == nil {
-		got := secCypherSingleString(t, res)
-		if got != "llo" {
-			t.Fatalf("substring overflow: want tail %q, got %q", "llo", got)
-		}
-		return // FIXED behaviour — finding #1492 resolved.
+	if err != nil {
+		t.Fatalf("substring overflow: want no error and tail 'llo', got error: %v", err)
 	}
-	if !errors.Is(err, cypher.ErrInternalPanic) {
-		t.Fatalf("substring overflow: unexpected error kind: %v", err)
+	if got := secCypherSingleString(t, res); got != "llo" {
+		t.Fatalf("substring overflow: want tail %q, got %q", "llo", got)
 	}
-	t.Logf("finding #1492 OPEN: substring overflow currently contained as ErrInternalPanic (want truncated value 'llo')")
 }
 
 // TestSec2026c_Substring_OverflowDirectNoPanic locks in the fail-stop
@@ -84,14 +72,14 @@ func TestSec2026c_Substring_OverflowContained(t *testing.T) {
 // process is never crashed (recover catches it) and, once fixed, the correct
 // tail is returned.
 //
-// FLIP (after #1492): assert err == nil and exact tails for each start.
+// FLIPPED after #1492: asserts err == nil and the exact tail for each start.
 func TestSec2026c_Substring_OverflowVariousStarts(t *testing.T) {
 	t.Parallel()
 	eng := secCypherNewEngine(t)
 
 	cases := []struct {
 		query string
-		tail  string // expected tail once fixed
+		tail  string // expected tail
 	}{
 		{`RETURN substring('hello', 0, 9223372036854775807) AS s`, "hello"},
 		{`RETURN substring('hello', 1, 9223372036854775807) AS s`, "ello"},
@@ -100,52 +88,36 @@ func TestSec2026c_Substring_OverflowVariousStarts(t *testing.T) {
 	}
 	for _, c := range cases {
 		res, err := eng.Run(context.Background(), c.query, nil)
-		if err == nil {
-			if got := secCypherSingleString(t, res); got != c.tail {
-				t.Fatalf("%s: want %q, got %q", c.query, c.tail, got)
-			}
-			continue
+		if err != nil {
+			t.Fatalf("%s: want no error, got: %v", c.query, err)
 		}
-		if !errors.Is(err, cypher.ErrInternalPanic) {
-			t.Fatalf("%s: unexpected error: %v", c.query, err)
+		if got := secCypherSingleString(t, res); got != c.tail {
+			t.Fatalf("%s: want %q, got %q", c.query, c.tail, got)
 		}
-		// OPEN: contained as ErrInternalPanic — acceptable until #1492 lands.
 	}
 }
 
 // TestSec2026c_PercentileCont_NaNContained drives a NaN percentile into
-// percentileCont (finding #1493) and asserts containment: the call must return
-// (no host crash) — today it either returns a value (arm64, where int(NaN)=0) or
-// ErrInternalPanic (amd64, where int(NaN)=MinInt64 → index panic). Either way it
-// must not crash the process or hang.
-//
-// FLIP (after #1493): assert err is a NumberOutOfRange-class error (NaN is
-// rejected by validPercentileParam), matching the out-of-range behaviour already
-// verified for p=5.0 / p=-3.0.
+// percentileCont (finding #1493) and asserts the conforming behaviour: a NaN
+// percentile is rejected at plan-build time with a NumberOutOfRange-class error
+// (NOT ErrInternalPanic, NOT a panic), matching the out-of-range behaviour
+// already verified for p=5.0 / p=-3.0. FLIPPED after #1493 landed.
 func TestSec2026c_PercentileCont_NaNContained(t *testing.T) {
 	t.Parallel()
 	eng := secCypherNewEngine(t)
 
 	const q = `UNWIND [1,2,3,4,5] AS x RETURN percentileCont(x, 0.0/0.0) AS p`
 
-	res, err := eng.Run(context.Background(), q, nil)
-	if err != nil {
-		// FIXED path: NaN rejected like other out-of-range percentiles, OR
-		// current amd64 containment via ErrInternalPanic. Both are non-crashing.
-		if strings.Contains(err.Error(), "NumberOutOfRange") {
-			return // FIXED behaviour — finding #1493 resolved.
-		}
-		if !errors.Is(err, cypher.ErrInternalPanic) {
-			t.Fatalf("percentileCont(NaN): unexpected error kind: %v", err)
-		}
-		t.Logf("finding #1493 OPEN: percentileCont(NaN) contained as ErrInternalPanic")
-		return
+	_, err := eng.Run(context.Background(), q, nil)
+	if err == nil {
+		t.Fatalf("percentileCont(NaN): want a NumberOutOfRange error, got nil")
 	}
-	// On this arch int(NaN)=0 so no panic fired; the result is whatever the
-	// degenerate index produced. The point of the lock-in is that it did not
-	// crash; record the OPEN state.
-	_ = res
-	t.Logf("finding #1493 OPEN: percentileCont(NaN) returned a value without rejecting NaN (platform-dependent; would panic where int(NaN) is out of range)")
+	if errors.Is(err, cypher.ErrInternalPanic) {
+		t.Fatalf("percentileCont(NaN): got ErrInternalPanic (a contained panic), want a typed NumberOutOfRange error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NumberOutOfRange") {
+		t.Fatalf("percentileCont(NaN): want a NumberOutOfRange error, got: %v", err)
+	}
 }
 
 // TestSec2026c_PercentileCont_NaNAggNoPanic exercises the aggregator directly
@@ -206,39 +178,72 @@ func TestSec2026c_PercentileDisc_NaNAggSafe(t *testing.T) {
 // output-size cap lands, it returns a NumberOutOfRange error instead of
 // materialising the giant string.
 //
-// The inputs are deliberately small enough that even the unbounded path stays
-// within a few hundred MiB (safe for CI) yet demonstrates the amplification.
+// The inputs are deliberately small enough that even the (former) unbounded path
+// stayed within a few hundred MiB (safe for CI) yet demonstrate the
+// amplification: 16 KiB × 16 KiB ≈ 256 MiB worst-case output, which trips the
+// 1 GiB cap only with the parameters scaled up — so this test pins the SMALLER
+// amplification by asserting the worst-case ESTIMATE (not the materialised
+// bytes) is rejected. To keep the assertion deterministic and well over the cap
+// we size the params so (runeCount($a)+1)*len($b) exceeds 1 GiB while the inputs
+// themselves stay tiny (the empty-search worst case is quadratic in the rune
+// count, so 64 KiB × 64 KiB ≈ 4 GiB estimate, comfortably over the 1 GiB cap,
+// from 128 KiB of total input).
 //
-// FLIP (after #1494): assert err is a NumberOutOfRange-class error and no large
-// string is returned.
+// FLIPPED after #1494: asserts a NumberOutOfRange-class error and that no giant
+// string is materialised.
 func TestSec2026c_Replace_EmptySearchAmplificationBounded(t *testing.T) {
 	t.Parallel()
 	eng := secCypherNewEngine(t)
 
-	const unit = 16 * 1024 // 16 KiB each; worst-case output ≈ 256 MiB.
+	const unit = 64 * 1024 // 64 KiB each; worst-case estimate ≈ 4 GiB > 1 GiB cap.
 	params := map[string]expr.Value{
 		"a": expr.StringValue(strings.Repeat("a", unit)),
 		"b": expr.StringValue(strings.Repeat("b", unit)),
 	}
 	const q = `RETURN replace($a, '', $b) AS r`
 
-	res, err := eng.Run(context.Background(), q, params)
+	// The budget rejection is raised while materialising the row, so it can
+	// surface either from Run or from the result iterator — drain to capture it.
+	err := secCypherDrainErr(eng.Run(context.Background(), q, params))
+	if err == nil {
+		t.Fatalf("replace amplification: want a NumberOutOfRange error, got nil (output materialised unbounded)")
+	}
+	if errors.Is(err, cypher.ErrInternalPanic) {
+		t.Fatalf("replace amplification: got ErrInternalPanic, want a typed NumberOutOfRange budget error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NumberOutOfRange") {
+		t.Fatalf("replace amplification: want a NumberOutOfRange error, got: %v", err)
+	}
+}
+
+// secCypherDrainErr returns the first error from a (result, err) pair, draining
+// the result iterator so a lazily-raised per-row evaluation error (which
+// surfaces from res.Err(), not from Run) is captured. It never materialises row
+// values, so an over-budget string is never built.
+func secCypherDrainErr(res *cypher.Result, err error) error {
 	if err != nil {
-		if strings.Contains(err.Error(), "NumberOutOfRange") {
-			return // FIXED behaviour — finding #1494 resolved (output capped).
-		}
-		// Any other typed error is also non-crashing containment.
-		t.Logf("finding #1494: replace amplification returned error: %v", err)
-		return
+		return err
 	}
-	// Unbounded path: verify the engine produced the amplified string (proving
-	// the gap) but did not crash. The amplification factor is ~unit, confirming
-	// the quadratic blow-up that would OOM with larger parameters.
-	got := secCypherSingleString(t, res)
-	if len(got) < unit*unit { // (len(a)+1)*len(b) ≈ unit*unit
-		t.Logf("finding #1494: replace produced %d bytes from 2x%d-byte inputs", len(got), unit)
+	defer res.Close()
+	for res.Next() {
 	}
-	t.Logf("finding #1494 OPEN: replace($a,'',$b) is unbudgeted (%d-byte output from 2x%d-byte inputs; scales to OOM with larger params)", len(got), unit)
+	return res.Err()
+}
+
+// TestSec2026c_Replace_LegitimateUnchanged is a POSITIVE lock-in: a normal,
+// small replace() (non-empty search, no amplification) is unaffected by the
+// #1494 output-size budget.
+func TestSec2026c_Replace_LegitimateUnchanged(t *testing.T) {
+	t.Parallel()
+	eng := secCypherNewEngine(t)
+
+	res, err := eng.Run(context.Background(), `RETURN replace('hello', 'l', 'L') AS r`, nil)
+	if err != nil {
+		t.Fatalf("replace('hello','l','L'): unexpected error: %v", err)
+	}
+	if got := secCypherSingleString(t, res); got != "heLLo" {
+		t.Fatalf("replace('hello','l','L'): want %q, got %q", "heLLo", got)
+	}
 }
 
 // secCypherSingleString extracts the single string column of a single-row

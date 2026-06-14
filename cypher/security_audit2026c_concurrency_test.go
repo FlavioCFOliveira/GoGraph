@@ -41,7 +41,7 @@ func recordInt(rec map[string]interface{}, col string) int64 {
 }
 
 // countLabel runs a one-shot count of nodes carrying label on eng.
-func countLabel(t *testing.T, eng *cypher.Engine, ctx context.Context, label string) int64 {
+func countLabel(ctx context.Context, t *testing.T, eng *cypher.Engine, label string) int64 {
 	t.Helper()
 	res, err := eng.Run(ctx, "MATCH (n:"+label+") RETURN count(n) AS c", nil)
 	if err != nil {
@@ -172,7 +172,7 @@ func TestSEC14c_ConcurrentWriteRead_NoRace_NoPartialReads(t *testing.T) {
 	for _, c := range commitOK {
 		wantCommits += c
 	}
-	if got := countLabel(t, eng, ctx, "Audit"); int(got) != wantCommits {
+	if got := countLabel(ctx, t, eng, "Audit"); int(got) != wantCommits {
 		t.Errorf("lost/double write: committed %d :Audit nodes but graph holds %d",
 			wantCommits, got)
 	}
@@ -231,7 +231,7 @@ func TestSEC14c_ConcurrentBeginWriters_SingleWriterSerialised(t *testing.T) {
 	}
 
 	// Every successful commit must be fully and exactly visible.
-	if got := countLabel(t, eng, ctx, "W"); got != okCount.Load() {
+	if got := countLabel(ctx, t, eng, "W"); got != okCount.Load() {
 		t.Errorf("single-writer serialisation lost a commit: committed %d but graph holds %d",
 			okCount.Load(), got)
 	}

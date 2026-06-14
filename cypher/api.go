@@ -66,6 +66,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -5383,11 +5384,24 @@ func validPercentileParam(v expr.Value) (float64, error) {
 	switch n := v.(type) {
 	case expr.FloatValue:
 		f := float64(n)
+		// Reject non-finite percentiles first: NaN passes BOTH `f < 0.0` and
+		// `f > 1.0` (every NaN comparison is false), so without this guard a NaN
+		// percentile (reachable from O(1) query text via float div-by-zero, e.g.
+		// percentileCont(x, 0.0/0.0)) slips through validation and later indexes
+		// the aggregator's value slice with int(NaN) — implementation-dependent
+		// per the Go spec (MinInt64 on amd64) → a slice-index panic. This mirrors
+		// the fnToInteger guard (cypher/funcs/essentials.go) (#1493).
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, fmt.Errorf("ArgumentError.NumberOutOfRange: percentile must be in [0.0, 1.0], got %g", f)
+		}
 		if f < 0.0 || f > 1.0 {
 			return 0, fmt.Errorf("ArgumentError.NumberOutOfRange: percentile must be in [0.0, 1.0], got %g", f)
 		}
 		return f, nil
 	case expr.IntegerValue:
+		// An IntegerValue can never be NaN or infinite, so only the range check
+		// applies here (the non-finite guard is exclusive to the FloatValue case,
+		// which is the path NaN actually reaches via float div-by-zero).
 		f := float64(int64(n))
 		if f < 0.0 || f > 1.0 {
 			return 0, fmt.Errorf("ArgumentError.NumberOutOfRange: percentile must be in [0.0, 1.0], got %g", f)
