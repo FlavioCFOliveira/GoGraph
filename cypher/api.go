@@ -2314,7 +2314,9 @@ type Result struct {
 	// actually called; a caller that drains positionally (or never reads a row,
 	// like a count drain or the Bolt PULL via RowAt) pays no map allocation at
 	// all. matRowLen is the per-row width (len(cols)); matRows has length
-	// rowCount*matRowLen. recScratch is the single reused map backing Record().
+	// rowCount*matRowLen. recScratch is the single reused map backing Record(),
+	// allocated lazily on the first Record() call so a positional/never-read
+	// drain pays no map allocation (#1499 follow-up).
 	matRows    []expr.Value
 	matRowLen  int
 	matRecords int // number of materialised rows
@@ -2438,6 +2440,14 @@ func (r *Result) Next() bool {
 // without materialising the map.
 func (r *Result) Record() exec.Record {
 	if r.matOn {
+		if r.recScratch == nil {
+			// Allocated lazily on the first Record call (#1499 follow-up): a
+			// caller that drains positionally via RowAt/ValueAt (the Bolt PULL
+			// path) or never reads a row (a count drain) never pays for this
+			// scratch map, which restored the small-result alloc count to its
+			// pre-column-oriented baseline.
+			r.recScratch = make(exec.Record, r.matRowLen)
+		}
 		row := r.rowSlice(r.matIdx - 1)
 		for i, col := range r.cols {
 			if i < len(row) {
@@ -2495,7 +2505,10 @@ func (r *Result) rowSlice(i int) []expr.Value {
 // Result.Err(); Close still commits/rolls back.
 func (r *Result) materialize() {
 	r.matRowLen = len(r.cols)
-	r.recScratch = make(exec.Record, r.matRowLen)
+	// recScratch (the reused map backing Record()) is allocated lazily on the
+	// first Record() call, not here: a result drained positionally (RowAt/
+	// ValueAt — the Bolt PULL path) or never read at all must not pay for a map
+	// it never uses (#1499 follow-up).
 	var byteCount int64
 	for r.rs.Next() {
 		// Read the row positionally — no per-row map allocation. Each value is

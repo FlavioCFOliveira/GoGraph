@@ -95,14 +95,16 @@ type ResultSet struct {
 // must call [ResultSet.Close] when done.
 //
 // Run does not pull any rows; all work happens lazily in [ResultSet.Next].
-// The Record map is pre-allocated once here and reused across every Next call
-// to eliminate the per-row allocation that previously dominated heap usage.
+// The Record map is allocated lazily on the first [ResultSet.Record] /
+// [ResultSet.TakeRecord] call (#1499 follow-up) and then reused across every
+// subsequent Next call. A consumer that drains rows positionally via
+// [ResultSet.Row] — the materialisation path and the Bolt PULL path — never
+// triggers the allocation at all, which keeps small-result queries off the heap.
 func Run(ctx context.Context, plan Operator, cols []string) *ResultSet {
 	rs := &ResultSet{
-		plan:    plan,
-		cols:    cols,
-		ctx:     ctx,
-		current: make(Record, len(cols)), // pre-allocated; reused by each Next call
+		plan: plan,
+		cols: cols,
+		ctx:  ctx,
 	}
 	if err := plan.Init(ctx); err != nil {
 		rs.err = fmt.Errorf("exec: plan init: %w", err)
@@ -166,8 +168,12 @@ func (rs *ResultSet) Record() Record {
 }
 
 // fillCurrent projects the positional current row into the reused rs.current
-// map. Splitting it out lets Record and TakeRecord share the projection.
+// map, allocating it on first use (#1499 follow-up). Splitting it out lets
+// Record and TakeRecord share the projection.
 func (rs *ResultSet) fillCurrent() {
+	if rs.current == nil {
+		rs.current = make(Record, len(rs.cols))
+	}
 	for i, col := range rs.cols {
 		if i < len(rs.curRow) {
 			rs.current[col] = rs.curRow[i]
