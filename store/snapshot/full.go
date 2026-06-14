@@ -745,7 +745,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 
 	var labelsParsed LabelsReadback
 	if labelsEntry != nil {
-		labelsParsed, err = readVerifiedLabels(filepath.Join(dir, LabelsFile), labelsEntry.CRC32C)
+		labelsParsed, err = readVerifiedLabels(filepath.Join(dir, LabelsFile), labelsEntry.CRC32C, labelsEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -754,7 +754,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 
 	var propsParsed PropertiesReadback
 	if propsEntry != nil {
-		propsParsed, err = readVerifiedProperties(filepath.Join(dir, PropertiesFile), propsEntry.CRC32C)
+		propsParsed, err = readVerifiedProperties(filepath.Join(dir, PropertiesFile), propsEntry.CRC32C, propsEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -775,9 +775,9 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		// lets a single LoadSnapshotFull serve both layouts without a
 		// codec of its own.
 		if ver == mapperFormatVersionCodec {
-			mapperParsed, err = readVerifiedMapperBytes(mapperPath, mapperEntry.CRC32C)
+			mapperParsed, err = readVerifiedMapperBytes(mapperPath, mapperEntry.CRC32C, mapperEntry.Size)
 		} else {
-			mapperParsed, err = readVerifiedMapper(mapperPath, mapperEntry.CRC32C)
+			mapperParsed, err = readVerifiedMapper(mapperPath, mapperEntry.CRC32C, mapperEntry.Size)
 		}
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
@@ -804,7 +804,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	// CRC32C is verified exactly like the other components.
 	var edgeHandlesParsed EdgeHandlesReadback
 	if ehEntry := findEntry(m.Files, EdgeHandlesFile); ehEntry != nil {
-		edgeHandlesParsed, err = readVerifiedEdgeHandles(filepath.Join(dir, EdgeHandlesFile), ehEntry.CRC32C)
+		edgeHandlesParsed, err = readVerifiedEdgeHandles(filepath.Join(dir, EdgeHandlesFile), ehEntry.CRC32C, ehEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -884,6 +884,21 @@ func findEntries(files []FileEntry) (csrEntry, labelsEntry, propsEntry, mapperEn
 	return csrEntry, labelsEntry, propsEntry, mapperEntry, tombEntry
 }
 
+// boundedComponentReader wraps r so at most size bytes are readable when a
+// positive manifest size is known. A declared record count in a component
+// header can then never drive a structural parser's append loop past the real
+// on-disk size: once the bounded reader EOFs, the parser fails fail-stop on
+// the truncated record. When size <= 0 (no manifest size recorded) the reader
+// is returned unbounded, preserving the prior behaviour. For a valid file the
+// recorded size equals the on-disk size, so the CRC computed over the bounded
+// stream still covers exactly the component bytes.
+func boundedComponentReader(r io.Reader, size int64) io.Reader {
+	if size <= 0 {
+		return r
+	}
+	return io.LimitReader(r, size)
+}
+
 // readVerifiedCSR opens path, runs the file bytes through CRC32C and
 // the structural CSR reader simultaneously, and returns the parsed
 // snapshot iff the CRC matches expected. Any disagreement surfaces
@@ -916,8 +931,12 @@ func readVerifiedCSR(path string, expected uint32, size int64) (CSRReadback, err
 	return parsed, nil
 }
 
-// readVerifiedLabels is the dual of [readVerifiedCSR] for labels.bin.
-func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
+// readVerifiedLabels is the dual of [readVerifiedCSR] for labels.bin. size is
+// the manifest-recorded file size; the body reader is bounded to it via
+// [io.LimitReader] so a malicious header declaring more records than the file
+// could hold cannot drive the parser's append loop past the real on-disk size
+// (the structural reader then fails fail-stop on the truncated record).
+func readVerifiedLabels(path string, expected uint32, size int64) (LabelsReadback, error) {
 	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return LabelsReadback{}, err
@@ -926,7 +945,7 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
-	tee := io.TeeReader(f, hasher)
+	tee := io.TeeReader(boundedComponentReader(f, size), hasher)
 	parsed, err := ReadLabels(tee)
 	if err != nil {
 		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
@@ -942,8 +961,8 @@ func readVerifiedLabels(path string, expected uint32) (LabelsReadback, error) {
 }
 
 // readVerifiedEdgeHandles is the dual of [readVerifiedCSR] for
-// edgehandles.bin.
-func readVerifiedEdgeHandles(path string, expected uint32) (EdgeHandlesReadback, error) {
+// edgehandles.bin. size bounds the body reader (see [readVerifiedLabels]).
+func readVerifiedEdgeHandles(path string, expected uint32, size int64) (EdgeHandlesReadback, error) {
 	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return EdgeHandlesReadback{}, err
@@ -952,7 +971,7 @@ func readVerifiedEdgeHandles(path string, expected uint32) (EdgeHandlesReadback,
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
-	tee := io.TeeReader(f, hasher)
+	tee := io.TeeReader(boundedComponentReader(f, size), hasher)
 	parsed, err := ReadEdgeHandles(tee)
 	if err != nil {
 		return EdgeHandlesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
@@ -1020,8 +1039,8 @@ func readVerifiedConstraints(path string, expected uint32) (ConstraintsReadback,
 }
 
 // readVerifiedProperties is the dual of [readVerifiedCSR] for
-// properties.bin.
-func readVerifiedProperties(path string, expected uint32) (PropertiesReadback, error) {
+// properties.bin. size bounds the body reader (see [readVerifiedLabels]).
+func readVerifiedProperties(path string, expected uint32, size int64) (PropertiesReadback, error) {
 	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return PropertiesReadback{}, err
@@ -1030,7 +1049,7 @@ func readVerifiedProperties(path string, expected uint32) (PropertiesReadback, e
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
-	tee := io.TeeReader(f, hasher)
+	tee := io.TeeReader(boundedComponentReader(f, size), hasher)
 	parsed, err := ReadProperties(tee)
 	if err != nil {
 		return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)

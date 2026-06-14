@@ -502,8 +502,9 @@ func ReadMapperString(r io.Reader) (MapperReadback, error) {
 // and the structural mapper reader simultaneously, and returns the
 // parsed readback iff the CRC matches expected. Any disagreement
 // surfaces as [ErrCorrupted]. Mirrors [readVerifiedCSR] /
-// [readVerifiedLabels] / [readVerifiedProperties] in shape.
-func readVerifiedMapper(path string, expected uint32) (MapperReadback, error) {
+// [readVerifiedLabels] / [readVerifiedProperties] in shape. size bounds the
+// body reader (see [readVerifiedLabels]).
+func readVerifiedMapper(path string, expected uint32, size int64) (MapperReadback, error) {
 	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return MapperReadback{}, err
@@ -512,7 +513,7 @@ func readVerifiedMapper(path string, expected uint32) (MapperReadback, error) {
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
-	tee := io.TeeReader(f, hasher)
+	tee := io.TeeReader(boundedComponentReader(f, size), hasher)
 	parsed, err := ReadMapperString(tee)
 	if err != nil {
 		return MapperReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
@@ -558,8 +559,8 @@ func peekMapperVersion(path string) (uint16, error) {
 // version-1 (string) and version-2 (codec) layouts, returning the
 // per-record key bytes in [MapperReadback.RawPairs] for the caller to
 // decode through the matching codec. Any disagreement surfaces as
-// [ErrCorrupted].
-func readVerifiedMapperBytes(path string, expected uint32) (MapperReadback, error) {
+// [ErrCorrupted]. size bounds the body reader (see [readVerifiedLabels]).
+func readVerifiedMapperBytes(path string, expected uint32, size int64) (MapperReadback, error) {
 	f, err := openSnapshotComponent(path)
 	if err != nil {
 		return MapperReadback{}, err
@@ -568,7 +569,7 @@ func readVerifiedMapperBytes(path string, expected uint32) (MapperReadback, erro
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
-	tee := io.TeeReader(f, hasher)
+	tee := io.TeeReader(boundedComponentReader(f, size), hasher)
 	parsed, err := ReadMapperBytes(tee)
 	if err != nil {
 		return MapperReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
