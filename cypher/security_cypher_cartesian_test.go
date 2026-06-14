@@ -187,7 +187,16 @@ func TestSec_Cypher_Cartesian_FinalRowCapDoesNotBoundIntermediateWork(t *testing
 	const n = 40
 	eng := secCartesianEngine(t, n)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The timeout is a generous harness completion ceiling, NOT the security
+	// bound under test: this test asserts the 2.56M-tuple product *completes*
+	// (all intermediate tuples streamed, one row out, notification emitted). The
+	// 4-way product streams 40^4 tuples, which under the race detector on a
+	// loaded shared CI runner can take well over ten seconds; a too-tight ceiling
+	// made this flake (context deadline exceeded) without ever exercising the
+	// security property. 120s keeps the test bounded (it returns as soon as the
+	// count finishes, typically well under a second un-raced) while absorbing
+	// -race CI variance.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	q := "MATCH (a:N),(b:N),(c:N),(d:N) RETURN count(*) AS c"
