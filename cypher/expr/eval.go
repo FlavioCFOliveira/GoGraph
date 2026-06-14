@@ -124,6 +124,29 @@ func (e *EvalError) Error() string { return "eval: " + e.Msg }
 // [EvalError] (fail-stop) rather than allocating without bound.
 const DefaultMaxListElements = 10_000_000
 
+// DefaultMaxStringEvalBytes is the per-evaluation upper bound on the total
+// number of STRING BYTES a single expression may materialise across all of its
+// string-producing helpers (string concatenation with "+", and string
+// accumulation inside reduce()/comprehensions). The list-element budget
+// ([DefaultMaxListElements]) is byte-blind, so it does not stop a string
+// doubling such as
+//
+//	reduce(s='x', i IN range(1,33) | s + s)
+//
+// from growing one StringValue to gigabytes from O(1) query text (#1482).
+// This byte budget complements the element budget: it charges the bytes a
+// string concatenation is about to materialise BEFORE allocating, so an
+// over-budget concat fails fast with a typed [EvalError] (fail-stop) rather than
+// exhausting host memory.
+//
+// The ceiling is 1 GiB, set far above any legitimate single-expression string.
+// The largest string the openCypher TCK constructs or asserts is the 10,000-char
+// literal in Literals6 (~10 KiB) — roughly five orders of magnitude below this
+// bound — so no conforming query trips it (verified with the cypher-expert; the
+// openCypher specification imposes no maximum string length, leaving it
+// implementation-defined). Operators on memory-constrained hosts can lower it.
+const DefaultMaxStringEvalBytes = 1 << 30
+
 // errListTooLarge builds the typed error returned when an expression would
 // materialise more list elements than its per-evaluation budget allows. The
 // message shape mirrors the range() over-cap error
@@ -132,6 +155,16 @@ const DefaultMaxListElements = 10_000_000
 func errListTooLarge(limit int64) error {
 	return &EvalError{Msg: fmt.Sprintf(
 		"ArgumentError: NumberOutOfRange: expression would materialise more than %d list elements, exceeding the maximum of %d",
+		limit, limit)}
+}
+
+// errStringTooLarge builds the typed error returned when an expression would
+// materialise more string bytes than its per-evaluation byte budget allows. Its
+// message shape mirrors [errListTooLarge] so callers map it to a query error,
+// never a panic or an out-of-memory crash (#1482).
+func errStringTooLarge(limit int64) error {
+	return &EvalError{Msg: fmt.Sprintf(
+		"ArgumentError: NumberOutOfRange: expression would materialise more than %d string bytes, exceeding the maximum of %d",
 		limit, limit)}
 }
 
@@ -146,8 +179,13 @@ func errListTooLarge(limit int64) error {
 // evalBudget is not safe for concurrent use; each Eval/EvalWith call owns its
 // own instance on the call stack.
 type evalBudget struct {
-	remaining int64 // remaining elements that may still be materialised
-	limit     int64 // original ceiling, retained for the error message
+	remaining int64 // remaining list elements that may still be materialised
+	limit     int64 // original element ceiling, retained for the error message
+
+	// bytesRemaining and bytesLimit form the parallel per-evaluation STRING
+	// BYTE budget (#1482), debited whenever a string is grown (concatenation).
+	bytesRemaining int64
+	bytesLimit     int64
 }
 
 // charge debits n elements from the budget and returns a typed [EvalError] when
@@ -159,6 +197,19 @@ func (b *evalBudget) charge(n int64) error {
 	b.remaining -= n
 	if b.remaining < 0 {
 		return errListTooLarge(b.limit)
+	}
+	return nil
+}
+
+// chargeBytes debits n string bytes from the byte budget and returns a typed
+// [EvalError] when the budget is exhausted. n<=0 is a no-op (#1482).
+func (b *evalBudget) chargeBytes(n int64) error {
+	if b == nil || n <= 0 {
+		return nil
+	}
+	b.bytesRemaining -= n
+	if b.bytesRemaining < 0 {
+		return errStringTooLarge(b.bytesLimit)
 	}
 	return nil
 }
@@ -187,6 +238,21 @@ func chargeListGrowth(row RowContext, n int64) error {
 	}
 	if n > DefaultMaxListElements {
 		return errListTooLarge(DefaultMaxListElements)
+	}
+	return nil
+}
+
+// chargeStringGrowth charges n newly-materialised string bytes against the
+// per-evaluation byte budget carried by row. When row carries no budget (the
+// bare [Eval] path), it instead enforces an intrinsic per-call ceiling of
+// [DefaultMaxStringEvalBytes] on n alone, which still rejects a single oversized
+// concatenation. It returns a typed [EvalError] on breach (#1482).
+func chargeStringGrowth(row RowContext, n int64) error {
+	if b := extractBudget(row); b != nil {
+		return b.chargeBytes(n)
+	}
+	if n > DefaultMaxStringEvalBytes {
+		return errStringTooLarge(DefaultMaxStringEvalBytes)
 	}
 	return nil
 }
@@ -249,10 +315,15 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 		augmented[k] = v
 	}
 	augmented[subqueryContextKey] = &subqueryContextValue{
-		ctx:    ctx,
-		sub:    subEval,
-		pat:    patEval,
-		budget: &evalBudget{remaining: DefaultMaxListElements, limit: DefaultMaxListElements},
+		ctx: ctx,
+		sub: subEval,
+		pat: patEval,
+		budget: &evalBudget{
+			remaining:      DefaultMaxListElements,
+			limit:          DefaultMaxListElements,
+			bytesRemaining: DefaultMaxStringEvalBytes,
+			bytesLimit:     DefaultMaxStringEvalBytes,
+		},
 	}
 	return evalExpr(expr, augmented, params, reg)
 }
@@ -969,6 +1040,14 @@ func evalArith(row RowContext, op string, left, right Value) (Value, error) {
 	if op == "+" {
 		if ls, lok := left.(StringValue); lok {
 			if rs, rok := right.(StringValue); rok {
+				// Charge the bytes the concatenation is about to materialise
+				// against the per-evaluation byte budget BEFORE allocating, so a
+				// doubling accumulator (reduce(s='x', … | s + s)) is rejected
+				// with a typed [EvalError] rather than growing one string to
+				// gigabytes from O(1) query text (#1482).
+				if err := chargeStringGrowth(row, int64(len(ls))+int64(len(rs))); err != nil {
+					return nil, err
+				}
 				return StringValue(string(ls) + string(rs)), nil
 			}
 		}
