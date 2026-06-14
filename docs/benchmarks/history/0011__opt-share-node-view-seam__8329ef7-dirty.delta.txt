@@ -1,0 +1,126 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                │                                                    sec/op                                                    │                                        sec/op                                         vs base                 │
+AllNodesScan-10                                                                                                   4.373µ ± 53%                                                                            4.341µ ± 1%       ~ (p=0.093 n=6+10)
+ProjectOp-10                                                                                                      13.13µ ±  2%                                                                            13.16µ ± 2%       ~ (p=0.958 n=6+10)
+ResultSet-10                                                                                                      20.24µ ±  2%                                                                            20.06µ ± 1%       ~ (p=0.181 n=6+10)
+geomean                                                                                                           10.51µ                                                                                  10.46µ       -0.47%
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                │                                                     B/op                                                     │                                        B/op                                         vs base                   │
+AllNodesScan-10                                                                                                   10.06Ki ± 0%                                                                         10.06Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+ProjectOp-10                                                                                                      21.95Ki ± 0%                                                                         21.95Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+ResultSet-10                                                                                                      33.79Ki ± 0%                                                                         33.79Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+geomean                                                                                                           19.54Ki                                                                              19.54Ki       +0.00%
+¹ all samples are equal
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                │                                                  allocs/op                                                   │                                     allocs/op                                       vs base                   │
+AllNodesScan-10                                                                                                     258.0 ± 0%                                                                           258.0 ± 0%       ~ (p=1.000 n=6+10) ¹
+ProjectOp-10                                                                                                        762.0 ± 0%                                                                           762.0 ± 0%       ~ (p=1.000 n=6+10) ¹
+ResultSet-10                                                                                                       1.264k ± 0%                                                                          1.264k ± 0%       ~ (p=1.000 n=6+10) ¹
+geomean                                                                                                             628.7                                                                                628.7       +0.00%
+¹ all samples are equal
+
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+                  │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                  │                                                    sec/op                                                    │                                        sec/op                                         vs base                 │
+IC1-10                                                                                                              191.7µ ±  1%                                                                            182.2µ ± 1%  -4.97% (p=0.000 n=6+10)
+IC2-10                                                                                                              66.02µ ±  0%                                                                            63.73µ ± 1%  -3.47% (p=0.000 n=6+10)
+IC3-10                                                                                                              66.14µ ±  1%                                                                            63.81µ ± 0%  -3.53% (p=0.000 n=6+10)
+IC4-10                                                                                                              93.44µ ±  0%                                                                            94.20µ ± 0%  +0.80% (p=0.000 n=6+10)
+IC5-10                                                                                                              5.611µ ±  1%                                                                            5.508µ ± 1%  -1.83% (p=0.000 n=6+10)
+IC6-10                                                                                                              5.863µ ±  0%                                                                            5.784µ ± 0%  -1.35% (p=0.000 n=6+10)
+IC7-10                                                                                                              67.73µ ±  1%                                                                            65.05µ ± 0%  -3.96% (p=0.000 n=6+10)
+IC8-10                                                                                                              5.618µ ±  1%                                                                            5.529µ ± 0%  -1.58% (p=0.000 n=6+10)
+IC9-10                                                                                                              94.76µ ±  1%                                                                            95.43µ ± 0%  +0.71% (p=0.007 n=6+10)
+IC10-10                                                                                                             119.8µ ±  0%                                                                            120.5µ ± 0%  +0.55% (p=0.002 n=6+10)
+IC11-10                                                                                                             282.4µ ±  0%                                                                            284.5µ ± 0%  +0.73% (p=0.000 n=6+10)
+IC12-10                                                                                                             6.366µ ±  1%                                                                            6.300µ ± 1%  -1.04% (p=0.001 n=6+10)
+IC13-10                                                                                                             6.443µ ±  0%                                                                            6.345µ ± 0%  -1.53% (p=0.000 n=6+10)
+IC14-10                                                                                                             68.90µ ±  8%                                                                            66.25µ ± 0%  -3.85% (p=0.000 n=6+10)
+WithProjection-10                                                                                                   373.4µ ± 18%                                                                            373.7µ ± 0%       ~ (p=0.875 n=6+10)
+geomean                                                                                                             43.12µ                                                                                  42.42µ       -1.63%
+
+                  │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                  │                                                     B/op                                                     │                                        B/op                                         vs base                   │
+IC1-10                                                                                                              199.1Ki ± 0%                                                                         199.1Ki ± 0%       ~ (p=0.316 n=6+10)
+IC2-10                                                                                                              67.42Ki ± 0%                                                                         67.42Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+IC3-10                                                                                                              67.42Ki ± 0%                                                                         67.42Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+IC4-10                                                                                                              162.2Ki ± 0%                                                                         162.2Ki ± 0%       ~ (p=1.250 n=6+10)
+IC5-10                                                                                                              2.235Ki ± 0%                                                                         2.232Ki ± 0%  -0.13% (p=0.004 n=6+10)
+IC6-10                                                                                                              2.398Ki ± 0%                                                                         2.398Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+IC7-10                                                                                                              67.23Ki ± 0%                                                                         67.23Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+IC8-10                                                                                                              2.233Ki ± 0%                                                                         2.233Ki ± 0%       ~ (p=0.765 n=6+10)
+IC9-10                                                                                                              162.2Ki ± 0%                                                                         162.2Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+IC10-10                                                                                                             204.2Ki ± 0%                                                                         204.2Ki ± 0%       ~ (p=1.250 n=6+10)
+IC11-10                                                                                                             501.6Ki ± 0%                                                                         501.6Ki ± 0%       ~ (p=0.071 n=6+10)
+IC12-10                                                                                                             3.011Ki ± 0%                                                                         3.008Ki ± 0%       ~ (p=0.056 n=6+10)
+IC13-10                                                                                                             2.977Ki ± 0%                                                                         2.977Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+IC14-10                                                                                                             67.24Ki ± 0%                                                                         67.24Ki ± 0%       ~ (p=1.000 n=6+10) ¹
+WithProjection-10                                                                                                   630.3Ki ± 0%                                                                         630.3Ki ± 0%  -0.00% (n=6+10)
+geomean                                                                                                             39.04Ki                                                                              39.03Ki       -0.01%
+¹ all samples are equal
+
+                  │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                  │                                                  allocs/op                                                   │                                     allocs/op                                       vs base                   │
+IC1-10                                                                                                               5.794k ± 0%                                                                          5.794k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC2-10                                                                                                               1.971k ± 0%                                                                          1.971k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC3-10                                                                                                               1.971k ± 0%                                                                          1.971k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC4-10                                                                                                               1.970k ± 0%                                                                          1.970k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC5-10                                                                                                                40.00 ± 0%                                                                           40.00 ± 0%       ~ (p=1.000 n=6+10) ¹
+IC6-10                                                                                                                41.00 ± 0%                                                                           41.00 ± 0%       ~ (p=1.000 n=6+10) ¹
+IC7-10                                                                                                               1.960k ± 0%                                                                          1.960k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC8-10                                                                                                                40.00 ± 0%                                                                           40.00 ± 0%       ~ (p=1.000 n=6+10) ¹
+IC9-10                                                                                                               1.970k ± 0%                                                                          1.970k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC10-10                                                                                                              2.982k ± 0%                                                                          2.982k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC11-10                                                                                                              5.792k ± 0%                                                                          5.792k ± 0%       ~ (p=1.000 n=6+10) ¹
+IC12-10                                                                                                               50.00 ± 0%                                                                           50.00 ± 0%       ~ (p=1.000 n=6+10) ¹
+IC13-10                                                                                                               50.00 ± 0%                                                                           50.00 ± 0%       ~ (p=1.000 n=6+10) ¹
+IC14-10                                                                                                              1.960k ± 0%                                                                          1.960k ± 0%       ~ (p=1.000 n=6+10) ¹
+WithProjection-10                                                                                                    9.810k ± 0%                                                                          9.810k ± 0%       ~ (p=1.000 n=6+10) ¹
+geomean                                                                                                               732.2                                                                                732.2       +0.00%
+¹ all samples are equal
+
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                            │                                                    sec/op                                                    │                                        sec/op                                         vs base                 │
+BFSDirectionOpt_PowerLaw-10                                                                                                    29.07m ± 3%                                                                            29.21m ± 2%       ~ (p=0.368 n=6+10)
+Dijkstra_Large-10                                                                                                              8.198m ± 2%                                                                            8.230m ± 1%       ~ (p=0.093 n=6+10)
+Dijkstra_PostWarmup-10                                                                                                         8.087m ± 1%                                                                            8.120m ± 1%       ~ (p=0.635 n=6+10)
+geomean                                                                                                                        12.44m                                                                                 12.50m       +0.43%
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                            │                                                     B/op                                                     │                                        B/op                                         vs base                   │
+BFSDirectionOpt_PowerLaw-10                                                                                                   0.000 ± 0%                                                                             0.000 ± 0%       ~ (p=1.000 n=6+10) ¹
+Dijkstra_Large-10                                                                                                           1.087Mi ± 2%                                                                           1.088Mi ± 0%       ~ (p=0.731 n=6+10)
+Dijkstra_PostWarmup-10                                                                                                        0.000 ± 0%                                                                             0.000 ± 0%       ~ (p=1.000 n=6+10) ¹
+geomean                                                                                                                                  ²                                                                                       +0.01%                  ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                            │                                                  allocs/op                                                   │                                     allocs/op                                       vs base                   │
+BFSDirectionOpt_PowerLaw-10                                                                                                   0.000 ± 0%                                                                             0.000 ± 0%       ~ (p=1.000 n=6+10) ¹
+Dijkstra_Large-10                                                                                                             4.000 ± 0%                                                                             4.000 ± 0%       ~ (p=1.000 n=6+10) ¹
+Dijkstra_PostWarmup-10                                                                                                        0.000 ± 0%                                                                             0.000 ± 0%       ~ (p=1.000 n=6+10) ¹
+geomean                                                                                                                                  ²                                                                                       +0.00%                  ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                       │                                                    sec/op                                                    │                                          sec/op                                            vs base            │
+Brandes_RandomGraph-10                                                                                                    7.801m ± 1%                                                                                 7.833m ± 1%  ~ (p=0.118 n=6+10)
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                       │                                                     B/op                                                     │                                           B/op                                             vs base            │
+Brandes_RandomGraph-10                                                                                                   94.34Ki ± 0%                                                                                94.34Ki ± 0%  ~ (p=0.429 n=6+10)
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0010__opt-evalwith-single-map__3d37452-dirty.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0011__opt-share-node-view-seam__8329ef7-dirty.txt │
+                       │                                                  allocs/op                                                   │                                        allocs/op                                         vs base              │
+Brandes_RandomGraph-10                                                                                                    1.921k ± 0%                                                                               1.921k ± 0%  ~ (p=1.000 n=6+10) ¹
+¹ all samples are equal

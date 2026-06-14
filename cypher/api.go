@@ -6245,6 +6245,39 @@ func hashIndexKind(sub index.Subscriber) (expr.Kind, bool) {
 // When the body is malformed the value falls back to a plain StringValue
 // carrying the raw bytes; this keeps reads forward-safe in the unlikely event
 // that a legacy WAL contains a byte-collision payload.
+// nodePropsToExprMap materialises the property map of node id directly as an
+// expr.MapValue, fusing the storage read with the lpg→expr value conversion so
+// the node's properties are copied out of storage exactly once on their way to a
+// returned/wired NodeValue. It replaces the older two-step
+// NodePropertiesByID-then-rebuild idiom, which allocated a throwaway
+// map[string]lpg.PropertyValue solely to range over it once.
+//
+// The returned map is nil for a propertyless node: a nil expr.MapValue reads
+// identically to an empty one (missing-key access yields null, keys()/
+// properties() range as empty, Bolt serialises {}), so a label-only or
+// relationship-dense graph pays zero map allocations per such node. The map is
+// allocated lazily on the first present property and sized to the node's
+// property count via the two-pass-free streaming visitor.
+//
+// Isolation: the per-property conversion runs inside lpg.NodePropertiesByIDFunc
+// under the property shard's read lock, observing the same consistent snapshot
+// the previous two-step path observed; the resulting map is freshly owned by the
+// caller and aliases no graph-internal state.
+func nodePropsToExprMap(g *lpg.Graph[string, float64], id graph.NodeID) expr.MapValue {
+	var props expr.MapValue
+	g.NodePropertiesByIDFunc(id, func(name string, pv lpg.PropertyValue) {
+		if props == nil {
+			// First present property: allocate. We do not know the exact count
+			// up front (the visitor is single-pass), but property bags are small,
+			// so a default-grown map costs at most O(log n) rehashes — far cheaper
+			// than the eliminated intermediate map.
+			props = make(expr.MapValue)
+		}
+		props[name] = lpgPropToExpr(pv)
+	})
+	return props
+}
+
 func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
 	switch pv.Kind() {
 	case lpg.PropString:
@@ -6399,19 +6432,10 @@ func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Valu
 	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
 		return v
 	}
-	rawProps := g.NodePropertiesByID(id)
-	// Skip the map allocation entirely for propertyless nodes: a nil MapValue
-	// reads identically to an empty one (missing-key access yields null,
-	// keys()/properties() range as empty, Bolt serialises {}). This removes one
-	// allocation per propertyless returned node — common in label-only and
-	// relationship-dense graphs.
-	var props expr.MapValue
-	if len(rawProps) > 0 {
-		props = make(expr.MapValue, len(rawProps))
-		for k, pv := range rawProps {
-			props[k] = lpgPropToExpr(pv)
-		}
-	}
+	// Materialise the property map directly from storage into expr form — one
+	// copy out of the shard, no throwaway intermediate map. Propertyless nodes
+	// keep a nil map (see nodePropsToExprMap).
+	props := nodePropsToExprMap(g, id)
 	labels := g.NodeLabelsByID(id)
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }
@@ -6601,14 +6625,7 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
 		return expr.NodeValue{ID: uint64(id)}
 	}
-	rawProps := g.NodePropertiesByID(id)
-	var props expr.MapValue
-	if len(rawProps) > 0 {
-		props = make(expr.MapValue, len(rawProps))
-		for k, pv := range rawProps {
-			props[k] = lpgPropToExpr(pv)
-		}
-	}
+	props := nodePropsToExprMap(g, id)
 	labels := g.NodeLabelsByID(id)
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }

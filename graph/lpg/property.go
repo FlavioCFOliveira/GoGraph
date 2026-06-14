@@ -309,6 +309,44 @@ func (g *Graph[N, W]) NodePropertiesByID(id graph.NodeID) map[string]PropertyVal
 	return out
 }
 
+// NodePropertiesByIDFunc invokes visit once per property attached to the node
+// identified by id, passing the resolved property name and a value copy of the
+// PropertyValue. It is the allocation-fusing counterpart of
+// [Graph.NodePropertiesByID]: callers that immediately re-key every property
+// into a different map (chiefly the Cypher result-materialisation path, which
+// converts each lpg.PropertyValue into a cypher/expr value) would otherwise
+// allocate a throwaway intermediate map[string]PropertyValue only to range over
+// it once. Streaming the bag through visit lets the caller build its target map
+// directly, removing that intermediate allocation per returned node.
+//
+// visit is called zero times for a node with no recorded properties (and for an
+// unknown id). The iteration order is unspecified, matching Go map iteration.
+//
+// Concurrency and isolation: visit runs while the property shard's read lock is
+// held, so it observes a consistent snapshot of the node's properties relative
+// to any concurrent writer holding the shard write lock — identical to the
+// guarantee of [Graph.NodePropertiesByID]. visit therefore MUST NOT call back
+// into any Graph method that takes a property-shard lock (it would deadlock) and
+// MUST NOT retain the PropertyValue beyond the callback in a way that aliases
+// graph-internal state; the PropertyValue passed in is a value copy, so copying
+// it out (or deriving an independent value from it) is safe and is the intended
+// use.
+func (g *Graph[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name string, pv PropertyValue)) {
+	s := g.nodePropShardFor(id)
+	s.mu.RLock()
+	bag, ok := s.m[id]
+	if !ok {
+		s.mu.RUnlock()
+		return
+	}
+	for k, v := range bag {
+		if name, ok := g.propKeys().Resolve(k); ok {
+			visit(name, v)
+		}
+	}
+	s.mu.RUnlock()
+}
+
 // NodePropertyByID returns the single property keyed by name attached to the
 // node identified by id, without materialising the node's full property map. It
 // is the single-key counterpart of [Graph.NodePropertiesByID] and exists for
