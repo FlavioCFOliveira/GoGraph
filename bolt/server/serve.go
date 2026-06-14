@@ -92,6 +92,14 @@ const (
 // hot-path read lock-free and the race detector clean.
 var handshakeTimeout atomic.Int64
 
+// readerPanicHookForTest is a nil-by-default test seam invoked at the top of the
+// per-connection reader goroutine's read loop. It lets the #1491 reader-panic
+// boundary regression inject a recoverable panic onto that goroutine; no
+// adversarial-byte path reaches a panic there today, so the seam exists solely
+// for the test. It is set only from export_test.go, never by production code,
+// and so requires no synchronisation (it is mutated before the server starts).
+var readerPanicHookForTest func()
+
 func init() { handshakeTimeout.Store(int64(DefaultHandshakeTimeout)) }
 
 // Options configures a Server. It is a plain configuration value read once
@@ -652,12 +660,42 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}()
 
 	go func() {
+		// close(readerDone) is the FIRST deferred call so it ALWAYS runs — even
+		// on a recovered panic below — and the teardown's `<-readerDone` join can
+		// never hang. The recover boundary mirrors the handleConn handler's: the
+		// reader is a goroutine the library owns, and per the CLAUDE.md "never
+		// crash" mandate we recover ONLY to (a) increment the conn-panic metric,
+		// (b) log the panic with remote + stack, and (c) cancel the connection so
+		// the message loop tears it down. We do not swallow-and-continue: the
+		// connection dies. Today ChunkedReader.ReadMessage / SetReadDeadline are
+		// panic-free on adversarial bytes, so this is defence-in-depth against a
+		// future framing/read-path change that could panic on crafted input —
+		// without it, such a panic would unwind uncaught and crash the WHOLE
+		// process, taking down every other live connection (#1491).
 		defer close(readerDone)
+		defer func() {
+			if r := recover(); r != nil {
+				incCounter(metricConnPanics)
+				s.log.Error("bolt: recovered panic in connection reader; closing connection",
+					slog.String("remote", remote),
+					slog.Any("panic", r),
+					slog.String("stack", string(debug.Stack())))
+				cancelConn()
+			}
+		}()
 		pprof.SetGoroutineLabels(
 			pprof.WithLabels(connCtx,
 				pprof.Labels("component", "bolt-server-reader", "remote", remote)),
 		)
 		for {
+			// Test-only seam: a nil-by-default hook the reader-panic-boundary
+			// regression installs to inject a recoverable panic into THIS
+			// goroutine (production-reachable panics on the read/framing path do
+			// not exist today; #1491 is defence-in-depth). The nil check is a
+			// single branch per read iteration and is inert in production.
+			if h := readerPanicHookForTest; h != nil {
+				h()
+			}
 			// Idle ConnTimeout bound on the read. The transaction-timeout reaper
 			// is handled by the message loop's timer below, so the reader only
 			// enforces the idle bound here.
