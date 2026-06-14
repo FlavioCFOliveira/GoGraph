@@ -61,8 +61,11 @@ checksum:
 # goreleaser's per-archive workdir, and is correct because the Go
 # module graph does not vary by OS/arch.
 #
-# cyclonedx-gomod must be installed before goreleaser is invoked;
-# see docs/release.md and .github/workflows/release.yml.
+# cyclonedx-gomod must be installed before goreleaser is invoked,
+# pinned to an exact released version (currently v1.10.0) so the SBOM
+# generator cannot be silently swapped by a poisoned upstream release;
+# see docs/release.md and .github/workflows/release.yml. Bump the pin in
+# lockstep via Dependabot's gomod ecosystem (.github/dependabot.yml).
 
 snapshot:
   version_template: "{{ .Tag }}-next"
