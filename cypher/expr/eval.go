@@ -307,14 +307,29 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 	}
 	// The subquery/pattern context is carried alongside the per-row evaluator
 	// state via a small holder so it threads through every recursive call
-	// automatically. We attach it to a context-augmented RowContext using a
-	// sentinel reserved key that cannot collide with any valid Cypher identifier
-	// (NUL bytes are not legal in identifiers per the openCypher 9 grammar §A.1).
-	augmented := make(RowContext, len(row)+1)
-	for k, v := range row {
-		augmented[k] = v
+	// automatically. We attach it to the RowContext under a sentinel reserved
+	// key that cannot collide with any valid Cypher identifier (NUL bytes are
+	// not legal in identifiers per the openCypher 9 grammar §A.1).
+	//
+	// The sentinel is inserted into the caller's map in place rather than into
+	// a full clone: cloning copied every binding on every projected row, the
+	// dominant per-row allocation on the WITH/RETURN general path (#1501). The
+	// caller owns a freshly built, single-goroutine RowContext that is
+	// discarded after this call, so an in-place toggle is sound. To remain
+	// re-entrant — a nested EvalWith reached through a pattern comprehension
+	// can receive a map that already carries the sentinel (it was copied down
+	// by enumeratePatternMatches' cloneRow) — the prior binding is saved and
+	// restored on return rather than blindly deleted.
+	//
+	// A nil RowContext (a legal input: an expression with no variable
+	// bindings) has no slot to toggle, so allocate a one-entry map for it —
+	// there is nothing to copy, so this is not the clone the optimisation
+	// removes.
+	if row == nil {
+		row = make(RowContext, 1)
 	}
-	augmented[subqueryContextKey] = &subqueryContextValue{
+	prev, had := row[subqueryContextKey]
+	row[subqueryContextKey] = &subqueryContextValue{
 		ctx: ctx,
 		sub: subEval,
 		pat: patEval,
@@ -325,7 +340,13 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 			bytesLimit:     DefaultMaxStringEvalBytes,
 		},
 	}
-	return evalExpr(expr, augmented, params, reg)
+	v, err := evalExpr(expr, row, params, reg)
+	if had {
+		row[subqueryContextKey] = prev
+	} else {
+		delete(row, subqueryContextKey)
+	}
+	return v, err
 }
 
 // subqueryContextKey is the sentinel RowContext key used by [EvalWith] to

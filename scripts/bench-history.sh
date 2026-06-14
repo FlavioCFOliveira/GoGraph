@@ -57,7 +57,7 @@ mkdir -p "$HIST_DIR"
 # Each entry is "PACKAGE :: REGEX". Packages are listed once even when several
 # regexes target them so go test compiles each package a single time.
 declare -a SUITE=(
-  "./bench/cypher_ldbc/... :: ^(BenchmarkIC1|BenchmarkIC2|BenchmarkIC3|BenchmarkIC4|BenchmarkIC5|BenchmarkIC6|BenchmarkIC7|BenchmarkIC8|BenchmarkIC9|BenchmarkIC10|BenchmarkIC11|BenchmarkIC12|BenchmarkIC13|BenchmarkIC14)$"
+  "./bench/cypher_ldbc/... :: ^(BenchmarkIC1|BenchmarkIC2|BenchmarkIC3|BenchmarkIC4|BenchmarkIC5|BenchmarkIC6|BenchmarkIC7|BenchmarkIC8|BenchmarkIC9|BenchmarkIC10|BenchmarkIC11|BenchmarkIC12|BenchmarkIC13|BenchmarkIC14|BenchmarkWithProjection)$"
   "./bench/cypher_alloc/... :: ^(BenchmarkProjectOp|BenchmarkResultSet|BenchmarkAllNodesScan)$"
   "./search/... :: ^(BenchmarkDijkstra_PostWarmup|BenchmarkDijkstra_Large|BenchmarkBFSDirectionOpt_PowerLaw)$"
   "./search/centrality/... :: ^(BenchmarkBrandes_RandomGraph)$"

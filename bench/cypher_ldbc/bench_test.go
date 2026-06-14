@@ -205,6 +205,45 @@ func BenchmarkIC12(b *testing.B) { benchmarkQuery(b, "ic12.cypher") }
 func BenchmarkIC13(b *testing.B) { benchmarkQuery(b, "ic13.cypher") }
 func BenchmarkIC14(b *testing.B) { benchmarkQuery(b, "ic14.cypher") }
 
+// BenchmarkWithProjection exercises the WITH-clause general projection path
+// (#1501). Each projected row is evaluated through the engine's
+// buildRowCtx → evalRow → expr.EvalWith bridge; the WITH item `n.name AS name`
+// is a property-access expression (not a bare-variable fast path), so every
+// matched row builds a per-row RowContext and dispatches through EvalWith.
+// The query matches all seeded nodes, so the per-row cost dominates and any
+// regression or improvement on that path is visible in allocs/op.
+//
+// This benchmark is the focused WITH-path coverage the curated benchmark set
+// otherwise lacks: the LDBC IC queries are MATCH/WHERE/RETURN and never carry
+// a WITH clause.
+func BenchmarkWithProjection(b *testing.B) {
+	benchmarkInlineRead(b, "MATCH (n) WITH n.name AS name RETURN name")
+}
+
+// benchmarkInlineRead runs a read-only inline query against the shared
+// benchGraph for b.N iterations, draining and closing the result each time.
+func benchmarkInlineRead(b *testing.B, query string) {
+	b.Helper()
+	engine := cypher.NewEngine(benchGraph)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := engine.Run(ctx, query, nil)
+		if err != nil {
+			b.Fatalf("Run(%q): %v", query, err)
+		}
+		for res.Next() {
+		}
+		if e := res.Err(); e != nil {
+			b.Fatalf("result.Err(%q): %v", query, e)
+		}
+		if err := res.Close(); err != nil {
+			b.Fatalf("result.Close(%q): %v", query, err)
+		}
+	}
+}
+
 // BenchmarkIC1_Parallel measures IC1 throughput across GOMAXPROCS goroutines.
 // IC1 is the broadest read query (all nodes); it exercises the full scan path
 // under concurrent load.
