@@ -2,6 +2,7 @@ package lpg
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -140,54 +141,81 @@ func ListValue(elems []PropertyValue) PropertyValue {
 // name.
 type PropertyKeyID uint32
 
+// propertyKeyNames is an immutable id→name table published by
+// [PropertyKeyRegistry] via copy-on-write. Once stored it is never
+// mutated; a new interning allocates a fresh table. Readers load the
+// pointer once with zero synchronisation, so the read path (Resolve) is
+// fully lock-free.
+type propertyKeyNames struct {
+	names []string
+}
+
 // PropertyKeyRegistry interns property names and assigns sequential
 // PropertyKeyIDs. It is safe for concurrent use.
+//
+// The read path ([PropertyKeyRegistry.Resolve]) is lock-free: it loads
+// an immutable id→name snapshot through an [atomic.Pointer] and indexes
+// into it without taking any lock. The write path
+// ([PropertyKeyRegistry.Intern] of a previously unseen name) serialises
+// under a mutex, builds a new immutable snapshot extended by one entry,
+// and atomically publishes it. The ordering guarantee is identical to
+// [LabelRegistry]: Intern publishes the snapshot carrying names[id]
+// before returning id, so any reader that observes id in a property bag
+// observes (by release/acquire ordering through that bag's publication) a
+// snapshot at least as new as the one Intern published. Resolve
+// therefore never misses a live id.
 type PropertyKeyRegistry struct {
-	mu      sync.RWMutex
+	// mu serialises Intern (write path) and guards forward. It is never
+	// taken on the read path.
+	mu      sync.Mutex
 	forward map[string]PropertyKeyID
-	reverse []string
+	// snap holds the immutable id→name table. Loaded lock-free by
+	// Resolve; swapped under mu by Intern.
+	snap atomic.Pointer[propertyKeyNames]
 }
 
 // NewPropertyKeyRegistry returns an empty registry.
 func NewPropertyKeyRegistry() *PropertyKeyRegistry {
-	return &PropertyKeyRegistry{forward: make(map[string]PropertyKeyID)}
+	r := &PropertyKeyRegistry{forward: make(map[string]PropertyKeyID)}
+	r.snap.Store(&propertyKeyNames{})
+	return r
 }
 
-// Intern returns a stable PropertyKeyID for name.
+// Intern returns a stable PropertyKeyID for name. It runs on the write
+// path only (property assignment), so it serialises under the write
+// mutex; the steady-state property vocabulary is small and stable.
 func (r *PropertyKeyRegistry) Intern(name string) PropertyKeyID {
-	r.mu.RLock()
-	if id, ok := r.forward[name]; ok {
-		r.mu.RUnlock()
-		return id
-	}
-	r.mu.RUnlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if id, ok := r.forward[name]; ok {
 		return id
 	}
-	id := PropertyKeyID(len(r.reverse))
-	r.reverse = append(r.reverse, name)
+	cur := r.snap.Load()
+	id := PropertyKeyID(len(cur.names))
+	next := &propertyKeyNames{names: make([]string, len(cur.names)+1)}
+	copy(next.names, cur.names)
+	next.names[id] = name
+	r.snap.Store(next)
 	r.forward[name] = id
 	return id
 }
 
 // Lookup returns the PropertyKeyID for name and true when known.
 func (r *PropertyKeyRegistry) Lookup(name string) (PropertyKeyID, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	id, ok := r.forward[name]
 	return id, ok
 }
 
-// Resolve returns the name interned under id.
+// Resolve returns the name interned under id. It is lock-free: it loads
+// the immutable id→name snapshot once and indexes into it.
 func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if uint64(id) >= uint64(len(r.reverse)) {
+	s := r.snap.Load()
+	if uint64(id) >= uint64(len(s.names)) {
 		return "", false
 	}
-	return r.reverse[id], true
+	return s.names[id], true
 }
 
 // SetNodeProperty records the named property on n with the given

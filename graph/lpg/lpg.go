@@ -51,35 +51,63 @@ import (
 // [LabelRegistry] for an interned label string.
 type LabelID uint32
 
+// labelNames is an immutable id→name table published by
+// [LabelRegistry] via copy-on-write. Once stored into the registry's
+// atomic pointer it is never mutated; a new interning allocates a fresh
+// table. Readers load the pointer once with zero synchronisation and
+// index into the slice, so the read path (Resolve) is fully lock-free.
+type labelNames struct {
+	names []string
+}
+
 // LabelRegistry interns label names and assigns sequential LabelIDs.
 // It is safe for concurrent use.
+//
+// The read path ([LabelRegistry.Resolve]) is lock-free: it loads an
+// immutable id→name snapshot through an [atomic.Pointer] and indexes
+// into it without taking any lock. The write path ([LabelRegistry.Intern]
+// of a previously unseen name — a rare event) serialises under a mutex,
+// builds a new immutable snapshot extended by one entry, and atomically
+// publishes it. Because LabelIDs are only ever appended (never reused or
+// renamed) and Intern publishes the snapshot carrying names[id] before
+// returning id — i.e. before id can be stored into any node/edge bag —
+// every reader that observes an id in a bag observes, by release/acquire
+// ordering through that bag's own publication, a snapshot at least as new
+// as the one Intern published. Resolve therefore never misses a live id.
 type LabelRegistry struct {
-	mu      sync.RWMutex
+	// mu serialises Intern (write path) and guards forward. It is never
+	// taken on the read path.
+	mu      sync.Mutex
 	forward map[string]LabelID
-	reverse []string
+	// snap holds the immutable id→name table. Loaded lock-free by
+	// Resolve; swapped under mu by Intern.
+	snap atomic.Pointer[labelNames]
 }
 
 // NewLabelRegistry returns an empty registry.
 func NewLabelRegistry() *LabelRegistry {
-	return &LabelRegistry{forward: make(map[string]LabelID)}
+	r := &LabelRegistry{forward: make(map[string]LabelID)}
+	r.snap.Store(&labelNames{})
+	return r
 }
 
 // Intern returns a stable LabelID for name, allocating one on first
-// encounter. The fast path takes a read lock only.
+// encounter. It runs on the write path only (label assignment), so it
+// serialises under the write mutex; the steady-state label vocabulary is
+// small and stable, so the mutex is contended only while the vocabulary
+// is first built up.
 func (r *LabelRegistry) Intern(name string) LabelID {
-	r.mu.RLock()
-	if id, ok := r.forward[name]; ok {
-		r.mu.RUnlock()
-		return id
-	}
-	r.mu.RUnlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if id, ok := r.forward[name]; ok {
 		return id
 	}
-	id := LabelID(len(r.reverse))
-	r.reverse = append(r.reverse, name)
+	cur := r.snap.Load()
+	id := LabelID(len(cur.names))
+	next := &labelNames{names: make([]string, len(cur.names)+1)}
+	copy(next.names, cur.names)
+	next.names[id] = name
+	r.snap.Store(next)
 	r.forward[name] = id
 	return id
 }
@@ -87,21 +115,21 @@ func (r *LabelRegistry) Intern(name string) LabelID {
 // Lookup returns the LabelID for name and true, or 0 and false when
 // name has not been interned.
 func (r *LabelRegistry) Lookup(name string) (LabelID, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	id, ok := r.forward[name]
 	return id, ok
 }
 
 // Resolve returns the name interned under id, or the empty string and
-// false when id is unknown.
+// false when id is unknown. It is lock-free: it loads the immutable
+// id→name snapshot once and indexes into it.
 func (r *LabelRegistry) Resolve(id LabelID) (string, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if uint64(id) >= uint64(len(r.reverse)) {
+	s := r.snap.Load()
+	if uint64(id) >= uint64(len(s.names)) {
 		return "", false
 	}
-	return r.reverse[id], true
+	return s.names[id], true
 }
 
 // edgeKey identifies a single directed edge endpoints pair for label
