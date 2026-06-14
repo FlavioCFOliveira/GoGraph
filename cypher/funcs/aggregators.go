@@ -603,6 +603,14 @@ func (a *PercentileContAgg) Result() expr.Value {
 	pos := p * float64(n-1)
 	lo := int(math.Floor(pos))
 	hi := int(math.Ceil(pos))
+	// Defensively clamp lo/hi to [0, n-1] before indexing, mirroring
+	// PercentileDiscAgg.Result. validPercentileParam now rejects a non-finite p
+	// (#1493), but a NaN reaching here would make pos = NaN and int(NaN) an
+	// out-of-range index (platform-dependent: MinInt64 on amd64) → a slice panic.
+	// The clamp keeps the aggregator robust even if a bad p ever bypasses the
+	// plan-time validation.
+	lo = clampIndex(lo, n)
+	hi = clampIndex(hi, n)
 	if lo == hi {
 		return expr.FloatValue(a.values[lo])
 	}
@@ -729,4 +737,18 @@ func clamp01(p float64) float64 {
 		return 1
 	}
 	return p
+}
+
+// clampIndex clamps idx to the valid range [0, n-1] for a slice of length n
+// (n ≥ 1 at every call site). It guards against an out-of-range index produced
+// by int() of a non-finite float (int(NaN) is platform-dependent, e.g. MinInt64
+// on amd64), keeping the percentile aggregators panic-free regardless of p.
+func clampIndex(idx, n int) int {
+	if idx < 0 {
+		return 0
+	}
+	if idx >= n {
+		return n - 1
+	}
+	return idx
 }

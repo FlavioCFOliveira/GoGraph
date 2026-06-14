@@ -1451,6 +1451,28 @@ func decodePropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) {
 	}
 }
 
+// txnListElemMinBytes is the smallest number of bytes one PropList element
+// can occupy on the wire: a 1-byte kind plus a 4-byte payload-length prefix
+// (the payload itself may be zero bytes). It is the divisor used to bound a
+// list capacity hint against the remaining input.
+const txnListElemMinBytes = 5
+
+// txnListCapHint returns a safe capacity hint for a PropList decode buffer.
+// count is the untrusted element count from the wire; remaining is the number
+// of bytes left to parse. Because each element consumes at least
+// txnListElemMinBytes bytes, no more than remaining/txnListElemMinBytes
+// elements can follow, so the hint is min(count, remaining/txnListElemMinBytes).
+// This prevents a hostile count (up to ~4.3e9) from triggering a multi-gigabyte
+// eager reservation while still pre-sizing accurately for legitimate lists.
+// Mirrors recovery.recoveryListCapHint and snapshot.listCapHint.
+func txnListCapHint(count uint32, remaining int) int {
+	maxElems := remaining / txnListElemMinBytes
+	if int64(count) < int64(maxElems) {
+		return int(count)
+	}
+	return maxElems
+}
+
 // decodeTxnListProp parses a PropList value from buf.
 // Format (following the kind byte already consumed by the caller):
 //
@@ -1462,7 +1484,16 @@ func decodeTxnListProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 	}
 	count := binary.LittleEndian.Uint32(buf)
 	buf = buf[4:]
-	elems := make([]lpg.PropertyValue, 0, count)
+	// count is an untrusted uint32 (up to ~4.3e9). Each element needs at
+	// least txnListElemMinBytes on the wire, so at most len(buf)/txnListElemMinBytes
+	// elements can actually follow; clamp the capacity hint to that ceiling so a
+	// hostile count cannot drive a multi-GB eager reservation
+	// (lpg.PropertyValue is 24 B, so an unclamped count would reserve ~103 GiB).
+	// The loop below still validates and bounds every element, so a
+	// smaller-than-count capacity only costs a few re-grows for a genuinely large
+	// legitimate list. Mirrors recovery.recoveryListCapHint and
+	// snapshot.listCapHint so all three PropList decoders share one bound.
+	elems := make([]lpg.PropertyValue, 0, txnListCapHint(count, len(buf)))
 	for i := uint32(0); i < count; i++ {
 		if len(buf) < 5 { // kind(1) + payloadLen(4)
 			return lpg.PropertyValue{}, buf,
