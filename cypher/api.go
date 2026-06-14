@@ -306,6 +306,20 @@ type buildOpts struct {
 	// the Engine-internal build paths set it; the public BuildPlanWithMutator
 	// path leaves it zero and so inherits the finite default.
 	maxCollectItems int
+	// hashJoinEnabled gates the disconnected-equi-join hash-join physical
+	// optimisation (#1506). The read-path build (buildPlanEngine) sets it from
+	// the Engine field; it is consulted in buildOperator's *ir.Selection case
+	// together with the order-safety and size-floor guards. Left false by every
+	// other build path (write path, public BuildPlanWithMutator), so those paths
+	// always build the legacy nested-loop plan.
+	hashJoinEnabled bool
+	// hashJoinOrderSafe records whether the order-safety scan of the whole query
+	// IR (performed once at the top of the read-path build) found no operator
+	// above the join that would observe the changed row order — a bare
+	// LIMIT/SKIP without ORDER BY, or a collect()/arrival-order aggregation. When
+	// false the hash join is disabled for the whole query even where the
+	// structural equi-join trigger matches.
+	hashJoinOrderSafe bool
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -453,6 +467,16 @@ type EngineOptions struct {
 	// store from disk MUST pass these (or use [NewEngineWithStoreAndSchema]);
 	// a store-less in-memory engine leaves the field nil.
 	RecoveredIndexes []IndexDef
+
+	// DisableHashJoin turns OFF the disconnected-equi-join hash-join physical
+	// optimisation (#1506). When false (the default) the planner may replace a
+	// nested-loop Cartesian product over two disconnected pattern parts joined
+	// by an equality predicate (`MATCH (a:A),(b:B) WHERE a.x = b.y …`) with an
+	// order-insensitive hash join, under the structural and order-safety guards
+	// in hash_join_plan.go. Setting it true forces the legacy nested-loop plan;
+	// it exists for the differential test that proves both plans return an
+	// identical result multiset, and as an operational escape hatch.
+	DisableHashJoin bool
 }
 
 // IndexDef is a durable index definition handed to the engine on open so it
@@ -521,6 +545,11 @@ type Engine struct {
 	// >0 → active) rather than the resolved internal form, because
 	// buildEagerAggregation performs the final resolution at the build boundary.
 	maxCollectItems int
+
+	// hashJoinEnabled gates the disconnected-equi-join hash-join optimisation
+	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
+	// false the planner always builds the legacy nested-loop Cartesian plan.
+	hashJoinEnabled bool
 
 	// writeMu is the engine-level single-writer serialisation used ONLY when
 	// the engine is store-less (store == nil). A WAL-backed engine instead
@@ -703,6 +732,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		maxResultRows:   resolveMaxResultRows(opts.MaxResultRows),
 		maxResultBytes:  resolveMaxResultBytes(opts.MaxResultBytes),
 		maxCollectItems: opts.MaxCollectItems,
+		hashJoinEnabled: !opts.DisableHashJoin,
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
 		return e.constraintReg.ListConstraintRows()
@@ -1268,6 +1298,12 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// result list — the same bound collect() enforces (#1294, #1298).
 		patEval := newPatternEvaluator(e.g, e.maxCollectItems)
 		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
+		// Hash-join optimisation gating (#1506): enable only when the Engine
+		// permits it AND the whole-query order-safety scan finds no operator that
+		// would observe the changed row order. Both must hold; otherwise the
+		// planner falls back to the legacy nested-loop Cartesian plan.
+		bopts.hashJoinEnabled = e.hashJoinEnabled
+		bopts.hashJoinOrderSafe = hashJoinOrderSafe(plan)
 		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
 			buildErr = err
@@ -4228,6 +4264,17 @@ func buildOperator(
 		return buildIndexSeekOperator(p, params, schema, idxMgr)
 
 	case *ir.Selection:
+		// Disconnected-equi-join hash join (#1506): when this Selection sits
+		// directly above a plain Apply and carries an equi-join predicate
+		// straddling the two arms, replace the nested-loop Cartesian product with
+		// an order-insensitive hash join under the structural + order-safety +
+		// size-floor guards (see hash_join_plan.go). Falls through to the normal
+		// Selection build when the pattern is not eligible.
+		if op, ok, err := tryBuildHashJoin(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
+		}
 		// Opportunistic index-seek rewrite: if the predicate is a simple equality
 		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
 		// directly without first building the scan child.
