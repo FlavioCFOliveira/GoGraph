@@ -854,6 +854,15 @@ func decodeListPropertyValue(raw []byte) (lpg.PropertyValue, error) {
 		elemKind := lpg.PropertyKind(raw[0])
 		elemLen := binary.LittleEndian.Uint32(raw[1:5])
 		raw = raw[5:]
+		// The encoder ([encodeListPropertyValue]) forbids nesting: a list
+		// element is never itself a PropList. A nested PropList element kind
+		// can therefore only come from a corrupt or hostile artifact, and
+		// honouring it would recurse without a depth bound. Reject it as a
+		// typed corruption error, enforcing the encoder's invariant exactly.
+		if elemKind == lpg.PropList {
+			return lpg.PropertyValue{}, fmt.Errorf("%w: PropList: nested PropList element at index %d not supported",
+				ErrPropertiesCorrupted, i)
+		}
 		if uint64(len(raw)) < uint64(elemLen) {
 			return lpg.PropertyValue{}, fmt.Errorf("%w: PropList: truncated element body at index %d",
 				ErrPropertiesCorrupted, i)
