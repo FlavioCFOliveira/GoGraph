@@ -842,6 +842,14 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		}
 	}
 
+	// Capture any plan-time notifications (e.g. a Cartesian-product warning,
+	// #1483) before draining the cursor; they are reported in the terminal PULL
+	// SUCCESS metadata, as Neo4j does.
+	var notifications []packstream.Value
+	if !hasMore && s.result != nil {
+		notifications = notificationsToValues(s.result.Notifications())
+	}
+
 	// Transition state based on has_more.
 	next, transErr := StreamingTransition(s.state, hasMore)
 	if transErr != nil {
@@ -858,6 +866,9 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	}
 	if !hasMore {
 		meta["bookmark"] = s.bookmark
+		if len(notifications) > 0 {
+			meta["notifications"] = notifications
+		}
 	}
 	responses = append(responses, &proto.Success{Metadata: meta})
 	return responses, nil
@@ -1262,6 +1273,27 @@ func stringsToValues(ss []string) []packstream.Value {
 	out := make([]packstream.Value, len(ss))
 	for i, s := range ss {
 		out[i] = packstream.Value(s)
+	}
+	return out
+}
+
+// notificationsToValues encodes the engine's plan-time notifications as the
+// Bolt SUCCESS "notifications" metadata: a list of maps with the Neo4j-style
+// keys (code, title, description, severity, category). It returns nil when there
+// are no notifications so the metadata key is omitted entirely (#1483).
+func notificationsToValues(ns []cypher.Notification) []packstream.Value {
+	if len(ns) == 0 {
+		return nil
+	}
+	out := make([]packstream.Value, len(ns))
+	for i, n := range ns {
+		out[i] = map[string]packstream.Value{
+			"code":        packstream.Value(n.Code),
+			"title":       packstream.Value(n.Title),
+			"description": packstream.Value(n.Description),
+			"severity":    packstream.Value(n.Severity),
+			"category":    packstream.Value(n.Category),
+		}
 	}
 	return out
 }

@@ -1274,6 +1274,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		}
 		rs := exec.Run(ctx, op, cols)
 		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
+		r.notifications = entry.notifications
 		r.materialize()
 	})
 	if buildErr != nil {
@@ -2182,6 +2183,10 @@ type planCacheEntry struct {
 	plan      ir.LogicalPlan
 	semaErr   *sema.SemanticError
 	paramRefs []string // parameter names referenced by the query, collected at parse time
+	// notifications are out-of-band advisories computed once at parse time and
+	// attached to every Result for this query (e.g. a Cartesian-product warning,
+	// #1483). nil when the query produces none.
+	notifications []Notification
 }
 
 // planFor returns the cached logical plan for query, or parses, translates,
@@ -2219,7 +2224,15 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cypher: translate: %w", err)
 	}
-	entry := &planCacheEntry{plan: plan, semaErr: semaErr, paramRefs: paramRefs}
+	// Plan-time advisories: a disconnected Cartesian product is surfaced as a
+	// notification so an embedder or Bolt driver can warn the user that the
+	// query may stream Nᵏ intermediate tuples (#1483). Notifications are out of
+	// band and never change the result rows.
+	var notifications []Notification
+	if note := analyseCartesianProductQuery(astNode); note != nil {
+		notifications = []Notification{*note}
+	}
+	entry := &planCacheEntry{plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
 }
@@ -2358,8 +2371,21 @@ type Result struct {
 	// honour.
 	maxBytes int64
 
+	// notifications holds the out-of-band plan-time advisories for this query
+	// (e.g. a Cartesian-product warning, #1483). They are exposed verbatim via
+	// [Result.Notifications] and never affect the rows iterated.
+	notifications []Notification
+
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
+
+// Notifications returns the out-of-band advisories attached to this result by
+// the planner — for example a Cartesian-product warning when the query builds a
+// cross product between disconnected patterns (#1483). Notifications are NOT
+// result rows and never affect iteration; a caller (or a Bolt driver via the
+// SUCCESS "notifications" metadata) may surface them to warn the user. The
+// returned slice is nil when the query produced no notifications.
+func (r *Result) Notifications() []Notification { return r.notifications }
 
 // Next advances to the next result row. Returns true when a row is available.
 // If [EngineOptions.MaxResultRows] is set and the limit is reached, Next sets
