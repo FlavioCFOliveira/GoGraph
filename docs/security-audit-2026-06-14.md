@@ -371,8 +371,10 @@ All 13 findings were fixed on branch `security/sec-2026-06-14-remediation`:
    `UnionFindSlice` widened to 64-bit indices; the variable-length-path
    budget is now per-query with a default hop ceiling.
 4. **#1472 / #1473** — every GitHub Action is pinned to a verified 40-hex
-   SHA (with a version comment) and `cyclonedx-gomod` to `v1.10.0`; a
-   `.github/dependabot.yml` keeps the pins current.
+   SHA (with a version comment) and `cyclonedx-gomod` to `v1.10.0`. (A
+   `.github/dependabot.yml` was briefly added to keep the pins current but
+   was **removed at the maintainer's request**; the SHA/version pins are now
+   maintained manually.)
 5. **#1471** — CSV export gained an opt-in `Options.SanitizeFormulae`
    (default off, preserving the lossless round-trip).
 
