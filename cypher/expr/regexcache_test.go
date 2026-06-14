@@ -241,7 +241,16 @@ func TestEval_RegexMatch_EndToEnd(t *testing.T) {
 		{"anchored_match", "abc123", "^abc[0-9]+$", BoolValue(true)},
 		{"invalid_pattern_null", "anything", "[", Null},
 		{"another_invalid_null", "x", "a(b", Null},
-		{"empty_pattern_matches", "x", "", BoolValue(true)},
+		// openCypher `=~` is an anchored full-string match (Java
+		// Matcher.matches()), so an empty pattern matches ONLY the empty
+		// string. "x" =~ "" is therefore false — Go's unanchored MatchString
+		// previously returned true here, which was a latent non-conformance
+		// corrected when the operator was made reachable and anchored (#1479).
+		{"empty_pattern_no_match", "x", "", BoolValue(false)},
+		{"empty_pattern_matches_empty", "", "", BoolValue(true)},
+		// Anchoring: a bare interior substring must NOT match the whole string.
+		{"anchored_substring_rejected", "abc", "b", BoolValue(false)},
+		{"anchored_substring_wildcards", "abc", ".*b.*", BoolValue(true)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

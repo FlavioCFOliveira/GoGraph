@@ -120,8 +120,18 @@ func evalListComprehension(n *ast.ListComprehension, row RowContext, params map[
 		return ListValue{}, nil
 	}
 
+	// ctx is the (possibly cancellable) context smuggled through row by
+	// EvalWith; on the bare Eval path it is context.Background() and the
+	// per-stride cancellation check (#1477) never fires.
+	ctx, _ := extractSubqueryContext(row)
+
 	result := make(ListValue, 0, len(list))
-	for _, elem := range list {
+	for i, elem := range list {
+		// Honour cancellation/deadline on a fixed stride so a comprehension
+		// over a large list — or a deeply nested one — is interruptible (#1477).
+		if err := checkIterCtx(ctx, i); err != nil {
+			return nil, err
+		}
 		// Bind the loop variable.
 		innerRow := make(RowContext, len(row)+1)
 		for k, v := range row {
@@ -138,6 +148,13 @@ func evalListComprehension(n *ast.ListComprehension, row RowContext, params map[
 			if !IsTruthy(pv) {
 				continue
 			}
+		}
+
+		// Charge the element this iteration appends against the per-evaluation
+		// list-element budget so nested comprehensions (whose product is
+		// N^depth) cannot materialise without bound (#1475).
+		if err := chargeListGrowth(row, 1); err != nil {
+			return nil, err
 		}
 
 		// Apply projection if present, otherwise use the element as-is.

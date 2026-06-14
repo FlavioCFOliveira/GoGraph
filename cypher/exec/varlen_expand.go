@@ -51,11 +51,17 @@ package exec
 // that drives the read loop would silently overwrite already-staged frontier
 // entries — a slice-aliasing hazard fixed in task-393.
 //
-// # Safety cap
+// # Safety caps
 //
-// If the total number of edge traversals across all paths (reset per input row)
-// exceeds maxEdgesTraversed (default 1,000,000), the operator returns
-// [ErrVarLenCapExceeded]. This prevents runaway queries on dense graphs.
+// Two edge-traversal caps bound the work. The PER-INPUT-ROW cap
+// (maxEdgesTraversed, default 1,000,000, reset for each source row) bounds the
+// expansion from a single anchor and prevents runaway queries on dense graphs.
+// The AGGREGATE PER-QUERY cap (maxTotalEdgesTraversed, default 100,000,000, NOT
+// reset per row) bounds the sum across every input row, so a query that first
+// produces M source rows and then expands from each cannot multiply the per-row
+// budget by M. Exceeding either returns [ErrVarLenCapExceeded]. In addition, an
+// omitted upper bound (-[*]-) is given a finite default hop ceiling
+// ([defaultMaxUnboundedHops]) rather than math.MaxInt.
 //
 // # Cancellation
 //
@@ -69,17 +75,48 @@ package exec
 import (
 	"context"
 	"errors"
+	"math"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // ErrVarLenCapExceeded is returned when a VarLengthExpand exceeds its
-// configured maximum edge traversal count.
+// configured maximum edge traversal count — either the per-input-row cap or the
+// aggregate per-query cap (see [defaultMaxEdgesTraversed] and
+// [defaultMaxTotalEdgesTraversed]).
 var ErrVarLenCapExceeded = errors.New("exec: variable-length expand safety cap exceeded")
 
-// defaultMaxEdgesTraversed is the default safety cap for VarLengthExpand.
+// defaultMaxEdgesTraversed is the default PER-INPUT-ROW safety cap for
+// VarLengthExpand. It bounds the edge traversals performed while expanding from
+// a single anchor row.
 const defaultMaxEdgesTraversed = 1_000_000
+
+// defaultMaxTotalEdgesTraversed is the default AGGREGATE PER-QUERY safety cap
+// for VarLengthExpand: the sum of edge traversals across every input row that
+// drives the operator. The per-row cap alone does not bound a query that first
+// produces M source rows and then expands a variable-length pattern from each
+// (e.g. MATCH (a),(b) MATCH (a)-[*]->() ...), because the per-row counter is
+// reset for every input row — the aggregate work is then up to M ×
+// [defaultMaxEdgesTraversed]. This counter is NOT reset per row; once the
+// running total exceeds the cap the operator returns [ErrVarLenCapExceeded]
+// (#1478). The default (100,000,000) is two orders of magnitude above the
+// per-row cap, so a single multi-row traversal is not rejected, yet it removes
+// the unbounded multiplication an attacker could drive by inflating source
+// cardinality. Every openCypher TCK variable-length pattern runs on a tiny
+// graph far below this bound, so no conforming query trips it.
+const defaultMaxTotalEdgesTraversed = 100_000_000
+
+// defaultMaxUnboundedHops is the default upper hop bound applied when a
+// variable-length pattern omits its upper bound (-[*]-, -[*1..]-, -[*..]-). The
+// IR encodes "unbounded" as math.MaxInt (see cypher/ir/match.go); leaving the
+// operator with that value means the only depth bound is the no-repeated-edge
+// rule plus the edge-traversal caps. This finite default is a defence-in-depth
+// hop ceiling that bounds per-path memory (the edge slice grows with the hop
+// count). At 65,536 it is astronomically above any legitimate path length and
+// far above the longest path any TCK graph can produce, so no conforming query
+// regresses (#1478).
+const defaultMaxUnboundedHops = 65_536
 
 // edgeStep is one hop in a BFS path.
 type edgeStep struct {
@@ -106,12 +143,13 @@ type VarLengthExpand struct {
 	dir      Direction
 	edgeType string
 	// edgeTypeFilter maps absolute forward edge positions to type labels.
-	edgeTypeFilter    map[uint64]string
-	inputCol          int
-	minHops           int
-	maxHops           int
-	maxEdgesTraversed int
-	excludedRelCols   []int
+	edgeTypeFilter         map[uint64]string
+	inputCol               int
+	minHops                int
+	maxHops                int
+	maxEdgesTraversed      int // per-input-row cap
+	maxTotalEdgesTraversed int // aggregate per-query cap (NOT reset per row)
+	excludedRelCols        []int
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -135,11 +173,12 @@ type VarLengthExpand struct {
 	// `nextQueue`. After each level the two are swapped. This avoids the
 	// slice-aliasing hazard that arises if the same backing array is both read
 	// and written in the same call.
-	queue        []pathState // current BFS frontier (read)
-	nextQueue    []pathState // next BFS frontier (write target during expansion)
-	inputRow     Row         // current outer input row (stable copy)
-	inputEOS     bool        // true after input plan exhausted
-	edgesVisited int         // traversal counter for safety cap (reset per input row)
+	queue             []pathState // current BFS frontier (read)
+	nextQueue         []pathState // next BFS frontier (write target during expansion)
+	inputRow          Row         // current outer input row (stable copy)
+	inputEOS          bool        // true after input plan exhausted
+	edgesVisited      int         // traversal counter for the per-row safety cap (reset per input row)
+	totalEdgesVisited int         // traversal counter for the aggregate per-query cap (reset once per Init)
 
 	// pending result rows: paths whose hop count is in [minHops..maxHops]
 	// that have been collected during BFS but not yet emitted.
@@ -165,9 +204,15 @@ type VarLengthConfig struct {
 	// MaxHops is the maximum path length (inclusive). Must be ≥ MinHops.
 	// Use math.MaxInt for unbounded (not recommended without a safety cap).
 	MaxHops int
-	// MaxEdgesTraversed is the safety cap on total edge traversals per input
-	// row. Defaults to 1,000,000 when 0.
+	// MaxEdgesTraversed is the safety cap on edge traversals per input row.
+	// Defaults to [defaultMaxEdgesTraversed] (1,000,000) when 0.
 	MaxEdgesTraversed int
+	// MaxTotalEdgesTraversed is the aggregate safety cap on edge traversals
+	// across all input rows for the whole query — it is NOT reset per row, so it
+	// bounds the M × (per-row cost) multiplication that the per-row cap alone
+	// cannot (#1478). Defaults to [defaultMaxTotalEdgesTraversed] (100,000,000)
+	// when 0.
+	MaxTotalEdgesTraversed int
 	// ExcludedRelCols lists column indices in the input row holding edge
 	// identifiers (IntegerValue or RelationshipValue) that must not be
 	// traversed inside this VLE step. Implements the openCypher
@@ -190,18 +235,31 @@ func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg *VarLengthCon
 	if capVal <= 0 {
 		capVal = defaultMaxEdgesTraversed
 	}
+	totalCap := cfg.MaxTotalEdgesTraversed
+	if totalCap <= 0 {
+		totalCap = defaultMaxTotalEdgesTraversed
+	}
+	// Apply a finite default hop ceiling when the pattern is unbounded
+	// (MaxHops == math.MaxInt, as the IR encodes -[*]-, -[*1..]-, -[*..]-).
+	// This bounds per-path memory and adds defence-in-depth on top of the
+	// edge-traversal caps without affecting any bounded pattern (#1478).
+	maxHops := cfg.MaxHops
+	if maxHops == math.MaxInt {
+		maxHops = defaultMaxUnboundedHops
+	}
 	return &VarLengthExpand{
-		input:             input,
-		fwd:               fwd,
-		rev:               rev,
-		dir:               dir,
-		edgeType:          cfg.EdgeType,
-		edgeTypeFilter:    cfg.EdgeTypeFilter,
-		inputCol:          cfg.InputCol,
-		minHops:           cfg.MinHops,
-		maxHops:           cfg.MaxHops,
-		maxEdgesTraversed: capVal,
-		excludedRelCols:   append([]int(nil), cfg.ExcludedRelCols...),
+		input:                  input,
+		fwd:                    fwd,
+		rev:                    rev,
+		dir:                    dir,
+		edgeType:               cfg.EdgeType,
+		edgeTypeFilter:         cfg.EdgeTypeFilter,
+		inputCol:               cfg.InputCol,
+		minHops:                cfg.MinHops,
+		maxHops:                maxHops,
+		maxEdgesTraversed:      capVal,
+		maxTotalEdgesTraversed: totalCap,
+		excludedRelCols:        append([]int(nil), cfg.ExcludedRelCols...),
 	}
 }
 
@@ -221,6 +279,10 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.inputRow = nil
 	op.inputEOS = false
 	op.edgesVisited = 0
+	// The aggregate per-query counter is reset exactly once per operator run
+	// (here in Init), NEVER at the per-input-row reset below, so it accumulates
+	// across every source row (#1478).
+	op.totalEdgesVisited = 0
 	// Precompute a reverse-edge-position → forward-edge-position mapping
 	// so the relationship-uniqueness bitset can dedupe the same physical
 	// edge across direction. For each reverse edge (b←a) in revEdges,
@@ -511,7 +573,11 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 
 	for pos := start; pos < end; pos++ {
 		op.edgesVisited++
-		if op.edgesVisited > op.maxEdgesTraversed {
+		op.totalEdgesVisited++
+		// Per-input-row cap and aggregate per-query cap. The latter is not reset
+		// per row, so it bounds the M × (per-row cost) multiplication that an
+		// attacker could otherwise drive by inflating source cardinality (#1478).
+		if op.edgesVisited > op.maxEdgesTraversed || op.totalEdgesVisited > op.maxTotalEdgesTraversed {
 			return ErrVarLenCapExceeded
 		}
 

@@ -2766,8 +2766,32 @@ func relationshipTypes(ctx gen.IRelationshipTypesContext) []string {
 }
 
 // comparisonOp returns the operator string for a ComparisonSigns node.
+//
+// The vendored ANTLR grammar (cypher/parser/gen) recognises the comparison
+// signs ASSIGN | LE | GE | GT | LT | NOT_EQUAL; it has no dedicated token for
+// the openCypher regex-match operator `=~`. Regenerating the grammar to add a
+// proper REGMATCH token requires the ANTLR tool (a JDK + the ANTLR jar), which
+// is not available in this environment, so we cannot edit cypher/parser/gen.
+//
+// In practice the lexer error-recovery silently consumes the trailing `~`, so
+// `'abc' =~ '[a-z]+'` parses with no error and surfaces as an ASSIGN sign
+// sitting between the two operands. We disambiguate `=~` from a plain `=` here
+// by peeking the source character immediately after the `=` token: when it is
+// a contiguous `~` we emit the dedicated "=~" operator (handled downstream in
+// cypher/ir/translator.go, cypher/sema/types.go, and cypher/expr/eval.go);
+// otherwise it is an ordinary equality. A plain `=` is always followed by
+// whitespace or the right operand, never by `~`, so this peek never
+// misclassifies it.
+//
+// Residual: the lexer still recovers internally from the stray `~` token; the
+// production Run path already tolerates that recovery, and this peek does not
+// change it — it only recovers the operator's identity. The clean fix (a real
+// REGMATCH lexer rule) is a future enhancement gated on grammar regeneration.
 func comparisonOp(ctx gen.IComparisonSignsContext) string {
 	if ctx.ASSIGN() != nil {
+		if isRegexMatchAssign(ctx.ASSIGN()) {
+			return "=~"
+		}
 		return "="
 	}
 	if ctx.LE() != nil {
@@ -2786,6 +2810,31 @@ func comparisonOp(ctx gen.IComparisonSignsContext) string {
 		return "<>"
 	}
 	return "="
+}
+
+// isRegexMatchAssign reports whether the source character immediately following
+// the given ASSIGN token is a contiguous `~`, i.e. the two characters spell the
+// openCypher regex-match operator `=~`.
+//
+// It reads from the token's underlying CharStream at position GetStop()+1
+// (GetStop is the char index of the `=`). CharStream.GetText is bounds-safe:
+// when the index is past end-of-input it returns the empty string rather than
+// panicking, so a trailing `=` at the very end of the query is handled
+// gracefully. A nil token or stream yields false.
+func isRegexMatchAssign(assign antlr.TerminalNode) bool {
+	if assign == nil {
+		return false
+	}
+	tok := assign.GetSymbol()
+	if tok == nil {
+		return false
+	}
+	stream := tok.GetInputStream()
+	if stream == nil {
+		return false
+	}
+	next := tok.GetStop() + 1
+	return stream.GetText(next, next) == "~"
 }
 
 // stringPrefixOp maps StringExpPrefix alternatives to Cypher operators.

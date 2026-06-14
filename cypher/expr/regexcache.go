@@ -38,6 +38,30 @@ import (
 	"sync"
 )
 
+// anchorRegexMatch wraps a user-supplied openCypher `=~` pattern so that, once
+// compiled and matched with Go's regexp package, it behaves as an anchored
+// full-string match equivalent to Java java.util.regex.Matcher.matches() —
+// the openCypher contract for `=~` — rather than Go's default unanchored
+// substring search.
+//
+//   - \A / \z anchor the absolute start and end of the subject text. \z is used
+//     instead of the line anchor $ so a trailing newline does NOT satisfy the
+//     match, matching Java matches() semantics (and unlike $, which can match
+//     before a final \n under the multiline flag).
+//   - The non-capturing group (?:…) binds any top-level alternation in the user
+//     pattern to both anchors: pattern `a|b` becomes `\A(?:a|b)\z`, not the
+//     unsafe `\Aa|b\z` (which parses as `(\Aa)|(b\z)` and would match a mere
+//     prefix or suffix — a correctness and security hazard for predicates such
+//     as `role =~ 'admin'`).
+//
+// Inline flags at the head of the user pattern (for example (?i) for
+// case-insensitivity) remain in scope inside the group. The returned string is
+// what the bounded cache keys on, so identical user patterns share one cached
+// compiled form and the cache is never double-anchored on a hit.
+func anchorRegexMatch(pattern string) string {
+	return `\A(?:` + pattern + `)\z`
+}
+
 // regexCacheCapacity is the maximum number of distinct compiled patterns the
 // shared cache retains. Patterns beyond this bound trigger FIFO eviction. The
 // value is a deliberate trade-off: large enough to absorb the realistic set of

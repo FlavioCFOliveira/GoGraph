@@ -103,6 +103,113 @@ type EvalError struct {
 // Error implements the error interface.
 func (e *EvalError) Error() string { return "eval: " + e.Msg }
 
+// DefaultMaxListElements is the per-evaluation upper bound on the total number
+// of list ELEMENTS a single expression may materialise across all of its
+// iteration helpers (reduce(), list comprehensions and their nested
+// combinations, and list concatenation). It guards against a single tiny query
+// such as
+//
+//	reduce(acc=[0], i IN range(1,30) | acc + acc)
+//
+// (which doubles the accumulator to 2^30 elements) or deeply nested
+// comprehensions (which multiply element counts as N^depth) exhausting host
+// memory before any pipeline-breaker cap applies — those caps bound result
+// ROWS, not intermediate lists built inside ONE evalExpr call for ONE row.
+//
+// The value mirrors [github.com/FlavioCFOliveira/GoGraph/cypher/funcs].DefaultMaxCollectItems
+// (10,000,000) for consistency with the collect()/percentile aggregator budget.
+// It is far above any openCypher TCK scenario (whose lists are at most a few
+// thousand elements) and above any legitimate single-expression list, so no
+// conforming query trips it; an expression that exceeds it returns a typed
+// [EvalError] (fail-stop) rather than allocating without bound.
+const DefaultMaxListElements = 10_000_000
+
+// errListTooLarge builds the typed error returned when an expression would
+// materialise more list elements than its per-evaluation budget allows. The
+// message shape mirrors the range() over-cap error
+// (github.com/FlavioCFOliveira/GoGraph/cypher/funcs.errRangeTooLarge) so callers
+// map it to a query error, never a panic or an out-of-memory crash.
+func errListTooLarge(limit int64) error {
+	return &EvalError{Msg: fmt.Sprintf(
+		"ArgumentError: NumberOutOfRange: expression would materialise more than %d list elements, exceeding the maximum of %d",
+		limit, limit)}
+}
+
+// evalBudget is the per-evaluation cumulative list-element budget shared across
+// every iteration helper reached from a single [EvalWith] call. It lets nested
+// list comprehensions (whose individual lists may each be small, but whose
+// product is enormous) charge against one ceiling. The bare [Eval] entry point
+// installs no budget; those helpers fall back to a per-call intrinsic ceiling
+// (see [chargeListGrowth]), which still bounds a single oversized list such as
+// a doubling reduce accumulator.
+//
+// evalBudget is not safe for concurrent use; each Eval/EvalWith call owns its
+// own instance on the call stack.
+type evalBudget struct {
+	remaining int64 // remaining elements that may still be materialised
+	limit     int64 // original ceiling, retained for the error message
+}
+
+// charge debits n elements from the budget and returns a typed [EvalError] when
+// the budget is exhausted. n<=0 is a no-op.
+func (b *evalBudget) charge(n int64) error {
+	if b == nil || n <= 0 {
+		return nil
+	}
+	b.remaining -= n
+	if b.remaining < 0 {
+		return errListTooLarge(b.limit)
+	}
+	return nil
+}
+
+// extractBudget returns the per-evaluation [evalBudget] smuggled through row by
+// [EvalWith], or nil when none is present (the bare [Eval] path).
+func extractBudget(row RowContext) *evalBudget {
+	if row == nil {
+		return nil
+	}
+	scv, ok := row[subqueryContextKey].(*subqueryContextValue)
+	if !ok {
+		return nil
+	}
+	return scv.budget
+}
+
+// chargeListGrowth charges n newly-materialised list elements against the
+// per-evaluation budget carried by row. When row carries no budget (the bare
+// [Eval] path), it instead enforces an intrinsic per-call ceiling of
+// [DefaultMaxListElements] on n alone, which still rejects a single oversized
+// list. It returns a typed [EvalError] on breach.
+func chargeListGrowth(row RowContext, n int64) error {
+	if b := extractBudget(row); b != nil {
+		return b.charge(n)
+	}
+	if n > DefaultMaxListElements {
+		return errListTooLarge(DefaultMaxListElements)
+	}
+	return nil
+}
+
+// ctxIterCheckStride is the iteration stride at which the list-iteration
+// helpers poll the context for cancellation, mirroring the executor's
+// every-4096-tuples convention (see cypher/exec/operator.go and eager.go).
+const ctxIterCheckStride = 4096
+
+// checkIterCtx polls the context smuggled through row for cancellation when
+// iter is a multiple of [ctxIterCheckStride]. It returns the context error
+// (context.Canceled / context.DeadlineExceeded) promptly so a long in-expression
+// loop — reduce(), a comprehension, or a quantifier over a large list — can be
+// aborted by a caller's deadline or cancellation. On the bare [Eval] path no
+// context is smuggled; the extracted context is context.Background() and the
+// check never fires.
+func checkIterCtx(ctx context.Context, iter int) error {
+	if iter%ctxIterCheckStride != 0 {
+		return nil
+	}
+	return ctx.Err()
+}
+
 // Eval evaluates expr in the context of row and params. It dispatches on the
 // concrete AST node type and returns the resulting Value. An EvalError is
 // returned for unsupported constructs; all other errors propagate from the
@@ -141,7 +248,12 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 	for k, v := range row {
 		augmented[k] = v
 	}
-	augmented[subqueryContextKey] = &subqueryContextValue{ctx: ctx, sub: subEval, pat: patEval}
+	augmented[subqueryContextKey] = &subqueryContextValue{
+		ctx:    ctx,
+		sub:    subEval,
+		pat:    patEval,
+		budget: &evalBudget{remaining: DefaultMaxListElements, limit: DefaultMaxListElements},
+	}
 	return evalExpr(expr, augmented, params, reg)
 }
 
@@ -158,9 +270,10 @@ const subqueryContextKey = "\x00subquery-context\x00"
 // [extractSubqueryContext] and [extractPatternEvaluator]; user code never
 // sees this value.
 type subqueryContextValue struct {
-	ctx context.Context //nolint:containedctx // smuggled through RowContext, see EvalWith
-	sub SubqueryEvaluator
-	pat PatternEvaluator
+	ctx    context.Context //nolint:containedctx // smuggled through RowContext, see EvalWith
+	sub    SubqueryEvaluator
+	pat    PatternEvaluator
+	budget *evalBudget // per-evaluation cumulative list-element budget (#1475)
 }
 
 // Kind implements [Value]. Returns [KindNull] because subqueryContextValue
@@ -591,17 +704,17 @@ func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg 
 
 	// ── Arithmetic ────────────────────────────────────────────────────────────
 	case "+":
-		return evalArith("+", left, right)
+		return evalArith(row, "+", left, right)
 	case "-":
-		return evalArith("-", left, right)
+		return evalArith(row, "-", left, right)
 	case "*":
-		return evalArith("*", left, right)
+		return evalArith(row, "*", left, right)
 	case "/":
-		return evalArith("/", left, right)
+		return evalArith(row, "/", left, right)
 	case "%":
-		return evalArith("%", left, right)
+		return evalArith(row, "%", left, right)
 	case "^":
-		return evalArith("^", left, right)
+		return evalArith(row, "^", left, right)
 
 	// ── String operators ──────────────────────────────────────────────────────
 	case "CONTAINS":
@@ -843,8 +956,12 @@ func promoteNumeric(a, b Value) (Value, Value) { //nolint:gocritic // Named retu
 	return a, b
 }
 
-// evalArith evaluates arithmetic binary operators.
-func evalArith(op string, left, right Value) (Value, error) {
+// evalArith evaluates arithmetic binary operators. row carries the
+// per-evaluation list-element budget (#1475), consulted before any list
+// concatenation allocates so a doubling accumulator (reduce(acc=[0], … | acc +
+// acc)) is rejected with a typed [EvalError] rather than allocating an
+// exponentially large slice.
+func evalArith(row RowContext, op string, left, right Value) (Value, error) {
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
 	}
@@ -858,15 +975,24 @@ func evalArith(op string, left, right Value) (Value, error) {
 		// List concatenation and list+element / element+list append.
 		// openCypher spec §3.5 (Collections): list + list → concatenation;
 		// list + element → append element; element + list → prepend element.
+		// Each branch charges the elements it is about to materialise against
+		// the per-evaluation budget BEFORE make(), so an over-budget concat
+		// fails fast instead of attempting an oversized allocation (#1475).
 		if ll, lok := left.(ListValue); lok {
 			if rl, rok := right.(ListValue); rok {
 				// list + list
+				if err := chargeListGrowth(row, int64(len(ll))+int64(len(rl))); err != nil {
+					return nil, err
+				}
 				result := make(ListValue, len(ll)+len(rl))
 				copy(result, ll)
 				copy(result[len(ll):], rl)
 				return result, nil
 			}
 			// list + element: wrap right in a single-element list and append.
+			if err := chargeListGrowth(row, int64(len(ll))+1); err != nil {
+				return nil, err
+			}
 			result := make(ListValue, len(ll)+1)
 			copy(result, ll)
 			result[len(ll)] = right
@@ -874,6 +1000,9 @@ func evalArith(op string, left, right Value) (Value, error) {
 		}
 		if rl, rok := right.(ListValue); rok {
 			// element + list: prepend left to right.
+			if err := chargeListGrowth(row, int64(len(rl))+1); err != nil {
+				return nil, err
+			}
 			result := make(ListValue, 1+len(rl))
 			result[0] = left
 			copy(result[1:], rl)
@@ -1112,11 +1241,24 @@ func evalStringOp(op string, left, right Value) (Value, error) {
 	case "ENDS WITH":
 		return BoolValue(strings.HasSuffix(s, pattern)), nil
 	case "=~":
-		// Compile via the bounded, concurrency-safe cache so a repeated
-		// pattern (e.g. WHERE x =~ $p over a large scan) compiles only once.
-		// Behaviour is identical to regexp.MatchString: an invalid pattern
-		// yields a compile error, which maps to NULL per openCypher.
-		re, err := regexCacheShared.compile(pattern)
+		// openCypher `=~` is an ANCHORED full-string match, equivalent to Java
+		// java.util.regex.Matcher.matches(): the pattern must match the entire
+		// subject string, not merely a substring of it. Go's regexp.MatchString
+		// is an unanchored search (find), so we anchor the user pattern before
+		// compiling: \A and \z are the absolute start/end of text. The
+		// non-capturing group (?:…) binds any top-level alternation in the user
+		// pattern to the anchors, so `a|b` becomes `\A(?:a|b)\z` rather than the
+		// unsafe `\Aa|b\z` (= `(\Aa)|(b\z)`). \z (not the line anchor $) is used
+		// deliberately so a trailing newline does NOT satisfy the match, matching
+		// Java matches() semantics. Inline flags such as (?i) at the head of the
+		// user pattern remain in scope within the group.
+		//
+		// The anchored source string is the cache key, so identical user
+		// patterns hit the same cached compiled form (no double-anchoring), and
+		// the cache stays bounded by the number of distinct user patterns.
+		// An invalid pattern yields a compile error, which maps to NULL per
+		// openCypher.
+		re, err := regexCacheShared.compile(anchorRegexMatch(pattern))
 		if err != nil {
 			return Null, nil //nolint:nilerr // invalid pattern → NULL per openCypher
 		}
@@ -1327,8 +1469,16 @@ type quantifierCounts struct {
 // element, partitioning the outcomes into the (true, false, null) counters
 // of [quantifierCounts].
 func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowContext, params map[string]Value, reg FunctionRegistry) (quantifierCounts, error) {
+	// ctx is smuggled through row by EvalWith; on the bare Eval path it is
+	// context.Background() and the per-stride cancellation check never fires.
+	ctx, _ := extractSubqueryContext(row)
 	c := quantifierCounts{total: len(list)}
-	for _, elem := range list {
+	for i, elem := range list {
+		// Honour cancellation/deadline on a fixed stride so a quantifier
+		// (all/any/none/single) over a large list is interruptible (#1477).
+		if err := checkIterCtx(ctx, i); err != nil {
+			return quantifierCounts{}, err
+		}
 		innerRow := make(RowContext, len(row)+1)
 		for k, v := range row {
 			innerRow[k] = v
@@ -1426,7 +1576,17 @@ func evalReduceExpr(n *ast.ReduceExpr, row RowContext, params map[string]Value, 
 	if !ok {
 		return acc, nil
 	}
-	for _, elem := range list {
+	// ctx is smuggled through row by EvalWith; on the bare Eval path it is
+	// context.Background() and the per-stride cancellation check never fires.
+	// The per-evaluation list-element budget that bounds a list-growing
+	// accumulator (reduce(acc=[0], … | acc + acc)) is charged inside evalArith
+	// before each concat allocates (#1475); this loop adds the cancellation
+	// check (#1477).
+	ctx, _ := extractSubqueryContext(row)
+	for i, elem := range list {
+		if err := checkIterCtx(ctx, i); err != nil {
+			return nil, err
+		}
 		innerRow := make(RowContext, len(row)+2)
 		for k, v := range row {
 			innerRow[k] = v
@@ -1482,7 +1642,15 @@ func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowConte
 		accVarName = v.Name
 	}
 
-	for _, elem := range list {
+	// ctx is smuggled through row by EvalWith; on the bare Eval path it is
+	// context.Background() and the per-stride cancellation check never fires.
+	// The per-evaluation list-element budget is charged inside evalArith before
+	// each concat allocates (#1475); this loop adds the cancellation check (#1477).
+	ctx, _ := extractSubqueryContext(row)
+	for i, elem := range list {
+		if err := checkIterCtx(ctx, i); err != nil {
+			return nil, err
+		}
 		innerRow := make(RowContext, len(row)+2)
 		for k, v := range row {
 			innerRow[k] = v
