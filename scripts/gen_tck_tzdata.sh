@@ -37,6 +37,21 @@ set -euo pipefail
 # expectations change; re-run the self-check below after any bump.
 TZ_VERSION="2026b"
 
+# Pinned SHA-256 of the tzdata${TZ_VERSION}.tar.gz tarball, verified against the
+# upstream IANA publish at https://data.iana.org/time-zones/releases/. A 'case'
+# is used (not 'declare -A') for portability with the bash 3.2 shipped on macOS.
+# Add a case when bumping TZ_VERSION; the script refuses to proceed without one
+# so a MITM or a compromised mirror cannot silently substitute a tarball whose
+# Stockholm-1818 canary matches while other zones are tampered with (CWE-494).
+case "${TZ_VERSION}" in
+  "2026b") EXPECTED_SHA256="114543d9f19a6bfeb5bca43686aea173d38755a3db1f2eec112647ae92c6f544" ;;
+  *)
+    echo "ERROR: no pinned SHA-256 for tzdata${TZ_VERSION}." >&2
+    echo "Add a case for it to this script before regenerating the fixture." >&2
+    exit 1
+    ;;
+esac
+
 # Expected offset for the canary scenario, used as a self-check.
 CANARY_EXPECTED="+00:53:28"
 
@@ -49,6 +64,26 @@ trap 'rm -rf "${workdir}"' EXIT
 echo "==> Downloading IANA tzdata${TZ_VERSION}"
 curl -fsSL -o "${workdir}/tzdata.tar.gz" \
   "https://data.iana.org/time-zones/releases/tzdata${TZ_VERSION}.tar.gz"
+
+echo "==> Verifying tarball SHA-256"
+if command -v shasum >/dev/null 2>&1; then
+  actual_sha="$(shasum -a 256 "${workdir}/tzdata.tar.gz" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  actual_sha="$(sha256sum "${workdir}/tzdata.tar.gz" | awk '{print $1}')"
+else
+  echo "ERROR: neither shasum nor sha256sum found on PATH." >&2
+  exit 1
+fi
+if [[ "${actual_sha}" != "${EXPECTED_SHA256}" ]]; then
+  echo "ERROR: tzdata${TZ_VERSION}.tar.gz checksum mismatch — refusing to proceed." >&2
+  echo "  expected: ${EXPECTED_SHA256}" >&2
+  echo "  actual:   ${actual_sha}" >&2
+  echo "A tampered or wrong tarball would poison the committed zoneinfo-slim.zip" >&2
+  echo "fixture. Update the pinned SHA-256 only if you trust the new upstream." >&2
+  exit 1
+fi
+echo "    checksum OK: ${actual_sha}"
+
 mkdir -p "${workdir}/src" "${workdir}/out"
 tar -xzf "${workdir}/tzdata.tar.gz" -C "${workdir}/src"
 
