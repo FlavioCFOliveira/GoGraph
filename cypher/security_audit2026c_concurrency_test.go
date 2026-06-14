@@ -77,7 +77,10 @@ func countLabel(ctx context.Context, t *testing.T, eng *cypher.Engine, label str
 // The whole test is bounded by a 30s context so a barrier regression that
 // deadlocks fails fast rather than hanging CI.
 func TestSEC14c_ConcurrentWriteRead_NoRace_NoPartialReads(t *testing.T) {
-	t.Parallel()
+	// Deliberately NOT t.Parallel(): this test spawns many concurrent
+	// txn writers/readers; running it in the parallel batch under -race
+	// starves CPU from deadline-sensitive peers (e.g. the Cartesian
+	// intermediate-work bound test) on shared CI runners. Run serially.
 
 	const (
 		writers          = 8
@@ -187,7 +190,9 @@ func TestSEC14c_ConcurrentWriteRead_NoRace_NoPartialReads(t *testing.T) {
 // under contention. Bounded by a context deadline so a lock-ordering
 // regression fails fast.
 func TestSEC14c_ConcurrentBeginWriters_SingleWriterSerialised(t *testing.T) {
-	t.Parallel()
+	// Deliberately NOT t.Parallel(): see the sibling test above — heavy
+	// concurrent writers must not contend with deadline-sensitive parallel
+	// peers under -race on shared CI runners.
 
 	const (
 		writers          = 16
