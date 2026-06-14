@@ -64,8 +64,10 @@ checksum:
 # cyclonedx-gomod must be installed before goreleaser is invoked,
 # pinned to an exact released version (currently v1.10.0) so the SBOM
 # generator cannot be silently swapped by a poisoned upstream release;
-# see docs/release.md and .github/workflows/release.yml. Bump the pin in
-# lockstep via Dependabot's gomod ecosystem (.github/dependabot.yml).
+# see docs/release.md and .github/workflows/release.yml. This pin — like
+# the GitHub Actions SHA pins in the workflows — is maintained MANUALLY
+# (the auto-update Dependabot config was removed in commit 28d3c20);
+# review and bump it each release.
 
 snapshot:
   version_template: "{{ .Tag }}-next"

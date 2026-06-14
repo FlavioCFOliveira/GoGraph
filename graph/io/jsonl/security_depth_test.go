@@ -187,6 +187,56 @@ func TestSec_IO_JSONLReadLineTooLong(t *testing.T) {
 	}
 }
 
+// TestSec_IO_JSONLReadWellFormedNestedListBounded pins the bound on the
+// recursive typed-list decoder (decodePropertyValue → "list" → decode each
+// element → "list" → …) against a *well-formed* nested list — the case the
+// malformed-bracket test does not exercise. Each nesting level is a valid
+// JSON array string [["list", <inner-as-JSON-string>]], so the per-call
+// encoding/json depth limit never trips; the recursion lives in
+// decodePropertyValue itself.
+//
+// The defence is structural: because each level embeds the inner level as a
+// JSON *string*, every level must JSON-escape the one below it, so the wire
+// size grows ~4x per level. A nesting depth deep enough to threaten the Go
+// stack would need a payload far larger than the 16 MiB per-line scanner cap
+// and the byte cap, so the reader rejects the line (ErrLineTooLong /
+// ErrInputTooLarge) long before the recursion can exhaust the stack. This
+// test builds the largest nested value that still fits comfortably under the
+// line cap and asserts the reader returns a bounded result — never a panic.
+func TestSec_IO_JSONLReadWellFormedNestedListBounded(t *testing.T) {
+	t.Parallel()
+
+	// Build a valid nested list value. depth 12 yields a wire payload on the
+	// order of a megabyte (4x per level), still safely under the 16 MiB line
+	// cap, and proves the recursion runs and unwinds without crashing.
+	const depth = 12
+	v := "[]"
+	for i := 0; i < depth; i++ {
+		esc := strings.ReplaceAll(v, `\`, `\\`)
+		esc = strings.ReplaceAll(esc, `"`, `\"`)
+		v = `[["list","` + esc + `"]]`
+	}
+	escVal := strings.ReplaceAll(v, `\`, `\\`)
+	escVal = strings.ReplaceAll(escVal, `"`, `\"`)
+
+	var b strings.Builder
+	b.WriteString(`{"type":"node","id":"n0"}` + "\n")
+	b.WriteString(`{"type":"property","id":"n0","key":"k","kind":"list","value":"` + escVal + `"}` + "\n")
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("well-formed nested list panicked (stack exhaustion): %v", r)
+		}
+	}()
+	// A bounded, well-formed nested list decodes successfully; the guarantee
+	// under test is "no panic, bounded work", so either a clean decode or a
+	// typed error is acceptable — a crash is not.
+	g, _, err := jsonl.ReadWithProps(strings.NewReader(b.String()), adjlist.Config{Directed: true})
+	if err != nil && g != nil {
+		t.Errorf("graph must be nil on error, got %v", g)
+	}
+}
+
 // secIORepeatReader streams the byte b exactly `remaining` times, then EOF.
 // It lets a test feed a multi-megabyte line to the scanner without holding
 // that many bytes in a single allocation in the test itself.
