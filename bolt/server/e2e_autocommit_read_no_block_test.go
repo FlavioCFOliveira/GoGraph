@@ -40,7 +40,11 @@ import (
 func TestE2E_ConcurrentAutocommitReadsRunInParallel(t *testing.T) {
 	const (
 		concurrency = 8
-		maxFactor   = 4.0 // 8 parallel reads must finish within 4× a single read
+		// A serialised handler (the #1432 regression) takes ~concurrency* the
+		// single-read baseline; a parallel one is bounded by the host CPU count.
+		// 0.75*concurrency still flags serialisation (~8x) while tolerating
+		// CPU-bound execution on small CI runners (8 reads on 2 cores ~4x).
+		maxFactor = 0.75 * concurrency
 	)
 
 	ctx := context.Background()
@@ -69,7 +73,13 @@ func TestE2E_ConcurrentAutocommitReadsRunInParallel(t *testing.T) {
 		sess := drv.NewSession(ctx, neo4j.SessionConfig{})
 		defer func() { _ = sess.Close(ctx) }() //nolint:errcheck
 		start := time.Now()
-		result, err := sess.Run(ctx, "RETURN 1 AS n", nil)
+		// A read heavy enough (a few ms) that the serialisation signal dominates
+		// fixed per-request overhead (goroutine scheduling, driver pool mutex,
+		// session Run/Consume). A sub-millisecond "RETURN 1" makes the
+		// concurrent/baseline ratio noise-dominated rather than a parallelism
+		// measurement. This is a pure read (no graph mutation): it routes
+		// through the shared read lock, exactly the #1432 path under test.
+		result, err := sess.Run(ctx, "UNWIND range(1, 200000) AS x RETURN count(x) AS n", nil)
 		if err != nil {
 			return 0, err
 		}
@@ -78,6 +88,28 @@ func TestE2E_ConcurrentAutocommitReadsRunInParallel(t *testing.T) {
 		}
 		return time.Since(start), nil
 	}
+
+	// Prime the driver single-threaded first. One read initialises the neo4j
+	// driver's shared connector state (it lazily assigns Connector.SupplyConnection
+	// on the first Connect, unsynchronised in v5.28.4) and opens one pooled
+	// connection. Without this prime, the concurrent warm-up below would have
+	// many goroutines hit that cold-start lazy-init simultaneously, and the race
+	// detector would (correctly) flag the driver's own unsynchronised write.
+	if _, err := runRead(); err != nil {
+		t.Fatalf("priming read: %v", err)
+	}
+
+	// Warm the ENTIRE connection pool next. The baseline below warms only one
+	// pooled connection, but the concurrent phase needs `concurrency` of them;
+	// without this warm-up the concurrent phase pays to establish concurrency-1
+	// fresh Bolt connections (TCP + handshake + HELLO), which dominates the
+	// measurement and is unrelated to read parallelism.
+	var warm sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		warm.Add(1)
+		go func() { defer warm.Done(); _, _ = runRead() }()
+	}
+	warm.Wait()
 
 	// Warm up: measure a single-read baseline (evicts cold-start latency).
 	baseline, err := runRead()
@@ -116,6 +148,16 @@ func TestE2E_ConcurrentAutocommitReadsRunInParallel(t *testing.T) {
 
 	limit := time.Duration(float64(baseline) * maxFactor)
 	t.Logf("%d concurrent reads finished in %v (limit %v, baseline %v)", concurrency, total, limit, baseline)
+
+	// Coverage instrumentation (-coverpkg=./... -covermode=atomic) adds severe,
+	// unpredictable per-goroutine overhead to this micro-benchmark, making the
+	// latency ratio unreliable. The reads above still execute under coverage
+	// (exercising the concurrent read path); the strict timing assertion is
+	// enforced on the normal and -race runs.
+	if testing.CoverMode() != "" {
+		t.Logf("under coverage instrumentation (mode=%q): skipping strict latency assertion", testing.CoverMode())
+		return
+	}
 	if total > limit {
 		t.Errorf("concurrent reads took %v > %v (%.1f× baseline %v): reads appear to be serialised",
 			total, limit, float64(total)/float64(baseline), baseline)
