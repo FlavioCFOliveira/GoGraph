@@ -249,6 +249,13 @@ const labelMagic uint32 = 0x49424C53
 // label index.
 const labelFormatVersion uint32 = 1
 
+// labelCapHintMax caps the eager map size hint in Deserialize so a hostile
+// label count cannot drive a large pre-allocation before any entry is read.
+// It mirrors the safe sibling ceiling used by store/snapshot/tombstones.bin
+// and constraints.bin (1<<20). A legitimately large index is unaffected: the
+// map grows past the hint as entries are inserted.
+const labelCapHintMax = 1 << 20
+
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
 // Serialize writes the index's per-label bitmaps to w in the format
@@ -372,7 +379,11 @@ func (i *Index) Deserialize(r io.Reader) error {
 		return fmt.Errorf("%w: count: %w", index.ErrIndexCorrupted, err)
 	}
 
-	bits := make(map[uint32]*roaring64.Bitmap, int(count))
+	hint := int(count)
+	if hint > labelCapHintMax {
+		hint = labelCapHintMax
+	}
+	bits := make(map[uint32]*roaring64.Bitmap, hint)
 	for k := uint32(0); k < count; k++ {
 		var labelID uint32
 		if err := binary.Read(br, binary.LittleEndian, &labelID); err != nil {
