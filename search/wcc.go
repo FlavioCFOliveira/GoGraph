@@ -32,6 +32,13 @@ func WCC[W any](c *csr.CSR[W]) (component []int, k int, err error) {
 // WCCCtx is the context-aware variant of [WCC]. ctx.Err() is checked
 // once before the union sweep and once before the relabel sweep; on
 // cancellation returns (nil, 0, wrapped ctx.Err()).
+//
+// The union-find universe and the working storage are sized on the live
+// NodeID count, not on MaxNodeID(), so a sparse (shard-amplified) NodeID
+// space cannot inflate the allocation beyond O(live) (rmp #1474). The
+// returned component slice is still indexed by NodeID (length MaxNodeID)
+// to preserve the public contract — ghost / isolated slots report -1 —
+// but the disjoint-set arithmetic runs in the compact [0, live) space.
 func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, err error) {
 	defer metrics.Time("search.WCCCtx")()
 	if cerr := ctx.Err(); cerr != nil {
@@ -42,13 +49,46 @@ func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, 
 	if maxID == 0 {
 		return nil, 0, nil
 	}
+	// Compact the live NodeID set into a dense [0, live) index space so
+	// the Union-Find covers only real nodes. dense[id] is the compact
+	// index of a live NodeID, or -1 for a ghost / isolated slot.
 	mask := c.LiveMask()
-	uf := ds.NewSlice(maxID)
+	dense := make([]int, maxID)
+	live := 0
+	for i := 0; i < maxID; i++ {
+		if mask[i] {
+			dense[i] = live
+			live++
+		} else {
+			dense[i] = -1
+		}
+	}
+	if live == 0 {
+		// No incident edges anywhere: every slot is a ghost. Preserve
+		// the documented all-(-1) NodeID-indexed output with K=0.
+		component = make([]int, maxID)
+		for i := range component {
+			component[i] = -1
+		}
+		return component, 0, nil
+	}
+	uf := ds.NewSlice(live)
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	for u := 0; u < maxID; u++ {
+		du := dense[u]
+		if du < 0 {
+			continue
+		}
 		for k := verts[u]; k < verts[u+1]; k++ {
-			uf.Union(u, int(edges[k]))
+			dv := dense[int(edges[k])]
+			if dv < 0 {
+				// A live source's neighbour is live by the LiveMask
+				// definition; this branch keeps the union total under
+				// any future mask/edge skew.
+				continue
+			}
+			uf.Union(du, dv)
 		}
 	}
 	if cerr := ctx.Err(); cerr != nil {
@@ -60,13 +100,16 @@ func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, 
 		component[i] = -1
 	}
 	// Compact root IDs into [0, K) preserving order of first occurrence.
-	rootRemap := make(map[int]int, maxID)
+	// rootRemap is keyed by compact root index, so it holds at most
+	// `live` entries rather than O(MaxNodeID).
+	rootRemap := make(map[int]int, live)
 	next := 0
 	for i := 0; i < maxID; i++ {
-		if !mask[i] {
+		di := dense[i]
+		if di < 0 {
 			continue
 		}
-		r := uf.Find(i)
+		r := uf.Find(di)
 		id, ok := rootRemap[r]
 		if !ok {
 			id = next

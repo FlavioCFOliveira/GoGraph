@@ -107,22 +107,37 @@ func (u *UnionFind[T]) Reset() {
 // faster operations on typical Kruskal-MST workloads where the
 // element set is densely packed in a known range.
 //
+// The parent slice is widened to the platform int (64-bit on every
+// 64-bit target) so the element-ID domain matches the int domain of
+// the graph NodeID / MaxNodeID callers feed into [NewSlice]
+// (search.WCC, search.KruskalMST). An earlier int32 backing silently
+// truncated element IDs once the universe exceeded math.MaxInt32,
+// wrapping high IDs to negative slice indices and corrupting set
+// membership (rmp #1476); the int backing removes that ceiling
+// entirely. Correctness is preferred over the ~2x density int32 would
+// save, and only on universes already near the 2^31 boundary.
+//
 // UnionFindSlice is not safe for concurrent use; callers that need
 // concurrent access must guard it externally.
 type UnionFindSlice struct {
-	parent []int32
+	parent []int
 	rank   []uint8
 }
 
 // NewSlice returns a UnionFindSlice covering elements [0, n). Each
 // element starts in its own singleton set.
+//
+// n is the universe size in the platform int domain; the parent slice
+// is indexed by int throughout, so any n that a Go slice can hold is
+// supported without truncation. Passing a negative n panics in make,
+// matching every other slice constructor in the standard library.
 func NewSlice(n int) *UnionFindSlice {
 	u := &UnionFindSlice{
-		parent: make([]int32, n),
+		parent: make([]int, n),
 		rank:   make([]uint8, n),
 	}
 	for i := range u.parent {
-		u.parent[i] = int32(i)
+		u.parent[i] = i
 	}
 	return u
 }
@@ -130,17 +145,17 @@ func NewSlice(n int) *UnionFindSlice {
 // Find returns the representative of the set containing x with
 // two-pass path compression. x must be in [0, len(parent)).
 func (u *UnionFindSlice) Find(x int) int {
-	root := int32(x)
+	root := x
 	for u.parent[root] != root {
 		root = u.parent[root]
 	}
-	cur := int32(x)
+	cur := x
 	for u.parent[cur] != root {
 		next := u.parent[cur]
 		u.parent[cur] = root
 		cur = next
 	}
-	return int(root)
+	return root
 }
 
 // Union merges the sets containing a and b. Returns true when the
@@ -153,11 +168,11 @@ func (u *UnionFindSlice) Union(a, b int) bool {
 	}
 	switch {
 	case u.rank[ra] < u.rank[rb]:
-		u.parent[ra] = int32(rb)
+		u.parent[ra] = rb
 	case u.rank[ra] > u.rank[rb]:
-		u.parent[rb] = int32(ra)
+		u.parent[rb] = ra
 	default:
-		u.parent[rb] = int32(ra)
+		u.parent[rb] = ra
 		u.rank[ra]++
 	}
 	return true
@@ -178,7 +193,7 @@ func (u *UnionFindSlice) Len() int { return len(u.parent) }
 // change. Rank is zeroed via a single clear() call.
 func (u *UnionFindSlice) Reset() {
 	for i := range u.parent {
-		u.parent[i] = int32(i)
+		u.parent[i] = i
 	}
 	clear(u.rank)
 }
