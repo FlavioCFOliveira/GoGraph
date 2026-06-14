@@ -4,13 +4,14 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] — 2026-06-13
+## [0.3.0] — 2026-06-14
 
 The third published release of **GoGraph**, a Go module for graph
 persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
 release: it is additive over `v0.2.0` and its headline work is a deep
-**reliability and robustness hardening pass** drawn from three
-successive code audits, alongside four additive features. No exported
+**reliability and robustness hardening pass** drawn from four
+successive code audits (three reliability and one security), alongside
+four additive features. No exported
 identifier was removed or renamed. Both compliance invariants continue
 to hold without regression: the module is **100 % openCypher
 TCK-compliant at the execution level** (3 897 / 3 897 scenarios) and
@@ -34,9 +35,12 @@ infrastructure.
 Under Semantic Versioning, a `0.y.z` version signals that the public Go
 API is **not yet stable** and may change while the module matures toward
 `1.0.0`. Pin the exact version you depend on. This release introduces no
-breaking change and tightens only one consumer-visible default (the
-CSV/GraphML import byte ceiling); consumers should read the **Upgrade
-notes** in [release-notes/v0.3.0.md](release-notes/v0.3.0.md).
+breaking API change. It tightens one consumer-visible default (the
+CSV/GraphML import byte ceiling) and corrects one consumer-visible
+behaviour — the Cypher `=~` regex operator, which was silently evaluated
+as plain string equality and now performs an anchored regular-expression
+match per the openCypher specification. Consumers should read the
+**Upgrade notes** in [release-notes/v0.3.0.md](release-notes/v0.3.0.md).
 
 Install with:
 
@@ -78,6 +82,12 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.3.0
   (not only that the scenario fails), built on the existing semantic
   error vocabulary. The execution result count is unchanged at
   3 897 / 3 897 (#1443).
+- **Opt-in CSV formula-injection sanitisation** — the CSV writer gains
+  `Options.SanitizeFormulae` (default off). When enabled, cells whose
+  first character is `=`, `+`, `-`, `@`, tab, or carriage return are
+  prefixed with a quote so a spreadsheet opening the export treats them
+  as text (OWASP CSV/formula injection, CWE-1236). The default preserves
+  the lossless round-trip (#1471).
 
 ### Changed
 
@@ -92,6 +102,16 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.3.0
 - **The `cypher/ir/rewrite` package documents its experimental status**
   and is guarded by an import-graph test, clarifying that it is not part
   of the stable public surface.
+- **The Cypher `=~` regex-match operator now matches correctly.** It was
+  silently parsed as `=` (string equality), so `'abc' =~ '[a-z]+'`
+  returned false; it now performs an anchored full-match regular
+  expression (`\A(?:…)\z`, openCypher / Java `String.matches` semantics).
+  This corrects a latent fail-open hazard for any query that used `=~` in
+  an authorisation or allow/deny predicate. See the Upgrade notes (#1479).
+- **Dependencies bumped** (Dependabot): `RoaringBitmap/roaring/v2`
+  2.18.0 → 2.18.2, `cucumber/godog` 0.14.1 → 0.15.1, `golang.org/x/sys`
+  0.44.0 → 0.46.0, `spf13/pflag` 1.0.5 → 1.0.7. `govulncheck` stays clean
+  and the TCK execution count is unchanged at 3 897 / 3 897.
 
 ### Fixed
 
@@ -189,6 +209,46 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.3.0
   pre-allocation with in-place append reuse and a single-lock bulk
   removal path. A degree-10 000 hub is now roughly 11.6× slower than a
   degree-1 000 hub, where it was previously 50–100× slower.
+
+### Security
+
+- **Exhaustive security audit and remediation (SEC-2026-06-14).** A
+  phased, six-domain security audit found and fixed **13** issues
+  (tasks #1467–#1479); the full report is in
+  [docs/security-audit-2026-06-14.md](docs/security-audit-2026-06-14.md).
+  All are reachable from untrusted input (a Cypher query, an imported
+  file, or an on-disk artefact):
+  - **Memory-exhaustion DoS bounds** — the snapshot record/string-table
+    decoders now clamp their eager allocation *before* the CRC/size gate
+    (a hostile snapshot could OOM `recovery.Open`), and the Cypher
+    expression evaluator enforces a per-evaluation list-element budget so
+    a tiny `reduce()`/comprehension query can no longer exhaust host
+    memory (#1467, #1468, #1469, #1475).
+  - **Cypher cancellability** — `reduce()`/comprehension/quantifier loops
+    now honour `context` cancellation, so a deadline aborts a runaway
+    query (#1477); variable-length-path traversal gained a per-query edge
+    budget and a default hop ceiling (#1478).
+  - **Bolt credentialed authentication** — `BasicAuthHandler` now
+    authenticates at `LOGON` for Bolt ≥ 5.1, so credentialed auth works
+    with modern drivers instead of forcing `NoAuth` (#1470).
+  - **`=~` regex correctness** — the operator no longer behaves as string
+    equality and is anchored per the openCypher specification, closing a
+    fail-open hazard in authorisation predicates (#1479).
+  - **Analytics over untrusted graphs** — `TransitiveClosure`, WCC and
+    Kruskal compact over the live node set and `UnionFindSlice` uses
+    64-bit indices, so hash-flooded node keys can no longer drive
+    O(MaxNodeID²) over-allocation or index overflow (#1474, #1476).
+  - **Export hardening** — opt-in CSV formula-injection sanitisation
+    (#1471).
+  - **Supply chain** — every GitHub Action in the release pipeline is
+    pinned to a full-length commit SHA and the SBOM generator
+    (`cyclonedx-gomod`) to an exact version, hardening the published
+    artefacts against a moved/poisoned upstream tag
+    (tj-actions/CVE-2025-30066 class) (#1472, #1473).
+
+  Both compliance invariants held throughout: openCypher TCK at
+  3 897 / 3 897 and ACID preserved; `go test -race`, golangci-lint,
+  staticcheck and `govulncheck` are all clean.
 
 ## [0.2.0] — 2026-06-05
 
