@@ -14,6 +14,10 @@ edge type, or property is added or removed, update both in the same change.
   element was last confirmed) and `gitDate` (ISO `YYYY-MM-DD`).
 
 Counts as of commit `567253c` + in-flight worktree (2026-06-11): **11,867 nodes**, **15,360 edges**.
+Incrementally synced at commit `257ce96` (2026-06-14, task #1502): +4 nodes
+(`NodePropertiesByIDFunc` Method, `nodePropsToExprMap` Function,
+`TestNodePropertiesByIDFunc_MatchesByID` Test, `BenchmarkNodeReturnToPackstream`
+Benchmark), +5 edges (4 `CONTAINS`, 1 `HAS_METHOD`).
 
 ---
 
