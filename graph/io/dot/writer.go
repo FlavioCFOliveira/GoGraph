@@ -150,6 +150,19 @@ func quote(s string) string {
 	return b.String()
 }
 
+// dotReservedKeywords is the set of DOT language reserved words. Per the
+// Graphviz DOT grammar (https://graphviz.org/doc/info/lang.html) these are
+// case-independent keywords that "may not be used as identifiers" unless
+// quoted. Matched against strings.ToLower(id) so every casing is covered.
+var dotReservedKeywords = map[string]struct{}{
+	"node":     {},
+	"edge":     {},
+	"graph":    {},
+	"digraph":  {},
+	"subgraph": {},
+	"strict":   {},
+}
+
 func isSimpleID(s string) bool {
 	if s == "" {
 		return false
@@ -162,6 +175,13 @@ func isSimpleID(s string) bool {
 		if !ok {
 			return false
 		}
+	}
+	// An id whose lowercase form is a DOT reserved keyword must be quoted,
+	// otherwise Graphviz reinterprets e.g. 'node -> safe;' as a default-
+	// attribute statement rather than an edge from a vertex named 'node',
+	// silently corrupting the export (#1489).
+	if _, reserved := dotReservedKeywords[strings.ToLower(s)]; reserved {
+		return false
 	}
 	return true
 }
