@@ -1,0 +1,242 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+BenchmarkIC1-10     	    6319	    184470 ns/op	  203924 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    6434	    185594 ns/op	  203922 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    6458	    184298 ns/op	  203922 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    6506	    184985 ns/op	  203923 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    6480	    315108 ns/op	  203925 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    3661	    337393 ns/op	  203926 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    5506	    191621 ns/op	  203923 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    6547	    189681 ns/op	  203923 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    5979	    239929 ns/op	  203924 B/op	    5794 allocs/op
+BenchmarkIC1-10     	    3468	    290192 ns/op	  203927 B/op	    5794 allocs/op
+BenchmarkIC2-10     	   14808	     76793 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   18466	     66374 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   18106	     62352 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   19278	     62032 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   19357	     62089 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   19146	     61660 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   19396	     62396 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   18685	     65970 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   17978	     63399 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC2-10     	   18997	     64007 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19394	     61552 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19471	     61978 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19413	     61675 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19465	     61747 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19372	     61921 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19335	     62188 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19189	     62215 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19395	     61912 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19506	     61787 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC3-10     	   19437	     61752 ns/op	   69033 B/op	    1971 allocs/op
+BenchmarkIC4-10     	   10000	    117090 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC4-10     	   10000	    116713 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC4-10     	   10000	    116720 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC4-10     	   10000	    116452 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC4-10     	   10000	    119857 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC4-10     	    9906	    121821 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC4-10     	    9866	    122134 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC4-10     	    9870	    122002 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC4-10     	    9729	    122302 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC4-10     	    9763	    122277 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC5-10     	  217298	      5436 ns/op	    2287 B/op	      40 allocs/op
+BenchmarkIC5-10     	  220953	      5469 ns/op	    2284 B/op	      40 allocs/op
+BenchmarkIC5-10     	  220862	      5420 ns/op	    2284 B/op	      40 allocs/op
+BenchmarkIC5-10     	  217017	      5451 ns/op	    2286 B/op	      40 allocs/op
+BenchmarkIC5-10     	  217264	      5504 ns/op	    2287 B/op	      40 allocs/op
+BenchmarkIC5-10     	  220970	      5509 ns/op	    2292 B/op	      40 allocs/op
+BenchmarkIC5-10     	  219284	      5451 ns/op	    2284 B/op	      40 allocs/op
+BenchmarkIC5-10     	  220634	      5477 ns/op	    2288 B/op	      40 allocs/op
+BenchmarkIC5-10     	  219226	      5477 ns/op	    2284 B/op	      40 allocs/op
+BenchmarkIC5-10     	  220479	      5491 ns/op	    2287 B/op	      40 allocs/op
+BenchmarkIC6-10     	  207470	      5722 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  209458	      5711 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  210657	      5731 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  208830	      5834 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  204666	      5818 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  206343	      5804 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  207591	      5783 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  204741	      5834 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  205862	      5788 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC6-10     	  210157	      5707 ns/op	    2456 B/op	      41 allocs/op
+BenchmarkIC7-10     	   18142	     66073 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18128	     65821 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18160	     66089 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18198	     66173 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18090	     65882 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18110	     66033 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18228	     66246 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18283	     66144 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18262	     65856 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC7-10     	   18105	     66151 ns/op	   68841 B/op	    1960 allocs/op
+BenchmarkIC8-10     	  217965	      5478 ns/op	    2290 B/op	      40 allocs/op
+BenchmarkIC8-10     	  217096	      5500 ns/op	    2290 B/op	      40 allocs/op
+BenchmarkIC8-10     	  215354	      5522 ns/op	    2287 B/op	      40 allocs/op
+BenchmarkIC8-10     	  217375	      5493 ns/op	    2285 B/op	      40 allocs/op
+BenchmarkIC8-10     	  219895	      5490 ns/op	    2285 B/op	      40 allocs/op
+BenchmarkIC8-10     	  216926	      5499 ns/op	    2285 B/op	      40 allocs/op
+BenchmarkIC8-10     	  217272	      5510 ns/op	    2285 B/op	      40 allocs/op
+BenchmarkIC8-10     	  214713	      5567 ns/op	    2288 B/op	      40 allocs/op
+BenchmarkIC8-10     	  214563	      5480 ns/op	    2288 B/op	      40 allocs/op
+BenchmarkIC8-10     	  216375	      5492 ns/op	    2287 B/op	      40 allocs/op
+BenchmarkIC9-10     	    9440	    124576 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9555	    125369 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9439	    125125 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9534	    124623 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9790	    124162 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9687	    125008 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9607	    124873 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9818	    124618 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9712	    124746 ns/op	  278299 B/op	    2638 allocs/op
+BenchmarkIC9-10     	    9602	    125791 ns/op	  278300 B/op	    2638 allocs/op
+BenchmarkIC10-10    	    7921	    150682 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    7948	    150692 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    7850	    151328 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    7926	    150507 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    7951	    151590 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    8013	    150730 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    7893	    151179 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    8028	    151201 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    8010	    151316 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC10-10    	    8037	    150781 ns/op	  321300 B/op	    3650 allocs/op
+BenchmarkIC11-10    	    3168	    375593 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3271	    377873 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3219	    377622 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3176	    376966 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3190	    378294 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3256	    376438 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3193	    377256 ns/op	  849685 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3196	    376693 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3156	    376290 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC11-10    	    3190	    375541 ns/op	  849684 B/op	    7792 allocs/op
+BenchmarkIC12-10    	  191911	      6210 ns/op	    3082 B/op	      50 allocs/op
+BenchmarkIC12-10    	  197499	      6196 ns/op	    3076 B/op	      50 allocs/op
+BenchmarkIC12-10    	  196759	      6190 ns/op	    3077 B/op	      50 allocs/op
+BenchmarkIC12-10    	  195007	      6220 ns/op	    3079 B/op	      50 allocs/op
+BenchmarkIC12-10    	  194812	      6238 ns/op	    3079 B/op	      50 allocs/op
+BenchmarkIC12-10    	  196906	      6223 ns/op	    3077 B/op	      50 allocs/op
+BenchmarkIC12-10    	  196664	      6204 ns/op	    3077 B/op	      50 allocs/op
+BenchmarkIC12-10    	  191733	      6219 ns/op	    3082 B/op	      50 allocs/op
+BenchmarkIC12-10    	  197215	      6209 ns/op	    3076 B/op	      50 allocs/op
+BenchmarkIC12-10    	  196952	      6244 ns/op	    3077 B/op	      50 allocs/op
+BenchmarkIC13-10    	  190843	      6272 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  190076	      6293 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  190488	      6275 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  187316	      6298 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  190138	      6273 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  191078	      6376 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  188869	      6353 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  187428	      6385 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  188300	      6347 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC13-10    	  188522	      6366 ns/op	    3048 B/op	      50 allocs/op
+BenchmarkIC14-10    	   17874	     66885 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17886	     66813 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17826	     67440 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17966	     67029 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17918	     66815 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17845	     67114 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17970	     67049 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   18008	     67190 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17853	     67002 ns/op	   68849 B/op	    1960 allocs/op
+BenchmarkIC14-10    	   17846	     67008 ns/op	   68849 B/op	    1960 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc	200.361s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+BenchmarkAllNodesScan-10    	  250791	      4283 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  280461	      4284 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  281583	      4334 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  278829	      4309 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  280320	      4281 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  279614	      4277 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  280788	      4332 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  276363	      4301 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  278384	      4313 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkAllNodesScan-10    	  275475	      4324 ns/op	   10304 B/op	     258 allocs/op
+BenchmarkProjectOp-10       	   93290	     12887 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   92899	     12873 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   93540	     12810 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   94113	     12639 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   95096	     12742 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   94066	     12755 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   94464	     13003 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   90214	     13018 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   92196	     13095 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkProjectOp-10       	   92700	     12952 ns/op	   22472 B/op	     762 allocs/op
+BenchmarkResultSet-10       	   62337	     19167 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   62553	     19210 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   60908	     19346 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   61702	     19204 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   62558	     19281 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   62259	     19338 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   61912	     19750 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   61143	     19805 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   61528	     19297 ns/op	   34600 B/op	    1264 allocs/op
+BenchmarkResultSet-10       	   62432	     19340 ns/op	   34600 B/op	    1264 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc	40.013s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29255665 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  28955215 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  29309681 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29665809 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  29459355 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29146739 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29168465 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  29506573 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29620099 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29158493 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     147	   8125585 ns/op	 1140056 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8193218 ns/op	 1140414 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     146	   8140160 ns/op	 1140235 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     146	   8214445 ns/op	 1140234 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     146	   8166318 ns/op	 1140234 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     146	   8162841 ns/op	 1140234 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8164815 ns/op	 1140413 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     146	   8110636 ns/op	 1140234 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8275926 ns/op	 1140414 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     147	   8096946 ns/op	 1140057 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     148	   8085494 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   7993565 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8093633 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     150	   8070694 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     150	   8098915 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8139304 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     148	   8117724 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     148	   8193261 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8013723 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     150	   7972840 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search	107.271s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	0.420s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/community	0.301s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/extern	0.273s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/flow	0.264s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     151	   7868056 ns/op	   96601 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     154	   7803154 ns/op	   96601 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     152	   7803198 ns/op	   96601 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     153	   7776224 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     153	   7834706 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     152	   7772269 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     154	   7797432 ns/op	   96601 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     152	   7852251 ns/op	   96600 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     153	   7764339 ns/op	   96601 B/op	    1921 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     153	   7835551 ns/op	   96600 B/op	    1921 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	20.031s

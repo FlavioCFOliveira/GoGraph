@@ -308,3 +308,38 @@ func (g *Graph[N, W]) NodePropertiesByID(id graph.NodeID) map[string]PropertyVal
 	s.mu.RUnlock()
 	return out
 }
+
+// NodePropertyByID returns the single property keyed by name attached to the
+// node identified by id, without materialising the node's full property map. It
+// is the single-key counterpart of [Graph.NodePropertiesByID] and exists for
+// the Cypher scalar-projection fast path: a predicate or projection that reads
+// only n.name from a bound node fetches just that one value instead of copying
+// every property into a fresh map per row.
+//
+// The boolean reports whether the property is present (false for both an
+// unknown key name and a node that carries no such property), mirroring the
+// missing-key-is-null semantics of openCypher property access. The returned
+// PropertyValue is a value copy owned by the caller. Concurrency-safe under the
+// same contract as [Graph.NodeProperties]: the read holds the property shard's
+// read lock for the duration of the lookup, so it observes a consistent view of
+// the node's properties relative to any concurrent writer holding the shard
+// write lock.
+func (g *Graph[N, W]) NodePropertyByID(id graph.NodeID, key string) (PropertyValue, bool) {
+	// Resolve the key name to its interned id without interning a new one: an
+	// unknown key cannot be present on any node, so a miss here is a definite
+	// "absent" answer and avoids polluting the registry with query-time names.
+	kid, ok := g.propKeys().Lookup(key)
+	if !ok {
+		return PropertyValue{}, false
+	}
+	s := g.nodePropShardFor(id)
+	s.mu.RLock()
+	bag, ok := s.m[id]
+	if !ok {
+		s.mu.RUnlock()
+		return PropertyValue{}, false
+	}
+	v, ok := bag[kid]
+	s.mu.RUnlock()
+	return v, ok
+}

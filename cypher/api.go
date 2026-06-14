@@ -4254,8 +4254,20 @@ func buildOperator(
 				capturedParams := params
 				capturedReg := reg
 				capturedBopts := bopts
+				// Lazy node materialisation (#1500): the predicate is a single
+				// read-only expression whose RowContext is evaluated and
+				// discarded inside the query's pinned visibility barrier and
+				// never escapes into a result row, so a node referenced only
+				// through scalar accesses (n.key, n["key"], n:Label) is
+				// materialised partially. analyseNodeScalarUse runs once at
+				// build time; a bailout (complex expression kind) disables the
+				// lazy path and restores full eager materialisation.
+				scalarUse, bail := analyseNodeScalarUse(predExpr)
+				if bail {
+					scalarUse = nil
+				}
 				return exec.NewFilter(child, func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+					rowCtx := buildRowCtxWithUse(row, schemaSnap, capturedG, capturedBopts, scalarUse)
 					return evalRow(capturedBopts, predExpr, rowCtx, capturedParams, capturedReg)
 				}), nil
 			}
@@ -6404,6 +6416,181 @@ func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Valu
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }
 
+// nodeScalarUse records, for a single bound node variable, the minimal set of
+// node state a read-only expression actually dereferences. It drives the lazy /
+// partial node-materialisation fast path in [buildRowCtx]: instead of eagerly
+// copying every property and label of the node into a row value, only the
+// statically-named scalar pieces are loaded.
+//
+// keys holds the literal property keys read via `n.key` or `n["key"]`.
+// needsLabels is set when a label predicate `n:Label` or a label-reading
+// construct touches the node. needsWholeNode is the fail-safe escape hatch: it
+// is set for ANY use of the variable that is not a provably-scalar access (a
+// bare reference, a dynamic subscript `n[$k]`, passing `n` to a function such
+// as properties()/keys()/labels(), node identity equality, etc.). When
+// needsWholeNode is true the variable falls back to full eager materialisation,
+// so correctness is never traded for the allocation win.
+type nodeScalarUse struct {
+	keys           map[string]struct{}
+	needsLabels    bool
+	needsWholeNode bool
+}
+
+// analyseNodeScalarUse walks a read-only expression and classifies how each
+// variable it references is used, returning a per-variable map. The analysis is
+// deliberately conservative: it whitelists the small set of provably-scalar
+// access shapes and marks every other use as needsWholeNode. A nil expression
+// yields an empty map. The result is consumed by [buildRowCtx] to decide, per
+// node-bound column, whether a partial node value suffices.
+//
+// Robustness is the priority over coverage: the walk recurses only through an
+// explicit allowlist of composite expression kinds. Any kind outside that set
+// — subqueries, comprehensions, pattern expressions, reduce, map projection —
+// sets a bailout flag, which forces the caller to fall back to full eager
+// materialisation for every variable. This guarantees the analysis can never
+// silently miss a non-scalar use of a node variable (which would be a
+// correctness bug); a new AST node type added later defaults to the safe path.
+//
+// The analysis must only be applied to a single read-only expression evaluated
+// inside the query's pinned visibility barrier (the WHERE predicate and the
+// SET/DELETE value/target evaluators). It must never gate the materialisation
+// of a value that escapes into a result row, because a partially-filled node
+// value would serialise a truncated property map to the caller.
+func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bailout bool) {
+	uses = map[string]*nodeScalarUse{}
+	get := func(name string) *nodeScalarUse {
+		u, ok := uses[name]
+		if !ok {
+			u = &nodeScalarUse{keys: map[string]struct{}{}}
+			uses[name] = u
+		}
+		return u
+	}
+
+	var walk func(x ast.Expression)
+	walk = func(x ast.Expression) {
+		if bailout {
+			return
+		}
+		switch v := x.(type) {
+		case nil:
+			return
+		case *ast.Variable:
+			// A bare variable reference that was not consumed by a scalar
+			// accessor above forces full materialisation.
+			get(v.Name).needsWholeNode = true
+		case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+			*ast.BoolLiteral, *ast.NullLiteral, *ast.OverflowIntLit,
+			*ast.StarLiteral, *ast.Parameter:
+			// Scalar leaves: never reference a bound node.
+			return
+		case *ast.Property:
+			if rv, ok := v.Receiver.(*ast.Variable); ok {
+				get(rv.Name).keys[v.Key] = struct{}{}
+				return
+			}
+			walk(v.Receiver)
+		case *ast.LabelPredicate:
+			if rv, ok := v.Receiver.(*ast.Variable); ok {
+				get(rv.Name).needsLabels = true
+				return
+			}
+			walk(v.Receiver)
+		case *ast.SubscriptExpr:
+			// n["literal"] is a scalar property access; any other index
+			// (dynamic key, parameter, computed expression) cannot be
+			// statically resolved, so the whole node is required.
+			if rv, ok := v.Expr.(*ast.Variable); ok {
+				if sl, ok := v.Index.(*ast.StringLiteral); ok {
+					get(rv.Name).keys[sl.Value] = struct{}{}
+					return
+				}
+			}
+			walk(v.Expr)
+			walk(v.Index)
+		case *ast.SliceExpr:
+			walk(v.Expr)
+			walk(v.From)
+			walk(v.To)
+		case *ast.BinaryOp:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.UnaryOp:
+			walk(v.Operand)
+		case *ast.FunctionInvocation:
+			for _, a := range v.Args {
+				walk(a)
+			}
+		case *ast.ListLiteral:
+			for _, el := range v.Elements {
+				walk(el)
+			}
+		case *ast.MapLiteral:
+			for _, val := range v.Values {
+				walk(val)
+			}
+		case *ast.CaseExpression:
+			walk(v.Subject)
+			for _, alt := range v.Alternatives {
+				walk(alt.Condition)
+				walk(alt.Consequent)
+			}
+			walk(v.ElseExpr)
+		default:
+			// Unknown / complex kind (subquery, comprehension, pattern,
+			// reduce, map projection, or a future node type): bail to the
+			// safe eager path rather than risk missing a non-scalar use.
+			bailout = true
+		}
+	}
+	walk(e)
+	return uses, bailout
+}
+
+// upgradeNodeIDToValuePartial is the lazy counterpart of [upgradeNodeIDToValue]:
+// it constructs an [expr.NodeValue] populated only with the property keys and
+// (optionally) the labels named in use, reading each scalar directly from g
+// without copying the node's full property map or label set. It is only sound
+// for a value that does not escape the query's pinned visibility barrier — see
+// [analyseNodeScalarUse].
+//
+// When use.needsWholeNode is set the call degrades to the full eager upgrade so
+// constructs such as properties(n)/keys(n)/labels(n) and node identity always
+// observe the complete node. v is returned unchanged when it is not a resolved
+// NodeID, matching the value-passthrough contract of [upgradeNodeIDToValue].
+func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse) expr.Value {
+	if g == nil || use == nil || use.needsWholeNode {
+		return upgradeNodeIDToValue(v, g)
+	}
+	iv, ok := v.(expr.IntegerValue)
+	if !ok {
+		return v
+	}
+	id := graph.NodeID(iv)
+	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
+		return v
+	}
+	// Allocate the property map lazily on the first present key, mirroring the
+	// propertyless-node fast path in upgradeNodeIDToValue: a referenced key that
+	// the node does not carry (e.g. WHERE n.name IS NOT NULL over a label-only
+	// node) must not cost a map allocation, since a nil MapValue reads
+	// identically (missing-key access yields null).
+	var props expr.MapValue
+	for k := range use.keys {
+		if pv, ok := g.NodePropertyByID(id, k); ok {
+			if props == nil {
+				props = make(expr.MapValue, len(use.keys))
+			}
+			props[k] = lpgPropToExpr(pv)
+		}
+	}
+	var labels []string
+	if use.needsLabels {
+		labels = g.NodeLabelsByID(id)
+	}
+	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
+}
+
 // buildNodeValueFromID constructs an expr.NodeValue for a known graph NodeID,
 // loading labels and properties from g. If the ID is not found in the mapper,
 // an empty NodeValue with only the ID set is returned.
@@ -6670,6 +6857,28 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 // shape rather than on the raw alternating path encoding emitted by
 // VarLengthExpand.
 func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts) expr.RowContext {
+	return buildRowCtxWithUse(row, schema, g, bopts, nil)
+}
+
+// buildRowCtxWithUse is the lazy-aware core of [buildRowCtx]. When scalarUse is
+// nil it is byte-for-byte equivalent to the historical buildRowCtx: every
+// node-bound column is eagerly upgraded to a full [expr.NodeValue]. When
+// scalarUse is non-nil (the WHERE-predicate and SET/DELETE evaluator callers)
+// it applies two optimisations that are only sound for a RowContext consumed
+// and discarded inside the query's pinned visibility barrier:
+//
+//   - columns whose variable the expression never references are skipped
+//     entirely (no upgrade), and
+//   - a referenced node accessed only through scalar shapes (n.key, n["key"],
+//     n:Label) is materialised partially via [upgradeNodeIDToValuePartial],
+//     loading only the touched properties / labels.
+//
+// A variable flagged needsWholeNode (or any variable when the analysis bailed)
+// falls back to the full eager upgrade, so semantics are preserved exactly.
+// scalarUse therefore MUST NOT be supplied by any caller whose RowContext value
+// can flow into a result row (e.g. the projection general path), because a
+// partially-materialised node would serialise a truncated property map.
+func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
@@ -6744,6 +6953,17 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 				ctx[varName] = row[colIdx]
 				continue
 			}
+		}
+		if scalarUse != nil {
+			use, referenced := scalarUse[varName]
+			if !referenced {
+				// The expression never names this variable: building a node
+				// value for it is pure waste. Leave it absent from the ctx —
+				// evalExpr only ever reads variables the expression mentions.
+				continue
+			}
+			ctx[varName] = upgradeNodeIDToValuePartial(row[colIdx], g, use)
+			continue
 		}
 		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)
 	}
@@ -7971,8 +8191,29 @@ func buildIRProjection(
 				capturedParams := params
 				capturedReg := reg
 				capturedBopts := bopts
+				// Lazy node materialisation (#1500) for scalar-only projections
+				// such as `RETURN n.name`: the projected value is a scalar that
+				// is materialised into the result row, so partially loading the
+				// bound node it reads from is sound ONLY when the projection
+				// expression dereferences every node it touches through scalar
+				// accesses — i.e. the analysis did not bail AND no variable
+				// needs the whole node. A bare-variable projection (`RETURN n`)
+				// or any whole-node use returns the node itself into the row, so
+				// it must keep full eager materialisation; the gate below
+				// disables the lazy path for those cases.
+				scalarUse, bail := analyseNodeScalarUse(capturedExpr)
+				projectsWholeNode := bail
+				for _, u := range scalarUse {
+					if u.needsWholeNode {
+						projectsWholeNode = true
+						break
+					}
+				}
+				if projectsWholeNode {
+					scalarUse = nil
+				}
 				evalFn = func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+					rowCtx := buildRowCtxWithUse(row, schemaSnap, capturedG, capturedBopts, scalarUse)
 					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				}
 			}
