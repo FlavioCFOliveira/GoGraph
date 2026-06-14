@@ -60,6 +60,15 @@ var ErrMapperCorrupted = errors.New("snapshot: mapper.bin corrupted")
 // buffer.
 const maxMapperKeyLen = 1 << 30
 
+// mapperCapHintMax caps an eager slice reservation in [ReadMapperString] /
+// [ReadMapperBytes] so a hostile pairCount (up to the 1<<40 implausibility
+// ceiling, a make() of pairCount*24 or *32 bytes) cannot drive a
+// multi-gigabyte allocation before the per-pair reads fail on a truncated
+// body. The reader validates pairCount against the ceiling first, then grows
+// via append. Mirrors labels.go's labelsCapHintMax and tombstones.go's
+// tombstonesCapHintMax.
+const mapperCapHintMax = 1 << 20
+
 // MapperPair is one (NodeID, natural key) record as parsed from the
 // on-disk mapper.bin payload. The slice exposed by
 // [MapperReadback.Pairs] is enumerated in shard-major / intra-index-
@@ -379,7 +388,10 @@ func ReadMapperBytes(r io.Reader) (MapperReadback, error) {
 		return MapperReadback{}, fmt.Errorf("%w: implausible pair count %d",
 			ErrMapperCorrupted, pairCount)
 	}
-	raw := make([]MapperRawPair, pairCount)
+	// Clamp the eager reservation: a hostile pairCount (up to 1<<40) is bounded
+	// to mapperCapHintMax; the per-pair read loop grows via append and fails on
+	// the first truncated read.
+	raw := make([]MapperRawPair, 0, capHint(pairCount, mapperCapHintMax))
 	for i := uint64(0); i < pairCount; i++ {
 		var idRaw uint64
 		if err := binary.Read(br, binary.LittleEndian, &idRaw); err != nil {
@@ -403,7 +415,7 @@ func ReadMapperBytes(r io.Reader) (MapperReadback, error) {
 				return MapperReadback{}, fmt.Errorf("%w: %w", ErrMapperCorrupted, err)
 			}
 		}
-		raw[i] = MapperRawPair{ID: graph.NodeID(idRaw), Key: buf}
+		raw = append(raw, MapperRawPair{ID: graph.NodeID(idRaw), Key: buf})
 	}
 
 	return MapperReadback{RawPairs: raw}, nil
@@ -453,7 +465,10 @@ func ReadMapperString(r io.Reader) (MapperReadback, error) {
 		return MapperReadback{}, fmt.Errorf("%w: implausible pair count %d",
 			ErrMapperCorrupted, pairCount)
 	}
-	pairs := make([]MapperPair, pairCount)
+	// Clamp the eager reservation: a hostile pairCount (up to 1<<40) is bounded
+	// to mapperCapHintMax; the per-pair read loop grows via append and fails on
+	// the first truncated read.
+	pairs := make([]MapperPair, 0, capHint(pairCount, mapperCapHintMax))
 	for i := uint64(0); i < pairCount; i++ {
 		var idRaw uint64
 		if err := binary.Read(br, binary.LittleEndian, &idRaw); err != nil {
@@ -477,7 +492,7 @@ func ReadMapperString(r io.Reader) (MapperReadback, error) {
 				return MapperReadback{}, fmt.Errorf("%w: %w", ErrMapperCorrupted, err)
 			}
 		}
-		pairs[i] = MapperPair{ID: graph.NodeID(idRaw), Key: string(buf)}
+		pairs = append(pairs, MapperPair{ID: graph.NodeID(idRaw), Key: string(buf)})
 	}
 
 	return MapperReadback{Pairs: pairs}, nil

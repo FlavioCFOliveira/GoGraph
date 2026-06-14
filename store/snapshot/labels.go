@@ -34,6 +34,17 @@ const labelsFormatVersion uint32 = 1
 // label-string index that points beyond the embedded string table).
 var ErrLabelsCorrupted = errors.New("snapshot: labels.bin corrupted")
 
+// labelsCapHintMax caps an eager slice reservation in [ReadLabels] so a
+// hostile count (up to the implausibility ceilings: 1<<30 for the string
+// table, 1<<40 for the record arrays) cannot drive a multi-gigabyte
+// allocation before the per-record reads have a chance to fail on a
+// truncated body. The reader still validates the count against the ceiling
+// first and then grows via append, so a header declaring a vast count with
+// a short body hits EOF on the first read rather than after a giant make().
+// Mirrors tombstones.go's tombstonesCapHintMax and edgehandles.go's
+// edgeHandlesCapHintMax.
+const labelsCapHintMax = 1 << 20
+
 // NodeLabelEntry pairs a NodeID with the string-table index of one
 // label name attached to that node. A node carrying N labels yields
 // N entries.
@@ -354,7 +365,11 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 		return LabelsReadback{}, fmt.Errorf("%w: implausible string count %d",
 			ErrLabelsCorrupted, stringCount)
 	}
-	strings := make([]string, stringCount)
+	// Clamp the eager reservation: a hostile stringCount (up to 1<<30, a
+	// ~16 GiB string-header allocation) is bounded to labelsCapHintMax here;
+	// the per-string read loop grows via append, so a truncated body fails on
+	// the first ReadFull rather than after a giant make().
+	strings := make([]string, 0, capHint(stringCount, labelsCapHintMax))
 	for i := uint64(0); i < stringCount; i++ {
 		var n uint32
 		if err := binary.Read(br, binary.LittleEndian, &n); err != nil {
@@ -371,7 +386,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
-		strings[i] = string(buf)
+		strings = append(strings, string(buf))
 	}
 
 	var nodeCount uint64
@@ -384,21 +399,26 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 		return LabelsReadback{}, fmt.Errorf("%w: implausible node-label count %d",
 			ErrLabelsCorrupted, nodeCount)
 	}
-	nodes := make([]NodeLabelEntry, nodeCount)
+	// Clamp the eager reservation: a hostile nodeCount (up to 1<<40, a
+	// ~16 TiB make()) is bounded to labelsCapHintMax; the per-record read loop
+	// grows via append and fails on the first truncated read.
+	nodes := make([]NodeLabelEntry, 0, capHint(nodeCount, labelsCapHintMax))
 	for i := uint64(0); i < nodeCount; i++ {
-		if err := binary.Read(br, binary.LittleEndian, &nodes[i].NodeID); err != nil {
+		var rec NodeLabelEntry
+		if err := binary.Read(br, binary.LittleEndian, &rec.NodeID); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
-		if err := binary.Read(br, binary.LittleEndian, &nodes[i].StringIdx); err != nil {
+		if err := binary.Read(br, binary.LittleEndian, &rec.StringIdx); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
-		if uint64(nodes[i].StringIdx) >= stringCount {
+		if uint64(rec.StringIdx) >= stringCount {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: node string idx %d >= %d",
-				ErrLabelsCorrupted, nodes[i].StringIdx, stringCount)
+				ErrLabelsCorrupted, rec.StringIdx, stringCount)
 		}
+		nodes = append(nodes, rec)
 	}
 
 	var edgeCount uint64
@@ -411,25 +431,29 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 		return LabelsReadback{}, fmt.Errorf("%w: implausible edge-label count %d",
 			ErrLabelsCorrupted, edgeCount)
 	}
-	edges := make([]EdgeLabelEntry, edgeCount)
+	// Clamp the eager reservation: a hostile edgeCount (up to 1<<40) is bounded
+	// to labelsCapHintMax; the per-record read loop grows via append.
+	edges := make([]EdgeLabelEntry, 0, capHint(edgeCount, labelsCapHintMax))
 	for i := uint64(0); i < edgeCount; i++ {
-		if err := binary.Read(br, binary.LittleEndian, &edges[i].Src); err != nil {
+		var rec EdgeLabelEntry
+		if err := binary.Read(br, binary.LittleEndian, &rec.Src); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
-		if err := binary.Read(br, binary.LittleEndian, &edges[i].Dst); err != nil {
+		if err := binary.Read(br, binary.LittleEndian, &rec.Dst); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
-		if err := binary.Read(br, binary.LittleEndian, &edges[i].StringIdx); err != nil {
+		if err := binary.Read(br, binary.LittleEndian, &rec.StringIdx); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
-		if uint64(edges[i].StringIdx) >= stringCount {
+		if uint64(rec.StringIdx) >= stringCount {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: edge string idx %d >= %d",
-				ErrLabelsCorrupted, edges[i].StringIdx, stringCount)
+				ErrLabelsCorrupted, rec.StringIdx, stringCount)
 		}
+		edges = append(edges, rec)
 	}
 
 	return LabelsReadback{

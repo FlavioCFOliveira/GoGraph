@@ -137,6 +137,14 @@ const fixed64ValueSize = 8
 // reader to allocate an absurd buffer.
 const maxValueLen = 1 << 30
 
+// propertiesCapHintMax caps an eager slice reservation in [ReadProperties]
+// so a hostile count (up to the implausibility ceilings: 1<<30 for the key
+// table, 1<<40 for the record arrays) cannot drive a multi-gigabyte
+// allocation before the per-record reads fail on a truncated body. The reader
+// validates the count against the ceiling first, then grows via append.
+// Mirrors labels.go's labelsCapHintMax and tombstones.go's tombstonesCapHintMax.
+const propertiesCapHintMax = 1 << 20
+
 // WriteProperties serialises every node and edge property attached
 // to g into w in the properties.bin format documented at the top of
 // this file. It returns the number of bytes written and the CRC32C of
@@ -559,7 +567,10 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 		return PropertiesReadback{}, fmt.Errorf("%w: implausible key count %d",
 			ErrPropertiesCorrupted, keyCount)
 	}
-	keys := make([]string, keyCount)
+	// Clamp the eager reservation: a hostile keyCount (up to 1<<30, a ~16 GiB
+	// string-header allocation) is bounded to propertiesCapHintMax; the
+	// per-key read loop grows via append and fails on the first truncated read.
+	keys := make([]string, 0, capHint(keyCount, propertiesCapHintMax))
 	for i := uint64(0); i < keyCount; i++ {
 		var n uint32
 		if err := binary.Read(br, binary.LittleEndian, &n); err != nil {
@@ -576,7 +587,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
 			return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 		}
-		keys[i] = string(buf)
+		keys = append(keys, string(buf))
 	}
 
 	var nodeCount uint64
@@ -589,12 +600,17 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 		return PropertiesReadback{}, fmt.Errorf("%w: implausible node-property count %d",
 			ErrPropertiesCorrupted, nodeCount)
 	}
-	nodes := make([]NodePropertyEntry, nodeCount)
+	// Clamp the eager reservation: a hostile nodeCount (up to 1<<40, a make()
+	// of nodeCount*40 bytes) is bounded to propertiesCapHintMax; the per-record
+	// read loop grows via append and fails on the first truncated read.
+	nodes := make([]NodePropertyEntry, 0, capHint(nodeCount, propertiesCapHintMax))
 	for i := uint64(0); i < nodeCount; i++ {
-		if err := readNodePropRecord(br, &nodes[i], keyCount); err != nil {
+		var rec NodePropertyEntry
+		if err := readNodePropRecord(br, &rec, keyCount); err != nil {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
 			return PropertiesReadback{}, err
 		}
+		nodes = append(nodes, rec)
 	}
 
 	var edgeCount uint64
@@ -607,12 +623,16 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 		return PropertiesReadback{}, fmt.Errorf("%w: implausible edge-property count %d",
 			ErrPropertiesCorrupted, edgeCount)
 	}
-	edges := make([]EdgePropertyEntry, edgeCount)
+	// Clamp the eager reservation: a hostile edgeCount (up to 1<<40) is bounded
+	// to propertiesCapHintMax; the per-record read loop grows via append.
+	edges := make([]EdgePropertyEntry, 0, capHint(edgeCount, propertiesCapHintMax))
 	for i := uint64(0); i < edgeCount; i++ {
-		if err := readEdgePropRecord(br, &edges[i], keyCount); err != nil {
+		var rec EdgePropertyEntry
+		if err := readEdgePropRecord(br, &rec, keyCount); err != nil {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
 			return PropertiesReadback{}, err
 		}
+		edges = append(edges, rec)
 	}
 
 	return PropertiesReadback{

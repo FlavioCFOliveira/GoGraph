@@ -35,18 +35,26 @@ var ErrCSRCorrupted = errors.New("snapshot: csr.bin corrupted")
 // edge counts read from the header. Each vertex and each edge consumes
 // at least 8 bytes of input, so a count above this bound cannot
 // correspond to a file of any plausible size and is treated as
-// corruption. The bound matches the absolute cap the sibling readers
-// apply to their per-8-byte-record counts (1<<40 entries ≈ 8 TiB),
-// keeping the validation style consistent across the package.
+// corruption.
 //
-// It is the *backstop*, not the primary guard. On every real load path
-// the bytes flow through [Open] / [readVerifiedCSR], which pass the
+// It is set to 1<<34 (≈ 1.7e10 records ⇒ a ≈ 128 GiB vertex or edge
+// array): far beyond any legitimate single in-memory CSR — a graph with
+// 17 billion vertices is not one this engine builds — yet low enough that
+// the bare backstop alone cannot let a hostile header drive a multi-TiB
+// make() on the unbounded entry point. Real reference engines
+// (RocksDB/LMDB) never expose an unbounded parse entry point; this tight
+// ceiling is the bare reader's analogue of their recorded-extent bound.
+//
+// It remains the *backstop*, not the primary guard. On every real load
+// path the bytes flow through [Open] / [readVerifiedCSR], which pass the
 // manifest-recorded file size (FileEntry.Size) to [readCSRLimited] as a
-// precise remaining-bytes bound; the count is then rejected the moment
-// it exceeds what that many bytes could hold. The backstop only applies
-// when a caller invokes the bare exported [ReadCSR] over an io.Reader of
-// unknown length, where no manifest size is available.
-const maxCSRCount = 1 << 40
+// precise remaining-bytes bound; the effective per-count limit is the
+// smaller of that precise bound and this backstop, so lowering the
+// backstop only ever tightens the real path, never relaxes it. The
+// backstop alone applies when a caller invokes the bare exported
+// [ReadCSR] over an io.Reader of unknown length, where no manifest size
+// is available.
+const maxCSRCount = 1 << 34
 
 // maxInt is the largest value representable by the platform int. It
 // bounds the overflow-safe weights-size computation in [ReadCSR] before
@@ -54,6 +62,23 @@ const maxCSRCount = 1 << 40
 const maxInt = uint64(^uint(0) >> 1)
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
+
+// capHint returns a safe initial capacity for an append-grown slice whose
+// element count is an untrusted, validated-but-large header value. It is
+// min(count, maxCap): the count has already been rejected against the
+// decoder's implausibility ceiling, and clamping the eager reservation to
+// maxCap means a hostile-but-under-ceiling count cannot drive a multi-gigabyte
+// make() before the per-record reads fail on a truncated body. The append loop
+// then grows the slice to the true count for a legitimate file, costing only a
+// few re-grows beyond maxCap. Shared by the snapshot record decoders
+// (ReadLabels / ReadProperties / ReadMapper* / readEdgeHandleStrTable),
+// mirroring the inline clamp tombstones.go and edgehandles.go already apply.
+func capHint(count uint64, maxCap int) int {
+	if count < uint64(maxCap) {
+		return int(count)
+	}
+	return maxCap
+}
 
 // WriteCSR serialises c to w, returning the number of bytes written
 // and the CRC32C of the serialised payload. The on-disk layout is:
@@ -192,14 +217,19 @@ type CSRReadback struct {
 //
 // Untrusted input: a bare ReadCSR over an io.Reader of unknown length
 // cannot know the true remaining-bytes bound, so the declared vertex,
-// edge, and weight sizes are checked only against an absolute backstop
-// cap (see [maxCSRCount]) plus the overflow-safe weights computation.
-// That stops an unbounded pre-EOF allocation, but the precise bound
-// requires the file size. Callers loading an untrusted snapshot should
-// prefer the [Open] / [LoadSnapshotFull] path, which supplies the
-// manifest-recorded size (FileEntry.Size) so the count is rejected the
-// moment it exceeds what that many bytes could possibly hold; bounding
-// a bare reader otherwise remains the caller's responsibility.
+// edge, and weight sizes are checked only against the absolute backstop
+// cap [maxCSRCount] plus the overflow-safe weights computation. That cap
+// is deliberately tight (1<<34 records ⇒ a ≈ 128 GiB array): it bounds
+// the worst-case eager reservation on this entry point well below the
+// multi-TiB an unbounded ceiling would permit, while still admitting any
+// CSR this engine could legitimately produce. It is, however, only a
+// backstop, not a precise bound — that requires the file size. Callers
+// loading an untrusted snapshot should prefer the [Open] /
+// [LoadSnapshotFull] path, which supplies the manifest-recorded size
+// (FileEntry.Size) so the count is rejected the moment it exceeds what
+// that many bytes could possibly hold; bounding a bare reader more
+// tightly than the backstop otherwise remains the caller's
+// responsibility.
 func ReadCSR(r io.Reader) (CSRReadback, error) {
 	// maxBytes <= 0 selects the absolute backstop cap; the overflow
 	// guard still applies. See readCSRLimited.

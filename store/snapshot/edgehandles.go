@@ -388,7 +388,12 @@ func failEdgeHandles(err error) (EdgeHandlesReadback, error) {
 	return EdgeHandlesReadback{}, fmt.Errorf("%w: %w", ErrEdgeHandlesCorrupted, err)
 }
 
-// readEdgeHandleStrTable reads a length-prefixed string table.
+// readEdgeHandleStrTable reads a length-prefixed string table. A hostile
+// length (up to the 1<<30 ceiling, a ~16 GiB string-header allocation) is
+// bounded to edgeHandlesCapHintMax: the count is validated against the
+// ceiling first, then the per-string read loop grows via append and fails on
+// the first truncated read rather than after a giant make() — mirroring the
+// record-loop clamp [ReadEdgeHandles] already applies.
 func readEdgeHandleStrTable(br *bufio.Reader) ([]string, error) {
 	var n uint64
 	if err := binary.Read(br, binary.LittleEndian, &n); err != nil {
@@ -397,7 +402,7 @@ func readEdgeHandleStrTable(br *bufio.Reader) ([]string, error) {
 	if n > 1<<30 {
 		return nil, fmt.Errorf("implausible string-table length %d", n)
 	}
-	out := make([]string, n)
+	out := make([]string, 0, capHint(n, edgeHandlesCapHintMax))
 	for i := uint64(0); i < n; i++ {
 		var slen uint32
 		if err := binary.Read(br, binary.LittleEndian, &slen); err != nil {
@@ -410,7 +415,7 @@ func readEdgeHandleStrTable(br *bufio.Reader) ([]string, error) {
 		if _, err := io.ReadFull(br, buf); err != nil {
 			return nil, err
 		}
-		out[i] = string(buf)
+		out = append(out, string(buf))
 	}
 	return out, nil
 }
