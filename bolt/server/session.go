@@ -802,10 +802,12 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		if !s.result.Next() {
 			break
 		}
-		rec := s.result.Record()
+		// Read the row positionally (#1499): the engine result is always
+		// materialised, so ValueAt reads the column-oriented backing store
+		// directly and never builds the per-row map that Record() would.
 		row := make([]packstream.Value, len(s.columns))
-		for i, col := range s.columns {
-			row[i] = exprToPackstream(rec[col], s.boltVersion.Major)
+		for i := range s.columns {
+			row[i] = exprToPackstream(s.result.ValueAt(i), s.boltVersion.Major)
 		}
 		if err := emit(row); err != nil {
 			return s.abortStream(err)
@@ -832,10 +834,9 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		// Only peek when we might have hit the n-row limit; pull-all (n≤0) or
 		// early-termination (fetched < n) are always exhausted.
 		if s.result.Next() {
-			rec := s.result.Record()
 			row := make([]packstream.Value, len(s.columns))
-			for i, col := range s.columns {
-				row[i] = exprToPackstream(rec[col], s.boltVersion.Major)
+			for i := range s.columns {
+				row[i] = exprToPackstream(s.result.ValueAt(i), s.boltVersion.Major)
 			}
 			s.peeked = &row
 			hasMore = true

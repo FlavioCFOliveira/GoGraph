@@ -2306,9 +2306,21 @@ type Result struct {
 	// the property that makes the barrier safe for the lazy executor. matOn
 	// distinguishes a materialised Result (serve matRows) from a raw streaming
 	// one (delegate to rs).
-	matRows []exec.Record
-	matIdx  int
-	matOn   bool
+	// matRows holds the materialised rows column-oriented (struct-of-arrays):
+	// instead of one map[string]Value per row (the dominant allocation on the
+	// read path — ~32% of allocs on LDBC IC1, #1499), every row's positional
+	// values are copied into a single flat backing slice, sub-sliced per row.
+	// The public per-row map is built lazily and reused only when Record() is
+	// actually called; a caller that drains positionally (or never reads a row,
+	// like a count drain or the Bolt PULL via RowAt) pays no map allocation at
+	// all. matRowLen is the per-row width (len(cols)); matRows has length
+	// rowCount*matRowLen. recScratch is the single reused map backing Record().
+	matRows    []expr.Value
+	matRowLen  int
+	matRecords int // number of materialised rows
+	recScratch exec.Record
+	matIdx     int
+	matOn      bool
 
 	// bufHandled is set once the secondary-index buffer has been committed (or
 	// rolled back) inside the write query's ApplyAtomically window (F3.4), so
@@ -2396,7 +2408,7 @@ func (r *Result) Next() bool {
 		return false
 	}
 	if r.matOn {
-		if r.matIdx < len(r.matRows) {
+		if r.matIdx < r.matRecords {
 			r.matIdx++
 			return true
 		}
@@ -2417,11 +2429,55 @@ func (r *Result) Next() bool {
 
 // Record returns the current row as a map from column name to value.
 // Must only be called after a successful [Next].
+//
+// For a materialised result the map is built lazily from the column-oriented
+// backing store into a single reused scratch map (#1499): the returned map is
+// owned by the Result and is overwritten on the next Record call, mirroring the
+// streaming [exec.ResultSet.Record] contract. Callers that need to retain a row
+// must copy it. Use [Result.RowAt]/[Result.ValueAt] to read values positionally
+// without materialising the map.
 func (r *Result) Record() exec.Record {
 	if r.matOn {
-		return r.matRows[r.matIdx-1]
+		row := r.rowSlice(r.matIdx - 1)
+		for i, col := range r.cols {
+			if i < len(row) {
+				r.recScratch[col] = row[i]
+			} else {
+				r.recScratch[col] = nil
+			}
+		}
+		return r.recScratch
 	}
 	return r.rs.Record()
+}
+
+// RowAt returns the materialised row at index i as a positional slice of values
+// whose indices correspond to [Result.Columns]. The returned slice aliases the
+// Result's backing store and must not be mutated or retained beyond the
+// Result's lifetime. It is only valid for a materialised result (every read
+// query and every RunInTx result is materialised under the visibility barrier);
+// it panics if i is out of range. This is the allocation-free row accessor: it
+// never builds the per-row map that [Result.Record] returns.
+func (r *Result) RowAt(i int) []expr.Value {
+	return r.rowSlice(i)
+}
+
+// ValueAt returns the value at column index col of the current materialised row.
+// It must only be called after a successful [Next] on a materialised result and
+// is the allocation-free positional accessor used by hot consumers (the Bolt
+// PULL path) that read every column by index and discard the row.
+func (r *Result) ValueAt(col int) expr.Value {
+	row := r.rowSlice(r.matIdx - 1)
+	if col < 0 || col >= len(row) {
+		return nil
+	}
+	return row[col]
+}
+
+// rowSlice returns the backing sub-slice for materialised row i.
+func (r *Result) rowSlice(i int) []expr.Value {
+	start := i * r.matRowLen
+	return r.matRows[start : start+r.matRowLen : start+r.matRowLen]
 }
 
 // materialize drains the underlying ResultSet fully into matRows. Each row is
@@ -2438,28 +2494,40 @@ func (r *Result) Record() exec.Record {
 // encountered during the drain are recorded on the ResultSet and surfaced via
 // Result.Err(); Close still commits/rolls back.
 func (r *Result) materialize() {
+	r.matRowLen = len(r.cols)
+	r.recScratch = make(exec.Record, r.matRowLen)
 	var byteCount int64
 	for r.rs.Next() {
-		rec := r.rs.TakeRecord()
-		r.matRows = append(r.matRows, rec)
-		if r.maxRows > 0 && int64(len(r.matRows)) > r.maxRows {
+		// Read the row positionally — no per-row map allocation. Each value is
+		// copied into the flat backing slice because the operator tree reuses the
+		// row's backing array on the next Next (Project.outBuf etc.). append grows
+		// the single backing slice amortised, turning N per-row map allocations
+		// into O(log N) slice-grow allocations.
+		row := r.rs.Row()
+		for i := 0; i < r.matRowLen; i++ {
+			if i < len(row) {
+				r.matRows = append(r.matRows, row[i])
+			} else {
+				r.matRows = append(r.matRows, nil)
+			}
+		}
+		r.matRecords++
+		if r.maxRows > 0 && int64(r.matRecords) > r.maxRows {
 			r.rowsErr = ErrResultRowsExceeded
 			break
 		}
 		// Aggregate-byte budget (#1328): the row cap bounds the *number* of rows
 		// but a handful of rows carrying very large values (a node with
 		// megabyte-scale string properties) can still dwarf a high row cap. A
-		// coarse, allocation-free size estimate (estimateRecordSize: O(columns)
-		// per row, no serialisation) accumulates here alongside the row check and
+		// coarse, allocation-free size estimate (estimateRowSize: O(columns) per
+		// row, no serialisation) accumulates here alongside the row check and
 		// trips ErrResultBytesExceeded when the budget is exceeded. byteCount can
 		// saturate for a pathological result, which only makes the budget trip
 		// sooner — never miss — so the additions are deliberately unguarded against
-		// overflow. The only per-row cost is one map lookup per column to reach the
-		// value; benchstat shows that is allocation-free and within noise of the
-		// un-accounted drain on a representative scalar-projection result (see
-		// BenchmarkResultMaterialize* in result_bytes_cap_bench_test.go).
+		// overflow. With the column-oriented store (#1499) the estimate reads the
+		// positional row slice directly — no map lookup per column.
 		if r.maxBytes > 0 {
-			byteCount += estimateRecordSize(r.cols, rec)
+			byteCount += estimateRowSize(row)
 			if byteCount > r.maxBytes {
 				r.rowsErr = ErrResultBytesExceeded
 				break
@@ -2496,6 +2564,20 @@ func estimateRecordSize(cols []string, rec exec.Record) int64 {
 	var total int64
 	for _, k := range cols {
 		total += estimateValueSize(rec[k])
+	}
+	return total
+}
+
+// estimateRowSize is the column-oriented counterpart of [estimateRecordSize]: it
+// sums [estimateValueSize] over a positional row slice (the materialised row
+// layout introduced in #1499) rather than over a map. It is the per-row term of
+// the aggregate-byte budget on the column-oriented drain path; reading the slice
+// directly drops the per-column map lookup the record-based estimate paid, and
+// like its sibling it never allocates or serialises.
+func estimateRowSize(row []expr.Value) int64 {
+	var total int64
+	for _, v := range row {
+		total += estimateValueSize(v)
 	}
 	return total
 }

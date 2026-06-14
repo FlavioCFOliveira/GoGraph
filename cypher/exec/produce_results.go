@@ -85,6 +85,7 @@ type ResultSet struct {
 	cols    []string
 	ctx     context.Context //nolint:containedctx // stored for streaming lifecycle
 	current Record
+	curRow  Row // positional view of the current row, set by Next alongside current
 	err     error
 	closed  bool
 }
@@ -131,26 +132,49 @@ func (rs *ResultSet) Next() bool {
 		return false
 	}
 
-	// Update the pre-allocated Record in place. The godoc contract on Record
-	// states that the map is owned by the ResultSet and callers must copy any
-	// value they need to retain beyond the next Next call, so reuse is safe.
+	// Retain only the positional view of the row. The map projection into
+	// rs.current is built lazily by Record/TakeRow, so a caller that consumes
+	// rows positionally (or never reads them at all — e.g. a count(*) drain, or
+	// the materialisation path) pays no per-row map-rehash cost. The operator
+	// owns row's backing array and reuses it on the next Next, so callers that
+	// retain it across Next must copy (the godoc contract on Row says so).
+	rs.curRow = row
+	return true
+}
+
+// Row returns the current row as a positional slice of values whose indices
+// correspond to [ResultSet.Columns]. The slice is owned by the operator tree
+// and is reused on the next [ResultSet.Next] call; callers that retain values
+// beyond the next Next must copy them. This is the allocation-free accessor:
+// unlike [ResultSet.Record] it never builds a map. Must only be called after a
+// successful Next.
+func (rs *ResultSet) Row() Row {
+	return rs.curRow
+}
+
+// Record returns the current row as a map. Must only be called after a
+// successful Next.
+//
+// The returned map is owned by the ResultSet and reused by the next Next call;
+// callers that need to retain a row beyond the next Next must copy it (or use
+// [ResultSet.TakeRecord]). The map is built lazily on the first Record call for
+// the current row, so a caller that consumes rows positionally via
+// [ResultSet.Row] never pays for it.
+func (rs *ResultSet) Record() Record {
+	rs.fillCurrent()
+	return rs.current
+}
+
+// fillCurrent projects the positional current row into the reused rs.current
+// map. Splitting it out lets Record and TakeRecord share the projection.
+func (rs *ResultSet) fillCurrent() {
 	for i, col := range rs.cols {
-		if i < len(row) {
-			rs.current[col] = row[i]
+		if i < len(rs.curRow) {
+			rs.current[col] = rs.curRow[i]
 		} else {
 			rs.current[col] = nil
 		}
 	}
-	return true
-}
-
-// Record returns the current row. Must only be called after a successful Next.
-//
-// The returned map is owned by the ResultSet and reused by the next Next call;
-// callers that need to retain a row beyond the next Next must copy it (or use
-// [ResultSet.TakeRecord]).
-func (rs *ResultSet) Record() Record {
-	return rs.current
 }
 
 // TakeRecord returns the current row and transfers ownership of its backing
@@ -161,6 +185,7 @@ func (rs *ResultSet) Record() Record {
 // that re-hashing every column into a new map would cost. Must only be called
 // after a successful Next.
 func (rs *ResultSet) TakeRecord() Record {
+	rs.fillCurrent()
 	rec := rs.current
 	rs.current = make(Record, len(rs.cols))
 	return rec
