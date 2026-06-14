@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -198,6 +199,28 @@ func (s *Session) setDefaultTxTimeout(d time.Duration) {
 	if d > 0 {
 		s.defaultTxTimeout = d
 	}
+}
+
+// maxClientTimeoutMillis is the largest client-supplied timeout, in
+// milliseconds, that converts to a positive [time.Duration] without overflowing
+// the underlying int64 nanosecond count. time.Duration is an int64 of
+// nanoseconds, so ms * int64(time.Millisecond) overflows once ms exceeds
+// math.MaxInt64 / int64(time.Millisecond) (≈9.22e12 ms ≈ 2562047h). A hostile
+// client can otherwise pick a value that wraps the product to zero (e.g.
+// 1<<62 ms) or negative (e.g. math.MaxInt64 ms), defeating the timeout guard.
+const maxClientTimeoutMillis = int64(math.MaxInt64) / int64(time.Millisecond)
+
+// clientMillisToDuration converts a client-supplied timeout in milliseconds to
+// a [time.Duration], overflow-safely. It returns (d, true) only when ms is
+// strictly positive AND small enough that the nanosecond product does not
+// overflow int64. A non-positive or overflowing ms returns (0, false), so the
+// caller treats it as "unset" and falls back to the server default — never to a
+// wrapped, non-positive duration (CWE-190). See #1484.
+func clientMillisToDuration(ms int64) (time.Duration, bool) {
+	if ms <= 0 || ms > maxClientTimeoutMillis {
+		return 0, false
+	}
+	return time.Duration(ms) * time.Millisecond, true
 }
 
 // setBoltVersion records the Bolt protocol version agreed during handshake.
@@ -641,8 +664,13 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	// server-side cap (maxStmtTimeout). When the client supplies no timeout
 	// but maxStmtTimeout is set, the cap is applied unconditionally.
 	if v, ok := m.Extra["timeout"]; ok {
-		if ms, ok := v.(int64); ok && ms > 0 {
-			s.stmtTimeout = time.Duration(ms) * time.Millisecond
+		if ms, ok := v.(int64); ok {
+			// Convert overflow-safely (#1484); a non-positive or overflowing
+			// per-statement timeout is ignored rather than wrapping to a
+			// non-positive duration.
+			if d, ok := clientMillisToDuration(ms); ok {
+				s.stmtTimeout = d
+			}
 		}
 	}
 	effective := s.stmtTimeout
@@ -903,8 +931,15 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// operator permits.
 	effective := s.defaultTxTimeout
 	if v, ok := m.Extra["tx_timeout"]; ok {
-		if ms, ok := v.(int64); ok && ms > 0 {
-			effective = time.Duration(ms) * time.Millisecond
+		if ms, ok := v.(int64); ok {
+			// Convert overflow-safely (#1484). A non-positive or overflowing
+			// tx_timeout (e.g. 1<<62 → product 0, or math.MaxInt64 → negative)
+			// is treated as "unset" and leaves the server default in place,
+			// rather than wrapping to a non-positive duration that would leave
+			// txDeadline zero and disarm the writer-lock reaper.
+			if d, ok := clientMillisToDuration(ms); ok {
+				effective = d
+			}
 		}
 	}
 	if s.maxStmtTimeout > 0 && (effective <= 0 || effective > s.maxStmtTimeout) {
