@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -43,6 +44,28 @@ type soakSnapshot struct {
 	goroutines int
 }
 
+// soakEnvInt returns the positive integer value of environment variable key,
+// or def when the variable is unset, empty, non-numeric, or non-positive.
+func soakEnvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// soakEnvDuration returns the positive duration value of environment variable
+// key (e.g. "30m", "4h"), or def when unset, empty, unparseable, or non-positive.
+func soakEnvDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
 // TestBoltSoak_1024_4h runs a 1024-connection, 4-hour soak test.
 // The function only compiles when the 'soakfull' build tag is set
 // (see the //go:build soakfull line at the top of this file); no
@@ -50,11 +73,15 @@ type soakSnapshot struct {
 // The test emits heap/goroutine snapshots every 30 s.
 // CI uses TestBoltSoak_60s instead.
 func TestBoltSoak_1024_4h(t *testing.T) {
-	const (
-		nConns           = 1024
-		duration         = 4 * time.Hour
-		snapshotInterval = 30 * time.Second
-	)
+	// nConns and duration default to the canonical 1024-connection, 4-hour
+	// gate but are overridable via SOAK_CONNS / SOAK_DURATION so the same
+	// workload can be tuned to the host's RAM/CPU budget (for example, to fit
+	// a GitHub-hosted runner) and validated with a shorter run. The defaults
+	// are unchanged, so an unconfigured release-gate run is identical to before.
+	nConns := soakEnvInt("SOAK_CONNS", 1024)
+	duration := soakEnvDuration("SOAK_DURATION", 4*time.Hour)
+	const snapshotInterval = 30 * time.Second
+	t.Logf("soak_1024_4h: config nConns=%d duration=%v snapshotInterval=%v", nConns, duration, snapshotInterval)
 
 	// ── Build graph and engine ────────────────────────────────────────────────
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
