@@ -174,6 +174,51 @@ func TestTransition(t *testing.T) {
 			wantState: StateFailed,
 			wantErr:   true,
 		},
+		// ── StateAuthentication (Bolt >= 5.1 pre-LOGON) (task #1470) ──────────
+		{
+			name:      "AUTHENTICATION+Logon+ok→READY",
+			current:   StateAuthentication,
+			msg:       &proto.Logon{},
+			success:   true,
+			wantState: StateReady,
+		},
+		{
+			name:      "AUTHENTICATION+Logon+fail→FAILED",
+			current:   StateAuthentication,
+			msg:       &proto.Logon{},
+			success:   false,
+			wantState: StateFailed,
+		},
+		{
+			name:      "AUTHENTICATION+Logoff+ok→AUTHENTICATION",
+			current:   StateAuthentication,
+			msg:       &proto.Logoff{},
+			success:   true,
+			wantState: StateAuthentication,
+		},
+		{
+			name:      "AUTHENTICATION+Run→invalid",
+			current:   StateAuthentication,
+			msg:       &proto.Run{},
+			success:   true,
+			wantState: StateFailed,
+			wantErr:   true,
+		},
+		{
+			name:      "AUTHENTICATION+Begin→invalid",
+			current:   StateAuthentication,
+			msg:       &proto.Begin{},
+			success:   true,
+			wantState: StateFailed,
+			wantErr:   true,
+		},
+		{
+			name:      "AUTHENTICATION+Goodbye→DEFUNCT",
+			current:   StateAuthentication,
+			msg:       &proto.Goodbye{},
+			success:   true,
+			wantState: StateDefunct,
+		},
 	}
 
 	for _, tc := range tests {
@@ -221,6 +266,46 @@ func TestStreamingTransition(t *testing.T) {
 	}
 }
 
+// TestHelloTransition covers the version-aware HELLO transition added for the
+// Bolt >= 5.1 deferred-authentication flow (task #1470): a successful HELLO
+// routes to StateAuthentication on >= 5.1 and to StateReady on <= 5.0 (including
+// the zero-value version used by direct white-box tests); a failed or
+// out-of-state HELLO delegates to Transition.
+func TestHelloTransition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		current   State
+		ver       proto.Version
+		success   bool
+		wantState State
+		wantErr   bool
+	}{
+		{"NEGOTIATION+5.1+ok→AUTHENTICATION", StateNegotiation, proto.Version{Major: 5, Minor: 1}, true, StateAuthentication, false},
+		{"NEGOTIATION+5.6+ok→AUTHENTICATION", StateNegotiation, proto.Version{Major: 5, Minor: 6}, true, StateAuthentication, false},
+		{"NEGOTIATION+5.0+ok→READY", StateNegotiation, proto.Version{Major: 5, Minor: 0}, true, StateReady, false},
+		{"NEGOTIATION+4.4+ok→READY", StateNegotiation, proto.Version{Major: 4, Minor: 4}, true, StateReady, false},
+		{"NEGOTIATION+zero+ok→READY", StateNegotiation, proto.Version{}, true, StateReady, false},
+		{"NEGOTIATION+5.1+fail→FAILED", StateNegotiation, proto.Version{Major: 5, Minor: 1}, false, StateFailed, false},
+		// Out of state: delegates to Transition, which reports an illegal transition.
+		{"READY+5.1+ok→invalid", StateReady, proto.Version{Major: 5, Minor: 1}, true, StateFailed, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := HelloTransition(tc.current, tc.ver, tc.success)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HelloTransition(%v, %v, %v): err=%v, wantErr=%v", tc.current, tc.ver, tc.success, err, tc.wantErr)
+			}
+			if got != tc.wantState {
+				t.Fatalf("HelloTransition(%v, %v, %v): got %v, want %v", tc.current, tc.ver, tc.success, got, tc.wantState)
+			}
+		})
+	}
+}
+
 func TestStateString(t *testing.T) {
 	t.Parallel()
 	states := []struct {
@@ -229,6 +314,7 @@ func TestStateString(t *testing.T) {
 	}{
 		{StateConnected, "CONNECTED"},
 		{StateNegotiation, "NEGOTIATION"},
+		{StateAuthentication, "AUTHENTICATION"},
 		{StateReady, "READY"},
 		{StateStreaming, "STREAMING"},
 		{StateTxReady, "TX_READY"},

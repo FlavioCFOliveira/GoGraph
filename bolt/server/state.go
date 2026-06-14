@@ -26,6 +26,17 @@ const (
 	// the client's HELLO message.
 	StateNegotiation
 
+	// StateAuthentication is the pre-LOGON state reached after a successful
+	// credential-less HELLO on Bolt >= 5.1. Bolt 5.1 split authentication out of
+	// HELLO into a dedicated LOGON message, so a 5.1+ client sends a HELLO
+	// carrying only driver metadata and then a LOGON carrying the credentials.
+	// In this state the connection is not yet authenticated; only LOGON, LOGOFF,
+	// RESET, and GOODBYE are legal, and a successful LOGON transitions to
+	// StateReady. On Bolt <= 5.0 (and the white-box tests, which run at the
+	// zero-value version) HELLO authenticates inline and goes straight to
+	// StateReady, so this state is never entered. (task #1470)
+	StateAuthentication
+
 	// StateReady is the idle state after a successful HELLO or after a result
 	// set has been fully consumed, committed, or rolled back.
 	StateReady
@@ -58,6 +69,8 @@ func (s State) String() string {
 		return "CONNECTED"
 	case StateNegotiation:
 		return "NEGOTIATION"
+	case StateAuthentication:
+		return "AUTHENTICATION"
 	case StateReady:
 		return "READY"
 	case StateStreaming:
@@ -106,13 +119,16 @@ func Transition(current State, msg any, success bool) (State, error) {
 		if !success {
 			return StateFailed, nil
 		}
-		// RESET issued before the connection has left the pre-HELLO phase must
-		// not advance to READY: it returns to NEGOTIATION so a HELLO is still
-		// required. The authoritative authentication gate lives in the session
-		// layer ([Session.handleReset] consults [Session.authenticated]); this
-		// keeps the transport state machine itself from minting READY out of the
+		// RESET issued before the connection has left the pre-authentication phase
+		// must not advance to READY: it returns to NEGOTIATION so a HELLO is still
+		// required. The pre-authentication phase is the pre-HELLO states
+		// (CONNECTED/NEGOTIATION) and, on Bolt >= 5.1, the pre-LOGON
+		// StateAuthentication reached after a credential-less HELLO (task #1470).
+		// The authoritative authentication gate lives in the session layer
+		// ([Session.handleReset] consults [Session.authenticated]); this keeps the
+		// transport state machine itself from minting READY out of the
 		// pre-authentication phase as a second line of defence. (task #1345)
-		if current == StateConnected || current == StateNegotiation {
+		if current == StateConnected || current == StateNegotiation || current == StateAuthentication {
 			return StateNegotiation, nil
 		}
 		return StateReady, nil
@@ -130,7 +146,34 @@ func Transition(current State, msg any, success bool) (State, error) {
 			if !success {
 				return StateFailed, nil
 			}
+			// HELLO on Bolt <= 5.0 authenticates inline and goes straight to
+			// READY. On Bolt >= 5.1 the version-aware [HelloTransition] routes a
+			// successful credential-less HELLO into StateAuthentication instead,
+			// and the session does not call this path for that case. This branch
+			// therefore preserves the <= 5.0 behaviour. (task #1470)
 			return StateReady, nil
+		default:
+			return StateFailed, ErrInvalidTransition
+		}
+
+	case StateAuthentication:
+		// Pre-LOGON state on Bolt >= 5.1: only LOGON, LOGOFF, RESET, and GOODBYE
+		// are legal (RESET and GOODBYE are handled at the top of this function).
+		// A successful LOGON authenticates and advances to READY; LOGOFF in this
+		// state is a no-op de-authorisation that leaves the connection awaiting a
+		// fresh LOGON. RUN/BEGIN/ROUTE/PULL are rejected as illegal transitions,
+		// reinforcing the session-layer [Session.authenticated] gates. (task #1470)
+		switch msg.(type) {
+		case *proto.Logon:
+			if !success {
+				return StateFailed, nil
+			}
+			return StateReady, nil
+		case *proto.Logoff:
+			if !success {
+				return StateFailed, nil
+			}
+			return StateAuthentication, nil
 		default:
 			return StateFailed, ErrInvalidTransition
 		}
@@ -242,6 +285,46 @@ func Transition(current State, msg any, success bool) (State, error) {
 	default:
 		return StateFailed, ErrInvalidTransition
 	}
+}
+
+// boltAuthDeferredVersion is the lowest Bolt version that defers authentication
+// from HELLO to a dedicated LOGON message. Bolt 5.1 introduced the split
+// HELLO/LOGON authentication flow; every 5.1+ driver (including neo4j-go-driver
+// v5) sends a credential-less HELLO followed by a credential-bearing LOGON.
+var boltAuthDeferredVersion = proto.Version{Major: 5, Minor: 1}
+
+// authDeferredToLogon reports whether the negotiated Bolt version v defers
+// authentication from HELLO to LOGON (Bolt >= 5.1). The zero-value Version
+// (Major 0, Minor 0) used by the white-box session tests is below the
+// threshold, so those tests keep the inline-HELLO authentication path. (task #1470)
+func authDeferredToLogon(v proto.Version) bool {
+	if v.Major != boltAuthDeferredVersion.Major {
+		return v.Major > boltAuthDeferredVersion.Major
+	}
+	return v.Minor >= boltAuthDeferredVersion.Minor
+}
+
+// HelloTransition computes the next state for a successful HELLO given the
+// negotiated Bolt version. It is the version-aware variant of the
+// NEGOTIATION→HELLO branch of [Transition]:
+//
+//   - Bolt <= 5.0 (and the zero-value version used by direct white-box tests):
+//     HELLO authenticates inline and advances straight to StateReady.
+//   - Bolt >= 5.1: HELLO is credential-less by spec, so a successful HELLO
+//     advances to the pre-LOGON StateAuthentication, from which a successful
+//     LOGON reaches StateReady.
+//
+// It is only valid in StateNegotiation; any other current state, or a failed
+// HELLO, is delegated to [Transition], which returns StateFailed (with
+// ErrInvalidTransition for an illegal current state). (task #1470)
+func HelloTransition(current State, ver proto.Version, success bool) (State, error) {
+	if current != StateNegotiation || !success {
+		return Transition(current, &proto.Hello{}, success)
+	}
+	if authDeferredToLogon(ver) {
+		return StateAuthentication, nil
+	}
+	return StateReady, nil
 }
 
 // StreamingTransition is a variant of Transition for PULL in STREAMING or

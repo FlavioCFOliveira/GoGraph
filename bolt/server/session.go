@@ -412,6 +412,26 @@ func (s *Session) handleHello(m *proto.Hello) ([]any, error) {
 		return s.failTransition(&proto.Hello{})
 	}
 
+	// Bolt >= 5.1 split authentication out of HELLO into a dedicated LOGON
+	// message: a 5.1+ driver sends a credential-less HELLO carrying only driver
+	// metadata, then a LOGON carrying scheme/principal/credentials. Authenticating
+	// the (empty) HELLO token against a credentialed AuthHandler would reject the
+	// correctly-configured client before its LOGON is ever read. So on >= 5.1 the
+	// server does NOT authenticate at HELLO and does NOT set authenticated;
+	// HELLO(success) advances to the pre-LOGON StateAuthentication, from which only
+	// LOGON/LOGOFF/RESET/GOODBYE are legal and a successful LOGON reaches READY.
+	// (task #1470)
+	if authDeferredToLogon(s.boltVersion) {
+		next, transErr := HelloTransition(s.state, s.boltVersion, true)
+		if transErr != nil {
+			return s.failTransition(m)
+		}
+		s.state = next
+		return []any{&proto.Success{Metadata: s.helloSuccessMetadata()}}, nil
+	}
+
+	// Bolt <= 5.0 (and the white-box tests, which run at the zero-value version):
+	// HELLO carries the credentials and authenticates inline, advancing to READY.
 	scheme, _ := extractString(m.Extra, "scheme")
 	principal, _ := extractString(m.Extra, "principal")
 	credentials, _ := extractString(m.Extra, "credentials")
@@ -434,26 +454,41 @@ func (s *Session) handleHello(m *proto.Hello) ([]any, error) {
 	s.identity = id
 	s.authenticated = true
 
-	next, transErr := Transition(s.state, m, true)
+	next, transErr := HelloTransition(s.state, s.boltVersion, true)
 	if transErr != nil {
 		return s.failTransition(m)
 	}
 	s.state = next
 
-	return []any{&proto.Success{
-		Metadata: map[string]packstream.Value{
-			"server":        serverAgent,
-			"connection_id": s.id,
-			"hints":         map[string]packstream.Value{},
-			"bolt_agent":    map[string]packstream.Value{"product": serverAgent},
-		},
-	}}, nil
+	return []any{&proto.Success{Metadata: s.helloSuccessMetadata()}}, nil
+}
+
+// helloSuccessMetadata builds the SUCCESS metadata returned for a successful
+// HELLO, identical for the inline-auth (<= 5.0) and deferred-auth (>= 5.1) paths.
+func (s *Session) helloSuccessMetadata() map[string]packstream.Value {
+	return map[string]packstream.Value{
+		"server":        serverAgent,
+		"connection_id": s.id,
+		"hints":         map[string]packstream.Value{},
+		"bolt_agent":    map[string]packstream.Value{"product": serverAgent},
+	}
 }
 
 func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
-	if s.state != StateReady && s.state != StateTxReady {
+	// LOGON is legal as the first authentication from the pre-LOGON
+	// StateAuthentication (Bolt >= 5.1, after a credential-less HELLO) and as a
+	// re-authentication from READY/TX_READY. (tasks #1345, #1470)
+	if s.state != StateAuthentication && s.state != StateReady && s.state != StateTxReady {
 		return s.failTransition(m)
 	}
+
+	// firstAuth is true when this LOGON is the connection's first authentication
+	// (Bolt >= 5.1 deferred-auth flow). A FIRST authentication that fails must
+	// terminate the connection per the Bolt 5.1 spec: respond FAILURE then close,
+	// exactly like a failed <= 5.0 HELLO — the client never reached an
+	// authenticated state, so there is nothing to recover. A RE-authentication
+	// failure (from READY/TX_READY) stays recoverable via RESET, unchanged. (task #1470)
+	firstAuth := s.state == StateAuthentication
 
 	scheme, _ := extractString(m.Auth, "scheme")
 	principal, _ := extractString(m.Auth, "principal")
@@ -461,6 +496,16 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 
 	id, err := s.auth.Authenticate(scheme, principal, credentials)
 	if err != nil {
+		if firstAuth {
+			// First authentication failed: terminate the connection (DEFUNCT). No
+			// transaction or cursor can be open in StateAuthentication, so a raw
+			// state set is correct (no enterFailed reclaim is needed). The FAILURE
+			// is written by the serve loop before it observes DEFUNCT and closes,
+			// so the client still learns why it was rejected. (task #1470)
+			s.state = StateDefunct
+			s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
+			return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
+		}
 		// LOGON re-authentication is legal in TX_READY, so a failed auth here can
 		// leave an explicit transaction open; enterFailed reclaims it (#1312).
 		s.enterFailed()
@@ -481,7 +526,11 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 
 func (s *Session) handleLogoff() ([]any, error) {
 	m := &proto.Logoff{}
-	if s.state != StateReady && s.state != StateTxReady {
+	// LOGOFF is legal from READY/TX_READY (de-authorising an authenticated
+	// connection) and from the pre-LOGON StateAuthentication (Bolt >= 5.1), where
+	// it is a no-op de-authorisation that leaves the connection awaiting a fresh
+	// LOGON. (tasks #1345, #1470)
+	if s.state != StateAuthentication && s.state != StateReady && s.state != StateTxReady {
 		return s.failTransition(m)
 	}
 	next, err := Transition(s.state, m, true)
