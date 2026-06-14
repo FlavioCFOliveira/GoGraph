@@ -1,0 +1,206 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                │                                                    sec/op                                                    │
+AllNodesScan-10                                                                                                    4.331µ ± 1%
+ProjectOp-10                                                                                                       12.83µ ± 1%
+ResultSet-10                                                                                                       23.23µ ± 1%
+geomean                                                                                                            10.89µ
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                │                                                     B/op                                                     │
+AllNodesScan-10                                                                                                   10.06Ki ± 0%
+ProjectOp-10                                                                                                      21.95Ki ± 0%
+ResultSet-10                                                                                                      34.10Ki ± 0%
+geomean                                                                                                           19.60Ki
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                │                                                  allocs/op                                                   │
+AllNodesScan-10                                                                                                     258.0 ± 0%
+ProjectOp-10                                                                                                        762.0 ± 0%
+ResultSet-10                                                                                                       1.266k ± 0%
+geomean                                                                                                             629.0
+
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+        │                                                    sec/op                                                    │
+IC1-10                                                                                                     289.0µ ± 2%
+IC2-10                                                                                                     96.43µ ± 3%
+IC5-10                                                                                                     5.618µ ± 1%
+IC9-10                                                                                                     138.7µ ± 0%
+IC10-10                                                                                                    196.7µ ± 3%
+IC13-10                                                                                                    6.513µ ± 1%
+IC3-10                                                                                                     96.53µ ± 2%
+IC4-10                                                                                                     136.3µ ± 2%
+IC6-10                                                                                                     5.918µ ± 1%
+IC7-10                                                                                                     99.40µ ± 2%
+IC8-10                                                                                                     5.622µ ± 1%
+IC11-10                                                                                                    414.8µ ± 2%
+IC12-10                                                                                                    6.378µ ± 1%
+IC14-10                                                                                                    101.1µ ± 1%
+geomean                                                                                                    47.78µ
+
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+        │                                                     B/op                                                     │
+IC1-10                                                                                                    510.0Ki ± 0%
+IC2-10                                                                                                    167.8Ki ± 0%
+IC5-10                                                                                                    2.234Ki ± 0%
+IC9-10                                                                                                    276.5Ki ± 0%
+IC10-10                                                                                                   418.8Ki ± 0%
+IC13-10                                                                                                   2.977Ki ± 0%
+IC3-10                                                                                                    167.8Ki ± 0%
+IC4-10                                                                                                    276.5Ki ± 0%
+IC6-10                                                                                                    2.398Ki ± 0%
+IC7-10                                                                                                    167.3Ki ± 0%
+IC8-10                                                                                                    2.235Ki ± 0%
+IC11-10                                                                                                   844.9Ki ± 0%
+IC12-10                                                                                                   3.010Ki ± 0%
+IC14-10                                                                                                   167.3Ki ± 0%
+geomean                                                                                                   52.37Ki
+
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+        │                                                  allocs/op                                                   │
+IC1-10                                                                                                     7.795k ± 0%
+IC2-10                                                                                                     2.640k ± 0%
+IC5-10                                                                                                      41.00 ± 0%
+IC9-10                                                                                                     2.968k ± 0%
+IC10-10                                                                                                    4.648k ± 0%
+IC13-10                                                                                                     51.00 ± 0%
+IC3-10                                                                                                     2.640k ± 0%
+IC4-10                                                                                                     2.968k ± 0%
+IC6-10                                                                                                      42.00 ± 0%
+IC7-10                                                                                                     2.627k ± 0%
+IC8-10                                                                                                      41.00 ± 0%
+IC11-10                                                                                                    8.788k ± 0%
+IC12-10                                                                                                     51.00 ± 0%
+IC14-10                                                                                                    2.627k ± 0%
+geomean                                                                                                     767.9
+
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                            │                                                    sec/op                                                    │
+BFSDirectionOpt_PowerLaw-10                                                                                                    30.07m ± 1%
+Dijkstra_Large-10                                                                                                              8.348m ± 1%
+Dijkstra_PostWarmup-10                                                                                                         8.207m ± 1%
+geomean                                                                                                                        12.72m
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                            │                                                     B/op                                                     │
+BFSDirectionOpt_PowerLaw-10                                                                                                   0.000 ± 0%
+Dijkstra_Large-10                                                                                                           1.088Mi ± 0%
+Dijkstra_PostWarmup-10                                                                                                        0.000 ± 0%
+geomean                                                                                                                                  ¹
+¹ summaries must be >0 to compute geomean
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                            │                                                  allocs/op                                                   │
+BFSDirectionOpt_PowerLaw-10                                                                                                   0.000 ± 0%
+Dijkstra_Large-10                                                                                                             4.000 ± 0%
+Dijkstra_PostWarmup-10                                                                                                        0.000 ± 0%
+geomean                                                                                                                                  ¹
+¹ summaries must be >0 to compute geomean
+
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                       │                                                    sec/op                                                    │
+Brandes_RandomGraph-10                                                                                                    8.038m ± 1%
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                       │                                                     B/op                                                     │
+Brandes_RandomGraph-10                                                                                                   94.34Ki ± 0%
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0006__baseline-perfcycle-2026-06-14__f6f8c7a.txt │
+                       │                                                  allocs/op                                                   │
+Brandes_RandomGraph-10                                                                                                    1.921k ± 0%
+
+pkg: gograph/bench/cypher_alloc
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                │                                                      sec/op                                                      │
+AllNodesScan-10                                                                                                        4.401µ ± 1%
+ProjectOp-10                                                                                                           13.48µ ± 1%
+ResultSet-10                                                                                                           23.85µ ± 0%
+geomean                                                                                                                11.23µ
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                │                                                       B/op                                                       │
+AllNodesScan-10                                                                                                       10.06Ki ± 0%
+ProjectOp-10                                                                                                          21.95Ki ± 0%
+ResultSet-10                                                                                                          34.10Ki ± 0%
+geomean                                                                                                               19.60Ki
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                │                                                    allocs/op                                                     │
+AllNodesScan-10                                                                                                         258.0 ± 0%
+ProjectOp-10                                                                                                            762.0 ± 0%
+ResultSet-10                                                                                                           1.266k ± 0%
+geomean                                                                                                                 629.0
+
+pkg: gograph/bench/cypher_ldbc
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+        │                                                      sec/op                                                      │
+IC1-10                                                                                                         264.2µ ± 3%
+IC2-10                                                                                                         84.84µ ± 1%
+IC5-10                                                                                                         1.335µ ± 1%
+IC9-10                                                                                                         131.3µ ± 0%
+IC10-10                                                                                                        181.9µ ± 1%
+IC13-10                                                                                                        2.104µ ± 1%
+geomean                                                                                                        33.85µ
+
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+        │                                                       B/op                                                       │
+IC1-10                                                                                                        509.8Ki ± 0%
+IC2-10                                                                                                        167.5Ki ± 0%
+IC5-10                                                                                                        1.774Ki ± 0%
+IC9-10                                                                                                        260.6Ki ± 0%
+IC10-10                                                                                                       402.9Ki ± 0%
+IC13-10                                                                                                       2.555Ki ± 0%
+geomean                                                                                                       58.64Ki
+
+        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+        │                                                    allocs/op                                                     │
+IC1-10                                                                                                         7.793k ± 0%
+IC2-10                                                                                                         2.638k ± 0%
+IC5-10                                                                                                          31.00 ± 0%
+IC9-10                                                                                                         2.632k ± 0%
+IC10-10                                                                                                        4.312k ± 0%
+IC13-10                                                                                                         45.00 ± 0%
+geomean                                                                                                         829.4
+
+pkg: gograph/search
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                            │                                                      sec/op                                                      │
+BFSDirectionOpt_PowerLaw-10                                                                                                        29.56m ± 2%
+Dijkstra_Large-10                                                                                                                  8.709m ± 3%
+Dijkstra_PostWarmup-10                                                                                                             8.262m ± 2%
+geomean                                                                                                                            12.86m
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                            │                                                       B/op                                                       │
+BFSDirectionOpt_PowerLaw-10                                                                                                       0.000 ±  ?
+Dijkstra_Large-10                                                                                                               1.089Mi ± 5%
+Dijkstra_PostWarmup-10                                                                                                            0.000 ± 0%
+geomean                                                                                                                                      ¹
+¹ summaries must be >0 to compute geomean
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                            │                                                    allocs/op                                                     │
+BFSDirectionOpt_PowerLaw-10                                                                                                       0.000 ±  ?
+Dijkstra_Large-10                                                                                                                 4.000 ± 0%
+Dijkstra_PostWarmup-10                                                                                                            0.000 ± 0%
+geomean                                                                                                                                      ¹
+¹ summaries must be >0 to compute geomean
+
+pkg: gograph/search/centrality
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                       │                                                      sec/op                                                      │
+Brandes_RandomGraph-10                                                                                                        8.031m ± 2%
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                       │                                                       B/op                                                       │
+Brandes_RandomGraph-10                                                                                                       94.34Ki ± 0%
+
+                       │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0005__opt4-materialize-takerecord__7f6c1b5-dirty.txt │
+                       │                                                    allocs/op                                                     │
+Brandes_RandomGraph-10                                                                                                        1.921k ± 0%
