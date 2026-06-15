@@ -4,6 +4,17 @@ Status: design spike — **no production code changed** by this document.
 rmp task: #1504 (sprint S-PA3 #190). Downstream increments: #1505 (range index seeks), #1506 (hash join).
 Date: 2026-06-15.
 
+> **Implementation note (v0.3.1).** The two downstream increments this spike
+> scoped have **shipped**: a physical **hash join** for disconnected equi-join
+> patterns (`exec.HashJoin`, #1506) and a **range-predicate B+tree index seek**
+> (`NodeByIndexRangeScan`, #1505), both as plan-build physical substitutions
+> proven against differential tests to return an identical result multiset. The
+> logical `cypher/ir/rewrite` Driver remains **unwired** (the guard test stays
+> green). Statements below such as "no hash join exists" describe the
+> pre-implementation premise this spike was written against; see
+> [docs/benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows 0013
+> (#1506) and 0014 (#1505) for the measured outcome.
+
 This document evaluates whether — and how — the dormant cost-based optimizer in
 `cypher/ir/rewrite/` and `cypher/plan/` can be safely activated in the GoGraph
 engine without regressing either compliance mandate (100% openCypher TCK at

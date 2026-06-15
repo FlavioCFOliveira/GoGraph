@@ -13,6 +13,17 @@ no-regression / TCK / ACID acceptance gate.
 All findings are recorded as atomic tasks in the `gograph` rmp roadmap, one task
 per finding, across six themed sprints **S-PA1…S-PA6 (#188–#193)**.
 
+> **Remediation status — addressed in v0.3.1 (2026-06-15).** The three top
+> claims below were the audit-time state and have since been remediated: the
+> optimizer now has a **hash join** for disconnected equi-join patterns (#1506)
+> and a **range-predicate B+tree index seek** (#1505); **PageRank** runs a
+> parallel pull-formulation over a reverse-CSR on large graphs, bit-identical to
+> the serial path (#1513); and the WAL commit path now does **group commit**
+> (#1507, ≈ 118× concurrent write throughput). See
+> [docs/benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) (rows
+> 0006–0016) and [release-notes/v0.3.1.md](../release-notes/v0.3.1.md). The
+> findings text below is retained as the audit-time record.
+
 ## Independently verified top claims
 
 - **The cost-based optimizer is dead code.** `cypher/ir/rewrite` is imported

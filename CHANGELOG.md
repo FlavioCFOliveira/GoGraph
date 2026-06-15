@@ -4,6 +4,191 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-06-15
+
+The fourth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **PATCH**
+release: it is **API-additive** over `v0.3.0`, with **no breaking change**
+and **no new user-facing public API**. Its headline is a deep
+**performance cycle** (tasks #1497–#1525) paired with two further
+**security audits** (SEC-2026-06-14b and SEC-2026-06-14c, tasks
+#1480–#1496). Every documented API contract is preserved unchanged, and
+the performance work is correctness-preserving: the new write and
+analytics paths produce **byte-identical / bit-identical** results and
+regress **nothing** on the curated benchmark set. No exported identifier
+was added, removed, or renamed.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios) and **100 % ACID-compliant**. The group-commit
+write path was certified by the storage-engine auditor as preserving
+Atomicity, Consistency, Isolation, and Durability. The Go toolchain
+remains **go1.26.4** (unchanged), and `govulncheck ./...` stays clean.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.3.1
+```
+
+### Security
+
+- **Second security audit (SEC-2026-06-14b).** A follow-on, additive
+  six-domain audit found and fixed **9** issues (tasks #1480–#1489); the
+  full report is in
+  [docs/security-audit-2026-06-14b.md](docs/security-audit-2026-06-14b.md).
+  Its dominant theme was that the morning audit's "bound the eager
+  allocation before the integrity gate" discipline had **not been
+  generalised** to sibling decoders. All reachable from untrusted input
+  (an on-disk artefact, a Cypher query, or Bolt bytes):
+  - **Untrusted-artefact allocation bounds** — the **btree index**
+    decoder (#1480) and the **label index** decoder (#1481) now clamp
+    their eager allocation to `min(count, 1<<20)` and grow on demand,
+    instead of pre-sizing on an unbounded untrusted count (a 20-byte
+    CRC-valid payload could drive a 16 TiB reservation). The snapshot
+    component readers (`readVerified{Labels,Properties,Mapper,EdgeHandles}`)
+    now thread `FileEntry.Size` through an `io.LimitReader`, so the
+    `append` loop can no longer grow past the real on-disk size — closing
+    a back-door re-open of the earlier recovery-OOM hole (#1486). The
+    property-value decoder now rejects a nested `PropList` element,
+    enforcing the encoder's no-nesting invariant and closing an
+    unbounded-recursion stack-exhaustion path (#1488).
+  - **Cypher string-byte budget** — string concatenation (`+`) is now
+    charged against a per-evaluation **byte** budget
+    (`DefaultMaxStringEvalBytes`) before allocation, so a tiny doubling
+    query such as `reduce(s='x', i IN range(1,33) | s+s)` can no longer
+    grow an 8 GiB string from ~100 bytes of query text (#1482).
+  - **Bolt `tx_timeout` overflow** — a client `tx_timeout` / `timeout`
+    is now converted overflow-safely; a non-positive or overflowing value
+    falls back to the server default unconditionally, so the wall-clock
+    transaction reaper is always armed and the single global writer lock
+    can no longer be pinned indefinitely (#1484).
+  - **Cartesian-product visibility and cancellation** — a disconnected
+    multi-pattern `MATCH` now surfaces a plan-time Cartesian-product
+    **notification** (via the new `Result.Notifications()` accessor and
+    the Bolt PULL `SUCCESS` metadata, faithful to Neo4j's
+    `CartesianProductWarning`) and a locked-in deadline-cancellation
+    guarantee (#1483).
+  - **Bolt NOOP keep-alive** — a bare `00 00` NOOP keep-alive chunk is
+    now silently discarded instead of being answered with a spurious
+    `FAILURE` that evicted the very idle connection it was meant to
+    preserve (#1485).
+  - **DOT reserved-keyword quoting** — the DOT exporter now quotes node
+    ids that collide with Graphviz reserved keywords (`node`, `edge`,
+    `graph`, `digraph`, `subgraph`, `strict`), preventing silent
+    export-integrity corruption (#1489).
+- **Third security audit (SEC-2026-06-14c).** A four-phase red-team audit
+  found and fixed **7** issues (tasks #1490–#1496), with **no Critical
+  finding and no prior-fix regression**; the full report is in
+  [docs/security-audit-2026-06-14c.md](docs/security-audit-2026-06-14c.md):
+  - **`substring()` integer overflow** — the end bound is computed
+    overflow-safely, so a huge `length` argument returns the conforming
+    truncated tail instead of panicking on a negative slice index (#1492).
+  - **`percentileCont()` NaN guard** — a non-finite percentile parameter
+    is now rejected by `validPercentileParam` (a NaN previously bypassed
+    the `[0,1]` check and could panic via a platform-dependent
+    `int(NaN)` index); the continuous aggregator also clamps its index
+    defensively (#1493).
+  - **`replace()` amplification bound** — `replace(s, '', r)` now computes
+    its worst-case output size overflow-safely and returns a typed
+    `NumberOutOfRange` budget error before allocating, closing a
+    quadratic output-amplification OOM (#1494).
+  - **txn PropList decoder clamp** — `decodeTxnListProp` now clamps its
+    capacity hint to `min(count, remaining/5)`, bringing the third
+    parallel PropList decoder into lockstep with its two clamped siblings
+    (#1490).
+  - **Bolt reader panic boundary** — the per-connection reader goroutine
+    now carries a `defer`/`recover` boundary mirroring the connection
+    handler, so a future panic-on-input bug crashes one connection rather
+    than the whole process (#1491).
+  - **Supply-chain integrity** — a stale `.goreleaser.yaml` Dependabot
+    comment was corrected with a regression gate (#1495), and
+    `gen_tck_tzdata.sh` now pins the SHA-256 of the IANA tzdata tarball
+    and aborts on mismatch (#1496).
+
+### Performance
+
+The 2026-06-14 performance cycle (rmp sprints S-PA1..S-PA6, tasks
+#1497–#1525) delivered measured, benchstat-gated wins across the write,
+analytics, query, and read paths. Every change is gated against the
+`f6f8c7a` baseline (ledger row 0006) and the curated guard band
+(Dijkstra / BFS / Brandes) stayed flat throughout. The raw before/after
+numbers live in [docs/benchmarks/history/](docs/benchmarks/history/) and
+the per-release report in [docs/benchmarks/v0.3.1.md](docs/benchmarks/v0.3.1.md).
+
+- **Group commit / WAL fsync coalescing** (#1507) — the per-commit
+  `fsync`, previously the dominant write-throughput ceiling, is replaced
+  by a PostgreSQL-`XLogFlush`-style leader/follower coalesced fsync
+  (`wal.Writer.SyncGroup`): one leader flushes and fsyncs the whole
+  buffered suffix once while followers keep appending, and every follower
+  whose durability watermark is covered returns success with no I/O of
+  its own. Measured on `BenchmarkCommitConcurrent`: **−74.15 % at 8
+  goroutines, −96.72 % at 64, and −99.16 % at 256 (≈ 118× concurrent
+  write throughput)**, with **zero single-thread regression** (1
+  goroutine flat at 3.683 ms, p = 0.959). The storage-engine auditor
+  certified all four ACID properties preserved (durability acked only
+  after the covering fsync; in-memory apply only in WAL sequence order
+  after durability).
+- **Parallel pull-formulation PageRank over reverse-CSR** (#1513) —
+  PageRank's per-iteration SpMV, previously a single-goroutine push
+  scatter, now runs a parallel pull formulation
+  (`next[v] = baseShare + d·Σ cur[u]/outdeg[u]`) over a structure-only
+  reverse-CSR across a persistent worker pool, partitioned by
+  approximately equal in-edge count. Results are **bit-for-bit identical
+  to the serial path regardless of `GOMAXPROCS` or scheduling** (proven
+  cross-process). Measured **1.68–1.77× on large graphs** at 30
+  iterations (up to **2.40×** for the SpMV kernel with the transpose
+  amortised). Gated behind `live >= 2048 && GOMAXPROCS > 1`; smaller
+  graphs and single-core runs take the unchanged serial path with **zero
+  regression**.
+- **Range-predicate B+tree index seek** (#1505) — a range predicate
+  (`n.p > x`, `>=`, `<`, `<=`, or a two-sided AND) on a property backed
+  by a bound string btree index now builds a `NodeByIndexRangeScan` in
+  place of the label scan, with the original `Selection` filter retained
+  on top. Measured **≈ 114× (−99.11 % time)** on the targeted
+  0.5 %-selective shape, with **zero regression** on the curated set (the
+  seek only fires under the selectivity / cardinality guards). This
+  release also makes a Cypher `CREATE INDEX … {indexType:'btree'}` a
+  bound, backfilled, self-maintaining index (it was previously registered
+  empty with a no-op `Apply`).
+- **Hash join for disconnected equi-join patterns** (#1506) — a
+  disconnected multi-pattern `MATCH` joined by an equality predicate now
+  builds an `exec.HashJoin` (O(|A|+|B|)) in place of the nested-loop
+  Cartesian product (O(|A|·|B|)), under a structural trigger, a size
+  floor, and an order-safety guard. The differential test proves an
+  identical result multiset join-on vs join-off across NULL / NaN /
+  cross-type keys; measured **≈ 93× faster, ≈ 95× less memory** on the
+  targeted shape.
+- **Real B+ tree replacing the sorted-array index** (#1514) — the
+  range property index is now a real B+ tree.
+- **Cypher read-path allocation cuts** (#1499–#1503) — column-oriented
+  (SoA) materialised result rows (#1499, IC1 **−32.4 % time / −60.9 %
+  B/op**), deferred node materialisation for scalar-only projections
+  (#1500), a dropped redundant per-row map in the `WITH`/`RETURN`
+  projection (#1501), shared node property/label views across the
+  lpg→expr→wire seam (#1502), and a lock-free copy-on-write metadata name
+  registry on the read path (#1503, **−81.57 % time at 8-way contention**
+  on the isolated metadata-read benchmark). All curated entries are
+  byte-identical or lower on allocations and B/op.
+- **Storage write-path hardening of the durability stack** —
+  a pre-sized partitioned-parallel bulk loader (#1512); a non-blocking
+  LSN-watermarked checkpoint with WAL prefix truncation (#1508);
+  elimination of the per-WAL-frame double allocation and copy (#1509);
+  and `fdatasync` for the per-commit WAL sync on Linux (#1510). A CRC32C
+  strategy microbenchmark confirmed the incremental `Update` path already
+  uses the hardware path (#1511).
+
+### Validation
+
+- The full validation battery was run **green** at the release commit on
+  **Go 1.26.4**: `go build ./...`, `go test -race ./...` (0 data races),
+  `TestTCKExecution` (**3 897 / 3 897** scenarios, error-fidelity gate
+  121), the `internal/crashinject` crash-injection battery,
+  `golangci-lint`, `staticcheck`, and `govulncheck` (no vulnerabilities).
+- A reproducible security test battery accompanies both audits, with
+  every demonstration flipped to a strict regression assertion that
+  passes on the fixed code and fails on regression.
+
 ## [0.3.0] — 2026-06-14
 
 The third published release of **GoGraph**, a Go module for graph

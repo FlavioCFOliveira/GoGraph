@@ -37,10 +37,20 @@ transaction's op frames and applies them only on reading the durable
 that loses any op frame *or* the marker therefore discards the **entire**
 transaction — recovery never applies a prefix, so a `CREATE`/`MERGE`/
 multi-`SET` statement can never leave a half-built node or a dangling edge.
-The commit issues exactly one fsync, so group-commit throughput is unchanged;
-bufio may flush a prefix of frames to the OS before the fsync, but that is
-benign because durability is gated on the fsync and an un-marked tail is
-discarded. Every store is a typed store on the v3 commit path; the legacy v1
+Durability is gated on the fsync: bufio may flush a prefix of frames to the OS
+before the fsync, but that is benign because an un-marked tail is discarded on
+recovery. Concurrent commits are coalesced by **group commit**
+(`wal.Writer.SyncGroup`): a single leader fsyncs the whole buffered suffix once
+and every committer whose durability watermark the flush covers acknowledges
+without issuing its own fsync, so the per-commit fsync no longer caps
+write throughput under concurrency (≈ 118× at 256 concurrent writers, #1507)
+while the single-threaded commit cost is unchanged. A commit is acknowledged
+only after the covering fsync, so atomicity and durability are preserved (a
+failed group fsync fails every member of the group), and the in-memory state is
+applied strictly in WAL sequence order, so isolation is preserved (the
+group-commit measurements are in
+[docs/benchmarks/v0.3.1.md](benchmarks/v0.3.1.md)). Every store is a typed store
+on the v3 commit path; the legacy v1
 fmt-codec write path was removed (see "WAL payload schema" below), so
 there is no non-durable, non-atomic per-op framing left in the module.
 

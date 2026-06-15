@@ -335,7 +335,7 @@ than absolute numbers.
 
 **Soak stability:** Not applicable (short-layer battery).
 
-**Known limitations:** `NodeByIndexRangeScan` not wired in `buildOperator`. `USING INDEX` hint not parsed. `StreamingAggregation` not in IR (eager aggregation used throughout). All documented as known gaps.
+**Known limitations:** `USING INDEX` hint not parsed. `StreamingAggregation` not in IR (eager aggregation used throughout). (`NodeByIndexRangeScan` was wired in v0.3.1 — range predicates over a selective string btree index are now served by an index seek, #1505.)
 
 ---
 
@@ -354,7 +354,7 @@ than absolute numbers.
 
 **Soak stability:** Not applicable (short-layer battery).
 
-**Known limitations:** `ElementId` / temporal encoding in PackStream not yet implemented. `TypeUnknown` sentinel not in PackStream.
+**Known limitations:** `ElementId` not yet emitted by the Bolt server. `TypeUnknown` sentinel not in PackStream. (Temporal values are now encoded as PackStream temporal Structs, shipped in v0.3.0, #1434.)
 
 ---
 
@@ -455,6 +455,5 @@ than absolute numbers.
 - `USING INDEX` hint not parsed
 - `ElementId` not emitted by Bolt server
 - `StreamingAggregation` not in IR
-- Temporal types not encoded in PackStream
 - `CALL {} IN TRANSACTIONS` not implemented
 - Literal normalisation absent from plan-cache key computation

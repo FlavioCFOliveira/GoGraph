@@ -47,6 +47,28 @@ copying.
 | Reinterpret[uint64] 1024 vs | 1.31     | 0         |
 | naive copy (1024 uint64)    | ~5800    | 1         |
 
+## v0.3.1 performance cycle (2026-06-14, tasks #1497–#1525)
+
+The per-change record, with the full benchstat output and guard-band
+confirmation for each step, lives in
+[benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) (rows
+0006–0016). Headline measured wins:
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Group commit / WAL fsync coalescing | #1507 | `BenchmarkCommitConcurrent` (256 g) | −99.16 % (≈ 118× throughput), single-thread flat |
+| Parallel pull-formulation PageRank over reverse-CSR | #1513 | `PageRank_PowerLaw50K`, 100K/3.2M | 1.68–1.77× (2.40× SpMV kernel), bit-identical |
+| Range-predicate B+tree index seek | #1505 | `BenchmarkRangeSeekSelective` | −99.11 % time (≈ 114×), −98.95 % B/op |
+| Hash join for disconnected equi-joins | #1506 | `BenchmarkHashJoinDisconnectedEquiJoin` | ≈ 93× faster, ≈ 95× less memory |
+| Real B+ tree replacing the sorted-array index | #1514 | — | range property index is now a real B+ tree |
+| Column-oriented (SoA) result rows | #1499 | `cypher_ldbc` IC1 | −32.4 % time / −60.9 % B/op / −25.6 % allocs |
+| Lock-free copy-on-write metadata name registry | #1503 | `BenchmarkNodeMetadataReadParallel` (8-way) | −81.57 % time |
+
+Every change is benchstat-gated against the `f6f8c7a` baseline (ledger
+row 0006); the curated search guard band (Dijkstra / BFS / Brandes) stayed
+flat, TCK held at 3897/3897, and ACID was preserved (the group-commit
+write path was storage-engine-auditor-certified).
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with

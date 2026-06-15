@@ -5,10 +5,13 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.3.0`.** This is the project's **third release**,
+**Current release: `v0.3.1`.** This is the project's **fourth release**,
 published at a pre-1.0 baseline: under Semantic Versioning a `0.y.z`
 version signals that the public API is **not yet stable** and may change
-without a major bump while the module matures toward `1.0.0`. The five major
+without a major bump while the module matures toward `1.0.0`. `v0.3.1` is
+a pre-1.0 **PATCH** release — a performance and security-hardening release
+that is API-additive over `v0.3.0`, with no breaking change and no new
+user-facing public API. The five major
 subsystems below are functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
@@ -17,9 +20,9 @@ every change is gated by the project's CI suite (build, vet, race, lint,
 `govulncheck`, TCK conformance, and the deterministic crash-injection
 battery). The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.3.0`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.3.1`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.3.0.md](release-notes/v0.3.0.md) for the full release
+[release-notes/v0.3.1.md](release-notes/v0.3.1.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)
@@ -41,8 +44,8 @@ narrative.
 - `github.com/FlavioCFOliveira/GoGraph/graph/index/label` — Roaring-bitmap inverted label index.
 - `github.com/FlavioCFOliveira/GoGraph/graph/index/hash` — sharded hash exact-match property
   index.
-- `github.com/FlavioCFOliveira/GoGraph/graph/index/btree` — order-preserving range property
-  index.
+- `github.com/FlavioCFOliveira/GoGraph/graph/index/btree` — order-preserving B+ tree range
+  property index (backs the Cypher range-predicate index seek).
 - `github.com/FlavioCFOliveira/GoGraph/graph/query` — fluent `MATCH`-style pattern engine.
 - `github.com/FlavioCFOliveira/GoGraph/graph/io/csv` · `graph/io/graphml` · `graph/io/dot` ·
   `graph/io/jsonl` — interchange formats for CSV, GraphML, DOT,
@@ -55,8 +58,9 @@ narrative.
   iterative DFS, Dijkstra, Bellman-Ford, A\*, bidirectional BFS,
   Yen k-shortest, topological sort (Kahn), Tarjan SCC, biconnected
   components, Eulerian path, APSP).
-- `github.com/FlavioCFOliveira/GoGraph/search/centrality` — Brandes betweenness, PageRank,
-  personalised PageRank.
+- `github.com/FlavioCFOliveira/GoGraph/search/centrality` — Brandes betweenness, PageRank
+  (parallel pull-formulation over a reverse-CSR on large graphs,
+  bit-identical to the serial path), personalised PageRank.
 - `github.com/FlavioCFOliveira/GoGraph/search/community` — Leiden, label propagation.
 - `github.com/FlavioCFOliveira/GoGraph/search/flow` — Dinic, Edmonds-Karp, push-relabel,
   Stoer-Wagner, min-cost max-flow.
@@ -231,6 +235,15 @@ Benchmarks (Apple M4, Go 1.26.3):
 > Hardware deltas should be reported in CHANGELOG.md alongside
 > any number that changes by more than the 5 % CI gate
 > (`benchstat regression gate` in `.github/workflows/ci.yml`).
+
+The `v0.3.1` performance cycle lifts the write, analytics, and query
+paths without regressing the single-threaded figures above: **group
+commit** raises concurrent write throughput ≈ 118× at 256 goroutines
+(with zero single-thread regression), **parallel PageRank** runs 1.7–2.4×
+on large graphs (bit-identical results), and a **range-predicate B+tree
+index seek** is ≈ 114× on selective indexed ranges. See
+[docs/benchmarks/v0.3.1.md](docs/benchmarks/v0.3.1.md) for the full
+per-release report and concurrency sweeps.
 
 ## Module Layout
 
