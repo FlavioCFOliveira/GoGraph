@@ -446,7 +446,15 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint
 			if current.handles != nil && cap(current.handles) >= newLen {
 				hs = current.handles[:newLen]
 			} else {
-				hs = make([]uint64, newLen, growCap(len(current.handles)))
+				// Size capacity from oldLen, not len(current.handles): a
+				// handle-less prefix leaves the handle column shorter than
+				// neighbours (len 0 while still nil), and growCap of that short
+				// length can be < newLen — make([]uint64, newLen, <newLen) panics.
+				// growCap(oldLen) mirrors the slow path and is always >= newLen.
+				// copy back-fills the leading slots; any gap up to oldLen stays
+				// the 0 ("no handle") sentinel, keeping the column length-aligned
+				// with neighbours.
+				hs = make([]uint64, newLen, growCap(oldLen))
 				copy(hs, current.handles)
 			}
 			hs[oldLen] = handle
