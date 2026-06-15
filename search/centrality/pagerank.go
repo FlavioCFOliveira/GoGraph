@@ -3,11 +3,25 @@ package centrality
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"runtime"
+	"runtime/pprof"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
+
+// pageRankParallelThreshold is the live-node count below which the
+// sequential push-based SpMV is used and the reverse-CSR transpose is
+// skipped entirely. Below this size the one-time O(V+E) transpose build
+// plus the goroutine fan-out/join overhead dominates the per-iteration
+// SpMV, so the serial path is strictly faster. The threshold was chosen
+// empirically (see BenchmarkPageRank_* in pagerank_parallel_test.go):
+// the parallel pull path overtakes the serial push path on graphs of a
+// few thousand live nodes and upward.
+const pageRankParallelThreshold = 2048
 
 // ErrInvalidInput is returned by centrality algorithms when their
 // float options contain an invalid value: NaN, +/-Inf, or an
@@ -77,6 +91,17 @@ func DefaultPageRankOptions() PageRankOptions {
 // teleporting their entire share back into the system. This ensures
 // total mass is conserved and the result is a true stationary
 // distribution.
+//
+// Parallelism. On graphs with at least pageRankParallelThreshold live
+// nodes and when GOMAXPROCS > 1, the per-iteration sparse mat-vec runs
+// the pull formulation (next[v] = baseShare + d·Σ_{u∈in(v)} cur[u]/
+// outdeg[u]) over a reverse-CSR, partitioned across a persistent worker
+// pool by approximately equal in-edge count. Each next[v] is computed
+// independently with no write contention, and every vertex sums its
+// in-edges in the fixed reverse-CSR order, so the result is bit-for-bit
+// identical to the serial path regardless of GOMAXPROCS or worker
+// scheduling. Smaller graphs use the serial push form unchanged and pay
+// neither the reverse-CSR transpose nor any goroutine overhead.
 func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	defer metrics.Time("search.centrality.PageRank")()
 	ranks, iterations, err = PageRankCtx(context.Background(), c, opts)
@@ -163,6 +188,30 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 	}
 	teleport := (1 - opts.Damping) / float64(live)
 
+	// Decide once whether to run the parallel pull-formulation SpMV. The
+	// pull path requires the reverse-CSR (in-edges); it is built once and
+	// reused across every iteration. For graphs below the threshold (or
+	// when GOMAXPROCS == 1) the serial push path is used unchanged, so
+	// tiny graphs never pay the transpose nor the goroutine overhead.
+	workers := runtime.GOMAXPROCS(0)
+	useParallel := workers > 1 && live >= pageRankParallelThreshold
+	var engine *pageRankEngine
+	if useParallel {
+		// Build only the reverse-CSR structure (offsets + in-neighbour
+		// ids). The full csr.BuildReverse also transposes the weight and
+		// handle columns, which PageRank never reads — for an int64- or
+		// otherwise-weighted CSR that is a large wasted allocation and an
+		// extra serial pass that dominates the per-iteration win when the
+		// iteration count is small. The lean structure-only transpose
+		// keeps the one-time O(V+E) cost minimal.
+		revVerts, revEdges := pageRankBuildReverseStructure(verts, edges, n)
+		if workers > n {
+			workers = n
+		}
+		engine = newPageRankEngine(ctx, workers, revVerts, revEdges, n)
+		defer engine.close()
+	}
+
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
 		if cerr := ctx.Err(); cerr != nil {
 			metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
@@ -170,6 +219,8 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 		}
 		// Dangling mass: sum of cur[i] for live nodes with no out-edges.
 		// Redistributed uniformly across all live nodes (canonical PageRank).
+		// This O(V) reduction stays sequential (cheap, and its fixed
+		// increasing-i order keeps the float sum deterministic).
 		var danglingMass float64
 		for i := 0; i < n; i++ {
 			if isLive[i] && outdeg[i] == 0 {
@@ -178,34 +229,48 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 		}
 		baseShare := teleport + opts.Damping*danglingMass/float64(live)
 
-		// Seed every live node with teleport + dangling redistribution.
-		for i := 0; i < n; i++ {
-			if isLive[i] {
-				next[i] = baseShare
-			} else {
-				next[i] = 0
-			}
-		}
-
-		// Distribute outgoing mass from non-dangling sources.
-		for src := 0; src < n; src++ {
-			if outdeg[src] == 0 {
-				continue
-			}
-			share := opts.Damping * cur[src] / float64(outdeg[src])
-			for k := verts[src]; k < verts[src+1]; k++ {
-				next[int(edges[k])] += share
-			}
-		}
-
-		// L1 delta.
 		var delta float64
-		for i := 0; i < n; i++ {
-			d := next[i] - cur[i]
-			if d < 0 {
-				d = -d
+		if useParallel {
+			// Cancellation is honoured at iteration granularity: a worker
+			// runs its whole O(E/workers) range without polling ctx, then
+			// ctx.Err() is checked here and at the top of the loop. One
+			// iteration's SpMV is sub-millisecond per worker at the
+			// parallel threshold, so cancellation latency stays bounded by
+			// a single step plus the barrier.
+			delta = engine.iterate(next, cur, isLive, outdeg, baseShare, opts.Damping)
+			if cerr := ctx.Err(); cerr != nil {
+				metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
+				return nil, 0, cerr
 			}
-			delta += d
+		} else {
+			// Seed every live node with teleport + dangling redistribution.
+			for i := 0; i < n; i++ {
+				if isLive[i] {
+					next[i] = baseShare
+				} else {
+					next[i] = 0
+				}
+			}
+
+			// Distribute outgoing mass from non-dangling sources (push SpMV).
+			for src := 0; src < n; src++ {
+				if outdeg[src] == 0 {
+					continue
+				}
+				share := opts.Damping * cur[src] / float64(outdeg[src])
+				for k := verts[src]; k < verts[src+1]; k++ {
+					next[int(edges[k])] += share
+				}
+			}
+
+			// L1 delta.
+			for i := 0; i < n; i++ {
+				d := next[i] - cur[i]
+				if d < 0 {
+					d = -d
+				}
+				delta += d
+			}
 		}
 
 		cur, next = next, cur
@@ -215,3 +280,227 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 	}
 	return cur, opts.MaxIterations, nil
 }
+
+// pageRankBuildReverseStructure transposes the forward CSR (verts,
+// edges) into a structure-only reverse-CSR: revVerts are the in-edge
+// prefix-sum offsets (length n+1) and revEdges lists, for every vertex
+// v, its in-neighbours u. Weights and edge handles are deliberately not
+// transposed — PageRank reads neither, and on a weighted CSR copying
+// them would add a large allocation and a serial pass.
+//
+// Order. In-neighbours are scattered in increasing source-id order (the
+// outer loop visits u = 0..n-1 ascending), so revEdges[revVerts[v]:
+// revVerts[v+1]] lists v's in-neighbours in the same order the serial
+// push path accumulates contributions into next[v]. This is the
+// property the bit-identity determinism argument relies on.
+//
+// Complexity: O(V + E) time, O(V + E) space (two integer arrays only).
+func pageRankBuildReverseStructure(verts []uint64, edges []graph.NodeID, n int) (revVerts []uint64, revEdges []graph.NodeID) {
+	revVerts = make([]uint64, n+1)
+	// Pass 1: count in-degree per destination into revVerts[v+1].
+	for u := 0; u < n; u++ {
+		for k := verts[u]; k < verts[u+1]; k++ {
+			revVerts[int(edges[k])+1]++
+		}
+	}
+	// Prefix sum -> offsets.
+	for i := 1; i <= n; i++ {
+		revVerts[i] += revVerts[i-1]
+	}
+	revEdges = make([]graph.NodeID, revVerts[n])
+	// Pass 2: scatter sources into reversed slots, advancing a per-dest
+	// cursor. The cursor array reuses no extra type; it is a temporary.
+	cursor := make([]uint64, n)
+	for u := 0; u < n; u++ {
+		for k := verts[u]; k < verts[u+1]; k++ {
+			v := int(edges[k])
+			revEdges[revVerts[v]+cursor[v]] = graph.NodeID(u)
+			cursor[v]++
+		}
+	}
+	return revVerts, revEdges
+}
+
+// pageRankEngine is a persistent worker pool that runs one PageRank
+// power-iteration step per call to iterate, using the pull formulation
+// over a reverse-CSR. The pool is created once (newPageRankEngine) and
+// reused across every iteration, so the per-iteration goroutine spawn
+// and pprof-label cost is paid once rather than per iteration — the
+// dominant overhead the naive fan-out/join design suffered on the
+// short, memory-bound SpMV step.
+//
+// Pull formulation. For every live vertex v,
+//
+//	next[v] = baseShare + damping * Σ_{u ∈ in(v)} cur[u] / outdeg[u]
+//
+// where in(v) are the in-neighbours of v listed in revEdges. Each v
+// writes only next[v], so workers operate on disjoint output ranges
+// with zero write contention.
+//
+// Determinism. The summation order for each v is the fixed reverse-CSR
+// order revEdges[revVerts[v]:revVerts[v+1]], independent of the worker
+// that handles v and of the worker count. Because
+// pageRankBuildReverseStructure scatters in-neighbours in increasing
+// source-id order — the same order in which the serial push path
+// accumulates them — the per-vertex float sum is identical to the
+// serial push result down to the last bit. The
+// per-worker partial L1 deltas are reduced in fixed worker-id order, so
+// the returned delta is likewise deterministic across worker counts.
+//
+// Load balancing. Vertex ranges are partitioned by approximately equal
+// in-edge count, not equal vertex count. On power-law graphs a handful
+// of hub vertices hold a large fraction of all in-edges, so equal-
+// vertex chunks would be grossly imbalanced and the hub-heavy worker
+// would gate the barrier. Edge-balanced contiguous ranges keep the
+// per-worker work even while preserving the increasing-v order that the
+// determinism argument relies on.
+//
+// Complexity: O(V + E) work per iterate call, O(workers) extra space.
+type pageRankEngine struct {
+	ctx      context.Context
+	workers  int
+	revVerts []uint64
+	revEdges []graph.NodeID
+	bounds   []int           // edge-balanced chunk boundaries, len workers+1
+	deltas   []float64       // per-worker partial L1 delta
+	start    []chan struct{} // fan-out: one private signal channel per worker
+	done     chan int        // fan-in: each worker reports its index on completion
+	quit     chan struct{}
+
+	// Per-iteration shared inputs, set by iterate before releasing workers.
+	next, cur []float64
+	isLive    []bool
+	outdeg    []uint32
+	baseShare float64
+	damping   float64
+}
+
+// newPageRankEngine builds the edge-balanced partition and launches the
+// persistent worker goroutines. close must be called to terminate them.
+func newPageRankEngine(ctx context.Context, workers int, revVerts []uint64, revEdges []graph.NodeID, n int) *pageRankEngine {
+	e := &pageRankEngine{
+		ctx:      ctx,
+		workers:  workers,
+		revVerts: revVerts,
+		revEdges: revEdges,
+		deltas:   make([]float64, workers),
+		start:    make([]chan struct{}, workers),
+		done:     make(chan int, workers),
+		quit:     make(chan struct{}),
+	}
+	e.bounds = edgeBalancedBounds(revVerts, n, workers)
+	for w := 0; w < workers; w++ {
+		e.start[w] = make(chan struct{})
+		go e.worker(w)
+	}
+	return e
+}
+
+// edgeBalancedBounds partitions [0, n) into workers contiguous vertex
+// ranges with approximately equal in-edge counts, returning the
+// workers+1 boundary offsets (bounds[0]=0, bounds[workers]=n). The
+// partition uses the reverse-CSR prefix sums (revVerts) so each range's
+// in-edge total is revVerts[hi]-revVerts[lo].
+//
+// The boundary scan advances a single cursor v monotonically, so the
+// returned offsets are non-decreasing. On a graph dominated by one
+// very-high-in-degree hub, several boundaries may collapse to the same
+// v, leaving some workers an empty range (lo == hi); that is harmless —
+// an empty range writes no next[v] and contributes zero delta.
+func edgeBalancedBounds(revVerts []uint64, n, workers int) []int {
+	bounds := make([]int, workers+1)
+	bounds[workers] = n
+	if n == 0 || workers <= 1 {
+		return bounds
+	}
+	totalEdges := revVerts[n]
+	v := 0
+	for w := 1; w < workers; w++ {
+		// Target cumulative in-edges at this boundary. The cursor v only
+		// advances (revVerts is non-decreasing), so bounds stay sorted.
+		target := uint64(w) * totalEdges / uint64(workers)
+		for v < n && revVerts[v] < target {
+			v++
+		}
+		bounds[w] = v
+	}
+	return bounds
+}
+
+// worker is the persistent loop: park on start, run the assigned range,
+// report on done; exit on quit.
+func (e *pageRankEngine) worker(w int) {
+	pprof.Do(e.ctx, pprof.Labels("component", "pagerank-pull", "worker", fmt.Sprintf("%d", w)), func(context.Context) {
+		for {
+			select {
+			case <-e.quit:
+				return
+			case <-e.start[w]:
+				e.runRange(w)
+				e.done <- w
+			}
+		}
+	})
+}
+
+// runRange computes next[v] for every v in worker w's edge-balanced
+// range and accumulates the partial L1 delta into e.deltas[w].
+func (e *pageRankEngine) runRange(w int) {
+	lo, hi := e.bounds[w], e.bounds[w+1]
+	next, cur := e.next, e.cur
+	isLive, outdeg := e.isLive, e.outdeg
+	revVerts, revEdges := e.revVerts, e.revEdges
+	baseShare, damping := e.baseShare, e.damping
+	var localDelta float64
+	for v := lo; v < hi; v++ {
+		if !isLive[v] {
+			// next[v] becomes 0; its delta contribution is |0 - cur[v]|.
+			d := cur[v]
+			if d < 0 {
+				d = -d
+			}
+			localDelta += d
+			next[v] = 0
+			continue
+		}
+		sum := baseShare
+		for k := revVerts[v]; k < revVerts[v+1]; k++ {
+			u := int(revEdges[k])
+			sum += damping * cur[u] / float64(outdeg[u])
+		}
+		next[v] = sum
+		d := sum - cur[v]
+		if d < 0 {
+			d = -d
+		}
+		localDelta += d
+	}
+	e.deltas[w] = localDelta
+}
+
+// iterate runs one power-iteration step across the worker pool and
+// returns the deterministic L1 delta ||next - cur||_1.
+func (e *pageRankEngine) iterate(next, cur []float64, isLive []bool, outdeg []uint32, baseShare, damping float64) float64 {
+	e.next, e.cur = next, cur
+	e.isLive, e.outdeg = isLive, outdeg
+	e.baseShare, e.damping = baseShare, damping
+	// Release every worker on its private channel, then wait for all to
+	// report. The per-worker start[w]/done rendezvous is the per-iteration
+	// barrier; private start channels pin each fixed range to its worker
+	// so no worker can steal a second range within one iteration.
+	for w := 0; w < e.workers; w++ {
+		e.start[w] <- struct{}{}
+	}
+	for w := 0; w < e.workers; w++ {
+		<-e.done
+	}
+	// Deterministic reduction of partial deltas in fixed worker-id order.
+	var delta float64
+	for w := 0; w < e.workers; w++ {
+		delta += e.deltas[w]
+	}
+	return delta
+}
+
+// close terminates the worker pool. It is safe to call exactly once.
+func (e *pageRankEngine) close() { close(e.quit) }
