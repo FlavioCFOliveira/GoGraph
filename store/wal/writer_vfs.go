@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // walFile is the minimal file-system interface that [Writer] requires
@@ -44,10 +45,12 @@ func OpenWith(f walFile) (*Writer, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("wal: OpenWith: seek to end: %w", err)
 	}
-	return &Writer{
+	w := &Writer{
 		f:            f,
 		bw:           bufio.NewWriterSize(f, 64*1024),
 		durableSize:  pos,
 		appendedSize: pos,
-	}, nil
+	}
+	w.groupCond = sync.NewCond(&w.mu)
+	return w, nil
 }

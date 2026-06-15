@@ -90,6 +90,27 @@ type Writer struct {
 	// seek syscalls.
 	appendedSize int64
 
+	// --- group-commit coordination (Writer-owned, all under mu) ---
+	//
+	// SyncGroup implements PostgreSQL-XLogFlush-style commit coalescing: a
+	// committer records the watermark (appendedSize) covering its last
+	// appended frame, then either fsyncs the whole buffered suffix once as
+	// the group LEADER or, if a leader is already flushing, waits on
+	// groupCond until a fsync covers its watermark. One fsync therefore
+	// makes many committers' frames durable, amortising the ~per-commit fsync
+	// cost across the group. The watermark is the Writer's own appendedSize /
+	// durableSize, taken under mu, so the coordinator never tracks byte
+	// offsets independently of the file (the load-bearing audit invariant).
+
+	// groupCond signals waiters when a sync round completes (durableSize
+	// advanced) or the writer is poisoned. Its locker is &mu.
+	groupCond *sync.Cond
+	// leaderActive is true while one committer is performing the group
+	// flush+fsync. While set, no other committer starts a competing fsync;
+	// arriving committers wait on groupCond. It guarantees a single leader
+	// per round so two goroutines never flush the same Writer concurrently.
+	leaderActive bool
+
 	frames     atomic.Uint64
 	bytes      atomic.Uint64
 	syncs      atomic.Uint64
@@ -177,13 +198,15 @@ func Open(path string) (*Writer, error) {
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: probe size: %w", path, err)
 	}
-	return &Writer{
+	w := &Writer{
 		f:            f,
 		lockFile:     lockFile,
 		bw:           bufio.NewWriterSize(f, 64*1024),
 		durableSize:  size,
 		appendedSize: size,
-	}, nil
+	}
+	w.groupCond = sync.NewCond(&w.mu)
+	return w, nil
 }
 
 // discardTornTail scans an existing WAL file from offset 0 and, when
@@ -356,6 +379,183 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 	}
 	w.durableSize = w.appendedSize
 	w.syncs.Add(1)
+	// Wake any group-commit waiter: a direct Sync (e.g. the checkpointer)
+	// advances durableSize past their watermark, so they are now durable
+	// without electing their own leader.
+	if w.groupCond != nil {
+		w.groupCond.Broadcast()
+	}
+	return nil
+}
+
+// SyncGroup durably commits the caller's already-appended frames, coalescing
+// the fsync with those of every other committer whose frames are buffered at
+// the same time — PostgreSQL-XLogFlush-style group commit. It returns nil only
+// after a single os.File.Sync has made durable every byte up to and including
+// the caller's last appended frame (its OpCommit marker); a caller therefore
+// acknowledges its commit only once the marker is on stable storage, exactly
+// as [Writer.Sync] does, but without paying a private fsync per commit.
+//
+// # Contract
+//
+// SyncGroup must be called AFTER the caller has appended all of its frames via
+// [Writer.Append] / [Writer.AppendCtx] and is the durability barrier for those
+// frames. It captures the current appendedSize as the caller's watermark, then:
+//
+//   - If the writer is already poisoned, it returns the sticky error
+//     immediately (the un-synced suffix, including this caller's frames, was
+//     discarded by an earlier failed sync).
+//   - If a previous sync has already advanced durableSize past the caller's
+//     watermark (a concurrent leader covered it), it returns nil without any
+//     I/O — the follower fast path.
+//   - Otherwise, if no leader is flushing, the caller becomes the LEADER:
+//     it flushes the buffer and fsyncs once, covering its own and every other
+//     buffered committer's frames, publishes the new durableSize, and wakes the
+//     followers. If a leader is already flushing, the caller waits on the group
+//     condition until durableSize covers its watermark or the writer poisons.
+//
+// # Durability, atomicity, and failure semantics
+//
+//   - DURABILITY: success is returned only after the fsync covering the
+//     caller's marker completes. Because all appends serialise (the buffer is
+//     FIFO and O_APPEND lands every write at EOF), a marker whose end offset
+//     is <= the flushed appendedSize is made durable by that flush's fsync;
+//     there is no prefix-only fsync on a local file system.
+//   - ATOMICITY: the on-disk frame stream is unchanged from the per-commit
+//     path — each transaction's ops are contiguous and followed by its
+//     OpCommit marker — so a crash mid-leader-fsync recovers each fully-marked
+//     transaction and discards the unmarked tail exactly as before.
+//   - FAIL-ALL: if the leader's flush or fsync fails, [Writer.poison] discards
+//     the entire un-synced suffix (every group member's frames and markers) and
+//     broadcasts; every waiter then observes the sticky error and fails its own
+//     commit. No member may believe it committed when the shared fsync failed.
+//
+// # Cancellation
+//
+// SyncGroup is intentionally NOT context-aware. Once a committer's frames are
+// in the shared buffer they cannot be un-appended (later committers' frames sit
+// after them, and the transaction sequence is consumed), so abandoning the wait
+// while the group still fsyncs the frames would make the transaction durable —
+// recovery replays a fully-marked transaction — while returning an error to the
+// caller, risking a double apply on retry. The caller's deadline is honoured
+// earlier, at the cancellable single-writer acquire ([Store.BeginCtx]); after
+// the append point the commit is in-flight-durable and the wait for its covering
+// fsync runs to completion (the marker either becomes durable or the writer
+// poisons and fails it). This matches PostgreSQL: a backend cannot un-write WAL
+// it has already inserted.
+//
+// Concurrency: safe for concurrent calls; it serialises on the same internal
+// mutex as Append/Sync and guarantees a single leader per fsync round.
+func (w *Writer) SyncGroup() error {
+	defer metrics.Time("store.wal.SyncGroup")()
+	if w.closed.Load() {
+		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
+		return ErrWriterClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.syncErr != nil {
+		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
+		return w.syncErr
+	}
+	// The caller's durability watermark: every byte the writer has accepted so
+	// far, which includes the caller's just-appended frames and OpCommit marker.
+	// Taken under mu from the Writer's own appendedSize, so the coordinator
+	// never tracks offsets independently of the file.
+	target := w.appendedSize
+
+	for {
+		if w.syncErr != nil {
+			metrics.IncCounter("store.wal.SyncGroup.errors", 1)
+			return w.syncErr
+		}
+		if w.durableSize >= target {
+			// A leader's fsync already covered this watermark: the follower
+			// fast path. The commit is durable with no I/O of our own.
+			metrics.IncCounter("store.wal.SyncGroup.coalesced", 1)
+			return nil
+		}
+		if !w.leaderActive {
+			// Become the leader for this round and fsync the whole buffered
+			// suffix once.
+			return w.leadGroupSyncLocked()
+		}
+		// A leader is flushing; wait for durableSize to advance (success) or a
+		// poison to wake us (failure). groupCond's locker is &w.mu, so Wait
+		// atomically releases mu while parked and re-acquires on wake.
+		w.groupCond.Wait()
+	}
+}
+
+// leadGroupSyncLocked performs one group flush+fsync as the elected leader.
+// The caller holds w.mu, is not poisoned, and has set neither leaderActive nor
+// observed durableSize past its target. It flushes the buffer and fsyncs once,
+// covering its own and every concurrently-buffered committer's frames, then
+// publishes the advanced durableSize and wakes the followers.
+//
+// The fsync runs while w.mu is RELEASED so other committers may keep appending
+// into the buffer (their frames land after the flushed snapshot and are
+// captured by the next round); bufio.Flush has already drained the leader's
+// snapshot out of the buffer, so a concurrent Append touches only in-memory
+// buffer bytes while f.Sync syncs the file — the two do not race on the file.
+// leaderActive excludes a second concurrent flush of the same Writer for the
+// duration. The publish (durableSize update) and the success/failure decision
+// are performed under w.mu, with the just-flushed snapshot as the watermark, so
+// no waiter ever observes a stale durableSize from a prior round.
+func (w *Writer) leadGroupSyncLocked() error {
+	w.leaderActive = true
+	// Snapshot the watermark this fsync will make durable. Everything buffered
+	// now will be flushed; frames appended after this point belong to the next
+	// round. Captured under mu before any unlock, per the Writer-owned-watermark
+	// invariant.
+	flushed := w.appendedSize
+
+	// Flush the buffer to the OS under mu so it does not race a concurrent
+	// Append's Encode(w.bw, ...). After this the buffer is empty and the
+	// leader's snapshot is in the file's OS page cache.
+	if err := w.bw.Flush(); err != nil {
+		// Clear leaderActive BEFORE poison so poison's broadcast (the single
+		// wakeup) finds the flag already cleared: a Close waiter parked on
+		// `for w.leaderActive` then wakes and proceeds, and every SyncGroup
+		// follower wakes to the sticky syncErr.
+		w.leaderActive = false
+		w.poison(err)
+		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
+		return err
+	}
+
+	// Release mu for the slow fsync so followers can append into the (now
+	// empty) buffer while we wait on durable storage. The file bytes being
+	// synced are already written; concurrent Appends only mutate the in-memory
+	// bufio buffer, never the file, so f.Sync and those Appends do not race.
+	w.mu.Unlock()
+	syncErr := w.f.Sync()
+	w.mu.Lock()
+
+	w.leaderActive = false
+	if syncErr != nil {
+		// fsync failed: discard the entire un-synced suffix (this leader's and
+		// every follower's frames and markers) and fail every member. leaderActive
+		// is already cleared above, so poison's broadcast is the single, correct
+		// wakeup for both the Close waiter and every SyncGroup follower.
+		w.poison(syncErr)
+		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
+		return syncErr
+	}
+	// Publish: the fsync made every byte up to `flushed` durable. Advance
+	// durableSize to the snapshot we actually flushed (not the live
+	// appendedSize, which a concurrent Append may have grown past what this
+	// fsync covered) so a waiter never concludes a not-yet-synced frame is
+	// durable.
+	if flushed > w.durableSize {
+		w.durableSize = flushed
+	}
+	w.syncs.Add(1)
+	metrics.IncCounter("store.wal.SyncGroup.leader", 1)
+	// Wake the followers: those whose watermark <= durableSize return success;
+	// those appended after our snapshot re-evaluate and elect the next leader.
+	w.groupCond.Broadcast()
 	return nil
 }
 
@@ -401,6 +601,14 @@ func (w *Writer) poison(err error) {
 	w.bw.Reset(w.f)
 	w.appendedSize = w.durableSize
 	w.syncErr = err
+	// Wake every group-commit waiter so each observes the sticky syncErr and
+	// fails its own commit: the un-synced suffix (every group member's frames
+	// and OpCommit markers) was just discarded, so no member may believe it
+	// committed. Safe even when groupCond is nil (a zero-value/never-grouped
+	// Writer): the field is set in every constructor.
+	if w.groupCond != nil {
+		w.groupCond.Broadcast()
+	}
 }
 
 // Stats returns a snapshot of the writer's lifetime counters.
@@ -498,6 +706,18 @@ func (w *Writer) Close() error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	// Self-safe against an in-flight group-commit leader: leadGroupSyncLocked
+	// releases w.mu across its f.Sync() and re-acquires it to publish, so a
+	// Close that grabbed w.mu in that window must NOT flush+close the file while
+	// the leader is mid-fsync (that would race the leader's f.Sync and could
+	// make un-acknowledged frames durable). Wait until the leader finishes and
+	// clears leaderActive. The store-layer quiesce (RunUnderCommitLock's inflight
+	// drain) is the primary guard; this is defence-in-depth so Close is correct
+	// even when called without that drain. groupCond's locker is w.mu, so Wait
+	// atomically releases it while parked.
+	for w.leaderActive {
+		w.groupCond.Wait()
+	}
 	if w.syncErr != nil {
 		// Second-chance discard: poison's own truncate may have failed
 		// on a device in transient distress. Best-effort — the sticky

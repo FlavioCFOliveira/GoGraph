@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -404,6 +405,60 @@ type Store[N comparable, W any] struct {
 	// <= the recovery cap guarantees every durably-committed transaction
 	// replays within recovery's buffer (audit gap: bounded resources).
 	maxTxnOps int
+
+	// --- group-commit apply gate (#1507) ---
+	//
+	// Group commit releases the single-writer semaphore after a transaction's
+	// frames are appended (so the next transaction can append while this one
+	// fsyncs), and the fsync itself is coalesced across committers by
+	// [wal.Writer.SyncGroup]. But [Tx.Commit]'s post-durability in-memory apply
+	// ([applyOp] under [lpg.Graph.ApplyAtomically]) must still run in
+	// transaction-sequence order: applying a higher-seq transaction before a
+	// lower-seq one could materialise an op against a node a not-yet-applied
+	// earlier transaction was to create (lpg property writes are
+	// create-on-demand), letting a [lpg.Graph.View] reader observe a state no
+	// serial schedule produces — a Consistency/Isolation regression. The apply
+	// gate restores that order WITHOUT holding the append semaphore across the
+	// fsync: a committer waits until appliedSeq == its seq-1, applies, then
+	// advances appliedSeq and wakes the next committer.
+	//
+	// applyMu guards appliedSeq and is the locker of applyCond.
+	applyMu sync.Mutex
+	// applyCond signals committers when appliedSeq advances.
+	applyCond *sync.Cond
+	// appliedSeq is the highest transaction sequence whose post-durability
+	// in-memory apply step has completed (or been skipped, for a durable txn
+	// whose apply failed or whose path performs no apply). A committer holding
+	// sequence seq waits until appliedSeq == seq-1 before applying, then sets
+	// appliedSeq = seq. It is advanced for EVERY consumed sequence — including a
+	// transaction whose fsync failed or whose apply errored — so a failed
+	// transaction never wedges the apply chain behind it.
+	appliedSeq uint64
+
+	// --- in-flight commit tracker (#1507 quiesce boundary) ---
+	//
+	// Group commit releases the single-writer semaphore after the append phase
+	// but BEFORE the coalesced fsync ([wal.Writer.SyncGroup]) and the
+	// sequence-ordered apply. The semaphore therefore no longer bounds the
+	// in-flight-fsync window, but [Store.RunUnderCommitLock] — the seam
+	// [store.DB] and a checkpointer use to exclude the commit path while they
+	// close or truncate the WAL — relied on the semaphore bounding it. Without a
+	// separate tracker, RunUnderCommitLock could acquire the semaphore while a
+	// committer is parked inside SyncGroup, and the caller's fn (e.g. wal.Close)
+	// would then race that in-flight flush+fsync, making un-acknowledged frames
+	// durable (an acked != durable violation).
+	//
+	// inflight counts committers that have released the semaphore but not yet
+	// finished their SyncGroup + apply. A committer increments it WHILE STILL
+	// HOLDING the semaphore (in markInflight, before releaseAfterAppend), so
+	// once the semaphore is free the increment is already visible to a
+	// RunUnderCommitLock that then acquires it; the committer decrements (and
+	// broadcasts when reaching zero) only after its entire commit finishes
+	// (doneInflight). The increment MUST happen-before the release; reversing
+	// them reopens the race.
+	inflightMu   sync.Mutex
+	inflightCond *sync.Cond
+	inflight     int
 }
 
 // resolveMaxTxnOps normalises the maxTxnOps constructor argument to the
@@ -454,13 +509,16 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 // [NewStoreWithCodec] for the weight-handling contract.
 func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithCodecCapped")()
-	return &Store[N, W]{
+	s := &Store[N, W]{
 		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
 		codec:     codec,
 		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
+	s.applyCond = sync.NewCond(&s.applyMu)
+	s.inflightCond = sync.NewCond(&s.inflightMu)
+	return s
 }
 
 // NewStoreWithOptions returns a Store wrapping g and wal that encodes
@@ -497,7 +555,7 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 // opts.Codec and opts.WeightCodec must not be nil.
 func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithOptionsCapped")()
-	return &Store[N, W]{
+	s := &Store[N, W]{
 		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
@@ -505,6 +563,9 @@ func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wa
 		wcodec:    opts.WeightCodec,
 		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
+	s.applyCond = sync.NewCond(&s.applyMu)
+	s.inflightCond = sync.NewCond(&s.inflightMu)
+	return s
 }
 
 // Codec returns the [Codec] installed on the Store. The returned value
@@ -599,7 +660,52 @@ func (s *Store[N, W]) RunUnderCommitLock(fn func() error) error {
 	// guaranteed and the deferred release is always paired with it.
 	_ = s.acquire(context.Background())
 	defer s.release()
+	// Drain in-flight group commits before running fn. Holding the semaphore
+	// excludes any NEW commit from appending and bumping inflight; once the
+	// semaphore is held, every committer that already released it has its
+	// inflight increment visible (the increment happens-before the release).
+	// Waiting for inflight==0 therefore guarantees no SyncGroup (flush+fsync)
+	// is in flight when fn (e.g. wal.Close / wal.Truncate) runs, restoring the
+	// quiesce boundary the semaphore alone no longer provides under group
+	// commit. The wait is uncancellable, matching the acquire above.
+	s.drainInflight()
 	return fn()
+}
+
+// markInflight registers a committer as in-flight (past the append phase,
+// pending its SyncGroup + apply). It MUST be called while the single-writer
+// semaphore is still held, immediately before [Tx.releaseAfterAppend], so the
+// increment happens-before the release and is visible to any
+// [Store.RunUnderCommitLock] that subsequently acquires the semaphore.
+func (s *Store[N, W]) markInflight() {
+	s.inflightMu.Lock()
+	s.inflight++
+	s.inflightMu.Unlock()
+}
+
+// doneInflight clears the in-flight registration of a committer that has
+// finished its entire commit (SyncGroup returned and the apply gate advanced).
+// It broadcasts when the count reaches zero so a draining
+// [Store.RunUnderCommitLock] is woken. It must be called exactly once for every
+// [Store.markInflight].
+func (s *Store[N, W]) doneInflight() {
+	s.inflightMu.Lock()
+	s.inflight--
+	if s.inflight == 0 {
+		s.inflightCond.Broadcast()
+	}
+	s.inflightMu.Unlock()
+}
+
+// drainInflight blocks until no group commit is in flight. The caller must hold
+// the single-writer semaphore so no new commit can start; the wait is
+// uncancellable.
+func (s *Store[N, W]) drainInflight() {
+	s.inflightMu.Lock()
+	for s.inflight != 0 {
+		s.inflightCond.Wait()
+	}
+	s.inflightMu.Unlock()
 }
 
 // Begin opens a new transaction. The returned Tx holds the
@@ -926,12 +1032,71 @@ func (t *Tx[N, W]) Commit() error {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return ErrTxFinished
 	}
-	defer t.release()
 
-	if err := t.appendAndSync(); err != nil {
-		metrics.IncCounter("store.txn.Commit.errors", 1)
-		return err
+	// Group-commit phase 1 — APPEND under the single-writer semaphore: cap
+	// check, mint the transaction sequence, encode and append every op frame
+	// plus the OpCommit marker. The semaphore is released the instant the
+	// append completes (releaseAfterAppend) so the next transaction can Begin
+	// and append while this one fsyncs — the precondition for fsync coalescing
+	// (#1507). The on-disk frame order is unchanged (still serialised by the
+	// semaphore in sequence order).
+	seq, hasSeq, appendErr := t.appendOnly()
+	// Pair the in-flight registration appendOnly made: cleared only after the
+	// entire commit (SyncGroup + apply gate) below has finished, so a draining
+	// RunUnderCommitLock never closes the WAL mid-fsync.
+	defer t.store.doneInflight()
+
+	if !hasSeq {
+		// No sequence was minted (empty commit, or the cap-check rejection
+		// which writes nothing). It never enters the apply gate. An empty
+		// commit still flushes any prior buffered tail; the cap rejection
+		// returns its error without I/O.
+		if appendErr != nil {
+			metrics.IncCounter("store.txn.Commit.errors", 1)
+			return appendErr
+		}
+		if syncErr := t.store.wal.SyncGroup(); syncErr != nil {
+			metrics.IncCounter("store.txn.Commit.errors", 1)
+			return syncErr
+		}
+		return nil
 	}
+
+	// A sequence was minted (hasSeq). It MUST advance the apply gate exactly
+	// once, in every outcome below (append error, fsync failure, apply error,
+	// or success), or a gap would wedge every higher-sequence committer.
+
+	// Group-commit phase 2 — DURABILITY with the semaphore free: a single
+	// coalesced fsync covers this transaction's marker and every other
+	// concurrently-buffered committer's frames. Returns only after the fsync
+	// covering this marker has completed (durable-before-visible), or fails the
+	// whole group on a sync error (poison fails all). If the append itself
+	// failed we still run SyncGroup so a poisoned writer surfaces the sticky
+	// error to this committer too; either way this transaction will not apply.
+	syncErr := t.store.wal.SyncGroup()
+
+	// Group-commit phase 3 — APPLY in sequence order. Wait until every
+	// lower-sequence transaction has applied (or been skipped), so the
+	// in-memory view is mutated in WAL order and no Graph.View reader observes
+	// an out-of-order or pre-durable state.
+	t.waitApplyTurn(seq)
+	defer t.advanceApply(seq)
+
+	if appendErr != nil {
+		// The append did not complete (encode/append failure). No durable,
+		// fully-marked transaction exists; do not apply. Surface the append
+		// error (the primary cause); the writer is typically poisoned, so
+		// syncErr would echo it.
+		metrics.IncCounter("store.txn.Commit.errors", 1)
+		return appendErr
+	}
+	if syncErr != nil {
+		// The shared fsync failed: this transaction is NOT durable (its frames
+		// were discarded by the writer's poison/truncate). Do not apply.
+		metrics.IncCounter("store.txn.Commit.errors", 1)
+		return syncErr
+	}
+
 	// Apply to the in-memory graph after durability is secured, under the
 	// graph's visibility barrier (ApplyAtomically) so the whole transaction's
 	// writes flip visible to Graph.View readers as one atomic step — no
@@ -961,60 +1126,159 @@ func (t *Tx[N, W]) Commit() error {
 // already applied mutations eagerly (e.g. [walMutatorAdapter]) and only
 // needs WAL durability without a second in-memory pass. It uses the same
 // atomic v3 framing as [Tx.Commit] for typed stores.
+//
+// It performs no in-memory apply of its own, but it STILL advances the
+// sequence-ordered apply gate for the sequence it mints. The gate tracks the
+// dense per-store transaction sequence shared by [Tx.Commit] and CommitWALOnly;
+// if CommitWALOnly minted a sequence without advancing the gate, a later
+// [Tx.Commit] on the same store would wait on appliedSeq forever. Taking the
+// turn and immediately advancing (applying nothing) keeps the chain dense
+// whether or not the two commit paths are mixed on one store. The caller (the
+// Cypher engine's commitUnderBarrier, #1281) has already applied the mutations
+// eagerly inside the visibility barrier, and CommitWALOnly returning only after
+// the covering fsync preserves durable-before-visible.
 func (t *Tx[N, W]) CommitWALOnly() error {
 	defer metrics.Time("store.txn.CommitWALOnly")()
 	if t.finished {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 		return ErrTxFinished
 	}
-	defer t.release()
 
-	if err := t.appendAndSync(); err != nil {
+	seq, hasSeq, appendErr := t.appendOnly()
+	defer t.store.doneInflight()
+	if !hasSeq {
+		if appendErr != nil {
+			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+			return appendErr
+		}
+		if err := t.store.wal.SyncGroup(); err != nil {
+			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+			return err
+		}
+		return nil
+	}
+	syncErr := t.store.wal.SyncGroup()
+	// A sequence was minted: take its apply-gate turn and advance it, applying
+	// nothing, so the dense chain stays intact for any Commit on this store.
+	t.waitApplyTurn(seq)
+	t.advanceApply(seq)
+	if appendErr != nil {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
-		return err
+		return appendErr
+	}
+	if syncErr != nil {
+		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+		return syncErr
 	}
 	return nil
 }
 
-// appendAndSync writes the transaction's ops to the WAL and fsyncs them.
+// waitApplyTurn blocks until the in-memory apply of every transaction with a
+// lower sequence than seq has completed (appliedSeq == seq-1), so this
+// transaction applies in WAL/sequence order. Sequences are dense and assigned
+// under the single-writer semaphore, so the predecessor is always exactly
+// seq-1. See the apply-gate fields on [Store].
+func (t *Tx[N, W]) waitApplyTurn(seq uint64) {
+	s := t.store
+	s.applyMu.Lock()
+	for s.appliedSeq != seq-1 {
+		s.applyCond.Wait()
+	}
+	s.applyMu.Unlock()
+}
+
+// advanceApply marks seq's apply step complete and wakes the committer waiting
+// on seq+1. It must be called exactly once for every sequence whose turn was
+// taken via [Tx.waitApplyTurn], in every outcome (success, apply error, or
+// fsync failure) — otherwise a failed transaction would wedge the apply chain
+// behind it.
+func (t *Tx[N, W]) advanceApply(seq uint64) {
+	s := t.store
+	s.applyMu.Lock()
+	s.appliedSeq = seq
+	s.applyCond.Broadcast()
+	s.applyMu.Unlock()
+}
+
+// appendOnly performs group-commit phase 1: it encodes and appends every
+// buffered op to the WAL (without fsyncing) and then RELEASES the single-writer
+// semaphore so the next transaction can append while this one fsyncs. It is the
+// append half of the old appendAndSync; the fsync is now a separate, coalesced
+// step ([wal.Writer.SyncGroup]) the caller runs with the semaphore free.
 //
-// Every op is encoded as a v3 frame carrying a fresh per-transaction
-// sequence ([Store.txnSeq]), and an [OpCommit] marker frame for the same
-// sequence is appended after the last op; a single [wal.Writer.Sync] then
-// makes the whole batch durable. The marker is the atomicity boundary:
-// bufio may auto-flush a prefix of frames to the OS before the Sync, but
-// that is benign — durability is gated on the fsync, and recovery discards
-// any op frames not followed by a durable matching marker, so a torn batch
-// recovers all-or-nothing.
-func (t *Tx[N, W]) appendAndSync() error {
+// Every op is encoded as a v3 frame carrying a fresh per-transaction sequence
+// ([Store.txnSeq]) assigned under the semaphore, and an [OpCommit] marker frame
+// for the same sequence is appended after the last op. The on-disk frame order
+// is therefore unchanged from the per-commit path — each transaction's ops are
+// contiguous in sequence order, followed by its marker — so recovery's
+// all-or-nothing replay is unaffected.
+//
+// The return values:
+//   - seq is the assigned transaction sequence (valid only when hasSeq is true);
+//   - hasSeq is true once a sequence has been MINTED (txnSeq.Add) — true for any
+//     non-empty transaction, even one whose subsequent encode/append failed. A
+//     minted sequence MUST take its turn in the apply gate and advance it, or a
+//     gap in the dense sequence chain would wedge every higher-sequence
+//     committer; the caller therefore enters the gate whenever hasSeq is true
+//     and decides whether to apply based on err and the SyncGroup result.
+//     hasSeq is false only for an empty commit and for the cap-check rejection,
+//     both of which mint no sequence.
+//   - err is non-nil when the cap check, encoding, or append failed.
+//
+// The semaphore is released exactly once, on every path, via
+// releaseAfterAppend; the Tx is marked finished at the same time.
+//
+// markInflight is called here, while the semaphore is still held, so the commit
+// is registered as in-flight BEFORE the semaphore is released — the happens-
+// before that lets [Store.RunUnderCommitLock] observe it (#1507 quiesce
+// boundary). The caller MUST pair it with exactly one [Store.doneInflight] once
+// the whole commit (SyncGroup + apply gate) finishes.
+func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
+	t.store.markInflight()
 	if len(t.ops) == 0 {
-		// Empty commit: preserve the historical no-op-with-Sync behaviour
-		// (flush any prior buffered tail) without writing a lone marker.
-		return t.store.wal.Sync()
+		// Empty commit: mint no sequence and write no marker. The caller still
+		// runs SyncGroup to flush any prior buffered tail (the historical
+		// no-op-with-Sync behaviour), then applies nothing.
+		t.releaseAfterAppend()
+		return 0, false, nil
 	}
 	// Bounded resources / Durability: reject an over-cap transaction BEFORE
-	// writing any frame, so a transaction recovery could not replay without
-	// unbounded buffering is never made durable. The producer cap is <= the
-	// recovery cap, so every transaction that passes here is guaranteed to
-	// fit recovery's buffer (see [ErrTransactionTooLarge], [DefaultMaxTxnOps]).
+	// minting a sequence or writing any frame, so a transaction recovery could
+	// not replay without unbounded buffering is never made durable and never
+	// consumes a sequence slot. The producer cap is <= the recovery cap, so
+	// every transaction that passes here is guaranteed to fit recovery's buffer
+	// (see [ErrTransactionTooLarge], [DefaultMaxTxnOps]).
 	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
-		metrics.IncCounter("store.txn.appendAndSync.txnTooLarge", 1)
-		return fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
+		t.releaseAfterAppend()
+		return 0, false, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
 	}
-	seq := t.store.txnSeq.Add(1)
+	// Mint the sequence. From here hasSeq is true on every return: the sequence
+	// is consumed, so the caller must advance the apply gate past it even if the
+	// append below fails (a gap would deadlock the dense sequence chain). A
+	// partial append is harmless on disk — recovery discards any frames not
+	// followed by a durable matching OpCommit marker — and the err makes the
+	// caller skip the in-memory apply.
+	seq = t.store.txnSeq.Add(1)
 	for _, op := range t.ops {
 		payload, enErr := encodeOpTypedV3(op, seq, t.store.codec, t.store.wcodec)
 		if enErr != nil {
-			return enErr
+			t.releaseAfterAppend()
+			return seq, true, enErr
 		}
-		if err := t.store.wal.Append(payload); err != nil {
-			return err
+		if aerr := t.store.wal.Append(payload); aerr != nil {
+			t.releaseAfterAppend()
+			return seq, true, aerr
 		}
 	}
-	if err := t.store.wal.Append(encodeCommitV3(seq)); err != nil {
-		return err
+	if aerr := t.store.wal.Append(encodeCommitV3(seq)); aerr != nil {
+		t.releaseAfterAppend()
+		return seq, true, aerr
 	}
-	return t.store.wal.Sync()
+	// Frames + marker are buffered. Release the semaphore so the next
+	// transaction can append while this one fsyncs (group-commit coalescing).
+	t.releaseAfterAppend()
+	return seq, true, nil
 }
 
 // Rollback discards buffered ops without touching the WAL or graph.
@@ -1024,17 +1288,26 @@ func (t *Tx[N, W]) Rollback() error {
 		metrics.IncCounter("store.txn.Rollback.errors", 1)
 		return ErrTxFinished
 	}
-	t.release()
+	t.releaseAfterAppend()
 	return nil
 }
 
-// release marks the transaction finished and frees the store's
-// single-writer lock. It is called exactly once per transaction, from the
-// deferred release in [Tx.Commit] / [Tx.CommitWALOnly] and from
-// [Tx.Rollback]; the finished guard in those entry points ensures the
-// underlying [Store.release] runs once, so the capacity-one semaphore is
-// never over-released (which would let a second writer in).
-func (t *Tx[N, W]) release() {
+// releaseAfterAppend marks the transaction finished and frees the store's
+// single-writer semaphore, exactly once. It is called from [Tx.appendOnly] (on
+// every path), from [Tx.Rollback], and the entry-point finished guard in
+// Commit/CommitWALOnly/Rollback ensures it is reached once per transaction, so
+// the capacity-one semaphore is never over-released (which would let a second
+// writer in). The idempotency check makes a double call (defensive) a no-op.
+//
+// NOTE: under group commit the semaphore is released here — after the frames
+// are appended but BEFORE the coalesced fsync — so the fsync window no longer
+// holds the writer lock. The fsync's durability and the sequence-ordered
+// in-memory apply are coordinated separately (SyncGroup and the apply gate);
+// they do not depend on the semaphore being held.
+func (t *Tx[N, W]) releaseAfterAppend() {
+	if t.finished {
+		return
+	}
 	t.finished = true
 	t.store.release()
 }
