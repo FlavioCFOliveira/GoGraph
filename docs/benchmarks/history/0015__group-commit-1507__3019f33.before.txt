@@ -1,0 +1,54 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10        	     342	   3674482 ns/op	     732 B/op	      11 allocs/op
+BenchmarkCommit/ops=1-10        	     349	   3733211 ns/op	     729 B/op	      11 allocs/op
+BenchmarkCommit/ops=1-10        	     345	   3706860 ns/op	     730 B/op	      11 allocs/op
+BenchmarkCommit/ops=1-10        	     346	   3664264 ns/op	     730 B/op	      11 allocs/op
+BenchmarkCommit/ops=1-10        	     345	   3674779 ns/op	     730 B/op	      11 allocs/op
+BenchmarkCommit/ops=1-10        	     346	   3644019 ns/op	     730 B/op	      11 allocs/op
+BenchmarkCommit/ops=1-10        	     346	   3644408 ns/op	     731 B/op	      11 allocs/op
+BenchmarkCommit/ops=1-10        	     346	   3655223 ns/op	     730 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10       	     312	   3771884 ns/op	   11652 B/op	     101 allocs/op
+BenchmarkCommit/ops=16-10       	     319	   3799500 ns/op	   11603 B/op	     101 allocs/op
+BenchmarkCommit/ops=16-10       	     318	   3785742 ns/op	   11610 B/op	     101 allocs/op
+BenchmarkCommit/ops=16-10       	     314	   3770401 ns/op	   11632 B/op	     101 allocs/op
+BenchmarkCommit/ops=16-10       	     321	   3800095 ns/op	   11594 B/op	     101 allocs/op
+BenchmarkCommit/ops=16-10       	     316	   3787883 ns/op	   11625 B/op	     101 allocs/op
+BenchmarkCommit/ops=16-10       	     321	   3813273 ns/op	   11595 B/op	     101 allocs/op
+BenchmarkCommit/ops=16-10       	     318	   3789050 ns/op	   11610 B/op	     101 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     346	   3673346 ns/op	     730 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     346	   3687338 ns/op	     732 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     345	   3686866 ns/op	     731 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     346	   3675978 ns/op	     730 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     344	   3685705 ns/op	     731 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     348	   3680779 ns/op	     729 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     345	   3678070 ns/op	     731 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     344	   3691342 ns/op	     731 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     348	   3672228 ns/op	     732 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     344	   3674272 ns/op	     734 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     342	   3674689 ns/op	     736 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     346	   3664991 ns/op	     732 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     346	   3676104 ns/op	     734 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     343	   3670368 ns/op	     735 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     346	   3693523 ns/op	     731 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	     344	   3674184 ns/op	     732 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     342	   3675289 ns/op	     812 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     346	   3684569 ns/op	     771 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     346	   3678729 ns/op	     754 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     343	   3690643 ns/op	     755 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     346	   3679009 ns/op	     756 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     346	   3673029 ns/op	     753 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     337	   3697275 ns/op	     762 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	     333	   3663242 ns/op	     766 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     348	   3672256 ns/op	    1033 B/op	      12 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     343	   3678843 ns/op	     974 B/op	      12 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     349	   3679399 ns/op	     830 B/op	      12 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     345	   3660178 ns/op	     864 B/op	      12 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     343	   3673256 ns/op	     835 B/op	      12 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     346	   3675685 ns/op	     847 B/op	      12 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     346	   3681805 ns/op	     835 B/op	      12 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	     343	   3673129 ns/op	     855 B/op	      12 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/store/txn	78.739s
