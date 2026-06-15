@@ -36,7 +36,27 @@ the new Spec; `Task 1526 -[ABOUT]->` both Features). New edge type
 `DEPENDS_ON (Task)->(Task)` introduced for the streaming-needs-foundation
 dependency. Task #1526 captures the per-shard versioned `Snapshot` root
 (`atomic.Pointer[Snapshot]`) foundation that SI-safe lazy result streaming
-depends on. DATA-QUALITY NOTE: the `CypherEngine` (id 12659) and
+depends on.
+Incrementally synced at commit `9516d52` (2026-06-15, task #1508, sprint 191 —
+non-blocking LSN-watermarked checkpoint with WAL prefix truncation): +12 nodes
+(`Commit` `9516d52`; `Sprint` `191`; `Task` `1508` COMPLETED; new `Method`s on
+`store/wal` `Writer` — `DurableOffset`, `TruncatePrefix`, `poisonAfterRename`,
+`writeSuffixTmp`, `reopenAfterPrefixTruncate` — and on `store/checkpoint`
+`Checkpointer` — `runUnderCommitLock`, `runNonBlocking`, `writeAndTruncate`,
+`truncatePrefixLocked`; plus 9 new `Test` nodes split across `store/wal`
+(`truncate_prefix_test.go`), `store/checkpoint` (`writer_stall_test.go`) and
+`store/recovery` (`checkpoint_crashinject_test.go` — the renamed crash
+scenarios). +many edges: `Sprint 191 -[CONTAINS]-> Commit`; `Task 1508
+-[IMPLEMENTED_IN]-> Commit`; `Commit -[FIXES]->` Features `WAL & Recovery`
+(id 11553) and `ACID Transactions` (id 9736); `Commit -[TOUCHES]->` Packages
+`wal` (249) / `checkpoint` (181) / `recovery` (27); `CONTAINS`/`HAS_METHOD` for
+each new Method; `CONTAINS` for each new Test. Provenance bumped on the `Writer`
+(1677) and `Checkpointer` (956) Types and the three touched Packages. The
+checkpoint now captures the WAL watermark (`wal.Writer.DurableOffset`) + CSR
+under the commit lock, writes the snapshot lock-free, and re-acquires the lock
+to prefix-truncate the WAL via `wal.Writer.TruncatePrefix` (atomic
+copy-suffix-then-rename, never truncate-to-zero). DATA-QUALITY NOTE: the
+`CypherEngine` (id 12659) and
 `ACIDTransactions` (id 9736) Feature nodes carry a hidden interior character
 (`size`=13 and 17 for the 12-/16-char visible names), so `{name:'…'}` equality
 and `STARTS WITH`/`CONTAINS 'CypherEngine'` fail to bind them; match by `id(f)`
