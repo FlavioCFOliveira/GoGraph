@@ -18,6 +18,29 @@ Incrementally synced at commit `257ce96` (2026-06-14, task #1502): +4 nodes
 (`NodePropertiesByIDFunc` Method, `nodePropsToExprMap` Function,
 `TestNodePropertiesByIDFunc_MatchesByID` Test, `BenchmarkNodeReturnToPackstream`
 Benchmark), +5 edges (4 `CONTAINS`, 1 `HAS_METHOD`).
+Incrementally synced at commit `f47b18a` (2026-06-15, task #1506, sprint 190 —
+hash join for disconnected equi-join patterns): +5 nodes (`Commit` `f47b18a`;
+`HashJoin` Type and `NewHashJoin` Function in `cypher/exec`; `tryBuildHashJoin`
+and `hashJoinOrderSafe` Functions in `cypher`), +9 edges (4 `TOUCHES` from the
+commit to packages `cypher`/`exec`/`cypher_ldbc_test` and the `HashJoin` Type,
+1 `FIXES` to the `Cypher Engine` Feature, 4 `CONTAINS` for the new symbols). The
+optimisation is increment A of the optimizer-activation spike (task #1504,
+commit `9fa521b`); the `cypher/ir/rewrite` logical Driver remains unwired.
+Incrementally synced at commit `657d9ba` (2026-06-15, task #1525, sprint 190 —
+result-streaming feasibility spike, DESIGN-ONLY outcome): +4 nodes (`Commit`
+`657d9ba`; `Spec` `docs/result-streaming-design.md`; `Task` `1525` COMPLETED and
+`Task` `1526` BACKLOG); +8 edges (`Task 1525 -[IMPLEMENTED_IN]-> Commit
+657d9ba`; `Task 1525 -[DEPENDS_ON]-> Task 1526`; `Commit 657d9ba -[TOUCHES]->
+Spec`; `CypherEngine` and `ACIDTransactions` Features each `-[SPECIFIED_IN]->`
+the new Spec; `Task 1526 -[ABOUT]->` both Features). New edge type
+`DEPENDS_ON (Task)->(Task)` introduced for the streaming-needs-foundation
+dependency. Task #1526 captures the per-shard versioned `Snapshot` root
+(`atomic.Pointer[Snapshot]`) foundation that SI-safe lazy result streaming
+depends on. DATA-QUALITY NOTE: the `CypherEngine` (id 12659) and
+`ACIDTransactions` (id 9736) Feature nodes carry a hidden interior character
+(`size`=13 and 17 for the 12-/16-char visible names), so `{name:'…'}` equality
+and `STARTS WITH`/`CONTAINS 'CypherEngine'` fail to bind them; match by `id(f)`
+or `CONTAINS 'Cypher'`+`CONTAINS 'Engine'`. Pre-existing; not corrected here.
 
 ---
 
