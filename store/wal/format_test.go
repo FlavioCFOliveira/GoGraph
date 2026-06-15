@@ -8,6 +8,74 @@ import (
 	"testing"
 )
 
+// TestEncode_GoldenBytes pins the exact on-disk byte stream Encode produces
+// for a known frame. It is the byte-identity gate for #1509 (header written
+// from a stack array via two Writes instead of a single concatenated make):
+// the golden vectors below were captured from the pre-#1509 single-buffer
+// implementation and independently cross-checked against a from-scratch
+// CRC32C(Castagnoli) over magic+version+length+payload. Any future change to
+// the framing layout, the CRC input, or byte order will fail here, protecting
+// the WAL's backward compatibility with archives written by earlier releases.
+func TestEncode_GoldenBytes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		payload []byte
+		want    []byte
+	}{
+		{
+			name:    "payload",
+			payload: []byte("hello, gograph"),
+			want: []byte{
+				0x47, 0x47, 0x57, 0x41, // magic GGWA
+				0x01, 0x00, // version 1 (LE)
+				0x0e, 0x00, 0x00, 0x00, // length 14 (LE)
+				0xb2, 0x04, 0x13, 0x80, // crc32c (LE)
+				0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, // "hello, "
+				0x67, 0x6f, 0x67, 0x72, 0x61, 0x70, 0x68, // "gograph"
+			},
+		},
+		{
+			name:    "empty",
+			payload: nil,
+			want: []byte{
+				0x47, 0x47, 0x57, 0x41, // magic GGWA
+				0x01, 0x00, // version 1 (LE)
+				0x00, 0x00, 0x00, 0x00, // length 0 (LE)
+				0xde, 0xba, 0xa0, 0x2a, // crc32c (LE)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			n, err := Encode(&buf, Frame{Payload: tc.payload})
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if n != len(tc.want) {
+				t.Fatalf("Encode wrote %d bytes, want %d", n, len(tc.want))
+			}
+			if !bytes.Equal(buf.Bytes(), tc.want) {
+				t.Fatalf("frame bytes mismatch:\n got %#v\nwant %#v", buf.Bytes(), tc.want)
+			}
+			// The golden frame must still decode cleanly — byte-identity and
+			// round-trip are independent guarantees.
+			out, err := Decode(bytes.NewReader(tc.want))
+			if err != nil {
+				t.Fatalf("Decode golden: %v", err)
+			}
+			// bytes.Equal treats nil and a zero-length slice as equal, so the
+			// empty-payload case (tc.payload == nil, out.Payload == []byte{})
+			// compares equal without a special case.
+			if !bytes.Equal(out.Payload, tc.payload) {
+				t.Fatalf("Decode golden payload = %q, want %q", out.Payload, tc.payload)
+			}
+		})
+	}
+}
+
 func TestEncodeDecode_Roundtrip(t *testing.T) {
 	t.Parallel()
 	in := Frame{Payload: []byte("hello, gograph")}

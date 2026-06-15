@@ -1260,18 +1260,28 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 	// followed by a durable matching OpCommit marker — and the err makes the
 	// caller skip the in-memory apply.
 	seq = t.store.txnSeq.Add(1)
+	// One scratch buffer, borrowed from the pool, is reused for every op frame
+	// and the trailing OpCommit marker. wal.Append copies each encoded payload
+	// into its bufio buffer synchronously, so the scratch is safe to reset and
+	// reuse for the next op (see encodeScratchPool). The buffer is returned to
+	// the pool on every exit path, including encode/append failures.
+	scratch := getEncodeScratch()
+	defer putEncodeScratch(scratch)
 	for _, op := range t.ops {
-		payload, enErr := encodeOpTypedV3(op, seq, t.store.codec, t.store.wcodec)
+		payload, enErr := encodeOpTypedV3Into((*scratch)[:0], op, seq, t.store.codec, t.store.wcodec)
 		if enErr != nil {
 			t.releaseAfterAppend()
 			return seq, true, enErr
 		}
+		*scratch = payload // retain the (possibly grown) backing array for reuse
 		if aerr := t.store.wal.Append(payload); aerr != nil {
 			t.releaseAfterAppend()
 			return seq, true, aerr
 		}
 	}
-	if aerr := t.store.wal.Append(encodeCommitV3(seq)); aerr != nil {
+	marker := encodeCommitV3Into((*scratch)[:0], seq)
+	*scratch = marker
+	if aerr := t.store.wal.Append(marker); aerr != nil {
 		t.releaseAfterAppend()
 		return seq, true, aerr
 	}
@@ -1370,28 +1380,95 @@ func encodeOpTyped[N comparable, W any](op Op[N, W], codec Codec[N], wcodec Weig
 	return appendOpBodyTyped(buf, op, codec, wcodec)
 }
 
+// encodeScratchPool recycles the byte buffers used to serialise WAL op
+// payloads on the commit hot path. Each [Tx.appendOnly] op borrows a buffer,
+// the codec encoders append the payload into it, [wal.Writer.Append] copies
+// that payload into its bufio buffer SYNCHRONOUSLY (bufio.Writer.Write copies
+// into its internal buffer before returning), and the buffer is then reset to
+// length 0 (its capacity retained) and returned to the pool for the next op.
+//
+// Reuse is safe precisely because Append's copy completes before the borrow
+// returns: no reference to the buffer's backing array survives the Append call,
+// so the next op's encode cannot observe or corrupt a frame already handed to
+// the WAL. This mirrors RocksDB's reused WriteBatch rep buffer — one scratch
+// buffer amortised across a transaction's ops and across transactions — and
+// removes the per-op `make([]byte, …)` that the txn layer previously paid for
+// every frame (#1509).
+//
+// The pool holds *[]byte (not []byte) so a Put stores no allocation: a []byte
+// placed in a sync.Pool directly would box the slice header on every Put.
+var encodeScratchPool = sync.Pool{
+	New: func() any {
+		// 256 bytes covers the overwhelming majority of op frames (version +
+		// kind + txnSeq + endpoints + a short label/property) without a grow,
+		// matching the historical `headroom + len(label) + 32` sizing. Larger
+		// payloads grow the buffer once and that larger capacity is retained
+		// in the pool, so the steady state is allocation-free.
+		b := make([]byte, 0, 256)
+		return &b
+	},
+}
+
+// getEncodeScratch borrows a zero-length, capacity-retaining scratch buffer.
+func getEncodeScratch() *[]byte {
+	return encodeScratchPool.Get().(*[]byte)
+}
+
+// putEncodeScratch resets the buffer to length 0 (retaining its grown
+// capacity) and returns it to the pool. The caller must hold no live reference
+// to the buffer's contents — true on the commit path because [wal.Writer.Append]
+// has already copied the payload synchronously before this is called.
+func putEncodeScratch(b *[]byte) {
+	*b = (*b)[:0]
+	encodeScratchPool.Put(b)
+}
+
+// encodeOpTypedV3Into serialises one op to a v3 ([OpRecordV3]) WAL payload,
+// appending into the supplied buffer (which must be length 0) and returning the
+// extended slice. It is the pool-aware sibling of [encodeOpTypedV3]: the byte
+// layout produced is identical (version + kind + 8-byte txnSeq + v2 body), so
+// the on-disk frame is byte-for-byte the same regardless of which encoder built
+// the payload.
+func encodeOpTypedV3Into[N comparable, W any](buf []byte, op Op[N, W], seq uint64, codec Codec[N], wcodec WeightCodec[W]) ([]byte, error) {
+	buf = append(buf, OpRecordV3, byte(op.Kind))
+	buf = binary.LittleEndian.AppendUint64(buf, seq)
+	return appendOpBodyTyped(buf, op, codec, wcodec)
+}
+
+// encodeCommitV3Into serialises the [OpCommit] marker into the supplied buffer
+// (which must be length 0), returning the extended slice. Pool-aware sibling of
+// [encodeCommitV3]; the bytes produced are identical.
+func encodeCommitV3Into(buf []byte, seq uint64) []byte {
+	buf = append(buf, OpRecordV3, byte(OpCommit))
+	return binary.LittleEndian.AppendUint64(buf, seq)
+}
+
 // encodeOpTypedV3 serialises one op to a v3 ([OpRecordV3]) WAL payload:
 // the v2 header (version + kind) plus an 8-byte little-endian transaction
 // sequence, followed by the byte-identical v2 body for that kind. The
 // sequence groups a transaction's frames so recovery can apply them
 // atomically (see [OpRecordV3] and [OpCommit]).
+//
+// It is the allocating convenience form of [encodeOpTypedV3Into]: it mints a
+// fresh, exactly-sized buffer and delegates, so the bytes it returns are
+// identical to the pooled commit path's. The commit hot path uses the Into
+// form against a pooled buffer (#1509); this form remains the canonical,
+// self-contained reference encoder (it is exercised by the byte-identity test).
 func encodeOpTypedV3[N comparable, W any](op Op[N, W], seq uint64, codec Codec[N], wcodec WeightCodec[W]) ([]byte, error) {
 	const headroom = 2 + 8 + 2 // version + kind + txnSeq + uint16 labelLen
 	buf := make([]byte, 0, headroom+len(op.Label)+32)
-	buf = append(buf, OpRecordV3, byte(op.Kind))
-	buf = binary.LittleEndian.AppendUint64(buf, seq)
-	return appendOpBodyTyped(buf, op, codec, wcodec)
+	return encodeOpTypedV3Into(buf, op, seq, codec, wcodec)
 }
 
 // encodeCommitV3 serialises the [OpCommit] marker for a v3 transaction:
 // version + kind + the transaction sequence, with no body. Recovery
 // applies the buffered ops carrying the same sequence when it reads this
 // frame; a torn write that loses it discards the whole transaction.
+//
+// Allocating convenience form of [encodeCommitV3Into]; the bytes are identical.
 func encodeCommitV3(seq uint64) []byte {
 	buf := make([]byte, 0, 2+8)
-	buf = append(buf, OpRecordV3, byte(OpCommit))
-	buf = binary.LittleEndian.AppendUint64(buf, seq)
-	return buf
+	return encodeCommitV3Into(buf, seq)
 }
 
 // appendOpBodyTyped appends the codec-encoded body for op to buf (which

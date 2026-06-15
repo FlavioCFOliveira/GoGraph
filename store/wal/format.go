@@ -82,22 +82,40 @@ func Encode(w io.Writer, f Frame) (int, error) {
 	}
 	plen := uint32(len(f.Payload))
 
-	header := make([]byte, HeaderSize+len(f.Payload))
+	// Build the 14-byte header on the stack — no per-frame heap allocation.
+	// The frame stream is written as two contiguous Writes (header then
+	// payload) instead of one concatenated buffer; the on-disk bytes are
+	// byte-for-byte identical because the header layout and the CRC input
+	// are unchanged (see below). The previous implementation allocated a
+	// fresh HeaderSize+len(payload) slice per frame and copied the payload
+	// into it; that allocation and copy are removed here (#1509).
+	var header [HeaderSize]byte
 	copy(header[0:4], Magic[:])
 	binary.LittleEndian.PutUint16(header[4:6], f.Version)
 	binary.LittleEndian.PutUint32(header[6:10], plen)
-	// CRC is over magic+version+length+payload. Reserve crc field
-	// (zeroed) while computing.
-	copy(header[14:], f.Payload)
+	// CRC is over magic+version+length+payload — the 4 crc bytes at
+	// header[10:14] are NOT part of the input, exactly as before. Computing
+	// it incrementally over header[0:10] then the payload reproduces the
+	// identical checksum the single-buffer path produced.
 	crc := crc32.Update(0, castagnoli, header[0:10])
-	crc = crc32.Update(crc, castagnoli, header[14:])
+	crc = crc32.Update(crc, castagnoli, f.Payload)
 	binary.LittleEndian.PutUint32(header[10:14], crc)
 
-	n, err := w.Write(header)
+	// Write the header, then the payload. bufio.Writer (the production
+	// sink in Writer.Append) copies each Write into its internal buffer
+	// synchronously before returning, so the caller's payload slice is
+	// fully consumed when Encode returns — this is what makes the pooled
+	// txn-layer scratch buffer safe to reuse for the next op (#1509).
+	nh, err := w.Write(header[:])
+	if err != nil {
+		metrics.IncCounter("store.wal.Encode.errors", 1)
+		return nh, err
+	}
+	np, err := w.Write(f.Payload)
 	if err != nil {
 		metrics.IncCounter("store.wal.Encode.errors", 1)
 	}
-	return n, err
+	return nh + np, err
 }
 
 // Decode reads the next frame from r. It returns ErrTornFrame when
