@@ -91,12 +91,27 @@ CSV_OUT="$("$BENCHSTAT" -format csv "$BASE" "$HEAD" 2>/dev/null)"
 # seen contained "sec/op".  Allocation tables (B/op, allocs/op) are
 # logged but do not fail the gate.
 REGRESSIONS=0
+current_unit=""   # which benchstat metric table we are inside (sec/op, B/op, allocs/op, B/s)
 
 while IFS=',' read -r name _base_val _base_ci _head_val _head_ci vsbase _pval; do
-  # Skip blank lines, goos/goarch/pkg header lines, and column-header rows.
+  # Detect a metric-table header row (empty name, "vs base" in the delta
+  # column) and capture its unit FIRST — benchstat emits one table per metric
+  # and the unit lives in the header row's second field. This must run before
+  # the empty-name skip below, since the header row also has an empty name.
+  if [[ -z "$name" && "$vsbase" == "vs base" ]]; then
+    current_unit="$_base_val"
+    continue
+  fi
+
+  # Skip blank lines, goos/goarch/pkg header lines, and path rows.
   [[ -z "$name" ]] && continue
   [[ "$name" == goos* || "$name" == goarch* || "$name" == pkg* ]] && continue
-  [[ "$vsbase" == "vs base" ]] && continue
+
+  # Only the sec/op table fails the gate. B/op and allocs/op are logged but do
+  # not fail here (the bench-history guard band covers allocations); B/s is the
+  # SetBytes throughput table, where a positive delta is an IMPROVEMENT, not a
+  # regression — failing on it was a latent bug surfaced by SetBytes benchmarks.
+  [[ "$current_unit" != "sec/op" ]] && continue
 
   # Skip the geomean aggregate row — individual rows already catch it.
   [[ "$name" == geomean* ]] && continue

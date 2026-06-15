@@ -48,6 +48,26 @@ BenchmarkDijkstra_PostWarmup-8   1000   $((ns + 200)) ns/op   512 B/op   8 alloc
 EOF
 }
 
+# Writes 6 samples of a SetBytes benchmark: <ns> ns/op plus a <mbs> MB/s
+# throughput column (which makes benchstat emit a separate B/s metric table,
+# where a positive delta is an IMPROVEMENT, not a regression).
+write_bench_setbytes() {
+  local file="$1"
+  local ns="$2"
+  local mbs="$3"
+  cat > "$file" <<EOF
+goos: linux
+goarch: amd64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+BenchmarkWALEncode-8   1000   $((ns + 0)) ns/op   ${mbs}.0 MB/s   16 B/op   1 allocs/op
+BenchmarkWALEncode-8   1000   $((ns + 100)) ns/op   ${mbs}.0 MB/s   16 B/op   1 allocs/op
+BenchmarkWALEncode-8   1000   $((ns - 100)) ns/op   ${mbs}.0 MB/s   16 B/op   1 allocs/op
+BenchmarkWALEncode-8   1000   $((ns + 50)) ns/op   ${mbs}.0 MB/s   16 B/op   1 allocs/op
+BenchmarkWALEncode-8   1000   $((ns - 50)) ns/op   ${mbs}.0 MB/s   16 B/op   1 allocs/op
+BenchmarkWALEncode-8   1000   $((ns + 20)) ns/op   ${mbs}.0 MB/s   16 B/op   1 allocs/op
+EOF
+}
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -121,6 +141,16 @@ sed 's/BenchmarkDijkstra_PostWarmup/BenchmarkDijkstra_Renamed/g' \
   "$TMPDIR/base.txt" > "$TMPDIR/head_renamed.txt"
 check "headline benchmark renamed in head FAILs" fail \
   bash "$GATE" "$TMPDIR/base.txt" "$TMPDIR/head_renamed.txt" 10
+
+# ── Test 8: SetBytes throughput improvement must NOT fail the gate ────────────
+# Regression guard for the B/s-table bug (#1509): a SetBytes benchmark that gets
+# FASTER (sec/op -50%) emits a B/s throughput table with a large POSITIVE delta
+# (+100%). The gate must scope its check to the sec/op table only and PASS here;
+# the pre-fix gate misread the +100% B/s delta as a slow-down and FAILed.
+write_bench_setbytes "$TMPDIR/sb_base.txt" 1000   100   # 1000 ns/op, 100 MB/s
+write_bench_setbytes "$TMPDIR/sb_head.txt" 500    200   # 500 ns/op (faster), 200 MB/s (higher)
+check "SetBytes throughput improvement passes (sec/op -50%, B/s +100%)" pass \
+  bash "$GATE" "$TMPDIR/sb_base.txt" "$TMPDIR/sb_head.txt" 10
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo
