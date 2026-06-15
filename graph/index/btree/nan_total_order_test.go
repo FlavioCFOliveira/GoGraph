@@ -31,15 +31,23 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
-// sortedInvariantHolds reports whether the entries array is strictly
-// ascending under the [cmp.Compare] total order — the precondition
-// every sort.Search call in this package depends on.
+// sortedInvariantHolds reports whether the B+ tree's leaf chain is
+// strictly ascending under the [cmp.Compare] total order — the
+// precondition every lower-bound search in this package depends on. It
+// walks the leaves low→high (the same order Serialize and Range use) and
+// checks each key against the previous one across leaf boundaries.
 func sortedInvariantHolds[V cmp.Ordered](i *Index[V]) bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	for k := 1; k < len(i.entries); k++ {
-		if cmp.Compare(i.entries[k-1].value, i.entries[k].value) >= 0 {
-			return false
+	var prev V
+	hasPrev := false
+	for l := i.tree.first; l != nil; l = l.next {
+		for k := range l.keys {
+			if hasPrev && cmp.Compare(prev, l.keys[k]) >= 0 {
+				return false
+			}
+			prev = l.keys[k]
+			hasPrev = true
 		}
 	}
 	return true

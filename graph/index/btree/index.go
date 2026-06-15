@@ -2,16 +2,24 @@
 // constraints.Ordered value type, answering range predicates against
 // the NodeIDs that carry each value.
 //
-// The v1 implementation is a sorted-array index — sufficient to meet
-// the Sprint 2 acceptance criteria (sub-microsecond Range first-
-// result on a 10^7-element index, multi-million-entry bulk-load in
-// seconds). The public API is designed so that a future replacement
-// with a fan-out-tuned B+ tree (or skip list) can land without
-// breaking callers; per-key Insert is O(n) today and should be
-// avoided on the hot path in favour of [Index.BulkLoad].
+// The implementation is a cache-friendly in-memory B+ tree (task
+// #1514): all (value, NodeID-set) data lives in the leaves, internal
+// nodes hold separator keys + child pointers, and leaves are singly
+// linked low→high for forward range scans. Insert and Delete of a
+// distinct key are O(log n); point reads (Lookup, Cardinality) are
+// O(log n); a range scan is O(log n + k) over the k keys it spans; and
+// [Index.BulkLoad] builds the tree bottom-up in O(n) from sorted input.
+// This replaces the original sorted-array index, whose per-key Insert
+// and Delete were O(n) (an array shift) — the win is on write-heavy
+// indexed workloads while every read path keeps its prior complexity.
+// The tree internals live in bplus.go.
 //
 // All operations are safe for concurrent use; a single [sync.RWMutex]
-// guards the array.
+// guards the tree for the whole duration of each operation. Because the
+// mutex fully excludes a writer's split/unlink from any in-flight
+// reader, a reader can never observe a half-applied split or a dangling
+// leaf. The mutex provides index-internal isolation only; transaction
+// isolation across multiple calls is the engine's responsibility.
 //
 // # Key ordering
 //
@@ -55,16 +63,11 @@ import (
 // validation failure.
 var ErrMismatchedLengths = errors.New("btree: values and nodes slices must have the same length")
 
-// entry is one (value, set-of-nodes) record in the sorted array.
-type entry[V cmp.Ordered] struct {
-	value V
-	bm    *roaring64.Bitmap
-}
-
-// Index is an order-preserving property index keyed by V.
+// Index is an order-preserving property index keyed by V, backed by an
+// in-memory B+ tree (see bplus.go).
 type Index[V cmp.Ordered] struct {
-	mu      sync.RWMutex
-	entries []entry[V]
+	mu   sync.RWMutex
+	tree *bplus[V]
 
 	// binding, when non-nil, ties the index to one (label, property) pair of
 	// a live node graph so [Index.Apply] can translate [index.Change] events
@@ -75,7 +78,7 @@ type Index[V cmp.Ordered] struct {
 }
 
 // New returns an empty index.
-func New[V cmp.Ordered]() *Index[V] { return &Index[V]{} }
+func New[V cmp.Ordered]() *Index[V] { return &Index[V]{tree: newBplus[V]()} }
 
 // BulkLoad replaces the contents of the index with the given
 // (value, node) pairs in O(n log n) time. The pairs slice is left
@@ -102,7 +105,8 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 	// the grouping loop below would never advance past a NaN pair
 	// (NaN == NaN is false), appending empty entries forever.
 	sort.Slice(pairs, func(a, b int) bool { return cmp.Less(pairs[a].v, pairs[b].v) })
-	out := make([]entry[V], 0, len(pairs))
+	keys := make([]V, 0, len(pairs))
+	bms := make([]*roaring64.Bitmap, 0, len(pairs))
 	for k := 0; k < len(pairs); {
 		j := k
 		bm := roaring64.New()
@@ -110,11 +114,14 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 			bm.Add(uint64(pairs[j].n))
 			j++
 		}
-		out = append(out, entry[V]{value: pairs[k].v, bm: bm})
+		keys = append(keys, pairs[k].v)
+		bms = append(bms, bm)
 		k = j
 	}
+	tree := newBplus[V]()
+	tree.bulkPack(keys, bms)
 	i.mu.Lock()
-	i.entries = out
+	i.tree = tree
 	i.mu.Unlock()
 	return nil
 }
@@ -135,58 +142,36 @@ func equalKeys[V cmp.Ordered](a, b V) bool {
 	return a == b
 }
 
-// Lower-bound search strategy (shared by every method below): the
-// entries array is strictly ascending under the [cmp.Compare] total
-// order, so the optional NaN entry — the minimum of that order, with
-// all NaN bit patterns deduplicated — can only sit at index 0. A NaN
-// probe therefore needs no search: its lower bound is always 0, which
-// each call site gets for free from the zero value of idx/start. For
-// a non-NaN probe the raw >= predicate coincides with the total order
-// over this array — it is false for the leading NaN entry exactly as
-// it is for smaller real keys — so the hot sort.Search loop keeps the
-// single-comparison probe the pre-#1354 code had, with no per-probe
-// NaN checks and no extra call frame.
+// Lower-bound search strategy (shared by every method below): the B+
+// tree is ordered under the [cmp.Compare] total order, and every
+// descent and leaf search goes through that same comparator (keyCompare
+// / keyLess in bplus.go). The total order places the single deduplicated
+// NaN key before every other value — including -Inf — so it falls out as
+// the leftmost key with no special-casing in the tree mechanics: a NaN
+// probe lands on it like any other key, and any non-NaN lower bound
+// excludes it because NaN < every real key. The NaN rule lives entirely
+// inside the comparator (task #1354).
 
 // Insert records that node carries value. Keys follow the total
 // order described in the package documentation, so a floating-point
 // NaN is a valid key: it sorts before every other value and all NaN
-// bit patterns share one entry.
+// bit patterns share one entry. Inserting a new distinct key is
+// O(log n).
 func (i *Index[V]) Insert(value V, node graph.NodeID) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	var idx int
-	if !isNaN(value) {
-		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	}
-	if idx < len(i.entries) && equalKeys(i.entries[idx].value, value) {
-		i.entries[idx].bm.Add(uint64(node))
-		return
-	}
-	bm := roaring64.New()
-	bm.Add(uint64(node))
-	i.entries = append(i.entries, entry[V]{})
-	copy(i.entries[idx+1:], i.entries[idx:len(i.entries)-1])
-	i.entries[idx] = entry[V]{value: value, bm: bm}
+	i.tree.insert(value, uint64(node))
 }
 
 // Delete removes node from the set associated with value. No-op when
 // absent. The (value, bitmap) entry is removed when its bitmap
-// becomes empty. Like [Index.Insert], value is matched under the
-// total order, so Delete addresses a NaN-keyed entry.
+// becomes empty, and a leaf that becomes entirely empty is unlinked
+// (see the delete policy in bplus.go). Like [Index.Insert], value is
+// matched under the total order, so Delete addresses a NaN-keyed entry.
 func (i *Index[V]) Delete(value V, node graph.NodeID) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	var idx int
-	if !isNaN(value) {
-		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	}
-	if idx >= len(i.entries) || !equalKeys(i.entries[idx].value, value) {
-		return
-	}
-	i.entries[idx].bm.Remove(uint64(node))
-	if i.entries[idx].bm.IsEmpty() {
-		i.entries = append(i.entries[:idx], i.entries[idx+1:]...)
-	}
+	i.tree.remove(value, uint64(node))
 }
 
 // RangeFirst returns the first NodeID in the smallest indexed value
@@ -203,15 +188,12 @@ func (i *Index[V]) RangeFirst(lo, hi V) (V, graph.NodeID, bool) {
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	var start int
-	if !isNaN(lo) {
-		start = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
-	}
-	if start >= len(i.entries) || cmp.Less(hi, i.entries[start].value) {
+	l, off := i.tree.lowerBound(lo)
+	if l == nil || cmp.Less(hi, l.keys[off]) {
 		return zeroV, 0, false
 	}
-	first := i.entries[start].bm.Minimum()
-	return i.entries[start].value, graph.NodeID(first), true
+	first := l.bms[off].Minimum()
+	return l.keys[off], graph.NodeID(first), true
 }
 
 // Range returns a Roaring bitmap that is the union of the per-value
@@ -226,12 +208,15 @@ func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	var start int
-	if !isNaN(lo) {
-		start = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
-	}
-	for k := start; k < len(i.entries) && !cmp.Less(hi, i.entries[k].value); k++ {
-		out.Or(i.entries[k].bm)
+	l, off := i.tree.lowerBound(lo)
+	for l != nil {
+		for k := off; k < len(l.keys); k++ {
+			if cmp.Less(hi, l.keys[k]) {
+				return out
+			}
+			out.Or(l.bms[k])
+		}
+		l, off = l.next, 0
 	}
 	return out
 }
@@ -242,14 +227,11 @@ func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	var idx int
-	if !isNaN(value) {
-		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	}
-	if idx >= len(i.entries) || !equalKeys(i.entries[idx].value, value) {
+	bm := i.tree.get(value)
+	if bm == nil {
 		return roaring64.New()
 	}
-	return i.entries[idx].bm.Clone()
+	return bm.Clone()
 }
 
 // Cardinality returns the number of NodeIDs associated with value,
@@ -257,22 +239,19 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 func (i *Index[V]) Cardinality(value V) uint64 {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	var idx int
-	if !isNaN(value) {
-		idx = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= value })
-	}
-	if idx >= len(i.entries) || !equalKeys(i.entries[idx].value, value) {
+	bm := i.tree.get(value)
+	if bm == nil {
 		return 0
 	}
-	return i.entries[idx].bm.GetCardinality()
+	return bm.GetCardinality()
 }
 
 // DistinctValues returns the number of distinct values currently
-// indexed.
+// indexed. It is O(1): the tree maintains a running key count.
 func (i *Index[V]) DistinctValues() int {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return len(i.entries)
+	return i.tree.count
 }
 
 // Kind returns "btree" — satisfies [index.Subscriber].
@@ -309,16 +288,19 @@ func (i *Index[V]) RangeCount(lo, hi V, budget uint64) (count uint64, exact bool
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	var start int
-	if !isNaN(lo) {
-		start = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
-	}
+	l, off := i.tree.lowerBound(lo)
 	var total uint64
-	for k := start; k < len(i.entries) && !cmp.Less(hi, i.entries[k].value); k++ {
-		total += i.entries[k].bm.GetCardinality()
-		if total > budget {
-			return budget + 1, false
+	for l != nil {
+		for k := off; k < len(l.keys); k++ {
+			if cmp.Less(hi, l.keys[k]) {
+				return total, true
+			}
+			total += l.bms[k].GetCardinality()
+			if total > budget {
+				return budget + 1, false
+			}
 		}
+		l, off = l.next, 0
 	}
 	return total, true
 }
@@ -488,29 +470,35 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	if err := binary.Write(tee, binary.LittleEndian, uint64(len(i.entries))); err != nil {
+	if err := binary.Write(tee, binary.LittleEndian, uint64(i.tree.count)); err != nil {
 		return err
 	}
-	for k := range i.entries {
-		key, err := encodeOrdered(i.entries[k].value)
-		if err != nil {
-			return err
-		}
-		if uint64(len(key)) > uint64(^uint32(0)) {
-			return fmt.Errorf("btree: key too long to serialize: %d", len(key))
-		}
-		if err := binary.Write(tee, binary.LittleEndian, uint32(len(key))); err != nil {
-			return err
-		}
-		if _, err := tee.Write(key); err != nil {
-			return err
-		}
-		ids := i.entries[k].bm.ToArray()
-		if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
-			return err
-		}
-		if err := binary.Write(tee, binary.LittleEndian, ids); err != nil {
-			return err
+	// Walk the leaf chain low→high so entries are emitted in ascending key
+	// order — the byte-identical layout the v1 sorted-array writer produced
+	// (the wire format is a logical key→nodes mapping; the tree shape is not
+	// serialised). storage-engine-auditor #1514: formatVersion stays 1.
+	for l := i.tree.first; l != nil; l = l.next {
+		for k := range l.keys {
+			key, err := encodeOrdered(l.keys[k])
+			if err != nil {
+				return err
+			}
+			if uint64(len(key)) > uint64(^uint32(0)) {
+				return fmt.Errorf("btree: key too long to serialize: %d", len(key))
+			}
+			if err := binary.Write(tee, binary.LittleEndian, uint32(len(key))); err != nil {
+				return err
+			}
+			if _, err := tee.Write(key); err != nil {
+				return err
+			}
+			ids := l.bms[k].ToArray()
+			if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
+				return err
+			}
+			if err := binary.Write(tee, binary.LittleEndian, ids); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -577,11 +565,17 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 			index.ErrIndexCorrupted, entryCount)
 	}
 
+	// Clamp the eager reservation: a hostile entryCount (up to the 1<<40
+	// implausibility ceiling) must not pre-allocate a multi-terabyte buffer
+	// before the per-entry reads fail on a truncated file (storage-engine-
+	// auditor #1514, mirroring #1480). The transient slices grow via append;
+	// the tree is built bottom-up from them only AFTER validation succeeds.
 	hint := entryCount
 	if hint > btreeCapHintMax {
 		hint = btreeCapHintMax
 	}
-	out := make([]entry[V], 0, hint)
+	keys := make([]V, 0, hint)
+	bms := make([]*roaring64.Bitmap, 0, hint)
 	var prev V
 	hasPrev := false
 	for e := uint64(0); e < entryCount; e++ {
@@ -621,11 +615,17 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		}
 		bm := roaring64.New()
 		bm.AddMany(ids)
-		out = append(out, entry[V]{value: v, bm: bm})
+		keys = append(keys, v)
+		bms = append(bms, bm)
 	}
 
+	// Build the tree bottom-up from the validated, strictly-ascending entries
+	// in O(n). The strict-ascending check above gated admission, so a corrupt
+	// non-ascending payload never reaches this point (auditor condition C4a).
+	tree := newBplus[V]()
+	tree.bulkPack(keys, bms)
 	i.mu.Lock()
-	i.entries = out
+	i.tree = tree
 	i.mu.Unlock()
 	return nil
 }
