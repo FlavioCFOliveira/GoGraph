@@ -62,6 +62,27 @@ copy-suffix-then-rename, never truncate-to-zero). DATA-QUALITY NOTE: the
 and `STARTS WITH`/`CONTAINS 'CypherEngine'` fail to bind them; match by `id(f)`
 or `CONTAINS 'Cypher'`+`CONTAINS 'Engine'`. Pre-existing; not corrected here.
 
+Incrementally synced at commit `1bc8eb7` (2026-06-15, task #1513, sprint 192 —
+S-PA5: parallel pull-formulation PageRank over a reverse-CSR): +6 nodes
+(`Commit` `1bc8eb7`; `Sprint` `192` OPEN; `Task` `1513` COMPLETED; two new
+`Test`s `TestPageRank_ParallelBitIdentical` /
+`TestPageRank_ParallelCancellation` and one new `Benchmark`
+`BenchmarkPageRank_PowerLaw50K`, all in
+`search/centrality/pagerank_parallel_test.go`). +8 edges: `Sprint 192
+-[CONTAINS]-> Commit`; `Task 1513 -[IMPLEMENTED_IN]-> Commit`; `Commit
+-[IMPROVES]->` Feature `Search & Path-finding` (id 10375); `Commit -[TOUCHES]->`
+Package `centrality` (`search/centrality`); `centrality -[CONTAINS]->` each of
+the 3 new symbols; `TestPageRank_ParallelBitIdentical -[TESTS]->` Function
+`PageRankCtx` (`search/centrality/pagerank.go`). The parallel PageRank path
+(unexported `pageRankEngine` persistent worker pool, `newPageRankEngine`,
+`edgeBalancedBounds`, `pageRankBuildReverseStructure`, constant
+`pageRankParallelThreshold`=2048) is bit-identical to the retained serial push
+path (gated behind `live>=2048 && GOMAXPROCS>1`); the unexported symbols are not
+materialised as nodes (the graph models exported + Test/Benchmark/Fuzz/Example
+symbols). Measured 1.68-2.40x; 4-8x ruled out as physically unreachable for this
+latency-bound random-gather SpMV (rust-perf analysis). NOTE: `graph create`
+rejects `MERGE … SET`; all properties were set inline in the MERGE map.
+
 ---
 
 ## Node labels
