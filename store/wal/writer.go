@@ -349,10 +349,11 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 	return nil
 }
 
-// Sync flushes the buffered frames to the OS and then calls
-// [os.File.Sync] so the data reaches durable storage before
-// returning. It must be invoked at every transaction commit
-// boundary.
+// Sync flushes the buffered frames to the OS and then issues the
+// per-commit data sync (fdatasync(2) on Linux, [os.File.Sync] / fsync
+// elsewhere; see dataSync) so the appended frames and the grown file
+// size reach durable storage before returning. It must be invoked at
+// every transaction commit boundary.
 //
 // The first flush or fsync failure permanently poisons the writer:
 // the un-synced suffix of the file is discarded and every subsequent
@@ -395,7 +396,11 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
 	}
-	if err := w.f.Sync(); err != nil {
+	// Per-commit WAL data durability: fdatasync on Linux, full fsync
+	// elsewhere (see dataSync). Like the group-commit leader path, this only
+	// needs the appended data and the grown file size durable, not the
+	// inode timestamps.
+	if err := dataSync(w.f); err != nil {
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
@@ -414,7 +419,8 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 // SyncGroup durably commits the caller's already-appended frames, coalescing
 // the fsync with those of every other committer whose frames are buffered at
 // the same time — PostgreSQL-XLogFlush-style group commit. It returns nil only
-// after a single os.File.Sync has made durable every byte up to and including
+// after a single data sync (fdatasync on Linux, fsync elsewhere; see dataSync)
+// has made durable every byte up to and including
 // the caller's last appended frame (its OpCommit marker); a caller therefore
 // acknowledges its commit only once the marker is on stable storage, exactly
 // as [Writer.Sync] does, but without paying a private fsync per commit.
@@ -553,7 +559,11 @@ func (w *Writer) leadGroupSyncLocked() error {
 	// synced are already written; concurrent Appends only mutate the in-memory
 	// bufio buffer, never the file, so f.Sync and those Appends do not race.
 	w.mu.Unlock()
-	syncErr := w.f.Sync()
+	// fdatasync on Linux (skips the redundant inode-metadata flush), full
+	// fsync elsewhere; see dataSync. This is the per-commit WAL data
+	// durability point: the appended frames and the grown file size are made
+	// durable, which is all a commit requires.
+	syncErr := dataSync(w.f)
 	w.mu.Lock()
 
 	w.leaderActive = false
