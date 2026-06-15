@@ -320,6 +320,11 @@ type buildOpts struct {
 	// false the hash join is disabled for the whole query even where the
 	// structural equi-join trigger matches.
 	hashJoinOrderSafe bool
+	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). The
+	// read-path build sets it from the Engine field; it is consulted in
+	// buildOperator's *ir.Selection case. Left false by every other build path,
+	// which therefore always builds the legacy NodeByLabelScan+Filter plan.
+	rangeSeekEnabled bool
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -477,6 +482,17 @@ type EngineOptions struct {
 	// it exists for the differential test that proves both plans return an
 	// identical result multiset, and as an operational escape hatch.
 	DisableHashJoin bool
+
+	// DisableRangeIndexSeek turns OFF the range-predicate B+tree index seek
+	// (#1505). When false (the default) the planner may replace a
+	// NodeByLabelScan+Filter for a range predicate (`n.p > x`, `n.p >= x`,
+	// `n.p < x`, `n.p <= x`, or a two-sided AND) on a property backed by a
+	// bound string btree index with a NodeByIndexRangeScan, under the
+	// comparability + selectivity guards in range_seek_plan.go. Setting it true
+	// forces the legacy scan+filter plan; it exists for the differential test
+	// that proves both plans return an identical result multiset, and as an
+	// operational escape hatch.
+	DisableRangeIndexSeek bool
 }
 
 // IndexDef is a durable index definition handed to the engine on open so it
@@ -550,6 +566,11 @@ type Engine struct {
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
 	// false the planner always builds the legacy nested-loop Cartesian plan.
 	hashJoinEnabled bool
+
+	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). True
+	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
+	// the planner always builds the legacy NodeByLabelScan+Filter plan.
+	rangeSeekEnabled bool
 
 	// writeMu is the engine-level single-writer serialisation used ONLY when
 	// the engine is store-less (store == nil). A WAL-backed engine instead
@@ -723,16 +744,17 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// function-produced values.
 	reg = newGraphAwareRegistry(reg, g)
 	e := &Engine{
-		g:               g,
-		store:           opts.Store,
-		reg:             reg,
-		constraintReg:   exec.NewConstraintRegistry(),
-		procReg:         procs.NewRegistry(),
-		cache:           newPlanCache(opts.PlanCacheCapacity),
-		maxResultRows:   resolveMaxResultRows(opts.MaxResultRows),
-		maxResultBytes:  resolveMaxResultBytes(opts.MaxResultBytes),
-		maxCollectItems: opts.MaxCollectItems,
-		hashJoinEnabled: !opts.DisableHashJoin,
+		g:                g,
+		store:            opts.Store,
+		reg:              reg,
+		constraintReg:    exec.NewConstraintRegistry(),
+		procReg:          procs.NewRegistry(),
+		cache:            newPlanCache(opts.PlanCacheCapacity),
+		maxResultRows:    resolveMaxResultRows(opts.MaxResultRows),
+		maxResultBytes:   resolveMaxResultBytes(opts.MaxResultBytes),
+		maxCollectItems:  opts.MaxCollectItems,
+		hashJoinEnabled:  !opts.DisableHashJoin,
+		rangeSeekEnabled: !opts.DisableRangeIndexSeek,
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
 		return e.constraintReg.ListConstraintRows()
@@ -1304,6 +1326,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// planner falls back to the legacy nested-loop Cartesian plan.
 		bopts.hashJoinEnabled = e.hashJoinEnabled
 		bopts.hashJoinOrderSafe = hashJoinOrderSafe(plan)
+		bopts.rangeSeekEnabled = e.rangeSeekEnabled
 		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
 			buildErr = err
@@ -1337,15 +1360,17 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	if err != nil {
 		return "", err
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params), nil
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g), nil
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
 // Selection→{AllNodesScan|NodeByLabelScan} pairs with "NodeByIndexSeek" when
-// tryBuildIndexSeekFromSelection would succeed given idxMgr and params.
-func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value) string {
+// tryBuildIndexSeekFromSelection would succeed given idxMgr and params, and
+// rendering a "NodeByIndexRangeScan" leaf in place of the scan child when the
+// range seek (#1505) would fire given the live graph statistics.
+func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64]) string {
 	var b strings.Builder
-	explainWithIndexesNode(&b, plan, idxMgr, params, "", true, true)
+	explainWithIndexesNode(&b, plan, idxMgr, params, g, "", true, true)
 	return b.String()
 }
 
@@ -1354,6 +1379,7 @@ func explainWithIndexesNode(
 	plan ir.LogicalPlan,
 	idxMgr *index.Manager,
 	params map[string]expr.Value,
+	explainGraph *lpg.Graph[string, float64],
 	prefix string,
 	isRoot, isLast bool,
 ) {
@@ -1374,10 +1400,16 @@ func explainWithIndexesNode(
 
 	// Check whether a Selection→scan rewrite would fire.
 	opName := ir.OperatorName(plan)
+	rangeSeek := false
 	if sel, ok := plan.(*ir.Selection); ok && idxMgr != nil {
 		schema := make(map[string]int)
 		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr); err == nil && fired && op != nil {
 			opName = "NodeByIndexSeek"
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph); fired {
+			// A range seek REPLACES the scan child but the original Selection
+			// Filter is retained on top, so the node renders as Selection over
+			// NodeByIndexRangeScan (not subsumed like the equality seek).
+			rangeSeek = true
 		}
 	}
 
@@ -1392,10 +1424,19 @@ func explainWithIndexesNode(
 		return
 	}
 
-	children := plan.Children()
 	nextPrefix := prefix + childCont
+
+	// When a range seek fires, the Selection keeps its Filter on top but its
+	// NodeByLabelScan child is replaced by a NodeByIndexRangeScan leaf.
+	if rangeSeek {
+		b.WriteString(nextPrefix)
+		b.WriteString("└─ NodeByIndexRangeScan\n")
+		return
+	}
+
+	children := plan.Children()
 	for i, child := range children {
-		explainWithIndexesNode(b, child, idxMgr, params, nextPrefix, false, i == len(children)-1)
+		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, nextPrefix, false, i == len(children)-1)
 	}
 }
 
@@ -1483,12 +1524,18 @@ func emptyDDLResult(ctx context.Context) *Result {
 	return newResult(exec.Run(ctx, exec.NewArgument(), nil), nil, nil, nil, nil)
 }
 
-// runCreateBTreeIndex executes CREATE INDEX for the btree kind via the generic
-// DDL operator, then (on a WAL-backed engine) appends a durable CREATE INDEX
-// op so the index definition survives a crash and is re-registered on the next
-// open (task #1343). The writer serialisation for the btree path is provided
-// by the transaction opened here — the same single-writer mutex every
-// RunInTx write holds — so no concurrent write can race the registration.
+// runCreateBTreeIndex executes CREATE INDEX for the btree kind. Like the hash
+// path (task #1340), it builds a BOUND btree (so post-creation writes maintain
+// it via the change fan-out), backfills it from the pre-existing data, and
+// registers it — all under the engine's writer serialisation so no concurrent
+// write can race between the backfill scan and the registration. Before #1505
+// this path registered a fresh EMPTY btree with a no-op Apply: it was never
+// populated, so a range seek over it would have returned zero rows.
+//
+// On a WAL-backed engine the successful registration is also made durable: the
+// CREATE INDEX op is appended to the WAL and fsynced (task #1343). A WAL-append
+// failure unwinds the in-memory registration (DropIndex) to keep the index
+// manager and the durable state consistent (registered ⇔ durable).
 func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idxMgr *index.Manager) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1496,46 +1543,73 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if e.store == nil {
 		e.writeMu.Lock()
 		defer e.writeMu.Unlock()
-		// Run the registration inside the visibility barrier so concurrent
-		// readers via Graph.View never observe a partially-registered index.
-		var res *Result
-		barrierErr := e.g.ApplyAtomically(func() error {
-			r, err := e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
-			if err != nil {
-				return err
-			}
-			res = r
-			return nil
-		})
-		return res, barrierErr
+		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
 	}
+	// WAL-backed: open the serialising transaction before the backfill scan so
+	// no concurrent write can slip between the scan and the registration.
 	tx, err := e.store.BeginCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res, rerr := func() (*Result, error) {
-		// Wrap registration inside the visibility barrier: readers calling
-		// Graph.View must never observe a BTree index in a partially-registered
-		// state. commitIndexTx is left outside the barrier because it does
-		// not touch the in-memory graph — it only appends a WAL frame.
-		var r *Result
-		if barrierErr := e.g.ApplyAtomically(func() error {
-			var err error
-			r, err = e.runDDLOp(ctx, exec.NewCreateIndexOp(p.Name, exec.ExecIndexBTree, p.IfNotExists, idxMgr, e.ClearPlanCache))
-			return err
-		}); barrierErr != nil {
-			return nil, barrierErr
-		}
-		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindBTree, p.Label, p.Property, p.Name); err != nil {
-			// Unwind: the operator already registered the index; drop it so
-			// the in-memory state matches the (empty) durable state.
-			_ = idxMgr.DropIndex(p.Name)
-			return nil, err
-		}
-		return r, nil
-	}()
+	res, rerr := e.createBTreeIndexLocked(ctx, p, idxMgr, tx)
 	_ = tx.Rollback() // guarded no-op after CommitWALOnly
 	return res, rerr
+}
+
+// createBTreeIndexLocked executes the CREATE INDEX (btree) sequence under the
+// writer serialisation held by the caller; tx is the serialising transaction
+// on a WAL-backed engine (nil on a store-less one). It mirrors
+// [Engine.createHashIndexLocked].
+func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
+	if _, gerr := idxMgr.GetIndex(p.Name); gerr == nil {
+		if p.IfNotExists {
+			return emptyDDLResult(ctx), nil
+		}
+		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name,
+			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
+	}
+
+	idx, err := newBoundNodeBTreeIndex(e.g, p.Label, p.Property)
+	if err != nil {
+		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
+	}
+	// Backfill BEFORE registration: a concurrent reader's plan build either
+	// misses the index (scan+filter, correct) or sees it fully populated.
+	e.backfillNodeBTreeIndex(idx, p.Label, p.Property)
+
+	// Wrap the registration inside the visibility barrier so readers calling
+	// Graph.View never observe a partially-registered index.
+	var registered bool
+	if barrierErr := e.g.ApplyAtomically(func() error {
+		if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
+			if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
+				return nil
+			}
+			return fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
+		}
+		registered = true
+		e.ClearPlanCache()
+		return nil
+	}); barrierErr != nil {
+		return nil, barrierErr
+	}
+	if !registered {
+		// IF NOT EXISTS absorbed an already-registered name: no schema change,
+		// no WAL record.
+		return emptyDDLResult(ctx), nil
+	}
+
+	// Durability: append the CREATE INDEX op and fsync (task #1343). On failure
+	// unwind the in-memory registration (registered ⇔ durable invariant).
+	if tx != nil {
+		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindBTree, p.Label, p.Property, p.Name); err != nil {
+			if derr := idxMgr.DropIndex(p.Name); derr != nil {
+				return nil, errors.Join(err, fmt.Errorf("cypher: unwind CREATE INDEX registration: %w", derr))
+			}
+			return nil, err
+		}
+	}
+	return emptyDDLResult(ctx), nil
 }
 
 // runDropIndex executes DROP INDEX via the generic DDL operator, then (on a
@@ -4285,9 +4359,29 @@ func buildOperator(
 				return op, nil
 			}
 		}
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
-		if err != nil {
-			return nil, err
+		// Opportunistic range-index seek (#1505): when the predicate is a range
+		// (n.prop > x, >=, <, <=, or a two-sided AND) on a property backed by a
+		// BOUND string btree index, and the exact in-range cardinality is a
+		// provable, selective win, replace the NodeByLabelScan child with a
+		// NodeByIndexRangeScan and let the ORIGINAL predicate Filter wrap it
+		// unchanged (seek-superset + residual refilter — unconditionally
+		// result-identical, cypher-expert + storage-engine-auditor). The seek
+		// only narrows the candidate stream; the Filter remains the
+		// source-of-truth predicate, so null/NaN/cross-type are still excluded
+		// exactly as the full scan would.
+		var child exec.Operator
+		var err error
+		var rangeG *lpg.Graph[string, float64]
+		if lw, ok := walker.(*lpgNodeWalker); ok {
+			rangeG = lw.g
+		}
+		if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG); ok {
+			child = rangeChild
+		} else {
+			child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if p.PredicateExpr != nil {
 			var selG *lpg.Graph[string, float64]

@@ -65,6 +65,13 @@ type entry[V cmp.Ordered] struct {
 type Index[V cmp.Ordered] struct {
 	mu      sync.RWMutex
 	entries []entry[V]
+
+	// binding, when non-nil, ties the index to one (label, property) pair of
+	// a live node graph so [Index.Apply] can translate [index.Change] events
+	// into typed Insert / Delete calls. It is set once by [NewBound] before
+	// the index is shared and never mutated afterwards, so Apply reads it
+	// without synchronisation. See bound.go.
+	binding *Binding[V]
 }
 
 // New returns an empty index.
@@ -271,10 +278,50 @@ func (i *Index[V]) DistinctValues() int {
 // Kind returns "btree" — satisfies [index.Subscriber].
 func (*Index[V]) Kind() string { return "btree" }
 
-// Apply is a no-op for the generic B+ tree index. See the matching
-// note on [hash.Index.Apply] — the index cannot auto-project arbitrary
-// [index.Change] values without caller-supplied bindings.
-func (*Index[V]) Apply(index.Change) {}
+// Apply maintains a bound index (see [NewBound]) from the [index.Manager]
+// change fan-out; it is a no-op for an unbound index (see [New]), which cannot
+// reliably interpret arbitrary [index.Change] values without the
+// caller-supplied binding (property key + value-type coercion). The bound
+// rules live in [Index.applyBound] (bound.go).
+func (i *Index[V]) Apply(c index.Change) {
+	if i.binding == nil {
+		return
+	}
+	i.applyBound(c)
+}
+
+// RangeCount returns the exact number of NodeIDs whose value falls within the
+// inclusive interval [lo, hi] under the total order, but stops accumulating as
+// soon as the running total exceeds budget and returns (budget+1, false) — the
+// caller learns only that the count is "more than budget" without paying to
+// walk the whole range. When the full count is ≤ budget it is returned with
+// exact == true.
+//
+// The entries are pairwise-disjoint node-sets (each node carries exactly one
+// value for the property), so the sum of per-entry cardinalities equals the
+// union cardinality exactly, with no allocation and no union materialisation
+// (graph-theory-expert, #1505). The early-exit bounds the gate cost to
+// O(budget) cardinality probes regardless of how many distinct values the
+// range spans, which keeps a non-selective range cheap to reject.
+func (i *Index[V]) RangeCount(lo, hi V, budget uint64) (count uint64, exact bool) {
+	if cmp.Less(hi, lo) {
+		return 0, true
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	var start int
+	if !isNaN(lo) {
+		start = sort.Search(len(i.entries), func(k int) bool { return i.entries[k].value >= lo })
+	}
+	var total uint64
+	for k := start; k < len(i.entries) && !cmp.Less(hi, i.entries[k].value); k++ {
+		total += i.entries[k].bm.GetCardinality()
+		if total > budget {
+			return budget + 1, false
+		}
+	}
+	return total, true
+}
 
 // btreeMagic is the four-byte magic at the head of a serialised
 // btree index ('SBTR' little-endian — 0x52544253).

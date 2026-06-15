@@ -138,6 +138,96 @@ func (e *Engine) backfillNodeHashIndex(idx *indexhash.Index[string], label, prop
 	}
 }
 
+// newBoundNodeBTreeIndex builds a btree.Index[string] bound to (label, prop)
+// on g, mirroring [newBoundNodeHashIndex]. The bound btree self-maintains from
+// the index.Manager change fan-out (btree.Apply) and uses the SAME
+// projectStringPropValue gate as the hash index, so a btree key is never
+// created for a non-string or SOH-tagged temporal value — load-bearing for an
+// ORDERED index, where a raw temporal encoding would otherwise sort into the
+// string key space and a range scan could return nodes the scan+filter path
+// rejects (#1505, confirmed by storage-engine-auditor).
+func newBoundNodeBTreeIndex(
+	g *lpg.Graph[string, float64], label, prop string,
+) (*indexbtree.Index[string], error) {
+	labelID := uint32(g.Registry().Intern(label))
+	propID := uint32(g.PropertyKeys().Intern(prop))
+	mapper := g.AdjList().Mapper()
+	nodeIdx := g.NodeIndex()
+	return indexbtree.NewBound(indexbtree.Binding[string]{
+		PropertyID: propID,
+		LabelID:    labelID,
+		Label:      label,
+		Property:   prop,
+		Project:    projectStringPropValue,
+		Eligible: func(id graph.NodeID) bool {
+			return !g.IsTombstoned(id) && nodeIdx.Has(labelID, id)
+		},
+		CurrentValue: func(id graph.NodeID) (string, bool) {
+			if g.IsTombstoned(id) {
+				return "", false
+			}
+			key, ok := mapper.Resolve(id)
+			if !ok {
+				return "", false
+			}
+			pv, ok := g.GetNodeProperty(key, prop)
+			if !ok {
+				return "", false
+			}
+			return projectStringPropValue(pv)
+		},
+	})
+}
+
+// backfillNodeBTreeIndex bulk-loads every live node of label whose prop holds
+// an indexable string into idx. Callers must hold the engine's writer
+// serialisation so no write transaction can interleave with the scan.
+//
+// Unlike [Engine.backfillNodeHashIndex], the population uses
+// [btree.Index.BulkLoad] (O(n log n)), not a per-key Insert loop: the sorted-
+// array btree's per-key Insert is O(n), so an Insert loop would be O(n²) on
+// the pre-existing data (storage-engine-auditor). The two-phase scan is the
+// same as the hash backfill: phase 1 snapshots the interned (id, key) pairs
+// under the mapper shard locks; phase 2 resolves liveness/label/property with
+// no shard lock held, so a queued writer cannot deadlock a nested lookup
+// (#1339).
+func (e *Engine) backfillNodeBTreeIndex(idx *indexbtree.Index[string], label, prop string) {
+	mapper := e.g.AdjList().Mapper()
+
+	type nodeRef struct {
+		id  graph.NodeID
+		key string
+	}
+	refs := make([]nodeRef, 0, mapper.Len())
+	mapper.Walk(func(id graph.NodeID, key string) bool {
+		refs = append(refs, nodeRef{id: id, key: key})
+		return true
+	})
+
+	values := make([]string, 0, len(refs))
+	nodes := make([]graph.NodeID, 0, len(refs))
+	for i := range refs {
+		r := refs[i]
+		if e.g.IsTombstoned(r.id) {
+			continue
+		}
+		if !e.g.HasNodeLabel(r.key, label) {
+			continue
+		}
+		pv, ok := e.g.GetNodeProperty(r.key, prop)
+		if !ok {
+			continue
+		}
+		if s, ok := projectStringPropValue(pv); ok {
+			values = append(values, s)
+			nodes = append(nodes, r.id)
+		}
+	}
+	// BulkLoad cannot fail here: values and nodes are appended in lockstep, so
+	// their lengths are equal by construction.
+	_ = idx.BulkLoad(values, nodes)
+}
+
 // indexFanoutActive reports whether the write path must capture old property
 // values and node-removal changes for the secondary-index fan-out: only when
 // a change buffer is wired AND at least one index is registered. Registration
@@ -211,11 +301,21 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 				_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
 			}
 		} else {
-			// BTree index: register a fresh btree subscriber. The BTree
-			// implementation self-maintains from the change fan-out;
-			// rebuilding from existing data is deferred (rebuild-on-restart).
-			sub := indexbtree.New[string]()
-			_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
+			// BTree index: rebuild a BOUND btree backfilled from the recovered
+			// graph so range seeks on the re-opened engine return the correct
+			// rows (#1505). A fresh empty unbound btree (the pre-#1505
+			// behaviour) is never maintained and would make every range seek
+			// return zero rows. Binding failures (e.g. an empty graph) fall
+			// back to an unbound index, which the planner declines to seek
+			// (BoundNode reports false) — the worst outcome is a scan+filter,
+			// never wrong rows.
+			if boundIdx, bidxErr := newBoundNodeBTreeIndex(e.g, d.Label, d.Property); bidxErr == nil {
+				e.backfillNodeBTreeIndex(boundIdx, d.Label, d.Property)
+				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
+			} else {
+				sub := indexbtree.New[string]()
+				_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
+			}
 		}
 	}
 }
