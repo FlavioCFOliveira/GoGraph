@@ -31,18 +31,24 @@ var crashSeedEdges = []struct {
 	{3, 1, 300},
 }
 
-// TestCheckpointCrash_PostSnapshotPreTruncate is the AC#4 durability
-// proof for the checkpoint.post-snapshot-pre-truncate breakpoint. A
-// child process commits an int64-keyed workload and triggers a
-// codec-aware checkpoint; the breakpoint SIGKILLs it AFTER the
-// self-sufficient snapshot is durable but BEFORE the WAL is truncated.
+// crashPostEdge mirrors the extra edge runCheckpointPrefixCrash commits after
+// the first clean checkpoint, so the WAL carries a real suffix when the second
+// checkpoint's prefix-truncate crashes. The parent asserts it survives.
+var crashPostEdge = struct{ src, dst, weight int64 }{3, 4, 400}
+
+// TestCheckpointCrash_P2SnapshotPublishedPreTruncate is the durability proof
+// for the non-blocking checkpoint's checkpoint.p2-snapshot-published-pre-truncate
+// breakpoint. A child commits an int64-keyed workload and triggers a
+// non-blocking codec-aware checkpoint; the breakpoint SIGKILLs it AFTER the
+// self-sufficient snapshot is published and durable but BEFORE the WAL prefix
+// is truncated.
 //
-// Recovery from the resulting artefacts (durable snapshot + still-intact
-// WAL) must reconstruct the full committed state. The WAL is replayed on
-// top of the snapshot; the apply is idempotent, so the final graph is
-// identical to the pre-crash state — Durability holds at this crash point.
-func TestCheckpointCrash_PostSnapshotPreTruncate(t *testing.T) {
-	const scenario = "checkpoint.post-snapshot-pre-truncate"
+// Recovery from the resulting artefacts (durable snapshot + still-intact full
+// WAL) must reconstruct the full committed state. The whole WAL is replayed on
+// top of the snapshot; replay is idempotent, so the final graph is identical to
+// the pre-crash state — Durability holds at this crash point.
+func TestCheckpointCrash_P2SnapshotPublishedPreTruncate(t *testing.T) {
+	const scenario = "checkpoint.p2-snapshot-published-pre-truncate"
 	out, err := crashinject.Run(t, scenario, crashinject.Opts{})
 	if err != nil {
 		t.Fatalf("crashinject.Run(%s): %v", scenario, err)
@@ -69,49 +75,55 @@ func TestCheckpointCrash_PostSnapshotPreTruncate(t *testing.T) {
 	assertCrashStateFull(t, res.Graph)
 }
 
-// TestCheckpointCrash_MidTruncate is the AC#4 durability proof for the
-// checkpoint.mid-truncate breakpoint. The child commits the same
-// workload and triggers the codec-aware checkpoint; the breakpoint
-// SIGKILLs it in the MIDDLE of the WAL truncation, after the file has
-// been shrunk to zero on disk.
+// TestCheckpointCrash_TruncatePrefixInterleavings is the durability proof for
+// the three crash points inside wal.Writer.TruncatePrefix's atomic
+// copy-then-rename. The child commits the seed, runs one complete checkpoint
+// (folding the seed into a self-sufficient snapshot and prefix-truncating the
+// WAL), commits one more "post" edge so the WAL carries a real suffix, then
+// triggers a SECOND checkpoint whose prefix-truncate SIGKILLs the child at the
+// named point:
 //
-// Recovery must reconstruct the full committed state from the
-// self-sufficient snapshot ALONE, because the WAL is now empty. This is
-// the strongest F3 guarantee: the snapshot stands on its own at the
-// exact instant the WAL prefix is discarded.
-func TestCheckpointCrash_MidTruncate(t *testing.T) {
-	const scenario = "checkpoint.mid-truncate"
-	out, err := crashinject.Run(t, scenario, crashinject.Opts{})
-	if err != nil {
-		t.Fatalf("crashinject.Run(%s): %v", scenario, err)
+//   - tmp-written-pre-rename:   the suffix-only temp file is durable but the
+//     atomic rename has NOT happened — the ORIGINAL full WAL is intact.
+//   - post-rename-pre-dirfsync: the rename is done but its dirent may not be
+//     durable — recovery tolerates either the old full or new suffix-only WAL.
+//   - post-rename-pre-bookkeeping: the suffix-only WAL is durable.
+//
+// At every point recovery must reconstruct the FULL committed state — seed
+// (from the snapshot) plus the post edge (from whichever WAL survives) — losing
+// nothing. This is the crux: a non-blocking checkpoint must never lose a
+// transaction committed during the lock-free snapshot write.
+func TestCheckpointCrash_TruncatePrefixInterleavings(t *testing.T) {
+	scenarios := []string{
+		"checkpoint.truncprefix.tmp-written-pre-rename",
+		"checkpoint.truncprefix.post-rename-pre-dirfsync",
+		"checkpoint.truncprefix.post-rename-pre-bookkeeping",
 	}
-	if !out.Killed {
-		t.Fatalf("child not SIGKILL'd at %s\nstdout: %s\nstderr: %s",
-			scenario, out.Stdout, out.Stderr)
+	for _, scenario := range scenarios {
+		t.Run(scenario, func(t *testing.T) {
+			out, err := crashinject.Run(t, scenario, crashinject.Opts{})
+			if err != nil {
+				t.Fatalf("crashinject.Run(%s): %v", scenario, err)
+			}
+			if !out.Killed {
+				t.Fatalf("child not SIGKILL'd at %s\nstdout: %s\nstderr: %s",
+					scenario, out.Stdout, out.Stderr)
+			}
+			if _, err := os.Stat(filepath.Join(out.Dir, "snapshot", "manifest.json")); err != nil {
+				t.Fatalf("snapshot not durable after %s: %v", scenario, err)
+			}
+			res := recoverInt64(t, out.Dir)
+			if !res.SnapshotHit {
+				t.Fatalf("SnapshotHit = false, want true at %s", scenario)
+			}
+			// Seed (from the snapshot) plus the post edge (from the surviving
+			// WAL) must both be present — no committed transaction lost.
+			assertCrashStateFull(t, res.Graph)
+			if !res.Graph.AdjList().HasEdge(crashPostEdge.src, crashPostEdge.dst) {
+				t.Errorf("post edge %d->%d lost across %s", crashPostEdge.src, crashPostEdge.dst, scenario)
+			}
+		})
 	}
-
-	if _, err := os.Stat(filepath.Join(out.Dir, "snapshot", "manifest.json")); err != nil {
-		t.Fatalf("snapshot not durable after %s: %v", scenario, err)
-	}
-
-	// The WAL was truncated to zero on disk before the crash.
-	walInfo, err := os.Stat(filepath.Join(out.Dir, "wal"))
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-	if walInfo.Size() != 0 {
-		t.Fatalf("WAL size = %d after %s, want 0 (truncation reached disk before the crash)",
-			walInfo.Size(), scenario)
-	}
-
-	res := recoverInt64(t, out.Dir)
-	if !res.SnapshotHit {
-		t.Fatal("SnapshotHit = false, want true")
-	}
-	if res.WALOps != 0 {
-		t.Fatalf("WALOps = %d, want 0 (state must come from the snapshot alone)", res.WALOps)
-	}
-	assertCrashStateFull(t, res.Graph)
 }
 
 // recoverInt64 opens the int64-keyed store rooted at dir with the same

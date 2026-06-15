@@ -3,18 +3,29 @@
 // Without this the WAL would grow unbounded during steady-state
 // operation.
 //
-// The checkpointer takes the snapshot and truncates the WAL under the
-// store's commit serialisation, so no transaction can be mid-apply or
-// mid-commit during that window: the snapshot is a consistent
-// transaction-boundary image and the truncation never drops a frame
-// committed after the snapshot. Wire it with [WithCommitSerialiser]
-// ([txn.Store.RunUnderCommitLock]) when the store is driven by the Cypher
-// engine, whose commit mutex is private and is therefore NOT the storeMu an
-// external checkpointer is constructed with (see docs/acid-audit.md F3.5).
-// The serialisation is held for the whole snapshot write, so the checkpointer
-// blocks writers for the duration of the disk I/O; a non-blocking,
-// watermark-bounded truncate is the documented future optimisation
-// (docs/isolation-design.md, "Checkpoint and recovery").
+// The checkpoint is NON-BLOCKING: it holds the store's commit serialisation
+// only to capture a transaction-boundary-consistent image — the WAL durable
+// offset (the watermark) and the CSR adjacency built inside [lpg.Graph.View] —
+// then RELEASES the lock and writes the (potentially multi-second) snapshot
+// disk I/O while transactions commit concurrently. It re-acquires the lock
+// only briefly at the end to prefix-truncate the WAL up to the captured
+// watermark, discarding the frames the snapshot folded while preserving every
+// frame committed during the lock-free write. Writers therefore stall only for
+// the watermark+CSR capture, never for the snapshot write (#1508). The pattern
+// mirrors RocksDB flush (seal under a short lock, write without blocking
+// writers) and PostgreSQL CHECKPOINT (write concurrently, then trim the WAL up
+// to the redo point).
+//
+// Wire it with [WithCommitSerialiser] ([txn.Store.RunUnderCommitLock]) when the
+// store is driven by the Cypher engine, whose commit mutex is private and is
+// therefore NOT the storeMu an external checkpointer is constructed with (see
+// docs/acid-audit.md F3.5); RunUnderCommitLock also drains in-flight group
+// commits, so the captured watermark is a true transaction boundary. The
+// snapshot is a consistent transaction-boundary image and the prefix-truncate
+// never drops a frame committed after the watermark; a crash at any
+// interleaving recovers the exact committed state (recovery loads the
+// self-sufficient snapshot and idempotently replays the surviving WAL) — see
+// [wal.Writer.TruncatePrefix] and the checkpoint crashpoints.
 package checkpoint
 
 import (
@@ -109,6 +120,14 @@ type Checkpointer[N comparable, W any] struct {
 	// truncates the WAL prefix which first declared a constraint would
 	// otherwise silently lose it.
 	constraintsFn func() []snapshot.ConstraintSpec
+
+	// afterCaptureHook, when non-nil, is invoked at the START of phase 2 —
+	// immediately after the phase-1 commit lock is released and BEFORE the
+	// lock-free snapshot write. It is a test-only seam (set by white-box tests
+	// in this package) used to prove the commit lock is NOT held during the
+	// snapshot I/O: a test sets it to block and asserts a concurrent committer
+	// proceeds meanwhile. It is nil in production.
+	afterCaptureHook func()
 
 	stopCh    chan struct{}
 	triggerCh chan chan error
@@ -442,42 +461,94 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 	defer func() {
 		c.lastDuration.Store(uint64(time.Since(start).Nanoseconds()))
 	}()
+	return c.runNonBlocking()
+}
 
-	// Run the entire snapshot+truncate window under the store's commit
-	// serialisation so that no transaction commits new WAL frames — and no
-	// transaction's in-memory apply runs — between the snapshot capture and
-	// the truncation. When a commit serialiser is wired (WithCommitSerialiser,
-	// the engine path) the window holds the store's PRIVATE commit mutex,
-	// which the engine actually takes from Begin to commit; without one we
-	// fall back to locking the raw storeMu (correct only when the caller
-	// serialises its own writes under that same mutex). Either way the
-	// snapshot itself is captured inside Graph.View so the adjacency is
-	// barrier-consistent even if the serialisation is misconfigured.
-	//
-	// The trade-off is that the serialisation is held during disk I/O for the
-	// duration of the snapshot write; for very large graphs this can stall
-	// writers and may be reworked later to a position-tracked truncate
-	// (capture LSN under lock, write snapshot lock-free, truncate up-to-LSN
-	// under lock). For v1 the simple correctness-first path is preferred.
+// runUnderCommitLock runs fn under the store's commit serialisation: the
+// store's PRIVATE commit semaphore when a serialiser is wired
+// (WithCommitSerialiser, the engine path — it also drains in-flight group
+// commits so the call is a true quiesce boundary), or the raw storeMu
+// otherwise (correct only when the caller serialises its own writes under
+// that same mutex). It is invoked TWICE per non-blocking checkpoint — once to
+// capture the watermark + CSR, once to truncate the WAL prefix — so the two
+// brief locked windows bracket the lock-free snapshot write.
+func (c *Checkpointer[N, W]) runUnderCommitLock(fn func() error) error {
 	if c.serialise != nil {
-		return c.serialise(c.runCheckpointLocked)
+		return c.serialise(fn)
 	}
 	c.storeMu.Lock()
 	defer c.storeMu.Unlock()
-	return c.runCheckpointLocked()
+	return fn()
 }
 
-// runCheckpointLocked performs the snapshot capture and WAL truncation. It
-// MUST be called with the store's commit serialisation held (either via
-// c.serialise or with c.storeMu locked) so no transaction can be mid-apply
-// or mid-commit while it runs. The CSR is built inside [lpg.Graph.View] so
-// the captured adjacency reflects a single transaction-boundary state with
-// no partially-applied transaction visible.
-func (c *Checkpointer[N, W]) runCheckpointLocked() error {
-	var cs *csr.CSR[W]
-	c.g.View(func() {
-		cs = csr.BuildFromAdjList(c.g.AdjList())
-	})
+// runNonBlocking performs a non-blocking, LSN-watermarked checkpoint in three
+// phases so writers stall only for the watermark+CSR capture, never for the
+// (potentially multi-second) snapshot disk I/O:
+//
+//	Phase 1 (under the commit lock — the quiesce boundary): capture a
+//	  transaction-boundary-consistent image. The WAL durable offset W is read
+//	  under the quiesce boundary, so it equals the byte length of every frame
+//	  committed so far (on a frame boundary); the CSR adjacency is built inside
+//	  Graph.View so it reflects the same boundary state. Then the lock is
+//	  released.
+//	Phase 2 (lock-free): write and publish the self-sufficient snapshot while
+//	  concurrent transactions commit and append frames PAST W. fsync the WAL so
+//	  the suffix [W,end) is durable.
+//	Phase 3 (under the commit lock again, briefly): re-verify self-sufficiency
+//	  (a constraint DDL may have committed in phase 2) and prefix-truncate the
+//	  WAL up to W — discarding ONLY the frames the snapshot folded and
+//	  preserving every frame committed during phase 2.
+//
+// Crash safety (certified by storage-engine-auditor, #1508): the snapshot is
+// self-sufficient and recovery replays the WHOLE surviving WAL idempotently on
+// top of it, so a crash at any interleaving reconstructs the exact committed
+// state — see [wal.Writer.TruncatePrefix] for the atomic-rename argument and
+// the per-interleaving crashpoints.
+func (c *Checkpointer[N, W]) runNonBlocking() error {
+	// --- Phase 1: capture watermark + CSR under the quiesce boundary. ---
+	var (
+		cs        *csr.CSR[W]
+		watermark int64
+	)
+	var constraints []snapshot.ConstraintSpec
+	if err := c.runUnderCommitLock(func() error {
+		// W is the durable WAL offset at a transaction boundary. Captured under
+		// the quiesce boundary (RunUnderCommitLock drains in-flight commits), so
+		// every committed frame is durable and none is mid-flight: W is exactly
+		// the prefix a self-sufficient snapshot of this state folds, and the only
+		// safe WAL cut point (see wal.Writer.DurableOffset / TruncatePrefix).
+		watermark = c.wlog.DurableOffset()
+		c.g.View(func() {
+			cs = csr.BuildFromAdjList(c.g.AdjList())
+		})
+		// Capture the constraint set inside the same locked window so it is
+		// transaction-boundary consistent with the CSR (see WithConstraintSpecs).
+		if c.constraintsFn != nil {
+			constraints = c.constraintsFn()
+		}
+		return nil
+	}); err != nil {
+		c.setErr(err)
+		return err
+	}
+
+	// Test-only seam: fires at the start of phase 2, with the commit lock
+	// released, so a white-box test can prove writers are not blocked during
+	// the lock-free snapshot write. Nil in production.
+	if c.afterCaptureHook != nil {
+		c.afterCaptureHook()
+	}
+
+	// --- Phase 2: write + publish the snapshot LOCK-FREE, then prefix-truncate. ---
+	return c.writeAndTruncate(cs, constraints, watermark)
+}
+
+// writeAndTruncate is phases 2 and 3 of the non-blocking checkpoint: it writes
+// the self-sufficient snapshot from the captured image (lock-free, so writers
+// commit concurrently), then re-acquires the commit lock to prefix-truncate the
+// WAL up to the captured watermark. cs and constraints are the phase-1 capture;
+// watermark is the durable WAL offset W those reflect.
+func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, watermark int64) error {
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
 	// Durability invariant (audit gaps F2/F3): the snapshot MUST be a
 	// self-sufficient image of the committed state — CSR adjacency PLUS
@@ -500,62 +571,88 @@ func (c *Checkpointer[N, W]) runCheckpointLocked() error {
 	// must carry them in constraints.bin BEFORE the WAL prefix that first
 	// declared them is truncated, or every constraint silently vanishes
 	// on the next restart (#1334).
-	var constraints []snapshot.ConstraintSpec
-	if c.constraintsFn != nil {
-		constraints = c.constraintsFn()
-	}
+	// Phase 2 disk I/O runs WITHOUT the commit lock: writers commit
+	// concurrently and append frames past the captured watermark, paying no
+	// stall for this (potentially multi-second) write. The snapshot is a
+	// self-sufficient image of the phase-1 boundary state.
 	if err := c.writeSnapshot(snapDir, cs, constraints); err != nil {
 		c.setErr(err)
 		return err
 	}
-	// Source needConstraints from the graph's own constraint count, NOT from
-	// len(constraints): the latter is empty whenever the embedder never wired
-	// WithConstraintSpecs, which would wrongly judge the snapshot self-sufficient
-	// and truncate the WAL prefix that declared the constraints — silently losing
-	// every constraint on reopen (#1464). HasConstraints is the engine-maintained
-	// truth, so a missing constraints.bin now correctly forces the fail-safe
-	// no-truncate branch below.
+	// fsync the WAL so the suffix [watermark, end) — the frames committed
+	// concurrently during the snapshot write — is durable before we touch the
+	// prefix. Snapshot durable (writeSnapshot publishes with its own fsync +
+	// parent-dir fsync) THEN suffix durable THEN truncate the prefix: the
+	// ordering the auditor required (#1508 Q5).
+	if err := c.wlog.Sync(); err != nil {
+		c.setErr(err)
+		return err
+	}
+	// Crash-injection point: the new self-sufficient snapshot is published and
+	// durable, the FULL WAL (folded prefix [0,W) + concurrently-committed
+	// suffix [W,end)) is intact, and NO truncation has happened. A crash here
+	// must recover the exact committed state — recovery loads the new snapshot
+	// and idempotently replays the WHOLE WAL (prefix re-folded harmlessly,
+	// suffix applied on top). This is the non-blocking analogue of
+	// "post-snapshot-pre-truncate", now with a non-empty concurrent suffix.
+	// No-op in production (GOGRAPH_CRASH_AT unset).
+	crashpoint.Breakpoint("checkpoint.p2-snapshot-published-pre-truncate")
+
+	// --- Phase 3: prefix-truncate the WAL under the commit lock, briefly. ---
+	return c.runUnderCommitLock(func() error {
+		return c.truncatePrefixLocked(snapDir, watermark)
+	})
+}
+
+// truncatePrefixLocked is phase 3 of the non-blocking checkpoint: it runs
+// under the store's commit lock (the quiesce boundary) so no concurrent commit
+// races the WAL prefix truncation. It re-verifies snapshot self-sufficiency —
+// a constraint DDL may have committed during the lock-free phase-2 write, in
+// which case the snapshot (captured at the watermark, before the DDL) cannot
+// stand alone and the WAL must be retained — then discards only the WAL bytes
+// in [0, watermark), preserving every frame committed during phase 2.
+func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int64) error {
+	// Re-source needConstraints from the graph's own constraint count, NOT from
+	// the phase-1 len(constraints): a constraint DDL committed during the
+	// lock-free phase-2 write makes HasConstraints true while the snapshot
+	// (captured before the DDL) carries no constraints.bin for it, so the
+	// snapshot is correctly judged not self-sufficient and the WAL prefix
+	// holding that DDL is retained (#1334 / #1464 fail-safe, re-checked under
+	// the phase-3 lock per the #1508 audit condition C2).
 	selfSufficient, err := snapshotIsSelfSufficient(snapDir, c.g.HasConstraints())
 	if err != nil {
 		c.setErr(err)
 		return err
 	}
-	if err := c.wlog.Sync(); err != nil {
-		c.setErr(err)
-		return err
-	}
-	// Crash-injection point: the snapshot is durable on disk but the WAL
-	// has NOT been truncated yet. A crash here must leave the store fully
-	// recoverable — recovery loads the self-sufficient snapshot and
-	// idempotently replays the still-intact WAL on top. No-op in
-	// production (GOGRAPH_CRASH_AT unset).
-	crashpoint.Breakpoint("checkpoint.post-snapshot-pre-truncate")
 	if !selfSufficient {
-		// The snapshot cannot reconstruct the graph on its own (no
-		// mapper.bin for this key type, or a declared constraint set that
-		// did not land in constraints.bin), so truncating the WAL would
-		// lose committed data. Skip truncation: the WAL is retained and replayed
-		// on top of the snapshot at recovery, preserving Durability at the
-		// cost of unbounded WAL growth for this key type. Surfaced via a
-		// metric so operators can detect the degraded mode.
+		// The snapshot cannot reconstruct the graph on its own (no mapper.bin
+		// for this key type, or a constraint set that did not land in
+		// constraints.bin), so truncating the WAL would lose committed data.
+		// Skip truncation: the WAL is retained and replayed on top of the
+		// snapshot at recovery, preserving Durability at the cost of unbounded
+		// WAL growth. Surfaced via a metric so operators can detect the mode.
 		metrics.IncCounter("store.checkpoint.truncate_skipped_not_self_sufficient", 1)
 		c.checkpoints.Add(1)
 		c.setErr(nil)
 		return nil
 	}
-	truncated, err := c.wlog.Truncate()
+	// Discard ONLY the folded prefix [0, watermark); the suffix [watermark,
+	// end) holds transactions committed during phase 2 and is preserved (a
+	// truncate-to-zero would lose them — the exact bug WithCommitSerialiser
+	// was created to prevent). TruncatePrefix is itself crash-safe via an
+	// atomic copy-suffix-then-rename.
+	truncated, err := c.wlog.TruncatePrefix(watermark)
 	if err != nil {
 		c.setErr(err)
 		return err
 	}
 	if truncated > 0 {
 		c.walTrunc.Add(uint64(truncated))
-		// Surface the bytes reclaimed through the metrics backend so
-		// operators monitoring long-running stores can plot WAL-prefix
-		// reclamation cadence without polling Stats(). The atomic
-		// lifetime counter [c.walTrunc] remains the test-friendly
-		// in-process aggregate; this counter is the observability
-		// surface.
+		// Surface the bytes reclaimed through the metrics backend so operators
+		// monitoring long-running stores can plot WAL-prefix reclamation cadence
+		// without polling Stats(). The atomic lifetime counter [c.walTrunc]
+		// remains the test-friendly in-process aggregate; this is the
+		// observability surface.
 		metrics.IncCounter("store.checkpoint.wal_truncated_bytes", uint64(truncated))
 	}
 	c.checkpoints.Add(1)

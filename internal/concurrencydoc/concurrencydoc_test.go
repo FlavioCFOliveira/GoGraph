@@ -22,7 +22,7 @@ import (
 // by bumping this constant. The CLAUDE.md mandate is explicit: "Every exported
 // type carries a godoc clause stating whether it is safe for concurrent use;
 // ambiguity is a defect."
-const baselineMax = 33
+const baselineMax = 32
 
 // concurrencyAllowlist names exported types that are exempt from the scan:
 // pure-data value types for which a concurrency clause would add no

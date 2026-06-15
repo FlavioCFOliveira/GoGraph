@@ -23,6 +23,7 @@ type syncCountFile struct {
 }
 
 func (s *syncCountFile) Write(p []byte) (int, error) { return s.inner.Write(p) }
+func (s *syncCountFile) Read(p []byte) (int, error)  { return s.inner.Read(p) }
 func (s *syncCountFile) Seek(off int64, whence int) (int64, error) {
 	return s.inner.Seek(off, whence)
 }

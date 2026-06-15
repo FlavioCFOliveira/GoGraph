@@ -40,6 +40,10 @@ func (d *discardFile) Sync() error               { return nil }
 func (d *discardFile) Truncate(size int64) error { d.size = size; return nil }
 func (d *discardFile) Close() error              { return nil }
 
+// Read satisfies the walFile io.Reader requirement (added for
+// TruncatePrefix). The benchmark never reads back, so it reports EOF.
+func (d *discardFile) Read(_ []byte) (int, error) { return 0, io.EOF }
+
 // BenchmarkAppend measures the WAL append path at a range of representative
 // frame sizes, in two regimes that bracket the durability cost:
 //

@@ -17,6 +17,11 @@ import (
 // tests reach for [OpenWith].
 type walFile interface {
 	io.Writer
+	// Reader is required by [Writer.TruncatePrefix], which reads the
+	// surviving suffix of the file (the frames committed after the
+	// captured watermark) before atomically replacing the file with a
+	// suffix-only copy. *os.File and *testfs.FaultFile both satisfy it.
+	io.Reader
 	io.Seeker
 	// Sync flushes OS write buffers to durable storage.
 	Sync() error
@@ -47,6 +52,7 @@ func OpenWith(f walFile) (*Writer, error) {
 	}
 	w := &Writer{
 		f:            f,
+		dirFsync:     parentDirFsync,
 		bw:           bufio.NewWriterSize(f, 64*1024),
 		durableSize:  pos,
 		appendedSize: pos,

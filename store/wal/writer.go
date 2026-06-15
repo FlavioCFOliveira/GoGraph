@@ -25,6 +25,13 @@ var ErrWriterClosed = errors.New("wal: writer is closed")
 // log.
 var ErrWALLocked = errors.New("wal: WAL directory is locked by another process")
 
+// ErrPrefixTruncateUnsupported is returned by [Writer.TruncatePrefix] on a
+// Writer created via [OpenWith] (a synthetic, path-less file handle). The
+// crash-safe prefix truncation works by writing the surviving suffix to a
+// sibling temp file and atomically renaming it over the WAL path, so it
+// requires a real filesystem path — which only [Open] records.
+var ErrPrefixTruncateUnsupported = errors.New("wal: TruncatePrefix requires a path-backed writer (use Open, not OpenWith)")
+
 // Stats is a snapshot of a [Writer]'s lifetime counters. Counters
 // are monotonic; subtract two snapshots to compute deltas. Values
 // are read with [sync/atomic.LoadUint64], so they may race slightly
@@ -65,6 +72,20 @@ type Writer struct {
 	f      walFile
 	bw     *bufio.Writer
 	closed atomic.Bool
+
+	// path is the filesystem path of the WAL file, recorded by [Open] so
+	// [Writer.TruncatePrefix] can perform its crash-safe atomic-rename
+	// (write the surviving suffix to a sibling temp file, then rename it
+	// over path). It is empty for Writers built via [OpenWith] (synthetic
+	// test files have no real path); TruncatePrefix returns
+	// [ErrPrefixTruncateUnsupported] for a path-less Writer.
+	path string
+
+	// dirFsync is the parent-directory fsync used by [Writer.TruncatePrefix]
+	// after the atomic rename. It defaults to parentDirFsync; tests override it
+	// to inject a post-rename failure and assert the Writer fail-stops. Never
+	// nil after a constructor runs.
+	dirFsync func(string) error
 
 	// lockFile is the open handle of the WAL directory LOCK file whose
 	// flock(2) / O_EXCL lifetime is tied to this Writer. It is non-nil
@@ -200,6 +221,8 @@ func Open(path string) (*Writer, error) {
 	}
 	w := &Writer{
 		f:            f,
+		path:         path,
+		dirFsync:     parentDirFsync,
 		lockFile:     lockFile,
 		bw:           bufio.NewWriterSize(f, 64*1024),
 		durableSize:  size,
@@ -685,6 +708,269 @@ func (w *Writer) Truncate() (int64, error) {
 	}
 	w.bw.Reset(w.f)
 	return sz, nil
+}
+
+// DurableOffset returns the file size, in bytes, covered by the last
+// successful fsync — the byte length of every frame durably committed so
+// far. The value always lands on a frame boundary: a transaction commits
+// only after its [OpCommit] marker has been appended and fsynced, so the
+// durable prefix is always a whole number of complete frames.
+//
+// It is the watermark a non-blocking checkpoint captures (see
+// store/checkpoint): taken under the store's quiesce boundary
+// ([txn.Store.RunUnderCommitLock], which drains in-flight group commits)
+// the returned offset equals appendedSize — every committed frame is
+// durable and none is mid-flight — so it is exactly the prefix a
+// self-sufficient snapshot folds and [Writer.TruncatePrefix] may discard.
+//
+// Concurrency: safe for concurrent use; it reads durableSize under the
+// internal mutex.
+func (w *Writer) DurableOffset() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.durableSize
+}
+
+// TruncatePrefix crash-safely discards the WAL bytes in [0, upTo) and
+// preserves every byte in [upTo, end) — the frames committed after the
+// watermark a checkpoint captured. It is the WAL-prefix-reclamation
+// primitive a non-blocking checkpoint uses: the snapshot folds the prefix
+// [0, upTo), the suffix [upTo, end) holds transactions committed
+// concurrently while the snapshot was written lock-free, and recovery
+// replays that surviving suffix on top of the self-sufficient snapshot.
+//
+// # Why a copy-and-rename, not an in-place rewrite
+//
+// The WAL is opened O_APPEND, so writes cannot be repositioned; more
+// importantly, rewriting the file in place (truncate to zero, then write
+// the suffix back) has a fatal crash window: a crash after the truncate
+// but before the suffix is rewritten leaves the suffix — committed
+// transactions NOT present in the snapshot — permanently lost, a
+// Durability violation. Instead TruncatePrefix writes the surviving
+// suffix to a sibling temp file, fsyncs it, then atomically renames it
+// over the WAL path and fsyncs the parent directory. rename(2) is atomic:
+// a crash before the rename leaves the original full WAL intact (recovery
+// = snapshot + full replay); a crash after it leaves the suffix-only WAL
+// (recovery = snapshot + suffix replay); both reconstruct the exact
+// committed state. This mirrors the file-granularity WAL reclamation of
+// RocksDB (delete whole log files below the flush point) and PostgreSQL
+// (recycle whole segments below the redo LSN), adapted to GoGraph's
+// single un-segmented WAL file.
+//
+// # Contract and ordering
+//
+// The caller MUST hold the store's quiesce boundary
+// ([txn.Store.RunUnderCommitLock]) so no concurrent [Writer.Append] races
+// the rename or the durableSize/appendedSize/buffer reset, and MUST have
+// made the covering snapshot fully durable (data fsync + snapshot
+// publish + parent-dir fsync) BEFORE calling this. upTo must be a value
+// previously returned by [Writer.DurableOffset] (a frame boundary) and
+// must satisfy 0 <= upTo <= durableSize; an out-of-range upTo is rejected
+// without touching the file. upTo == 0 is a no-op (nothing to reclaim).
+//
+// On success the returned int64 is the number of bytes reclaimed (upTo)
+// and the Writer continues against the suffix-only file. On a path-less
+// Writer ([OpenWith]) it returns [ErrPrefixTruncateUnsupported].
+//
+// Error handling splits on the atomic rename:
+//
+//   - A failure BEFORE the rename (suffix copy, or the rename itself) leaves
+//     the ORIGINAL full WAL intact and the Writer usable; the error is
+//     returned and the caller may retry the checkpoint — the prefix is still
+//     present, so nothing is lost.
+//   - A failure AFTER the rename (parent-dir fsync, or the reopen of the new
+//     inode) cannot be undone: the on-disk state has already advanced to the
+//     durable suffix-only WAL and the old inode is unlinked. The Writer is
+//     therefore POISONED (fail-stop): the error is returned and every
+//     subsequent Append/Sync returns it, so the owner must discard the Writer
+//     and re-open the WAL, which re-validates the already-correct on-disk
+//     suffix. The committed data is safe on disk; only the in-memory handle
+//     is abandoned.
+func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
+	defer metrics.Time("store.wal.TruncatePrefix")()
+	if w.closed.Load() {
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, ErrWriterClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.syncErr != nil {
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, w.syncErr
+	}
+	// Reject a path-less (OpenWith) writer before any other check: the
+	// atomic copy-then-rename has no path to rename over, so the operation is
+	// fundamentally unsupported regardless of the offset.
+	if w.path == "" {
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, ErrPrefixTruncateUnsupported
+	}
+	if upTo < 0 || upTo > w.durableSize {
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, fmt.Errorf("wal: TruncatePrefix: upTo %d out of range [0, %d]", upTo, w.durableSize)
+	}
+	if upTo == 0 {
+		return 0, nil // nothing to reclaim
+	}
+
+	// Flush so the surviving suffix is entirely in the file (not split
+	// between the file and the bufio buffer). Under the quiesce boundary no
+	// Append can be buffered, but a prior commit's tail may still sit in the
+	// buffer; flushing makes the file the single source of truth for the
+	// suffix copy. A flush failure poisons the writer (the suffix bytes are
+	// not durable) and aborts before any rename.
+	if err := w.bw.Flush(); err != nil {
+		w.poison(err)
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, err
+	}
+
+	end := w.appendedSize // == durableSize after the flush under the quiesce boundary
+	suffixLen := end - upTo
+
+	// Write the surviving suffix to a sibling temp file. Streaming it through
+	// a 64 KiB buffer keeps memory bounded regardless of how many
+	// transactions committed during the lock-free snapshot write.
+	tmpPath := w.path + ".tmp"
+	if err := w.writeSuffixTmp(tmpPath, upTo, suffixLen); err != nil {
+		// Best-effort cleanup of a partial temp file; the original WAL is
+		// untouched, so the checkpoint simply fails and may retry.
+		_ = os.Remove(tmpPath)
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, err
+	}
+
+	// Crash-injection point: the suffix-only temp file is durable on disk but
+	// the atomic rename over the live WAL has NOT happened. A crash here must
+	// recover from the (already durable, self-sufficient) snapshot plus the
+	// ORIGINAL full WAL, which is still intact — the suffix temp is ignored.
+	// No-op in production (GOGRAPH_CRASH_AT unset).
+	crashpoint.Breakpoint("checkpoint.truncprefix.tmp-written-pre-rename")
+
+	// Atomically replace the WAL with the suffix-only file. After this the
+	// old inode (full WAL) is unlinked and path names the suffix-only inode.
+	if err := os.Rename(tmpPath, w.path); err != nil {
+		_ = os.Remove(tmpPath)
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, fmt.Errorf("wal: TruncatePrefix: rename %q: %w", w.path, err)
+	}
+
+	// Crash-injection point: the rename is done (path now names the
+	// suffix-only file) but its directory entry may not yet be durable. A
+	// crash here recovers from the snapshot plus EITHER the old full WAL (if
+	// the dirent rename was not yet persisted) OR the new suffix-only WAL —
+	// both replay to the exact committed state. No-op in production.
+	crashpoint.Breakpoint("checkpoint.truncprefix.post-rename-pre-dirfsync")
+
+	// Make the rename's directory entry durable so a host crash cannot revert
+	// path to the old inode on the next mount.
+	//
+	// Past the successful rename the on-disk state has already advanced to the
+	// suffix-only WAL and the old inode is unlinked, so a failure here must NOT
+	// be reported as a plain retryable error: w.f still points at the unlinked
+	// old inode, so continuing to use this Writer would append to a vanished
+	// file while recovery reads the new one — a silent Durability/Atomicity
+	// hole. Fail-stop instead (poisonAfterRename sets the sticky syncErr), so
+	// every subsequent Append/Sync returns the error and the owner re-opens the
+	// WAL, which re-validates the (already-correct) on-disk suffix.
+	if err := w.dirFsync(w.path); err != nil {
+		w.poisonAfterRename(fmt.Errorf("wal: TruncatePrefix: fsync parent dir of %q: %w", w.path, err))
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, w.syncErr
+	}
+
+	// Repoint the in-memory Writer state at the new (suffix-only) inode: the
+	// old fd points at the now-unlinked full-WAL inode and must be replaced,
+	// or subsequent Appends would write to a deleted file. Open the new file
+	// O_APPEND so appends land at its end, seek to confirm the size, and reset
+	// the bufio writer onto it. A failure here is also post-rename and so must
+	// fail-stop the Writer, for the same reason as the parent-dir fsync above.
+	if err := w.reopenAfterPrefixTruncate(suffixLen); err != nil {
+		w.poisonAfterRename(err)
+		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return 0, w.syncErr
+	}
+
+	// Crash-injection point: the file is the durable suffix-only WAL and the
+	// in-memory bookkeeping is repointed. A crash here recovers from the
+	// snapshot plus the suffix-only WAL — the exact committed state. No-op in
+	// production.
+	crashpoint.Breakpoint("checkpoint.truncprefix.post-rename-pre-bookkeeping")
+
+	metrics.IncCounter("store.wal.TruncatePrefix.bytes_reclaimed", uint64(upTo))
+	return upTo, nil
+}
+
+// poisonAfterRename fail-stops the Writer following an error that occurs
+// AFTER the atomic suffix-rename in [Writer.TruncatePrefix] has already
+// succeeded. The caller holds w.mu.
+//
+// It differs from [Writer.poison] in one critical respect: it must NOT
+// truncate or otherwise touch a file handle. By this point the on-disk state
+// is the durable, correct suffix-only WAL and the old full-WAL inode is
+// unlinked; poison's Truncate(durableSize) would operate on the stale handle
+// (the wrong inode) and the suffix-only file on disk must be left intact for
+// recovery. So poisonAfterRename only sets the sticky syncErr and broadcasts,
+// so every subsequent Append/Sync fail-stops and the owner re-opens the WAL
+// (which re-validates the already-correct on-disk suffix). The stale handle is
+// closed by the eventual [Writer.Close].
+func (w *Writer) poisonAfterRename(err error) {
+	w.syncFailed.Add(1)
+	w.syncErr = err
+	if w.groupCond != nil {
+		w.groupCond.Broadcast()
+	}
+}
+
+// writeSuffixTmp copies the WAL bytes in [from, from+length) to tmpPath and
+// fsyncs it, so the surviving suffix is durable before the caller renames it
+// over the live WAL. Called by [Writer.TruncatePrefix] with w.mu held. It
+// reads through the walFile's own handle (seeking it; the caller restores no
+// position because the handle is discarded by the subsequent reopen).
+func (w *Writer) writeSuffixTmp(tmpPath string, from, length int64) error {
+	if _, err := w.f.Seek(from, io.SeekStart); err != nil {
+		return fmt.Errorf("wal: TruncatePrefix: seek to suffix: %w", err)
+	}
+	// 0o600: the suffix carries the same graph mutation stream as the WAL and
+	// must not be world-readable.
+	tmp, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // sibling of caller-supplied WAL path
+	if err != nil {
+		return fmt.Errorf("wal: TruncatePrefix: create temp: %w", err)
+	}
+	if _, err := io.CopyN(tmp, w.f, length); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("wal: TruncatePrefix: copy suffix: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("wal: TruncatePrefix: fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("wal: TruncatePrefix: close temp: %w", err)
+	}
+	return nil
+}
+
+// reopenAfterPrefixTruncate replaces the Writer's file handle with a fresh
+// O_APPEND handle on the (just-renamed) suffix-only WAL and resets the size
+// bookkeeping and bufio writer. Called by [Writer.TruncatePrefix] with w.mu
+// held, after the atomic rename. The old handle is closed best-effort: it
+// points at the unlinked full-WAL inode and is no longer usable.
+func (w *Writer) reopenAfterPrefixTruncate(suffixLen int64) error {
+	nf, err := os.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // caller-supplied path is by-design
+	if err != nil {
+		return fmt.Errorf("wal: TruncatePrefix: reopen %q: %w", w.path, err)
+	}
+	if _, err := nf.Seek(0, io.SeekEnd); err != nil {
+		_ = nf.Close()
+		return fmt.Errorf("wal: TruncatePrefix: seek reopened: %w", err)
+	}
+	_ = w.f.Close() // best-effort: old inode is unlinked
+	w.f = nf
+	w.bw.Reset(nf)
+	w.durableSize = suffixLen
+	w.appendedSize = suffixLen
+	return nil
 }
 
 // Close flushes any buffered frames, calls Sync once, and releases

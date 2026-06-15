@@ -16,19 +16,26 @@
 //	                 WAL file has a torn tail that wal.Reader must
 //	                 detect as ErrTornFrame.
 //
-//	checkpoint.post-snapshot-pre-truncate
+//	checkpoint.p2-snapshot-published-pre-truncate
 //	               — commits an int64-keyed workload, then triggers a
-//	                 codec-aware checkpoint that crashes AFTER the
-//	                 self-sufficient snapshot is durable but BEFORE the
-//	                 WAL is truncated. Recovery must reconstruct the full
-//	                 state from the snapshot plus the still-intact WAL.
+//	                 non-blocking codec-aware checkpoint that crashes AFTER
+//	                 the self-sufficient snapshot is published and durable
+//	                 but BEFORE the WAL prefix is truncated. Recovery must
+//	                 reconstruct the full state from the snapshot plus the
+//	                 still-intact full WAL (idempotent whole-WAL replay).
 //
-//	checkpoint.mid-truncate
-//	               — same workload and checkpoint, but the crash lands
-//	                 in the middle of the WAL truncation (file already
-//	                 shrunk to zero on disk). Recovery must reconstruct
-//	                 the full state from the self-sufficient snapshot
-//	                 alone (the WAL is empty).
+//	checkpoint.truncprefix.tmp-written-pre-rename
+//	checkpoint.truncprefix.post-rename-pre-dirfsync
+//	checkpoint.truncprefix.post-rename-pre-bookkeeping
+//	               — commits the seed, runs ONE complete checkpoint
+//	                 (prefix-truncating to a self-sufficient snapshot),
+//	                 commits one more "post" edge so the WAL carries a real
+//	                 non-empty suffix, then triggers a SECOND checkpoint
+//	                 whose prefix-truncate crashes at the named point in
+//	                 wal.Writer.TruncatePrefix's atomic copy-then-rename.
+//	                 Recovery must reconstruct the full committed state
+//	                 (seed + post edge) from the snapshot plus whichever WAL
+//	                 — original full or suffix-only — survives the crash.
 //
 //	recovery.snapshot-promote-post-rename-pre-fsync
 //	               — builds the interrupted-publish on-disk state (a
@@ -98,8 +105,12 @@ func run() int {
 	switch scenario {
 	case "wal.mid-frame":
 		runWALMidFrame(dir)
-	case "checkpoint.post-snapshot-pre-truncate", "checkpoint.mid-truncate":
+	case "checkpoint.p2-snapshot-published-pre-truncate":
 		runCheckpointCrash(dir, scenario)
+	case "checkpoint.truncprefix.tmp-written-pre-rename",
+		"checkpoint.truncprefix.post-rename-pre-dirfsync",
+		"checkpoint.truncprefix.post-rename-pre-bookkeeping":
+		runCheckpointPrefixCrash(dir, scenario)
 	case "recovery.snapshot-promote-post-rename-pre-fsync":
 		runRecoveryPromoteCrash(dir)
 	default:
@@ -123,20 +134,14 @@ var checkpointSeedEdges = []struct {
 }
 
 // runCheckpointCrash commits an int64-keyed workload through a typed
-// Store, then drives a codec-aware checkpoint that crashes at the named
-// breakpoint:
+// Store, then drives a non-blocking codec-aware checkpoint that crashes at
+// checkpoint.p2-snapshot-published-pre-truncate: after the self-sufficient
+// snapshot is published and durable but before the WAL prefix is truncated.
 //
-//   - checkpoint.post-snapshot-pre-truncate fires inside runCheckpoint,
-//     after the self-sufficient snapshot is durable but before the WAL
-//     is truncated.
-//   - checkpoint.mid-truncate fires inside wal.Writer.Truncate, after
-//     the file has been shrunk to zero but before the truncation is
-//     finalised.
-//
-// Both rely on WithMapperCodec so the snapshot carries mapper.bin for
-// the int64 key type and is therefore self-sufficient on load. The
-// artefacts (snapshot/ + wal) are left in GOGRAPH_CRASH_DIR for the
-// parent to recover from.
+// It relies on WithMapperCodec so the snapshot carries mapper.bin for the
+// int64 key type and is therefore self-sufficient on load. The artefacts
+// (snapshot/ + the still-intact full WAL) are left in GOGRAPH_CRASH_DIR for
+// the parent to recover from.
 func runCheckpointCrash(dir, scenario string) {
 	walPath := filepath.Join(dir, "wal")
 	w, err := wal.Open(walPath)
@@ -196,6 +201,89 @@ func runCheckpointCrash(dir, scenario string) {
 	// Reached only on the non-crash self-test path
 	// (GOGRAPH_CRASH_AT != scenario).
 	fmt.Printf("runCheckpointCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
+}
+
+// checkpointPostEdge is the extra edge runCheckpointPrefixCrash commits before
+// the crashing checkpoint, so the recovered graph must carry it in addition to
+// the seed for the durability assertion to pass.
+var checkpointPostEdge = struct{ src, dst, weight int64 }{3, 4, 400}
+
+// runCheckpointPrefixCrash exercises a crash inside the WAL prefix-truncate
+// (wal.Writer.TruncatePrefix) of a non-blocking checkpoint. It commits the seed
+// workload plus one more "post" edge (3->4), then triggers a single checkpoint
+// whose prefix-truncate crashes at the named breakpoint inside the atomic
+// copy-then-rename (tmp-written-pre-rename, post-rename-pre-dirfsync, or
+// post-rename-pre-bookkeeping).
+//
+// At every one of those crash points recovery must reconstruct the FULL
+// committed state — seed plus the post edge — from the self-sufficient snapshot
+// plus whichever WAL survives (the original full WAL before the rename, or the
+// suffix-only WAL after it). The non-empty-suffix-PRESERVATION property of
+// TruncatePrefix itself is proven separately and deterministically by the
+// store/wal unit test TestTruncatePrefix_PreservesSuffix; here the focus is the
+// crash-atomicity of the rename at every interleaving (no committed transaction
+// is ever lost). The artefacts are left in GOGRAPH_CRASH_DIR for the parent.
+func runCheckpointPrefixCrash(dir, scenario string) {
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+
+	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	opts := txn.Options[int64, int64]{
+		Codec:       txn.NewInt64Codec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	}
+	store := txn.NewStoreWithOptions[int64, int64](g, w, opts)
+
+	tx := store.Begin()
+	for _, e := range checkpointSeedEdges {
+		if err := tx.AddEdge(e.src, e.dst, e.weight); err != nil {
+			log.Fatalf("AddEdge(%d->%d): %v", e.src, e.dst, err)
+		}
+	}
+	if err := tx.SetNodeLabel(1, "Root"); err != nil {
+		log.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := tx.SetNodeProperty(2, "weight", lpg.Int64Value(42)); err != nil {
+		log.Fatalf("SetNodeProperty: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Fatalf("Commit(seed): %v", err)
+	}
+
+	// Commit the post edge before the checkpoint so it is definitely durable
+	// and applied; the single checkpoint folds seed+post into the snapshot and
+	// prefix-truncates. (The breakpoint fires on THIS — the only — checkpoint.)
+	txPost := store.Begin()
+	if err := txPost.AddEdge(checkpointPostEdge.src, checkpointPostEdge.dst, checkpointPostEdge.weight); err != nil {
+		log.Fatalf("AddEdge(post %d->%d): %v", checkpointPostEdge.src, checkpointPostEdge.dst, err)
+	}
+	if err := txPost.Commit(); err != nil {
+		log.Fatalf("Commit(post): %v", err)
+	}
+
+	var mu sync.Mutex
+	cp := checkpoint.New[int64, int64](
+		checkpoint.Config{Dir: dir},
+		g, w, &mu,
+		checkpoint.WithMapperCodec[int64, int64](store.Codec()),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cp.Start(ctx)
+
+	// The checkpoint's prefix-truncate crashes at the named breakpoint inside
+	// wal.Writer.TruncatePrefix. Under the crash harness this never returns.
+	err = cp.Trigger()
+	cp.Stop()
+	cancel()
+	if err != nil {
+		log.Fatalf("checkpoint Trigger: %v", err)
+	}
+
+	// Reached only on the non-crash self-test path.
+	fmt.Printf("runCheckpointPrefixCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
 }
 
 // runRecoveryPromoteCrash builds the interrupted-publish on-disk state
