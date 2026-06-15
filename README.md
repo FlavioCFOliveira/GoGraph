@@ -5,13 +5,13 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.3.1`.** This is the project's **fourth release**,
+**Current release: `v0.3.2`.** This is the project's **fifth release**,
 published at a pre-1.0 baseline: under Semantic Versioning a `0.y.z`
 version signals that the public API is **not yet stable** and may change
-without a major bump while the module matures toward `1.0.0`. `v0.3.1` is
-a pre-1.0 **PATCH** release — a performance and security-hardening release
-that is API-additive over `v0.3.0`, with no breaking change and no new
-user-facing public API. The five major
+without a major bump while the module matures toward `1.0.0`. `v0.3.2` is
+a pre-1.0 **PATCH** release — a correctness-only fix for a
+data-compatibility recovery panic, API-additive over `v0.3.1`, with no
+breaking change and no new user-facing public API. The five major
 subsystems below are functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
@@ -20,9 +20,9 @@ every change is gated by the project's CI suite (build, vet, race, lint,
 `govulncheck`, TCK conformance, and the deterministic crash-injection
 battery). The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.3.1`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.3.2`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.3.1.md](release-notes/v0.3.1.md) for the full release
+[release-notes/v0.3.2.md](release-notes/v0.3.2.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)

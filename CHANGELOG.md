@@ -4,6 +4,64 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-06-15
+
+The fifth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **PATCH**
+release with a single, focused change: it **fixes a data-compatibility
+recovery panic** that could crash the process when opening an existing
+on-disk store. It is **API-additive** over `v0.3.1` — no exported
+identifier was added, removed, or renamed, there is **no breaking
+change**, and there is **no new user-facing public API**. It is a
+**strongly recommended upgrade** for anyone running `v0.3.0` or `v0.3.1`,
+in particular anyone whose store was first written by `v0.2.0` or
+earlier.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios) and **100 % ACID-compliant**. The Go toolchain
+remains **go1.26.4** (unchanged), and `govulncheck ./...` stays clean.
+This is a correctness-only patch that touches no hot path, so the
+benchmark figures are **inherited unchanged from `v0.3.1`**
+(see [docs/benchmarks/v0.3.2.md](docs/benchmarks/v0.3.2.md)).
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.3.2
+```
+
+### Fixed
+
+- **Recovery panic on the edge fast-path handle column (data
+  compatibility).** `graph/adjlist.upsertEdgeLocked` could panic with
+  `makeslice: cap out of range` on the spare-capacity fast path when
+  growing the per-edge handle column for a node that had accrued a
+  **handle-less prefix**. The fast path sized the new handle column from
+  `len(current.handles)` rather than from the neighbour count `oldLen`;
+  for a node whose handle column was still nil/short (for example length
+  `0`) while its neighbour backing array had grown with spare capacity, a
+  later handle-bearing append computed a capacity (`growCap(0) = 4`) below
+  the required length (`6`), so `make([]uint64, newLen, <newLen)`
+  panicked. The fix sizes the column from `oldLen`
+  (`make([]uint64, newLen, growCap(oldLen))`), matching the slow path in
+  the same function; `growCap(oldLen)` is always `>= newLen`, and the
+  copy-plus-zero-fill keeps the handle column length-aligned with the
+  neighbour list (leading handle-less slots stay the `0` "no handle"
+  sentinel).
+
+  This was a hard **data-compatibility break** introduced by the
+  amortised-O(1) `AddEdge` hub rewrite (`877e455`) and shipped in
+  `v0.3.0` and `v0.3.1`; it is **absent in `v0.2.0`**.
+  `store/snapshot.ApplyCSRToGraph` replays each node's edges as a mix of
+  handle-less (`AddEdge`) and handle-bearing (`AddEdgeHIfAbsent`)
+  inserts, so **any snapshot containing such a node crashed the process
+  on open** — under both read and write recovery. Upgrading restores the
+  ability to open these stores. Two regression tests guard the fix
+  (`graph/adjlist/handle_prefix_regression_test.go` and
+  `store/snapshot/apply_handle_prefix_test.go`), each verified red without
+  the fix and green with it.
+
 ## [0.3.1] — 2026-06-15
 
 The fourth published release of **GoGraph**, a Go module for graph
@@ -795,6 +853,8 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.1.0
   `github.com/FlavioCFOliveira/GoGraph` with no `/vN` suffix, which is
   Semantic-Import-Versioning-correct for a `0.x` line.
 
+[0.3.2]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.2
+[0.3.1]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.1
 [0.3.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.0
 [0.2.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.2.0
 [0.1.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.1.0
