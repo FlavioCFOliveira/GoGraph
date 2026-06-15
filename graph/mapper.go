@@ -213,6 +213,48 @@ func NewMapper[N comparable]() *Mapper[N] {
 	return m
 }
 
+// Reserve pre-allocates interning capacity for an expected total of n
+// distinct keys, spread evenly across the Mapper's shards. It is a pure
+// capacity hint: it never assigns a NodeID, never changes the NodeID a
+// future [Mapper.Intern] will assign, and never changes iteration or
+// resolution order. Calling Reserve only reduces the number of map and
+// slice re-growths the subsequent Intern calls incur, which is the
+// project's "pre-size all slices and maps" mandate applied to bulk
+// ingest. A non-positive n is a no-op.
+//
+// Because keys hash uniformly across the 256 shards, the per-shard
+// reservation is ceil(n / shardCount); a heavily skewed key
+// distribution may still grow some shards past the hint, which is
+// harmless. Reserve takes each shard's write lock in turn and is safe
+// for concurrent use, though it is intended to be called once, before
+// ingest begins, on a quiescent Mapper.
+func (m *Mapper[N]) Reserve(n int) {
+	if n <= 0 {
+		return
+	}
+	perShard := (n + mapperShardCount - 1) / mapperShardCount
+	for i := range m.shards {
+		s := &m.shards[i]
+		s.mu.Lock()
+		// Only grow: never discard already-interned state. A map cannot be
+		// shrunk in place, and the reverse slice is grown via a capacity-
+		// preserving reallocation when it is still smaller than the hint.
+		if len(s.forward) < perShard {
+			grown := make(map[N]NodeID, perShard)
+			for k, v := range s.forward {
+				grown[k] = v
+			}
+			s.forward = grown
+		}
+		if cap(s.reverse) < perShard {
+			grown := make([]N, len(s.reverse), perShard)
+			copy(grown, s.reverse)
+			s.reverse = grown
+		}
+		s.mu.Unlock()
+	}
+}
+
 // Intern returns the [NodeID] associated with k, allocating a new one
 // on first encounter. Subsequent calls with the same value return the
 // same NodeID. The fast path (k already interned) takes a read lock
