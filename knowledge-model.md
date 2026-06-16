@@ -209,6 +209,25 @@ insensitive and held; new engine-level tests + a `constraint.drop.post-wal-sync`
 crash scenario cover it; the DST pinning test was flipped to a regression guard.
 No new label or edge type.
 
+Incrementally synced at commits `be91e38`..`712d455` (2026-06-16, tasks
+#1557-#1563, sprint 198 — DST Phase 4 Scenario registry + trace shrinking, now
+CLOSED): +8 `Commit`s, +7 `Task`s (`1557`-`1563` COMPLETED). TEST-ONLY
+(`internal/sim` + `cmd/sim` — no production code changed; TCK 3897/3897 held).
+New `internal/sim` pieces: `scenario.go`+`catalogue.go` (a `Scenario` config +
+named `Registry`, no global state — 8 scenarios: crash-storm, write-heavy,
+read-heavy, schema-chaos, bad-actors, overload, bulk-vs-online, long-running),
+`trace.go` (deterministic trace recording + scripted replay — DETERMINISTIC
+modes only; concurrent interleaving not bit-replayable), `shrink.go` (ddmin
+trace shrinking to a minimal failing reproducer — demoed 500→1 op, 500×), a
+full (non-sampled) index-vs-base-data consistency check in `checker.go`, and
+`cmd/sim` flags `-scenario`/`-list-scenarios`/`-replay` (verbose per-op trace +
+shrunk reproducer on failure). Edges: `Sprint 198 -[CONTAINS]->` each Commit;
+each Task `-[IMPLEMENTED_IN]->` its Commit; Commits `-[TOUCHES]->` `internal/sim`
+(the CLI commit → `cmd/sim`); `Commit 80f9d44 -[IMPLEMENTED_IN]->` Feature `DST
+Simulator`. No catalogue scenario surfaced a production bug (all ran clean or
+with only expected bad-actor/overload errors). -race + goleak clean,
+lint/staticcheck/govulncheck 0. No new label or edge type.
+
 ---
 
 ## Node labels
