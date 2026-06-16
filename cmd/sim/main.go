@@ -295,7 +295,9 @@ func runListScenarios(stdout, stderr *errWriter) int {
 		return 1
 	}
 	stdout.printf("Scenario catalogue (%d):\n", reg.Len())
-	for _, sc := range reg.Scenarios() {
+	scenarios := reg.Scenarios()
+	for i := range scenarios {
+		sc := &scenarios[i]
 		stdout.printf("  %-16s [%s] seed=%d\n      %s\n", sc.Name, sc.Mode, sc.DefaultSeed, sc.Description)
 	}
 	return 0

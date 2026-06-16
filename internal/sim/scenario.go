@@ -57,7 +57,7 @@ func (m ExecMode) String() string {
 	}
 }
 
-// Bit-reproducible reports whether a scenario in this mode is bit-reproducible
+// Reproducible reports whether a scenario in this mode is bit-reproducible
 // from its seed and therefore eligible for trace recording, scripted replay,
 // and shrinking. Only [ModeDeterministic] qualifies.
 func (m ExecMode) Reproducible() bool { return m == ModeDeterministic }
@@ -133,7 +133,7 @@ type Scenario struct {
 
 // resolveSeed returns the seed to run with: the supplied override when non-zero
 // intent is signalled by useOverride, else the scenario's default.
-func (sc Scenario) resolveSeed(override uint64, useOverride bool) uint64 {
+func (sc *Scenario) resolveSeed(override uint64, useOverride bool) uint64 {
 	if useOverride {
 		return override
 	}
@@ -149,7 +149,7 @@ func (sc Scenario) resolveSeed(override uint64, useOverride bool) uint64 {
 // returned report (on failure) carries enough to replay and shrink. For the
 // concurrent and liveness modes the run is convergence/leak-guarded and the
 // report, when non-nil, describes the inconsistency found at quiescence.
-func (sc Scenario) Run(ctx context.Context, seed uint64) (*SimReport, error) {
+func (sc *Scenario) Run(ctx context.Context, seed uint64) (*SimReport, error) {
 	if sc.run != nil {
 		return sc.run(ctx, seed)
 	}
@@ -171,7 +171,7 @@ func (sc Scenario) Run(ctx context.Context, seed uint64) (*SimReport, error) {
 // DeterministicConfig builds the [Config] for a deterministic-mode run from the
 // scenario plus a resolved seed. It is exported-internal so trace recording and
 // shrinking can build the identical config.
-func (sc Scenario) DeterministicConfig(seed uint64) Config {
+func (sc *Scenario) DeterministicConfig(seed uint64) Config {
 	wl := sc.Workload
 	if wl == nil {
 		wl = DefaultWorkload
@@ -192,7 +192,7 @@ func (sc Scenario) DeterministicConfig(seed uint64) Config {
 // runDeterministic runs the engine-API safety loop and, when selected, the
 // full index-consistency check at the end. It always closes the simulator so no
 // durable handle or goroutine leaks past the run.
-func (sc Scenario) runDeterministic(ctx context.Context, seed uint64) (*SimReport, error) {
+func (sc *Scenario) runDeterministic(ctx context.Context, seed uint64) (*SimReport, error) {
 	cfg := sc.DeterministicConfig(seed)
 	sm, err := New(cfg)
 	if err != nil {
@@ -217,7 +217,7 @@ func (sc Scenario) runDeterministic(ctx context.Context, seed uint64) (*SimRepor
 
 // runConcurrent runs the concurrent multi-connection mode and maps an
 // inconsistency to a report. It builds a fresh SimServer it owns and closes.
-func (sc Scenario) runConcurrent(ctx context.Context, seed uint64) (*SimReport, error) {
+func (sc *Scenario) runConcurrent(ctx context.Context, seed uint64) (*SimReport, error) {
 	srv, err := newScenarioServer()
 	if err != nil {
 		return nil, fmt.Errorf("sim: scenario %q server: %w", sc.Name, err)
@@ -241,7 +241,7 @@ func (sc Scenario) runConcurrent(ctx context.Context, seed uint64) (*SimReport, 
 
 // runLiveness runs the two-phase safety->liveness flow and maps a
 // non-converging or inconsistent outcome to a report.
-func (sc Scenario) runLiveness(ctx context.Context, seed uint64) (*SimReport, error) {
+func (sc *Scenario) runLiveness(ctx context.Context, seed uint64) (*SimReport, error) {
 	srv, err := newScenarioServer()
 	if err != nil {
 		return nil, fmt.Errorf("sim: scenario %q server: %w", sc.Name, err)
@@ -352,7 +352,8 @@ type Registry struct {
 // silently shadow one scenario with another.
 func NewRegistry(scenarios ...Scenario) (*Registry, error) {
 	r := &Registry{byName: make(map[string]Scenario, len(scenarios))}
-	for _, sc := range scenarios {
+	for i := range scenarios {
+		sc := scenarios[i]
 		if sc.Name == "" {
 			return nil, fmt.Errorf("sim: registry: scenario with empty name")
 		}

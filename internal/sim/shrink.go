@@ -36,7 +36,7 @@ type ShrinkResult struct {
 
 // Ratio returns the reduction factor (original / minimal); 1 means no reduction.
 // It is reported so a caller can assert an orders-of-magnitude shrink.
-func (r ShrinkResult) Ratio() float64 {
+func (r *ShrinkResult) Ratio() float64 {
 	if r.MinimalLen == 0 {
 		return float64(r.OriginalLen)
 	}
