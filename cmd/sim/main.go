@@ -19,6 +19,14 @@
 //	--list-scenarios  print the scenario catalogue and exit
 //	--replay        re-run the seed in verbose full-trace debug; on a violation,
 //	                shrink to a minimal reproducer and print it
+//	--swarm         run a swarm of many derived seeds across a bounded worker
+//	                pool, time/count-boxed; prints a summary (runs/passes/
+//	                failures with reproduce lines) and exits non-zero on any
+//	                failing seed. Tuned by --workers, --runs, --duration, and an
+//	                optional --scenario filter; --bias steers selection toward
+//	                under-covered scenarios; --coverage-report prints coverage.
+//	                The leading positional seed is the swarm's MASTER seed, so
+//	                the whole swarm reproduces from it.
 //
 // Scenario and replay modes (Phase 4):
 //
@@ -80,6 +88,12 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	scenario := fs.String("scenario", "", "run a named scenario from the catalogue (see -list-scenarios)")
 	listScenarios := fs.Bool("list-scenarios", false, "print the scenario catalogue and exit")
 	replay := fs.Bool("replay", false, "re-run the seed in verbose full-trace debug; on a violation, shrink to a minimal reproducer")
+	swarm := fs.Bool("swarm", false, "run a swarm of many seeds across a bounded worker pool (time/count-boxed)")
+	workers := fs.Int("workers", 0, "swarm worker-pool cap (0 = min(GOMAXPROCS, runs))")
+	runs := fs.Int("runs", 200, "swarm seed-count budget (ignored when -duration is set without -runs)")
+	duration := fs.Duration("duration", 0, "swarm wall-clock budget (e.g. 30s); 0 = bounded by -runs only")
+	coverageReport := fs.Bool("coverage-report", false, "with -swarm: print the coverage summary; alone: print an empty coverage template and exit")
+	bias := fs.Bool("bias", false, "with -swarm: bias scenario selection toward under-covered scenarios (coverage-driven)")
 	injectDemoFault := fs.Bool("inject-demo-fault", false, "DEMO ONLY: inject a synthetic lost-write fault into the replayed trace to demonstrate shrinking")
 
 	// Go's flag package stops parsing at the first non-flag token, so the
@@ -101,9 +115,30 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 		return runListScenarios(stdout, stderr)
 	}
 
+	// -coverage-report WITHOUT -swarm prints the coverage template (every tracked
+	// scenario bucket, all unexplored) and exits, so the report shape is
+	// inspectable without running a swarm.
+	if *coverageReport && !*swarm {
+		return runCoverageTemplate(stdout, stderr)
+	}
+
 	seed, ok := resolveSeed(seedArgs, stderr)
 	if !ok {
 		return 2
+	}
+
+	// -swarm runs many derived seeds across a bounded worker pool, time/count
+	// boxed, and reports failures + coverage. It uses the (positional or random)
+	// seed as the swarm's MASTER seed, so the whole swarm reproduces from it.
+	if *swarm {
+		return runSwarmMode(seed, swarmOptions{
+			scenario:       *scenario,
+			workers:        *workers,
+			runs:           *runs,
+			duration:       *duration,
+			bias:           *bias,
+			coverageReport: *coverageReport,
+		}, stdout, stderr)
 	}
 
 	// -replay re-runs the (scenario or default) deterministic workload for the
@@ -446,6 +481,124 @@ func replayConfig(seed uint64, scenarioName string, stderr *errWriter) (sim.Conf
 		return sim.Config{}, false
 	}
 	return sc.DeterministicConfig(seed), true
+}
+
+// swarmOptions carries the parsed swarm flags into runSwarmMode.
+type swarmOptions struct {
+	scenario       string
+	workers        int
+	runs           int
+	duration       time.Duration
+	bias           bool
+	coverageReport bool
+}
+
+// defaultSwarmScenario is the scenario a swarm runs when -scenario is empty: a
+// fast deterministic mix so a large swarm stays cheap and reproducible per seed.
+const defaultSwarmScenario = sim.ScenarioReadHeavy
+
+// runSwarmMode runs a bounded-worker, time/count-boxed swarm of derived seeds
+// from the master seed, feeding a coverage tracker, and prints the summary
+// (runs/passes/failures with reproduce lines) plus the coverage report when
+// requested. It exits non-zero if any seed failed.
+func runSwarmMode(masterSeed uint64, opt swarmOptions, stdout, stderr *errWriter) int {
+	reg, err := sim.DefaultRegistry()
+	if err != nil {
+		stderr.printf("sim: build catalogue: %v\n", err)
+		return 1
+	}
+	scenario := opt.scenario
+	if scenario == "" {
+		scenario = defaultSwarmScenario
+	}
+	if _, ok := reg.Lookup(scenario); !ok {
+		stderr.printf("sim: unknown scenario %q (use -list-scenarios)\n", scenario)
+		return 2
+	}
+
+	// The coverage tracker biases AND reports over a swarm-appropriate scenario
+	// universe. The soak-scale long-running scenario (millions of ticks per run)
+	// would stall an interactive swarm, so it is excluded from the universe
+	// (it remains runnable explicitly via -scenario=long-running). One tracker
+	// serves both selection and reporting so the bias reflects what it has seen.
+	universe := reg.Names()
+	if opt.bias {
+		universe = swarmBiasUniverse(reg)
+	}
+	tracker := sim.NewCoverageTracker(universe)
+	cfg := sim.SwarmConfig{
+		MasterSeed: masterSeed,
+		Scenario:   scenario,
+		Workers:    opt.workers,
+		Runs:       opt.runs,
+		Duration:   opt.duration,
+		Observe:    tracker.Record,
+	}
+	// A pure-duration budget (no positive runs) drops the count bound; -bias
+	// steers selection across the universe toward under-covered scenarios.
+	if opt.duration > 0 && opt.runs <= 0 {
+		cfg.Runs = 0
+	}
+	if opt.bias {
+		cfg.Selector = tracker
+	}
+
+	sw, err := sim.NewSwarm(reg, cfg)
+	if err != nil {
+		stderr.printf("sim: swarm: %v\n", err)
+		return 2
+	}
+
+	res, err := sw.Run(context.Background())
+	if err != nil {
+		stderr.printf("sim: swarm run: %v\n", err)
+		return 1
+	}
+
+	stdout.printf("%s\n", res.Summary())
+	if opt.coverageReport {
+		stdout.printf("%s\n", tracker.Summary().String())
+		if unobs := tracker.UnobservableSignals(); len(unobs) > 0 {
+			stdout.printf("Unobservable without a production hook (not tracked): %v\n", unobs)
+		}
+	}
+	if res.FailureCount() > 0 {
+		// The reproduce lines are already in the summary; exit non-zero so CI/the
+		// caller treats any failing seed as a failure.
+		return 1
+	}
+	return 0
+}
+
+// swarmBiasUniverse returns the scenario names the biased swarm steers over:
+// every catalogue scenario EXCEPT the soak-scale long-running one, whose
+// millions-of-ticks budget would stall an interactive swarm. The excluded
+// scenario stays runnable explicitly via -scenario=long-running.
+func swarmBiasUniverse(reg *sim.Registry) []string {
+	all := reg.Names()
+	out := make([]string, 0, len(all))
+	for _, n := range all {
+		if n == sim.ScenarioLongRunning {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// runCoverageTemplate prints the coverage report shape for a fresh tracker over
+// the catalogue (every scenario bucket unexplored) and exits 0. It is the
+// -coverage-report-alone handler.
+func runCoverageTemplate(stdout, stderr *errWriter) int {
+	reg, err := sim.DefaultRegistry()
+	if err != nil {
+		stderr.printf("sim: build catalogue: %v\n", err)
+		return 1
+	}
+	tracker := sim.NewCoverageTracker(reg.Names())
+	stdout.printf("%s\n", tracker.Summary().String())
+	stdout.printf("Unobservable without a production hook (not tracked): %v\n", tracker.UnobservableSignals())
+	return 0
 }
 
 // errWriter latches the first write error from a sequence of formatted writes so

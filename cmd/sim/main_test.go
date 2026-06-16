@@ -197,3 +197,61 @@ func TestRun_UnknownMode(t *testing.T) {
 		t.Fatalf("missing error, got %q", errBuf.String())
 	}
 }
+
+// TestRun_Swarm verifies the -swarm flag runs a bounded, count-boxed swarm over
+// a fast deterministic scenario, prints the summary, and exits 0 when every
+// seed passes. It also confirms the leading-positional seed is honoured as the
+// master seed alongside flags.
+func TestRun_Swarm(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	code := run([]string{"7", "--swarm", "--workers=4", "--runs=12", "--scenario=read-heavy"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "master-seed=7") || !strings.Contains(s, "runs=12") {
+		t.Fatalf("missing swarm summary, got %q", s)
+	}
+	if !strings.Contains(s, "failures=0") {
+		t.Fatalf("expected zero failures for a correct scenario, got %q", s)
+	}
+}
+
+// TestRun_SwarmCoverageReport verifies -coverage-report with -swarm prints the
+// coverage summary including the unexplored buckets and the unobservable-signal
+// disclosure.
+func TestRun_SwarmCoverageReport(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	code := run([]string{"7", "--swarm", "--workers=2", "--runs=8", "--scenario=read-heavy", "--coverage-report"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "Coverage:") || !strings.Contains(s, "read-heavy") {
+		t.Fatalf("missing coverage report, got %q", s)
+	}
+	if !strings.Contains(s, "Unobservable without a production hook") {
+		t.Fatalf("missing unobservable-signal disclosure, got %q", s)
+	}
+}
+
+// TestRun_CoverageReportAlone verifies -coverage-report without -swarm prints
+// the coverage template (every scenario unexplored) and exits 0.
+func TestRun_CoverageReportAlone(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	code := run([]string{"--coverage-report"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Coverage:") {
+		t.Fatalf("missing coverage template, got %q", out.String())
+	}
+}
+
+// TestRun_SwarmUnknownScenario verifies an unknown swarm scenario exits 2.
+func TestRun_SwarmUnknownScenario(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"1", "--swarm", "--scenario=bogus", "--runs=4"}, &out, &errBuf); code != 2 {
+		t.Fatalf("exit %d, want 2; stderr=%q", code, errBuf.String())
+	}
+}
