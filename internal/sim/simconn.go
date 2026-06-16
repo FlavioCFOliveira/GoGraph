@@ -174,6 +174,15 @@ func (h *halfPipe) close(err error) {
 	h.cond.Broadcast()
 }
 
+// buffered reports how many bytes are currently queued in the pipe (unread by
+// the consumer). It is the observability seam the SlowConsumer test uses to
+// assert the buffer stays bounded under a stalled reader.
+func (h *halfPipe) buffered() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.buf)
+}
+
 func (h *halfPipe) setReadDeadline(t time.Time) {
 	h.mu.Lock()
 	h.readDeadline = t
@@ -288,6 +297,11 @@ func (c *SimConn) CloseWithError(err error) error {
 	})
 	return nil
 }
+
+// ReadBuffered reports how many bytes the peer has written that this end has not
+// yet read. It never exceeds [simConnBufferSize]; the bound holding under a
+// stalled reader is the backpressure property the SlowConsumer asserts.
+func (c *SimConn) ReadBuffered() int { return c.rd.buffered() }
 
 // LocalAddr implements [net.Conn.LocalAddr].
 func (c *SimConn) LocalAddr() net.Addr { return c.localAddr }
