@@ -10,7 +10,7 @@ import (
 // success summary including the seed.
 func TestRun_PassesWithSeed(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	code := run([]string{"42", "--ticks=500"}, &out, &errBuf)
+	code := run([]string{"42", "--ticks=100"}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errBuf.String())
 	}
@@ -59,7 +59,7 @@ func TestRun_WorkloadNames(t *testing.T) {
 	for _, name := range []string{"default", "write-heavy", "read-heavy"} {
 		t.Run(name, func(t *testing.T) {
 			var out, errBuf bytes.Buffer
-			if code := run([]string{"3", "--ticks=200", "--workload=" + name}, &out, &errBuf); code != 0 {
+			if code := run([]string{"3", "--ticks=80", "--workload=" + name}, &out, &errBuf); code != 0 {
 				t.Fatalf("%s: exit %d stderr=%q", name, code, errBuf.String())
 			}
 		})

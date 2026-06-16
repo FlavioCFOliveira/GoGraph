@@ -156,9 +156,13 @@ func (HonestWriter) opDelete(seed *Seed, names []string) Op {
 // KNOWS, a filtered aggregate, and a variable-length path length projection.
 var readTemplates = []readTemplate{
 	{cypher: "MATCH (n:Person) RETURN n.name, n.age LIMIT 10"},
-	{cypher: "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name, b.name"},
+	{cypher: "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name, b.name LIMIT 50"},
 	{cypher: "MATCH (n:Person) WHERE n.age > $age RETURN count(n)", needsAge: true},
-	{cypher: "MATCH p=(a:Person)-[:KNOWS*1..3]->(b) RETURN length(p)"},
+	// The variable-length path read is bounded with LIMIT so its enumeration
+	// cost stays linear in the limit rather than exploding combinatorially on a
+	// dense KNOWS cluster — the engine still exercises the VLE expansion plan,
+	// but a supernode cannot make a single read dominate the whole run.
+	{cypher: "MATCH p=(a:Person)-[:KNOWS*1..3]->(b) RETURN length(p) LIMIT 50"},
 }
 
 // readTemplate is a read query and a flag indicating whether it binds the $age

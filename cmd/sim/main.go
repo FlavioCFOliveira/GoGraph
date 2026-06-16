@@ -44,11 +44,22 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	ticks := fs.Int("ticks", 100000, "number of ticks (operations) to simulate")
 	workloadName := fs.String("workload", "default", "actor mix: default | write-heavy | read-heavy")
 	verbose := fs.Bool("verbose", false, "print each operation as it runs")
-	if err := fs.Parse(args); err != nil {
+
+	// Go's flag package stops parsing at the first non-flag token, so the
+	// documented usage `sim <seed> --ticks=N` would otherwise leave --ticks
+	// unparsed. Split the optional leading positional seed out first, then parse
+	// the remaining tokens as flags, so flags work whether they precede or
+	// follow the seed.
+	seedArgs, flagArgs := splitSeedArg(args)
+	if err := fs.Parse(flagArgs); err != nil {
+		return 2
+	}
+	if len(fs.Args()) > 0 {
+		stderr.printf("sim: unexpected arguments: %v\n", fs.Args())
 		return 2
 	}
 
-	seed, ok := resolveSeed(fs.Args(), stderr)
+	seed, ok := resolveSeed(seedArgs, stderr)
 	if !ok {
 		return 2
 	}
@@ -104,6 +115,25 @@ func (e *errWriter) printf(format string, args ...any) {
 		return
 	}
 	_, e.err = fmt.Fprintf(e.w, format, args...)
+}
+
+// splitSeedArg separates an optional leading positional seed token (the first
+// argument that does not start with '-') from the flag tokens. It returns
+// (seedArgs, flagArgs): seedArgs holds the single seed token when present (else
+// empty), and flagArgs holds every remaining token in its original order. Only
+// a leading positional is treated as the seed; a non-flag token appearing after
+// flags is left in flagArgs so flag.Parse reports it as unexpected.
+func splitSeedArg(args []string) (seedArgs, flagArgs []string) {
+	for i, a := range args {
+		if a == "" || a[0] == '-' {
+			continue
+		}
+		flagArgs = make([]string, 0, len(args)-1)
+		flagArgs = append(flagArgs, args[:i]...)
+		flagArgs = append(flagArgs, args[i+1:]...)
+		return []string{a}, flagArgs
+	}
+	return nil, args
 }
 
 // resolveSeed returns the seed to use: the first positional argument parsed as
