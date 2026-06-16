@@ -185,6 +185,30 @@ goleak clean on internal/sim + bolt/server, lint/staticcheck/govulncheck 0;
 lock-step single-conn wire is byte-reproducible, concurrent/liveness modes are
 goleak+convergence-guarded.
 
+Incrementally synced at commit `171e9d3` (2026-06-16, task #1556, sprint 200 —
+S-fix-drop-constraint, CLOSED): FIXED the fail-silent `DROP CONSTRAINT <name>`
+no-op surfaced by the DST simulator (Phase 3). +1 `Commit`; `Task 1556` (the BUG)
+→ COMPLETED; new `Sprint 200`. Root cause: by-name DROP produced empty
+label/prop in the IR (`cypher/ir/ddl_parser.go`), so the operator targeted the
+nonexistent index `__uniq__.` and, with IF EXISTS, silently absorbed
+`ErrIndexNotFound` and reported success without unregistering the constraint or
+dropping its real backing index. Fix: `cypher/exec/constraints.go` adds
+`ResolveByName` + `ErrConstraintNotFound`; `cypher/exec/drop_constraint.go` +
+`cypher/api.go` resolve name→(kind,label,prop) from the registry and drop the
+constraint + its `__uniq__<Label>.<prop>` backing index as ONE durable
+`OpDropConstraint` unit (the backing index is never separately persisted —
+recovery reconstructs it from the constraint set, so a torn intermediate is
+structurally impossible); IF-EXISTS no-op on absent, typed
+`ErrConstraintNotFound` (→ Bolt `Neo.ClientError.Schema.ConstraintDropFailed`)
+otherwise. storage-engine-auditor CERTIFIED atomicity + crash-safety. Edges:
+`Sprint 200 -[CONTAINS]-> Commit`; `Task 1556 -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[FIXES]->` Feature `ACID Transactions`; `Commit -[TOUCHES]->` Packages
+`cypher/exec` + `store/recovery`. Schema DDL is a Neo4j extension NOT covered by
+the openCypher TCK (verified — no DROP CONSTRAINT scenarios), so 3897 is
+insensitive and held; new engine-level tests + a `constraint.drop.post-wal-sync`
+crash scenario cover it; the DST pinning test was flipped to a regression guard.
+No new label or edge type.
+
 ---
 
 ## Node labels
