@@ -155,6 +155,36 @@ snapshot/csrfile/checkpoint-on-SimDisk wiring was deferred to backlog #1546 (the
 WAL-only seam was chosen to avoid touching mmap/`O_NOFOLLOW` security-hardened
 code).
 
+Incrementally synced at commits `f631e8e`..`3a49b79` (2026-06-16, tasks
+#1547-#1555, sprint 197 — DST Phase 3 Full actor suite + Bolt wire + liveness,
+now CLOSED): +10 `Commit`s, +9 `Task`s (`1547`-`1555` COMPLETED) + a new backlog
+`BUG` `Task` `1556`. SIM-SIDE (`internal/sim`, hybrid determinism per the
+user-decided model): `SimConn` (custom bounded-buffer 64 KiB/dir net.Conn — NOT
+net.Pipe, which deadlocks when both ends block) + `SimListener`; a Bolt wire
+client + `SimServer` driving the REAL `bolt/server` over `Serve(ctx, ln)` (no
+production hook needed — the listener seam already exists); `BoltAbuser`
+(wire-protocol violations, lock-step deterministic), `OverloadActor`
+(resource-pressure), `SlowConsumer` (backpressure/no-leak, concurrent),
+`SchemaChanger` (DDL under load, concurrent); a concurrent multi-connection
+harness (goleak-clean, eventual oracle==engine, NOT bit-reproducible); and a
+two-phase safety→liveness driver with a deadlock/resonance watchdog. `cmd/sim`
+gained `--mode=wire|concurrent|liveness`. PRODUCTION CHANGE: ONE behaviour-
+preserving fix — `bolt/server.failTransition` now names the originating session
+state in the FAILURE message instead of always "FAILED" (`82d98af`, surfaced by
+BoltAbuser, regression test added). FINDING (reported, NOT fixed — tracked as
+BUG #1556 with a pinning test `internal/sim/dropconstraint_finding_test.go`):
+`DROP CONSTRAINT <name>` by name is a fail-silent no-op (reports SUCCESS but the
+UNIQUE constraint + its backing index survive, permanently blocking re-creation)
+— a Consistency-mandate violation whose fix widens into the IR/constraint
+registry. Edges: `Sprint 197 -[CONTAINS]->` each Commit; each Task
+`-[IMPLEMENTED_IN]->` its Commit; Commits `-[TOUCHES]->` `internal/sim` (the
+bolt fix → `bolt/server`, the CLI commit → `cmd/sim`); `Commit 84791a9
+-[IMPLEMENTED_IN]->` Feature `DST Simulator`; `Commit 82d98af -[FIXES]->` Feature
+`Bolt Protocol`. No new label or edge type. Gate held: TCK 3897/3897, -race +
+goleak clean on internal/sim + bolt/server, lint/staticcheck/govulncheck 0;
+lock-step single-conn wire is byte-reproducible, concurrent/liveness modes are
+goleak+convergence-guarded.
+
 ---
 
 ## Node labels
