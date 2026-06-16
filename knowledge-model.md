@@ -83,6 +83,27 @@ symbols). Measured 1.68-2.40x; 4-8x ruled out as physically unreachable for this
 latency-bound random-gather SpMV (rust-perf analysis). NOTE: `graph create`
 rejects `MERGE … SET`; all properties were set inline in the MERGE map.
 
+Incrementally synced at commit `a363735` (2026-06-16, task #1515, sprint 192 —
+S-PA5: flatten Brandes predecessors into a zero-alloc arena): +1 node
+(`Commit` `a363735`; `Task` `1515` and `Sprint` `192` already existed and were
+re-stamped — `Task 1515` → COMPLETED, `Sprint 192` → CLOSED). +5 edges:
+`Sprint 192 -[CONTAINS]-> Commit`; `Task 1515 -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[IMPROVES]->` Feature `Search & Path-finding` (id 10375);
+`Commit -[TOUCHES]->` Package `centrality` and Function `Betweenness`. The
+predecessor sets now live in a flat CSR-style arena (offsets + positions over
+one backing slice) in `search/centrality/brandes.go` /
+`brandes_parallel.go` (shared read-only in-degree array across workers);
+steady-state ~10 allocs/op at every size (down from up to ~43k), −44% B/op
+geomean, serial scores bit-identical to the legacy slice-of-slices impl (new
+`Test` `brandes_arena_bitident_test.go`, new `Benchmark` `BenchmarkBrandes_Scale`).
+The hypothesised 10-25% time win was empirically falsified (Brandes is
+BFS-bound; predecessor sets too small for arena cache-locality to manifest), so
+it landed as an allocation/GC-pressure win, time-neutral — the task's
+acceptance criteria were reframed accordingly. Also registered the DST
+(Deterministic Simulation Testing) simulator effort as 5 `Sprint` nodes
+(`195`-`199`; `195` OPEN — Phase 1 Core simulator infrastructure in
+`internal/sim`; `196`-`199` PENDING), modelled on TigerBeetle VOPR.
+
 ---
 
 ## Node labels
