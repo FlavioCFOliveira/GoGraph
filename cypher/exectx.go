@@ -92,6 +92,16 @@ var ErrTxFinished = errors.New("cypher: explicit transaction already finished")
 // calling [ExplicitTx.Rollback] instead. Matchable with [errors.Is].
 var ErrTxPoisoned = errors.New("cypher: transaction poisoned by a prior failed Exec statement — call Rollback")
 
+// ErrWriteInReadOnlyTx is returned by [ExplicitTx.Exec] when a writing clause
+// (CREATE/MERGE/SET/REMOVE/DELETE/DETACH) or a DDL statement (CREATE/DROP INDEX
+// or CONSTRAINT) is issued inside a read-only explicit transaction opened with
+// [Engine.BeginReadTx]. A read-only transaction holds neither the engine's
+// writer serialisation, the visibility barrier, nor a WAL transaction, so a
+// write has no lock, no barrier, and no durable log to record into; it is
+// rejected BEFORE any execution so no state change can occur. Matchable with
+// [errors.Is].
+var ErrWriteInReadOnlyTx = errors.New("cypher: write or DDL statement not allowed in a read-only transaction")
+
 // ErrStatementPipeline wraps a runtime pipeline error from [ExplicitTx.Exec].
 // It signals that the query was compiled and ran to completion inside the
 // visibility barrier but the execution pipeline failed (e.g. a constraint
@@ -165,6 +175,18 @@ type ExplicitTx struct {
 	// the caller must call Rollback to unwind the partial writes accumulated in
 	// the undo log.
 	failed bool
+
+	// readOnly is true when the handle was opened by [Engine.BeginReadTx]. A
+	// read-only transaction acquires NONE of the writer serialisation, the
+	// visibility barrier, or a WAL transaction: walTx, buf and undo are nil,
+	// unlockWriter is a no-op and barrierHeld is false. Each [ExplicitTx.Exec]
+	// rejects any writing/DDL statement with [ErrWriteInReadOnlyTx] before
+	// execution and routes a read through the engine's concurrent read path
+	// ([Engine.Run]), which takes its own per-statement [lpg.Graph.View]
+	// snapshot — so reads observe read-committed isolation across statements and
+	// never block (or are blocked by) other readers or writers. Commit and
+	// Rollback on a read-only handle are teardown-only no-ops.
+	readOnly bool
 
 	// barrierHeld is true when BeginTx has acquired the graph's
 	// transaction-visibility write lock (visMu) for the whole lifetime of this
@@ -243,6 +265,46 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	return tx, nil
 }
 
+// BeginReadTx opens a read-only explicit transaction bound to ctx. Unlike
+// [Engine.BeginTx], it acquires NO writer serialisation, opens NO WAL
+// transaction, and does NOT hold the visibility barrier: a read-only
+// transaction has no durability obligation and never serialises behind, or
+// blocks, a concurrent writer. The caller MUST still finish the returned handle
+// with exactly one [ExplicitTx.Commit] or [ExplicitTx.Rollback]; on a read-only
+// handle both are teardown-only no-ops (they release nothing, since nothing was
+// acquired).
+//
+// Every statement run through [ExplicitTx.Exec] on the handle:
+//
+//   - is rejected with [ErrWriteInReadOnlyTx] BEFORE execution if it contains a
+//     writing clause ([QueryHasWritingClause]) or is DDL ([ir.IsDDL]) — the
+//     rejection is what keeps the lock-free read path safe, since a write would
+//     otherwise run with no writer lock, no barrier, and no WAL; and
+//   - otherwise runs through the engine's concurrent read path ([Engine.Run]),
+//     taking its OWN per-statement [lpg.Graph.View] snapshot. Reads therefore
+//     observe READ-COMMITTED isolation across the statements of the transaction
+//     (each RUN sees the latest committed state, matching Neo4j's default), and
+//     run fully in parallel with other readers and writers.
+//
+// If ctx is already cancelled or its deadline has elapsed, BeginReadTx returns
+// promptly with an error wrapping the context error (matchable via [errors.Is]
+// against [context.Canceled] / [context.DeadlineExceeded]).
+func (e *Engine) BeginReadTx(ctx context.Context) (*ExplicitTx, error) {
+	defer cmetrics.Time("cypher.BeginReadTx")()
+	if err := checkContext(ctx); err != nil {
+		cmetrics.IncCounter("cypher.BeginReadTx.errors", 1)
+		return nil, err
+	}
+	cmetrics.IncCounter("cypher.BeginReadTx.opened", 1)
+	return &ExplicitTx{
+		eng:          e,
+		ctx:          ctx,
+		readOnly:     true,
+		unlockWriter: func() {}, // read-only: nothing to release
+		// buf, undo, walTx remain nil; barrierHeld stays false.
+	}, nil
+}
+
 // Exec runs one statement inside the open transaction and returns a materialised
 // [Result]. The statement's writes are applied eagerly and accumulate in the
 // transaction; they are NOT made durable or finalised here — that happens once,
@@ -269,6 +331,20 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	defer cmetrics.Time("cypher.ExplicitTx.Exec")()
 	if tx.finished {
 		return nil, ErrTxFinished
+	}
+	// Read-only transaction: reject any writing/DDL statement BEFORE execution
+	// (no writer lock, no barrier, no WAL backs this handle), and route every
+	// permitted read through the engine's concurrent read path so it takes its
+	// own per-statement View snapshot (read-committed across statements). This
+	// path never touches buf/undo/walTx (all nil) or the visibility barrier.
+	if tx.readOnly {
+		if err := checkContext(tx.ctx); err != nil {
+			return nil, err
+		}
+		if queryHasWritingClause(query) || ir.IsDDL(query) {
+			return nil, ErrWriteInReadOnlyTx
+		}
+		return tx.eng.Run(tx.ctx, query, params)
 	}
 	// A panic anywhere in the statement is converted to ErrInternalPanic by this
 	// boundary. Registered before the work below so it observes a panic raised in
@@ -363,6 +439,15 @@ func (tx *ExplicitTx) Commit() (err error) {
 	if tx.finished {
 		return ErrTxFinished
 	}
+	// Read-only transaction: teardown only. No writer lock, no barrier, and no
+	// WAL transaction were acquired, so there is nothing to make durable or
+	// release beyond marking the handle finished (release() guards on
+	// barrierHeld/unlockWriter, both no-ops here). A second call is ErrTxFinished.
+	if tx.readOnly {
+		tx.release()
+		cmetrics.IncCounter("cypher.ExplicitTx.committed", 1)
+		return nil
+	}
 	if tx.failed {
 		return ErrTxPoisoned
 	}
@@ -423,6 +508,14 @@ func (tx *ExplicitTx) Rollback() (err error) {
 	defer cmetrics.Time("cypher.ExplicitTx.Rollback")()
 	if tx.finished {
 		return ErrTxFinished
+	}
+	// Read-only transaction: teardown only (see Commit). Nothing to unwind —
+	// no undo log, index buffer, WAL transaction, or held barrier — so this
+	// just finishes the handle. A second call is ErrTxFinished.
+	if tx.readOnly {
+		tx.release()
+		cmetrics.IncCounter("cypher.ExplicitTx.rolledBack", 1)
+		return nil
 	}
 	defer tx.recoverFinishPanic(&err)
 	defer tx.release()

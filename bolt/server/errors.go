@@ -94,6 +94,16 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.Statement.TypeError"
 	}
 
+	// A writing or DDL statement issued inside a read-only transaction (BEGIN
+	// with mode="r"). The request is invalid for the transaction's declared
+	// access mode — a deterministic client fault — so it maps to Neo4j's
+	// official request-invalid code. isClientFaultErr (derived from this
+	// function) then forwards the sentinel's own message, which names only the
+	// access-mode violation and discloses nothing internal.
+	if errors.Is(err, cypher.ErrWriteInReadOnlyTx) {
+		return "Neo.ClientError.Request.Invalid"
+	}
+
 	// A write transaction that exceeds the store's per-transaction op cap
 	// ([txn.ErrTransactionTooLarge], wrapped as "cypher: commit WAL: %w"). The
 	// cap is deterministic — retrying the same transaction fails again — so

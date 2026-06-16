@@ -204,6 +204,16 @@ func TestFailureCode(t *testing.T) {
 			want: "Neo.ClientError.Request.InvalidFormat",
 		},
 		{
+			name: "ErrWriteInReadOnlyTx",
+			err:  cypher.ErrWriteInReadOnlyTx,
+			want: "Neo.ClientError.Request.Invalid",
+		},
+		{
+			name: "ErrWriteInReadOnlyTx wrapped",
+			err:  fmt.Errorf("bolt: run: %w", cypher.ErrWriteInReadOnlyTx),
+			want: "Neo.ClientError.Request.Invalid",
+		},
+		{
 			name: "unknown error",
 			err:  fmt.Errorf("something went wrong"),
 			want: "Neo.DatabaseError.General.UnknownError",

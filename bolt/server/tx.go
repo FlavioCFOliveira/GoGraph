@@ -38,14 +38,23 @@ type Tx struct {
 	// transaction ends so the derived context and its timer are released.
 	cancel context.CancelFunc
 
-	// mode is "w" for write transactions and "r" for read-only. Both currently
-	// run through the same engine transaction (cypher.ExplicitTx), which applies
-	// writes eagerly: reads issued by a concurrent Engine.Run between an Exec and
-	// the corresponding Commit/Rollback can observe not-yet-committed writes
-	// (read-uncommitted isolation — dirty reads are possible). The distinction
-	// between read and write modes is reserved for future read-only enforcement
-	// once snapshot isolation is implemented; see docs/isolation-design.md for the
-	// tracked end-state.
+	// mode is "w" for write transactions and "r" for read-only.
+	//
+	//   - "w" opens a writing transaction via cypher.Engine.BeginTx: it holds the
+	//     engine's writer serialisation and the visibility barrier from BEGIN
+	//     until COMMIT/ROLLBACK, so concurrent writers serialise behind it and
+	//     concurrent readers observe only committed state (write-write isolation
+	//     for writers, read-committed for readers).
+	//
+	//   - "r" opens a read-only transaction via cypher.Engine.BeginReadTx: it
+	//     acquires no writer lock, no barrier, and no WAL transaction, so it
+	//     never serialises behind or blocks a concurrent writer. Each RUN takes
+	//     its own per-statement View snapshot (read-committed across statements);
+	//     any writing/DDL RUN is refused with cypher.ErrWriteInReadOnlyTx before
+	//     execution. Commit and Rollback are teardown-only no-ops.
+	//
+	// The read-only/writing state itself lives in the engine transaction
+	// (cypher.ExplicitTx); this field records the requested mode for the session.
 	mode string
 }
 
@@ -55,8 +64,11 @@ type Tx struct {
 // guarantees the engine writer serialisation the transaction holds can never be
 // retained indefinitely.
 //
-// newTx acquires the engine writer serialisation via [cypher.Engine.BeginTx]; on
-// failure (a context already done before BEGIN) it returns the error and holds no
+// For a writing transaction (mode != "r") newTx acquires the engine writer
+// serialisation via [cypher.Engine.BeginTx]; for a read-only transaction
+// (mode == "r") it opens a lock-free read-only handle via
+// [cypher.Engine.BeginReadTx], which holds no writer lock or barrier. On failure
+// (a context already done before BEGIN) it returns the error and holds no
 // resources.
 func newTx(ctx context.Context, eng *cypher.Engine, mode string, timeout time.Duration) (*Tx, error) {
 	txCtx := ctx
@@ -64,7 +76,15 @@ func newTx(ctx context.Context, eng *cypher.Engine, mode string, timeout time.Du
 	if timeout > 0 {
 		txCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
-	engTx, err := eng.BeginTx(txCtx)
+	var (
+		engTx *cypher.ExplicitTx
+		err   error
+	)
+	if mode == "r" {
+		engTx, err = eng.BeginReadTx(txCtx)
+	} else {
+		engTx, err = eng.BeginTx(txCtx)
+	}
 	if err != nil {
 		cancel()
 		return nil, err
