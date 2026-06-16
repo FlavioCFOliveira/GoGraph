@@ -1221,12 +1221,19 @@ func (s *Session) transitionTo(next State) {
 }
 
 // failTransition moves the session to FAILED (reclaiming any open transaction)
-// and returns a FAILURE response for an illegal state transition.
+// and returns a FAILURE response for an illegal state transition. The FAILURE
+// message reports the state the message was illegal IN (captured before the
+// FAILED transition), not the post-transition FAILED state: reporting the
+// originating state is the actionable diagnostic for a client that sent, say, a
+// PULL with no active stream (the message then reads "in state READY", telling
+// the client what it should have sent instead, rather than the uninformative
+// "in state FAILED" the session lands in for every illegal transition alike).
 func (s *Session) failTransition(msg any) ([]any, error) {
+	origin := s.state
 	s.enterFailed()
 	return []any{&proto.Failure{
 		Code:    "Neo.ClientError.Request.Invalid",
-		Message: fmt.Sprintf("illegal message %T in state %s", msg, s.state),
+		Message: fmt.Sprintf("illegal message %T in state %s", msg, origin),
 	}}, nil
 }
 
