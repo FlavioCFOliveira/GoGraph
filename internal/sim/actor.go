@@ -1,6 +1,9 @@
 package sim
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // OpKind classifies an operation so the simulator can route it to the engine's
 // read or write path and the oracle to the matching Apply method.
@@ -13,13 +16,22 @@ const (
 	OpMerge  OpKind = "OpMerge"
 	OpDelete OpKind = "OpDelete"
 	OpUpdate OpKind = "OpUpdate"
+	// OpMalformed is an intentionally ill-formed operation emitted by
+	// [MalformedSender]. The engine must reject it with a typed error without
+	// panicking, corrupting state, or applying any partial mutation; the oracle
+	// models it as a no-op (it never changes modelled state).
+	OpMalformed OpKind = "OpMalformed"
 )
 
 // IsWrite reports whether an operation of this kind mutates the graph and must
-// therefore run through the engine's write (RunInTx) path.
+// therefore run through the engine's write (RunInTx) path. Malformed operations
+// are routed through the write path too: it is the stricter, atomicity-bearing
+// path, so proving a malformed statement is rejected there (with a full
+// rollback and no partial application) is the stronger guarantee. A malformed
+// read-shaped statement run through the write path still simply errors.
 func (k OpKind) IsWrite() bool {
 	switch k {
-	case OpCreate, OpMerge, OpDelete, OpUpdate:
+	case OpCreate, OpMerge, OpDelete, OpUpdate, OpMalformed:
 		return true
 	default:
 		return false
@@ -190,4 +202,126 @@ func (HonestReader) NextOp(seed *Seed, _ *GraphOracle) Op {
 		op.Params = map[string]any{"age": int64(seed.IntN(100))}
 	}
 	return op
+}
+
+// malformedKindCount is the number of distinct malformed-operation families
+// [MalformedSender] rotates through. It must equal the number of cases in
+// [MalformedSender.NextOp]; the unit test asserts every family is reachable.
+const malformedKindCount = 6
+
+// malformedNestingDepth is the bracket-nesting depth the oversized-input family
+// emits. It must exceed the parser's nesting guard (256) so the statement is
+// always rejected before any execution, yet stays bounded so the harness itself
+// allocates a fixed, small amount.
+const malformedNestingDepth = 600
+
+// MalformedSender is a bad actor: it emits intentionally ill-formed operations —
+// invalid Cypher syntax, missing parameters, wrong parameter types,
+// type-mismatched predicates, and oversized-but-bounded inputs — to assert that
+// the engine rejects each with a typed error WITHOUT panicking, corrupting
+// state, or applying any partial mutation. Every operation it emits is modelled
+// by the oracle as a no-op ([OpMalformed]), so a clean run sees the engine error
+// and the modelled state stay in lock-step (unchanged) after each one.
+//
+// # Concurrency contract
+//
+// MalformedSender is NOT safe for concurrent use; it is invoked from the single
+// simulation goroutine.
+type MalformedSender struct{}
+
+// Name returns the actor's identifier.
+func (MalformedSender) Name() string { return "MalformedSender" }
+
+// NextOp returns one malformed operation, chosen by a single seed draw across
+// the malformed families. Each family is constructed to be rejected by the
+// engine for a distinct reason, so the workload exercises several rejection
+// paths (parser, parameter binding, type checking, input caps) rather than one.
+func (m MalformedSender) NextOp(seed *Seed, _ *GraphOracle) Op {
+	switch seed.IntN(malformedKindCount) {
+	case 0:
+		return m.opSyntaxError(seed)
+	case 1:
+		return m.opMissingParam()
+	case 2:
+		return m.opWrongParamType(seed)
+	case 3:
+		return m.opTypeMismatchedPredicate()
+	case 4:
+		return m.opOversizedInput(seed)
+	default:
+		return m.opUnknownFunction()
+	}
+}
+
+// opSyntaxError emits a statement the parser cannot accept (an unbalanced
+// pattern). The suffix varies with the seed so the workload does not repeat one
+// fixed string, but every variant is unparsable.
+func (MalformedSender) opSyntaxError(seed *Seed) Op {
+	return Op{
+		Kind:   OpMalformed,
+		Cypher: fmt.Sprintf("MATCH (n:Person RETURN n.%s", seed.Pick(firstNames)),
+	}
+}
+
+// opMissingParam references $name but binds no parameters, so the engine must
+// reject it as a missing parameter rather than treating the name as null.
+func (MalformedSender) opMissingParam() Op {
+	return Op{
+		Kind:   OpMalformed,
+		Cypher: "MATCH (n:Person {name:$name}) RETURN n",
+		// Params intentionally nil: $name is unbound.
+	}
+}
+
+// opWrongParamType binds $val (an integer) to a SET-map assignment that
+// requires a Map, so the engine rejects it with a TypeError at plan time. It
+// exercises both parameter binding and type checking, and the rejecting
+// statement is a write (CREATE ... SET) so atomicity-on-error is exercised too:
+// the leading CREATE must NOT survive the rejected SET. The integer suffix
+// varies with the seed so the workload does not repeat one fixed value.
+func (MalformedSender) opWrongParamType(seed *Seed) Op {
+	return Op{
+		Kind:   OpMalformed,
+		Cypher: "CREATE (n:Person) SET n = $val",
+		Params: map[string]any{"val": int64(seed.IntN(1000))},
+	}
+}
+
+// opTypeMismatchedPredicate accesses a property on a non-graph literal
+// (x.foo where x is an integer), which the engine rejects with a typed
+// InvalidArgumentType error before any execution. The rejecting statement is a
+// write so the leading binding never produces a committed node.
+func (MalformedSender) opTypeMismatchedPredicate() Op {
+	return Op{
+		Kind:   OpMalformed,
+		Cypher: "WITH 1 AS x CREATE (n:Person {name: x.foo})",
+	}
+}
+
+// opOversizedInput emits a statement whose bracket nesting exceeds the parser's
+// pre-parse nesting guard, exercising the engine's input caps. The depth is
+// bounded by [malformedNestingDepth] so the harness allocates a fixed small
+// amount, and the statement is guaranteed to be rejected before any execution,
+// so — unlike a genuinely-huge-but-valid property value — it can never commit
+// and leave engine and oracle out of sync.
+func (MalformedSender) opOversizedInput(_ *Seed) Op {
+	var b strings.Builder
+	b.WriteString("RETURN ")
+	for i := 0; i < malformedNestingDepth; i++ {
+		b.WriteByte('(')
+	}
+	b.WriteByte('1')
+	for i := 0; i < malformedNestingDepth; i++ {
+		b.WriteByte(')')
+	}
+	return Op{Kind: OpMalformed, Cypher: b.String()}
+}
+
+// opUnknownFunction calls a function that does not exist, which the engine must
+// reject at planning/semantic time with a typed error.
+func (MalformedSender) opUnknownFunction() Op {
+	return Op{
+		Kind:   OpMalformed,
+		Cypher: "RETURN nonExistentFunction(1, 2, 3)",
+	}
 }

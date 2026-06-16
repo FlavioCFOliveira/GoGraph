@@ -43,6 +43,19 @@ func ReadHeavyWorkload(_ *Seed) *Workload {
 	}
 }
 
+// BadActorWorkload returns a mix that injects a [MalformedSender] alongside the
+// honest actors (50% writer, 30% reader, 20% malformed), so the safety loop
+// continuously exercises the engine's rejection paths while honest traffic keeps
+// the graph populated. The malformed traffic must never panic, corrupt state, or
+// trip an invariant: each ill-formed op is modelled by the oracle as a no-op, so
+// a clean run sees engine and oracle stay in lock-step across every rejection.
+func BadActorWorkload(_ *Seed) *Workload {
+	return &Workload{
+		Actors:  []Actor{HonestWriter{}, HonestReader{}, MalformedSender{}},
+		Weights: []float64{0.5, 0.3, 0.2},
+	}
+}
+
 // SelectActor returns one actor chosen with probability proportional to its
 // weight, drawing a single float64 from seed. It panics if the workload has no
 // actors (a programmer error). A non-positive total weight falls back to a

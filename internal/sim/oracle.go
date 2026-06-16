@@ -254,6 +254,15 @@ func (o *GraphOracle) ApplyDelete(cypher string, params map[string]any) OracleRe
 	return o.recordOp(cypher, params, OracleResult{Committed: true})
 }
 
+// ApplyMalformed models an intentionally ill-formed operation ([OpMalformed]
+// from [MalformedSender]): the engine is expected to reject it with a typed
+// error and apply no mutation, so the oracle records it as an expected-error
+// no-op and changes no modelled state. Recording it keeps the operation history
+// complete for replay/shrinking.
+func (o *GraphOracle) ApplyMalformed(cypher string, params map[string]any) OracleResult {
+	return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: malformed op (expected engine error, no state change)"})
+}
+
 // NodeCount returns the number of nodes the oracle currently models.
 func (o *GraphOracle) NodeCount() int { return len(o.nodes) }
 

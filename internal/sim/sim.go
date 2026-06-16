@@ -176,6 +176,11 @@ func (s *Simulator) applyToOracle(op Op) {
 		// modelled by ApplyMatch, which routes the SET template to its handler
 		// and treats every other MATCH as a pure read.
 		s.oracle.ApplyMatch(op.Cypher, op.Params)
+	case OpMalformed:
+		// A malformed op is expected to be rejected by the engine with a typed
+		// error and to leave state unchanged; the oracle records it as an
+		// expected-error no-op so engine and oracle stay in lock-step.
+		s.oracle.ApplyMalformed(op.Cypher, op.Params)
 	}
 }
 
