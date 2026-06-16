@@ -126,6 +126,35 @@ stream); -race/golangci/staticcheck/govulncheck clean; nothing under
 `graph`/`cypher`/`store`/`bolt` was touched (TCK + ACID unaffected by
 construction).
 
+Incrementally synced at commits `1d0529a`..`6815b56` (2026-06-16, tasks
+#1537-#1545, sprint 196 — DST Phase 2 Crash & recovery + Clock injection, now
+CLOSED): new `Package` `clock` (`internal/clock`) — a behaviour-preserving
+injectable `Clock` interface (`realClock` default, fake clock for tests); +10
+`Commit`s, +9 `Task`s (`1537`-`1545` COMPLETED) and a deferred backlog `Task`
+`1546`. PRODUCTION CHANGES (all behaviour-preserving, default = real time / real
+OS fs): `store/checkpoint` cadence loop and `bolt/server` explicit-tx timeout
+reaper now route through the injectable `Clock`; `store/recovery` gained an
+exported `ReplayWAL[N,W]` extracted from `openCodec` (pure refactor — `openCodec`
+calls it; storage-engine-auditor certified byte-for-byte equivalence). The WAL
+group-commit path was AUDITED and found already wall-clock-free (pure `sync.Cond`
+leader/follower, ref LEDGER 0015) — NO injection there. SIM-SIDE (`internal/sim`):
+`simstore.go` (SimDisk-backed `txn.Store`+`cypher.Engine` over the WAL-only
+recovery path, F1 torn-tail truncate-before-append), `crash.go` (deterministic
+seed-driven `CrashSchedule`), `MalformedSender` bad-actor + `BadActorWorkload`,
+crash+recovery folded into the tick loop (opt-in via `CrashConfig`, safe default
+OFF — no-crash runs byte-identical), and a post-recovery Durability (ACID-D)
+invariant battery. Edges: `Sprint 196 -[CONTAINS]->` each Commit; each Task
+`-[IMPLEMENTED_IN]->` its Commit (#1540 spans the recovery-extract + simstore
+commits); Commits `-[TOUCHES]->` their Packages; `Commit 24643fe -[TOUCHES]->`
+Feature `WAL & Recovery` (id 11553); `Commit bbb6ea8 -[IMPLEMENTED_IN]->` Feature
+`DST Simulator`. No new label or edge type. Full gate held: TCK 3897/3897, ACID
+crash battery green, -race clean on store/bolt/cypher, golangci/staticcheck/
+govulncheck 0; deterministic crash+recovery proven (seed 7: 11 crashes, 37673
+WAL ops replayed, identical across runs, zero durability violations). The full
+snapshot/csrfile/checkpoint-on-SimDisk wiring was deferred to backlog #1546 (the
+WAL-only seam was chosen to avoid touching mmap/`O_NOFOLLOW` security-hardened
+code).
+
 ---
 
 ## Node labels
