@@ -104,6 +104,28 @@ acceptance criteria were reframed accordingly. Also registered the DST
 (`195`-`199`; `195` OPEN — Phase 1 Core simulator infrastructure in
 `internal/sim`; `196`-`199` PENDING), modelled on TigerBeetle VOPR.
 
+Incrementally synced at commits `12ec636`..`455bbef` (2026-06-16, tasks
+#1528-#1536, sprint 195 — DST Phase 1 Core simulator infrastructure, now
+CLOSED): new `Feature` `DST Simulator` (a deterministic, seed-reproducible,
+single-goroutine tick-loop test harness modelled on TigerBeetle VOPR that
+drives the real engine against a shadow `GraphOracle` with ACID + graph
+invariant checks); new `Package`s `sim` (`internal/sim`) and `main`
+(`cmd/sim`); 7 `Commit`s and 9 `Task`s (`1528`-`1536`, all COMPLETED). Edges:
+`Sprint 195 -[CONTAINS]->` each Commit; each Task `-[IMPLEMENTED_IN]->` its
+Commit; each Commit `-[TOUCHES]->` Package `internal/sim` (the CLI commit +
+the --ticks fix also TOUCH `cmd/sim`); `Feature DST Simulator -[IMPLEMENTED_IN]->`
+the capstone Commit `b441950`; `Package internal/sim -[IMPLEMENTS]-> Feature`.
+Phase-1 files: `seed.go` (PCG `math/rand/v2`), `clock.go` (VirtualClock),
+`disk.go` (in-mem faulting SimDisk over a restated `walFile`), `oracle.go`
+(GraphOracle shadow model), `checker.go`+`adapter.go` (InvariantChecker over a
+minimal `Engine` iface bridging the real `cypher.Engine`), `actor.go`+
+`workload.go` (HonestWriter/HonestReader + weighted mix), `sim.go`+`report.go`
+(safety-phase Simulator + SimReport), `cmd/sim/main.go` (CLI). No new label or
+edge type introduced. Determinism proven (same seed → byte-identical op
+stream); -race/golangci/staticcheck/govulncheck clean; nothing under
+`graph`/`cypher`/`store`/`bolt` was touched (TCK + ACID unaffected by
+construction).
+
 ---
 
 ## Node labels
