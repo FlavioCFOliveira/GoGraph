@@ -125,6 +125,113 @@ func (c *InvariantChecker) Check(tick int64, oracle *GraphOracle, engine Engine)
 	return out
 }
 
+// CheckDurability verifies ACID Durability at a crash-recovery boundary: every
+// operation the engine ACKed as committed before the crash (which the oracle
+// models exactly, because [Simulator.applyToOracle] advances the oracle only on
+// a committed write) must be present in the recovered engine, and nothing that
+// was never committed may have leaked in as partial state. Unlike
+// [InvariantChecker.Check] it scans the FULL oracle node and edge set, not a
+// bounded sample, because a single dropped committed op is a durability
+// violation that sampling could miss.
+//
+// It performs:
+//
+//   - exact node- and edge-count parity (a recovered count below the oracle's
+//     means a committed op was lost — a Durability breach; a count above means
+//     uncommitted state leaked in — an Atomicity breach at the crash boundary);
+//   - full-scan oracle-node presence (every committed node survived recovery);
+//   - full-scan oracle-edge presence (every committed edge survived recovery).
+//
+// Count mismatches are tagged [ViolationACIDDurability]; a missing node or edge
+// is tagged [ViolationACIDDurability] (the committed datum did not survive).
+// Each failing check appends a typed Violation; a clean pass returns nil.
+func (c *InvariantChecker) CheckDurability(tick int64, oracle *GraphOracle, engine Engine) []Violation {
+	before := len(c.violations)
+
+	c.checkDurableCounts(tick, oracle, engine)
+	c.checkAllNodesDurable(tick, oracle, engine)
+	c.checkAllEdgesDurable(tick, oracle, engine)
+
+	if len(c.violations) == before {
+		return nil
+	}
+	out := make([]Violation, len(c.violations)-before)
+	copy(out, c.violations[before:])
+	return out
+}
+
+// checkDurableCounts asserts exact count parity at the crash boundary, tagging a
+// shortfall as a durability loss and a surplus as a crash-boundary atomicity
+// breach (uncommitted state leaked in).
+func (c *InvariantChecker) checkDurableCounts(tick int64, oracle *GraphOracle, engine Engine) {
+	gotN, err := engine.NodeCount()
+	if err != nil {
+		c.add(ViolationOracleDeviation, tick, "durable node count", fmt.Sprintf("engine.NodeCount failed: %v", err))
+	} else if wantN := int64(oracle.NodeCount()); gotN != wantN {
+		kind := ViolationACIDDurability
+		if gotN > wantN {
+			kind = ViolationACIDAtomicity
+		}
+		c.add(kind, tick, "durable node count",
+			fmt.Sprintf("post-recovery node-count mismatch: committed(oracle)=%d recovered(engine)=%d", wantN, gotN))
+	}
+
+	gotE, err := engine.EdgeCount()
+	if err != nil {
+		c.add(ViolationOracleDeviation, tick, "durable edge count", fmt.Sprintf("engine.EdgeCount failed: %v", err))
+	} else if wantE := int64(oracle.EdgeCount()); gotE != wantE {
+		kind := ViolationACIDDurability
+		if gotE > wantE {
+			kind = ViolationACIDAtomicity
+		}
+		c.add(kind, tick, "durable edge count",
+			fmt.Sprintf("post-recovery edge-count mismatch: committed(oracle)=%d recovered(engine)=%d", wantE, gotE))
+	}
+}
+
+// checkAllNodesDurable verifies every modelled (committed) node survived
+// recovery, scanning the full oracle node set rather than a sample.
+func (c *InvariantChecker) checkAllNodesDurable(tick int64, oracle *GraphOracle, engine Engine) {
+	for _, name := range oracle.NodeNames() {
+		n, err := c.countQuery(engine,
+			"MATCH (n:Person {name:$name}) RETURN count(n)",
+			map[string]any{"name": name})
+		if err != nil {
+			c.add(ViolationOracleDeviation, tick, "durable node existence", fmt.Sprintf("probe %q failed: %v", name, err))
+			continue
+		}
+		if n == 0 {
+			c.add(ViolationACIDDurability, tick, "durable node existence",
+				fmt.Sprintf("committed node name=%q did not survive recovery", name))
+		}
+	}
+}
+
+// checkAllEdgesDurable verifies every modelled (committed) edge survived
+// recovery, scanning the full oracle edge set rather than a sample.
+func (c *InvariantChecker) checkAllEdgesDurable(tick int64, oracle *GraphOracle, engine Engine) {
+	for _, e := range oracle.edgeStates() {
+		src := oracle.nameOf(e.SrcID)
+		dst := oracle.nameOf(e.DstID)
+		if src == "" || dst == "" {
+			c.add(ViolationGraphIntegrity, tick, "durable edge endpoint",
+				fmt.Sprintf("committed edge %d-[%s]->%d has a missing endpoint", e.SrcID, e.Label, e.DstID))
+			continue
+		}
+		n, err := c.countQuery(engine,
+			"MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) RETURN count(r)",
+			map[string]any{"a": src, "b": dst})
+		if err != nil {
+			c.add(ViolationOracleDeviation, tick, "durable edge existence", fmt.Sprintf("probe %s->%s failed: %v", src, dst, err))
+			continue
+		}
+		if n == 0 {
+			c.add(ViolationACIDDurability, tick, "durable edge existence",
+				fmt.Sprintf("committed edge %s-[KNOWS]->%s did not survive recovery", src, dst))
+		}
+	}
+}
+
 // checkNodeCount compares the modelled node count with the engine's.
 func (c *InvariantChecker) checkNodeCount(tick int64, oracle *GraphOracle, engine Engine) {
 	got, err := engine.NodeCount()

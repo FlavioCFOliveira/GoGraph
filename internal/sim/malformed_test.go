@@ -116,10 +116,13 @@ func TestMalformedSender_IsWriteRoutesThroughWritePath(t *testing.T) {
 // writers keep the graph populated so the malformed traffic runs against
 // non-trivial state.
 func TestBadActorWorkload_RunsClean(t *testing.T) {
+	// Kept modest so the short layer stays within the per-package budget under
+	// -race; the malformed stream is dense (20% of ops) so even this window
+	// exercises every rejection path many times.
 	runToCompletion(t, Config{
 		Seed:       0xBADAC7,
-		MaxTicks:   3000,
-		CheckEvery: 8,
+		MaxTicks:   1200,
+		CheckEvery: 16,
 		Workload:   BadActorWorkload(NewSeed(0xBADAC7)),
 	})
 }
@@ -129,7 +132,7 @@ func TestBadActorWorkload_RunsClean(t *testing.T) {
 // state with no violations.
 func TestBadActorWorkload_Reproducible(t *testing.T) {
 	mk := func() Config {
-		return Config{Seed: 99, MaxTicks: 2000, CheckEvery: 16, Workload: BadActorWorkload(NewSeed(99))}
+		return Config{Seed: 99, MaxTicks: 1000, CheckEvery: 32, Workload: BadActorWorkload(NewSeed(99))}
 	}
 	a := runToCompletion(t, mk())
 	b := runToCompletion(t, mk())

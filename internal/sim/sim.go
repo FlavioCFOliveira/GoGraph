@@ -43,6 +43,18 @@ type Config struct {
 	// randomness, or it would break reproducibility. It runs on the simulation
 	// goroutine.
 	OnOp func(tick int64, op Op)
+	// Crash configures deterministic crash/recovery injection. The zero value
+	// disables it (Enabled == false), which is the safe default: a run that does
+	// not opt in drives a plain in-memory engine exactly as before, byte for
+	// byte. When enabled, the simulator instead drives a real SimDisk-backed
+	// persistence stack (WAL append+sync + recovery replay) so a scheduled crash
+	// drops the live engine and the store is reopened from the durable image.
+	Crash CrashConfig
+	// OnCrash, when non-nil, is called synchronously after each crash+recovery
+	// cycle with the crash tick and how many WAL ops recovery replayed. Like
+	// OnOp it is an observation hook and must not mutate state or draw
+	// randomness.
+	OnCrash func(tick int64, replayedWALOps int)
 }
 
 // Simulator drives the real cypher.Engine against a shadow [GraphOracle] under
@@ -63,6 +75,17 @@ type Simulator struct {
 	checker  *InvariantChecker
 	workload *Workload
 	engine   *EngineAdapter
+	// crash is the deterministic crash scheduler. It is always non-nil but is
+	// inert (never fires, never draws) when Config.Crash.Enabled is false.
+	crash *CrashSchedule
+	// store is the live SimDisk-backed persistence stack the simulator drives in
+	// crash mode; nil when crashes are disabled (the engine is then a plain
+	// in-memory engine with no durable layer). On a crash it is reopened from the
+	// durable SimDisk image via real recovery.
+	store *SimStore
+	// crashCount and replayedOps accumulate run statistics for reports and tests.
+	crashCount  int
+	replayedOps int
 }
 
 // New builds a Simulator with a fresh in-memory engine, oracle, checker, clock,
@@ -82,25 +105,45 @@ func New(cfg Config) (*Simulator, error) {
 		cfg.CheckEvery = defaultCheckEvery
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	eng := cypher.NewEngine(g)
-
 	// The checker samples from its own seed, derived from the master seed, so
 	// that changing the check cadence (CheckEvery) never perturbs the workload
 	// draw stream: the actor/op/param sequence stays a pure function of cfg.Seed
 	// alone, independent of how often invariants are checked.
 	checkerSeed := NewSeed(cfg.Seed ^ checkerSeedMix)
 
-	return &Simulator{
+	// The disk's fault stream draws from its own sub-seed for the same reason.
+	disk := NewSimDisk(NewSeed(cfg.Seed^diskSeedMix), 0)
+
+	s := &Simulator{
 		cfg:      cfg,
 		seed:     seed,
 		clock:    NewVirtualClock(defaultTickSize),
-		disk:     NewSimDisk(NewSeed(cfg.Seed^diskSeedMix), 0), // built now; engine wiring is Phase 2.
+		disk:     disk,
 		oracle:   NewGraphOracle(),
 		checker:  NewInvariantChecker(checkerSeed),
 		workload: wl,
-		engine:   NewEngineAdapter(eng),
-	}, nil
+		// The crash scheduler draws from its own sub-seed, so toggling crashes
+		// never perturbs the workload stream. It is inert when disabled.
+		crash: NewCrashSchedule(NewSeed(cfg.Seed^crashSeedMix), cfg.Crash),
+	}
+
+	if cfg.Crash.Enabled {
+		// Crash mode: drive the real SimDisk-backed persistence stack so a crash
+		// can drop the engine and recovery can replay the durable WAL bytes.
+		store, err := OpenSimStore(disk, simulatorStoreConfig())
+		if err != nil {
+			return nil, fmt.Errorf("sim: open SimDisk-backed store: %w", err)
+		}
+		s.store = store
+		s.engine = NewEngineAdapter(store.Engine())
+	} else {
+		// Default (no-crash) path: a plain in-memory engine with no durable
+		// layer, byte-identical to the pre-crash simulator.
+		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		s.engine = NewEngineAdapter(cypher.NewEngine(g))
+	}
+
+	return s, nil
 }
 
 // Run executes the safety-phase tick loop. Each tick advances the clock,
@@ -119,6 +162,18 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 		}
 		tick := s.clock.Tick()
 
+		// Decide a crash for this tick BEFORE running the op. A scheduled crash
+		// drops the live engine and reopens from the durable SimDisk image via
+		// real recovery; the durability check then verifies every ACKed-committed
+		// op survived (see [Simulator.maybeCrash]). The crash decision draws from
+		// the crash sub-seed only (or not at all when disabled), so it never
+		// perturbs the workload op stream.
+		if report, err := s.maybeCrash(ctx, tick); err != nil {
+			return nil, err
+		} else if report != nil {
+			return report, nil
+		}
+
 		actor := s.workload.SelectActor(s.seed)
 		op := actor.NextOp(s.seed, s.oracle)
 
@@ -126,8 +181,8 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 			s.cfg.OnOp(tick, op)
 		}
 
-		s.execute(ctx, op)
-		s.applyToOracle(op)
+		committed := s.execute(ctx, op)
+		s.applyToOracle(op, committed)
 
 		if tick%int64(s.cfg.CheckEvery) == 0 {
 			if violations := s.checker.Check(tick, s.oracle, s.engine); len(violations) > 0 {
@@ -138,12 +193,62 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 	return nil, nil
 }
 
-// execute runs op against the engine via the read or write path per its kind.
-// Engine errors are not treated as violations here: an honest workload may
-// legitimately hit a typed engine error (and the checker catches any resulting
-// state divergence). The result is always drained and closed so no resources
-// leak across ticks.
-func (s *Simulator) execute(ctx context.Context, op Op) {
+// maybeCrash performs a crash+recovery cycle when the schedule fires at tick.
+// It crashes the SimDisk-backed store (drops the in-memory engine, keeps the
+// durable WAL byte image), reopens it through real recovery, rebinds the engine
+// adapter to the recovered graph, and verifies the post-recovery durable state
+// against the oracle's ACKed-committed set. On a durability violation it returns
+// a populated report; on a recovery error it returns that error; otherwise
+// (nil, nil) and the loop resumes against the recovered engine.
+//
+// When crashes are disabled the schedule is inert and this is a cheap no-op.
+func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error) {
+	if !s.crash.ShouldCrash(tick) {
+		return nil, nil
+	}
+	// SIGKILL-equivalent: discard the live engine and store WITHOUT a graceful
+	// close, so any buffered-but-unsynced frame is lost exactly as a real crash
+	// would lose it. The durable WAL byte image in the SimDisk survives.
+	s.store.Crash()
+
+	store, err := OpenSimStore(s.disk, simulatorStoreConfig())
+	if err != nil {
+		// A genuine recovery failure (e.g. corruption fail-stop) is a hard fault
+		// the run must surface, not swallow.
+		return nil, fmt.Errorf("sim: crash recovery at tick %d: %w", tick, err)
+	}
+	s.store = store
+	s.engine = NewEngineAdapter(store.Engine())
+	s.crashCount++
+	s.replayedOps += store.WALOps()
+
+	if s.cfg.OnCrash != nil {
+		s.cfg.OnCrash(tick, store.WALOps())
+	}
+
+	// Durability check at the crash boundary: every op the engine ACKed as
+	// committed before the crash must be present after recovery, and nothing
+	// uncommitted may have leaked in (see [InvariantChecker.CheckDurability]).
+	if violations := s.checker.CheckDurability(tick, s.oracle, s.engine); len(violations) > 0 {
+		return s.report(tick, Op{Kind: OpMatch, Cypher: "<crash recovery>"}, violations), nil
+	}
+	return nil, nil
+}
+
+// execute runs op against the engine via the read or write path per its kind
+// and reports whether a write committed (the engine ACKed it without error and
+// the result drained cleanly). Engine errors are not treated as violations
+// here: an honest workload may legitimately hit a typed engine error, and a
+// malformed actor expects one. Reporting the commit outcome lets [applyToOracle]
+// advance the shadow model ONLY for writes the engine actually durably ACKed,
+// which is what keeps the oracle equal to the engine's durable state across a
+// crash. The result is always drained and closed so no resources leak across
+// ticks.
+//
+// For read-shaped ops the return value is not meaningful (reads never change
+// modelled state) and is reported as committed so a read still records its
+// (no-effect) history entry.
+func (s *Simulator) execute(ctx context.Context, op Op) bool {
 	var (
 		res Result
 		err error
@@ -154,27 +259,45 @@ func (s *Simulator) execute(ctx context.Context, op Op) {
 		res, err = s.engine.Run(ctx, op.Cypher, op.Params)
 	}
 	if err != nil {
-		return
+		return false
 	}
 	for res.Next() {
 	}
-	_ = res.Err()
+	// A drain error after the statement was accepted means the result did not
+	// fully materialise; treat it as not-committed so the oracle does not model
+	// an effect the engine may not have durably applied.
+	drainErr := res.Err()
 	_ = res.Close()
+	return drainErr == nil
 }
 
-// applyToOracle advances the shadow model for op per its kind.
-func (s *Simulator) applyToOracle(op Op) {
+// applyToOracle advances the shadow model for op per its kind. A write is
+// applied only when the engine committed it (committed == true); a write the
+// engine rejected (e.g. an injected durability fault poisoned the WAL, or a
+// malformed op was refused) leaves the oracle unchanged, so the oracle always
+// models exactly the engine's durable committed set. Reads and the
+// expected-error malformed no-op are recorded unconditionally (they change no
+// state).
+func (s *Simulator) applyToOracle(op Op, committed bool) {
 	switch op.Kind {
 	case OpCreate:
-		s.oracle.ApplyCreate(op.Cypher, op.Params)
+		if committed {
+			s.oracle.ApplyCreate(op.Cypher, op.Params)
+		}
 	case OpMerge:
-		s.oracle.ApplyMerge(op.Cypher, op.Params)
+		if committed {
+			s.oracle.ApplyMerge(op.Cypher, op.Params)
+		}
 	case OpDelete:
-		s.oracle.ApplyDelete(op.Cypher, op.Params)
-	case OpMatch, OpUpdate:
-		// OpUpdate (SET) and OpMatch (reads, incl. the SET template) are both
-		// modelled by ApplyMatch, which routes the SET template to its handler
-		// and treats every other MATCH as a pure read.
+		if committed {
+			s.oracle.ApplyDelete(op.Cypher, op.Params)
+		}
+	case OpUpdate:
+		if committed {
+			s.oracle.ApplyMatch(op.Cypher, op.Params)
+		}
+	case OpMatch:
+		// A pure read never changes state; record it regardless of outcome.
 		s.oracle.ApplyMatch(op.Cypher, op.Params)
 	case OpMalformed:
 		// A malformed op is expected to be rejected by the engine with a typed
@@ -202,3 +325,24 @@ func (s *Simulator) report(tick int64, op Op, violations []Violation) *SimReport
 // Oracle returns the simulator's shadow model, for tests that assert on the
 // modelled state after a run.
 func (s *Simulator) Oracle() *GraphOracle { return s.oracle }
+
+// CrashCount returns how many crash+recovery cycles the run performed (always 0
+// when crashes are disabled).
+func (s *Simulator) CrashCount() int { return s.crashCount }
+
+// ReplayedOps returns the cumulative number of WAL ops recovery replayed across
+// every crash cycle in the run.
+func (s *Simulator) ReplayedOps() int { return s.replayedOps }
+
+// Close releases the simulator's durable resources. In crash mode it gracefully
+// closes the live SimDisk-backed store (flushing and releasing the WAL writer)
+// so no handle or goroutine leaks past the run; in the default in-memory mode it
+// is a no-op. It is safe to call more than once.
+func (s *Simulator) Close() error {
+	if s.store == nil {
+		return nil
+	}
+	err := s.store.Close()
+	s.store = nil
+	return err
+}

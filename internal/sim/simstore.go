@@ -31,14 +31,29 @@ type simStoreConfig struct {
 	maxTxnOps   int
 }
 
-// defaultSimStoreConfig is the shape the simulator's engine uses: a directed
-// multigraph (openCypher's additive-CREATE relationship model), the default
-// per-transaction op cap, matching the production recovery default so a
-// simulated commit replays exactly as a real one would.
+// defaultSimStoreConfig is a directed multigraph (openCypher's additive-CREATE
+// relationship model) with the default per-transaction op cap, matching the
+// production recovery default so a simulated commit replays exactly as a real
+// one would. It is used by the standalone SimStore tests.
 func defaultSimStoreConfig() simStoreConfig {
 	return simStoreConfig{
 		graphConfig: adjlist.Config{Directed: true, Multigraph: true},
 		maxTxnOps:   0, // 0 -> txn.DefaultMaxTxnOps, the production default.
+	}
+}
+
+// simulatorStoreConfig is the shape the crash-mode [Simulator] drives. It is a
+// SIMPLE directed graph (Multigraph: false), matching both the simulator's
+// non-crash in-memory engine and the [GraphOracle]'s edge model, which keys an
+// edge by (src, dst, label) and so collapses parallel edges. A multigraph here
+// would let two CREATE (a)-[:KNOWS]->(b) statements on the same pair produce two
+// engine edges where the oracle models one, a spurious count divergence after
+// recovery. Keeping the durable store simple makes the oracle a faithful model
+// of the engine across a crash.
+func simulatorStoreConfig() simStoreConfig {
+	return simStoreConfig{
+		graphConfig: adjlist.Config{Directed: true, Multigraph: false},
+		maxTxnOps:   0,
 	}
 }
 

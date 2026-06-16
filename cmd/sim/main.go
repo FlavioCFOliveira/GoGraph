@@ -42,8 +42,9 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	fs := flag.NewFlagSet("sim", flag.ContinueOnError)
 	fs.SetOutput(stderrRaw)
 	ticks := fs.Int("ticks", 100000, "number of ticks (operations) to simulate")
-	workloadName := fs.String("workload", "default", "actor mix: default | write-heavy | read-heavy")
+	workloadName := fs.String("workload", "default", "actor mix: default | write-heavy | read-heavy | bad-actor")
 	verbose := fs.Bool("verbose", false, "print each operation as it runs")
+	crashes := fs.Bool("crashes", false, "inject deterministic crash+recovery cycles (drives the real SimDisk-backed persistence stack)")
 
 	// Go's flag package stops parsing at the first non-flag token, so the
 	// documented usage `sim <seed> --ticks=N` would otherwise leave --ticks
@@ -74,10 +75,16 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 		MaxTicks: *ticks,
 		Workload: wlFactory(sim.NewSeed(seed)),
 	}
+	if *crashes {
+		cfg.Crash = sim.CrashConfig{Enabled: true}
+	}
 	if *verbose {
-		stdout.printf("Running simulation: seed=%d ticks=%d workload=%s\n", seed, *ticks, *workloadName)
+		stdout.printf("Running simulation: seed=%d ticks=%d workload=%s crashes=%v\n", seed, *ticks, *workloadName, *crashes)
 		cfg.OnOp = func(tick int64, op sim.Op) {
 			stdout.printf("  tick=%d %s %q %v\n", tick, op.Kind, op.Cypher, op.Params)
+		}
+		cfg.OnCrash = func(tick int64, replayedWALOps int) {
+			stdout.printf("  CRASH tick=%d -> recovery replayed %d WAL ops\n", tick, replayedWALOps)
 		}
 	}
 	sm, err := sim.New(cfg)
@@ -85,6 +92,7 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 		stderr.printf("sim: %v\n", err)
 		return 2
 	}
+	defer func() { _ = sm.Close() }()
 
 	report, err := sm.Run(context.Background())
 	if err != nil {
@@ -95,7 +103,12 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 		stderr.printf("%s", report.String())
 		return 1
 	}
-	stdout.printf("Simulation passed. Seed: %d, Ticks: %d\n", seed, *ticks)
+	if *crashes {
+		stdout.printf("Simulation passed. Seed: %d, Ticks: %d, Crashes: %d, Replayed WAL ops: %d\n",
+			seed, *ticks, sm.CrashCount(), sm.ReplayedOps())
+	} else {
+		stdout.printf("Simulation passed. Seed: %d, Ticks: %d\n", seed, *ticks)
+	}
 	return 0
 }
 
@@ -168,8 +181,10 @@ func workloadByName(name string, stderr *errWriter) (workloadFactory, bool) {
 		return sim.WriteHeavyWorkload, true
 	case "read-heavy":
 		return sim.ReadHeavyWorkload, true
+	case "bad-actor":
+		return sim.BadActorWorkload, true
 	default:
-		stderr.printf("sim: unknown workload %q (want default|write-heavy|read-heavy)\n", name)
+		stderr.printf("sim: unknown workload %q (want default|write-heavy|read-heavy|bad-actor)\n", name)
 		return nil, false
 	}
 }
