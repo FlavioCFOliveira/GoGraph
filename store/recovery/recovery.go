@@ -1065,100 +1065,17 @@ func openCodec[N comparable, W any](
 		}
 		// best-effort: read-only WAL reader, close err is non-actionable for callers.
 		defer func() { _ = r.Close() }()
-		// pending buffers the ops of an in-flight v3 transaction until its
-		// OpCommit marker is read. The store serialises commits (single
-		// writer), so a transaction's frames are contiguous and never
-		// interleave with another's; an un-marked tail at end of input is
-		// an incomplete transaction and is discarded for atomicity (F1).
-		// The buffer may also hold the orphaned ops of a PRIOR transaction
-		// whose OpCommit was never written (its commit failed between the
-		// data frames and the marker, and the WAL kept growing); those are
-		// discarded on the next marker by the TxnSeq suffix filter below,
-		// never merged into the committed transaction.
-		var pending []Op
-		for f := range r.Frames() {
-			if res.WALOps&0xFFF == 0 {
-				if err := ctx.Err(); err != nil {
-					metrics.IncCounter("store.recovery.openCodec.errors", 1)
-					return res, err
-				}
-			}
-			op, derr := Decode(f.Payload)
-			if derr != nil {
-				res.TailErr = derr
-				break
-			}
-			if op.Version == txn.OpRecordV3 {
-				if op.Kind != txn.OpCommit {
-					// Bound the in-flight transaction buffer: stop the instant
-					// the buffered op count would exceed the cap, BEFORE
-					// appending (and before copying another op body), so a
-					// marker-less run — a legitimately huge transaction OR a
-					// crafted/corrupt valid-CRC tail — can never drive recovery
-					// to allocate proportionally to the run. Fail-stop, like the
-					// other genuine-corruption sentinels (tailErrIsCorruption).
-					if maxTxnOps > 0 && len(pending) >= maxTxnOps {
-						metrics.IncCounter("store.recovery.openCodec.txnTooLarge", 1)
-						res.TailErr = fmt.Errorf("%w: buffered %d ops with no commit marker (cap %d)",
-							ErrTransactionTooLarge, len(pending), maxTxnOps)
-						break
-					}
-					pending = append(pending, op)
-					continue
-				}
-				// Durable transaction boundary: apply the buffered ops as a
-				// unit. A crash that tore the batch never reaches a marker
-				// with a partial set — the marker is the last frame written.
-				//
-				// Atomicity guard: a marker commits ONLY the ops carrying
-				// its own TxnSeq. The buffer may still hold ops from a prior
-				// transaction whose marker was never written (commit failed
-				// after the data frames, before the OpCommit); flushing them
-				// here would resurrect an aborted transaction fused into
-				// this one. Commits are serialised, so the committed ops are
-				// a contiguous suffix of the buffer: discard the orphaned
-				// prefix whose TxnSeq does not match the marker's.
-				commitSeq := op.TxnSeq
-				start := 0
-				for start < len(pending) && pending[start].TxnSeq != commitSeq {
-					start++
-				}
-				if start > 0 {
-					metrics.IncCounter("store.recovery.openCodec.orphanedOps", uint64(start))
-				}
-				committed := pending[start:]
-				ok := true
-				for i := range committed {
-					if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc) {
-						ok = false
-						break
-					}
-					res.WALOps++
-				}
-				pending = pending[:0]
-				if !ok {
-					res.TailErr = errors.New("recovery: corrupt op inside a committed v3 transaction")
-					break
-				}
-				continue
-			}
-			// v2 frame: self-committing (one frame is one transaction). v1
-			// frames never reach here — Decode rejects them upstream with
-			// ErrUnsupportedRecordVersion.
-			if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc) {
-				// A malformed v2 body (truncated endpoints, missing or
-				// overflowing trailing label/key length) failed to decode
-				// through the codec; stop replay so callers see the cut-off
-				// boundary deterministically.
-				res.TailErr = errors.New("recovery: v2 frame is not decodable through the supplied codec")
-				break
-			}
-			res.WALOps++
+		walRes, walErr := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc)
+		res.WALOps = walRes.WALOps
+		res.TailErr = walRes.TailErr
+		res.WALTailOffset = walRes.WALTailOffset
+		if walErr != nil {
+			// The only non-nil walErr is a ctx cancellation surfaced mid-replay;
+			// it is returned with the partially-recovered Result, exactly as the
+			// inline loop did before the extraction.
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, walErr
 		}
-		if tErr := r.TailError(); tErr != nil {
-			res.TailErr = tErr
-		}
-		res.WALTailOffset = r.TailOffset()
 	}
 
 	// Finalise the recovered constraint set: the snapshot's durable
@@ -1225,6 +1142,201 @@ func openCodec[N comparable, W any](
 		metrics.IncCounter("store.recovery.openCodec.corruptTail", 1)
 		return res, res.TailErr
 	}
+	return res, nil
+}
+
+// ReplayResult reports what a single WAL-replay pass consumed and recovered. It
+// is the [ReplayWAL] analogue of the WAL-tail fields on [Result]: WALOps counts
+// the ops applied to the graph, TailErr records why replay stopped (nil at a
+// clean EOF, a benign torn tail, or a genuine-corruption sentinel — classified
+// by [tailErrIsCorruption] / the [Result.IsClean] contract), and WALTailOffset
+// is the byte offset of the last durable frame boundary (the truncation point a
+// reopen-for-append must cut back to, per [Result.WALTailOffset]).
+//
+// Constraints and Indexes hold the durable schema definitions accumulated from
+// the CREATE/DROP CONSTRAINT and CREATE/DROP INDEX ops seen during this pass,
+// deterministically ordered exactly as [Result.Constraints] / [Result.Indexes].
+// They are surfaced rather than applied to the graph because a constraint or
+// index definition is engine schema, not graph topology.
+type ReplayResult struct {
+	WALOps        int
+	TailErr       error
+	WALTailOffset int64
+	Constraints   []ConstraintRecord
+	Indexes       []IndexRecord
+}
+
+// IsClean reports whether replay stopped at a state from which it is safe to
+// reopen the WAL for append: a clean EOF or a benign torn tail. It mirrors
+// [Result.IsClean] exactly (the complement of the genuine-corruption set). The
+// pointer receiver avoids copying the result struct on the call; it does not
+// mutate it.
+func (r *ReplayResult) IsClean() bool { return !tailErrIsCorruption(r.TailErr) }
+
+// ReplayWAL replays the v2/v3 transaction-encoded frames of r into g and reports
+// the outcome in a [ReplayResult]. It is the single, reusable durability-replay
+// core: [Open] / [OpenCtx] drive it through the in-package [openCodec] path
+// (over the OS WAL file), and the deterministic simulation harness drives the
+// identical logic over an in-memory WAL byte image, so production and simulation
+// share ONE code path for the durability-critical replay semantics (atomicity
+// TxnSeq-suffix filter, per-transaction op cap, corruption fail-stop).
+//
+// r is an already-positioned [wal.Reader] (built by [wal.OpenReader] over an OS
+// file, or by [wal.NewReader] over any [io.Reader] — e.g. an in-memory handle);
+// ReplayWAL neither opens nor closes it. codec decodes endpoint identifiers and
+// must be non-nil; wcodec mirrors the producer store (nil for a codec-only
+// store, non-nil for a weight-codec store). maxTxnOps follows the [Options]
+// convention as already resolved by [resolveRecoveryMaxTxnOps]: 0 means "no
+// cap", any positive value is the verbatim per-transaction op cap.
+//
+// The replay is the exact dual of [store/txn.Tx.Commit]: every op that reached a
+// durable [txn.OpCommit] marker is applied as an atomic unit; an un-marked tail
+// (an interrupted final transaction) and the orphaned prefix of a prior
+// transaction whose marker was never written are both discarded. A benign torn
+// or CRC-valid-but-unparseable tail leaves [ReplayResult.TailErr] benign and
+// [ReplayResult.IsClean] true; genuine corruption inside an already-durable
+// frame is surfaced via TailErr and reported not-clean. A ctx cancellation
+// observed mid-replay (checked every 4096 ops) is returned as the function error
+// alongside the partial [ReplayResult].
+//
+// ReplayWAL does NOT apply the snapshot side (labels, properties, mapper,
+// tombstones, indexes) — that orchestration is [openCodec]'s job. A caller that
+// only needs WAL-tail recovery (the simulator's WAL-only path) constructs the
+// graph itself, calls ReplayWAL, and re-registers [ReplayResult.Constraints] /
+// [ReplayResult.Indexes] as it sees fit.
+func ReplayWAL[N comparable, W any](
+	ctx context.Context,
+	r *wal.Reader,
+	g *lpg.Graph[N, W],
+	codec txn.Codec[N],
+	wcodec txn.WeightCodec[W],
+	maxTxnOps int,
+) (ReplayResult, error) {
+	cAcc := newConstraintSet()
+	iAcc := newIndexSet()
+	res, err := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc)
+	res.Constraints = cAcc.snapshot()
+	res.Indexes = iAcc.snapshot()
+	return res, err
+}
+
+// replayWALInto is the shared core driven both by [openCodec] (which supplies
+// its own snapshot-seeded accumulators so a checkpoint-truncated constraint
+// survives) and by [ReplayWAL] (which supplies fresh accumulators). It is a
+// pure extraction of the loop that previously lived inline in [openCodec]: the
+// per-frame decode, the v3 in-flight buffering with the per-transaction op cap,
+// the TxnSeq-suffix atomicity filter, the v2 self-committing apply, and the
+// tail-offset / tail-error capture are all byte-for-byte the prior behaviour.
+//
+// It populates only the WAL-tail fields of the returned [ReplayResult]
+// (WALOps / TailErr / WALTailOffset); the Constraints / Indexes slices are left
+// nil here because openCodec reads them off its own accumulators after the
+// snapshot reconciliation and ReplayWAL snapshots the fresh ones it owns. The
+// returned error is non-nil only for a ctx cancellation observed mid-replay.
+func replayWALInto[N comparable, W any](
+	ctx context.Context,
+	r *wal.Reader,
+	g *lpg.Graph[N, W],
+	codec txn.Codec[N],
+	wcodec txn.WeightCodec[W],
+	maxTxnOps int,
+	cAcc *constraintSet,
+	iAcc *indexSet,
+) (ReplayResult, error) {
+	var res ReplayResult
+	// pending buffers the ops of an in-flight v3 transaction until its
+	// OpCommit marker is read. The store serialises commits (single
+	// writer), so a transaction's frames are contiguous and never
+	// interleave with another's; an un-marked tail at end of input is
+	// an incomplete transaction and is discarded for atomicity (F1).
+	// The buffer may also hold the orphaned ops of a PRIOR transaction
+	// whose OpCommit was never written (its commit failed between the
+	// data frames and the marker, and the WAL kept growing); those are
+	// discarded on the next marker by the TxnSeq suffix filter below,
+	// never merged into the committed transaction.
+	var pending []Op
+	for f := range r.Frames() {
+		if res.WALOps&0xFFF == 0 {
+			if err := ctx.Err(); err != nil {
+				return res, err
+			}
+		}
+		op, derr := Decode(f.Payload)
+		if derr != nil {
+			res.TailErr = derr
+			break
+		}
+		if op.Version == txn.OpRecordV3 {
+			if op.Kind != txn.OpCommit {
+				// Bound the in-flight transaction buffer: stop the instant
+				// the buffered op count would exceed the cap, BEFORE
+				// appending (and before copying another op body), so a
+				// marker-less run — a legitimately huge transaction OR a
+				// crafted/corrupt valid-CRC tail — can never drive recovery
+				// to allocate proportionally to the run. Fail-stop, like the
+				// other genuine-corruption sentinels (tailErrIsCorruption).
+				if maxTxnOps > 0 && len(pending) >= maxTxnOps {
+					metrics.IncCounter("store.recovery.openCodec.txnTooLarge", 1)
+					res.TailErr = fmt.Errorf("%w: buffered %d ops with no commit marker (cap %d)",
+						ErrTransactionTooLarge, len(pending), maxTxnOps)
+					break
+				}
+				pending = append(pending, op)
+				continue
+			}
+			// Durable transaction boundary: apply the buffered ops as a
+			// unit. A crash that tore the batch never reaches a marker
+			// with a partial set — the marker is the last frame written.
+			//
+			// Atomicity guard: a marker commits ONLY the ops carrying
+			// its own TxnSeq. The buffer may still hold ops from a prior
+			// transaction whose marker was never written (commit failed
+			// after the data frames, before the OpCommit); flushing them
+			// here would resurrect an aborted transaction fused into
+			// this one. Commits are serialised, so the committed ops are
+			// a contiguous suffix of the buffer: discard the orphaned
+			// prefix whose TxnSeq does not match the marker's.
+			commitSeq := op.TxnSeq
+			start := 0
+			for start < len(pending) && pending[start].TxnSeq != commitSeq {
+				start++
+			}
+			if start > 0 {
+				metrics.IncCounter("store.recovery.openCodec.orphanedOps", uint64(start))
+			}
+			committed := pending[start:]
+			ok := true
+			for i := range committed {
+				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc) {
+					ok = false
+					break
+				}
+				res.WALOps++
+			}
+			pending = pending[:0]
+			if !ok {
+				res.TailErr = errors.New("recovery: corrupt op inside a committed v3 transaction")
+				break
+			}
+			continue
+		}
+		// v2 frame: self-committing (one frame is one transaction). v1
+		// frames never reach here — Decode rejects them upstream with
+		// ErrUnsupportedRecordVersion.
+		if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc) {
+			// A malformed v2 body (truncated endpoints, missing or
+			// overflowing trailing label/key length) failed to decode
+			// through the codec; stop replay so callers see the cut-off
+			// boundary deterministically.
+			res.TailErr = errors.New("recovery: v2 frame is not decodable through the supplied codec")
+			break
+		}
+		res.WALOps++
+	}
+	if tErr := r.TailError(); tErr != nil {
+		res.TailErr = tErr
+	}
+	res.WALTailOffset = r.TailOffset()
 	return res, nil
 }
 
