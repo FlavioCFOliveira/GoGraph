@@ -1818,26 +1818,27 @@ func (e *Engine) unwindConstraintRegistration(cause error, name, label, prop str
 	return cause
 }
 
-// runDropConstraint executes DROP CONSTRAINT: it deregisters the constraint via
-// the operator, then (on a WAL-backed engine) appends a durable drop op so the
-// removal survives a crash. Like runCreateConstraint, the whole sequence runs
-// under the engine's writer serialisation (task #1341).
+// runDropConstraint executes DROP CONSTRAINT <name> [IF EXISTS]: it resolves
+// the constraint NAME to its (kind, label, property) identity via the registry,
+// deregisters the constraint and its UNIQUE backing index via the operator,
+// then (on a WAL-backed engine) appends a durable drop op so the removal
+// survives a crash. Like runCreateConstraint, the whole sequence runs under the
+// engine's writer serialisation (task #1341).
 func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, idxMgr *index.Manager) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	kind := execConstraintKind(p.Kind)
 
 	if e.store == nil {
 		e.writeMu.Lock()
 		defer e.writeMu.Unlock()
-		return e.dropConstraintLocked(ctx, p, kind, idxMgr, nil)
+		return e.dropConstraintLocked(ctx, p, idxMgr, nil)
 	}
 	tx, err := e.store.BeginCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res, rerr := e.dropConstraintLocked(ctx, p, kind, idxMgr, tx)
+	res, rerr := e.dropConstraintLocked(ctx, p, idxMgr, tx)
 	// Guarded no-op after CommitWALOnly (success or failure); releases the
 	// single-writer lock on the earlier error paths. See runCreateConstraint.
 	_ = tx.Rollback()
@@ -1848,25 +1849,79 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 // serialisation held by the caller; tx is the serialising transaction on a
 // WAL-backed engine (nil on a store-less one).
 //
-// No re-registration unwind exists on the WAL-failure path today, and none is
-// needed: the DDL parser produces DROP CONSTRAINT plans with empty
-// label/property (see ir.parseDropConstraint), so the operator can only reach
-// the WAL append via the IF EXISTS absorb branch, which performs no schema
-// change — there is nothing to restore. A future DROP-by-name executor that
-// really deregisters must re-register (and re-seed) on this failure path,
-// mirroring unwindConstraintRegistration on the CREATE path.
-func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint, kind exec.ConstraintKind, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
+// A by-name DROP carries an empty label/property in the IR (the parser cannot
+// know them), so the constraint identity is resolved from the registry first:
+//
+//   - constraint present → drop it (UNIQUE: backing index + registry entry
+//     removed atomically; NOT NULL: registry entry removed) and, on a
+//     WAL-backed engine, append the durable drop op keyed by the resolved
+//     (kind, label, property) so recovery replays the SAME removal — both the
+//     constraint and its backing index, since the engine reconstructs the
+//     backing index from the recovered constraint set, never from a separate
+//     index record. The pair is therefore a single all-or-nothing WAL frame:
+//     recovery yields BOTH-present or BOTH-absent, never a partial state.
+//   - constraint absent + IF EXISTS → clean no-op success, no schema change,
+//     no WAL record.
+//   - constraint absent + no IF EXISTS → typed error wrapping
+//     exec.ErrConstraintNotFound; never a fail-silent success.
+//
+// On a WAL-append failure after the in-memory removal the registration is
+// re-established (mirroring unwindConstraintRegistration on the CREATE path),
+// so the registry and the durable state stay consistent (removed ⇔ durable).
+func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	defer e.syncConstraintCount() // keep Graph.HasConstraints in sync on every exit, under the writer lock (#1464)
-	op := exec.NewDropConstraintOp(p.Name, p.Label, p.Property, kind, p.IfExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+
+	// Resolve NAME → (kind, label, property). The IR's own label/property are
+	// empty for a by-name drop; the registry is the authoritative name map.
+	kind, label, prop, found := e.constraintReg.ResolveByName(p.Name)
+	if !found {
+		if p.IfExists {
+			return emptyDDLResult(ctx), nil // clean no-op: nothing removed
+		}
+		return nil, fmt.Errorf("cypher: DROP CONSTRAINT %q: %w", p.Name, exec.ErrConstraintNotFound)
+	}
+
+	// IF EXISTS is satisfied (the constraint exists), so the operator drops it
+	// unconditionally; pass ifExists=false so any unexpected internal mismatch
+	// surfaces rather than being absorbed.
+	op := exec.NewDropConstraintOp(p.Name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
 	if _, err := e.runDDLOp(ctx, op); err != nil {
 		return nil, err
 	}
 	if tx != nil {
-		if err := commitConstraintTx(tx, txn.OpDropConstraint, kind, p.Label, p.Property, p.Name); err != nil {
-			return nil, err
+		if err := commitConstraintTx(tx, txn.OpDropConstraint, kind, label, prop, p.Name); err != nil {
+			return nil, e.rewindConstraintDrop(err, p.Name, label, prop, kind, idxMgr)
 		}
 	}
 	return emptyDDLResult(ctx), nil
+}
+
+// rewindConstraintDrop re-establishes a just-removed constraint after a failure
+// later in the DROP CONSTRAINT sequence (the WAL append), by re-registering it
+// with the same identity and, for UNIQUE, re-creating and re-seeding its
+// backing index from the live graph. It is the DROP-path analogue of
+// unwindConstraintRegistration: without it a constraint would vanish in memory
+// while remaining durable, so the next reopen would resurrect it (removed but
+// not durable). It returns cause, optionally joined with the rewind's own error.
+//
+// The rewind runs with an uncancellable context so it completes even when the
+// caller's ctx is already done.
+func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
+	op := exec.NewCreateConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
+	if kind == exec.ConstraintUnique {
+		if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, label, prop); bidxErr == nil {
+			e.backfillNodeHashIndex(boundIdx, label, prop)
+			op.WithBackingIndex(boundIdx)
+		}
+	}
+	if _, rerr := e.runDDLOp(context.Background(), op); rerr != nil {
+		return errors.Join(cause, fmt.Errorf("cypher: rewind constraint drop: %w", rerr))
+	}
+	if kind == exec.ConstraintUnique {
+		values, _ := e.scanLabelProperty(label, prop)
+		e.constraintReg.SeedUniqueValuesIgnoringDuplicates(label, prop, values)
+	}
+	return cause
 }
 
 // execConstraintKind maps the IR constraint kind to the exec kind.

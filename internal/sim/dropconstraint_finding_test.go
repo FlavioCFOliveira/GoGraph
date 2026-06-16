@@ -8,31 +8,20 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
-// TestFinding_DropConstraintByNameIsFailSilent documents a robustness defect the
-// DST SchemaChanger (#1552) surfaced in the engine's DROP CONSTRAINT path, with
-// a minimal reproducer. It is NOT a fix — the defect needs an engine change that
-// materially widens this task's scope, so it is reported for a decision rather
-// than fixed blindly. The test pins the CURRENT (incorrect) behaviour so the
-// eventual fix is forced to update it.
+// TestRegression_DropConstraintByNameDropsConstraint is the regression guard for
+// the DST SchemaChanger finding (#1552, fixed in #1556): `DROP CONSTRAINT
+// <name>` (by name only) used to report SUCCESS while performing NO schema
+// change — the constraint stayed enforced and its "__uniq__<Label>.<prop>"
+// backing index lingered, permanently blocking re-creation of any UNIQUE
+// constraint on the same (label, property). That was a fail-silent Consistency
+// violation.
 //
-// Defect: `DROP CONSTRAINT <name>` (by name only) reports SUCCESS but performs
-// NO schema change. The IR for a by-name drop carries an empty label/property
-// (a documented IR limitation), so the executor cannot resolve the UNIQUE
-// backing index ("__uniq__Label.prop"); with IF EXISTS it then silently
-// "succeeds" without dropping the index or unregistering the constraint. Two
-// consequences, both observable below:
-//
-//  1. CONSISTENCY / fail-silent: the constraint stays fully enforced after a
-//     DROP that acknowledged success — the client believes it is gone but a
-//     duplicate is still rejected. This violates the module's fail-stop,
-//     never-fail-silent mandate.
-//  2. The orphaned backing index permanently blocks re-creating any UNIQUE
-//     constraint on the same (label, property): a later CREATE fails with
-//     "an index by that name already exists".
-//
-// Reproducer (also runnable over the wire): CREATE → DROP (reports OK) →
-// duplicate still rejected; re-CREATE fails.
-func TestFinding_DropConstraintByNameIsFailSilent(t *testing.T) {
+// The fix resolves the constraint NAME to its (kind, label, property) identity
+// via the registry, then drops both the constraint and its backing index
+// atomically. This test pins the CORRECT behaviour: after a by-name drop the
+// constraint is genuinely gone (a duplicate is accepted) and the same UNIQUE
+// constraint can be re-created cleanly.
+func TestRegression_DropConstraintByNameDropsConstraint(t *testing.T) {
 	t.Parallel()
 	srv, err := NewSimServer(SimEngineForServer(), clock.Real())
 	if err != nil {
@@ -83,15 +72,29 @@ func TestFinding_DropConstraintByNameIsFailSilent(t *testing.T) {
 
 	runOK("CREATE CONSTRAINT find_c ON (a:FindAcct) ASSERT a.email IS UNIQUE")
 	runOK("CREATE (a:FindAcct {email:'a@x'})")
-	// DROP by name reports success.
+	// While the constraint is live the duplicate must be rejected.
+	if !isRejected("CREATE (a:FindAcct {email:'a@x'})") {
+		t.Fatal("duplicate was accepted while the UNIQUE constraint is still live")
+	}
+
+	// DROP by name reports success AND actually removes enforcement.
 	runOK("DROP CONSTRAINT find_c IF EXISTS")
 
-	// CURRENT (defective) behaviour: the constraint is STILL enforced after the
-	// "successful" drop. When the engine is fixed so DROP CONSTRAINT <name>
-	// actually drops the backing index + registry entry, the duplicate will be
-	// ACCEPTED and this expectation must flip to false.
+	// The constraint is gone: the duplicate is now ACCEPTED.
+	if isRejected("CREATE (a:FindAcct {email:'a@x'})") {
+		t.Fatal("DROP CONSTRAINT by-name did not remove enforcement — the #1556 defect has regressed")
+	}
+
+	// The "__uniq__" backing index is gone too, so the same UNIQUE constraint
+	// can be re-created cleanly (this used to fail with "an index by that name
+	// already exists").
+	runOK("DROP CONSTRAINT find_c IF EXISTS")          // tolerate the now-duplicated data before re-create
+	runOK("MATCH (a:FindAcct {email:'a@x'}) DELETE a") // remove duplicates so re-create's pre-existing check passes
+	runOK("CREATE CONSTRAINT find_c ON (a:FindAcct) ASSERT a.email IS UNIQUE")
+
+	// And it enforces again after re-creation.
+	runOK("CREATE (a:FindAcct {email:'a@x'})")
 	if !isRejected("CREATE (a:FindAcct {email:'a@x'})") {
-		t.Log("DROP CONSTRAINT by-name now removes enforcement — the documented defect is FIXED; update this test and the SchemaChanger notes")
-		t.Fail()
+		t.Fatal("re-created UNIQUE constraint does not enforce")
 	}
 }

@@ -62,6 +62,13 @@ const (
 // CheckSetProperty when a write would violate a constraint.
 var ErrConstraintViolation = errors.New("exec: constraint violation")
 
+// ErrConstraintNotFound is the sentinel returned (wrapped) when a
+// DROP CONSTRAINT names a constraint that does not exist and IF EXISTS was not
+// given. It is the fail-stop analogue of Neo4j's ConstraintDropFailed / "No
+// such constraint": the drop reports a typed error rather than fail-silently
+// claiming success.
+var ErrConstraintNotFound = errors.New("exec: constraint not found")
+
 // ConstraintViolationError carries structured context about which constraint
 // was violated.
 type ConstraintViolationError struct {
@@ -335,6 +342,38 @@ func (r *ConstraintRegistry) UniqueIndexName(label, prop string) (string, bool) 
 	name, ok := r.unique[constraintKey(label, prop)]
 	r.mu.RUnlock()
 	return name, ok
+}
+
+// ResolveByName resolves a user-defined constraint name to its (kind, label,
+// property) identity, so a DROP CONSTRAINT <name> can locate the constraint to
+// remove. It searches the UNIQUE names first, then the NOT NULL names, and
+// returns found=false when no constraint carries that name.
+//
+// Only constraints registered WITH a name (via [SetConstraintName], which the
+// CREATE CONSTRAINT executor calls) are resolvable; an anonymous constraint
+// registered through the legacy [RegisterUnique] / [RegisterNotNull] path has
+// no name to match.
+//
+// ResolveByName is safe for concurrent use.
+func (r *ConstraintRegistry) ResolveByName(name string) (kind ConstraintKind, label, prop string, found bool) {
+	if name == "" {
+		return 0, "", "", false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for key, n := range r.uniqueNames {
+		if n == name {
+			l, p := splitConstraintKey(key)
+			return ConstraintUnique, l, p, true
+		}
+	}
+	for key, n := range r.notNullNames {
+		if n == name {
+			l, p := splitConstraintKey(key)
+			return ConstraintNotNull, l, p, true
+		}
+	}
+	return 0, "", "", false
 }
 
 // HasNotNull reports whether a not-null constraint exists for (label, prop).

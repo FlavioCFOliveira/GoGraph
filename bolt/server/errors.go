@@ -120,6 +120,13 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.Schema.ConstraintValidationFailed"
 	}
 
+	// DROP CONSTRAINT naming a constraint that does not exist (without IF
+	// EXISTS) — a deterministic client fault, mapped to Neo4j's official
+	// constraint-drop-failed code rather than a generic database error.
+	if errors.Is(err, exec.ErrConstraintNotFound) {
+		return "Neo.ClientError.Schema.ConstraintDropFailed"
+	}
+
 	// Index errors.
 	if errors.Is(err, index.ErrIndexExists) {
 		return "Neo.ClientError.Schema.IndexAlreadyExists"

@@ -37,6 +37,16 @@
 //	                 (seed + post edge) from the snapshot plus whichever WAL
 //	                 — original full or suffix-only — survives the crash.
 //
+//	constraint.drop.post-wal-sync
+//	               — commits a durable CREATE CONSTRAINT (UNIQUE) frame plus a
+//	                 node, then commits a durable DROP CONSTRAINT frame, fsyncs
+//	                 the WAL, and crashes AFTER the drop frame is durable.
+//	                 Recovery over the resulting WAL must yield an EMPTY
+//	                 constraint set — the constraint and its backing index gone
+//	                 together (both-absent), since recovery reconstructs the
+//	                 backing index from the constraint set in one frame, never
+//	                 leaving a torn "constraint gone, index lingering" state.
+//
 //	recovery.snapshot-promote-post-rename-pre-fsync
 //	               — builds the interrupted-publish on-disk state (a
 //	                 stranded snapshot.bak with the live snapshot name
@@ -113,6 +123,8 @@ func run() int {
 		runCheckpointPrefixCrash(dir, scenario)
 	case "recovery.snapshot-promote-post-rename-pre-fsync":
 		runRecoveryPromoteCrash(dir)
+	case "constraint.drop.post-wal-sync":
+		runConstraintDropCrash(dir)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
 		return 1
@@ -451,4 +463,82 @@ func runWALMidFrame(dir string) {
 	// Reached only when GOGRAPH_CRASH_AT != "wal.mid-frame"
 	// (non-crash self-test path).
 	fmt.Println("runWALMidFrame: completed without crash (GOGRAPH_CRASH_AT != wal.mid-frame)")
+}
+
+// constraintDropLabel/Property/Name identify the UNIQUE constraint the
+// drop-crash scenario creates and then drops. The parent test reconstructs
+// these to assert the recovered constraint set is EMPTY (both the constraint
+// and its backing index gone).
+const (
+	constraintDropLabel    = "Acct"
+	constraintDropProperty = "email"
+	constraintDropName     = "acct_email"
+)
+
+// runConstraintDropCrash exercises the crash-atomicity of DROP CONSTRAINT
+// by-name (#1556). It commits a durable CREATE CONSTRAINT (UNIQUE) frame plus a
+// node, then commits a durable DROP CONSTRAINT frame, fsyncs the WAL, and
+// crashes at constraint.drop.post-wal-sync — AFTER the drop frame is durable.
+//
+// The constraint removal and its UNIQUE backing-index removal are a single WAL
+// frame: recovery reconstructs the backing index FROM the recovered constraint
+// set (never from a separate index record), so dropping the constraint record
+// drops the index with it. There is therefore no torn intermediate where the
+// constraint is gone but the index lingers (or vice-versa). With the drop frame
+// durable the recovered constraint set must be EMPTY — the "both-absent" arm of
+// the both-or-neither guarantee. The complementary "both-present" arm (a crash
+// BEFORE the drop frame) is proven by the parent test recovering the same WAL
+// truncated to the pre-drop length.
+//
+// The artefacts (the WAL carrying the CREATE+node+DROP frames) are left in
+// GOGRAPH_CRASH_DIR for the parent to recover from.
+func runConstraintDropCrash(dir string) {
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+
+	g := lpg.New[string, float64](adjlist.Config{})
+	store := txn.NewStoreWithCodec[string, float64](g, w, txn.NewStringCodec())
+
+	// CREATE CONSTRAINT (UNIQUE) + a node carrying the constrained value.
+	txCreate := store.Begin()
+	if cerr := txCreate.CreateConstraint(txn.ConstraintUnique, constraintDropLabel, constraintDropProperty, constraintDropName); cerr != nil {
+		log.Fatalf("CreateConstraint: %v", cerr)
+	}
+	if cerr := txCreate.AddNode("n1"); cerr != nil {
+		log.Fatalf("AddNode: %v", cerr)
+	}
+	if cerr := txCreate.SetNodeLabel("n1", constraintDropLabel); cerr != nil {
+		log.Fatalf("SetNodeLabel: %v", cerr)
+	}
+	if cerr := txCreate.SetNodeProperty("n1", constraintDropProperty, lpg.StringValue("a@x")); cerr != nil {
+		log.Fatalf("SetNodeProperty: %v", cerr)
+	}
+	if cerr := txCreate.Commit(); cerr != nil {
+		log.Fatalf("Commit(create): %v", cerr)
+	}
+
+	// DROP CONSTRAINT — one durable WAL frame, fsynced.
+	txDrop := store.Begin()
+	if derr := txDrop.DropConstraint(txn.ConstraintUnique, constraintDropLabel, constraintDropProperty, constraintDropName); derr != nil {
+		log.Fatalf("DropConstraint: %v", derr)
+	}
+	if derr := txDrop.Commit(); derr != nil {
+		log.Fatalf("Commit(drop): %v", derr)
+	}
+	if serr := w.Sync(); serr != nil {
+		log.Fatalf("Sync: %v", serr)
+	}
+
+	// Crash here — the drop frame is durable. SIGKILL delivered immediately
+	// under the crash harness.
+	crashinject.Breakpoint("constraint.drop.post-wal-sync")
+
+	// Reached only on the non-crash self-test path.
+	if cerr := w.Close(); cerr != nil {
+		log.Fatalf("wal.Close: %v", cerr)
+	}
+	fmt.Println("runConstraintDropCrash: completed without crash (GOGRAPH_CRASH_AT != constraint.drop.post-wal-sync)")
 }

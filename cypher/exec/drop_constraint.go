@@ -5,11 +5,20 @@ package exec
 // DropConstraintOp is a single-row DDL Volcano operator that removes a
 // constraint from the ConstraintRegistry.
 //
-// For UNIQUE constraints the backing hash index is also dropped from the
-// index.Manager. If the index is not found and IF EXISTS is set, the
-// operation is silently skipped.
+// For UNIQUE constraints the backing hash index is dropped from the
+// index.Manager together with the registry entry as one unit — the index
+// cannot outlive the constraint, which is what makes re-creating the same
+// UNIQUE constraint work after a drop.
 //
 // For NOT NULL constraints only the registry entry is removed.
+//
+// When the named constraint is not registered the operator is a clean no-op
+// under IF EXISTS, and returns a typed error wrapping ErrConstraintNotFound
+// otherwise — it never reports success without removing anything.
+//
+// The caller resolves the constraint NAME to its (kind, label, property)
+// identity (via ConstraintRegistry.ResolveByName) before constructing the
+// operator: a by-name DROP otherwise carries an empty label/property in the IR.
 
 import (
 	"context"
@@ -82,16 +91,22 @@ func (op *DropConstraintOp) Next(_ *Row) (bool, error) {
 
 	switch op.kind {
 	case ConstraintUnique:
-		// Resolve the backing index name from the registry when label+prop are
-		// known; fall back to the deterministic synthetic name otherwise.
+		// Resolve the backing index name from the registry. When the constraint
+		// is not registered there is no UNIQUE constraint to drop: with IF EXISTS
+		// this is a clean no-op, otherwise a typed not-found error. Never drop a
+		// stray "__uniq__" index that no live constraint backs.
 		idxName, ok := op.reg.UniqueIndexName(op.label, op.prop)
 		if !ok {
-			idxName = uniqueIndexName(op.label, op.prop)
-		}
-		if err := op.mgr.DropIndex(idxName); err != nil {
-			if op.ifExists && errors.Is(err, index.ErrIndexNotFound) {
-				return false, nil // IF EXISTS — silently succeed; no schema change
+			if op.ifExists {
+				return false, nil // IF EXISTS — clean no-op; no schema change
 			}
+			return false, fmt.Errorf("exec: DropConstraint %q: %w", op.name, ErrConstraintNotFound)
+		}
+		// Drop the backing index and the registry entry as one unit: the index
+		// cannot outlive the constraint on this path. ErrIndexNotFound is
+		// tolerated (the constraint may predate a bound backing index), so the
+		// registry entry is still removed and re-creation works.
+		if err := op.mgr.DropIndex(idxName); err != nil && !errors.Is(err, index.ErrIndexNotFound) {
 			return false, fmt.Errorf("exec: DropConstraint %q: drop backing index: %w", op.name, err)
 		}
 		op.reg.UnregisterUnique(op.label, op.prop)
@@ -99,9 +114,9 @@ func (op *DropConstraintOp) Next(_ *Row) (bool, error) {
 	case ConstraintNotNull:
 		if !op.reg.HasNotNull(op.label, op.prop) {
 			if op.ifExists {
-				return false, nil // IF EXISTS — silently succeed; no schema change
+				return false, nil // IF EXISTS — clean no-op; no schema change
 			}
-			return false, fmt.Errorf("exec: DropConstraint %q: constraint not found", op.name)
+			return false, fmt.Errorf("exec: DropConstraint %q: %w", op.name, ErrConstraintNotFound)
 		}
 		op.reg.UnregisterNotNull(op.label, op.prop)
 
