@@ -228,6 +228,38 @@ Simulator`. No catalogue scenario surfaced a production bug (all ran clean or
 with only expected bad-actor/overload errors). -race + goleak clean,
 lint/staticcheck/govulncheck 0. No new label or edge type.
 
+Incrementally synced at commits `237146a`..`580ee21` (2026-06-16, tasks
+#1564-#1570, sprint 199 — DST Phase 5 Swarm + advanced oracles, now CLOSED) and
+`8d1ce89` (task #1571, sprint 201 — DST P5b cross-release harness, CLOSED): +10
+`Commit`s, +8 `Task`s (`1564`-`1571` COMPLETED), new `Package` `main`
+(`cmd/sim-xrelease-helper`). TEST-ONLY (no production code changed; TCK
+3897/3897 held). `internal/sim`: `swarm.go` (bounded-worker, time/count-boxed,
+reproducible-seed-set swarm runner, goleak-clean), `coverage.go` (concurrency-
+safe coverage tracker + biasing selector toward rare paths; reports
+unobservable signals rather than adding production hooks), `upgrade.go`
+(WAL-only data-compat round-trip across a version boundary + corrupt-image
+fail-stop), `differential.go` (replays a P4 Trace against two equivalent-result
+engine toggles — `DisableHashJoin`/`DisableRangeIndexSeek` — must agree),
+`metrics_oracle.go` (asserts exported counters + goroutine baseline against the
+oracle's accounting). `cmd/sim` gained `-swarm`/`-workers`/`-runs`/`-duration`/
+`-coverage-report`. P5b (`crossrelease.go`+`crossrelease_run.go`+
+`cmd/sim-xrelease-helper`): builds a prior git tag (v0.2.0, v0.3.0) into a temp
+git worktree, runs it as a subprocess speaking a line-JSON write/selfcheck
+protocol over the v0.2.0..HEAD-stable store/wal/cypher API, and proves the
+current code opens+recovers a prior-release WAL image faithfully (UPGRADE) +
+diffs the same op stream against the prior engine (DIFFERENTIAL, unordered-LIMIT
+divergences classified benign). FINDING (informational, tracked as SPIKE #1572,
+NOT a current-code defect): v0.2.0's OWN recovery over-counts (live n=32 vs
+self/WAL n=79 — MERGE dedup not persisted in v0.2.0's WAL); current code is
+FAITHFUL (reproduces v0.2.0 self-recovery exactly), v0.3.0 round-trips fully.
+Edges: `Sprint 199/201 -[CONTAINS]->` their Commits; each Task
+`-[IMPLEMENTED_IN]->` its Commit; Commits `-[TOUCHES]->` `internal/sim`
+(+`cmd/sim`, +`cmd/sim-xrelease-helper`); `Commits 237146a/8d1ce89
+-[IMPLEMENTED_IN]->` Feature `DST Simulator`. Cross-release builds run on the
+soak lane (env-precondition skip when git/tag/toolchain unavailable); a fast
+HEAD-as-prior smoke runs on short. -race + goleak clean, lint 0. No new label
+or edge type. **The 5-phase DST simulator (P1-P5 + P5b) is COMPLETE.**
+
 ---
 
 ## Node labels
