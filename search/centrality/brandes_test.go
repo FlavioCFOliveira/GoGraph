@@ -54,6 +54,59 @@ func BenchmarkBrandes_RandomGraph(b *testing.B) {
 	}
 }
 
+// buildRandomCSR builds an undirected random graph of n vertices with
+// avgDeg*n undirected edges (so ~avgDeg/2 expected degree per vertex
+// after de-duplication by the adjacency list). The PCG seed is fixed
+// so every run is bit-for-bit reproducible. It is the shared fixture
+// for the scale benchmarks below.
+func buildRandomCSR(b *testing.B, n, avgDeg int) *csr.CSR[struct{}] {
+	b.Helper()
+	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	r := rand.New(rand.NewPCG(19, 23)) //nolint:gosec // deterministic benchmark RNG
+	for i := 0; i < avgDeg*n; i++ {
+		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
+			b.Fatalf("AddEdge: %v", err)
+		}
+	}
+	return csr.BuildFromAdjList(a)
+}
+
+// BenchmarkBrandes_Scale measures Betweenness across larger and denser
+// undirected random graphs than [BenchmarkBrandes_RandomGraph]. The
+// flat predecessor arena (#1515) trades one extra O(E) in-degree pass
+// for a contiguous, pointer-chase-free accumulation walk; that
+// cache-locality win only manifests once the predecessor working set
+// exceeds the L1/L2 footprint, which the 512-node guard-band graph is
+// far too small to reach. These sizes make the locality effect — and
+// the near-zero steady-state allocation — measurable, per the
+// "measure to decide" mandate. Brandes is O(V*E), so the larger sizes
+// are intentionally capped; they remain comfortably inside the short
+// test layer's per-package budget under -benchtime.
+func BenchmarkBrandes_Scale(b *testing.B) {
+	cases := []struct {
+		name   string
+		n      int
+		avgDeg int
+	}{
+		{"2k_deg4", 2000, 4},
+		{"2k_deg16", 2000, 16},
+		{"5k_deg4", 5000, 4},
+		{"5k_deg16", 5000, 16},
+		{"10k_deg4", 10000, 4},
+	}
+	for _, tc := range cases {
+		tc := tc
+		b.Run(tc.name, func(b *testing.B) {
+			c := buildRandomCSR(b, tc.n, tc.avgDeg)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = Betweenness(c)
+			}
+		})
+	}
+}
+
 func TestBetweenness_Star(t *testing.T) {
 	t.Parallel()
 	// Star: hub 0 connected to 1..4. Hub has max betweenness;

@@ -1,0 +1,131 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                │                                             sec/op                                              │                                   sec/op                                     vs base              │
+AllNodesScan-10                                                                                       4.390µ ± 1%                                                                   4.287µ ± 1%  -2.36% (p=0.001 n=8)
+ProjectOp-10                                                                                          13.29µ ± 1%                                                                   12.68µ ± 1%  -4.61% (p=0.000 n=8)
+ResultSet-10                                                                                          20.34µ ± 1%                                                                   19.32µ ± 1%  -5.02% (p=0.000 n=8)
+geomean                                                                                               10.59µ                                                                        10.16µ       -4.00%
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                │                                              B/op                                               │                                   B/op                                     vs base                │
+AllNodesScan-10                                                                                      10.06Ki ± 0%                                                                10.06Ki ± 0%       ~ (p=1.000 n=8) ¹
+ProjectOp-10                                                                                         21.95Ki ± 0%                                                                21.95Ki ± 0%       ~ (p=1.000 n=8) ¹
+ResultSet-10                                                                                         33.79Ki ± 0%                                                                33.79Ki ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                                                              19.54Ki                                                                     19.54Ki       +0.00%
+¹ all samples are equal
+
+                │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                │                                            allocs/op                                            │                                 allocs/op                                  vs base                │
+AllNodesScan-10                                                                                        258.0 ± 0%                                                                  258.0 ± 0%       ~ (p=1.000 n=8) ¹
+ProjectOp-10                                                                                           762.0 ± 0%                                                                  762.0 ± 0%       ~ (p=1.000 n=8) ¹
+ResultSet-10                                                                                          1.264k ± 0%                                                                 1.264k ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                                                                628.7                                                                       628.7       +0.00%
+¹ all samples are equal
+
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+                  │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                  │                                             sec/op                                              │                                   sec/op                                     vs base              │
+IC1-10                                                                                                  180.6µ ± 1%                                                                   182.2µ ± 1%  +0.87% (p=0.007 n=8)
+IC2-10                                                                                                  63.50µ ± 0%                                                                   63.90µ ± 2%       ~ (p=0.195 n=8)
+IC3-10                                                                                                  63.70µ ± 1%                                                                   63.68µ ± 1%       ~ (p=0.574 n=8)
+IC4-10                                                                                                  96.16µ ± 1%                                                                   95.55µ ± 2%       ~ (p=0.505 n=8)
+IC5-10                                                                                                  5.674µ ± 0%                                                                   5.728µ ± 1%       ~ (p=0.110 n=8)
+IC6-10                                                                                                  5.951µ ± 1%                                                                   6.003µ ± 1%       ~ (p=0.083 n=8)
+IC7-10                                                                                                  64.71µ ± 0%                                                                   65.11µ ± 1%       ~ (p=0.083 n=8)
+IC8-10                                                                                                  5.698µ ± 1%                                                                   5.688µ ± 2%       ~ (p=0.442 n=8)
+IC9-10                                                                                                  96.95µ ± 2%                                                                   96.83µ ± 2%       ~ (p=0.721 n=8)
+IC10-10                                                                                                 122.6µ ± 1%                                                                   121.7µ ± 1%       ~ (p=0.083 n=8)
+IC11-10                                                                                                 288.2µ ± 0%                                                                   288.5µ ± 1%       ~ (p=0.721 n=8)
+IC12-10                                                                                                 6.441µ ± 2%                                                                   6.421µ ± 1%       ~ (p=0.959 n=8)
+IC13-10                                                                                                 6.495µ ± 1%                                                                   6.493µ ± 1%       ~ (p=0.979 n=8)
+IC14-10                                                                                                 65.38µ ± 0%                                                                   65.34µ ± 1%       ~ (p=0.505 n=8)
+WithProjection-10                                                                                       375.1µ ± 0%                                                                   375.6µ ± 0%       ~ (p=0.645 n=8)
+geomean                                                                                                 42.90µ                                                                        42.96µ       +0.14%
+
+                  │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                  │                                              B/op                                               │                                   B/op                                     vs base                │
+IC1-10                                                                                                 199.2Ki ± 0%                                                                199.2Ki ± 0%       ~ (p=1.000 n=8)
+IC2-10                                                                                                 67.46Ki ± 0%                                                                67.46Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC3-10                                                                                                 67.46Ki ± 0%                                                                67.46Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC4-10                                                                                                 162.2Ki ± 0%                                                                162.2Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC5-10                                                                                                 2.250Ki ± 0%                                                                2.250Ki ± 0%       ~ (p=0.486 n=8)
+IC6-10                                                                                                 2.414Ki ± 0%                                                                2.414Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC7-10                                                                                                 67.27Ki ± 0%                                                                67.27Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC8-10                                                                                                 2.252Ki ± 0%                                                                2.251Ki ± 0%       ~ (p=0.784 n=8)
+IC9-10                                                                                                 162.2Ki ± 0%                                                                162.2Ki ± 0%  -0.00% (p=0.041 n=8)
+IC10-10                                                                                                204.2Ki ± 0%                                                                204.2Ki ± 0%       ~ (p=1.000 n=8)
+IC11-10                                                                                                501.7Ki ± 0%                                                                501.7Ki ± 0%       ~ (p=1.000 n=8)
+IC12-10                                                                                                3.027Ki ± 0%                                                                3.026Ki ± 0%       ~ (p=0.819 n=8)
+IC13-10                                                                                                2.992Ki ± 0%                                                                2.992Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC14-10                                                                                                67.28Ki ± 0%                                                                67.28Ki ± 0%       ~ (p=1.000 n=8) ¹
+WithProjection-10                                                                                      630.4Ki ± 0%                                                                630.4Ki ± 0%       ~ (p=1.000 n=8)
+geomean                                                                                                39.13Ki                                                                     39.13Ki       -0.00%
+¹ all samples are equal
+
+                  │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                  │                                            allocs/op                                            │                                 allocs/op                                  vs base                │
+IC1-10                                                                                                  5.796k ± 0%                                                                 5.796k ± 0%       ~ (p=1.000 n=8) ¹
+IC2-10                                                                                                  1.973k ± 0%                                                                 1.973k ± 0%       ~ (p=1.000 n=8) ¹
+IC3-10                                                                                                  1.973k ± 0%                                                                 1.973k ± 0%       ~ (p=1.000 n=8) ¹
+IC4-10                                                                                                  1.973k ± 0%                                                                 1.973k ± 0%       ~ (p=1.000 n=8) ¹
+IC5-10                                                                                                   40.00 ± 0%                                                                  40.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC6-10                                                                                                   41.00 ± 0%                                                                  41.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC7-10                                                                                                  1.962k ± 0%                                                                 1.962k ± 0%       ~ (p=1.000 n=8) ¹
+IC8-10                                                                                                   40.00 ± 0%                                                                  40.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC9-10                                                                                                  1.973k ± 0%                                                                 1.973k ± 0%       ~ (p=1.000 n=8) ¹
+IC10-10                                                                                                 2.984k ± 0%                                                                 2.984k ± 0%       ~ (p=1.000 n=8) ¹
+IC11-10                                                                                                 5.795k ± 0%                                                                 5.795k ± 0%       ~ (p=1.000 n=8) ¹
+IC12-10                                                                                                  50.00 ± 0%                                                                  50.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC13-10                                                                                                  50.00 ± 0%                                                                  50.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC14-10                                                                                                 1.962k ± 0%                                                                 1.962k ± 0%       ~ (p=1.000 n=8) ¹
+WithProjection-10                                                                                       9.813k ± 0%                                                                 9.813k ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                                                                  732.7                                                                       732.7       +0.00%
+¹ all samples are equal
+
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                            │                                             sec/op                                              │                                   sec/op                                     vs base              │
+BFSDirectionOpt_PowerLaw-10                                                                                       29.72m ± 2%                                                                   29.94m ± 1%  +0.72% (p=0.005 n=8)
+Dijkstra_Large-10                                                                                                 8.132m ± 1%                                                                   8.230m ± 3%  +1.21% (p=0.003 n=8)
+Dijkstra_PostWarmup-10                                                                                            8.026m ± 1%                                                                   8.061m ± 1%       ~ (p=0.130 n=8)
+geomean                                                                                                           12.47m                                                                        12.57m       +0.79%
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                            │                                              B/op                                               │                                   B/op                                     vs base                │
+BFSDirectionOpt_PowerLaw-10                                                                                      0.000 ± 0%                                                                    0.000 ± 0%       ~ (p=1.000 n=8) ¹
+Dijkstra_Large-10                                                                                              1.087Mi ± 0%                                                                  1.088Mi ± 0%  +0.05% (p=0.025 n=8)
+Dijkstra_PostWarmup-10                                                                                           0.000 ± 0%                                                                    0.000 ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                                                                                     ²                                                                              +0.02%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                            │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                            │                                            allocs/op                                            │                                 allocs/op                                  vs base                │
+BFSDirectionOpt_PowerLaw-10                                                                                      0.000 ± 0%                                                                    0.000 ± 0%       ~ (p=1.000 n=8) ¹
+Dijkstra_Large-10                                                                                                4.000 ± 0%                                                                    4.000 ± 0%       ~ (p=1.000 n=8) ¹
+Dijkstra_PostWarmup-10                                                                                           0.000 ± 0%                                                                    0.000 ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                                                                                     ²                                                                              +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+                        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                        │                                             sec/op                                              │                                   sec/op                                     vs base              │
+Brandes_RandomGraph-10                                                                                        7.759m ± 1%                                                                   7.972m ± 1%  +2.75% (p=0.000 n=8)
+PageRank_PowerLaw50K-10                                                                                       7.862m ± 1%                                                                   7.840m ± 0%       ~ (p=0.505 n=8)
+geomean                                                                                                       7.810m                                                                        7.906m       +1.22%
+
+                        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                        │                                              B/op                                               │                                    B/op                                     vs base               │
+Brandes_RandomGraph-10                                                                                       94.34Ki ± 0%                                                                 60.75Ki ± 0%  -35.60% (p=0.000 n=8)
+PageRank_PowerLaw50K-10                                                                                      7.903Mi ± 0%                                                                 7.903Mi ± 0%        ~ (p=0.743 n=8)
+geomean                                                                                                      873.7Ki                                                                      701.2Ki       -19.75%
+
+                        │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0017__brandes-baseline__0e7dbc2.txt │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/history/0018__brandes-arena-1515__f3545fc.txt │
+                        │                                            allocs/op                                            │                                 allocs/op                                   vs base               │
+Brandes_RandomGraph-10                                                                                       1921.00 ± 0%                                                                   10.00 ± 0%  -99.48% (p=0.000 n=8)
+PageRank_PowerLaw50K-10                                                                                        68.00 ± 1%                                                                   68.00 ± 1%        ~ (p=1.000 n=8)
+geomean                                                                                                        361.4                                                                        26.08       -92.79%

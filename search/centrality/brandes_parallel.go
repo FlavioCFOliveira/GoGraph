@@ -53,6 +53,10 @@ func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorker
 	}
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
+	// In-degrees are read-only and identical for every worker, so
+	// compute them once and share the slice; each worker still builds
+	// its own arena (the only mutable state) over this shared bound.
+	indeg := computeInDegrees(n, verts, edges)
 
 	// Cancellation cascade: any worker that observes ctx.Err() (or
 	// fails its work) calls cancel() on the shared cancellable
@@ -79,7 +83,11 @@ func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorker
 					sigma := make([]float64, n)
 					dist := make([]int, n)
 					delta := make([]float64, n)
-					pred := make([][]int, n)
+					// Each worker owns a private predecessor arena —
+					// predArena is not safe for concurrent use, so it
+					// must never be shared across workers. The shared
+					// indeg slice is read-only.
+					pred := newPredArena(n, indeg)
 					queue := make([]int, 0, n)
 					stack := make([]int, 0, n)
 					for s := w; s < n; s += numWorkers {
