@@ -65,3 +65,50 @@ func TestRun_WorkloadNames(t *testing.T) {
 		})
 	}
 }
+
+// TestRun_WireMode verifies the Phase-3 lock-step wire mode runs and reports a
+// reproducible round-trip.
+func TestRun_WireMode(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"42", "--mode=wire"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Wire round-trip reproducible") {
+		t.Fatalf("missing wire success line, got %q", out.String())
+	}
+}
+
+// TestRun_ConcurrentMode verifies the Phase-3 concurrent mode runs and reports a
+// consistent quiescence.
+func TestRun_ConcurrentMode(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"7", "--mode=concurrent", "--conns=8", "--ops-per-conn=10"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Concurrent run consistent") {
+		t.Fatalf("missing concurrent success line, got %q", out.String())
+	}
+}
+
+// TestRun_LivenessMode verifies the Phase-3 two-phase safety->liveness mode runs
+// and converges.
+func TestRun_LivenessMode(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"9", "--mode=liveness", "--conns=8", "--ops-per-conn=10"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "converged") {
+		t.Fatalf("missing liveness success line, got %q", out.String())
+	}
+}
+
+// TestRun_UnknownMode verifies an unknown mode exits 2.
+func TestRun_UnknownMode(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"1", "--mode=bogus"}, &out, &errBuf); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errBuf.String(), "unknown mode") {
+		t.Fatalf("missing error, got %q", errBuf.String())
+	}
+}

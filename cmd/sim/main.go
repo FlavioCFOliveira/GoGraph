@@ -8,9 +8,22 @@
 // source used solely to pick the seed value) and printed so the run can be
 // reproduced. Flags:
 //
-//	--ticks     number of ticks (operations) to simulate (default 100000)
-//	--workload  actor mix: default | write-heavy | read-heavy (default "default")
-//	--verbose   print each operation as it runs
+//	--ticks       number of ticks (operations) to simulate (default 100000)
+//	--workload    actor mix: default | write-heavy | read-heavy | bad-actor
+//	--verbose     print each operation as it runs
+//	--crashes     inject deterministic crash+recovery cycles
+//	--mode        engine | wire | concurrent | liveness (default "engine")
+//	--conns       concurrent connections for the concurrent/liveness modes
+//	--ops-per-conn  operations per connection for those modes
+//
+// The Phase-3 modes drive the REAL Bolt wire protocol against a genuine
+// bolt/server over an in-memory connection:
+//
+//	wire        a deterministic LOCK-STEP single-connection round-trip demo
+//	concurrent  N real goroutines, one per connection (NOT bit-reproducible);
+//	            asserts eventual oracle==engine consistency, no panic, no leak
+//	liveness    a two-phase safety->liveness run with convergence + a
+//	            deadlock/resonance watchdog
 //
 // On a violation the report (which includes a "Reproduce with:" line) is
 // printed to stderr and the process exits 1. On success a one-line summary is
@@ -25,7 +38,9 @@ import (
 	mrand "math/rand/v2"
 	"os"
 	"strconv"
+	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 	"github.com/FlavioCFOliveira/GoGraph/internal/sim"
 )
 
@@ -45,6 +60,9 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	workloadName := fs.String("workload", "default", "actor mix: default | write-heavy | read-heavy | bad-actor")
 	verbose := fs.Bool("verbose", false, "print each operation as it runs")
 	crashes := fs.Bool("crashes", false, "inject deterministic crash+recovery cycles (drives the real SimDisk-backed persistence stack)")
+	mode := fs.String("mode", "engine", "execution mode: engine | wire | concurrent | liveness")
+	conns := fs.Int("conns", 16, "concurrent connections (concurrent/liveness modes)")
+	opsPerConn := fs.Int("ops-per-conn", 25, "operations per connection (concurrent/liveness modes)")
 
 	// Go's flag package stops parsing at the first non-flag token, so the
 	// documented usage `sim <seed> --ticks=N` would otherwise leave --ticks
@@ -62,6 +80,21 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 
 	seed, ok := resolveSeed(seedArgs, stderr)
 	if !ok {
+		return 2
+	}
+
+	// Phase-3 modes drive the real Bolt wire path against a genuine bolt/server.
+	switch *mode {
+	case "engine":
+		// Fall through to the engine-API safety loop below.
+	case "wire":
+		return runWireMode(seed, *verbose, stdout, stderr)
+	case "concurrent":
+		return runConcurrentMode(seed, *conns, *opsPerConn, stdout, stderr)
+	case "liveness":
+		return runLivenessMode(seed, *conns, *opsPerConn, stdout, stderr)
+	default:
+		stderr.printf("sim: unknown mode %q (want engine|wire|concurrent|liveness)\n", *mode)
 		return 2
 	}
 
@@ -109,6 +142,111 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	} else {
 		stdout.printf("Simulation passed. Seed: %d, Ticks: %d\n", seed, *ticks)
 	}
+	return 0
+}
+
+// runWireMode runs the deterministic LOCK-STEP single-connection Bolt-wire demo:
+// it drives a fixed honest op sequence over the real bolt/server twice and
+// verifies the two transcripts are byte-identical (the reproducibility proof).
+func runWireMode(seed uint64, verbose bool, stdout, stderr *errWriter) int {
+	const nOps = 40
+	first, err := sim.RunLockStepWire(seed, nOps)
+	if err != nil {
+		stderr.printf("sim: wire mode: %v\n", err)
+		return 1
+	}
+	second, err := sim.RunLockStepWire(seed, nOps)
+	if err != nil {
+		stderr.printf("sim: wire mode: %v\n", err)
+		return 1
+	}
+	if !first.Equal(second) {
+		stderr.printf("sim: LOCK-STEP wire transcript NOT reproducible for seed %d\n", seed)
+		return 1
+	}
+	if verbose {
+		for i, e := range first.Exchanges {
+			stdout.printf("  [%d] %s -> %s\n", i, e.Op, e.Response)
+		}
+	}
+	stdout.printf("Wire round-trip reproducible. Seed: %d, Exchanges: %d (lock-step, byte-identical across two runs)\n",
+		seed, len(first.Exchanges))
+	return 0
+}
+
+// runConcurrentMode runs the concurrent (non-bit-reproducible) Bolt-wire mode and
+// reports the eventual-consistency oracle at quiescence.
+func runConcurrentMode(seed uint64, conns, opsPerConn int, stdout, stderr *errWriter) int {
+	srv, err := sim.NewSimServer(sim.SimEngineForServer(), clock.Real())
+	if err != nil {
+		stderr.printf("sim: concurrent mode: %v\n", err)
+		return 1
+	}
+	defer func() { _ = srv.Close() }()
+
+	res, err := sim.RunConcurrent(context.Background(), srv, sim.ConcurrentConfig{
+		Seed:        seed,
+		Connections: conns,
+		OpsPerConn:  opsPerConn,
+	})
+	if err != nil {
+		stderr.printf("sim: concurrent mode: %v\n", err)
+		return 1
+	}
+	if !res.Consistent() {
+		stderr.printf("CONCURRENT INCONSISTENT seed=%d engine=%d acked=%d panics=%d transport=%d\n",
+			seed, res.EngineNodeCount, res.AckedCreates, res.Panics, res.TransportErrors)
+		return 1
+	}
+	stdout.printf("Concurrent run consistent. Seed: %d, Conns: %d, Acked creates: %d (==engine), Bounded rejects: %d (NOT bit-reproducible)\n",
+		seed, res.Connections, res.AckedCreates, res.BoundedRejects)
+	return 0
+}
+
+// runLivenessMode runs the two-phase safety->liveness flow and reports
+// convergence, or the liveness failure report (with seed + pending dump) on a
+// non-converging run.
+func runLivenessMode(seed uint64, conns, opsPerConn int, stdout, stderr *errWriter) int {
+	srv, err := sim.NewSimServer(sim.SimEngineForServer(), clock.Real())
+	if err != nil {
+		stderr.printf("sim: liveness mode: %v\n", err)
+		return 1
+	}
+	defer func() { _ = srv.Close() }()
+
+	// Safety phase: concurrent mixed workload including the bounded overload actor.
+	safety, err := sim.RunConcurrent(context.Background(), srv, sim.ConcurrentConfig{
+		Seed:        seed,
+		Connections: conns,
+		OpsPerConn:  opsPerConn,
+		Mix:         &sim.ConcurrentMix{WriterWeight: 0.5, ReaderWeight: 0.3, OverloadWeight: 0.2},
+	})
+	if err != nil {
+		stderr.printf("sim: liveness safety phase: %v\n", err)
+		return 1
+	}
+	if !safety.Consistent() {
+		stderr.printf("SAFETY INCONSISTENT seed=%d engine=%d acked=%d\n", seed, safety.EngineNodeCount, safety.AckedCreates)
+		return 1
+	}
+
+	// Liveness phase: faults healed, must converge.
+	live, err := sim.RunLiveness(context.Background(), srv, clock.Real(), sim.LivenessConfig{
+		Seed:           seed,
+		Connections:    conns,
+		OpsPerConn:     opsPerConn,
+		ConvergeBudget: 30 * time.Second,
+	})
+	if err != nil {
+		stderr.printf("sim: liveness phase: %v\n", err)
+		return 1
+	}
+	if !live.Converged {
+		stderr.printf("%s", live.Report())
+		return 1
+	}
+	stdout.printf("Two-phase safety->liveness converged. Seed: %d, Safety acked: %d, Liveness ticks: %d\n",
+		seed, safety.AckedCreates, live.Ticks)
 	return 0
 }
 
