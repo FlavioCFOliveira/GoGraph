@@ -125,10 +125,10 @@ type MetricsOracleResult struct {
 
 // Consistent reports whether the metrics matched the oracle and the reliability
 // bounds (no discrepancy).
-func (r MetricsOracleResult) Consistent() bool { return len(r.Discrepancies) == 0 }
+func (r *MetricsOracleResult) Consistent() bool { return len(r.Discrepancies) == 0 }
 
 // String renders the result: the deltas and every discrepancy.
-func (r MetricsOracleResult) String() string {
+func (r *MetricsOracleResult) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "metrics oracle: writes=%d (expected %d) writeErrors=%d (expected %d) goroutines %d->%d",
 		r.After.RunInTxCount-r.Before.RunInTxCount, r.ExpectedWrites,

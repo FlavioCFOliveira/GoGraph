@@ -64,7 +64,7 @@ func TestMetricsOracle_SwarmGoroutineBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
-	sw, err := NewSwarm(reg, SwarmConfig{
+	sw, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 0x5EED, Scenario: ScenarioReadHeavy, Workers: 4, Runs: 16,
 	})
 	if err != nil {
@@ -93,8 +93,9 @@ func TestMetricsOracle_CatchesMiscount(t *testing.T) {
 	after := MetricsSnapshot{RunInTxCount: 150, Goroutines: 10} // 50 writes observed
 
 	// Oracle accounts 50 writes -> consistent.
-	if r := o.Check(before, after, 50, 0, 0); !r.Consistent() {
-		t.Errorf("Check flagged a matching count:\n%s", r.String())
+	r0 := o.Check(before, after, 50, 0, 0)
+	if !r0.Consistent() {
+		t.Errorf("Check flagged a matching count:\n%s", r0.String())
 	}
 	// A miscounting metric (engine recorded 50 but oracle expected 60) -> caught.
 	r := o.Check(before, after, 60, 0, 0)
@@ -111,11 +112,13 @@ func TestMetricsOracle_CatchesLeak(t *testing.T) {
 	before := MetricsSnapshot{Goroutines: 10}
 	after := MetricsSnapshot{Goroutines: 15} // +5 leaked
 
-	if r := o.Check(before, after, 0, 0, 0); r.Consistent() {
+	r1 := o.Check(before, after, 0, 0, 0)
+	if r1.Consistent() {
 		t.Errorf("Check failed to catch a goroutine leak of 5")
 	}
 	// Within slack -> not flagged.
-	if r := o.Check(before, after, 0, 0, 8); !r.Consistent() {
-		t.Errorf("Check flagged a leak within slack:\n%s", r.String())
+	r2 := o.Check(before, after, 0, 0, 8)
+	if !r2.Consistent() {
+		t.Errorf("Check flagged a leak within slack:\n%s", r2.String())
 	}
 }

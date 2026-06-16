@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"go.uber.org/goleak"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // alwaysFailScenario builds a scenario whose custom run always reports an
@@ -46,7 +47,7 @@ func TestPhase5_SwarmAggregatesFailures(t *testing.T) {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	const runs = 12
-	sw, err := NewSwarm(reg, SwarmConfig{
+	sw, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 0x1234, Scenario: "fail-fixture", Workers: 4, Runs: runs,
 	})
 	if err != nil {
@@ -85,7 +86,7 @@ func TestPhase5_EndToEnd(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	tracker := NewCoverageTracker(reg.Names())
-	sw, err := NewSwarm(reg, SwarmConfig{
+	sw, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 0x5EED, Scenario: ScenarioReadHeavy, Workers: 4, Runs: 20,
 		Observe: tracker.Record,
 	})
@@ -119,7 +120,7 @@ func TestPhase5_SoakSwarm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
-	sw, err := NewSwarm(reg, SwarmConfig{
+	sw, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 0x50A4,
 		Scenario:   ScenarioWriteHeavy,
 		Workers:    8,

@@ -168,7 +168,7 @@ type Swarm struct {
 // well-formed (at least one of Runs or Duration is positive) and that the
 // configured scenario resolves, returning an error otherwise so a
 // misconfiguration fails fast rather than running an empty or unbounded swarm.
-func NewSwarm(reg *Registry, cfg SwarmConfig) (*Swarm, error) {
+func NewSwarm(reg *Registry, cfg *SwarmConfig) (*Swarm, error) {
 	if reg == nil {
 		return nil, fmt.Errorf("sim: NewSwarm: nil registry")
 	}
@@ -178,7 +178,7 @@ func NewSwarm(reg *Registry, cfg SwarmConfig) (*Swarm, error) {
 	if _, ok := reg.Lookup(cfg.Scenario); !ok {
 		return nil, fmt.Errorf("sim: NewSwarm: unknown scenario %q", cfg.Scenario)
 	}
-	return &Swarm{reg: reg, cfg: cfg}, nil
+	return &Swarm{reg: reg, cfg: *cfg}, nil
 }
 
 // resolveWorkers returns the worker cap, normalising a non-positive value to
@@ -210,8 +210,12 @@ func (s *Swarm) resolveClock() clock.Clock {
 // the master seed and i, so the whole schedule is a pure function of the master
 // seed. The mix uses a NewSeed-backed PCG draw keyed by (master, i) so adjacent
 // run indices produce well-separated seeds rather than a trivial +1 sequence.
+// i is a run index and is always non-negative (the dispatcher counts up from 0).
 func (s *Swarm) derivedSeed(i int) uint64 {
-	return NewSeed(s.cfg.MasterSeed^(uint64(i)*swarmSeedMix)).Uint64N(1<<63) ^ (uint64(i+1) * swarmSeedMix)
+	//nolint:gosec // G115: i is a run index, always >= 0; the uint64 conversion
+	// cannot wrap. The conversion only mixes the index into the seed.
+	idx := uint64(i)
+	return NewSeed(s.cfg.MasterSeed^(idx*swarmSeedMix)).Uint64N(1<<62) ^ ((idx + 1) * swarmSeedMix)
 }
 
 // Run executes the swarm and returns its aggregated result. It spawns the

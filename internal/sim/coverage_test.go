@@ -101,7 +101,7 @@ func TestCoverageBias_IncreasesRarePathCoverage(t *testing.T) {
 
 	// Uniform policy: every run pins to the single configured scenario.
 	uniform := NewCoverageTracker(reg.Names())
-	swU, err := NewSwarm(reg, SwarmConfig{
+	swU, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 7, Scenario: "cov-a", Workers: 4, Runs: budget,
 		Observe: func(r SwarmRun) { uniform.Record(r) },
 	})
@@ -115,7 +115,7 @@ func TestCoverageBias_IncreasesRarePathCoverage(t *testing.T) {
 	// Biased policy: the tracker is also the selector, steering toward
 	// under-covered scenarios. Feed it as it selects so the bias adapts.
 	biased := NewCoverageTracker(reg.Names())
-	swB, err := NewSwarm(reg, SwarmConfig{
+	swB, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 7, Scenario: "cov-a", Workers: 4, Runs: budget,
 		Selector: biased,
 		Observe:  func(r SwarmRun) { biased.Record(r) },

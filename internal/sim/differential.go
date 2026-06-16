@@ -30,7 +30,7 @@ type EngineVariant struct {
 // buildEngine constructs the variant's engine adapter over a fresh graph. The
 // graph shape matches the deterministic scripted executor (directed simple
 // graph) so the two variants and a recorded trace are directly comparable.
-func (v EngineVariant) buildEngine() *EngineAdapter {
+func (v *EngineVariant) buildEngine() *EngineAdapter {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	return NewEngineAdapter(cypher.NewEngineWithOptions(g, v.Options))
 }
@@ -115,7 +115,7 @@ type diffEngine struct {
 // this proof), a clean trace must replay to identical output on both.
 //
 // It spawns no goroutines and is a pure function of trace + the two variants.
-func DifferentialTrace(ctx context.Context, trace Trace, a, b EngineVariant) (DiffResult, error) {
+func DifferentialTrace(ctx context.Context, trace Trace, a, b *EngineVariant) (DiffResult, error) {
 	return differentialTrace(ctx, trace, a, b, -1)
 }
 
@@ -125,13 +125,13 @@ func DifferentialTrace(ctx context.Context, trace Trace, a, b EngineVariant) (Di
 // divergence: variant B drops one write, so its end-state diverges from variant
 // A and the first comparison after the drop fails. injectAt < 0 injects nothing
 // (equivalent to [DifferentialTrace]).
-func DifferentialTraceInjectB(ctx context.Context, trace Trace, a, b EngineVariant, injectAt int) (DiffResult, error) {
+func DifferentialTraceInjectB(ctx context.Context, trace Trace, a, b *EngineVariant, injectAt int) (DiffResult, error) {
 	return differentialTrace(ctx, trace, a, b, injectAt)
 }
 
 // differentialTrace is the shared core: replay against both variants, optionally
 // dropping the write at injectBAt on variant B only.
-func differentialTrace(ctx context.Context, trace Trace, a, b EngineVariant, injectBAt int) (DiffResult, error) {
+func differentialTrace(ctx context.Context, trace Trace, a, b *EngineVariant, injectBAt int) (DiffResult, error) {
 	ea := diffEngine{name: a.Name, engine: a.buildEngine()}
 	eb := diffEngine{name: b.Name, engine: b.buildEngine()}
 
@@ -282,7 +282,7 @@ func renderRow(res *cypher.Result) string {
 	cols := res.Columns()
 	parts := make([]string, 0, len(cols))
 	for i := range cols {
-		parts = append(parts, fmt.Sprintf("%v", res.ValueAt(i)))
+		parts = append(parts, res.ValueAt(i).String())
 	}
 	return strings.Join(parts, ",")
 }

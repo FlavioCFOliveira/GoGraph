@@ -543,7 +543,7 @@ func runSwarmMode(masterSeed uint64, opt swarmOptions, stdout, stderr *errWriter
 		cfg.Selector = tracker
 	}
 
-	sw, err := sim.NewSwarm(reg, cfg)
+	sw, err := sim.NewSwarm(reg, &cfg)
 	if err != nil {
 		stderr.printf("sim: swarm: %v\n", err)
 		return 2

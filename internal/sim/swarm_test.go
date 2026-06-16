@@ -20,7 +20,7 @@ func TestSwarm_Smoke(t *testing.T) {
 	}
 
 	const runs = 24
-	sw, err := NewSwarm(reg, SwarmConfig{
+	sw, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 0x5EED,
 		Scenario:   ScenarioReadHeavy,
 		Workers:    4,
@@ -62,7 +62,7 @@ func TestSwarm_Reproducible(t *testing.T) {
 
 	collect := func(workers int) map[int]uint64 {
 		seen := make(map[int]uint64)
-		sw, err := NewSwarm(reg, SwarmConfig{
+		sw, err := NewSwarm(reg, &SwarmConfig{
 			MasterSeed: 0xABCDEF,
 			Scenario:   ScenarioReadHeavy,
 			Workers:    workers,
@@ -108,7 +108,7 @@ func TestSwarm_DurationBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
-	sw, err := NewSwarm(reg, SwarmConfig{
+	sw, err := NewSwarm(reg, &SwarmConfig{
 		MasterSeed: 1,
 		Scenario:   ScenarioReadHeavy,
 		Workers:    2,
@@ -149,7 +149,8 @@ func TestSwarm_ConfigValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewSwarm(tt.reg, tt.cfg)
+			cfg := tt.cfg
+			_, err := NewSwarm(tt.reg, &cfg)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewSwarm err = %v, wantErr = %v", err, tt.wantErr)
 			}

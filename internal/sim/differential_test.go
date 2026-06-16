@@ -42,7 +42,7 @@ func TestDifferential_IdenticalVariantsAgree(t *testing.T) {
 			t.Run(p.name, func(t *testing.T) {
 				trace := recordTraceForDiff(t, seed, 400)
 				a, b := p.pair()
-				res, err := DifferentialTrace(context.Background(), trace, a, b)
+				res, err := DifferentialTrace(context.Background(), trace, &a, &b)
 				if err != nil {
 					t.Fatalf("DifferentialTrace: %v", err)
 				}
@@ -73,7 +73,7 @@ func TestDifferential_CatchesInjectedDivergence(t *testing.T) {
 	}
 
 	a, b := DefaultVariantPair()
-	res, err := DifferentialTraceInjectB(context.Background(), trace, a, b, injectAt)
+	res, err := DifferentialTraceInjectB(context.Background(), trace, &a, &b, injectAt)
 	if err != nil {
 		t.Fatalf("DifferentialTraceInjectB: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestDifferential_CatchesInjectedDivergence(t *testing.T) {
 func TestDifferential_NoOpInjection(t *testing.T) {
 	trace := recordTraceForDiff(t, 0xDA7A, 300)
 	a, b := DefaultVariantPair()
-	res, err := DifferentialTraceInjectB(context.Background(), trace, a, b, -1)
+	res, err := DifferentialTraceInjectB(context.Background(), trace, &a, &b, -1)
 	if err != nil {
 		t.Fatalf("DifferentialTraceInjectB: %v", err)
 	}
