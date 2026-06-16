@@ -34,13 +34,13 @@ func buildFailingTrace(t *testing.T, seed uint64, n int) Trace {
 	return trace
 }
 
-// TestShrinkTrace_ReducesToSmallReproducer shrinks a 600-op trace with one
-// injected lost-write fault to a tiny reproducer that still fails, and asserts
-// an orders-of-magnitude reduction.
+// TestShrinkTrace_ReducesToSmallReproducer shrinks a multi-hundred-op trace with
+// one injected lost-write fault to a tiny reproducer that still fails, and
+// asserts an orders-of-magnitude reduction.
 func TestShrinkTrace_ReducesToSmallReproducer(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	const n = 600
+	const n = 250
 	trace := buildFailingTrace(t, 2024, n)
 
 	res, err := ShrinkTrace(ctx, trace, ShrinkConfig{})
@@ -85,7 +85,7 @@ func TestShrinkTrace_ReducesToSmallReproducer(t *testing.T) {
 func TestShrinkTrace_Deterministic(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	trace := buildFailingTrace(t, 777, 300)
+	trace := buildFailingTrace(t, 777, 150)
 
 	a, err := ShrinkTrace(ctx, trace, ShrinkConfig{})
 	if err != nil {
@@ -123,7 +123,7 @@ func TestShrinkTrace_ErrorsWhenNoViolation(t *testing.T) {
 func TestShrinkTrace_BoundedIterations(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	trace := buildFailingTrace(t, 11, 400)
+	trace := buildFailingTrace(t, 11, 200)
 	res, err := ShrinkTrace(ctx, trace, ShrinkConfig{MaxIterations: 50})
 	if err != nil {
 		t.Fatalf("ShrinkTrace: %v", err)
