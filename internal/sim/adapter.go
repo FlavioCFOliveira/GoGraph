@@ -114,6 +114,22 @@ func (r *resultAdapter) ScalarInt() (int64, bool) {
 	return 0, false
 }
 
+// IntAt reads column i of the current row as an int64.
+func (r *resultAdapter) IntAt(i int) (int64, bool) {
+	if v, ok := r.res.ValueAt(i).(expr.IntegerValue); ok {
+		return int64(v), true
+	}
+	return 0, false
+}
+
+// StringAt reads column i of the current row as a string.
+func (r *resultAdapter) StringAt(i int) (string, bool) {
+	if v, ok := r.res.ValueAt(i).(expr.StringValue); ok {
+		return string(v), true
+	}
+	return "", false
+}
+
 // RowCount reports how many rows have been produced so far.
 func (r *resultAdapter) RowCount() int { return r.rowCount }
 

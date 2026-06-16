@@ -55,10 +55,12 @@ func (r *fakeCountResult) Next() bool {
 	r.done = true
 	return true
 }
-func (r *fakeCountResult) ScalarInt() (int64, bool) { return r.n, true }
-func (r *fakeCountResult) RowCount() int            { return 1 }
-func (r *fakeCountResult) Err() error               { return nil }
-func (r *fakeCountResult) Close() error             { return nil }
+func (r *fakeCountResult) ScalarInt() (int64, bool)    { return r.n, true }
+func (r *fakeCountResult) IntAt(int) (int64, bool)     { return r.n, true }
+func (r *fakeCountResult) StringAt(int) (string, bool) { return "", false }
+func (r *fakeCountResult) RowCount() int               { return 1 }
+func (r *fakeCountResult) Err() error                  { return nil }
+func (r *fakeCountResult) Close() error                { return nil }
 
 // oracleWithNodesAndEdge builds an oracle with two named Person nodes and a
 // KNOWS edge between them, returning it plus the two names.

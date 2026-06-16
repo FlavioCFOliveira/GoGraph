@@ -58,6 +58,12 @@ type Result interface {
 	// ScalarInt returns the integer value of the first column of the current
 	// row. It is only valid after a successful Next.
 	ScalarInt() (int64, bool)
+	// IntAt returns the integer value of column i of the current row. It is only
+	// valid after a successful Next.
+	IntAt(i int) (int64, bool)
+	// StringAt returns the string value of column i of the current row. It is
+	// only valid after a successful Next.
+	StringAt(i int) (string, bool)
 	// RowCount reports how many rows the result has produced so far via Next.
 	RowCount() int
 	// Err returns any error accumulated during iteration.
@@ -359,6 +365,155 @@ func (c *InvariantChecker) sampleIndices(n int) []int {
 // add appends a violation.
 func (c *InvariantChecker) add(kind ViolationKind, tick int64, op, msg string) {
 	c.violations = append(c.violations, Violation{Kind: kind, Tick: tick, Op: op, Message: msg})
+}
+
+// IndexSpec declares one secondary index the simulator created during a run, by
+// the (Label, Property) it covers. The index-consistency checker cross-checks
+// each declared spec against the engine's base data. Specs are declared by the
+// scenario (the simulator does not introspect (label, property) from the engine
+// index manager, which exposes only opaque names), so the registry of specs is
+// the authoritative set the checker walks.
+type IndexSpec struct {
+	// Label is the node label the index is declared on (e.g. "Person").
+	Label string
+	// Property is the property key the index covers (e.g. "name").
+	Property string
+}
+
+// indexConsistencyEngine is the slice of the [Engine] surface
+// [CheckIndexConsistency] needs: the generic Run (to drive both the full-scan
+// and the index-seek probe queries). The simulator's [EngineAdapter] satisfies
+// it.
+type indexConsistencyEngine = Engine
+
+// CheckIndexConsistency performs a THOROUGH (not sampled) index-vs-base-data
+// consistency check for every declared index in specs. For each index on
+// (Label, Property) it:
+//
+//   - full-scans the base data via the engine
+//     (MATCH (n:Label) RETURN id(n), n.Property) and builds the authoritative
+//     value -> {node id} map directly from the nodes that carry the property;
+//   - for every distinct indexed value, runs the index-seek probe
+//     (MATCH (n:Label {Property:$v}) RETURN id(n)) — which the engine resolves
+//     through the index when one is present — and asserts the seek returns
+//     EXACTLY the node ids the full scan attributed to that value.
+//
+// A value the seek over-reports (a node id the full scan does not carry) is a
+// torn/orphaned index entry; a value the seek under-reports (a node id the full
+// scan carries but the seek misses) is a stale/lost index entry. Either is a
+// [ViolationACIDConsistency] (the index disagrees with the base data it
+// indexes). The check is bounded but exhaustive over the CURRENT graph: it
+// walks every node of each indexed label exactly once for the scan and issues
+// one seek per distinct value.
+//
+// The check probes the engine through the same execution path the workload
+// uses, so it observes whatever the engine would serve a real query — which is
+// precisely the property an index must preserve. It cross-checks the engine
+// against itself (seek path vs scan path) rather than against the oracle,
+// because an index covers DDL-created labels the minimal Phase-1 oracle does
+// not model.
+func CheckIndexConsistency(tick int64, _ *GraphOracle, engine indexConsistencyEngine, specs ...IndexSpec) []Violation {
+	c := &InvariantChecker{}
+	for _, spec := range specs {
+		c.checkOneIndex(tick, engine, spec)
+	}
+	return c.violations
+}
+
+// checkOneIndex cross-checks a single (Label, Property) index against the base
+// data, appending a violation per divergence found.
+func (c *InvariantChecker) checkOneIndex(tick int64, engine indexConsistencyEngine, spec IndexSpec) {
+	// Authoritative value -> node-id set, built from a full label scan.
+	want, err := c.scanByValue(engine, spec)
+	if err != nil {
+		c.add(ViolationOracleDeviation, tick, "index scan",
+			fmt.Sprintf("full scan of (:%s).%s failed: %v", spec.Label, spec.Property, err))
+		return
+	}
+	for value, wantIDs := range want {
+		gotIDs, err := c.seekByValue(engine, spec, value)
+		if err != nil {
+			c.add(ViolationOracleDeviation, tick, "index seek",
+				fmt.Sprintf("index seek (:%s {%s:%q}) failed: %v", spec.Label, spec.Property, value, err))
+			continue
+		}
+		c.diffIDSets(tick, spec, value, wantIDs, gotIDs)
+	}
+}
+
+// diffIDSets compares the full-scan node-id set (want) with the index-seek set
+// (got) for one indexed value and records a violation for every divergence.
+func (c *InvariantChecker) diffIDSets(tick int64, spec IndexSpec, value string, want, got map[int64]struct{}) {
+	for id := range want {
+		if _, ok := got[id]; !ok {
+			c.add(ViolationACIDConsistency, tick, "index consistency",
+				fmt.Sprintf("STALE/LOST index entry: node %d carries (:%s).%s=%q but the index seek misses it",
+					id, spec.Label, spec.Property, value))
+		}
+	}
+	for id := range got {
+		if _, ok := want[id]; !ok {
+			c.add(ViolationACIDConsistency, tick, "index consistency",
+				fmt.Sprintf("TORN/ORPHANED index entry: index seek for (:%s).%s=%q returns node %d which does not carry it",
+					spec.Label, spec.Property, value, id))
+		}
+	}
+}
+
+// scanByValue full-scans the indexed label and groups node ids by the indexed
+// property value, skipping nodes that do not carry the property (a null value).
+// The returned map is the authoritative model the index must match.
+func (c *InvariantChecker) scanByValue(engine indexConsistencyEngine, spec IndexSpec) (map[string]map[int64]struct{}, error) {
+	query := fmt.Sprintf("MATCH (n:%s) WHERE n.%s IS NOT NULL RETURN id(n), n.%s",
+		spec.Label, spec.Property, spec.Property)
+	res, err := engine.Run(context.Background(), query, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+
+	out := make(map[string]map[int64]struct{})
+	for res.Next() {
+		id, okID := res.IntAt(0)
+		val, okVal := res.StringAt(1)
+		if !okID || !okVal {
+			// The index-consistency scenarios index string-valued properties only;
+			// a non-string value is not part of this check's contract.
+			continue
+		}
+		ids := out[val]
+		if ids == nil {
+			ids = make(map[int64]struct{})
+			out[val] = ids
+		}
+		ids[id] = struct{}{}
+	}
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// seekByValue runs the index-seek probe for one value and returns the node-id
+// set the engine resolves — which flows through the index when one is present.
+func (c *InvariantChecker) seekByValue(engine indexConsistencyEngine, spec IndexSpec, value string) (map[int64]struct{}, error) {
+	query := fmt.Sprintf("MATCH (n:%s {%s:$v}) RETURN id(n)", spec.Label, spec.Property)
+	res, err := engine.Run(context.Background(), query, map[string]any{"v": value})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+
+	out := make(map[int64]struct{})
+	for res.Next() {
+		if id, ok := res.ScalarInt(); ok {
+			out[id] = struct{}{}
+		}
+	}
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // HasViolations reports whether any violation has been recorded.
