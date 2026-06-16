@@ -31,6 +31,11 @@ type SimReport struct {
 	FailedOp    Op
 	Violations  []Violation
 	OracleState OracleSnapshot
+	// Shrunk, when non-nil, carries the minimal failing reproducer the shrinker
+	// produced for this failure ([ShrinkTrace]). It is attached by the CLI replay
+	// path after a deterministic failure is shrunk; a report from a live run
+	// leaves it nil.
+	Shrunk *ShrinkResult
 }
 
 // String renders a human-readable failure report. It always includes a
@@ -49,5 +54,10 @@ func (r *SimReport) String() string {
 		fmt.Fprintf(&b, "    - %s\n", v.String())
 	}
 	fmt.Fprintf(&b, "Reproduce with: go run ./cmd/sim %d\n", r.Seed)
+	if r.Shrunk != nil {
+		fmt.Fprintf(&b, "Minimal reproducer: %d ops (shrunk from %d, ratio %.1fx, %d replay iterations)\n",
+			r.Shrunk.MinimalLen, r.Shrunk.OriginalLen, r.Shrunk.Ratio(), r.Shrunk.Iterations)
+		b.WriteString(ReplayInstructions(r.Shrunk.Minimal))
+	}
 	return b.String()
 }
