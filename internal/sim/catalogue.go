@@ -198,7 +198,7 @@ const schemaChurnEvery = 50
 // stream is the master seed's alone.
 func runSchemaChaos(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := schemaChaosScenario()
-	cfg := sc.deterministicConfig(seed)
+	cfg := sc.DeterministicConfig(seed)
 
 	sm, err := New(cfg)
 	if err != nil {

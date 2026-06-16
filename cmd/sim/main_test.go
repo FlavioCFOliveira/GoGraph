@@ -102,6 +102,91 @@ func TestRun_LivenessMode(t *testing.T) {
 	}
 }
 
+// TestRun_ListScenarios verifies -list-scenarios prints the catalogue and exits
+// 0 without needing a seed.
+func TestRun_ListScenarios(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"--list-scenarios"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d stderr=%q", code, errBuf.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "Scenario catalogue") {
+		t.Fatalf("missing catalogue header, got %q", s)
+	}
+	for _, name := range []string{"crash-storm", "write-heavy", "schema-chaos", "bulk-vs-online", "long-running"} {
+		if !strings.Contains(s, name) {
+			t.Fatalf("catalogue missing %q:\n%s", name, s)
+		}
+	}
+}
+
+// TestRun_ScenarioMode verifies -scenario runs a named deterministic scenario
+// for an explicit seed and reports a pass.
+func TestRun_ScenarioMode(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"42", "--scenario=write-heavy"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), `Scenario "write-heavy" passed`) {
+		t.Fatalf("missing scenario pass line, got %q", out.String())
+	}
+}
+
+// TestRun_UnknownScenario verifies an unknown scenario name exits 2.
+func TestRun_UnknownScenario(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"1", "--scenario=nope"}, &out, &errBuf); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errBuf.String(), "unknown scenario") {
+		t.Fatalf("missing error, got %q", errBuf.String())
+	}
+}
+
+// TestRun_ReplayClean verifies a plain -replay of a correct deterministic run
+// passes (exit 0) and prints the full per-op trace.
+func TestRun_ReplayClean(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"7", "--scenario=read-heavy", "--replay"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d stderr=%q", code, errBuf.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "Replaying seed=7") || !strings.Contains(s, "tick=") {
+		t.Fatalf("missing replay trace, got %q", s)
+	}
+	if !strings.Contains(s, "Replay passed") {
+		t.Fatalf("missing replay-pass line, got %q", s)
+	}
+}
+
+// TestRun_ReplayWithInjectedFaultShrinks verifies the demo-fault replay exits 1
+// and prints a shrunk minimal reproducer.
+func TestRun_ReplayWithInjectedFaultShrinks(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"12345", "--replay", "--inject-demo-fault"}, &out, &errBuf); code != 1 {
+		t.Fatalf("exit %d, want 1; stderr=%q", code, errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "Minimal reproducer:") {
+		t.Fatalf("missing minimal-reproducer line:\n%s", combined)
+	}
+	if !strings.Contains(combined, "FAULT:drop-engine-write") {
+		t.Fatalf("minimal reproducer should retain the faulted op:\n%s", combined)
+	}
+}
+
+// TestRun_ReplayRejectsNonDeterministicScenario verifies replaying a concurrent
+// scenario is rejected (exit 2) because it is not bit-replayable.
+func TestRun_ReplayRejectsNonDeterministicScenario(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"1", "--scenario=overload", "--replay"}, &out, &errBuf); code != 2 {
+		t.Fatalf("exit %d, want 2; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "not bit-replayable") {
+		t.Fatalf("missing rejection message, got %q", errBuf.String())
+	}
+}
+
 // TestRun_UnknownMode verifies an unknown mode exits 2.
 func TestRun_UnknownMode(t *testing.T) {
 	var out, errBuf bytes.Buffer

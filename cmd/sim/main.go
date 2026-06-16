@@ -15,6 +15,20 @@
 //	--mode        engine | wire | concurrent | liveness (default "engine")
 //	--conns       concurrent connections for the concurrent/liveness modes
 //	--ops-per-conn  operations per connection for those modes
+//	--scenario      run a named scenario from the catalogue (see --list-scenarios)
+//	--list-scenarios  print the scenario catalogue and exit
+//	--replay        re-run the seed in verbose full-trace debug; on a violation,
+//	                shrink to a minimal reproducer and print it
+//
+// Scenario and replay modes (Phase 4):
+//
+//	--list-scenarios            prints the catalogue (name, mode, default seed)
+//	--scenario=<name> [seed]    runs a named scenario; exit 1 on a violation
+//	--replay=<seed> [--scenario=<name>]
+//	                            re-runs a DETERMINISTIC workload for the seed,
+//	                            printing every op; on a violation it shrinks the
+//	                            recorded trace to a minimal reproducer (ddmin) and
+//	                            prints it with the reproduce line, exiting 1
 //
 // The Phase-3 modes drive the REAL Bolt wire protocol against a genuine
 // bolt/server over an in-memory connection:
@@ -63,6 +77,10 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	mode := fs.String("mode", "engine", "execution mode: engine | wire | concurrent | liveness")
 	conns := fs.Int("conns", 16, "concurrent connections (concurrent/liveness modes)")
 	opsPerConn := fs.Int("ops-per-conn", 25, "operations per connection (concurrent/liveness modes)")
+	scenario := fs.String("scenario", "", "run a named scenario from the catalogue (see -list-scenarios)")
+	listScenarios := fs.Bool("list-scenarios", false, "print the scenario catalogue and exit")
+	replay := fs.Bool("replay", false, "re-run the seed in verbose full-trace debug; on a violation, shrink to a minimal reproducer")
+	injectDemoFault := fs.Bool("inject-demo-fault", false, "DEMO ONLY: inject a synthetic lost-write fault into the replayed trace to demonstrate shrinking")
 
 	// Go's flag package stops parsing at the first non-flag token, so the
 	// documented usage `sim <seed> --ticks=N` would otherwise leave --ticks
@@ -78,9 +96,27 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 		return 2
 	}
 
+	// -list-scenarios prints the catalogue and exits without needing a seed.
+	if *listScenarios {
+		return runListScenarios(stdout, stderr)
+	}
+
 	seed, ok := resolveSeed(seedArgs, stderr)
 	if !ok {
 		return 2
+	}
+
+	// -replay re-runs the (scenario or default) deterministic workload for the
+	// seed in verbose full-trace mode and, on a violation, shrinks to a minimal
+	// reproducer. It must precede the -scenario branch so `-scenario X -replay`
+	// replays scenario X.
+	if *replay {
+		return runReplayMode(seed, *scenario, *injectDemoFault, stdout, stderr)
+	}
+
+	// -scenario runs a named scenario from the catalogue for the seed.
+	if *scenario != "" {
+		return runScenarioMode(seed, *scenario, *verbose, stdout, stderr)
 	}
 
 	// Phase-3 modes drive the real Bolt wire path against a genuine bolt/server.
@@ -248,6 +284,166 @@ func runLivenessMode(seed uint64, conns, opsPerConn int, stdout, stderr *errWrit
 	stdout.printf("Two-phase safety->liveness converged. Seed: %d, Safety acked: %d, Liveness ticks: %d\n",
 		seed, safety.AckedCreates, live.Ticks)
 	return 0
+}
+
+// runListScenarios prints the scenario catalogue (name + description + mode) and
+// returns 0. It is the -list-scenarios handler.
+func runListScenarios(stdout, stderr *errWriter) int {
+	reg, err := sim.DefaultRegistry()
+	if err != nil {
+		stderr.printf("sim: build catalogue: %v\n", err)
+		return 1
+	}
+	stdout.printf("Scenario catalogue (%d):\n", reg.Len())
+	for _, sc := range reg.Scenarios() {
+		stdout.printf("  %-16s [%s] seed=%d\n      %s\n", sc.Name, sc.Mode, sc.DefaultSeed, sc.Description)
+	}
+	return 0
+}
+
+// runScenarioMode runs a named scenario for the seed and returns the process
+// exit code: 0 when it passes, 1 on a violation (printing the report, which
+// carries a "Reproduce with:" line). An unknown scenario name is exit 2.
+func runScenarioMode(seed uint64, name string, verbose bool, stdout, stderr *errWriter) int {
+	reg, err := sim.DefaultRegistry()
+	if err != nil {
+		stderr.printf("sim: build catalogue: %v\n", err)
+		return 1
+	}
+	sc, ok := reg.Lookup(name)
+	if !ok {
+		stderr.printf("sim: unknown scenario %q (use -list-scenarios)\n", name)
+		return 2
+	}
+	if verbose {
+		stdout.printf("Running scenario %q [%s] seed=%d: %s\n", sc.Name, sc.Mode, seed, sc.Description)
+	}
+	report, err := sc.Run(context.Background(), seed)
+	if err != nil {
+		stderr.printf("sim: scenario %q: %v\n", name, err)
+		return 1
+	}
+	if report != nil {
+		stderr.printf("%s", report.String())
+		return 1
+	}
+	stdout.printf("Scenario %q passed. Seed: %d\n", sc.Name, seed)
+	return 0
+}
+
+// runReplayMode re-runs a deterministic workload for the seed in verbose
+// full-trace mode: it records the trace (printing each op), and on a violation
+// it shrinks the trace to a minimal reproducer and prints it, exiting 1 with the
+// reproduce line + minimal trace. With no violation it exits 0.
+//
+// When scenarioName is non-empty the replay uses that catalogue scenario's
+// deterministic config; the scenario must be a deterministic (bit-replayable)
+// mode — replay/shrink do not apply to the concurrent or liveness modes. With no
+// scenario it replays the default write-heavy deterministic workload.
+func runReplayMode(seed uint64, scenarioName string, injectDemoFault bool, stdout, stderr *errWriter) int {
+	cfg, ok := replayConfig(seed, scenarioName, stderr)
+	if !ok {
+		return 2
+	}
+	if injectDemoFault {
+		// Keep the demo fast: a small trace shrinks quickly and still shows the
+		// orders-of-magnitude reduction.
+		cfg.MaxTicks = 500
+	}
+
+	// Verbose full-trace: print each op as the recorder observes it.
+	cfg.OnOp = func(tick int64, op sim.Op) {
+		stdout.printf("  tick=%d %s %q %v\n", tick, op.Kind, op.Cypher, op.Params)
+	}
+	stdout.printf("Replaying seed=%d (deterministic, full trace)\n", seed)
+
+	trace, report, err := sim.RecordTrace(context.Background(), cfg)
+	if err != nil {
+		stderr.printf("sim: replay record: %v\n", err)
+		return 1
+	}
+
+	if injectDemoFault {
+		// DEMO ONLY: the engine is correct, so a real replay never fails. Inject a
+		// synthetic lost-write fault on a CREATE op so the shrinker has a violation
+		// to reduce, demonstrating the minimal-reproducer flow end to end.
+		report = injectDemoFaultAndReplay(&trace, stdout, stderr)
+	}
+
+	if report == nil {
+		stdout.printf("Replay passed (no violation). Seed: %d, Ops: %d\n", seed, trace.Len())
+		return 0
+	}
+
+	// A violation: shrink to a minimal reproducer and attach it to the report.
+	shrunk, serr := sim.ShrinkTrace(context.Background(), trace, sim.ShrinkConfig{})
+	if serr != nil {
+		// Shrinking failed (e.g. the violation is not scripted-replayable); still
+		// surface the original failure report.
+		stderr.printf("sim: shrink: %v\n", serr)
+		stderr.printf("%s", report.String())
+		return 1
+	}
+	report.Shrunk = &shrunk
+	stderr.printf("%s", report.String())
+	return 1
+}
+
+// injectDemoFaultAndReplay mutates trace in place to carry a synthetic lost-write
+// fault on its first CREATE op, replays it, and returns the resulting report (a
+// deterministic divergence). It is the -inject-demo-fault path: the engine is
+// correct, so this is the ONLY way to exhibit a failure-shrink end to end in a
+// demo. It is clearly labelled in the output as a demo injection.
+func injectDemoFaultAndReplay(trace *sim.Trace, stdout, stderr *errWriter) *sim.SimReport {
+	stdout.printf("[DEMO] injecting a synthetic lost-write fault to demonstrate shrinking (the engine itself is correct)\n")
+	injected := false
+	for i := range trace.Ops {
+		if trace.Ops[i].Op.Kind == sim.OpCreate {
+			trace.Ops[i].Fault = sim.FaultDropEngineWrite
+			injected = true
+			break
+		}
+	}
+	if !injected {
+		stderr.printf("[DEMO] no CREATE op in the trace to inject into\n")
+		return nil
+	}
+	res, err := sim.ReplayTrace(context.Background(), *trace)
+	if err != nil {
+		stderr.printf("[DEMO] replay error: %v\n", err)
+		return nil
+	}
+	return res.Report
+}
+
+// replayConfig builds the deterministic Config a replay drives: from the named
+// scenario when given (rejecting a non-deterministic mode), else the default
+// write-heavy deterministic workload. The bool is false (with a message
+// written) on an error.
+func replayConfig(seed uint64, scenarioName string, stderr *errWriter) (sim.Config, bool) {
+	if scenarioName == "" {
+		return sim.Config{
+			Seed:     seed,
+			MaxTicks: 100000,
+			Workload: sim.WriteHeavyWorkload(sim.NewSeed(seed)),
+		}, true
+	}
+	reg, err := sim.DefaultRegistry()
+	if err != nil {
+		stderr.printf("sim: build catalogue: %v\n", err)
+		return sim.Config{}, false
+	}
+	sc, ok := reg.Lookup(scenarioName)
+	if !ok {
+		stderr.printf("sim: unknown scenario %q (use -list-scenarios)\n", scenarioName)
+		return sim.Config{}, false
+	}
+	if !sc.Mode.Reproducible() {
+		stderr.printf("sim: scenario %q is %s mode, which is not bit-replayable (replay/shrink need a deterministic mode)\n",
+			scenarioName, sc.Mode)
+		return sim.Config{}, false
+	}
+	return sc.DeterministicConfig(seed), true
 }
 
 // errWriter latches the first write error from a sequence of formatted writes so

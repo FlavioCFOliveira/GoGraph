@@ -168,10 +168,10 @@ func (sc Scenario) Run(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 }
 
-// deterministicConfig builds the [Config] for a deterministic-mode run from the
+// DeterministicConfig builds the [Config] for a deterministic-mode run from the
 // scenario plus a resolved seed. It is exported-internal so trace recording and
 // shrinking can build the identical config.
-func (sc Scenario) deterministicConfig(seed uint64) Config {
+func (sc Scenario) DeterministicConfig(seed uint64) Config {
 	wl := sc.Workload
 	if wl == nil {
 		wl = DefaultWorkload
@@ -193,7 +193,7 @@ func (sc Scenario) deterministicConfig(seed uint64) Config {
 // full index-consistency check at the end. It always closes the simulator so no
 // durable handle or goroutine leaks past the run.
 func (sc Scenario) runDeterministic(ctx context.Context, seed uint64) (*SimReport, error) {
-	cfg := sc.deterministicConfig(seed)
+	cfg := sc.DeterministicConfig(seed)
 	sm, err := New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("sim: scenario %q new: %w", sc.Name, err)
