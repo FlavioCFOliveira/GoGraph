@@ -52,6 +52,24 @@ and serves every read of the query from it. Justification:
 We therefore target SI; we do **not** add MVCC version chains or SSI machinery,
 which would pay read-path/GC cost for conflict handling we do not need.
 
+**Shipped increment — read-only explicit transactions (task #1573).** A Bolt
+`BEGIN` carrying `mode="r"` opens a read-only explicit transaction via
+`cypher.Engine.BeginReadTx`, which acquires **neither** the single-writer
+serialisation **nor** the visibility barrier **nor** a WAL transaction.
+Each `RUN` inside it executes through the normal concurrent read path
+(`Engine.Run`, per-statement `Graph.View` RLock), so read-only transactions run
+concurrently with one another instead of serialising on the writer mutex. The
+isolation this provides is **per-statement read-committed** (a fresh `View`
+snapshot per `RUN`, not one pinned view for the whole transaction), matching
+Neo4j's documented default — a deliberate, weaker-than-full-SI choice for the
+multi-statement read-transaction case. Safety rests on one load-bearing
+invariant: a read-only transaction **rejects every writing clause and DDL**
+(`ErrWriteInReadOnlyTx`, surfaced to Bolt as `Neo.ClientError.Request.Invalid`)
+*before* execution — a write on this lock-free path would otherwise run with no
+writer lock, no barrier and no WAL frame. `Commit`/`Rollback` are teardown-only
+no-ops with no durability obligation. Write transactions (`mode="w"`/absent) are
+unchanged and keep the single-writer + barrier path described above.
+
 ## Mechanism — per-shard versioned single-root snapshot
 
 Reject element-level MVCC and per-element generation tags (they bloat the
