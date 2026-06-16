@@ -40,6 +40,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -120,6 +121,13 @@ type Checkpointer[N comparable, W any] struct {
 	// truncates the WAL prefix which first declared a constraint would
 	// otherwise silently lose it.
 	constraintsFn func() []snapshot.ConstraintSpec
+
+	// clk is the wall-clock source for the cadence loop (ticker, MaxAge
+	// elapsed comparison, duration measurement). It defaults to
+	// [clock.Real] in [New] so production behaviour is unchanged; a test
+	// (notably the deterministic simulation harness) may inject a fake via
+	// [WithClock] to drive checkpoints by virtual time.
+	clk clock.Clock
 
 	// afterCaptureHook, when non-nil, is invoked at the START of phase 2 —
 	// immediately after the phase-1 commit lock is released and BEFORE the
@@ -241,6 +249,19 @@ func WithCommitSerialiser[N comparable, W any](serialise func(func() error) erro
 	}
 }
 
+// WithClock supplies the wall-clock source for the cadence loop. When unset
+// the checkpointer uses [clock.Real], so production behaviour is unchanged. A
+// test or the deterministic simulation harness may inject a [clock.Fake] to
+// drive periodic checkpoints by virtual time, making the cadence deterministic.
+// A nil clock is ignored (the checkpointer keeps the real clock).
+func WithClock[N comparable, W any](clk clock.Clock) Option[N, W] {
+	return func(c *Checkpointer[N, W]) {
+		if clk != nil {
+			c.clk = clk
+		}
+	}
+}
+
 // New returns a Checkpointer; call Start to launch the goroutine.
 //
 // storeMu is the serialisation the checkpointer holds across the
@@ -281,6 +302,9 @@ func New[N comparable, W any](
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.clk == nil {
+		c.clk = clock.Real()
 	}
 	return c
 }
@@ -423,16 +447,16 @@ func (c *Checkpointer[N, W]) loop(ctx context.Context) {
 			}
 		}
 	}()
-	var ticker *time.Ticker
+	var ticker clock.Ticker
 	if c.cfg.Interval > 0 {
-		ticker = time.NewTicker(c.cfg.Interval)
+		ticker = c.clk.NewTicker(c.cfg.Interval)
 		defer ticker.Stop()
 	}
 	var lastFire time.Time
 	for {
 		var tickCh <-chan time.Time
 		if ticker != nil {
-			tickCh = ticker.C
+			tickCh = ticker.C()
 		}
 		select {
 		case <-ctx.Done():
@@ -441,25 +465,25 @@ func (c *Checkpointer[N, W]) loop(ctx context.Context) {
 			return
 		case done := <-c.triggerCh:
 			err := c.runCheckpoint()
-			lastFire = time.Now()
+			lastFire = c.clk.Now()
 			done <- err
 		case <-tickCh:
-			if c.cfg.MaxAge > 0 && time.Since(lastFire) >= c.cfg.MaxAge {
+			if c.cfg.MaxAge > 0 && c.clk.Since(lastFire) >= c.cfg.MaxAge {
 				// Periodic firings record the error in Stats.LastError
 				// (via setErr inside runCheckpoint) so observability
 				// surfaces; there is no caller to return to from the
 				// loop, so the value itself is intentionally discarded.
 				_ = c.runCheckpoint() //nolint:errcheck // error captured in stats
-				lastFire = time.Now()
+				lastFire = c.clk.Now()
 			}
 		}
 	}
 }
 
 func (c *Checkpointer[N, W]) runCheckpoint() error {
-	start := time.Now()
+	start := c.clk.Now()
 	defer func() {
-		c.lastDuration.Store(uint64(time.Since(start).Nanoseconds()))
+		c.lastDuration.Store(uint64(c.clk.Since(start).Nanoseconds()))
 	}()
 	return c.runNonBlocking()
 }
