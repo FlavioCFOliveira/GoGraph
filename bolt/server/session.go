@@ -15,6 +15,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
 // serverAgent is the agent string advertised in SUCCESS metadata after HELLO.
@@ -151,6 +152,13 @@ type Session struct {
 	// PackStream encoding for temporal types (e.g. DateTime tag 0x46 for v4.4,
 	// 0x49 for v5.0+).
 	boltVersion proto.Version
+
+	// clk is the wall-clock source for computing the explicit-transaction
+	// deadline (txDeadline). It defaults to [clock.Real] in [newSession] and is
+	// set by the server to the same clock its serve-loop reaper uses, so the
+	// deadline and the reaper's countdown are coherent. A test may inject a
+	// [clock.Fake] so a session timeout is driven by virtual time.
+	clk clock.Clock
 }
 
 // newSession constructs an idle Session backed by eng, starting in
@@ -168,6 +176,17 @@ func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session
 		log:              slog.Default(),
 		maxInFlight:      DefaultMaxInFlightPerConnection,
 		defaultTxTimeout: DefaultTxTimeout,
+		clk:              clock.Real(),
+	}
+}
+
+// setClock overrides the session's wall-clock source for the
+// explicit-transaction deadline computation. A nil clock is ignored, leaving
+// the default real clock in place. Intended for the server bootstrap (so the
+// session and the serve-loop reaper share one clock) and for tests.
+func (s *Session) setClock(clk clock.Clock) {
+	if clk != nil {
+		s.clk = clk
 	}
 }
 
@@ -1000,7 +1019,7 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// effective timeout (never produced by the production server, which installs
 	// a finite default) leaves the deadline zero, i.e. no reaper.
 	if effective > 0 {
-		s.txDeadline = time.Now().Add(effective)
+		s.txDeadline = s.clk.Now().Add(effective)
 	} else {
 		s.txDeadline = time.Time{}
 	}

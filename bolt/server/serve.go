@@ -18,6 +18,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
 const (
@@ -223,10 +224,19 @@ var ErrNoAuthHandler = errors.New("bolt: no auth handler configured; set Options
 //
 // Server is safe for concurrent use by multiple goroutines.
 type Server struct {
-	eng    *cypher.Engine
-	opts   Options
-	sem    chan struct{} // capacity == MaxConnections
-	log    *slog.Logger
+	eng  *cypher.Engine
+	opts Options
+	sem  chan struct{} // capacity == MaxConnections
+	log  *slog.Logger
+	// clk is the wall-clock source for the explicit-transaction timeout reaper
+	// (the per-session timeout logic). It defaults to [clock.Real] in
+	// [NewServer] so production behaviour is unchanged; a test (notably the DST
+	// harness) may inject a [clock.Fake] via [Server.setClock] to drive a
+	// session timeout by virtual time deterministically. Note this governs only
+	// the tx-reaper deadline computation/timer: the net.Conn read/write/handshake
+	// deadlines remain real OS-socket deadlines (connection liveness, enforced by
+	// the kernel against wall time, not session logic).
+	clk    clock.Clock
 	closer io.Closer // optional store-level teardown owner; closed after drain by Serve's exit path or Shutdown
 	// closeOnce guards the one-and-only Close of closer: Serve's drained-exit
 	// path and Shutdown's drain-success branch may both reach closeOwned (ctx
@@ -298,8 +308,20 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 		opts:   opts,
 		sem:    make(chan struct{}, opts.MaxConnections),
 		log:    log,
+		clk:    clock.Real(),
 		closer: opts.Closer,
 	}, nil
+}
+
+// setClock overrides the server's wall-clock source for the explicit-transaction
+// timeout reaper. It is an unexported test seam (used by the clock-injection
+// test and the DST harness) so the public Options contract is unchanged; a nil
+// clock is ignored. It must be called before Serve starts accepting
+// connections, as each connection captures the clock at session construction.
+func (s *Server) setClock(clk clock.Clock) {
+	if clk != nil {
+		s.clk = clk
+	}
 }
 
 // Serve accepts connections from ln until ctx is cancelled or Shutdown is
@@ -609,6 +631,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess.setMaxInFlight(s.opts.MaxInFlightPerConnection)
 	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)
 	sess.setDefaultTxTimeout(s.opts.DefaultTxTimeout)
+	sess.setClock(s.clk)
 
 	// Stream RECORD messages incrementally: handlePull hands each record to
 	// this sink, which encodes and writes it to the connection immediately
@@ -730,18 +753,18 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// single-threaded session) and the connection survives so the client may
 	// RESET — preserving the #1302 behaviour that a statement issued after the
 	// timeout still receives a typed FAILURE.
-	var txTimer *time.Timer
+	var txTimer clock.Timer
 	var txTimerC <-chan time.Time
 	syncTxTimer := func() {
 		switch {
 		case sess.txActive && !sess.txDeadline.IsZero():
 			if txTimer == nil {
-				d := time.Until(sess.txDeadline)
+				d := s.clk.Until(sess.txDeadline)
 				if d < 0 {
 					d = 0
 				}
-				txTimer = time.NewTimer(d)
-				txTimerC = txTimer.C
+				txTimer = s.clk.NewTimer(d)
+				txTimerC = txTimer.C()
 			}
 		case txTimer != nil:
 			txTimer.Stop()

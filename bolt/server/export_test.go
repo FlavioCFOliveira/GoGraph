@@ -1,6 +1,18 @@
 package server
 
-import "time"
+import (
+	"time"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
+)
+
+// SetClockForTest overrides the server's wall-clock source (used by the
+// explicit-transaction timeout reaper) so a test can drive a session timeout by
+// virtual time deterministically. It must be called before Serve starts
+// accepting connections, since each session captures the clock at construction.
+// Production code never sets a non-default clock; only tests do, through this
+// seam.
+func (s *Server) SetClockForTest(clk clock.Clock) { s.setClock(clk) }
 
 // SetHandshakeTimeoutForTest overrides the package-level handshake deadline and
 // returns a function that restores the previous value. It exists solely so the
