@@ -56,6 +56,18 @@ func BadActorWorkload(_ *Seed) *Workload {
 	}
 }
 
+// SteadyStateWorkload returns a mix tuned to keep the modelled graph BOUNDED
+// over a very long run: a writer that creates and deletes in equal measure
+// (via [BoundedChurnWriter]) plus a reader. It is the long-running scenario's
+// workload — the point there is heap/goroutine stability across millions of
+// small ops, which requires the working set not to grow without bound.
+func SteadyStateWorkload(_ *Seed) *Workload {
+	return &Workload{
+		Actors:  []Actor{BoundedChurnWriter{}, HonestReader{}},
+		Weights: []float64{0.6, 0.4},
+	}
+}
+
 // SelectActor returns one actor chosen with probability proportional to its
 // weight, drawing a single float64 from seed. It panics if the workload has no
 // actors (a programmer error). A non-positive total weight falls back to a

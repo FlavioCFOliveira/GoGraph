@@ -163,6 +163,56 @@ func (HonestWriter) opDelete(seed *Seed, names []string) Op {
 	}
 }
 
+// churnHighWater is the modelled node count at or above which a
+// [BoundedChurnWriter] switches to delete-biased behaviour, and below which it
+// switches to create-biased behaviour, keeping the working set near this size
+// over an arbitrarily long run.
+const churnHighWater = 200
+
+// BoundedChurnWriter is an honest writer whose create/delete bias is steered by
+// the current modelled node count so the graph stays BOUNDED near
+// [churnHighWater] over a very long run: below the high-water mark it favours
+// creates and links; at or above it, it favours deletes. It reuses
+// [HonestWriter]'s well-formed statement builders, so every op it emits is a
+// statement the engine accepts. It is the long-running scenario's writer.
+//
+// # Concurrency contract
+//
+// BoundedChurnWriter is NOT safe for concurrent use; it is invoked from the
+// single simulation goroutine.
+type BoundedChurnWriter struct{}
+
+// Name returns the actor's identifier.
+func (BoundedChurnWriter) Name() string { return "BoundedChurnWriter" }
+
+// NextOp steers create-vs-delete by the current node count to keep the working
+// set bounded. Below the high-water mark it creates (and occasionally links);
+// at or above it, it deletes (and occasionally updates), so the modelled graph
+// oscillates around [churnHighWater] indefinitely.
+func (BoundedChurnWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
+	w := HonestWriter{}
+	names := oracle.NodeNames()
+	if len(names) == 0 {
+		return w.opCreatePerson(seed)
+	}
+	if len(names) >= churnHighWater {
+		// Delete-biased: 4/5 delete, 1/5 update, holding the count down.
+		if seed.IntN(5) == 0 {
+			return w.opSetAge(seed, names)
+		}
+		return w.opDelete(seed, names)
+	}
+	// Create-biased: 3/5 create, 1/5 link, 1/5 update, growing toward the mark.
+	switch seed.IntN(5) {
+	case 0, 1, 2:
+		return w.opCreatePerson(seed)
+	case 3:
+		return w.opCreateKnows(seed, names)
+	default:
+		return w.opSetAge(seed, names)
+	}
+}
+
 // readTemplates is the fixed set of read queries HonestReader rotates through.
 // All are pure reads with no side effects: a projection with LIMIT, a join over
 // KNOWS, a filtered aggregate, and a variable-length path length projection.

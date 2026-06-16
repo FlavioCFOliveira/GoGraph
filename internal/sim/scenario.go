@@ -101,6 +101,11 @@ type Scenario struct {
 
 	// MaxTicks bounds the deterministic safety loop (ModeDeterministic).
 	MaxTicks int
+	// CheckEvery is the invariant-check cadence in ticks (ModeDeterministic). A
+	// value <= 0 checks every tick. A long run sets it higher so the per-tick
+	// full-graph parity probes do not dominate a millions-of-ops workload (the
+	// scenario's value there is heap/goroutine stability, not per-tick parity).
+	CheckEvery int
 	// Workload is the deterministic-mode actor mix factory. When nil,
 	// [DefaultWorkload] is used. It is a factory (not a built Workload) so each
 	// run gets a fresh, seed-parameterised mix.
@@ -176,10 +181,11 @@ func (sc Scenario) deterministicConfig(seed uint64) Config {
 		ticks = 1000
 	}
 	return Config{
-		Seed:     seed,
-		MaxTicks: ticks,
-		Workload: wl(NewSeed(seed)),
-		Crash:    sc.Crash,
+		Seed:       seed,
+		MaxTicks:   ticks,
+		Workload:   wl(NewSeed(seed)),
+		Crash:      sc.Crash,
+		CheckEvery: sc.CheckEvery,
 	}
 }
 

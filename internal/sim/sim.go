@@ -193,6 +193,72 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 	return nil, nil
 }
 
+// engineRunDDL runs a DDL statement (CREATE/DROP INDEX/CONSTRAINT) against the
+// live engine and drains it. It is used by the schema-chaos scenario to churn
+// schema deterministically over the same engine the safety loop drives. DDL
+// statements go through the engine's read path ([cypher.Engine.Run]), which is
+// where the DDL operators live.
+func (s *Simulator) engineRunDDL(ctx context.Context, query string) error {
+	res, err := s.engine.Run(ctx, query, nil)
+	if err != nil {
+		return err
+	}
+	for res.Next() {
+	}
+	drainErr := res.Err()
+	_ = res.Close()
+	return drainErr
+}
+
+// schemaChurnStatements is the fixed, idempotent DDL cycle runWithDDL rotates
+// through: drop then re-create the (:Person).name index. Idempotent forms (IF
+// [NOT] EXISTS) make each step a clean no-op when it races nothing, so the churn
+// never errors on a benign re-create/re-drop.
+var schemaChurnStatements = []string{
+	"DROP INDEX sim_person_name IF EXISTS",
+	"CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)",
+}
+
+// runWithDDL is the schema-chaos variant of [Simulator.Run]: it drives the same
+// deterministic tick loop but, every ddlEvery ticks, issues the next idempotent
+// DDL statement from [schemaChurnStatements] against the live engine, churning
+// the index under the honest write load. Like Run it returns a populated report
+// on the first invariant violation, or (nil, nil) on clean completion. The DDL
+// cadence is positional (tick-driven), so the run stays a deterministic function
+// of the seed.
+func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, error) {
+	churnIdx := 0
+	for i := 0; i < s.cfg.MaxTicks; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tick := s.clock.Tick()
+
+		if ddlEvery > 0 && tick%int64(ddlEvery) == 0 {
+			stmt := schemaChurnStatements[churnIdx%len(schemaChurnStatements)]
+			churnIdx++
+			if err := s.engineRunDDL(ctx, stmt); err != nil {
+				return nil, fmt.Errorf("sim: schema churn DDL %q at tick %d: %w", stmt, tick, err)
+			}
+		}
+
+		actor := s.workload.SelectActor(s.seed)
+		op := actor.NextOp(s.seed, s.oracle)
+		if s.cfg.OnOp != nil {
+			s.cfg.OnOp(tick, op)
+		}
+		committed := s.execute(ctx, op)
+		s.applyToOracle(op, committed)
+
+		if tick%int64(s.cfg.CheckEvery) == 0 {
+			if violations := s.checker.Check(tick, s.oracle, s.engine); len(violations) > 0 {
+				return s.report(tick, op, violations), nil
+			}
+		}
+	}
+	return nil, nil
+}
+
 // maybeCrash performs a crash+recovery cycle when the schedule fires at tick.
 // It crashes the SimDisk-backed store (drops the in-memory engine, keeps the
 // durable WAL byte image), reopens it through real recovery, rebinds the engine
