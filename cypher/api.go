@@ -325,6 +325,29 @@ type buildOpts struct {
 	// buildOperator's *ir.Selection case. Left false by every other build path,
 	// which therefore always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
+	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
+	// the stable per-edge handle and the per-CREATE instance index at a forward
+	// CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
+	// the first time a relationship is reconstructed (mirroring edgeIDResolver):
+	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
+	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
+	//
+	// The whole query's reads run inside one [lpg.Graph.View] RLock, so the
+	// adjacency is stable for the snapshot's lifetime: a single snapshot reused
+	// across all rows is consistent with the Expand-time CSR that minted the
+	// positions (invariant I-POS: identical per-source out-degree counts and
+	// neighbour insertion order ⇒ identical edge positions, BuildFromAdjList
+	// being a deterministic pure function of the adjacency list). fwdCSRReady
+	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
+	// the helpers never read reverse state, so the reverse CSR is not cached.
+	//
+	// Concurrency: assigned without synchronisation, exactly like edgeIDResolver,
+	// under the single-goroutine-per-query build/exec contract (the projection
+	// operator's Next drives reconstruction on one goroutine; ParallelScan
+	// workers never touch bopts).
+	fwdCSR      *csr.CSR[float64]
+	fwdCSRReady bool
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -7139,7 +7162,7 @@ func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.Graph[string
 					continue
 				}
 				if meta, isEdge2 := bopts.edgeVarMeta[varName]; isEdge2 {
-					if rv, ok := buildRelationshipValueFromRow(row, meta, g); ok {
+					if rv, ok := buildRelationshipValueFromRow(row, meta, g, bopts); ok {
 						ctx[varName] = rv
 						continue
 					}
@@ -7251,7 +7274,7 @@ func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string,
 // when both endpoints resolve. Returns (zero, false) when the row does not
 // contain the expected columns or when the column types are not
 // IntegerValue.
-func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[string, float64]) (expr.RelationshipValue, bool) {
+func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.RelationshipValue, bool) {
 	if meta.edgeCol >= len(row) {
 		return expr.RelationshipValue{}, false
 	}
@@ -7317,7 +7340,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 			// slot's handle is 0 (a MERGE-created edge).
 			handled := false
 			if storageStart == srcID && storageEnd == dstID {
-				if h := edgeHandleAtFwdPos(g, srcKey, dstKey, uint64(edgeIDVal)); h != 0 {
+				if h := edgeHandleAtFwdPos(bopts, g, srcKey, dstKey, uint64(edgeIDVal)); h != 0 {
 					if perHandle := g.EdgeLabelsByHandle(srcKey, dstKey, h); len(perHandle) > 0 {
 						ets = perHandle
 						handled = true
@@ -7325,7 +7348,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 				}
 			}
 			if !handled {
-				instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(g, srcKey, dstKey, uint64(edgeIDVal))
+				instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(bopts, g, srcKey, dstKey, uint64(edgeIDVal))
 				if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
 					if perInstance := g.EdgeLabelsAt(srcKey, dstKey, instanceIdx); len(perInstance) > 0 {
 						ets = perInstance
@@ -7360,7 +7383,13 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 // Unlike edgeInstanceIdxFor this performs no positional counting: it reads
 // the handle directly from the CSR slot, which is why it remains correct
 // after a parallel sibling is deleted.
-func edgeHandleAtFwdPos(g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) uint64 {
+//
+// The forward CSR is the per-query snapshot cached on bopts ([ensureFwdCSR]),
+// built once per query rather than once per row (#1574). All slot reads —
+// bounds, the edges[edgePos] != dstID guard, and the handle — are made against
+// that snapshot's own VerticesSlice/EdgesSlice/HandlesSlice so they stay
+// internally consistent.
+func edgeHandleAtFwdPos(bopts *buildOpts, g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) uint64 {
 	adj := g.AdjList()
 	srcID, ok := adj.Mapper().Lookup(srcKey)
 	if !ok {
@@ -7370,7 +7399,10 @@ func edgeHandleAtFwdPos(g *lpg.Graph[string, float64], srcKey, dstKey string, ed
 	if !ok {
 		return 0
 	}
-	fwdCSR := csr.BuildFromAdjList(adj)
+	fwdCSR := ensureFwdCSR(bopts, g)
+	if fwdCSR == nil {
+		return 0
+	}
 	handles := fwdCSR.HandlesSlice()
 	if handles == nil {
 		return 0
@@ -7406,7 +7438,7 @@ func edgeHandleAtFwdPos(g *lpg.Graph[string, float64], srcKey, dstKey string, ed
 // CREATE-time instance idx. Simple-graph storage collapses every
 // parallel CREATE onto one slot, so parallelCount stays at 1 and
 // callers fall back to the per-pair union surfaces.
-func edgeInstanceIdxFor(g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
+func edgeInstanceIdxFor(bopts *buildOpts, g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
 	totalCreates = g.EdgeCreateCount(srcKey, dstKey)
 	if totalCreates == 0 {
 		return 0, 0, 0
@@ -7420,7 +7452,10 @@ func edgeInstanceIdxFor(g *lpg.Graph[string, float64], srcKey, dstKey string, ed
 	if !ok {
 		return 0, totalCreates, 0
 	}
-	fwdCSR := csr.BuildFromAdjList(adj)
+	fwdCSR := ensureFwdCSR(bopts, g)
+	if fwdCSR == nil {
+		return 0, totalCreates, 0
+	}
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
 	if uint64(srcID)+1 >= uint64(len(verts)) {
@@ -9799,6 +9834,31 @@ func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) func(
 		return uint64(lo), storageDst, true
 	}
 	return bopts.edgeIDResolver
+}
+
+// ensureFwdCSR returns the forward CSR snapshot for relationship reconstruction,
+// building it at most once per query and caching it on bopts. It mirrors
+// [ensureEdgeIDResolver]: the snapshot is built lazily on first use so queries
+// that never project a relationship pay nothing, and reused for every result
+// row thereafter so the O(V+E) build leaves the per-row path (the #1574 fix).
+//
+// When bopts is nil (no per-query cache is available — the helpers are only
+// reached with a non-nil bopts today, but the guard keeps them safe in
+// isolation) it falls back to a one-off build, preserving the previous
+// behaviour exactly. Forward-only: the reverse CSR is never built here.
+func ensureFwdCSR(bopts *buildOpts, g *lpg.Graph[string, float64]) *csr.CSR[float64] {
+	if g == nil {
+		return nil
+	}
+	if bopts == nil {
+		return csr.BuildFromAdjList(g.AdjList())
+	}
+	if bopts.fwdCSRReady {
+		return bopts.fwdCSR
+	}
+	bopts.fwdCSR = csr.BuildFromAdjList(g.AdjList())
+	bopts.fwdCSRReady = true
+	return bopts.fwdCSR
 }
 
 // nodeIDOrNodeValue extracts a NodeID from a row column. The slot may hold a
