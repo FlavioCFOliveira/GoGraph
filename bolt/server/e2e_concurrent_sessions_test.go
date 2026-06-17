@@ -55,6 +55,25 @@ func TestE2E_ConcurrentSessions100(t *testing.T) {
 		}
 	})
 
+	// Prime the driver single-threaded BEFORE the goroutine fan-out. The neo4j
+	// driver lazily assigns Connector.SupplyConnection on the first Connect, and
+	// that check-and-set is unsynchronised in v5.28.4 (connector.go:55-56):
+	//
+	//     if c.SupplyConnection == nil {            // read  (line 55)
+	//         c.SupplyConnection = c.createConnection // write (line 56)
+	//     }
+	//
+	// The *Connector is shared across the driver's connection pool, so without
+	// priming the 100 goroutines below would race this lazy init and the race
+	// detector would (correctly) flag the driver's own unsynchronised write.
+	// VerifyConnectivity performs one single-threaded Connect, leaving
+	// SupplyConnection non-nil; thereafter every concurrent Connect only reads
+	// the field (line 55 sees non-nil, skips line 56), so there is no concurrent
+	// write. This mirrors the warm-up established for TestE2E_FailureTimeout.
+	if err := bigDriver.VerifyConnectivity(ctx); err != nil {
+		t.Fatalf("warm-up VerifyConnectivity: %v", err)
+	}
+
 	type result struct {
 		dur time.Duration
 		err error

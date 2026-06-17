@@ -1,6 +1,19 @@
-//go:build soak
+//go:build soakfull
 
 package sim
+
+// The two endurance scenarios below drive millions of ticks (2,000,000 and
+// 1,000,000) and run for many minutes-to-hours under the race detector — long
+// enough to blow the 50m go-test timeout / 90m job budget of the scheduled
+// nightly-ci runner. They are therefore gated to the heaviest soak tier,
+// `soakfull` (part of the soak family), which the full `make test-nightly`
+// target passes but the CI-safe `make test-nightly-ci` subset does not. This
+// loses no scenario coverage: the ScenarioLongRunning run-path is exercised on
+// every PR by the short-layer TestCatalogue_SmokeSubsetRunsClean and at a
+// 2,000-tick budget by the soak-layer TestCatalogue_EachScenarioRunsClean — the
+// endurance budget here is a periodic heap/goroutine-stability watch, which the
+// project's CLAUDE.md classifies as a periodic reliability exercise, not a CI
+// release gate.
 
 import (
 	"context"

@@ -64,8 +64,8 @@ test-soak: ## [layer: soak]    short + soak — race detector, -tags=soak
 	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak $(PACKAGES)
 
 .PHONY: test-nightly
-test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=soak,nightly (full; includes large-scale tests)
-	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak,nightly $(PACKAGES)
+test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=soak,nightly,soakfull (full; includes the multi-hour endurance tests)
+	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak,nightly,soakfull $(PACKAGES)
 
 # test-nightly-ci: CI-safe nightly subset for scheduled GitHub Actions runs.
 #
@@ -75,6 +75,18 @@ test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tag
 # the race detector. All other nightly-layer packages — including the
 # shapegen SNAP test (which self-skips when offline) — are included.
 #
+# Also excluded — by build tag rather than by package, because the package holds
+# many fast and valuable nightly tests that must keep running on CI: the two
+# multi-hour endurance scenarios in internal/sim/phase4_long_running_soak_test.go
+# (2,000,000 / 1,000,000 ticks). They are gated behind the `soakfull` tag, which
+# test-nightly passes but this CI subset does not, so they compile out here.
+# Under the race detector they alone exceed the 600 s go-test default timeout on
+# a fast workstation and would blow the 50m timeout / 90m job budget on a GitHub
+# runner. Their scenario run-path is still covered on every PR (short-layer
+# TestCatalogue_SmokeSubsetRunsClean) and at a small budget by the soak-layer
+# TestCatalogue_EachScenarioRunsClean; the endurance budget is a periodic
+# stability watch, not a CI release gate (see CLAUDE.md soak-gate policy).
+#
 # Use test-nightly (no -ci suffix) for a complete local run or on machines
 # with ≥ 16 GB RAM. The manual-heavy.yml workflow (workflow_dispatch only)
 # covers the excluded packages.
@@ -83,7 +95,7 @@ NIGHTLY_CI_PKGS := $(filter-out \
 	$(shell $(GO) list -tags=soak,nightly ./...))
 
 .PHONY: test-nightly-ci
-test-nightly-ci: ## [layer: nightly-ci] CI-safe nightly subset — excludes search/extern (>7 GB under race)
+test-nightly-ci: ## [layer: nightly-ci] CI-safe nightly subset — excludes search/extern (pkg, >7 GB under race) and the soakfull multi-hour sim endurance tests (tag)
 	$(GO) test $(RACE_FLAGS) -count=1 -timeout=50m -tags=soak,nightly $(NIGHTLY_CI_PKGS)
 
 .PHONY: test-crashinject

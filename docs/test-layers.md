@@ -171,6 +171,20 @@ The longer-running 4-hour Bolt soak in `bench/soak/` continues to use
 its own `soakfull` tag (see `.github/workflows/soak.yml`). Like
 `stress`, it is considered part of the soak family.
 
+The `soakfull` tag also gates the two multi-hour DST endurance scenarios
+in `internal/sim/phase4_long_running_soak_test.go` (2,000,000 and
+1,000,000 ticks). Under the race detector these alone exceed the 600 s
+`go test` default timeout, so they are excluded from the scheduled
+`make test-nightly-ci` subset — which passes only `-tags=soak,nightly`
+— while the full `make test-nightly` target passes
+`-tags=soak,nightly,soakfull` and runs them. Excluding them loses no
+scenario coverage: the `ScenarioLongRunning` run-path is exercised on
+every PR by the short-layer `TestCatalogue_SmokeSubsetRunsClean` and at a
+2,000-tick budget by the soak-layer `TestCatalogue_EachScenarioRunsClean`;
+the endurance budget is a periodic heap/goroutine-stability watch, not a
+CI release gate. This is the per-test analogue of the package-level
+`search/extern` exclusion in `NIGHTLY_CI_PKGS`.
+
 ## Helpers reference
 
 `github.com/FlavioCFOliveira/GoGraph/internal/testlayers` exposes the runtime API. The package is
