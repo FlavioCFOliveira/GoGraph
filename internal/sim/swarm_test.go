@@ -6,12 +6,57 @@ import (
 	"time"
 
 	"go.uber.org/goleak"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
+
+// TestSwarm_SmokeShort is the short-layer swarm smoke: a tiny single-worker
+// bounded swarm over a fast deterministic scenario, asserting the aggregate is
+// well-formed (every run accounted for, passes+failures==runs) and clean. It
+// keeps the swarm wired on every PR; the larger multi-worker swarms that prove
+// scheduling-independence and reproducibility live in the soak lane below.
+func TestSwarm_SmokeShort(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	reg, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+
+	const runs = 4
+	sw, err := NewSwarm(reg, &SwarmConfig{
+		MasterSeed: 0x5EED,
+		Scenario:   ScenarioReadHeavy,
+		Workers:    1,
+		Runs:       runs,
+	})
+	if err != nil {
+		t.Fatalf("NewSwarm: %v", err)
+	}
+	res, err := sw.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Swarm.Run: %v", err)
+	}
+	if res.Runs != runs {
+		t.Errorf("Runs = %d, want %d", res.Runs, runs)
+	}
+	if res.Passes+res.FailureCount() != res.Runs {
+		t.Errorf("passes(%d)+failures(%d) != runs(%d)", res.Passes, res.FailureCount(), res.Runs)
+	}
+	if res.FailureCount() != 0 {
+		t.Errorf("unexpected failures in a correct scenario:\n%s", res.Summary())
+	}
+}
 
 // TestSwarm_Smoke runs a small bounded swarm over a fast deterministic scenario
 // and asserts the aggregate is well-formed: every run accounted for, passes +
 // failures == runs, and the worker cap respected.
+//
+// Gated to the soak layer: the multi-worker swarm over the full read-heavy
+// workload runs minutes-long under -race. The short layer keeps the
+// single-worker TestSwarm_SmokeShort for PR smoke coverage of the same path.
 func TestSwarm_Smoke(t *testing.T) {
+	testlayers.RequireSoak(t)
 	defer goleak.VerifyNone(t)
 
 	reg, err := DefaultRegistry()
@@ -52,7 +97,12 @@ func TestSwarm_Smoke(t *testing.T) {
 // TestSwarm_Reproducible asserts the derived seed schedule is a pure function of
 // the master seed: two swarms with the same config execute the identical set of
 // (index, seed) pairs regardless of worker scheduling.
+//
+// Gated to the soak layer: it runs two full multi-worker swarms (16 runs each
+// over the read-heavy workload) to prove scheduling-independence, which is
+// minutes-long under -race.
 func TestSwarm_Reproducible(t *testing.T) {
+	testlayers.RequireSoak(t)
 	defer goleak.VerifyNone(t)
 
 	reg, err := DefaultRegistry()
@@ -101,7 +151,12 @@ func TestSwarm_Reproducible(t *testing.T) {
 // TestSwarm_DurationBudget runs a duration-only swarm under a virtual clock and
 // asserts it terminates cleanly (the budget bounds scheduling; in-flight runs
 // finish). It proves a swarm need not carry a run-count budget.
+//
+// Gated to the soak layer: although the wall-clock budget is small, the
+// duration-bounded swarm packs many full read-heavy runs into the window, which
+// is minutes-long under -race.
 func TestSwarm_DurationBudget(t *testing.T) {
+	testlayers.RequireSoak(t)
 	defer goleak.VerifyNone(t)
 
 	reg, err := DefaultRegistry()

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"go.uber.org/goleak"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // TestMetricsOracle_HonestWorkload drives a write-heavy workload and asserts the
@@ -57,7 +59,13 @@ func TestMetricsOracle_MalformedWorkload(t *testing.T) {
 // TestMetricsOracle_SwarmGoroutineBaseline wires the oracle into a concurrent
 // swarm and asserts the reliability bound: the goroutine count returns to its
 // baseline after the swarm joins every worker. Global metrics sink -> serial.
+//
+// Gated to the soak layer: it runs a 16-run multi-worker swarm over the
+// read-heavy workload, which is minutes-long under -race. The short-layer
+// TestPhase5_EndToEndShort asserts the same goroutine-baseline bound
+// (mres.Consistent) at a smaller scale on every PR.
 func TestMetricsOracle_SwarmGoroutineBaseline(t *testing.T) {
+	testlayers.RequireSoak(t)
 	defer goleak.VerifyNone(t)
 
 	reg, err := DefaultRegistry()

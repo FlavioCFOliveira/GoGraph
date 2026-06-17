@@ -75,10 +75,50 @@ func TestPhase5_SwarmAggregatesFailures(t *testing.T) {
 	}
 }
 
+// TestPhase5_EndToEndShort is the short-layer Phase-5 wiring smoke: a small
+// swarm bracketed by the metrics oracle, feeding a coverage tracker, over a
+// correct scenario — every piece cooperating with no leak. It keeps the Phase-5
+// surface wired on every PR; the larger end-to-end run is in the soak lane.
+func TestPhase5_EndToEndShort(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	reg, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	tracker := NewCoverageTracker(reg.Names())
+	const runs = 4
+	sw, err := NewSwarm(reg, &SwarmConfig{
+		MasterSeed: 0x5EED, Scenario: ScenarioReadHeavy, Workers: 2, Runs: runs,
+		Observe: tracker.Record,
+	})
+	if err != nil {
+		t.Fatalf("NewSwarm: %v", err)
+	}
+	res, mres, err := RunSwarmWithMetricsOracle(context.Background(), sw, 2)
+	if err != nil {
+		t.Fatalf("RunSwarmWithMetricsOracle: %v", err)
+	}
+	if res.FailureCount() != 0 {
+		t.Fatalf("correct scenario swarm had failures:\n%s", res.Summary())
+	}
+	if !mres.Consistent() {
+		t.Errorf("metrics goroutine-baseline bound violated:\n%s", mres.String())
+	}
+	if tracker.ScenarioCoverage()[ScenarioReadHeavy] != runs {
+		t.Errorf("coverage tracker did not record all %d runs: %v", runs, tracker.ScenarioCoverage())
+	}
+}
+
 // TestPhase5_EndToEnd ties the Phase 5 surface together on one fast path: a
 // swarm bracketed by the metrics oracle (goroutine baseline), feeding a coverage
 // tracker, over a correct scenario — every piece cooperating with no leak.
+//
+// Gated to the soak layer: the 20-run multi-worker swarm over the read-heavy
+// workload is minutes-long under -race. The short-layer
+// TestPhase5_EndToEndShort covers the same wiring at a smaller scale.
 func TestPhase5_EndToEnd(t *testing.T) {
+	testlayers.RequireSoak(t)
 	defer goleak.VerifyNone(t)
 
 	reg, err := DefaultRegistry()

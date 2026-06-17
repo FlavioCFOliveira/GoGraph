@@ -3,6 +3,8 @@ package sim
 import (
 	"context"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // recordTraceForDiff records a deterministic write-heavy trace for the seed, so
@@ -24,11 +26,33 @@ func recordTraceForDiff(t *testing.T, seed uint64, ticks int) Trace {
 	return trace
 }
 
+// TestDifferential_IdenticalVariantsAgreeShort is the short-layer positive
+// smoke: one variant pair on one seed over a small trace must produce
+// byte-identical observable output. It keeps the differential plumbing wired on
+// every PR; the full seed/pair matrix runs in the soak lane below.
+func TestDifferential_IdenticalVariantsAgreeShort(t *testing.T) {
+	trace := recordTraceForDiff(t, 0x5217E, 120)
+	a, b := DefaultVariantPair()
+	res, err := DifferentialTrace(context.Background(), trace, &a, &b)
+	if err != nil {
+		t.Fatalf("DifferentialTrace: %v", err)
+	}
+	if !res.Agreed {
+		t.Fatalf("variants diverged on an equivalent-result toggle (a regression):\n%s", res.String())
+	}
+}
+
 // TestDifferential_IdenticalVariantsAgree is the PRIMARY positive case: the
 // engine's default plan and the same engine with the hash-join (and,
 // separately, the range-seek) optimisation disabled MUST produce byte-identical
 // observable output on the same recorded trace.
+//
+// Gated to the soak layer: it sweeps two variant pairs across three seeds, each
+// over a 400-op trace, which is minutes-long under -race. The short-layer
+// TestDifferential_IdenticalVariantsAgreeShort covers the same path at one
+// (pair, seed) on every PR.
 func TestDifferential_IdenticalVariantsAgree(t *testing.T) {
+	testlayers.RequireSoak(t)
 	pairs := []struct {
 		name string
 		pair func() (EngineVariant, EngineVariant)
@@ -58,7 +82,7 @@ func TestDifferential_IdenticalVariantsAgree(t *testing.T) {
 // variant drops a write the trace applied, the differential must catch the
 // divergence and report the first diverging op.
 func TestDifferential_CatchesInjectedDivergence(t *testing.T) {
-	trace := recordTraceForDiff(t, 0x5217E, 400)
+	trace := recordTraceForDiff(t, 0x5217E, 150)
 
 	// Find the first write op to drop on variant B.
 	injectAt := -1
@@ -91,7 +115,7 @@ func TestDifferential_CatchesInjectedDivergence(t *testing.T) {
 // TestDifferential_NoOpInjection asserts that injecting at -1 is equivalent to a
 // plain differential (a guard that the injection plumbing is opt-in).
 func TestDifferential_NoOpInjection(t *testing.T) {
-	trace := recordTraceForDiff(t, 0xDA7A, 300)
+	trace := recordTraceForDiff(t, 0xDA7A, 120)
 	a, b := DefaultVariantPair()
 	res, err := DifferentialTraceInjectB(context.Background(), trace, &a, &b, -1)
 	if err != nil {

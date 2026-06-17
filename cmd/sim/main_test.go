@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // TestRun_PassesWithSeed verifies a small fixed-seed run exits 0 and prints the
@@ -202,7 +204,32 @@ func TestRun_UnknownMode(t *testing.T) {
 // a fast deterministic scenario, prints the summary, and exits 0 when every
 // seed passes. It also confirms the leading-positional seed is honoured as the
 // master seed alongside flags.
+// TestRun_SwarmSmokeShort is the short-layer CLI swarm smoke: a tiny
+// single-worker swarm via the CLI exits 0 and prints the swarm summary. It keeps
+// the -swarm flag path wired on every PR; the larger multi-worker swarm runs in
+// the soak lane.
+func TestRun_SwarmSmokeShort(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	code := run([]string{"7", "--swarm", "--workers=1", "--runs=3", "--scenario=read-heavy"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "master-seed=7") || !strings.Contains(s, "runs=3") {
+		t.Fatalf("missing swarm summary, got %q", s)
+	}
+	if !strings.Contains(s, "failures=0") {
+		t.Fatalf("expected zero failures for a correct scenario, got %q", s)
+	}
+}
+
+// TestRun_Swarm drives a multi-worker CLI swarm and asserts the summary.
+//
+// Gated to the soak layer: the 12-run multi-worker swarm over the read-heavy
+// workload is one of the heaviest tests in the package under -race. The
+// short-layer TestRun_SwarmSmokeShort covers the -swarm CLI path on every PR.
 func TestRun_Swarm(t *testing.T) {
+	testlayers.RequireSoak(t)
 	var out, errBuf bytes.Buffer
 	code := run([]string{"7", "--swarm", "--workers=4", "--runs=12", "--scenario=read-heavy"}, &out, &errBuf)
 	if code != 0 {
@@ -220,7 +247,13 @@ func TestRun_Swarm(t *testing.T) {
 // TestRun_SwarmCoverageReport verifies -coverage-report with -swarm prints the
 // coverage summary including the unexplored buckets and the unobservable-signal
 // disclosure.
+//
+// Gated to the soak layer: it runs a multi-worker swarm to populate the
+// coverage report, which is heavy under -race. The short-layer
+// TestRun_CoverageReportAlone covers the coverage-report rendering (template +
+// unobservable-signal disclosure) without a swarm on every PR.
 func TestRun_SwarmCoverageReport(t *testing.T) {
+	testlayers.RequireSoak(t)
 	var out, errBuf bytes.Buffer
 	code := run([]string{"7", "--swarm", "--workers=2", "--runs=8", "--scenario=read-heavy", "--coverage-report"}, &out, &errBuf)
 	if code != 0 {

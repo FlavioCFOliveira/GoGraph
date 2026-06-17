@@ -51,9 +51,15 @@ func requireTagOrSkip(t *testing.T, root, tag string) {
 // and the protocol round-trips, WITHOUT building a prior tag (which is slow).
 // It builds the helper from the CURRENT tree (HEAD), drives a tiny op stream
 // through it, reopens the image with the current recovery, and asserts parity.
-// This keeps the protocol + image format wired on every PR; the genuine
+// This exercises the worktree-build + spawn + protocol path; the genuine
 // cross-version builds live in the soak-lane tests below.
+//
+// Gated to the soak layer: even building the helper from HEAD spawns a
+// subprocess worktree build, which is slow and CI-runner-fragile. The protocol
+// and image-format paths it drives are also covered by the in-process
+// differential and recovery tests in the short layer.
 func TestCrossRelease_HelperBuildsAtHead(t *testing.T) {
+	testlayers.RequireSoak(t)
 	defer goleak.VerifyNone(t)
 	root := repoRoot(t)
 
@@ -88,7 +94,12 @@ func TestCrossRelease_HelperBuildsAtHead(t *testing.T) {
 // (HEAD) vs current in-process must agree on every op (they are the same code),
 // proving the differential plumbing + classification works without a slow tag
 // build.
+//
+// Gated to the soak layer: it spawns a subprocess worktree build of HEAD, which
+// is slow and CI-runner-fragile. The differential plumbing and classification
+// are covered in-process by TestDifferential_* in the short layer.
 func TestCrossRelease_DifferentialHeadSmoke(t *testing.T) {
+	testlayers.RequireSoak(t)
 	defer goleak.VerifyNone(t)
 	root := repoRoot(t)
 
