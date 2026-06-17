@@ -84,6 +84,22 @@ jobs:
           EOF
           echo "path=/tmp/body.md" >> "$GITHUB_OUTPUT"
 
+      - name: Ensure the ci-failure label exists
+        # `gh issue create --label` fails the whole command when the label is
+        # missing, which silently swallows the alert (the failure this step
+        # fixes: 'could not add label: ci-failure not found'). Create it
+        # idempotently first so a missing label can never break alerting again.
+        if: steps.find.outputs.number == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create ci-failure \
+            --repo "$REPO" \
+            --description "Automated alert: a scheduled CI workflow (Nightly/Soak) failed or was cancelled" \
+            --color B60205 \
+            --force
+
       - name: Open new issue
         if: steps.find.outputs.number == ''
         env:
