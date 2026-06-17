@@ -122,7 +122,7 @@ func TestProcsEngine_DbLabels_Empty(t *testing.T) {
 		t.Fatalf("Run CALL db.labels(): %v", err)
 	}
 	rows := collectProc(t, res)
-	// No label indexes registered; expect zero rows.
+	// No nodes, so no labels are in use; expect zero rows.
 	if len(rows) != 0 {
 		t.Errorf("expected 0 label rows on empty graph, got %d", len(rows))
 	}

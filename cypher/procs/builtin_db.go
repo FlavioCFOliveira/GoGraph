@@ -10,7 +10,7 @@ package procs
 //
 //   - db.indexes()           → name string, type string
 //   - db.constraints()       → name string, type string, label string, property string
-//   - db.labels()            → label string
+//   - db.labels()            → label string (labels in use on live nodes)
 //   - db.relationshipTypes() → relationshipType string
 //   - db.propertyKeys()      → propertyKey string
 //   - db.schema.visualization() → nodes list, relationships list
@@ -29,13 +29,13 @@ import (
 //
 // Every field is optional. A nil closure makes its corresponding procedure
 // return an empty result set, mirroring the nil-index-manager behaviour of
-// db.indexes() and db.labels().
+// db.indexes().
 type BuiltinSources struct {
 	// ListConstraints is invoked by db.constraints() to obtain the current
 	// constraint rows (each row is [name, type, label, property]).
 	ListConstraints func() [][]expr.Value
-	// Labels is invoked by db.labels() to obtain the distinct node labels in
-	// use, one per returned name. (Wired but not yet consumed by db.labels().)
+	// Labels is invoked by db.labels() to obtain the distinct node labels
+	// currently attached to live nodes, one per returned name.
 	Labels func() []string
 	// RelationshipTypes is invoked by db.relationshipTypes() to obtain the
 	// distinct relationship types in use, one per returned name.
@@ -47,8 +47,8 @@ type BuiltinSources struct {
 
 // RegisterBuiltins registers all built-in db.* procedures into reg.
 //
-// mgr is the index manager used by db.indexes() and db.labels(); it may be nil
-// (both procedures return empty results).
+// mgr is the index manager used by db.indexes(); it may be nil (the procedure
+// returns an empty result).
 //
 // src carries the enumeration closures backing db.constraints(), db.labels(),
 // db.relationshipTypes() and db.propertyKeys(); see [BuiltinSources]. Each
@@ -58,7 +58,7 @@ type BuiltinSources struct {
 func RegisterBuiltins(reg *Registry, mgr *index.Manager, src BuiltinSources) {
 	mustRegister(reg, dbIndexes(mgr))
 	mustRegister(reg, dbConstraints(src.ListConstraints))
-	mustRegister(reg, dbLabels(mgr))
+	mustRegister(reg, dbLabels(src.Labels))
 	mustRegister(reg, dbRelationshipTypes(src.RelationshipTypes))
 	mustRegister(reg, dbPropertyKeys(src.PropertyKeys))
 	mustRegister(reg, dbSchemaVisualization())
@@ -141,7 +141,19 @@ func dbConstraints(listConstraints func() [][]expr.Value) ProcEntry {
 // db.labels()
 // ─────────────────────────────────────────────────────────────────────────────
 
-func dbLabels(mgr *index.Manager) ProcEntry {
+// dbLabels builds the db.labels() procedure entry. It yields a single column,
+// label (a string), with one row per name returned by listLabels, in the order
+// listLabels produces them. A nil listLabels closure yields an empty result
+// set, mirroring the nil-source behaviour of the other built-in db.*
+// procedures.
+//
+// Semantics. db.labels() returns the labels currently attached to live nodes
+// (in use): the listLabels closure is backed by lpg.Graph.NodeLabelsInUse,
+// which reports tombstone-filtered node labels. A label is therefore listed
+// regardless of whether an index exists for it, and is dropped once the last
+// node bearing it is deleted. The db.* introspection procedures are not covered
+// by the openCypher TCK, so this is a deliberate, TCK-neutral behaviour.
+func dbLabels(listLabels func() []string) ProcEntry {
 	return ProcEntry{
 		Sig: Signature{
 			Namespace: []string{"db"},
@@ -152,19 +164,13 @@ func dbLabels(mgr *index.Manager) ProcEntry {
 			},
 		},
 		Impl: func(_ context.Context, _ []expr.Value) ([][]expr.Value, error) {
-			if mgr == nil {
+			if listLabels == nil {
 				return nil, nil
 			}
-			names := mgr.ListIndexes()
-			rows := make([][]expr.Value, 0)
+			names := listLabels()
+			rows := make([][]expr.Value, 0, len(names))
 			for _, name := range names {
-				sub, err := mgr.GetIndex(name)
-				if err != nil {
-					continue
-				}
-				if sub.Kind() == "label" {
-					rows = append(rows, []expr.Value{expr.StringValue(name)})
-				}
+				rows = append(rows, []expr.Value{expr.StringValue(name)})
 			}
 			return rows, nil
 		},

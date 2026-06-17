@@ -155,35 +155,61 @@ func TestDbConstraints_WithCallback(t *testing.T) {
 // db.labels()
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestDbLabels_NilManager(t *testing.T) {
+// TestDbLabels_NilClosure verifies db.labels() returns an empty result set when
+// its Labels source closure is nil.
+func TestDbLabels_NilClosure(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
 	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "labels")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil {
-		t.Fatalf("db.labels() with nil mgr: %v", err)
+		t.Fatalf("db.labels() with nil Labels closure: %v", err)
 	}
 	if len(rows) != 0 {
 		t.Errorf("expected 0 rows, got %d", len(rows))
 	}
 }
 
-func TestDbLabels_FiltersLabelKind(t *testing.T) {
+// TestDbLabels_WithClosure verifies db.labels() yields one single-column row
+// per name returned by the Labels closure, in closure order. db.labels() now
+// reads the labels in use on live nodes via this closure, independently of any
+// index registered in the index.Manager.
+func TestDbLabels_WithClosure(t *testing.T) {
 	t.Parallel()
-	mgr := newManagerWithLabel(t, "Person")
-	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, mgr, procs.BuiltinSources{})
-	entry, _ := reg.Lookup([]string{"db"}, "labels")
-	rows, err := entry.Impl(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("db.labels(): %v", err)
+	cases := []struct {
+		name   string
+		labels []string
+		want   []string
+	}{
+		{name: "two labels", labels: []string{"Person", "Movie"}, want: []string{"Person", "Movie"}},
+		{name: "single label", labels: []string{"Admin"}, want: []string{"Admin"}},
+		{name: "empty slice", labels: []string{}, want: []string{}},
 	}
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(rows))
-	}
-	if rows[0][0] != expr.StringValue("Person") {
-		t.Errorf("label = %v, want Person", rows[0][0])
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := procs.NewRegistry()
+			procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{
+				Labels: func() []string { return tc.labels },
+			})
+			entry, _ := reg.Lookup([]string{"db"}, "labels")
+			rows, err := entry.Impl(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("db.labels(): %v", err)
+			}
+			if len(rows) != len(tc.want) {
+				t.Fatalf("got %d rows, want %d", len(rows), len(tc.want))
+			}
+			for i, want := range tc.want {
+				if len(rows[i]) != 1 {
+					t.Fatalf("row %d width = %d, want 1", i, len(rows[i]))
+				}
+				if rows[i][0] != expr.StringValue(want) {
+					t.Errorf("row %d = %v, want %q", i, rows[i][0], want)
+				}
+			}
+		})
 	}
 }
 
