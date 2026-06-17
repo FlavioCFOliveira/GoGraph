@@ -45,9 +45,18 @@ func secBuildSmallCSR(tb testing.TB, n int) *csr.CSR[struct{}] {
 // the bound indirectly but reliably — the call completes correctly and
 // the goroutine count does not balloon — and directly via the documented
 // clamp (numWorkers > n is reduced to n).
+//
+// This test must NOT call t.Parallel(): it asserts on the
+// process-global runtime.NumGoroutine() delta around the call, so any
+// sibling parallel test (e.g. TestBetweennessParallel_* in
+// brandes_parallel_test.go, which spawn workers) would have its
+// in-flight goroutines counted in this test's before/after window and
+// produce a spurious failure. Go runs all non-parallel tests to
+// completion before starting the parallel ones, so leaving this test
+// sequential guarantees no sibling-test goroutines exist during its
+// measurement window — making the goroutine-delta assertion
+// deterministic.
 func TestSec_Core_BrandesWorkerCountClamped(t *testing.T) {
-	t.Parallel()
-
 	const n = 4 // tiny graph: a 4-node path.
 	c := secBuildSmallCSR(t, n)
 
@@ -64,10 +73,32 @@ func TestSec_Core_BrandesWorkerCountClamped(t *testing.T) {
 		t.Fatalf("result length = %d, want %d", len(out), c.MaxNodeID())
 	}
 
+	// Direct, non-flaky observable of the clamp: a clamped run with an
+	// absurd worker count must produce exactly the same result as an
+	// explicit n-worker run (the clamp target). If the clamp were broken
+	// and 1_000_000 workers were spawned, the run would still be correct
+	// numerically, so this guards the contract rather than correctness —
+	// but it pins the result to the n-worker behaviour the clamp selects.
+	want, err := BetweennessParallelCtx(context.Background(), c, n)
+	if err != nil {
+		t.Fatalf("n-worker reference run failed: %v", err)
+	}
+	if len(out) != len(want) {
+		t.Fatalf("clamped result length = %d, n-worker length = %d", len(out), len(want))
+	}
+	for i := range out {
+		if out[i] != want[i] {
+			t.Fatalf("clamped result[%d] = %v, n-worker result = %v (clamp changed the computation)",
+				i, out[i], want[i])
+		}
+	}
+
 	// All workers must have been joined by return (WaitGroup). Allow a
 	// brief settle and a generous slack for the test runtime's own
 	// scheduler goroutines; the key point is the count is bounded by a
-	// small constant, not by absurdWorkers.
+	// small constant, not by absurdWorkers. Because this test is
+	// sequential (see the comment above), no sibling parallel test runs
+	// concurrently to pollute the count.
 	time.Sleep(10 * time.Millisecond)
 	after := runtime.NumGoroutine()
 	if delta := after - before; delta > 2*runtime.GOMAXPROCS(0)+8 {
