@@ -91,3 +91,36 @@ func BenchmarkRelProjection_Small(b *testing.B) { benchmarkRelProjection(b, 100,
 // BenchmarkRelProjection_Large — relationship-dense graph where the per-row
 // full-CSR rebuild dominates (the case the DST profile flagged).
 func BenchmarkRelProjection_Large(b *testing.B) { benchmarkRelProjection(b, 400, 5) }
+
+// BenchmarkScalarFilterProjection exercises the non-escaping per-row evaluation
+// sites that #1575 pools: a scalar WHERE predicate (Filter closure) and a
+// scalar projection (RETURN n.i). Both build a RowContext per matched row that
+// is consumed and discarded, so the pooled map should cut per-row allocations.
+func BenchmarkScalarFilterProjection(b *testing.B) {
+	g := newBenchGraph()
+	eng := cypher.NewEngine(g)
+	for i := 0; i < 2000; i++ {
+		res, err := eng.RunInTx(context.Background(), fmt.Sprintf("CREATE (:N {i:%d, j:%d})", i, i*2), nil)
+		if err != nil {
+			b.Fatalf("seed: %v", err)
+		}
+		for res.Next() { //nolint:revive // drain
+		}
+		_ = res.Close()
+	}
+	const q = "MATCH (n:N) WHERE n.i >= 0 AND n.j >= n.i RETURN n.i, n.j"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := eng.RunInTx(context.Background(), q, nil)
+		if err != nil {
+			b.Fatalf("Exec: %v", err)
+		}
+		for res.Next() { //nolint:revive // drain
+		}
+		if err := res.Err(); err != nil {
+			b.Fatalf("drain: %v", err)
+		}
+		_ = res.Close()
+	}
+}

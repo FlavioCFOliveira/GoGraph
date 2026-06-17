@@ -4486,8 +4486,7 @@ func buildOperator(
 					scalarUse = nil
 				}
 				return exec.NewFilter(child, func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtxWithUse(row, schemaSnap, capturedG, capturedBopts, scalarUse)
-					return evalRow(capturedBopts, predExpr, rowCtx, capturedParams, capturedReg)
+					return evalRowPooled(capturedBopts, predExpr, row, schemaSnap, capturedG, capturedParams, capturedReg, scalarUse)
 				}), nil
 			}
 		}
@@ -7116,6 +7115,78 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 // partially-materialised node would serialise a truncated property map.
 func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
+	populateRowCtx(ctx, row, schema, g, bopts, scalarUse)
+	return ctx
+}
+
+// rowCtxPool recycles the per-row RowContext map for the non-escaping
+// evaluation sites (the WHERE-predicate and scalar-projection closures), where
+// the map is built, passed to one [evalRow], and discarded. Reusing the outer
+// map container removes the per-row map allocation that a heap profile of
+// `RETURN count(r)` flagged as a top allocator (#1575). Only the map container
+// is recycled — the Values it holds are independently owned (a scalar
+// projection returns a fresh property value, not the map), so clearing and
+// returning the map cannot recycle a value that escaped into a result row.
+//
+// Safety rests on the same gate that drives partial materialisation: a pooled
+// map is used ONLY when scalarUse != nil, which [analyseNodeScalarUse] sets
+// only for expressions with no subquery / comprehension / pattern (it bails to
+// nil otherwise). Those bailed-out kinds are exactly the ones whose evaluator
+// could retain the RowContext beyond the call, so the gate guarantees no
+// evaluator keeps a reference to a map we are about to recycle.
+var rowCtxPool = sync.Pool{New: func() any { return make(expr.RowContext, 8) }}
+
+// rowCtxPoolMaxSchema bounds which schemas use the pool: a very wide row would
+// retain an oversized map in the pool forever. Schemas wider than this allocate
+// a fresh map (the common case is 1–8 variables).
+const rowCtxPoolMaxSchema = 16
+
+// acquireRowCtx returns a cleared RowContext sized for schemaLen, drawn from
+// rowCtxPool for small schemas and freshly allocated for wide ones. The
+// companion [releaseRowCtx] returns it to the pool.
+func acquireRowCtx(schemaLen int) expr.RowContext {
+	if schemaLen > rowCtxPoolMaxSchema {
+		return make(expr.RowContext, schemaLen)
+	}
+	ctx, _ := rowCtxPool.Get().(expr.RowContext)
+	if ctx == nil {
+		ctx = make(expr.RowContext, rowCtxPoolMaxSchema)
+	}
+	clear(ctx)
+	return ctx
+}
+
+// releaseRowCtx returns a RowContext acquired from [acquireRowCtx] to the pool.
+// The caller must not retain ctx (or any reference into it) after this call.
+// Wide maps that bypassed the pool on acquire are simply dropped.
+func releaseRowCtx(ctx expr.RowContext) {
+	if ctx == nil || len(ctx) > rowCtxPoolMaxSchema {
+		return
+	}
+	rowCtxPool.Put(ctx) //nolint:staticcheck // map is a reference type; SA6002 false positive — clear() on acquire resets it
+}
+
+// evalRowPooled builds a RowContext for row and evaluates e against it. For the
+// non-escaping case (scalarUse != nil — set only for ctx-safe expressions; see
+// [rowCtxPool]) it draws the map from the pool and returns it afterwards; only
+// the evaluation result escapes, never the map. When scalarUse is nil it falls
+// back to a freshly allocated RowContext (the historical behaviour), preserving
+// exact semantics. It is the shared body of the non-escaping Filter-predicate
+// and scalar-projection evaluation closures.
+func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
+	if scalarUse == nil {
+		return evalRow(bopts, e, buildRowCtxWithUse(row, schema, g, bopts, nil), params, reg)
+	}
+	ctx := acquireRowCtx(len(schema))
+	defer releaseRowCtx(ctx)
+	populateRowCtx(ctx, row, schema, g, bopts, scalarUse)
+	return evalRow(bopts, e, ctx, params, reg)
+}
+
+// populateRowCtx fills ctx (which the caller sized/cleared) with the row's
+// variable bindings. It is the shared core of [buildRowCtxWithUse] and the
+// pooled non-escaping evaluation sites.
+func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) {
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
@@ -7203,7 +7274,6 @@ func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.Graph[string
 		}
 		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)
 	}
-	return ctx
 }
 
 // buildVLERelListFromRow reconstructs a List<RelationshipValue> from the
@@ -8461,8 +8531,7 @@ func buildIRProjection(
 					scalarUse = nil
 				}
 				evalFn = func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtxWithUse(row, schemaSnap, capturedG, capturedBopts, scalarUse)
-					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+					return evalRowPooled(capturedBopts, capturedExpr, row, schemaSnap, capturedG, capturedParams, capturedReg, scalarUse)
 				}
 			}
 		} else if colIdx, ok := schema[exprStr]; ok {
