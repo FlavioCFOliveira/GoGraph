@@ -392,7 +392,10 @@ Yields: `name STRING`, `type STRING`, `label STRING`, `property STRING`
 
 ### db.labels()
 
-Returns all distinct node labels present in the graph.
+Returns every distinct node label currently in use — that is, attached to at
+least one live node. Labels are reported whether or not an index exists for
+them, and a label disappears from the list once its last bearing node is
+deleted. The order is unspecified.
 
 ```cypher
 CALL db.labels()
@@ -402,7 +405,8 @@ Yields: `label STRING`
 
 ### db.relationshipTypes()
 
-Returns all distinct relationship type names present in the graph.
+Returns every distinct relationship type currently in use — that is, attached
+to at least one live relationship. The order is unspecified.
 
 ```cypher
 CALL db.relationshipTypes()
@@ -412,7 +416,16 @@ Yields: `relationshipType STRING`
 
 ### db.propertyKeys()
 
-Returns all distinct property key names present across all nodes.
+Returns every distinct property key currently in use across nodes **and**
+relationships. The order is unspecified.
+
+> **Divergence from Neo4j.** Neo4j's `db.propertyKeys()` lists property-key
+> tokens from the token store, which are never garbage-collected, so it keeps
+> reporting a key even after the last node or relationship using it is deleted.
+> GoGraph instead reports only the property keys currently in use: a key that
+> no live element bears is not listed. This difference is observable but is not
+> an openCypher-conformance issue — the `db.*` introspection procedures are not
+> covered by the openCypher TCK.
 
 ```cypher
 CALL db.propertyKeys()
@@ -422,8 +435,12 @@ Yields: `propertyKey STRING`
 
 ### db.schema.visualization()
 
-Returns the schema as two lists: node labels and relationship types. Intended
-for schema introspection tooling.
+Intended to return the schema as two lists (node labels and relationship
+types) for schema introspection tooling.
+
+> **Not yet implemented.** This procedure is registered but currently returns
+> an empty result set. It is documented here for forward compatibility; do not
+> rely on its output until it is implemented.
 
 ```cypher
 CALL db.schema.visualization()
@@ -730,4 +747,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-06-17 against commit `90e0be8`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-17 against commit `088bce9`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

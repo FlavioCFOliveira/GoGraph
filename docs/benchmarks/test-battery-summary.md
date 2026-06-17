@@ -308,7 +308,7 @@ than absolute numbers.
 **What was implemented:**
 - 14-task battery.
 - Plan-cache LRU with configurable capacity (default 1 024 entries); O(1) hit, O(1) eviction.
-- `db.labels`, `db.relationshipTypes`, `db.propertyKeys` procedure stubs.
+- `db.labels`, `db.relationshipTypes`, `db.propertyKeys` procedures (initially registered as stubs here; fully implemented with live in-use semantics in sprint 204).
 
 **Performance characteristics:**
 - Plan-cache LRU: hit path is a single atomic pointer load + doubly-linked-list MRU promotion under a short critical section; amortised O(1).
