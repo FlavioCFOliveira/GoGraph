@@ -1,13 +1,11 @@
 package cypher_test
 
 // proc_db_relationship_types_test.go — tests for db.relationshipTypes()
-// procedure (task-894).
+// procedure (task-894, wired in task-1578).
 //
-// db.relationshipTypes() is registered and callable, but its implementation is
-// a stub that always returns nil (no rows). Edge labels set via
-// g.SetEdgeLabel or Cypher CREATE are stored in the LPG's internal edgeIdx
-// and are not surfaced by this procedure. The populated-graph test is skipped
-// until the procedure implementation is wired to a data source.
+// db.relationshipTypes() yields one row per distinct relationship type borne
+// by an edge with both endpoints live, sourced from the engine graph via
+// lpg.Graph.RelationshipTypesInUse. Order is unspecified.
 
 import (
 	"context"
@@ -34,57 +32,57 @@ func TestProcDbRelationshipTypes_Empty(t *testing.T) {
 	}
 }
 
-// TestProcDbRelationshipTypes_AfterCreatingEdges documents the intended
-// behaviour once db.relationshipTypes() is wired to the edge-label data source.
-//
-// The test is skipped because the current stub implementation always returns
-// nil regardless of which edges exist in the graph. When the procedure is
-// implemented, it should return each distinct relationship type registered via
-// SetEdgeLabel (stored in the LPG's internal edgeIdx) or via Cypher CREATE.
+// TestProcDbRelationshipTypes_AfterCreatingEdges seeds typed edges into the
+// engine's graph and verifies that CALL db.relationshipTypes() yields exactly
+// the distinct relationship types in use, one per row in the single
+// relationshipType column. Order is unspecified, so the result is asserted as
+// a set. KNOWS is attached to two edges to confirm the result is de-duplicated.
 func TestProcDbRelationshipTypes_AfterCreatingEdges(t *testing.T) {
-	t.Skip("db.relationshipTypes() not yet implemented: " +
-		"procedure is a stub that returns nil; " +
-		"enable this test once the implementation queries the edge-label registry")
-
+	t.Parallel()
 	g := newProcTestGraph()
-	eng := cypher.NewEngine(g)
-	ctx := context.Background()
+	eng := cypher.NewEngine(g) // installs the index.Manager on g
 
-	// Create nodes and typed edges.
-	for _, q := range []string{
-		`CREATE (a:Person {name: "Alice"})`,
-		`CREATE (b:Person {name: "Bob"})`,
-		`CREATE (c:Company {name: "Acme"})`,
-	} {
-		if _, err := eng.Run(ctx, q, nil); err != nil {
-			t.Fatalf("CREATE node: %v", err)
+	// Seed nodes and typed edges directly on the graph; db.relationshipTypes()
+	// reads the engine graph's live edge-label shards via RelationshipTypesInUse.
+	for _, n := range []string{"alice", "bob", "acme"} {
+		if err := g.AddNode(n); err != nil {
+			t.Fatalf("AddNode(%q): %v", n, err)
 		}
 	}
-
-	// Create edges with distinct relationship types.
-	for _, q := range []string{
-		`MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS]->(b)`,
-		`MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:LIKES]->(b)`,
-		`MATCH (a:Person {name: "Alice"}), (c:Company {name: "Acme"}) CREATE (a)-[:WORKS_WITH]->(c)`,
-	} {
-		if _, err := eng.Run(ctx, q, nil); err != nil {
-			t.Fatalf("CREATE edge: %v", err)
+	for _, e := range [][2]string{{"alice", "bob"}, {"alice", "acme"}} {
+		if err := g.AddEdge(e[0], e[1], 1); err != nil {
+			t.Fatalf("AddEdge(%q,%q): %v", e[0], e[1], err)
 		}
 	}
+	// KNOWS is borne by two distinct edges to confirm de-duplication.
+	g.SetEdgeLabel("alice", "bob", "KNOWS")
+	g.SetEdgeLabel("alice", "bob", "LIKES")
+	g.SetEdgeLabel("alice", "acme", "KNOWS")
+	g.SetEdgeLabel("alice", "acme", "WORKS_WITH")
 
-	res, err := eng.Run(ctx,
+	res, err := eng.Run(context.Background(),
 		`CALL db.relationshipTypes() YIELD relationshipType`, nil)
 	if err != nil {
 		t.Fatalf("CALL db.relationshipTypes(): %v", err)
 	}
 	rows := collectProc(t, res)
 
-	if len(rows) != 3 {
-		t.Fatalf("expected 3 relationship type rows, got %d: %v", len(rows), rows)
-	}
+	got := make(map[string]int, len(rows))
 	for i, row := range rows {
-		if _, ok := row["relationshipType"]; !ok {
+		v, ok := row["relationshipType"]
+		if !ok {
 			t.Errorf("row[%d] missing 'relationshipType' column", i)
+			continue
+		}
+		got[v]++
+	}
+	want := []string{"KNOWS", "LIKES", "WORKS_WITH"}
+	if len(rows) != len(want) {
+		t.Fatalf("expected %d distinct relationship-type rows, got %d: %v", len(want), len(rows), rows)
+	}
+	for _, w := range want {
+		if got[w] != 1 {
+			t.Errorf("relationship type %q appeared %d times, want exactly 1", w, got[w])
 		}
 	}
 }

@@ -779,8 +779,11 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		hashJoinEnabled:  !opts.DisableHashJoin,
 		rangeSeekEnabled: !opts.DisableRangeIndexSeek,
 	}
-	procs.RegisterBuiltins(e.procReg, g.IndexManager(), func() [][]expr.Value {
-		return e.constraintReg.ListConstraintRows()
+	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
+		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },
+		Labels:            g.NodeLabelsInUse,
+		RelationshipTypes: g.RelationshipTypesInUse,
+		PropertyKeys:      g.PropertyKeysInUse,
 	})
 	// Re-register constraints recovered from disk and re-seed each UNIQUE
 	// value-set by scanning the recovered graph, so a constraint declared

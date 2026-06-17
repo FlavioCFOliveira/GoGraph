@@ -3,8 +3,8 @@ package procs
 // builtin_db.go — built-in db.* procedure registrations (task-300).
 //
 // RegisterBuiltins registers the standard db.* introspection procedures into
-// reg. mgr and listConstraints may both be nil; procedures that depend on them
-// return empty result sets in that case.
+// reg. mgr and every closure in BuiltinSources may be nil; procedures that
+// depend on a nil source return empty result sets in that case.
 //
 // Registered procedures:
 //
@@ -22,19 +22,45 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
+// BuiltinSources bundles the data-source callbacks the built-in db.* procedures
+// query at invocation time. It decouples the procs package from the concrete
+// graph type: callers (typically the engine) supply pure closures that read
+// live graph state, and procs never imports the graph layer.
+//
+// Every field is optional. A nil closure makes its corresponding procedure
+// return an empty result set, mirroring the nil-index-manager behaviour of
+// db.indexes() and db.labels().
+type BuiltinSources struct {
+	// ListConstraints is invoked by db.constraints() to obtain the current
+	// constraint rows (each row is [name, type, label, property]).
+	ListConstraints func() [][]expr.Value
+	// Labels is invoked by db.labels() to obtain the distinct node labels in
+	// use, one per returned name. (Wired but not yet consumed by db.labels().)
+	Labels func() []string
+	// RelationshipTypes is invoked by db.relationshipTypes() to obtain the
+	// distinct relationship types in use, one per returned name.
+	RelationshipTypes func() []string
+	// PropertyKeys is invoked by db.propertyKeys() to obtain the distinct
+	// property keys in use, one per returned name. (Wired but not yet consumed
+	// by db.propertyKeys().)
+	PropertyKeys func() []string
+}
+
 // RegisterBuiltins registers all built-in db.* procedures into reg.
 //
 // mgr is the index manager used by db.indexes() and db.labels(); it may be nil
 // (both procedures return empty results).
 //
-// listConstraints is a callback invoked by db.constraints() to obtain the
-// current constraint rows (each row is [name, type, label, property]). Pass
-// nil to always return an empty set.
-func RegisterBuiltins(reg *Registry, mgr *index.Manager, listConstraints func() [][]expr.Value) {
+// src carries the enumeration closures backing db.constraints(), db.labels(),
+// db.relationshipTypes() and db.propertyKeys(); see [BuiltinSources]. Each
+// closure may be nil, in which case its procedure returns an empty set.
+//
+//nolint:gocritic // hugeParam: BuiltinSources is small and passed by value intentionally
+func RegisterBuiltins(reg *Registry, mgr *index.Manager, src BuiltinSources) {
 	mustRegister(reg, dbIndexes(mgr))
-	mustRegister(reg, dbConstraints(listConstraints))
+	mustRegister(reg, dbConstraints(src.ListConstraints))
 	mustRegister(reg, dbLabels(mgr))
-	mustRegister(reg, dbRelationshipTypes())
+	mustRegister(reg, dbRelationshipTypes(src.RelationshipTypes))
 	mustRegister(reg, dbPropertyKeys())
 	mustRegister(reg, dbSchemaVisualization())
 }
@@ -150,7 +176,7 @@ func dbLabels(mgr *index.Manager) ProcEntry {
 // db.relationshipTypes()
 // ─────────────────────────────────────────────────────────────────────────────
 
-func dbRelationshipTypes() ProcEntry {
+func dbRelationshipTypes(listTypes func() []string) ProcEntry {
 	return ProcEntry{
 		Sig: Signature{
 			Namespace: []string{"db"},
@@ -161,7 +187,15 @@ func dbRelationshipTypes() ProcEntry {
 			},
 		},
 		Impl: func(_ context.Context, _ []expr.Value) ([][]expr.Value, error) {
-			return nil, nil
+			if listTypes == nil {
+				return nil, nil
+			}
+			names := listTypes()
+			rows := make([][]expr.Value, 0, len(names))
+			for _, name := range names {
+				rows = append(rows, []expr.Value{expr.StringValue(name)})
+			}
+			return rows, nil
 		},
 	}
 }

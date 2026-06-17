@@ -29,7 +29,7 @@ func newManagerWithLabel(t *testing.T, name string) *index.Manager {
 func TestRegisterBuiltins_RegistersAll(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 
 	expected := []struct {
 		ns   []string
@@ -55,13 +55,13 @@ func TestRegisterBuiltins_Idempotent_Error(t *testing.T) {
 	// Calling RegisterBuiltins twice should panic on the second call because
 	// the procedures are already registered. Verify it panics.
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic on double registration, got none")
 		}
 	}()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ func TestRegisterBuiltins_Idempotent_Error(t *testing.T) {
 func TestDbIndexes_NilManager(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "indexes")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil {
@@ -86,7 +86,7 @@ func TestDbIndexes_WithManager(t *testing.T) {
 	t.Parallel()
 	mgr := newManagerWithLabel(t, "Person")
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, mgr, nil)
+	procs.RegisterBuiltins(reg, mgr, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "indexes")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil {
@@ -110,7 +110,7 @@ func TestDbIndexes_WithManager(t *testing.T) {
 func TestDbConstraints_NilCallback(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "constraints")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestDbConstraints_WithCallback(t *testing.T) {
 		}
 	}
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, callback)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{ListConstraints: callback})
 	entry, _ := reg.Lookup([]string{"db"}, "constraints")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil {
@@ -158,7 +158,7 @@ func TestDbConstraints_WithCallback(t *testing.T) {
 func TestDbLabels_NilManager(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "labels")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil {
@@ -173,7 +173,7 @@ func TestDbLabels_FiltersLabelKind(t *testing.T) {
 	t.Parallel()
 	mgr := newManagerWithLabel(t, "Person")
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, mgr, nil)
+	procs.RegisterBuiltins(reg, mgr, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "labels")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil {
@@ -194,7 +194,7 @@ func TestDbLabels_FiltersLabelKind(t *testing.T) {
 func TestDbRelationshipTypes_Empty(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "relationshipTypes")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil || len(rows) != 0 {
@@ -202,10 +202,48 @@ func TestDbRelationshipTypes_Empty(t *testing.T) {
 	}
 }
 
+func TestDbRelationshipTypes_WithClosure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		types []string
+		want  []string
+	}{
+		{name: "two types", types: []string{"KNOWS", "LIKES"}, want: []string{"KNOWS", "LIKES"}},
+		{name: "single type", types: []string{"REL"}, want: []string{"REL"}},
+		{name: "empty slice", types: []string{}, want: []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := procs.NewRegistry()
+			procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{
+				RelationshipTypes: func() []string { return tc.types },
+			})
+			entry, _ := reg.Lookup([]string{"db"}, "relationshipTypes")
+			rows, err := entry.Impl(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("db.relationshipTypes(): %v", err)
+			}
+			if len(rows) != len(tc.want) {
+				t.Fatalf("got %d rows, want %d", len(rows), len(tc.want))
+			}
+			for i, want := range tc.want {
+				if len(rows[i]) != 1 {
+					t.Fatalf("row %d width = %d, want 1", i, len(rows[i]))
+				}
+				if rows[i][0] != expr.StringValue(want) {
+					t.Errorf("row %d = %v, want %q", i, rows[i][0], want)
+				}
+			}
+		})
+	}
+}
+
 func TestDbPropertyKeys_Empty(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db"}, "propertyKeys")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil || len(rows) != 0 {
@@ -216,7 +254,7 @@ func TestDbPropertyKeys_Empty(t *testing.T) {
 func TestDbSchemaVisualization_Empty(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()
-	procs.RegisterBuiltins(reg, nil, nil)
+	procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{})
 	entry, _ := reg.Lookup([]string{"db", "schema"}, "visualization")
 	rows, err := entry.Impl(context.Background(), nil)
 	if err != nil || len(rows) != 0 {
