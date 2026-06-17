@@ -41,8 +41,7 @@ type BuiltinSources struct {
 	// distinct relationship types in use, one per returned name.
 	RelationshipTypes func() []string
 	// PropertyKeys is invoked by db.propertyKeys() to obtain the distinct
-	// property keys in use, one per returned name. (Wired but not yet consumed
-	// by db.propertyKeys().)
+	// property keys in use, one per returned name.
 	PropertyKeys func() []string
 }
 
@@ -61,7 +60,7 @@ func RegisterBuiltins(reg *Registry, mgr *index.Manager, src BuiltinSources) {
 	mustRegister(reg, dbConstraints(src.ListConstraints))
 	mustRegister(reg, dbLabels(mgr))
 	mustRegister(reg, dbRelationshipTypes(src.RelationshipTypes))
-	mustRegister(reg, dbPropertyKeys())
+	mustRegister(reg, dbPropertyKeys(src.PropertyKeys))
 	mustRegister(reg, dbSchemaVisualization())
 }
 
@@ -204,7 +203,23 @@ func dbRelationshipTypes(listTypes func() []string) ProcEntry {
 // db.propertyKeys()
 // ─────────────────────────────────────────────────────────────────────────────
 
-func dbPropertyKeys() ProcEntry {
+// dbPropertyKeys builds the db.propertyKeys() procedure entry. It yields a
+// single column, propertyKey (a string), with one row per name returned by
+// listKeys, in the order listKeys produces them. A nil listKeys closure yields
+// an empty result set, mirroring the nil-source behaviour of the other built-in
+// db.* procedures.
+//
+// Divergence from Neo4j (deliberate, openCypher-conformant). Neo4j's
+// db.propertyKeys() returns the property-key tokens held in the token store,
+// which includes keys no longer borne by any node or relationship: property-key
+// tokens are interned on first use and are never garbage-collected, so a key
+// survives in the listing after the last element using it is deleted. GoGraph
+// instead returns only the property keys currently in use — the listKeys
+// closure is backed by lpg.Graph.PropertyKeysInUse, which reports live,
+// tombstone-filtered property keys. This difference is observable but is not an
+// openCypher-conformance violation: the db.* introspection procedures are not
+// covered by the openCypher TCK.
+func dbPropertyKeys(listKeys func() []string) ProcEntry {
 	return ProcEntry{
 		Sig: Signature{
 			Namespace: []string{"db"},
@@ -215,7 +230,15 @@ func dbPropertyKeys() ProcEntry {
 			},
 		},
 		Impl: func(_ context.Context, _ []expr.Value) ([][]expr.Value, error) {
-			return nil, nil
+			if listKeys == nil {
+				return nil, nil
+			}
+			names := listKeys()
+			rows := make([][]expr.Value, 0, len(names))
+			for _, name := range names {
+				rows = append(rows, []expr.Value{expr.StringValue(name)})
+			}
+			return rows, nil
 		},
 	}
 }

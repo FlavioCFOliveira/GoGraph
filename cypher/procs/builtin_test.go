@@ -251,6 +251,44 @@ func TestDbPropertyKeys_Empty(t *testing.T) {
 	}
 }
 
+func TestDbPropertyKeys_WithClosure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		keys []string
+		want []string
+	}{
+		{name: "two keys", keys: []string{"name", "age"}, want: []string{"name", "age"}},
+		{name: "single key", keys: []string{"score"}, want: []string{"score"}},
+		{name: "empty slice", keys: []string{}, want: []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := procs.NewRegistry()
+			procs.RegisterBuiltins(reg, nil, procs.BuiltinSources{
+				PropertyKeys: func() []string { return tc.keys },
+			})
+			entry, _ := reg.Lookup([]string{"db"}, "propertyKeys")
+			rows, err := entry.Impl(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("db.propertyKeys(): %v", err)
+			}
+			if len(rows) != len(tc.want) {
+				t.Fatalf("got %d rows, want %d", len(rows), len(tc.want))
+			}
+			for i, want := range tc.want {
+				if len(rows[i]) != 1 {
+					t.Fatalf("row %d width = %d, want 1", i, len(rows[i]))
+				}
+				if rows[i][0] != expr.StringValue(want) {
+					t.Errorf("row %d = %v, want %q", i, rows[i][0], want)
+				}
+			}
+		})
+	}
+}
+
 func TestDbSchemaVisualization_Empty(t *testing.T) {
 	t.Parallel()
 	reg := procs.NewRegistry()

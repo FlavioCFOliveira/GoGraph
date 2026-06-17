@@ -1,19 +1,30 @@
 package cypher_test
 
 // proc_db_property_keys_test.go — tests for db.propertyKeys() procedure
-// (task-895).
+// (task-895, wired in task-1579).
 //
-// db.propertyKeys() is registered and callable, but its implementation is a
-// stub that always returns nil (no rows). Properties set on nodes or edges are
-// stored in the LPG and are not surfaced by this procedure. The
-// populated-graph test is skipped until the procedure implementation is wired
-// to a property-key registry.
+// db.propertyKeys() yields one row per distinct property key currently in use
+// — that is, present on at least one non-tombstoned node, or on at least one
+// edge whose endpoints are both live — sourced from the engine graph via
+// lpg.Graph.PropertyKeysInUse. Order is unspecified.
+//
+// This is a deliberate, openCypher-conformant divergence from Neo4j, whose
+// db.propertyKeys() lists every property-key token ever interned (tokens are
+// never garbage-collected) and so retains keys no longer borne by any element.
+// GoGraph reports only keys in live use; see dbPropertyKeys in
+// cypher/procs/builtin_db.go.
+//
+// Properties are seeded directly on the engine graph (the same approach the
+// db.relationshipTypes() integration test uses for edge labels): the procedure
+// reads the graph's live node/edge property shards via PropertyKeysInUse, so a
+// directly seeded graph exercises the same code path as Cypher writes.
 
 import (
 	"context"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestProcDbPropertyKeys_Empty verifies that CALL db.propertyKeys() returns
@@ -34,84 +45,116 @@ func TestProcDbPropertyKeys_Empty(t *testing.T) {
 	}
 }
 
-// TestProcDbPropertyKeys_AfterCreatingNodes documents the intended behaviour
-// once db.propertyKeys() is wired to a property-key registry.
-//
-// The test is skipped because the current stub implementation always returns
-// nil regardless of which properties have been set. When the procedure is
-// implemented, it should return each distinct property key that exists across
-// all nodes and edges (e.g. "name", "age", "score").
-func TestProcDbPropertyKeys_AfterCreatingNodes(t *testing.T) {
-	t.Skip("db.propertyKeys() not yet implemented: " +
-		"procedure is a stub that returns nil; " +
-		"enable this test once the implementation queries the property-key registry")
-
-	g := newProcTestGraph()
-	eng := cypher.NewEngine(g)
-	ctx := context.Background()
-
-	// Create nodes with distinct property keys.
-	for _, q := range []string{
-		`CREATE (a:Person {name: "Alice", age: 30})`,
-		`CREATE (b:Person {name: "Bob", score: 9.5})`,
-		`CREATE (c:Movie {name: "Inception"})`,
-	} {
-		if _, err := eng.Run(ctx, q, nil); err != nil {
-			t.Fatalf("CREATE: %v", err)
-		}
-	}
-
-	res, err := eng.Run(ctx,
+// propertyKeysInUse runs CALL db.propertyKeys() through the engine and returns
+// the yielded keys as a set.
+func propertyKeysInUse(t *testing.T, eng *cypher.Engine) map[string]struct{} {
+	t.Helper()
+	res, err := eng.Run(context.Background(),
 		`CALL db.propertyKeys() YIELD propertyKey`, nil)
 	if err != nil {
 		t.Fatalf("CALL db.propertyKeys(): %v", err)
 	}
 	rows := collectProc(t, res)
-
-	// Expect 3 distinct keys: name, age, score.
-	if len(rows) != 3 {
-		t.Fatalf("expected 3 property key rows, got %d: %v", len(rows), rows)
-	}
+	set := make(map[string]struct{}, len(rows))
 	for i, row := range rows {
-		if _, ok := row["propertyKey"]; !ok {
+		v, ok := row["propertyKey"]
+		if !ok {
 			t.Errorf("row[%d] missing 'propertyKey' column", i)
+			continue
+		}
+		if _, dup := set[v]; dup {
+			t.Errorf("duplicate property key %q in result %v", v, rows)
+		}
+		set[v] = struct{}{}
+	}
+	return set
+}
+
+// TestProcDbPropertyKeys_AfterCreatingNodes seeds nodes and an edge bearing
+// distinct property keys and verifies that CALL db.propertyKeys() yields
+// exactly the distinct keys in use. "name" is borne by multiple nodes to
+// confirm de-duplication, and the edge property "since" confirms the result is
+// the union across the node and edge property stores. Order is unspecified, so
+// the result is asserted as a set.
+func TestProcDbPropertyKeys_AfterCreatingNodes(t *testing.T) {
+	t.Parallel()
+	g := newProcTestGraph()
+	eng := cypher.NewEngine(g) // installs the index.Manager and wires PropertyKeys
+
+	for _, n := range []string{"alice", "bob", "inception"} {
+		if err := g.AddNode(n); err != nil {
+			t.Fatalf("AddNode(%q): %v", n, err)
+		}
+	}
+	mustSetNodeProp(t, g, "alice", "name", lpg.StringValue("Alice"))
+	mustSetNodeProp(t, g, "alice", "age", lpg.Int64Value(30))
+	mustSetNodeProp(t, g, "bob", "name", lpg.StringValue("Bob"))
+	mustSetNodeProp(t, g, "bob", "score", lpg.Float64Value(9.5))
+	mustSetNodeProp(t, g, "inception", "name", lpg.StringValue("Inception"))
+
+	if err := g.AddEdge("alice", "bob", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetEdgeProperty("alice", "bob", "since", lpg.Int64Value(2020)); err != nil {
+		t.Fatalf("SetEdgeProperty: %v", err)
+	}
+
+	got := propertyKeysInUse(t, eng)
+	want := []string{"name", "age", "score", "since"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d distinct property keys, got %d: %v", len(want), len(got), got)
+	}
+	for _, w := range want {
+		if _, ok := got[w]; !ok {
+			t.Errorf("missing expected property key %q in %v", w, got)
 		}
 	}
 }
 
-// TestProcDbPropertyKeys_CountAggregation documents the intended behaviour of
-// combining db.propertyKeys() with YIELD and count(*).
-//
-// Skipped for the same reason as TestProcDbPropertyKeys_AfterCreatingNodes.
-func TestProcDbPropertyKeys_CountAggregation(t *testing.T) {
-	t.Skip("db.propertyKeys() not yet implemented: " +
-		"procedure is a stub that returns nil; " +
-		"enable this test once the implementation queries the property-key registry")
-
+// TestProcDbPropertyKeys_DroppedAfterDelete verifies the in-use semantics
+// end-to-end: a property key borne by exactly one node is no longer listed by
+// db.propertyKeys() once that node is deleted (tombstoned). This exercises both
+// the in-use filtering and the tombstone filtering of PropertyKeysInUse. A key
+// still borne by a surviving node ("name") remains listed.
+func TestProcDbPropertyKeys_DroppedAfterDelete(t *testing.T) {
+	t.Parallel()
 	g := newProcTestGraph()
 	eng := cypher.NewEngine(g)
-	ctx := context.Background()
 
-	for _, q := range []string{
-		`CREATE (a:Person {name: "Alice", age: 30})`,
-		`CREATE (b:Person {score: 9.5})`,
-	} {
-		if _, err := eng.Run(ctx, q, nil); err != nil {
-			t.Fatalf("CREATE: %v", err)
+	for _, n := range []string{"alice", "bob"} {
+		if err := g.AddNode(n); err != nil {
+			t.Fatalf("AddNode(%q): %v", n, err)
 		}
 	}
+	// "rare" is borne only by bob; "name" is borne by both nodes.
+	mustSetNodeProp(t, g, "alice", "name", lpg.StringValue("Alice"))
+	mustSetNodeProp(t, g, "bob", "name", lpg.StringValue("Bob"))
+	mustSetNodeProp(t, g, "bob", "rare", lpg.Int64Value(1))
 
-	// name, age, score → 3 distinct keys.
-	res, err := eng.Run(ctx,
-		`CALL db.propertyKeys() YIELD propertyKey RETURN count(*) AS n`, nil)
-	if err != nil {
-		t.Fatalf("CALL db.propertyKeys() YIELD ... RETURN count(*): %v", err)
+	before := propertyKeysInUse(t, eng)
+	if _, ok := before["rare"]; !ok {
+		t.Fatalf("before delete: expected %q to be listed, got %v", "rare", before)
 	}
-	rows := collectProc(t, res)
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 aggregation row, got %d: %v", len(rows), rows)
+	if _, ok := before["name"]; !ok {
+		t.Fatalf("before delete: expected %q to be listed, got %v", "name", before)
 	}
-	if n := rows[0]["n"]; n != "3" {
-		t.Errorf("count(*) = %q, want \"3\"", n)
+
+	// Delete the only element bearing "rare".
+	g.RemoveNode("bob")
+
+	after := propertyKeysInUse(t, eng)
+	if _, ok := after["rare"]; ok {
+		t.Errorf("after delete: %q must no longer be listed, got %v", "rare", after)
+	}
+	if _, ok := after["name"]; !ok {
+		t.Errorf("after delete: %q must still be listed (borne by alice), got %v", "name", after)
+	}
+}
+
+// mustSetNodeProp sets a node property or fails the test.
+func mustSetNodeProp(t *testing.T, g *lpg.Graph[string, float64], n, key string, v lpg.PropertyValue) {
+	t.Helper()
+	if err := g.SetNodeProperty(n, key, v); err != nil {
+		t.Fatalf("SetNodeProperty(%q, %q): %v", n, key, err)
 	}
 }
