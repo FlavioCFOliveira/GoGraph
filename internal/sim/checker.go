@@ -100,6 +100,11 @@ type Engine interface {
 type InvariantChecker struct {
 	seed       *Seed
 	violations []Violation
+	// checksRun counts how many times [InvariantChecker.Check] has executed. It
+	// makes the invariant-check cadence observable: under CheckEvery>1 it lets a
+	// caller (and the cadence tests) confirm the checker ran the expected number
+	// of times, including the simulator's terminal check.
+	checksRun int
 }
 
 // NewInvariantChecker returns a checker whose sampling draws from seed.
@@ -116,6 +121,7 @@ func NewInvariantChecker(seed *Seed) *InvariantChecker {
 //
 // Each check that fails appends a typed Violation; a clean pass returns nil.
 func (c *InvariantChecker) Check(tick int64, oracle *GraphOracle, engine Engine) []Violation {
+	c.checksRun++
 	before := len(c.violations)
 
 	c.checkNodeCount(tick, oracle, engine)
@@ -515,6 +521,12 @@ func (c *InvariantChecker) seekByValue(engine indexConsistencyEngine, spec Index
 	}
 	return out, nil
 }
+
+// ChecksRun reports how many times [InvariantChecker.Check] has executed since
+// construction. It exposes the realised invariant-check cadence so callers can
+// confirm, for a given CheckEvery, that the expected number of checks ran
+// (including the simulator's terminal check).
+func (c *InvariantChecker) ChecksRun() int { return c.checksRun }
 
 // HasViolations reports whether any violation has been recorded.
 func (c *InvariantChecker) HasViolations() bool { return len(c.violations) > 0 }

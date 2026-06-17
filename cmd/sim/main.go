@@ -9,6 +9,10 @@
 // reproduced. Flags:
 //
 //	--ticks       number of ticks (operations) to simulate (default 100000)
+//	--check-every invariant-check cadence in ticks (default 1 = every tick);
+//	              >1 trades check coverage for speed on long runs. The terminal
+//	              tick is always checked regardless, so a violation in the final
+//	              ticks is never missed.
 //	--workload    actor mix: default | write-heavy | read-heavy | bad-actor
 //	--verbose     print each operation as it runs
 //	--crashes     inject deterministic crash+recovery cycles
@@ -79,6 +83,7 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	fs := flag.NewFlagSet("sim", flag.ContinueOnError)
 	fs.SetOutput(stderrRaw)
 	ticks := fs.Int("ticks", 100000, "number of ticks (operations) to simulate")
+	checkEvery := fs.Int("check-every", 1, "invariant-check cadence in ticks (1 = check every tick; >1 trades coverage for speed on long runs, the terminal tick is always checked)")
 	workloadName := fs.String("workload", "default", "actor mix: default | write-heavy | read-heavy | bad-actor")
 	verbose := fs.Bool("verbose", false, "print each operation as it runs")
 	crashes := fs.Bool("crashes", false, "inject deterministic crash+recovery cycles (drives the real SimDisk-backed persistence stack)")
@@ -175,9 +180,10 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	}
 
 	cfg := sim.Config{
-		Seed:     seed,
-		MaxTicks: *ticks,
-		Workload: wlFactory(sim.NewSeed(seed)),
+		Seed:       seed,
+		MaxTicks:   *ticks,
+		CheckEvery: *checkEvery,
+		Workload:   wlFactory(sim.NewSeed(seed)),
 	}
 	if *crashes {
 		cfg.Crash = sim.CrashConfig{Enabled: true}

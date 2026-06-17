@@ -156,6 +156,8 @@ func New(cfg Config) (*Simulator, error) {
 // The loop runs entirely on the calling goroutine and spawns none; engine
 // operations are synchronous.
 func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
+	var lastTick int64
+	var lastOp Op
 	for i := 0; i < s.cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -183,6 +185,7 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 
 		committed := s.execute(ctx, op)
 		s.applyToOracle(op, committed)
+		lastTick, lastOp = tick, op
 
 		if tick%int64(s.cfg.CheckEvery) == 0 {
 			if violations := s.checker.Check(tick, s.oracle, s.engine); len(violations) > 0 {
@@ -190,7 +193,24 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 			}
 		}
 	}
-	return nil, nil
+	return s.finalCheck(lastTick, lastOp), nil
+}
+
+// finalCheck runs one terminal invariant check on the final tick when the
+// cadence (CheckEvery) skipped it, so a CheckEvery>1 run can never let a
+// violation introduced in the last (CheckEvery-1) ticks escape unverified. It
+// is a no-op for an empty run (lastTick == 0) and for any run whose last tick
+// the loop already checked (lastTick % CheckEvery == 0, which always holds for
+// the default CheckEvery == 1). Returns a populated report on a violation, or
+// nil when the terminal state is clean or no terminal check is needed.
+func (s *Simulator) finalCheck(lastTick int64, lastOp Op) *SimReport {
+	if lastTick == 0 || lastTick%int64(s.cfg.CheckEvery) == 0 {
+		return nil
+	}
+	if violations := s.checker.Check(lastTick, s.oracle, s.engine); len(violations) > 0 {
+		return s.report(lastTick, lastOp, violations)
+	}
+	return nil
 }
 
 // engineRunDDL runs a DDL statement (CREATE/DROP INDEX/CONSTRAINT) against the
@@ -228,6 +248,8 @@ var schemaChurnStatements = []string{
 // of the seed.
 func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, error) {
 	churnIdx := 0
+	var lastTick int64
+	var lastOp Op
 	for i := 0; i < s.cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -249,6 +271,7 @@ func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, e
 		}
 		committed := s.execute(ctx, op)
 		s.applyToOracle(op, committed)
+		lastTick, lastOp = tick, op
 
 		if tick%int64(s.cfg.CheckEvery) == 0 {
 			if violations := s.checker.Check(tick, s.oracle, s.engine); len(violations) > 0 {
@@ -256,7 +279,7 @@ func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, e
 			}
 		}
 	}
-	return nil, nil
+	return s.finalCheck(lastTick, lastOp), nil
 }
 
 // maybeCrash performs a crash+recovery cycle when the schedule fires at tick.
