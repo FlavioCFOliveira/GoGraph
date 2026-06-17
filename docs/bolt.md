@@ -376,4 +376,4 @@ Drivers that negotiate Bolt 3.x or earlier are not supported.
 
 ---
 
-*Last reviewed: 2026-06-12 against commit `ec76e6f`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-17 against commit `e9b2c18`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

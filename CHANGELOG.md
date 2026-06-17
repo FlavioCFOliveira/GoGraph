@@ -4,6 +4,109 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-06-17
+
+The seventh published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release. Its headline is **live `db.*` schema introspection**: the
+built-in `db.labels()`, `db.relationshipTypes()`, and
+`db.propertyKeys()` procedures now report only the schema tokens
+**currently in use** — labels, relationship types, and property keys
+attached to at least one live (non-tombstoned) node or relationship —
+rather than every token ever indexed or seen. A token disappears from
+the result as soon as its last bearing element is deleted.
+
+The bump is **MINOR** under [Semantic Versioning](https://semver.org/):
+the new behaviour is additive on top of `v0.4.0`, and three new
+exported methods are introduced on `lpg.Graph` — `NodeLabelsInUse`,
+`RelationshipTypesInUse`, and `PropertyKeysInUse`. The low-level helper
+`procs.RegisterBuiltins` changed its third parameter from a single
+closure to a `procs.BuiltinSources` struct; this is permitted in a
+`0.y.z` line and affects only direct callers of that internal-style
+registration helper, not users of the public Cypher engine. As a
+`0.y.z` release the public API remains unstable; pin the exact version
+you depend on.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios, 16 006 / 16 006 steps) and **100 %
+ACID-compliant**. The `db.*` introspection procedures are not covered by
+the openCypher TCK, so the in-use semantics are free to diverge from
+Neo4j (see Notes). The Go toolchain remains **go1.26.4** (unchanged),
+and `govulncheck ./...` stays clean.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.5.0
+```
+
+### Added
+
+- **`db.labels()` — labels in use.** `CALL db.labels()` returns every
+  distinct node label currently attached to at least one live node,
+  whether or not an index exists for that label. The order is
+  unspecified.
+- **`db.relationshipTypes()` — types in use.** `CALL
+  db.relationshipTypes()` returns every distinct relationship type
+  currently attached to at least one live relationship. The order is
+  unspecified.
+- **`db.propertyKeys()` — keys in use.** `CALL db.propertyKeys()`
+  returns every distinct property key currently in use across nodes
+  **and** relationships. The order is unspecified.
+- **`lpg.Graph` introspection methods.** New exported methods
+  `NodeLabelsInUse() []string`, `RelationshipTypesInUse() []string`, and
+  `PropertyKeysInUse() []string` enumerate the schema tokens in use,
+  filtering out tombstoned elements. They back the `db.*` procedures and
+  are available directly on the graph type.
+
+### Changed
+
+- **`db.labels()` no longer reports index-only labels.** Before this
+  release the procedure could report a label merely because an index
+  existed for it; it now reports a label only while at least one live
+  node bears it.
+- **`procs.RegisterBuiltins` signature.** Its third parameter is now a
+  `procs.BuiltinSources` struct bundling the `ListConstraints`,
+  `Labels`, `RelationshipTypes`, and `PropertyKeys` data-source
+  closures, replacing the previous single constraint-rows closure. Every
+  field is optional; a nil closure makes its procedure return an empty
+  result set. This decouples the `procs` package from the concrete graph
+  type.
+
+### Documentation
+
+- **`docs/cypher.md`** documents the in-use semantics of `db.labels()`,
+  `db.relationshipTypes()`, and `db.propertyKeys()`, the deliberate
+  divergence from Neo4j for `db.propertyKeys()`, and the
+  not-yet-implemented status of `db.schema.visualization()` (registered
+  but currently returns an empty result set).
+
+### Compliance
+
+- **openCypher TCK.** Execution suite remains fully green at
+  **3 897 / 3 897 scenarios** and **16 006 / 16 006 steps**; the
+  regression gate (`tckExecutionBaseline = 3897`) is unchanged. The
+  `db.*` introspection procedures are not TCK-covered.
+- **ACID.** Atomicity, Consistency, Isolation, and Durability hold
+  across the in-memory engine and every persistence backend; the new
+  introspection is read-only and does not touch the write path.
+
+### Notes
+
+- **Divergence from Neo4j (`db.propertyKeys()`).** Neo4j lists
+  property-key tokens from a token store that is never
+  garbage-collected, so it keeps reporting a key after its last bearer
+  is deleted. GoGraph reports only keys currently in use. This is
+  observable but not an openCypher-conformance issue, because the `db.*`
+  procedures are outside the TCK.
+- **Pre-1.0 stability.** This is a `0.y.z` release. The public Go API
+  may change without a major-version bump until `1.0.0`; pin the exact
+  version you depend on.
+- **Module path.** The Go module path is
+  `github.com/FlavioCFOliveira/GoGraph` with no `/vN` suffix, which is
+  Semantic-Import-Versioning-correct for a `0.x` line.
+
 ## [0.4.0] — 2026-06-17
 
 The sixth published release of **GoGraph**, a Go module for graph
@@ -961,6 +1064,7 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.1.0
   `github.com/FlavioCFOliveira/GoGraph` with no `/vN` suffix, which is
   Semantic-Import-Versioning-correct for a `0.x` line.
 
+[0.5.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.5.0
 [0.4.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.4.0
 [0.3.2]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.2
 [0.3.1]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.1

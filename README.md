@@ -5,15 +5,17 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.4.0`.** This is the project's **sixth release**,
-published at a pre-1.0 baseline: under Semantic Versioning a `0.y.z`
-version signals that the public API is **not yet stable** and may change
-without a major bump while the module matures toward `1.0.0`. `v0.4.0` is
-a pre-1.0 **MINOR** release — it adds a new public API,
-`(*cypher.Engine).BeginReadTx` (lock-free, read-only explicit
-transactions, ≈ 2× concurrent read throughput), plus Cypher read-path
-performance work; it is API-additive over `v0.3.2`, with no breaking
-change. The five major
+**Current release: `v0.5.0`.** This is the project's **seventh
+release**, published at a pre-1.0 baseline: under Semantic Versioning a
+`0.y.z` version signals that the public API is **not yet stable** and may
+change without a major bump while the module matures toward `1.0.0`.
+`v0.5.0` is a pre-1.0 **MINOR** release — it makes the built-in `db.*`
+schema-introspection procedures (`db.labels()`,
+`db.relationshipTypes()`, `db.propertyKeys()`) report only the labels,
+relationship types, and property keys **currently in use** on live
+elements, and adds three exported `lpg.Graph` methods
+(`NodeLabelsInUse`, `RelationshipTypesInUse`, `PropertyKeysInUse`); it is
+additive over `v0.4.0`. The five major
 subsystems below are functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
@@ -22,9 +24,9 @@ every change is gated by the project's CI suite (build, vet, race, lint,
 `govulncheck`, TCK conformance, and the deterministic crash-injection
 battery). The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.4.0`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.5.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.4.0.md](release-notes/v0.4.0.md) for the full release
+[release-notes/v0.5.0.md](release-notes/v0.5.0.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)
