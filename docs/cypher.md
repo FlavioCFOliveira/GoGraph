@@ -560,6 +560,54 @@ back.
 This API is the engine substrate for the Bolt `BEGIN` / `RUN` / `COMMIT` /
 `ROLLBACK` protocol (see [docs/bolt.md](bolt.md)).
 
+### Read-only explicit transactions
+
+For read-only work, prefer `Engine.BeginReadTx`. It opens an explicit
+transaction that acquires **neither** the writer serialisation, **nor** the
+visibility barrier, **nor** a WAL transaction, so it never serialises behind, or
+blocks, a concurrent writer — roughly doubling concurrent read throughput.
+
+```go
+func (e *Engine) BeginReadTx(ctx context.Context) (*cypher.ExplicitTx, error)
+```
+
+It returns the same `*ExplicitTx` handle, with these differences from `BeginTx`:
+
+- **Writes are rejected before execution.** A statement containing a writing
+  clause, or any DDL, is rejected with the exported sentinel
+  `cypher.ErrWriteInReadOnlyTx` **before** it runs. This guard is what keeps the
+  lock-free read path safe: a write would otherwise execute with no writer lock,
+  no barrier, and no WAL.
+- **Read-committed isolation across statements.** Each `Exec` takes its own
+  per-statement snapshot, so reads observe the latest committed state across the
+  statements of the transaction (matching Neo4j's default), rather than a single
+  snapshot for the whole transaction.
+- **Teardown-only finish.** The caller must still finish the handle with exactly
+  one `Commit` or `Rollback`; on a read-only handle both are no-ops, because
+  nothing was acquired.
+
+```go
+tx, err := eng.BeginReadTx(ctx)
+if err != nil {
+    // handle
+}
+defer tx.Rollback() // teardown-only no-op for a read-only handle
+
+res, err := tx.Exec("MATCH (n:Person) RETURN n.name", nil)
+if err != nil {
+    // handle
+}
+_ = res
+
+if _, err := tx.Exec("CREATE (:Person)", nil); errors.Is(err, cypher.ErrWriteInReadOnlyTx) {
+    // expected: writes are not permitted on a read-only transaction
+}
+```
+
+Over the Bolt protocol, `BEGIN` with `mode="r"` routes through `BeginReadTx`, and
+`ErrWriteInReadOnlyTx` maps to `Neo.ClientError.Request.Invalid`
+(see [docs/isolation-design.md](isolation-design.md) and [docs/bolt.md](bolt.md)).
+
 ---
 
 ## Resource budgets
@@ -682,4 +730,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-06-13 against commit `37adcc2`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-17 against commit `90e0be8`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

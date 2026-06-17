@@ -4,6 +4,114 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-06-17
+
+The sixth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release. Its headline is a **new public API** —
+`(*cypher.Engine).BeginReadTx` — that opens a **lock-free, read-only
+explicit transaction**, lifting concurrent read throughput by roughly
+**2×** by never acquiring the single-writer serialisation, the
+visibility barrier, or a WAL transaction. The release also lands
+**Cypher read-path performance work** (per-query forward-CSR caching in
+relationship reconstruction; non-escaping `RowContext` pooling) and the
+**first publication of the deterministic-simulation-testing (DST)
+harness** (`internal/sim` + `cmd/sim`), TigerBeetle-VOPR-modelled
+test/CI infrastructure that found and fixed two latent defects.
+
+The bump is **MINOR** under [Semantic Versioning](https://semver.org/):
+the new `BeginReadTx` API is **purely additive** over `v0.3.2` — no
+exported identifier was removed or renamed, and there is **no breaking
+change**. As a `0.y.z` release the public API remains unstable; pin the
+exact version you depend on.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios, 16 006 / 16 006 steps) and **100 %
+ACID-compliant**. The Go toolchain remains **go1.26.4** (unchanged), and
+`govulncheck ./...` stays clean.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.4.0
+```
+
+### Added
+
+- **`(*cypher.Engine).BeginReadTx(ctx)` — lock-free read-only explicit
+  transactions.** A read-only transaction handle that acquires **neither**
+  the engine writer serialisation, **nor** the visibility barrier, **nor**
+  a WAL transaction — so it never serialises behind, or blocks, a
+  concurrent writer. Every statement run through the handle is rejected
+  **before execution** with the new exported sentinel
+  `cypher.ErrWriteInReadOnlyTx` if it contains a writing clause or is DDL;
+  this guard is what keeps the lock-free path safe. Permitted reads route
+  through the engine's concurrent read path, each taking its own
+  per-statement snapshot — **read-committed** isolation across the
+  statements of the transaction, matching Neo4j's default. `Commit` and
+  `Rollback` on a read-only handle are teardown-only no-ops. Over the Bolt
+  protocol, `BEGIN` with `mode="r"` now routes through `BeginReadTx`, and
+  `ErrWriteInReadOnlyTx` maps to `Neo.ClientError.Request.Invalid` with
+  the message forwarded to the client (client-fault). Motivated by
+  block-profiling that attributed **83 %** of Bolt-load blocking time to
+  the single-writer semaphore held by `BeginTx` for the whole explicit
+  transaction — even for read-only ones. (#1573)
+- **Deterministic-simulation-testing (DST) harness** (`internal/sim`,
+  `cmd/sim`) — first publication of a TigerBeetle-VOPR-modelled
+  deterministic simulator: seed-driven virtual clock, in-memory faulting
+  disk with real WAL recovery, graph oracle and invariant checkers,
+  crash-and-recovery cycles, a real in-process Bolt wire path, a named
+  scenario catalogue with deterministic trace recording, scripted replay
+  and `ddmin` shrinking, a reproducible bounded-worker swarm, and upgrade,
+  cross-release, and differential harnesses. The `cmd/sim` CLI exposes
+  `-swarm`, `-scenario`, `-replay`, and `-check-every`. This is **test and
+  CI infrastructure**, not a public module API. (#1528–#1576)
+
+### Performance
+
+- **Cypher relationship reconstruction — cache the forward CSR per
+  query.** `edgeHandleAtFwdPos` / `edgeInstanceIdxFor` previously rebuilt
+  the entire forward CSR (`O(V+E)`) on **every** result row to read one
+  slot, making relationship reconstruction `O(R·(V+E))` per query. The
+  forward CSR snapshot is now built once per query and reused, mirroring
+  the existing edge-ID-resolver pattern. On `MATCH (a)-[r]->(b) RETURN
+  count(r)` over a multigraph (benchstat, count = 6): **dense graph
+  −88.2 % sec/op, −95.9 % B/op, −16.7 % allocs/op**; small graph −73.6 %
+  sec/op, −83.3 % B/op. Certified by `graph-theory-expert`,
+  `storage-engine-auditor`, and `go-developer`. (#1574)
+- **Cypher scalar projection — pool the per-row `RowContext`.** The
+  per-row context map is now recycled through a `sync.Pool` at the two
+  **non-escaping** evaluation sites (the `Filter` predicate closure and
+  the scalar-projection evaluator), gated on the existing analysis flag
+  that bails on any expression kind that could retain the context past the
+  call. On `MATCH (n:N) WHERE n.i>=0 AND n.j>=n.i RETURN n.i,n.j`
+  (benchstat, count = 6): **−42.1 % B/op, −26.6 % allocs/op, −11.5 %
+  sec/op**. Only the outer map container is recycled; values that escape
+  into a result row are independently owned and never reused. Certified by
+  `go-developer`; `rust-perf-engineer` consulted. (#1575)
+- **Brandes betweenness — zero-allocation predecessor arena.** The
+  per-source predecessor lists are flattened into a reusable arena,
+  cutting allocations on the centrality hot path (bit-identical results).
+  (#1515)
+- **DST simulator — configurable invariant-check cadence.** The simulator
+  invariant checker now runs on a configurable cadence with a guaranteed
+  terminal check, reducing per-tick overhead in long runs without
+  weakening end-state verification. (#1576)
+
+### Fixed
+
+- **Bolt illegal-transition error names the originating state.** An
+  illegal protocol transition into `FAILURE` now reports the state the
+  connection was actually in, rather than always reporting `FAILED` —
+  found via the DST Bolt wire harness. (commit `82d98af`)
+- **`DROP CONSTRAINT` by name is now atomic and never a silent no-op.**
+  Dropping a constraint by name now drops the constraint **and** its
+  backing index atomically; a previously fail-silent path that left the
+  constraint in place is fixed. Schema DDL is not covered by the
+  openCypher TCK, so the execution-conformance count is unaffected. Found
+  via the DST schema-chaos scenario. (#1556)
+
 ## [0.3.2] — 2026-06-15
 
 The fifth published release of **GoGraph**, a Go module for graph
@@ -853,6 +961,7 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.1.0
   `github.com/FlavioCFOliveira/GoGraph` with no `/vN` suffix, which is
   Semantic-Import-Versioning-correct for a `0.x` line.
 
+[0.4.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.4.0
 [0.3.2]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.2
 [0.3.1]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.1
 [0.3.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.3.0
