@@ -132,21 +132,29 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
-	if err := binary.Write(tee, binary.LittleEndian, verts); err != nil {
+	// Vertices, edges, weights and handles are streamed to the tee as their
+	// raw little-endian byte views in bounded csrWriteChunk-sized slices,
+	// instead of via binary.Write. The prior path widened edges into a whole
+	// `tmp []uint64` copy (graph.NodeID IS uint64, so the copy was a no-op
+	// widening) and let binary.Write's fast path allocate a make([]byte, 8*len)
+	// scratch buffer per whole-slice call — together ~1.92x the payload of
+	// transient heap at checkpoint time. Reinterpreting each native slice as
+	// bytes (see csr_codec_bytes.go; the on-disk format is little-endian and
+	// the engine runs only on little-endian hosts) and streaming in 64 KiB
+	// chunks keeps the writer's working set O(chunk). The byte stream — and
+	// therefore the on-disk layout and the tee'd CRC32C — is byte-identical to
+	// the prior binary.Write output, which the v1 golden fixture and the CSR
+	// cross-process byte-equality tests pin.
+	if err := streamLE(tee, uint64sAsBytes(verts)); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
-	// Write edges as []uint64 by casting through binary.Write.
-	tmp := make([]uint64, len(edges))
-	for i, e := range edges {
-		tmp[i] = uint64(e)
-	}
-	if err := binary.Write(tee, binary.LittleEndian, tmp); err != nil {
+	if err := streamLE(tee, nodeIDsAsBytes(edges)); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
 	if hasW == 1 {
-		if err := binary.Write(tee, binary.LittleEndian, weights); err != nil {
+		if err := streamLE(tee, weightsAsBytes(weights, int(wsize))); err != nil {
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 			return 0, 0, err
 		}
@@ -160,7 +168,7 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 			return 0, 0, err
 		}
-		if err := binary.Write(tee, binary.LittleEndian, handles); err != nil {
+		if err := streamLE(tee, uint64sAsBytes(handles)); err != nil {
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 			return 0, 0, err
 		}
@@ -177,6 +185,17 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 // csrWeightSize returns the size in bytes of one weight value, or 0
 // when W is struct{} (unweighted). For unsupported weight types we
 // return 0 and rely on the writer to skip the weights section.
+//
+// The int / uint / uintptr cases report 8 bytes, matching the read-side
+// decode in [decodeCSRWeight]. The prior writer serialised weights with
+// binary.Write, which rejects these variable-width Go types with "some
+// values are not fixed-sized" — so a CSR with int/uint/uintptr weights was
+// never persistable (WriteCSR returned an error). Since [WriteCSR] now
+// streams the raw 8-byte little-endian view ([weightsAsBytes]), these
+// weights round-trip correctly through the symmetric decode. This is a
+// strictly additive capability: no pre-existing on-disk file can contain an
+// int/uint/uintptr weights section, so there is no migration concern and the
+// byte layout for every previously-writable weight type is unchanged.
 func csrWeightSize[W any]() uint8 {
 	var zero W
 	switch any(zero).(type) {
@@ -302,14 +321,25 @@ func readCSRLimited(r io.Reader, maxBytes int64) (CSRReadback, error) {
 		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
 		return CSRReadback{}, err
 	}
-	raw := make([]uint64, nE)
-	if err := binary.Read(br, binary.LittleEndian, raw); err != nil {
+	// Edges are read directly into the destination []graph.NodeID via its
+	// raw byte view — graph.NodeID IS uint64 (graph/graph.go), so the prior
+	// `raw []uint64` + per-element copy into a second `edges []graph.NodeID`
+	// array was a pure widening no-op that doubled the readback's transient
+	// working set (an extra whole edge column). Reading the little-endian
+	// bytes straight into the final slice mirrors the established mmap
+	// precedent in store/csrfile (Reader.bindSlices): the on-disk format is
+	// explicitly little-endian and the engine runs only on little-endian
+	// hosts, so the raw bytes land as native uint64s with no byte-swap and no
+	// alignment hazard — a []graph.NodeID from make is always 8-byte aligned.
+	//
+	// The edge count nE was already rejected against the validated byte budget
+	// (recordCap) ABOVE, before this allocation — the OOM / decoder-bomb guard
+	// from the 2026-06-14 security audits is preserved: no make() here can be
+	// driven past what the file's bytes could hold.
+	edges := make([]graph.NodeID, nE)
+	if _, err := io.ReadFull(br, nodeIDsAsBytes(edges)); err != nil {
 		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
 		return CSRReadback{}, err
-	}
-	edges := make([]graph.NodeID, nE)
-	for i, v := range raw {
-		edges[i] = graph.NodeID(v)
 	}
 	var weightBytes []byte
 	if hasW {
