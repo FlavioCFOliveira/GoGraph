@@ -1,6 +1,7 @@
 package adjlist
 
 import (
+	"context"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -160,7 +161,7 @@ func TestAdjList_Compact(t *testing.T) {
 	// Simple graph collapses duplicates → only one edge a->b.
 	mustAddEdge(t, a, "a", "c", 100)
 	a.RemoveEdge("a", "b")
-	a.Compact()
+	a.Compact(context.Background())
 	if a.HasEdge("a", "b") {
 		t.Fatalf("removed edge must remain removed after Compact")
 	}

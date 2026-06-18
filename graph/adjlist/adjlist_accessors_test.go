@@ -1,6 +1,7 @@
 package adjlist
 
 import (
+	"context"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -79,15 +80,16 @@ func TestAdjList_LoadEntry_AllPaths(t *testing.T) {
 	}
 }
 
-// TestAdjList_Compact_NoOp documents the v1 contract: Compact is a
-// no-op and does not alter observable state.
-func TestAdjList_Compact_NoOp(t *testing.T) {
+// TestAdjList_Compact_PreservesObservableState confirms Compact leaves
+// every observable property of the graph unchanged — order, size, and
+// edge membership — while it right-sizes the backing arrays underneath.
+func TestAdjList_Compact_PreservesObservableState(t *testing.T) {
 	t.Parallel()
 	a := New[string, int](Config{Directed: true})
 	mustAddEdge(t, a, "a", "b", 1)
 	beforeOrder := a.Order()
 	beforeSize := a.Size()
-	a.Compact()
+	a.Compact(context.Background())
 	if a.Order() != beforeOrder {
 		t.Fatalf("Compact changed Order: %d -> %d", beforeOrder, a.Order())
 	}

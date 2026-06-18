@@ -19,11 +19,13 @@
 // atomic load on the slot itself, and operates on the immutable
 // snapshot of neighbours/weights stored in the resulting entry.
 //
-// Writes (AddEdge, RemoveEdge, Compact) take the shard mutex, copy
-// the entry's slices with the modification applied, and publish the
-// new entry pointer via [sync/atomic.StorePointer]. Concurrent
-// readers always observe a consistent snapshot — either the entry
-// before the write or the entry after it.
+// Writes (AddEdge, RemoveEdge) take the shard mutex, copy the entry's
+// slices with the modification applied, and publish the new entry
+// pointer via [sync/atomic.StorePointer]. Compact likewise takes the
+// shard mutex and republishes each slack-bearing entry with its backing
+// arrays right-sized to exact length. Concurrent readers always observe
+// a consistent snapshot — either the entry before the write or the entry
+// after it.
 //
 // The yield callback of [AdjList.Neighbours] iterates over slices
 // owned by a snapshotted entry and may safely call any other AdjList
@@ -31,6 +33,7 @@
 package adjlist
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"sync"
@@ -875,11 +878,101 @@ func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 	}
 }
 
-// Compact is a no-op in the current copy-on-write implementation:
-// removed edges already release their slots' previous slices on the
-// next write. It is retained for API symmetry with future backends
-// that may benefit from explicit compaction.
-func (a *AdjList[N, W]) Compact() {}
+// Compact right-sizes every adjacency entry's backing arrays to their
+// exact live length, reclaiming the slack left by geometric (×2) append
+// growth. After a bulk build a degree-d hub typically over-allocates its
+// neighbours/weights (and optional handles/labels) columns by up to ~2×;
+// across a graph the wasted capacity averages ≈21% of the adjacency
+// arrays. Compact walks every shard, and for each occupied slot whose
+// entry has any column with spare capacity (cap > len) it builds a fresh
+// entry whose every column is allocated at EXACT length (cap == len),
+// copying only the live [0:len] data, then publishes it via the same
+// atomic store-pointer mechanism the writers use. Entries with no slack
+// (every column already cap == len) are skipped to avoid useless churn.
+//
+// Compact is best run once after a build-then-query workload has finished
+// mutating the graph and before the read-heavy query phase, so the
+// resident footprint reflects the tight arrays.
+//
+// Concurrency: Compact is safe for concurrent use with lock-free readers.
+// It takes one shard mutex at a time (never two simultaneously, so it can
+// never participate in a lock-ordering cycle with the two-lock
+// cross-shard [AdjList.addEdge] path) and publishes each trimmed entry
+// with [sync/atomic.StorePointer]. A reader holding the prior entry
+// pointer keeps iterating the old, untrimmed — but never mutated —
+// backing arrays; a reader that loads after the store observes the
+// trimmed entry. No reader ever sees a torn or half-trimmed entry. The
+// trimmed entry preserves the nil-vs-empty distinction of the optional
+// handles/labels columns exactly: a nil column stays nil (a label- or
+// handle-free graph never gains a zero-length slice).
+//
+// Compact honours ctx cancellation between shards, so a cancelled Compact
+// of a very large graph stops promptly with whatever shards it has
+// already trimmed left consistently published.
+func (a *AdjList[N, W]) Compact(ctx context.Context) {
+	for i := range a.shards {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		a.compactShard(&a.shards[i])
+	}
+}
+
+// compactShard trims every slack-bearing entry of a single shard under the
+// shard mutex. It is the per-shard body of [AdjList.Compact].
+func (a *AdjList[N, W]) compactShard(s *adjShard[W]) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ss := s.slotsRef.Load()
+	if ss == nil {
+		return
+	}
+	for idx := range ss.slots {
+		p := atomic.LoadPointer(&ss.slots[idx])
+		if p == nil {
+			continue
+		}
+		e := (*adjEntry[W])(p)
+		trimmed := trimEntry(e)
+		if trimmed == nil {
+			continue // no slack: leave the slot untouched.
+		}
+		atomic.StorePointer(&ss.slots[idx], unsafe.Pointer(trimmed)) //nolint:gosec // typed atomic publication of *adjEntry[W]
+	}
+}
+
+// trimEntry returns a new adjEntry whose every column is allocated at exact
+// length (cap == len), or nil when e already has no slack in any column (so
+// the caller can skip republishing it). The optional handles/labels columns
+// preserve the nil-vs-empty distinction: a nil source column stays nil in the
+// result, exactly as [compactEntry] does, so downstream code that branches on
+// `handles == nil` / `labels == nil` is unaffected. Column alignment is
+// preserved: result.X[i] still corresponds to result.neighbours[i].
+func trimEntry[W any](e *adjEntry[W]) *adjEntry[W] {
+	if cap(e.neighbours) == len(e.neighbours) &&
+		cap(e.weights) == len(e.weights) &&
+		(e.handles == nil || cap(e.handles) == len(e.handles)) &&
+		(e.labels == nil || cap(e.labels) == len(e.labels)) {
+		return nil
+	}
+	n := len(e.neighbours)
+	nb := make([]graph.NodeID, n)
+	copy(nb, e.neighbours)
+	ws := make([]W, n)
+	copy(ws, e.weights)
+	var hs []uint64
+	if e.handles != nil {
+		hs = make([]uint64, len(e.handles))
+		copy(hs, e.handles)
+	}
+	var ls []uint32
+	if e.labels != nil {
+		ls = make([]uint32, len(e.labels))
+		copy(ls, e.labels)
+	}
+	return &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls}
+}
 
 // MaxNodeID returns one more than the largest [graph.NodeID] that has
 // been assigned by the underlying Mapper. The value is a stable upper

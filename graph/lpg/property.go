@@ -235,12 +235,13 @@ func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) erro
 	keyID := g.propKeys().Intern(key)
 	s := g.nodePropShardFor(id)
 	s.mu.Lock()
-	bag, ok := s.m[id]
-	if !ok {
-		bag = make(map[PropertyKeyID]PropertyValue)
-		s.m[id] = bag
-	}
-	bag[keyID] = value
+	// propBag is stored by value, so mutate a local copy and write it back.
+	// In the small tier set may append to (and thus reallocate) the pairs
+	// slice, and a first Set on a new node starts from the zero bag; the
+	// write-back makes both visible.
+	bag := s.m[id]
+	bag.set(keyID, value)
+	s.m[id] = bag
 	s.mu.Unlock()
 	return nil
 }
@@ -263,8 +264,7 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 	if !ok {
 		return PropertyValue{}, false
 	}
-	v, ok := bag[keyID]
-	return v, ok
+	return bag.get(keyID)
 }
 
 // DelNodeProperty removes the named property from n. No-op if absent.
@@ -280,9 +280,13 @@ func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
 	s := g.nodePropShardFor(id)
 	s.mu.Lock()
 	if bag, ok2 := s.m[id]; ok2 {
-		delete(bag, keyID)
-		if len(bag) == 0 {
+		// propBag is stored by value; write the mutated copy back, dropping
+		// the node entry entirely when the last property goes so an empty
+		// bag never lingers (preserving the prior delete-when-empty contract).
+		if bag.del(keyID) {
 			delete(s.m, id)
+		} else {
+			s.m[id] = bag
 		}
 	}
 	s.mu.Unlock()
@@ -302,12 +306,12 @@ func (g *Graph[N, W]) NodeProperties(n N) map[string]PropertyValue {
 		s.mu.RUnlock()
 		return nil
 	}
-	out := make(map[string]PropertyValue, len(bag))
-	for k, v := range bag {
+	out := make(map[string]PropertyValue, bag.len())
+	bag.forEach(func(k PropertyKeyID, v PropertyValue) {
 		if name, ok := g.propKeys().Resolve(k); ok {
 			out[name] = v
 		}
-	}
+	})
 	s.mu.RUnlock()
 	return out
 }
@@ -327,12 +331,12 @@ func (g *Graph[N, W]) NodePropertiesByID(id graph.NodeID) map[string]PropertyVal
 		s.mu.RUnlock()
 		return nil
 	}
-	out := make(map[string]PropertyValue, len(bag))
-	for k, v := range bag {
+	out := make(map[string]PropertyValue, bag.len())
+	bag.forEach(func(k PropertyKeyID, v PropertyValue) {
 		if name, ok := g.propKeys().Resolve(k); ok {
 			out[name] = v
 		}
-	}
+	})
 	s.mu.RUnlock()
 	return out
 }
@@ -367,11 +371,11 @@ func (g *Graph[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name st
 		s.mu.RUnlock()
 		return
 	}
-	for k, v := range bag {
+	bag.forEach(func(k PropertyKeyID, v PropertyValue) {
 		if name, ok := g.propKeys().Resolve(k); ok {
 			visit(name, v)
 		}
-	}
+	})
 	s.mu.RUnlock()
 }
 
@@ -405,7 +409,7 @@ func (g *Graph[N, W]) NodePropertyByID(id graph.NodeID, key string) (PropertyVal
 		s.mu.RUnlock()
 		return PropertyValue{}, false
 	}
-	v, ok := bag[kid]
+	v, ok := bag.get(kid)
 	s.mu.RUnlock()
 	return v, ok
 }

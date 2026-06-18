@@ -147,10 +147,14 @@ type edgeKey struct {
 // access is less hot than adjacency.
 const propMapShards = 16
 
-// nodePropShard is one stripe of the per-vertex property map.
+// nodePropShard is one stripe of the per-vertex property map. The inner
+// per-node bag is a compact tiered [propBag] (sprint 207, #1587) stored by
+// value, not a nested Go map: a node carrying a handful of properties pays a
+// single small slice backing instead of ~300 B of map overhead. The bag is
+// guarded by mu exactly as the nested map was.
 type nodePropShard struct {
 	mu sync.RWMutex
-	m  map[graph.NodeID]map[PropertyKeyID]PropertyValue
+	m  map[graph.NodeID]propBag
 }
 
 // edgePropShard is one stripe of the per-edge property map.
@@ -689,7 +693,7 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	// relationship type inline in the adjacency slot column and never allocates
 	// these sixteen maps.
 	for i := range g.nodePropShards {
-		g.nodePropShards[i].m = make(map[graph.NodeID]map[PropertyKeyID]PropertyValue)
+		g.nodePropShards[i].m = make(map[graph.NodeID]propBag)
 	}
 	for i := range g.edgePropShards {
 		g.edgePropShards[i].m = make(map[edgeKey]map[PropertyKeyID]PropertyValue)

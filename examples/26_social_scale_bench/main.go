@@ -182,6 +182,16 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return fmt.Errorf("build: %w", err)
 	}
 
+	// This is a build-then-query workload: the graph is fully assembled
+	// above and only read from here on. Compact right-sizes the adjacency
+	// backing arrays, reclaiming the ~21% slack that geometric (×2) append
+	// growth leaves behind, so the resident-heap figures reported below
+	// reflect the tight arrays the query phase actually runs against.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	g.AdjList().Compact(ctx)
+
 	fmt.Fprintf(w, "nodes.users=%d\n", stats.users)
 	fmt.Fprintf(w, "nodes.articles=%d\n", stats.articles)
 	fmt.Fprintf(w, "edges.friend=%d\n", stats.friendEdges)

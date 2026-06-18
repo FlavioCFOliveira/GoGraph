@@ -146,15 +146,15 @@ func (g *Graph[N, W]) PropertyKeysInUse() []string {
 		sh := &g.nodePropShards[i]
 		sh.mu.RLock()
 		for id, bag := range sh.m {
-			if len(bag) == 0 {
+			if bag.len() == 0 {
 				continue
 			}
 			if tombstoned && g.IsTombstoned(id) {
 				continue
 			}
-			for pk := range bag {
+			bag.forEach(func(pk PropertyKeyID, _ PropertyValue) {
 				seen[pk] = struct{}{}
-			}
+			})
 		}
 		sh.mu.RUnlock()
 	}
