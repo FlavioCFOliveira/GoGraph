@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -197,5 +196,5 @@ func factLines(out string) string {
 		}
 		keep = append(keep, line)
 	}
-	return fmt.Sprint(strings.Join(keep, "\n"))
+	return strings.Join(keep, "\n")
 }

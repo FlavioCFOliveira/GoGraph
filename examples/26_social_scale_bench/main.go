@@ -129,7 +129,7 @@ func (c config) validate() error {
 		return fmt.Errorf("articles must be >= 0, got %d", c.articles)
 	case c.friendsMin < 0 || c.friendsMax < c.friendsMin:
 		return fmt.Errorf("require 0 <= friendsMin <= friendsMax, got [%d,%d]", c.friendsMin, c.friendsMax)
-	case c.friendsMax > c.users-1:
+	case c.friendsMax >= c.users:
 		return fmt.Errorf("friendsMax (%d) exceeds users-1 (%d): not enough distinct friends", c.friendsMax, c.users-1)
 	case c.likesMax < 0:
 		return fmt.Errorf("likesMax must be >= 0, got %d", c.likesMax)
@@ -235,7 +235,9 @@ type buildStats struct {
 // are 24-char hex strings drawn from the seeded RNG; names and titles
 // are realistic strings assembled from fixed word lists. The build
 // honours ctx cancellation between phases and on a periodic check.
-func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, w io.Writer) (buildStats, error) {
+func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.Writer) (buildStats, error) {
+	//nolint:gosec // G404: a seeded math/rand is intentional here — the benchmark
+	// must reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
 	start := time.Now()
 
