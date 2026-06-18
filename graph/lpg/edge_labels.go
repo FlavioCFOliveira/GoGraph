@@ -22,17 +22,17 @@ func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.RLock()
-	bag, ok := sh.m[k]
-	if !ok {
+	n := sh.count(k)
+	if n == 0 {
 		sh.mu.RUnlock()
 		return nil
 	}
-	out := make([]string, 0, len(bag))
-	for lid := range bag {
+	out := make([]string, 0, n)
+	sh.forLabels(k, func(lid LabelID) {
 		if name, ok := g.reg.Resolve(lid); ok {
 			out = append(out, name)
 		}
-	}
+	})
 	sh.mu.RUnlock()
 	return out
 }

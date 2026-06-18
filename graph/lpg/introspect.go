@@ -81,17 +81,12 @@ func (g *Graph[N, W]) RelationshipTypesInUse() []string {
 	for i := range g.edgeLabelShards {
 		sh := &g.edgeLabelShards[i]
 		sh.mu.RLock()
-		for k, bag := range sh.m {
-			if len(bag) == 0 {
-				continue
-			}
+		sh.forEach(func(k edgeKey, lid LabelID) {
 			if !g.edgeEndpointLive(k) {
-				continue
+				return
 			}
-			for lid := range bag {
-				seen[lid] = struct{}{}
-			}
-		}
+			seen[lid] = struct{}{}
+		})
 		sh.mu.RUnlock()
 	}
 	return g.resolveLabelIDs(seen)

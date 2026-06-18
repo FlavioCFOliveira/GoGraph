@@ -173,9 +173,133 @@ type nodeLabelShard struct {
 // the shard is keyed by the src endpoint so all labels of edges
 // out of one node coalesce in the same shard (favourable for the
 // common access pattern: walk-out-of-node-then-inspect-label).
+//
+// Storage is split by cardinality. The overwhelmingly common case — an
+// edge carrying exactly one relationship type — is stored inline in the
+// "one" map as a bare [LabelID], with no per-edge container allocation.
+// Only the rare multi-label edge spills into the "multi" map, which
+// holds a small deduplicated slice of label ids. This keeps the
+// single-label memory cost to one map entry (key + a 4-byte id) instead
+// of a whole map[LabelID]struct{} (header plus a bucket) per edge — the
+// dominant resident-memory cost on label-heavy graphs. The two maps are
+// mutually exclusive: a given edgeKey appears in at most one of them.
+//
+// The multi map is allocated lazily on the first promotion to keep an
+// all-single-label graph from paying for sixteen empty spill maps.
 type edgeLabelShard struct {
-	mu sync.RWMutex
-	m  map[edgeKey]map[LabelID]struct{}
+	mu    sync.RWMutex
+	one   map[edgeKey]LabelID
+	multi map[edgeKey][]LabelID
+}
+
+// add attaches lid to k. The caller must hold sh.mu for writing.
+func (sh *edgeLabelShard) add(k edgeKey, lid LabelID) {
+	if ls, ok := sh.multi[k]; ok {
+		for _, x := range ls {
+			if x == lid {
+				return
+			}
+		}
+		sh.multi[k] = append(ls, lid)
+		return
+	}
+	if cur, ok := sh.one[k]; ok {
+		if cur == lid {
+			return
+		}
+		delete(sh.one, k)
+		if sh.multi == nil {
+			sh.multi = make(map[edgeKey][]LabelID)
+		}
+		sh.multi[k] = []LabelID{cur, lid}
+		return
+	}
+	sh.one[k] = lid
+}
+
+// has reports whether k carries lid. The caller must hold sh.mu for
+// reading (or writing).
+func (sh *edgeLabelShard) has(k edgeKey, lid LabelID) bool {
+	if cur, ok := sh.one[k]; ok {
+		return cur == lid
+	}
+	for _, x := range sh.multi[k] {
+		if x == lid {
+			return true
+		}
+	}
+	return false
+}
+
+// forLabels calls fn once per distinct label id on k. The caller must
+// hold sh.mu for reading (or writing).
+func (sh *edgeLabelShard) forLabels(k edgeKey, fn func(LabelID)) {
+	if cur, ok := sh.one[k]; ok {
+		fn(cur)
+		return
+	}
+	for _, x := range sh.multi[k] {
+		fn(x)
+	}
+}
+
+// count returns the number of distinct labels on k. The caller must
+// hold sh.mu for reading (or writing).
+func (sh *edgeLabelShard) count(k edgeKey) int {
+	if _, ok := sh.one[k]; ok {
+		return 1
+	}
+	return len(sh.multi[k])
+}
+
+// remove detaches lid from k, demoting a two-label edge back to the
+// inline representation and dropping the entry entirely when its last
+// label goes. The caller must hold sh.mu for writing.
+func (sh *edgeLabelShard) remove(k edgeKey, lid LabelID) {
+	if cur, ok := sh.one[k]; ok {
+		if cur == lid {
+			delete(sh.one, k)
+		}
+		return
+	}
+	ls, ok := sh.multi[k]
+	if !ok {
+		return
+	}
+	for i, x := range ls {
+		if x == lid {
+			ls = append(ls[:i], ls[i+1:]...)
+			break
+		}
+	}
+	switch len(ls) {
+	case 0:
+		delete(sh.multi, k)
+	case 1:
+		delete(sh.multi, k)
+		sh.one[k] = ls[0]
+	default:
+		sh.multi[k] = ls
+	}
+}
+
+// clear drops every label on k. The caller must hold sh.mu for writing.
+func (sh *edgeLabelShard) clear(k edgeKey) {
+	delete(sh.one, k)
+	delete(sh.multi, k)
+}
+
+// forEach calls fn once per (edge, label) pair stored in the shard. The
+// caller must hold sh.mu for reading (or writing).
+func (sh *edgeLabelShard) forEach(fn func(edgeKey, LabelID)) {
+	for k, lid := range sh.one {
+		fn(k, lid)
+	}
+	for k, ls := range sh.multi {
+		for _, lid := range ls {
+			fn(k, lid)
+		}
+	}
 }
 
 // Graph is a labelled property graph generic over the user node type
@@ -535,7 +659,7 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 		g.nodeLabelShards[i].m = make(map[graph.NodeID]map[LabelID]struct{})
 	}
 	for i := range g.edgeLabelShards {
-		g.edgeLabelShards[i].m = make(map[edgeKey]map[LabelID]struct{})
+		g.edgeLabelShards[i].one = make(map[edgeKey]LabelID)
 	}
 	for i := range g.nodePropShards {
 		g.nodePropShards[i].m = make(map[graph.NodeID]map[PropertyKeyID]PropertyValue)
@@ -793,7 +917,7 @@ func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
 func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	lsh := g.edgeLabelShardFor(k)
 	lsh.mu.Lock()
-	delete(lsh.m, k)
+	lsh.clear(k)
 	lsh.mu.Unlock()
 	psh := g.edgePropShardFor(k)
 	psh.mu.Lock()
@@ -1203,12 +1327,7 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	bag, ok := sh.m[k]
-	if !ok {
-		bag = make(map[LabelID]struct{})
-		sh.m[k] = bag
-	}
-	bag[lid] = struct{}{}
+	sh.add(k, lid)
 	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
 }
@@ -1232,12 +1351,7 @@ func (g *Graph[N, W]) HasEdgeLabel(src, dst N, name string) bool {
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	bag, ok := sh.m[k]
-	if !ok {
-		return false
-	}
-	_, ok = bag[lid]
-	return ok
+	return sh.has(k, lid)
 }
 
 // RemoveEdgeLabel detaches name from the directed edge (src, dst). It is the
@@ -1271,11 +1385,6 @@ func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	if bag, ok2 := sh.m[k]; ok2 {
-		delete(bag, lid)
-		if len(bag) == 0 {
-			delete(sh.m, k)
-		}
-	}
+	sh.remove(k, lid)
 	sh.mu.Unlock()
 }
