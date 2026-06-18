@@ -12,6 +12,7 @@ package community
 import (
 	"context"
 	"runtime"
+	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -131,6 +132,13 @@ func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (P
 	}
 
 	prevQ := g.modularity(comm, opts.Resolution)
+	// free holds aggGraph output buffer-sets retired from earlier levels,
+	// reused to build later levels (see aggregate's pooling note and the
+	// graphBufs type). Because aggregate reads only the current g and never
+	// an older level, the buffer-set displaced by `g = nextG` below is
+	// fully dead and safe to recycle on the next pass; the surviving g is
+	// never pushed here, so the final projection's g stays valid.
+	var free graphBufFreeList
 	for pass := 0; pass < opts.MaxPasses; pass++ {
 		if err := ctx.Err(); err != nil {
 			metrics.IncCounter("search.community.LeidenCtx.errors", 1)
@@ -141,12 +149,16 @@ func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (P
 		moved := g.localMove(comm, opts)
 		// Phase 2: refinement.
 		refined := g.refine(comm, opts)
-		// Phase 3: aggregation.
-		nextG, nextComm := g.aggregate(comm, refined)
+		// Phase 3: aggregation, drawing the new level's persistent output
+		// arrays from the free list when one is available.
+		nextG, nextComm := g.aggregate(comm, refined, free.get())
 		nextQ := nextG.modularity(nextComm, opts.Resolution)
 		if !moved && nextQ <= prevQ {
 			break
 		}
+		// g is now displaced and fully dead (nextG was built reading it,
+		// and nothing else holds it). Recycle its output arrays.
+		free.put(g.bufs())
 		g = nextG
 		comm = nextComm
 		prevQ = nextQ
@@ -544,69 +556,337 @@ func (g *aggGraph) refine(parent []int, opts LeidenOptions) []int {
 	return refined
 }
 
+// graphBufs holds the persistent output arrays of one aggGraph level so
+// they can be recycled into a later level. The arrays escape into the
+// returned aggGraph, so they cannot live in the per-call aggScratch pool;
+// instead LeidenCtx threads a small free list of retired buffer-sets
+// (graphBufFreeList) through the pass loop. Reuse is sound because
+// aggregate's read-dependency depth is exactly 1: it reads only the
+// current level g, so once `g = nextG` displaces g, g's buffers are dead.
+type graphBufs struct {
+	verts   []int
+	edges   []int
+	weights []float64
+	deg     []float64
+	loop    []float64
+	lifted  []int
+}
+
+// bufs packages g's persistent output arrays for recycling. Used by
+// LeidenCtx to return a displaced (dead) level's arrays to the free list.
+func (g *aggGraph) bufs() *graphBufs {
+	return &graphBufs{
+		verts:   g.verts,
+		edges:   g.edges,
+		weights: g.weights,
+		deg:     g.deg,
+		loop:    g.loop,
+		lifted:  g.lifted,
+	}
+}
+
+// graphBufFreeList is a tiny LIFO of retired graphBufs. At most one entry
+// is ever held during the Leiden pass loop (one level is displaced per
+// pass and consumed by the next), but the slice form keeps put/get total
+// and makes the "empty -> fresh allocation" path explicit.
+type graphBufFreeList struct {
+	bufs []*graphBufs
+}
+
+// get returns a recycled buffer-set, or nil when none is available (the
+// caller then allocates fresh).
+func (f *graphBufFreeList) get() *graphBufs {
+	n := len(f.bufs)
+	if n == 0 {
+		return nil
+	}
+	b := f.bufs[n-1]
+	f.bufs = f.bufs[:n-1]
+	return b
+}
+
+// put returns a dead buffer-set for later reuse.
+func (f *graphBufFreeList) put(b *graphBufs) { f.bufs = append(f.bufs, b) }
+
+// intBuf is a reusable, capacity-growing []int scratch slot.
+type intBuf []int
+
+// grow returns the buffer resliced to length n, reusing the backing array
+// when its capacity already suffices and reallocating (growing) otherwise.
+// The returned contents are not zeroed; callers that need zeros use
+// growZero.
+func (b *intBuf) grow(n int) []int {
+	if cap(*b) < n {
+		*b = make([]int, n)
+		return *b
+	}
+	*b = (*b)[:n]
+	return *b
+}
+
+// growZero is grow with the returned slice zeroed.
+func (b *intBuf) growZero(n int) []int {
+	s := b.grow(n)
+	for i := range s {
+		s[i] = 0
+	}
+	return s
+}
+
+// floatBuf is a reusable, capacity-growing []float64 scratch slot.
+type floatBuf []float64
+
+func (b *floatBuf) grow(n int) []float64 {
+	if cap(*b) < n {
+		*b = make([]float64, n)
+		return *b
+	}
+	*b = (*b)[:n]
+	return *b
+}
+
+func (b *floatBuf) growZero(n int) []float64 {
+	s := b.grow(n)
+	for i := range s {
+		s[i] = 0
+	}
+	return s
+}
+
+// growReuseInts reslices src to length n, reusing its backing array when
+// capacity suffices and reallocating otherwise. Used for the recyclable
+// persistent output arrays of aggGraph (see graphBufs). zero requests the
+// returned slice be zeroed; callers that fully overwrite skip it.
+func growReuseInts(src []int, n int, zero bool) []int {
+	var s []int
+	if cap(src) < n {
+		s = make([]int, n)
+		return s // make already zeroes
+	}
+	s = src[:n]
+	if zero {
+		for i := range s {
+			s[i] = 0
+		}
+	}
+	return s
+}
+
+// growReuseFloats is growReuseInts for []float64.
+func growReuseFloats(src []float64, n int, zero bool) []float64 {
+	var s []float64
+	if cap(src) < n {
+		s = make([]float64, n)
+		return s
+	}
+	s = src[:n]
+	if zero {
+		for i := range s {
+			s[i] = 0
+		}
+	}
+	return s
+}
+
+// aggScratch bundles the transient working buffers of one aggregate call.
+// All fields are pure scratch (dead once aggregate returns) and are
+// reused across the aggregation levels of a Leiden call via aggScratchPool.
+// The buffers grow monotonically to the largest level's size, so the pool
+// amortises the per-level allocations that previously dominated Leiden's
+// profile.
+type aggScratch struct {
+	remap    intBuf   // refined-community -> [0,nNew) relabel
+	pRemap   intBuf   // parent-community -> [0,kOuter) relabel
+	srcStart intBuf   // counting-sort per-source offsets
+	fill     intBuf   // per-source scatter cursor
+	ordDst   intBuf   // counting-sorted targets
+	ordW     floatBuf // counting-sorted weights
+	acc      floatBuf // per-source coalesce accumulator
+	touched  []int    // first-emission target order within a source
+}
+
+var aggScratchPool = sync.Pool{New: func() any { return &aggScratch{} }}
+
+func acquireAggScratch() *aggScratch { return aggScratchPool.Get().(*aggScratch) }
+
+func releaseAggScratch(sc *aggScratch) { aggScratchPool.Put(sc) }
+
 // aggregate builds a new aggGraph in which each refined community is
 // a single super-node. The returned comm slice projects the outer
 // (non-refined) partition onto the super-nodes.
 //
-//nolint:gocyclo // canonical aggregation: refined-community renumber + super-edge accumulation + lifted projection
-func (g *aggGraph) aggregate(parent, refined []int) (newG *aggGraph, newComm []int) {
-	// Renumber refined communities into [0, nNew).
-	remap := map[int]int{}
-	next := 0
+// # Allocation strategy
+//
+// The super-edge accumulation avoids the map[edgeKey]float64 that an
+// earlier implementation allocated per aggregation level (it dominated
+// Leiden's allocation profile). Instead it uses the CSR-build idiom:
+// inter-community edges are emitted as (source, target, weight) triples
+// in vertex-ascending, CSR-edge order, counting-sorted by source into
+// contiguous per-source runs, then coalesced — equal targets within a
+// run are summed using a dense accumulator and a touched-list (the same
+// O(degree)-reset pattern localMove uses). The community-renumber maps
+// (refined → [0,nNew); parent → [0,kOuter)) are likewise replaced by
+// dense []int relabel slices, since both source spaces are already dense
+// in [0, g.n).
+//
+// # Determinism
+//
+// Each super-edge's float64 weight is summed in the exact vertex-ascending
+// CSR-edge order the map version used (the counting sort and the
+// touched-list coalesce are both stable in emission order), so the per
+// (a,b) sum is bit-identical. The resulting adjacency is ordered by
+// first-emission within each source — a fixed deterministic order, unlike
+// the map version's iteration-order-dependent layout. Because Leiden's
+// edge weights are exact integers (every aggGraph edge starts at 1.0 and
+// only ever accumulates integer sums), the downstream modularity and
+// local-move/refine results are invariant to this within-source ordering;
+// see the determinism note on [LeidenCtx]. A future weighted-Leiden
+// variant with non-integer weights would make the chosen order
+// load-bearing, which this canonical (first-emission) order already pins.
+//
+//nolint:gocyclo // canonical aggregation: dense renumber + counting-sort super-edge coalesce + lifted projection
+func (g *aggGraph) aggregate(parent, refined []int, out *graphBufs) (newG *aggGraph, newComm []int) {
+	// Transient scratch (relabel maps, counting-sort scatter buffers,
+	// coalesce accumulator) is drawn from a pool and reused across every
+	// aggregation level of this Leiden call — the buffers are dead once
+	// aggregate returns, so pooling them removes the per-level allocations
+	// that dominated the profile.
+	//
+	// The persistent outputs (verts, edges, weights, deg, loop, lifted)
+	// escape into the returned graph, so they cannot use the per-call
+	// scratch pool. When the caller passes a recycled buffer-set (out !=
+	// nil, drawn from a displaced earlier level — see graphBufs), they are
+	// grown-or-reused from it; otherwise they are freshly allocated. newComm
+	// (the projected parent partition) is always freshly allocated and never
+	// pooled. out must NOT be the buffer-set of the current g (the caller
+	// guarantees this: it only recycles a level displaced two passes ago,
+	// never the live g aggregate is reading).
+	if out == nil {
+		out = &graphBufs{}
+	}
+	sc := acquireAggScratch()
+	defer releaseAggScratch(sc)
+
+	// Renumber refined communities into [0, nNew) via a dense relabel
+	// slice (refined ids live in [0, g.n)). First-occurrence order over v
+	// ascending is identical to the previous map-based remap.
+	remap := sc.remap.grow(g.n)
+	for i := range remap {
+		remap[i] = -1
+	}
+	nNew := 0
 	for v := 0; v < g.n; v++ {
 		r := refined[v]
-		if _, ok := remap[r]; !ok {
-			remap[r] = next
-			next++
+		if remap[r] < 0 {
+			remap[r] = nNew
+			nNew++
 		}
 	}
-	nNew := next
 
-	// New aggGraph: nodes = refined communities; edges accumulated by
-	// summing weights between distinct refined communities; self-loops
-	// accumulate internal weight.
-	type edgeKey struct{ a, b int }
-	weight := map[edgeKey]float64{}
-	deg := make([]float64, nNew)
-	loop := make([]float64, nNew)
-	// Invariant maintained at every level: deg[v] = sum(g.weights for
-	// non-self edges from v) + g.loop[v]. The previous level's loop
-	// represents already-contracted internal mass; it contributes to
-	// the new node's degree exactly once (already CSR-doubled).
+	deg := growReuseFloats(out.deg, nNew, true)
+	loop := growReuseFloats(out.loop, nNew, true)
+	// Counting-sort the inter-community super-edges by source into
+	// per-source contiguous runs, scattering directly from g (no
+	// intermediate triple buffers). Pass 1 counts inter-community edges per
+	// source and accumulates deg/loop; pass 2 scatters (target, weight)
+	// into each source's run in vertex-ascending CSR order — the order the
+	// float sums must follow. Invariant maintained at every level:
+	// deg[v] = sum(g.weights for non-self edges from v) + g.loop[v]. The
+	// previous level's loop is already-contracted internal mass and
+	// contributes to the new node's degree exactly once (already
+	// CSR-doubled).
+	srcStart := sc.srcStart.growZero(nNew + 1)
 	for v := 0; v < g.n; v++ {
 		a := remap[refined[v]]
 		loop[a] += g.loop[v]
 		deg[a] += g.loop[v] // self-loop's contribution to degree
 		for k := g.verts[v]; k < g.verts[v+1]; k++ {
-			u := g.edges[k]
-			b := remap[refined[u]]
-			deg[a] += g.weights[k]
+			b := remap[refined[g.edges[k]]]
+			w := g.weights[k]
+			deg[a] += w
 			if a == b {
-				loop[a] += g.weights[k]
+				loop[a] += w
 				continue
 			}
-			key := edgeKey{a, b}
-			weight[key] += g.weights[k]
+			srcStart[a+1]++
 		}
 	}
-	// Each non-self edge was counted twice (a->b and b->a) — that's
-	// the CSR doubling convention; we keep it. Build verts/edges.
-	verts := make([]int, nNew+1)
-	for key := range weight {
-		verts[key.a+1]++
+	for i := 1; i <= nNew; i++ {
+		srcStart[i] += srcStart[i-1]
+	}
+	nTri := srcStart[nNew]
+	ordDst := sc.ordDst.grow(nTri)
+	ordW := sc.ordW.grow(nTri)
+	fill := sc.fill.growZero(nNew)
+	for v := 0; v < g.n; v++ {
+		a := remap[refined[v]]
+		for k := g.verts[v]; k < g.verts[v+1]; k++ {
+			b := remap[refined[g.edges[k]]]
+			if a == b {
+				continue
+			}
+			pos := srcStart[a] + fill[a]
+			ordDst[pos] = b
+			ordW[pos] = g.weights[k]
+			fill[a]++
+		}
+	}
+
+	// Coalesce equal targets within each source run using a dense
+	// accumulator reset via a touched-list (O(distinct targets) per
+	// source). touched records first-emission order so the output
+	// adjacency is deterministic. acc holds the running float sum for the
+	// currently-processed source's targets, in emission order.
+	acc := sc.acc.growZero(nNew)
+	touched := sc.touched[:0]
+	// verts[0] must be 0; verts[a+1] is overwritten for every a below, so
+	// only index 0 relies on zeroing — request a full zero for safety.
+	verts := growReuseInts(out.verts, nNew+1, true)
+	// Pass A: count distinct targets per source to size edges/weights.
+	for a := 0; a < nNew; a++ {
+		lo, hi := srcStart[a], srcStart[a+1]
+		touched = touched[:0]
+		for p := lo; p < hi; p++ {
+			b := ordDst[p]
+			if acc[b] == 0 {
+				touched = append(touched, b)
+			}
+			acc[b] += ordW[p]
+		}
+		verts[a+1] = len(touched)
+		for _, b := range touched {
+			acc[b] = 0
+		}
 	}
 	for i := 1; i <= nNew; i++ {
 		verts[i] += verts[i-1]
 	}
-	edges := make([]int, verts[nNew])
-	weights := make([]float64, verts[nNew])
-	cursor := make([]int, nNew)
-	for key, w := range weight {
-		off := verts[key.a] + cursor[key.a]
-		edges[off] = key.b
-		weights[off] = w
-		cursor[key.a]++
+	// edges/weights are fully overwritten in Pass B (verts[nNew] slots, one
+	// per distinct super-edge), so they need no zeroing on reuse.
+	edges := growReuseInts(out.edges, verts[nNew], false)
+	weights := growReuseFloats(out.weights, verts[nNew], false)
+	// Pass B: coalesce and emit each source's distinct targets in
+	// first-emission order, summing weights in emission order.
+	for a := 0; a < nNew; a++ {
+		lo, hi := srcStart[a], srcStart[a+1]
+		touched = touched[:0]
+		for p := lo; p < hi; p++ {
+			b := ordDst[p]
+			if acc[b] == 0 {
+				touched = append(touched, b)
+			}
+			acc[b] += ordW[p]
+		}
+		off := verts[a]
+		for _, b := range touched {
+			edges[off] = b
+			weights[off] = acc[b]
+			off++
+			acc[b] = 0
+		}
 	}
+	sc.touched = touched // retain grown capacity for reuse next level
+
 	var m2 float64
 	for _, d := range deg {
 		m2 += d
@@ -625,18 +905,27 @@ func (g *aggGraph) aggregate(parent, refined []int) (newG *aggGraph, newComm []i
 		}
 	}
 
-	// Lift the level-0 compact NodeID -> current node mapping.
-	newLifted := make([]int, len(g.lifted))
+	// Lift the level-0 compact NodeID -> current node mapping. Fully
+	// overwritten, so no zeroing on reuse. out.lifted is a displaced
+	// earlier level's array, distinct from g.lifted (the caller never
+	// recycles the live g), so reading g.lifted while writing newLifted is
+	// safe. len(g.lifted) is the constant level-0 node count at every level.
+	newLifted := growReuseInts(out.lifted, len(g.lifted), false)
 	for level0 := 0; level0 < len(g.lifted); level0++ {
 		old := g.lifted[level0]
 		newLifted[level0] = remap[refined[old]]
 	}
 
-	// Renumber newParent to [0, kOuter): preserves first-occurrence order.
-	pRemap := map[int]int{}
+	// Renumber newParent to [0, kOuter) via a dense relabel slice,
+	// preserving first-occurrence order. Parent ids are community ids of a
+	// partition over g.n nodes, hence in [0, g.n).
+	pRemap := sc.pRemap.grow(g.n)
+	for i := range pRemap {
+		pRemap[i] = -1
+	}
 	pNext := 0
 	for _, p := range newParent {
-		if _, ok := pRemap[p]; !ok {
+		if pRemap[p] < 0 {
 			pRemap[p] = pNext
 			pNext++
 		}

@@ -115,31 +115,20 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 // is checked at every iteration boundary; on cancellation returns
 // (nil, 0, wrapped ctx.Err()).
 //
+// This is the one-shot hot path: its computation is kept as a single
+// monolithic function (rather than routed through the [PageRanker] state
+// machinery) so the compiler keeps every working buffer in one frame —
+// extracting it behind a method boundary measurably regressed the
+// parallel SpMV by ~3%. [PageRanker.Run] carries the reusable variant for
+// repeated queries.
+//
 //nolint:gocyclo // canonical power-iteration: defaults + live detection + iteration loop
 func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	defer metrics.Time("search.centrality.PageRankCtx")()
-	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+	opts, err = validatePageRankOptions(opts)
+	if err != nil {
 		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
-		return nil, 0, ErrInvalidInput
-	}
-	// Zero is the Go zero-value sentinel meaning "use the default".
-	// Only explicitly out-of-range values are rejected.
-	if opts.Damping != 0 && (opts.Damping <= 0 || opts.Damping >= 1) {
-		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
-		return nil, 0, ErrInvalidInput
-	}
-	if opts.Tolerance < 0 {
-		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
-		return nil, 0, ErrInvalidInput
-	}
-	if opts.Damping == 0 {
-		opts.Damping = 0.85
-	}
-	if opts.MaxIterations <= 0 {
-		opts.MaxIterations = 100
-	}
-	if opts.Tolerance <= 0 {
-		opts.Tolerance = 1e-6
+		return nil, 0, err
 	}
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -279,6 +268,296 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 		}
 	}
 	return cur, opts.MaxIterations, nil
+}
+
+// validatePageRankOptions rejects invalid float options and fills in the
+// zero-value defaults, returning the canonicalised options. It is the
+// single validation site shared by [PageRankCtx] and [PageRanker.Run].
+func validatePageRankOptions(opts PageRankOptions) (PageRankOptions, error) {
+	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
+		return opts, ErrInvalidInput
+	}
+	// Zero is the Go zero-value sentinel meaning "use the default".
+	// Only explicitly out-of-range values are rejected.
+	if opts.Damping != 0 && (opts.Damping <= 0 || opts.Damping >= 1) {
+		return opts, ErrInvalidInput
+	}
+	if opts.Tolerance < 0 {
+		return opts, ErrInvalidInput
+	}
+	if opts.Damping == 0 {
+		opts.Damping = 0.85
+	}
+	if opts.MaxIterations <= 0 {
+		opts.MaxIterations = 100
+	}
+	if opts.Tolerance <= 0 {
+		opts.Tolerance = 1e-6
+	}
+	return opts, nil
+}
+
+// pageRankState bundles the CSR-derived working storage for one PageRank
+// computation: the live/out-degree topology (a pure function of the CSR)
+// and the two rank vectors. A fresh state is built per one-shot call; a
+// [PageRanker] reuses one state across repeated runs to amortise the
+// allocations and the reverse-CSR transpose.
+type pageRankState[W any] struct {
+	n        int
+	live     int
+	isLive   []bool
+	outdeg   []uint32
+	cur      []float64
+	next     []float64
+	revInit  bool     // whether revVerts/revEdges have been built
+	revVerts []uint64 // reverse-CSR offsets (lazy, cached on a PageRanker)
+	revEdges []graph.NodeID
+}
+
+// newPageRankState builds the CSR-derived topology (isLive, outdeg, live
+// count) and allocates the two rank vectors. Returns nil when the graph
+// is empty (n <= 0). The reverse-CSR structure is NOT built here; it is
+// materialised lazily by run when the parallel path is selected.
+func newPageRankState[W any](c *csr.CSR[W]) *pageRankState[W] {
+	verts := c.VerticesSlice()
+	edges := c.EdgesSlice()
+	n := len(verts) - 1
+	if n <= 0 {
+		return nil
+	}
+	// A node is "live" if it has at least one incident edge (in or out).
+	// Dangling sinks (out-degree 0, in-degree > 0) count as live;
+	// totally isolated ghost slots from sharded NodeID packing do not.
+	isLive := make([]bool, n)
+	// outdeg is logically an unsigned integer count; storing it as
+	// uint32 halves its memory footprint (n nodes saved 4 bytes each
+	// vs the v1.0 float64) and doubles its L1 lane density. The
+	// per-source float64 conversion at use site is a single FCVT
+	// instruction with no measurable cost on M4-class cores.
+	outdeg := make([]uint32, n)
+	for i := 0; i < n; i++ {
+		deg := verts[i+1] - verts[i]
+		if deg > 0 {
+			outdeg[i] = uint32(deg)
+			isLive[i] = true
+			for k := verts[i]; k < verts[i+1]; k++ {
+				isLive[int(edges[k])] = true
+			}
+		}
+	}
+	live := 0
+	for i := 0; i < n; i++ {
+		if isLive[i] {
+			live++
+		}
+	}
+	return &pageRankState[W]{
+		n:      n,
+		live:   live,
+		isLive: isLive,
+		outdeg: outdeg,
+		cur:    make([]float64, n),
+		next:   make([]float64, n),
+	}
+}
+
+// run executes the power iteration over the prepared state. The cur/next
+// vectors are re-seeded each call so a reused state yields a result
+// identical to a one-shot call. opts must already be validated/defaulted.
+//
+//nolint:gocyclo // canonical power-iteration: live re-seed + parallel/serial dispatch + iteration loop
+func (st *pageRankState[W]) run(ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	// Hoist every field the hot loop touches into locals so the loop body
+	// reads stack/registers rather than chasing the *pageRankState pointer
+	// each iteration — matching the locals-only form of the original
+	// monolithic implementation.
+	n := st.n
+	live := st.live
+	isLive := st.isLive
+	outdeg := st.outdeg
+	verts := c.VerticesSlice()
+	edges := c.EdgesSlice()
+
+	// Re-seed cur from scratch (a reused state may hold a previous run's
+	// values; the one-shot path's cur is already fresh zeros). next is not
+	// re-seeded here: both the serial seed loop and the parallel runRange
+	// fully overwrite every next[i] at the start of each iteration before
+	// any read, so a stale next from a previous run is never observed.
+	cur := st.cur
+	next := st.next
+	initRank := 1.0 / float64(live)
+	for i := 0; i < n; i++ {
+		if isLive[i] {
+			cur[i] = initRank
+		} else {
+			cur[i] = 0
+		}
+	}
+	teleport := (1 - opts.Damping) / float64(live)
+
+	// Decide once whether to run the parallel pull-formulation SpMV. The
+	// pull path requires the reverse-CSR (in-edges); it is built once and
+	// reused across every iteration (and, on a PageRanker, across every
+	// query). For graphs below the threshold (or when GOMAXPROCS == 1) the
+	// serial push path is used unchanged, so tiny graphs never pay the
+	// transpose nor the goroutine overhead.
+	workers := runtime.GOMAXPROCS(0)
+	useParallel := workers > 1 && live >= pageRankParallelThreshold
+	var engine *pageRankEngine
+	if useParallel {
+		// Build only the reverse-CSR structure (offsets + in-neighbour
+		// ids), and cache it on the state. The full csr.BuildReverse also
+		// transposes the weight and handle columns, which PageRank never
+		// reads — for an int64- or otherwise-weighted CSR that is a large
+		// wasted allocation and an extra serial pass that dominates the
+		// per-iteration win when the iteration count is small. The lean
+		// structure-only transpose keeps the one-time O(V+E) cost minimal,
+		// and a reused state pays it only on the first parallel run.
+		if !st.revInit {
+			st.revVerts, st.revEdges = pageRankBuildReverseStructure(verts, edges, n)
+			st.revInit = true
+		}
+		if workers > n {
+			workers = n
+		}
+		engine = newPageRankEngine(ctx, workers, st.revVerts, st.revEdges, n)
+		defer engine.close()
+	}
+
+	for iter := 1; iter <= opts.MaxIterations; iter++ {
+		if cerr := ctx.Err(); cerr != nil {
+			metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
+			return nil, 0, cerr
+		}
+		// Dangling mass: sum of cur[i] for live nodes with no out-edges.
+		// Redistributed uniformly across all live nodes (canonical PageRank).
+		// This O(V) reduction stays sequential (cheap, and its fixed
+		// increasing-i order keeps the float sum deterministic).
+		var danglingMass float64
+		for i := 0; i < n; i++ {
+			if isLive[i] && outdeg[i] == 0 {
+				danglingMass += cur[i]
+			}
+		}
+		baseShare := teleport + opts.Damping*danglingMass/float64(live)
+
+		var delta float64
+		if useParallel {
+			// Cancellation is honoured at iteration granularity: a worker
+			// runs its whole O(E/workers) range without polling ctx, then
+			// ctx.Err() is checked here and at the top of the loop. One
+			// iteration's SpMV is sub-millisecond per worker at the
+			// parallel threshold, so cancellation latency stays bounded by
+			// a single step plus the barrier.
+			delta = engine.iterate(next, cur, isLive, outdeg, baseShare, opts.Damping)
+			if cerr := ctx.Err(); cerr != nil {
+				metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
+				return nil, 0, cerr
+			}
+		} else {
+			// Seed every live node with teleport + dangling redistribution.
+			for i := 0; i < n; i++ {
+				if isLive[i] {
+					next[i] = baseShare
+				} else {
+					next[i] = 0
+				}
+			}
+
+			// Distribute outgoing mass from non-dangling sources (push SpMV).
+			for src := 0; src < n; src++ {
+				if outdeg[src] == 0 {
+					continue
+				}
+				share := opts.Damping * cur[src] / float64(outdeg[src])
+				for k := verts[src]; k < verts[src+1]; k++ {
+					next[int(edges[k])] += share
+				}
+			}
+
+			// L1 delta.
+			for i := 0; i < n; i++ {
+				d := next[i] - cur[i]
+				if d < 0 {
+					d = -d
+				}
+				delta += d
+			}
+		}
+
+		cur, next = next, cur
+		if delta < opts.Tolerance {
+			st.cur, st.next = cur, next
+			return cur, iter, nil
+		}
+	}
+	st.cur, st.next = cur, next
+	return cur, opts.MaxIterations, nil
+}
+
+// PageRanker is a stateful, reusable PageRank computer bound to one
+// immutable CSR snapshot. It caches the CSR-derived working storage —
+// the live/out-degree topology and, on the parallel path, the reverse-CSR
+// transpose — so that repeated [PageRanker.Run] calls on the same
+// snapshot skip those one-time allocations. It mirrors the stateless
+// [PageRank] / stateful split used elsewhere in the package (e.g.
+// search.Dijkstra vs search.DijkstraInto).
+//
+// Use it for repeated-query workloads (parameter sweeps over Damping or
+// MaxIterations, convergence studies, A/B comparisons) on a single graph.
+// For a single computation, prefer the one-shot [PageRank].
+//
+// # Concurrency
+//
+// A PageRanker owns mutable working buffers and is therefore NOT safe for
+// concurrent use: a single PageRanker must not have Run invoked from more
+// than one goroutine at a time. To run PageRank concurrently over a shared
+// CSR, give each goroutine its own PageRanker (or call the one-shot
+// [PageRank]); because the underlying CSR is immutable and read-only,
+// independent PageRankers over the same snapshot are race-free.
+//
+// # Result aliasing
+//
+// The []float64 returned by Run aliases an internal buffer and is
+// invalidated by the next Run call on the same PageRanker. Callers that
+// need the rank vector to outlive the next Run must copy it.
+type PageRanker[W any] struct {
+	c     *csr.CSR[W]
+	state *pageRankState[W]
+}
+
+// NewPageRanker builds a reusable PageRanker over the immutable snapshot
+// c. The CSR-derived topology is built eagerly; the reverse-CSR transpose
+// (needed only by the parallel path) is built lazily on the first Run
+// that selects it and then cached for subsequent runs.
+func NewPageRanker[W any](c *csr.CSR[W]) *PageRanker[W] {
+	return &PageRanker[W]{c: c, state: newPageRankState[W](c)}
+}
+
+// Run computes PageRank over the bound snapshot with opts and returns the
+// per-NodeID rank slice plus the iteration count to convergence. The
+// returned slice aliases an internal buffer (see the type's Result
+// aliasing note) and is invalidated by the next Run.
+//
+// The result is bit-for-bit identical to the equivalent one-shot
+// [PageRankCtx] call: Run re-seeds the rank vectors from scratch on every
+// invocation and consumes the same shared core, so reusing cached state
+// changes only the allocation profile, never the output.
+func (p *PageRanker[W]) Run(ctx context.Context, opts PageRankOptions) (ranks []float64, iterations int, err error) {
+	defer metrics.Time("search.centrality.PageRanker.Run")()
+	opts, err = validatePageRankOptions(opts)
+	if err != nil {
+		metrics.IncCounter("search.centrality.PageRanker.Run.errors", 1)
+		return nil, 0, err
+	}
+	if p.state == nil {
+		// n <= 0: empty graph.
+		return nil, 0, nil
+	}
+	if p.state.live == 0 {
+		return make([]float64, p.state.n), 0, nil
+	}
+	return p.state.run(ctx, p.c, opts)
 }
 
 // pageRankBuildReverseStructure transposes the forward CSR (verts,

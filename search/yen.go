@@ -96,8 +96,13 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 
 	edgeIdx := buildEdgeIndex[W](c)
 
-	seen := make(map[string]struct{}, k*4)
-	seen[pathBytes(first)] = struct{}{}
+	// Dedup paths by hashing the []NodeID directly instead of allocating a
+	// string per candidate. A hash-with-full-slice-fallback set has the
+	// same membership semantics as the string-keyed set it replaces (the
+	// fallback compares whole node sequences on collision), so the k
+	// returned paths and their order are unchanged.
+	seen := newPathSet(k * 4)
+	seen.add(first)
 
 	type candRef struct {
 		start, end int
@@ -134,11 +139,12 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 			fullPath := make([]graph.NodeID, 0, len(rootPath)-1+len(cand.Nodes))
 			fullPath = append(fullPath, rootPath[:len(rootPath)-1]...)
 			fullPath = append(fullPath, cand.Nodes...)
-			key := pathBytes(fullPath)
-			if _, dup := seen[key]; dup {
+			// fullPath is a freshly-allocated, never-mutated slice; the set
+			// retains it on insert, so storing it (not an arena range) keeps
+			// the backing array stable for later collision comparisons.
+			if !seen.add(fullPath) {
 				continue
 			}
-			seen[key] = struct{}{}
 			candStart := len(candArena)
 			candArena = append(candArena, fullPath...)
 			candidates = append(candidates, candRef{
@@ -157,11 +163,99 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 		best := candidates[0]
 		nodes := make([]graph.NodeID, best.end-best.start)
 		copy(nodes, candArena[best.start:best.end])
-		seen[pathBytes(nodes)] = struct{}{}
+		// The promoted node sequence was already inserted (as fullPath)
+		// when it became a candidate; re-adding it is a documented no-op
+		// that mirrors the original code's defensive re-mark.
+		seen.add(nodes)
 		result = append(result, YenPath[W]{Nodes: nodes, Cost: best.cost})
 		candidates = candidates[1:]
 	}
 	return result, nil
+}
+
+// pathSet is a set of node sequences ([]NodeID) used by Yen to deduplicate
+// candidate paths. Membership is keyed by a 64-bit FNV-1a hash of the
+// sequence with a full-slice-equality fallback on hash collision, giving
+// it exactly the membership semantics of a map keyed by an injective
+// string encoding of the sequence — but without allocating a string per
+// query.
+//
+// The first sequence for each hash is stored by value in first (its slice
+// header lives inline in the map bucket, so a unique path costs no
+// per-key heap allocation beyond the map's own growth). The rare extra
+// sequences that share a hash spill into overflow. Because a 64-bit
+// FNV-1a collision over the few hundred distinct paths a Yen query
+// generates is astronomically unlikely, overflow stays empty in practice.
+type pathSet struct {
+	first    map[uint64][]graph.NodeID
+	overflow map[uint64][][]graph.NodeID
+}
+
+func newPathSet(sizeHint int) *pathSet {
+	if sizeHint < 1 {
+		sizeHint = 1
+	}
+	return &pathSet{first: make(map[uint64][]graph.NodeID, sizeHint)}
+}
+
+// add inserts nodes into the set, returning true if it was newly added
+// and false if an element-wise-equal sequence was already present. The
+// caller must not mutate nodes after a true return: the set retains the
+// slice for subsequent collision comparisons.
+func (s *pathSet) add(nodes []graph.NodeID) bool {
+	h := hashNodes(nodes)
+	first, ok := s.first[h]
+	if !ok {
+		s.first[h] = nodes
+		return true
+	}
+	if nodesEqual(first, nodes) {
+		return false
+	}
+	for _, existing := range s.overflow[h] {
+		if nodesEqual(existing, nodes) {
+			return false
+		}
+	}
+	if s.overflow == nil {
+		s.overflow = make(map[uint64][][]graph.NodeID, 1)
+	}
+	s.overflow[h] = append(s.overflow[h], nodes)
+	return true
+}
+
+// hashNodes computes the FNV-1a 64-bit hash of a node sequence, streaming
+// each NodeID as 8 little-endian bytes with no temporary allocation. The
+// per-byte mixing matches the injective layout the prior string key used,
+// so distinct sequences hash independently of NodeID magnitude.
+func hashNodes(nodes []graph.NodeID) uint64 {
+	const (
+		fnvOffset uint64 = 14695981039346656037
+		fnvPrime  uint64 = 1099511628211
+	)
+	h := fnvOffset
+	for _, n := range nodes {
+		v := uint64(n)
+		for b := 0; b < 8; b++ {
+			h ^= v & 0xff
+			h *= fnvPrime
+			v >>= 8
+		}
+	}
+	return h
+}
+
+// nodesEqual reports whether two node sequences are element-wise identical.
+func nodesEqual(a, b []graph.NodeID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // edgeKey identifies a directed edge by its endpoints.
@@ -376,28 +470,4 @@ func pathCostFast[W Weight](weights []W, edgeIdx map[edgeKey]uint64, path []grap
 		}
 	}
 	return cost
-}
-
-// pathBytes encodes a node-ID sequence as a string suitable for use as
-// a map key. Each NodeID (uint64) is encoded in little-endian order;
-// the resulting string contains no null bytes beyond the encoding itself,
-// making it collision-free for distinct NodeID sequences.
-func pathBytes(nodes []graph.NodeID) string {
-	if len(nodes) == 0 {
-		return ""
-	}
-	const sz = 8 // sizeof(graph.NodeID) == sizeof(uint64)
-	b := make([]byte, len(nodes)*sz)
-	for i, n := range nodes {
-		v := uint64(n)
-		b[i*sz+0] = byte(v)
-		b[i*sz+1] = byte(v >> 8)
-		b[i*sz+2] = byte(v >> 16)
-		b[i*sz+3] = byte(v >> 24)
-		b[i*sz+4] = byte(v >> 32)
-		b[i*sz+5] = byte(v >> 40)
-		b[i*sz+6] = byte(v >> 48)
-		b[i*sz+7] = byte(v >> 56)
-	}
-	return string(b)
 }

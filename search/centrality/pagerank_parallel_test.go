@@ -118,3 +118,26 @@ func BenchmarkPageRank_PowerLaw50K(b *testing.B) {
 		_, _, _ = PageRank(c, opts)
 	}
 }
+
+// BenchmarkPageRanker_PowerLaw50K_Repeated measures the per-query
+// allocation profile of a reused [PageRanker] on the same fixture as
+// BenchmarkPageRank_PowerLaw50K. The PageRanker caches the CSR-derived
+// topology and the reverse-CSR transpose, so every iteration after the
+// first amortises those one-time allocations away. Task #1592 requires a
+// repeated run on the same CSR to allocate materially less than the
+// one-shot PageRank (which rebuilds the reverse structure every call).
+func BenchmarkPageRanker_PowerLaw50K_Repeated(b *testing.B) {
+	g, err := shapegen.BarabasiAlbert(50000, 8, 7).Build(adjlist.Config{Directed: true})
+	if err != nil {
+		b.Fatalf("BarabasiAlbert.Build: %v", err)
+	}
+	c := csr.BuildFromAdjList(g.AdjList())
+	opts := PageRankOptions{Damping: 0.85, MaxIterations: 30, Tolerance: 1e-6}
+	pr := NewPageRanker(c)
+	// Warm the lazy reverse-CSR cache so b.N measures the steady state.
+	_, _, _ = pr.Run(context.Background(), opts)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = pr.Run(context.Background(), opts)
+	}
+}
