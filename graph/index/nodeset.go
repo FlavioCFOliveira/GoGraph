@@ -75,6 +75,13 @@ const smallSetMax = 8
 // package-level nodeset.go documentation for the state machine and the
 // query/serialization invariants.
 //
+// Concurrency: a NodeSet is not safe for concurrent use on its own. It is
+// embedded by value in an index (a btree leaf slot, a hash shard map, or
+// the label-index map), and every read and mutation is serialised by that
+// owning index's lock; a NodeSet is never shared across goroutines outside
+// that discipline. Lookup paths that hand a set's contents to a caller copy
+// out under the read lock, so the returned data is safe for concurrent use.
+//
 // The fields form a tagged union resolved by which is non-zero:
 //   - bm != nil           -> bitmap state (promoted; never demotes).
 //   - bm == nil, ids != nil -> small state (len(ids) in 1..smallSetMax,
