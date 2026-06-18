@@ -1,6 +1,6 @@
 # GoGraph examples
 
-This directory contains 25 runnable, self-documenting demonstrations of
+This directory contains 26 runnable, self-documenting demonstrations of
 GoGraph — from a five-line shortest-path query to a persistent,
 `kill -9`-safe REST service. Each example is a standalone `package main`
 with its own `README.md`, and each is pinned by a regression test so the
@@ -70,3 +70,9 @@ regression test, and the per-example `README.md` template — see
 | [13_network_reliability](13_network_reliability/README.md) | Two resilience analyses over one network: single points of failure (articulation points and bridges) and the max throughput plus its limiting min-cut bottleneck, with the flow network derived from the same edge list. | `go run ./examples/13_network_reliability` |
 | [19_pattern_query](19_pattern_query/README.md) | The fluent `graph/query` API: MATCH-style pattern queries combining label and property predicates with a one-hop expansion, reading matched properties back out. | `go run ./examples/19_pattern_query` |
 | [20_concurrent_reads](20_concurrent_reads/README.md) | The lock-free read contract of a frozen CSR: Dijkstra, BFS, and PageRank run concurrently over one shared immutable snapshot with zero synchronisation on the snapshot. | `go run ./examples/20_concurrent_reads` |
+
+## Benchmarks
+
+| Example | What it demonstrates | Run |
+|---|---|---|
+| [26_social_scale_bench](26_social_scale_bench/README.md) | A large-scale social network (up to 1M users, 30k articles, `FRIEND` and `LIKE` edges) built in memory and queried with Cypher, reporting build throughput, Go heap footprint, and per-query latency — a benchmark for query performance and resource consumption. Scale-parametrised via flags. | `go run ./examples/26_social_scale_bench` |
