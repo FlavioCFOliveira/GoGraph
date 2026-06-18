@@ -43,14 +43,18 @@ With **no flags** the example builds the full specification: **1,000,000
 users**, **30,000 articles**, **150–200 friends per user**, and **up to
 300 likes per user** — roughly 1.03M nodes and ~3.2 × 10⁸ edges.
 
-> **Resource warning.** At ~187 bytes of live heap per edge (measured),
-> the full run needs on the order of **60 GiB of RAM** and several minutes
-> to build. Run it only on a machine sized for it. On a laptop, scale down
-> first:
+> **Resource warning.** At ~70 bytes of live heap per edge (measured, with
+> explicit relationship types), the full run needs on the order of **~21 GiB
+> of live heap (~27 GiB RSS)** and a few minutes to build. With implicit
+> types (`-rel-types=false`) it drops to **~7.4 GiB live (~9.4 GiB RSS)**.
+> Run it only on a machine sized for it. On a laptop, scale down first:
 >
 > ```sh
 > go run ./examples/26_social_scale_bench -users 20000 -articles 2000
 > ```
+>
+> See [Memory profile and optimizations](#memory-profile-and-optimizations)
+> for the before/after figures and how they were measured.
 
 ### Flags
 
@@ -62,6 +66,7 @@ users**, **30,000 articles**, **150–200 friends per user**, and **up to
 | `-friends-max` | `200` | maximum `FRIEND` out-degree per user |
 | `-likes-max` | `300` | maximum `LIKE` out-degree per user |
 | `-seed` | `1` | RNG seed (fixes the deterministic data shape) |
+| `-rel-types` | `true` | store explicit `FRIEND`/`LIKE` types. `false`: infer the type from endpoint labels and store no per-edge label (much less memory; see below) |
 
 ## Expected output
 
@@ -77,31 +82,32 @@ config.articles=2000
 config.friends=[150,200]
 config.likes=[0,300]
 config.seed=1
+config.rel_types=true
 nodes.users=20000
 nodes.articles=2000
 edges.friend=3499345
 edges.like=2988203
-# build.elapsed=3.889s
-# build.node_rate=5657 nodes/s
-# build.edge_rate=1668076 edges/s
-# mem.heap_alloc=1.13 GiB
-# mem.heap_growth=1.13 GiB
-# mem.total_alloc=1.95 GiB
-# mem.sys=1.44 GiB
-# mem.num_gc=14
-# bytes_per_edge=186.9
+# build.elapsed=3.658s
+# build.node_rate=6014 nodes/s
+# build.edge_rate=1773430 edges/s
+# mem.heap_alloc=364.48 MiB
+# mem.heap_growth=364.13 MiB
+# mem.total_alloc=1.18 GiB
+# mem.sys=670.08 MiB
+# mem.num_gc=16
+# bytes_per_edge=58.9
 q.count_users=20000
-# q.count_users.latency=15.497ms
+# q.count_users.latency=13.543ms
 q.count_articles=2000
-# q.count_articles.latency=1.31ms
+# q.count_articles.latency=1.333ms
 q.count_friend=3499345
-# q.count_friend.latency=7.396601s
+# q.count_friend.latency=6.853897s
 q.count_like=2988203
-# q.count_like.latency=6.415286s
+# q.count_like.latency=5.928564s
 q.fof_reach=15224
-# q.fof_reach.latency=6.078179s
+# q.fof_reach.latency=5.534114s
 q.top_articles.rows=10
-# q.top_articles.latency=11.386062s
+# q.top_articles.latency=10.569924s
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`
@@ -109,6 +115,48 @@ always equal `edges.friend` and `edges.like` respectively, which is the
 core consistency invariant the regression test asserts. The `# `-prefixed
 figures (including all latencies) are environment-dependent and are **not**
 pinned by the test.
+
+## Memory profile and optimizations
+
+The resident memory of this workload is dominated by the edges. A heap
+profile of the build (captured with `go test -bench=BenchmarkBuild
+-benchtime=1x -memprofile=mem.out` and read with `go tool pprof
+-inuse_space`) originally showed that **~87 % of live heap was the
+per-edge relationship-type storage** in `graph/lpg`: every labelled edge
+allocated a whole `map[LabelID]struct{}` to hold, almost always, a single
+label — even though this model has only two relationship types.
+
+Three optimizations were applied (all verified against the full openCypher
+TCK, the ACID battery, and `go test -race ./...` — no functional change):
+
+1. **Compact single-label storage in `graph/lpg`.** The per-pair edge-label
+   shard now stores the common single-label case as a bare `LabelID` inline
+   in a `map[edgeKey]LabelID`, with a lazily-allocated spill map only for the
+   rare multi-label edge. This removes the per-edge map allocation entirely
+   while preserving multi-label semantics, the persistence format, and every
+   public method's behaviour.
+2. (Same structure as 1 — the inline `LabelID` is exactly the "no per-edge
+   container" win, realised at the LPG layer so the durable CSR/snapshot
+   format is untouched and durability/TCK invariants are preserved.)
+3. **Implicit relationship types (`-rel-types=false`).** In this model the
+   two edge kinds are already disambiguated by their endpoints — `FRIEND` is
+   the only `USER→USER` edge and `LIKE` the only `USER→ARTICLE` edge — so the
+   type can be inferred from endpoint labels and no per-edge label stored at
+   all. The queries switch from `[:FRIEND]`/`[:LIKE]` to untyped `-->`.
+
+### Measured effect (40k users / 4k articles ≈ 13 M edges, `inuse_space`)
+
+| Version | Live heap | B/edge | vs. original |
+|---|---:|---:|---:|
+| Original (per-edge label map) | ~2.28 GiB | ~175 | — |
+| Optimized, explicit types (1+2) | ~0.76 GiB | ~70 | **−66 %** |
+| Optimized, implicit types (3) | ~0.31 GiB | ~24 | **−87 %** |
+
+Confirmed with the full `runtime.ReadMemStats` heap at 60k/6k (≈19.5 M
+edges): **3.60 GiB → 1.28 GiB** (explicit) and **→ 0.44 GiB** (implicit),
+with identical query results in every mode. Extrapolated to the full
+specification (~3.25 × 10⁸ edges): **~60 GiB → ~21 GiB** (explicit) or
+**~7.4 GiB** (implicit) of live heap.
 
 ## Key APIs
 

@@ -22,6 +22,7 @@ func testConfig() config {
 		friendsMax: 8,
 		likesMax:   10,
 		seed:       42,
+		relTypes:   true,
 	}
 }
 
@@ -89,6 +90,38 @@ func TestRun(t *testing.T) {
 	// scale).
 	if rows := facts["q.top_articles.rows"]; rows != 10 {
 		t.Errorf("q.top_articles.rows = %d, want 10", rows)
+	}
+}
+
+// TestRunCompact confirms the implicit-type mode (relTypes=false) is
+// functionally equivalent: it stores no per-edge labels, yet the
+// endpoint-inferred relationship queries return the same counts as the
+// explicit-type mode for the same seed.
+func TestRunCompact(t *testing.T) {
+	explicit := testConfig()
+	compact := testConfig()
+	compact.relTypes = false
+
+	var eb, cb bytes.Buffer
+	if err := run(context.Background(), &eb, explicit); err != nil {
+		t.Fatalf("run explicit: %v", err)
+	}
+	if err := run(context.Background(), &cb, compact); err != nil {
+		t.Fatalf("run compact: %v", err)
+	}
+	ef := parseFacts(t, eb.String())
+	cf := parseFacts(t, cb.String())
+
+	// Same dataset shape and same query answers, regardless of how the
+	// relationship kind is encoded.
+	for _, k := range []string{
+		"nodes.users", "nodes.articles", "edges.friend", "edges.like",
+		"q.count_users", "q.count_articles", "q.count_friend", "q.count_like",
+		"q.fof_reach", "q.top_articles.rows",
+	} {
+		if ef[k] != cf[k] {
+			t.Errorf("%s: explicit=%d compact=%d (must be equal)", k, ef[k], cf[k])
+		}
 	}
 }
 

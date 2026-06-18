@@ -25,9 +25,12 @@
 // Run with no flags, the example builds the full specification — one
 // million users, thirty thousand articles, 150-200 friends per user and
 // up to 300 likes per user. That is roughly 1.03M nodes and on the
-// order of 3.2 × 10^8 edges; it needs tens of gigabytes of RAM and
-// several minutes to build. This is deliberate: the example exists to
-// stress query performance and resource consumption at that scale.
+// order of 3.2 × 10^8 edges; with explicit relationship types it needs
+// ~21 GiB of live heap (~27 GiB RSS) and a few minutes to build, and
+// with implicit types (-rel-types=false) ~7.4 GiB. This is deliberate:
+// the example exists to stress query performance and resource
+// consumption at that scale. See the README's "Memory profile and
+// optimizations" section for how those figures were measured.
 //
 // Every dimension is a flag, so the same binary scales down to a
 // laptop-sized run:
@@ -88,6 +91,16 @@ type config struct {
 	friendsMax int   // maximum FRIEND out-degree per user (inclusive)
 	likesMax   int   // maximum LIKE out-degree per user (0..likesMax)
 	seed       int64 // RNG seed; fixes the deterministic data shape
+
+	// relTypes selects how the two relationship kinds are distinguished.
+	// When true (the default, faithful to the model) every edge carries
+	// an explicit FRIEND or LIKE relationship type and queries match on
+	// it. When false the type is left implicit and inferred from the
+	// endpoint labels — FRIEND is the only USER->USER edge and LIKE the
+	// only USER->ARTICLE edge — so no per-edge label is stored at all.
+	// The implicit mode trades model fidelity for a large cut in
+	// resident memory; see the README.
+	relTypes bool
 }
 
 // defaultConfig returns the full specification this example was written
@@ -101,6 +114,7 @@ func defaultConfig() config {
 		friendsMax: 200,
 		likesMax:   300,
 		seed:       1,
+		relTypes:   true,
 	}
 }
 
@@ -133,6 +147,8 @@ func main() {
 	flag.IntVar(&cfg.friendsMax, "friends-max", cfg.friendsMax, "maximum FRIEND out-degree per user")
 	flag.IntVar(&cfg.likesMax, "likes-max", cfg.likesMax, "maximum LIKE out-degree per user")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	flag.BoolVar(&cfg.relTypes, "rel-types", cfg.relTypes,
+		"store explicit FRIEND/LIKE relationship types (false: infer type from endpoint labels, no per-edge label stored)")
 	flag.Parse()
 
 	if err := run(context.Background(), os.Stdout, cfg); err != nil {
@@ -156,6 +172,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "config.friends=[%d,%d]\n", cfg.friendsMin, cfg.friendsMax)
 	fmt.Fprintf(w, "config.likes=[0,%d]\n", cfg.likesMax)
 	fmt.Fprintf(w, "config.seed=%d\n", cfg.seed)
+	fmt.Fprintf(w, "config.rel_types=%t\n", cfg.relTypes)
 
 	base := readMem()
 
@@ -259,7 +276,7 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, w io.
 			targets[j] = struct{}{}
 		}
 		for j := range targets {
-			if err := addEdge(g, userIDs[i], userIDs[j], relFriend); err != nil {
+			if err := addEdge(g, userIDs[i], userIDs[j], relFriend, cfg.relTypes); err != nil {
 				return buildStats{}, err
 			}
 			friendEdges++
@@ -282,7 +299,7 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, w io.
 				likes[rng.Intn(cfg.articles)] = struct{}{}
 			}
 			for a := range likes {
-				if err := addEdge(g, userIDs[i], articleIDs[a], relLike); err != nil {
+				if err := addEdge(g, userIDs[i], articleIDs[a], relLike, cfg.relTypes); err != nil {
 					return buildStats{}, err
 				}
 				likeEdges++
@@ -323,13 +340,17 @@ func addNode(g *lpg.Graph[string, float64], id, label, propKey, propVal string) 
 	return nil
 }
 
-// addEdge adds a directed, weight-1 edge and tags it with the given
-// relationship type so Cypher patterns like [:FRIEND] / [:LIKE] match.
-func addEdge(g *lpg.Graph[string, float64], src, dst, relType string) error {
+// addEdge adds a directed, weight-1 edge. When withType is true it also
+// tags the edge with the given relationship type so Cypher patterns like
+// [:FRIEND] / [:LIKE] match; when false the type is left implicit (to be
+// inferred from the endpoint labels) and no per-edge label is stored.
+func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType bool) error {
 	if err := g.AddEdge(src, dst, 1); err != nil {
 		return fmt.Errorf("AddEdge %s-[%s]->%s: %w", src, relType, dst, err)
 	}
-	g.SetEdgeLabel(src, dst, relType)
+	if withType {
+		g.SetEdgeLabel(src, dst, relType)
+	}
 	return nil
 }
 
@@ -376,14 +397,23 @@ func realisticTitle(rng *rand.Rand) string {
 func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser string, w io.Writer) error {
 	// Scalar count aggregations over label scans and relationship
 	// patterns — the bread-and-butter of analytics over a social graph.
+	// The relationship patterns differ by mode: with explicit types they
+	// match [:FRIEND] / [:LIKE]; without, the type is inferred from the
+	// endpoint labels (FRIEND is the only USER->USER edge, LIKE the only
+	// USER->ARTICLE edge), so the same shape is expressed untyped.
+	friendPat, likePat := "-[:FRIEND]->", "-[:LIKE]->"
+	if !cfg.relTypes {
+		friendPat, likePat = "-->", "-->"
+	}
+
 	scalars := []struct {
 		name  string
 		query string
 	}{
 		{"count_users", "MATCH (u:USER) RETURN count(u) AS c"},
 		{"count_articles", "MATCH (a:ARTICLE) RETURN count(a) AS c"},
-		{"count_friend", "MATCH (:USER)-[:FRIEND]->(:USER) RETURN count(*) AS c"},
-		{"count_like", "MATCH (:USER)-[:LIKE]->(:ARTICLE) RETURN count(*) AS c"},
+		{"count_friend", "MATCH (:USER)" + friendPat + "(:USER) RETURN count(*) AS c"},
+		{"count_like", "MATCH (:USER)" + likePat + "(:ARTICLE) RETURN count(*) AS c"},
 	}
 	for _, q := range scalars {
 		n, d, err := scalarCount(ctx, eng, q.query, nil)
@@ -399,7 +429,7 @@ func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser 
 	// index the anchor is a label scan, so this also measures the cost
 	// of point access at scale.
 	{
-		const query = "MATCH (u:USER {id:$id})-[:FRIEND]->()-[:FRIEND]->(fof) " +
+		query := "MATCH (u:USER {id:$id})" + friendPat + "(:USER)" + friendPat + "(fof:USER) " +
 			"RETURN count(DISTINCT fof) AS c"
 		params := map[string]expr.Value{"id": expr.StringValue(sampleUser)}
 		n, d, err := scalarCount(ctx, eng, query, params)
@@ -419,7 +449,7 @@ func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser 
 		if cfg.articles < limit {
 			limit = cfg.articles
 		}
-		query := fmt.Sprintf("MATCH (:USER)-[:LIKE]->(a:ARTICLE) "+
+		query := fmt.Sprintf("MATCH (:USER)"+likePat+"(a:ARTICLE) "+
 			"RETURN a.id AS id, count(*) AS likes ORDER BY likes DESC, id ASC LIMIT %d", limit)
 		rows, d, err := topArticles(ctx, eng, query)
 		if err != nil {
