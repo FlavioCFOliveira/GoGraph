@@ -494,6 +494,127 @@ func (v NodeValue) Equal(other Value) Value {
 		return BoolValue(v.ID == o.ID)
 	case IntegerValue:
 		return BoolValue(int64(v.ID) == int64(o))
+	case *LazyNodeValue:
+		return BoolValue(v.ID == o.id)
+	}
+	return BoolValue(false)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LazyNodeValue
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NodeResolver fetches individual node attributes from the backing graph on
+// demand, so a [LazyNodeValue] can answer a scalar `n.prop` / `n:Label` access
+// without materialising the node's whole property map or label slice. The
+// implementation (in package cypher) reads each attribute under the graph's
+// property/label shard read lock, observing the same consistent snapshot the
+// eager materialiser would, and must alias no graph-internal mutable state in
+// the returned [Value].
+//
+// A NodeResolver is consulted only for a node the query's static analysis has
+// proven is dereferenced solely through scalar accessors (see the lazy
+// fast-path gate in package cypher); whole-node uses (properties/keys/labels
+// functions, identity equality, bare projection) take the eager path and never
+// construct a LazyNodeValue.
+//
+// Concurrency: an implementation must be safe for concurrent use, since a
+// single resolver instance is shared across every row of a query and the engine
+// is safe for concurrent reads. The package-cypher implementation satisfies this
+// by holding only an immutable graph reference and locking each attribute fetch
+// under the relevant shard read lock.
+type NodeResolver interface {
+	// NodeProperty returns the value of key on the node, and false when the
+	// node does not carry that property (a missing key reads as null per
+	// openCypher three-valued logic — the caller maps !ok to Null).
+	NodeProperty(id uint64, key string) (Value, bool)
+	// HasNodeLabel reports whether the node carries the named label.
+	HasNodeLabel(id uint64, label string) bool
+}
+
+// LazyNodeValue is an on-demand-resolving node value used exclusively on the
+// engine's non-escaping evaluation fast path (a WHERE predicate or a scalar
+// projection whose RowContext is built, evaluated once, and discarded inside
+// the query's pinned visibility barrier). Instead of eagerly copying the node's
+// properties into a [MapValue] and boxing a full [NodeValue] per row, it carries
+// only the node ID plus a [NodeResolver] and reads each touched scalar
+// (`n.prop`, `n["lit"]`, `n:Label`) directly from storage when the evaluator
+// asks for it.
+//
+// Soundness: a LazyNodeValue is produced only for a variable the static
+// analysis proved is used solely through scalar accessors, so it is observed
+// only by [evalProperty], [evalLabelPredicate] and the literal-string subscript
+// path — never by whole-node consumers (properties()/keys()/labels()/id()/
+// identity equality), which force eager materialisation upstream. A node
+// deleted earlier in the same statement is never represented as a bare NodeID
+// in a row (the DELETE operator stamps it as a Deleted [NodeValue] carrying a
+// frozen property snapshot), so a LazyNodeValue is never constructed for a
+// deleted entity and the DeletedEntityAccess contract is preserved by
+// construction.
+//
+// It is a pointer type so that storing it in a [RowContext] costs a single
+// small allocation (the struct itself) rather than the NodeValue box plus a
+// per-row property map. Like every [Value] it is immutable after construction
+// and safe for concurrent reads (the resolver performs its own locking).
+type LazyNodeValue struct {
+	id  uint64
+	res NodeResolver
+}
+
+// NewLazyNodeValue constructs a [LazyNodeValue] for node id backed by res.
+func NewLazyNodeValue(id uint64, res NodeResolver) *LazyNodeValue {
+	return &LazyNodeValue{id: id, res: res}
+}
+
+// ID returns the node's storage-layer identifier.
+func (v *LazyNodeValue) ID() uint64 { return v.id }
+
+// Property resolves key on demand, returning Null for an absent key (openCypher
+// missing-property-is-null). It is the lazy counterpart of indexing a
+// [NodeValue.Properties] map.
+func (v *LazyNodeValue) Property(key string) Value {
+	if v.res == nil {
+		return Null
+	}
+	if pv, ok := v.res.NodeProperty(v.id, key); ok {
+		return pv
+	}
+	return Null
+}
+
+// HasLabel resolves a single-label membership test on demand. It is the lazy
+// counterpart of scanning [NodeValue.Labels].
+func (v *LazyNodeValue) HasLabel(label string) bool {
+	if v.res == nil {
+		return false
+	}
+	return v.res.HasNodeLabel(v.id, label)
+}
+
+// Kind implements [Value]; a lazy node is a node.
+func (v *LazyNodeValue) Kind() Kind { return KindNode }
+
+// Hash implements [Value]; identity is determined by ID, matching
+// [NodeValue.Hash] so the two forms hash consistently.
+func (v *LazyNodeValue) Hash() uint64 { return v.id ^ (v.id >> 32) }
+
+// String returns the same diagnostic form as the eager [NodeValue].
+func (v *LazyNodeValue) String() string { return fmt.Sprintf("(node#%d)", v.id) }
+
+// Equal compares on node identity, symmetric with [NodeValue.Equal] and
+// [IntegerValue.Equal], so a lazy node compares equal to the same node in
+// eager or raw-NodeID form.
+func (v *LazyNodeValue) Equal(other Value) Value {
+	if IsNull(other) {
+		return Null
+	}
+	switch o := other.(type) {
+	case *LazyNodeValue:
+		return BoolValue(v.id == o.id)
+	case NodeValue:
+		return BoolValue(v.id == o.ID)
+	case IntegerValue:
+		return BoolValue(int64(v.id) == int64(o))
 	}
 	return BoolValue(false)
 }

@@ -204,6 +204,11 @@ type vleRelInfo struct {
 }
 
 type buildOpts struct {
+	// nodeResolver backs [expr.LazyNodeValue] for the lazy node-materialisation
+	// fast path. It is created once per build (it depends only on the graph) and
+	// shared across every row and every node column, so the lazy path costs no
+	// per-row resolver allocation. nil until first use; see [bopts.lazyResolver].
+	nodeResolver expr.NodeResolver
 	// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] expressions
 	// encountered inside Filter/Project closures. May be nil; in that case
 	// subquery expressions surface as [expr.EvalError] at runtime.
@@ -6792,18 +6797,71 @@ func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bai
 	return uses, bailout
 }
 
-// upgradeNodeIDToValuePartial is the lazy counterpart of [upgradeNodeIDToValue]:
-// it constructs an [expr.NodeValue] populated only with the property keys and
-// (optionally) the labels named in use, reading each scalar directly from g
-// without copying the node's full property map or label set. It is only sound
-// for a value that does not escape the query's pinned visibility barrier — see
-// [analyseNodeScalarUse].
+// lazyNodeResolver adapts an *lpg.Graph to [expr.NodeResolver], translating the
+// storage-layer property value to the runtime expr form on demand. One instance
+// is created per query build (see [buildOpts.nodeResolver]) and shared across
+// every row and every lazily-materialised node column, so the lazy fast path
+// pays no per-row resolver allocation.
 //
-// When use.needsWholeNode is set the call degrades to the full eager upgrade so
-// constructs such as properties(n)/keys(n)/labels(n) and node identity always
-// observe the complete node. v is returned unchanged when it is not a resolved
-// NodeID, matching the value-passthrough contract of [upgradeNodeIDToValue].
-func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse) expr.Value {
+// Each lookup acquires the relevant property / label shard read lock for the
+// duration of that single attribute fetch, observing the same consistent
+// snapshot the eager materialiser would; the returned value aliases no
+// graph-internal mutable state.
+type lazyNodeResolver struct {
+	g *lpg.Graph[string, float64]
+}
+
+// NodeProperty implements [expr.NodeResolver]. A missing key returns (nil,
+// false); the caller maps that to Null.
+func (r lazyNodeResolver) NodeProperty(id uint64, key string) (expr.Value, bool) {
+	pv, ok := r.g.NodePropertyByID(graph.NodeID(id), key)
+	if !ok {
+		return nil, false
+	}
+	return lpgPropToExpr(pv), true
+}
+
+// HasNodeLabel implements [expr.NodeResolver] with an allocation-free,
+// NodeID-keyed membership test.
+func (r lazyNodeResolver) HasNodeLabel(id uint64, label string) bool {
+	return r.g.HasNodeLabelByID(graph.NodeID(id), label)
+}
+
+// lazyResolver returns the per-build [expr.NodeResolver] for g, creating and
+// caching it on bopts on first use. When bopts is nil (call sites that build a
+// RowContext without a buildOpts) a fresh per-call resolver is returned; this
+// is the cold path and never the per-row hot path, which always carries bopts.
+func lazyResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) expr.NodeResolver {
+	if bopts == nil {
+		return lazyNodeResolver{g: g}
+	}
+	if bopts.nodeResolver == nil {
+		bopts.nodeResolver = lazyNodeResolver{g: g}
+	}
+	return bopts.nodeResolver
+}
+
+// upgradeNodeIDToValuePartial is the lazy counterpart of [upgradeNodeIDToValue].
+// Instead of eagerly copying the node's touched properties into a fresh
+// [expr.MapValue] and boxing a full [expr.NodeValue] per row, it produces an
+// [expr.LazyNodeValue] that carries only the node ID plus a shared
+// [expr.NodeResolver] and reads each touched scalar (n.key, n["key"], n:Label)
+// directly from storage when the evaluator dereferences it. This removes the
+// per-row property-map allocation and shrinks the boxed value to a single small
+// struct.
+//
+// It is only sound for a value that does not escape the query's pinned
+// visibility barrier — see [analyseNodeScalarUse]. When use.needsWholeNode is
+// set the call degrades to the full eager upgrade so constructs such as
+// properties(n)/keys(n)/labels(n) and node identity always observe the complete
+// node. v is returned unchanged when it is not a resolved NodeID, matching the
+// value-passthrough contract of [upgradeNodeIDToValue].
+//
+// A node deleted earlier in the same statement is never a bare NodeID in a row
+// (the DELETE operator stamps it as a Deleted [expr.NodeValue] carrying a frozen
+// property snapshot), so it never reaches the IntegerValue branch here and the
+// DeletedEntityAccess contract is preserved by construction.
+func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse, bopts *buildOpts) expr.Value {
 	if g == nil || use == nil || use.needsWholeNode {
 		return upgradeNodeIDToValue(v, g)
 	}
@@ -6815,25 +6873,7 @@ func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], us
 	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
 		return v
 	}
-	// Allocate the property map lazily on the first present key, mirroring the
-	// propertyless-node fast path in upgradeNodeIDToValue: a referenced key that
-	// the node does not carry (e.g. WHERE n.name IS NOT NULL over a label-only
-	// node) must not cost a map allocation, since a nil MapValue reads
-	// identically (missing-key access yields null).
-	var props expr.MapValue
-	for k := range use.keys {
-		if pv, ok := g.NodePropertyByID(id, k); ok {
-			if props == nil {
-				props = make(expr.MapValue, len(use.keys))
-			}
-			props[k] = lpgPropToExpr(pv)
-		}
-	}
-	var labels []string
-	if use.needsLabels {
-		labels = g.NodeLabelsByID(id)
-	}
-	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
+	return expr.NewLazyNodeValue(uint64(id), lazyResolver(bopts, g))
 }
 
 // buildNodeValueFromID constructs an expr.NodeValue for a known graph NodeID,
@@ -7272,7 +7312,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 				// evalExpr only ever reads variables the expression mentions.
 				continue
 			}
-			ctx[varName] = upgradeNodeIDToValuePartial(row[colIdx], g, use)
+			ctx[varName] = upgradeNodeIDToValuePartial(row[colIdx], g, use, bopts)
 			continue
 		}
 		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)

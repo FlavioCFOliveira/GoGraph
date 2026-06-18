@@ -1463,6 +1463,32 @@ func (g *Graph[N, W]) NodeLabelsByID(id graph.NodeID) []string {
 	return out
 }
 
+// HasNodeLabelByID is the NodeID-keyed, allocation-free counterpart of
+// [Graph.HasNodeLabel]: it reports whether the node identified by id carries
+// the named label without the external-key → NodeID Mapper lookup and without
+// materialising the node's label slice (which [NodeLabelsByID] would).
+//
+// It backs the lazy `n:Label` predicate fast path in the Cypher engine, which
+// holds the NodeID already and only needs a membership test. An unknown label
+// name (never interned) is a definite "absent" answer, mirroring
+// [Graph.HasNodeLabel].
+func (g *Graph[N, W]) HasNodeLabelByID(id graph.NodeID, name string) bool {
+	lid, ok := g.reg.Lookup(name)
+	if !ok {
+		return false
+	}
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	bag, ok := sh.m[id]
+	if !ok {
+		sh.mu.RUnlock()
+		return false
+	}
+	_, present := bag[lid]
+	sh.mu.RUnlock()
+	return present
+}
+
 // SetEdgeLabel attaches label to the directed edge (src, dst). The
 // edge must already exist in the underlying adjacency list; otherwise
 // the call is a no-op. The label is associated with the source

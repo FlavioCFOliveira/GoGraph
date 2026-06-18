@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
@@ -224,7 +225,7 @@ func extractBudget(row RowContext) *evalBudget {
 	if !ok {
 		return nil
 	}
-	return scv.budget
+	return &scv.budget
 }
 
 // chargeListGrowth charges n newly-materialised list elements against the
@@ -328,25 +329,66 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 	if row == nil {
 		row = make(RowContext, 1)
 	}
-	prev, had := row[subqueryContextKey]
-	row[subqueryContextKey] = &subqueryContextValue{
-		ctx: ctx,
-		sub: subEval,
-		pat: patEval,
-		budget: &evalBudget{
-			remaining:      DefaultMaxListElements,
-			limit:          DefaultMaxListElements,
-			bytesRemaining: DefaultMaxStringEvalBytes,
-			bytesLimit:     DefaultMaxStringEvalBytes,
-		},
+	// The holder + its embedded budget were the dominant per-row allocation on
+	// the common (no-subquery) evaluation path (#1589): every EvalWith call
+	// heap-allocated a fresh subqueryContextValue and evalBudget even when no
+	// subquery / pattern / list-budget work occurred. They are now drawn from a
+	// sync.Pool and returned on exit. The lifetime is exactly this single,
+	// single-goroutine EvalWith call: the holder lives only in row[sentinel],
+	// is restored to its prior binding before return, and is never retained by
+	// any evaluator (subquery/pattern evaluators read correlation bindings and
+	// return fresh scalar/list values; they never keep the holder), so it is
+	// sound to recycle. A nested EvalWith (reached through a pattern
+	// comprehension) acquires its OWN holder and restores ours on return — each
+	// call releases only the holder it acquired, so the LIFO save/restore and
+	// the pool stay in lockstep.
+	scv := acquireSubqueryContext()
+	scv.ctx = ctx
+	scv.sub = subEval
+	scv.pat = patEval
+	scv.budget = evalBudget{
+		remaining:      DefaultMaxListElements,
+		limit:          DefaultMaxListElements,
+		bytesRemaining: DefaultMaxStringEvalBytes,
+		bytesLimit:     DefaultMaxStringEvalBytes,
 	}
+	prev, had := row[subqueryContextKey]
+	row[subqueryContextKey] = scv
 	v, err := evalExpr(expr, row, params, reg)
 	if had {
 		row[subqueryContextKey] = prev
 	} else {
 		delete(row, subqueryContextKey)
 	}
+	releaseSubqueryContext(scv)
 	return v, err
+}
+
+// subqueryContextPool recycles the per-evaluation holder allocated by
+// [EvalWith]. The holder's lifetime is exactly one EvalWith call (it is
+// installed into the call's RowContext, restored before return, and never
+// retained beyond the call), so recycling it removes the per-row holder +
+// budget allocation without any aliasing hazard. See [EvalWith].
+var subqueryContextPool = sync.Pool{New: func() any { return new(subqueryContextValue) }}
+
+// acquireSubqueryContext returns a holder from the pool. The caller fully
+// overwrites every field before use, so a recycled holder needs no clearing.
+func acquireSubqueryContext() *subqueryContextValue {
+	scv, _ := subqueryContextPool.Get().(*subqueryContextValue)
+	if scv == nil {
+		scv = new(subqueryContextValue)
+	}
+	return scv
+}
+
+// releaseSubqueryContext returns a holder to the pool. The evaluator references
+// (ctx/sub/pat) are nilled so a pooled holder cannot pin a context, evaluator,
+// or — transitively — a graph snapshot between evaluations.
+func releaseSubqueryContext(scv *subqueryContextValue) {
+	scv.ctx = nil
+	scv.sub = nil
+	scv.pat = nil
+	subqueryContextPool.Put(scv)
 }
 
 // subqueryContextKey is the sentinel RowContext key used by [EvalWith] to
@@ -365,7 +407,7 @@ type subqueryContextValue struct {
 	ctx    context.Context //nolint:containedctx // smuggled through RowContext, see EvalWith
 	sub    SubqueryEvaluator
 	pat    PatternEvaluator
-	budget *evalBudget // per-evaluation cumulative list-element budget (#1475)
+	budget evalBudget // per-evaluation cumulative list-element budget (#1475), embedded by value so the holder is a single (pooled) allocation
 }
 
 // Kind implements [Value]. Returns [KindNull] because subqueryContextValue
@@ -600,6 +642,17 @@ func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, params map[string
 			}
 		}
 		return BoolValue(true), nil
+	case *LazyNodeValue:
+		// Lazy node fast path: test each required label membership on demand.
+		// The conjunction `n:A:B` is true iff every label is present; a
+		// node with no labels yields false (not null), matching the eager
+		// NodeValue branch above.
+		for _, want := range n.Labels {
+			if !r.HasLabel(want) {
+				return BoolValue(false), nil
+			}
+		}
+		return BoolValue(true), nil
 	case RelationshipValue:
 		// A relationship has exactly one type; the openCypher spec
 		// only allows a single label after the colon. We accept the
@@ -638,6 +691,15 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 			}
 		}
 		return Null, nil
+	case *LazyNodeValue:
+		// Lazy node fast path: resolve only the touched property from
+		// storage. A LazyNodeValue is constructed solely for nodes the
+		// static analysis proved are accessed only through scalar
+		// accessors, and never for an entity deleted in the same statement
+		// (the DELETE operator stamps those as a Deleted NodeValue, handled
+		// above), so the DeletedEntityAccess contract is preserved without a
+		// flag here. A missing key reads as Null (Property does this).
+		return r.Property(n.Key), nil
 	case RelationshipValue:
 		if r.Deleted {
 			return nil, &EvalError{Msg: fmt.Sprintf("EntityNotFound: DeletedEntityAccess: cannot read property %q of deleted relationship", n.Key)}
@@ -712,6 +774,16 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value
 			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
 		}
 		return subscriptMap(c.Properties, idx), nil
+	case *LazyNodeValue:
+		// Lazy node subscript: only a String key is valid (same TypeError
+		// surface as the eager NodeValue branch). The static analysis only
+		// produces a LazyNodeValue when subscripts use literal-string keys,
+		// but resolving any runtime String key on demand is equally sound.
+		sk, ok := idx.(StringValue)
+		if !ok {
+			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
+		}
+		return c.Property(string(sk)), nil
 	case RelationshipValue:
 		if _, ok := idx.(StringValue); !ok {
 			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}

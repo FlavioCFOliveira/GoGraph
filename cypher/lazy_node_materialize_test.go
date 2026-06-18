@@ -199,3 +199,104 @@ func TestLazy_SnapshotConsistency(t *testing.T) {
 		t.Fatalf("RETURN n.age = %#v, want IntegerValue(30)", rec["a"])
 	}
 }
+
+// TestLazy_PropertyTypeFidelity asserts that the lazy resolver reproduces the
+// exact runtime value for every scalar property kind — string, integer, float,
+// bool, and list — byte-identical to eager materialisation (cypher-expert item
+// 2). A type or value divergence here would mean the on-demand fetch decodes a
+// property differently from the full materialiser.
+func TestLazy_PropertyTypeFidelity(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{})
+	if err := g.AddNode("v"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.SetNodeLabel("v", "T"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	for k, pv := range map[string]lpg.PropertyValue{
+		"s": lpg.StringValue("hello"),
+		"i": lpg.Int64Value(-7),
+		"f": lpg.Float64Value(3.5),
+		"b": lpg.BoolValue(true),
+		"g": lpg.Int64Value(0), // gate property for the WHERE filter
+	} {
+		if err := g.SetNodeProperty("v", k, pv); err != nil {
+			t.Fatalf("SetNodeProperty %s: %v", k, err)
+		}
+	}
+	// WHERE n.g = 0 keeps the row but only touches scalars, so n is lazily
+	// materialised; the projection then reads each typed property on demand.
+	rec := firstRecord(t, g, "MATCH (n:T) WHERE n.g = 0 RETURN n.s AS s, n.i AS i, n.f AS f, n.b AS b", 1)
+	if s, ok := rec["s"].(expr.StringValue); !ok || string(s) != "hello" {
+		t.Errorf("n.s = %#v, want StringValue(\"hello\")", rec["s"])
+	}
+	if i, ok := rec["i"].(expr.IntegerValue); !ok || int64(i) != -7 {
+		t.Errorf("n.i = %#v, want IntegerValue(-7)", rec["i"])
+	}
+	if f, ok := rec["f"].(expr.FloatValue); !ok || float64(f) != 3.5 {
+		t.Errorf("n.f = %#v, want FloatValue(3.5)", rec["f"])
+	}
+	if b, ok := rec["b"].(expr.BoolValue); !ok || !bool(b) {
+		t.Errorf("n.b = %#v, want BoolValue(true)", rec["b"])
+	}
+}
+
+// TestLazy_LabelPredicateConjunction pins the `n:A:B` conjunction and the
+// no-label-node-yields-false semantics through the lazy label-predicate path
+// (cypher-expert item 3). A node with both labels matches the conjunction; a
+// node missing one label does not; a label-less node yields false, never null.
+func TestLazy_LabelPredicateConjunction(t *testing.T) {
+	g := newLazyGraph(t) // n0 carries both Person and Employee
+	if err := g.AddNode("bare"); err != nil {
+		t.Fatalf("AddNode bare: %v", err)
+	}
+	if err := g.SetNodeProperty("bare", "age", lpg.Int64Value(40)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	// Conjunction matches only the dual-labelled node.
+	firstRecord(t, g, "MATCH (n) WHERE n:Person:Employee RETURN 1 AS x", 1)
+	// A label-less node makes the predicate false (not null), so it is filtered
+	// out — the label-less `bare` node never satisfies n:Person.
+	firstRecord(t, g, "MATCH (n) WHERE n:Person AND n.age = 40 RETURN 1 AS x", 0)
+}
+
+// TestLazy_DeletedEntityViaScalarPath is the cypher-expert item-7 guard: a node
+// deleted earlier in the same statement must raise DeletedEntityAccess on a
+// later property read, NOT be served a stale or null value, even when the
+// surrounding query shape would otherwise be lazy-eligible. The DELETE operator
+// stamps the deleted node into the row as a Deleted NodeValue carrying a frozen
+// snapshot, so it never reaches the lazy IntegerValue branch — the eager
+// Deleted-flag check fires. This proves the lazy path cannot smuggle a stale
+// read past an in-statement deletion.
+func TestLazy_DeletedEntityViaScalarPath(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+
+	res, err := eng.RunInTx(ctx, `CREATE (n:Person {name: "Dora", age: 22})`, nil)
+	if err != nil {
+		t.Fatalf("seed CREATE: %v", err)
+	}
+	for res.Next() { //nolint:revive // drain
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("seed drain: %v", err)
+	}
+	_ = res.Close() //nolint:errcheck
+
+	// `n.age > 0` is a scalar predicate (lazy-eligible); DELETE n stamps n
+	// Deleted; RETURN n.name must surface DeletedEntityAccess.
+	res2, err := eng.RunInTx(ctx, `MATCH (n:Person) WHERE n.age > 0 DELETE n RETURN n.name AS x`, nil)
+	failed := err != nil
+	if err == nil {
+		for res2.Next() { //nolint:revive // drain
+		}
+		if res2.Err() != nil {
+			failed = true
+		}
+		_ = res2.Close() //nolint:errcheck
+	}
+	if !failed {
+		t.Fatal("DELETE n ... RETURN n.name: expected DeletedEntityAccess error, got success (a stale lazy read would mask the deletion)")
+	}
+}
