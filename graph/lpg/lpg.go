@@ -169,61 +169,60 @@ type nodeLabelShard struct {
 	m  map[graph.NodeID]map[LabelID]struct{}
 }
 
-// edgeLabelShard is the edge-label counterpart of [nodeLabelShard];
-// the shard is keyed by the src endpoint so all labels of edges
-// out of one node coalesce in the same shard (favourable for the
-// common access pattern: walk-out-of-node-then-inspect-label).
+// edgeLabelShard is the OVERFLOW half of the edge-label store, the edge
+// counterpart of [nodeLabelShard]; the shard is keyed by the src endpoint so
+// all overflow labels of edges out of one node coalesce in the same shard
+// (favourable for the common access pattern: walk-out-of-node-then-inspect-
+// label) and the shard alignment matches [edgePropShardFor].
 //
-// Storage is split by cardinality. The overwhelmingly common case — an
-// edge carrying exactly one relationship type — is stored inline in the
-// "one" map as a bare [LabelID], with no per-edge container allocation.
-// Only the rare multi-label edge spills into the "multi" map, which
-// holds a small deduplicated slice of label ids. This keeps the
-// single-label memory cost to one map entry (key + a 4-byte id) instead
-// of a whole map[LabelID]struct{} (header plus a bucket) per edge — the
-// dominant resident-memory cost on label-heavy graphs. The two maps are
-// mutually exclusive: a given edgeKey appears in at most one of them.
+// # Two-tier representation (task #1583)
 //
-// The multi map is allocated lazily on the first promotion to keep an
-// all-single-label graph from paying for sixteen empty spill maps.
+// The single relationship type of the overwhelmingly common LIVE single-label
+// edge is NOT stored here at all: it lives in the per-slot label column
+// co-located in the [adjlist.AdjList] adjacency entry (encoded as id+1, 0 ==
+// no label), removing the redundant 16-byte (src,dst) key plus per-entry map
+// overhead that previously dominated resident memory on label-heavy graphs.
+//
+// This overflow map holds only the two cases the slot column cannot:
+//
+//	(a) the 2nd..Nth label of a multi-label endpoint pair (>= 2 labels), the
+//	    first of which is in the slot; and
+//	(b) ORPHANED labels — a label set on a (src,dst) whose adjacency edge was
+//	    later removed within a failed statement, since [Graph.RemoveEdgeLabel]
+//	    does not require the edge to still exist (the executor's transaction-
+//	    undo path). Such a label has no live slot to live in, so it can only
+//	    reside in overflow.
+//
+// The per-pair label set a caller observes via [Graph.EdgeLabels] is therefore
+// DERIVED: the dedup-union of the decoded slot labels of every dst-matching
+// adjacency slot and overflow[k]. The overflow map is allocated lazily, so an
+// all-single-label graph never pays for sixteen empty spill maps.
 type edgeLabelShard struct {
-	mu    sync.RWMutex
-	one   map[edgeKey]LabelID
-	multi map[edgeKey][]LabelID
+	mu sync.RWMutex
+	// overflow holds the extra (beyond the slot) labels of a pair, deduplicated.
+	// nil until the first label spills here.
+	overflow map[edgeKey][]LabelID
 }
 
-// add attaches lid to k. The caller must hold sh.mu for writing.
-func (sh *edgeLabelShard) add(k edgeKey, lid LabelID) {
-	if ls, ok := sh.multi[k]; ok {
-		for _, x := range ls {
-			if x == lid {
-				return
-			}
-		}
-		sh.multi[k] = append(ls, lid)
-		return
-	}
-	if cur, ok := sh.one[k]; ok {
-		if cur == lid {
+// addOverflow appends lid to k's overflow list if not already present. The
+// caller must hold sh.mu for writing.
+func (sh *edgeLabelShard) addOverflow(k edgeKey, lid LabelID) {
+	ls := sh.overflow[k]
+	for _, x := range ls {
+		if x == lid {
 			return
 		}
-		delete(sh.one, k)
-		if sh.multi == nil {
-			sh.multi = make(map[edgeKey][]LabelID)
-		}
-		sh.multi[k] = []LabelID{cur, lid}
-		return
 	}
-	sh.one[k] = lid
+	if sh.overflow == nil {
+		sh.overflow = make(map[edgeKey][]LabelID)
+	}
+	sh.overflow[k] = append(ls, lid)
 }
 
-// has reports whether k carries lid. The caller must hold sh.mu for
-// reading (or writing).
-func (sh *edgeLabelShard) has(k edgeKey, lid LabelID) bool {
-	if cur, ok := sh.one[k]; ok {
-		return cur == lid
-	}
-	for _, x := range sh.multi[k] {
+// hasOverflow reports whether k's overflow list carries lid. The caller must
+// hold sh.mu for reading (or writing).
+func (sh *edgeLabelShard) hasOverflow(k edgeKey, lid LabelID) bool {
+	for _, x := range sh.overflow[k] {
 		if x == lid {
 			return true
 		}
@@ -231,75 +230,32 @@ func (sh *edgeLabelShard) has(k edgeKey, lid LabelID) bool {
 	return false
 }
 
-// forLabels calls fn once per distinct label id on k. The caller must
-// hold sh.mu for reading (or writing).
-func (sh *edgeLabelShard) forLabels(k edgeKey, fn func(LabelID)) {
-	if cur, ok := sh.one[k]; ok {
-		fn(cur)
-		return
-	}
-	for _, x := range sh.multi[k] {
-		fn(x)
-	}
-}
-
-// count returns the number of distinct labels on k. The caller must
-// hold sh.mu for reading (or writing).
-func (sh *edgeLabelShard) count(k edgeKey) int {
-	if _, ok := sh.one[k]; ok {
-		return 1
-	}
-	return len(sh.multi[k])
-}
-
-// remove detaches lid from k, demoting a two-label edge back to the
-// inline representation and dropping the entry entirely when its last
-// label goes. The caller must hold sh.mu for writing.
-func (sh *edgeLabelShard) remove(k edgeKey, lid LabelID) {
-	if cur, ok := sh.one[k]; ok {
-		if cur == lid {
-			delete(sh.one, k)
-		}
-		return
-	}
-	ls, ok := sh.multi[k]
+// removeOverflow detaches lid from k's overflow list, dropping the entry when
+// its last label goes. Returns true when lid was present. The caller must hold
+// sh.mu for writing.
+func (sh *edgeLabelShard) removeOverflow(k edgeKey, lid LabelID) bool {
+	ls, ok := sh.overflow[k]
 	if !ok {
-		return
+		return false
 	}
 	for i, x := range ls {
 		if x == lid {
 			ls = append(ls[:i], ls[i+1:]...)
-			break
+			if len(ls) == 0 {
+				delete(sh.overflow, k)
+			} else {
+				sh.overflow[k] = ls
+			}
+			return true
 		}
 	}
-	switch len(ls) {
-	case 0:
-		delete(sh.multi, k)
-	case 1:
-		delete(sh.multi, k)
-		sh.one[k] = ls[0]
-	default:
-		sh.multi[k] = ls
-	}
+	return false
 }
 
-// clear drops every label on k. The caller must hold sh.mu for writing.
-func (sh *edgeLabelShard) clear(k edgeKey) {
-	delete(sh.one, k)
-	delete(sh.multi, k)
-}
-
-// forEach calls fn once per (edge, label) pair stored in the shard. The
-// caller must hold sh.mu for reading (or writing).
-func (sh *edgeLabelShard) forEach(fn func(edgeKey, LabelID)) {
-	for k, lid := range sh.one {
-		fn(k, lid)
-	}
-	for k, ls := range sh.multi {
-		for _, lid := range ls {
-			fn(k, lid)
-		}
-	}
+// clearOverflow drops every overflow label on k. The caller must hold sh.mu
+// for writing.
+func (sh *edgeLabelShard) clearOverflow(k edgeKey) {
+	delete(sh.overflow, k)
 }
 
 // Graph is a labelled property graph generic over the user node type
@@ -631,6 +587,76 @@ func (g *Graph[N, W]) edgeLabelShardFor(k edgeKey) *edgeLabelShard {
 	return &g.edgeLabelShards[uint64(k.src)&(propMapShards-1)]
 }
 
+// encodeSlotLabel maps a [LabelID] to its on-slot encoding. The adjacency
+// label column reserves 0 for "no label", so the stored value is lid+1. The
+// id space is uint32; the +1 bias forbids only the single id math.MaxUint32,
+// which would require 2^32 distinct relationship-type names to ever reach.
+func encodeSlotLabel(lid LabelID) uint32 { return uint32(lid) + 1 }
+
+// decodeSlotLabel is the inverse of [encodeSlotLabel]. The second return is
+// false for the 0 ("no label") sentinel.
+func decodeSlotLabel(v uint32) (LabelID, bool) {
+	if v == 0 {
+		return 0, false
+	}
+	return LabelID(v - 1), true
+}
+
+// slotLabelsForPair scans src's adjacency label column and invokes fn for the
+// decoded label of every slot whose neighbour is dstID and that carries a
+// label. fn may be called more than once with the SAME id when parallel edges
+// happen to share a relationship type; callers that enumerate distinct labels
+// must deduplicate. This reads the lock-free adjacency snapshot and takes no
+// lock; it is safe for concurrent use.
+func (g *Graph[N, W]) slotLabelsForPair(srcID, dstID graph.NodeID, fn func(LabelID)) {
+	labs := g.adj.LoadEntryLabels(srcID)
+	if labs == nil {
+		return
+	}
+	nbs, _ := g.adj.LoadEntry(srcID)
+	// labs is published in lockstep with neighbours, but a concurrent writer
+	// may publish a longer neighbours snapshot after we loaded labs; bound the
+	// scan by the shorter length so an index is never out of range.
+	n := len(nbs)
+	if len(labs) < n {
+		n = len(labs)
+	}
+	for i := 0; i < n; i++ {
+		if nbs[i] != dstID {
+			continue
+		}
+		if lid, ok := decodeSlotLabel(labs[i]); ok {
+			fn(lid)
+		}
+	}
+}
+
+// clearSlotLabels drops the relationship-type label from every dst-matching
+// adjacency slot of src. It is the slot half of [Graph.clearEdgePairState];
+// the caller must hold the pair's edge-label shard write lock so the slot and
+// overflow halves transition together.
+func (g *Graph[N, W]) clearSlotLabels(srcID, dstID graph.NodeID) {
+	g.adj.ClearEdgeLabelSlots(srcID, dstID)
+}
+
+// firstSlotLabel returns the encoded label currently on the FIRST dst-matching
+// adjacency slot of src and whether such a slot exists. encoded == 0 means the
+// slot exists but carries no label. Reads the lock-free adjacency snapshot.
+func (g *Graph[N, W]) firstSlotLabel(srcID, dstID graph.NodeID) (encoded uint32, slotExists bool) {
+	nbs, _ := g.adj.LoadEntry(srcID)
+	labs := g.adj.LoadEntryLabels(srcID)
+	for i, nb := range nbs {
+		if nb != dstID {
+			continue
+		}
+		if labs != nil && i < len(labs) {
+			return labs[i], true
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
 // edgePropShardFor returns the shard responsible for the edgeKey k.
 // The shard is keyed by the src endpoint so all properties of edges
 // out of one node coalesce in the same shard (favourable for the
@@ -658,9 +684,10 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	for i := range g.nodeLabelShards {
 		g.nodeLabelShards[i].m = make(map[graph.NodeID]map[LabelID]struct{})
 	}
-	for i := range g.edgeLabelShards {
-		g.edgeLabelShards[i].one = make(map[edgeKey]LabelID)
-	}
+	// The edge-label overflow maps stay nil until the first label spills there
+	// (a multi-label or orphaned-label pair); a single-label graph keeps every
+	// relationship type inline in the adjacency slot column and never allocates
+	// these sixteen maps.
 	for i := range g.nodePropShards {
 		g.nodePropShards[i].m = make(map[graph.NodeID]map[PropertyKeyID]PropertyValue)
 	}
@@ -793,6 +820,47 @@ func (g *Graph[N, W]) Revive(n N) {
 // this (CREATE routes every endpoint through the mutator's AddNode).
 func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src, dst, w) }
 
+// AddEdgeLabeled inserts a directed edge (mirrored when the graph is
+// undirected) from src to dst with weight w and tags it with the
+// relationship-type name in a SINGLE adjacency operation: the type is interned
+// and written into the edge's inline label slot AT insertion time, instead of
+// the two-step [Graph.AddEdge] + [Graph.SetEdgeLabel] which copies the whole
+// label column after the append. For a bulk labelled build this restores
+// O(degree) amortised cost per source (the fused append is O(1) amortised),
+// versus the O(degree²) a per-edge column copy-on-write would cost.
+//
+// AddEdgeLabeled is the labelled-build fast path. For the simple single-label
+// case its observable result is identical to AddEdge followed by SetEdgeLabel:
+// the type lands in the first dst-matching inline slot, so [Graph.EdgeLabels],
+// [Graph.HasEdgeLabel], the per-slot label scan, and the TCK read path all see
+// exactly the same derived label set. To ADD A SECOND distinct type to an
+// already-labelled pair, or to (re)label a PRE-EXISTING edge, use
+// [Graph.SetEdgeLabel]; that path keeps its general copy-on-write semantics and
+// the overflow spill for multi-label pairs.
+//
+// The coarse src-keyed edge-label index (g.edgeIdx) is updated exactly as
+// SetEdgeLabel updates it, so index-driven candidate enumeration is unaffected.
+//
+// AddEdgeLabeled honours the same error and revival contract as [Graph.AddEdge]:
+// it propagates [adjlist.ErrShardFull] and does NOT revive a tombstoned
+// endpoint. When the underlying adjacency no-ops the insertion (a simple-graph
+// duplicate (src, dst)) the supplied type is not stamped on the existing slot;
+// callers that may re-label an existing edge must use SetEdgeLabel.
+//
+// AddEdgeLabeled is safe for concurrent use.
+func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
+	lid := g.reg.Intern(relType)
+	if err := g.adj.AddEdgeLabeled(src, dst, w, encodeSlotLabel(lid)); err != nil {
+		return err
+	}
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return nil
+	}
+	g.edgeIdx.Add(uint32(lid), srcID)
+	return nil
+}
+
 // AddEdgeH inserts a directed edge exactly like [Graph.AddEdge] but first
 // allocates a stable per-edge handle for it and stamps that handle onto
 // the adjacency slot (via [adjlist.AdjList.AddEdgeH]). It returns the
@@ -849,16 +917,38 @@ func (g *Graph[N, W]) NextEdgeHandle() uint64 { return g.nextEdgeHandle() }
 // using [adjlist.AdjList.RemoveEdge] directly; that path does not touch
 // labels or properties.
 func (g *Graph[N, W]) RemoveEdge(src, dst N) {
-	g.adj.RemoveEdge(src, dst)
-	if g.adj.HasEdge(src, dst) {
-		return // parallel edge(s) remain: keep the shared per-pair surfaces
+	srcID, srcOK := g.adj.Mapper().Lookup(src)
+	dstID, dstOK := g.adj.Mapper().Lookup(dst)
+
+	// Capture the per-pair label set BEFORE the adjacency removal. The
+	// underlying adjlist removes the first-matching slot, which may be the very
+	// slot carrying an inline relationship type; if a parallel edge survives we
+	// must re-assert the captured set so removing one parallel edge never drops
+	// a label the surviving edges still share (the per-pair coalesced-union
+	// contract). Reverse-direction labels are captured too for the undirected
+	// case below.
+	var fwdLabels, revLabels []LabelID
+	if srcOK && dstOK {
+		fwdLabels = g.pairLabelIDs(srcID, dstID)
+		if !g.adj.Directed() {
+			revLabels = g.pairLabelIDs(dstID, srcID)
+		}
 	}
-	srcID, ok := g.adj.Mapper().Lookup(src)
-	if !ok {
+
+	g.adj.RemoveEdge(src, dst)
+
+	if g.adj.HasEdge(src, dst) {
+		// Parallel edge(s) remain: keep the shared per-pair surfaces. Re-assert
+		// any captured labels in case the removed slot was the one holding them.
+		if srcOK && dstOK {
+			g.reassertPairLabels(srcID, dstID, fwdLabels)
+			if !g.adj.Directed() {
+				g.reassertPairLabels(dstID, srcID, revLabels)
+			}
+		}
 		return
 	}
-	dstID, ok := g.adj.Mapper().Lookup(dst)
-	if !ok {
+	if !srcOK || !dstOK {
 		return
 	}
 	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID})
@@ -868,6 +958,55 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 		// endpoint order).
 		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID})
 	}
+}
+
+// pairLabelIDs returns the deduplicated label-id set of the directed pair
+// (srcID, dstID) — the union of inline slot labels and overflow — under the
+// pair's edge-label shard RLock. Used to snapshot a pair's labels before an
+// adjacency mutation that may relocate them.
+func (g *Graph[N, W]) pairLabelIDs(srcID, dstID graph.NodeID) []LabelID {
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	var ids []LabelID
+	seen := func(lid LabelID) bool {
+		for _, x := range ids {
+			if x == lid {
+				return true
+			}
+		}
+		return false
+	}
+	g.slotLabelsForPair(srcID, dstID, func(lid LabelID) {
+		if !seen(lid) {
+			ids = append(ids, lid)
+		}
+	})
+	for _, lid := range sh.overflow[k] {
+		if !seen(lid) {
+			ids = append(ids, lid)
+		}
+	}
+	return ids
+}
+
+// reassertPairLabels re-applies every label in ids to the directed pair
+// (srcID, dstID), placing each on a surviving inline slot or in overflow. It
+// is idempotent: a label already present is a no-op. Called after removing one
+// of several parallel edges, when the removed slot might have carried a label
+// the surviving edges still share.
+func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelID) {
+	if len(ids) == 0 {
+		return
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.Lock()
+	for _, lid := range ids {
+		g.setEdgeLabelLocked(k, lid)
+	}
+	sh.mu.Unlock()
 }
 
 // RemoveAllEdgesFrom removes all edges incident from src in O(d) time for a
@@ -915,9 +1054,16 @@ func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
 // verifies against the authoritative per-pair labels, so a stale entry can
 // cost at most a filtered-out candidate, never a wrong result.
 func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
+	// Clear both halves of the per-pair label set together under the pair's
+	// shard write lock: the overflow entry AND the label on every dst-matching
+	// adjacency slot. They are two halves of one logical set and must transition
+	// atomically with respect to a concurrent EdgeLabels reader (which takes the
+	// same shard RLock), so a re-CREATE of the same endpoints later cannot
+	// resurrect a removed edge's relationship type.
 	lsh := g.edgeLabelShardFor(k)
 	lsh.mu.Lock()
-	lsh.clear(k)
+	lsh.clearOverflow(k)
+	g.clearSlotLabels(k.src, k.dst)
 	lsh.mu.Unlock()
 	psh := g.edgePropShardFor(k)
 	psh.mu.Lock()
@@ -1317,6 +1463,13 @@ func (g *Graph[N, W]) NodeLabelsByID(id graph.NodeID) []string {
 // edge must already exist in the underlying adjacency list; otherwise
 // the call is a no-op. The label is associated with the source
 // NodeID's row in the edge index.
+//
+// The first relationship type of a pair is stored inline in the adjacency
+// slot's label column; a second distinct type spills to the per-shard
+// overflow store. The two together form the pair's derived label set
+// returned by [Graph.EdgeLabels]. The whole update runs under the pair's
+// edge-label shard write lock so the slot and overflow halves transition
+// together with respect to a concurrent reader.
 func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 	if !g.adj.HasEdge(src, dst) {
 		return
@@ -1327,9 +1480,36 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	sh.add(k, lid)
+	g.setEdgeLabelLocked(k, lid)
 	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
+}
+
+// setEdgeLabelLocked adds lid to the derived label set of k. The caller must
+// hold k's edge-label shard write lock AND must already have verified that the
+// edge (k.src, k.dst) exists (the slot to receive an inline label is present).
+//
+// Placement: if the first dst-matching slot carries no label, the label goes
+// there; if that slot already carries the SAME label the call is a no-op (the
+// label is already in the set); otherwise — the slot holds a different label —
+// the label spills to overflow (deduplicated). Membership in the derived union
+// is invariant under which slot or overflow physically holds the id.
+func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) {
+	enc := encodeSlotLabel(lid)
+	cur, slotExists := g.firstSlotLabel(k.src, k.dst)
+	if slotExists && cur == 0 {
+		// Empty inline slot: store the first label there.
+		g.adj.SetEdgeLabelSlot(k.src, k.dst, enc)
+		return
+	}
+	if slotExists && cur == enc {
+		// Already the inline label — nothing to do.
+		return
+	}
+	// Either the inline slot holds a different label, or (defensively) there is
+	// no slot; spill to overflow, but skip if it is already the slot label.
+	sh := g.edgeLabelShardFor(k)
+	sh.addOverflow(k, lid)
 }
 
 // HasEdgeLabel reports whether the directed edge (src, dst) carries
@@ -1351,7 +1531,16 @@ func (g *Graph[N, W]) HasEdgeLabel(src, dst N, name string) bool {
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	return sh.has(k, lid)
+	if sh.hasOverflow(k, lid) {
+		return true
+	}
+	found := false
+	g.slotLabelsForPair(srcID, dstID, func(slotLid LabelID) {
+		if slotLid == lid {
+			found = true
+		}
+	})
+	return found
 }
 
 // RemoveEdgeLabel detaches name from the directed edge (src, dst). It is the
@@ -1385,6 +1574,22 @@ func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	sh.remove(k, lid)
+	// Prefer dropping the overflow copy; if the label is not in overflow it
+	// must live in an inline slot, so clear the FIRST dst-matching slot whose
+	// label decodes to lid. The whole update is under the shard lock so the
+	// slot and overflow halves of the derived set stay consistent for readers.
+	if !sh.removeOverflow(k, lid) {
+		g.clearFirstSlotLabel(srcID, dstID, lid)
+	}
 	sh.mu.Unlock()
+}
+
+// clearFirstSlotLabel clears the label of the FIRST dst-matching adjacency
+// slot of src whose label decodes to lid (not merely the first dst-matching
+// slot — a multigraph pair may carry different labels on its parallel slots).
+// The caller must hold the pair's edge-label shard write lock. No-op when no
+// such slot carries lid (e.g. the edge was already removed — the orphan case,
+// where the label lived only in overflow and was handled by the caller).
+func (g *Graph[N, W]) clearFirstSlotLabel(srcID, dstID graph.NodeID, lid LabelID) {
+	g.adj.ClearEdgeLabelSlotValue(srcID, dstID, encodeSlotLabel(lid))
 }

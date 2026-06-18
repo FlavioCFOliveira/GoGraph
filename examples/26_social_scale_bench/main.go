@@ -344,12 +344,20 @@ func addNode(g *lpg.Graph[string, float64], id, label, propKey, propVal string) 
 // tags the edge with the given relationship type so Cypher patterns like
 // [:FRIEND] / [:LIKE] match; when false the type is left implicit (to be
 // inferred from the endpoint labels) and no per-edge label is stored.
+//
+// The labelled case uses [lpg.Graph.AddEdgeLabeled] so the type lands in the
+// edge's inline slot AT insertion time — a single O(1)-amortised append — rather
+// than AddEdge followed by a SetEdgeLabel that copies the whole label column
+// (which makes a bulk labelled build O(degree²) per source).
 func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType bool) error {
+	if withType {
+		if err := g.AddEdgeLabeled(src, dst, 1, relType); err != nil {
+			return fmt.Errorf("AddEdgeLabeled %s-[%s]->%s: %w", src, relType, dst, err)
+		}
+		return nil
+	}
 	if err := g.AddEdge(src, dst, 1); err != nil {
 		return fmt.Errorf("AddEdge %s-[%s]->%s: %w", src, relType, dst, err)
-	}
-	if withType {
-		g.SetEdgeLabel(src, dst, relType)
 	}
 	return nil
 }

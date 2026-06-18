@@ -158,10 +158,37 @@ with identical query results in every mode. Extrapolated to the full
 specification (~3.25 × 10⁸ edges): **~60 GiB → ~21 GiB** (explicit) or
 **~7.4 GiB** (implicit) of live heap.
 
+### Update — per-edge labels moved into the adjacency column
+
+A later optimization removed the per-pair edge-label map entirely. A heap
+profile (`inuse_space`) of the explicit-type build at 40k/4k (≈13 M edges)
+showed the `map[edgeKey]LabelID` store at **418.7 MiB = 56.7 % of live
+heap (~32 B/edge)** — the single largest resident consumer, and one that
+redundantly re-stored the `(src, dst)` pair the adjacency list already
+holds. The relationship type is now stored inline as a compact per-slot
+column in the adjacency entry (the same mechanism as the stable-handle
+column), with a small spill structure for the rare multi-label edge and
+for a label left on an already-removed edge. `AddEdgeLabeled` writes the
+edge and its type together so the bulk build stays O(degree) amortised.
+
+Measured at 40k/4k (explicit types), verified against the full openCypher
+TCK (3897/3897), the ACID battery, and `go test -race ./...` — no
+functional change and the on-disk snapshot format is unchanged:
+
+| | Live heap | B/edge | Build |
+|---|---:|---:|---:|
+| Before (per-pair label map) | ~738 MiB | ~57 | ~7.5 s |
+| After (inline label column) | **~375 MiB** | **~29** | **~3.3 s** |
+
+The edge-label store dropped **~85 %** (418.7 → ~60 MiB) and total live
+heap **~49 %**; build time also improved because the fused
+`AddEdgeLabeled` path drops the per-edge existence check the old
+`AddEdge` + `SetEdgeLabel` pair paid.
+
 ## Key APIs
 
 - `graph/lpg.New` / `Graph.AddNode` / `Graph.SetNodeLabel` / `Graph.SetNodeProperty` — build the labelled property graph in memory.
-- `graph/lpg.Graph.AddEdge` / `Graph.SetEdgeLabel` — add typed `FRIEND` / `LIKE` relationships.
+- `graph/lpg.Graph.AddEdgeLabeled` — add a typed `FRIEND` / `LIKE` relationship in one call (the edge and its relationship type are written together, so the per-edge label is stored inline in the adjacency column rather than in a separate keyed map). `Graph.AddEdge` / `Graph.SetEdgeLabel` remain for the untyped and re-labelling cases.
 - `graph/lpg.StringValue` — wrap string property values.
 - `cypher.NewEngine` / `Engine.Run` — query the in-memory graph.
 - `cypher.Result.Next` / `Result.Record` / `Result.Err` / `Result.Close` — iterate result rows and read columns.

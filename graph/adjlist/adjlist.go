@@ -153,10 +153,23 @@ type shardSlots struct {
 // length as neighbours and is carried verbatim across compaction in
 // [AdjList.removeOneEdge] — a surviving slot keeps its ORIGINAL handle
 // (handles are never renumbered or reused).
+//
+// labels is a second optional parallel column carrying one OPAQUE 4-byte
+// value per neighbour slot. adjlist never interprets it; the higher layer
+// (lpg) co-locates a single encoded relationship-type id here instead of
+// re-storing the (src,dst) pair in a separate map, which is the dominant
+// resident-memory cost on label-heavy graphs. Like handles it is nil until
+// a caller first sets a label via [AdjList.SetEdgeLabelSlot]; when non-nil
+// it is the same length as neighbours and is carried in lockstep across
+// growth (upsertEdgeLocked), compaction (compactEntry), and bulk removal
+// (RemoveAllEdgesFrom). The value 0 is reserved by convention for "no
+// label on this slot"; lpg owns the +1/-1 bias so that a real label id 0
+// maps to the stored value 1.
 type adjEntry[W any] struct {
 	neighbours []graph.NodeID
 	weights    []W
 	handles    []uint64 // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
+	labels     []uint32 // nil unless SetEdgeLabelSlot set one; parallel to neighbours when set; 0 == no label
 }
 
 // New returns an empty AdjList configured by cfg.
@@ -251,7 +264,7 @@ func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 // strict orphan-free behaviour should detect ErrShardFull and treat
 // the graph as saturated.
 func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
-	return a.addEdge(src, dst, w, 0, false)
+	return a.addEdge(src, dst, w, edgeExtra{})
 }
 
 // AddEdgeH is [AdjList.AddEdge] with an explicit, caller-supplied stable
@@ -270,13 +283,58 @@ func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
 // a no-op and the supplied handle is ignored (the existing slot keeps its
 // original handle).
 func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
-	return a.addEdge(src, dst, w, handle, true)
+	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true})
 }
 
-// addEdge is the shared implementation of [AdjList.AddEdge] and
-// [AdjList.AddEdgeH]. When hasHandle is false the slot's handle column is
-// left untouched (nil for a fresh entry); when true the supplied handle is
-// stored parallel to the new neighbour.
+// AddEdgeLabeled is [AdjList.AddEdge] with an OPAQUE 4-byte label supplied AT
+// edge-insertion time. The label is written into the slot's parallel label
+// column (see [adjEntry.labels]) within the SAME O(1)-amortised append fast
+// path that writes the neighbour and weight — no separate copy-on-write of the
+// whole column afterwards. This is the bulk-build path for a labelled graph: a
+// degree-d source is assembled in O(d) amortised total, not O(d²).
+//
+// adjlist treats label as opaque: any uint32 is accepted, including 0 (the
+// higher layer's "no label" sentinel). A label-free graph that never calls this
+// method keeps the labels column nil and pays no extra memory.
+//
+// For an undirected graph the mirrored (dst, src) slot receives the SAME label,
+// so both directions of one logical edge carry the same relationship type.
+//
+// AddEdgeLabeled honours the same [ErrShardFull] and all-or-nothing contract as
+// [AdjList.AddEdge]. In simple-graph mode a duplicate (src, dst) is still a
+// no-op and the supplied label is ignored (the existing slot keeps its label).
+// Use [AdjList.SetEdgeLabelSlot] to (re)label a slot of a pre-existing edge.
+func (a *AdjList[N, W]) AddEdgeLabeled(src, dst N, w W, label uint32) error {
+	return a.addEdge(src, dst, w, edgeExtra{label: label, hasLabel: true})
+}
+
+// AddEdgeLabeledH fuses [AdjList.AddEdgeH] and [AdjList.AddEdgeLabeled]: it
+// stores both a caller-supplied stable handle and an opaque label on the new
+// slot within the same append fast path. Both optional columns are written at
+// position oldLen at insertion time, so a labelled, handle-carrying edge is
+// still an O(1)-amortised append.
+func (a *AdjList[N, W]) AddEdgeLabeledH(src, dst N, w W, handle uint64, label uint32) error {
+	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true, label: label, hasLabel: true})
+}
+
+// edgeExtra carries the two OPTIONAL parallel-column values an edge insertion
+// may stamp onto its new slot AT append time: a stable handle and an opaque
+// label. Each is gated by its own "has" flag so an absent column stays nil for
+// a label-free / handle-free graph. Bundling them keeps the append fast path's
+// signature stable as new optional columns are added, and the struct is a small
+// value type passed by copy (no heap escape).
+type edgeExtra struct {
+	handle    uint64
+	label     uint32
+	hasHandle bool
+	hasLabel  bool
+}
+
+// addEdge is the shared implementation of [AdjList.AddEdge], [AdjList.AddEdgeH],
+// [AdjList.AddEdgeLabeled], and [AdjList.AddEdgeLabeledH]. The optional handle
+// and label in ex are stamped onto the new slot's parallel columns at append
+// time; when a "has" flag is false that column is left untouched (nil for a
+// fresh entry).
 //
 // For undirected multigraphs where src and dst land in DIFFERENT shards the
 // two shard locks are acquired simultaneously in a canonical (lower-index-
@@ -284,13 +342,13 @@ func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
 // and mirror slots are assigned atomically — no concurrent parallel-edge
 // insertion can interleave between the two appends — so both directions
 // always reflect the same slot ordering.
-func (a *AdjList[N, W]) addEdge(src, dst N, w W, handle uint64, hasHandle bool) error {
+func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 	srcID := a.mapper.Intern(src)
 	dstID := a.mapper.Intern(dst)
 
 	// Directed graphs and self-loops need only the forward append.
 	if a.cfg.Directed || srcID == dstID {
-		inserted, err := a.upsertEdge(srcID, dstID, w, handle, hasHandle)
+		inserted, err := a.upsertEdge(srcID, dstID, w, ex)
 		if err != nil {
 			return err
 		}
@@ -306,7 +364,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, handle uint64, hasHandle bool) 
 
 	if srcShard == dstShard {
 		// Single shard covers both endpoints: one lock suffices.
-		inserted, err := a.upsertEdge(srcID, dstID, w, handle, hasHandle)
+		inserted, err := a.upsertEdge(srcID, dstID, w, ex)
 		if err != nil {
 			return err
 		}
@@ -314,7 +372,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, handle uint64, hasHandle bool) 
 			return nil
 		}
 		a.size.Add(1)
-		if _, err := a.upsertEdge(dstID, srcID, w, handle, hasHandle); err != nil {
+		if _, err := a.upsertEdge(dstID, srcID, w, ex); err != nil {
 			// Both endpoints share a shard, so the forward append and this
 			// mirror append are already serialised; just undo the forward.
 			a.removeOneEdge(srcID, dstID)
@@ -332,7 +390,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, handle uint64, hasHandle bool) 
 	sLo.mu.Lock()
 	sHi.mu.Lock()
 
-	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, handle, hasHandle)
+	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, ex)
 	if err != nil {
 		sHi.mu.Unlock()
 		sLo.mu.Unlock()
@@ -344,7 +402,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, handle uint64, hasHandle bool) 
 		return nil
 	}
 	// Forward slot appended. Now append the mirror under the same lock pair.
-	if _, err := a.upsertEdgeLocked(dstID, srcID, w, handle, hasHandle); err != nil {
+	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex); err != nil {
 		// Undo the forward append before releasing — we still hold both locks
 		// so the rollback is atomic with respect to any reader.
 		a.removeOneEdgeLocked(srcID, dstID)
@@ -366,11 +424,11 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, handle uint64, hasHandle bool) 
 // snapshot is constructed fresh and swapped in via atomic.StorePointer
 // so concurrent readers always observe a consistent immutable
 // adjacency.
-func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, handle uint64, hasHandle bool) (bool, error) {
+func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, ex edgeExtra) (bool, error) {
 	s := &a.shards[src&shardMask]
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return a.upsertEdgeLocked(src, dst, w, handle, hasHandle)
+	return a.upsertEdgeLocked(src, dst, w, ex)
 }
 
 // growCap returns the next backing-array capacity to use when appending to a
@@ -398,7 +456,7 @@ func growCap(cur int) int {
 // readers). When the array is full a new one is allocated with geometric
 // capacity (growCap), amortising the copy cost to O(log d) large allocations
 // per degree-d hub.
-func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint64, hasHandle bool) (bool, error) {
+func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -412,9 +470,16 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint
 		}
 		entry.neighbours[0] = dst
 		entry.weights[0] = w
-		if hasHandle {
+		if ex.hasHandle {
 			entry.handles = make([]uint64, 1, c)
-			entry.handles[0] = handle
+			entry.handles[0] = ex.handle
+		}
+		// Fused label: when a label is supplied at insertion time the column is
+		// allocated here and the first (only) slot receives it directly — the
+		// same O(1) write as neighbours/weights, never a separate column copy.
+		if ex.hasLabel {
+			entry.labels = make([]uint32, 1, c)
+			entry.labels[0] = ex.label
 		}
 		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry); err != nil {
 			return false, err
@@ -442,7 +507,7 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint
 		ws[oldLen] = w
 
 		var hs []uint64
-		if hasHandle || current.handles != nil {
+		if ex.hasHandle || current.handles != nil {
 			if current.handles != nil && cap(current.handles) >= newLen {
 				hs = current.handles[:newLen]
 			} else {
@@ -457,9 +522,24 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint
 				hs = make([]uint64, newLen, growCap(oldLen))
 				copy(hs, current.handles)
 			}
-			hs[oldLen] = handle
+			hs[oldLen] = ex.handle
 		}
-		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs}); err != nil {
+		// Carry the optional labels column forward when it exists OR when this
+		// call supplies a fused label. The new slot at oldLen receives ex.label
+		// (0 when no fused label was supplied — the "no label" sentinel, exactly
+		// as a label-less append would leave it). The same growCap(oldLen)
+		// capacity rule and back-fill apply as for handles.
+		var ls []uint32
+		if ex.hasLabel || current.labels != nil {
+			if current.labels != nil && cap(current.labels) >= newLen {
+				ls = current.labels[:newLen]
+			} else {
+				ls = make([]uint32, newLen, growCap(oldLen))
+				copy(ls, current.labels) // no-op when current.labels is nil
+			}
+			ls[oldLen] = ex.label
+		}
+		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls}); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -481,12 +561,21 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, handle uint
 	// "no handle" sentinel), so the column stays length-aligned with
 	// neighbours.
 	var newH []uint64
-	if hasHandle || current.handles != nil {
+	if ex.hasHandle || current.handles != nil {
 		newH = make([]uint64, newLen, newCap)
 		copy(newH, current.handles) // copy is a no-op when current.handles is nil
-		newH[oldLen] = handle
+		newH[oldLen] = ex.handle
 	}
-	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH}); err != nil {
+	// Carry the optional labels column forward when it exists OR a fused label
+	// is supplied. The appended slot at oldLen receives ex.label (0 when none),
+	// so it stays the sentinel for a label-less append.
+	var newL []uint32
+	if ex.hasLabel || current.labels != nil {
+		newL = make([]uint32, newLen, newCap)
+		copy(newL, current.labels) // no-op when current.labels is nil
+		newL[oldLen] = ex.label
+	}
+	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -747,7 +836,16 @@ func compactEntry[W any](current *adjEntry[W], idx int) *adjEntry[W] {
 		copy(newH, current.handles[:idx])
 		copy(newH[idx:], current.handles[idx+1:])
 	}
-	return &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH}
+	// Compact the labels column in lock-step too: every surviving slot keeps
+	// its ORIGINAL opaque label value. Removing one parallel edge must not
+	// renumber or drop the labels of the edges that remain.
+	var newL []uint32
+	if current.labels != nil {
+		newL = make([]uint32, len(current.labels)-1)
+		copy(newL, current.labels[:idx])
+		copy(newL[idx:], current.labels[idx+1:])
+	}
+	return &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL}
 }
 
 // Neighbours returns an iterator over the live out-neighbours of src
@@ -817,6 +915,172 @@ func (a *AdjList[N, W]) LoadEntryH(id graph.NodeID) (neighbours []graph.NodeID, 
 		return nil, nil, nil
 	}
 	return e.neighbours, e.weights, e.handles
+}
+
+// LoadEntryLabels returns an immutable snapshot of the optional per-slot
+// label column of the node identified by id, or nil when id has no outgoing
+// edges or no caller has ever set a label on any of id's slots. When non-nil
+// the slice is the same length as the neighbours returned by [AdjList.LoadEntry]
+// and labels[i] is the OPAQUE label value of the edge to neighbours[i] (0 means
+// "no label on that slot"). adjlist never interprets the value; the higher
+// layer owns its meaning. The returned slice is owned by the current adjacency
+// snapshot and must not be mutated by the caller.
+func (a *AdjList[N, W]) LoadEntryLabels(id graph.NodeID) []uint32 {
+	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
+	if e == nil {
+		return nil
+	}
+	return e.labels
+}
+
+// SetEdgeLabelSlot stores the opaque label value v on the first adjacency
+// slot of src whose neighbour is dst, publishing a new immutable entry
+// snapshot. It returns true when such a slot was found and updated, false
+// when src has no edge to dst (the caller's higher layer is responsible for
+// the no-live-edge case via its own overflow store).
+//
+// adjlist treats v as opaque: any uint32 is accepted, including 0 (which the
+// higher layer uses as the "no label" sentinel, so passing 0 clears the
+// slot's label). When src's entry carries no label column yet, one is
+// allocated lazily, length-aligned with neighbours, with every other slot at
+// 0; a label-free graph therefore never pays for the column.
+//
+// Concurrency: the update is copy-on-write. The label column (and the entry)
+// is copied with the change applied and published via the same atomic
+// store-pointer mechanism as [AdjList.AddEdgeH]; the slot's existing index is
+// never mutated in place, so a concurrent lock-free reader holding the prior
+// snapshot is unaffected. SetEdgeLabelSlot is safe for concurrent use.
+func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := loadEntry[W](s, intraIdx)
+	if current == nil {
+		return false
+	}
+	idx := -1
+	for i, n := range current.neighbours {
+		if n == dst {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	// Copy-on-write the label column. Sharing the immutable neighbours/weights/
+	// handles headers into the new entry is safe (they are never mutated after
+	// publication); only the label column is replaced so an in-place write at a
+	// live index can never race a concurrent reader.
+	newL := make([]uint32, len(current.neighbours))
+	copy(newL, current.labels) // no-op when current.labels is nil
+	newL[idx] = v
+	entry := &adjEntry[W]{
+		neighbours: current.neighbours,
+		weights:    current.weights,
+		handles:    current.handles,
+		labels:     newL,
+	}
+	// storeEntry cannot fail here: the slot already exists, so no growth is
+	// required.
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
+	return true
+}
+
+// ClearEdgeLabelSlotValue clears the opaque label of the FIRST adjacency slot
+// of src whose neighbour is dst AND whose label equals v, publishing a new
+// immutable entry snapshot. It returns true when such a slot was found and
+// cleared. This targets a specific label value so a multigraph pair whose
+// parallel slots carry different labels can drop exactly one of them without
+// disturbing the others. No-op when v is 0, src has no label column, or no
+// dst-matching slot carries v.
+//
+// Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
+// for concurrent use.
+func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32) bool {
+	if v == 0 {
+		return false
+	}
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := loadEntry[W](s, intraIdx)
+	if current == nil || current.labels == nil {
+		return false
+	}
+	idx := -1
+	for i, n := range current.neighbours {
+		if n == dst && i < len(current.labels) && current.labels[i] == v {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	newL := make([]uint32, len(current.labels))
+	copy(newL, current.labels)
+	newL[idx] = 0
+	entry := &adjEntry[W]{
+		neighbours: current.neighbours,
+		weights:    current.weights,
+		handles:    current.handles,
+		labels:     newL,
+	}
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
+	return true
+}
+
+// ClearEdgeLabelSlots clears the opaque label of EVERY adjacency slot of src
+// whose neighbour is dst (all parallel slots in a multigraph), publishing a
+// single new immutable entry snapshot. It is the bulk inverse used when the
+// last edge between an endpoint pair is removed and the higher layer must drop
+// the pair's per-slot labels in lockstep with its own overflow state. No-op
+// (and no allocation) when src has no label column or no dst-matching slot
+// carries a label.
+//
+// Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
+// for concurrent use.
+func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := loadEntry[W](s, intraIdx)
+	if current == nil || current.labels == nil {
+		return
+	}
+	// Find dst-matching slots that still carry a label; skip the allocation
+	// when there is nothing to clear.
+	var newL []uint32
+	for i, n := range current.neighbours {
+		if n != dst || i >= len(current.labels) || current.labels[i] == 0 {
+			continue
+		}
+		if newL == nil {
+			newL = make([]uint32, len(current.labels))
+			copy(newL, current.labels)
+		}
+		newL[i] = 0
+	}
+	if newL == nil {
+		return
+	}
+	entry := &adjEntry[W]{
+		neighbours: current.neighbours,
+		weights:    current.weights,
+		handles:    current.handles,
+		labels:     newL,
+	}
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
 }
 
 // loadEntry atomically reads the entry stored at intraIdx within s.

@@ -373,6 +373,64 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
+// TestLabels_Roundtrip_MultiLabel locks the on-disk-format invariant for the
+// two-tier edge-label representation (task #1583): a pair carrying MORE than
+// one relationship type (first inline in the adjacency slot, the rest in the
+// LPG-side overflow) must round-trip through a full snapshot with the complete
+// label set preserved. The snapshot writer reads g.EdgeLabels() — the derived
+// union — so the slot/overflow split is invisible to the on-disk format and no
+// migration is needed. Verifies the FULL set, not merely membership.
+func TestLabels_Roundtrip_MultiLabel(t *testing.T) {
+	t.Parallel()
+
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge a->b: %v", err)
+	}
+	if err := g.AddEdge("c", "d", 2); err != nil {
+		t.Fatalf("AddEdge c->d: %v", err)
+	}
+	// a->b carries three types: REL1 inline, REL2 + REL3 in overflow.
+	g.SetEdgeLabel("a", "b", "REL1")
+	g.SetEdgeLabel("a", "b", "REL2")
+	g.SetEdgeLabel("a", "b", "REL3")
+	// c->d carries a single inline type.
+	g.SetEdgeLabel("c", "d", "REL1")
+
+	c := csr.BuildFromAdjList(g.AdjList())
+	dir := filepath.Join(t.TempDir(), "snap")
+	if err := WriteSnapshotFull(dir, c, g); err != nil {
+		t.Fatalf("WriteSnapshotFull: %v", err)
+	}
+	loaded, err := LoadSnapshotFull(dir)
+	if err != nil {
+		t.Fatalf("LoadSnapshotFull: %v", err)
+	}
+
+	// Replay adjacency, then apply labels — the canonical post-restart path.
+	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+	for _, e := range []struct{ s, d string }{{"a", "b"}, {"c", "d"}} {
+		if err := restored.AddEdge(e.s, e.d, 0); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	}
+	if err := ApplyLabelsToGraph(restored, loaded.Labels); err != nil {
+		t.Fatalf("ApplyLabelsToGraph: %v", err)
+	}
+
+	checkSet := func(s, d string, want []string) {
+		got := restored.EdgeLabels(s, d)
+		sort.Strings(got)
+		ws := append([]string(nil), want...)
+		sort.Strings(ws)
+		if !equalStrings(got, ws) {
+			t.Errorf("restored EdgeLabels(%q,%q) = %v, want %v", s, d, got, ws)
+		}
+	}
+	checkSet("a", "b", []string{"REL1", "REL2", "REL3"})
+	checkSet("c", "d", []string{"REL1"})
+}
+
 func sameSet(got []string, want map[string]bool) bool {
 	if len(got) != len(want) {
 		return false

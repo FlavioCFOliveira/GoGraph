@@ -1,5 +1,7 @@
 package lpg
 
+import "github.com/FlavioCFOliveira/GoGraph/graph"
+
 // This file holds the read-only schema-introspection enumerators:
 // NodeLabelsInUse, RelationshipTypesInUse, and PropertyKeysInUse. They
 // report the distinct names currently borne by live (non-tombstoned)
@@ -72,21 +74,51 @@ func (g *Graph[N, W]) NodeLabelsInUse() []string {
 // carries a label it is empty (len 0). The caller owns the slice and may
 // mutate it.
 //
-// RelationshipTypesInUse is safe for concurrent use. It snapshots each of
-// the 16 edge-label shards under that shard's RLock (one at a time) and
-// resolves ids through the lock-free [LabelRegistry]. The result is a
-// point-in-time view and is not guaranteed to be consistent across shards.
+// RelationshipTypesInUse is safe for concurrent use. It walks the inline
+// per-slot label column of every source's adjacency (the lock-free snapshot)
+// and each of the 16 edge-label overflow shards under that shard's RLock (one
+// at a time), and resolves ids through the lock-free [LabelRegistry]. The
+// result is a point-in-time view and is not guaranteed to be consistent across
+// shards.
 func (g *Graph[N, W]) RelationshipTypesInUse() []string {
 	seen := make(map[LabelID]struct{})
+	// Inline labels: walk every source's adjacency label column. A label
+	// counts only while both endpoints of the bearing slot are live.
+	maxID := uint64(g.adj.MaxNodeID())
+	for id := uint64(0); id < maxID; id++ {
+		srcID := graph.NodeID(id)
+		labs := g.adj.LoadEntryLabels(srcID)
+		if labs == nil {
+			continue
+		}
+		nbs, _ := g.adj.LoadEntry(srcID)
+		n := len(nbs)
+		if len(labs) < n {
+			n = len(labs)
+		}
+		for i := 0; i < n; i++ {
+			lid, ok := decodeSlotLabel(labs[i])
+			if !ok {
+				continue
+			}
+			if !g.edgeEndpointLive(edgeKey{src: srcID, dst: nbs[i]}) {
+				continue
+			}
+			seen[lid] = struct{}{}
+		}
+	}
+	// Overflow labels (multi-label and orphaned pairs).
 	for i := range g.edgeLabelShards {
 		sh := &g.edgeLabelShards[i]
 		sh.mu.RLock()
-		sh.forEach(func(k edgeKey, lid LabelID) {
+		for k, ls := range sh.overflow {
 			if !g.edgeEndpointLive(k) {
-				return
+				continue
 			}
-			seen[lid] = struct{}{}
-		})
+			for _, lid := range ls {
+				seen[lid] = struct{}{}
+			}
+		}
 		sh.mu.RUnlock()
 	}
 	return g.resolveLabelIDs(seen)
