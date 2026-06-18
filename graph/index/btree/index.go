@@ -106,20 +106,20 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 	// (NaN == NaN is false), appending empty entries forever.
 	sort.Slice(pairs, func(a, b int) bool { return cmp.Less(pairs[a].v, pairs[b].v) })
 	keys := make([]V, 0, len(pairs))
-	bms := make([]*roaring64.Bitmap, 0, len(pairs))
+	sets := make([]index.NodeSet, 0, len(pairs))
 	for k := 0; k < len(pairs); {
 		j := k
-		bm := roaring64.New()
+		var set index.NodeSet
 		for j < len(pairs) && equalKeys(pairs[j].v, pairs[k].v) {
-			bm.Add(uint64(pairs[j].n))
+			set.Add(uint64(pairs[j].n))
 			j++
 		}
 		keys = append(keys, pairs[k].v)
-		bms = append(bms, bm)
+		sets = append(sets, set)
 		k = j
 	}
 	tree := newBplus[V]()
-	tree.bulkPack(keys, bms)
+	tree.bulkPack(keys, sets)
 	i.mu.Lock()
 	i.tree = tree
 	i.mu.Unlock()
@@ -192,7 +192,7 @@ func (i *Index[V]) RangeFirst(lo, hi V) (V, graph.NodeID, bool) {
 	if l == nil || cmp.Less(hi, l.keys[off]) {
 		return zeroV, 0, false
 	}
-	first := l.bms[off].Minimum()
+	first := l.sets[off].Minimum()
 	return l.keys[off], graph.NodeID(first), true
 }
 
@@ -214,7 +214,7 @@ func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 			if cmp.Less(hi, l.keys[k]) {
 				return out
 			}
-			out.Or(l.bms[k])
+			l.sets[k].OrInto(out)
 		}
 		l, off = l.next, 0
 	}
@@ -227,11 +227,20 @@ func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	bm := i.tree.get(value)
-	if bm == nil {
+	set := i.tree.get(value)
+	if set == nil {
 		return roaring64.New()
 	}
-	return bm.Clone()
+	bm, shared := set.Bitmap()
+	if shared {
+		// The set is in the bitmap state and the returned bitmap aliases
+		// the live one; clone so the caller owns an independent copy that
+		// a later writer cannot mutate (the pre-refactor Lookup contract).
+		return bm.Clone()
+	}
+	// Inline state: Bitmap already materialised a fresh, caller-owned
+	// bitmap — no clone needed.
+	return bm
 }
 
 // Cardinality returns the number of NodeIDs associated with value,
@@ -239,11 +248,11 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 func (i *Index[V]) Cardinality(value V) uint64 {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	bm := i.tree.get(value)
-	if bm == nil {
+	set := i.tree.get(value)
+	if set == nil {
 		return 0
 	}
-	return bm.GetCardinality()
+	return set.Cardinality()
 }
 
 // DistinctValues returns the number of distinct values currently
@@ -295,7 +304,7 @@ func (i *Index[V]) RangeCount(lo, hi V, budget uint64) (count uint64, exact bool
 			if cmp.Less(hi, l.keys[k]) {
 				return total, true
 			}
-			total += l.bms[k].GetCardinality()
+			total += l.sets[k].Cardinality()
 			if total > budget {
 				return budget + 1, false
 			}
@@ -492,7 +501,7 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 			if _, err := tee.Write(key); err != nil {
 				return err
 			}
-			ids := l.bms[k].ToArray()
+			ids := l.sets[k].ToArray()
 			if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
 				return err
 			}
@@ -575,7 +584,7 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		hint = btreeCapHintMax
 	}
 	keys := make([]V, 0, hint)
-	bms := make([]*roaring64.Bitmap, 0, hint)
+	sets := make([]index.NodeSet, 0, hint)
 	var prev V
 	hasPrev := false
 	for e := uint64(0); e < entryCount; e++ {
@@ -613,17 +622,18 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		if err := binary.Read(br, binary.LittleEndian, ids); err != nil {
 			return fmt.Errorf("%w: ids: %w", index.ErrIndexCorrupted, err)
 		}
-		bm := roaring64.New()
-		bm.AddMany(ids)
+		// ids is strictly ascending (the writer emits ToArray order and the
+		// reader does not reorder), so NodeSetFromSorted picks the cheapest
+		// representation without a re-sort. Ownership of ids transfers.
 		keys = append(keys, v)
-		bms = append(bms, bm)
+		sets = append(sets, index.NodeSetFromSorted(ids))
 	}
 
 	// Build the tree bottom-up from the validated, strictly-ascending entries
 	// in O(n). The strict-ascending check above gated admission, so a corrupt
 	// non-ascending payload never reaches this point (auditor condition C4a).
 	tree := newBplus[V]()
-	tree.bulkPack(keys, bms)
+	tree.bulkPack(keys, sets)
 	i.mu.Lock()
 	i.tree = tree
 	i.mu.Unlock()

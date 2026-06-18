@@ -46,9 +46,17 @@ const (
 // Index maps label identifiers (uint32) to the set of NodeIDs that
 // carry them. Different LabelID namespaces (vertices, edges) should
 // use distinct Index instances.
+//
+// Each label's node set is held as an [index.NodeSet]: a sparse label
+// carried by one or a handful of nodes stays in the inline small-set
+// tier (no per-label roaring overhead), while a dense label — one built
+// via [Index.AddRange] over a contiguous NodeID band, or grown past the
+// small-set threshold — is a [roaring64.Bitmap] with its run-container
+// optimality intact. Promotion to the bitmap tier is one-way, so a dense
+// label can never be mis-tiered as a small set (sprint 206, #1585).
 type Index struct {
 	mu    sync.RWMutex
-	bits  map[uint32]*roaring64.Bitmap
+	bits  map[uint32]index.NodeSet
 	scope Scope
 }
 
@@ -62,13 +70,13 @@ func NewIndex() *Index {
 // NewNodeIndex returns an empty index that listens for node-label
 // changes when registered with a [index.Manager].
 func NewNodeIndex() *Index {
-	return &Index{bits: make(map[uint32]*roaring64.Bitmap), scope: ScopeNode}
+	return &Index{bits: make(map[uint32]index.NodeSet), scope: ScopeNode}
 }
 
 // NewEdgeIndex returns an empty index that listens for edge-label
 // changes when registered with a [index.Manager].
 func NewEdgeIndex() *Index {
-	return &Index{bits: make(map[uint32]*roaring64.Bitmap), scope: ScopeEdge}
+	return &Index{bits: make(map[uint32]index.NodeSet), scope: ScopeEdge}
 }
 
 // Scope reports which label-event kind the index observes via
@@ -78,22 +86,23 @@ func (i *Index) Scope() Scope { return i.scope }
 // Add records that node carries label.
 func (i *Index) Add(label uint32, node graph.NodeID) {
 	i.mu.Lock()
-	bm, ok := i.bits[label]
-	if !ok {
-		bm = roaring64.New()
-		i.bits[label] = bm
-	}
-	bm.Add(uint64(node))
+	// NodeSet is stored by value; read-modify-write so an inline-tier
+	// mutation is recorded. A bitmap-tier Add mutates the shared bitmap in
+	// place, so the store-back is a harmless no-op in that state.
+	set := i.bits[label]
+	set.Add(uint64(node))
+	i.bits[label] = set
 	i.mu.Unlock()
 }
 
 // Remove records that node no longer carries label. No-op if absent.
 func (i *Index) Remove(label uint32, node graph.NodeID) {
 	i.mu.Lock()
-	if bm, ok := i.bits[label]; ok {
-		bm.Remove(uint64(node))
-		if bm.IsEmpty() {
+	if set, ok := i.bits[label]; ok {
+		if set.Remove(uint64(node)) {
 			delete(i.bits, label)
+		} else {
+			i.bits[label] = set
 		}
 	}
 	i.mu.Unlock()
@@ -104,12 +113,13 @@ func (i *Index) Remove(label uint32, node graph.NodeID) {
 // O(1) space, making bulk ingestion of contiguous NodeID bands efficient.
 func (i *Index) AddRange(label uint32, fromNode, toNode graph.NodeID) {
 	i.mu.Lock()
-	bm, ok := i.bits[label]
-	if !ok {
-		bm = roaring64.New()
-		i.bits[label] = bm
-	}
-	bm.AddRange(uint64(fromNode), uint64(toNode)+1)
+	// AddRange promotes the label's NodeSet to (or keeps it on) the roaring
+	// bitmap tier and uses run-container AddRange, so a contiguous band is
+	// stored in O(1) space — the dense-label fast path. Promotion is
+	// one-way, so a dense label stays optimal.
+	set := i.bits[label]
+	set.AddRange(uint64(fromNode), uint64(toNode))
+	i.bits[label] = set
 	i.mu.Unlock()
 }
 
@@ -118,10 +128,11 @@ func (i *Index) AddRange(label uint32, fromNode, toNode graph.NodeID) {
 // unboundedly after bulk-remove operations.
 func (i *Index) RemoveRange(label uint32, fromNode, toNode graph.NodeID) {
 	i.mu.Lock()
-	if bm, ok := i.bits[label]; ok {
-		bm.RemoveRange(uint64(fromNode), uint64(toNode)+1)
-		if bm.IsEmpty() {
+	if set, ok := i.bits[label]; ok {
+		if set.RemoveRange(uint64(fromNode), uint64(toNode)) {
 			delete(i.bits, label)
+		} else {
+			i.bits[label] = set
 		}
 	}
 	i.mu.Unlock()
@@ -131,12 +142,12 @@ func (i *Index) RemoveRange(label uint32, fromNode, toNode graph.NodeID) {
 // Returns nil when label has no entries.
 func (i *Index) Scan(label uint32) []graph.NodeID {
 	i.mu.RLock()
-	bm, ok := i.bits[label]
+	set, ok := i.bits[label]
 	if !ok {
 		i.mu.RUnlock()
 		return nil
 	}
-	raw := bm.ToArray()
+	raw := set.ToArray()
 	i.mu.RUnlock()
 	if len(raw) == 0 {
 		return nil
@@ -152,8 +163,8 @@ func (i *Index) Scan(label uint32) []graph.NodeID {
 func (i *Index) Count(label uint32) uint64 {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	if bm, ok := i.bits[label]; ok {
-		return bm.GetCardinality()
+	if set, ok := i.bits[label]; ok {
+		return set.Cardinality()
 	}
 	return 0
 }
@@ -162,11 +173,11 @@ func (i *Index) Count(label uint32) uint64 {
 func (i *Index) Has(label uint32, node graph.NodeID) bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	bm, ok := i.bits[label]
+	set, ok := i.bits[label]
 	if !ok {
 		return false
 	}
-	return bm.Contains(uint64(node))
+	return set.Contains(uint64(node))
 }
 
 // Intersect returns a fresh Roaring bitmap containing the NodeIDs
@@ -182,13 +193,20 @@ func (i *Index) Intersect(labels ...uint32) *roaring64.Bitmap {
 	if !ok {
 		return roaring64.New()
 	}
-	result := first.Clone()
+	// Materialise a fresh, caller-owned bitmap from the first label's set
+	// (clone when it aliases the live bitmap) and intersect the rest into
+	// it via OrInto-backed bitmaps.
+	result, shared := first.Bitmap()
+	if shared {
+		result = result.Clone()
+	}
 	for _, l := range labels[1:] {
-		bm, ok := i.bits[l]
+		set, ok := i.bits[l]
 		if !ok {
 			return roaring64.New()
 		}
-		result.And(bm)
+		other, _ := set.Bitmap()
+		result.And(other)
 		if result.IsEmpty() {
 			return result
 		}
@@ -206,8 +224,8 @@ func (i *Index) Union(labels ...uint32) *roaring64.Bitmap {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	for _, l := range labels {
-		if bm, ok := i.bits[l]; ok {
-			result.Or(bm)
+		if set, ok := i.bits[l]; ok {
+			set.OrInto(result)
 		}
 	}
 	return result
@@ -306,7 +324,18 @@ func (i *Index) Serialize(w io.Writer) error {
 
 	var scratch bytes.Buffer
 	for _, k := range keys {
-		bm := i.bits[k]
+		set := i.bits[k]
+		// Materialise a roaring bitmap from the set's logical contents and
+		// write its native binary form. roaring64.WriteTo is a
+		// content-deterministic pure function of the final set (it never
+		// implicitly RunOptimizes), so a bitmap built here via AddMany of
+		// the sorted ids is BYTE-IDENTICAL to one that held the same ids all
+		// along — the inline small-set tier produces exactly the bytes the
+		// pre-refactor per-label *roaring64.Bitmap produced, keeping the
+		// on-disk format unchanged with zero migration (storage-engine-
+		// auditor, #1585). A dense (AddRange) label is already a bitmap, so
+		// Bitmap returns it directly with no materialisation cost.
+		bm, _ := set.Bitmap()
 		if err := binary.Write(tee, binary.LittleEndian, k); err != nil {
 			return err
 		}
@@ -383,7 +412,7 @@ func (i *Index) Deserialize(r io.Reader) error {
 	if hint > labelCapHintMax {
 		hint = labelCapHintMax
 	}
-	bits := make(map[uint32]*roaring64.Bitmap, hint)
+	bits := make(map[uint32]index.NodeSet, hint)
 	for k := uint32(0); k < count; k++ {
 		var labelID uint32
 		if err := binary.Read(br, binary.LittleEndian, &labelID); err != nil {
@@ -405,7 +434,13 @@ func (i *Index) Deserialize(r io.Reader) error {
 		if _, err := bm.ReadFrom(bytes.NewReader(buf)); err != nil {
 			return fmt.Errorf("%w: bitmap parse: %w", index.ErrIndexCorrupted, err)
 		}
-		bits[labelID] = bm
+		// Down-convert a sparse label to the inline small-set tier so a
+		// reload recovers the memory win (a snapshot taken before this
+		// refactor carries roaring images for singleton labels). A dense
+		// label stays on the bitmap tier. This is purely an in-memory
+		// representation choice; the bytes already read were validated above
+		// and are not affected.
+		bits[labelID] = index.NodeSetFromBitmap(bm)
 	}
 
 	i.mu.Lock()

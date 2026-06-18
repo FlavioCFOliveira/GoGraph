@@ -5,7 +5,7 @@ package btree
 //
 // # Structure
 //
-// A classic B+ tree: all (key, *roaring64.Bitmap) data lives in the LEAVES;
+// A classic B+ tree: all (key, [index.NodeSet]) data lives in the LEAVES;
 // internal nodes hold only separator keys and child pointers. Leaves are
 // SINGLY linked low→high via leaf.next, because every scan in this package
 // (Range, RangeCount, Serialize) walks forward from a lower bound only. The
@@ -28,8 +28,8 @@ package btree
 // # Complexity (n = distinct keys, k = keys in a range)
 //
 //	Insert (new key)      O(log n)   descend + leaf insert + split propagation
-//	Insert (existing key) O(log n)   descend + bm.Add
-//	Delete                O(log n)   descend + bm.Remove (+ empty-leaf unlink)
+//	Insert (existing key) O(log n)   descend + set.Add
+//	Delete                O(log n)   descend + set.Remove (+ empty-leaf unlink)
 //	point (Lookup/Card.)  O(log n)   descend + leaf binary search
 //	Range / RangeCount    O(log n+k) lower-bound descend + forward leaf walk
 //	RangeFirst            O(log n)   lower-bound descend
@@ -61,7 +61,7 @@ package btree
 import (
 	"cmp"
 
-	"github.com/RoaringBitmap/roaring/v2/roaring64"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
 // bplusFanout is the maximum number of keys in a leaf node and the maximum
@@ -93,11 +93,13 @@ func keyCompare[V cmp.Ordered](a, b V) int { return cmp.Compare(a, b) }
 // keyLess reports a < b under the total order (cmp.Less).
 func keyLess[V cmp.Ordered](a, b V) bool { return cmp.Less(a, b) }
 
-// leaf is a B+ tree leaf: parallel slices of keys and their bitmaps in
-// ascending key order, plus a forward link to the next leaf.
+// leaf is a B+ tree leaf: parallel slices of keys and their node-sets in
+// ascending key order, plus a forward link to the next leaf. The node-set
+// is stored BY VALUE (see [index.NodeSet]) so a leaf of singleton-keyed
+// entries carries no per-key heap object.
 type leaf[V cmp.Ordered] struct {
 	keys []V
-	bms  []*roaring64.Bitmap
+	sets []index.NodeSet
 	next *leaf[V]
 }
 
@@ -191,13 +193,15 @@ func (t *bplus[V]) lowerBound(target V) (*leaf[V], int) {
 	return nil, 0
 }
 
-// get returns the bitmap stored for value under the total order, or nil when
-// the key is absent.
-func (t *bplus[V]) get(value V) *roaring64.Bitmap {
+// get returns a pointer to the node-set stored for value under the total
+// order, or nil when the key is absent. The pointer aliases the leaf's
+// by-value set, so the caller must hold the index lock for the duration
+// of any read or mutation through it.
+func (t *bplus[V]) get(value V) *index.NodeSet {
 	l := t.findLeaf(value)
 	off := leafSearch(l, value)
 	if off < len(l.keys) && keyCompare(l.keys[off], value) == 0 {
-		return l.bms[off]
+		return &l.sets[off]
 	}
 	return nil
 }
@@ -256,13 +260,13 @@ func (t *bplus[V]) insertInto(cur any, value V, node uint64) (created bool, prom
 func (t *bplus[V]) insertLeaf(l *leaf[V], value V, node uint64) (created bool, promoted *insertNode[V]) {
 	off := leafSearch(l, value)
 	if off < len(l.keys) && keyCompare(l.keys[off], value) == 0 {
-		l.bms[off].Add(node)
+		l.sets[off].Add(node)
 		return false, nil
 	}
-	bm := roaring64.New()
-	bm.Add(node)
+	var set index.NodeSet
+	set.Add(node)
 	l.keys = insertAt(l.keys, off, value)
-	l.bms = insertAt(l.bms, off, bm)
+	l.sets = insertAt(l.sets, off, set)
 	if len(l.keys) <= bplusFanout {
 		return true, nil
 	}
@@ -277,11 +281,11 @@ func splitLeaf[V cmp.Ordered](l *leaf[V]) *insertNode[V] {
 	mid := len(l.keys) / 2
 	right := &leaf[V]{
 		keys: append([]V(nil), l.keys[mid:]...),
-		bms:  append([]*roaring64.Bitmap(nil), l.bms[mid:]...),
+		sets: append([]index.NodeSet(nil), l.sets[mid:]...),
 		next: l.next,
 	}
 	l.keys = l.keys[:mid:mid]
-	l.bms = l.bms[:mid:mid]
+	l.sets = l.sets[:mid:mid]
 	l.next = right
 	return &insertNode[V]{key: right.keys[0], right: right}
 }
@@ -311,13 +315,12 @@ func (t *bplus[V]) remove(value V, node uint64) bool {
 	if off >= len(l.keys) || keyCompare(l.keys[off], value) != 0 {
 		return false
 	}
-	l.bms[off].Remove(node)
-	if !l.bms[off].IsEmpty() {
+	if !l.sets[off].Remove(node) {
 		return false
 	}
 	// Drop the emptied key from the leaf.
 	l.keys = removeAt(l.keys, off)
-	l.bms = removeAt(l.bms, off)
+	l.sets = removeAt(l.sets, off)
 	t.count--
 	if len(l.keys) == 0 {
 		t.unlinkEmptyLeaf(l)
@@ -417,11 +420,11 @@ func (t *bplus[V]) contains(cur, target any) bool {
 }
 
 // bulkPack builds the tree bottom-up from already-sorted, deduplicated
-// (key, bitmap) pairs in O(n): it packs leaves to the fill factor, links them,
-// then packs each parent level from the children's first-keys until a single
-// root remains. The caller guarantees keys are strictly ascending under the
-// total order (the v1 contract and the Deserialize precondition).
-func (t *bplus[V]) bulkPack(keys []V, bms []*roaring64.Bitmap) {
+// (key, node-set) pairs in O(n): it packs leaves to the fill factor, links
+// them, then packs each parent level from the children's first-keys until a
+// single root remains. The caller guarantees keys are strictly ascending under
+// the total order (the v1 contract and the Deserialize precondition).
+func (t *bplus[V]) bulkPack(keys []V, sets []index.NodeSet) {
 	t.count = len(keys)
 	if len(keys) == 0 {
 		l := &leaf[V]{}
@@ -441,7 +444,7 @@ func (t *bplus[V]) bulkPack(keys []V, bms []*roaring64.Bitmap) {
 		}
 		l := &leaf[V]{
 			keys: append([]V(nil), keys[i:end]...),
-			bms:  append([]*roaring64.Bitmap(nil), bms[i:end]...),
+			sets: append([]index.NodeSet(nil), sets[i:end]...),
 		}
 		if len(leaves) > 0 {
 			leaves[len(leaves)-1].next = l

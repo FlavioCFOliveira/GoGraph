@@ -132,14 +132,14 @@ func (i *Index[V]) BoundNode() (label, property string, ok bool) {
 
 type hashShard[V comparable] struct {
 	mu      sync.RWMutex
-	entries map[V]*roaring64.Bitmap
+	entries map[V]index.NodeSet
 }
 
 // New returns an empty hash index.
 func New[V comparable]() *Index[V] {
 	idx := &Index[V]{}
 	for i := range idx.shards {
-		idx.shards[i].entries = make(map[V]*roaring64.Bitmap)
+		idx.shards[i].entries = make(map[V]index.NodeSet)
 	}
 	return idx
 }
@@ -175,12 +175,13 @@ func (i *Index[V]) Insert(value V, node graph.NodeID) {
 	}
 	s := i.shard(value)
 	s.mu.Lock()
-	bm, ok := s.entries[value]
-	if !ok {
-		bm = roaring64.New()
-		s.entries[value] = bm
-	}
-	bm.Add(uint64(node))
+	// NodeSet is stored by value; read-modify-write so an inline-tier
+	// mutation (which updates the struct's fields/slice) is recorded. A
+	// bitmap-tier Add mutates the shared *roaring64.Bitmap in place, so the
+	// store-back is a harmless no-op in that state.
+	set := s.entries[value]
+	set.Add(uint64(node))
+	s.entries[value] = set
 	s.mu.Unlock()
 }
 
@@ -192,10 +193,11 @@ func (i *Index[V]) Delete(value V, node graph.NodeID) {
 	}
 	s := i.shard(value)
 	s.mu.Lock()
-	if bm, ok := s.entries[value]; ok {
-		bm.Remove(uint64(node))
-		if bm.IsEmpty() {
+	if set, ok := s.entries[value]; ok {
+		if set.Remove(uint64(node)) {
 			delete(s.entries, value)
+		} else {
+			s.entries[value] = set
 		}
 	}
 	s.mu.Unlock()
@@ -212,14 +214,24 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 	}
 	s := i.shard(value)
 	s.mu.RLock()
-	bm, ok := s.entries[value]
+	set, ok := s.entries[value]
 	if !ok {
 		s.mu.RUnlock()
 		return roaring64.New()
 	}
-	out := bm.Clone()
+	bm, shared := set.Bitmap()
+	if shared {
+		// Bitmap state: the returned bitmap aliases the live one, so clone
+		// it under the lock to give the caller an independent copy that a
+		// later writer cannot mutate (the pre-refactor Lookup contract).
+		out := bm.Clone()
+		s.mu.RUnlock()
+		return out
+	}
+	// Inline state: Bitmap already materialised a fresh, caller-owned
+	// bitmap — no clone needed.
 	s.mu.RUnlock()
-	return out
+	return bm
 }
 
 // Cardinality returns the number of NodeIDs associated with value.
@@ -228,12 +240,12 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 func (i *Index[V]) Cardinality(value V) uint64 {
 	s := i.shard(value)
 	s.mu.RLock()
-	bm, ok := s.entries[value]
+	set, ok := s.entries[value]
 	if !ok {
 		s.mu.RUnlock()
 		return 0
 	}
-	c := bm.GetCardinality()
+	c := set.Cardinality()
 	s.mu.RUnlock()
 	return c
 }
@@ -243,12 +255,12 @@ func (i *Index[V]) Cardinality(value V) uint64 {
 func (i *Index[V]) Contains(value V, node graph.NodeID) bool {
 	s := i.shard(value)
 	s.mu.RLock()
-	bm, ok := s.entries[value]
+	set, ok := s.entries[value]
 	if !ok {
 		s.mu.RUnlock()
 		return false
 	}
-	c := bm.Contains(uint64(node))
+	c := set.Contains(uint64(node))
 	s.mu.RUnlock()
 	return c
 }
@@ -512,7 +524,7 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 		if entries == nil {
 			entries = make([]entry, 0, len(s.entries))
 		}
-		for v, bm := range s.entries {
+		for v, set := range s.entries {
 			b, err := encodeValue(v)
 			if err != nil {
 				s.mu.RUnlock()
@@ -523,7 +535,10 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 			// but []byte keys are not allowed for comparable maps).
 			cp := make([]byte, len(b))
 			copy(cp, b)
-			ids := bm.ToArray()
+			// ToArray is the sorted-ascending logical NodeID list — the
+			// representation-independent wire form, identical to the
+			// pre-refactor bm.ToArray().
+			ids := set.ToArray()
 			entries = append(entries, entry{key: cp, ids: ids})
 		}
 		s.mu.RUnlock()
@@ -616,7 +631,7 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 	// Build into a fresh shards array, then atomically swap in.
 	var fresh [shardCount]hashShard[V]
 	for k := range fresh {
-		fresh[k].entries = make(map[V]*roaring64.Bitmap)
+		fresh[k].entries = make(map[V]index.NodeSet)
 	}
 
 	for e := uint64(0); e < entryCount; e++ {
@@ -648,11 +663,12 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		if err := binary.Read(br, binary.LittleEndian, ids); err != nil {
 			return fmt.Errorf("%w: ids: %w", index.ErrIndexCorrupted, err)
 		}
-		bm := roaring64.New()
-		bm.AddMany(ids)
+		// The writer emits ids in sorted-ascending ToArray order, so
+		// NodeSetFromSorted picks the cheapest representation for this
+		// cardinality without a re-sort. Ownership of ids transfers.
 		// Pick the shard the way the live Insert path would.
 		sh := &fresh[maphash.Comparable(seed, v)&shardMask]
-		sh.entries[v] = bm
+		sh.entries[v] = index.NodeSetFromSorted(ids)
 	}
 
 	// Atomic shard-by-shard swap.
