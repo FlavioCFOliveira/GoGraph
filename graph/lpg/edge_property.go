@@ -20,12 +20,12 @@ func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValu
 	k := edgeKey{src: srcID, dst: dstID}
 	s := g.edgePropShardFor(k)
 	s.mu.Lock()
-	bag, ok := s.m[k]
-	if !ok {
-		bag = make(map[PropertyKeyID]PropertyValue)
-		s.m[k] = bag
-	}
-	bag[keyID] = value
+	// propBag is stored by value: read it out, mutate, write it back under the
+	// shard lock. The write-back is load-bearing — set may grow or promote the
+	// bag's backing storage, so the updated header must be re-stored.
+	bag := s.m[k]
+	bag.set(keyID, value)
+	s.m[k] = bag
 	s.mu.Unlock()
 	return nil
 }
@@ -49,12 +49,8 @@ func (g *Graph[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bo
 	s := g.edgePropShardFor(k)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	bag, ok := s.m[k]
-	if !ok {
-		return PropertyValue{}, false
-	}
-	v, ok := bag[keyID]
-	return v, ok
+	bag := s.m[k]
+	return bag.get(keyID)
 }
 
 // DelEdgeProperty removes the named property from the directed edge
@@ -76,9 +72,12 @@ func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) {
 	s := g.edgePropShardFor(k)
 	s.mu.Lock()
 	if bag, ok2 := s.m[k]; ok2 {
-		delete(bag, keyID)
-		if len(bag) == 0 {
+		if bag.del(keyID) {
+			// Bag became empty: drop the entry entirely so an edge with no
+			// properties costs no map slot (matches the prior map behaviour).
 			delete(s.m, k)
+		} else {
+			s.m[k] = bag
 		}
 	}
 	s.mu.Unlock()
@@ -103,12 +102,12 @@ func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
 		s.mu.RUnlock()
 		return nil
 	}
-	out := make(map[string]PropertyValue, len(bag))
-	for kk, v := range bag {
+	out := make(map[string]PropertyValue, bag.len())
+	bag.forEach(func(kk PropertyKeyID, v PropertyValue) {
 		if name, ok := g.pkeys.Resolve(kk); ok {
 			out[name] = v
 		}
-	}
+	})
 	s.mu.RUnlock()
 	return out
 }

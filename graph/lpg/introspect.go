@@ -163,15 +163,15 @@ func (g *Graph[N, W]) PropertyKeysInUse() []string {
 		sh := &g.edgePropShards[i]
 		sh.mu.RLock()
 		for k, bag := range sh.m {
-			if len(bag) == 0 {
+			if bag.len() == 0 {
 				continue
 			}
 			if !g.edgeEndpointLive(k) {
 				continue
 			}
-			for pk := range bag {
+			bag.forEach(func(pk PropertyKeyID, _ PropertyValue) {
 				seen[pk] = struct{}{}
-			}
+			})
 		}
 		sh.mu.RUnlock()
 	}

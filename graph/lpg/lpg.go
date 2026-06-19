@@ -157,10 +157,15 @@ type nodePropShard struct {
 	m  map[graph.NodeID]propBag
 }
 
-// edgePropShard is one stripe of the per-edge property map.
+// edgePropShard is one stripe of the per-edge property map. The inner
+// per-edge bag is the compact tiered [propBag] (sprint 221, #1628) stored by
+// value, mirroring the per-node property store: a 1-2-property edge pays a
+// single small slice instead of a ~300 B Go map, collapsing the dominant
+// edge-property resident cost. The mutex guards every read and write of the
+// shard's map and the propBag values it holds.
 type edgePropShard struct {
 	mu sync.RWMutex
-	m  map[edgeKey]map[PropertyKeyID]PropertyValue
+	m  map[edgeKey]propBag
 }
 
 // nodeLabelShard is one stripe of the node-label bag. The mutex
@@ -696,7 +701,7 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 		g.nodePropShards[i].m = make(map[graph.NodeID]propBag)
 	}
 	for i := range g.edgePropShards {
-		g.edgePropShards[i].m = make(map[edgeKey]map[PropertyKeyID]PropertyValue)
+		g.edgePropShards[i].m = make(map[edgeKey]propBag)
 	}
 	for i := range g.edgeCreateCountShards {
 		g.edgeCreateCountShards[i].m = make(map[edgeKey]int64)
