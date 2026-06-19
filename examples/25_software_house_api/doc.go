@@ -42,14 +42,31 @@
 //	    {"columns":[],"rows":[]} after the write is durably committed.
 //
 //	POST /seed
-//	    Idempotently load the deterministic fixture. Returns
-//	        {"seeded": <bool>, "status": "ok"}
-//	    seeded is false when the graph was already populated.
+//	    Idempotently load the fixture. An empty body loads the small
+//	    deterministic hand-authored fixture (46 nodes, 106 edges); supplying
+//	    scale fields grows it with a seeded synthetic layer:
+//	        {"scale_components": N, "scale_tasks": N,
+//	         "scale_developers": N, "scale_seed": S}
+//	    Returns
+//	        {"seeded": <bool>, "status": "ok",
+//	         "scale_components": N, "scale_tasks": N, "scale_developers": N}
+//	    seeded is false when the graph was already populated (the synthetic
+//	    layer commits in the same atomic transaction as the base fixture, so
+//	    it is applied exactly once, alongside the first seed).
 //
 //	GET /stats
-//	    Node counts by type label and edge counts by relationship type:
+//	    Deterministic FACTS — node counts by type label and edge counts by
+//	    relationship type — plus a separate volatile TELEMETRY object holding
+//	    live Go heap, bytes per stored element, request counters, and recent
+//	    per-endpoint latencies:
 //	        {"nodes": {"Component": N, ...},
-//	         "edges": {"DEPENDS_ON": N, ...}}
+//	         "edges": {"DEPENDS_ON": N, ...},
+//	         "telemetry": {"heap_alloc_bytes": N, "bytes_per_element": F,
+//	                       "query_count": N, "last_query_ms": F, ...}}
+//	    The nodes/edges counts are reproducible for a fixed seed and scale;
+//	    every telemetry field varies per run and per machine. The split is the
+//	    JSON analogue of the "# " telemetry convention the non-server examples
+//	    use (see docs/examples-standard.md).
 //
 //	GET /healthz
 //	    Liveness probe; returns {"status":"ok"} without touching the graph.
@@ -96,8 +113,19 @@
 //
 // # Lifecycle and flags
 //
-//	-d <dir>          data directory holding the WAL and snapshot (required)
-//	-addr <host:port> HTTP listen address (default ":8080")
+//	-d <dir>                data directory holding the WAL and snapshot (required)
+//	-addr <host:port>       HTTP listen address (default ":8080")
+//	-scale-components <n>   extra synthetic :Component nodes to seed at startup
+//	                        (default 0: the small deterministic fixture only)
+//	-scale-tasks <n>        extra synthetic :Task nodes to seed at startup
+//	-scale-developers <n>   extra synthetic :Developer nodes to seed at startup
+//	-scale-seed <s>         RNG seed fixing the synthetic data shape (default 1)
+//
+// When any -scale-* flag is non-zero the server seeds the synthetic layer once
+// at startup, before serving, and prints the build telemetry on stderr —
+// deterministic facts as bare lines (seed.scale_components=…), volatile
+// telemetry as "# "-prefixed lines (# seed.elapsed=…, # mem.heap_alloc=…). The
+// same scale can also be requested per call via the POST /seed body.
 //
 // On SIGINT or SIGTERM the server stops accepting connections, lets
 // in-flight requests finish, writes a final snapshot, and closes the WAL,
@@ -108,11 +136,17 @@
 //
 // # Example session
 //
+//	# small deterministic default
 //	go run ./examples/25_software_house_api -d /tmp/shop -addr :8080 &
 //	curl -s -XPOST localhost:8080/seed
 //	curl -s localhost:8080/stats
 //	curl -s -XPOST localhost:8080/query \
 //	    -d '{"query":"MATCH (c:Component)<-[:DEPENDS_ON]-(d) RETURN c.key AS component, count(d) AS inDegree ORDER BY inDegree DESC LIMIT 5"}'
+//
+//	# observable-scale run: ~5.7k nodes, ~19k edges, seeded and reproducible
+//	go run ./examples/25_software_house_api -d /tmp/big -addr :8081 \
+//	    -scale-components 2000 -scale-tasks 1500 -scale-developers 80 -scale-seed 7
+//	curl -s localhost:8081/stats   # read the "telemetry" object for heap and latency
 //
 // See README.md for the full maintenance-query catalogue with sample
 // output and a kill -9 / restart persistence demonstration.

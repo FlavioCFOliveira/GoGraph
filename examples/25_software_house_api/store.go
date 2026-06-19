@@ -85,6 +85,11 @@ type dataStore struct {
 	graph    *lpg.Graph[string, float64]
 	res      recovery.Result[string, float64]
 
+	// metrics accumulates volatile per-process telemetry (request counts,
+	// latencies, heap) reported by GET /stats. It is lock-free (sync/atomic),
+	// updated on the request path without taking mu.
+	metrics metrics
+
 	// mu serialises every engine access (readers share, writers and Close
 	// are exclusive) and guards closed. It is the outermost lock.
 	mu     sync.RWMutex

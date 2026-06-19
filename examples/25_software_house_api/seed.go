@@ -96,11 +96,23 @@ func hasSeed(g *lpg.Graph[string, float64]) bool {
 	return g.HasNodeLabel(seedKey, typeRepository)
 }
 
-// seedFixture loads the fixture in a single atomic transaction. It is
-// idempotent: if the graph already contains the seed it returns
-// (false, nil) without writing. On a fresh graph it commits the whole
-// fixture and returns (true, nil).
+// seedFixture loads the deterministic hand-authored fixture in a single
+// atomic transaction. It is idempotent: if the graph already contains the
+// seed it returns (false, nil) without writing. On a fresh graph it commits
+// the whole fixture and returns (true, nil). It is the small, deterministic
+// default the regression tests pin — equivalent to seedFixtureScaled with a
+// zero synthScale.
 func seedFixture(store *txn.Store[string, float64]) (bool, error) {
+	return seedFixtureScaled(store, synthScale{})
+}
+
+// seedFixtureScaled loads the hand-authored fixture and, when scale is active,
+// grows it with a seeded synthetic layer (see synth.go) — all in one atomic
+// transaction so base and synthetic data commit together. It is idempotent on
+// the base fixture: a graph that already holds the seed returns (false, nil)
+// without writing, regardless of scale. The synthetic layer is therefore
+// applied exactly once, alongside the first base seed.
+func seedFixtureScaled(store *txn.Store[string, float64], scale synthScale) (bool, error) {
 	if hasSeed(store.Graph()) {
 		return false, nil
 	}
@@ -108,6 +120,12 @@ func seedFixture(store *txn.Store[string, float64]) (bool, error) {
 	if err := applyFixture(tx); err != nil {
 		_ = tx.Rollback()
 		return false, err
+	}
+	if scale.active() {
+		if err := applySynthetic(tx, scale); err != nil {
+			_ = tx.Rollback()
+			return false, fmt.Errorf("synthetic seed: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("seed commit: %w", err)

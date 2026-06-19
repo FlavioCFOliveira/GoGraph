@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
@@ -62,12 +64,19 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	release, err := s.ds.acquire(isWriteQuery(req.Query))
+	write := isWriteQuery(req.Query)
+	release, err := s.ds.acquire(write)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
 		return
 	}
 	defer release()
+
+	// Time the whole engine call (plan-build, drain, Close) as one volatile
+	// latency sample. Recording it is lock-free and never affects the
+	// deterministic response body.
+	start := time.Now()
+	defer func() { s.ds.metrics.recordQuery(time.Since(start), write) }()
 
 	res, err := s.ds.engine.RunAny(r.Context(), req.Query, req.Params)
 	if err != nil {
@@ -122,11 +131,53 @@ func writeQueryError(w http.ResponseWriter, err error) {
 	}
 }
 
-// handleSeed loads the deterministic fixture under the exclusive hold (it
-// is a bulk write). It is idempotent: the response reports whether data
-// was actually written. A seed that arrives after the store has been
-// closed is rejected with 503.
-func (s *Server) handleSeed(w http.ResponseWriter, _ *http.Request) {
+// seedRequest is the optional POST /seed request body. An empty body (or no
+// body at all) loads the small deterministic fixture; supplying any of the
+// scale fields grows it with a seeded synthetic layer (see synth.go). The
+// fields mirror the -scale-* command-line flags.
+type seedRequest struct {
+	ScaleComponents int   `json:"scale_components"`
+	ScaleTasks      int   `json:"scale_tasks"`
+	ScaleDevelopers int   `json:"scale_developers"`
+	ScaleSeed       int64 `json:"scale_seed"`
+}
+
+// scale converts the request fields into a synthScale.
+func (r seedRequest) scale() synthScale {
+	return synthScale{
+		components: r.ScaleComponents,
+		tasks:      r.ScaleTasks,
+		developers: r.ScaleDevelopers,
+		seed:       r.ScaleSeed,
+	}
+}
+
+// handleSeed loads the fixture under the exclusive hold (it is a bulk write).
+// The request body may carry optional scale fields; an empty body loads the
+// small deterministic fixture. It is idempotent: the response reports whether
+// data was actually written and, for a scaled seed, the synthetic dimensions
+// requested. A seed that arrives after the store has been closed is rejected
+// with 503.
+func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxQueryBodyBytes)
+	var req seedRequest
+	// An empty body is valid and means "default fixture". Only a malformed
+	// non-empty body is an error.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "request body exceeds the 1 MiB limit")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: "+err.Error())
+		return
+	}
+	scale := req.scale()
+	if err := scale.validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
 	release, err := s.ds.acquire(true)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
@@ -134,54 +185,81 @@ func (s *Server) handleSeed(w http.ResponseWriter, _ *http.Request) {
 	}
 	defer release()
 
-	seeded, err := seedFixture(s.ds.txnStore)
+	start := time.Now()
+	seeded, err := seedFixtureScaled(s.ds.txnStore, scale)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "runtime", "seed failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"seeded": seeded, "status": "ok"})
+	if seeded {
+		s.ds.metrics.recordSeed(time.Since(start))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"seeded":           seeded,
+		"status":           "ok",
+		"scale_components": scale.components,
+		"scale_tasks":      scale.tasks,
+		"scale_developers": scale.developers,
+	})
 }
 
-// statsResponse is the GET /stats body: node counts by type label and
-// edge counts by relationship type.
+// statsResponse is the GET /stats body. Nodes and Edges are deterministic
+// FACTS — counts reproducible for a fixed seed and scale — kept apart from the
+// volatile Telemetry, which varies per run and per machine. A consumer that
+// only cares about the graph shape can read Nodes/Edges and ignore Telemetry,
+// the JSON analogue of the "# " telemetry convention the non-server examples
+// use. Telemetry is a pointer so a test asserting on facts can still confirm
+// the block is present without depending on any value inside it.
 type statsResponse struct {
-	Nodes map[string]int64 `json:"nodes"`
-	Edges map[string]int64 `json:"edges"`
+	Nodes     map[string]int64 `json:"nodes"`
+	Edges     map[string]int64 `json:"edges"`
+	Telemetry *telemetryBody   `json:"telemetry"`
 }
 
-// handleStats counts nodes per type label and edges per relationship type.
-// The whole sweep runs under a single shared hold so the counts form one
-// consistent snapshot and no concurrent write can mutate the structures
-// the count queries read. A request that arrives after the store has been
-// closed is rejected with 503.
+// handleStats counts nodes per type label and edges per relationship type, then
+// attaches volatile telemetry (live heap, request counters, recent latencies).
+// The whole count sweep runs under a single shared hold so the counts form one
+// consistent snapshot and no concurrent write can mutate the structures the
+// count queries read. A request that arrives after the store has been closed is
+// rejected with 503.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	start := time.Now()
 	release, err := s.ds.acquire(false)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
 		return
 	}
-	defer release()
 
 	nodes := make(map[string]int64, len(nodeTypeLabels))
+	edges := make(map[string]int64, len(relTypes))
+	var totalElements int64
 	for _, lbl := range nodeTypeLabels {
 		n, err := s.countOne(ctx, "MATCH (n:"+lbl+") RETURN count(n) AS n")
 		if err != nil {
+			release()
 			writeError(w, http.StatusInternalServerError, "runtime", "stats: "+err.Error())
 			return
 		}
 		nodes[lbl] = n
+		totalElements += n
 	}
-	edges := make(map[string]int64, len(relTypes))
 	for _, rt := range relTypes {
 		n, err := s.countOne(ctx, "MATCH ()-[r:"+rt+"]->() RETURN count(r) AS n")
 		if err != nil {
+			release()
 			writeError(w, http.StatusInternalServerError, "runtime", "stats: "+err.Error())
 			return
 		}
 		edges[rt] = n
+		totalElements += n
 	}
-	writeJSON(w, http.StatusOK, statsResponse{Nodes: nodes, Edges: edges})
+	// Release the read hold before reading memory: snapshotTelemetry forces a
+	// GC, which has no need of the store hold and must not extend it.
+	release()
+	s.ds.metrics.recordStats(time.Since(start))
+	tel := s.ds.metrics.snapshotTelemetry(totalElements)
+	writeJSON(w, http.StatusOK, statsResponse{Nodes: nodes, Edges: edges, Telemetry: &tel})
 }
 
 // countOne runs a single count query and returns the integer in column
