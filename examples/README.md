@@ -1,20 +1,32 @@
 # GoGraph examples
 
-This directory contains 26 runnable, self-documenting demonstrations of
-GoGraph — from a five-line shortest-path query to a persistent,
-`kill -9`-safe REST service. Each example is a standalone `package main`
-with its own `README.md`, and each is pinned by a regression test so the
-output you see below is guaranteed by CI, not just illustrative.
+This directory contains 26 runnable, self-documenting examples of
+GoGraph — from a shortest-path query to a persistent, `kill -9`-safe REST
+service. Each example serves the two objectives the project sets for
+examples: it **demonstrates** a capability in a realistic end-to-end
+application, and it **exercises** the module through a realistic, seeded,
+scale-parametrised scenario while **collecting evidence** — timing and
+throughput, memory and allocation, contention, and correctness. Each is a
+standalone `package main` with its own `README.md`, and each pins its
+deterministic facts with a regression test so the results below are
+guaranteed by CI, not just illustrative.
 
-Run any example with:
+Run any example at its small deterministic default, or scale it up:
 
 ```bash
-go run ./examples/<NN_name>
+go run ./examples/<NN_name>                 # small deterministic default
+go run ./examples/<NN_name> -h              # the scale/shape flags it accepts
 ```
 
-For the conventions every example follows — testable extraction, a
-regression test, and the per-example `README.md` template — see
-[`../docs/examples-standard.md`](../docs/examples-standard.md).
+Output is split into deterministic **facts** (bare lines, pinned by the
+test) and volatile **telemetry** (lines prefixed with `# ` — durations,
+throughput, heap — which vary per run and per machine).
+
+For the full contract every example follows — the realistic seeded
+generator, scale knobs, the evidence taxonomy, the `# ` telemetry
+convention, testable extraction, and the per-example `README.md` template —
+see [`../docs/examples-standard.md`](../docs/examples-standard.md).
+`examples/26_social_scale_bench` is the reference end state.
 
 ## Basics
 

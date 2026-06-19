@@ -1,290 +1,303 @@
 # Examples standard
 
-This document defines the single, reusable standard that every example
-under `examples/01_*` through `examples/23_*` must follow. It exists so
-that each example is **runnable**, **self-documenting**, and — above
-all — **regression-tested**: the output an example prints is not just a
-demonstration, it is a baseline that a test pins down so a future change
-cannot silently break it.
+This document defines the single, reusable standard that **every** example
+under `examples/` must follow. It exists so that each example fulfils the
+two objectives the project sets for examples (see the **Examples** section
+of [`../CLAUDE.md`](../CLAUDE.md)):
 
-The two multi-file references `examples/24_social_network_cli` and
-`examples/25_software_house_api` already meet this bar; treat them as
-the worked end state, and this document as the recipe for bringing the
-single-file examples up to it.
+1. **Demonstration** — show, in a realistic end-to-end application, how
+   GoGraph is used in practice.
+2. **Exercise and evidence** — drive GoGraph through a diverse, realistic
+   scenario *and gather evidence* about its behaviour: timing/throughput,
+   memory and allocation, contention/scaling, and correctness.
 
-The standard has three pillars:
+The guiding principle is the one stated in `CLAUDE.md`: **treat every
+example as a real simulation of the graph, not a throwaway toy.** A toy
+graph of a handful of hard-coded nodes can demonstrate an API, but it
+cannot *exercise* the module or *collect evidence* — at that scale every
+operation is instant and free, so there is nothing to observe.
 
-1. **Testable extraction** — move the logic out of `func main()` so a
-   test can drive it and capture its output.
-2. **A regression test** — a Go testable example for deterministic
-   output, or an assertion-based test for output that is not
-   byte-stable.
-3. **A per-example `README.md`** — written from one uniform template.
+`examples/26_social_scale_bench` is the **reference end state**: a realistic,
+seeded, scale-parametrised social network that reports build throughput,
+per-query latency, and live-heap footprint while keeping a deterministic
+data shape pinned by a regression test. Treat example 26 as the worked
+example and this document as the recipe for bringing every other example
+up to it.
 
 ---
 
-## Pillar 1 — Testable extraction
+## The rubric — when an example "fully fulfils its purpose"
 
-Every example refactors its logic out of `func main()` into a single
-function:
+An example meets the standard when it satisfies all five points:
+
+1. **Realistic, reproducible data.** The dataset is produced by a
+   **seeded generator** that models a genuine domain, not a handful of
+   hard-coded nodes. Fixing the seed fixes the data shape exactly, so the
+   run is reproducible across machines.
+2. **Scale knobs.** Every scale and shape dimension is a flag (and a field
+   on a `config` struct), so the same binary runs a small deterministic
+   default *and* scales up to a size where the module's behaviour is
+   actually observable.
+3. **Subject-appropriate evidence.** The example measures and reports the
+   evidence that matters for *its* subject (see the taxonomy below) — not
+   just a correctness check.
+4. **Deterministic facts vs. volatile telemetry.** Output is split into
+   two kinds of line: deterministic *facts* (counts, results, invariants —
+   reproducible for a fixed seed) and volatile *telemetry* (durations,
+   throughput, heap — varies per run and per machine). Telemetry lines are
+   prefixed with `# ` so a test can pin the facts and ignore the telemetry.
+5. **Pinned by a regression test.** A small deterministic default is pinned
+   by a regression test (a Go testable example for byte-stable output, or
+   an assertion-based test for the deterministic invariants of
+   non-deterministic output).
+
+These five build on the three structural pillars that follow — testable
+extraction, the regression test, and the per-example README — which remain
+in force.
+
+---
+
+## Pillar 1 — Testable extraction with a config
+
+Every example factors its logic out of `func main()` into a single
+function that takes a context, a writer, and a configuration:
 
 ```go
-func run(w io.Writer) error
+func run(ctx context.Context, w io.Writer, cfg config) error
 ```
 
 `run` does all the work and writes every byte of its output to `w`.
-`main()` becomes a thin wrapper that wires `run` to the real process:
-it passes `os.Stdout` and converts a returned error into a fatal exit.
-
-The rule is absolute: **inside `run`, nothing writes to `os.Stdout` or
-to `os.Stderr` directly, and nothing calls `fmt.Println` /
-`fmt.Printf` without a writer.** Use `fmt.Fprintf(w, …)` and
-`fmt.Fprintln(w, …)` exclusively. This is what makes the output
-capturable by a `bytes.Buffer` in a test and comparable against a
-`// Output:` block in a testable example.
-
-### Before
+`main()` becomes a thin wrapper: it builds the default `config`, binds each
+field to a flag, parses, and calls `run(context.Background(), os.Stdout, cfg)`,
+converting a returned error into a fatal exit.
 
 ```go
 func main() {
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	// … build the graph …
-	d, err := search.Dijkstra(c, src)
-	if err != nil {
-		log.Fatalf("Dijkstra: %v", err)
-	}
-	fmt.Printf("Lisbon -> %-7s : %4d km\n", "Madrid", dist) // writes to os.Stdout
-}
-```
-
-### After
-
-```go
-func main() {
-	if err := run(os.Stdout); err != nil {
+	cfg := defaultConfig()
+	flag.IntVar(&cfg.nodes, "nodes", cfg.nodes, "number of nodes to generate")
+	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the data shape)")
+	flag.Parse()
+	if err := run(context.Background(), os.Stdout, cfg); err != nil {
 		log.Fatal(err)
 	}
 }
-
-// run builds the graph, runs the query, and writes the report to w.
-// All output goes to w so a test can capture and assert it.
-func run(w io.Writer) error {
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	// … build the graph …
-	d, err := search.Dijkstra(c, src)
-	if err != nil {
-		return fmt.Errorf("Dijkstra: %w", err)
-	}
-	fmt.Fprintf(w, "Lisbon -> %-7s : %4d km\n", "Madrid", dist) // writes to w
-	return nil
-}
 ```
 
-Notes:
+The `config` struct centralises every scale/shape knob; `defaultConfig()`
+returns the small, deterministic default the regression test pins; and a
+`validate()` method rejects impossible configurations once, at the
+boundary, before any work.
 
-- `run` **returns** errors (`return fmt.Errorf("…: %w", err)`); it never
-  calls `log.Fatal` itself. Only `main()` is allowed to terminate the
-  process. This keeps `run` testable: a test can assert on the returned
-  error instead of having the process exit.
-- The example's leading package doc comment stays as-is; it already
-  claims the output "serves as the regression baseline". Pillar 2 is
-  what makes that claim true.
+The rule is absolute: **inside `run`, nothing writes to `os.Stdout` or
+`os.Stderr` directly, and nothing calls `fmt.Println` / `fmt.Printf`
+without a writer.** Use `fmt.Fprintf(w, …)` / `fmt.Fprintln(w, …)`
+exclusively, so the output is capturable by a `bytes.Buffer` in a test.
+`run` **returns** errors (`return fmt.Errorf("…: %w", err)`); only `main()`
+may terminate the process.
+
+A trivial example may have an empty-ish `config` (just a seed), but the
+`run(ctx, w, cfg)` shape stays uniform across the set.
+
+### Context and cancellation
+
+`run` accepts a `context.Context` and honours cancellation. A generator or
+query loop that can run for more than a moment polls `ctx.Err()` on a
+coarse interval (see example 26's `checkEvery`), so a cancelled large run
+stops promptly without making the check measurable.
 
 ---
 
-## Pillar 2 — Regression test standard
+## Pillar 2 — Realistic seeded data and scale
 
-Each example carries exactly one regression test that pins its output.
-Which form you use depends on whether the example's stdout is
-byte-stable.
+### Seeded generator
 
-### Default — deterministic stdout → Go testable example
+Replace hard-coded toy data with a generator driven by `math/rand` seeded
+from `cfg.seed`. The generator models a genuine domain shape for the
+subject — for example:
 
-When the output is byte-for-byte stable across runs and machines, add
-an `example_test.go` in `package main` containing a Go **testable
-example**:
+- a coordinate road network for routing examples (so A*'s heuristic is
+  meaningful);
+- a scale-free / authority-hub web for PageRank and centrality;
+- planted-partition communities for community detection;
+- a layered DAG for build-dependency / topological-sort examples;
+- a bipartite instance with a realistic cost structure for assignment.
 
-```go
-package main
+Where the realistic topology is not obvious, consult the
+`graph-theory-expert` sub-agent before fixing the generator.
 
-import "os"
+The seed makes the data reproducible: the same `-seed` yields byte-identical
+deterministic facts. Use a seeded `math/rand` (annotated `//nolint:gosec`
+G404 — a deterministic dataset is the point; `crypto/rand` would defeat it).
 
-func Example() {
-	_ = run(os.Stdout)
-	// Output:
-	// Lisbon -> Madrid  :  624 km
-	// Lisbon -> Paris   : 1737 km
-	// Lisbon -> Rome    : 2046 km
-}
+### Scale knobs and the deterministic default
+
+Every dimension is a flag bound to a `config` field. `defaultConfig()`
+returns a **small** default whose deterministic facts the regression test
+pins; the same binary scales up with flags:
+
+```sh
+go run ./examples/NN_name                       # small deterministic default
+go run ./examples/NN_name -nodes 1000000 -seed 7 # observable-scale run
 ```
 
-Go's test framework captures everything the example writes to
-`os.Stdout` and compares it against the text in the `// Output:` block.
-If they differ, the test fails. This runs under plain `go test ./...`
-with no build tags. **This is the default for the majority of the
-examples.**
+Document the default and a representative large invocation in the leading
+doc comment and the README. The default must stay fast (well under the
+60 s per-package short-test budget) and deterministic; the large run is
+where evidence becomes interesting.
 
-The `_ =` on `run(os.Stdout)` is deliberate: a testable example cannot
-return an error, so the error is discarded here. If the example can
-realistically fail in a way worth asserting on, prefer the
-assertion-based form below instead.
+---
 
-### Non-deterministic stdout → assertion-based `Test*`
+## Pillar 3 — Evidence collection
 
-Some examples produce output that is **not** byte-stable: it varies with
-timing, the network, the filesystem, or goroutine scheduling. A
-`// Output:` block would be flaky for these. Instead, write a normal
-test function that drives `run` into a `bytes.Buffer` and asserts only
-the **deterministic invariants** — counts, the presence of expected
-lines, recovered data — never the volatile parts (durations, absolute
-paths, ordering that depends on scheduling).
+Each example measures and reports the evidence appropriate to its subject.
+Pick from this taxonomy the dimensions that matter for the example:
+
+| Subject | Evidence to collect |
+|---|---|
+| Search / traversal / path-finding (`search/*`) | wall-clock latency per query; nodes settled/expanded (e.g. A* vs Dijkstra); many-query throughput and a p50/p95/p99 latency distribution at scale |
+| Centrality / community (`centrality`, `community`) | per-algorithm wall-clock; convergence iterations; transient allocations (`runtime.MemStats.Mallocs` delta) and live heap |
+| Graph structures (`adjlist`, `csr`, `lpg`) | live heap (`HeapAlloc`) and **bytes per node/edge**; build throughput (nodes/s, edges/s) |
+| Persistence / recovery (`store/*`, `recovery`) | commit throughput; on-disk snapshot/WAL **bytes**; recovery wall-clock; live heap before vs after recovery |
+| Out-of-core (`csrfile`, mmap) | on-disk size vs live heap (the out-of-core footprint advantage); mmap and query wall-clock |
+| Interchange (`io/csv`, `io/graphml`, `io/jsonl`, `io/dot`) | parse and serialise throughput (rows/s, MiB/s); bytes in/out; round-trip invariant |
+| Cypher / Bolt (`cypher`, `bolt`) | per-query latency; query throughput across sessions; live heap |
+| Concurrency (`20_concurrent_reads`, servers) | aggregate throughput; scaling across worker counts / `GOMAXPROCS`; evidence of the lock-free read contract (no synchronisation on the snapshot) |
+
+Helpers worth copying from example 26: `readMem()` (forces a GC, then
+`runtime.ReadMemStats`, so `HeapAlloc` reflects live bytes), `humanBytes`,
+`rate`, and `safeDiv`.
+
+### The `# ` telemetry convention
+
+Print **deterministic facts as bare lines** and **volatile telemetry as
+`# `-prefixed lines**:
+
+```
+nodes.users=20000            # fact — pinned by the test
+edges.friend=3500000         # fact — pinned by the test
+# build.elapsed=1.2s         # telemetry — varies, never pinned
+# mem.heap_alloc=512.00 MiB  # telemetry — varies, never pinned
+# q.count_users.latency=4ms  # telemetry — varies, never pinned
+```
+
+A regression test asserts the bare-line facts and ignores every `# ` line.
+This is the convention example 26 established; keep the `key=value` shape so
+the facts are easy to assert and the telemetry is easy to grep.
+
+---
+
+## Pillar 4 — Regression test standard
+
+Each example carries exactly one regression test that pins its
+deterministic default. Which form depends on whether stdout is byte-stable
+*once the telemetry lines are removed*.
+
+### Deterministic facts only → Go testable example
+
+When, at the default config, the **fact** lines are byte-for-byte stable
+(the usual case once `# ` telemetry is excluded), add an `example_test.go`
+in `package main` with a Go **testable example** whose `// Output:` block
+contains only the fact lines. Because a testable example compares *all*
+captured stdout, the example must **not print telemetry at the default
+config used by the test** — either gate telemetry behind a config field the
+test leaves off, or use the assertion form below.
+
+### Mixed or non-deterministic stdout → assertion-based `Test*`
+
+When the example prints telemetry inline with facts, or its output varies
+with timing/network/scheduling, write a normal test that drives `run` into a
+`bytes.Buffer` and asserts only the deterministic invariants — counts, the
+presence of expected fact lines, recovered data, conservation laws (e.g.
+`friend_since_filled == edges.friend`) — never the `# ` telemetry. This is
+the form example 26 uses, and it is the recommended default for the scaled
+examples because most of them report telemetry inline.
 
 ```go
-package main
-
-import (
-	"bytes"
-	"strings"
-	"testing"
-)
-
 func TestRun(t *testing.T) {
 	var buf bytes.Buffer
-	if err := run(&buf); err != nil {
+	cfg := defaultConfig() // small, deterministic
+	if err := run(context.Background(), &buf, cfg); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	out := buf.String()
-
-	// Assert deterministic invariants, not volatile output.
-	if !strings.Contains(out, "Converged") {
-		t.Errorf("expected a convergence line, got:\n%s", out)
-	}
-	if got := strings.Count(out, "node "); got != 5 {
-		t.Errorf("expected 5 node lines, got %d:\n%s", got, out)
-	}
+	mustContain(t, out, "nodes.users=20000")
+	mustContain(t, out, "q.count_users=20000")
+	// Never assert on "# " telemetry lines.
 }
 ```
 
-This mirrors `bolt/server/example_test.go`, the in-repo precedent: it
-drives a non-deterministic network round-trip and asserts the
-deterministic query result (`n = 1`) rather than any wire-level or
-timing-dependent output.
+Optionally add a `func Benchmark*` that runs `run` (or the hot inner
+operation) at a chosen scale, so `go test -bench` produces the evidence
+mechanically alongside the human-readable report.
 
-#### Examples that are non-deterministic, and why
+### Temp-directory caveat (persistence examples)
 
-| Example | Why its stdout is not byte-stable |
-|---|---|
-| `examples/10_dimacs9_routing` | Reports latency percentiles; timings are environment-dependent. |
-| `examples/17_transactional_log` | Background checkpoint timing and the stats it prints vary per run. |
-| `examples/23_bolt_server` | Drives a network round-trip; timing is non-deterministic. |
-| `examples/20_concurrent_reads` | Spawns goroutines; completion order is non-deterministic. Assert the aggregate results, not per-goroutine ordering. |
-
-These four examples use the assertion-based `Test*` form. Every other
-example in the `01`–`23` range uses the default testable-example form
-unless the temp-dir caveat below applies.
-
-#### Temp-directory caveat (04, 05, 17, 18, 21)
-
-The following examples write to a directory created with `os.MkdirTemp`,
-whose absolute path is different on every run:
-
-`examples/04_persistence`, `examples/05_out_of_core`,
-`examples/17_transactional_log`, `examples/18_oocore_pipeline`,
-`examples/21_typed_recovery`.
-
-The temp path must **never** appear in a `// Output:` block — it would
-make the testable example flaky. For these, either:
-
-- print only deterministic content (keep the temp path out of stdout
-  entirely, so the testable-example form still works); or
-- use the assertion-based `Test*` form and assert on the stable parts
-  of the output.
-
-`examples/17_transactional_log` is in both lists: it is non-deterministic
-(checkpoint timing) **and** writes to a temp directory, so it uses the
-assertion-based form.
+Examples that write to an `os.MkdirTemp` directory must keep the temp path
+**out of any pinned output** (it differs every run). Print only
+deterministic content, or use the assertion form and assert on the stable
+parts.
 
 ### goleak — examples that spawn goroutines or a server
 
-Examples that start goroutines or a server must double as a
-goroutine-leak check. `go.uber.org/goleak` is already a direct
-dependency of the module (see `go.mod`). Add a `TestMain` to the
-example's test package that wraps the suite:
+Examples that start goroutines or a server must double as a goroutine-leak
+check. Add a `TestMain` wrapping `goleak.VerifyTestMain(m)` and run the
+package under `-race`:
 
 ```go
-package main
-
-import (
-	"testing"
-
-	"go.uber.org/goleak"
-)
-
-// TestMain runs every test in this package under go.uber.org/goleak so
-// the example doubles as a goroutine-leak check.
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
+func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 ```
-
-This is the same pattern `examples/24_social_network_cli/cli_test.go`
-uses. The examples that need it are:
-
-| Example | Why it needs a goleak guard |
-|---|---|
-| `examples/17_transactional_log` | Runs a background checkpoint goroutine. |
-| `examples/20_concurrent_reads` | Spawns worker goroutines for the concurrent reads. |
-| `examples/23_bolt_server` | Starts a server with per-connection goroutines. |
-
-Run the tests for these three examples under the race detector:
 
 ```sh
-go test -race ./examples/17_transactional_log/...
-go test -race ./examples/20_concurrent_reads/...
-go test -race ./examples/23_bolt_server/...
+go test -race ./examples/<NN_name>/...
 ```
+
+The examples that need it include the background-checkpointer, concurrent-read,
+and Bolt-server examples (17, 20, 23) and the flagship apps (24, 25).
 
 ---
 
-## Pillar 3 — Per-example README
+## Pillar 5 — Per-example README
 
-Every example gets a `README.md` written from the uniform template
-below. Keep it **concise** for trivial examples (a one-line "What it
-demonstrates", a short expected-output block) and **fuller** for complex
-ones, but always keep every section heading present and in the same
-order so the set reads consistently.
-
-### README template (copy-paste ready)
+Every example gets a `README.md` from the uniform template below. Keep
+every heading present and in order so the set reads consistently.
 
 ```markdown
 # Example NN — <Title>
 
 ## What it demonstrates
 
-<One or two sentences. What GoGraph capability does this example show?>
+<One or two sentences: which GoGraph capability does this example show?>
 
 ## Domain / scenario
 
-<The concrete scenario the example models — the toy graph, the dataset,
-the workload. One short paragraph.>
+<The realistic domain modelled and how the seeded generator shapes it.>
 
 ## How to run
 
 \`\`\`sh
-go run ./examples/<NN_name>
+go run ./examples/<NN_name>                 # small deterministic default
+go run ./examples/<NN_name> -nodes 1000000  # observable-scale run
 \`\`\`
+
+## Scale and flags
+
+<Each flag, its meaning, the default, and a representative large value.>
 
 ## Expected output
 
 \`\`\`
-<The exact deterministic lines this example prints. For
-non-deterministic examples, show a representative run and note which
-parts vary (timings, paths).>
+<The exact deterministic FACT lines at the default config. Show a
+representative "# " telemetry line too and note that telemetry varies
+per run and per machine.>
 \`\`\`
+
+## Evidence it collects
+
+<Which evidence dimensions (from the taxonomy) this example reports, and
+what a reader should look at when they scale it up.>
 
 ## Key APIs
 
-- `pkg/path.Symbol` — <what it is used for here>
 - `pkg/path.Symbol` — <what it is used for here>
 
 ## Further reading
@@ -294,75 +307,54 @@ parts vary (timings, paths).>
 - [docs/<topic>.md](../../docs/<topic>.md) — relevant design note
 ```
 
-### Section meanings
-
-- **What it demonstrates** — the single capability or technique. One or
-  two sentences.
-- **Domain / scenario** — the concrete toy domain (cities and roads, a
-  social graph, a build-dependency DAG …) so the reader knows what the
-  numbers mean.
-- **How to run** — always the `go run ./examples/<NN_name>` invocation,
-  plus any flags the example accepts.
-- **Expected output** — a fenced block holding the exact deterministic
-  output. This block and the test's `// Output:` block (or asserted
-  lines) must agree. For a non-deterministic example, show a
-  representative run and call out which parts vary.
-- **Key APIs** — a short list of the GoGraph packages and functions the
-  example exercises, each with a one-line note. This is the index a
-  reader scans to find "which example shows package X".
-- **Further reading** — links to the relevant package docs, to related
-  examples, and to any design note under `docs/`. Use relative links
-  from the example directory (e.g. `../../search` for the `search`
-  package, `../08_pagerank` for a sibling example).
+The **Expected output** block, the leading doc comment, and the test's
+`// Output:` (or asserted lines) must all describe the same facts.
 
 ---
 
 ## How to bring an example to the standard
 
-A checklist for each example, in order:
+A checklist, in order:
 
-1. **Refactor.** Extract the body of `main()` into
-   `func run(w io.Writer) error`. Replace every `fmt.Print*` /
-   `os.Stdout` write inside the logic with `fmt.Fprint*(w, …)`. Make
-   `main()` a thin `run(os.Stdout)` + `log.Fatal` wrapper. Return errors
-   from `run` instead of calling `log.Fatal` inside it.
-2. **README.** Add `README.md` from the template above, filling every
-   section.
-3. **Test.** Add the regression test:
-   - deterministic stdout → `example_test.go` with `func Example()` and
-     a `// Output:` block;
-   - non-deterministic stdout (10, 17, 20, 23) → `func TestRun` driving
-     `run` into a `bytes.Buffer` and asserting the stable invariants;
-   - temp-dir examples (04, 05, 17, 18, 21) → keep the temp path out of
-     any `// Output:` block;
-   - goroutine/server examples (17, 20, 23) → add a `TestMain` wrapping
-     `goleak.VerifyTestMain(m)` and run under `-race`.
-4. **Verify green.** Run, in order:
+1. **Generator.** Replace hard-coded toy data with a seeded generator that
+   models a realistic domain shape for the subject. Consult
+   `graph-theory-expert` when the topology choice is non-obvious.
+2. **Config + flags.** Introduce a `config` struct, `defaultConfig()`,
+   `validate()`, and bind every dimension to a flag in `main`.
+3. **Refactor.** Extract the logic into `func run(ctx, w, cfg) error`;
+   route every write through `w`; return errors instead of `log.Fatal`.
+4. **Evidence.** Add subject-appropriate measurement (timing/throughput,
+   heap & bytes-per-element, allocations, contention) and print it as `# `
+   telemetry, with the deterministic results as bare fact lines.
+5. **Test.** Pin the default config's facts with a testable example or an
+   assertion-based `Test*`; add `goleak`/`-race` for goroutine/server
+   examples; keep temp paths out of pinned output. Optionally add a
+   `Benchmark*`.
+6. **README + doc comment.** Update both to describe the realistic domain,
+   the flags, the expected facts, and the evidence collected — faithfully
+   to the code.
+7. **Verify green.** Run, in order:
 
    ```sh
-   gofmt -l ./examples/<NN_name>      # must print nothing
+   gofmt -l ./examples/<NN_name>          # must print nothing
    go vet ./examples/<NN_name>/...
-   go test ./examples/<NN_name>/...   # add -race for 17, 20, 23
+   go test ./examples/<NN_name>/...       # add -race for goroutine/server examples
+   golangci-lint run ./examples/<NN_name>/...
    ```
-
-   The expected-output block in the README, the example's leading doc
-   comment, and the test's `// Output:` (or asserted lines) must all
-   describe the same output.
 
 ---
 
 ## References
 
-- `examples/24_social_network_cli` — a multi-file CLI example that
-  already meets this standard: logic factored out of `main`, golden-file
-  regression tests, and a `TestMain` goleak guard
-  (`examples/24_social_network_cli/cli_test.go`).
-- `examples/25_software_house_api` — a multi-file persistent REST
-  example that already meets this standard: a full test matrix
-  (seed, endpoints, concurrency under `-race`, in-process reopen, and a
-  real `kill -9` cross-process restart) with a `go.uber.org/goleak`
-  guard.
+- `examples/26_social_scale_bench` — the reference end state: seeded,
+  scale-parametrised, reports build throughput / per-query latency / live
+  heap / bytes-per-edge, with deterministic facts pinned and `# ` telemetry
+  separated.
+- `examples/24_social_network_cli` and `examples/25_software_house_api` —
+  multi-file flagship apps with full test matrices (golden files, concurrency
+  under `-race`, cross-process `kill -9` restart) and `goleak` guards.
 - `bolt/server/example_test.go` — the in-repo precedent for an
-  assertion-based test that drives a non-deterministic round-trip with
-  clean teardown and a no-leak guarantee. Mirror it for the
-  non-deterministic examples.
+  assertion-based test that drives a non-deterministic round-trip with clean
+  teardown and a no-leak guarantee.
+</content>
+</invoke>

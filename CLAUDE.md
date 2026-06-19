@@ -321,3 +321,14 @@ The module is organised around three concerns:
 - Each algorithm lives in its own file inside `search/` (e.g., `search/dijkstra.go`).
 - Algorithms accept a `graph.Graph` interface and return a typed result struct (path, distance map, etc.) — never raw `interface{}` or `any`.
 - Provide both a simple one-shot function (`ShortestPath(g, src, dst)`) and a stateful struct for repeated queries on the same graph.
+
+---
+
+## Examples
+
+Every example under `examples/` serves **two equally important objectives**:
+
+1. **Demonstration** — show, in a realistic end-to-end application, how the GoGraph module can be used in practice.
+2. **Exercise and evidence** — drive the GoGraph module through diverse, realistic scenarios in order to observe its behaviour and gather evidence.
+
+Treat every example as a **real simulation of the graph**, not a throwaway toy. Because the examples exercise the module under realistic conditions, observing them and collecting evidence — performance profiles, memory and allocation behaviour, contention signals, correctness observations — is **strongly encouraged** as a means to improve GoGraph. Feed any insight that emerges back into the project (Knowledge Graph, benchmarks under `docs/benchmarks/`, and the `rmp` backlog) so the examples continuously inform the module's evolution.
