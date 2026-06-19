@@ -192,8 +192,17 @@ suite (98 packages) stay green throughout.
 | **F2** edge-props → propBag | cd4d24d | edge-prop store **365 → 154 B/edge (−58%)**; full mix 355.4 → 229.1 MiB (−35.5%) | ex22 live heap **483.8 → 246.4 MiB (−49.1%)**, peak RSS 1276 → 747 MB (−41.5%) |
 | **F1** node-labels → labelBag | c7ef402 | label store **~145 → ~72 B/node (−50%)**; labels-only 68.0 → 53.4 MiB | ex02 786.9 → 726.3 B/node, heap 227.6 → 210.1 MiB |
 | **#1597** csrfile byte-views | db8a504 | — | WriteToFile 400k edges **4.26 → 1.85 MB/op (−56.6%)**, 27 → 24 allocs, −13% ns |
+| **F4a** Cypher demand-gate unreferenced rels + topology direction probe | fe8bcff | — | query binding an unread property-bearing rel **3.26 → 0.47 MB/op (−85.6%)**, −67% allocs, −69% ns |
+| **#1633** multigraph per-instance/per-handle stores → propBag/labelBag | 4605381 | — | format-neutral; benefits parallel-edge multigraphs (tier transitions gated) |
 | **F3** PropertyValue de-box | (none) | **Deferred** — gated experiment | see below |
 | **F1+F2 combined** | — | full LPG build **355.4 → 214.5 MiB (−39.6%)** | — |
+
+All six sprint-221 tasks are COMPLETED (the sprint is closed); every change passed
+go-developer review (F2/F1/F4a) and the cypher-expert review (F4a). Final gate:
+gofmt/vet clean, golangci-lint 0 issues, `go test -race` green on every touched
+package incl. TCK 3897, full short suite 98 packages green. One pre-existing
+(not-a-regression) limitation surfaced by the F4a review — undirected multigraph
+reverse-hop type fidelity — is filed as backlog #1634.
 
 **F3 outcome (gated, rejected).** The proposed `{kind; num uint64; ref any}`
 keeps the `ref` pointer in every value, so the type stays GC-scanned (no
@@ -205,10 +214,21 @@ node) with no GC-scan benefit. Closed as measured-not-worth-it (rmp #1631); a
 true win needs a fully unboxed scalar union (no `ref` for scalar kinds), tracked
 separately and only if alloc/GC throughput — not resident memory — is the target.
 
-**F4a** (Cypher `LazyRelationshipValue`) — `RelationshipValue` is a concrete
-struct consumed at ~60 sites across `cypher/api.go` + `cypher/exec/*`; a lazy
-variant is a large, TCK-sensitive value-model change. Under cypher-expert design
-review for a contained, openCypher-safe approach before implementation (rmp #1630).
+**F4a outcome (implemented, contained).** A `LazyRelationshipValue` type was
+rejected by cypher-expert design review (`PathValue` holds rels by value; ~60
+consumer sites; multigraph Type is positional). The shipped design (Variant 1)
+is contained: (1) `populateRowCtx` skips building the relationship value for an
+edge variable the expression never names — safe because that path runs only for
+non-escaping `scalarUse` expressions; (2) the stored-edge direction is now
+determined by `AdjList.HasEdge` topology rather than the prior "labels AND props
+both empty" heuristic, which (a) lets the property fetch be skipped without
+losing the direction signal and (b) is now correct for an unlabelled,
+property-less reverse edge. The escaping projection path (`RETURN r`, `r.prop`)
+is deliberately unchanged — still fully materialised — to preserve the
+no-truncated-escaping-value invariant; per-row property reduction there was
+already largely captured by F2 (ex22 peak RSS −41.5%). Result: queries that bind
+a relationship without reading it drop **−85.6 % B/op**. TCK 3897 held
+throughout, including Match6 undirected.
 
 ## 4. Suggested sequencing
 F2 → F1 → F4a (each its own commit with a `-benchmem` gate and a heap-snapshot
