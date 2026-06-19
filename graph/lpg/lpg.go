@@ -175,7 +175,7 @@ type edgePropShard struct {
 // serialised every Set/Remove/Has across all NodeIDs in the graph.
 type nodeLabelShard struct {
 	mu sync.RWMutex
-	m  map[graph.NodeID]map[LabelID]struct{}
+	m  map[graph.NodeID]labelBag
 }
 
 // edgeLabelShard is the OVERFLOW half of the edge-label store, the edge
@@ -691,7 +691,7 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 		edgeIdx: label.NewIndex(),
 	}
 	for i := range g.nodeLabelShards {
-		g.nodeLabelShards[i].m = make(map[graph.NodeID]map[LabelID]struct{})
+		g.nodeLabelShards[i].m = make(map[graph.NodeID]labelBag)
 	}
 	// The edge-label overflow maps stay nil until the first label spills there
 	// (a multi-label or orphaned-label pair); a single-label graph keeps every
@@ -1153,12 +1153,12 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 	lid := g.reg.Intern(name)
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
-	bag, ok := sh.m[id]
-	if !ok {
-		bag = make(map[LabelID]struct{})
-		sh.m[id] = bag
-	}
-	bag[lid] = struct{}{}
+	// labelBag is stored by value: read it out, mutate, write it back under the
+	// shard lock. The write-back is load-bearing — add may grow or promote the
+	// bag's backing storage, so the updated header must be re-stored.
+	bag := sh.m[id]
+	bag.add(lid)
+	sh.m[id] = bag
 	sh.mu.Unlock()
 	g.nodeIdx.Add(uint32(lid), id)
 	return nil
@@ -1202,10 +1202,10 @@ func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID) {
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.RLock()
 	bag := sh.m[id]
-	lids := make([]LabelID, 0, len(bag))
-	for lid := range bag {
+	lids := make([]LabelID, 0, bag.len())
+	bag.forEach(func(lid LabelID) {
 		lids = append(lids, lid)
-	}
+	})
 	sh.mu.RUnlock()
 	for _, lid := range lids {
 		g.nodeIdx.Remove(uint32(lid), id)
@@ -1222,10 +1222,10 @@ func (g *Graph[N, W]) restoreLabelBitmaps(id graph.NodeID) {
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.RLock()
 	bag := sh.m[id]
-	lids := make([]LabelID, 0, len(bag))
-	for lid := range bag {
+	lids := make([]LabelID, 0, bag.len())
+	bag.forEach(func(lid LabelID) {
 		lids = append(lids, lid)
-	}
+	})
 	sh.mu.RUnlock()
 	for _, lid := range lids {
 		g.nodeIdx.Add(uint32(lid), id)
@@ -1392,9 +1392,12 @@ func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
 	if bag, ok2 := sh.m[id]; ok2 {
-		delete(bag, lid)
-		if len(bag) == 0 {
+		if bag.del(lid) {
+			// Bag became empty: drop the entry so a node with no labels costs
+			// no map slot (matches the prior map behaviour).
 			delete(sh.m, id)
+		} else {
+			sh.m[id] = bag
 		}
 	}
 	sh.mu.Unlock()
@@ -1414,12 +1417,8 @@ func (g *Graph[N, W]) HasNodeLabel(n N, name string) bool {
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	bag, ok := sh.m[id]
-	if !ok {
-		return false
-	}
-	_, ok = bag[lid]
-	return ok
+	bag := sh.m[id]
+	return bag.has(lid)
 }
 
 // NodeLabels returns the names of every label attached to n in
@@ -1436,12 +1435,12 @@ func (g *Graph[N, W]) NodeLabels(n N) []string {
 		sh.mu.RUnlock()
 		return nil
 	}
-	out := make([]string, 0, len(bag))
-	for lid := range bag {
+	out := make([]string, 0, bag.len())
+	bag.forEach(func(lid LabelID) {
 		if name, ok := g.reg.Resolve(lid); ok {
 			out = append(out, name)
 		}
-	}
+	})
 	sh.mu.RUnlock()
 	return out
 }
@@ -1458,12 +1457,12 @@ func (g *Graph[N, W]) NodeLabelsByID(id graph.NodeID) []string {
 		sh.mu.RUnlock()
 		return nil
 	}
-	out := make([]string, 0, len(bag))
-	for lid := range bag {
+	out := make([]string, 0, bag.len())
+	bag.forEach(func(lid LabelID) {
 		if name, ok := g.reg.Resolve(lid); ok {
 			out = append(out, name)
 		}
-	}
+	})
 	sh.mu.RUnlock()
 	return out
 }
@@ -1484,12 +1483,8 @@ func (g *Graph[N, W]) HasNodeLabelByID(id graph.NodeID, name string) bool {
 	}
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.RLock()
-	bag, ok := sh.m[id]
-	if !ok {
-		sh.mu.RUnlock()
-		return false
-	}
-	_, present := bag[lid]
+	bag := sh.m[id]
+	present := bag.has(lid)
 	sh.mu.RUnlock()
 	return present
 }

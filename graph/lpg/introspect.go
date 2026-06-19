@@ -50,15 +50,15 @@ func (g *Graph[N, W]) NodeLabelsInUse() []string {
 		sh := &g.nodeLabelShards[i]
 		sh.mu.RLock()
 		for id, bag := range sh.m {
-			if len(bag) == 0 {
+			if bag.len() == 0 {
 				continue
 			}
 			if tombstoned && g.IsTombstoned(id) {
 				continue
 			}
-			for lid := range bag {
+			bag.forEach(func(lid LabelID) {
 				seen[lid] = struct{}{}
-			}
+			})
 		}
 		sh.mu.RUnlock()
 	}
