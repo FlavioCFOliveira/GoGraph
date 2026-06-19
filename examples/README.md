@@ -30,61 +30,61 @@ see [`../docs/examples-standard.md`](../docs/examples-standard.md).
 
 ## Basics
 
-| Example | What it demonstrates | Run |
+| Example | What it demonstrates | Evidence reported |
 |---|---|---|
-| [01_basic](01_basic/README.md) | Build a weighted directed graph, freeze it into an immutable CSR snapshot, and run single-source `search.Dijkstra`, reading back both distances and reconstructed routes. | `go run ./examples/01_basic` |
-| [02_property_graph](02_property_graph/README.md) | Build a labelled property graph with an optional schema, run label- and property-indexed `MATCH`-style queries, and read typed properties back out. | `go run ./examples/02_property_graph` |
-| [03_advanced_algorithms](03_advanced_algorithms/README.md) | Run four algorithms over one CSR snapshot — BFS, Dijkstra, exact Brandes betweenness centrality (with printed ranks), and PageRank. | `go run ./examples/03_advanced_algorithms` |
+| [01_basic](01_basic/README.md) | Build a seeded weighted directed road network, freeze it into an immutable CSR snapshot, and run single-source `search.Dijkstra`, reading back distances and reconstructed routes. | Build throughput, Dijkstra query latency, reachable-node count, live heap. |
+| [02_property_graph](02_property_graph/README.md) | Build a seeded labelled property graph with an optional schema validator, run label- and property-indexed `MATCH`-style queries, and read typed properties back out. | Build throughput, indexed-query latency, live heap and bytes per node. |
+| [03_advanced_algorithms](03_advanced_algorithms/README.md) | Run four algorithms over one CSR snapshot of a seeded scale-free graph — BFS, Dijkstra, exact Brandes betweenness centrality, and PageRank. | Per-algorithm timing, PageRank iterations, transient allocations, live heap. |
 
 ## Persistence and out-of-core
 
-| Example | What it demonstrates | Run |
+| Example | What it demonstrates | Evidence reported |
 |---|---|---|
-| [04_persistence](04_persistence/README.md) | The full durability path: WAL-committed transactions, a v2 snapshot (CSR + labels + properties), then rebuild from disk with `recovery.Open`. | `go run ./examples/04_persistence` |
-| [05_out_of_core](05_out_of_core/README.md) | Tier 2 external memory: persist a CSR snapshot as a `csrfile`, re-open it by `mmap`, and run semi-external PageRank over the mapped adjacency. | `go run ./examples/05_out_of_core` |
-| [17_transactional_log](17_transactional_log/README.md) | WAL-backed store with a background checkpointer that folds the log into a self-sufficient snapshot, plus recovery after a simulated crash. | `go run ./examples/17_transactional_log` |
-| [18_oocore_pipeline](18_oocore_pipeline/README.md) | The full out-of-core pipeline: CSV → CSR → `csrfile` → `mmap`, then semi-external BFS and PageRank over the mapped region. | `go run ./examples/18_oocore_pipeline` |
-| [21_typed_recovery](21_typed_recovery/README.md) | Generic `recovery.Open[N, W]` over an `(int64, float64)` graph: round-trip edges (bit-exact float weights), labels, and typed properties through a v2 snapshot. | `go run ./examples/21_typed_recovery` |
+| [04_persistence](04_persistence/README.md) | The full durability path over a seeded graph: WAL-committed transactions, a v2 snapshot (CSR + labels + properties), then rebuild from disk with `recovery.Open`. | Commit throughput, WAL/snapshot bytes on disk, recovery time, heap before/after. |
+| [05_out_of_core](05_out_of_core/README.md) | Tier 2 external memory: persist a seeded CSR snapshot as a `csrfile`, re-open it by `mmap`, and run semi-external PageRank over the mapped adjacency. | On-disk size vs resident heap (the out-of-core advantage), mmap and query time. |
+| [17_transactional_log](17_transactional_log/README.md) | WAL-backed store over a seeded financial ledger with a background checkpointer that folds the log into a self-sufficient snapshot, plus recovery after a simulated crash. | Write throughput, WAL bytes folded, snapshot bytes, checkpoint count, recovery time. |
+| [18_oocore_pipeline](18_oocore_pipeline/README.md) | The full out-of-core pipeline over a seeded graph: CSV → CSR → `csrfile` → `mmap`, then semi-external BFS and PageRank over the mapped region. | Per-stage timing (parse/build/write/mmap/BFS/PageRank), on-disk size vs heap. |
+| [21_typed_recovery](21_typed_recovery/README.md) | Generic `recovery.Open[N, W]` over a seeded `(int64, float64)` graph: round-trip edges (bit-exact float weights), labels, and typed properties through a v2 snapshot. | Snapshot bytes, recovery time, heap, and a bit-exact float64 round-trip verification. |
 
 ## Cypher and Bolt
 
-| Example | What it demonstrates | Run |
+| Example | What it demonstrates | Evidence reported |
 |---|---|---|
-| [22_cypher](22_cypher/README.md) | The Cypher engine over a small social graph: a label scan with projection and `ORDER BY`, a `WHERE` filter, a relationship pattern, and a `CREATE` in a write transaction — every value printed in human-readable form. | `go run ./examples/22_cypher` |
-| [23_bolt_server](23_bolt_server/README.md) | Bolt v5 end to end: start the embedded server, connect the official `neo4j-go-driver/v5` as a real client, run a Cypher query over a session, and shut down cleanly with no goroutine leak. | `go run ./examples/23_bolt_server` |
-| [24_social_network_cli](24_social_network_cli/README.md) | A one-shot CLI over a persistent LPG social network, walking every layer: LPG, WAL + recovery, manual checkpoints, and Cypher reads streamed as JSON Lines. | `go run ./examples/24_social_network_cli` |
-| [25_software_house_api](25_software_house_api/README.md) | A persistent, `kill -9`-safe REST API (stdlib only) over a multi-layer LPG spanning Code/Work/People, answering change-impact, ownership, and bus-factor questions in Cypher. | `go run ./examples/25_software_house_api` |
+| [22_cypher](22_cypher/README.md) | The Cypher engine over a seeded social graph: a label scan with projection and `ORDER BY`, a `WHERE` filter, a relationship pattern, and a `CREATE` in a write transaction. | Per-query latency, live heap. |
+| [23_bolt_server](23_bolt_server/README.md) | Bolt v5 end to end over a seeded graph: start the embedded server, connect the official `neo4j-go-driver/v5`, run many queries across concurrent sessions, and shut down cleanly with no goroutine leak. | Query throughput, p50/p95/p99 latency distribution, live heap. |
+| [24_social_network_cli](24_social_network_cli/README.md) | A one-shot CLI over a persistent LPG social network with an opt-in seeded scale mode, walking every layer: LPG, WAL + recovery, manual checkpoints, and Cypher reads streamed as JSON Lines. | Seed throughput, live heap, per-query latency (via the `-evidence` flag). |
+| [25_software_house_api](25_software_house_api/README.md) | A persistent, `kill -9`-safe REST API (stdlib only) over a multi-layer LPG spanning Code/Work/People with an opt-in seeded scale mode, answering change-impact, ownership, and bus-factor questions in Cypher. | Graph size, live heap, bytes per element, per-query/seed latency (via `/stats`). |
 
 ## Interchange
 
-| Example | What it demonstrates | Run |
+| Example | What it demonstrates | Evidence reported |
 |---|---|---|
-| [06_csv_import](06_csv_import/README.md) | The serialisation round-trip: read an edge-list CSV with `csv.ReadInto`, then write the graph back out as CSV and as newline-delimited JSON (JSON Lines). | `go run ./examples/06_csv_import` |
-| [07_graphml_roundtrip](07_graphml_roundtrip/README.md) | Graph interchange I/O: parse a GraphML document with `graphml.ReadInto`, then serialise it back out to GraphML and Graphviz DOT, edges and weights intact. | `go run ./examples/07_graphml_roundtrip` |
+| [06_csv_import](06_csv_import/README.md) | The serialisation round-trip over a seeded edge list: read it with `csv.ReadInto`, then write the graph back out as CSV and as newline-delimited JSON (JSON Lines). | Parse and serialise throughput (rows/s, MiB/s), bytes in/out, live heap. |
+| [07_graphml_roundtrip](07_graphml_roundtrip/README.md) | Graph interchange I/O over a seeded graph: parse a GraphML document with `graphml.ReadInto`, then serialise it back out to GraphML and Graphviz DOT, edges and weights intact. | Parse and serialise throughput, bytes in/out per format, live heap. |
 
 ## Algorithms
 
-| Example | What it demonstrates | Run |
+| Example | What it demonstrates | Evidence reported |
 |---|---|---|
-| [08_pagerank](08_pagerank/README.md) | PageRank over a directed authority web (peripheral pages → an authority → a hub), reading back the per-node rank vector ordered most- to least-important with distinct ranks. | `go run ./examples/08_pagerank` |
-| [09_leiden](09_leiden/README.md) | Modularity-optimising community detection with `community.Leiden` over two K4 cliques joined by a single bridge edge. | `go run ./examples/09_leiden` |
-| [10_dimacs9_routing](10_dimacs9_routing/README.md) | Build a deterministic synthetic road network with the DIMACS 9 harness, then run a concrete `search.Dijkstra` query that reconstructs the shortest route from node 0 to node 11. | `go run ./examples/10_dimacs9_routing` |
-| [14_routing_alternatives](14_routing_alternatives/README.md) | Three shortest-path flavours over one routing graph: Dijkstra, Yen's k-shortest paths, and `search.AStar` driven by a coordinate-based Euclidean heuristic that expands fewer nodes for the same optimal cost. | `go run ./examples/14_routing_alternatives` |
-| [15_task_assignment](15_task_assignment/README.md) | Two bipartite assignment algorithms side by side: `search.Hungarian` (cheapest one-to-one assignment) and `search.HopcroftKarp` (largest matching once edges are pruned). | `go run ./examples/15_task_assignment` |
-| [16_centrality_analytics](16_centrality_analytics/README.md) | Two analytics over one CSR snapshot: exact Brandes betweenness centrality and label-propagation community detection, with deterministic tie-breaking. | `go run ./examples/16_centrality_analytics` |
+| [08_pagerank](08_pagerank/README.md) | PageRank over a seeded directed scale-free web (heavy-tailed in-degree), reading back the per-node rank vector ordered most- to least-important. | Convergence iterations, timing, transient allocations, live heap. |
+| [09_leiden](09_leiden/README.md) | Modularity-optimising community detection with `community.Leiden` over a seeded stochastic-block-model graph of planted communities. | Detection timing, achieved modularity, communities found. |
+| [10_dimacs9_routing](10_dimacs9_routing/README.md) | Build a synthetic DIMACS 9 road network at scale, run a concrete `search.Dijkstra` route, and drive a seeded random source-target probe workload. | Query throughput, p50/p95/p99 latency distribution, live heap. |
+| [14_routing_alternatives](14_routing_alternatives/README.md) | Three shortest-path flavours over one seeded k-NN spatial graph: Dijkstra, Yen's k-shortest paths, and `search.AStar` with an admissible Euclidean heuristic. | Per-algorithm timing, nodes expanded (the A* vs Dijkstra advantage), live heap. |
+| [15_task_assignment](15_task_assignment/README.md) | Two bipartite assignment algorithms over a seeded instance: `search.Hungarian` (cheapest one-to-one assignment) and `search.HopcroftKarp` (largest matching). | Per-algorithm timing, live heap. |
+| [16_centrality_analytics](16_centrality_analytics/README.md) | Two analytics over one CSR snapshot of a seeded chain-of-clusters graph: exact Brandes betweenness centrality and label-propagation community detection. | Per-analysis timing, transient allocations, live heap. |
 
 ## Real-world recipes
 
-| Example | What it demonstrates | Run |
+| Example | What it demonstrates | Evidence reported |
 |---|---|---|
-| [11_social_network](11_social_network/README.md) | An end-to-end social-network workload over an LPG: PageRank influence ranking, Leiden community detection, and a manual friend-of-friend recommendation walk. | `go run ./examples/11_social_network` |
-| [12_build_dependency](12_build_dependency/README.md) | Model a build-dependency graph, derive a valid build order with `search.TopologicalSort` (Kahn), and detect a circular dependency with `search.TarjanSCC`. | `go run ./examples/12_build_dependency` |
-| [13_network_reliability](13_network_reliability/README.md) | Two resilience analyses over one network: single points of failure (articulation points and bridges) and the max throughput plus its limiting min-cut bottleneck, with the flow network derived from the same edge list. | `go run ./examples/13_network_reliability` |
-| [19_pattern_query](19_pattern_query/README.md) | The fluent `graph/query` API: MATCH-style pattern queries combining label and property predicates with a one-hop expansion, reading matched properties back out. | `go run ./examples/19_pattern_query` |
-| [20_concurrent_reads](20_concurrent_reads/README.md) | The lock-free read contract of a frozen CSR: Dijkstra, BFS, and PageRank run concurrently over one shared immutable snapshot with zero synchronisation on the snapshot. | `go run ./examples/20_concurrent_reads` |
+| [11_social_network](11_social_network/README.md) | An end-to-end social-network workload over a seeded LPG: PageRank influence ranking, Leiden community detection, and a manual friend-of-friend recommendation walk. | Per-stage timing (PageRank/Leiden/FoF), live heap. |
+| [12_build_dependency](12_build_dependency/README.md) | Model a seeded build-dependency DAG, derive a valid build order with `search.TopologicalSort` (Kahn), and detect a circular dependency with `search.TarjanSCC`. | Per-algorithm timing, DAG statistics, live heap. |
+| [13_network_reliability](13_network_reliability/README.md) | Two resilience analyses over one seeded transit-stub network: single points of failure (articulation points and bridges) and max throughput plus its limiting min-cut bottleneck. | Per-analysis timing, max-flow value, min-cut size, live heap. |
+| [19_pattern_query](19_pattern_query/README.md) | The fluent `graph/query` API over a seeded dependency LPG: MATCH-style pattern queries combining label and property predicates with a one-hop expansion, reading matched properties back out. | Per-query latency, matched-row counts, live heap. |
+| [20_concurrent_reads](20_concurrent_reads/README.md) | The lock-free read contract of a frozen CSR: Dijkstra, BFS, and PageRank run concurrently over one shared immutable seeded snapshot with zero synchronisation on the snapshot. | Aggregate throughput, scaling across worker counts, live heap. |
 
 ## Benchmarks
 
-| Example | What it demonstrates | Run |
+| Example | What it demonstrates | Evidence reported |
 |---|---|---|
-| [26_social_scale_bench](26_social_scale_bench/README.md) | A large-scale social network (up to 1M users, 30k articles, `FRIEND` and `LIKE` edges) built in memory and queried with Cypher, reporting build throughput, Go heap footprint, and per-query latency — a benchmark for query performance and resource consumption. Scale-parametrised via flags. | `go run ./examples/26_social_scale_bench` |
+| [26_social_scale_bench](26_social_scale_bench/README.md) | A large-scale social network (up to 1M users, 30k articles, `FRIEND` and `LIKE` edges) built in memory and queried with Cypher — the reference end state for this standard, scale-parametrised via flags. | Build throughput, Go heap footprint, bytes per edge, per-query latency. |
