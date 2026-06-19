@@ -10,27 +10,44 @@
 //
 // # Model
 //
-//	(:USER    {id, name})                 // id is a 24-char hex string
-//	(:ARTICLE {id, title})                // id is a 24-char hex string
-//	(:USER)-[:FRIEND]->(:USER)            // friendsMin..friendsMax per user
-//	(:USER)-[:LIKE]->(:ARTICLE)           // 0..likesMax per user
+//	(:USER    {id, name})                       // id is a 24-char hex string
+//	(:ARTICLE {id, title})                      // id is a 24-char hex string
+//	(:USER)-[:FRIEND {since}]->(:USER)          // friendsMin..friendsMax per user
+//	(:USER)-[:LIKE   {when}]->(:ARTICLE)        // 0..likesMax per user
 //
 // FRIEND is modelled as a directed out-edge: every user is given a
 // random out-degree in [friendsMin, friendsMax] to distinct other
 // users (no self-loops, no duplicate targets). LIKE is a directed
 // out-edge to between zero and likesMax distinct articles.
 //
+// Every relationship carries exactly one mandatory date property: a
+// FRIEND records when the friendship was created in since and a LIKE
+// records when the like happened in when. Both are always present.
+// The dates are stored as ISO-8601 (YYYY-MM-DD) strings — the same
+// representation example 25 uses for Cypher-queryable timestamps — so
+// the cypher.Engine reads them back as non-null values and, because
+// ISO-8601 sorts chronologically, range and ORDER BY predicates over
+// since/when behave as dates. (lpg.TimeValue is not used: the Cypher
+// reader maps it to null, whereas the tagged date strings round-trip.)
+// The dates are drawn from the seeded RNG, anchored to a fixed
+// reference date rather than the wall clock, so they are reproducible
+// for a given -seed.
+//
 // # Scale
 //
 // Run with no flags, the example builds the full specification — one
 // million users, thirty thousand articles, 150-200 friends per user and
 // up to 300 likes per user. That is roughly 1.03M nodes and on the
-// order of 3.2 × 10^8 edges; with explicit relationship types it needs
-// ~21 GiB of live heap (~27 GiB RSS) and a few minutes to build, and
-// with implicit types (-rel-types=false) ~7.4 GiB. This is deliberate:
-// the example exists to stress query performance and resource
-// consumption at that scale. See the README's "Memory profile and
-// optimizations" section for how those figures were measured.
+// order of 3.2 × 10^8 edges. Because every edge now carries a mandatory
+// date property, that per-edge property store dominates resident heap at
+// ~425 bytes per edge (measured at 20k/2k), so the full run needs on the
+// order of ~130 GiB of live heap and several minutes to build. The
+// implicit-type mode (-rel-types=false) no longer helps materially — the
+// date-property store is identical in both modes and dwarfs the
+// relationship-label store — landing at ~127 GiB. This is deliberate: the
+// example exists to stress query performance and resource consumption at
+// that scale. See the README's "Memory profile and optimizations" section
+// for the per-edge breakdown and how these figures were measured.
 //
 // Every dimension is a flag, so the same binary scales down to a
 // laptop-sized run:
@@ -76,8 +93,14 @@ const (
 	labelUser    = "USER"
 	labelArticle = "ARTICLE"
 
-	relFriend = "FRIEND" // (:USER)-[:FRIEND]->(:USER)
-	relLike   = "LIKE"   // (:USER)-[:LIKE]->(:ARTICLE)
+	relFriend = "FRIEND" // (:USER)-[:FRIEND {since}]->(:USER)
+	relLike   = "LIKE"   // (:USER)-[:LIKE   {when}]->(:ARTICLE)
+
+	// Mandatory per-relationship date properties. Every FRIEND carries a
+	// since (when the friendship was created) and every LIKE a when (when
+	// the like happened). Stored as ISO-8601 date strings (see isoEdgeDate).
+	propFriendSince = "since"
+	propLikeWhen    = "when"
 )
 
 // config captures every scale and shape knob of the benchmark. The
@@ -288,7 +311,7 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 			targets[j] = struct{}{}
 		}
 		for j := range targets {
-			if err := addEdge(g, userIDs[i], userIDs[j], relFriend, cfg.relTypes); err != nil {
+			if err := addEdge(g, userIDs[i], userIDs[j], relFriend, cfg.relTypes, propFriendSince, isoEdgeDate(rng)); err != nil {
 				return buildStats{}, err
 			}
 			friendEdges++
@@ -311,7 +334,7 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 				likes[rng.Intn(cfg.articles)] = struct{}{}
 			}
 			for a := range likes {
-				if err := addEdge(g, userIDs[i], articleIDs[a], relLike, cfg.relTypes); err != nil {
+				if err := addEdge(g, userIDs[i], articleIDs[a], relLike, cfg.relTypes, propLikeWhen, isoEdgeDate(rng)); err != nil {
 					return buildStats{}, err
 				}
 				likeEdges++
@@ -352,26 +375,56 @@ func addNode(g *lpg.Graph[string, float64], id, label, propKey, propVal string) 
 	return nil
 }
 
-// addEdge adds a directed, weight-1 edge. When withType is true it also
-// tags the edge with the given relationship type so Cypher patterns like
-// [:FRIEND] / [:LIKE] match; when false the type is left implicit (to be
-// inferred from the endpoint labels) and no per-edge label is stored.
+// addEdge adds a directed, weight-1 edge and sets its mandatory date
+// property (propKey=propVal). When withType is true it also tags the edge
+// with the given relationship type so Cypher patterns like [:FRIEND] /
+// [:LIKE] match; when false the type is left implicit (to be inferred from
+// the endpoint labels) and no per-edge label is stored.
 //
 // The labelled case uses [lpg.Graph.AddEdgeLabeled] so the type lands in the
 // edge's inline slot AT insertion time — a single O(1)-amortised append — rather
 // than AddEdge followed by a SetEdgeLabel that copies the whole label column
 // (which makes a bulk labelled build O(degree²) per source).
-func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType bool) error {
+//
+// The date is stored with [lpg.Graph.SetEdgeProperty] (a pair-level property,
+// which is unambiguous here because every (src, dst) pair carries exactly one
+// edge) as an ISO-8601 string via [lpg.StringValue]; SetEdgeProperty must run
+// after the edge exists, so it follows the add. This is the property tier the
+// Cypher engine reads when materialising a matched relationship's properties,
+// so the date is visible as r.since / r.when in the query battery.
+func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType bool, propKey, propVal string) error {
 	if withType {
 		if err := g.AddEdgeLabeled(src, dst, 1, relType); err != nil {
 			return fmt.Errorf("AddEdgeLabeled %s-[%s]->%s: %w", src, relType, dst, err)
 		}
-		return nil
-	}
-	if err := g.AddEdge(src, dst, 1); err != nil {
+	} else if err := g.AddEdge(src, dst, 1); err != nil {
 		return fmt.Errorf("AddEdge %s-[%s]->%s: %w", src, relType, dst, err)
 	}
+	if err := g.SetEdgeProperty(src, dst, propKey, lpg.StringValue(propVal)); err != nil {
+		return fmt.Errorf("SetEdgeProperty %s on %s-[%s]->%s: %w", propKey, src, relType, dst, err)
+	}
 	return nil
+}
+
+// edgeDateWindowDays bounds how far before the fixed reference date a
+// relationship may be dated: every FRIEND.since and LIKE.when falls within
+// the window [edgeDateRef-edgeDateWindowDays, edgeDateRef]. ~6 years.
+const edgeDateWindowDays = 2192
+
+// edgeDateRef is the fixed reference date the synthetic edge dates count
+// back from. Anchoring to a constant — never the wall clock — keeps the
+// dataset reproducible for a given -seed. It is hoisted out of isoEdgeDate
+// so the per-edge build loop does not re-run time.Date's normalisation on
+// every one of the hundreds of millions of edges. Immutable after init,
+// like the word-list vars below.
+var edgeDateRef = time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+// isoEdgeDate returns a deterministic calendar date in ISO-8601 form
+// (YYYY-MM-DD) drawn from rng as a whole-day offset back from edgeDateRef.
+// ISO-8601 strings sort chronologically, so storing the dates as strings
+// keeps range and ORDER BY predicates over since/when behaving as dates.
+func isoEdgeDate(rng *rand.Rand) string {
+	return edgeDateRef.AddDate(0, 0, -rng.Intn(edgeDateWindowDays+1)).Format("2006-01-02")
 }
 
 // uniqueHexID returns a 24-character lowercase hex id (12 random bytes)
@@ -426,6 +479,14 @@ func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser 
 		friendPat, likePat = "-->", "-->"
 	}
 
+	// Bound-relationship variants of the same two patterns, used to read
+	// each relationship's mandatory date property. The variable r binds the
+	// relationship in both modes; only the optional type token differs.
+	friendRelPat, likeRelPat := "-[r:FRIEND]->", "-[r:LIKE]->"
+	if !cfg.relTypes {
+		friendRelPat, likeRelPat = "-[r]->", "-[r]->"
+	}
+
 	scalars := []struct {
 		name  string
 		query string
@@ -436,6 +497,28 @@ func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser 
 		{"count_like", "MATCH (:USER)" + likePat + "(:ARTICLE) RETURN count(*) AS c"},
 	}
 	for _, q := range scalars {
+		n, d, err := scalarCount(ctx, eng, q.query, nil)
+		if err != nil {
+			return fmt.Errorf("%s: %w", q.name, err)
+		}
+		fmt.Fprintf(w, "q.%s=%d\n", q.name, n)
+		fmt.Fprintf(w, "# q.%s.latency=%s\n", q.name, d.Round(time.Microsecond))
+	}
+
+	// Mandatory date-property coverage. Every FRIEND carries a since date
+	// and every LIKE a when date, so the count of relationships whose date
+	// IS NOT NULL must equal the total relationship count. This exercises
+	// the relationship-property read path and verifies the always-filled
+	// invariant at the query level: the regression test asserts these equal
+	// edges.friend and edges.like respectively.
+	coverage := []struct {
+		name  string
+		query string
+	}{
+		{"friend_since_filled", "MATCH (:USER)" + friendRelPat + "(:USER) WHERE r.since IS NOT NULL RETURN count(*) AS c"},
+		{"like_when_filled", "MATCH (:USER)" + likeRelPat + "(:ARTICLE) WHERE r.when IS NOT NULL RETURN count(*) AS c"},
+	}
+	for _, q := range coverage {
 		n, d, err := scalarCount(ctx, eng, q.query, nil)
 		if err != nil {
 			return fmt.Errorf("%s: %w", q.name, err)

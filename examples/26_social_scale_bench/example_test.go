@@ -71,6 +71,10 @@ func TestRun(t *testing.T) {
 		{"q.count_articles", int64(cfg.articles)},
 		{"q.count_friend", friend},
 		{"q.count_like", like},
+		// Every relationship's mandatory date is filled, so the IS NOT NULL
+		// coverage counts must equal the total relationship counts.
+		{"q.friend_since_filled", friend},
+		{"q.like_when_filled", like},
 	}
 	for _, c := range checks {
 		if got := facts[c.col]; got != c.want {
@@ -116,6 +120,7 @@ func TestRunCompact(t *testing.T) {
 	for _, k := range []string{
 		"nodes.users", "nodes.articles", "edges.friend", "edges.like",
 		"q.count_users", "q.count_articles", "q.count_friend", "q.count_like",
+		"q.friend_since_filled", "q.like_when_filled",
 		"q.fof_reach", "q.top_articles.rows",
 	} {
 		if ef[k] != cf[k] {

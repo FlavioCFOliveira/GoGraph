@@ -14,10 +14,10 @@ aggregation).
 A social network of `USER` and `ARTICLE` nodes:
 
 ```
-(:USER    {id, name})            // id is a 24-char hex string, name is realistic
-(:ARTICLE {id, title})           // id is a 24-char hex string, title is realistic
-(:USER)-[:FRIEND]->(:USER)       // friends-min .. friends-max per user
-(:USER)-[:LIKE]->(:ARTICLE)      // 0 .. likes-max per user
+(:USER    {id, name})                  // id is a 24-char hex string, name is realistic
+(:ARTICLE {id, title})                 // id is a 24-char hex string, title is realistic
+(:USER)-[:FRIEND {since}]->(:USER)     // friends-min .. friends-max per user
+(:USER)-[:LIKE   {when}]->(:ARTICLE)   // 0 .. likes-max per user
 ```
 
 `FRIEND` is a directed out-edge: each user is given a random out-degree in
@@ -26,6 +26,21 @@ duplicate targets). `LIKE` is a directed out-edge to between zero and
 `likes-max` distinct articles. The dataset is generated from a seeded RNG,
 so its shape is reproducible for a fixed `-seed`; only the telemetry varies
 between runs.
+
+Every relationship carries exactly one **mandatory date** property:
+`FRIEND.since` records when the friendship was created and `LIKE.when`
+records when the like happened, both always present. They are stored as
+ISO-8601 (`YYYY-MM-DD`) strings — the representation example 25 also uses
+for Cypher-queryable timestamps — so the engine reads them back as
+non-null values, and because ISO-8601 sorts chronologically, range and
+`ORDER BY` predicates over `since`/`when` behave as dates. (`lpg.TimeValue`
+is deliberately **not** used here: the Cypher reader maps it to null,
+whereas the date strings round-trip.) The dates are drawn from the seeded
+RNG anchored to a fixed reference date — never the wall clock — so they are
+reproducible for a fixed `-seed`. The query battery includes two coverage
+queries that count relationships whose date `IS NOT NULL`; they always
+equal the total relationship counts, which is the always-filled invariant
+the regression test asserts.
 
 The graph is built in memory and queried with an in-memory
 `cypher.Engine`. The example deliberately does **not** exercise the
@@ -43,18 +58,22 @@ With **no flags** the example builds the full specification: **1,000,000
 users**, **30,000 articles**, **150–200 friends per user**, and **up to
 300 likes per user** — roughly 1.03M nodes and ~3.2 × 10⁸ edges.
 
-> **Resource warning.** At ~70 bytes of live heap per edge (measured, with
-> explicit relationship types), the full run needs on the order of **~21 GiB
-> of live heap (~27 GiB RSS)** and a few minutes to build. With implicit
-> types (`-rel-types=false`) it drops to **~7.4 GiB live (~9.4 GiB RSS)**.
-> Run it only on a machine sized for it. On a laptop, scale down first:
+> **Resource warning.** Each edge now carries a mandatory date property,
+> and at this model's degrees that per-edge property store dominates
+> resident heap: **~425 bytes of live heap per edge** (measured at 20k/2k,
+> explicit types — see below). The full run therefore needs on the order of
+> **~130 GiB of live heap** and several minutes to build. The implicit-type
+> mode (`-rel-types=false`) no longer helps materially — the date-property
+> store is identical in both modes and dwarfs the relationship-label store —
+> so it lands at **~127 GiB**. Run the full specification only on a machine
+> sized for it. On a laptop, scale down first:
 >
 > ```sh
 > go run ./examples/26_social_scale_bench -users 20000 -articles 2000
 > ```
 >
 > See [Memory profile and optimizations](#memory-profile-and-optimizations)
-> for the before/after figures and how they were measured.
+> for the per-edge breakdown and how these figures were measured.
 
 ### Flags
 
@@ -85,36 +104,42 @@ config.seed=1
 config.rel_types=true
 nodes.users=20000
 nodes.articles=2000
-edges.friend=3499345
-edges.like=2988203
-# build.elapsed=3.658s
-# build.node_rate=6014 nodes/s
-# build.edge_rate=1773430 edges/s
-# mem.heap_alloc=364.48 MiB
-# mem.heap_growth=364.13 MiB
-# mem.total_alloc=1.18 GiB
-# mem.sys=670.08 MiB
-# mem.num_gc=16
-# bytes_per_edge=58.9
+edges.friend=3498025
+edges.like=3006369
+# build.elapsed=5.203s
+# build.node_rate=4228 nodes/s
+# build.edge_rate=1250004 edges/s
+# mem.heap_alloc=2.58 GiB
+# mem.heap_growth=2.58 GiB
+# mem.total_alloc=3.70 GiB
+# mem.sys=3.15 GiB
+# mem.num_gc=15
+# bytes_per_edge=425.6
 q.count_users=20000
-# q.count_users.latency=13.543ms
+# q.count_users.latency=13.9ms
 q.count_articles=2000
-# q.count_articles.latency=1.333ms
-q.count_friend=3499345
-# q.count_friend.latency=6.853897s
-q.count_like=2988203
-# q.count_like.latency=5.928564s
-q.fof_reach=15224
-# q.fof_reach.latency=5.534114s
+# q.count_articles.latency=1.251ms
+q.count_friend=3498025
+# q.count_friend.latency=8.332093s
+q.count_like=3006369
+# q.count_like.latency=7.248027s
+q.friend_since_filled=3498025
+# q.friend_since_filled.latency=12.118435s
+q.like_when_filled=3006369
+# q.like_when_filled.latency=10.39269s
+q.fof_reach=15246
+# q.fof_reach.latency=5.611974s
 q.top_articles.rows=10
-# q.top_articles.latency=10.569924s
+# q.top_articles.latency=13.172801s
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`
-always equal `edges.friend` and `edges.like` respectively, which is the
-core consistency invariant the regression test asserts. The `# `-prefixed
-figures (including all latencies) are environment-dependent and are **not**
-pinned by the test.
+always equal `edges.friend` and `edges.like`, and the date-coverage counts
+`q.friend_since_filled` / `q.like_when_filled` equal them in turn (every
+relationship's date is filled) — the core consistency and always-filled
+invariants the regression test asserts. The `# `-prefixed figures
+(including all latencies) are environment-dependent and are **not** pinned
+by the test.
 
 ## Memory profile and optimizations
 
@@ -185,11 +210,49 @@ heap **~49 %**; build time also improved because the fused
 `AddEdgeLabeled` path drops the per-edge existence check the old
 `AddEdge` + `SetEdgeLabel` pair paid.
 
+### The mandatory date property now dominates resident heap
+
+The optimizations above shrank the relationship-**label** store to a few
+bytes per edge. Adding the mandatory `since`/`when` **date property** to
+every edge reverses that win in absolute terms: a pair-level edge property
+is held in a per-edge keyed map (`map[edgeKey]map[PropertyKeyID]Value`),
+and one small map per edge costs far more than the date string it holds.
+
+Measured at the 20k/2k scale of the *Expected output* block above (≈6.5 M
+edges, full `runtime.ReadMemStats` live heap), before vs. after adding the
+date property, with explicit relationship types:
+
+| | Live heap | B/edge |
+|---|---:|---:|
+| Without edge property (labels only) | ~364 MiB | ~58.9 |
+| With `since`/`when` date property | **~2.58 GiB** | **~425.6** |
+
+The date property adds **~367 B/edge** — overwhelmingly the per-edge map
+overhead, not the ~10-byte ISO date string. Two consequences follow:
+
+1. **Edge properties, not labels, now set the memory ceiling.** Extrapolated
+   to the full specification (~3.25 × 10⁸ edges) the live heap rises from the
+   label-only ~21 GiB to **~130 GiB**.
+2. **The implicit-type mode (`-rel-types=false`) no longer saves meaningfully.**
+   The date-property store is identical in both modes and dwarfs the
+   label store, so implicit types measure **~421.4 B/edge (~2.55 GiB)** at
+   20k/2k — within ~1 % of explicit. The flag still changes how the
+   relationship *kind* is encoded and queried, but it is no longer a memory
+   lever once every edge carries a property.
+
+This is intrinsic to storing a queryable edge property with the current
+engine: there is no inline/columnar edge-property tier analogous to the
+relationship-label column, and a lighter encoding does not help (the cost
+is the per-edge map, not the value). `lpg.TimeValue` was rejected for a
+different reason — the Cypher reader maps it to null, so it would not be
+queryable as `r.since` / `r.when` at all.
+
 ## Key APIs
 
 - `graph/lpg.New` / `Graph.AddNode` / `Graph.SetNodeLabel` / `Graph.SetNodeProperty` — build the labelled property graph in memory.
 - `graph/lpg.Graph.AddEdgeLabeled` — add a typed `FRIEND` / `LIKE` relationship in one call (the edge and its relationship type are written together, so the per-edge label is stored inline in the adjacency column rather than in a separate keyed map). `Graph.AddEdge` / `Graph.SetEdgeLabel` remain for the untyped and re-labelling cases.
-- `graph/lpg.StringValue` — wrap string property values.
+- `graph/lpg.Graph.SetEdgeProperty` — attach the mandatory `since` / `when` date to each relationship (a pair-level property, which is unambiguous here because every endpoint pair carries one edge; it is the tier the Cypher engine reads as `r.since` / `r.when`).
+- `graph/lpg.StringValue` — wrap string property values, including the ISO-8601 date strings stored on relationships.
 - `cypher.NewEngine` / `Engine.Run` — query the in-memory graph.
 - `cypher.Result.Next` / `Result.Record` / `Result.Err` / `Result.Close` — iterate result rows and read columns.
 - `cypher/expr.StringValue` / `expr.IntegerValue` — typed query parameters and result cells.
