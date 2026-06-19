@@ -28,10 +28,13 @@ import (
 	"sync"
 )
 
-// edgeInstanceLabelShard holds the per-(src, dst, idx) label sets.
+// edgeInstanceLabelShard holds the per-(src, dst, idx) label sets. The
+// innermost per-instance set is the compact tiered [labelBag] (sprint 221,
+// #1633), stored by value, so a 1-2-label edge instance pays a small slice
+// instead of a ~300 B Go map.
 type edgeInstanceLabelShard struct {
 	mu sync.Mutex
-	m  map[edgeKey]map[int64]map[LabelID]struct{}
+	m  map[edgeKey]map[int64]labelBag
 }
 
 // SetEdgeLabelAt attaches `name` to the directed edge instance
@@ -57,19 +60,18 @@ func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[int64]map[LabelID]struct{})
+		sh.m = make(map[edgeKey]map[int64]labelBag)
 	}
 	byIdx, ok := sh.m[k]
 	if !ok {
-		byIdx = make(map[int64]map[LabelID]struct{})
+		byIdx = make(map[int64]labelBag)
 		sh.m[k] = byIdx
 	}
-	bag, ok := byIdx[idx]
-	if !ok {
-		bag = make(map[LabelID]struct{})
-		byIdx[idx] = bag
-	}
-	bag[lid] = struct{}{}
+	// labelBag is stored by value: mutate a local copy and write it back under
+	// the shard lock (the write-back is load-bearing — add may grow/promote).
+	bag := byIdx[idx]
+	bag.add(lid)
+	byIdx[idx] = bag
 }
 
 // EdgeLabelsAt returns the labels recorded at instance `idx` of the
@@ -112,12 +114,12 @@ func (g *Graph[N, W]) EdgeLabelsAt(src, dst N, idx int64) []string {
 	if !ok {
 		return nil
 	}
-	out := make([]string, 0, len(bag))
-	for lid := range bag {
+	out := make([]string, 0, bag.len())
+	bag.forEach(func(lid LabelID) {
 		if name, ok := g.reg.Resolve(lid); ok {
 			out = append(out, name)
 		}
-	}
+	})
 	return out
 }
 

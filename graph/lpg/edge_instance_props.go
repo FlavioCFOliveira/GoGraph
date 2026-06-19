@@ -13,10 +13,13 @@ import (
 	"sync"
 )
 
-// edgeInstancePropShard holds the per-(src, dst, idx) property maps.
+// edgeInstancePropShard holds the per-(src, dst, idx) property bags. The
+// innermost per-instance bag is the compact tiered [propBag] (sprint 221,
+// #1633), stored by value, so a 1-2-property edge instance pays a small slice
+// instead of a ~300 B Go map.
 type edgeInstancePropShard struct {
 	mu sync.Mutex
-	m  map[edgeKey]map[int64]map[PropertyKeyID]PropertyValue
+	m  map[edgeKey]map[int64]propBag
 }
 
 // SetEdgePropertyAt records the property `key`=`value` for the directed
@@ -48,19 +51,18 @@ func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[int64]map[PropertyKeyID]PropertyValue)
+		sh.m = make(map[edgeKey]map[int64]propBag)
 	}
 	byIdx, ok := sh.m[k]
 	if !ok {
-		byIdx = make(map[int64]map[PropertyKeyID]PropertyValue)
+		byIdx = make(map[int64]propBag)
 		sh.m[k] = byIdx
 	}
-	bag, ok := byIdx[idx]
-	if !ok {
-		bag = make(map[PropertyKeyID]PropertyValue)
-		byIdx[idx] = bag
-	}
-	bag[pid] = value
+	// propBag is stored by value: mutate a local copy and write it back under
+	// the shard lock (the write-back is load-bearing — set may grow/promote).
+	bag := byIdx[idx]
+	bag.set(pid, value)
+	byIdx[idx] = bag
 	return nil
 }
 
@@ -104,12 +106,12 @@ func (g *Graph[N, W]) EdgePropertiesAt(src, dst N, idx int64) map[string]Propert
 	if !ok {
 		return nil
 	}
-	out := make(map[string]PropertyValue, len(bag))
-	for pid, v := range bag {
+	out := make(map[string]PropertyValue, bag.len())
+	bag.forEach(func(pid PropertyKeyID, v PropertyValue) {
 		if name, ok := g.pkeys.Resolve(pid); ok {
 			out[name] = v
 		}
-	}
+	})
 	return out
 }
 

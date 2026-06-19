@@ -217,12 +217,12 @@ func (g *Graph[N, W]) EdgeLabelsByHandleID(srcID, dstID graph.NodeID, handle uin
 	if !ok {
 		return nil
 	}
-	out := make([]string, 0, len(bag))
-	for lid := range bag {
+	out := make([]string, 0, bag.len())
+	bag.forEach(func(lid LabelID) {
 		if name, ok := g.reg.Resolve(lid); ok {
 			out = append(out, name)
 		}
-	}
+	})
 	return out
 }
 
@@ -249,12 +249,12 @@ func (g *Graph[N, W]) EdgePropertiesByHandleID(srcID, dstID graph.NodeID, handle
 	if !ok {
 		return nil
 	}
-	out := make(map[string]PropertyValue, len(bag))
-	for pid, v := range bag {
+	out := make(map[string]PropertyValue, bag.len())
+	bag.forEach(func(pid PropertyKeyID, v PropertyValue) {
 		if name, ok := g.pkeys.Resolve(pid); ok {
 			out[name] = v
 		}
-	}
+	})
 	return out
 }
 
@@ -276,19 +276,16 @@ func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle u
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[uint64]map[LabelID]struct{})
+		sh.m = make(map[edgeKey]map[uint64]labelBag)
 	}
 	byHandle, ok := sh.m[k]
 	if !ok {
-		byHandle = make(map[uint64]map[LabelID]struct{})
+		byHandle = make(map[uint64]labelBag)
 		sh.m[k] = byHandle
 	}
-	bag, ok := byHandle[handle]
-	if !ok {
-		bag = make(map[LabelID]struct{})
-		byHandle[handle] = bag
-	}
-	bag[lid] = struct{}{}
+	bag := byHandle[handle]
+	bag.add(lid)
+	byHandle[handle] = bag
 }
 
 // SetEdgePropertyByHandleID records key=value on the edge identified by
@@ -312,17 +309,14 @@ func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[uint64]map[PropertyKeyID]PropertyValue)
+		sh.m = make(map[edgeKey]map[uint64]propBag)
 	}
 	byHandle, ok := sh.m[k]
 	if !ok {
-		byHandle = make(map[uint64]map[PropertyKeyID]PropertyValue)
+		byHandle = make(map[uint64]propBag)
 		sh.m[k] = byHandle
 	}
-	bag, ok := byHandle[handle]
-	if !ok {
-		bag = make(map[PropertyKeyID]PropertyValue)
-		byHandle[handle] = bag
-	}
-	bag[pid] = value
+	bag := byHandle[handle]
+	bag.set(pid, value)
+	byHandle[handle] = bag
 }
