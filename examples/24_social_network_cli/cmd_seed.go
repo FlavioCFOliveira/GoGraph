@@ -2,19 +2,41 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
+
+// seedConfig bundles the data directory with the opt-in scale and
+// evidence knobs of the seed subcommand. The zero scaleConfig and
+// evidence == false reproduce the example's original behaviour exactly
+// (canonical fixture, single JSON fact line), so the golden tests keep
+// passing byte-for-byte unless the operator asks for more.
+type seedConfig struct {
+	dir      string
+	scale    scaleConfig
+	evidence bool
+}
 
 // cmdSeed populates the data directory with the deterministic
 // social-network fixture: 5 users, 8 follows, 3 posts (each with an
 // author edge), 5 comments (with ON, REPLY_OF and authorship edges)
 // and 7 likes. All timestamps in the fixture are hard-coded so the
 // snapshot byte stream is reproducible across machines.
+//
+// The seed scales beyond the fixture with three opt-in flags, off by
+// default so the deterministic output is unchanged:
+//
+//	-users N     append N extra seeded :User nodes (0 = fixture only)
+//	-friends K   FOLLOWS out-degree per synthetic user (default 8)
+//	-seed S      RNG seed that fixes the synthetic data shape (default 1)
+//	-evidence    print "# " telemetry (seed throughput, live heap)
 //
 // The operation is idempotent: if at least one User already exists
 // (e.g., a previous seed completed against the same data directory),
@@ -25,19 +47,55 @@ import (
 //
 //	{"seeded":<bool>,"status":"ok"}
 //
-// The seeded field is false on idempotent re-runs.
+// The seeded field is false on idempotent re-runs. With -evidence the
+// JSON fact line is followed by "# "-prefixed telemetry lines.
 func cmdSeed(args []string) error {
-	dir, _, err := parseDataDir("seed", args)
+	cfg, err := parseSeedArgs(args)
 	if err != nil {
 		return err
 	}
-	return runSeed(context.Background(), dir, os.Stdout)
+	return runSeedWithConfig(context.Background(), cfg, os.Stdout)
 }
 
-// runSeed opens the data directory, applies the fixture through the
-// transactional API, and writes the success reply to out. The body is
-// factored out from cmdSeed so the round-trip test in T9 can drive it
-// with a captured *bytes.Buffer instead of os.Stdout.
+// parseSeedArgs parses the seed subcommand's flags into a seedConfig,
+// validating the scale knobs at the boundary. A flag-parse failure or a
+// missing -d is mapped to a *usageError (exit code 2); an impossible
+// scale configuration is a runtime error (exit code 1).
+func parseSeedArgs(args []string) (seedConfig, error) {
+	cfg := seedConfig{scale: defaultScaleConfig()}
+	fs := flag.NewFlagSet("seed", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&cfg.dir, "d", "", "data directory (required)")
+	fs.IntVar(&cfg.scale.users, "users", cfg.scale.users, "number of extra seeded :User nodes to append (0 = canonical fixture only)")
+	fs.IntVar(&cfg.scale.friends, "friends", cfg.scale.friends, "FOLLOWS out-degree per synthetic user")
+	fs.Int64Var(&cfg.scale.seed, "seed", cfg.scale.seed, "RNG seed (fixes the synthetic data shape)")
+	fs.BoolVar(&cfg.evidence, "evidence", cfg.evidence, "print \"# \" telemetry (seed throughput, live heap)")
+	if perr := fs.Parse(args); perr != nil {
+		return seedConfig{}, newUsageError("seed: flag parse: %v", perr)
+	}
+	if cfg.dir == "" {
+		return seedConfig{}, newUsageError("seed: missing required flag -d <dir>")
+	}
+	if err := cfg.scale.validate(); err != nil {
+		return seedConfig{}, err
+	}
+	return cfg, nil
+}
+
+// runSeed opens the data directory, applies the canonical fixture through
+// the transactional API, and writes the success reply to out. It is kept
+// at its original signature — no scale, no evidence — so the existing
+// round-trip and unit tests drive it with a captured *bytes.Buffer and see
+// byte-for-byte the same output. It delegates to runSeedWithConfig with the
+// default (off) scale and evidence knobs.
+func runSeed(ctx context.Context, dir string, out io.Writer) error {
+	return runSeedWithConfig(ctx, seedConfig{dir: dir, scale: defaultScaleConfig()}, out)
+}
+
+// runSeedWithConfig is the full seed entry point: it applies the canonical
+// fixture and, when cfg.scale is enabled, layers the seeded synthetic
+// population on top, all in a single transaction. With cfg.evidence set it
+// follows the JSON fact line with "# "-prefixed telemetry.
 //
 // Writes go through the direct txn.Tx API rather than Engine.RunInTx:
 // the current Cypher engine cannot express multi-edge CREATE patterns
@@ -45,8 +103,8 @@ func cmdSeed(args []string) error {
 // planner, so the simplest and most idiomatic path for bulk loads is
 // the same one used by examples/04_persistence. The query subcommand
 // remains the demonstration of Cypher writes for individual statements.
-func runSeed(ctx context.Context, dir string, out io.Writer) (retErr error) {
-	o, err := openStore(ctx, dir)
+func runSeedWithConfig(ctx context.Context, cfg seedConfig, out io.Writer) (retErr error) {
+	o, err := openStore(ctx, cfg.dir)
 	if err != nil {
 		return err
 	}
@@ -56,14 +114,44 @@ func runSeed(ctx context.Context, dir string, out io.Writer) (retErr error) {
 		}
 	}()
 
-	seeded, err := seedFixture(o.store)
+	var base runtime.MemStats
+	if cfg.evidence {
+		base = readMem()
+	}
+
+	seeded, scaled, err := seedFixtureScaled(ctx, o.store, cfg.scale)
 	if err != nil {
 		return fmt.Errorf("seed: %w", err)
 	}
-	return writeJSONObject(out, map[string]any{
+	if err := writeJSONObject(out, map[string]any{
 		"status": "ok",
 		"seeded": seeded,
-	})
+	}); err != nil {
+		return err
+	}
+	if cfg.evidence {
+		writeSeedTelemetry(out, base, scaled)
+	}
+	return nil
+}
+
+// writeSeedTelemetry emits the volatile seed evidence as "# " lines after
+// the deterministic JSON fact line: synthetic-population throughput
+// (nodes/s, edges/s), the realised synthetic counts, and the live Go heap
+// after the build. The counts are reported as telemetry too because they
+// depend on the opt-in scale knobs rather than the pinned fixture, so they
+// must never enter the golden output. base is the heap snapshot taken
+// before the build so the heap line can be read either absolute or as
+// growth.
+func writeSeedTelemetry(out io.Writer, base runtime.MemStats, scaled scaleStats) {
+	after := readMem()
+	writeTelemetry(out, "scale.users", fmt.Sprintf("%d", scaled.users))
+	writeTelemetry(out, "scale.follows", fmt.Sprintf("%d", scaled.follows))
+	writeTelemetry(out, "seed.elapsed", scaled.elapsed.Round(time.Microsecond).String())
+	writeTelemetry(out, "seed.node_rate", fmt.Sprintf("%.0f nodes/s", rate(scaled.users, scaled.elapsed)))
+	writeTelemetry(out, "seed.edge_rate", fmt.Sprintf("%.0f edges/s", rate(scaled.follows, scaled.elapsed)))
+	writeTelemetry(out, "mem.heap_alloc", humanBytes(after.HeapAlloc))
+	writeTelemetry(out, "mem.heap_growth", humanBytes(after.HeapAlloc-base.HeapAlloc))
 }
 
 // seedFixture inserts the canonical social-network fixture through one
@@ -72,22 +160,47 @@ func runSeed(ctx context.Context, dir string, out io.Writer) (retErr error) {
 // (idempotent re-invocation).
 //
 // The function is exported (package-internal) so the round-trip test
-// in T9 can construct a store directly and reuse the same fixture.
+// in T9 can construct a store directly and reuse the same fixture. It is
+// the canonical-fixture-only path; seedFixtureScaled is the superset that
+// also layers the opt-in synthetic population.
 func seedFixture(store *txn.Store[string, float64]) (bool, error) {
+	seeded, _, err := seedFixtureScaled(context.Background(), store, scaleConfig{})
+	return seeded, err
+}
+
+// seedFixtureScaled inserts the canonical fixture and, when scale.enabled(),
+// the seeded synthetic population on top of it — all in one transaction so
+// the whole seed is atomic and durable as a unit. It returns whether the
+// fixture was applied (false on an idempotent re-invocation, when at least
+// one fixture User already exists) and the realised synthetic-population
+// stats (zero value when scale is disabled or the seed was a no-op).
+//
+// The transaction commits exactly once, so the WAL records one durable seed
+// regardless of how large the synthetic population is; a crash mid-build
+// leaves the data directory recoverable to the pre-seed state.
+func seedFixtureScaled(ctx context.Context, store *txn.Store[string, float64], scale scaleConfig) (bool, scaleStats, error) {
 	g := store.Graph()
 	if hasAnyUser(g) {
-		return false, nil
+		return false, scaleStats{}, nil
 	}
 
 	tx := store.Begin()
 	if err := applyFixture(tx); err != nil {
 		_ = tx.Rollback()
-		return false, err
+		return false, scaleStats{}, err
+	}
+	var scaled scaleStats
+	if scale.enabled() {
+		var err error
+		if scaled, err = appendSyntheticPopulation(ctx, tx, scale); err != nil {
+			_ = tx.Rollback()
+			return false, scaleStats{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("commit: %w", err)
+		return false, scaleStats{}, fmt.Errorf("commit: %w", err)
 	}
-	return true, nil
+	return true, scaled, nil
 }
 
 // hasAnyUser reports whether the in-memory graph already carries at

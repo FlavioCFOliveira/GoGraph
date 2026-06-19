@@ -58,7 +58,7 @@
 //	    On success prints one JSON object:
 //	        {"data_dir":"<absolute path>","status":"ok"}
 //
-//	seed -d <dir>
+//	seed -d <dir> [-users N] [-friends K] [-seed S] [-evidence]
 //	    Populate the graph with a deterministic fixture: 5 users
 //	    (alice, bob, carol, dave, erin), 8 :FOLLOWS edges, 3 :Post
 //	    nodes with their :AUTHORED edges, 5 :Comment nodes attached
@@ -70,6 +70,26 @@
 //	    seed twice is a no-op when at least one :User node is
 //	    already present. The reply is:
 //	        {"seeded":<bool>,"status":"ok"}
+//
+//	    Scale knobs (all opt-in; the default reproduces the fixture
+//	    byte-for-byte so the regression goldens stay valid):
+//	        -users N    append N extra seeded :User nodes on top of the
+//	                    fixture (0, the default, = fixture only).
+//	        -friends K  :FOLLOWS out-degree per synthetic user (default 8).
+//	        -seed S     RNG seed that fixes the synthetic data shape
+//	                    (default 1). The same seed yields byte-identical
+//	                    deterministic facts on any machine.
+//	    The synthetic users carry the same username / display_name /
+//	    created_at shape as the fixture and share keys with neither the
+//	    fixture (alice..erin) nor the Cypher CREATE counter, so they are
+//	    counted by stats and walked by FOLLOWS traversals just like the
+//	    hand-written fixture. The whole seed — fixture plus synthetic
+//	    population — commits in one durable transaction.
+//
+//	    With -evidence the JSON reply is followed by "# "-prefixed
+//	    telemetry: synthetic-population throughput (nodes/s, edges/s),
+//	    elapsed wall-clock, and live Go heap. Telemetry varies per run
+//	    and per machine and is never part of the deterministic output.
 //
 //	query -d <dir> [cypher]
 //	    Run a Cypher query (read or write) against the data directory.
@@ -88,13 +108,19 @@
 //	    directory and the manifest path:
 //	        {"snapshot_dir":"<dir>","status":"ok"}
 //
-//	stats -d <dir>
+//	stats -d <dir> [-evidence]
 //	    Count nodes by label and edges by relationship type. The
 //	    output is a single JSON object with alphabetically ordered
 //	    integer keys:
 //	        {"authored":N,"comments":N,"follows":N,"likes":N,
 //	         "on":N,"posts":N,"replies":N,"users":N}
 //	    (`replies` counts :REPLY_OF edges.)
+//
+//	    With -evidence the JSON object is followed by "# "-prefixed
+//	    telemetry: the graph order and size read from the adjacency
+//	    list, the live Go heap, and the per-query wall-clock latency of
+//	    each of the eight count queries. The counts stay the
+//	    deterministic facts; only the telemetry varies per run.
 //
 // # Output Format (JSON Lines)
 //
@@ -156,6 +182,26 @@
 //	go run ./examples/24_social_network_cli query    -d /tmp/social \
 //	    'MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u.username AS from, v.username AS to'
 //	go run ./examples/24_social_network_cli snapshot -d /tmp/social
+//
+// An observable-scale session that seeds a synthetic population and
+// reports the evidence (build throughput, live heap, per-query latency):
+//
+//	go run ./examples/24_social_network_cli init  -d /tmp/social
+//	go run ./examples/24_social_network_cli seed  -d /tmp/social \
+//	    -users 100000 -friends 20 -seed 7 -evidence
+//	go run ./examples/24_social_network_cli stats -d /tmp/social -evidence
+//
+// # Evidence
+//
+// The CLI follows the persistence-and-Cypher evidence taxonomy from
+// docs/examples-standard.md. The seed subcommand reports synthetic-build
+// throughput (nodes/s, edges/s) and live heap; the stats subcommand
+// reports graph order and size, live heap, and per-query latency for each
+// count. Deterministic facts (the JSON replies, the counts) are printed as
+// bare lines and pinned by the regression tests; volatile telemetry is
+// printed only as "# "-prefixed lines so a test ignores it. The synthetic
+// population is produced by a seeded math/rand generator, so a given -seed
+// fixes the deterministic facts exactly across machines.
 //
 // # History
 //
