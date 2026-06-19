@@ -7260,6 +7260,19 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 		}
 		if bopts != nil && bopts.edgeVarMeta != nil {
 			if _, isEdge := bopts.edgeVarMeta[varName]; isEdge {
+				// Demand-gate (#1630): in the non-escaping scalarUse path an
+				// edge variable the expression never names needs no value at
+				// all — building one (and the EdgeProperties/EdgeLabels reads it
+				// entails) is pure waste. Leave it absent; evalExpr only reads
+				// variables the expression mentions. Mirrors the node skip below
+				// and is safe for exactly the same reason: scalarUse is set only
+				// for ctx-safe (non-escaping) expressions, never for a value
+				// that escapes into a result row.
+				if scalarUse != nil {
+					if _, referenced := scalarUse[varName]; !referenced {
+						continue
+					}
+				}
 				// Post-projection forward: if the schema slot for varName
 				// already carries a RelationshipValue (an upstream
 				// projection emitted it into the column), use that
@@ -7413,25 +7426,25 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 		srcKey, srcResolved := g.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 		dstKey, dstResolved := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 		if srcResolved && dstResolved {
-			// Forward direction first: covers the common case of a directed
-			// expansion or the forward pass of an undirected expansion.
-			ets := g.EdgeLabels(srcKey, dstKey)
-			rawEP := g.EdgeProperties(srcKey, dstKey)
-			if len(ets) == 0 && len(rawEP) == 0 {
-				// Reverse-edge pass of an undirected expansion: storage
-				// holds the edge as (dstKey -> srcKey); record the
-				// inverted storage direction so the PathValue renderer
-				// (which compares rel.StartID against the path's
-				// preceding node) emits `<-[…]-` for this hop. Without
-				// this Match6 [12]/[13] rendered every undirected
-				// reverse hop as a forward arrow because StartID still
-				// matched the traversal-src.
-				ets = g.EdgeLabels(dstKey, srcKey)
-				rawEP = g.EdgeProperties(dstKey, srcKey)
-				if len(ets) > 0 || len(rawEP) > 0 {
-					storageStart, storageEnd = dstID, srcID
-				}
+			// Determine the stored direction by TOPOLOGY, not by whether the
+			// edge carries labels/properties. The forward pass covers a
+			// directed expansion or the forward pass of an undirected one; the
+			// reverse pass covers the undirected reverse hop, where storage
+			// holds the edge as (dstKey -> srcKey). Recording the inverted
+			// storage direction lets the PathValue renderer (which compares
+			// rel.StartID against the path's preceding node) emit `<-[…]-` for
+			// the reverse hop — Match6 [12]/[13]. Using HasEdge instead of the
+			// prior "empty labels AND props" probe keeps the direction correct
+			// for an UNLABELLED, PROPERTY-LESS edge (which the old probe
+			// defaulted to forward) and, crucially, lets the property fetch be
+			// skipped (#1630) without losing the direction signal.
+			stKey, enKey := srcKey, dstKey
+			if !g.AdjList().HasEdge(srcKey, dstKey) && g.AdjList().HasEdge(dstKey, srcKey) {
+				storageStart, storageEnd = dstID, srcID
+				stKey, enKey = dstKey, srcKey
 			}
+			ets := g.EdgeLabels(stKey, enKey)
+			rawEP := g.EdgeProperties(stKey, enKey)
 			// Per-instance label override: when the CSR slot at
 			// edgeIDVal corresponds to a specific parallel CREATE
 			// (multigraph mode), narrow the edge's type to that
