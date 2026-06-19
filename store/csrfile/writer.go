@@ -121,18 +121,20 @@ func writeSections[W any](w io.Writer, h hash.Hash32, header Header, verts []uin
 	if err := writePadding(w, h, header.VerticesOffset-HeaderSize); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.LittleEndian, verts); err != nil {
+	// Stream the vertex and edge columns through zero-copy little-endian byte
+	// views (#1597). Both are 8-byte native-endian words on a little-endian
+	// host, so the views are byte-identical to binary.Write(LittleEndian, ...)
+	// — but with no transient buffer. In particular the edge column previously
+	// paid a full `make([]uint64, len(edges))` no-op widening copy even though
+	// graph.NodeID IS uint64.
+	if err := streamLE(w, uint64sAsBytes(verts)); err != nil {
 		return err
 	}
 	wrote := header.VerticesOffset + 8*uint64(len(verts))
 	if err := writePadding(w, h, header.EdgesOffset-wrote); err != nil {
 		return err
 	}
-	tmp := make([]uint64, len(edges))
-	for i, e := range edges {
-		tmp[i] = uint64(e)
-	}
-	if err := binary.Write(w, binary.LittleEndian, tmp); err != nil {
+	if err := streamLE(w, nodeIDsAsBytes(edges)); err != nil {
 		return err
 	}
 	wrote = header.EdgesOffset + 8*uint64(len(edges))
