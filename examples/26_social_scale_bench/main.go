@@ -381,23 +381,28 @@ func addNode(g *lpg.Graph[string, float64], id, label, propKey, propVal string) 
 // [:LIKE] match; when false the type is left implicit (to be inferred from
 // the endpoint labels) and no per-edge label is stored.
 //
-// The labelled case uses [lpg.Graph.AddEdgeLabeled] so the type lands in the
-// edge's inline slot AT insertion time — a single O(1)-amortised append — rather
-// than AddEdge followed by a SetEdgeLabel that copies the whole label column
-// (which makes a bulk labelled build O(degree²) per source).
+// The labelled case uses [lpg.Graph.AddEdgeLabeledWithProperty] so BOTH the type
+// AND the date property land in the edge's inline slot AT insertion time — a
+// single O(1)-amortised append — rather than AddEdge[Labeled] followed by a
+// SetEdgeProperty that copies the whole per-source property column (which makes a
+// bulk property-carrying build O(degree²) per source: the regression sprint 222
+// #1646 fixes). The untyped case has no relationship label, so it uses AddEdge +
+// SetEdgeProperty (no fused-with-label entry point applies); it is exercised only
+// at small scale.
 //
-// The date is stored with [lpg.Graph.SetEdgeProperty] (a pair-level property,
-// which is unambiguous here because every (src, dst) pair carries exactly one
-// edge) as an ISO-8601 string via [lpg.StringValue]; SetEdgeProperty must run
-// after the edge exists, so it follows the add. This is the property tier the
-// Cypher engine reads when materialising a matched relationship's properties,
-// so the date is visible as r.since / r.when in the query battery.
+// The date is an ISO-8601 string via [lpg.StringValue]. It is the property tier
+// the Cypher engine reads when materialising a matched relationship's properties,
+// so the date is visible as r.since / r.when in the query battery. Using a
+// pair-level property is unambiguous here because every (src, dst) pair carries
+// exactly one edge.
 func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType bool, propKey, propVal string) error {
 	if withType {
-		if err := g.AddEdgeLabeled(src, dst, 1, relType); err != nil {
-			return fmt.Errorf("AddEdgeLabeled %s-[%s]->%s: %w", src, relType, dst, err)
+		if err := g.AddEdgeLabeledWithProperty(src, dst, 1, relType, propKey, lpg.StringValue(propVal)); err != nil {
+			return fmt.Errorf("AddEdgeLabeledWithProperty %s-[%s]->%s: %w", src, relType, dst, err)
 		}
-	} else if err := g.AddEdge(src, dst, 1); err != nil {
+		return nil
+	}
+	if err := g.AddEdge(src, dst, 1); err != nil {
 		return fmt.Errorf("AddEdge %s-[%s]->%s: %w", src, relType, dst, err)
 	}
 	if err := g.SetEdgeProperty(src, dst, propKey, lpg.StringValue(propVal)); err != nil {

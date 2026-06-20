@@ -66,6 +66,24 @@ import (
 // signatures in this file short.
 type auxColumn = adjlist.AuxColumn
 
+// edgePropPayload is the opaque value the fused property-carrying append path
+// ([Graph.AddEdgeLabeledWithProperty]) threads through adjlist's append fast path
+// (as the [adjlist] edgeExtra aux payload) to the new slot. adjlist treats it as
+// an opaque interface word and never inspects it; only the two lpg-owned
+// consumers — [edgePropCols.GrowSlotWithValue] (existing entry) and
+// [newEdgePropColsAux] (fresh entry, via the registered aux factory) — read it,
+// folding the value into the per-slot columnar block.
+//
+// It is always handed across the boundary as a *edgePropPayload, so wrapping it
+// in adjlist's any-typed field stores the pointer directly in the interface word
+// and adds no boxing allocation beyond the single struct itself; lpg allocates
+// exactly one per fused edge. keyID/value are the interned key and the value to
+// record on the new slot.
+type edgePropPayload struct {
+	value PropertyValue
+	keyID PropertyKeyID
+}
+
 // edgePropColumn is one typed value column inside an [edgePropCols] block. It is
 // keyed by the interned property key and the property kind, holds one logical
 // value per adjacency slot in a de-boxed representation when possible, and
@@ -191,6 +209,117 @@ func (c *edgePropCols) GrowSlot(oldLen int) auxColumn {
 		out.cols[i] = c.cols[i].grown(oldLen)
 	}
 	return out
+}
+
+// GrowSlotWithValue is the value-carrying analogue of [edgePropCols.GrowSlot]: it
+// returns a new block of length oldLen+1 whose existing slots are unchanged and
+// whose new slot at index oldLen is PRESENT in the (key, kind) column named by
+// the opaque payload, and ABSENT in every other column. It implements
+// [adjlist.AuxColumn] and is the per-slot half of the fused build fast path:
+// adjlist calls it during the same O(1)-amortised append that grows the
+// adjacency entry, so a degree-d source stamping one property per edge stays
+// O(d) total rather than the O(d²) a per-edge SetEdgeProperty column rebuild
+// would cost.
+//
+// Two design rules from the amortised analysis (graph-theory-expert + the
+// columnar-db survey) make the O(d) guarantee real and are load-bearing:
+//
+//  1. The target column's value lands at the TAIL: oldLen is strictly greater
+//     than every slot already present (length == neighbour count at every
+//     observable point, and every prior slot index is < oldLen), so the append
+//     is a coordinate-list tail push — append the value and append oldLen to the
+//     strictly-ascending idx — in O(1) amortised, never the O(P) ordered insert
+//     [edgePropColumn.setSlot] would do. This path forces/keeps the target column
+//     SPARSE for exactly that reason; the dense slot-indexed backing has cap ==
+//     length (no spare), so a dense append would reallocate-and-copy O(oldLen)
+//     each time and reintroduce O(d²).
+//  2. It does NOT call [edgePropColumn.reshaped]. Re-evaluating the sparse↔dense
+//     representation per append would run an O(P) toDense rebuild repeatedly as a
+//     fill→1.0 build crosses the promote threshold, again O(d²). Representation
+//     re-evaluation is deferred to [edgePropCols.Compact] (the freeze/trim pass)
+//     and to the next ordinary set/del/grow, exactly as an Arrow array builder
+//     picks its physical encoding at Finish, not per Append.
+//
+// payload must be a *edgePropPayload (lpg is the only caller); a payload of any
+// other dynamic type is ignored and the new slot is left absent (defensive — it
+// cannot happen through the public API).
+func (c *edgePropCols) GrowSlotWithValue(oldLen int, payload any) auxColumn {
+	p, ok := payload.(*edgePropPayload)
+	if !ok || p == nil {
+		// Defensive: an unexpected payload degrades to an absent grow rather than
+		// corrupting the block. Unreachable through the public API.
+		return c.GrowSlot(oldLen)
+	}
+	newLen := oldLen + 1
+	if c == nil {
+		// No prior block (the entry's first aux value arrives via the grow path
+		// rather than the factory, e.g. earlier edges added without a property):
+		// build a fresh single-present-slot block spanning newLen.
+		return newEdgePropColsWithValue(newLen, oldLen, p)
+	}
+	kind, days, _ := classify(p.value)
+	out := &edgePropCols{length: newLen}
+	if len(c.cols) == 0 {
+		// Block existed but carried no columns yet: just the new column.
+		out.cols = []edgePropColumn{newSparseSingleSlot(p.keyID, kind, newLen, oldLen, p.value, days)}
+		return out
+	}
+	out.cols = make([]edgePropColumn, len(c.cols))
+	target := -1
+	for i := range c.cols {
+		if c.cols[i].key == p.keyID && c.cols[i].kind == kind {
+			target = i
+			out.cols[i] = c.cols[i].grownWithValue(oldLen, p.value, days)
+			continue
+		}
+		// Every NON-target column grows the new slot ABSENT. This MUST stay O(1)
+		// amortised: a source node that carries two keys (e.g. a USER with both
+		// FRIEND.since and LIKE.when out-edges) appends to each key's column while
+		// the OTHER key's column is the non-target on every such append, so a
+		// dense full-column copy here (grown) would reintroduce O(degree²). The
+		// absent shared-extend bumps the length while sharing the immutable
+		// backing — O(1) for a sparse column (the new slot is simply not in idx)
+		// and a copy-on-write-safe bitmap extend for a dense one.
+		out.cols[i] = c.cols[i].grownAbsentShared(oldLen)
+	}
+	if target < 0 {
+		// The (key, kind) column does not exist yet on this node: append a fresh
+		// sparse column whose single present slot is the new one.
+		out.cols = append(out.cols, newSparseSingleSlot(p.keyID, kind, newLen, oldLen, p.value, days))
+	}
+	return out
+}
+
+// newEdgePropColsAux is the [adjlist.AdjList] aux factory (registered in
+// [New]) for the fused property-carrying append. adjlist invokes it for the
+// FIRST edge of a node — where there is no aux block to grow — handing the block
+// length the single present slot must span (1 for a brand-new entry; oldLen+1
+// when earlier edges were added without a property) and the opaque payload. It
+// returns a block whose only present slot is the last one (index length-1).
+//
+// The signature matches adjlist's registered factory type exactly; payload must
+// be a *edgePropPayload.
+func newEdgePropColsAux(length int, payload any) auxColumn {
+	p, ok := payload.(*edgePropPayload)
+	if !ok || p == nil {
+		return nil // defensive: unreachable through the public API
+	}
+	if length < 1 {
+		length = 1
+	}
+	return newEdgePropColsWithValue(length, length-1, p)
+}
+
+// newEdgePropColsWithValue builds a fresh block of the given length carrying the
+// payload's value on the single present slot `slot` (all other slots absent),
+// with the column in the SPARSE representation so a subsequent fused append is an
+// O(1) coordinate-list tail push (see [edgePropCols.GrowSlotWithValue] rule 1).
+func newEdgePropColsWithValue(length, slot int, p *edgePropPayload) *edgePropCols {
+	kind, days, _ := classify(p.value)
+	return &edgePropCols{
+		length: length,
+		cols:   []edgePropColumn{newSparseSingleSlot(p.keyID, kind, length, slot, p.value, days)},
+	}
 }
 
 // CompactSlot returns a new block of length n-1 with the slot at idx excised
@@ -943,6 +1072,146 @@ func (col *edgePropColumn) materialiseValidity(oldLen, newLen int) []uint64 {
 		v[i>>6] |= 1 << (uint(i) & 63)
 	}
 	return v
+}
+
+// --- fused build fast path (sparse coordinate-list tail append) ------------
+
+// newSparseSingleSlot builds a column of the given length whose ONLY present
+// slot is `slot`, carrying value v (days is its pre-classified epoch-day for the
+// date kind). It is always the SPARSE representation: a single (slot) entry in
+// idx and one value in the compacted backing, no validity bitmap. This is the
+// shape the fused build path starts every property column in, so the next fused
+// append is an O(1) coordinate-list tail push rather than a dense
+// reallocate-and-copy (see [edgePropCols.GrowSlotWithValue]).
+//
+// bit-packed bool has no compact COO value array, so a bool single-slot column
+// is built dense (length-indexed bits + a validity bitmap unless length 1); this
+// is unreachable from the date-property build path and exists only for
+// robustness if a future caller fuses a bool.
+func newSparseSingleSlot(key PropertyKeyID, kind PropertyKind, length, slot int, v PropertyValue, days int32) edgePropColumn {
+	if kind == PropBool {
+		col := newColumn(key, kind, length)
+		col.setSlot(slot, v, days)
+		return col
+	}
+	col := edgePropColumn{key: key, kind: kind, length: length, sparse: true}
+	col.idx = make([]int32, 0, 1)
+	allocSparseBacking(&col, kind, 1)
+	col.tailAppendSparse(int32(slot), v, days)
+	return col
+}
+
+// grownWithValue returns a copy of the column grown by one slot at oldLen whose
+// new slot at oldLen is PRESENT, carrying value v. It is the column-level half of
+// the fused build fast path and is the value-carrying analogue of
+// [edgePropColumn.grown].
+//
+// The new slot index oldLen is strictly greater than every present slot (the
+// column spans the entry, whose neighbour count was oldLen before the append), so
+// the append is a tail push that preserves the strictly-ascending idx invariant:
+//
+//   - SPARSE: append oldLen to idx and the value to the compacted backing, both
+//     O(1) amortised. The append SHARES the receiver's backing arrays rather than
+//     copying them, exactly as the adjacency neighbour fast path does: a
+//     lock-free reader holding the prior column reads only [0:len(idx)], which is
+//     never mutated; the append either writes at index len(idx) — a slot no
+//     current reader observes and that becomes visible only via the freshly
+//     published longer header — or, when the backing is full, reallocates and
+//     copies geometrically (so total copy work is O(d), not O(d) per append).
+//     Sharing is what keeps a fused build O(d) per source; cloning the whole
+//     backing on each append would reintroduce O(d²).
+//   - DENSE: convert the column to sparse ONCE (toSparse is O(P)), then tail
+//     push. A pure fused build never hits this branch because the column starts
+//     and stays sparse; it only fires when a fused append follows an earlier
+//     dense general-path mutation on the same column, so the O(P) conversion is a
+//     one-off, leaving subsequent appends O(1) — amortised O(1).
+//
+// reshaped() is deliberately NOT called: representation re-evaluation is deferred
+// to Compact (see [edgePropCols.GrowSlotWithValue] rule 2).
+//
+// Concurrency: adjlist holds the source's shard write lock across the whole
+// append, so two fused appends never race on the shared backing; the published
+// header is installed via a single atomic store. This is the same copy-on-write
+// contract the neighbour/handle/label columns rely on.
+func (col *edgePropColumn) grownWithValue(oldLen int, v PropertyValue, days int32) edgePropColumn {
+	if !col.sparse {
+		s := col.toSparse() // fresh, exactly-sized backing; safe to extend in place
+		s.length = oldLen + 1
+		s.tailAppendSparse(int32(oldLen), v, days)
+		return s
+	}
+	// Share the receiver's immutable backings and extend at the tail. out aliases
+	// col's idx/value slices; appending to out's (aliased) headers writes only at
+	// the tail — a slot no reader bounded by the old length observes — or
+	// reallocates geometrically, so the prior immutable column's [0:len) prefix is
+	// never disturbed. This is the same copy-on-write-safe extend the adjacency
+	// neighbour array uses.
+	out := *col
+	out.length = oldLen + 1
+	out.tailAppendSparse(int32(oldLen), v, days)
+	return out
+}
+
+// grownAbsentShared returns a copy of the column grown by one slot at oldLen
+// whose new slot is ABSENT, in O(1) amortised — the absent-grow counterpart of
+// [edgePropColumn.grownWithValue], used for the NON-target columns on a fused
+// append so a node carrying several property keys stays O(degree) per source.
+//
+//   - SPARSE: the new slot oldLen is simply not a member of idx, so presence is
+//     already correct; only length changes. The idx and value backings are SHARED
+//     with the receiver (immutable, untouched) — no copy. The result reads
+//     identically; reshape is deferred to Compact. O(1).
+//   - DENSE: convert to sparse ONCE (O(P)) then bump the length. A pure fused
+//     build keeps every column sparse, so this fires at most once per column if a
+//     prior dense general-path mutation left it dense, leaving subsequent
+//     absent-grows O(1) — amortised O(1). (The dense in-place absent-grow would
+//     need an O(length/64) bitmap copy each call, which is quadratic over a build;
+//     the one-off sparse conversion avoids that.)
+//
+// The shared SPARSE extend is copy-on-write-safe under the same rule as
+// [edgePropColumn.grownWithValue]: the receiver's [0:len) prefix is never mutated
+// and adjlist holds the shard lock across the publish.
+func (col *edgePropColumn) grownAbsentShared(oldLen int) edgePropColumn {
+	if !col.sparse {
+		s := col.toSparse()
+		s.length = oldLen + 1
+		return s
+	}
+	out := *col // share idx + value backing; only length changes
+	out.length = oldLen + 1
+	return out
+}
+
+// tailAppendSparse pushes one (slotIdx, value) entry onto the tail of the
+// receiver's sparse (COO) idx and value backings, in O(1) amortised. slotIdx must
+// be strictly greater than every index already in idx (the caller guarantees this
+// — it is the new last slot of a growing column), so the append keeps idx
+// strictly ascending without a shift. days carries the pre-classified epoch-day
+// for the date column and is ignored for other kinds; bit-packed bool never
+// reaches the sparse path.
+//
+// The receiver's idx/value slices may ALIAS a prior immutable column's backings
+// (the copy-on-write-safe shared-extend in [edgePropColumn.grownWithValue]).
+// append assigns back to the same headers and writes only at the tail or
+// reallocates, so a concurrent reader bounded by the prior column's length never
+// observes the new cell — the prior [0:len) prefix is untouched.
+func (col *edgePropColumn) tailAppendSparse(slotIdx int32, v PropertyValue, days int32) {
+	col.idx = append(col.idx, slotIdx)
+	switch col.kind {
+	case PropInt64:
+		i, _ := v.Int64()
+		col.i64 = append(col.i64, i)
+	case PropFloat64:
+		f, _ := v.Float64()
+		col.f64 = append(col.f64, f)
+	case dateKind:
+		col.days = append(col.days, days)
+	case PropString:
+		s, _ := v.String()
+		col.str = append(col.str, s)
+	default:
+		col.boxed = append(col.boxed, v)
+	}
 }
 
 // compacted returns a copy of the column with the slot at idx excised, keeping

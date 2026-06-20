@@ -30,6 +30,20 @@ func (f *fakeAux) GrowSlot(oldLen int) AuxColumn {
 	return out
 }
 
+// GrowSlotWithValue is the value-carrying analogue: the new slot at oldLen is
+// PRESENT and carries the payload (an int in this test double).
+func (f *fakeAux) GrowSlotWithValue(oldLen int, payload any) AuxColumn {
+	out := &fakeAux{
+		vals:    make([]int, oldLen+1),
+		present: make([]bool, oldLen+1),
+	}
+	copy(out.vals, f.vals)
+	copy(out.present, f.present)
+	out.vals[oldLen] = payload.(int)
+	out.present[oldLen] = true
+	return out
+}
+
 func (f *fakeAux) CompactSlot(idx int) AuxColumn {
 	n := len(f.vals)
 	out := &fakeAux{
@@ -122,6 +136,135 @@ func TestAux_GrowAcrossAppends(t *testing.T) {
 		if aux.present[i] {
 			t.Fatalf("appended slot %d is present (should be absent)", i)
 		}
+	}
+}
+
+// TestAux_FusedAppendViaFactoryAndGrow drives the fused property-carrying append
+// (AddEdgeLabeledWithProp): the FIRST edge of a node must build its aux column via
+// the registered factory (value present at slot 0), and every subsequent fused
+// append must add a PRESENT slot at oldLen via GrowSlotWithValue, all length-
+// aligned with neighbours.
+func TestAux_FusedAppendViaFactoryAndGrow(t *testing.T) {
+	t.Parallel()
+	a := New[string, int](Config{Directed: true, Multigraph: true})
+	// The factory builds a single-present-slot fakeAux of the requested length
+	// (the new slot is the last one, length-1) carrying the payload int.
+	a.SetAuxFactory(func(length int, payload any) AuxColumn {
+		f := &fakeAux{vals: make([]int, length), present: make([]bool, length)}
+		f.vals[length-1] = payload.(int)
+		f.present[length-1] = true
+		return f
+	})
+
+	dsts := []string{"d0", "d1", "d2", "d3"}
+	for i, d := range dsts {
+		if err := a.AddEdgeLabeledWithProp("s", d, i, uint32(7), 100+i); err != nil {
+			t.Fatalf("AddEdgeLabeledWithProp %s: %v", d, err)
+		}
+	}
+	srcID, _ := a.Mapper().Lookup("s")
+	nbs, _ := a.LoadEntry(srcID)
+	aux := auxOf(a, srcID)
+	if aux == nil {
+		t.Fatalf("aux column never built by the fused path")
+	}
+	if len(aux.vals) != len(nbs) {
+		t.Fatalf("aux length %d != neighbours %d", len(aux.vals), len(nbs))
+	}
+	// Every slot is present and carries 100+slot (the value fused at append time).
+	for i := range nbs {
+		if !aux.present[i] || aux.vals[i] != 100+i {
+			t.Fatalf("slot %d: present=%v val=%d want %d", i, aux.present[i], aux.vals[i], 100+i)
+		}
+	}
+	// The labels column was fused too (every slot carries label 7).
+	labs := labelsOf(t, a, "s")
+	if len(labs) != len(nbs) {
+		t.Fatalf("fused labels column length %d != neighbours %d", len(labs), len(nbs))
+	}
+	for i, l := range labs {
+		if l != 7 {
+			t.Fatalf("fused label not stamped on slot %d: got %d want 7", i, l)
+		}
+	}
+}
+
+// TestAux_FusedAppendAfterAbsentGrow asserts a fused payload arriving on an entry
+// whose earlier edges were added WITHOUT a payload (so the aux column is still
+// nil) builds the column at the right length via the factory, with only the new
+// slot present.
+func TestAux_FusedAppendAfterAbsentGrow(t *testing.T) {
+	t.Parallel()
+	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a.SetAuxFactory(func(length int, payload any) AuxColumn {
+		f := &fakeAux{vals: make([]int, length), present: make([]bool, length)}
+		f.vals[length-1] = payload.(int)
+		f.present[length-1] = true
+		return f
+	})
+	// First two edges carry no payload: aux stays nil.
+	if err := a.AddEdge("s", "d0", 0); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := a.AddEdge("s", "d1", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	srcID, _ := a.Mapper().Lookup("s")
+	if a.LoadEntryAux(srcID) != nil {
+		t.Fatalf("aux non-nil before any payload")
+	}
+	// Third edge fuses a payload: the column is born at length 3 with only slot 2
+	// present.
+	if err := a.AddEdgeLabeledWithProp("s", "d2", 2, uint32(1), 999); err != nil {
+		t.Fatalf("AddEdgeLabeledWithProp: %v", err)
+	}
+	aux := auxOf(a, srcID)
+	nbs, _ := a.LoadEntry(srcID)
+	if aux == nil || len(aux.vals) != len(nbs) {
+		t.Fatalf("aux not length-aligned: %v vs %d neighbours", aux, len(nbs))
+	}
+	if aux.present[0] || aux.present[1] {
+		t.Fatalf("earlier payload-free slots are present: %v", aux.present)
+	}
+	if !aux.present[2] || aux.vals[2] != 999 {
+		t.Fatalf("fused slot 2: present=%v val=%d want 999", aux.present[2], aux.vals[2])
+	}
+}
+
+// TestAux_FusedPayloadIsDirectional asserts the fused payload is stamped only on
+// the FORWARD (src) entry, not the undirected MIRROR (dst,src) entry: edge
+// properties are stored directionally (matching UpdateEntryAux / the higher
+// layer's per-source SetEdgeProperty), while the label IS symmetric. This keeps a
+// fused undirected write observationally identical to the two-step build.
+func TestAux_FusedPayloadIsDirectional(t *testing.T) {
+	t.Parallel()
+	a := New[string, int](Config{Directed: false, Multigraph: true})
+	a.SetAuxFactory(func(length int, payload any) AuxColumn {
+		f := &fakeAux{vals: make([]int, length), present: make([]bool, length)}
+		f.vals[length-1] = payload.(int)
+		f.present[length-1] = true
+		return f
+	})
+	if err := a.AddEdgeLabeledWithProp("a", "b", 0, uint32(3), 42); err != nil {
+		t.Fatalf("AddEdgeLabeledWithProp: %v", err)
+	}
+	// Forward a->b carries the payload.
+	aID, _ := a.Mapper().Lookup("a")
+	fwd := auxOf(a, aID)
+	if fwd == nil || len(fwd.vals) != 1 || !fwd.present[0] || fwd.vals[0] != 42 {
+		t.Fatalf("forward entry missing fused payload: %v", fwd)
+	}
+	// Mirror b->a carries NO aux column (the payload is directional).
+	bID, _ := a.Mapper().Lookup("b")
+	if mir := a.LoadEntryAux(bID); mir != nil {
+		t.Fatalf("mirror entry carries an aux column (payload must be directional): %v", mir)
+	}
+	// The label IS symmetric: both directions carry label 3.
+	if labs := labelsOf(t, a, "a"); len(labs) != 1 || labs[0] != 3 {
+		t.Fatalf("forward label = %v, want [3]", labs)
+	}
+	if labs := labelsOf(t, a, "b"); len(labs) != 1 || labs[0] != 3 {
+		t.Fatalf("mirror label = %v, want [3] (label is symmetric)", labs)
 	}
 }
 

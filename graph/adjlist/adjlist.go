@@ -120,6 +120,35 @@ type AdjList[N comparable, W any] struct {
 	shards [shardCount]adjShard[W]
 
 	size atomic.Uint64
+
+	// auxFactory constructs the higher layer's opaque [AuxColumn] for the FIRST
+	// edge of a node when a fused property-carrying append (the auxPayload path
+	// of [AdjList.AddEdgeLabeledWithProp]) lands on an entry that has no aux
+	// column yet. adjlist cannot build the column itself — it is opaque — so the
+	// higher layer (lpg) registers this factory once via [AdjList.SetAuxFactory].
+	// The factory is handed the entry's neighbour count BEFORE the append (the
+	// length the returned single-slot block must span, i.e. 1 for a fresh entry)
+	// and the opaque payload, and returns a column whose only present slot is the
+	// new one. It is read only on the fused-append fresh-entry path; nil when no
+	// higher layer registered one, in which case a fused payload on a fresh entry
+	// is dropped (the higher layer guarantees registration before using the fused
+	// path). It is set once at construction and never mutated thereafter, so it
+	// needs no synchronisation.
+	auxFactory func(length int, payload any) AuxColumn
+}
+
+// SetAuxFactory registers the constructor the fused property-carrying append
+// path uses to build the higher layer's opaque [AuxColumn] for the FIRST edge of
+// a node (see the auxFactory field). It must be called once, before any fused
+// [AdjList.AddEdgeLabeledWithProp] that may create a node's first edge, and is
+// the seam that lets adjlist stay oblivious to the column's concrete type: the
+// factory is owned by the higher layer (lpg) and produces a single-slot block
+// carrying the supplied payload at slot 0.
+//
+// SetAuxFactory is not safe to call concurrently with itself or with fused
+// appends; it is part of one-time wiring at graph construction.
+func (a *AdjList[N, W]) SetAuxFactory(fn func(length int, payload any) AuxColumn) {
+	a.auxFactory = fn
 }
 
 // adjShard is one independently locked stripe of the adjacency list.
@@ -217,6 +246,30 @@ type AuxColumn interface {
 	// bit for that slot, never reusing a stale value from recycled backing
 	// storage). oldLen is the neighbour count of the entry BEFORE the append.
 	GrowSlot(oldLen int) AuxColumn
+
+	// GrowSlotWithValue is the value-carrying analogue of [AuxColumn.GrowSlot]:
+	// it returns a new column of length oldLen+1 whose existing slots [0,oldLen)
+	// are unchanged and whose new slot at index oldLen is PRESENT, carrying the
+	// opaque payload. adjlist never interprets payload; it forwards verbatim the
+	// value the higher layer supplied to the fused append entry point so the
+	// per-slot value is written during the same O(1)-amortised append that grows
+	// the entry, with no separate copy-on-write of the whole column afterwards
+	// (the mechanism that makes a bulk property-carrying build O(degree) per
+	// source rather than O(degree²)).
+	//
+	// The new slot at oldLen MUST be marked present (its validity bit set, or
+	// for a sparse representation its index appended) so a subsequent read finds
+	// the value — this is the only structural difference from [AuxColumn.GrowSlot],
+	// which leaves the slot absent. Because oldLen is strictly greater than every
+	// existing slot index, an implementation may append the value at the tail of
+	// its backing (and, for a coordinate-list representation, append oldLen at the
+	// end of its strictly-ascending index array) in O(1) amortised — never an
+	// ordered insert.
+	//
+	// Like [AuxColumn.GrowSlot] the returned column is a fresh immutable
+	// copy-on-write value published the same lock-free way; the receiver is never
+	// mutated. oldLen is the neighbour count of the entry BEFORE the append.
+	GrowSlotWithValue(oldLen int, payload any) AuxColumn
 
 	// CompactSlot returns a new column of length n-1 with the slot at idx
 	// excised: result slots [0,idx) equal the receiver's [0,idx) and result
@@ -381,17 +434,71 @@ func (a *AdjList[N, W]) AddEdgeLabeledH(src, dst N, w W, handle uint64, label ui
 	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true, label: label, hasLabel: true})
 }
 
-// edgeExtra carries the two OPTIONAL parallel-column values an edge insertion
-// may stamp onto its new slot AT append time: a stable handle and an opaque
-// label. Each is gated by its own "has" flag so an absent column stays nil for
-// a label-free / handle-free graph. Bundling them keeps the append fast path's
-// signature stable as new optional columns are added, and the struct is a small
-// value type passed by copy (no heap escape).
+// AddEdgeLabeledWithProp fuses [AdjList.AddEdgeLabeled] with one opaque
+// edge-property value written into the new slot's [AuxColumn] AT append time.
+// Like the label, the property value lands on the new slot at position oldLen
+// within the SAME O(1)-amortised append that writes the neighbour and weight —
+// no separate copy-on-write of the whole aux column afterwards. This is the
+// bulk-build fast path for a property-carrying graph: a degree-d source that
+// stamps one property per edge is assembled in O(d) amortised total, not the
+// O(d²) a per-edge [AdjList.UpdateEntryAux] copy-on-write would cost.
+//
+// payload is opaque to adjlist: it is forwarded verbatim to
+// [AuxColumn.GrowSlotWithValue] when the source already has an aux column, or to
+// the factory registered via [AdjList.SetAuxFactory] when this is the source's
+// FIRST edge (no column exists yet to grow). A nil aux factory on the fresh-entry
+// path silently drops the payload, so the higher layer must register one before
+// using this method; lpg always does.
+//
+// For an undirected graph the mirrored (dst, src) slot receives the SAME label
+// (relationship type is symmetric) but NOT the property payload: the aux column
+// is directional, matching [AdjList.UpdateEntryAux] / the higher layer's
+// SetEdgeProperty, which writes only the source's entry. The higher layer reads a
+// pair's properties from the source's entry, so stamping the payload only on the
+// forward slot reproduces exactly the two-step AddEdgeLabeled + per-source
+// property write it replaces. AddEdgeLabeledWithProp honours the same
+// [ErrShardFull] and all-or-nothing contract as [AdjList.AddEdge]. In
+// simple-graph mode a duplicate (src, dst) is still a no-op and neither the
+// label nor the payload is stamped on the existing slot; use
+// [AdjList.SetEdgeLabelSlot] / [AdjList.UpdateEntryAux] to mutate a pre-existing
+// edge.
+func (a *AdjList[N, W]) AddEdgeLabeledWithProp(src, dst N, w W, label uint32, payload any) error {
+	return a.addEdge(src, dst, w, edgeExtra{
+		label: label, hasLabel: true,
+		auxPayload: payload, hasAuxPayload: true,
+	})
+}
+
+// edgeExtra carries the OPTIONAL parallel-column values an edge insertion may
+// stamp onto its new slot AT append time: a stable handle, an opaque label, and
+// an opaque aux-column payload (one de-boxed edge-property value, supplied by
+// the higher layer). Each is gated by its own "has" flag so an absent column
+// stays nil for a label-free / handle-free / property-free graph. Bundling them
+// keeps the append fast path's signature stable as new optional columns are
+// added, and the struct is a small value type passed by copy. auxPayload is the
+// single interface word the fused property path carries; it is opaque to adjlist
+// and forwarded verbatim to [AuxColumn.GrowSlotWithValue] (or to the registered
+// aux factory on a fresh entry).
 type edgeExtra struct {
-	handle    uint64
-	label     uint32
-	hasHandle bool
-	hasLabel  bool
+	auxPayload    any
+	handle        uint64
+	label         uint32
+	hasHandle     bool
+	hasLabel      bool
+	hasAuxPayload bool
+}
+
+// mirror returns the edgeExtra to stamp on an undirected edge's MIRROR (dst,src)
+// slot. The handle and label are symmetric (both directions of one logical edge
+// share an identity and a relationship type), but the aux-column payload is NOT:
+// edge properties are stored directionally on the source's entry, matching
+// [AdjList.UpdateEntryAux] and the higher layer's per-source SetEdgeProperty, so
+// the mirror carries no payload. This keeps the fused undirected write
+// observationally identical to the two-step AddEdgeLabeled + property write.
+func (ex edgeExtra) mirror() edgeExtra {
+	ex.auxPayload = nil
+	ex.hasAuxPayload = false
+	return ex
 }
 
 // addEdge is the shared implementation of [AdjList.AddEdge], [AdjList.AddEdgeH],
@@ -436,7 +543,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 			return nil
 		}
 		a.size.Add(1)
-		if _, err := a.upsertEdge(dstID, srcID, w, ex); err != nil {
+		if _, err := a.upsertEdge(dstID, srcID, w, ex.mirror()); err != nil {
 			// Both endpoints share a shard, so the forward append and this
 			// mirror append are already serialised; just undo the forward.
 			a.removeOneEdge(srcID, dstID)
@@ -466,7 +573,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 		return nil
 	}
 	// Forward slot appended. Now append the mirror under the same lock pair.
-	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex); err != nil {
+	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex.mirror()); err != nil {
 		// Undo the forward append before releasing — we still hold both locks
 		// so the rollback is atomic with respect to any reader.
 		a.removeOneEdgeLocked(srcID, dstID)
@@ -545,6 +652,14 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 			entry.labels = make([]uint32, 1, c)
 			entry.labels[0] = ex.label
 		}
+		// Fused property: a fresh entry has no aux column to grow, and adjlist
+		// cannot construct the opaque column itself, so the higher layer's
+		// registered factory builds the single-slot block (length 1) carrying
+		// the payload at slot 0. A nil factory drops the payload (see
+		// SetAuxFactory).
+		if ex.hasAuxPayload && a.auxFactory != nil {
+			entry.aux = a.auxFactory(1, ex.auxPayload)
+		}
 		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry); err != nil {
 			return false, err
 		}
@@ -603,12 +718,13 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 			}
 			ls[oldLen] = ex.label
 		}
-		// Carry the opaque aux column forward when it exists. GrowSlot returns a
-		// fresh column of length newLen whose new slot at oldLen is absent; the
-		// higher layer is responsible for clearing any presence bit there. A
-		// fresh entry never has an aux column, so a label-/property-free graph
-		// pays nothing.
-		ax := growAux(current.aux, oldLen)
+		// Carry the opaque aux column forward when it exists. When this append
+		// fuses a property payload the new slot at oldLen is written PRESENT via
+		// GrowSlotWithValue (or the factory builds the column when none exists
+		// yet); otherwise GrowSlot leaves the new slot absent. Either returns a
+		// fresh column of length newLen. A fresh entry that fuses no payload never
+		// gains an aux column, so a label-/property-free graph pays nothing.
+		ax := a.growAuxEx(current.aux, oldLen, ex)
 		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: ax}); err != nil {
 			return false, err
 		}
@@ -645,20 +761,41 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 		copy(newL, current.labels) // no-op when current.labels is nil
 		newL[oldLen] = ex.label
 	}
-	// Carry the opaque aux column forward when it exists; the new slot at
-	// oldLen is absent (GrowSlot clears its presence bit).
-	newAux := growAux(current.aux, oldLen)
+	// Carry the opaque aux column forward when it exists; a fused payload writes
+	// the new slot at oldLen PRESENT, otherwise the new slot is absent.
+	newAux := a.growAuxEx(current.aux, oldLen, ex)
 	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// growAux returns the aux column for an entry that has just grown by one slot
-// at position oldLen, or nil when the entry carries no aux column. It is the
-// single place the append fast and slow paths consult so the "nil stays nil,
-// otherwise GrowSlot" rule lives in one spot.
-func growAux(cur AuxColumn, oldLen int) AuxColumn {
+// growAuxEx returns the aux column for an entry that has just grown by one slot
+// at position oldLen. It is the single place the append fast and slow paths
+// consult, so the four-way "carry the column forward" rule lives in one spot:
+//
+//   - a fused payload + an existing column  -> GrowSlotWithValue (new slot
+//     present, written at oldLen in O(1) amortised);
+//   - a fused payload + no column yet        -> the registered factory builds a
+//     fresh single-slot block of length oldLen+1 carrying the payload at oldLen
+//     (nil factory drops the payload);
+//   - no payload + an existing column        -> GrowSlot (new slot absent);
+//   - no payload + no column                 -> nil (a property-free graph pays
+//     nothing).
+//
+// The factory is handed oldLen+1 as the block length so the new slot at oldLen
+// is the last (and only present) slot; lpg's factory marks every prior slot
+// absent, exactly as GrowSlot would.
+func (a *AdjList[N, W]) growAuxEx(cur AuxColumn, oldLen int, ex edgeExtra) AuxColumn {
+	if ex.hasAuxPayload {
+		if cur != nil {
+			return cur.GrowSlotWithValue(oldLen, ex.auxPayload)
+		}
+		if a.auxFactory != nil {
+			return a.auxFactory(oldLen+1, ex.auxPayload)
+		}
+		return nil
+	}
 	if cur == nil {
 		return nil
 	}

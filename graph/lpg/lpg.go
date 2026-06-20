@@ -689,6 +689,12 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	for i := range g.edgeCreateCountShards {
 		g.edgeCreateCountShards[i].m = make(map[edgeKey]int64)
 	}
+	// Register the aux-column factory the fused property-carrying append path
+	// (AddEdgeLabeledWithProperty) uses to build a node's FIRST edge-property
+	// block: adjlist cannot construct the opaque columnar block itself, so it
+	// calls back through this factory. See edge_property_column.go
+	// (newEdgePropColsWithValue) and edge_property.go (AddEdgeLabeledWithProperty).
+	g.adj.SetAuxFactory(newEdgePropColsAux)
 	g.barrier.init()
 	return g
 }
@@ -843,6 +849,60 @@ func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src,
 func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
 	lid := g.reg.Intern(relType)
 	if err := g.adj.AddEdgeLabeled(src, dst, w, encodeSlotLabel(lid)); err != nil {
+		return err
+	}
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return nil
+	}
+	g.edgeIdx.Add(uint32(lid), srcID)
+	return nil
+}
+
+// AddEdgeLabeledWithProperty inserts a directed edge (mirrored when the graph is
+// undirected) from src to dst with weight w, tags it with the relationship-type
+// name, AND records one property (key, value) on it — all in a SINGLE adjacency
+// operation. Both the type and the property value are written into the new edge's
+// inline slot AT insertion time, instead of the three-step [Graph.AddEdgeLabeled]
+// + [Graph.SetEdgeProperty] whose final step copies the whole per-source property
+// column. For a bulk property-carrying build this restores O(degree) amortised
+// cost per source (the fused append is O(1) amortised), versus the O(degree²) the
+// per-edge column copy-on-write of [Graph.SetEdgeProperty] costs.
+//
+// AddEdgeLabeledWithProperty is the property-carrying labelled-build fast path.
+// Its observable result is identical to AddEdgeLabeled followed by
+// SetEdgeProperty for the simple single-edge-per-pair case the bulk builders use:
+// the type lands in the first dst-matching inline slot and the value lands on the
+// new slot's columnar block, so [Graph.EdgeProperties], [Graph.GetEdgeProperty],
+// the per-pair coalesce, and the TCK read path all see exactly the same derived
+// state. To set a SECOND property on the edge, or to mutate a PRE-EXISTING edge,
+// use [Graph.SetEdgeProperty]; that path keeps its general copy-on-write
+// semantics.
+//
+// If the installed [SchemaValidator] rejects the value the edge is NOT inserted
+// and the error is returned (validation runs before any mutation), so the
+// fused write keeps the same all-or-nothing contract as a validated
+// SetEdgeProperty. AddEdgeLabeledWithProperty otherwise honours the same error
+// and revival contract as [Graph.AddEdge]: it propagates [adjlist.ErrShardFull]
+// and does NOT revive a tombstoned endpoint. When the underlying adjacency
+// no-ops the insertion (a simple-graph duplicate (src, dst)) neither the type nor
+// the property is stamped on the existing slot.
+//
+// A date-shaped string value (a Cypher Date delivered as a SOH-tagged canonical
+// string) is folded into the int32 epoch-day column exactly as SetEdgeProperty
+// folds it, so it round-trips to a native Date through the Cypher read path.
+//
+// AddEdgeLabeledWithProperty is safe for concurrent use.
+func (g *Graph[N, W]) AddEdgeLabeledWithProperty(src, dst N, w W, relType, key string, value PropertyValue) error {
+	if v := g.validator.load(); v != nil {
+		if err := v.Validate(key, value); err != nil {
+			return err
+		}
+	}
+	lid := g.reg.Intern(relType)
+	keyID := g.pkeys.Intern(key)
+	payload := &edgePropPayload{keyID: keyID, value: value}
+	if err := g.adj.AddEdgeLabeledWithProp(src, dst, w, encodeSlotLabel(lid), payload); err != nil {
 		return err
 	}
 	srcID, ok := g.adj.Mapper().Lookup(src)
