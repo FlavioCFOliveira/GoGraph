@@ -166,12 +166,16 @@ deterministically.
    the same swap as `neighbours` (`compactEntry`); reuse the `growCap(oldLen)` sizing
    rule (`adjlist.go:518-524` — the one that previously caused a recovery panic). The
    bitmap compaction is a bit-shift, not a slice copy.
-3. **Recovery value identity (highest durability risk).** A crashinject scenario must
-   assert edge-property **value identity** (kind + payload, not mere presence) over a
-   typed mix (string/int64/float64/list) across a `kill -9`/recovery cycle, with
-   crashpoints (a) between WAL fsync and snapshot publish and (b) mid-recovery between
-   adjacency rebuild and property-column reconstruction. `internal/crashinject` has no
-   edge-property durability coverage today.
+3. **Recovery value identity (highest durability risk).** Edge-property **value
+   identity** (kind + payload, not mere presence) over a typed mix must survive a
+   `kill -9`/recovery cycle, with crashpoints (a) between WAL fsync and snapshot publish
+   and (b) mid-recovery between adjacency rebuild and property-column reconstruction.
+   *Covered* by `store/recovery/edge_property_sparse_recovery_test.go` — a deterministic
+   value-identity recovery test over a string/int64/float64/date mix across every WAL
+   frame boundary and a snapshot-then-crash — added with the sparse tier (#1641) and
+   certified by the storage-engine review. (The coverage lives in the `store/recovery`
+   deterministic harness rather than `internal/crashinject`; both exercise the same
+   crash/replay path, so the durability guarantee is unaffected by the location.)
 4. **Dense-path guard.** A monomorphic dense column must remain a bare validity-free
    `[]T` (nil-until-used). A benchstat test asserts the dense date column's B/op
    equals the bare-`[]int32` baseline with zero validity/overflow allocation.
