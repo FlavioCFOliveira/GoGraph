@@ -282,3 +282,69 @@ func assertStrings(t *testing.T, label string, got, want []string) {
 		}
 	}
 }
+
+// TestRelPresence_NotAndComposed pins three-valued-logic composition over the
+// presence path (cypher-expert review anchor, #1638): NOT (r.k IS NOT NULL)
+// must select exactly the edges r.k IS NULL selects, and AND/OR of the two
+// total predicates behave as the totality of IS [NOT] NULL requires. A key that
+// appears only inside IS [NOT] NULL operands stays presence-only even when it
+// appears in several of them.
+func TestRelPresence_NotAndComposed(t *testing.T) {
+	g := newRelPresenceGraph(t)
+	eng := cypher.NewEngine(g)
+
+	// NOT (r.since IS NOT NULL) ≡ r.since IS NULL → only carol→dave.
+	notForm := stringColumn(t, presenceRows(t, eng,
+		`MATCH (n:P)-[r:FRIEND]->(:P) WHERE NOT (r.since IS NOT NULL) RETURN n.name AS n`), "n")
+	assertStrings(t, "NOT(r.since IS NOT NULL)", notForm, []string{"carol"})
+
+	// IS NOT NULL OR IS NULL is total-true → every edge (alice, carol, eve).
+	if got := len(presenceRows(t, eng,
+		`MATCH (n:P)-[r:FRIEND]->(:P) WHERE r.since IS NOT NULL OR r.since IS NULL RETURN n.name AS n`)); got != 3 {
+		t.Fatalf("IS NOT NULL OR IS NULL: got %d rows, want 3", got)
+	}
+	// IS NOT NULL AND IS NULL is total-false → no edge.
+	if got := len(presenceRows(t, eng,
+		`MATCH (n:P)-[r:FRIEND]->(:P) WHERE r.since IS NOT NULL AND r.since IS NULL RETURN n.name AS n`)); got != 0 {
+		t.Fatalf("IS NOT NULL AND IS NULL: got %d rows, want 0", got)
+	}
+}
+
+// TestRelPresence_TwoRelVarsComposed exercises two DISTINCT relationship
+// variables, each carrying an IS [NOT] NULL presence check, in one predicate
+// (cypher-expert review anchor, #1638).
+func TestRelPresence_TwoRelVarsComposed(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	eng := cypher.NewEngine(g)
+	// a -[since]-> b -[no since]-> c : satisfies r1 IS NOT NULL AND r2 IS NULL.
+	mustExec(t, eng, `CREATE (a:P {name:'a'})-[:FRIEND {since:2020}]->(b:P {name:'b'})-[:FRIEND]->(c:P {name:'c'})`)
+	// a2 -[no since]-> x -[since]-> y : fails r1 IS NOT NULL.
+	mustExec(t, eng, `CREATE (a2:P {name:'a2'})-[:FRIEND]->(x:P {name:'x'})-[:FRIEND {since:2021}]->(y:P {name:'y'})`)
+
+	rows := stringColumn(t, presenceRows(t, eng,
+		`MATCH (s:P)-[r1:FRIEND]->(:P)-[r2:FRIEND]->(:P) WHERE r1.since IS NOT NULL AND r2.since IS NULL RETURN s.name AS n`), "n")
+	assertStrings(t, "two-rel-var composed presence", rows, []string{"a"})
+}
+
+// TestRelPresence_MixedDifferentKeys pins the len(keys)==0 guard (cypher-expert
+// review anchor, #1638): an edge whose `since` is presence-checked in WHERE
+// while a DIFFERENT key `weight` is read as a value in RETURN must still
+// materialise the real `weight`. The presence fast path applies to the
+// non-escaping WHERE predicate only; the escaping projection takes the value
+// path, so r.weight is the stored value, not a presence placeholder.
+func TestRelPresence_MixedDifferentKeys(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	eng := cypher.NewEngine(g)
+	mustExec(t, eng, `CREATE (a:P {name:'a'})-[:FRIEND {since:2020, weight:5}]->(b:P {name:'b'})`)
+	mustExec(t, eng, `CREATE (c:P {name:'c'})-[:FRIEND {weight:9}]->(d:P {name:'d'})`) // since absent
+
+	rows := presenceRows(t, eng,
+		`MATCH (:P)-[r:FRIEND]->(:P) WHERE r.since IS NOT NULL RETURN r.weight AS w`)
+	if len(rows) != 1 {
+		t.Fatalf("mixed presence+value keys: got %d rows, want 1", len(rows))
+	}
+	w, ok := rows[0]["w"].(expr.IntegerValue)
+	if !ok || int64(w) != 5 {
+		t.Fatalf("r.weight: got %v (%T), want IntegerValue 5", rows[0]["w"], rows[0]["w"])
+	}
+}
