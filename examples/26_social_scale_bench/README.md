@@ -58,15 +58,14 @@ With **no flags** the example builds the full specification: **1,000,000
 users**, **30,000 articles**, **150–200 friends per user**, and **up to
 300 likes per user** — roughly 1.03M nodes and ~3.2 × 10⁸ edges.
 
-> **Resource warning.** Each edge carries a mandatory date property,
-> and at this model's degrees that per-edge property store dominates
-> resident heap: **~159 bytes of live heap per edge** (measured at 20k/2k,
-> explicit types — see below). The full run therefore needs on the order of
-> **~48 GiB of live heap** and several minutes to build. The implicit-type
-> mode (`-rel-types=false`) no longer helps materially — the date-property
-> store is identical in both modes and dwarfs the relationship-label store —
-> so it lands at **~47 GiB**. Run the full specification only on a machine
-> sized for it. On a laptop, scale down first:
+> **Resource warning.** Each edge carries a mandatory date property. At this
+> model's degrees the graph needs on the order of **~62 bytes of live heap per
+> edge** (measured at 20k/2k, explicit types — see below), so the full run needs
+> roughly **~20 GiB of live heap** and a few minutes to build. The implicit-type
+> mode (`-rel-types=false`) does not change this materially — the date-property
+> columns are identical in both modes and the relationship-label column is already
+> negligible. Run the full specification only on a machine sized for it. On a
+> laptop, scale down first:
 >
 > ```sh
 > go run ./examples/26_social_scale_bench -users 20000 -articles 2000
@@ -106,31 +105,31 @@ nodes.users=20000
 nodes.articles=2000
 edges.friend=3498025
 edges.like=3006369
-# build.elapsed=4.915s
-# build.node_rate=4476 nodes/s
-# build.edge_rate=1323475 edges/s
-# mem.heap_alloc=988.60 MiB
-# mem.heap_growth=988.25 MiB
-# mem.total_alloc=2.32 GiB
-# mem.sys=1.56 GiB
-# mem.num_gc=18
-# bytes_per_edge=159.3
+# build.elapsed=3.013s
+# build.node_rate=7302 nodes/s
+# build.edge_rate=2158801 edges/s
+# mem.heap_alloc=383.54 MiB
+# mem.heap_growth=383.20 MiB
+# mem.total_alloc=4.22 GiB
+# mem.sys=1023.96 MiB
+# mem.num_gc=39
+# bytes_per_edge=61.8
 q.count_users=20000
-# q.count_users.latency=11.437ms
+# q.count_users.latency=11.466ms
 q.count_articles=2000
-# q.count_articles.latency=1.088ms
+# q.count_articles.latency=999µs
 q.count_friend=3498025
-# q.count_friend.latency=4.466954s
+# q.count_friend.latency=4.236896s
 q.count_like=3006369
-# q.count_like.latency=4.101814s
+# q.count_like.latency=3.859588s
 q.friend_since_filled=3498025
-# q.friend_since_filled.latency=9.20518s
+# q.friend_since_filled.latency=8.453554s
 q.like_when_filled=3006369
-# q.like_when_filled.latency=8.380939s
+# q.like_when_filled.latency=7.878798s
 q.fof_reach=15246
-# q.fof_reach.latency=5.560177s
+# q.fof_reach.latency=5.21854s
 q.top_articles.rows=10
-# q.top_articles.latency=11.000578s
+# q.top_articles.latency=9.813192s
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`
@@ -217,16 +216,18 @@ heap **~49 %**; build time also improved because the fused
 `AddEdgeLabeled` path drops the per-edge existence check the old
 `AddEdge` + `SetEdgeLabel` pair paid.
 
-### The mandatory date property now dominates resident heap
+### Baseline: the date property in the map-backed store
 
 The optimizations above shrank the relationship-**label** store to a few
 bytes per edge. Adding the mandatory `since`/`when` **date property** to
-every edge reverses that win in absolute terms: a pair-level edge property
-is held in a per-edge keyed map (`map[edgeKey]propBag`), and even the
-compact `propBag` — a small inline slice for the common 1-2-property edge,
-not a nested map — still costs far more per edge than the date string it
-holds, because each edge pays a map slot keyed by `(src, dst)` plus a
-one-element slice plus an interface box around the value.
+every edge originally reversed that win in absolute terms. In the first
+implementation a pair-level edge property was held in a per-edge keyed map
+(`map[edgeKey]propBag`), and even the compact `propBag` — a small inline
+slice for the common 1-2-property edge, not a nested map — cost far more per
+edge than the date string it holds, because each edge paid a map slot keyed
+by `(src, dst)` plus a one-element slice plus an interface box around the
+value. The figures below are that **pre-columnar baseline**; the columnar
+tier that replaced it is documented immediately after.
 
 Measured at the 20k/2k scale of the *Expected output* block above (≈6.5 M
 edges), a heap profile (`inuse_space`) of the build attributes the live
@@ -255,15 +256,50 @@ follow:
    relationship *kind* is encoded and queried, but it is no longer a memory
    lever once every edge carries a property.
 
-This is intrinsic to storing a queryable edge property with the current
-engine: there is no inline/columnar edge-property tier analogous to the
-relationship-label column, so the per-edge map slot, slice, and interface
-box dominate — not the value (a lighter value encoding alone does not help).
-A position-aligned columnar edge-property tier — the same mechanism the
-relationship-label column already uses — would remove that overhead and is
-tracked in the project backlog. `lpg.TimeValue` was rejected for a
-different reason — the Cypher reader maps it to null, so it would not be
-queryable as `r.since` / `r.when` at all.
+`lpg.TimeValue` was rejected for a different reason — the Cypher reader maps
+it to null, so it would not be queryable as `r.since` / `r.when` at all; the
+date is stored as an ISO-8601 string instead.
+
+### The columnar edge-property tier
+
+The map-backed store above was replaced by a **position-aligned columnar
+edge-property tier** (design:
+[`docs/columnar-edge-properties-design.md`](../../docs/columnar-edge-properties-design.md)).
+Edge property values now live in per-`(propertyKeyID, kind)` de-boxed typed
+columns co-located with the adjacency `neighbours` array — the same mechanism
+the relationship-label column uses — so the redundant `(src, dst)` map key,
+the per-edge slice, and the interface box are all gone. A column carries an
+Arrow-style validity bitmap only where some slots are absent (a fully dense
+column pays none), and a column that is sparse within a high-degree node's
+neighbour list (here `since` is set only on `FRIEND` slots and `when` only on
+`LIKE` slots) switches to a compact COO representation. The date round-trips
+through Cypher as a non-null value (never `lpg.PropTime`, which the reader
+maps to null).
+
+Measured at 20k/2k (≈6.5 M edges), explicit types, full `runtime.ReadMemStats`,
+verified against the full openCypher TCK (3897/3897), the ACID battery, and
+`go test -race ./...` — identical query results:
+
+| | Live heap | B/edge | vs. baseline |
+|---|---:|---:|---:|
+| Map-backed baseline | ~1020 MiB | ~157 | — |
+| Columnar tier (dense columns) | ~465 MiB | ~74.8 | **−53 %** |
+| Columnar tier + sparse COO | **~383 MiB** | **~61.8** | **−61 %** |
+
+Extrapolated to the full specification (~3.25 × 10⁸ edges) the live-heap
+ceiling drops from the baseline **~48 GiB to ~20 GiB**. Build throughput is
+preserved: each edge's date is written into the column at insertion time via
+`AddEdgeLabeledWithProperty` (a fused append), so a bulk property-carrying
+build stays O(degree) amortised per source rather than the O(degree²) a
+separate per-edge `SetEdgeProperty` would pay — build allocation stays within
+~1.8× of the label-only baseline (~4.2 GiB total alloc at 20k/2k, vs ~2.3 GiB)
+rather than the ~54 GiB an un-fused build incurs.
+
+Headroom remains for a later phase: storing the date as a typed value (an
+`int32` epoch-day column) instead of an ISO string would cut the property
+column from ~33 to ~4 bytes per present slot, and a global dense edge-record
+(gated on a universal edge id) would suit edge-centric workloads — both
+tracked in the backlog.
 
 ## Key APIs
 
