@@ -512,12 +512,18 @@ func findCol(t *testing.T, block *edgePropCols, key PropertyKeyID) *edgePropColu
 }
 
 // poisonValues overwrites every value cell of the column with a distinctive
-// garbage payload WITHOUT touching the validity bitmap. popcountValid must be
-// blind to this: it counts presence from the bitmap (or length when dense), so a
+// garbage payload WITHOUT touching the presence plane (the validity bitmap in the
+// dense form, idx in the sparse form). popcountValid must be blind to this: it
+// counts presence from the bitmap / length (dense) or len(idx) (sparse), so a
 // poisoned value can never change the count. Any divergence after poisoning
-// proves the popcount illegally consulted a value cell.
+// proves the popcount illegally consulted a value cell. The number of value cells
+// is len(idx) in the sparse form and length in the dense form.
 func poisonValues(col *edgePropColumn) {
-	for i := 0; i < col.length; i++ {
+	n := col.length
+	if col.sparse {
+		n = len(col.idx)
+	}
+	for i := 0; i < n; i++ {
 		switch col.kind {
 		case PropInt64:
 			col.i64[i] = math.MaxInt64
@@ -565,10 +571,13 @@ func TestEdgePropCols_PopcountValid(t *testing.T) {
 		}
 	})
 
-	t.Run("bitmap-present-partial", func(t *testing.T) {
+	t.Run("partial-present-reads-presence-plane", func(t *testing.T) {
 		t.Parallel()
-		// A multi-slot column with only some slots present carries a bitmap; the
-		// popcount must equal the number of set bits, independent of the values.
+		// A multi-slot column with only some slots present: the popcount must
+		// equal the present count, read from the presence plane (the validity
+		// bitmap when dense, idx when sparse), independent of the values. At fill
+		// 3/5 = 0.6 an int64 column (demote 0.577, promote 0.677) stays sparse, so
+		// presence is idx; the assertion is representation-agnostic on purpose.
 		key := PropertyKeyID(2)
 		var block *edgePropCols
 		// Length-5 block; set slots 0, 2, 4 only (slots 1, 3 stay absent).
@@ -576,17 +585,23 @@ func TestEdgePropCols_PopcountValid(t *testing.T) {
 			block = block.set(key, slot, 5, Int64Value(int64(slot)))
 		}
 		col := findCol(t, block, key)
-		if col.valid == nil {
-			t.Fatalf("partial column must carry a validity bitmap")
+		// A partial column must carry SOME presence plane: a validity bitmap when
+		// dense, or the COO idx when sparse. It must not be a bare fully-dense
+		// column (which would read every slot present).
+		if !col.sparse && col.valid == nil {
+			t.Fatalf("partial dense column must carry a validity bitmap")
+		}
+		if col.sparse && len(col.idx) != 3 {
+			t.Fatalf("partial sparse column idx = %v, want 3 present entries", col.idx)
 		}
 		if got := col.popcountValid(); got != 3 {
-			t.Fatalf("bitmap popcount = %d, want 3", got)
+			t.Fatalf("popcount = %d, want 3", got)
 		}
-		// Poison every value cell (including the absent slots): popcount must stay
-		// 3 because it reads only the bitmap.
+		// Poison every value cell: popcount must stay 3 because it reads only the
+		// presence plane.
 		poisonValues(col)
 		if got := col.popcountValid(); got != 3 {
-			t.Fatalf("bitmap popcount after poison = %d, want 3", got)
+			t.Fatalf("popcount after poison = %d, want 3", got)
 		}
 	})
 

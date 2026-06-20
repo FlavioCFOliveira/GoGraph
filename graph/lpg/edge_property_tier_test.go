@@ -342,6 +342,73 @@ func runPublicOracle(t *testing.T, seed int64) {
 	}
 }
 
+// TestEdgePropTier_HeterogeneousKindAcrossEdges asserts that the SAME property
+// key carrying DIFFERENT kinds on DIFFERENT edges of one source node round-trips,
+// each edge reading back its own kind and value. openCypher allows a key to carry
+// different types across edges; the columnar tier handles this with one column
+// per (key, kind), so a key set as int64 on one edge and string on another lands
+// in two separate columns. This proves the "boxed overflow tier for same-key type
+// collisions" the design sketched is UNNECESSARY: per-(key,kind) columns subsume
+// it, and no such tier exists in the implementation.
+func TestEdgePropTier_HeterogeneousKindAcrossEdges(t *testing.T) {
+	t.Parallel()
+	g := New[string, int64](adjlist.Config{Directed: true})
+	dsts := []string{"b", "c", "d", "e", "f"}
+	for _, d := range dsts {
+		if err := g.AddEdge("a", d, 0); err != nil {
+			t.Fatalf("AddEdge a->%s: %v", d, err)
+		}
+	}
+	// One key "v", a DIFFERENT kind per edge.
+	g.mustSet(t, "a", "b", "v", Int64Value(42))
+	g.mustSet(t, "a", "c", "v", StringValue("forty-two"))
+	g.mustSet(t, "a", "d", "v", Float64Value(4.2))
+	g.mustSet(t, "a", "e", "v", BoolValue(true))
+	g.mustSet(t, "a", "f", "v", StringValue("\x012020-01-15")) // tagged Date
+
+	// Each edge reads back exactly its own kind and value.
+	check := func(dst string, kind PropertyKind, verify func(PropertyValue) bool) {
+		v, ok := g.GetEdgeProperty("a", dst, "v")
+		if !ok {
+			t.Fatalf("a->%s missing key v", dst)
+		}
+		if v.Kind() != kind {
+			t.Fatalf("a->%s v kind = %d, want %d", dst, v.Kind(), kind)
+		}
+		if !verify(v) {
+			t.Fatalf("a->%s v value mismatch: %v", dst, v)
+		}
+	}
+	check("b", PropInt64, func(v PropertyValue) bool { i, _ := v.Int64(); return i == 42 })
+	check("c", PropString, func(v PropertyValue) bool { s, _ := v.String(); return s == "forty-two" })
+	check("d", PropFloat64, func(v PropertyValue) bool { f, _ := v.Float64(); return f == 4.2 })
+	check("e", PropBool, func(v PropertyValue) bool { b, _ := v.Bool(); return b })
+	check("f", PropString, func(v PropertyValue) bool { s, _ := v.String(); return s == "\x012020-01-15" })
+
+	// The block holds one column per (key, kind): v as int64, string, float64,
+	// bool, and date (5 distinct columns), and no boxed-overflow spill structure.
+	srcID, _ := g.AdjList().Mapper().Lookup("a")
+	block := asEdgePropCols(g.AdjList().LoadEntryAux(srcID))
+	if block == nil {
+		t.Fatalf("no aux block")
+	}
+	kinds := map[PropertyKind]bool{}
+	for i := range block.cols {
+		if block.cols[i].key != g.pkeys.Intern("v") {
+			continue
+		}
+		if kinds[block.cols[i].kind] {
+			t.Fatalf("duplicate column for kind %d", block.cols[i].kind)
+		}
+		kinds[block.cols[i].kind] = true
+	}
+	for _, k := range []PropertyKind{PropInt64, PropString, PropFloat64, PropBool, dateKind} {
+		if !kinds[k] {
+			t.Fatalf("missing per-(key,kind) column for kind %d", k)
+		}
+	}
+}
+
 // mustSet is a test helper that sets an edge property and fails on error.
 func (g *Graph[N, W]) mustSet(t *testing.T, src, dst N, key string, v PropertyValue) {
 	t.Helper()

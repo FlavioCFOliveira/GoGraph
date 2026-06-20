@@ -69,9 +69,27 @@ type auxColumn = adjlist.AuxColumn
 // edgePropColumn is one typed value column inside an [edgePropCols] block. It is
 // keyed by the interned property key and the property kind, holds one logical
 // value per adjacency slot in a de-boxed representation when possible, and
-// carries an optional validity bitmap that is nil when the column is dense
-// (every slot present). Exactly one of the typed backing slices is non-nil,
-// selected by kind.
+// stores presence in one of two physical representations selected by fill ratio
+// (the [edgePropColumn.sparse] flag):
+//
+//	DENSE  (sparse == false): the typed backing slice has exactly [length]
+//	  elements, one per slot, indexed directly by slot. Presence is the
+//	  Arrow-style validity bitmap [edgePropColumn.valid], which is nil ⇔ every
+//	  slot is present (a fully-dense column pays zero validity overhead). A slot
+//	  whose validity bit is clear reads as null regardless of its value cell.
+//
+//	SPARSE (sparse == true): a COO (coordinate-list) representation. The typed
+//	  backing slice holds only the P present values in ascending-slot order, and
+//	  [edgePropColumn.idx] holds the present slot indices, strictly ascending and
+//	  in [0, length). Presence is membership in idx; the validity bitmap is nil.
+//	  Sparse wins on bytes when fill P/length is below the per-kind break-even
+//	  (see [denseFillThreshold]); for a sparse-within-a-high-degree-node key it
+//	  drops the (length-P) absent value cells the dense backing would allocate.
+//
+// Exactly one of the typed backing slices is non-nil, selected by kind. The
+// physical representation is re-evaluated with hysteresis at each mutation (see
+// [edgePropColumn.reshaped]) so it tracks the actual current fill without
+// thrashing at the boundary.
 //
 // A column is immutable once it is part of a published block; the mutation
 // helpers return a fresh column.
@@ -86,21 +104,37 @@ type edgePropColumn struct {
 	//   date        -> days (int32 epoch-day); see dateKind below
 	//   PropString  -> str
 	//   PropBytes / PropList / collision spill -> boxed
+	//
+	// DENSE: length elements, indexed by slot. SPARSE: P elements, indexed by
+	// position in idx (the k-th element is the value of slot idx[k]). Bit-packed
+	// bool is never sparse (its break-even fill is ~0.06, see reshaped), so
+	// boolBits always has the dense, slot-indexed meaning.
 	i64      []int64
 	f64      []float64
-	boolBits []uint64 // bit i = bool value of slot i (only meaningful where valid)
+	boolBits []uint64 // bit i = bool value of slot i (DENSE only; bool is never sparse)
 	days     []int32
 	str      []string
 	boxed    []PropertyValue
 
-	// valid is the Arrow-style validity bitmap: bit i set ⇔ slot i carries a
-	// value for this column. nil ⇔ the column is dense (every slot present), so
-	// a dense column pays zero validity overhead. A slot whose bit is clear
-	// reads as null regardless of the (don't-care) value cell.
+	// valid is the Arrow-style validity bitmap used in the DENSE representation:
+	// bit i set ⇔ slot i carries a value. nil ⇔ the dense column is fully present
+	// (zero validity overhead). Always nil in the SPARSE representation, where
+	// presence is membership in idx.
 	valid []uint64
 
+	// idx holds the present slot indices of the SPARSE representation, strictly
+	// ascending and each in [0, length). len(idx) == the present count P, and the
+	// k-th typed backing element is the value of slot idx[k]. nil ⇔ DENSE.
+	idx []int32
+
+	// sparse selects the physical representation: true ⇔ COO (idx + compacted
+	// backing), false ⇔ dense (slot-indexed backing + optional validity bitmap).
+	sparse bool
+
 	// length is the number of slots this column spans; it equals the adjacency
-	// entry's neighbour count at every observable point.
+	// entry's neighbour count at every observable point. It is an explicit stored
+	// scalar (NOT derivable from idx): a grow-without-set leaves absent trailing
+	// slots, so length can exceed max(idx)+1.
 	length int
 }
 
@@ -183,6 +217,33 @@ func (c *edgePropCols) CompactSlot(idx int) auxColumn {
 	return out
 }
 
+// Compact returns a block whose columns hold no backing slack, or the receiver
+// when every column is already exactly sized. A sparse (COO) column built by
+// amortised-growth inserts can carry up to ~2x slack in its idx and value
+// backings; Compact re-allocates each such backing at exact length. Dense
+// columns are already exactly length-sized, so a property-free or dense-only
+// block returns unchanged. Implements [adjlist.AuxColumn].
+func (c *edgePropCols) Compact() auxColumn {
+	if c == nil || len(c.cols) == 0 {
+		return c
+	}
+	var out *edgePropCols
+	for i := range c.cols {
+		if !c.cols[i].hasSlack() {
+			continue
+		}
+		if out == nil {
+			out = &edgePropCols{length: c.length, cols: make([]edgePropColumn, len(c.cols))}
+			copy(out.cols, c.cols)
+		}
+		out.cols[i] = c.cols[i].compactBacking()
+	}
+	if out == nil {
+		return c // no slack anywhere
+	}
+	return out
+}
+
 // --- block-level mutation (copy-on-write) ---------------------------------
 
 // withLength returns the block's length, treating a nil block as length 0.
@@ -219,18 +280,21 @@ func (c *edgePropCols) set(keyID PropertyKeyID, slot, length int, v PropertyValu
 		if out.cols[i].slotValid(slot) {
 			out.cols[i] = out.cols[i].cloneCol()
 			out.cols[i].clearSlot(slot)
+			out.cols[i] = out.cols[i].reshaped() // fill dropped: may demote to sparse
 			clearedOther = true
 		}
 	}
 	ci := out.columnIndex(keyID, kind)
 	if ci < 0 {
-		// New (key, kind) column: allocate dense-shaped then mark the slot.
+		// New (key, kind) column: newColumn picks the representation for a
+		// single-slot fill, then setSlot writes the first value.
 		col := newColumn(keyID, kind, length)
 		col.setSlot(slot, v, days)
-		out.cols = append(out.cols, col)
+		out.cols = append(out.cols, col.reshaped())
 	} else {
 		out.cols[ci] = out.cols[ci].cloneCol()
 		out.cols[ci].setSlot(slot, v, days)
+		out.cols[ci] = out.cols[ci].reshaped() // fill rose: may promote to dense
 	}
 	// Clearing the old-kind cell above may have emptied that column; drop any
 	// column with no present slot so a key that changed kind does not leave an
@@ -270,6 +334,7 @@ func (c *edgePropCols) del(keyID PropertyKeyID, slot int) (*edgePropCols, bool) 
 		}
 		out.cols[i] = out.cols[i].cloneCol()
 		out.cols[i].clearSlot(slot)
+		out.cols[i] = out.cols[i].reshaped() // fill dropped: may demote to sparse
 		changed = true
 	}
 	if !changed {
@@ -374,6 +439,267 @@ func (c *edgePropCols) dropEmptyColumns() {
 	c.cols = c.cols[:w]
 }
 
+// --- dense <-> sparse representation policy --------------------------------
+//
+// A column is stored dense (slot-indexed backing + optional validity bitmap) or
+// sparse (COO: ascending idx + compacted backing). The choice is a pure bytes
+// trade-off — both representations read identically (see [graph-theory] note in
+// reshaped) — driven by the fill ratio P/length against the per-kind break-even.
+//
+// Break-even derivation (bytes per logical slot, 4-byte int32 COO indices):
+//
+//	dense+validity:  v + 1/8        (value cell + one validity bit)
+//	sparse (COO):    (v + 4) * f    (value + index, only for present slots)
+//
+// where v is the per-slot value width in bytes and f = P/length the fill ratio.
+// Sparse wins on bytes when (v+4)*f < v + 1/8, i.e. f < (v + 1/8)/(v + 4). This
+// is [breakevenFill]. Hysteresis (see reshaped) keeps a column from thrashing
+// when its fill drifts across the break-even.
+
+// slotValueWidthBytes returns the per-slot value width in bytes used by the
+// dense/sparse bytes model, by storage kind. Bytes/list use the boxed
+// representation, whose per-slot cost is the PropertyValue header.
+func slotValueWidthBytes(kind PropertyKind) float64 {
+	switch kind {
+	case PropInt64, PropFloat64:
+		return 8
+	case dateKind:
+		return 4 // int32 epoch-day
+	case PropBool:
+		return 0.125 // one bit, packed
+	case PropString:
+		return 16 // string header (ptr + len); the body is shared either way
+	default: // PropBytes, PropList, collision spill: boxed PropertyValue
+		return 24
+	}
+}
+
+// breakevenFill returns the fill ratio f below which the sparse (COO)
+// representation costs fewer bytes than dense+validity for a column of the given
+// kind: f = (v + 1/8)/(v + 4) with v = [slotValueWidthBytes]. For bit-packed
+// bool (v = 0.125) this is ~0.06, so bool is effectively never sparse.
+func breakevenFill(kind PropertyKind) float64 {
+	v := slotValueWidthBytes(kind)
+	return (v + 0.125) / (v + 4)
+}
+
+// reshapeBand is the hysteresis width applied below the break-even fill for the
+// scalar kinds: a dense column demotes to sparse only when its fill drops at
+// least this far below break-even, and a sparse column promotes to dense at the
+// break-even. The gap prevents thrashing when a node's fill oscillates around
+// the boundary. The string kind (v = 16) uses a tighter band — its break-even
+// (~0.806) sits just above the dominant ~0.5 workload fill, so a wide band would
+// leave a region paying up to ~16% extra dense bytes; see reshaped.
+const (
+	reshapeBand       = 0.10 // scalar kinds (v in [4,8])
+	reshapeBandString = 0.05 // string kind (v = 16), tighter near a high break-even
+)
+
+// neverSparseWidth is the value-width ceiling at or below which a column is
+// always kept dense: the 4-byte COO index dwarfs the value, so sparse never pays
+// (bit-packed bool, v = 0.125, is the only kind in this regime today).
+const neverSparseWidth = 1.0
+
+// promoteThreshold / demoteThreshold return the fill ratios at which a column
+// changes representation. A column promotes (sparse -> dense) at fill >=
+// promoteThreshold; it demotes (dense -> sparse) at fill <= demoteThreshold.
+// demoteThreshold is clamped at 0, so a kind whose (break-even - band) is
+// non-positive never demotes (it is effectively always dense).
+func promoteThreshold(kind PropertyKind) float64 {
+	if slotValueWidthBytes(kind) <= neverSparseWidth {
+		return 0 // promote at any fill: always dense
+	}
+	return breakevenFill(kind)
+}
+
+func demoteThreshold(kind PropertyKind) float64 {
+	if slotValueWidthBytes(kind) <= neverSparseWidth {
+		return -1 // demote never fires (fill is always >= 0)
+	}
+	band := reshapeBand
+	if kind == PropString {
+		band = reshapeBandString
+	}
+	d := breakevenFill(kind) - band
+	if d < 0 {
+		d = 0
+	}
+	return d
+}
+
+// reshaped returns col reshaped to the physical representation its CURRENT fill
+// dictates under hysteresis, or col unchanged when no change is warranted. The
+// receiver must already be cloned for writing (reshaped mutates in place and
+// returns the receiver value). The decision is taken on the ACTUAL current
+// physical type (not a predicted post-op fill): a dense column at fill <=
+// [demoteThreshold] becomes sparse; a sparse column at fill >= [promoteThreshold]
+// becomes dense; otherwise the representation is left as-is, which is always
+// correct because the two representations are observationally identical
+// (confirmed by the dense-differential property oracle).
+//
+// A length-0 or single-slot column is left dense: there is nothing to compress
+// and the dense fast path the spike measured must never grow a COO sidecar.
+func (col *edgePropColumn) reshaped() edgePropColumn {
+	if col.length <= 1 {
+		if col.sparse {
+			return col.toDense()
+		}
+		return *col
+	}
+	fill := float64(col.popcountValid()) / float64(col.length)
+	switch {
+	case col.sparse && fill >= promoteThreshold(col.kind):
+		return col.toDense()
+	case !col.sparse && fill <= demoteThreshold(col.kind):
+		return col.toSparse()
+	default:
+		return *col
+	}
+}
+
+// toSparse converts a dense column to the COO representation in place and returns
+// it. It walks the dense slots once, copying every present slot's value into a
+// freshly-sized compacted backing and recording its index in idx (ascending by
+// construction). The validity bitmap is dropped. Idempotent on an already-sparse
+// column.
+func (col *edgePropColumn) toSparse() edgePropColumn {
+	if col.sparse {
+		return *col
+	}
+	p := col.popcountValid()
+	out := edgePropColumn{key: col.key, kind: col.kind, length: col.length, sparse: true}
+	out.idx = make([]int32, 0, p)
+	allocSparseBacking(&out, col.kind, p)
+	for slot := 0; slot < col.length; slot++ {
+		if !col.slotValid(slot) {
+			continue
+		}
+		out.idx = append(out.idx, int32(slot))
+		out.appendSparseValueFromDense(col, slot)
+	}
+	return out
+}
+
+// toDense converts a sparse column to the dense representation in place and
+// returns it. It allocates a full-length backing, scatters each present value to
+// its slot index, and materialises a validity bitmap unless every slot is
+// present (in which case the column is fully dense and the bitmap stays nil).
+// Idempotent on an already-dense column.
+func (col *edgePropColumn) toDense() edgePropColumn {
+	if !col.sparse {
+		return *col
+	}
+	out := edgePropColumn{key: col.key, kind: col.kind, length: col.length}
+	allocDenseBacking(&out, col.kind, col.length)
+	full := len(col.idx) == col.length
+	if !full {
+		out.valid = make([]uint64, words(col.length))
+	}
+	for k, slot := range col.idx {
+		s := int(slot)
+		out.scatterDenseValueFromSparse(col, k, s)
+		if !full {
+			out.valid[s>>6] |= 1 << (uint(s) & 63)
+		}
+	}
+	return out
+}
+
+// allocSparseBacking allocates the single typed backing slice the sparse
+// representation uses, sized to the present count p. bool is never sparse, so it
+// is unreachable here; we allocate a slot-indexed bit word defensively in case a
+// future kind change routes through.
+func allocSparseBacking(col *edgePropColumn, kind PropertyKind, p int) {
+	switch kind {
+	case PropInt64:
+		col.i64 = make([]int64, 0, p)
+	case PropFloat64:
+		col.f64 = make([]float64, 0, p)
+	case dateKind:
+		col.days = make([]int32, 0, p)
+	case PropString:
+		col.str = make([]string, 0, p)
+	case PropBool:
+		// Unreachable: bool never goes sparse. A bit-packed bool has no compact
+		// COO value array; fall back to a per-present-slot bit word.
+		col.boolBits = make([]uint64, words(p))
+	default:
+		col.boxed = make([]PropertyValue, 0, p)
+	}
+}
+
+// allocDenseBacking allocates the slot-indexed typed backing of length n.
+func allocDenseBacking(col *edgePropColumn, kind PropertyKind, n int) {
+	switch kind {
+	case PropInt64:
+		col.i64 = make([]int64, n)
+	case PropFloat64:
+		col.f64 = make([]float64, n)
+	case PropBool:
+		col.boolBits = make([]uint64, words(n))
+	case dateKind:
+		col.days = make([]int32, n)
+	case PropString:
+		col.str = make([]string, n)
+	default:
+		col.boxed = make([]PropertyValue, n)
+	}
+}
+
+// appendSparseValueFromDense appends the value of dense slot `slot` of src to the
+// receiver's compacted sparse backing (the receiver being built by toSparse).
+func (col *edgePropColumn) appendSparseValueFromDense(src *edgePropColumn, slot int) {
+	switch col.kind {
+	case PropInt64:
+		col.i64 = append(col.i64, src.i64[slot])
+	case PropFloat64:
+		col.f64 = append(col.f64, src.f64[slot])
+	case dateKind:
+		col.days = append(col.days, src.days[slot])
+	case PropString:
+		col.str = append(col.str, src.str[slot])
+	default:
+		col.boxed = append(col.boxed, src.boxed[slot])
+	}
+}
+
+// scatterDenseValueFromSparse writes the k-th sparse value of src to dense slot s
+// of the receiver (the receiver being built by toDense).
+func (col *edgePropColumn) scatterDenseValueFromSparse(src *edgePropColumn, k, s int) {
+	switch col.kind {
+	case PropInt64:
+		col.i64[s] = src.i64[k]
+	case PropFloat64:
+		col.f64[s] = src.f64[k]
+	case dateKind:
+		col.days[s] = src.days[k]
+	case PropString:
+		col.str[s] = src.str[k]
+	default:
+		col.boxed[s] = src.boxed[k]
+	}
+}
+
+// sparsePos returns the position in idx of slot `slot` (so the typed backing at
+// that position is the slot's value), and whether the slot is present. idx is
+// ascending, so this is a binary search.
+func (col *edgePropColumn) sparsePos(slot int) (int, bool) {
+	lo, hi := 0, len(col.idx)
+	target := int32(slot)
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		switch {
+		case col.idx[mid] < target:
+			lo = mid + 1
+		case col.idx[mid] > target:
+			hi = mid
+		default:
+			return mid, true
+		}
+	}
+	return lo, false // lo is the insertion point that keeps idx ascending
+}
+
 // --- column-level helpers --------------------------------------------------
 
 // classify maps a PropertyValue to its storage kind. A date-shaped string (SOH
@@ -403,6 +729,20 @@ func classify(v PropertyValue) (kind PropertyKind, days int32, dateOK bool) {
 // slot live, which IS dense and needs no bitmap; setSlot handles that by leaving
 // valid nil and the single bit implicitly set.
 func newColumn(key PropertyKeyID, kind PropertyKind, length int) edgePropColumn {
+	// Build-sparse-by-default for a multi-slot column whose single live slot
+	// leaves the fill at or below the demote threshold: a fresh column with one
+	// value has fill 1/length, so for any kind whose demote threshold * length >=
+	// 1 the column starts sparse and never allocates the length-sized dense
+	// backing on a high-degree, low-fill node — the exact regression this guards.
+	// A length-1 column (fill 1.0) and any kind that is always dense (bool) start
+	// dense, preserving the dense fast path the spike measured.
+	if length > 1 && slotValueWidthBytes(kind) > neverSparseWidth &&
+		1.0/float64(length) <= demoteThreshold(kind) {
+		col := edgePropColumn{key: key, kind: kind, length: length, sparse: true}
+		col.idx = make([]int32, 0, 1)
+		allocSparseBacking(&col, kind, 1)
+		return col
+	}
 	col := edgePropColumn{key: key, kind: kind, length: length}
 	switch kind {
 	case PropInt64:
@@ -418,9 +758,9 @@ func newColumn(key PropertyKeyID, kind PropertyKind, length int) edgePropColumn 
 	default: // PropBytes, PropList, and any collision spill.
 		col.boxed = make([]PropertyValue, length)
 	}
-	// A multi-slot column created for a single live slot starts mostly absent:
-	// allocate the validity bitmap so the other slots read null. A length-1
-	// column is dense and keeps valid nil.
+	// A multi-slot DENSE column created for a single live slot starts mostly
+	// absent: allocate the validity bitmap so the other slots read null. A
+	// length-1 column is dense and keeps valid nil.
 	if length > 1 {
 		col.valid = make([]uint64, words(length))
 	}
@@ -449,15 +789,78 @@ func (col *edgePropColumn) cloneCol() edgePropColumn {
 		out.boxed = cloneBoxed(col.boxed)
 	}
 	out.valid = cloneU64(col.valid)
+	out.idx = cloneI32Idx(col.idx)
+	return out
+}
+
+// hasSlack reports whether the column's in-use backing slices have spare
+// capacity that Compact should reclaim. Only the sparse representation (built by
+// amortised-growth inserts) can carry slack; dense backings are exactly
+// length-sized. idx and the value backing are checked together.
+func (col *edgePropColumn) hasSlack() bool {
+	if !col.sparse {
+		return false
+	}
+	if cap(col.idx) > len(col.idx) {
+		return true
+	}
+	switch col.kind {
+	case PropInt64:
+		return cap(col.i64) > len(col.i64)
+	case PropFloat64:
+		return cap(col.f64) > len(col.f64)
+	case dateKind:
+		return cap(col.days) > len(col.days)
+	case PropString:
+		return cap(col.str) > len(col.str)
+	default:
+		return cap(col.boxed) > len(col.boxed)
+	}
+}
+
+// compactBacking returns a copy of the sparse column with idx and the value
+// backing re-allocated at exact length (cap == len), reclaiming amortised-growth
+// slack. The contents are unchanged, so the result reads identically.
+func (col *edgePropColumn) compactBacking() edgePropColumn {
+	out := *col
+	out.idx = exactI32(col.idx)
+	switch col.kind {
+	case PropInt64:
+		out.i64 = exactI64(col.i64)
+	case PropFloat64:
+		out.f64 = exactF64(col.f64)
+	case dateKind:
+		out.days = exactI32Vals(col.days)
+	case PropString:
+		out.str = exactStr(col.str)
+	default:
+		out.boxed = exactBoxed(col.boxed)
+	}
 	return out
 }
 
 // grown returns a copy of the column extended by one slot at index oldLen, with
-// the new slot ABSENT. The validity bitmap is always present in the result (a
-// previously-dense column materialises one here, with every prior bit set and
-// the new bit clear), which is what makes the freshly-appended slot read null.
+// the new slot ABSENT.
+//
+// SPARSE: appending an absent trailing slot is a pure no-op on idx/val — the new
+// top slot is simply not in idx, so it reads null — and only the stored length
+// increments. The result is then re-evaluated: appending an absent slot lowers
+// the fill, which can only push toward sparse, so no promotion is possible, but
+// reshaped is called for uniformity (it is a no-op here).
+//
+// DENSE: the value backing grows by one and the validity bitmap is always
+// present in the result (a previously-fully-dense column materialises one here,
+// with every prior bit set and the new bit clear), which is what makes the
+// freshly-appended slot read null. The grown dense column is then re-evaluated:
+// the lower fill may demote it to sparse.
 func (col *edgePropColumn) grown(oldLen int) edgePropColumn {
 	newLen := oldLen + 1
+	if col.sparse {
+		out := col.cloneCol()
+		out.length = newLen
+		// idx/val unchanged: the new slot at oldLen is absent (not in idx).
+		return out.reshaped()
+	}
 	out := edgePropColumn{key: col.key, kind: col.kind, length: newLen}
 	switch col.kind {
 	case PropInt64:
@@ -474,7 +877,7 @@ func (col *edgePropColumn) grown(oldLen int) edgePropColumn {
 		out.boxed = growBoxed(col.boxed, newLen)
 	}
 	out.valid = col.materialiseValidity(oldLen, newLen)
-	return out
+	return out.reshaped()
 }
 
 // grownTo returns a copy of the column whose length is exactly newLen (>=
@@ -483,6 +886,13 @@ func (col *edgePropColumn) grown(oldLen int) edgePropColumn {
 func (col *edgePropColumn) grownTo(newLen int) edgePropColumn {
 	if newLen <= col.length {
 		return *col
+	}
+	if col.sparse {
+		// Added slots [col.length, newLen) are absent (not in idx); only length
+		// changes. The lower fill may demote, never promote.
+		out := col.cloneCol()
+		out.length = newLen
+		return out.reshaped()
 	}
 	out := edgePropColumn{key: col.key, kind: col.kind, length: newLen}
 	switch col.kind {
@@ -512,7 +922,7 @@ func (col *edgePropColumn) grownTo(newLen int) edgePropColumn {
 	}
 	// Added slots stay clear (absent) — no action needed.
 	out.valid = v
-	return out
+	return out.reshaped()
 }
 
 // materialiseValidity returns the validity bitmap for a column grown from oldLen
@@ -535,10 +945,31 @@ func (col *edgePropColumn) materialiseValidity(oldLen, newLen int) []uint64 {
 	return v
 }
 
-// compacted returns a copy of the column with the slot at idx excised: result
-// slots [0,idx) equal the receiver's, result slots [idx,n-1) equal the
-// receiver's [idx+1,n). The validity bitmap is compacted by the same transform.
+// compacted returns a copy of the column with the slot at idx excised, keeping
+// it aligned 1:1 with the neighbour array that adjlist compacts by the SAME
+// stable shift-down (see adjlist.compactEntry). It dispatches on the ACTUAL
+// current physical representation — never a predicted post-op fill — so the
+// transform always matches the storage it operates on (the dispatch-bug hazard
+// the design review flagged).
+//
+// DENSE: result slots [0,idx) equal the receiver's, result slots [idx,n-1) equal
+// the receiver's [idx+1,n). The value backing and the validity bitmap are
+// spliced by the identical index transform.
+//
+// SPARSE (COO): the transform is NOT the dense copy-down splice. It is
+// delete-if-present-then-decrement: the entry whose stored index == idx (if any)
+// is dropped, and every stored index strictly greater than idx is decremented by
+// one. Stored indices below idx are unchanged. This is the unique transform that
+// keeps idx aligned with the shifted neighbours while preserving the
+// strict-ascending no-duplicate invariant.
+//
+// The compacted column keeps the SAME physical representation it had (correct
+// because the two representations read identically); re-evaluation is deferred to
+// the next set/grow, which is a pure bytes decision.
 func (col *edgePropColumn) compacted(idx int) edgePropColumn {
+	if col.sparse {
+		return col.compactedSparse(idx)
+	}
 	n := col.length
 	out := edgePropColumn{key: col.key, kind: col.kind, length: n - 1}
 	switch col.kind {
@@ -561,10 +992,65 @@ func (col *edgePropColumn) compacted(idx int) edgePropColumn {
 	return out
 }
 
+// compactedSparse applies the COO compaction transform for slot idx:
+// delete-if-present, then decrement every stored index > idx. Both idx and the
+// typed value backing are rebuilt in lockstep; the value of a dropped slot is
+// elided. The result stays strictly ascending: dropping one element and
+// decrementing a strictly-greater suffix cannot collide (the straddle a<idx<b
+// gives a < b-1 on integers; the only way to manufacture {idx,idx} is to
+// decrement idx+1 WITHOUT dropping idx — which this never does).
+func (col *edgePropColumn) compactedSparse(idx int) edgePropColumn {
+	out := edgePropColumn{key: col.key, kind: col.kind, length: col.length - 1, sparse: true}
+	// Worst case (idx absent) keeps every present entry.
+	out.idx = make([]int32, 0, len(col.idx))
+	allocSparseBacking(&out, col.kind, len(col.idx))
+	target := int32(idx)
+	for k, slot := range col.idx {
+		switch {
+		case slot == target:
+			continue // drop the excised slot's entry
+		case slot > target:
+			out.idx = append(out.idx, slot-1) // shift down
+		default:
+			out.idx = append(out.idx, slot) // below idx: unchanged
+		}
+		out.appendSparseValueFromSparse(col, k)
+	}
+	return out
+}
+
+// appendSparseValueFromSparse appends src's k-th sparse value to the receiver's
+// sparse backing (used by compactedSparse, which copies surviving entries in
+// order).
+func (col *edgePropColumn) appendSparseValueFromSparse(src *edgePropColumn, k int) {
+	switch col.kind {
+	case PropInt64:
+		col.i64 = append(col.i64, src.i64[k])
+	case PropFloat64:
+		col.f64 = append(col.f64, src.f64[k])
+	case dateKind:
+		col.days = append(col.days, src.days[k])
+	case PropString:
+		col.str = append(col.str, src.str[k])
+	default:
+		col.boxed = append(col.boxed, src.boxed[k])
+	}
+}
+
 // setSlot records v on the slot in place (the column must already be cloned for
-// writing). It sets the value cell and marks the validity bit. days carries the
-// pre-classified epoch-day for the date column; it is ignored for other kinds.
+// writing). days carries the pre-classified epoch-day for the date column; it is
+// ignored for other kinds.
+//
+// DENSE: writes the value cell at index slot and marks the validity bit.
+//
+// SPARSE: locates slot in idx (binary search). If present, overwrites the value
+// at that position; if absent, inserts the index (keeping idx ascending) and the
+// value at the matching position. Bit-packed bool never reaches the sparse path.
 func (col *edgePropColumn) setSlot(slot int, v PropertyValue, days int32) {
+	if col.sparse {
+		col.setSlotSparse(slot, v, days)
+		return
+	}
 	switch col.kind {
 	case PropInt64:
 		i, _ := v.Int64()
@@ -590,9 +1076,70 @@ func (col *edgePropColumn) setSlot(slot int, v PropertyValue, days int32) {
 	col.markValid(slot)
 }
 
-// clearSlot resets the validity bit for the slot in place (the column must
-// already be cloned for writing). The value cell is left as don't-care.
+// setSlotSparse records v on the slot in the COO representation, inserting a new
+// (idx, value) entry in ascending order or overwriting an existing one.
+func (col *edgePropColumn) setSlotSparse(slot int, v PropertyValue, days int32) {
+	pos, present := col.sparsePos(slot)
+	if present {
+		col.overwriteSparseValue(pos, v, days)
+		return
+	}
+	col.idx = insertI32(col.idx, pos, int32(slot))
+	col.insertSparseValue(pos, v, days)
+}
+
+// overwriteSparseValue replaces the value at position pos of the sparse backing.
+func (col *edgePropColumn) overwriteSparseValue(pos int, v PropertyValue, days int32) {
+	switch col.kind {
+	case PropInt64:
+		i, _ := v.Int64()
+		col.i64[pos] = i
+	case PropFloat64:
+		f, _ := v.Float64()
+		col.f64[pos] = f
+	case dateKind:
+		col.days[pos] = days
+	case PropString:
+		s, _ := v.String()
+		col.str[pos] = s
+	default:
+		col.boxed[pos] = v
+	}
+}
+
+// insertSparseValue inserts v at position pos of the sparse backing, shifting the
+// tail up by one to stay aligned with idx.
+func (col *edgePropColumn) insertSparseValue(pos int, v PropertyValue, days int32) {
+	switch col.kind {
+	case PropInt64:
+		i, _ := v.Int64()
+		col.i64 = insertI64(col.i64, pos, i)
+	case PropFloat64:
+		f, _ := v.Float64()
+		col.f64 = insertF64(col.f64, pos, f)
+	case dateKind:
+		col.days = insertI32(col.days, pos, days)
+	case PropString:
+		s, _ := v.String()
+		col.str = insertStr(col.str, pos, s)
+	default:
+		col.boxed = insertBoxed(col.boxed, pos, v)
+	}
+}
+
+// clearSlot makes the slot absent in place (the column must already be cloned for
+// writing).
+//
+// DENSE: resets the validity bit (materialising the bitmap first if the column
+// was fully dense) and drops any string/boxed reference so the dead value can be
+// GC'd.
+//
+// SPARSE: removes the (idx, value) entry for the slot, if present.
 func (col *edgePropColumn) clearSlot(slot int) {
+	if col.sparse {
+		col.clearSlotSparse(slot)
+		return
+	}
 	if col.valid == nil {
 		// Was dense (every slot present). Materialise the bitmap with every slot
 		// set, then clear the target.
@@ -611,29 +1158,61 @@ func (col *edgePropColumn) clearSlot(slot int) {
 	}
 }
 
-// markValid sets the slot's validity bit, allocating the bitmap if the column
-// was dense. A dense column whose only newly-set slot keeps it dense (no bitmap
-// is needed when EVERY slot is present), but because setSlot is only ever
-// called on an already-allocated-or-grown column the dense invariant is
-// preserved by construction: a length-1 single-slot column stays dense (valid
-// nil); any longer column already carries a bitmap from newColumn/grown.
+// clearSlotSparse removes the (idx, value) entry for slot from the COO
+// representation, if present. The value is elided entirely (no dead reference to
+// retain), so a string/boxed column needs no separate GC-hygiene step.
+func (col *edgePropColumn) clearSlotSparse(slot int) {
+	pos, present := col.sparsePos(slot)
+	if !present {
+		return
+	}
+	col.idx = removeI32(col.idx, pos)
+	switch col.kind {
+	case PropInt64:
+		col.i64 = removeI64(col.i64, pos)
+	case PropFloat64:
+		col.f64 = removeF64(col.f64, pos)
+	case dateKind:
+		col.days = removeI32(col.days, pos)
+	case PropString:
+		col.str = removeStr(col.str, pos)
+	default:
+		col.boxed = removeBoxed(col.boxed, pos)
+	}
+}
+
+// markValid sets the slot's validity bit on a DENSE column.
+//
+// A nil validity bitmap means the column is FULLY dense — every slot present —
+// in two cases: a length-1 single-slot column, and a multi-slot column promoted
+// from sparse at 100 % fill (see toDense). In BOTH cases setting a slot keeps the
+// column fully dense, so the bitmap stays nil. This is the corrected invariant:
+// a nil bitmap is the fully-present sentinel, NOT "single slot only". Allocating
+// a zeroed bitmap here and setting one bit would WRONGLY drop the other present
+// slots' presence — the bug that arose once promotion could leave a multi-slot
+// column with nil validity.
+//
+// A non-nil bitmap means some slot is (or was) absent; the target bit is set
+// directly. setSlot only ever marks a slot it has just written, so this records
+// the presence of a previously-absent slot or re-affirms a present one.
 func (col *edgePropColumn) markValid(slot int) {
 	if col.valid == nil {
-		// Dense column: the only dense case is length 1 with the single slot
-		// present, which needs no bitmap. Setting that one slot keeps it dense.
-		if col.length == 1 && slot == 0 {
-			return
-		}
-		col.valid = make([]uint64, words(col.length))
+		// Fully dense (length-1 or 100 %-fill promoted): stays fully dense.
+		return
 	}
 	col.valid[slot>>6] |= 1 << (uint(slot) & 63)
 }
 
-// slotValid reports whether the slot carries a value (validity bit set, or the
-// column is dense). Bounds-checked: a slot past the column length is absent.
+// slotValid reports whether the slot carries a value. Bounds-checked: a slot
+// past the column length is absent. DENSE: reads the validity bit (or true when
+// the bitmap is omitted). SPARSE: tests membership in idx.
 func (col *edgePropColumn) slotValid(slot int) bool {
 	if slot < 0 || slot >= col.length {
 		return false
+	}
+	if col.sparse {
+		_, ok := col.sparsePos(slot)
+		return ok
 	}
 	if col.valid == nil {
 		return true // dense: every in-range slot is present
@@ -641,24 +1220,43 @@ func (col *edgePropColumn) slotValid(slot int) bool {
 	return col.valid[slot>>6]&(1<<(uint(slot)&63)) != 0
 }
 
-// slotValue returns the value on the slot and whether it is present.
-func (col *edgePropColumn) slotValue(slot int) (PropertyValue, bool) {
+// backingIndex returns the index into the typed value backing for the slot and
+// whether the slot is present. DENSE: the index is the slot itself (or absent
+// when its validity bit is clear). SPARSE: the index is the slot's position in
+// idx (or absent when the slot is not in idx). Presence reuses slotValid, so the
+// bounds and bitmap reasoning live in exactly one place.
+func (col *edgePropColumn) backingIndex(slot int) (int, bool) {
 	if !col.slotValid(slot) {
+		return 0, false
+	}
+	if col.sparse {
+		pos, _ := col.sparsePos(slot) // present (slotValid true) ⇒ found
+		return pos, true
+	}
+	return slot, true
+}
+
+// slotValue returns the value on the slot and whether it is present. DENSE
+// indexes the backing by slot; SPARSE indexes by the slot's position in idx.
+func (col *edgePropColumn) slotValue(slot int) (PropertyValue, bool) {
+	i, ok := col.backingIndex(slot)
+	if !ok {
 		return PropertyValue{}, false
 	}
 	switch col.kind {
 	case PropInt64:
-		return Int64Value(col.i64[slot]), true
+		return Int64Value(col.i64[i]), true
 	case PropFloat64:
-		return Float64Value(col.f64[slot]), true
+		return Float64Value(col.f64[i]), true
 	case PropBool:
-		return BoolValue(col.boolBits[slot>>6]&(1<<(uint(slot)&63)) != 0), true
+		// bool is never sparse, so i == slot here.
+		return BoolValue(col.boolBits[i>>6]&(1<<(uint(i)&63)) != 0), true
 	case dateKind:
-		return StringValue(epochDayToString(col.days[slot])), true
+		return StringValue(epochDayToString(col.days[i])), true
 	case PropString:
-		return StringValue(col.str[slot]), true
+		return StringValue(col.str[i]), true
 	default:
-		return col.boxed[slot], true
+		return col.boxed[i], true
 	}
 }
 
@@ -666,6 +1264,9 @@ func (col *edgePropColumn) slotValue(slot int) (PropertyValue, bool) {
 func (col *edgePropColumn) nonEmpty() bool {
 	if col.length == 0 {
 		return false
+	}
+	if col.sparse {
+		return len(col.idx) > 0
 	}
 	if col.valid == nil {
 		return true // dense and length>0
@@ -742,8 +1343,11 @@ func spliceBits(src []uint64, idx, n int) []uint64 {
 // buildRelationshipValueFromRow, so a presence-only / lazy read path must be
 // added before this primitive can be wired in — that work is out of scope here.
 func (col *edgePropColumn) popcountValid() int {
+	if col.sparse {
+		return len(col.idx) // COO: one stored entry per present slot
+	}
 	if col.valid == nil {
-		return col.length // dense
+		return col.length // dense, fully present
 	}
 	total := 0
 	for _, w := range col.valid {
@@ -850,6 +1454,136 @@ func spliceBoxed(s []PropertyValue, idx int) []PropertyValue {
 	out := make([]PropertyValue, len(s)-1)
 	copy(out, s[:idx])
 	copy(out[idx:], s[idx+1:])
+	return out
+}
+
+// --- sparse (COO) backing edits (insert/remove at a position) --------------
+//
+// These edit the COO backing slices in place on an already-cloned column. insert
+// grows by one at pos (shifting the tail up); remove shrinks by one at pos
+// (shifting the tail down). They keep the value backing aligned with idx.
+
+func insertI32(s []int32, pos int, v int32) []int32 {
+	s = append(s, 0)
+	copy(s[pos+1:], s[pos:])
+	s[pos] = v
+	return s
+}
+
+func insertI64(s []int64, pos int, v int64) []int64 {
+	s = append(s, 0)
+	copy(s[pos+1:], s[pos:])
+	s[pos] = v
+	return s
+}
+
+func insertF64(s []float64, pos int, v float64) []float64 {
+	s = append(s, 0)
+	copy(s[pos+1:], s[pos:])
+	s[pos] = v
+	return s
+}
+
+func insertStr(s []string, pos int, v string) []string {
+	s = append(s, "")
+	copy(s[pos+1:], s[pos:])
+	s[pos] = v
+	return s
+}
+
+func insertBoxed(s []PropertyValue, pos int, v PropertyValue) []PropertyValue {
+	s = append(s, PropertyValue{})
+	copy(s[pos+1:], s[pos:])
+	s[pos] = v
+	return s
+}
+
+func removeI32(s []int32, pos int) []int32 {
+	copy(s[pos:], s[pos+1:])
+	return s[:len(s)-1]
+}
+
+func removeI64(s []int64, pos int) []int64 {
+	copy(s[pos:], s[pos+1:])
+	return s[:len(s)-1]
+}
+
+func removeF64(s []float64, pos int) []float64 {
+	copy(s[pos:], s[pos+1:])
+	return s[:len(s)-1]
+}
+
+func removeStr(s []string, pos int) []string {
+	copy(s[pos:], s[pos+1:])
+	s[len(s)-1] = "" // release the dropped string reference for GC
+	return s[:len(s)-1]
+}
+
+func removeBoxed(s []PropertyValue, pos int) []PropertyValue {
+	copy(s[pos:], s[pos+1:])
+	s[len(s)-1] = PropertyValue{} // release the dropped value for GC
+	return s[:len(s)-1]
+}
+
+// cloneI32Idx deep-copies the sparse index slice (nil stays nil so a dense column
+// keeps idx nil).
+func cloneI32Idx(s []int32) []int32 {
+	if s == nil {
+		return nil
+	}
+	out := make([]int32, len(s))
+	copy(out, s)
+	return out
+}
+
+// exact* return a copy of the slice sized exactly to its length (cap == len),
+// reclaiming amortised-growth slack. nil stays nil. len==cap returns the slice
+// unchanged (no allocation when there is nothing to reclaim).
+
+func exactI32(s []int32) []int32 {
+	if s == nil || cap(s) == len(s) {
+		return s
+	}
+	out := make([]int32, len(s))
+	copy(out, s)
+	return out
+}
+
+func exactI32Vals(s []int32) []int32 { return exactI32(s) }
+
+func exactI64(s []int64) []int64 {
+	if s == nil || cap(s) == len(s) {
+		return s
+	}
+	out := make([]int64, len(s))
+	copy(out, s)
+	return out
+}
+
+func exactF64(s []float64) []float64 {
+	if s == nil || cap(s) == len(s) {
+		return s
+	}
+	out := make([]float64, len(s))
+	copy(out, s)
+	return out
+}
+
+func exactStr(s []string) []string {
+	if s == nil || cap(s) == len(s) {
+		return s
+	}
+	out := make([]string, len(s))
+	copy(out, s)
+	return out
+}
+
+func exactBoxed(s []PropertyValue) []PropertyValue {
+	if s == nil || cap(s) == len(s) {
+		return s
+	}
+	out := make([]PropertyValue, len(s))
+	copy(out, s)
 	return out
 }
 

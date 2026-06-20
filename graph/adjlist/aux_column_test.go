@@ -14,8 +14,9 @@ import (
 // simpler representation than lpg's edgePropCols so the test exercises only the
 // adjlist seam contract, not lpg internals.
 type fakeAux struct {
-	vals    []int
-	present []bool
+	vals         []int
+	present      []bool
+	compactCalls int // number of times Compact was invoked (for the Compact-seam test)
 }
 
 func (f *fakeAux) GrowSlot(oldLen int) AuxColumn {
@@ -39,6 +40,24 @@ func (f *fakeAux) CompactSlot(idx int) AuxColumn {
 	copy(out.present[:idx], f.present[:idx])
 	copy(out.vals[idx:], f.vals[idx+1:])
 	copy(out.present[idx:], f.present[idx+1:])
+	return out
+}
+
+// Compact reclaims backing slack. fakeAux records compactCalls so a test can
+// assert adjlist drives the hook; it returns a re-allocated exact-length copy
+// when its backing carries slack, else the receiver unchanged.
+func (f *fakeAux) Compact() AuxColumn {
+	f.compactCalls++
+	if cap(f.vals) == len(f.vals) && cap(f.present) == len(f.present) {
+		return f
+	}
+	out := &fakeAux{
+		vals:         make([]int, len(f.vals)),
+		present:      make([]bool, len(f.present)),
+		compactCalls: f.compactCalls,
+	}
+	copy(out.vals, f.vals)
+	copy(out.present, f.present)
 	return out
 }
 

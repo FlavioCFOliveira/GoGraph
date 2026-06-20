@@ -223,6 +223,17 @@ type AuxColumn interface {
 	// slots [idx,n-1) equal the receiver's [idx+1,n). idx is a valid index in
 	// [0,n) where n is the receiver's current length.
 	CompactSlot(idx int) AuxColumn
+
+	// Compact returns a column logically equal to the receiver but with its
+	// internal backing storage right-sized to the live contents, reclaiming any
+	// slack an amortised-growth build path left behind, or the receiver itself
+	// when it already holds no slack. It is the column analogue of
+	// [AdjList.Compact]'s topology-array trimming and is invoked from the same
+	// pass. An implementation whose representation is always exactly sized (no
+	// over-allocation) may return the receiver unchanged. The returned column
+	// must read identically to the receiver and is published the same lock-free
+	// way, so it must be a fresh immutable value when it differs.
+	Compact() AuxColumn
 }
 
 // New returns an empty AdjList configured by cfg.
@@ -1028,10 +1039,21 @@ func (a *AdjList[N, W]) compactShard(s *adjShard[W]) {
 // `handles == nil` / `labels == nil` is unaffected. Column alignment is
 // preserved: result.X[i] still corresponds to result.neighbours[i].
 func trimEntry[W any](e *adjEntry[W]) *adjEntry[W] {
+	// Right-size the opaque aux column too: an lpg sparse property column built by
+	// amortised-growth inserts can carry backing slack the topology arrays do not.
+	// Compact returns the receiver when it has no slack, so auxChanged is false in
+	// the common dense/exactly-sized case.
+	var auxTrimmed AuxColumn
+	auxChanged := false
+	if e.aux != nil {
+		auxTrimmed = e.aux.Compact()
+		auxChanged = auxTrimmed != e.aux
+	}
 	if cap(e.neighbours) == len(e.neighbours) &&
 		cap(e.weights) == len(e.weights) &&
 		(e.handles == nil || cap(e.handles) == len(e.handles)) &&
-		(e.labels == nil || cap(e.labels) == len(e.labels)) {
+		(e.labels == nil || cap(e.labels) == len(e.labels)) &&
+		!auxChanged {
 		return nil
 	}
 	n := len(e.neighbours)
@@ -1049,12 +1071,11 @@ func trimEntry[W any](e *adjEntry[W]) *adjEntry[W] {
 		ls = make([]uint32, len(e.labels))
 		copy(ls, e.labels)
 	}
-	// The opaque aux column has no adjlist-visible slack notion: lpg sizes it
-	// exactly to the neighbour count and it is immutable. Carry the pointer
-	// verbatim into the trimmed entry — a nil aux stays nil — so a graph that
-	// uses edge properties keeps its column unchanged while the topology arrays
-	// are right-sized.
-	return &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: e.aux}
+	// Carry the (possibly compacted) aux column into the trimmed entry — a nil aux
+	// stays nil — so a graph that uses edge properties keeps its column logically
+	// unchanged while both the topology arrays and the column backing are
+	// right-sized.
+	return &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: auxTrimmed}
 }
 
 // MaxNodeID returns one more than the largest [graph.NodeID] that has
