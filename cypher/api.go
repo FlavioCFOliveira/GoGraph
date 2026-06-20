@@ -6681,7 +6681,19 @@ func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Valu
 // needsWholeNode is true the variable falls back to full eager materialisation,
 // so correctness is never traded for the allocation win.
 type nodeScalarUse struct {
-	keys           map[string]struct{}
+	keys map[string]struct{}
+	// presenceKeys holds property keys read ONLY as the direct operand of an
+	// `IS NULL` / `IS NOT NULL` predicate and nowhere else in the expression.
+	// Such a key needs only a presence answer, not the value, so the
+	// relationship materialisation path (#1638) resolves it via
+	// lpg.Graph.EdgeHasProperty (a kind-gated storage presence check) and places
+	// a non-null placeholder under the key INSTEAD of fetching the value. A key
+	// that ALSO appears as a value use (comparison, function arg, arithmetic,
+	// bare `v.k`, …) is value-needed and is dropped from presenceKeys after the
+	// walk (the C1 invariant in [analyseNodeScalarUse]), so the two sets are
+	// always disjoint. presenceKeys is consulted only for relationship variables
+	// today; for node variables it is harmless (the node path ignores it).
+	presenceKeys   map[string]struct{}
 	needsLabels    bool
 	needsWholeNode bool
 }
@@ -6706,12 +6718,22 @@ type nodeScalarUse struct {
 // SET/DELETE value/target evaluators). It must never gate the materialisation
 // of a value that escapes into a result row, because a partially-filled node
 // value would serialise a truncated property map to the caller.
+//
+// Presence-only keys (#1638): a property read ONLY as the direct operand of an
+// `IS NULL` / `IS NOT NULL` predicate is recorded in presenceKeys rather than
+// keys, so the relationship path can answer it from a storage presence check
+// without materialising the value. The C1 invariant — a key that is also a
+// value use must be value-needed — is enforced after the walk by subtracting
+// keys from presenceKeys per variable, guaranteeing the two sets are disjoint.
+// This is safe in BOTH the predicate and the scalar-projection caller: the only
+// reader of the placeholder collapses it to IsNull(placeholder)==false, so only
+// the derived boolean ever escapes into a row, never the placeholder itself.
 func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bailout bool) {
 	uses = map[string]*nodeScalarUse{}
 	get := func(name string) *nodeScalarUse {
 		u, ok := uses[name]
 		if !ok {
-			u = &nodeScalarUse{keys: map[string]struct{}{}}
+			u = &nodeScalarUse{keys: map[string]struct{}{}, presenceKeys: map[string]struct{}{}}
 			uses[name] = u
 		}
 		return u
@@ -6766,6 +6788,23 @@ func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bai
 			walk(v.Left)
 			walk(v.Right)
 		case *ast.UnaryOp:
+			// Presence-only fast path (#1638): `v.k IS NULL` / `v.k IS NOT NULL`
+			// with a DIRECT property operand on a bound variable needs only a
+			// presence answer, not the value. Record it in presenceKeys and do
+			// NOT descend into the operand (which would record keys[k] as a value
+			// use). Any other operator, or any operand shape other than a direct
+			// v.k (a subscript v["k"], a nested expression, etc.), falls through
+			// to the ordinary value walk. The C1 reconciliation after the walk
+			// drops k from presenceKeys if it also appears as a value use, so a
+			// later `v.k > x` elsewhere in the predicate still forces the value.
+			if v.Operator == "IS NULL" || v.Operator == "IS NOT NULL" {
+				if p, ok := v.Operand.(*ast.Property); ok {
+					if rv, ok := p.Receiver.(*ast.Variable); ok {
+						get(rv.Name).presenceKeys[p.Key] = struct{}{}
+						return
+					}
+				}
+			}
 			walk(v.Operand)
 		case *ast.FunctionInvocation:
 			for _, a := range v.Args {
@@ -6794,6 +6833,21 @@ func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bai
 		}
 	}
 	walk(e)
+	// C1 reconciliation (#1638): a key recorded BOTH as a value use (keys) and a
+	// presence use (presenceKeys) is value-needed — e.g. `r.k IS NOT NULL AND
+	// r.k > x` reads k as both. Drop every such key from presenceKeys so the two
+	// sets are disjoint and the relationship path never substitutes a placeholder
+	// for a key whose actual value the expression also dereferences.
+	for _, u := range uses {
+		if len(u.presenceKeys) == 0 {
+			continue
+		}
+		for k := range u.presenceKeys {
+			if _, alsoValue := u.keys[k]; alsoValue {
+				delete(u.presenceKeys, k)
+			}
+		}
+	}
 	return uses, bailout
 }
 
@@ -7289,7 +7343,17 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 					continue
 				}
 				if meta, isEdge2 := bopts.edgeVarMeta[varName]; isEdge2 {
-					if rv, ok := buildRelationshipValueFromRow(row, meta, g, bopts); ok {
+					// Presence-only relationship keys (#1638): when scalarUse
+					// marks this edge variable's property reads as presence-only
+					// (r.k IS [NOT] NULL and no value use), pass the per-variable
+					// use so the value fetch can be replaced by a kind-gated
+					// EdgeHasProperty presence check. nil for every non-gated
+					// caller, which keeps the build byte-identical (C5).
+					var relUse *nodeScalarUse
+					if scalarUse != nil {
+						relUse = scalarUse[varName]
+					}
+					if rv, ok := buildRelationshipValueFromRow(row, meta, g, bopts, relUse); ok {
 						ctx[varName] = rv
 						continue
 					}
@@ -7400,7 +7464,20 @@ func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string,
 // when both endpoints resolve. Returns (zero, false) when the row does not
 // contain the expected columns or when the column types are not
 // IntegerValue.
-func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.RelationshipValue, bool) {
+//
+// relUse is the per-variable [nodeScalarUse] for this relationship variable in
+// the gated (non-escaping) scalarUse path, or nil for every other caller. When
+// relUse marks the edge's property reads as PRESENCE-ONLY (#1638) — at least one
+// presenceKey and NO value key — the full EdgeProperties materialisation is
+// skipped: each presence key is resolved by a kind-gated
+// [lpg.Graph.EdgeHasProperty] check and, when present, stamped into the property
+// map with a non-null PLACEHOLDER value. The placeholder only ever feeds an
+// IS NULL / IS NOT NULL evaluation (the sole reader, by the presence-eligibility
+// invariant), which collapses it to a boolean, so it never escapes into a result
+// row. With relUse nil — or carrying any value key — the property map is built
+// in full from EdgeProperties exactly as before, so non-gated callers are
+// byte-identical (C5).
+func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.RelationshipValue, bool) {
 	if meta.edgeCol >= len(row) {
 		return expr.RelationshipValue{}, false
 	}
@@ -7444,7 +7521,6 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 				stKey, enKey = dstKey, srcKey
 			}
 			ets := g.EdgeLabels(stKey, enKey)
-			rawEP := g.EdgeProperties(stKey, enKey)
 			// Per-instance label override: when the CSR slot at
 			// edgeIDVal corresponds to a specific parallel CREATE
 			// (multigraph mode), narrow the edge's type to that
@@ -7484,10 +7560,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 			if len(ets) > 0 {
 				edgeType = pickEdgeType(ets, meta.acceptedTypes)
 			}
-			edgeProps = make(expr.MapValue, len(rawEP))
-			for k, pv := range rawEP {
-				edgeProps[k] = lpgPropToExpr(pv)
-			}
+			edgeProps = buildEdgeProps(g, stKey, enKey, relUse)
 		}
 	}
 	return expr.RelationshipValue{
@@ -7497,6 +7570,50 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 		Type:       edgeType,
 		Properties: edgeProps,
 	}, true
+}
+
+// relPresencePlaceholder is the non-null sentinel stamped under a presence-only
+// relationship property key (#1638). Its only requirement is that
+// [expr.IsNull] reports false for it and that it is a value lpgPropToExpr could
+// never produce as null, so an IS NULL / IS NOT NULL predicate over the key
+// yields the same boolean the real value would. It is never read as a value (the
+// presence-eligibility invariant guarantees the only reader is the IS NULL /
+// IS NOT NULL operator) and never escapes into a result row.
+var relPresencePlaceholder = expr.BoolValue(true)
+
+// buildEdgeProps materialises the property map for a relationship value over the
+// post-direction-probe storage endpoints (stKey -> enKey, the C10 endpoints).
+//
+// When relUse marks the edge's property reads as PRESENCE-ONLY — at least one
+// presenceKey and no value key — it skips the full [lpg.Graph.EdgeProperties]
+// fetch and instead stamps [relPresencePlaceholder] under each presence key the
+// kind-gated [lpg.Graph.EdgeHasProperty] reports present, leaving absent keys
+// out (so IS NULL sees them as null). This is the allocation win: a relationship
+// bound only to answer `r.k IS [NOT] NULL` never boxes its real property values.
+//
+// In every other case — relUse nil, or carrying any value key — it returns the
+// full coalesced property map exactly as the original inline build did, so
+// non-gated callers stay byte-identical (C5). C9 holds because both
+// EdgeProperties and EdgeHasProperty expose the same per-pair coalesced view.
+func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, relUse *nodeScalarUse) expr.MapValue {
+	if relUse != nil && len(relUse.presenceKeys) > 0 && len(relUse.keys) == 0 {
+		var out expr.MapValue
+		for k := range relUse.presenceKeys {
+			if g.EdgeHasProperty(stKey, enKey, k) {
+				if out == nil {
+					out = make(expr.MapValue, len(relUse.presenceKeys))
+				}
+				out[k] = relPresencePlaceholder
+			}
+		}
+		return out
+	}
+	rawEP := g.EdgeProperties(stKey, enKey)
+	edgeProps := make(expr.MapValue, len(rawEP))
+	for k, pv := range rawEP {
+		edgeProps[k] = lpgPropToExpr(pv)
+	}
+	return edgeProps
 }
 
 // edgeHandleAtFwdPos returns the stable per-edge handle stored at forward

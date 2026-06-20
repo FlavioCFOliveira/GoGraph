@@ -519,6 +519,49 @@ func (c *edgePropCols) keyPresentAt(keyID PropertyKeyID, slot int) bool {
 	return false
 }
 
+// slotKind returns the storage kind of the column carrying keyID on the given
+// slot, and whether keyID is present there at all. It reads only the column's
+// kind tag plus the validity bitmap — never the value cell — so it allocates
+// nothing (no [edgePropColumn.slotValue] string/box build). Because
+// [edgePropCols.set] clears keyID on every column of a DIFFERENT kind on a slot,
+// a key is present in at most one column per slot, so the kind returned is
+// unambiguous. Used by [Graph.EdgeHasProperty] to gate per-pair presence on the
+// coalesced winner's kind. A second present column for the same key on the same
+// slot cannot occur, but should it ever (a representation bug) the first match
+// wins, mirroring the column-order traversal of [edgePropCols.get].
+func (c *edgePropCols) slotKind(keyID PropertyKeyID, slot int) (PropertyKind, bool) {
+	if c == nil {
+		return 0, false
+	}
+	for i := range c.cols {
+		if c.cols[i].key == keyID && c.cols[i].slotValid(slot) {
+			return c.cols[i].kind, true
+		}
+	}
+	return 0, false
+}
+
+// kindMapsToNonNullCypher reports whether a property stored under the given
+// columnar storage kind reads back, through the Cypher property-materialisation
+// path, as a NON-NULL value. It is the single congruence table behind
+// [Graph.EdgeHasProperty]: it must agree exactly with cypher.lpgPropToExpr,
+// which maps {PropString, PropInt64, PropFloat64, PropBool, PropList} — and the
+// internal dateKind column, whose tagged string round-trips to a native Cypher
+// Date — to non-null values, and every other kind (PropTime, PropBytes) to Null.
+//
+// Keeping this gate kind-driven (rather than building the value and testing it)
+// is what makes `r.k IS NOT NULL` answerable from storage metadata alone: a
+// present-but-null-mapping property (e.g. a stored PropTime) reads as Null
+// through Cypher and so must report ABSENT here, exactly as the value path would.
+func kindMapsToNonNullCypher(kind PropertyKind) bool {
+	switch kind {
+	case PropString, PropInt64, PropFloat64, PropBool, PropList, dateKind:
+		return true
+	default: // PropTime, PropBytes, and any future null-mapping kind.
+		return false
+	}
+}
+
 // clone returns a shallow copy of the block whose cols SLICE is fresh (so the
 // caller may replace an element) but whose column elements still alias the
 // receiver's immutable backings until cloneCol is called on the one being

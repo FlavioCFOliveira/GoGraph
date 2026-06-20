@@ -118,6 +118,69 @@ func (g *Graph[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bo
 	return out, found
 }
 
+// EdgeHasProperty reports whether the directed edge (src, dst) carries a value
+// under key that would materialise to a NON-NULL Cypher value — without
+// building that value. It is the storage-presence fast path behind a bound
+// relationship's `r.key IS NOT NULL` / `IS NULL` predicate: the caller needs
+// only the boolean presence, so fetching and boxing the value (as
+// [Graph.GetEdgeProperty] / [Graph.EdgeProperties] would) is pure waste.
+//
+// Congruence with the value path is BY CONSTRUCTION, on two axes:
+//
+//   - Per-pair coalescing — it folds parallel edges exactly as
+//     [Graph.EdgeProperties] does: the LATEST dst-matching adjacency slot that
+//     carries key wins. The returned answer therefore reflects the same single
+//     coalesced value the Cypher evaluator would observe via EdgeProperties,
+//     never an earlier shadowed write.
+//   - Kind gating — the winning slot's storage kind is tested with
+//     [kindMapsToNonNullCypher], which mirrors cypher.lpgPropToExpr's
+//     nullability table. A present-but-null-mapping property (a stored PropTime
+//     or PropBytes) reads as Null through Cypher, so this reports false for it,
+//     exactly as `r.key IS NOT NULL` would evaluate to false.
+//
+// The scan reads only validity bits and per-column kind tags (no value cell), so
+// it allocates nothing. Returns false when either endpoint or key is unknown, or
+// when no dst-matching slot carries a non-null-mapping value for key.
+//
+// Concurrency-safe under the same lock-free contract as [Graph.GetEdgeProperty]:
+// it reads an immutable published columnar block and bounds its scan by the
+// shorter of the block and the neighbours snapshot, so a concurrent copy-on-write
+// writer is observed atomically (old block or new, never half-built).
+func (g *Graph[N, W]) EdgeHasProperty(src, dst N, key string) bool {
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return false
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return false
+	}
+	keyID, ok := g.pkeys.Lookup(key)
+	if !ok {
+		return false
+	}
+	block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
+	if block == nil {
+		return false
+	}
+	nbs, _ := g.adj.LoadEntry(srcID)
+	n := minInt(len(nbs), block.lenOrZero())
+	found := false
+	var winning PropertyKind
+	for i := 0; i < n; i++ {
+		if nbs[i] != dstID {
+			continue
+		}
+		if k, present := block.slotKind(keyID, i); present {
+			winning, found = k, true // latest dst-matching slot wins
+		}
+	}
+	if !found {
+		return false
+	}
+	return kindMapsToNonNullCypher(winning)
+}
+
 // DelEdgeProperty removes the named property from the directed edge
 // (src, dst). No-op if absent. The key is cleared on every dst-matching slot so
 // the per-pair view no longer reports it.
