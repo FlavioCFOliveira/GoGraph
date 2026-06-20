@@ -1,0 +1,707 @@
+package lpg
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"testing"
+)
+
+// TestEdgePropCols_PerKindRoundTrip exercises set/get for each de-boxed kind on
+// a single-slot block, asserting the value reads back with the exact kind and
+// payload.
+func TestEdgePropCols_PerKindRoundTrip(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		val  PropertyValue
+		eq   func(PropertyValue) bool
+	}{
+		{"int64", Int64Value(2020), func(v PropertyValue) bool { i, ok := v.Int64(); return ok && i == 2020 }},
+		{"int64-zero", Int64Value(0), func(v PropertyValue) bool { i, ok := v.Int64(); return ok && i == 0 }},
+		{"float64", Float64Value(0.5), func(v PropertyValue) bool { f, ok := v.Float64(); return ok && f == 0.5 }},
+		{"float64-nan", Float64Value(math.NaN()), func(v PropertyValue) bool { f, ok := v.Float64(); return ok && math.IsNaN(f) }},
+		{"bool-true", BoolValue(true), func(v PropertyValue) bool { b, ok := v.Bool(); return ok && b }},
+		{"bool-false", BoolValue(false), func(v PropertyValue) bool { b, ok := v.Bool(); return ok && !b }},
+		{"string", StringValue("hello"), func(v PropertyValue) bool { s, ok := v.String(); return ok && s == "hello" }},
+		{"string-empty", StringValue(""), func(v PropertyValue) bool { s, ok := v.String(); return ok && s == "" }},
+		{"bytes", BytesValue([]byte{1, 2, 3}), func(v PropertyValue) bool { b, ok := v.Bytes(); return ok && len(b) == 3 && b[2] == 3 }},
+		{"list", ListValue([]PropertyValue{Int64Value(1), StringValue("x")}), func(v PropertyValue) bool {
+			l, ok := v.List()
+			if !ok || len(l) != 2 {
+				return false
+			}
+			i, _ := l[0].Int64()
+			s, _ := l[1].String()
+			return i == 1 && s == "x"
+		}},
+		{"date", StringValue("\x012020-01-15"), func(v PropertyValue) bool { s, ok := v.String(); return ok && s == "\x012020-01-15" }},
+	}
+	key := PropertyKeyID(7)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var block *edgePropCols
+			block = block.set(key, 0, 1, tc.val)
+			got, ok := block.get(key, 0)
+			if !ok {
+				t.Fatalf("get after set: not present")
+			}
+			if !tc.eq(got) {
+				t.Fatalf("round-trip mismatch: got kind=%d v=%v", got.Kind(), got)
+			}
+			// A different key on the same slot must be absent.
+			if _, ok := block.get(PropertyKeyID(99), 0); ok {
+				t.Fatalf("unrelated key reported present")
+			}
+		})
+	}
+}
+
+// TestEdgePropCols_DateFoldsToInt32 asserts that an SOH-tagged Date string is
+// folded into the de-boxed int32 epoch-day column (not the boxed/string column)
+// and reads back as the identical tagged string.
+func TestEdgePropCols_DateFoldsToInt32(t *testing.T) {
+	t.Parallel()
+	key := PropertyKeyID(1)
+	var block *edgePropCols
+	block = block.set(key, 0, 1, StringValue("\x012020-01-15"))
+
+	if len(block.cols) != 1 {
+		t.Fatalf("expected exactly 1 column, got %d", len(block.cols))
+	}
+	col := block.cols[0]
+	if col.kind != dateKind {
+		t.Fatalf("date value stored under kind %d, want dateKind(%d)", col.kind, dateKind)
+	}
+	if col.days == nil {
+		t.Fatalf("date column has no int32 epoch-day backing")
+	}
+	if col.i64 != nil || col.str != nil || col.boxed != nil {
+		t.Fatalf("date column unexpectedly allocated a non-date backing")
+	}
+	// 2020-01-15 is 18276 days after the Unix epoch.
+	if got := col.days[0]; got != 18276 {
+		t.Fatalf("epoch-day = %d, want 18276", got)
+	}
+	v, ok := block.get(key, 0)
+	if !ok {
+		t.Fatalf("date not present")
+	}
+	if s, _ := v.String(); s != "\x012020-01-15" {
+		t.Fatalf("date round-trip = %q, want SOH+2020-01-15", s)
+	}
+}
+
+// TestEdgePropCols_NonDateStringStaysString asserts that a plain string (or a
+// tagged non-Date temporal) does NOT fold into the date column.
+func TestEdgePropCols_NonDateStringStaysString(t *testing.T) {
+	t.Parallel()
+	key := PropertyKeyID(1)
+	for _, s := range []string{
+		"2020-01-15",         // no SOH tag → plain string
+		"\x012020-13-01",     // tagged but invalid month → not a date
+		"\x012020-1-1",       // tagged but non-canonical → not a date
+		"\x02localdatetime",  // different temporal tag → not a date
+		"\x01not-a-date",     // tagged garbage
+		"\x0199999999-01-01", // year overflows int32 epoch-day
+	} {
+		var block *edgePropCols
+		block = block.set(key, 0, 1, StringValue(s))
+		col := block.cols[0]
+		if col.kind == dateKind {
+			t.Fatalf("string %q wrongly folded into date column", s)
+		}
+		if col.kind != PropString {
+			t.Fatalf("string %q stored under kind %d, want PropString", s, col.kind)
+		}
+		v, _ := block.get(key, 0)
+		if got, _ := v.String(); got != s {
+			t.Fatalf("string %q round-trip = %q", s, got)
+		}
+	}
+}
+
+// TestEdgePropCols_ValidityLifecycle exercises set → get(present) → del →
+// get(absent): the IS NULL / IS NOT NULL contract on a single key.
+func TestEdgePropCols_ValidityLifecycle(t *testing.T) {
+	t.Parallel()
+	key := PropertyKeyID(3)
+	var block *edgePropCols
+	block = block.set(key, 0, 1, Int64Value(42))
+
+	if !block.keyPresentAt(key, 0) {
+		t.Fatalf("key not present after set")
+	}
+	if _, ok := block.get(key, 0); !ok {
+		t.Fatalf("value not present after set")
+	}
+
+	next, changed := block.del(key, 0)
+	if !changed {
+		t.Fatalf("del reported no change")
+	}
+	block = next
+	if block.keyPresentAt(key, 0) {
+		t.Fatalf("key still present after del")
+	}
+	if _, ok := block.get(key, 0); ok {
+		t.Fatalf("value still present after del")
+	}
+	// Deleting again is a no-op.
+	if _, changed := block.del(key, 0); changed {
+		t.Fatalf("double del reported a change")
+	}
+}
+
+// TestEdgePropCols_ZeroAndNaNAreQueryable asserts that 0 (int64) and NaN
+// (float64) are NOT confused with absence: they are present values, and only an
+// explicit del makes them absent. This is the reason a sentinel cannot replace
+// the validity bitmap.
+func TestEdgePropCols_ZeroAndNaNAreQueryable(t *testing.T) {
+	t.Parallel()
+	ki, kf := PropertyKeyID(1), PropertyKeyID(2)
+	var block *edgePropCols
+	block = block.set(ki, 0, 1, Int64Value(0))
+	block = block.set(kf, 0, 1, Float64Value(math.NaN()))
+
+	if vi, ok := block.get(ki, 0); !ok {
+		t.Fatalf("int64 zero reads as absent")
+	} else if i, _ := vi.Int64(); i != 0 {
+		t.Fatalf("int64 zero = %d", i)
+	}
+	if vf, ok := block.get(kf, 0); !ok {
+		t.Fatalf("float64 NaN reads as absent")
+	} else if f, _ := vf.Float64(); !math.IsNaN(f) {
+		t.Fatalf("float64 NaN = %v", f)
+	}
+}
+
+// TestEdgePropCols_GrowSlotAbsent asserts the highest-risk invariant: a slot
+// created by GrowSlot is ABSENT even when the underlying backing array reuses a
+// cell that previously held a value (validity drift). We force a dirty cell by
+// setting a value, deleting it, and growing — the new slot must read absent.
+func TestEdgePropCols_GrowSlotAbsent(t *testing.T) {
+	t.Parallel()
+	key := PropertyKeyID(5)
+
+	// Start with a 1-slot block carrying a value, then grow to 3 slots.
+	var block *edgePropCols
+	block = block.set(key, 0, 1, Int64Value(777))
+	grown := block.GrowSlot(1).(*edgePropCols) // now length 2; slot 1 absent
+	grown = grown.GrowSlot(2).(*edgePropCols)  // now length 3; slots 1,2 absent
+
+	if v, ok := grown.get(key, 0); !ok {
+		t.Fatalf("slot 0 lost its value after grow")
+	} else if i, _ := v.Int64(); i != 777 {
+		t.Fatalf("slot 0 value = %d, want 777", i)
+	}
+	for _, slot := range []int{1, 2} {
+		if _, ok := grown.get(key, slot); ok {
+			t.Fatalf("freshly-grown slot %d reads as present (validity drift)", slot)
+		}
+		if grown.keyPresentAt(key, slot) {
+			t.Fatalf("freshly-grown slot %d has its validity bit set", slot)
+		}
+	}
+}
+
+// TestEdgePropCols_CompactPreservesBinding asserts CompactSlot keeps the
+// positional binding: removing a middle slot shifts the survivors and keeps
+// every survivor's value.
+func TestEdgePropCols_CompactPreservesBinding(t *testing.T) {
+	t.Parallel()
+	key := PropertyKeyID(1)
+	// Build a length-4 block with distinct values at slots 0..3.
+	var block *edgePropCols
+	block = block.set(key, 0, 4, Int64Value(10))
+	block = block.set(key, 1, 4, Int64Value(11))
+	block = block.set(key, 2, 4, Int64Value(12))
+	block = block.set(key, 3, 4, Int64Value(13))
+
+	// Excise slot 1 (value 11). Survivors: [10, 12, 13].
+	out := block.CompactSlot(1).(*edgePropCols)
+	if out.length != 3 {
+		t.Fatalf("compacted length = %d, want 3", out.length)
+	}
+	want := []int64{10, 12, 13}
+	for i, w := range want {
+		v, ok := out.get(key, i)
+		if !ok {
+			t.Fatalf("slot %d absent after compact", i)
+		}
+		if g, _ := v.Int64(); g != w {
+			t.Fatalf("slot %d = %d, want %d", i, g, w)
+		}
+	}
+}
+
+// TestSpliceBits exercises the validity-bitmap compaction at the word-boundary
+// values flagged by the design review (n in {1,63,64,65,127,128,129}), against
+// an unpacked []bool oracle, and asserts no stale high bit survives.
+func TestSpliceBits(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(0xB17B17))
+	ns := []int{1, 2, 63, 64, 65, 127, 128, 129, 200}
+	for _, n := range ns {
+		// Random bit pattern of n bits.
+		src := make([]uint64, words(n))
+		ref := make([]bool, n)
+		for i := 0; i < n; i++ {
+			if rng.Intn(2) == 1 {
+				src[i>>6] |= 1 << (uint(i) & 63)
+				ref[i] = true
+			}
+		}
+		for idx := 0; idx < n; idx++ {
+			got := spliceBits(src, idx, n)
+			// Oracle: splice the unpacked []bool.
+			wantBits := make([]bool, 0, n-1)
+			wantBits = append(wantBits, ref[:idx]...)
+			wantBits = append(wantBits, ref[idx+1:]...)
+			// Compare bit-for-bit.
+			for j := 0; j < n-1; j++ {
+				gb := j>>6 < len(got) && got[j>>6]&(1<<(uint(j)&63)) != 0
+				if gb != wantBits[j] {
+					t.Fatalf("n=%d idx=%d bit %d: got %v want %v", n, idx, j, gb, wantBits[j])
+				}
+			}
+			// No stale high bits: every bit at index >= n-1 must be zero.
+			for w := 0; w < len(got); w++ {
+				lo := w << 6
+				for b := 0; b < 64; b++ {
+					bitIdx := lo + b
+					if bitIdx < n-1 {
+						continue
+					}
+					if got[w]&(1<<(uint(b)&63)) != 0 {
+						t.Fatalf("n=%d idx=%d: stale high bit at %d", n, idx, bitIdx)
+					}
+				}
+			}
+		}
+	}
+}
+
+// edgePropOracle is a reference model of one source node's per-slot edge
+// properties used by the property-based test: a map from slot index to a map of
+// keyID→value. It is deliberately a different representation from the columnar
+// block so a shared bug cannot mask a divergence.
+type edgePropOracle struct {
+	slots []map[PropertyKeyID]PropertyValue
+}
+
+func (o *edgePropOracle) grow() {
+	o.slots = append(o.slots, nil)
+}
+
+func (o *edgePropOracle) compact(idx int) {
+	o.slots = append(o.slots[:idx], o.slots[idx+1:]...)
+}
+
+func (o *edgePropOracle) set(slot int, key PropertyKeyID, v PropertyValue) {
+	if o.slots[slot] == nil {
+		o.slots[slot] = make(map[PropertyKeyID]PropertyValue)
+	}
+	o.slots[slot][key] = v
+}
+
+func (o *edgePropOracle) del(slot int, key PropertyKeyID) {
+	if o.slots[slot] != nil {
+		delete(o.slots[slot], key)
+	}
+}
+
+// TestEdgePropCols_PropertyBasedOracle drives a randomized add/remove/re-add
+// sequence against the columnar block and an independent oracle, asserting after
+// every operation that (1) every (slot,key) value matches and (2) the per-slot
+// CARDINALITY matches (number of present keys per slot). The cardinality clause
+// is load-bearing: it catches a phantom key whose stale value coincidentally
+// equals a real one — exactly the validity-drift bug. The generation strategy
+// (few keys, grow-to-cap then oscillate, grow-without-set, distinctive
+// sentinels) maximizes dirty-cell reuse, per the graph-theory review.
+func TestEdgePropCols_PropertyBasedOracle(t *testing.T) {
+	t.Parallel()
+	for seed := int64(1); seed <= 12; seed++ {
+		seed := seed
+		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
+			t.Parallel()
+			runOracle(t, seed)
+		})
+	}
+}
+
+func runOracle(t *testing.T, seed int64) {
+	t.Helper()
+	rng := rand.New(rand.NewSource(seed))
+	keys := []PropertyKeyID{1, 2, 3} // few keys → high reuse pressure
+	values := func() PropertyValue {
+		switch rng.Intn(5) {
+		case 0:
+			return Int64Value(int64(rng.Intn(7))) // small range incl 0 → coincidental equality
+		case 1:
+			return Float64Value(float64(rng.Intn(3)))
+		case 2:
+			return BoolValue(rng.Intn(2) == 1)
+		case 3:
+			return StringValue(fmt.Sprintf("s%d", rng.Intn(4)))
+		default:
+			// Tagged date, small day range.
+			return StringValue(epochDayToString(int32(18000 + rng.Intn(5))))
+		}
+	}
+
+	var block *edgePropCols
+	oracle := &edgePropOracle{}
+	const cap = 6 // oscillate just under this
+
+	ops := 400
+	for step := 0; step < ops; step++ {
+		n := oracle.length()
+		switch {
+		case n == 0 || (n < cap && rng.Intn(3) == 0):
+			// GROW (often without a subsequent set → exposes validity drift).
+			block = growBlock(block, n)
+			oracle.grow()
+		case n > 1 && rng.Intn(3) == 0:
+			// COMPACT a random slot (front / middle / back all reachable).
+			idx := rng.Intn(n)
+			block = block.CompactSlot(idx).(*edgePropCols)
+			oracle.compact(idx)
+		case rng.Intn(2) == 0:
+			// SET on a random slot/key.
+			slot := rng.Intn(n)
+			key := keys[rng.Intn(len(keys))]
+			v := values()
+			block = block.set(key, slot, n, v)
+			oracle.set(slot, key, normalizeForOracle(v))
+		default:
+			// DEL on a random slot/key.
+			slot := rng.Intn(n)
+			key := keys[rng.Intn(len(keys))]
+			next, _ := block.del(key, slot)
+			block = next
+			oracle.del(slot, key)
+		}
+		assertBlockMatchesOracle(t, seed, step, block, oracle, keys)
+	}
+}
+
+func (o *edgePropOracle) length() int { return len(o.slots) }
+
+// growBlock appends one slot to the block, treating nil as empty. It mirrors the
+// adjlist append: GrowSlot when a block exists, otherwise a length-1 empty block.
+func growBlock(block *edgePropCols, oldLen int) *edgePropCols {
+	if block == nil {
+		return &edgePropCols{length: oldLen + 1}
+	}
+	return block.GrowSlot(oldLen).(*edgePropCols)
+}
+
+// normalizeForOracle mirrors the column's date-folding round-trip: a tagged
+// Date string round-trips to itself, so the oracle stores the same value. (No
+// transformation is needed because the column reconstitutes the identical
+// string; this is here for clarity and future-proofing.)
+func normalizeForOracle(v PropertyValue) PropertyValue { return v }
+
+func assertBlockMatchesOracle(t *testing.T, seed int64, step int, block *edgePropCols, oracle *edgePropOracle, keys []PropertyKeyID) {
+	t.Helper()
+	if block.lenOrZero() != oracle.length() {
+		t.Fatalf("seed=%d step=%d: block length %d != oracle %d", seed, step, block.lenOrZero(), oracle.length())
+	}
+	for slot := 0; slot < oracle.length(); slot++ {
+		// Value match for every key.
+		presentCount := 0
+		for _, key := range keys {
+			wantV, wantOK := oracleGet(oracle, slot, key)
+			gotV, gotOK := block.get(key, slot)
+			if gotOK != wantOK {
+				t.Fatalf("seed=%d step=%d slot=%d key=%d: presence got=%v want=%v",
+					seed, step, slot, key, gotOK, wantOK)
+			}
+			if wantOK {
+				presentCount++
+				if !valuesEqual(gotV, wantV) {
+					t.Fatalf("seed=%d step=%d slot=%d key=%d: value got=%v want=%v",
+						seed, step, slot, key, gotV, wantV)
+				}
+			}
+		}
+		// CARDINALITY clause: the number of present keys the block reports on the
+		// slot must equal the oracle's. This is the clause that catches a phantom
+		// key whose stale value happens to equal a real one.
+		blockCount := 0
+		block.forEachAt(slot, func(_ PropertyKeyID, _ PropertyValue) { blockCount++ })
+		if blockCount != presentCount {
+			t.Fatalf("seed=%d step=%d slot=%d: block cardinality %d != oracle %d (phantom key)",
+				seed, step, slot, blockCount, presentCount)
+		}
+	}
+}
+
+func oracleGet(o *edgePropOracle, slot int, key PropertyKeyID) (PropertyValue, bool) {
+	if o.slots[slot] == nil {
+		return PropertyValue{}, false
+	}
+	v, ok := o.slots[slot][key]
+	return v, ok
+}
+
+// valuesEqual compares two PropertyValues for kind + payload equality (the
+// "value identity" the durability review demands, not mere presence).
+func valuesEqual(a, b PropertyValue) bool {
+	if a.Kind() != b.Kind() {
+		return false
+	}
+	switch a.Kind() {
+	case PropInt64:
+		ai, _ := a.Int64()
+		bi, _ := b.Int64()
+		return ai == bi
+	case PropFloat64:
+		af, _ := a.Float64()
+		bf, _ := b.Float64()
+		return af == bf || (math.IsNaN(af) && math.IsNaN(bf))
+	case PropBool:
+		ab, _ := a.Bool()
+		bb, _ := b.Bool()
+		return ab == bb
+	case PropString:
+		as, _ := a.String()
+		bs, _ := b.String()
+		return as == bs
+	case PropBytes:
+		ab, _ := a.Bytes()
+		bb, _ := b.Bytes()
+		if len(ab) != len(bb) {
+			return false
+		}
+		for i := range ab {
+			if ab[i] != bb[i] {
+				return false
+			}
+		}
+		return true
+	case PropList:
+		al, _ := a.List()
+		bl, _ := b.List()
+		if len(al) != len(bl) {
+			return false
+		}
+		for i := range al {
+			if !valuesEqual(al[i], bl[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// findCol returns the column carrying key in block, failing the test when no
+// such column exists. It is the white-box accessor the popcount test uses to
+// reach the storage primitive directly.
+func findCol(t *testing.T, block *edgePropCols, key PropertyKeyID) *edgePropColumn {
+	t.Helper()
+	for i := range block.cols {
+		if block.cols[i].key == key {
+			return &block.cols[i]
+		}
+	}
+	t.Fatalf("no column for key %d", key)
+	return nil
+}
+
+// poisonValues overwrites every value cell of the column with a distinctive
+// garbage payload WITHOUT touching the validity bitmap. popcountValid must be
+// blind to this: it counts presence from the bitmap (or length when dense), so a
+// poisoned value can never change the count. Any divergence after poisoning
+// proves the popcount illegally consulted a value cell.
+func poisonValues(col *edgePropColumn) {
+	for i := 0; i < col.length; i++ {
+		switch col.kind {
+		case PropInt64:
+			col.i64[i] = math.MaxInt64
+		case PropFloat64:
+			col.f64[i] = math.NaN()
+		case PropBool:
+			col.boolBits[i>>6] = ^uint64(0)
+		case dateKind:
+			col.days[i] = math.MaxInt32
+		case PropString:
+			col.str[i] = "POISON"
+		default:
+			col.boxed[i] = StringValue("POISON")
+		}
+	}
+}
+
+// TestEdgePropCols_PopcountValid asserts the storage-layer IS NOT NULL primitive
+// counts present slots from the validity bitmap alone, across the three states
+// #1638 names — dense (validity-omitted), bitmap-present, and post-delete /
+// post-compaction — and that it NEVER touches a value cell (proven by poisoning
+// every value after the validity state is fixed and re-asserting the count).
+func TestEdgePropCols_PopcountValid(t *testing.T) {
+	t.Parallel()
+
+	t.Run("dense-omitted-validity", func(t *testing.T) {
+		t.Parallel()
+		// A length-1 column with its single slot present is the dense case: no
+		// validity bitmap is materialised, and popcount returns the length.
+		key := PropertyKeyID(1)
+		var block *edgePropCols
+		block = block.set(key, 0, 1, Int64Value(0)) // value 0 is a real present value
+		col := findCol(t, block, key)
+		if col.valid != nil {
+			t.Fatalf("length-1 present column unexpectedly carries a validity bitmap")
+		}
+		if got := col.popcountValid(); got != 1 {
+			t.Fatalf("dense popcount = %d, want 1", got)
+		}
+		// Poison the (single) value cell: popcount must stay 1 because the dense
+		// branch returns length and never reads i64.
+		poisonValues(col)
+		if got := col.popcountValid(); got != 1 {
+			t.Fatalf("dense popcount after poison = %d, want 1", got)
+		}
+	})
+
+	t.Run("bitmap-present-partial", func(t *testing.T) {
+		t.Parallel()
+		// A multi-slot column with only some slots present carries a bitmap; the
+		// popcount must equal the number of set bits, independent of the values.
+		key := PropertyKeyID(2)
+		var block *edgePropCols
+		// Length-5 block; set slots 0, 2, 4 only (slots 1, 3 stay absent).
+		for _, slot := range []int{0, 2, 4} {
+			block = block.set(key, slot, 5, Int64Value(int64(slot)))
+		}
+		col := findCol(t, block, key)
+		if col.valid == nil {
+			t.Fatalf("partial column must carry a validity bitmap")
+		}
+		if got := col.popcountValid(); got != 3 {
+			t.Fatalf("bitmap popcount = %d, want 3", got)
+		}
+		// Poison every value cell (including the absent slots): popcount must stay
+		// 3 because it reads only the bitmap.
+		poisonValues(col)
+		if got := col.popcountValid(); got != 3 {
+			t.Fatalf("bitmap popcount after poison = %d, want 3", got)
+		}
+	})
+
+	t.Run("post-delete", func(t *testing.T) {
+		t.Parallel()
+		// Start fully present (5/5), delete two slots, expect popcount 3.
+		key := PropertyKeyID(3)
+		var block *edgePropCols
+		for slot := 0; slot < 5; slot++ {
+			block = block.set(key, slot, 5, Int64Value(int64(slot)))
+		}
+		if got := findCol(t, block, key).popcountValid(); got != 5 {
+			t.Fatalf("popcount before delete = %d, want 5", got)
+		}
+		for _, slot := range []int{1, 3} {
+			next, changed := block.del(key, slot)
+			if !changed {
+				t.Fatalf("del(slot=%d) reported no change", slot)
+			}
+			block = next
+		}
+		col := findCol(t, block, key)
+		if got := col.popcountValid(); got != 3 {
+			t.Fatalf("popcount after delete = %d, want 3", got)
+		}
+		poisonValues(col)
+		if got := col.popcountValid(); got != 3 {
+			t.Fatalf("popcount after delete+poison = %d, want 3", got)
+		}
+	})
+
+	t.Run("post-compaction", func(t *testing.T) {
+		t.Parallel()
+		// 4 present slots, compact a present slot, expect popcount 3; the validity
+		// bitmap must compact under the same index transform as the values.
+		key := PropertyKeyID(4)
+		var block *edgePropCols
+		for slot := 0; slot < 4; slot++ {
+			block = block.set(key, slot, 4, Int64Value(int64(10+slot)))
+		}
+		out := block.CompactSlot(1).(*edgePropCols) // excise a present slot
+		col := findCol(t, out, key)
+		if col.length != 3 {
+			t.Fatalf("compacted column length = %d, want 3", col.length)
+		}
+		if got := col.popcountValid(); got != 3 {
+			t.Fatalf("popcount after compaction = %d, want 3", got)
+		}
+		poisonValues(col)
+		if got := col.popcountValid(); got != 3 {
+			t.Fatalf("popcount after compaction+poison = %d, want 3", got)
+		}
+	})
+
+	t.Run("grow-then-compact-mixed", func(t *testing.T) {
+		t.Parallel()
+		// Grow introduces an absent trailing slot; popcount must ignore it, then a
+		// compaction that removes a present slot leaves the absent-slot count intact.
+		key := PropertyKeyID(5)
+		var block *edgePropCols
+		block = block.set(key, 0, 2, Int64Value(100)) // slot 0 present, slot 1 absent
+		block = block.GrowSlot(2).(*edgePropCols)     // length 3, slot 2 absent
+		col := findCol(t, block, key)
+		if got := col.popcountValid(); got != 1 {
+			t.Fatalf("popcount after grow = %d, want 1 (only slot 0 present)", got)
+		}
+		// Compact the present slot 0; nothing present remains, so the whole column
+		// is dropped (dropEmptyColumns is not run by CompactSlot, but the bitmap
+		// must report 0 present slots).
+		out := block.CompactSlot(0).(*edgePropCols)
+		// The column survives compaction (CompactSlot does not prune empties); its
+		// popcount must now be 0.
+		for i := range out.cols {
+			if out.cols[i].key == key {
+				if got := out.cols[i].popcountValid(); got != 0 {
+					t.Fatalf("popcount after compacting the only present slot = %d, want 0", got)
+				}
+			}
+		}
+	})
+}
+
+// TestEpochDayCodec round-trips a span of dates through the epoch-day codec and
+// cross-checks against a slow reference using the proleptic-Gregorian formula.
+func TestEpochDayCodec(t *testing.T) {
+	t.Parallel()
+	// Known anchors.
+	anchors := map[string]int32{
+		"1970-01-01": 0,
+		"1970-01-02": 1,
+		"1969-12-31": -1,
+		"2000-01-01": 10957,
+		"2020-01-15": 18276,
+	}
+	for s, want := range anchors {
+		ed, ok := stringToEpochDay("\x01" + s)
+		if !ok {
+			t.Fatalf("stringToEpochDay(%q) failed", s)
+		}
+		if ed != want {
+			t.Fatalf("epoch-day(%s) = %d, want %d", s, ed, want)
+		}
+		if back := epochDayToString(ed); back != "\x01"+s {
+			t.Fatalf("epochDayToString(%d) = %q, want SOH+%s", ed, back, s)
+		}
+	}
+	// Round-trip a dense range of epoch-days.
+	for ed := int32(-50000); ed <= 50000; ed += 37 {
+		s := epochDayToString(ed)
+		back, ok := stringToEpochDay(s)
+		if !ok {
+			t.Fatalf("round-trip parse failed for epoch-day %d (%q)", ed, s)
+		}
+		if back != ed {
+			t.Fatalf("epoch-day round-trip %d -> %q -> %d", ed, s, back)
+		}
+	}
+}

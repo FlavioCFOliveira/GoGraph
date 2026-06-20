@@ -168,11 +168,61 @@ type shardSlots struct {
 // (RemoveAllEdgesFrom). The value 0 is reserved by convention for "no
 // label on this slot"; lpg owns the +1/-1 bias so that a real label id 0
 // maps to the stored value 1.
+//
+// aux is a third optional parallel column, an OPAQUE immutable [AuxColumn]
+// block the higher layer (lpg) uses to co-locate de-boxed typed edge-property
+// values aligned 1:1 to neighbours, instead of re-storing the (src,dst) pair
+// in a separate property map. Unlike labels (a flat uint32 adjlist partially
+// interprets via the 0 sentinel) the property block is rich (several typed
+// columns plus a validity plane), so adjlist treats it as wholly opaque: it
+// only asks the block to transform itself across the two structural slot
+// events via [AuxColumn.GrowSlot] (append one absent slot at position oldLen)
+// and [AuxColumn.CompactSlot] (excise slot idx). It is nil until lpg first
+// sets a property via [AdjList.UpdateEntryAux]; when non-nil it is carried in
+// lockstep across growth (upsertEdgeLocked), compaction (compactEntry), and
+// trimming (trimEntry, verbatim — the block has no slack notion).
 type adjEntry[W any] struct {
 	neighbours []graph.NodeID
 	weights    []W
-	handles    []uint64 // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
-	labels     []uint32 // nil unless SetEdgeLabelSlot set one; parallel to neighbours when set; 0 == no label
+	handles    []uint64  // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
+	labels     []uint32  // nil unless SetEdgeLabelSlot set one; parallel to neighbours when set; 0 == no label
+	aux        AuxColumn // nil unless UpdateEntryAux set one; opaque, kept length-aligned by GrowSlot/CompactSlot
+}
+
+// AuxColumn is an opaque, immutable per-entry side column the higher layer
+// attaches to a node's adjacency entry to carry one logical value per
+// neighbour slot, aligned 1:1 to the entry's neighbours array. adjlist never
+// interprets the contents; it only drives the column's lifecycle so the
+// per-slot alignment is preserved across the two structural slot mutations
+// adjlist performs:
+//
+//   - an APPEND grows the entry by one slot at position oldLen;
+//   - a REMOVE excises one slot at position idx and shifts the tail down.
+//
+// Both lifecycle methods return a NEW immutable column (copy-on-write); the
+// receiver is never mutated, so a concurrent lock-free reader holding the
+// prior entry (and thus the prior column) is unaffected. An implementation
+// must keep its own length equal to the entry's neighbour count at all
+// observable points.
+//
+// Concurrency: an AuxColumn value is published as part of an immutable
+// [adjEntry] via atomic.StorePointer and is read lock-free thereafter, so an
+// implementation must be safe for concurrent reads once returned from a
+// lifecycle method. adjlist holds the shard mutex when it calls GrowSlot /
+// CompactSlot, so those calls never race each other for one entry.
+type AuxColumn interface {
+	// GrowSlot returns a new column of length oldLen+1 whose existing slots
+	// [0,oldLen) are unchanged and whose new slot at index oldLen is ABSENT
+	// (carries no value — the implementation must clear any presence/validity
+	// bit for that slot, never reusing a stale value from recycled backing
+	// storage). oldLen is the neighbour count of the entry BEFORE the append.
+	GrowSlot(oldLen int) AuxColumn
+
+	// CompactSlot returns a new column of length n-1 with the slot at idx
+	// excised: result slots [0,idx) equal the receiver's [0,idx) and result
+	// slots [idx,n-1) equal the receiver's [idx+1,n). idx is a valid index in
+	// [0,n) where n is the receiver's current length.
+	CompactSlot(idx int) AuxColumn
 }
 
 // New returns an empty AdjList configured by cfg.
@@ -542,7 +592,13 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 			}
 			ls[oldLen] = ex.label
 		}
-		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls}); err != nil {
+		// Carry the opaque aux column forward when it exists. GrowSlot returns a
+		// fresh column of length newLen whose new slot at oldLen is absent; the
+		// higher layer is responsible for clearing any presence bit there. A
+		// fresh entry never has an aux column, so a label-/property-free graph
+		// pays nothing.
+		ax := growAux(current.aux, oldLen)
+		if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: ax}); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -578,10 +634,24 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 		copy(newL, current.labels) // no-op when current.labels is nil
 		newL[oldLen] = ex.label
 	}
-	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL}); err != nil {
+	// Carry the opaque aux column forward when it exists; the new slot at
+	// oldLen is absent (GrowSlot clears its presence bit).
+	newAux := growAux(current.aux, oldLen)
+	if err := storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// growAux returns the aux column for an entry that has just grown by one slot
+// at position oldLen, or nil when the entry carries no aux column. It is the
+// single place the append fast and slow paths consult so the "nil stays nil,
+// otherwise GrowSlot" rule lives in one spot.
+func growAux(cur AuxColumn, oldLen int) AuxColumn {
+	if cur == nil {
+		return nil
+	}
+	return cur.GrowSlot(oldLen)
 }
 
 // RemoveEdge removes the directed edge from src to dst if present. For
@@ -848,7 +918,15 @@ func compactEntry[W any](current *adjEntry[W], idx int) *adjEntry[W] {
 		copy(newL, current.labels[:idx])
 		copy(newL[idx:], current.labels[idx+1:])
 	}
-	return &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL}
+	// Compact the opaque aux column in lock-step via CompactSlot, so its
+	// surviving slots keep the SAME positional binding as the surviving
+	// neighbours. The validity plane (if any) compacts under the same index
+	// transform inside the implementation.
+	var newAux AuxColumn
+	if current.aux != nil {
+		newAux = current.aux.CompactSlot(idx)
+	}
+	return &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}
 }
 
 // Neighbours returns an iterator over the live out-neighbours of src
@@ -971,7 +1049,12 @@ func trimEntry[W any](e *adjEntry[W]) *adjEntry[W] {
 		ls = make([]uint32, len(e.labels))
 		copy(ls, e.labels)
 	}
-	return &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls}
+	// The opaque aux column has no adjlist-visible slack notion: lpg sizes it
+	// exactly to the neighbour count and it is immutable. Carry the pointer
+	// verbatim into the trimmed entry — a nil aux stays nil — so a graph that
+	// uses edge properties keeps its column unchanged while the topology arrays
+	// are right-sized.
+	return &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: e.aux}
 }
 
 // MaxNodeID returns one more than the largest [graph.NodeID] that has
@@ -1026,6 +1109,78 @@ func (a *AdjList[N, W]) LoadEntryLabels(id graph.NodeID) []uint32 {
 	return e.labels
 }
 
+// LoadEntryAux returns the opaque [AuxColumn] currently attached to the
+// adjacency entry of the node identified by id, or nil when id has no outgoing
+// edges or no caller has attached an aux column via [AdjList.UpdateEntryAux].
+// The returned column is part of the current immutable adjacency snapshot and
+// must not be mutated by the caller; the higher layer reads it lock-free. To
+// align positionally with the column, read the neighbours from the SAME logical
+// snapshot via [AdjList.LoadEntry] and bound any per-slot scan by the shorter
+// of the two lengths (a concurrent writer may publish a longer neighbours
+// snapshot after the column is loaded).
+//
+// LoadEntryAux is lock-free and safe for concurrent use.
+func (a *AdjList[N, W]) LoadEntryAux(id graph.NodeID) AuxColumn {
+	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
+	if e == nil {
+		return nil
+	}
+	return e.aux
+}
+
+// UpdateEntryAux atomically replaces the opaque [AuxColumn] of src's adjacency
+// entry under the shard write lock, using the caller-supplied transform fn. fn
+// receives the entry's CURRENT aux column (nil when none has been attached yet)
+// and an immutable snapshot of its neighbours, and returns the NEW aux column
+// plus a bool reporting whether anything changed. When fn reports false the
+// entry is left untouched and no new snapshot is published; when it reports
+// true a fresh immutable [adjEntry] sharing the unchanged neighbours / weights /
+// handles / labels headers and carrying the returned aux is published via the
+// same atomic store-pointer mechanism the writers use.
+//
+// UpdateEntryAux returns false when src has no adjacency entry (no outgoing
+// edge), in which case fn is not called — the higher layer's contract is that
+// an aux value (an edge property) is only ever attached to a live edge slot, so
+// there is no entry to attach to. It returns the bool fn reported otherwise.
+//
+// The transform MUST build the new column copy-on-write and return it
+// fully-populated: adjlist publishes it with a single atomic store, so a
+// concurrent lock-free reader observes either the prior column or the new one,
+// never a half-built column. fn runs under the shard write lock and must not
+// call back into any AdjList method that takes the same shard lock.
+//
+// UpdateEntryAux is safe for concurrent use.
+func (a *AdjList[N, W]) UpdateEntryAux(
+	src graph.NodeID,
+	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
+) bool {
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := loadEntry[W](s, intraIdx)
+	if current == nil {
+		return false
+	}
+	newAux, changed := fn(current.aux, current.neighbours)
+	if !changed {
+		return false
+	}
+	entry := &adjEntry[W]{
+		neighbours: current.neighbours,
+		weights:    current.weights,
+		handles:    current.handles,
+		labels:     current.labels,
+		aux:        newAux,
+	}
+	// storeEntry cannot fail here: the slot already exists, so no growth is
+	// required.
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
+	return true
+}
+
 // SetEdgeLabelSlot stores the opaque label value v on the first adjacency
 // slot of src whose neighbour is dst, publishing a new immutable entry
 // snapshot. It returns true when such a slot was found and updated, false
@@ -1076,6 +1231,9 @@ func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
 		weights:    current.weights,
 		handles:    current.handles,
 		labels:     newL,
+		// The label-COW shares the immutable aux header unchanged: only the
+		// label column is replaced here.
+		aux: current.aux,
 	}
 	// storeEntry cannot fail here: the slot already exists, so no growth is
 	// required.
@@ -1125,6 +1283,9 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32)
 		weights:    current.weights,
 		handles:    current.handles,
 		labels:     newL,
+		// The label-COW shares the immutable aux header unchanged: only the
+		// label column is replaced here.
+		aux: current.aux,
 	}
 	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
 	return true
@@ -1172,6 +1333,9 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
 		weights:    current.weights,
 		handles:    current.handles,
 		labels:     newL,
+		// The label-COW shares the immutable aux header unchanged: only the
+		// label column is replaced here.
+		aux: current.aux,
 	}
 	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
 }

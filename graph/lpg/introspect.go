@@ -159,21 +159,27 @@ func (g *Graph[N, W]) PropertyKeysInUse() []string {
 		sh.mu.RUnlock()
 	}
 
-	for i := range g.edgePropShards {
-		sh := &g.edgePropShards[i]
-		sh.mu.RLock()
-		for k, bag := range sh.m {
-			if bag.len() == 0 {
+	// Edge properties live in the per-source-node columnar aux block, not a
+	// per-pair map. Walk every source's adjacency aux column and record the key
+	// of each present per-slot value whose bearing edge has two live endpoints,
+	// mirroring the inline-label walk in RelationshipTypesInUse.
+	maxID := uint64(g.adj.MaxNodeID())
+	for id := uint64(0); id < maxID; id++ {
+		srcID := graph.NodeID(id)
+		block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
+		if block == nil {
+			continue
+		}
+		nbs, _ := g.adj.LoadEntry(srcID)
+		n := minInt(len(nbs), block.lenOrZero())
+		for i := 0; i < n; i++ {
+			if !g.edgeEndpointLive(edgeKey{src: srcID, dst: nbs[i]}) {
 				continue
 			}
-			if !g.edgeEndpointLive(k) {
-				continue
-			}
-			bag.forEach(func(pk PropertyKeyID, _ PropertyValue) {
+			block.forEachAt(i, func(pk PropertyKeyID, _ PropertyValue) {
 				seen[pk] = struct{}{}
 			})
 		}
-		sh.mu.RUnlock()
 	}
 
 	out := make([]string, 0, len(seen))

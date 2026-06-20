@@ -157,17 +157,6 @@ type nodePropShard struct {
 	m  map[graph.NodeID]propBag
 }
 
-// edgePropShard is one stripe of the per-edge property map. The inner
-// per-edge bag is the compact tiered [propBag] (sprint 221, #1628) stored by
-// value, mirroring the per-node property store: a 1-2-property edge pays a
-// single small slice instead of a ~300 B Go map, collapsing the dominant
-// edge-property resident cost. The mutex guards every read and write of the
-// shard's map and the propBag values it holds.
-type edgePropShard struct {
-	mu sync.RWMutex
-	m  map[edgeKey]propBag
-}
-
 // nodeLabelShard is one stripe of the node-label bag. The mutex
 // serialises mutations on this shard only; readers hold an RLock
 // for HasNodeLabel / NodeLabels. Splitting the bag into 16 shards
@@ -282,7 +271,10 @@ type Graph[N comparable, W any] struct {
 	edgeLabelShards [propMapShards]edgeLabelShard
 
 	nodePropShards [propMapShards]nodePropShard
-	edgePropShards [propMapShards]edgePropShard
+	// Edge properties are NOT stored in a per-pair map. They live in the
+	// per-source-node columnar block ([edgePropCols]) carried inside each
+	// adjacency entry as its opaque aux column (sprint 222, #1637-1643). See
+	// edge_property.go and edge_property_column.go.
 
 	// edgeCreateCountShards tracks how many CREATE statements have
 	// targeted each directed (src, dst) endpoint pair — separate from
@@ -666,14 +658,6 @@ func (g *Graph[N, W]) firstSlotLabel(srcID, dstID graph.NodeID) (encoded uint32,
 	return 0, false
 }
 
-// edgePropShardFor returns the shard responsible for the edgeKey k.
-// The shard is keyed by the src endpoint so all properties of edges
-// out of one node coalesce in the same shard (favourable for the
-// common access pattern: enumerate-outgoing-edges-with-property).
-func (g *Graph[N, W]) edgePropShardFor(k edgeKey) *edgePropShard {
-	return &g.edgePropShards[uint64(k.src)&(propMapShards-1)]
-}
-
 // propKeys returns the property-key registry.
 func (g *Graph[N, W]) propKeys() *PropertyKeyRegistry { return g.pkeys }
 
@@ -700,9 +684,8 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	for i := range g.nodePropShards {
 		g.nodePropShards[i].m = make(map[graph.NodeID]propBag)
 	}
-	for i := range g.edgePropShards {
-		g.edgePropShards[i].m = make(map[edgeKey]propBag)
-	}
+	// Edge properties need no per-shard map: they are carried in the adjacency
+	// entries' columnar aux blocks, allocated lazily on the first SetEdgeProperty.
 	for i := range g.edgeCreateCountShards {
 		g.edgeCreateCountShards[i].m = make(map[edgeKey]int64)
 	}
@@ -937,10 +920,20 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 	// contract). Reverse-direction labels are captured too for the undirected
 	// case below.
 	var fwdLabels, revLabels []LabelID
+	// Capture the per-pair PROPERTY maps BEFORE the adjacency removal too. The
+	// adjlist removes the first-matching slot, which may be the slot a property
+	// was fanned out to; a newly-appended parallel slot is absent until the next
+	// SetEdgeProperty, so removing the value-bearing slot could otherwise drop a
+	// property the surviving edges still share. Re-asserting the captured map
+	// onto the surviving slots re-establishes the lockstep (the property analogue
+	// of reassertPairLabels). EdgeProperties returns the coalesced latest-wins map.
+	var fwdProps, revProps map[string]PropertyValue
 	if srcOK && dstOK {
 		fwdLabels = g.pairLabelIDs(srcID, dstID)
+		fwdProps = g.EdgeProperties(src, dst)
 		if !g.adj.Directed() {
 			revLabels = g.pairLabelIDs(dstID, srcID)
+			revProps = g.EdgeProperties(dst, src)
 		}
 	}
 
@@ -948,11 +941,14 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 
 	if g.adj.HasEdge(src, dst) {
 		// Parallel edge(s) remain: keep the shared per-pair surfaces. Re-assert
-		// any captured labels in case the removed slot was the one holding them.
+		// any captured labels and properties in case the removed slot was the one
+		// holding them.
 		if srcOK && dstOK {
 			g.reassertPairLabels(srcID, dstID, fwdLabels)
+			g.reassertPairProps(src, dst, fwdProps)
 			if !g.adj.Directed() {
 				g.reassertPairLabels(dstID, srcID, revLabels)
+				g.reassertPairProps(dst, src, revProps)
 			}
 		}
 		return
@@ -1018,6 +1014,24 @@ func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelI
 	sh.mu.Unlock()
 }
 
+// reassertPairProps re-applies every property in props to the directed pair
+// (src, dst) via [Graph.SetEdgeProperty], fanning each back onto every surviving
+// dst-matching adjacency slot. It is the property analogue of
+// [Graph.reassertPairLabels], called after removing one of several parallel
+// edges when the removed slot might have carried a value the surviving edges
+// still share (a newly-appended parallel slot is absent until the next set, so
+// the value may have lived only on the removed slot). It is idempotent: writing
+// the same value to a slot that already carries it is a no-op. Called only when
+// at least one parallel edge survives, so SetEdgeProperty's HasEdge gate passes.
+func (g *Graph[N, W]) reassertPairProps(src, dst N, props map[string]PropertyValue) {
+	for key, v := range props {
+		// The validator already accepted these values when they were first set,
+		// and re-asserting cannot introduce a new violation, so a validator error
+		// here is not expected; ignore it to keep the removal path total.
+		_ = g.SetEdgeProperty(src, dst, key, v)
+	}
+}
+
 // RemoveAllEdgesFrom removes all edges incident from src in O(d) time for a
 // degree-d hub, rather than the O(d²) cost of d sequential [Graph.RemoveEdge]
 // calls. After clearing the adjacency layer it also clears the per-pair edge
@@ -1074,10 +1088,14 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	lsh.clearOverflow(k)
 	g.clearSlotLabels(k.src, k.dst)
 	lsh.mu.Unlock()
-	psh := g.edgePropShardFor(k)
-	psh.mu.Lock()
-	delete(psh.m, k)
-	psh.mu.Unlock()
+	// Edge properties need no explicit per-pair clear: they live ONLY on the
+	// adjacency slots, and clearEdgePairState is reached exclusively after the
+	// last edge between the pair has been removed (RemoveEdge / RemoveAllEdgesFrom
+	// run the adjacency removal first). The removed slot's columnar cells are
+	// dropped in lockstep by the adjlist compaction (CompactSlot), so by the time
+	// we get here there is no dst-matching slot left carrying the pair's
+	// properties — re-creating an edge between the same endpoints starts from an
+	// absent column slot, exactly as the old map-delete guaranteed.
 	// Drop the stable-handle keyed per-instance metadata for the pair too,
 	// matching the per-pair hygiene above: once the last edge between the
 	// endpoints is gone, no handle for the pair can be resolved again, so
