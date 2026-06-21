@@ -710,11 +710,16 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		defer cancel()
 	}
 
-	// Convert proto params to map[string]any for RunAny / tx.Run.
-	params := make(map[string]any, len(m.Parameters))
-	for k, v := range m.Parameters {
-		params[k] = v
-	}
+	// m.Parameters is map[string]packstream.Value, and packstream.Value is an
+	// alias of any, so it already IS a map[string]any — pass it straight to the
+	// engine instead of copying it per RUN (#1521). RunAny and tx.Run consume it
+	// read-only: BindParams converts it once into the engine's internal form and
+	// retains no reference to the map, and no engine path writes to it. The map
+	// is freshly decoded per message and used only on this single message-loop
+	// goroutine, so there is no aliasing or concurrency hazard. The explicit
+	// conversion fails to compile (flagging the maintainer) if Value ever stops
+	// being an alias.
+	params := map[string]any(m.Parameters)
 
 	var (
 		result *cypher.Result
