@@ -23,31 +23,35 @@
 // Every relationship carries exactly one mandatory date property: a
 // FRIEND records when the friendship was created in since and a LIKE
 // records when the like happened in when. Both are always present.
-// The dates are stored as ISO-8601 (YYYY-MM-DD) strings — the same
-// representation example 25 uses for Cypher-queryable timestamps — so
-// the cypher.Engine reads them back as non-null values and, because
-// ISO-8601 sorts chronologically, range and ORDER BY predicates over
-// since/when behave as dates. (lpg.TimeValue is not used: the Cypher
-// reader maps it to null, whereas the tagged date strings round-trip.)
-// The dates are drawn from the seeded RNG, anchored to a fixed
-// reference date rather than the wall clock, so they are reproducible
-// for a given -seed.
+// The dates are written with [lpg.DateValue], which stores a native
+// Cypher Date: the storage tier folds it into a compact int32 epoch-day
+// column (~4 bytes/value) and the cypher.Engine reads it back as a Date,
+// so range and ORDER BY predicates over since/when behave as dates
+// natively. (lpg.TimeValue is deliberately NOT used: the Cypher reader
+// maps PropTime to null; and a plain ISO-8601 string would read back as
+// a String and cost a ~16-byte header plus its backing text — the
+// per-edge cost #1649 removed by switching this example to DateValue.)
+// The dates are drawn from the seeded RNG, anchored to a fixed reference
+// date rather than the wall clock, so they are reproducible for a given
+// -seed.
 //
 // # Scale
 //
 // Run with no flags, the example builds the full specification — one
 // million users, thirty thousand articles, 150-200 friends per user and
 // up to 300 likes per user. That is roughly 1.03M nodes and on the
-// order of 3.2 × 10^8 edges. Because every edge now carries a mandatory
-// date property, that per-edge property store dominates resident heap at
-// ~425 bytes per edge (measured at 20k/2k), so the full run needs on the
-// order of ~130 GiB of live heap and several minutes to build. The
-// implicit-type mode (-rel-types=false) no longer helps materially — the
-// date-property store is identical in both modes and dwarfs the
-// relationship-label store — landing at ~127 GiB. This is deliberate: the
-// example exists to stress query performance and resource consumption at
-// that scale. See the README's "Memory profile and optimizations" section
-// for the per-edge breakdown and how these figures were measured.
+// order of 3.2 × 10^8 edges. The dominant resident cost is the per-edge
+// property and adjacency store. With the columnar edge-property tier and
+// the int32 date column it measures ~32.9 bytes per edge at 20k/2k —
+// roughly half the ~61.8 bytes the equivalent ISO-8601 string date column
+// cost (#1649) — so the full run needs on the order of ~10 GiB of live
+// heap and several minutes to build, down from ~19 GiB before the date
+// column landed. The implicit-type mode (-rel-types=false) saves only the
+// small relationship-label store on top; the date-property store is
+// identical in both modes. This is deliberate: the example exists to
+// stress query performance and resource consumption at that scale. See the
+// README's "Memory profile and optimizations" section for the per-edge
+// breakdown and how these figures were measured.
 //
 // Every dimension is a flag, so the same binary scales down to a
 // laptop-sized run:
@@ -98,7 +102,8 @@ const (
 
 	// Mandatory per-relationship date properties. Every FRIEND carries a
 	// since (when the friendship was created) and every LIKE a when (when
-	// the like happened). Stored as ISO-8601 date strings (see isoEdgeDate).
+	// the like happened). Stored as native Cypher Dates via lpg.DateValue
+	// (see edgeDate), folded into the compact int32 epoch-day column.
 	propFriendSince = "since"
 	propLikeWhen    = "when"
 )
@@ -311,7 +316,7 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 			targets[j] = struct{}{}
 		}
 		for j := range targets {
-			if err := addEdge(g, userIDs[i], userIDs[j], relFriend, cfg.relTypes, propFriendSince, isoEdgeDate(rng)); err != nil {
+			if err := addEdge(g, userIDs[i], userIDs[j], relFriend, cfg.relTypes, propFriendSince, lpg.DateValue(edgeDate(rng))); err != nil {
 				return buildStats{}, err
 			}
 			friendEdges++
@@ -334,7 +339,7 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 				likes[rng.Intn(cfg.articles)] = struct{}{}
 			}
 			for a := range likes {
-				if err := addEdge(g, userIDs[i], articleIDs[a], relLike, cfg.relTypes, propLikeWhen, isoEdgeDate(rng)); err != nil {
+				if err := addEdge(g, userIDs[i], articleIDs[a], relLike, cfg.relTypes, propLikeWhen, lpg.DateValue(edgeDate(rng))); err != nil {
 					return buildStats{}, err
 				}
 				likeEdges++
@@ -390,14 +395,15 @@ func addNode(g *lpg.Graph[string, float64], id, label, propKey, propVal string) 
 // SetEdgeProperty (no fused-with-label entry point applies); it is exercised only
 // at small scale.
 //
-// The date is an ISO-8601 string via [lpg.StringValue]. It is the property tier
-// the Cypher engine reads when materialising a matched relationship's properties,
-// so the date is visible as r.since / r.when in the query battery. Using a
-// pair-level property is unambiguous here because every (src, dst) pair carries
-// exactly one edge.
-func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType bool, propKey, propVal string) error {
+// The date property is a Cypher-visible Date built via [lpg.DateValue]: the
+// caller pre-builds the PropertyValue so the value type is opaque here. It is
+// the property tier the Cypher engine reads when materialising a matched
+// relationship's properties, so the date is visible (as a native Date) at
+// r.since / r.when in the query battery. Using a pair-level property is
+// unambiguous here because every (src, dst) pair carries exactly one edge.
+func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType bool, propKey string, propVal lpg.PropertyValue) error {
 	if withType {
-		if err := g.AddEdgeLabeledWithProperty(src, dst, 1, relType, propKey, lpg.StringValue(propVal)); err != nil {
+		if err := g.AddEdgeLabeledWithProperty(src, dst, 1, relType, propKey, propVal); err != nil {
 			return fmt.Errorf("AddEdgeLabeledWithProperty %s-[%s]->%s: %w", src, relType, dst, err)
 		}
 		return nil
@@ -405,7 +411,7 @@ func addEdge(g *lpg.Graph[string, float64], src, dst, relType string, withType b
 	if err := g.AddEdge(src, dst, 1); err != nil {
 		return fmt.Errorf("AddEdge %s-[%s]->%s: %w", src, relType, dst, err)
 	}
-	if err := g.SetEdgeProperty(src, dst, propKey, lpg.StringValue(propVal)); err != nil {
+	if err := g.SetEdgeProperty(src, dst, propKey, propVal); err != nil {
 		return fmt.Errorf("SetEdgeProperty %s on %s-[%s]->%s: %w", propKey, src, relType, dst, err)
 	}
 	return nil
@@ -418,18 +424,21 @@ const edgeDateWindowDays = 2192
 
 // edgeDateRef is the fixed reference date the synthetic edge dates count
 // back from. Anchoring to a constant — never the wall clock — keeps the
-// dataset reproducible for a given -seed. It is hoisted out of isoEdgeDate
+// dataset reproducible for a given -seed. It is hoisted out of edgeDate
 // so the per-edge build loop does not re-run time.Date's normalisation on
 // every one of the hundreds of millions of edges. Immutable after init,
 // like the word-list vars below.
 var edgeDateRef = time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
-// isoEdgeDate returns a deterministic calendar date in ISO-8601 form
-// (YYYY-MM-DD) drawn from rng as a whole-day offset back from edgeDateRef.
-// ISO-8601 strings sort chronologically, so storing the dates as strings
-// keeps range and ORDER BY predicates over since/when behaving as dates.
-func isoEdgeDate(rng *rand.Rand) string {
-	return edgeDateRef.AddDate(0, 0, -rng.Intn(edgeDateWindowDays+1)).Format("2006-01-02")
+// edgeDate returns a deterministic calendar date drawn from rng as a whole-day
+// offset back from edgeDateRef. The caller wraps it in [lpg.DateValue], which
+// folds into the storage tier's compact int32 epoch-day column (~4 bytes/value)
+// and reads back as a native Cypher Date — so range and ORDER BY predicates
+// over since/when behave as dates while costing a fraction of the heap an
+// ISO-8601 string column would (the per-edge string-header + backing text that
+// dominated this example's heap before #1649).
+func edgeDate(rng *rand.Rand) time.Time {
+	return edgeDateRef.AddDate(0, 0, -rng.Intn(edgeDateWindowDays+1))
 }
 
 // uniqueHexID returns a 24-character lowercase hex id (12 random bytes)

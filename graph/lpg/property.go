@@ -128,6 +128,33 @@ func BoolValue(b bool) PropertyValue { return PropertyValue{kind: PropBool, v: b
 // TimeValue builds a PropTime.
 func TimeValue(t time.Time) PropertyValue { return PropertyValue{kind: PropTime, v: t} }
 
+// DateValue builds a Cypher-visible Date property from t's calendar date — its
+// year, month and day in t's location; any time-of-day and time zone are
+// ignored. The value is the canonical SOH-tagged date string that the columnar
+// storage tier folds into its compact int32 epoch-day column (~4 bytes/value)
+// and that the Cypher read path decodes back to a native Date.
+//
+// Prefer DateValue over a hand-formatted ISO string ([StringValue]) for date
+// properties written through the Go API: an untagged string stays in the
+// 16-byte-header string column and reads back as a String, whereas a DateValue
+// costs ~4 bytes/value and round-trips as a Date — the same on-disk and
+// in-memory form a date written through Cypher produces. (Contrast [TimeValue]/
+// PropTime, which is not Cypher-visible and reads back as Null.)
+func DateValue(t time.Time) PropertyValue {
+	y, m, d := t.Date()
+	ed := daysFromCivil(y, int(m), d)
+	if ed < minEpochDay || ed > maxEpochDay {
+		// Calendar dates beyond the int32 epoch-day range (~±5.8M years): emit
+		// the tagged canonical string directly — byte-identical to what the
+		// Cypher write path produces for the same date — rather than folding it
+		// into the compact int32 column. Such extreme dates are astronomically
+		// outside any realistic dataset; this branch only guards the int32 cast
+		// above from truncating.
+		return PropertyValue{kind: PropString, v: string(rune(epochDayTag)) + formatCivil(y, int(m), d)}
+	}
+	return PropertyValue{kind: PropString, v: epochDayToString(int32(ed))}
+}
+
 // BytesValue builds a PropBytes wrapping b (no copy).
 func BytesValue(b []byte) PropertyValue { return PropertyValue{kind: PropBytes, v: b} }
 

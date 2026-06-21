@@ -29,14 +29,16 @@ between runs.
 
 Every relationship carries exactly one **mandatory date** property:
 `FRIEND.since` records when the friendship was created and `LIKE.when`
-records when the like happened, both always present. They are stored as
-ISO-8601 (`YYYY-MM-DD`) strings — the representation example 25 also uses
-for Cypher-queryable timestamps — so the engine reads them back as
-non-null values, and because ISO-8601 sorts chronologically, range and
-`ORDER BY` predicates over `since`/`when` behave as dates. (`lpg.TimeValue`
-is deliberately **not** used here: the Cypher reader maps it to null,
-whereas the date strings round-trip.) The dates are drawn from the seeded
-RNG anchored to a fixed reference date — never the wall clock — so they are
+records when the like happened, both always present. They are written with
+`lpg.DateValue`, which stores a **native Cypher `Date`**: the storage tier
+folds it into a compact **int32 epoch-day column** (~4 bytes/value) and the
+engine reads it back as a `Date`, so range and `ORDER BY` predicates over
+`since`/`when` behave as dates natively. (`lpg.TimeValue` is deliberately
+**not** used here: the Cypher reader maps `PropTime` to null; and a plain
+ISO-8601 string would read back as a `String` and cost a ~16-byte header
+plus its backing text — that per-edge string cost is what `#1649` removed
+by switching to `DateValue`.) The dates are drawn from the seeded RNG
+anchored to a fixed reference date — never the wall clock — so they are
 reproducible for a fixed `-seed`. The query battery includes two coverage
 queries that count relationships whose date `IS NOT NULL`; they always
 equal the total relationship counts, which is the always-filled invariant
@@ -108,12 +110,12 @@ edges.like=3006369
 # build.elapsed=3.013s
 # build.node_rate=7302 nodes/s
 # build.edge_rate=2158801 edges/s
-# mem.heap_alloc=383.54 MiB
-# mem.heap_growth=383.20 MiB
-# mem.total_alloc=4.22 GiB
-# mem.sys=1023.96 MiB
-# mem.num_gc=39
-# bytes_per_edge=61.8
+# mem.heap_alloc=204.69 MiB
+# mem.heap_growth=204.34 MiB
+# mem.total_alloc=4.12 GiB
+# mem.sys=618.11 MiB
+# mem.num_gc=57
+# bytes_per_edge=32.9
 q.count_users=20000
 # q.count_users.latency=11.466ms
 q.count_articles=2000
@@ -257,8 +259,10 @@ follow:
    lever once every edge carries a property.
 
 `lpg.TimeValue` was rejected for a different reason — the Cypher reader maps
-it to null, so it would not be queryable as `r.since` / `r.when` at all; the
-date is stored as an ISO-8601 string instead.
+it to null, so it would not be queryable as `r.since` / `r.when` at all. The
+map-backed baseline stored the date as an ISO-8601 string; it is now written
+with `lpg.DateValue` and folded into the `int32` epoch-day column (`#1649`,
+see below).
 
 ### The columnar edge-property tier
 
@@ -295,10 +299,25 @@ separate per-edge `SetEdgeProperty` would pay — build allocation stays within
 ~1.8× of the label-only baseline (~4.2 GiB total alloc at 20k/2k, vs ~2.3 GiB)
 rather than the ~54 GiB an un-fused build incurs.
 
-Headroom remains for a later phase: storing the date as a typed value (an
-`int32` epoch-day column) instead of an ISO string would cut the property
-column from ~33 to ~4 bytes per present slot, and a global dense edge-record
-(gated on a universal edge id) would suit edge-centric workloads — both
+### The int32 epoch-day date column (`#1649`)
+
+The columnar tier already implemented a typed `int32` epoch-day date column;
+`#1649` activated it for the Go-API build path. Dates are now written with
+`lpg.DateValue` (a Cypher-visible `Date`) instead of a plain ISO-8601 string,
+so the value folds into the `int32` column (~4 bytes/value) rather than the
+string column (a ~16-byte header plus its backing text). Measured at 20k/2k
+(≈6.5 M edges), explicit types, full `runtime.ReadMemStats`, verified against
+the full openCypher TCK (3897/3897) and `go test -race` — identical query
+results (the `since`/`when` coverage counts are unchanged):
+
+| | Live heap | B/edge | vs. ISO-string column |
+|---|---:|---:|---:|
+| ISO-8601 string date column | ~383 MiB | ~61.8 | — |
+| `int32` epoch-day column (`DateValue`) | **~204 MiB** | **~32.9** | **−47 %** |
+
+Extrapolated to the full specification (~3.25 × 10⁸ edges) the live-heap
+ceiling drops from **~20 GiB to ~10 GiB**. Remaining headroom: a global dense
+edge-record (gated on a universal edge id) would suit edge-centric workloads —
 tracked in the backlog.
 
 ## Key APIs
@@ -306,7 +325,8 @@ tracked in the backlog.
 - `graph/lpg.New` / `Graph.AddNode` / `Graph.SetNodeLabel` / `Graph.SetNodeProperty` — build the labelled property graph in memory.
 - `graph/lpg.Graph.AddEdgeLabeledWithProperty` — add a typed `FRIEND` / `LIKE` relationship **and** its mandatory `since` / `when` date in one call: the edge, its relationship type, and the date property are all written into the new adjacency slot at insertion time, so the bulk build stays O(degree) amortised per source. This fuses the relationship-type inline label column and the columnar edge-property tier in a single append, avoiding the per-edge column copy a separate `SetEdgeProperty` would pay (which made a bulk property-carrying build O(degree²) per source). `Graph.AddEdgeLabeled` / `Graph.AddEdge` / `Graph.SetEdgeLabel` remain for the untyped and re-labelling cases.
 - `graph/lpg.Graph.SetEdgeProperty` — set or mutate a relationship property on a pair after the edge exists (a pair-level property, which is unambiguous here because every endpoint pair carries one edge; it is the tier the Cypher engine reads as `r.since` / `r.when`). The bulk build uses the fused `AddEdgeLabeledWithProperty` instead; `SetEdgeProperty` is the general single-property path used by the untyped branch.
-- `graph/lpg.StringValue` — wrap string property values, including the ISO-8601 date strings stored on relationships.
+- `graph/lpg.DateValue` — wrap the mandatory `since` / `when` relationship dates as native Cypher `Date` values; folds into the compact `int32` epoch-day column (~4 bytes/value) and reads back as a `Date` (`#1649`).
+- `graph/lpg.StringValue` — wrap string property values (node `id` / `name`, article `title`).
 - `cypher.NewEngine` / `Engine.Run` — query the in-memory graph.
 - `cypher.Result.Next` / `Result.Record` / `Result.Err` / `Result.Close` — iterate result rows and read columns.
 - `cypher/expr.StringValue` / `expr.IntegerValue` — typed query parameters and result cells.
