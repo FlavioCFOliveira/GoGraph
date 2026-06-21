@@ -5422,6 +5422,40 @@ func buildEagerAggregation(
 			continue
 		}
 
+		// count(<bare variable>), non-DISTINCT: CountAgg only null-checks its
+		// input (Step → !IsNull), so upgrading the argument to a full
+		// NodeValue/RelationshipValue per row is pure waste (audit M2 / #1654).
+		// Pass the raw row cell straight through — an IntegerValue(NodeID) or a
+		// relationship reference when the variable is bound, Null when it is not
+		// (e.g. an unmatched OPTIONAL MATCH). IsNull behaves identically on the
+		// raw cell and the value is consumed only by agg.Step then discarded, so
+		// the aggregate result is unchanged. Scoped deliberately:
+		//   - count only (sum/avg/min/max/collect read the value, not its presence);
+		//   - not count(*) (handled above), and not DISTINCT (distinctness dedups
+		//     by value identity; a relationship's raw-cell identity is out of scope
+		//     for this fix, so DISTINCT declines to the full path below);
+		//   - a BARE *ast.Variable argument only — count(n.prop)/count(expr) must
+		//     evaluate the expression with its own null semantics, so they decline;
+		//   - the variable must resolve to an input column.
+		// Verified TCK-safe against Aggregation1/7/8 and Return6 (#1654). Any other
+		// shape falls through to the full newAggregationEval path below.
+		if aggExpr.Function == "count" && !aggExpr.Distinct {
+			if v, isVar := aggExpr.ArgumentExpr.(*ast.Variable); isVar {
+				if col, found := schemaSnap[v.Name]; found {
+					items = append(items, exec.ProjectionItem{
+						Alias: aggExpr.OutputName,
+						Eval: func(row exec.Row) (expr.Value, error) {
+							if col < len(row) {
+								return row[col], nil
+							}
+							return expr.Null, nil
+						},
+					})
+					continue
+				}
+			}
+		}
+
 		items = append(items, exec.ProjectionItem{
 			Alias: aggExpr.OutputName,
 			Eval: newAggregationEval(
