@@ -755,6 +755,11 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// timeout still receives a typed FAILURE.
 	var txTimer clock.Timer
 	var txTimerC <-chan time.Time
+	// reqReader is reset to each inbound frame's bytes and fed to a pooled
+	// Decoder, so request decoding allocates neither a Decoder (with its ~4 KiB
+	// bufio) nor a bytes.Reader per message (#1517). It is owned by this single
+	// message-loop goroutine, so no synchronisation is needed on it.
+	var reqReader bytes.Reader
 	syncTxTimer := func() {
 		switch {
 		case sess.txActive && !sess.txDeadline.IsZero():
@@ -801,9 +806,16 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				return
 			}
 
-			// Decode request from PackStream bytes.
-			dec := packstream.NewDecoder(bytes.NewReader(res.raw))
+			// Decode request from PackStream bytes, reusing the per-connection
+			// reqReader and a pooled Decoder (#1517). DecodeRequest fully
+			// materialises msg — ReadString/ReadBytes copy into fresh allocations
+			// (packstream/decoder.go), never aliasing the Decoder's bufio buffer —
+			// so the Decoder is safe to return to the pool the moment it returns,
+			// even on a decode error.
+			reqReader.Reset(res.raw)
+			dec := reqDecPool.Get(&reqReader)
 			msg, decErr := proto.DecodeRequest(dec)
+			reqDecPool.Put(dec)
 			if decErr != nil {
 				// A message that fails to decode is a CLIENT fault (a malformed or
 				// truncated PackStream frame). The status code already says so
@@ -914,6 +926,13 @@ func (s *Server) writeResponse(cw *proto.ChunkedWriter, conn net.Conn, msg any, 
 	}
 	return true
 }
+
+// reqDecPool pools request Decoders for the read path: each Get resets a pooled
+// Decoder (with its ~4 KiB bufio) to read from the caller's bytes.Reader
+// (#1517). The serve loop pairs it with a per-connection reqReader, so request
+// decoding reuses both the Decoder and the Reader instead of allocating a fresh
+// pair per message. sync.Pool keeps it safe across connections.
+var reqDecPool = packstream.NewDecodePool()
 
 // respBuf bundles a reusable encode buffer with the packstream Encoder
 // permanently bound to it. It is pooled so the hot per-message sendResponse path
