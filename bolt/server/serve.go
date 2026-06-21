@@ -915,19 +915,58 @@ func (s *Server) writeResponse(cw *proto.ChunkedWriter, conn net.Conn, msg any, 
 	return true
 }
 
+// respBuf bundles a reusable encode buffer with the packstream Encoder
+// permanently bound to it. It is pooled so the hot per-message sendResponse path
+// does not allocate a fresh bytes.Buffer, Encoder, and internal bufio.Writer for
+// every Bolt response frame — every SUCCESS / RECORD / FAILURE goes through
+// sendResponse, so under a streaming PULL or a busy connection that is one
+// allocation set per row (#1518).
+type respBuf struct {
+	buf bytes.Buffer
+	enc *packstream.Encoder
+}
+
+// maxPooledRespBufCap bounds the backing array a pooled respBuf may retain: a
+// single oversized RECORD (a large string/list property) must not pin a big
+// buffer in the pool indefinitely. Buffers that grew past this are dropped on
+// return and a fresh one is allocated on the next miss.
+const maxPooledRespBufCap = 64 << 10 // 64 KiB
+
+// respBufPool pools respBuf values across all connections. The Encoder wraps
+// &rb.buf for the lifetime of the respBuf; sendResponse resets both before each
+// use, so a respBuf returned after a mid-encode error is cleaned on next Get.
+var respBufPool = sync.Pool{
+	New: func() any {
+		rb := &respBuf{}
+		rb.enc = packstream.NewEncoder(&rb.buf)
+		return rb
+	},
+}
+
 // sendResponse encodes a single proto response message and writes it as a
-// chunked Bolt message.
+// chunked Bolt message, reusing a pooled buffer+encoder (#1518).
 func sendResponse(cw *proto.ChunkedWriter, msg any) error {
-	var buf bytes.Buffer
-	enc := packstream.NewEncoder(&buf)
-	if err := proto.EncodeResponse(enc, msg); err != nil {
+	rb := respBufPool.Get().(*respBuf)
+	// Reset the encoder's internal bufio.Writer (discards any bytes left
+	// buffered by a prior mid-encode error) and clear the byte buffer.
+	rb.enc.Reset(&rb.buf)
+	rb.buf.Reset()
+	defer func() {
+		// WriteMessage below consumes buf.Bytes() synchronously, so the buffer
+		// is safe to reuse the moment sendResponse returns. Drop oversized
+		// buffers instead of pooling them to bound retained memory.
+		if rb.buf.Cap() <= maxPooledRespBufCap {
+			respBufPool.Put(rb)
+		}
+	}()
+	if err := proto.EncodeResponse(rb.enc, msg); err != nil {
 		return fmt.Errorf("bolt: encode response %T: %w", msg, err)
 	}
 	// Encoder uses an internal bufio.Writer; flush to buf before reading bytes.
-	if err := enc.Flush(); err != nil {
+	if err := rb.enc.Flush(); err != nil {
 		return fmt.Errorf("bolt: flush encoder %T: %w", msg, err)
 	}
-	if err := cw.WriteMessage(buf.Bytes()); err != nil {
+	if err := cw.WriteMessage(rb.buf.Bytes()); err != nil {
 		return fmt.Errorf("bolt: write response %T: %w", msg, err)
 	}
 	return nil
