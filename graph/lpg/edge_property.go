@@ -232,6 +232,23 @@ func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
 	if !ok {
 		return nil
 	}
+	return g.EdgePropertiesByID(srcID, dstID)
+}
+
+// EdgePropertiesByID is the NodeID-keyed counterpart of [Graph.EdgeProperties]:
+// it returns the latest-wins coalesced property map of the directed edge
+// identified by the endpoint NodeIDs (srcID, dstID), or nil when the pair
+// carries no properties. It is the edge dual of [Graph.NodePropertiesByID].
+//
+// Unlike [Graph.EdgeProperties] it performs NO Mapper access — no external-key →
+// NodeID lookup — so a caller that already holds both endpoint NodeIDs can
+// resolve edge properties without re-entering the Mapper. This is precisely what
+// the snapshot collectors require: they enumerate endpoints from inside
+// [graph.Mapper.Walk], which holds a Mapper shard read lock across its callback,
+// and the Mapper contract forbids re-entry there while a writer may be running
+// (graph/mapper.go:337-345, #1648). The read is served from the lock-free
+// immutable adjacency entry, so EdgePropertiesByID is safe for concurrent use.
+func (g *Graph[N, W]) EdgePropertiesByID(srcID, dstID graph.NodeID) map[string]PropertyValue {
 	block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
 	if block == nil {
 		return nil

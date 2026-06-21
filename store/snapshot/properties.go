@@ -352,19 +352,19 @@ func collectNodePropertyRecords[N comparable, W any](
 ) ([]NodePropertyEntry, error) {
 	idx := buildKeyIndex(keys)
 	out := make([]NodePropertyEntry, 0, 32)
-	var walkErr error
-	g.AdjList().Mapper().Walk(func(id graph.NodeID, n N) bool {
-		props := g.NodeProperties(n)
-		for key, val := range props {
+	// Snapshot node IDs inside Mapper.Walk; resolve properties afterwards via the
+	// lock-free [lpg.Graph.NodePropertiesByID]. Resolving inside the callback
+	// would re-enter the Mapper and deadlock against a concurrent intern
+	// (#1648 — see [collectInternedNodeIDs]).
+	for _, id := range collectInternedNodeIDs(g) {
+		for key, val := range g.NodePropertiesByID(id) {
 			ki, ok := idx[key]
 			if !ok {
-				walkErr = fmt.Errorf("snapshot: node property key %q not in registry snapshot", key)
-				return false
+				return nil, fmt.Errorf("snapshot: node property key %q not in registry snapshot", key)
 			}
 			vb, encErr := encodePropertyValue(val)
 			if encErr != nil {
-				walkErr = encErr
-				return false
+				return nil, encErr
 			}
 			out = append(out, NodePropertyEntry{
 				NodeID:     uint64(id),
@@ -373,10 +373,6 @@ func collectNodePropertyRecords[N comparable, W any](
 				ValueBytes: vb,
 			})
 		}
-		return true
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
 	return out, nil
 }
@@ -393,12 +389,15 @@ func collectEdgePropertyRecords[N comparable, W any](
 ) ([]EdgePropertyEntry, error) {
 	idx := buildKeyIndex(keys)
 	out := make([]EdgePropertyEntry, 0, 32)
-	var walkErr error
 	adj := g.AdjList()
-	adj.Mapper().Walk(func(srcID graph.NodeID, srcN N) bool {
+	// Snapshot source IDs inside Mapper.Walk; resolve adjacency and edge
+	// properties afterwards via the lock-free [adjlist.AdjList.LoadEntry] and
+	// [lpg.Graph.EdgePropertiesByID]. Neither re-enters the Mapper, so this is
+	// safe against a concurrent intern (#1648 — see [collectInternedNodeIDs]).
+	for _, srcID := range collectInternedNodeIDs(g) {
 		neighbours, _ := adj.LoadEntry(srcID)
 		if len(neighbours) == 0 {
-			return true
+			continue
 		}
 		seen := make(map[graph.NodeID]struct{}, len(neighbours))
 		for _, dstID := range neighbours {
@@ -406,21 +405,14 @@ func collectEdgePropertyRecords[N comparable, W any](
 				continue
 			}
 			seen[dstID] = struct{}{}
-			dstN, ok := adj.Mapper().Resolve(dstID)
-			if !ok {
-				continue
-			}
-			props := g.EdgeProperties(srcN, dstN)
-			for key, val := range props {
+			for key, val := range g.EdgePropertiesByID(srcID, dstID) {
 				ki, ok := idx[key]
 				if !ok {
-					walkErr = fmt.Errorf("snapshot: edge property key %q not in registry snapshot", key)
-					return false
+					return nil, fmt.Errorf("snapshot: edge property key %q not in registry snapshot", key)
 				}
 				vb, encErr := encodePropertyValue(val)
 				if encErr != nil {
-					walkErr = encErr
-					return false
+					return nil, encErr
 				}
 				out = append(out, EdgePropertyEntry{
 					Src:        uint64(srcID),
@@ -431,10 +423,6 @@ func collectEdgePropertyRecords[N comparable, W any](
 				})
 			}
 		}
-		return true
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
 	return out, nil
 }

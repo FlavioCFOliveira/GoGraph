@@ -224,77 +224,93 @@ func snapshotRegistry(reg *lpg.LabelRegistry) []string {
 	return out
 }
 
-// collectNodeLabelRecords walks every interned node and emits one
-// [NodeLabelEntry] per (node, label) pair. names is the registry
-// snapshot taken by [snapshotRegistry]; we re-intern each label name
-// to translate the LPG's runtime LabelID back into the snapshot's
-// string-table index. The two indexes are equal in practice (both
-// follow interning order), but the explicit lookup keeps the writer
-// robust against a future divergence.
+// collectInternedNodeIDs returns every NodeID currently interned in g's Mapper,
+// in Mapper.Walk order. It snapshots the IDs inside [graph.Mapper.Walk] —
+// appending only, never re-entering the Mapper — so the bulk label/property
+// collectors can resolve their per-node and per-edge state through the lock-free
+// NodeID-keyed accessors AFTER Walk has released each shard's read lock.
+//
+// This is the remedy the Mapper contract itself prescribes (graph/mapper.go:
+// 337-345): a callback that re-enters the Mapper (Lookup/Resolve) while holding
+// a shard read lock deadlocks against a concurrent writer's queued internSlow
+// write lock, because sync.RWMutex admits no new readers once a writer waits.
+// The non-blocking checkpoint runs the collectors in its lock-free phase 2 with
+// no commit lock and no Graph.View held, so a concurrent committer interning a
+// fresh key is exactly such a writer (#1648).
+func collectInternedNodeIDs[N comparable, W any](g *lpg.Graph[N, W]) []graph.NodeID {
+	ids := make([]graph.NodeID, 0, 64)
+	g.AdjList().Mapper().Walk(func(id graph.NodeID, _ N) bool {
+		ids = append(ids, id)
+		return true
+	})
+	return ids
+}
+
+// collectNodeLabelRecords emits one [NodeLabelEntry] per (node, label) pair.
+// names is the registry snapshot taken by [snapshotRegistry]; we re-intern each
+// label name to translate the LPG's runtime LabelID back into the snapshot's
+// string-table index. The two indexes are equal in practice (both follow
+// interning order), but the explicit lookup keeps the writer robust against a
+// future divergence.
+//
+// The node IDs are snapshotted inside Mapper.Walk and labels resolved afterwards
+// via the lock-free [lpg.Graph.NodeLabelsByID]; resolving inside the Walk
+// callback would re-enter the Mapper and deadlock against a concurrent intern
+// (#1648 — see [collectInternedNodeIDs]).
 func collectNodeLabelRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
 	names []string,
 ) ([]NodeLabelEntry, error) {
 	idx := buildNameIndex(names)
 	out := make([]NodeLabelEntry, 0, 32)
-	var walkErr error
-	g.AdjList().Mapper().Walk(func(id graph.NodeID, n N) bool {
-		labs := g.NodeLabels(n)
-		for _, name := range labs {
+	for _, id := range collectInternedNodeIDs(g) {
+		for _, name := range g.NodeLabelsByID(id) {
 			si, ok := idx[name]
 			if !ok {
-				walkErr = fmt.Errorf("snapshot: node label %q not in registry snapshot", name)
-				return false
+				return nil, fmt.Errorf("snapshot: node label %q not in registry snapshot", name)
 			}
 			out = append(out, NodeLabelEntry{NodeID: uint64(id), StringIdx: si})
 		}
-		return true
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
 	return out, nil
 }
 
-// collectEdgeLabelRecords walks every interned source node, snapshots
-// its adjacency via the lock-free [adjlist.AdjList.LoadEntry], and
-// emits one [EdgeLabelEntry] per (src, dst, label) triple. Each
-// (src, dst) pair is visited once even when the graph is a
-// multigraph: edge labels in v1 are keyed by endpoints only, mirroring
-// the LPG's in-memory edgeBag semantics.
+// collectEdgeLabelRecords emits one [EdgeLabelEntry] per (src, dst, label)
+// triple. Each (src, dst) pair is visited once even when the graph is a
+// multigraph: edge labels in v1 are keyed by endpoints only, mirroring the LPG's
+// in-memory edgeBag semantics.
+//
+// Source IDs are snapshotted inside Mapper.Walk; the adjacency
+// ([adjlist.AdjList.LoadEntry]) and edge labels ([lpg.Graph.EdgeLabelsByID]) are
+// resolved afterwards. Both are lock-free with respect to the Mapper, so this
+// never re-enters it from within the Walk callback (#1648 — see
+// [collectInternedNodeIDs]).
 func collectEdgeLabelRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
 	names []string,
 ) ([]EdgeLabelEntry, error) {
 	idx := buildNameIndex(names)
 	out := make([]EdgeLabelEntry, 0, 32)
-	var walkErr error
 	adj := g.AdjList()
-	adj.Mapper().Walk(func(srcID graph.NodeID, srcN N) bool {
+	for _, srcID := range collectInternedNodeIDs(g) {
 		neighbours, _ := adj.LoadEntry(srcID)
 		if len(neighbours) == 0 {
-			return true
+			continue
 		}
-		// De-duplicate parallel edges: emit each (src, dst) endpoint
-		// pair once. v1 edge-label semantics already collapse parallel
-		// edges into a single edgeBag entry, so the on-disk format
-		// preserves that semantic by visiting each pair exactly once.
+		// De-duplicate parallel edges: emit each (src, dst) endpoint pair once.
+		// v1 edge-label semantics already collapse parallel edges into a single
+		// edgeBag entry, so the on-disk format preserves that by visiting each
+		// pair exactly once.
 		seen := make(map[graph.NodeID]struct{}, len(neighbours))
 		for _, dstID := range neighbours {
 			if _, dup := seen[dstID]; dup {
 				continue
 			}
 			seen[dstID] = struct{}{}
-			dstN, ok := adj.Mapper().Resolve(dstID)
-			if !ok {
-				continue
-			}
-			labs := g.EdgeLabels(srcN, dstN)
-			for _, name := range labs {
+			for _, name := range g.EdgeLabelsByID(srcID, dstID) {
 				si, ok := idx[name]
 				if !ok {
-					walkErr = fmt.Errorf("snapshot: edge label %q not in registry snapshot", name)
-					return false
+					return nil, fmt.Errorf("snapshot: edge label %q not in registry snapshot", name)
 				}
 				out = append(out, EdgeLabelEntry{
 					Src:       uint64(srcID),
@@ -303,10 +319,6 @@ func collectEdgeLabelRecords[N comparable, W any](
 				})
 			}
 		}
-		return true
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
 	return out, nil
 }
