@@ -249,29 +249,91 @@ func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
 // (graph/mapper.go:337-345, #1648). The read is served from the lock-free
 // immutable adjacency entry, so EdgePropertiesByID is safe for concurrent use.
 func (g *Graph[N, W]) EdgePropertiesByID(srcID, dstID graph.NodeID) map[string]PropertyValue {
+	var out map[string]PropertyValue
+	g.ForEachEdgePropertyByID(srcID, dstID, func(name string, v PropertyValue) {
+		if out == nil {
+			out = make(map[string]PropertyValue, 2)
+		}
+		out[name] = v // latest dst-matching slot wins
+	})
+	return out
+}
+
+// ForEachEdgeProperty streams the latest-wins coalesced property set of the
+// directed edge (src, dst), invoking visit once per emitted (name, value)
+// without building the intermediate per-pair map that [Graph.EdgeProperties]
+// returns. It is the allocation-fusing counterpart of [Graph.EdgeProperties],
+// the edge analogue of [Graph.NodePropertiesByIDFunc]: a caller that re-keys
+// every property into a different map (chiefly the Cypher result path, which
+// converts each lpg.PropertyValue into a cypher/expr value) would otherwise
+// allocate a throwaway map[string]PropertyValue only to range over it once.
+// Streaming the values lets the caller build its target map directly, removing
+// that intermediate allocation per relationship row.
+//
+// visit is called zero times when either endpoint is unknown or the pair carries
+// no properties. See [Graph.ForEachEdgePropertyByID] for the coalescing and
+// concurrency contract.
+func (g *Graph[N, W]) ForEachEdgeProperty(src, dst N, visit func(name string, pv PropertyValue)) {
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return
+	}
+	g.ForEachEdgePropertyByID(srcID, dstID, visit)
+}
+
+// ForEachEdgePropertyByID is the NodeID-keyed counterpart of
+// [Graph.ForEachEdgeProperty] and the streaming counterpart of
+// [Graph.EdgePropertiesByID]: it invokes visit once per (name, value) of the
+// latest-wins coalesced property set of the edge identified by the endpoint
+// NodeIDs (srcID, dstID), without materialising the intermediate map.
+//
+// Like [Graph.EdgePropertiesByID] it performs NO Mapper access, so a caller that
+// already holds both endpoint NodeIDs avoids re-entering the Mapper.
+//
+// Coalescing: the per-pair view folds parallel edges by taking the LATEST
+// dst-matching adjacency slot per key. Because the columns are per-slot and a key
+// is present in at most one column per slot, visit fires at most once per name
+// PER SLOT; across the parallel slots a name MAY be visited more than once, so a
+// consumer that needs the single coalesced value MUST apply last-write-wins (the
+// last emission for a name is the coalesced winner, exactly as
+// [Graph.EdgePropertiesByID] records out[name] = v). A map-building consumer gets
+// this for free.
+//
+// Concurrency-safe under the same lock-free contract as
+// [Graph.EdgePropertiesByID]: it reads an immutable, atomically-published
+// columnar block and neighbours snapshot and bounds the scan by the shorter of
+// the two, so a concurrent copy-on-write writer is observed atomically (old
+// snapshot or new, never half-built). Unlike [Graph.NodePropertiesByIDFunc] NO
+// lock is held across visit — the reads are lock-free atomic-pointer loads — so
+// visit imposes no re-entrancy restriction. The PropertyValue passed to visit is
+// a value copy of the immutable cell, so copying it out (or deriving an
+// independent value from it) is safe; for the boxed Bytes/List kinds the same
+// slice-aliasing caveat as [Graph.GetEdgeProperty] applies.
+func (g *Graph[N, W]) ForEachEdgePropertyByID(srcID, dstID graph.NodeID, visit func(name string, pv PropertyValue)) {
 	block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
 	if block == nil {
-		return nil
+		return
 	}
 	nbs, _ := g.adj.LoadEntry(srcID)
+	// Bound the scan by the shorter of the two snapshots: a concurrent writer may
+	// publish a longer neighbours snapshot after the block was loaded. This guard
+	// must live here so every streaming consumer inherits the concurrent-COW
+	// protection (storage-engine-auditor certification, task #1662).
 	n := minInt(len(nbs), block.lenOrZero())
-	var out map[string]PropertyValue
 	for i := 0; i < n; i++ {
 		if nbs[i] != dstID {
 			continue
 		}
 		block.forEachAt(i, func(kk PropertyKeyID, v PropertyValue) {
-			name, ok := g.pkeys.Resolve(kk)
-			if !ok {
-				return
+			if name, ok := g.pkeys.Resolve(kk); ok {
+				visit(name, v) // latest dst-matching slot wins (caller dedups)
 			}
-			if out == nil {
-				out = make(map[string]PropertyValue, 2)
-			}
-			out[name] = v // latest dst-matching slot wins
 		})
 	}
-	return out
 }
 
 // asEdgePropCols narrows the opaque [adjlist.AuxColumn] to the concrete

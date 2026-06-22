@@ -352,13 +352,9 @@ func relValueFromHop(g *lpg.Graph[string, float64], hop candidateHop, _ *ast.Rel
 	if labels := g.EdgeLabels(srcKey, dstKey); len(labels) > 0 {
 		typeName = labels[0]
 	}
-	var props expr.MapValue
-	if raw := g.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
-		props = make(expr.MapValue, len(raw))
-		for k, pv := range raw {
-			props[k] = lpgPropToExpr(pv)
-		}
-	}
+	// Stream the coalesced properties straight into the expr map (M2 / #1662),
+	// dropping the transient lpg map the prior two-step build allocated per hop.
+	props := edgePropsToExprMap(g, srcKey, dstKey)
 	return expr.RelationshipValue{
 		StartID:    startID,
 		EndID:      endID,

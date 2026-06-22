@@ -6656,6 +6656,39 @@ func nodePropsToExprMap(g *lpg.Graph[string, float64], id graph.NodeID) expr.Map
 	return props
 }
 
+// edgePropsToExprMap builds the relationship property map for the directed edge
+// (srcKey -> dstKey) by streaming the latest-wins coalesced lpg property set
+// directly into the expr.MapValue, converting each value via lpgPropToExpr in the
+// streaming callback. It is the edge analogue of [nodePropsToExprMap] and the
+// allocation-fusing replacement for the former `rawEP := g.EdgeProperties(...);
+// m := make(expr.MapValue, len(rawEP)); for k, pv := range rawEP { m[k] =
+// lpgPropToExpr(pv) }` shape: that built a throwaway lpg map[string]PropertyValue
+// per relationship row only to copy it into the expr map. Streaming through
+// [lpg.Graph.ForEachEdgeProperty] removes that intermediate map (the second of
+// the two maps the projection allocated per row, finding M2 / #1662).
+//
+// The result is byte-identical to the prior two-step build: the streamer emits
+// the same coalesced (name, value) pairs in the same order, and writing
+// edgeProps[name] = lpgPropToExpr(pv) on each applies the identical last-write-wins
+// the map build did (lpg.Graph.ForEachEdgeProperty may visit a name more than once
+// across parallel-edge slots; the last emission is the coalesced winner). Returns
+// nil (an absent map) when the pair carries no properties, matching the old build,
+// which produced an empty map only when len(rawEP) == 0.
+//
+// Isolation: the conversion runs inside the lock-free immutable-read callback; no
+// lock is held, the resulting map is freshly owned by the caller, and it aliases
+// no graph-internal state.
+func edgePropsToExprMap(g *lpg.Graph[string, float64], srcKey, dstKey string) expr.MapValue {
+	var edgeProps expr.MapValue
+	g.ForEachEdgeProperty(srcKey, dstKey, func(name string, pv lpg.PropertyValue) {
+		if edgeProps == nil {
+			edgeProps = make(expr.MapValue, 2)
+		}
+		edgeProps[name] = lpgPropToExpr(pv)
+	})
+	return edgeProps
+}
+
 func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
 	switch pv.Kind() {
 	case lpg.PropString:
@@ -7326,18 +7359,10 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph
 			if sOK && dOK {
 				if ets := g.EdgeLabels(sKey, dKey); len(ets) > 0 {
 					et = ets[0]
-					rawEP := g.EdgeProperties(sKey, dKey)
-					edgeProps = make(expr.MapValue, len(rawEP))
-					for k, pv := range rawEP {
-						edgeProps[k] = lpgPropToExpr(pv)
-					}
+					edgeProps = edgePropsToExprMap(g, sKey, dKey)
 				} else if ets := g.EdgeLabels(dKey, sKey); len(ets) > 0 {
 					et = ets[0]
-					rawEP := g.EdgeProperties(dKey, sKey)
-					edgeProps = make(expr.MapValue, len(rawEP))
-					for k, pv := range rawEP {
-						edgeProps[k] = lpgPropToExpr(pv)
-					}
+					edgeProps = edgePropsToExprMap(g, dKey, sKey)
 					storageStart = pathEnd
 					storageEnd = pathStart
 				}
@@ -7976,12 +8001,12 @@ func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, relUse *
 			return nil
 		}
 	}
-	rawEP := g.EdgeProperties(stKey, enKey)
-	edgeProps := make(expr.MapValue, len(rawEP))
-	for k, pv := range rawEP {
-		edgeProps[k] = lpgPropToExpr(pv)
-	}
-	return edgeProps
+	// Whole-relationship / value-key path (needsWholeNode or use.keys): the full
+	// coalesced property map, byte-identical to the original inline build (C5).
+	// Stream the values straight into the expr map so the transient lpg
+	// map[string]PropertyValue the two-step build allocated per row is gone
+	// (M2 / #1662); #1659's field-extractor partial paths above are unaffected.
+	return edgePropsToExprMap(g, stKey, enKey)
 }
 
 // edgeHandleAtFwdPos returns the stable per-edge handle stored at forward
@@ -8674,11 +8699,7 @@ func buildIRProjection(
 									if sOK && dOK {
 										if ets := capturedG.EdgeLabels(sKey, dKey); len(ets) > 0 {
 											et = ets[0]
-											rawEP := capturedG.EdgeProperties(sKey, dKey)
-											edgeProps = make(expr.MapValue, len(rawEP))
-											for k, pv := range rawEP {
-												edgeProps[k] = lpgPropToExpr(pv)
-											}
+											edgeProps = edgePropsToExprMap(capturedG, sKey, dKey)
 										}
 									}
 								}
@@ -8807,22 +8828,29 @@ func buildIRProjection(
 								srcKey, srcResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 								dstKey, dstResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 								if srcResolved && dstResolved {
+									// Resolve the storage direction first: probe the
+									// forward pair, and on an undirected reverse pass
+									// (no labels AND no properties forward) fall back to
+									// the reverse pair, swapping the reported endpoints.
+									// propSrc/propDst then name the winning direction so
+									// the property map is streamed straight into the
+									// expr map (M2 / #1662), dropping the transient lpg
+									// map the prior `make`+copy allocated per row.
 									ets := capturedG.EdgeLabels(srcKey, dstKey)
-									rawEP := capturedG.EdgeProperties(srcKey, dstKey)
-									if len(ets) == 0 && len(rawEP) == 0 {
-										ets = capturedG.EdgeLabels(dstKey, srcKey)
-										rawEP = capturedG.EdgeProperties(dstKey, srcKey)
-										if len(ets) > 0 || len(rawEP) > 0 {
+									propSrc, propDst := srcKey, dstKey
+									if len(ets) == 0 && len(capturedG.EdgeProperties(srcKey, dstKey)) == 0 {
+										revEts := capturedG.EdgeLabels(dstKey, srcKey)
+										revProps := capturedG.EdgeProperties(dstKey, srcKey)
+										if len(revEts) > 0 || len(revProps) > 0 {
+											ets = revEts
+											propSrc, propDst = dstKey, srcKey
 											storageStart, storageEnd = dstID, srcID
 										}
 									}
 									if len(ets) > 0 {
 										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)
 									}
-									edgeProps = make(expr.MapValue, len(rawEP))
-									for k, pv := range rawEP {
-										edgeProps[k] = lpgPropToExpr(pv)
-									}
+									edgeProps = edgePropsToExprMap(capturedG, propSrc, propDst)
 								}
 							}
 							return expr.RelationshipValue{

@@ -126,3 +126,15 @@ func BenchmarkScalarFnEntity_KeysRel(b *testing.B) {
 func BenchmarkScalarFnEntity_PropertiesRel(b *testing.B) {
 	benchmarkScalarFnEntity(b, "MATCH (a)-[r]->(b) RETURN properties(r)")
 }
+
+// BenchmarkScalarFnEntity_WholeRel — RETURN r: the whole-relationship path M2
+// (#1662) targets. The relationship escapes whole, so buildEdgeProps takes the
+// full-coalesced-map branch #1659 did NOT optimise. Before M2 that branch built
+// a transient lpg map[string]PropertyValue per row and then copied every entry
+// into a second expr.MapValue; M2 streams the values straight into the expr map,
+// removing the first map. On the 3-property edges the per-row property-map build
+// dominates, so this benchmark attributes the allocation delta to the eliminated
+// intermediate map.
+func BenchmarkScalarFnEntity_WholeRel(b *testing.B) {
+	benchmarkScalarFnEntity(b, "MATCH (a)-[r]->(b) RETURN r")
+}
