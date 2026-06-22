@@ -197,8 +197,11 @@ func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (siz
 	}
 	total += 8
 
+	// scratch is the reusable per-record packing buffer (28 bytes covers the
+	// largest fixed group), allocated once so records cost no per-field allocs.
+	var scratch [28]byte
 	for i := range raws {
-		n, werr := writeEdgeHandleRecord(tee, &raws[i], labelIdx, keyIdx)
+		n, werr := writeEdgeHandleRecord(tee, scratch[:], &raws[i], labelIdx, keyIdx)
 		if werr != nil {
 			metrics.IncCounter("store.snapshot.WriteEdgeHandles.errors", 1)
 			return 0, 0, false, werr
@@ -214,33 +217,34 @@ func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (siz
 }
 
 // writeEdgeHandleRecord serialises one record and returns the byte count.
-func writeEdgeHandleRecord(w io.Writer, r *edgeHandleRaw, labelIdx, keyIdx map[string]uint32) (int64, error) {
+// scratch must be a caller-owned buffer of at least 28 bytes, reused across
+// records so each fixed-width field group is packed with PutUintNN and emitted
+// in one Write — byte-identical to the per-field binary.Write it replaces, but
+// without that path's per-field reflection/boxing and per-record allocation.
+func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelIdx, keyIdx map[string]uint32) (int64, error) {
 	total := int64(0)
-	if err := binary.Write(w, binary.LittleEndian, r.src); err != nil {
+	// Fixed prefix: src(8) | dst(8) | handle(8) | labelCount(4) = 28 bytes.
+	binary.LittleEndian.PutUint64(scratch[0:8], r.src)
+	binary.LittleEndian.PutUint64(scratch[8:16], r.dst)
+	binary.LittleEndian.PutUint64(scratch[16:24], r.handle)
+	binary.LittleEndian.PutUint32(scratch[24:28], uint32(len(r.labels)))
+	if _, err := w.Write(scratch[:28]); err != nil {
 		return 0, err
 	}
-	if err := binary.Write(w, binary.LittleEndian, r.dst); err != nil {
-		return 0, err
-	}
-	if err := binary.Write(w, binary.LittleEndian, r.handle); err != nil {
-		return 0, err
-	}
-	total += 24
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(r.labels))); err != nil {
-		return 0, err
-	}
-	total += 4
+	total += 28
 	for _, name := range r.labels {
 		si, ok := labelIdx[name]
 		if !ok {
 			return 0, fmt.Errorf("snapshot: edge handle label %q not in table", name)
 		}
-		if err := binary.Write(w, binary.LittleEndian, si); err != nil {
+		binary.LittleEndian.PutUint32(scratch[0:4], si)
+		if _, err := w.Write(scratch[:4]); err != nil {
 			return 0, err
 		}
 		total += 4
 	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(r.propKeys))); err != nil {
+	binary.LittleEndian.PutUint32(scratch[0:4], uint32(len(r.propKeys)))
+	if _, err := w.Write(scratch[:4]); err != nil {
 		return 0, err
 	}
 	total += 4
@@ -253,13 +257,11 @@ func writeEdgeHandleRecord(w io.Writer, r *edgeHandleRaw, labelIdx, keyIdx map[s
 		if verr != nil {
 			return 0, verr
 		}
-		if err := binary.Write(w, binary.LittleEndian, ki); err != nil {
-			return 0, err
-		}
-		if _, err := w.Write([]byte{byte(r.propVals[j].Kind())}); err != nil {
-			return 0, err
-		}
-		if err := binary.Write(w, binary.LittleEndian, uint32(len(valBytes))); err != nil {
+		// Per-property header: keyIdx(4) | kind(1) | valLen(4) = 9 bytes.
+		binary.LittleEndian.PutUint32(scratch[0:4], ki)
+		scratch[4] = byte(r.propVals[j].Kind())
+		binary.LittleEndian.PutUint32(scratch[5:9], uint32(len(valBytes)))
+		if _, err := w.Write(scratch[:9]); err != nil {
 			return 0, err
 		}
 		if _, err := w.Write(valBytes); err != nil {

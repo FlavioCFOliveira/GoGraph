@@ -154,12 +154,16 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 		return 0, 0, err
 	}
+	// scratch is the reusable per-record buffer (20 bytes covers the larger
+	// edge record: Src(8) | Dst(8) | StringIdx(4)). Allocated once, it escapes
+	// the io.Writer chain a single time rather than per record, so each record
+	// is packed with PutUintNN and emitted in one Write with no per-field
+	// reflection/boxing — byte-identical to the binary.Write it replaces.
+	var scratch [20]byte
 	for i := range nodeRecs {
-		if err := binary.Write(tee, binary.LittleEndian, nodeRecs[i].NodeID); err != nil {
-			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
-			return 0, 0, err
-		}
-		if err := binary.Write(tee, binary.LittleEndian, nodeRecs[i].StringIdx); err != nil {
+		binary.LittleEndian.PutUint64(scratch[0:8], nodeRecs[i].NodeID)
+		binary.LittleEndian.PutUint32(scratch[8:12], nodeRecs[i].StringIdx)
+		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 			return 0, 0, err
 		}
@@ -175,15 +179,10 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 		return 0, 0, err
 	}
 	for i := range edgeRecs {
-		if err := binary.Write(tee, binary.LittleEndian, edgeRecs[i].Src); err != nil {
-			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
-			return 0, 0, err
-		}
-		if err := binary.Write(tee, binary.LittleEndian, edgeRecs[i].Dst); err != nil {
-			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
-			return 0, 0, err
-		}
-		if err := binary.Write(tee, binary.LittleEndian, edgeRecs[i].StringIdx); err != nil {
+		binary.LittleEndian.PutUint64(scratch[0:8], edgeRecs[i].Src)
+		binary.LittleEndian.PutUint64(scratch[8:16], edgeRecs[i].Dst)
+		binary.LittleEndian.PutUint32(scratch[16:20], edgeRecs[i].StringIdx)
+		if _, err := tee.Write(scratch[:20]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 			return 0, 0, err
 		}

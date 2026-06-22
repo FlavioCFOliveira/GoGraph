@@ -685,7 +685,7 @@ func TestWriteNodePropRecord_WriterFailure(t *testing.T) {
 		Kind:       lpg.PropString,
 		ValueBytes: []byte("hello"),
 	}
-	_, err := writeNodePropRecord(errWriter{err: sentinel}, rec)
+	_, err := writeNodePropRecord(errWriter{err: sentinel}, make([]byte, 25), rec)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("writeNodePropRecord write failure = %v, want %v", err, sentinel)
 	}
@@ -703,7 +703,7 @@ func TestWriteEdgePropRecord_WriterFailure(t *testing.T) {
 		Kind:       lpg.PropString,
 		ValueBytes: []byte("world"),
 	}
-	_, err := writeEdgePropRecord(errWriter{err: sentinel}, rec)
+	_, err := writeEdgePropRecord(errWriter{err: sentinel}, make([]byte, 25), rec)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("writeEdgePropRecord write failure = %v, want %v", err, sentinel)
 	}
@@ -739,7 +739,7 @@ func TestWriteNodePropRecord_SuccessPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := tc.rec
 			var buf bytes.Buffer
-			n, err := writeNodePropRecord(&buf, &rec)
+			n, err := writeNodePropRecord(&buf, make([]byte, 25), &rec)
 			if err != nil {
 				t.Fatalf("writeNodePropRecord: %v", err)
 			}
@@ -776,7 +776,7 @@ func TestWriteEdgePropRecord_SuccessPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := tc.rec
 			var buf bytes.Buffer
-			n, err := writeEdgePropRecord(&buf, &rec)
+			n, err := writeEdgePropRecord(&buf, make([]byte, 25), &rec)
 			if err != nil {
 				t.Fatalf("writeEdgePropRecord: %v", err)
 			}

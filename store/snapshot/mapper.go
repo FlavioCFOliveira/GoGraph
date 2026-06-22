@@ -161,21 +161,24 @@ func WriteMapperString(w io.Writer, m *graph.Mapper[string]) (size int64, crc ui
 	}
 
 	total := int64(4 + 2 + 8)
+	// scratch holds each record's fixed 12-byte prefix — ID(8) | keyLen(4) —
+	// reused across records (allocated once, escapes the io.Writer chain once)
+	// so packing with PutUintNN and one Write replaces the per-field
+	// binary.Write reflection with zero per-record allocations, byte-identically.
+	var scratch [12]byte
 	for i := range pairs {
 		if uint64(len(pairs[i].Key)) > uint64(^uint32(0)) {
 			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
 			return 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(pairs[i].Key))
 		}
-		if err := binary.Write(tee, binary.LittleEndian, uint64(pairs[i].ID)); err != nil {
-			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-			return 0, 0, err
-		}
-		if err := binary.Write(tee, binary.LittleEndian, uint32(len(pairs[i].Key))); err != nil {
+		binary.LittleEndian.PutUint64(scratch[0:8], uint64(pairs[i].ID))
+		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(pairs[i].Key)))
+		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
 			return 0, 0, err
 		}
 		if pairs[i].Key != "" {
-			if _, err := tee.Write([]byte(pairs[i].Key)); err != nil {
+			if _, err := io.WriteString(tee, pairs[i].Key); err != nil {
 				metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
 				return 0, 0, err
 			}
@@ -286,16 +289,19 @@ func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder
 	}
 
 	total := int64(4 + 2 + 8)
+	// scratch holds each record's fixed 12-byte prefix — ID(8) | keyLen(4) —
+	// reused across records so packing with PutUintNN and one Write replaces
+	// the per-field binary.Write reflection with zero per-record allocations,
+	// byte-identically.
+	var scratch [12]byte
 	for i := range ids {
 		if uint64(len(keys[i])) > uint64(^uint32(0)) {
 			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
 			return 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(keys[i]))
 		}
-		if err := binary.Write(tee, binary.LittleEndian, uint64(ids[i])); err != nil {
-			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-			return 0, 0, err
-		}
-		if err := binary.Write(tee, binary.LittleEndian, uint32(len(keys[i]))); err != nil {
+		binary.LittleEndian.PutUint64(scratch[0:8], uint64(ids[i]))
+		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(keys[i])))
+		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
 			return 0, 0, err
 		}

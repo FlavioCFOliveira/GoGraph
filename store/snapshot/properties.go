@@ -220,9 +220,13 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 		return 0, 0, err
 	}
+	// scratch is the reusable fixed-header buffer for every node and edge
+	// record (25 bytes covers the larger edge header). Allocated once here, it
+	// escapes through the io.Writer chain a single time rather than per record.
+	var scratch [25]byte
 	nodeBytes := int64(0)
 	for i := range nodeRecs {
-		nb, err := writeNodePropRecord(tee, &nodeRecs[i])
+		nb, err := writeNodePropRecord(tee, scratch[:], &nodeRecs[i])
 		if err != nil {
 			metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 			return 0, 0, err
@@ -241,7 +245,7 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 	}
 	edgeBytes := int64(0)
 	for i := range edgeRecs {
-		eb, err := writeEdgePropRecord(tee, &edgeRecs[i])
+		eb, err := writeEdgePropRecord(tee, scratch[:], &edgeRecs[i])
 		if err != nil {
 			metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 			return 0, 0, err
@@ -269,20 +273,25 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 
 // writeNodePropRecord writes one node property record and returns the
 // number of bytes emitted (always 8 + 4 + 1 + 4 + len(value)).
-func writeNodePropRecord(w io.Writer, rec *NodePropertyEntry) (int64, error) {
-	if err := binary.Write(w, binary.LittleEndian, rec.NodeID); err != nil {
-		return 0, err
-	}
-	if err := binary.Write(w, binary.LittleEndian, rec.KeyIdx); err != nil {
-		return 0, err
-	}
-	if _, err := w.Write([]byte{byte(rec.Kind)}); err != nil {
-		return 0, err
-	}
+// scratch must be a caller-owned buffer of at least 17 bytes, reused across
+// records so the encode allocates nothing per record.
+func writeNodePropRecord(w io.Writer, scratch []byte, rec *NodePropertyEntry) (int64, error) {
 	if uint64(len(rec.ValueBytes)) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("snapshot: node property value too long: %d bytes", len(rec.ValueBytes))
 	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(rec.ValueBytes))); err != nil {
+	// Pack the fixed 17-byte header — NodeID(8) | KeyIdx(4) | Kind(1) |
+	// valLen(4) — into the reused scratch buffer and emit it in one Write.
+	// This is byte-identical to the per-field binary.Write/LittleEndian
+	// encoding it replaces, but avoids that path's per-field reflection
+	// (scalar boxed to any) and scratch make([]byte,n) — two heap allocations
+	// per field. The buffer is allocated once by the caller, so the per-record
+	// cost is zero allocations.
+	hdr := scratch[:17]
+	binary.LittleEndian.PutUint64(hdr[0:8], rec.NodeID)
+	binary.LittleEndian.PutUint32(hdr[8:12], rec.KeyIdx)
+	hdr[12] = byte(rec.Kind)
+	binary.LittleEndian.PutUint32(hdr[13:17], uint32(len(rec.ValueBytes)))
+	if _, err := w.Write(hdr); err != nil {
 		return 0, err
 	}
 	if len(rec.ValueBytes) > 0 {
@@ -290,28 +299,28 @@ func writeNodePropRecord(w io.Writer, rec *NodePropertyEntry) (int64, error) {
 			return 0, err
 		}
 	}
-	return int64(8 + 4 + 1 + 4 + len(rec.ValueBytes)), nil
+	return int64(17 + len(rec.ValueBytes)), nil
 }
 
 // writeEdgePropRecord writes one edge property record and returns the
 // number of bytes emitted (8 + 8 + 4 + 1 + 4 + len(value)).
-func writeEdgePropRecord(w io.Writer, rec *EdgePropertyEntry) (int64, error) {
-	if err := binary.Write(w, binary.LittleEndian, rec.Src); err != nil {
-		return 0, err
-	}
-	if err := binary.Write(w, binary.LittleEndian, rec.Dst); err != nil {
-		return 0, err
-	}
-	if err := binary.Write(w, binary.LittleEndian, rec.KeyIdx); err != nil {
-		return 0, err
-	}
-	if _, err := w.Write([]byte{byte(rec.Kind)}); err != nil {
-		return 0, err
-	}
+// scratch must be a caller-owned buffer of at least 25 bytes, reused across
+// records so the encode allocates nothing per record.
+func writeEdgePropRecord(w io.Writer, scratch []byte, rec *EdgePropertyEntry) (int64, error) {
 	if uint64(len(rec.ValueBytes)) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("snapshot: edge property value too long: %d bytes", len(rec.ValueBytes))
 	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(rec.ValueBytes))); err != nil {
+	// Pack the fixed 25-byte header — Src(8) | Dst(8) | KeyIdx(4) | Kind(1) |
+	// valLen(4) — into the reused scratch buffer and emit it in one Write,
+	// byte-identical to the per-field binary.Write encoding but without its
+	// per-field boxing and per-field scratch allocation.
+	hdr := scratch[:25]
+	binary.LittleEndian.PutUint64(hdr[0:8], rec.Src)
+	binary.LittleEndian.PutUint64(hdr[8:16], rec.Dst)
+	binary.LittleEndian.PutUint32(hdr[16:20], rec.KeyIdx)
+	hdr[20] = byte(rec.Kind)
+	binary.LittleEndian.PutUint32(hdr[21:25], uint32(len(rec.ValueBytes)))
+	if _, err := w.Write(hdr); err != nil {
 		return 0, err
 	}
 	if len(rec.ValueBytes) > 0 {
@@ -319,7 +328,7 @@ func writeEdgePropRecord(w io.Writer, rec *EdgePropertyEntry) (int64, error) {
 			return 0, err
 		}
 	}
-	return int64(8 + 8 + 4 + 1 + 4 + len(rec.ValueBytes)), nil
+	return int64(25 + len(rec.ValueBytes)), nil
 }
 
 // snapshotPropertyKeys returns the key table in interning order. We
