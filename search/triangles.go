@@ -64,8 +64,6 @@ func CountTriangles[W any](c *csr.CSR[W]) (total int64, perNode []int64) {
 // rather than per outer vertex because the inner pair-loop is
 // O(deg(v)^2): at a star-hub vertex (degree in the millions) a single
 // outer iteration would otherwise run O(V^2) with no ctx check.
-//
-//nolint:gocyclo // canonical degree-ordered node-iterator triangle count
 func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, perNode []int64, err error) {
 	defer metrics.Time("search.CountTrianglesCtx")()
 	if cerr := ctx.Err(); cerr != nil {
@@ -76,6 +74,35 @@ func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, 
 	if n == 0 {
 		return 0, nil, nil
 	}
+	p := prepareTrianglePlan(c, n)
+	perNode = make([]int64, n)
+	loops := 0
+	for v := 0; v < n; v++ {
+		if cerr := countTrianglesVertex(ctx, p, v, &total, perNode, &loops); cerr != nil {
+			metrics.IncCounter("search.CountTrianglesCtx.errors", 1)
+			return 0, nil, cerr
+		}
+	}
+	return total, perNode, nil
+}
+
+// trianglePlan bundles the source-independent products of the
+// triangle-count setup: the per-vertex-sorted adjacency copy (so the
+// inner edge test is a binary search), the CSR vertex-offset slice,
+// and the canonical degree-ordered rank. Every field is read-only once
+// [prepareTrianglePlan] returns, so the plan is safe to share by
+// pointer across the per-vertex workers of [CountTrianglesParallel].
+type trianglePlan struct {
+	adjBuf []graph.NodeID
+	verts  []uint64
+	rank   []int
+}
+
+// prepareTrianglePlan computes the sorted adjacency copy and the
+// degree-ordered canonical rank shared by the serial and parallel
+// triangle counters. It never mutates c (the adjacency is sorted in a
+// fresh copy).
+func prepareTrianglePlan[W any](c *csr.CSR[W], n int) trianglePlan {
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	// Sort each adjacency list ascending so the per-vertex inner
@@ -107,43 +134,55 @@ func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, 
 	for r, v := range order {
 		rank[v] = r
 	}
-	perNode = make([]int64, n)
-	loops := 0
-	for v := 0; v < n; v++ {
-		// Collect the higher-ranked neighbours of v.
-		nb := adjBuf[verts[v]:verts[v+1]]
-		// For each pair (u, w) where rank[u] > rank[v] and rank[w] > rank[v]
-		// and u < w (in NodeID order to dedupe), check if u-w is an edge.
-		for i := 0; i < len(nb); i++ {
-			u := nb[i]
-			if rank[u] <= rank[v] {
+	return trianglePlan{adjBuf: adjBuf, verts: verts, rank: rank}
+}
+
+// countTrianglesVertex counts the triangles whose lowest-ranked vertex
+// is v, accumulating the count into *total and the per-participant
+// counts into perNode. loops is a caller-owned running counter of
+// inner candidate-pair iterations; ctx.Err() is polled every 4096 of
+// them so cancellation latency stays bounded even at a high-degree hub.
+//
+// The triangle monoid is integer addition: counting only triangles
+// rooted at each v (and giving every vertex of a found triangle one
+// increment) means each triangle is tallied exactly once regardless of
+// the order in which vertices are visited. Both *total and perNode are
+// caller-private in the parallel path, so concurrent workers never
+// share a counter; their partials are summed exactly in the reduce.
+func countTrianglesVertex(ctx context.Context, p trianglePlan, v int, total *int64, perNode []int64, loops *int) error {
+	verts, adjBuf, rank := p.verts, p.adjBuf, p.rank
+	// Collect the higher-ranked neighbours of v.
+	nb := adjBuf[verts[v]:verts[v+1]]
+	// For each pair (u, w) where rank[u] > rank[v] and rank[w] > rank[v]
+	// and u < w (in NodeID order to dedupe), check if u-w is an edge.
+	for i := 0; i < len(nb); i++ {
+		u := nb[i]
+		if rank[u] <= rank[v] {
+			continue
+		}
+		uAdj := adjBuf[verts[u]:verts[u+1]]
+		for j := i + 1; j < len(nb); j++ {
+			// Poll on inner work: the pair-loop is O(deg(v)^2), so
+			// counting candidate pairs (not outer vertices) bounds
+			// cancellation latency at a high-degree hub.
+			if *loops&0xFFF == 0 {
+				if cerr := ctx.Err(); cerr != nil {
+					return cerr
+				}
+			}
+			*loops++
+			w := nb[j]
+			if rank[w] <= rank[v] {
 				continue
 			}
-			uAdj := adjBuf[verts[u]:verts[u+1]]
-			for j := i + 1; j < len(nb); j++ {
-				// Poll on inner work: the pair-loop is O(deg(v)^2), so
-				// counting candidate pairs (not outer vertices) bounds
-				// cancellation latency at a high-degree hub.
-				if loops&0xFFF == 0 {
-					if cerr := ctx.Err(); cerr != nil {
-						metrics.IncCounter("search.CountTrianglesCtx.errors", 1)
-						return 0, nil, cerr
-					}
-				}
-				loops++
-				w := nb[j]
-				if rank[w] <= rank[v] {
-					continue
-				}
-				idx := sort.Search(len(uAdj), func(k int) bool { return uAdj[k] >= w })
-				if idx < len(uAdj) && uAdj[idx] == w {
-					total++
-					perNode[v]++
-					perNode[uint64(u)]++
-					perNode[uint64(w)]++
-				}
+			idx := sort.Search(len(uAdj), func(k int) bool { return uAdj[k] >= w })
+			if idx < len(uAdj) && uAdj[idx] == w {
+				*total++
+				perNode[v]++
+				perNode[uint64(u)]++
+				perNode[uint64(w)]++
 			}
 		}
 	}
-	return total, perNode, nil
+	return nil
 }
