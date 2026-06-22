@@ -1445,6 +1445,12 @@ func (a *AdjList[N, W]) UpdateEntryAux(
 // allocated lazily, length-aligned with neighbours, with every other slot at
 // 0; a label-free graph therefore never pays for the column.
 //
+// Cost: one call is O(degree(src)) — it scans src's neighbours for the slot
+// and copies the whole label column to publish the change. A loop that
+// re-labels every one of a hub's d slots one call at a time is therefore
+// O(d²); use [AdjList.SetEdgeLabelSlots] to re-label many slots in a single
+// O(d) copy-on-write publication instead.
+//
 // Concurrency: the update is copy-on-write. The label column (and the entry)
 // is copied with the change applied and published via the same atomic
 // store-pointer mechanism as [AdjList.AddEdgeH]; the slot's existing index is
@@ -1590,6 +1596,82 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
 		aux: current.aux,
 	}
 	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
+}
+
+// SetEdgeLabelSlots stores opaque label values on many of src's adjacency
+// slots in a SINGLE copy-on-write publication. For each (neighbour, value)
+// pair in updates it writes value to the FIRST slot of src whose neighbour
+// matches — the same first-slot rule as [AdjList.SetEdgeLabelSlot] — and
+// returns the number of slots written. A zero value clears that slot's label,
+// exactly as SetEdgeLabelSlot(…, 0) does. Neighbours in updates that src has
+// no slot for are ignored.
+//
+// This is the amortized bulk form: the whole label column is copied at most
+// once and the new entry is published once, regardless of how many slots are
+// written. Re-labelling all d outgoing slots of a hub therefore costs O(d),
+// versus the O(d²) of d separate [AdjList.SetEdgeLabelSlot] calls — each of
+// which copies the entire column. Prefer this method for bulk or post-build
+// re-labelling. The column is allocated lazily, so a call that matches no
+// neighbour neither allocates nor publishes.
+//
+// Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]. The
+// existing column is never mutated in place — a fresh column is published via
+// the same atomic store-pointer mechanism — so a concurrent lock-free reader
+// holding the prior snapshot is unaffected. Safe for concurrent use.
+func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.NodeID]uint32) int {
+	if len(updates) == 0 {
+		return 0
+	}
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := loadEntry[W](s, intraIdx)
+	if current == nil {
+		return 0
+	}
+	// One pass over the neighbours applies every requested write into a single
+	// copied column. done records which neighbours have taken their first-slot
+	// write, so a multigraph's parallel slots follow the same first-match rule
+	// as the single-slot setter; it also lets the scan stop early once every
+	// requested neighbour has been placed.
+	var newL []uint32
+	var done map[graph.NodeID]struct{}
+	for i, n := range current.neighbours {
+		v, ok := updates[n]
+		if !ok {
+			continue
+		}
+		if _, seen := done[n]; seen {
+			continue
+		}
+		if newL == nil {
+			newL = make([]uint32, len(current.neighbours))
+			copy(newL, current.labels) // no-op when current.labels is nil
+			done = make(map[graph.NodeID]struct{}, len(updates))
+		}
+		newL[i] = v
+		done[n] = struct{}{}
+		if len(done) == len(updates) {
+			break
+		}
+	}
+	if newL == nil {
+		return 0
+	}
+	entry := &adjEntry[W]{
+		neighbours: current.neighbours,
+		weights:    current.weights,
+		handles:    current.handles,
+		labels:     newL,
+		// The label-COW shares the immutable aux header unchanged: only the
+		// label column is replaced here.
+		aux: current.aux,
+	}
+	_ = storeEntry[W](s, intraIdx, a.cfg.MaxShardCapacity, entry)
+	return len(done)
 }
 
 // loadEntry atomically reads the entry stored at intraIdx within s.

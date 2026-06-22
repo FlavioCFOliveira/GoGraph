@@ -1,6 +1,7 @@
 package adjlist
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -409,4 +410,183 @@ func TestAdjList_SetEdgeLabelSlot_RaceWithReaders(t *testing.T) {
 	writers.Wait()
 	close(stop)
 	readers.Wait()
+}
+
+// hubGraph builds a simple directed graph with one source ("hub") and deg
+// distinct out-neighbours ("n0".."n{deg-1}"), returning the graph, the source
+// id, and the neighbour ids in append order. It is the fixture for the
+// per-slot-vs-batch re-label benchmarks and the batch correctness test.
+func hubGraph(tb testing.TB, deg int) (*AdjList[string, int], graph.NodeID, []graph.NodeID) {
+	tb.Helper()
+	a := New[string, int](Config{Directed: true})
+	dsts := make([]graph.NodeID, deg)
+	for i := 0; i < deg; i++ {
+		dst := fmt.Sprintf("n%d", i)
+		if err := a.AddEdge("hub", dst, i); err != nil {
+			tb.Fatalf("AddEdge hub->%s: %v", dst, err)
+		}
+	}
+	srcID := slotID(tb, a, "hub")
+	for i := 0; i < deg; i++ {
+		dsts[i] = slotID(tb, a, fmt.Sprintf("n%d", i))
+	}
+	return a, srcID, dsts
+}
+
+// TestAdjList_SetEdgeLabelSlots_Batch verifies the amortized bulk setter: a
+// single call writes every requested slot, returns the count written, honours
+// the zero-clears-the-slot rule, ignores neighbours with no slot, and is a
+// no-op (no column) when nothing matches.
+func TestAdjList_SetEdgeLabelSlots_Batch(t *testing.T) {
+	t.Parallel()
+	a, srcID, dsts := hubGraph(t, 5)
+
+	updates := map[graph.NodeID]uint32{
+		dsts[0]: 10,
+		dsts[2]: 30,
+		dsts[4]: 50,
+	}
+	if got := a.SetEdgeLabelSlots(srcID, updates); got != 3 {
+		t.Fatalf("SetEdgeLabelSlots wrote %d slots, want 3", got)
+	}
+	labs := labelsOf(t, a, "hub")
+	want := []uint32{10, 0, 30, 0, 50}
+	if len(labs) != len(want) {
+		t.Fatalf("labels = %v, want %v", labs, want)
+	}
+	for i := range want {
+		if labs[i] != want[i] {
+			t.Fatalf("labels = %v, want %v", labs, want)
+		}
+	}
+
+	// A value of 0 clears a slot; an unknown neighbour is ignored. The two
+	// applied writes are dsts[0]->0 and dsts[4]->7; the bogus id matches nothing.
+	bogus := graph.NodeID(1 << 30)
+	if got := a.SetEdgeLabelSlots(srcID, map[graph.NodeID]uint32{dsts[0]: 0, dsts[4]: 7, bogus: 99}); got != 2 {
+		t.Fatalf("second batch wrote %d slots, want 2", got)
+	}
+	labs = labelsOf(t, a, "hub")
+	want = []uint32{0, 0, 30, 0, 7}
+	for i := range want {
+		if labs[i] != want[i] {
+			t.Fatalf("after clear+set labels = %v, want %v", labs, want)
+		}
+	}
+
+	// Empty updates and an unknown source are no-ops returning 0.
+	if got := a.SetEdgeLabelSlots(srcID, nil); got != 0 {
+		t.Fatalf("nil updates wrote %d, want 0", got)
+	}
+	if got := a.SetEdgeLabelSlots(graph.NodeID(1<<30), map[graph.NodeID]uint32{dsts[0]: 1}); got != 0 {
+		t.Fatalf("unknown source wrote %d, want 0", got)
+	}
+}
+
+// TestAdjList_SetEdgeLabelSlots_FirstSlotMultigraph verifies that, like the
+// single-slot setter, the batch writes only the FIRST slot matching each
+// neighbour when parallel edges share a destination.
+func TestAdjList_SetEdgeLabelSlots_FirstSlotMultigraph(t *testing.T) {
+	t.Parallel()
+	a := New[string, int](Config{Directed: true, Multigraph: true})
+	const parallel = 4
+	for i := 0; i < parallel; i++ {
+		if err := a.AddEdge("a", "b", i); err != nil {
+			t.Fatalf("AddEdge #%d: %v", i, err)
+		}
+	}
+	srcID := slotID(t, a, "a")
+	dstID := slotID(t, a, "b")
+	if got := a.SetEdgeLabelSlots(srcID, map[graph.NodeID]uint32{dstID: 7}); got != 1 {
+		t.Fatalf("batch wrote %d slots, want 1 (first slot only)", got)
+	}
+	labs := labelsOf(t, a, "a")
+	want := []uint32{7, 0, 0, 0}
+	for i := range want {
+		if labs[i] != want[i] {
+			t.Fatalf("labels = %v, want %v (only the first slot)", labs, want)
+		}
+	}
+}
+
+// TestAdjList_SetEdgeLabelSlots_RaceWithReaders mirrors the single-slot race
+// obligation for the bulk path: concurrent lock-free readers must never see a
+// torn entry while a batch writer republishes the whole column. Run under -race.
+func TestAdjList_SetEdgeLabelSlots_RaceWithReaders(t *testing.T) {
+	t.Parallel()
+	a, srcID, dsts := hubGraph(t, 64)
+
+	stop := make(chan struct{})
+	var readers, writers sync.WaitGroup
+
+	for r := 0; r < 4; r++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				labs := a.LoadEntryLabels(srcID)
+				nb, _ := a.LoadEntry(srcID)
+				if labs != nil && len(labs) != len(nb) {
+					t.Errorf("torn snapshot: labels %d != neighbours %d", len(labs), len(nb))
+					return
+				}
+			}
+		}()
+	}
+
+	for w := 0; w < 2; w++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for i := uint32(1); i < 1000; i++ {
+				updates := make(map[graph.NodeID]uint32, len(dsts))
+				for _, d := range dsts {
+					updates[d] = i
+				}
+				a.SetEdgeLabelSlots(srcID, updates)
+			}
+		}()
+	}
+
+	writers.Wait()
+	close(stop)
+	readers.Wait()
+}
+
+// BenchmarkAdjList_HubRelabel contrasts re-labelling all of a hub's d slots
+// one SetEdgeLabelSlot call at a time (each copies the whole column -> O(d²))
+// against one SetEdgeLabelSlots call (a single copy -> O(d)). Comparing ns/op
+// across the degrees shows the per-slot path scaling ~quadratically while the
+// batch path scales ~linearly — the sub-quadratic re-label the task requires.
+func BenchmarkAdjList_HubRelabel(b *testing.B) {
+	for _, deg := range []int{256, 1024, 4096} {
+		a, srcID, dsts := hubGraph(b, deg)
+
+		b.Run(fmt.Sprintf("PerSlot/deg=%d", deg), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				v := uint32(i + 1)
+				for _, d := range dsts {
+					a.SetEdgeLabelSlot(srcID, d, v)
+				}
+			}
+		})
+
+		updates := make(map[graph.NodeID]uint32, deg)
+		b.Run(fmt.Sprintf("Batch/deg=%d", deg), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				v := uint32(i + 1)
+				for _, d := range dsts {
+					updates[d] = v
+				}
+				a.SetEdgeLabelSlots(srcID, updates)
+			}
+		})
+	}
 }
