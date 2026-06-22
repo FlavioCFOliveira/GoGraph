@@ -107,7 +107,7 @@ type config struct {
 	packages int   // number of :Package nodes (each owns one :Release)
 	depsMin  int   // minimum DEPENDS_ON out-degree per release (inclusive)
 	depsMax  int   // maximum DEPENDS_ON out-degree per release (inclusive)
-	batch    int   // transactions group this many packages per WAL commit
+	batch    int   // packages processed between context-cancellation checks
 	seed     int64 // RNG seed; fixes the deterministic data shape
 }
 
@@ -148,7 +148,7 @@ func main() {
 	flag.IntVar(&cfg.packages, "packages", cfg.packages, "number of Package nodes (each owns one Release)")
 	flag.IntVar(&cfg.depsMin, "deps-min", cfg.depsMin, "minimum DEPENDS_ON out-degree per release")
 	flag.IntVar(&cfg.depsMax, "deps-max", cfg.depsMax, "maximum DEPENDS_ON out-degree per release")
-	flag.IntVar(&cfg.batch, "batch", cfg.batch, "packages committed per WAL transaction")
+	flag.IntVar(&cfg.batch, "batch", cfg.batch, "packages processed between context-cancellation checks")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.Parse()
 
@@ -218,11 +218,12 @@ type commitStats struct {
 }
 
 // commit builds the seeded supply-chain graph entirely through WAL
-// transactions and takes a v2 snapshot. It returns the realised shape and
-// the on-disk byte footprint. The write loop honours ctx cancellation
-// between batches.
+// transactions -- one committed transaction per package (package node,
+// release node, and their PUBLISHED/DEPENDS_ON edges) -- and takes a v2
+// snapshot. It returns the realised shape and the on-disk byte footprint.
+// The write loop polls ctx for cancellation every cfg.batch packages.
 //
-//nolint:gocyclo // one linear build pipeline: nodes+labels+props, then edges+props, batched into WAL commits.
+//nolint:gocyclo // one linear build pipeline: nodes+labels+props, then edges+props, one tx per package.
 func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitStats, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional — the example must
 	// reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
@@ -331,7 +332,7 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 
 		if err := tx.Commit(); err != nil {
 			_ = wl.Close()
-			return commitStats{}, fmt.Errorf("commit batch at package %d: %w", i, err)
+			return commitStats{}, fmt.Errorf("commit tx at package %d: %w", i, err)
 		}
 		st.commits++
 	}

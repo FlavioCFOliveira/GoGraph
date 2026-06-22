@@ -106,10 +106,16 @@ This is a **concurrency** example, so it reports (per the taxonomy in
 
 - **Aggregate throughput** — reads/s of the mixed workload at each level.
 - **Per-worker-count scaling** — the identical workload run at `1, 2, 4,
-  8 …` workers; throughput that climbs with the worker count is the
-  observable evidence that readers do not contend on the snapshot. Scale
-  `-nodes`/`-attach` up and watch the curve: it should keep climbing until
-  the worker count approaches `GOMAXPROCS`.
+  8 …` workers. Throughput that climbs with the worker count shows the read
+  path admits genuine parallelism — no global lock serialises the readers —
+  but the curve is a performance observation, not the proof of lock-freedom
+  (the correctness evidence below is). Its ceiling is set by memory
+  bandwidth and the machine's core mix: the mixed workload, and especially
+  its PageRank component, is largely memory-bound, so on a bandwidth-limited
+  or hybrid performance/efficiency-core CPU the curve typically flattens
+  well before the worker count reaches `GOMAXPROCS` rather than scaling
+  linearly. Scale `-nodes`/`-attach` up to do more work per read and the
+  climb extends further before it saturates.
 - **Live heap** — one immutable snapshot is shared, not copied per worker,
   so the heap does not grow with the worker count.
 

@@ -51,7 +51,7 @@ go run ./examples/04_persistence -packages 200000 -seed 7  # observable-scale ru
 | `-packages` | number of `Package` nodes (each owns one `Release`) | `300` | `200000` |
 | `-deps-min` | minimum `DEPENDS_ON` out-degree per release | `2` | `2` |
 | `-deps-max` | maximum `DEPENDS_ON` out-degree per release | `6` | `20` |
-| `-batch` | packages committed per WAL transaction | `50` | `500` |
+| `-batch` | packages processed between context-cancellation checks | `50` | `500` |
 | `-seed` | RNG seed (fixes the data shape) | `1` | any |
 
 The default is intentionally modest because persistence I/O is the slow part:
