@@ -253,13 +253,14 @@ func generate(ctx context.Context, cfg config) (*adjlist.AdjList[string, int64],
 	ids := make([]string, cfg.nodes)
 	seen := make(map[string]struct{}, cfg.nodes)
 
-	// inDegree drives preferential attachment: an earlier page is chosen as
-	// a link target with probability proportional to the in-degree it has
-	// already accumulated, plus one (so a page with no links yet can still
-	// be chosen). cumulative is the running prefix-sum scratch reused per
-	// source to avoid per-edge allocation.
-	inDegree := make([]int, cfg.nodes)
-	cumulative := make([]int64, 0, cfg.nodes)
+	// A Fenwick (binary-indexed) tree drives preferential attachment: an
+	// earlier page is chosen as a link target with probability proportional
+	// to the in-degree it has already accumulated, plus one (so a page with
+	// no links yet can still be chosen). The tree holds weight inDegree[k]+1
+	// at index k and supports O(log n) weighted draws and point updates, so
+	// the whole build is O(n·edgesPerNode·log n) instead of the O(n^2) a
+	// per-draw prefix-sum rebuild would cost.
+	weights := newFenwick(cfg.nodes)
 
 	var edges int
 	var weightSum int64
@@ -282,55 +283,98 @@ func generate(ctx context.Context, cfg config) (*adjlist.AdjList[string, int64],
 		// can have at most one link, and so on, which is the natural shape
 		// of a growing citation web.
 		degree := min(cfg.edgesPerNode, i)
-		if degree == 0 {
-			continue
-		}
-		clear(targets)
-		for len(targets) < degree {
-			j := preferentialPick(rng, inDegree[:i], &cumulative)
-			if _, dup := targets[j]; dup {
-				continue
+		if degree > 0 {
+			clear(targets)
+			// The candidate weights are constant across this page's draws,
+			// so the total weight of the [0,i) prefix is sampled once.
+			total := weights.total()
+			for len(targets) < degree {
+				j := weights.findByWeight(rng.Int63n(total))
+				if _, dup := targets[j]; dup {
+					continue
+				}
+				targets[j] = struct{}{}
 			}
-			targets[j] = struct{}{}
-		}
-		for j := range targets {
-			weight := int64(1 + rng.Intn(cfg.maxWeight))
-			if err := a.AddEdge(id, ids[j], weight); err != nil {
-				return nil, 0, 0, fmt.Errorf("AddEdge %s->%s: %w", id, ids[j], err)
+			for j := range targets {
+				weight := int64(1 + rng.Intn(cfg.maxWeight))
+				if err := a.AddEdge(id, ids[j], weight); err != nil {
+					return nil, 0, 0, fmt.Errorf("AddEdge %s->%s: %w", id, ids[j], err)
+				}
+				weights.add(j, 1) // one more inbound link raises page j's weight
+				edges++
+				weightSum += weight
 			}
-			inDegree[j]++
-			edges++
-			weightSum += weight
 		}
+		// Page i now joins the candidate pool for every later page, with
+		// base weight 1 (no inbound links yet).
+		weights.add(i, 1)
 	}
 	return a, edges, weightSum, nil
 }
 
-// preferentialPick returns the index of an earlier page chosen with
-// probability proportional to (inDegree+1), implementing preferential
-// attachment. cumulative is a caller-owned scratch slice reused across
-// calls; it is rebuilt as the prefix sum of (inDegree[k]+1) and then
-// binary-searched for the random draw.
-func preferentialPick(rng *rand.Rand, inDegree []int, cumulative *[]int64) int {
-	cum := (*cumulative)[:0]
-	var total int64
-	for _, d := range inDegree {
-		total += int64(d) + 1
-		cum = append(cum, total)
+// fenwick is a Fenwick (binary-indexed) tree over per-index int64 weights.
+// It supports point updates and prefix sums in O(log n), plus findByWeight
+// — a cumulative-weight search that turns weighted sampling into O(log n).
+// It backs the example's preferential-attachment generator; the indices are
+// page positions and each weight is that page's in-degree plus one.
+type fenwick struct {
+	tree []int64 // 1-indexed; tree[0] is unused
+	n    int
+}
+
+// newFenwick returns a tree sized for indices [0, n) with every weight zero.
+func newFenwick(n int) *fenwick {
+	return &fenwick{tree: make([]int64, n+1), n: n}
+}
+
+// add increases the weight at 0-based index i by delta.
+func (f *fenwick) add(i int, delta int64) {
+	for x := i + 1; x <= f.n; x += x & (-x) {
+		f.tree[x] += delta
 	}
-	*cumulative = cum
-	r := rng.Int63n(total)
-	// Smallest index whose cumulative weight is strictly greater than r.
-	lo, hi := 0, len(cum)
-	for lo < hi {
-		mid := int(uint(lo+hi) >> 1)
-		if cum[mid] <= r {
-			lo = mid + 1
-		} else {
-			hi = mid
+}
+
+// total returns the sum of every weight in the tree.
+func (f *fenwick) total() int64 {
+	var sum int64
+	for x := f.n; x > 0; x -= x & (-x) {
+		sum += f.tree[x]
+	}
+	return sum
+}
+
+// findByWeight returns the smallest 0-based index idx whose cumulative
+// weight over [0, idx] is strictly greater than r. This reproduces, in
+// O(log n), exactly the index a linear binary search over the prefix-sum
+// array would return for the same r, so the generated dataset is identical
+// to the earlier O(n^2) implementation. The caller must pass 0 <= r < total().
+func (f *fenwick) findByWeight(r int64) int {
+	// Walk the tree from the highest power-of-two stride down, advancing
+	// past every block whose cumulative weight still fits within r. pos
+	// ends as the largest 1-based index with prefix sum <= r, so the answer
+	// (the first index whose prefix sum exceeds r) is pos as a 0-based index.
+	pos := 0
+	rem := r
+	for k := highestPowerOfTwo(f.n); k > 0; k >>= 1 {
+		if next := pos + k; next <= f.n && f.tree[next] <= rem {
+			pos = next
+			rem -= f.tree[next]
 		}
 	}
-	return lo
+	return pos
+}
+
+// highestPowerOfTwo returns the largest power of two not exceeding n (or 0
+// when n <= 0); it bounds the leading stride of a Fenwick cumulative search.
+func highestPowerOfTwo(n int) int {
+	p := 1
+	for p<<1 <= n {
+		p <<= 1
+	}
+	if n <= 0 {
+		return 0
+	}
+	return p
 }
 
 // checkEvery bounds how often the build polls ctx for cancellation:
