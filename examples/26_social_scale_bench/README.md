@@ -110,12 +110,12 @@ edges.like=3006369
 # build.elapsed=3.013s
 # build.node_rate=7302 nodes/s
 # build.edge_rate=2158801 edges/s
-# mem.heap_alloc=204.69 MiB
-# mem.heap_growth=204.34 MiB
-# mem.total_alloc=4.12 GiB
-# mem.sys=618.11 MiB
-# mem.num_gc=57
-# bytes_per_edge=32.9
+# mem.heap_alloc=151.57 MiB
+# mem.heap_growth=151.22 MiB
+# mem.total_alloc=3.93 GiB
+# mem.sys=474.36 MiB
+# mem.num_gc=68
+# bytes_per_edge=24.4
 q.count_users=20000
 # q.count_users.latency=11.466ms
 q.count_articles=2000
@@ -316,9 +316,30 @@ results (the `since`/`when` coverage counts are unchanged):
 | `int32` epoch-day column (`DateValue`) | **~204 MiB** | **~32.9** | **−47 %** |
 
 Extrapolated to the full specification (~3.25 × 10⁸ edges) the live-heap
-ceiling drops from **~20 GiB to ~10 GiB**. Remaining headroom: a global dense
-edge-record (gated on a universal edge id) would suit edge-centric workloads —
-tracked in the backlog.
+ceiling drops from **~20 GiB to ~10 GiB**.
+
+### The weightless adjacency mode (`#1650`)
+
+This social graph is queried only by relationship type and property — never by
+edge weight — yet the Cypher engine forces `W = float64`, so the adjacency's
+per-edge weight column (8 bytes/edge) is dead. Building the graph with
+`adjlist.Config{Weightless: true}` drops that column entirely: `AddEdge`'s weight
+argument is accepted but ignored, reads return the zero weight, and the
+CSR/snapshot persist no weights (the manifest records `weightless`, so a
+recovered graph stays weightless rather than re-allocating a zero column).
+Measured at 20k/2k, verified against the full openCypher TCK (3897/3897), `go
+test -race`, and a snapshot+recovery round-trip:
+
+| | Live heap | B/edge | vs. weighted |
+|---|---:|---:|---:|
+| int32 date column, weighted | ~204 MiB | ~32.9 | — |
+| int32 date column, weightless (`#1650`) | **~151 MiB** | **~24.4** | **−26 %** |
+
+The two edge-store optimizations together take this example from the ISO-string
+weighted baseline of ~61.8 B/edge to **~24.4 B/edge (−60 %)**; the full-scale
+(~3.25 × 10⁸ edges) live-heap ceiling drops from ~20 GiB to **~8 GiB**.
+Remaining headroom: a global dense edge-record (gated on a universal edge id)
+would suit edge-centric workloads — tracked in the backlog.
 
 ## Key APIs
 
@@ -327,6 +348,7 @@ tracked in the backlog.
 - `graph/lpg.Graph.SetEdgeProperty` — set or mutate a relationship property on a pair after the edge exists (a pair-level property, which is unambiguous here because every endpoint pair carries one edge; it is the tier the Cypher engine reads as `r.since` / `r.when`). The bulk build uses the fused `AddEdgeLabeledWithProperty` instead; `SetEdgeProperty` is the general single-property path used by the untyped branch.
 - `graph/lpg.DateValue` — wrap the mandatory `since` / `when` relationship dates as native Cypher `Date` values; folds into the compact `int32` epoch-day column (~4 bytes/value) and reads back as a `Date` (`#1649`).
 - `graph/lpg.StringValue` — wrap string property values (node `id` / `name`, article `title`).
+- `graph/adjlist.Config{Weightless: true}` (passed through `lpg.New`) — build a graph with no per-edge weight column, for a workload queried only by relationship/property; `AddEdge`'s weight argument is ignored and reads return the zero weight. Persisted in the snapshot manifest so a recovered graph stays weightless (`#1650`).
 - `cypher.NewEngine` / `Engine.Run` — query the in-memory graph.
 - `cypher.Result.Next` / `Result.Record` / `Result.Err` / `Result.Close` — iterate result rows and read columns.
 - `cypher/expr.StringValue` / `expr.IntegerValue` — typed query parameters and result cells.

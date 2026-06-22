@@ -1198,6 +1198,9 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 // EdgeWeight performs an O(out-degree) scan of src's adjacency and allocates
 // nothing. It is safe for concurrent use under the same lock-free adjacency
 // snapshot contract as [adjlist.AdjList.LoadEntry].
+//
+// For a weightless graph (adjlist.Config.Weightless) the adjacency carries no
+// weights column, so a present edge reports the zero value of W with ok=true.
 func (g *Graph[N, W]) EdgeWeight(src, dst N) (W, bool) {
 	var zero W
 	srcID, ok := g.adj.Mapper().Lookup(src)
@@ -1211,6 +1214,11 @@ func (g *Graph[N, W]) EdgeWeight(src, dst N) (W, bool) {
 	nbs, ws := g.adj.LoadEntry(srcID)
 	for i, nb := range nbs {
 		if nb == dstID {
+			// A weightless graph (adjlist.Config.Weightless) carries no weights
+			// column, so ws is nil; the edge exists with the zero weight.
+			if ws == nil {
+				return zero, true
+			}
 			return ws[i], true
 		}
 	}

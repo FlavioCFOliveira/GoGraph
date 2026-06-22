@@ -76,7 +76,13 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if uint64(n) >= maxID || !live[uint64(n)] {
 				continue
 			}
-			if err := enc.Encode(Record{Type: "edge", Src: src, Dst: names[uint64(n)], Weight: ws[i]}); err != nil {
+			// A weightless source (Config.Weightless) carries no weights column,
+			// so ws is nil; emit the zero weight, identical to a genuine 0.
+			var weight int64
+			if ws != nil {
+				weight = ws[i]
+			}
+			if err := enc.Encode(Record{Type: "edge", Src: src, Dst: names[uint64(n)], Weight: weight}); err != nil {
 				metrics.IncCounter("graph.io.jsonl.WriteCtx.errors", 1)
 				return written, err
 			}
@@ -171,7 +177,13 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 			if uint64(n) >= maxID || !live[uint64(n)] {
 				continue
 			}
-			if err := enc.Encode(Record{Type: "edge", Src: src, Dst: names[uint64(n)], Weight: ws[i]}); err != nil {
+			// A weightless source (Config.Weightless) carries no weights column,
+			// so ws is nil; emit the zero weight, identical to a genuine 0.
+			var weight int64
+			if ws != nil {
+				weight = ws[i]
+			}
+			if err := enc.Encode(Record{Type: "edge", Src: src, Dst: names[uint64(n)], Weight: weight}); err != nil {
 				metrics.IncCounter("graph.io.jsonl.WriteWithPropsCtx.errors", 1)
 				return written, err
 			}

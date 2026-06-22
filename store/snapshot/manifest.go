@@ -79,6 +79,14 @@ type GraphConfig struct {
 	// Multigraph records whether the originating graph allowed parallel
 	// edges between the same ordered endpoint pair.
 	Multigraph bool `json:"multigraph"`
+	// Weightless records whether the originating graph stored no per-edge
+	// weight column (adjlist.Config.Weightless, #1650). It is omitempty and
+	// backward-compatible: a snapshot written before this field, or by a
+	// weighted graph, omits it, so it decodes to false (weighted) — the prior
+	// behaviour. A recovered weightless graph stays weightless, preserving the
+	// per-edge memory saving across a restart rather than re-allocating a
+	// zero-filled weight column.
+	Weightless bool `json:"weightless,omitempty"`
 }
 
 // Manifest is the JSON-encoded index of a snapshot directory.

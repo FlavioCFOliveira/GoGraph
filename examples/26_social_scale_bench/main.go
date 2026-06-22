@@ -41,17 +41,19 @@
 // million users, thirty thousand articles, 150-200 friends per user and
 // up to 300 likes per user. That is roughly 1.03M nodes and on the
 // order of 3.2 × 10^8 edges. The dominant resident cost is the per-edge
-// property and adjacency store. With the columnar edge-property tier and
-// the int32 date column it measures ~32.9 bytes per edge at 20k/2k —
-// roughly half the ~61.8 bytes the equivalent ISO-8601 string date column
-// cost (#1649) — so the full run needs on the order of ~10 GiB of live
-// heap and several minutes to build, down from ~19 GiB before the date
-// column landed. The implicit-type mode (-rel-types=false) saves only the
-// small relationship-label store on top; the date-property store is
-// identical in both modes. This is deliberate: the example exists to
-// stress query performance and resource consumption at that scale. See the
-// README's "Memory profile and optimizations" section for the per-edge
-// breakdown and how these figures were measured.
+// property and adjacency store, which measures ~24.4 bytes per edge at
+// 20k/2k after two optimizations: the int32 date column (#1649) brought it
+// from the ISO-string column's ~61.8 to ~32.9, and the weightless adjacency
+// mode (#1650 — this graph is queried only by relationship type and property,
+// never by edge weight, so the per-edge float64 weight column is dead) brought
+// it to ~24.4. So the full run needs on the order of ~8 GiB of live heap and
+// several minutes to build, down from ~19 GiB before the date column landed.
+// The implicit-type mode (-rel-types=false) saves only the small
+// relationship-label store on top; the date-property store is identical in both
+// modes. This is deliberate: the example exists to stress query performance and
+// resource consumption at that scale. See the README's "Memory profile and
+// optimizations" section for the per-edge breakdown and how these figures were
+// measured.
 //
 // Every dimension is a flag, so the same binary scales down to a
 // laptop-sized run:
@@ -204,7 +206,12 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	base := readMem()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	// Weightless: this social graph is queried only by relationship type and
+	// edge properties via the Cypher engine — the FRIEND/LIKE edges carry the
+	// constant weight 1 that nothing ever reads. Dropping the per-edge weight
+	// column (W=float64) saves 8 B/edge of dead memory; the build is otherwise
+	// identical (addEdge still passes weight 1, which is accepted and ignored).
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
 	stats, err := build(ctx, g, cfg, w)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)

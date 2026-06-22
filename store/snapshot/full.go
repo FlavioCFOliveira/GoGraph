@@ -487,6 +487,7 @@ func writeSnapshotFullCore[N comparable, W any](
 		GraphConfig: &GraphConfig{
 			Directed:   cfg.Directed,
 			Multigraph: cfg.Multigraph,
+			Weightless: cfg.Weightless,
 		},
 	}
 

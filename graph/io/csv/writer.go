@@ -73,7 +73,13 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			}
 			srcCell := src
 			dstCell := names[uint64(n)]
-			weightCell := strconv.FormatInt(ws[i], 10)
+			// A weightless source (Config.Weightless) carries no weights column,
+			// so ws is nil; emit "0", identical to a genuine 0 weight.
+			var weight int64
+			if ws != nil {
+				weight = ws[i]
+			}
+			weightCell := strconv.FormatInt(weight, 10)
 			if opts.SanitizeFormulae {
 				srcCell = sanitizeFormulaCell(srcCell)
 				dstCell = sanitizeFormulaCell(dstCell)

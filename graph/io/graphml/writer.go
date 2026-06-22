@@ -130,7 +130,13 @@ func encodeEdges(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint
 			if uint64(n) >= maxID || !live[uint64(n)] {
 				continue
 			}
-			if err := encodeEdge(enc, src, names[uint64(n)], ws[i]); err != nil {
+			// A weightless source (Config.Weightless) carries no weights column,
+			// so ws is nil; emit the zero weight, identical to a genuine 0.
+			var weight int64
+			if ws != nil {
+				weight = ws[i]
+			}
+			if err := encodeEdge(enc, src, names[uint64(n)], weight); err != nil {
 				return err
 			}
 		}

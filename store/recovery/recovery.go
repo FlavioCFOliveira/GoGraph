@@ -812,6 +812,7 @@ func recoveryGraphConfig(gc *snapshot.GraphConfig) adjlist.Config {
 	return adjlist.Config{
 		Directed:   gc.Directed,
 		Multigraph: gc.Multigraph,
+		Weightless: gc.Weightless,
 	}
 }
 

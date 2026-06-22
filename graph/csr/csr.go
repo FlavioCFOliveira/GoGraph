@@ -31,7 +31,7 @@ import (
 type CSR[W any] struct {
 	vertices []uint64       // offsets, length len(vertices); vertices[i] = start of node-i out-neighbours, vertices[len-1] = total edges
 	edges    []graph.NodeID // length size; out-neighbours sorted by source
-	weights  []W            // parallel to edges; nil when the source graph carries no weight payload of interest
+	weights  []W            // parallel to edges; nil when W is zero-size (struct{}) OR the source adjacency is weightless (see BuildFromAdjList)
 	handles  []uint64       // parallel to edges; nil unless the source carries per-slot stable edge handles (see HandlesSlice)
 	order    uint64         // number of distinct nodes in the snapshot
 	size     uint64         // number of edges in the snapshot
@@ -78,7 +78,16 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 
 	edges := make([]graph.NodeID, total)
 	var weights []W
-	if hasWeights[W]() {
+	// Allocate the weights array only when the source genuinely carries
+	// weights: the weight type W must carry a payload (hasWeights[W](), a
+	// compile-time gate that excludes struct{}) AND the source adjacency must
+	// not be in weightless mode (adj.Weightless(), a runtime gate the caller
+	// opts into to drop the per-edge weight column on an unweighted property
+	// graph). The two conditions are independent — a non-empty W can be paired
+	// with a deliberately weightless graph — so both must hold. A weightless
+	// source therefore yields a nil-weights CSR, which NeighboursByID renders
+	// as the zero W and the snapshot writer persists with hasWeights=0.
+	if hasWeights[W]() && !adj.Weightless() {
 		weights = make([]W, total)
 	}
 	var handles []uint64

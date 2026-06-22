@@ -91,9 +91,16 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 				continue
 			}
 			dstName := names[uint64(n)]
+			// A weightless source (Config.Weightless) carries no weights column,
+			// so ws is nil; treat the absent weight as 0 (no label), identical to
+			// a genuine 0 weight.
+			var weight int64
+			if ws != nil {
+				weight = ws[i]
+			}
 			label := ""
-			if ws[i] != 0 {
-				label = fmt.Sprintf(` [label=%q]`, strconv.FormatInt(ws[i], 10))
+			if weight != 0 {
+				label = fmt.Sprintf(` [label=%q]`, strconv.FormatInt(weight, 10))
 			}
 			line := fmt.Sprintf("  %s %s %s%s;\n", quote(srcName), edgeOp, quote(dstName), label)
 			if _, err := bw.WriteString(line); err != nil {

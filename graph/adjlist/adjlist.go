@@ -90,6 +90,37 @@ type Config struct {
 	// The default (0) places no upper bound — a shard doubles its
 	// slot slice indefinitely.
 	MaxShardCapacity int
+
+	// Weightless, when true, builds a graph that carries NO per-edge weight
+	// payload: the [adjEntry.weights] column is never allocated and stays nil
+	// for every node, so a degree-d hub costs d fewer W values (8 B/edge for
+	// the common W=float64). The weight argument of [AdjList.AddEdge] and the
+	// fused-append entry points is accepted but IGNORED, and [AdjList.LoadEntry]
+	// / [AdjList.LoadEntryH] return a nil weights slice. This is the explicit
+	// "unweighted graph" representation: every edge is treated as having the
+	// zero value of W (NOT 1), exactly the all-zero special case the immutable
+	// CSR snapshot already encodes for a zero-size W (see [graph/csr]).
+	//
+	// Weightless is the right choice for a property graph queried only by
+	// relationships and properties — for example the Cypher engine, which is
+	// hardwired to W=float64 yet never reads edge weights. It is left
+	// caller-opt-in (the engine is not auto-defaulted to it) because the weight
+	// column is load-bearing for weighted algorithms.
+	//
+	// Contract for weighted algorithms: a weightless graph models the weight≡0
+	// special case. Structure-only algorithms (BFS, DFS, connectivity,
+	// PageRank, label propagation, unweighted betweenness) are unaffected —
+	// they never read the weight. Weight-consuming algorithms (Dijkstra, A*,
+	// Bellman-Ford, Johnson, weighted betweenness, MST, max-flow) run on a
+	// weightless graph as if every edge weight were 0, which yields degenerate
+	// all-zero distances — this is NOT BFS hop count (that would require every
+	// weight to be 1). Do not enable Weightless for a graph you intend to query
+	// with a weighted algorithm.
+	//
+	// Weightless is fixed at [New] and never mutated, so [AdjList.Weightless]
+	// is safe for concurrent use and always returns the same value for the
+	// lifetime of the AdjList.
+	Weightless bool
 }
 
 // AdjList is a mutable adjacency-list graph generic over the user node
@@ -321,6 +352,16 @@ func (a *AdjList[N, W]) Directed() bool { return a.cfg.Directed }
 
 // Multigraph reports whether parallel edges are allowed.
 func (a *AdjList[N, W]) Multigraph() bool { return a.cfg.Multigraph }
+
+// Weightless reports whether the graph carries no per-edge weight column
+// (see [Config.Weightless]). When true, [AdjList.LoadEntry] and
+// [AdjList.LoadEntryH] always return a nil weights slice and the weight
+// argument of [AdjList.AddEdge] is ignored. The CSR builder
+// ([graph/csr.BuildFromAdjList]) reads this to skip the weights array, so a
+// weightless graph yields a nil-weights CSR that the snapshot writer persists
+// with hasWeights=0. The value is fixed at [New] and never mutated, so
+// Weightless is safe to call concurrently with any other operation.
+func (a *AdjList[N, W]) Weightless() bool { return a.cfg.Weightless }
 
 // Config returns the [Config] the AdjList was constructed with. The
 // configuration is fixed at [New] and never mutated thereafter, so
@@ -637,10 +678,17 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 		c := growCap(0) // == 4
 		entry := &adjEntry[W]{
 			neighbours: make([]graph.NodeID, 1, c),
-			weights:    make([]W, 1, c),
 		}
 		entry.neighbours[0] = dst
-		entry.weights[0] = w
+		// Weightless graphs never allocate the weights column: it stays nil for
+		// the entry's whole life, so a degree-d hub costs d fewer W values and a
+		// CSR built from this adjacency persists with hasWeights=0. The weight
+		// argument is ignored. A weighted graph allocates the column in lockstep
+		// with neighbours (same O(1) write, never a separate column copy).
+		if !a.cfg.Weightless {
+			entry.weights = make([]W, 1, c)
+			entry.weights[0] = w
+		}
 		if ex.hasHandle {
 			entry.handles = make([]uint64, 1, c)
 			entry.handles[0] = ex.handle
@@ -681,9 +729,16 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 	// headers that expose it. No large allocation; O(1) per call.
 	if cap(current.neighbours) >= newLen {
 		nb := current.neighbours[:newLen]
-		ws := current.weights[:newLen]
 		nb[oldLen] = dst
-		ws[oldLen] = w
+		// Carry the weights column forward only for a weighted graph. A
+		// weightless entry keeps weights nil (current.weights is nil, never
+		// sliced), so a label-/property-free weightless graph pays nothing and
+		// the published entry's weights stays nil — the all-zero W contract.
+		var ws []W
+		if !a.cfg.Weightless {
+			ws = current.weights[:newLen]
+			ws[oldLen] = w
+		}
 
 		var hs []uint64
 		if ex.hasHandle || current.handles != nil {
@@ -735,11 +790,16 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 	// copy existing data. This happens only O(log d) times for a degree-d hub.
 	newCap := growCap(oldLen)
 	newNb := make([]graph.NodeID, newLen, newCap)
-	newW := make([]W, newLen, newCap)
 	copy(newNb, current.neighbours)
-	copy(newW, current.weights)
 	newNb[oldLen] = dst
-	newW[oldLen] = w
+	// Carry the weights column forward only for a weighted graph; a weightless
+	// entry leaves newW nil so the grown snapshot still carries no weights.
+	var newW []W
+	if !a.cfg.Weightless {
+		newW = make([]W, newLen, newCap)
+		copy(newW, current.weights)
+		newW[oldLen] = w
+	}
 	// Carry the handle column forward only when this graph uses handles
 	// — either the existing entry already has one or this call supplies
 	// one. A previously handle-less entry that gains its first handle on
@@ -1042,11 +1102,19 @@ func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, c
 // [0, len(current.neighbours)).
 func compactEntry[W any](current *adjEntry[W], idx int) *adjEntry[W] {
 	newNb := make([]graph.NodeID, len(current.neighbours)-1)
-	newW := make([]W, len(current.weights)-1)
 	copy(newNb, current.neighbours[:idx])
-	copy(newW, current.weights[:idx])
 	copy(newNb[idx:], current.neighbours[idx+1:])
-	copy(newW[idx:], current.weights[idx+1:])
+	// Compact the weights column in lock-step with neighbours, preserving the
+	// nil-vs-present distinction: a weightless entry has weights == nil and the
+	// result stays nil (never make([]W, -1), which would panic for an empty
+	// source column). A weighted entry keeps every surviving weight aligned to
+	// its surviving neighbour.
+	var newW []W
+	if current.weights != nil {
+		newW = make([]W, len(current.weights)-1)
+		copy(newW, current.weights[:idx])
+		copy(newW[idx:], current.weights[idx+1:])
+	}
 	// Compact the handle column in lock-step with neighbours/weights so
 	// every SURVIVING slot keeps its ORIGINAL handle. This is the core
 	// stable-identity invariant: removing one parallel edge must not
@@ -1082,6 +1150,10 @@ func compactEntry[W any](current *adjEntry[W], idx int) *adjEntry[W] {
 // consistent immutable snapshot of src's adjacency at the time of the
 // first call; concurrent mutations of src after that point do not
 // affect this iteration. Implements [graph.Graph].
+//
+// For a weightless graph (see [Config.Weightless]) the entry carries no
+// weights column, so every neighbour is yielded with the zero value of W —
+// the all-zero "unweighted" representation.
 func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 	return func(yield func(N, W) bool) {
 		srcID, ok := a.mapper.Lookup(src)
@@ -1092,12 +1164,17 @@ func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 		if e == nil {
 			return
 		}
+		var zero W
 		for i, n := range e.neighbours {
 			v, vok := a.mapper.Resolve(n)
 			if !vok {
 				continue
 			}
-			if !yield(v, e.weights[i]) {
+			w := zero
+			if e.weights != nil {
+				w = e.weights[i]
+			}
+			if !yield(v, w) {
 				return
 			}
 		}
@@ -1196,8 +1273,16 @@ func trimEntry[W any](e *adjEntry[W]) *adjEntry[W] {
 	n := len(e.neighbours)
 	nb := make([]graph.NodeID, n)
 	copy(nb, e.neighbours)
-	ws := make([]W, n)
-	copy(ws, e.weights)
+	// Preserve the nil-vs-present distinction of the weights column exactly as
+	// for handles/labels: a weightless entry has weights == nil and the trimmed
+	// entry keeps it nil, so a weightless graph never gains a zero-filled
+	// weights slice that would defeat the memory saving and flip the snapshot's
+	// hasWeights flag to 1.
+	var ws []W
+	if e.weights != nil {
+		ws = make([]W, n)
+		copy(ws, e.weights)
+	}
 	var hs []uint64
 	if e.handles != nil {
 		hs = make([]uint64, len(e.handles))
@@ -1228,6 +1313,11 @@ func (a *AdjList[N, W]) MaxNodeID() graph.NodeID {
 // weights of the node identified by id, or (nil, nil) if id has no
 // outgoing edges. The returned slices are owned by the current
 // adjacency snapshot and must not be mutated by the caller.
+//
+// For a weightless graph (see [Config.Weightless]) the weights return is
+// always nil even when neighbours is non-empty; callers that index it
+// positionally must nil-check and treat an absent weight as the zero value
+// of W.
 func (a *AdjList[N, W]) LoadEntry(id graph.NodeID) (neighbours []graph.NodeID, weights []W) {
 	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
 	if e == nil {
@@ -1243,6 +1333,10 @@ func (a *AdjList[N, W]) LoadEntry(id graph.NodeID) (neighbours []graph.NodeID, w
 // length as neighbours and handles[i] is the stable handle of the edge to
 // neighbours[i]. The returned slices are owned by the current adjacency
 // snapshot and must not be mutated by the caller.
+//
+// For a weightless graph (see [Config.Weightless]) the weights return is
+// always nil even when neighbours is non-empty; the CSR builder relies on
+// this to skip the weights array (see [graph/csr.BuildFromAdjList]).
 func (a *AdjList[N, W]) LoadEntryH(id graph.NodeID) (neighbours []graph.NodeID, weights []W, handles []uint64) {
 	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
 	if e == nil {
