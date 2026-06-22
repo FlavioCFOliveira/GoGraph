@@ -22,8 +22,10 @@
 // # Concurrency
 //
 // [Registry] is safe for concurrent use. Counter increments and histogram
-// observations are lock-free once the named series has been created; the
-// write-lock is held only during the first creation of a new name.
+// observations are lock-free once the named series has been created: the hot
+// path is a single sync.Map load keyed by the raw name. Only the first call for
+// a given name sanitizes it and inserts into the canonical map (a sync.Map
+// LoadOrStore); no mutex is held on any path.
 package prometheus
 
 import (
@@ -93,21 +95,22 @@ func (h *histogram) observe(d time.Duration) {
 // All methods are safe for concurrent use. Counter and histogram lookups
 // are lock-free after the first observation for a given name.
 type Registry struct {
-	// counterMu guards counterMap; held only during first-creation.
-	counterMu  sync.RWMutex
-	counterMap map[string]*counter
+	// counters is the canonical sanitized-name -> *counter map, ranged by
+	// WriteText. counterByRaw caches raw-name -> *counter so the hot IncCounter
+	// path, once a counter is established, is a single lock-free sync.Map load
+	// with no per-call sanitize allocation or mutex (#1519). Metric names are a
+	// bounded set of code constants, so counterByRaw cannot grow without bound.
+	counters     sync.Map // string (sanitized) -> *counter
+	counterByRaw sync.Map // string (raw)        -> *counter
 
-	// histMu guards histMap; held only during first-creation.
-	histMu  sync.RWMutex
-	histMap map[string]*histogram
+	hists     sync.Map // string (sanitized) -> *histogram
+	histByRaw sync.Map // string (raw)        -> *histogram
 }
 
 // New creates a new Registry ready for use as a metrics.Backend.
 func New() *Registry {
-	return &Registry{
-		counterMap: make(map[string]*counter),
-		histMap:    make(map[string]*histogram),
-	}
+	// sync.Map zero values are ready for use; no field initialisation needed.
+	return &Registry{}
 }
 
 // sanitize converts an arbitrary string into a valid Prometheus metric
@@ -149,58 +152,45 @@ func sanitize(name string) string {
 	return b.String()
 }
 
-// getOrCreateCounter returns the existing counter for name, or creates one.
-// The fast path (counter already exists) takes only an RLock.
-func (r *Registry) getOrCreateCounter(name string) *counter {
-	r.counterMu.RLock()
-	c, ok := r.counterMap[name]
-	r.counterMu.RUnlock()
-	if ok {
-		return c
+// getOrCreateCounter returns the counter for the raw (un-sanitized) name,
+// creating it on first sight. The fast path — the counter already exists — is a
+// single lock-free sync.Map load keyed by the raw name, with no per-call
+// sanitize allocation. Only the first call for a given name sanitizes and
+// consults the canonical sanitized-keyed map; two raw names that sanitize to
+// the same metric name share one counter (LoadOrStore on the canonical key), so
+// WriteText still emits one line per metric.
+func (r *Registry) getOrCreateCounter(rawName string) *counter {
+	if v, ok := r.counterByRaw.Load(rawName); ok {
+		return v.(*counter)
 	}
-
-	r.counterMu.Lock()
-	// Re-check under write-lock to guard against a concurrent creator.
-	if c, ok = r.counterMap[name]; ok {
-		r.counterMu.Unlock()
-		return c
-	}
-	c = &counter{}
-	r.counterMap[name] = c
-	r.counterMu.Unlock()
+	actual, _ := r.counters.LoadOrStore(sanitize(rawName), &counter{})
+	c := actual.(*counter)
+	r.counterByRaw.Store(rawName, c)
 	return c
 }
 
-// getOrCreateHistogram returns the existing histogram for name, or creates one.
-func (r *Registry) getOrCreateHistogram(name string) *histogram {
-	r.histMu.RLock()
-	h, ok := r.histMap[name]
-	r.histMu.RUnlock()
-	if ok {
-		return h
+// getOrCreateHistogram returns the histogram for the raw (un-sanitized) name,
+// creating it on first sight; mirrors getOrCreateCounter.
+func (r *Registry) getOrCreateHistogram(rawName string) *histogram {
+	if v, ok := r.histByRaw.Load(rawName); ok {
+		return v.(*histogram)
 	}
-
-	r.histMu.Lock()
-	if h, ok = r.histMap[name]; ok {
-		r.histMu.Unlock()
-		return h
-	}
-	h = &histogram{}
-	r.histMap[name] = h
-	r.histMu.Unlock()
+	actual, _ := r.hists.LoadOrStore(sanitize(rawName), &histogram{})
+	h := actual.(*histogram)
+	r.histByRaw.Store(rawName, h)
 	return h
 }
 
 // IncCounter implements metrics.Backend. It increments the named counter by
 // delta. The name is sanitized before storage.
 func (r *Registry) IncCounter(name string, delta uint64) {
-	r.getOrCreateCounter(sanitize(name)).value.Add(delta)
+	r.getOrCreateCounter(name).value.Add(delta)
 }
 
 // ObserveLatency implements metrics.Backend. It records d in the latency
 // histogram named name. The name is sanitized before storage.
 func (r *Registry) ObserveLatency(name string, d time.Duration) {
-	r.getOrCreateHistogram(sanitize(name)).observe(d)
+	r.getOrCreateHistogram(name).observe(d)
 }
 
 // errWriter wraps an io.Writer and accumulates the first write error,
@@ -235,15 +225,17 @@ func bucketLabel(d time.Duration) string {
 func (r *Registry) WriteText(w io.Writer) error {
 	ew := &errWriter{w: w}
 
-	// Snapshot counter names under read-lock.
-	r.counterMu.RLock()
-	cNames := make([]string, 0, len(r.counterMap))
-	cSnap := make(map[string]uint64, len(r.counterMap))
-	for name, c := range r.counterMap {
+	// Snapshot counters from the canonical sanitized-name map. sync.Map.Range
+	// is safe for concurrent use; a counter created mid-range may or may not be
+	// included, which is acceptable for a point-in-time metrics scrape.
+	var cNames []string
+	cSnap := make(map[string]uint64)
+	r.counters.Range(func(k, v any) bool {
+		name := k.(string)
 		cNames = append(cNames, name)
-		cSnap[name] = c.value.Load()
-	}
-	r.counterMu.RUnlock()
+		cSnap[name] = v.(*counter).value.Load()
+		return true
+	})
 	sort.Strings(cNames)
 
 	for _, name := range cNames {
@@ -251,16 +243,17 @@ func (r *Registry) WriteText(w io.Writer) error {
 		ew.printf("%s %d\n", name, cSnap[name])
 	}
 
-	// Snapshot histogram names under read-lock.
-	r.histMu.RLock()
-	hNames := make([]string, 0, len(r.histMap))
+	// Snapshot histograms from the canonical sanitized-name map.
+	var hNames []string
 	type histSnap struct {
 		buckets [len(latencyBuckets)]uint64
 		inf     uint64
 		sumNs   int64
 	}
-	hSnap := make(map[string]histSnap, len(r.histMap))
-	for name, h := range r.histMap {
+	hSnap := make(map[string]histSnap)
+	r.hists.Range(func(k, v any) bool {
+		name := k.(string)
+		h := v.(*histogram)
 		hNames = append(hNames, name)
 		var snap histSnap
 		for i := range latencyBuckets {
@@ -269,8 +262,8 @@ func (r *Registry) WriteText(w io.Writer) error {
 		snap.inf = h.inf.Load()
 		snap.sumNs = h.sumNs.Load()
 		hSnap[name] = snap
-	}
-	r.histMu.RUnlock()
+		return true
+	})
 	sort.Strings(hNames)
 
 	for _, name := range hNames {
