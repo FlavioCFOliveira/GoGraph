@@ -330,6 +330,20 @@ type buildOpts struct {
 	// buildOperator's *ir.Selection case. Left false by every other build path,
 	// which therefore always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). The
+	// read-path build sets it from the Engine field; it is consulted in
+	// buildEagerAggregation's count fast path (tryBuildParallelCountScan). Left
+	// false by every other build path (write path, public BuildPlanWithMutator),
+	// which therefore always build the serial EagerAggregation pipeline.
+	parallelScanEnabled bool
+	// parallelScanThreshold is the live-node-count gate (strict >) for the
+	// parallel count fast path (#1672). The read-path build sets it from the
+	// Engine field; it is compared against the live node count of the graph
+	// backing the build's nodeWalker. Zero leaves the parallel count path
+	// disabled even when parallelScanEnabled is true, since no live count exceeds
+	// zero only when the graph is empty — so the resolved Engine value is always
+	// positive.
+	parallelScanThreshold int
 	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
 	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
 	// the stable per-edge handle and the per-CREATE instance index at a forward
@@ -521,7 +535,41 @@ type EngineOptions struct {
 	// that proves both plans return an identical result multiset, and as an
 	// operational escape hatch.
 	DisableRangeIndexSeek bool
+
+	// DisableParallelScan turns OFF the morsel-parallel count fast path (#1672).
+	// When false (the default) the planner serves a group-by-less count(*) /
+	// count(<scan-var>) over a bare full-node scan with a parallel reduce —
+	// summing per-worker partial counters over up to GOMAXPROCS worker
+	// goroutines — in place of the serial EagerAggregation pipeline, once the
+	// live node count exceeds [ParallelScanThreshold]. The parallel reduce
+	// produces a bit-identical count (int64 addition is associative and
+	// partition-invariant). Setting it true forces the serial path; it exists for
+	// the differential test that proves both plans return an identical result,
+	// and as an operational escape hatch. Small queries (at or below the
+	// threshold) always use the serial path regardless of this field, so they pay
+	// no goroutine-spawn cost. The full-node scan itself always runs serially: the
+	// morsel-parallel full-scan funnel was benchmarked as a regression and is not
+	// wired into the planner.
+	DisableParallelScan bool
+
+	// ParallelScanThreshold is the minimum live node count above which the
+	// planner prefers the morsel-parallel count reduce over the serial
+	// EagerAggregation pipeline (#1672). Zero (the default) selects
+	// [DefaultParallelScanThreshold]. The gate is strict (>): a graph whose live
+	// node count is at or below the threshold always uses the serial path, so
+	// spawning workers only happens when there is enough work to amortise it.
+	// Ignored when [DisableParallelScan] is true.
+	ParallelScanThreshold int
 }
+
+// DefaultParallelScanThreshold is the default minimum live node count above
+// which the planner prefers the morsel-parallel count reduce over the serial
+// EagerAggregation pipeline (#1672). It is set well above one morsel
+// ([exec.DefaultMorselSize] = 1024) so that the parallel path engages only when
+// several morsels of work exist to spread across workers; below it the
+// goroutine-spawn overhead would dominate and a small-query count stays serial
+// and unaffected.
+const DefaultParallelScanThreshold = 50_000
 
 // IndexDef is a durable index definition handed to the engine on open so it
 // can re-register an index recovered from disk. It mirrors
@@ -599,6 +647,18 @@ type Engine struct {
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
 	// the planner always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+
+	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). True
+	// by default; set false by EngineOptions.DisableParallelScan. When false the
+	// planner always builds the serial EagerAggregation pipeline.
+	parallelScanEnabled bool
+
+	// parallelScanThreshold is the minimum live node count (strict >) above which
+	// the planner prefers the parallel count reduce over the serial
+	// EagerAggregation pipeline (#1672). Resolved from
+	// EngineOptions.ParallelScanThreshold (0 → DefaultParallelScanThreshold) by
+	// the constructor.
+	parallelScanThreshold int
 
 	// writeMu is the engine-level single-writer serialisation used ONLY when
 	// the engine is store-less (store == nil). A WAL-backed engine instead
@@ -727,6 +787,23 @@ func resolveMaxResultRows(opt int64) int64 {
 	}
 }
 
+// resolveParallelScanThreshold maps the public
+// [EngineOptions.ParallelScanThreshold] value to the Engine's internal
+// threshold: zero (the zero value) selects [DefaultParallelScanThreshold]; a
+// positive value is used verbatim. A negative value is clamped to zero, which
+// makes the planner prefer the parallel scan for any non-empty graph (subject to
+// [EngineOptions.DisableParallelScan]).
+func resolveParallelScanThreshold(opt int) int {
+	switch {
+	case opt == 0:
+		return DefaultParallelScanThreshold
+	case opt < 0:
+		return 0
+	default:
+		return opt
+	}
+}
+
 // resolveMaxResultBytes maps the public [EngineOptions.MaxResultBytes] value to
 // the Engine's internal aggregate-byte budget, where a positive value is an
 // active budget and zero disables it (the convention the [Result] drain checks
@@ -783,6 +860,9 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		maxCollectItems:  opts.MaxCollectItems,
 		hashJoinEnabled:  !opts.DisableHashJoin,
 		rangeSeekEnabled: !opts.DisableRangeIndexSeek,
+
+		parallelScanEnabled:   !opts.DisableParallelScan,
+		parallelScanThreshold: resolveParallelScanThreshold(opts.ParallelScanThreshold),
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
 		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },
@@ -1358,6 +1438,13 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		bopts.hashJoinEnabled = e.hashJoinEnabled
 		bopts.hashJoinOrderSafe = hashJoinOrderSafe(plan)
 		bopts.rangeSeekEnabled = e.rangeSeekEnabled
+		// Parallel-count gating (#1672): the parallel count reduce replaces the
+		// serial EagerAggregation pipeline only when the Engine permits it AND the
+		// live node count exceeds the threshold (checked at the build site against
+		// the live graph). Both must hold; otherwise the planner builds the serial
+		// pipeline.
+		bopts.parallelScanEnabled = e.parallelScanEnabled
+		bopts.parallelScanThreshold = e.parallelScanThreshold
 		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
 			buildErr = err
@@ -3359,6 +3446,37 @@ func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return s.g.NodeIndex().Intersect(uint32(lid))
 }
 
+// parallelCountScanBuildCount counts how many times the planner has emitted the
+// parallel-reduce count scan in place of the serial EagerAggregation pipeline
+// (#1672). It is a diagnostic seam read only by the in-package differential test
+// to assert the structural trigger actually fired (or, under a guard, did not).
+// It is process-global and monotonic; tests snapshot it before/after a query
+// rather than resetting it, so concurrent tests do not interfere.
+var parallelCountScanBuildCount atomic.Uint64
+
+// useParallelScan reports whether the planner should engage the morsel-parallel
+// reduce in place of the serial path for the build's node source (#1672). It
+// returns true only when the parallel count path is enabled on the build
+// (bopts.parallelScanEnabled), the node source is the live LPG walker (the only
+// source whose live node count is known), and that live count strictly exceeds
+// bopts.parallelScanThreshold. Every other build path (write path, public
+// BuildPlanWithMutator, test stubs) leaves bopts nil or parallelScanEnabled
+// false and therefore keeps the serial path.
+//
+// The live count is read via [lpg.Graph.LiveOrder], which the build already
+// observes under the visibility-barrier RLock ([lpg.Graph.View]); it is stable
+// for the query's lifetime.
+func useParallelScan(walker nodeWalkerIface, bopts *buildOpts) bool {
+	if bopts == nil || !bopts.parallelScanEnabled {
+		return false
+	}
+	lw, ok := walker.(*lpgNodeWalker)
+	if !ok {
+		return false
+	}
+	return lw.g.LiveOrder() > uint64(bopts.parallelScanThreshold)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BuildPlan — IR → physical operator tree
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4529,6 +4647,13 @@ func buildOperator(
 
 	case *ir.AllNodesScan:
 		schema[p.NodeVar] = schemaWidth(schema)
+		// A full-node scan always lowers to the serial AllNodesScan. The
+		// morsel-parallel full-scan funnel (exec.ParallelScan) is deliberately not
+		// wired here: it funnels every row through a single channel and runs the
+		// downstream filter/projection serially in the lone consumer, which
+		// benchmarked as a regression rather than a win. Only the group-by-less
+		// count fast path is parallelised, in buildEagerAggregation via
+		// tryBuildParallelCountScan (#1672).
 		return exec.NewAllNodesScan(walker), nil
 
 	case *ir.NodeByLabelScan:
@@ -4998,6 +5123,18 @@ func buildOperator(
 		return exec.NewArgument(), nil
 
 	case *ir.EagerAggregation:
+		// Parallel-reduce fast path (#1672): a group-by-less count(*) /
+		// count(<scan-var>) over a bare full-node scan is served by a
+		// ParallelCountScan that sums per-worker partial counters, avoiding both
+		// the serial single-core scan and the per-row channel funnel. The result
+		// is bit-identical to the serial EagerAggregation (int64 count addition is
+		// associative and partition-invariant). Any other shape — a second
+		// aggregate, sum/avg/min/max/collect, a grouping key, a DISTINCT, a
+		// non-trivial count argument, a NodeByLabelScan child, or a graph at or
+		// below the threshold — falls through to the serial build below.
+		if op, ok := tryBuildParallelCountScan(p, walker, schema, bopts); ok {
+			return op, nil
+		}
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
@@ -5404,6 +5541,72 @@ func buildOperator(
 		}
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
 	}
+}
+
+// tryBuildParallelCountScan returns a [exec.ParallelCountScan] and true when p
+// is the single shape a parallel reduce can serve while staying bit-identical to
+// the serial EagerAggregation pipeline (#1672), and false otherwise (the caller
+// then builds the serial pipeline). The recognised shape is:
+//
+//   - no grouping keys (a global aggregate);
+//   - exactly one aggregate, function count, non-DISTINCT, whose argument is
+//     either empty (count(*)) or the bare variable bound by the child scan
+//     (count(n)) — both equal the number of scanned nodes because a bare scan
+//     binds a non-null node in every row;
+//   - the child is a bare [ir.AllNodesScan] (no Selection/Expand/Filter and not a
+//     NodeByLabelScan between the aggregate and the scan);
+//   - the parallel scan is enabled and the live node count exceeds the threshold
+//     (delegated to useParallelScan).
+//
+// When it fires, it mutates schema to the aggregation's single-column output
+// layout and tags that column scalar in bopts — mirroring the post-aggregation
+// schema that buildEagerAggregation installs — so the downstream projection
+// reads the count identically. Every declined shape leaves schema untouched.
+func tryBuildParallelCountScan(
+	p *ir.EagerAggregation,
+	walker nodeWalkerIface,
+	schema map[string]int,
+	bopts *buildOpts,
+) (exec.Operator, bool) {
+	if len(p.GroupBy) != 0 || len(p.Aggregates) != 1 {
+		return nil, false
+	}
+	agg := p.Aggregates[0]
+	if agg.Function != "count" || agg.Distinct {
+		return nil, false
+	}
+	scan, ok := p.Child.(*ir.AllNodesScan)
+	if !ok {
+		return nil, false
+	}
+	// count(*) (empty argument) or count(<scan-var>): both equal the scanned-node
+	// count. count(n.prop) / count(<other-var>) / count(expr) carry their own
+	// null semantics and decline.
+	if agg.Argument != "" && agg.Argument != scan.NodeVar {
+		return nil, false
+	}
+	if !useParallelScan(walker, bopts) {
+		return nil, false
+	}
+
+	// Install the post-aggregation schema: a single column at index 0 holding the
+	// count output. Mirror buildEagerAggregation: clear the pre-aggregation
+	// bindings (the scan variable is consumed by the aggregate and is no longer in
+	// scope) and tag the output column scalar so buildIRProjection's Variable
+	// fast-path does not mis-upgrade the integer count into a NodeValue when it
+	// coincides with a real NodeID.
+	for k := range schema {
+		delete(schema, k)
+	}
+	schema[agg.OutputName] = 0
+	if bopts != nil {
+		if bopts.scalarCols == nil {
+			bopts.scalarCols = make(map[string]struct{})
+		}
+		bopts.scalarCols[agg.OutputName] = struct{}{}
+	}
+	parallelCountScanBuildCount.Add(1)
+	return exec.NewParallelCountScan(walker, 0), true
 }
 
 // buildEagerAggregation builds the physical EagerAggregation operator from the
