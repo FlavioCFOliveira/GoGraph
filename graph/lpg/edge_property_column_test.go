@@ -720,3 +720,440 @@ func TestEpochDayCodec(t *testing.T) {
 		}
 	}
 }
+
+// --- frame-of-reference (FOR) bit-packed date column -----------------------
+
+// dateVal builds the SOH-tagged canonical-string PropertyValue for an epoch-day,
+// the exact shape a Cypher date write delivers to the property layer. The column
+// folds it into the int32 epoch-day backing (and, at Compact, the FOR form).
+func dateVal(ed int32) PropertyValue { return StringValue(epochDayToString(ed)) }
+
+// buildFullDenseDateColumn returns a block with a single date column of `length`
+// fully-present slots, slot i carrying epoch-day days[i]. The block is grown
+// slot-by-slot via set, the realistic way a fully-dense date column arises, so
+// the resulting column is dense (fill 1.0) and not yet packed.
+func buildFullDenseDateColumn(t *testing.T, key PropertyKeyID, days []int32) *edgePropCols {
+	t.Helper()
+	var block *edgePropCols
+	for i, ed := range days {
+		block = block.set(key, i, i+1, dateVal(ed))
+	}
+	col := findCol(t, block, key)
+	if col.sparse {
+		t.Fatalf("fully-present date column unexpectedly sparse")
+	}
+	if col.packedDate {
+		t.Fatalf("date column packed before Compact")
+	}
+	return block
+}
+
+// TestEdgePropCols_DatePacksAtCompact asserts a dense narrow-range date column is
+// FOR bit-packed at Compact, that every slot round-trips to the identical tagged
+// date string, and that the packed backing genuinely uses fewer bytes than the
+// plain int32 backing.
+func TestEdgePropCols_DatePacksAtCompact(t *testing.T) {
+	t.Parallel()
+	const key = PropertyKeyID(3)
+	const n = 400
+	// A 2192-day window anchored at an arbitrary epoch-day, the ex26 shape: the
+	// residual max-min fits in 12 bits.
+	const base = int32(18276) // 2020-01-15
+	days := make([]int32, n)
+	for i := range days {
+		days[i] = base + int32((i*53)%2193) // spread across [base, base+2192]
+	}
+	block := buildFullDenseDateColumn(t, key, days)
+
+	plainBytes := datesColBytes(findCol(t, block, key))
+
+	packed := block.Compact().(*edgePropCols)
+	pc := findCol(t, packed, key)
+	if !pc.packedDate {
+		t.Fatalf("dense narrow-range date column was not packed at Compact")
+	}
+	if pc.days != nil {
+		t.Fatalf("packed column still carries a days[] backing")
+	}
+	if pc.forWidth != 12 {
+		t.Fatalf("forWidth = %d, want 12 (bits.Len(2192))", pc.forWidth)
+	}
+	// Every slot reads back the identical tagged date string.
+	for i := 0; i < n; i++ {
+		got, ok := pc.slotValue(i)
+		if !ok {
+			t.Fatalf("slot %d absent after pack", i)
+		}
+		want := dateVal(days[i])
+		gs, _ := got.String()
+		ws, _ := want.String()
+		if gs != ws {
+			t.Fatalf("slot %d round-trip mismatch: got %q want %q", i, gs, ws)
+		}
+	}
+	// The packed backing must cost fewer bytes than the plain int32 backing.
+	packedBytes := datesColBytes(pc)
+	if packedBytes >= plainBytes {
+		t.Fatalf("packed column not smaller: packed=%d plain=%d bytes", packedBytes, plainBytes)
+	}
+	t.Logf("date column bytes: plain=%d packed=%d (%.2f -> %.2f B/slot)",
+		plainBytes, packedBytes, float64(plainBytes)/n, float64(packedBytes)/n)
+}
+
+// datesColBytes returns the resident bytes of a date column's value backing
+// (size-class effects ignored: the logical backing bytes are the honest
+// per-slot comparison the acceptance criterion asks for). For the packed form it
+// is the packed words plus the fixed FOR header; for the plain form it is the
+// int32 backing.
+func datesColBytes(col *edgePropColumn) int {
+	if col.packedDate {
+		return cap(col.packed)*8 + forHeaderBytes
+	}
+	return cap(col.days) * 4
+}
+
+// TestEdgePropCols_DatePackRoundTripWithNulls asserts FOR packing preserves the
+// validity plane: absent slots stay absent through pack/read, and present slots
+// round-trip, with the reference min computed only over present values.
+func TestEdgePropCols_DatePackRoundTripWithNulls(t *testing.T) {
+	t.Parallel()
+	const key = PropertyKeyID(4)
+	const n = 200
+	const base = int32(10957) // 2000-01-01
+	var block *edgePropCols
+	present := make(map[int]int32)
+	for i := 0; i < n; i++ {
+		if i%3 == 0 {
+			continue // leave every third slot absent
+		}
+		ed := base + int32((i*17)%1000)
+		present[i] = ed
+		block = block.set(key, i, n, dateVal(ed))
+	}
+	col := findCol(t, block, key)
+	if col.sparse {
+		// At ~2/3 fill an int32-width column promotes to dense; if it were sparse the
+		// test would not exercise the packed path, so force the dense representation.
+		dense := col.toDense()
+		block.cols[0] = dense
+	}
+	packed := block.Compact().(*edgePropCols)
+	pc := findCol(t, packed, key)
+	if !pc.packedDate {
+		t.Fatalf("date column with nulls was not packed (fill too low for the gate?)")
+	}
+	for i := 0; i < n; i++ {
+		got, ok := pc.slotValue(i)
+		want, wantPresent := present[i]
+		if ok != wantPresent {
+			t.Fatalf("slot %d presence = %v, want %v", i, ok, wantPresent)
+		}
+		if !ok {
+			continue
+		}
+		gs, _ := got.String()
+		if gs != epochDayToString(want) {
+			t.Fatalf("slot %d = %q, want %q", i, gs, epochDayToString(want))
+		}
+	}
+}
+
+// TestEdgePropCols_DateConstantColumnWidth0 asserts a date column whose present
+// values are all equal packs to the constant form (forWidth 0, nil packed slice)
+// and reads back the constant value.
+func TestEdgePropCols_DateConstantColumnWidth0(t *testing.T) {
+	t.Parallel()
+	const key = PropertyKeyID(5)
+	const n = 64
+	const ed = int32(18276)
+	days := make([]int32, n)
+	for i := range days {
+		days[i] = ed
+	}
+	block := buildFullDenseDateColumn(t, key, days)
+	packed := block.Compact().(*edgePropCols)
+	pc := findCol(t, packed, key)
+	if !pc.packedDate {
+		t.Fatalf("constant date column was not packed")
+	}
+	if pc.forWidth != 0 {
+		t.Fatalf("forWidth = %d, want 0 for a constant column", pc.forWidth)
+	}
+	if pc.packed != nil {
+		t.Fatalf("constant column allocated a packed slice (%d words), want nil", len(pc.packed))
+	}
+	for i := 0; i < n; i++ {
+		got, ok := pc.slotValue(i)
+		if !ok {
+			t.Fatalf("slot %d absent", i)
+		}
+		gs, _ := got.String()
+		if gs != epochDayToString(ed) {
+			t.Fatalf("slot %d = %q, want %q", i, gs, epochDayToString(ed))
+		}
+	}
+}
+
+// TestEdgePropCols_WideRangeDateNotPacked asserts the byte gate rejects a date
+// column whose residual range is too wide to save bytes (>= 32-bit residual), so
+// it stays a plain int32 column.
+func TestEdgePropCols_WideRangeDateNotPacked(t *testing.T) {
+	t.Parallel()
+	const key = PropertyKeyID(6)
+	const n = 64
+	// Two dates 32+ bits apart force a >= 32-bit residual; the rest fill the span.
+	days := make([]int32, n)
+	days[0] = math.MinInt32
+	days[1] = math.MaxInt32
+	for i := 2; i < n; i++ {
+		days[i] = int32(i)
+	}
+	block := buildFullDenseDateColumn(t, key, days)
+	packed := block.Compact().(*edgePropCols)
+	pc := findCol(t, packed, key)
+	if pc.packedDate {
+		t.Fatalf("a full int32-range date column was packed; the byte gate should reject it")
+	}
+	if pc.days == nil {
+		t.Fatalf("rejected column lost its days[] backing")
+	}
+}
+
+// TestEdgePropCols_ShortDateColumnNotPacked asserts the minPackLength floor: a
+// column shorter than the floor is left plain even when its range is narrow,
+// because the FOR header would erase the saving.
+func TestEdgePropCols_ShortDateColumnNotPacked(t *testing.T) {
+	t.Parallel()
+	const key = PropertyKeyID(7)
+	const base = int32(18276)
+	days := make([]int32, minPackLength-1)
+	for i := range days {
+		days[i] = base + int32(i)
+	}
+	block := buildFullDenseDateColumn(t, key, days)
+	packed := block.Compact().(*edgePropCols)
+	pc := findCol(t, packed, key)
+	if pc.packedDate {
+		t.Fatalf("a length-%d column was packed below the minPackLength floor (%d)", len(days), minPackLength)
+	}
+}
+
+// TestEdgePropCols_MutateAfterPackUnpacks asserts every copy-on-write mutation on
+// a packed date column transparently unpacks it to a plain dense column and that
+// the mutation's result is correct: set overwrites, set of a new slot, del clears,
+// and the unpacked column carries no packed state.
+func TestEdgePropCols_MutateAfterPackUnpacks(t *testing.T) {
+	t.Parallel()
+	const key = PropertyKeyID(8)
+	const n = 64
+	const base = int32(18276)
+	days := make([]int32, n)
+	for i := range days {
+		days[i] = base + int32(i)
+	}
+
+	t.Run("set-overwrite", func(t *testing.T) {
+		t.Parallel()
+		packed := buildFullDenseDateColumn(t, key, days).Compact().(*edgePropCols)
+		if !findCol(t, packed, key).packedDate {
+			t.Fatalf("setup: column not packed")
+		}
+		newED := base + 5000 // outside the original 64-day span
+		out := packed.set(key, 10, n, dateVal(newED))
+		oc := findCol(t, out, key)
+		if oc.packedDate {
+			t.Fatalf("column still packed after set")
+		}
+		got, ok := oc.slotValue(10)
+		if !ok {
+			t.Fatalf("slot 10 absent after set")
+		}
+		gs, _ := got.String()
+		if gs != epochDayToString(newED) {
+			t.Fatalf("slot 10 = %q, want %q", gs, epochDayToString(newED))
+		}
+		// A neighbouring slot keeps its original value.
+		got2, _ := oc.slotValue(11)
+		gs2, _ := got2.String()
+		if gs2 != epochDayToString(days[11]) {
+			t.Fatalf("slot 11 = %q, want %q (unchanged)", gs2, epochDayToString(days[11]))
+		}
+	})
+
+	t.Run("del-clears", func(t *testing.T) {
+		t.Parallel()
+		packed := buildFullDenseDateColumn(t, key, days).Compact().(*edgePropCols)
+		out, changed := packed.del(key, 20)
+		if !changed {
+			t.Fatalf("del reported no change")
+		}
+		oc := findCol(t, out, key)
+		if oc.packedDate {
+			t.Fatalf("column still packed after del")
+		}
+		if _, ok := oc.slotValue(20); ok {
+			t.Fatalf("slot 20 present after del")
+		}
+		// Untouched slots survive.
+		if got, ok := oc.slotValue(21); !ok {
+			t.Fatalf("slot 21 wrongly cleared")
+		} else if gs, _ := got.String(); gs != epochDayToString(days[21]) {
+			t.Fatalf("slot 21 = %q, want %q", gs, epochDayToString(days[21]))
+		}
+	})
+
+	t.Run("grow-and-compact-splice", func(t *testing.T) {
+		t.Parallel()
+		packed := buildFullDenseDateColumn(t, key, days).Compact().(*edgePropCols)
+		// GrowSlot then CompactSlot both reach the packed column via grown/compacted.
+		grown := packed.GrowSlot(n).(*edgePropCols)
+		gc := findCol(t, grown, key)
+		if gc.packedDate {
+			t.Fatalf("column still packed after GrowSlot")
+		}
+		if _, ok := gc.slotValue(n); ok {
+			t.Fatalf("the grown slot %d should be absent", n)
+		}
+		if got, ok := gc.slotValue(0); !ok {
+			t.Fatalf("slot 0 lost after grow")
+		} else if gs, _ := got.String(); gs != epochDayToString(days[0]) {
+			t.Fatalf("slot 0 = %q, want %q", gs, epochDayToString(days[0]))
+		}
+
+		packed2 := buildFullDenseDateColumn(t, key, days).Compact().(*edgePropCols)
+		comp := packed2.CompactSlot(0).(*edgePropCols)
+		cc := findCol(t, comp, key)
+		if cc.packedDate {
+			t.Fatalf("column still packed after CompactSlot")
+		}
+		// After excising slot 0, the old slot 1 shifts down to index 0.
+		if got, ok := cc.slotValue(0); !ok {
+			t.Fatalf("slot 0 absent after compaction")
+		} else if gs, _ := got.String(); gs != epochDayToString(days[1]) {
+			t.Fatalf("post-compaction slot 0 = %q, want old-slot-1 %q", gs, epochDayToString(days[1]))
+		}
+	})
+}
+
+// TestForBitKernel exercises the LSB-first pack/unpack kernels directly across
+// widths that do and do not divide 64 (so the uint64-boundary straddle is hit),
+// asserting every residual round-trips for a fully-present run.
+func TestForBitKernel(t *testing.T) {
+	t.Parallel()
+	allValid := func(int) bool { return true }
+	for _, width := range []uint8{1, 3, 7, 12, 17, 31} {
+		t.Run("w"+itoa(int(width)), func(t *testing.T) {
+			t.Parallel()
+			const length = 300
+			maxRes := int32((uint64(1) << width) - 1)
+			vals := make([]int32, length)
+			for i := range vals {
+				vals[i] = int32((int64(i) * 2654435761) & int64(maxRes)) // pseudo-random residual in range
+			}
+			packed := packResidualsLSB(vals, length, 0, width, allValid)
+			if got, want := len(packed), wordsForBits(length*int(width)); got != want {
+				t.Fatalf("packed words = %d, want %d", got, want)
+			}
+			for i := 0; i < length; i++ {
+				if got := int32(unpackResidualLSB(packed, i, width)); got != vals[i] {
+					t.Fatalf("width %d slot %d: unpack = %d, want %d", width, i, got, vals[i])
+				}
+			}
+		})
+	}
+}
+
+// TestBitsForRange asserts the residual bit width matches bits.Len of the span.
+func TestBitsForRange(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		mn, mx int32
+		want   uint8
+	}{
+		{0, 0, 0},                          // constant
+		{5, 5, 0},                          // constant non-zero
+		{0, 1, 1},                          // 1-bit span
+		{10, 13, 2},                        // span 3 -> 2 bits
+		{18276, 18276 + 2192, 12},          // the ex26 window
+		{math.MinInt32, math.MaxInt32, 32}, // full int32 span
+	}
+	for _, tc := range cases {
+		if got := bitsForRange(tc.mn, tc.mx); got != tc.want {
+			t.Fatalf("bitsForRange(%d,%d) = %d, want %d", tc.mn, tc.mx, got, tc.want)
+		}
+	}
+}
+
+// itoa is a tiny strconv.Itoa replacement kept local so the test file's import
+// set is unchanged.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// BenchmarkDateColumnPacking measures the resident bytes per slot of a dense
+// narrow-range date column before and after FOR bit-packing, the acceptance
+// evidence for the ~4 -> ~1.5 B/slot column-tier reduction (#1663). It reports a
+// custom B/slot metric for each. The whole-graph reduction is smaller (~10%) once
+// the irreducible Go-runtime per-edge overhead is included; this benchmark
+// isolates the date column's own value backing.
+func BenchmarkDateColumnPacking(b *testing.B) {
+	const key = PropertyKeyID(9)
+	const n = 4096
+	const base = int32(18276)
+	days := make([]int32, n)
+	for i := range days {
+		days[i] = base + int32((i*53)%2193) // ex26 shape: 2192-day window, 12-bit residual
+	}
+	var plain *edgePropCols
+	for i, ed := range days {
+		plain = plain.set(key, i, i+1, dateVal(ed))
+	}
+	plainCol := &plain.cols[0]
+	packed := plain.Compact().(*edgePropCols)
+	packedCol := &packed.cols[0]
+	if !packedCol.packedDate {
+		b.Fatalf("date column not packed; benchmark would be meaningless")
+	}
+
+	plainBytes := cap(plainCol.days) * 4
+	packedBytes := cap(packedCol.packed)*8 + forHeaderBytes
+	// Log the headline before/after so the evidence is visible even when the
+	// benchmark formatter suppresses same-unit custom metric columns.
+	b.Logf("date column value backing: plain=%d B (%.3f B/slot) -> packed=%d B (%.3f B/slot), %.1f%% smaller",
+		plainBytes, float64(plainBytes)/n, packedBytes, float64(packedBytes)/n,
+		100*(1-float64(packedBytes)/float64(plainBytes)))
+	b.ReportMetric(float64(plainBytes)/n, "plainB/slot")
+	b.ReportMetric(float64(packedBytes)/n, "packedB/slot")
+
+	// Drive the random-access unpack read path so the timed region reflects the
+	// per-slot decode cost (the string allocation is epochDayToString, not the
+	// unpack, which is alloc-free).
+	b.ResetTimer()
+	var sink int
+	for i := 0; i < b.N; i++ {
+		v, ok := packedCol.slotValue(i % n)
+		if ok {
+			s, _ := v.String()
+			sink += len(s)
+		}
+	}
+	_ = sink
+}

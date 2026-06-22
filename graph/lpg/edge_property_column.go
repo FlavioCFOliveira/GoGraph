@@ -119,7 +119,8 @@ type edgePropColumn struct {
 	//   PropInt64   -> i64
 	//   PropFloat64 -> f64
 	//   PropBool    -> packed bits in boolBits (1 bit/slot)
-	//   date        -> days (int32 epoch-day); see dateKind below
+	//   date        -> days (int32 epoch-day), OR the frame-of-reference
+	//                  bit-packed form when packedDate is set; see dateKind below
 	//   PropString  -> str
 	//   PropBytes / PropList / collision spill -> boxed
 	//
@@ -133,6 +134,41 @@ type edgePropColumn struct {
 	days     []int32
 	str      []string
 	boxed    []PropertyValue
+
+	// packed is the frame-of-reference (FOR) bit-packed form of a DENSE date
+	// column, produced by [edgePropCols.Compact] when the value range is narrow
+	// enough that bit-packing the (value - forMin) residuals costs fewer bytes
+	// than the 4 B/slot []int32 backing (see [maybePackDate]). When packedDate is
+	// set, days is nil and the value of slot i is forMin + the forWidth-bit
+	// residual at bit offset i*forWidth in packed (LSB-first within each uint64,
+	// the same layout boolBits uses). The constant case forWidth == 0 (every
+	// present slot equals forMin) carries packed == nil. The packed form is a
+	// THIRD physical state layered on the dense representation: it is dense-only
+	// (sparse stays plain []int32, exactly as boolBits is dense-only) and
+	// read-only — every copy-on-write mutation first unpacks it back to a plain
+	// dense []int32 column ([edgePropColumn.unpackedDate]), so the mutation
+	// helpers never have to understand packing. This mirrors the immutable
+	// compressed-segment model of C-Store/Vertica and DuckDB, where a compressed
+	// column is rebuilt on change rather than mutated in place.
+	packed []uint64
+
+	// forMin is the frame-of-reference minimum (the reference value subtracted
+	// from every date before bit-packing). Meaningful only when packedDate is set.
+	forMin int32
+
+	// forWidth is the number of bits each packed residual occupies. 0 ⇔ the
+	// constant column (every present slot equals forMin, packed == nil).
+	// Meaningful only when packedDate is set; always < 32 (a 32-bit-or-wider
+	// residual never beats the 4 B/slot dense int32, so it is never packed).
+	forWidth uint8
+
+	// packedDate selects the FOR bit-packed physical form for a DENSE date
+	// column: true ⇔ the value lives in packed (forMin/forWidth), days is nil;
+	// false ⇔ the ordinary representation (days for dense/sparse date columns, or
+	// a non-date kind). It is the unambiguous discriminator between a packed date
+	// column and a constant-width-0 packed column (which has packed == nil), so a
+	// nil packed slice is never mistaken for "not packed".
+	packedDate bool
 
 	// valid is the Arrow-style validity bitmap used in the DENSE representation:
 	// bit i set ⇔ slot i carries a value. nil ⇔ the dense column is fully present
@@ -346,29 +382,59 @@ func (c *edgePropCols) CompactSlot(idx int) auxColumn {
 	return out
 }
 
-// Compact returns a block whose columns hold no backing slack, or the receiver
-// when every column is already exactly sized. A sparse (COO) column built by
-// amortised-growth inserts can carry up to ~2x slack in its idx and value
-// backings; Compact re-allocates each such backing at exact length. Dense
-// columns are already exactly length-sized, so a property-free or dense-only
-// block returns unchanged. Implements [adjlist.AuxColumn].
+// Compact returns a block whose columns hold no backing slack and whose dense
+// date columns are frame-of-reference bit-packed when their value range is
+// narrow enough to save bytes, or the receiver when no column needs either
+// transform. It is the freeze pass adjlist runs when it trims an entry to exact
+// size (see adjlist.trimEntry), the columnar analogue of an Arrow array builder
+// picking its physical encoding at Finish rather than per Append.
+//
+// Two per-column transforms can fire:
+//
+//   - Slack trim: a SPARSE (COO) column built by amortised-growth inserts can
+//     carry up to ~2x slack in its idx and value backings; [compactBacking]
+//     re-allocates each such backing at exact length. Dense columns are already
+//     exactly length-sized.
+//   - Date packing: a DENSE date column whose present values span a range that
+//     fits in fewer than 4 bytes per slot is bit-packed via [maybePackDate]
+//     (frame-of-reference: store min(values) once, then the residuals at
+//     bits.Len(max-min) bits each). This is the freeze-only, pack-once step; any
+//     subsequent mutation unpacks it.
+//
+// A column needing neither is left untouched, so a property-free or
+// already-packed/dense-only block returns the receiver. Implements
+// [adjlist.AuxColumn].
 func (c *edgePropCols) Compact() auxColumn {
 	if c == nil || len(c.cols) == 0 {
 		return c
 	}
 	var out *edgePropCols
-	for i := range c.cols {
-		if !c.cols[i].hasSlack() {
-			continue
-		}
+	ensureOut := func() {
 		if out == nil {
 			out = &edgePropCols{length: c.length, cols: make([]edgePropColumn, len(c.cols))}
 			copy(out.cols, c.cols)
 		}
-		out.cols[i] = c.cols[i].compactBacking()
+	}
+	for i := range c.cols {
+		if c.cols[i].hasSlack() {
+			ensureOut()
+			out.cols[i] = c.cols[i].compactBacking()
+		}
+		// Date packing reads the (already slack-trimmed, if applicable) column.
+		// maybePackDate returns the column unchanged when it is not a packable
+		// dense date column or the byte gate rejects the range, so a non-date or
+		// wide-range column is a no-op here.
+		src := &c.cols[i]
+		if out != nil {
+			src = &out.cols[i]
+		}
+		if packed, changed := src.maybePackDate(); changed {
+			ensureOut()
+			out.cols[i] = packed
+		}
 	}
 	if out == nil {
-		return c // no slack anywhere
+		return c // nothing to trim or pack
 	}
 	return out
 }
@@ -712,6 +778,15 @@ func demoteThreshold(kind PropertyKind) float64 {
 // A length-0 or single-slot column is left dense: there is nothing to compress
 // and the dense fast path the spike measured must never grow a COO sidecar.
 func (col *edgePropColumn) reshaped() edgePropColumn {
+	if col.packedDate {
+		// Defensive: the dense<->sparse reshape operates on the plain []int32
+		// backing, so unpack the FOR form first. Unreachable through the normal flow
+		// — Compact (the only producer of a packed column) never calls reshaped, and
+		// every mutation unpacks via cloneCol before reshaping — but kept correct so
+		// the packed form can never leak into toSparse's days[] read.
+		u := col.unpackedDate()
+		return u.reshaped()
+	}
 	if col.length <= 1 {
 		if col.sparse {
 			return col.toDense()
@@ -944,7 +1019,16 @@ func newColumn(key PropertyKeyID, kind PropertyKind, length int) edgePropColumn 
 // caller may write into them without disturbing the shared immutable original.
 // The pointer receiver only reads *col; every backing slice in the returned
 // column is a fresh copy, so the result aliases none of the receiver's storage.
+//
+// A FOR bit-packed date column is unpacked back to a plain dense []int32 column
+// here: every mutation clones before writing, so this is the chokepoint that
+// keeps the packed form read-only and out of the mutation helpers (which only
+// ever see a plain dense or sparse column). The unpacked column is itself freshly
+// allocated, so it satisfies cloneCol's no-aliasing contract.
 func (col *edgePropColumn) cloneCol() edgePropColumn {
+	if col.packedDate {
+		return col.unpackedDate() // fresh dense []int32 column, nothing aliased
+	}
 	out := *col
 	switch col.kind {
 	case PropInt64:
@@ -1026,6 +1110,12 @@ func (col *edgePropColumn) compactBacking() edgePropColumn {
 // freshly-appended slot read null. The grown dense column is then re-evaluated:
 // the lower fill may demote it to sparse.
 func (col *edgePropColumn) grown(oldLen int) edgePropColumn {
+	if col.packedDate {
+		// A growing column is being mutated: unpack the FOR form to a plain dense
+		// []int32 column first, then grow that. Keeps packing out of the grow path.
+		u := col.unpackedDate()
+		return u.grown(oldLen)
+	}
 	newLen := oldLen + 1
 	if col.sparse {
 		out := col.cloneCol()
@@ -1058,6 +1148,12 @@ func (col *edgePropColumn) grown(oldLen int) edgePropColumn {
 func (col *edgePropColumn) grownTo(newLen int) edgePropColumn {
 	if newLen <= col.length {
 		return *col
+	}
+	if col.packedDate {
+		// Extending a column past its packed span is a structural change: unpack the
+		// FOR form first, then grow the plain dense []int32 column.
+		u := col.unpackedDate()
+		return u.grownTo(newLen)
 	}
 	if col.sparse {
 		// Added slots [col.length, newLen) are absent (not in idx); only length
@@ -1177,6 +1273,12 @@ func newSparseSingleSlot(key PropertyKeyID, kind PropertyKind, length, slot int,
 // header is installed via a single atomic store. This is the same copy-on-write
 // contract the neighbour/handle/label columns rely on.
 func (col *edgePropColumn) grownWithValue(oldLen int, v PropertyValue, days int32) edgePropColumn {
+	if col.packedDate {
+		// A fused append after a freeze: unpack the FOR form to a plain dense
+		// []int32 column, which the dense branch below then converts to sparse once.
+		u := col.unpackedDate()
+		return u.grownWithValue(oldLen, v, days)
+	}
 	if !col.sparse {
 		s := col.toSparse() // fresh, exactly-sized backing; safe to extend in place
 		s.length = oldLen + 1
@@ -1215,6 +1317,12 @@ func (col *edgePropColumn) grownWithValue(oldLen int, v PropertyValue, days int3
 // [edgePropColumn.grownWithValue]: the receiver's [0:len) prefix is never mutated
 // and adjlist holds the shard lock across the publish.
 func (col *edgePropColumn) grownAbsentShared(oldLen int) edgePropColumn {
+	if col.packedDate {
+		// A fused absent-grow on a frozen non-target column: unpack the FOR form to
+		// a plain dense []int32 column; the dense branch below converts it to sparse.
+		u := col.unpackedDate()
+		return u.grownAbsentShared(oldLen)
+	}
 	if !col.sparse {
 		s := col.toSparse()
 		s.length = oldLen + 1
@@ -1279,6 +1387,13 @@ func (col *edgePropColumn) tailAppendSparse(slotIdx int32, v PropertyValue, days
 // because the two representations read identically); re-evaluation is deferred to
 // the next set/grow, which is a pure bytes decision.
 func (col *edgePropColumn) compacted(idx int) edgePropColumn {
+	if col.packedDate {
+		// Excising a slot shifts the slot-indexed layout, so unpack the FOR form to
+		// a plain dense []int32 column and splice that. A subsequent Compact re-packs
+		// it if the surviving range is still narrow (rebuild-don't-mutate-compressed).
+		u := col.unpackedDate()
+		return u.compacted(idx)
+	}
 	if col.sparse {
 		return col.compactedSparse(idx)
 	}
@@ -1564,6 +1679,19 @@ func (col *edgePropColumn) slotValue(slot int) (PropertyValue, bool) {
 		// bool is never sparse, so i == slot here.
 		return BoolValue(col.boolBits[i>>6]&(1<<(uint(i)&63)) != 0), true
 	case dateKind:
+		if col.packedDate {
+			// FOR bit-packed dense date column: the packed form is dense and
+			// slot-indexed (i == slot here, via backingIndex), so the residual lives
+			// at bit offset slot*forWidth. The constant column (forWidth 0, packed
+			// nil) reads back forMin with no packed access. Reconstitute the identical
+			// SOH-tagged canonical string the unpacked column would have returned, so
+			// the read is byte-identical to the plain form.
+			ed := col.forMin
+			if col.forWidth != 0 {
+				ed += int32(unpackResidualLSB(col.packed, i, col.forWidth))
+			}
+			return StringValue(epochDayToString(ed)), true
+		}
 		return StringValue(epochDayToString(col.days[i])), true
 	case PropString:
 		return StringValue(col.str[i]), true
@@ -1897,6 +2025,231 @@ func exactBoxed(s []PropertyValue) []PropertyValue {
 	out := make([]PropertyValue, len(s))
 	copy(out, s)
 	return out
+}
+
+// --- frame-of-reference (FOR) bit-packing for the dense date column ---------
+//
+// A dense int32 epoch-day column whose present values span a narrow range wastes
+// most of its 4 bytes per slot: ex26's date columns hold dates in a ~2192-day
+// window, so the residual value - min(values) fits in bits.Len(2192) = 12 bits,
+// collapsing 4 B/slot toward ~1.5 B/slot. This is the canonical Frame-of-Reference
+// encoding (store the reference min once, bit-pack the residuals at the bit width
+// the range needs) used by Parquet (DELTA_BINARY_PACKED's per-block frame of
+// reference), Apache ORC (PATCHED_BASE / DIRECT), and the Lemire FastPFOR
+// literature. Plain FOR — no delta, no dictionary, no outlier patching — is the
+// right choice here: the column is bounded but UNORDERED (so delta-coding, which
+// needs sortedness, would not shrink the width) and its range is a tight uniform
+// span (so there are no outliers to patch).
+//
+// The packed form is dense-only and produced only at freeze ([edgePropCols.Compact]),
+// exactly as the bit-packed bool column [edgePropColumn.boolBits] is dense-only;
+// any mutation unpacks it first ([edgePropColumn.unpackedDate]). The residuals are
+// laid out LSB-first within each uint64, congruent with boolBits, so a residual
+// may straddle a uint64 boundary (12 bits crosses one every ~5-6 slots) and the
+// random-access unpack reads up to two words.
+
+const (
+	// minPackLength is the smallest column length worth bit-packing: below it the
+	// 8-byte FOR header (forMin + forWidth, with size-class rounding) and the
+	// minimum packed-slice allocation can erase the per-slot saving. It extends the
+	// "do not compress a tiny column" instinct of [edgePropColumn.reshaped] (which
+	// leaves a length<=1 column dense) to the packed tier.
+	minPackLength = 32
+
+	// forHeaderBytes is the fixed per-column overhead the FOR form adds beyond the
+	// packed residual words: the int32 reference (forMin) plus the bit width
+	// (forWidth). It is charged in the packing byte gate so a column is packed only
+	// when the residual words plus this header genuinely undercut the 4 B/slot
+	// dense int32 backing.
+	forHeaderBytes = 8
+)
+
+// maybePackDate returns the FOR bit-packed form of the receiver and true when it
+// is a DENSE date column whose present-value range is narrow enough that packing
+// saves bytes; otherwise it returns the receiver unchanged and false. It is the
+// freeze-only pack step called by [edgePropCols.Compact].
+//
+// The byte gate is exact (not a fixed width ceiling): packing is taken only when
+//
+//	wordsForBits(length*width)*8 + forHeaderBytes < length*4
+//
+// i.e. the packed residual words plus the fixed header genuinely undercut the
+// 4 B/slot dense int32 backing, with a [minPackLength] floor so the header cannot
+// erase the win on a tiny column. This is what Parquet/ORC do — they bit-pack at
+// whatever width the data needs rather than rejecting a whole savings band by a
+// magic constant — so the 24-31-bit residual range (which still saves up to ~12%)
+// is not forfeited.
+//
+// The reference min and the width are computed over PRESENT slots only: an absent
+// dense slot's value cell is don't-care (zero or stale), so folding it into the
+// range could corrupt the width. The packed residuals are laid out by SLOT (the
+// dense, slot-indexed model): an absent slot's residual is written 0 and never
+// read (the validity bitmap, which is left untouched, gates every read). The
+// constant case (every present value equal, width 0) carries packed == nil and
+// reads back as forMin with no packed allocation at all.
+func (col *edgePropColumn) maybePackDate() (edgePropColumn, bool) {
+	if col.kind != dateKind || col.sparse || col.packedDate || col.days == nil {
+		return *col, false // not a plain dense date column
+	}
+	if col.length < minPackLength {
+		return *col, false
+	}
+	mn, mx, found := col.presentDateRange()
+	if !found {
+		return *col, false // no present value: nothing to pack
+	}
+	width := bitsForRange(mn, mx)
+	if width >= 32 {
+		return *col, false // residual is no narrower than the raw int32
+	}
+	// Exact byte gate: packed residual words + fixed header must undercut dense.
+	packedBytes := wordsForBits(col.length*int(width))*8 + forHeaderBytes
+	if packedBytes >= col.length*4 {
+		return *col, false
+	}
+	out := edgePropColumn{
+		key:        col.key,
+		kind:       dateKind,
+		length:     col.length,
+		valid:      cloneU64(col.valid), // presence is preserved verbatim
+		forMin:     mn,
+		forWidth:   width,
+		packedDate: true,
+	}
+	if width == 0 {
+		return out, true // constant column: packed stays nil, reads return forMin
+	}
+	out.packed = packResidualsLSB(col.days, col.length, mn, width, col.slotValid)
+	return out, true
+}
+
+// presentDateRange returns the minimum and maximum epoch-day across the column's
+// PRESENT slots and whether at least one slot is present. It reads the dense days backing
+// directly (the receiver must be a plain dense date column) and consults the
+// validity bitmap via slotValid so absent slots' don't-care cells never widen the
+// range.
+func (col *edgePropColumn) presentDateRange() (mn, mx int32, found bool) {
+	for slot := 0; slot < col.length; slot++ {
+		if !col.slotValid(slot) {
+			continue
+		}
+		v := col.days[slot]
+		if !found {
+			mn, mx, found = v, v, true
+			continue
+		}
+		if v < mn {
+			mn = v
+		}
+		if v > mx {
+			mx = v
+		}
+	}
+	return mn, mx, found
+}
+
+// unpackedDate returns a plain DENSE date column ([]int32 backing, validity
+// preserved) equivalent to a FOR bit-packed receiver, or the receiver unchanged
+// when it is not packed. It is the single chokepoint every copy-on-write mutation
+// runs before touching a date column, so the mutation helpers never have to
+// understand the packed form: a published packed column is read-only and a
+// mutation produces a fresh unpacked column, the immutable-compressed-segment
+// model (C-Store/Vertica, DuckDB) the design follows.
+//
+// Absent slots are reconstructed as zero value cells (their presence is governed
+// by the copied validity bitmap, not the cell), exactly as a freshly-allocated
+// dense backing leaves them.
+func (col *edgePropColumn) unpackedDate() edgePropColumn {
+	if !col.packedDate {
+		return *col
+	}
+	out := edgePropColumn{
+		key:    col.key,
+		kind:   dateKind,
+		length: col.length,
+		valid:  cloneU64(col.valid),
+		days:   make([]int32, col.length),
+	}
+	if col.forWidth == 0 {
+		// Constant column: every present slot equals forMin. Absent slots are
+		// don't-care; writing forMin everywhere is harmless (validity gates reads)
+		// and keeps the backing uniform.
+		for slot := 0; slot < col.length; slot++ {
+			out.days[slot] = col.forMin
+		}
+		return out
+	}
+	for slot := 0; slot < col.length; slot++ {
+		if !col.slotValid(slot) {
+			continue // leave absent slots at the zero value
+		}
+		out.days[slot] = col.forMin + int32(unpackResidualLSB(col.packed, slot, col.forWidth))
+	}
+	return out
+}
+
+// bitsForRange returns the number of bits needed to bit-pack the residual
+// (value - mn) for every value in [mn, mx]. The widest residual is mx - mn, a
+// non-negative int32-range span computed in int64 so mx - mn cannot overflow.
+// A zero span (mn == mx) returns 0: the constant column needs no residual bits.
+func bitsForRange(mn, mx int32) uint8 {
+	span := uint64(int64(mx) - int64(mn))
+	return uint8(bits.Len64(span))
+}
+
+// wordsForBits returns the number of uint64 words needed to hold nbits bits. It
+// is the bit-width-aware sibling of [words] (which counts whole-bit bitmaps): a
+// packed column of length L at width w needs wordsForBits(L*w) words.
+func wordsForBits(nbits int) int {
+	if nbits <= 0 {
+		return 0
+	}
+	return (nbits + 63) >> 6
+}
+
+// packResidualsLSB bit-packs the residual days[slot] - mn at width bits per
+// PRESENT slot into a fresh uint64 stream, LSB-first within each word (the layout
+// boolBits uses). The residual is laid out by SLOT (bit offset slot*width), so the
+// dense slot-indexed read path can index it directly; an absent slot (slotValid
+// false) writes residual 0 and is never read. width must be in [1, 31] (width 0 is
+// the constant column, handled by the caller with a nil packed slice).
+func packResidualsLSB(days []int32, length int, mn int32, width uint8, slotValid func(int) bool) []uint64 {
+	out := make([]uint64, wordsForBits(length*int(width)))
+	w := uint(width)
+	for slot := 0; slot < length; slot++ {
+		if !slotValid(slot) {
+			continue // absent: residual stays 0, gated by validity on read
+		}
+		res := uint64(int64(days[slot]) - int64(mn)) // non-negative; fits in w bits
+		bitpos := uint(slot) * w
+		word := bitpos >> 6
+		off := bitpos & 63
+		out[word] |= res << off
+		if off+w > 64 {
+			// The residual straddles the uint64 boundary: the high (off+w-64) bits
+			// spill into the next word. wordsForBits sized out so word+1 is in range.
+			out[word+1] |= res >> (64 - off)
+		}
+	}
+	return out
+}
+
+// unpackResidualLSB returns the width-bit residual stored for slot in the LSB-first
+// packed stream (the inverse of [packResidualsLSB]). It reads one word, or two when
+// the residual straddles a uint64 boundary, then masks to width bits. width must be
+// in [1, 31]; the caller adds the frame-of-reference min to recover the value, and
+// never calls this for the constant width-0 column.
+func unpackResidualLSB(packed []uint64, slot int, width uint8) uint64 {
+	w := uint(width)
+	bitpos := uint(slot) * w
+	word := bitpos >> 6
+	off := bitpos & 63
+	v := packed[word] >> off
+	if off+w > 64 {
+		// High bits live in the next word; shift them above the low bits already read.
+		v |= packed[word+1] << (64 - off)
+	}
+	return v & ((1 << w) - 1)
 }
 
 // --- date <-> epoch-day codec ----------------------------------------------
