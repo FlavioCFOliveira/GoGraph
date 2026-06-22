@@ -93,8 +93,6 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 // Errors surfaced: [ErrInvalidInput] (NaN/Inf float weight),
 // [ErrNegativeCycle] (negative-weight cycle detected post-DP),
 // or the underlying ctx.Err() on cancellation.
-//
-//nolint:gocyclo // canonical Floyd-Warshall: NaN/Inf gate + live-mask compaction + matrix init + edge ingest + DP
 func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.FloydWarshallCtx")()
 	// Float Weight types: NaN / +/-Inf silently corrupts every
@@ -116,6 +114,26 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 			compact[i] = -1
 		}
 	}
+	out := floydInit[W](c, maxID, compact, live)
+	if live == 0 {
+		return out, nil
+	}
+	if err := floydRunDP[W](ctx, out, live); err != nil {
+		metrics.IncCounter("search.FloydWarshallCtx.errors", 1)
+		return nil, err
+	}
+	if floydHasNegativeCycle(out, live) {
+		metrics.IncCounter("search.FloydWarshallCtx.errors", 1)
+		return nil, ErrNegativeCycle
+	}
+	return out, nil
+}
+
+// floydInit allocates the compact APSP matrix, seeds the zero-distance
+// diagonal, and ingests the CSR edges (taking the minimum weight on
+// parallel edges). It is the shared prologue for the serial
+// [FloydWarshallCtx] and the parallel [FloydWarshallParallelCtx].
+func floydInit[W Weight](c *csr.CSR[W], maxID int, compact []int, live int) *APSP[W] {
 	out := &APSP[W]{
 		live:    live,
 		maxID:   maxID,
@@ -124,7 +142,7 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 		found:   make([]bool, live*live),
 	}
 	if live == 0 {
-		return out, nil
+		return out
 	}
 	for i := 0; i < live; i++ {
 		idx := i*live + i
@@ -158,19 +176,75 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 			}
 		}
 	}
-	// Materialise the k-th column into a contiguous scratch vector
-	// once per k-pivot. The original k-i-j loop reads dist[i, k]
-	// with stride live*sizeof(W), forcing a fresh cache line per i
-	// (the live=2048 case lands in DRAM bandwidth territory). The
-	// scratch vector turns that into a single hot row read in the
-	// inner i-loop, recovering 2x+ on M4-class cores while
-	// preserving the canonical k-i-j inner-loop block.
-	ikCol := make([]W, live)
-	ikFound := make([]bool, live)
+	return out
+}
+
+// floydPivotRows relaxes destination rows [lo,hi) against pivot k using
+// pre-snapshotted column k (colDist[i] = dist[i][k], colFound parallel)
+// and row k (rowDist[j] = dist[k][j], rowFound parallel). This is the
+// canonical CLRS recurrence d_k[i][j] = min(d_{k-1}[i][j],
+// d_{k-1}[i][k] + d_{k-1}[k][j]) with both right-hand terms read from
+// the pre-pivot snapshot rather than in place.
+//
+// Reading column k and row k from snapshot vectors — never from the
+// live matrix — is what makes the i-loop a pure function of (lo,hi):
+// the kernel reads only the two read-only snapshots plus the rows it
+// owns, and writes only rows in [lo,hi). Distinct [lo,hi) ranges touch
+// disjoint memory, so any partition of [0,live) across goroutines is
+// race-free and produces a result independent of the partition — the
+// foundation of the bit-identical parallel variant (rmp #1680). It also
+// keeps the column read cache-hot (a contiguous vector rather than a
+// strided dist[i][k] gather).
+func floydPivotRows[W Weight](dist []W, found []bool, live, lo, hi int, colDist []W, colFound []bool, rowDist []W, rowFound []bool) {
+	for i := lo; i < hi; i++ {
+		if !colFound[i] {
+			continue
+		}
+		ik := colDist[i]
+		iRow := i * live
+		for j := 0; j < live; j++ {
+			if !rowFound[j] {
+				continue
+			}
+			cand := ik + rowDist[j]
+			idx := iRow + j
+			if !found[idx] || cand < dist[idx] {
+				dist[idx] = cand
+				found[idx] = true
+			}
+		}
+	}
+}
+
+// floydSnapshotPivot materialises column k and row k of out into the
+// caller-owned scratch vectors before a pivot's relaxation. Splitting
+// the snapshot from the relaxation lets the parallel variant publish
+// both vectors once (under the coordinator) and then fan the disjoint
+// destination-row ranges out to workers that read them race-free.
+func floydSnapshotPivot[W Weight](out *APSP[W], live, k int, colDist []W, colFound []bool, rowDist []W, rowFound []bool) {
+	kRow := k * live
+	for i := 0; i < live; i++ {
+		colIdx := i*live + k
+		colDist[i] = out.dist[colIdx]
+		colFound[i] = out.found[colIdx]
+		rowDist[i] = out.dist[kRow+i]
+		rowFound[i] = out.found[kRow+i]
+	}
+}
+
+// floydRunDP runs the serial O(V^3) pivot loop over the prepared matrix,
+// honouring ctx cancellation at every pivot. It snapshots column k and
+// row k once per pivot and relaxes the whole [0,live) destination range
+// through the shared [floydPivotRows] kernel, so its output is
+// bit-identical to the parallel variant by construction.
+func floydRunDP[W Weight](ctx context.Context, out *APSP[W], live int) error {
+	colDist := make([]W, live)
+	colFound := make([]bool, live)
+	rowDist := make([]W, live)
+	rowFound := make([]bool, live)
 	for k := 0; k < live; k++ {
 		if err := ctx.Err(); err != nil {
-			metrics.IncCounter("search.FloydWarshallCtx.errors", 1)
-			return nil, err
+			return err
 		}
 		// Cooperative yield every 64 k-pivots so concurrent short
 		// queries scheduled on the same M see progress; the overhead
@@ -178,43 +252,22 @@ func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], e
 		if k&0x3F == 0 {
 			runtime.Gosched()
 		}
-		// Materialise dist[*, k] and found[*, k].
-		for i := 0; i < live; i++ {
-			idx := i*live + k
-			ikCol[i] = out.dist[idx]
-			ikFound[i] = out.found[idx]
-		}
-		kRow := k * live
-		for i := 0; i < live; i++ {
-			if !ikFound[i] {
-				continue
-			}
-			ik := ikCol[i]
-			iRow := i * live
-			for j := 0; j < live; j++ {
-				kjIdx := kRow + j
-				if !out.found[kjIdx] {
-					continue
-				}
-				cand := ik + out.dist[kjIdx]
-				idx := iRow + j
-				if !out.found[idx] || cand < out.dist[idx] {
-					out.dist[idx] = cand
-					out.found[idx] = true
-				}
-			}
-		}
+		floydSnapshotPivot[W](out, live, k, colDist, colFound, rowDist, rowFound)
+		floydPivotRows[W](out.dist, out.found, live, 0, live, colDist, colFound, rowDist, rowFound)
 	}
-	// Canonical CLRS §25.2 negative-cycle detection: after the DP,
-	// any diagonal entry dist[i,i] strictly below zero proves vertex
-	// i lies on a negative-weight cycle. Without this scan the matrix
-	// would silently report finite distances polluted by the cycle.
+	return nil
+}
+
+// floydHasNegativeCycle is the canonical CLRS §25.2 post-DP scan: any
+// diagonal entry dist[i,i] strictly below zero proves vertex i lies on a
+// negative-weight cycle. Without this check the matrix would silently
+// report finite distances polluted by the cycle.
+func floydHasNegativeCycle[W Weight](out *APSP[W], live int) bool {
 	var zero W
 	for i := 0; i < live; i++ {
 		if out.dist[i*live+i] < zero {
-			metrics.IncCounter("search.FloydWarshallCtx.errors", 1)
-			return nil, ErrNegativeCycle
+			return true
 		}
 	}
-	return out, nil
+	return false
 }
