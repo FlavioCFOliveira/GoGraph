@@ -255,6 +255,12 @@ func (s *Session) setBoltVersion(v proto.Version) {
 // error reports a failed or timed-out write; the failure is terminal for the
 // connection — a partially written chunked message cannot be resumed — so the
 // caller stops streaming and surfaces [errRecordWrite].
+//
+// Contract: a sink MUST consume the *proto.Record (and its Data slice)
+// synchronously and retain no reference to either past its return. handlePull
+// reuses one Record and one row buffer across the rows of a PULL (#1520), so a
+// sink that buffered or deferred the record would observe it overwritten by the
+// next row. The built-in sink (encode-and-write-now) honours this.
 type recordSink func(*proto.Record) error
 
 // errRecordWrite is the sentinel error returned by [Session.HandleMessage]
@@ -786,21 +792,48 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	var responses []any
 	fetched := int64(0)
 
-	// emit hands one RECORD to the streaming sink when one is installed (the
-	// serve loop's encode-and-write-now path, task #1350), falling back to
-	// buffering it in the response slice for sessions driven directly through
-	// HandleMessage. Streaming per row adds no write amplification — the
-	// buffered path also issued one chunked write per RECORD after the handler
-	// returned; only the timing changes — and the blocking write is the
-	// backpressure that keeps a slow reader from forcing the whole page into
-	// memory. A sink error is terminal: the wire may hold a partial chunk.
+	// On the streaming-sink path the sink encodes-and-writes each RECORD
+	// synchronously before handlePull advances to the next row (the serve loop's
+	// task #1350 path: setRecordSink -> writeResponse -> sendResponse consumes
+	// rec.Data on the calling goroutine and retains nothing). So a single row
+	// buffer and Record can be reused across the whole PULL instead of
+	// allocating both per row (#1520). The buffered path (no sink — sessions
+	// driven directly through HandleMessage) retains every RECORD in responses,
+	// so it must keep allocating a fresh row per record.
+	streaming := s.records != nil
+	var (
+		rowBuf    []packstream.Value
+		streamRec proto.Record
+	)
+	if streaming {
+		rowBuf = make([]packstream.Value, len(s.columns))
+	}
+
+	// emit hands one RECORD to the streaming sink when one is installed, reusing
+	// streamRec/rowBuf; otherwise it buffers a freshly-allocated RECORD.
+	// Streaming per row adds no write amplification — the buffered path also
+	// issued one chunked write per RECORD after the handler returned; only the
+	// timing changes — and the blocking write is the backpressure that keeps a
+	// slow reader from forcing the whole page into memory. A sink error is
+	// terminal: the wire may hold a partial chunk.
 	emit := func(row []packstream.Value) error {
-		rec := &proto.Record{Data: row}
-		if s.records != nil {
-			return s.records(rec)
+		if streaming {
+			streamRec.Data = row
+			return s.records(&streamRec)
 		}
-		responses = append(responses, rec)
+		responses = append(responses, &proto.Record{Data: row})
 		return nil
+	}
+
+	// newRow returns the buffer to fill for the next streamed row: the reused
+	// rowBuf when streaming, or a fresh slice when buffering (a buffered RECORD
+	// is retained in responses, so it must not alias rowBuf). The has_more peek
+	// below always allocates fresh because the peeked row outlives this PULL.
+	newRow := func() []packstream.Value {
+		if streaming {
+			return rowBuf
+		}
+		return make([]packstream.Value, len(s.columns))
 	}
 
 	// Emit the pre-fetched row from a previous partial PULL, if any.
@@ -828,8 +861,9 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		}
 		// Read the row positionally (#1499): the engine result is always
 		// materialised, so ValueAt reads the column-oriented backing store
-		// directly and never builds the per-row map that Record() would.
-		row := make([]packstream.Value, len(s.columns))
+		// directly and never builds the per-row map that Record() would. row is
+		// the reused streaming buffer or a fresh slice (#1520, see newRow).
+		row := newRow()
 		for i := range s.columns {
 			row[i] = exprToPackstream(s.result.ValueAt(i), s.boltVersion.Major)
 		}
