@@ -1,7 +1,6 @@
 package search
 
 import (
-	"container/heap"
 	"context"
 	"errors"
 
@@ -115,9 +114,8 @@ func KShortestPathsLooplessCtxWithOpts[W Weight](
 		return nil, ErrInvalidInput
 	}
 	pq := &looplessPQ[W]{}
-	heap.Init(pq)
 	seedPath := []graph.NodeID{src}
-	heap.Push(pq, looplessItem[W]{cost: 0, path: seedPath})
+	pq.pushItem(looplessItem[W]{cost: 0, path: seedPath})
 	pq.totalPathLen += int64(len(seedPath))
 	result := make([]YenPath[W], 0, k)
 	tick := 0
@@ -133,7 +131,7 @@ func KShortestPathsLooplessCtxWithOpts[W Weight](
 		if opts.MaxPops > 0 && tick > opts.MaxPops {
 			return partialOrNil(result), ErrResourceBudgetExceeded
 		}
-		top := heap.Pop(pq).(looplessItem[W]) //nolint:errcheck // PQ types are statically known
+		top := pq.popItem()
 		pq.totalPathLen -= int64(len(top.path))
 		last := top.path[len(top.path)-1]
 		if last == dst {
@@ -155,7 +153,7 @@ func KShortestPathsLooplessCtxWithOpts[W Weight](
 			copy(newPath, top.path)
 			newPath[len(newPath)-1] = nb
 			item := looplessItem[W]{cost: top.cost + w, path: newPath}
-			heap.Push(pq, item)
+			pq.pushItem(item)
 			pq.totalPathLen += int64(len(newPath))
 		}
 		// MaxQueueBytes guard: checked after the expansion of each pop.
@@ -206,14 +204,52 @@ type looplessPQ[W Weight] struct {
 	totalPathLen int64
 }
 
-func (h looplessPQ[W]) Len() int           { return len(h.items) }
-func (h looplessPQ[W]) Less(i, j int) bool { return h.items[i].cost < h.items[j].cost }
-func (h looplessPQ[W]) Swap(i, j int)      { h.items[i], h.items[j] = h.items[j], h.items[i] }
-func (h *looplessPQ[W]) Push(x any)        { h.items = append(h.items, x.(looplessItem[W])) } //nolint:errcheck // statically known
-func (h *looplessPQ[W]) Pop() any {
-	old := h.items
-	n := len(old)
-	item := old[n-1]
-	h.items = old[:n-1]
-	return item
+func (h looplessPQ[W]) Len() int { return len(h.items) }
+
+// pushItem inserts it and sifts it up. It is the monomorphic replacement for
+// container/heap.Push: no any-boxing of the item (which carries a path slice),
+// so a queue push allocates nothing beyond the backing-slice growth. The
+// min-heap ordering on cost matches the former Less, and the sift prefers the
+// existing element on ties (strict <), so the pop sequence — and the k shortest
+// paths returned — is unchanged.
+func (h *looplessPQ[W]) pushItem(it looplessItem[W]) {
+	h.items = append(h.items, it)
+	s := h.items
+	i := len(s) - 1
+	for i > 0 {
+		parent := (i - 1) / 2
+		if s[parent].cost <= s[i].cost {
+			break
+		}
+		s[parent], s[i] = s[i], s[parent]
+		i = parent
+	}
+}
+
+// popItem removes and returns the minimum-cost item, sifting the moved tail
+// down. The caller must ensure the queue is non-empty.
+func (h *looplessPQ[W]) popItem() looplessItem[W] {
+	s := h.items
+	n := len(s)
+	top := s[0]
+	s[0] = s[n-1]
+	s = s[:n-1]
+	i := 0
+	for {
+		l, r := 2*i+1, 2*i+2
+		smallest := i
+		if l < len(s) && s[l].cost < s[smallest].cost {
+			smallest = l
+		}
+		if r < len(s) && s[r].cost < s[smallest].cost {
+			smallest = r
+		}
+		if smallest == i {
+			break
+		}
+		s[i], s[smallest] = s[smallest], s[i]
+		i = smallest
+	}
+	h.items = s
+	return top
 }

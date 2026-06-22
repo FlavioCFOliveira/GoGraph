@@ -111,6 +111,11 @@ func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, er
 	v := make([]float64, m+1)
 	p := make([]int, m+1)
 	way := make([]int, m+1)
+	// minv/used are the per-row augmenting-path scratch. Allocated once and
+	// reset at the top of each row rather than reallocated per row, dropping
+	// the inner-loop allocation from O(n) to O(1) buffers.
+	minv := make([]float64, m+1)
+	used := make([]bool, m+1)
 
 	for i := 1; i <= n; i++ {
 		if err := ctx.Err(); err != nil {
@@ -122,10 +127,9 @@ func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, er
 		}
 		p[0] = i
 		j0 := 0
-		minv := make([]float64, m+1)
-		used := make([]bool, m+1)
-		for k := range minv {
+		for k := 0; k <= m; k++ {
 			minv[k] = inf
+			used[k] = false
 		}
 		for {
 			if err := ctx.Err(); err != nil {

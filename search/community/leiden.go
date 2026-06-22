@@ -269,6 +269,12 @@ type aggGraph struct {
 	// It is rewritten on each aggregate() call so that, at the end, lifted[origLevel0]
 	// returns the index into comm[] for the original node.
 	lifted []int
+	// sigA, sigB are reusable float64 accumulator scratch for the per-level
+	// modularity / localMove / refine passes (sigmaIn/sigmaTot/kvcArr). Those
+	// methods run sequentially on a given g and never nest, so a single shared
+	// pair, re-zeroed with growZero at each use, replaces their per-call
+	// make([]float64, …) allocations.
+	sigA, sigB floatBuf
 }
 
 // aggGraphFromCSR builds the initial aggGraph from c (using only live
@@ -374,8 +380,8 @@ func (g *aggGraph) modularity(comm []int, resolution float64) float64 {
 			cMax = c + 1
 		}
 	}
-	sigmaIn := make([]float64, cMax)
-	sigmaTot := make([]float64, cMax)
+	sigmaIn := g.sigA.growZero(cMax)
+	sigmaTot := g.sigB.growZero(cMax)
 	for v := 0; v < g.n; v++ {
 		c := comm[v]
 		sigmaTot[c] += g.deg[v]
@@ -409,7 +415,7 @@ func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
 			cMax = c + 1
 		}
 	}
-	sigmaTot := make([]float64, cMax)
+	sigmaTot := g.sigA.growZero(cMax)
 	for v := 0; v < g.n; v++ {
 		sigmaTot[comm[v]] += g.deg[v]
 	}
@@ -419,7 +425,7 @@ func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
 	// (reset via touched-list scan); touched records the indices that
 	// have been written so the reset is O(unique-neighbour-communities)
 	// rather than O(cMax).
-	kvcArr := make([]float64, cMax)
+	kvcArr := g.sigB.growZero(cMax)
 	touched := make([]int, 0, 32)
 	for iter := 0; iter < opts.MaxIterations; iter++ {
 		moved := false
@@ -500,12 +506,12 @@ func (g *aggGraph) refine(parent []int, opts LeidenOptions) []int {
 			cMax = c + 1
 		}
 	}
-	sigmaTot := make([]float64, g.n) // indexed by refined-community ID, initially == node ID
+	sigmaTot := g.sigA.growZero(g.n) // indexed by refined-community ID, initially == node ID
 	for v := 0; v < g.n; v++ {
 		sigmaTot[v] += g.deg[v]
 	}
 	// Scratch buffers (see localMove for the touched-list rationale).
-	kvcArr := make([]float64, g.n)
+	kvcArr := g.sigB.growZero(g.n)
 	touched := make([]int, 0, 32)
 	for iter := 0; iter < opts.MaxIterations; iter++ {
 		moved := false
