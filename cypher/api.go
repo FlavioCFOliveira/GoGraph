@@ -6845,9 +6845,50 @@ type nodeScalarUse struct {
 	// walk (the C1 invariant in [analyseNodeScalarUse]), so the two sets are
 	// always disjoint. presenceKeys is consulted only for relationship variables
 	// today; for node variables it is harmless (the node path ignores it).
-	presenceKeys   map[string]struct{}
-	needsLabels    bool
+	presenceKeys map[string]struct{}
+	// needsLabels is set by a label predicate `n:Label` or other label-MEMBERSHIP
+	// reader. It is satisfied by the lazy on-demand path (a [expr.LazyNodeValue]
+	// answers HasLabel without enumerating the full label set), so it does NOT by
+	// itself force a concrete node value.
+	needsLabels bool
+	// The five flags below classify a bound variable used ONLY as the bare
+	// argument of a field-extractor function (#1659). Each names the single piece
+	// of entity state that function reads, so the materialisation path can build a
+	// minimal entity value (skipping the property map, and every unrelated bound
+	// variable in scope) while the function still extracts the same scalar/list it
+	// always did. They are the projection-safe analogue of needsWholeNode: the
+	// function returns a fresh scalar/list/NodeValue-by-id, so the partial entity
+	// value itself never escapes into a result row (see [analyseNodeScalarUse] and
+	// [buildPartialNodeValueForFn]).
+	//
+	// needsIDOnly  — id(x)/elementId(x): reads only x.ID. The id already sits in
+	//                the row as an IntegerValue, but fnID/fnElementId type-switch on
+	//                a Node/Relationship value, so a minimal entity (ID only, no
+	//                labels, no properties) must be boxed.
+	// needsType    — type(r): reads only r.Type (already built cheaply by
+	//                [buildRelationshipValueFromRow]); the property map is skipped.
+	// needsEndpoint— startNode(r)/endNode(r): reads only r.StartID / r.EndID; the
+	//                property map is skipped.
+	// needsLabelList— labels(n): reads the full node label LIST (not a membership
+	//                test), so unlike needsLabels it forces a concrete NodeValue
+	//                carrying Labels; the property map is skipped.
+	// needsKeyNames— keys(x): reads only the property KEY set, never the values, so
+	//                the key-only placeholder map is built and value boxing skipped.
+	needsIDOnly    bool
+	needsType      bool
+	needsEndpoint  bool
+	needsLabelList bool
+	needsKeyNames  bool
 	needsWholeNode bool
+}
+
+// hasScalarFnNeed reports whether the variable is touched by at least one
+// field-extractor function (#1659). When true (and needsWholeNode is false) the
+// node materialisation path builds a concrete partial [expr.NodeValue] carrying
+// only the requested fields instead of a lazy value, because the extractor
+// functions (fnLabels/fnKeys/fnID) type-switch on a concrete Node/Relationship.
+func (u *nodeScalarUse) hasScalarFnNeed() bool {
+	return u.needsIDOnly || u.needsType || u.needsEndpoint || u.needsLabelList || u.needsKeyNames
 }
 
 // analyseNodeScalarUse walks a read-only expression and classifies how each
@@ -6959,6 +7000,16 @@ func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bai
 			}
 			walk(v.Operand)
 		case *ast.FunctionInvocation:
+			// Field-extractor fast path (#1659): a function whose sole argument is
+			// a bare bound variable and which reads only one piece of entity state
+			// (id/type/labels/keys/startNode/endNode) records that specific need
+			// instead of letting the bare *ast.Variable below mark the whole entity
+			// as needsWholeNode. properties() is deliberately NOT in this set — it
+			// returns the entity's full property map, which must be materialised in
+			// full, so it falls through to the bare-variable needsWholeNode path.
+			if classifyFieldExtractor(v, get) {
+				return
+			}
 			for _, a := range v.Args {
 				walk(a)
 			}
@@ -7001,6 +7052,59 @@ func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bai
 		}
 	}
 	return uses, bailout
+}
+
+// classifyFieldExtractor recognises a call of the form f(<bare variable>) where
+// f reads exactly one piece of entity state, and records that specific minimal
+// need on the variable's [nodeScalarUse] via get. It returns true when it has
+// fully accounted for the call (so the caller must NOT also recurse into the
+// argument, which would re-classify the bare variable as needsWholeNode).
+//
+// The recognised functions, the openCypher-verified field each reads, and the
+// flag set (see the field comments on [nodeScalarUse]):
+//
+//	id, elementId      → x.ID            → needsIDOnly
+//	type               → r.Type          → needsType
+//	startNode, endNode → r.StartID/EndID → needsEndpoint
+//	labels             → n.Labels (list) → needsLabelList
+//	keys               → property keys   → needsKeyNames
+//
+// properties() is intentionally absent: it returns the whole property map and so
+// must keep full materialisation (needsWholeNode), which the caller's fallback
+// recursion supplies. The call is recognised ONLY for arity 1 with a bare
+// *ast.Variable operand; any other shape (a computed argument, extra arguments,
+// a nested accessor) returns false and falls through to the conservative walk.
+//
+// Soundness for the escaping projection path: every listed function returns a
+// fresh scalar, list, or NodeValue-built-from-an-id — never the argument entity
+// itself — so the minimal partial entity placed in the RowContext is read by the
+// function and discarded; only the extracted value escapes into a result row.
+func classifyFieldExtractor(v *ast.FunctionInvocation, get func(string) *nodeScalarUse) bool {
+	// Only a bare, single-argument, non-DISTINCT, non-namespaced call matches:
+	// a namespaced call (apoc.id, …) is a different function, and DISTINCT /
+	// COUNT(*) are not field extractors.
+	if len(v.Namespace) != 0 || v.Distinct || v.CountStar || len(v.Args) != 1 {
+		return false
+	}
+	rv, ok := v.Args[0].(*ast.Variable)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(v.Name) {
+	case "id", "elementid":
+		get(rv.Name).needsIDOnly = true
+	case "type":
+		get(rv.Name).needsType = true
+	case "startnode", "endnode":
+		get(rv.Name).needsEndpoint = true
+	case "labels":
+		get(rv.Name).needsLabelList = true
+	case "keys":
+		get(rv.Name).needsKeyNames = true
+	default:
+		return false
+	}
+	return true
 }
 
 // lazyNodeResolver adapts an *lpg.Graph to [expr.NodeResolver], translating the
@@ -7080,6 +7184,81 @@ func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], us
 		return v
 	}
 	return expr.NewLazyNodeValue(uint64(id), lazyResolver(bopts, g))
+}
+
+// nodeKeyNamesPlaceholder is the non-null sentinel stamped under each property
+// key of a node materialised solely to answer keys(n) (#1659). fnKeys reads only
+// the map's KEY set, never a value, so the placeholder is never observed as a
+// value and never escapes into a result row. Mirrors [relPresencePlaceholder].
+var nodeKeyNamesPlaceholder = expr.BoolValue(true)
+
+// buildPartialNodeValueForFn builds a CONCRETE [expr.NodeValue] carrying only the
+// node state a field-extractor function over a bound node variable reads (#1659):
+// labels(n) needs Labels, keys(n) needs the property key set, id(n) needs only the
+// ID. Unlike [upgradeNodeIDToValuePartial] it never returns an [expr.LazyNodeValue],
+// because fnLabels/fnKeys/fnID type-switch on a concrete Node and a lazy value
+// cannot enumerate labels or keys.
+//
+// Field population, given use (the caller has already checked
+// use.hasScalarFnNeed() && !use.needsWholeNode):
+//
+//   - Labels: loaded iff use needs them (needsLabelList from labels(n), or
+//     needsLabels from a co-occurring n:Label predicate); otherwise nil.
+//   - Properties:
+//   - keys(n) AND a real value read (n.k) co-occur — full real map (keys(n)
+//     sees every key, n.k reads its true value);
+//   - keys(n) only — a KEY-NAMES placeholder map (no value boxing);
+//   - only value reads (n.k) — just those touched keys with real values;
+//   - neither — nil.
+//
+// Returns (zero, false) when v is not a resolved NodeID (a plain integer, a
+// Deleted NodeValue stamped by DELETE, etc.), so the caller falls back to the
+// ordinary path and the DeletedEntityAccess / value-passthrough contracts hold.
+//
+// Soundness: the partial NodeValue is read by the extractor function and then
+// discarded with the (possibly pooled) RowContext; the function returns a fresh
+// list / integer / NodeValue-by-id, so the partial node itself never escapes.
+func buildPartialNodeValueForFn(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse) (expr.NodeValue, bool) {
+	if g == nil {
+		return expr.NodeValue{}, false
+	}
+	iv, ok := v.(expr.IntegerValue)
+	if !ok {
+		return expr.NodeValue{}, false
+	}
+	id := graph.NodeID(iv)
+	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
+		return expr.NodeValue{}, false
+	}
+	nv := expr.NodeValue{ID: uint64(id)}
+	if use.needsLabelList || use.needsLabels {
+		nv.Labels = g.NodeLabelsByID(id)
+	}
+	switch {
+	case use.needsKeyNames && len(use.keys) > 0:
+		nv.Properties = nodePropsToExprMap(g, id)
+	case use.needsKeyNames:
+		var props expr.MapValue
+		g.NodePropertiesByIDFunc(id, func(name string, _ lpg.PropertyValue) {
+			if props == nil {
+				props = make(expr.MapValue)
+			}
+			props[name] = nodeKeyNamesPlaceholder
+		})
+		nv.Properties = props
+	case len(use.keys) > 0:
+		var props expr.MapValue
+		for k := range use.keys {
+			if pv, ok := g.NodePropertyByID(id, k); ok {
+				if props == nil {
+					props = make(expr.MapValue, len(use.keys))
+				}
+				props[k] = lpgPropToExpr(pv)
+			}
+		}
+		nv.Properties = props
+	}
+	return nv, true
 }
 
 // buildNodeValueFromID constructs an expr.NodeValue for a known graph NodeID,
@@ -7541,6 +7720,17 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 				// evalExpr only ever reads variables the expression mentions.
 				continue
 			}
+			// Node field-extractor (#1659: labels(n)/keys(n)/id(n)): the lazy
+			// value answers only on-demand scalar accesses (n.k, n:Label) and
+			// cannot enumerate labels or keys, and fnLabels/fnKeys/fnID
+			// type-switch on a concrete Node anyway. Build a concrete partial
+			// NodeValue carrying exactly the requested fields instead.
+			if !use.needsWholeNode && use.hasScalarFnNeed() {
+				if pv, ok := buildPartialNodeValueForFn(row[colIdx], g, use); ok {
+					ctx[varName] = pv
+					continue
+				}
+			}
 			ctx[varName] = upgradeNodeIDToValuePartial(row[colIdx], g, use, bopts)
 			continue
 		}
@@ -7734,31 +7924,57 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 var relPresencePlaceholder = expr.BoolValue(true)
 
 // buildEdgeProps materialises the property map for a relationship value over the
-// post-direction-probe storage endpoints (stKey -> enKey, the C10 endpoints).
+// post-direction-probe storage endpoints (stKey -> enKey, the C10 endpoints). The
+// shape of the map is dictated by how the bound relationship variable is used,
+// captured in relUse, so the allocation matches the demand:
 //
-// When relUse marks the edge's property reads as PRESENCE-ONLY — at least one
-// presenceKey and no value key — it skips the full [lpg.Graph.EdgeProperties]
-// fetch and instead stamps [relPresencePlaceholder] under each presence key the
-// kind-gated [lpg.Graph.EdgeHasProperty] reports present, leaving absent keys
-// out (so IS NULL sees them as null). This is the allocation win: a relationship
-// bound only to answer `r.k IS [NOT] NULL` never boxes its real property values.
+//   - relUse nil, needsWholeNode, or ANY value key (use.keys) — the full coalesced
+//     property map, byte-identical to the original inline build (C5), because the
+//     entity may escape whole or a real property value is read.
+//   - field-extractor only (#1659: id/type/startNode/endNode over the relationship,
+//     and nothing else) — NO property map (nil): those functions read only
+//     ID/Type/StartID/EndID, never a property, so building the map is pure waste.
+//   - keys(r) only (#1659) — a KEY-NAMES map: every property key the kind-gated
+//     view exposes, each under [relPresencePlaceholder], with NO value boxing.
+//     fnKeys reads only the map's keys, so the placeholder values never escape.
+//   - presence-only (#1638: r.k IS [NOT] NULL and no value key) — a placeholder
+//     map for exactly the present presence keys, resolved via
+//     [lpg.Graph.EdgeHasProperty]; absent keys are omitted so IS NULL sees null.
 //
-// In every other case — relUse nil, or carrying any value key — it returns the
-// full coalesced property map exactly as the original inline build did, so
-// non-gated callers stay byte-identical (C5). C9 holds because both
-// EdgeProperties and EdgeHasProperty expose the same per-pair coalesced view.
+// C9 holds because EdgeProperties, EdgeHasProperty, and the key enumeration all
+// expose the same per-pair coalesced view. In every field-extractor / presence
+// case the relationship value carries no real property value, so only the
+// scalar/list the function extracts ever escapes into a result row (#1659 / #1638).
 func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, relUse *nodeScalarUse) expr.MapValue {
-	if relUse != nil && len(relUse.presenceKeys) > 0 && len(relUse.keys) == 0 {
-		var out expr.MapValue
-		for k := range relUse.presenceKeys {
-			if g.EdgeHasProperty(stKey, enKey, k) {
-				if out == nil {
-					out = make(expr.MapValue, len(relUse.presenceKeys))
-				}
+	if relUse != nil && !relUse.needsWholeNode && len(relUse.keys) == 0 {
+		switch {
+		case relUse.needsKeyNames:
+			// keys(r): enumerate the key set, no value boxing.
+			rawEP := g.EdgeProperties(stKey, enKey)
+			if len(rawEP) == 0 {
+				return nil
+			}
+			out := make(expr.MapValue, len(rawEP))
+			for k := range rawEP {
 				out[k] = relPresencePlaceholder
 			}
+			return out
+		case len(relUse.presenceKeys) > 0:
+			// r.k IS [NOT] NULL only (#1638): presence placeholders.
+			var out expr.MapValue
+			for k := range relUse.presenceKeys {
+				if g.EdgeHasProperty(stKey, enKey, k) {
+					if out == nil {
+						out = make(expr.MapValue, len(relUse.presenceKeys))
+					}
+					out[k] = relPresencePlaceholder
+				}
+			}
+			return out
+		case relUse.hasScalarFnNeed():
+			// id/type/startNode/endNode over the relationship: no property read.
+			return nil
 		}
-		return out
 	}
 	rawEP := g.EdgeProperties(stKey, enKey)
 	edgeProps := make(expr.MapValue, len(rawEP))
@@ -8834,16 +9050,18 @@ func buildIRProjection(
 				capturedParams := params
 				capturedReg := reg
 				capturedBopts := bopts
-				// Lazy node materialisation (#1500) for scalar-only projections
-				// such as `RETURN n.name`: the projected value is a scalar that
-				// is materialised into the result row, so partially loading the
-				// bound node it reads from is sound ONLY when the projection
-				// expression dereferences every node it touches through scalar
-				// accesses — i.e. the analysis did not bail AND no variable
-				// needs the whole node. A bare-variable projection (`RETURN n`)
-				// or any whole-node use returns the node itself into the row, so
-				// it must keep full eager materialisation; the gate below
-				// disables the lazy path for those cases.
+				// Lazy / partial node materialisation (#1500, #1659) for
+				// scalar-only projections such as `RETURN n.name` or
+				// `RETURN id(r)`: the projected value is a scalar / list / fresh
+				// NodeValue-by-id, so partially loading the bound entity it reads
+				// from is sound ONLY when the projection expression dereferences
+				// every entity it touches through scalar accesses or a
+				// field-extractor function (id/type/labels/keys/startNode/endNode)
+				// — i.e. the analysis did not bail AND no variable needs the whole
+				// node. A bare-variable projection (`RETURN n`), properties(n), or
+				// any other whole-node use returns the node itself into the row, so
+				// it must keep full eager materialisation; the gate below disables
+				// the partial path for those cases by nulling scalarUse.
 				scalarUse, bail := analyseNodeScalarUse(capturedExpr)
 				projectsWholeNode := bail
 				for _, u := range scalarUse {
