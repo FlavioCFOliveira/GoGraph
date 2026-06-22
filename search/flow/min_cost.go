@@ -1,7 +1,6 @@
 package flow
 
 import (
-	"container/heap"
 	"context"
 	"errors"
 	"fmt"
@@ -111,6 +110,10 @@ func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (tota
 	}
 	dist := make([]int, n)
 	parentEdge := make([]int, n)
+	// pq is the Dijkstra frontier, allocated once and reused (reset to [:0])
+	// on every SSP iteration so the successive-shortest-paths loop does not
+	// reallocate a heap each round.
+	pq := make(mcmfHeap, 0, n)
 	for {
 		if cerr := ctx.Err(); cerr != nil {
 			metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)
@@ -123,10 +126,10 @@ func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (tota
 			parentEdge[i] = -1
 		}
 		dist[src] = 0
-		pq := &mcmfPQ{}
-		heap.Push(pq, mcmfItem{node: src, dist: 0})
-		for pq.Len() > 0 {
-			it := heap.Pop(pq).(mcmfItem) //nolint:errcheck // statically known
+		pq = pq[:0]
+		pq.push(mcmfItem{node: src, dist: 0})
+		for pq.len() > 0 {
+			it := pq.pop()
 			if it.dist > dist[it.node] {
 				continue
 			}
@@ -153,7 +156,7 @@ func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (tota
 				if cand < dist[to] {
 					dist[to] = cand
 					parentEdge[to] = e
-					heap.Push(pq, mcmfItem{node: to, dist: cand})
+					pq.push(mcmfItem{node: to, dist: cand})
 				}
 			}
 		}
@@ -273,16 +276,55 @@ type mcmfItem struct {
 	node int
 }
 
-type mcmfPQ []mcmfItem
+// mcmfHeap is a monomorphic binary min-heap of mcmfItem keyed on dist. It
+// replaces a container/heap-driven mcmfPQ so the inner Dijkstra loop carries no
+// interface dispatch and no any-boxing of items, and its backing slice is
+// reused across SSP iterations (reset with [:0]) rather than reallocated each
+// round. Pop order is identical to the heap.Interface version (ascending
+// dist), so the min-cost max-flow result is unchanged.
+type mcmfHeap []mcmfItem
 
-func (h mcmfPQ) Len() int           { return len(h) }
-func (h mcmfPQ) Less(i, j int) bool { return h[i].dist < h[j].dist }
-func (h mcmfPQ) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *mcmfPQ) Push(x any)        { *h = append(*h, x.(mcmfItem)) } //nolint:errcheck // statically known
-func (h *mcmfPQ) Pop() any {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
-	return item
+func (h mcmfHeap) len() int { return len(h) }
+
+// push inserts it and sifts it up to restore the heap invariant.
+func (h *mcmfHeap) push(it mcmfItem) {
+	s := append(*h, it)
+	i := len(s) - 1
+	for i > 0 {
+		parent := (i - 1) / 2
+		if s[parent].dist <= s[i].dist {
+			break
+		}
+		s[parent], s[i] = s[i], s[parent]
+		i = parent
+	}
+	*h = s
+}
+
+// pop removes and returns the minimum-dist item, sifting the moved tail down.
+// The caller must ensure the heap is non-empty.
+func (h *mcmfHeap) pop() mcmfItem {
+	s := *h
+	n := len(s)
+	top := s[0]
+	s[0] = s[n-1]
+	s = s[:n-1]
+	i := 0
+	for {
+		l, r := 2*i+1, 2*i+2
+		smallest := i
+		if l < len(s) && s[l].dist < s[smallest].dist {
+			smallest = l
+		}
+		if r < len(s) && s[r].dist < s[smallest].dist {
+			smallest = r
+		}
+		if smallest == i {
+			break
+		}
+		s[i], s[smallest] = s[smallest], s[i]
+		i = smallest
+	}
+	*h = s
+	return top
 }
