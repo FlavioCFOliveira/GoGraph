@@ -172,17 +172,73 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 // ctx.Err() is checked once per source vertex during the Dijkstra
 // pass and at every relaxation-round boundary during the
 // Bellman-Ford pass; on cancellation returns (nil, wrapped ctx.Err()).
-//
-//nolint:gocyclo // canonical Johnson: NaN/Inf gate + live-mask compaction + virtual-source BF + reweight + per-source Dijkstra + recover
 func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.JohnsonAPSPCtx")()
+	p, err := johnsonPrepare[W](ctx, c)
+	if err != nil {
+		metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
+		return nil, err
+	}
+	if p.out.live == 0 {
+		return p.out, nil
+	}
+
+	// Reweighted Dijkstra from every live vertex. We use the same
+	// pooled state machinery as Dijkstra to keep per-source allocation
+	// down to the heap items themselves (which the per-W sync.Pool
+	// amortises). dijkstraCoreWithWeights reads the reweighted slice
+	// in place of c.WeightsSlice().
+	st := acquireDijkstra[W](uint64(p.maxID))
+	defer releaseDijkstra(st)
+	for src := 0; src < p.maxID; src++ {
+		if p.compact[src] < 0 {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
+			return nil, err
+		}
+		if src&0x3F == 0 {
+			runtime.Gosched()
+		}
+		if err := johnsonDijkstraSource[W](ctx, c, p, src, st); err != nil {
+			metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
+			return nil, err
+		}
+	}
+	return p.out, nil
+}
+
+// johnsonPlan bundles the immutable, source-independent products of
+// Johnson's reweighting prologue. Every field is read-only once
+// [johnsonPrepare] returns, so it is safe to share by pointer across
+// the per-source workers of [JohnsonAPSPParallelCtx]: the only mutable
+// state during the Dijkstra pass is each source's own disjoint output
+// row (out.dist / out.found) plus the worker's private dijkstraState.
+type johnsonPlan[W Weight] struct {
+	out        *APSP[W]
+	compact    []int
+	live       int
+	maxID      int
+	h          []W // Johnson potential h(v)
+	reweighted []W // w'(u,v) = w(u,v) + h(u) - h(v), parallel to c.EdgesSlice()
+}
+
+// johnsonPrepare runs the source-independent prologue of Johnson's
+// algorithm: the NaN/Inf gate, live-mask compaction, the virtual-source
+// Bellman-Ford reweighting pass (h), and the reweighted edge-weight
+// view. It is shared verbatim by the serial [JohnsonAPSPCtx] and the
+// parallel [JohnsonAPSPParallelCtx] so both compute bit-identical
+// potentials and reweighted edges.
+//
+//nolint:gocyclo // canonical Johnson prologue: NaN/Inf gate + live-mask compaction + virtual-source BF + reweight
+func johnsonPrepare[W Weight](ctx context.Context, c *csr.CSR[W]) (johnsonPlan[W], error) {
 	// Float Weight types: NaN / +/-Inf in any edge silently corrupts
 	// both the BF reweighting potential h and every per-source
 	// Dijkstra. Fail fast at the public boundary so callers see a
 	// single point of failure; integer W short-circuits in O(1).
 	if anyFloatInvalid(c.WeightsSlice()) {
-		metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
-		return nil, ErrInvalidInput
+		return johnsonPlan[W]{}, ErrInvalidInput
 	}
 	maxID := int(c.MaxNodeID())
 	mask := c.LiveMask()
@@ -204,7 +260,7 @@ func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], err
 		found:   make([]bool, live*live),
 	}
 	if live == 0 {
-		return out, nil
+		return johnsonPlan[W]{out: out, compact: compact, live: live, maxID: maxID}, nil
 	}
 	for i := 0; i < live; i++ {
 		idx := i*live + i
@@ -220,8 +276,7 @@ func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], err
 	// any vertex enters the worklist more than V times.
 	h := make([]W, maxID)
 	if err := bellmanFordVirtualSource[W](ctx, c, h); err != nil {
-		metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
-		return nil, err
+		return johnsonPlan[W]{}, err
 	}
 
 	// Build the reweighted edge-weights view. By Johnson's lemma all
@@ -239,49 +294,45 @@ func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], err
 			reweighted[k] = weights[k] + h[u] - h[v]
 		}
 	}
+	return johnsonPlan[W]{
+		out:        out,
+		compact:    compact,
+		live:       live,
+		maxID:      maxID,
+		h:          h,
+		reweighted: reweighted,
+	}, nil
+}
 
-	// Reweighted Dijkstra from every live vertex. We use the same
-	// pooled state machinery as Dijkstra to keep per-source allocation
-	// down to the heap items themselves (which the per-W sync.Pool
-	// amortises). dijkstraCoreWithWeights reads the reweighted slice
-	// in place of c.WeightsSlice().
-	st := acquireDijkstra[W](uint64(maxID))
-	defer releaseDijkstra(st)
-	for src := 0; src < maxID; src++ {
-		si := compact[src]
-		if si < 0 {
+// johnsonDijkstraSource runs the reweighted Dijkstra from a single
+// source src and recovers the original distances into src's row of
+// p.out. st is caller-owned working storage (one per goroutine in the
+// parallel variant); only p.out's row for compact[src] is written, so
+// distinct sources touch disjoint output cells and the result is
+// independent of the order — and concurrency — in which sources run.
+func johnsonDijkstraSource[W Weight](ctx context.Context, c *csr.CSR[W], p johnsonPlan[W], src int, st *dijkstraState[W]) error {
+	if err := dijkstraCoreWithWeights[W](
+		ctx, c, p.reweighted, graph.NodeID(src),
+		st.dist[:p.maxID], st.parent[:p.maxID], st.found[:p.maxID], &st.heap,
+	); err != nil {
+		return err
+	}
+	// Recover original distances: d(src, dst) = d'(src, dst) - h[src] + h[dst].
+	si := p.compact[src]
+	hsrc := p.h[src]
+	for dst := 0; dst < p.maxID; dst++ {
+		di := p.compact[dst]
+		if di < 0 {
 			continue
 		}
-		if err := ctx.Err(); err != nil {
-			metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
-			return nil, err
+		if !st.found[dst] {
+			continue
 		}
-		if src&0x3F == 0 {
-			runtime.Gosched()
-		}
-		if err := dijkstraCoreWithWeights[W](
-			ctx, c, reweighted, graph.NodeID(src),
-			st.dist[:maxID], st.parent[:maxID], st.found[:maxID], &st.heap,
-		); err != nil {
-			metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)
-			return nil, err
-		}
-		// Recover original distances: d(src, dst) = d'(src, dst) - h[src] + h[dst].
-		hsrc := h[src]
-		for dst := 0; dst < maxID; dst++ {
-			di := compact[dst]
-			if di < 0 {
-				continue
-			}
-			if !st.found[dst] {
-				continue
-			}
-			idx := si*live + di
-			out.dist[idx] = st.dist[dst] - hsrc + h[dst]
-			out.found[idx] = true
-		}
+		idx := si*p.live + di
+		p.out.dist[idx] = st.dist[dst] - hsrc + p.h[dst]
+		p.out.found[idx] = true
 	}
-	return out, nil
+	return nil
 }
 
 // bellmanFordVirtualSource computes the Johnson potential h(v) for
