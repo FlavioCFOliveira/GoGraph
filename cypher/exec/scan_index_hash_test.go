@@ -7,8 +7,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2/roaring64"
-
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
@@ -26,16 +24,15 @@ func newMapHashLookup(data map[string][]uint64) *mapHashLookup {
 	return &mapHashLookup{data: data}
 }
 
-func (m *mapHashLookup) LookupBitmap(value expr.Value) (*roaring64.Bitmap, error) {
+func (m *mapHashLookup) LookupAppend(value expr.Value, dst []uint64) ([]uint64, error) {
 	sv, ok := value.(expr.StringValue)
 	if !ok {
 		return nil, exec.ErrIndexTypeMismatch
 	}
-	bm := roaring64.New()
 	if ids, found := m.data[string(sv)]; found {
-		bm.AddMany(ids)
+		dst = append(dst, ids...)
 	}
-	return bm, nil
+	return dst, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,15 +138,15 @@ func TestStringHashIndex_RoundTrip(t *testing.T) {
 	}}
 	idx := exec.NewStringHashIndex(inner)
 
-	bm, err := idx.LookupBitmap(expr.StringValue("x"))
+	ids, err := idx.LookupAppend(expr.StringValue("x"), nil)
 	if err != nil {
-		t.Fatalf("LookupBitmap: %v", err)
+		t.Fatalf("LookupAppend: %v", err)
 	}
-	if bm.GetCardinality() != 2 {
-		t.Errorf("cardinality = %d, want 2", bm.GetCardinality())
+	if len(ids) != 2 {
+		t.Errorf("got %d ids, want 2", len(ids))
 	}
 
-	_, err = idx.LookupBitmap(expr.IntegerValue(1))
+	_, err = idx.LookupAppend(expr.IntegerValue(1), nil)
 	if !errors.Is(err, exec.ErrIndexTypeMismatch) {
 		t.Errorf("expected ErrIndexTypeMismatch for wrong type, got %v", err)
 	}
@@ -160,10 +157,9 @@ type inMemStringHash struct {
 	data map[string][]uint64
 }
 
-func (h *inMemStringHash) Lookup(value string) *roaring64.Bitmap {
-	bm := roaring64.New()
+func (h *inMemStringHash) LookupAppend(value string, dst []uint64) []uint64 {
 	if ids, ok := h.data[value]; ok {
-		bm.AddMany(ids)
+		dst = append(dst, ids...)
 	}
-	return bm
+	return dst
 }

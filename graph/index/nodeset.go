@@ -359,6 +359,33 @@ func (s *NodeSet) OrInto(dst *roaring64.Bitmap) {
 	}
 }
 
+// AppendTo appends every NodeID in strictly ascending order — the same order
+// as ToArray — to dst and returns the extended slice, WITHOUT materialising a
+// throwaway bitmap for the inline (singleton/small) states. It is the
+// allocation-light way to drain a set into a caller-owned buffer under the
+// index read lock: a singleton or small set appends straight from the inline
+// fields, so a caller whose dst has spare capacity (e.g. a reused seek buffer)
+// pays no heap allocation at all. Only the promoted bitmap state allocates a
+// single iterator. The appended ids are an independent snapshot the caller may
+// read after releasing the lock.
+func (s *NodeSet) AppendTo(dst []uint64) []uint64 {
+	if s.bm != nil {
+		it := s.bm.Iterator()
+		for it.HasNext() {
+			dst = append(dst, it.Next())
+		}
+		return dst
+	}
+	switch s.count {
+	case 0:
+	case 1:
+		dst = append(dst, s.single)
+	default:
+		dst = append(dst, s.ids...)
+	}
+	return dst
+}
+
 // Bitmap returns the set as a *roaring64.Bitmap. When the set is already
 // in the bitmap state the live bitmap is returned (the caller must NOT
 // mutate it); otherwise a fresh bitmap is materialised from the sorted

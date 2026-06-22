@@ -6526,12 +6526,12 @@ func resolveSeekValue(value string, params map[string]expr.Value) (expr.Value, e
 
 // hashStringLookup is satisfied by hash.Index[string].
 type hashStringLookup interface {
-	Lookup(value string) *roaring64.Bitmap
+	LookupAppend(value string, dst []uint64) []uint64
 }
 
 // hashInt64Lookup is satisfied by hash.Index[int64].
 type hashInt64Lookup interface {
-	Lookup(value int64) *roaring64.Bitmap
+	LookupAppend(value int64, dst []uint64) []uint64
 }
 
 // tryNewHashSeek attempts to build a NodeByIndexSeek operator using sub as the

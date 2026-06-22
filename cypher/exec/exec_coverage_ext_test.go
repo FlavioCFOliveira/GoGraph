@@ -928,12 +928,11 @@ func (a *stringRangeAdapter) Range(lo, hi string) *roaring64.Bitmap {
 // int64HashAdapter is a minimal test double for hash.Index[int64].
 type int64HashAdapter struct{}
 
-func (a *int64HashAdapter) Lookup(value int64) *roaring64.Bitmap {
-	bm := roaring64.New()
+func (a *int64HashAdapter) LookupAppend(value int64, dst []uint64) []uint64 {
 	if value == 42 {
-		bm.Add(42)
+		dst = append(dst, 42)
 	}
-	return bm
+	return dst
 }
 
 // TestInt64RangeIndex_RangeBitmap exercises NewInt64RangeIndex + RangeBitmap.
@@ -972,24 +971,24 @@ func TestStringRangeIndex_RangeBitmap(t *testing.T) {
 	}
 }
 
-// TestInt64HashIndex_LookupBitmap exercises NewInt64HashIndex + LookupBitmap.
-func TestInt64HashIndex_LookupBitmap(t *testing.T) {
+// TestInt64HashIndex_LookupAppend exercises NewInt64HashIndex + LookupAppend.
+func TestInt64HashIndex_LookupAppend(t *testing.T) {
 	t.Parallel()
 	idx := exec.NewInt64HashIndex(&int64HashAdapter{})
 
 	// Correct type — IntegerValue lookup.
-	bm, err := idx.LookupBitmap(expr.IntegerValue(42))
+	ids, err := idx.LookupAppend(expr.IntegerValue(42), nil)
 	if err != nil {
-		t.Fatalf("LookupBitmap(42): %v", err)
+		t.Fatalf("LookupAppend(42): %v", err)
 	}
-	if !bm.Contains(42) {
-		t.Errorf("bitmap should contain 42")
+	if len(ids) != 1 || ids[0] != 42 {
+		t.Errorf("ids = %v, want [42]", ids)
 	}
 
 	// Wrong type must return ErrIndexTypeMismatch.
-	_, err = idx.LookupBitmap(expr.StringValue("not-int"))
+	_, err = idx.LookupAppend(expr.StringValue("not-int"), nil)
 	if err == nil {
-		t.Fatal("LookupBitmap on wrong type must return an error")
+		t.Fatal("LookupAppend on wrong type must return an error")
 	}
 }
 

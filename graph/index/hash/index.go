@@ -234,6 +234,32 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 	return bm
 }
 
+// LookupAppend appends the NodeIDs carrying value to dst in strictly
+// ascending order and returns the extended slice, draining the posting list
+// clone-free under the shard read lock. It is the allocation-light
+// alternative to [Index.Lookup] for callers that iterate the result once —
+// the dominant equality index-seek shape: a singleton or small posting list
+// yields its ids with no heap allocation when dst has spare capacity, where
+// Lookup would materialise (or clone) a full roaring bitmap plus an iterator.
+// A NaN key or an unknown value appends nothing. The appended ids are an
+// independent snapshot, so the caller may iterate them after the lock is
+// released, exactly as with the cloned bitmap Lookup returns.
+func (i *Index[V]) LookupAppend(value V, dst []uint64) []uint64 {
+	if nanKey(value) {
+		return dst
+	}
+	s := i.shard(value)
+	s.mu.RLock()
+	set, ok := s.entries[value]
+	if !ok {
+		s.mu.RUnlock()
+		return dst
+	}
+	dst = set.AppendTo(dst)
+	s.mu.RUnlock()
+	return dst
+}
+
 // Cardinality returns the number of NodeIDs associated with value.
 // It is exposed for query planners to choose between index lookup
 // and full-scan plans.

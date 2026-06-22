@@ -120,3 +120,40 @@ func BenchmarkIndex_LookupHot(b *testing.B) {
 		_ = idx.Cardinality(42)
 	}
 }
+
+// BenchmarkIndex_SeekSingleton compares the two ways an equality index seek
+// drains a singleton posting list: the legacy bitmap path (Lookup materialises
+// a roaring bitmap, then the operator iterates it) versus the borrow path
+// (LookupAppend drains the lone id straight into a reused buffer). The keys are
+// all distinct, so every posting list is a singleton — the dominant
+// unique/sparse-property seek shape. The Append sub-benchmark should report
+// zero allocs/op against the bitmap path's handful.
+func BenchmarkIndex_SeekSingleton(b *testing.B) {
+	const keys = 100_000
+	idx := New[int]()
+	for i := 0; i < keys; i++ {
+		idx.Insert(i, graph.NodeID(uint64(i)))
+	}
+
+	b.Run("Bitmap", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			bm := idx.Lookup(i % keys)
+			it := bm.Iterator()
+			for it.HasNext() {
+				_ = it.Next()
+			}
+		}
+	})
+
+	b.Run("Append", func(b *testing.B) {
+		b.ReportAllocs()
+		buf := make([]uint64, 0, 8)
+		for i := 0; i < b.N; i++ {
+			ids := idx.LookupAppend(i%keys, buf[:0])
+			for _, id := range ids {
+				_ = id
+			}
+		}
+	})
+}
