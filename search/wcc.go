@@ -49,28 +49,11 @@ func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, 
 	if maxID == 0 {
 		return nil, 0, nil
 	}
-	// Compact the live NodeID set into a dense [0, live) index space so
-	// the Union-Find covers only real nodes. dense[id] is the compact
-	// index of a live NodeID, or -1 for a ghost / isolated slot.
-	mask := c.LiveMask()
-	dense := make([]int, maxID)
-	live := 0
-	for i := 0; i < maxID; i++ {
-		if mask[i] {
-			dense[i] = live
-			live++
-		} else {
-			dense[i] = -1
-		}
-	}
+	dense, live := wccBuildDense(c, maxID)
 	if live == 0 {
 		// No incident edges anywhere: every slot is a ghost. Preserve
 		// the documented all-(-1) NodeID-indexed output with K=0.
-		component = make([]int, maxID)
-		for i := range component {
-			component[i] = -1
-		}
-		return component, 0, nil
+		return wccGhostComponent(maxID), 0, nil
 	}
 	uf := ds.NewSlice(live)
 	verts := c.VerticesSlice()
@@ -95,10 +78,50 @@ func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, 
 		metrics.IncCounter("search.WCCCtx.errors", 1)
 		return nil, 0, cerr
 	}
-	component = make([]int, maxID)
+	component, k = wccRelabel(uf, dense, maxID, live)
+	return component, k, nil
+}
+
+// wccBuildDense compacts the live NodeID set into a dense [0, live) index
+// space so the Union-Find covers only real nodes. dense[id] is the
+// compact index of a live NodeID, or -1 for a ghost / isolated slot.
+func wccBuildDense[W any](c *csr.CSR[W], maxID int) (dense []int, live int) {
+	mask := c.LiveMask()
+	dense = make([]int, maxID)
+	for i := 0; i < maxID; i++ {
+		if mask[i] {
+			dense[i] = live
+			live++
+		} else {
+			dense[i] = -1
+		}
+	}
+	return dense, live
+}
+
+// wccGhostComponent returns the all-(-1) NodeID-indexed component slice
+// for a graph with no incident edges anywhere.
+func wccGhostComponent(maxID int) []int {
+	component := make([]int, maxID)
 	for i := range component {
 		component[i] = -1
 	}
+	return component
+}
+
+// wccRelabel projects a settled union-find (over the dense [0, live)
+// space) back onto the NodeID-indexed component slice, assigning
+// component IDs [0, K) in ascending order of each component's minimum
+// NodeID (the order of first occurrence as i sweeps upward). Ghost slots
+// report -1.
+//
+// This pass is deterministic and a pure function of the partition: any
+// union-find encoding the same equivalence classes — serial or the
+// parallel merge of [WCCParallel] — yields byte-identical labels. The
+// serial sweep must not be parallelised or reordered, or the
+// min-first-occurrence labelling would change.
+func wccRelabel(uf *ds.UnionFindSlice, dense []int, maxID, live int) (component []int, k int) {
+	component = wccGhostComponent(maxID)
 	// Compact root IDs into [0, K) preserving order of first occurrence.
 	// rootRemap is keyed by compact root index, so it holds at most
 	// `live` entries rather than O(MaxNodeID).
@@ -118,5 +141,5 @@ func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, 
 		}
 		component[i] = id
 	}
-	return component, next, nil
+	return component, next
 }
