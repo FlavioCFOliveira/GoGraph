@@ -427,20 +427,56 @@ func decodePullDiscard[T pullDiscardResult](dec *packstream.Decoder, n int) (*T,
 	if n != 1 {
 		return nil, fmt.Errorf("proto: Pull/Discard expects 1 field, got %d", n)
 	}
-	extra, err := readMap(dec)
+	// Stream the extra map, reading only n and qid, instead of materialising the
+	// whole map[string]Value just to extract two ints (#1522). PULL/DISCARD are
+	// the most frequent post-RUN messages, so this drops one map allocation per
+	// result page. The decode uses the same ReadMapHeader + per-entry
+	// ReadString/ReadValue primitives as the full-map path (packstream
+	// readValue), so the byte and decoded-memory budgets — the DoS bound on a
+	// hostile extra map — are charged identically; only the unread values are
+	// discarded rather than stored.
+	var nVal, qidVal int64 = -1, -1
+	t, err := dec.PeekType()
 	if err != nil {
 		return nil, err
 	}
-	var nVal, qidVal int64 = -1, -1
-	if v, ok := extra["n"]; ok {
-		if i, ok := v.(int64); ok {
-			nVal = i
+	switch t {
+	case packstream.TypeNull:
+		// A null extra is tolerated as an empty map (matching the previous
+		// readMap behaviour): consume it and keep the n=-1/qid=-1 defaults.
+		if _, err := dec.ReadValue(); err != nil {
+			return nil, err
 		}
-	}
-	if v, ok := extra["qid"]; ok {
-		if i, ok := v.(int64); ok {
-			qidVal = i
+	case packstream.TypeMap:
+		count, err := dec.ReadMapHeader()
+		if err != nil {
+			return nil, err
 		}
+		for i := 0; i < count; i++ {
+			key, err := dec.ReadString()
+			if err != nil {
+				return nil, err
+			}
+			val, err := dec.ReadValue()
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "n":
+				if i64, ok := val.(int64); ok {
+					nVal = i64
+				}
+			case "qid":
+				if i64, ok := val.(int64); ok {
+					qidVal = i64
+				}
+			}
+		}
+	default:
+		// A non-map, non-null extra is a protocol violation. Reject it without
+		// decoding the bogus value (stricter and cheaper than the previous
+		// materialise-then-type-assert path).
+		return nil, fmt.Errorf("proto: Pull/Discard extra: expected map, got packstream type %d", t)
 	}
 	// T is either Pull or Discard — both have the same field layout.
 	// We use any conversion to populate the concrete type.
