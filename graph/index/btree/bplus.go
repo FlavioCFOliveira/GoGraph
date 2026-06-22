@@ -442,9 +442,15 @@ func (t *bplus[V]) bulkPack(keys []V, sets []index.NodeSet) {
 		if end > len(keys) {
 			end = len(keys)
 		}
+		// Adopt each leaf's slice window directly via a three-index reslice
+		// (cap == len) instead of copying it into a fresh slice. bulkPack owns
+		// keys/sets (the caller hands them off and never reads them again), and
+		// the windows are disjoint, so the leaves can share the backing arrays.
+		// The capped cap forces any later in-leaf append to reallocate, so a
+		// leaf can never grow into its neighbour's window.
 		l := &leaf[V]{
-			keys: append([]V(nil), keys[i:end]...),
-			sets: append([]index.NodeSet(nil), sets[i:end]...),
+			keys: keys[i:end:end],
+			sets: sets[i:end:end],
 		}
 		if len(leaves) > 0 {
 			leaves[len(leaves)-1].next = l

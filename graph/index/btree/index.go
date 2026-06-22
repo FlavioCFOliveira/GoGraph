@@ -63,6 +63,12 @@ import (
 // validation failure.
 var ErrMismatchedLengths = errors.New("btree: values and nodes slices must have the same length")
 
+// ErrNotSorted is returned by [Index.BulkLoadSorted] when the values slice is
+// not in ascending total order, so the caller's pre-sorted precondition is
+// violated. It is a recoverable input-validation failure; the index is left
+// untouched.
+var ErrNotSorted = errors.New("btree: values must be in ascending order for BulkLoadSorted")
+
 // Index is an order-preserving property index keyed by V, backed by an
 // in-memory B+ tree (see bplus.go).
 type Index[V cmp.Ordered] struct {
@@ -115,6 +121,48 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 			j++
 		}
 		keys = append(keys, pairs[k].v)
+		sets = append(sets, set)
+		k = j
+	}
+	tree := newBplus[V]()
+	tree.bulkPack(keys, sets)
+	i.mu.Lock()
+	i.tree = tree
+	i.mu.Unlock()
+	return nil
+}
+
+// BulkLoadSorted is [Index.BulkLoad] for input already in ascending total
+// order — the order [Index.Serialize] emits and the snapshot stores. It skips
+// the copy-into-pairs and the sort that BulkLoad performs, so a pre-sorted
+// load (e.g. snapshot recovery) avoids that throwaway O(n) materialization.
+// Equal keys must be adjacent (guaranteed by ascending order) and their nodes
+// are unioned into one entry, exactly as BulkLoad does, so for the same data
+// the resulting tree is identical.
+//
+// It returns [ErrMismatchedLengths] when the lengths differ and [ErrNotSorted]
+// when values is not ascending. The order precondition is checked by a cheap
+// allocation-free scan, so a mis-sorted input is rejected rather than silently
+// building a corrupt tree.
+func (i *Index[V]) BulkLoadSorted(values []V, nodes []graph.NodeID) error {
+	if len(values) != len(nodes) {
+		return ErrMismatchedLengths
+	}
+	for k := 1; k < len(values); k++ {
+		if keyLess(values[k], values[k-1]) {
+			return ErrNotSorted
+		}
+	}
+	keys := make([]V, 0, len(values))
+	sets := make([]index.NodeSet, 0, len(values))
+	for k := 0; k < len(values); {
+		j := k
+		var set index.NodeSet
+		for j < len(values) && equalKeys(values[j], values[k]) {
+			set.Add(uint64(nodes[j]))
+			j++
+		}
+		keys = append(keys, values[k])
 		sets = append(sets, set)
 		k = j
 	}
