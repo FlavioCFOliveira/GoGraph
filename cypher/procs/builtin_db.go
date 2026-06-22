@@ -17,10 +17,19 @@ package procs
 
 import (
 	"context"
+	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
+
+// numericCompanionSuffix is the reserved name suffix of the internal numeric
+// btree companion that a btree CREATE INDEX registers alongside the user-named
+// string btree (#1652, cypher.numericBTreeName). db.indexes() filters names
+// carrying it so the user sees exactly the index they created. It is duplicated
+// here rather than imported because procs must not depend on the cypher package
+// (cypher imports procs).
+const numericCompanionSuffix = "_btree_num"
 
 // BuiltinSources bundles the data-source callbacks the built-in db.* procedures
 // query at invocation time. It decouples the procs package from the concrete
@@ -97,6 +106,15 @@ func dbIndexes(mgr *index.Manager) ProcEntry {
 			names := mgr.ListIndexes()
 			rows := make([][]expr.Value, 0, len(names))
 			for _, name := range names {
+				// Hide the internal numeric-companion btree (#1652): a btree
+				// CREATE INDEX registers a "<label>_<prop>_btree_num" companion
+				// alongside the user-named string btree so a numeric range seek
+				// can find it, but the user must see exactly the one index they
+				// created. The suffix is reserved (a user index name carries no
+				// such suffix from the DDL parser).
+				if strings.HasSuffix(name, numericCompanionSuffix) {
+					continue
+				}
 				sub, err := mgr.GetIndex(name)
 				if err != nil {
 					continue

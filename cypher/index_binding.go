@@ -28,6 +28,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
@@ -136,6 +138,148 @@ func (e *Engine) backfillNodeHashIndex(idx *indexhash.Index[string], label, prop
 			idx.Insert(s, r.id)
 		}
 	}
+}
+
+// numericCompanionSuffix is the reserved name suffix of the internal numeric
+// btree companion (#1652). A user index name never carries it (the DDL parser
+// assigns no such suffix), so it unambiguously identifies the companion. The
+// procs package duplicates this constant (it must not import cypher) to filter
+// the companion out of db.indexes(); the two must stay in sync.
+const numericCompanionSuffix = "_btree_num"
+
+// numericBTreeName is the deterministic internal name of the numeric companion
+// btree built alongside the user-named string btree on every btree CREATE
+// INDEX (#1652). It mirrors the string auto-name "<label>_<prop>_btree" that
+// findBoundStringBTree probes, with a "_num" suffix, so findBoundNumericBTree
+// can locate it without the user ever naming or seeing it. The companion is
+// internal: db.indexes() / SHOW INDEXES filter the suffix so the user observes
+// exactly the one index they created (see procs.dbIndexes).
+func numericBTreeName(label, prop string) string {
+	return strings.ToLower(label) + "_" + strings.ToLower(prop) + numericCompanionSuffix
+}
+
+// projectNumericPropValue projects an index.Change value payload (an
+// lpg.PropertyValue on the engine's write path) to a unified float64 numeric
+// btree key (#1652). BOTH PropInt64 and PropFloat64 are indexed under one
+// float64 order, because openCypher orders integers and floats in a single
+// numeric order and a numeric range seek must be a SUPERSET of every numeric
+// match — an int64-only index would silently drop the float-valued matches and
+// be a non-superset.
+//
+// ok is false for absent payloads, non-numeric kinds (string, bool, list, and
+// the SOH-tagged temporal encodings carried as PropString), and for a NaN
+// float. NaN is never indexed: under the btree total order it would sort below
+// every real value and a non-NaN range never returns it, but excluding it at
+// projection keeps the index free of a key the predicate `n.x > 30` can never
+// match, and the residual Filter is the final backstop regardless. A large
+// int64 whose float64 widening loses precision is still indexed — the residual
+// Filter removes any boundary false positive (cypher-expert-consultant).
+func projectNumericPropValue(v any) (float64, bool) {
+	pv, ok := v.(lpg.PropertyValue)
+	if !ok {
+		return 0, false
+	}
+	switch pv.Kind() {
+	case lpg.PropInt64:
+		i, ok := pv.Int64()
+		if !ok {
+			return 0, false
+		}
+		return float64(i), true
+	case lpg.PropFloat64:
+		f, ok := pv.Float64()
+		if !ok || math.IsNaN(f) {
+			return 0, false
+		}
+		return f, true
+	default:
+		return 0, false
+	}
+}
+
+// newBoundNodeBTreeIndexNumeric builds a btree.Index[float64] bound to
+// (label, prop) on g, the UNIFIED numeric companion to the string btree
+// [newBoundNodeBTreeIndex] (#1652). It self-maintains from the index.Manager
+// change fan-out exactly like the string btree, using projectNumericPropValue
+// so a key is created for every integer- or float-valued node and never for a
+// non-numeric, temporal, or NaN value. The companion shares the same Binding
+// shape, so the engine's CREATE INDEX wiring builds it from the same closures.
+func newBoundNodeBTreeIndexNumeric(
+	g *lpg.Graph[string, float64], label, prop string,
+) (*indexbtree.Index[float64], error) {
+	labelID := uint32(g.Registry().Intern(label))
+	propID := uint32(g.PropertyKeys().Intern(prop))
+	mapper := g.AdjList().Mapper()
+	nodeIdx := g.NodeIndex()
+	return indexbtree.NewBound(indexbtree.Binding[float64]{
+		PropertyID: propID,
+		LabelID:    labelID,
+		Label:      label,
+		Property:   prop,
+		Project:    projectNumericPropValue,
+		Eligible: func(id graph.NodeID) bool {
+			return !g.IsTombstoned(id) && nodeIdx.Has(labelID, id)
+		},
+		CurrentValue: func(id graph.NodeID) (float64, bool) {
+			if g.IsTombstoned(id) {
+				return 0, false
+			}
+			key, ok := mapper.Resolve(id)
+			if !ok {
+				return 0, false
+			}
+			pv, ok := g.GetNodeProperty(key, prop)
+			if !ok {
+				return 0, false
+			}
+			return projectNumericPropValue(pv)
+		},
+	})
+}
+
+// backfillNodeBTreeIndexNumeric bulk-loads every live node of label whose prop
+// holds an indexable numeric value (integer or float, NaN excluded) into idx,
+// the float64 companion (#1652). It mirrors [Engine.backfillNodeBTreeIndex]
+// exactly — the same two-phase scan (snapshot interned (id, key) pairs under
+// the mapper shard locks, then resolve liveness/label/property with no shard
+// lock held, #1339) and the same O(n log n) BulkLoad (a per-key Insert loop
+// would be O(n²) on the sorted-array leaves). Callers must hold the engine's
+// writer serialisation so no write transaction can interleave with the scan.
+func (e *Engine) backfillNodeBTreeIndexNumeric(idx *indexbtree.Index[float64], label, prop string) {
+	mapper := e.g.AdjList().Mapper()
+
+	type nodeRef struct {
+		id  graph.NodeID
+		key string
+	}
+	refs := make([]nodeRef, 0, mapper.Len())
+	mapper.Walk(func(id graph.NodeID, key string) bool {
+		refs = append(refs, nodeRef{id: id, key: key})
+		return true
+	})
+
+	values := make([]float64, 0, len(refs))
+	nodes := make([]graph.NodeID, 0, len(refs))
+	for i := range refs {
+		r := refs[i]
+		if e.g.IsTombstoned(r.id) {
+			continue
+		}
+		if !e.g.HasNodeLabel(r.key, label) {
+			continue
+		}
+		pv, ok := e.g.GetNodeProperty(r.key, prop)
+		if !ok {
+			continue
+		}
+		if f, ok := projectNumericPropValue(pv); ok {
+			values = append(values, f)
+			nodes = append(nodes, r.id)
+		}
+	}
+	// BulkLoad cannot fail here: values and nodes are appended in lockstep, so
+	// their lengths are equal by construction.
+	_ = idx.BulkLoad(values, nodes)
 }
 
 // newBoundNodeBTreeIndex builds a btree.Index[string] bound to (label, prop)
@@ -315,6 +459,24 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			} else {
 				sub := indexbtree.New[string]()
 				_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
+			}
+			// Rebuild the UNIFIED numeric companion from the SAME recovered def
+			// (#1652): the durable record carries only the one btree def
+			// (format-neutral — no new persisted IndexKind), so recovery is
+			// self-sufficient by re-deriving the companion here, exactly as
+			// createBTreeIndexLocked builds it on a live CREATE INDEX. Without
+			// this a numeric range seek on the re-opened engine would find no
+			// companion and fall back to a scan+filter (correct, but the
+			// optimisation would be lost across a restart). The err-guard is
+			// defensive: newBoundNodeBTreeIndexNumeric supplies every Binding
+			// field, so it does not fail here; if it ever did, the seek would
+			// simply fall back to a scan+filter. When two user defs cover the
+			// same (label, property) the second CreateIndex(numName, …) returns
+			// ErrIndexExists and is absorbed (idempotent rebuild).
+			numName := numericBTreeName(d.Label, d.Property)
+			if numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g, d.Label, d.Property); nerr == nil {
+				e.backfillNodeBTreeIndexNumeric(numIdx, d.Label, d.Property)
+				_ = idxMgr.CreateIndex(numName, numIdx) // absorb ErrIndexExists
 			}
 		}
 	}

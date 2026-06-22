@@ -1436,7 +1436,7 @@ func explainWithIndexesNode(
 		schema := make(map[string]int)
 		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr); err == nil && fired && op != nil {
 			opName = "NodeByIndexSeek"
-		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph); fired {
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
 			// NodeByIndexRangeScan (not subsumed like the equality seek).
@@ -1608,9 +1608,29 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// misses the index (scan+filter, correct) or sees it fully populated.
 	e.backfillNodeBTreeIndex(idx, p.Label, p.Property)
 
-	// Wrap the registration inside the visibility barrier so readers calling
-	// Graph.View never observe a partially-registered index.
-	var registered bool
+	// Build the UNIFIED numeric companion alongside the string btree (#1652):
+	// a btree.Index[float64] under an internal, deterministic name so a numeric
+	// range seek (n.age > 30) can find it without the user naming or seeing it.
+	// It indexes BOTH integer- and float-valued nodes under one numeric order
+	// so the seek is a SUPERSET of every numeric match. CRUCIALLY this adds NO
+	// storage-format change: only the EXISTING string-btree def is persisted
+	// (commitIndexTx below, kind=IndexKindBTree, unchanged), and recovery
+	// re-derives the companion from that one def (registerRecoveredIndexes), so
+	// the change is cypher-package-only and ACID-format-neutral. The nil-guard
+	// is defensive: newBoundNodeBTreeIndexNumeric supplies every Binding field
+	// unconditionally, so it does not fail here, but a nil companion would still
+	// leave the user index correct (the seek declines with no covering numeric
+	// btree and falls back to scan+filter).
+	numName := numericBTreeName(p.Label, p.Property)
+	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g, p.Label, p.Property)
+	if numIdx != nil {
+		e.backfillNodeBTreeIndexNumeric(numIdx, p.Label, p.Property)
+	}
+
+	// Wrap BOTH registrations inside one visibility barrier so readers calling
+	// Graph.View never observe a partially-registered index pair: either both
+	// the user btree and its numeric companion are visible, or neither is.
+	var registered, numRegistered bool
 	if barrierErr := e.g.ApplyAtomically(func() error {
 		if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
 			if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
@@ -1619,9 +1639,33 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 			return fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
 		}
 		registered = true
+		// Register the companion under its internal name when it was built (a
+		// nil numIdx means the binding failed on an empty graph — the user
+		// index is still created and the companion is rebuilt on a later CREATE
+		// INDEX). A pre-existing companion (a second CREATE INDEX on the same
+		// (label, property) under a different user name) is absorbed: it
+		// already covers this pair, so the numeric seek stays served.
+		// numRegistered tracks whether WE created it, so the unwind below never
+		// drops a companion another live user index still relies on.
+		if numIdx != nil {
+			if cerr := idxMgr.CreateIndex(numName, numIdx); cerr == nil {
+				numRegistered = true
+			} else if !errors.Is(cerr, index.ErrIndexExists) {
+				return fmt.Errorf("exec: CreateIndex %q (numeric companion): %w", numName, cerr)
+			}
+		}
 		e.ClearPlanCache()
 		return nil
 	}); barrierErr != nil {
+		// The barrier ran the closure to completion or not at all; if the user
+		// index was registered before the companion failed, unwind it so the
+		// manager never keeps a user index without its companion.
+		if registered {
+			_ = idxMgr.DropIndex(p.Name)
+		}
+		if numRegistered {
+			_ = idxMgr.DropIndex(numName)
+		}
 		return nil, barrierErr
 	}
 	if !registered {
@@ -1631,11 +1675,23 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	}
 
 	// Durability: append the CREATE INDEX op and fsync (task #1343). On failure
-	// unwind the in-memory registration (registered ⇔ durable invariant).
+	// unwind the in-memory registration (registered ⇔ durable invariant). The
+	// companion is NOT separately persisted (format-neutral), so unwinding it
+	// here keeps the in-memory pair consistent with the durable state: nothing
+	// durable, nothing registered.
 	if tx != nil {
 		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindBTree, p.Label, p.Property, p.Name); err != nil {
+			var unwind error
 			if derr := idxMgr.DropIndex(p.Name); derr != nil {
-				return nil, errors.Join(err, fmt.Errorf("cypher: unwind CREATE INDEX registration: %w", derr))
+				unwind = errors.Join(unwind, fmt.Errorf("cypher: unwind CREATE INDEX registration: %w", derr))
+			}
+			if numRegistered {
+				if derr := idxMgr.DropIndex(numName); derr != nil {
+					unwind = errors.Join(unwind, fmt.Errorf("cypher: unwind CREATE INDEX numeric companion: %w", derr))
+				}
+			}
+			if unwind != nil {
+				return nil, errors.Join(err, unwind)
 			}
 			return nil, err
 		}
@@ -1658,7 +1714,18 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	if e.store == nil {
 		e.writeMu.Lock()
 		defer e.writeMu.Unlock()
-		return e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
+		// Capture the (label, property) of the index about to be dropped so the
+		// internal numeric companion (#1652) can be cleaned up alongside it; see
+		// dropNumericCompanionIfOrphaned.
+		lbl, prop, hadCoverage := indexCoverage(idxMgr, p.Name)
+		res, err := e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
+		if err != nil {
+			return nil, err
+		}
+		if hadCoverage {
+			dropNumericCompanionIfOrphaned(idxMgr, lbl, prop)
+		}
+		return res, nil
 	}
 	tx, err := e.store.BeginCtx(ctx)
 	if err != nil {
@@ -1670,6 +1737,9 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		// missing index silently; there is nothing durable to remove in that case.
 		_, existsErr := idxMgr.GetIndex(p.Name)
 		indexExisted := existsErr == nil
+		// Capture (label, property) before the drop so the numeric companion can
+		// be cleaned up once the user index is gone.
+		lbl, prop, hadCoverage := indexCoverage(idxMgr, p.Name)
 
 		res, err := e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
 		if err != nil {
@@ -1682,10 +1752,58 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		if err := commitIndexTx(tx, txn.OpDropIndex, 0, "", "", p.Name); err != nil {
 			return nil, err
 		}
+		// The user index is now durably dropped; remove its numeric companion
+		// when no other user btree still covers the same (label, property). The
+		// companion is not separately persisted, so this in-memory cleanup keeps
+		// the manager consistent with the durable state (the companion is also
+		// not rebuilt on reopen, since registerRecoveredIndexes only sees the
+		// surviving user defs).
+		if hadCoverage {
+			dropNumericCompanionIfOrphaned(idxMgr, lbl, prop)
+		}
 		return res, nil
 	}()
 	_ = tx.Rollback() // guarded no-op after CommitWALOnly
 	return res, rerr
+}
+
+// indexCoverage returns the (label, property) a bound btree index named name
+// covers, with ok reporting whether name resolves to a bound btree at all.
+// Used by DROP INDEX to locate the numeric companion (#1652). A hash index, an
+// unbound btree, or a missing name reports ok == false (no companion to clean).
+func indexCoverage(idxMgr *index.Manager, name string) (label, property string, ok bool) {
+	sub, err := idxMgr.GetIndex(name)
+	if err != nil || sub.Kind() != "btree" {
+		return "", "", false
+	}
+	br, ok := sub.(interface {
+		BoundNode() (label, property string, ok bool)
+	})
+	if !ok {
+		return "", "", false
+	}
+	return br.BoundNode()
+}
+
+// dropNumericCompanionIfOrphaned drops the internal numeric companion for
+// (label, property) when no SURVIVING user-named btree still covers that pair
+// (#1652). Two CREATE INDEX statements on the same (label, property) under
+// different names share one companion, so dropping one user index must not
+// remove a companion the other still relies on. The companion's own internal
+// name (the "_btree_num" suffix) is never counted as a covering user index.
+// Callers hold the engine's writer serialisation.
+func dropNumericCompanionIfOrphaned(idxMgr *index.Manager, label, property string) {
+	numName := numericBTreeName(label, property)
+	for _, name := range idxMgr.ListIndexes() {
+		if name == numName || strings.HasSuffix(name, numericCompanionSuffix) {
+			continue
+		}
+		if l, p, ok := indexCoverage(idxMgr, name); ok && l == label && p == property {
+			// Another user btree still covers this pair: keep the companion.
+			return
+		}
+	}
+	_ = idxMgr.DropIndex(numName) // absorb ErrIndexNotFound (no companion was built)
 }
 
 // runCreateConstraint executes CREATE CONSTRAINT: it validates the pre-existing
@@ -4461,7 +4579,7 @@ func buildOperator(
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			rangeG = lw.g
 		}
-		if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG); ok {
+		if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG, params); ok {
 			child = rangeChild
 		} else {
 			child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)

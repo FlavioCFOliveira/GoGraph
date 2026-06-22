@@ -43,6 +43,7 @@ package cypher
 // non-selective or small-population range keeps today's NodeByLabelScan+Filter.
 
 import (
+	"math"
 	"strings"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
@@ -91,6 +92,37 @@ type stringRangePred struct {
 	hi      *exec.RangeBound // nil = unbounded above
 }
 
+// boundNumericRange is satisfied by a bound UNIFIED numeric btree companion
+// (#1652): a btree.Index[float64] that indexes both integer- and float-valued
+// nodes under one float64 order. It exposes the range query, the exact
+// early-exit cardinality, and the (label, property) coverage. An UNBOUND btree
+// is never selected (BoundNode ok == false) — it is not maintained from the
+// change fan-out and could be stale.
+type boundNumericRange interface {
+	Range(lo, hi float64) *roaring64.Bitmap
+	RangeCount(lo, hi float64, budget uint64) (uint64, bool)
+	BoundNode() (label, property string, ok bool)
+}
+
+// numericRangePred is the extracted numeric range predicate on a single node
+// property: the float64 bounds and their inclusivity. An absent bound (nil) is
+// unbounded on that side. A bound that came from an integer or a parameter is
+// already coerced to float64 (the unified numeric order). The original AST
+// operand is preserved in loVal/hiVal so the executed NodeByIndexRangeScan
+// receives an inclusive superset bound (see [tryNumericRangeSeek]).
+type numericRangePred struct {
+	propKey string
+	lo      *numericBound // nil = unbounded below
+	hi      *numericBound // nil = unbounded above
+}
+
+// numericBound is one endpoint of a numeric range: the float64 value and
+// whether the bound is inclusive.
+type numericBound struct {
+	value   float64
+	include bool
+}
+
 // buildRangeSeekIfEnabled is the gated entry point: it returns no range seek
 // when the optimisation is disabled (EngineOptions.DisableRangeIndexSeek, or
 // any build path that does not set bopts.rangeSeekEnabled, such as the write
@@ -102,11 +134,12 @@ func buildRangeSeekIfEnabled(
 	schema map[string]int,
 	idxMgr *index.Manager,
 	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
 ) (exec.Operator, bool) {
 	if bopts == nil || !bopts.rangeSeekEnabled {
 		return nil, false
 	}
-	return tryBuildRangeSeekChild(sel, schema, idxMgr, g)
+	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params)
 }
 
 // tryBuildRangeSeekChild attempts to build a NodeByIndexRangeScan to replace
@@ -125,6 +158,7 @@ func tryBuildRangeSeekChild(
 	schema map[string]int,
 	idxMgr *index.Manager,
 	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
 ) (exec.Operator, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		// No index, or no AST predicate to build the residual Filter from:
@@ -140,6 +174,27 @@ func tryBuildRangeSeekChild(
 	}
 	nodeVar := lblScan.NodeVar
 
+	// Try the string-btree path first (a string range over a string-typed
+	// index). When the predicate is not a string range — typically a numeric
+	// range n.age > 30 — fall through to the unified numeric companion.
+	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar); ok {
+		return op, true
+	}
+	return tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params)
+}
+
+// tryStringRangeSeek builds a NodeByIndexRangeScan over a bound string btree
+// when the Selection predicate is a single-property string range and the
+// in-range count is a selective win. See [tryBuildRangeSeekChild] for the
+// shared preconditions (label scan, residual filter).
+func tryStringRangeSeek(
+	sel *ir.Selection,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	g *lpg.Graph[string, float64],
+	lblScan *ir.NodeByLabelScan,
+	nodeVar string,
+) (exec.Operator, bool) {
 	pred, ok := extractStringRangePred(sel.PredicateExpr, nodeVar)
 	if !ok {
 		return nil, false
@@ -150,18 +205,8 @@ func tryBuildRangeSeekChild(
 		return nil, false
 	}
 
-	// Selectivity gate: exact in-range count with an early-exit budget.
-	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(lblScan.Label)))
-	if nLabel < rangeSeekMinLabelPopulation {
-		return nil, false
-	}
-	budget := uint64(float64(nLabel) * rangeSeekMaxSelectivity)
 	lo, hi := rangeBoundStrings(pred)
-	count, exact := sub.RangeCount(lo, hi, budget)
-	if !exact || count == 0 || count > budget {
-		// Over budget (early-exited), unknown, or empty: keep the scan. (An
-		// empty range is correct but pointless to seek; the scan+filter yields
-		// the same zero rows without an index descent.)
+	if !rangeCountWins(g, lblScan.Label, sub.RangeCount, lo, hi) {
 		return nil, false
 	}
 
@@ -176,6 +221,32 @@ func tryBuildRangeSeekChild(
 	op := exec.NewNodeByIndexRangeScan(exec.NewStringRangeIndex(sub), loB, hiB)
 	schema[nodeVar] = schemaWidth(schema)
 	return op, true
+}
+
+// rangeCountWins applies the shared selectivity/population gate: the label
+// population must be at least rangeSeekMinLabelPopulation, and the EXACT
+// in-range count (early-exit at budget) must be non-empty and within
+// rangeSeekMaxSelectivity of the population. count is the type-specific
+// RangeCount closure (string or float64). The count is INCLUSIVE [lo, hi]
+// (a tiny over-count of at most the two boundary values when a bound is
+// exclusive), which only makes the gate marginally more conservative; the
+// residual Selection Filter re-checks every row regardless.
+func rangeCountWins[K any](
+	g *lpg.Graph[string, float64],
+	label string,
+	rangeCount func(lo, hi K, budget uint64) (uint64, bool),
+	lo, hi K,
+) bool {
+	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
+	if nLabel < rangeSeekMinLabelPopulation {
+		return false
+	}
+	budget := uint64(float64(nLabel) * rangeSeekMaxSelectivity)
+	count, exact := rangeCount(lo, hi, budget)
+	// Over budget (early-exited), unknown, or empty: keep the scan. (An empty
+	// range is correct but pointless to seek; the scan+filter yields the same
+	// zero rows without an index descent.)
+	return exact && count != 0 && count <= budget
 }
 
 // findBoundStringBTree returns the first bound string btree index covering
@@ -357,4 +428,263 @@ func stringLiteral(e ast.Expression) (expr.StringValue, bool) {
 		return expr.StringValue(sl.Value), true
 	}
 	return "", false
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Numeric range seek (#1652) — unified float64 companion
+// ─────────────────────────────────────────────────────────────────────────────
+
+// tryNumericRangeSeek builds a NodeByIndexRangeScan over the UNIFIED numeric
+// btree companion when the Selection predicate is a single-property numeric
+// range (n.age > 30, with integer OR float literals, or numeric PARAMETER
+// bounds n.age > $min) and the in-range count is a selective win.
+//
+// # Safety (cypher-expert-consultant, #1652)
+//
+// The seek is result-identical to NodeByLabelScan+Filter because:
+//
+//   - The companion indexes BOTH integer- and float-valued nodes under one
+//     float64 order, so it is a SUPERSET of every numeric match — never the
+//     non-superset an int64-only index would be (which would drop float-valued
+//     matches).
+//   - The original AST predicate is ALWAYS retained as a residual Filter on
+//     top (stacked by the caller in buildOperator), so any over-return is
+//     removed and null / NaN / cross-type / open-vs-closed-bound cases resolve
+//     exactly as the full scan+filter would.
+//   - The operator is given INCLUSIVE bounds (Include == true) so it returns
+//     the closed [lo, hi] superset and never runs its NodeID-vs-bound equality
+//     post-filter — which, for a numeric bound, could otherwise spuriously drop
+//     a node whose NodeID happens to equal the numeric bound. Exact open/closed
+//     semantics are enforced solely by the residual Filter.
+//   - NaN and null/missing are never indexed (projectNumericPropValue), and a
+//     numeric bound (never NaN) over the btree's total order never returns the
+//     NaN key even if one existed.
+//
+// PARAMETER bounds are admitted here even though the string path declines them:
+// they are safe (superset + residual filter) and are the common shape of a
+// numeric range. The parameter is resolved against params at build time; a
+// missing or non-numeric parameter declines the seek (the scan+filter path is
+// correct).
+func tryNumericRangeSeek(
+	sel *ir.Selection,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	g *lpg.Graph[string, float64],
+	lblScan *ir.NodeByLabelScan,
+	nodeVar string,
+	params map[string]expr.Value,
+) (exec.Operator, bool) {
+	pred, ok := extractNumericRangePred(sel.PredicateExpr, nodeVar, params)
+	if !ok {
+		return nil, false
+	}
+
+	sub, ok := findBoundNumericBTree(idxMgr, lblScan.Label, pred.propKey)
+	if !ok {
+		return nil, false
+	}
+
+	lo, hi := rangeBoundFloats(pred)
+	if !rangeCountWins(g, lblScan.Label, sub.RangeCount, lo, hi) {
+		return nil, false
+	}
+
+	// Inclusive bounds: the operator returns the closed [lo, hi] superset and
+	// skips its NodeID-vs-bound equality post-filter; the residual Selection
+	// Filter enforces the exact open/closed predicate. An unbounded side stays
+	// nil (the adapter widens it to ∓∞).
+	loB := exec.RangeBound{}
+	hiB := exec.RangeBound{}
+	if pred.lo != nil {
+		loB = exec.RangeBound{Value: expr.FloatValue(pred.lo.value), Include: true}
+	}
+	if pred.hi != nil {
+		hiB = exec.RangeBound{Value: expr.FloatValue(pred.hi.value), Include: true}
+	}
+	op := exec.NewNodeByIndexRangeScan(exec.NewFloat64RangeIndex(sub), loB, hiB)
+	schema[nodeVar] = schemaWidth(schema)
+	return op, true
+}
+
+// findBoundNumericBTree returns the first bound numeric btree companion
+// covering (label, propKey). It probes the deterministic internal companion
+// name ("<label>_<property>_btree_num") first, then any covering bound numeric
+// btree as a fallback. An unbound btree (BoundNode ok == false) and a string
+// btree (whose Range signature differs) are never returned.
+func findBoundNumericBTree(idxMgr *index.Manager, label, propKey string) (boundNumericRange, bool) {
+	wantName := numericBTreeName(label, propKey)
+	if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "btree" {
+		if br, ok := asBoundNumericRange(sub, label, propKey); ok {
+			return br, true
+		}
+	}
+	for _, name := range idxMgr.ListIndexes() {
+		sub, err := idxMgr.GetIndex(name)
+		if err != nil || sub.Kind() != "btree" {
+			continue
+		}
+		if br, ok := asBoundNumericRange(sub, label, propKey); ok {
+			return br, true
+		}
+	}
+	return nil, false
+}
+
+// asBoundNumericRange type-asserts sub to a bound numeric range index and
+// checks that it covers exactly (label, propKey). ok is false for a string
+// btree (the Range signature differs), an unbound btree, or a coverage
+// mismatch.
+func asBoundNumericRange(sub index.Subscriber, label, propKey string) (boundNumericRange, bool) {
+	br, ok := sub.(boundNumericRange)
+	if !ok {
+		return nil, false
+	}
+	bl, bp, bound := br.BoundNode()
+	if !bound || bl != label || bp != propKey {
+		return nil, false
+	}
+	return br, true
+}
+
+// rangeBoundFloats returns the lo/hi float64 keys for the EXACT count query,
+// using -∞ for an unbounded lower bound and +∞ for an unbounded upper bound —
+// matching exec.Float64RangeIndex.RangeBitmap. The count uses the INCLUSIVE
+// [lo, hi] keys; inclusivity is enforced at execution by the residual Filter,
+// and the count being a slight upper bound only makes the selectivity gate
+// marginally more conservative (see [rangeCountWins]).
+func rangeBoundFloats(pred numericRangePred) (lo, hi float64) {
+	lo = math.Inf(-1)
+	hi = math.Inf(1)
+	if pred.lo != nil {
+		lo = pred.lo.value
+	}
+	if pred.hi != nil {
+		hi = pred.hi.value
+	}
+	return lo, hi
+}
+
+// extractNumericRangePred extracts a single-property numeric range predicate
+// from an AST expression: either one comparison (n.prop <op> numeric) or a
+// two-sided AND of two comparisons on the SAME property. The numeric operand
+// may be an integer literal, a float literal, or a parameter resolving to a
+// numeric value. Returns ok == false for any other shape, a non-numeric
+// operand, a mixed-property AND, or a parameter that is absent / non-numeric.
+func extractNumericRangePred(e ast.Expression, nodeVar string, params map[string]expr.Value) (numericRangePred, bool) {
+	if bo, ok := e.(*ast.BinaryOp); ok && strings.EqualFold(bo.Operator, "AND") {
+		left, lok := extractSingleNumericCmp(bo.Left, nodeVar, params)
+		right, rok := extractSingleNumericCmp(bo.Right, nodeVar, params)
+		if lok && rok && left.propKey == right.propKey {
+			return mergeNumericRangeBounds(left, right)
+		}
+		return numericRangePred{}, false
+	}
+	return extractSingleNumericCmp(e, nodeVar, params)
+}
+
+// extractSingleNumericCmp extracts one comparison "nodeVar.prop <op> numeric"
+// (or its mirror "numeric <op> nodeVar.prop") with op ∈ {>,>=,<,<=}. The
+// returned numericRangePred has exactly one of lo/hi set.
+func extractSingleNumericCmp(e ast.Expression, nodeVar string, params map[string]expr.Value) (numericRangePred, bool) {
+	bo, ok := e.(*ast.BinaryOp)
+	if !ok {
+		return numericRangePred{}, false
+	}
+	op := bo.Operator
+	if op != ">" && op != ">=" && op != "<" && op != "<=" {
+		return numericRangePred{}, false
+	}
+	// Property on the left: n.prop <op> numeric.
+	if propKey, isProp := nodePropKey(bo.Left, nodeVar); isProp {
+		if f, isNum := numericOperand(bo.Right, params); isNum {
+			return numericBoundFor(propKey, op, f, false), true
+		}
+		return numericRangePred{}, false
+	}
+	// Property on the right: numeric <op> n.prop — flip the operator.
+	if propKey, isProp := nodePropKey(bo.Right, nodeVar); isProp {
+		if f, isNum := numericOperand(bo.Left, params); isNum {
+			return numericBoundFor(propKey, op, f, true), true
+		}
+		return numericRangePred{}, false
+	}
+	return numericRangePred{}, false
+}
+
+// numericBoundFor builds a one-sided numericRangePred for "prop op value",
+// flipping the operator's side when the property was on the right of the
+// comparison (mirrored == true).
+func numericBoundFor(propKey, op string, value float64, mirrored bool) numericRangePred {
+	if mirrored {
+		switch op {
+		case ">":
+			op = "<"
+		case ">=":
+			op = "<="
+		case "<":
+			op = ">"
+		case "<=":
+			op = ">="
+		}
+	}
+	nb := numericBound{value: value, include: op == ">=" || op == "<="}
+	switch op {
+	case ">", ">=":
+		return numericRangePred{propKey: propKey, lo: &nb}
+	default: // "<", "<="
+		return numericRangePred{propKey: propKey, hi: &nb}
+	}
+}
+
+// mergeNumericRangeBounds combines two one-sided predicates on the same
+// property into a two-sided range. ok is false when both bounds are on the
+// same side (e.g. n.p > 1 AND n.p > 2 is not a closed range; let the
+// scan+filter handle it).
+func mergeNumericRangeBounds(a, b numericRangePred) (numericRangePred, bool) {
+	out := numericRangePred{propKey: a.propKey}
+	switch {
+	case a.lo != nil && b.hi != nil:
+		out.lo, out.hi = a.lo, b.hi
+	case a.hi != nil && b.lo != nil:
+		out.lo, out.hi = b.lo, a.hi
+	default:
+		return numericRangePred{}, false
+	}
+	return out, true
+}
+
+// numericOperand returns (float64, true) when e is an integer literal, a float
+// literal, or a parameter resolving to a numeric value. An integer and a float
+// map onto the same float64 numeric order. A finite numeric value is required:
+// a NaN operand declines (the range it would describe is empty under the total
+// order, and the scan+filter path yields the correct empty result). An
+// OverflowIntLit (an integer beyond int64) declines: the residual filter would
+// still be correct, but the bound cannot be represented as a same-class scalar
+// here, so the scan+filter path handles it. A parameter that is absent or
+// non-numeric declines.
+func numericOperand(e ast.Expression, params map[string]expr.Value) (float64, bool) {
+	switch lit := e.(type) {
+	case *ast.IntLiteral:
+		return float64(lit.Value), true
+	case *ast.FloatLiteral:
+		if math.IsNaN(lit.Value) {
+			return 0, false
+		}
+		return lit.Value, true
+	case *ast.Parameter:
+		v, ok := params[lit.Name]
+		if !ok || v == nil {
+			return 0, false
+		}
+		switch n := v.(type) {
+		case expr.IntegerValue:
+			return float64(n), true
+		case expr.FloatValue:
+			if math.IsNaN(float64(n)) {
+				return 0, false
+			}
+			return float64(n), true
+		}
+	}
+	return 0, false
 }
