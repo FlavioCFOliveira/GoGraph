@@ -70,3 +70,53 @@ func BenchmarkCountNodeVar(b *testing.B) {
 		_ = res.Close()
 	}
 }
+
+// BenchmarkCountAllNodes is the multithread-audit M4 / #1673 query verbatim:
+// MATCH (n) RETURN count(n) over 2000 nodes, no edges, no label. It isolates
+// the per-row Project scratch-header allocation: the projection that feeds the
+// aggregator pulled its child row into a fresh `var inputRow Row` whose address
+// escaped through the Operator.Next interface boundary, costing one heap header
+// per scanned row (≈1 alloc/node, on top of the AllNodesScan id box). Reusing a
+// single Project.inputRow field removes that per-row header. Layer: short.
+//
+// Run with:
+//
+//	go test -run=^$ -bench=BenchmarkCountAllNodes -benchmem -count=8 ./cypher/
+func BenchmarkCountAllNodes(b *testing.B) {
+	g := newBenchGraph()
+	eng := cypher.NewEngine(g)
+	seedNodesOnly(b, eng, 2000)
+	const q = "MATCH (n) RETURN count(n)"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := eng.RunInTx(context.Background(), q, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for res.Next() { //nolint:revive // intentional full drain
+		}
+		if err := res.Err(); err != nil {
+			b.Fatal(err)
+		}
+		_ = res.Close()
+	}
+}
+
+// seedNodesOnly inserts n bare nodes (single property) via autocommit writes,
+// giving BenchmarkCountAllNodes an edge-free graph to scan.
+func seedNodesOnly(b *testing.B, eng *cypher.Engine, n int) {
+	b.Helper()
+	for i := 0; i < n; i++ {
+		res, err := eng.RunInTx(context.Background(), "CREATE ({v:1})", nil)
+		if err != nil {
+			b.Fatalf("seed: %v", err)
+		}
+		for res.Next() { //nolint:revive // intentional full drain
+		}
+		if err := res.Err(); err != nil {
+			b.Fatalf("seed drain: %v", err)
+		}
+		_ = res.Close()
+	}
+}

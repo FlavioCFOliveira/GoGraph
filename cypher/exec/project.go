@@ -45,10 +45,11 @@ type ProjectionItem struct {
 //
 // Project is NOT safe for concurrent use.
 type Project struct {
-	child  Operator
-	items  []ProjectionItem
-	ctx    context.Context //nolint:containedctx // stored for per-Next ctx check
-	outBuf Row             // reusable output backing slice; len = len(items)
+	child    Operator
+	items    []ProjectionItem
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
+	outBuf   Row             // reusable output backing slice; len = len(items)
+	inputRow Row             // reusable scratch header for the child's row (see Next)
 }
 
 // NewProject creates a Project operator.  items defines the output schema;
@@ -86,8 +87,13 @@ func (op *Project) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var inputRow Row
-	ok, err := op.child.Next(&inputRow)
+	// Reuse op.inputRow across calls so &op.inputRow points into the already
+	// heap-allocated Project struct rather than forcing a fresh per-row scratch
+	// header onto the heap (the child's Next takes *Row by pointer through the
+	// Operator interface, which defeats escape analysis on a local). The child
+	// writes a slice it owns into op.inputRow; we only read it within this call
+	// and never retain it past the loop, so sharing one header is sound.
+	ok, err := op.child.Next(&op.inputRow)
 	if err != nil {
 		return false, err
 	}
@@ -96,7 +102,7 @@ func (op *Project) Next(out *Row) (bool, error) {
 	}
 
 	for i, item := range op.items {
-		v, err := item.Eval(inputRow)
+		v, err := item.Eval(op.inputRow)
 		if err != nil {
 			return false, fmt.Errorf("exec: Project item %q eval: %w", item.Alias, err)
 		}
