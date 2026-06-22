@@ -1393,6 +1393,17 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 // skip phantom nodes (those that the Mapper still indexes but that
 // the graph treats as deleted).
 func (g *Graph[N, W]) IsTombstoned(id graph.NodeID) bool {
+	// Lock-free fast path: on a graph that has never tombstoned a node the
+	// answer is always false, so skip tombstoneMu entirely (mirroring the same
+	// gate in AddNode). This matters under concurrent reads — AllNodesScan
+	// calls IsTombstoned per node, and taking tombstoneMu.RLock per call bounces
+	// the RWMutex reader-count cache line across cores, capping read scaling.
+	// tombstoneActive is mutated only under tombstoneMu, so a 0 observed here
+	// means no tombstone is committed; once any tombstone exists the call falls
+	// through to the locked map lookup, preserving exact behaviour.
+	if g.tombstoneActive.Load() == 0 {
+		return false
+	}
 	g.tombstoneMu.RLock()
 	defer g.tombstoneMu.RUnlock()
 	_, ok := g.tombstones[id]
