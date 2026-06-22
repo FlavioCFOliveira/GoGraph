@@ -51,6 +51,10 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		live[uint64(id)] = true
 		return true
 	})
+	// row is the reused 3-cell record handed to the csv.Writer, so the hot
+	// edge loop does not allocate a fresh []string per edge. csv.Writer.Write
+	// consumes the slice synchronously (it does not retain it), so reuse is safe.
+	row := make([]string, 3)
 	for id := uint64(0); id < maxID; id++ {
 		if !live[id] {
 			continue
@@ -85,7 +89,8 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 				dstCell = sanitizeFormulaCell(dstCell)
 				weightCell = sanitizeFormulaCell(weightCell)
 			}
-			if err := cw.Write([]string{srcCell, dstCell, weightCell}); err != nil {
+			row[0], row[1], row[2] = srcCell, dstCell, weightCell
+			if err := cw.Write(row); err != nil {
 				metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 				return written, err
 			}

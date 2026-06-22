@@ -72,6 +72,11 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	// target of any visible edge; vertices that never appear are written
 	// as bare node statements below so isolated nodes are not lost.
 	appeared := make([]bool, maxID)
+	// scratch is the reused per-edge line buffer: the edge statement is
+	// assembled here with append + strconv.AppendInt for the weight, so the
+	// hot loop pays no per-edge fmt.Sprintf / FormatInt allocation (only the
+	// node-name quoting still allocates, on the string path).
+	var scratch []byte
 	for id := uint64(0); id < maxID; id++ {
 		if err := ctx.Err(); err != nil {
 			_ = bw.Flush()
@@ -98,12 +103,22 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if ws != nil {
 				weight = ws[i]
 			}
-			label := ""
+			scratch = scratch[:0]
+			scratch = append(scratch, "  "...)
+			scratch = append(scratch, quote(srcName)...)
+			scratch = append(scratch, ' ')
+			scratch = append(scratch, edgeOp...)
+			scratch = append(scratch, ' ')
+			scratch = append(scratch, quote(dstName)...)
 			if weight != 0 {
-				label = fmt.Sprintf(` [label=%q]`, strconv.FormatInt(weight, 10))
+				// Byte-identical to fmt.Sprintf(` [label=%q]`, …): the weight is
+				// a digit string, so %q just wraps it in double quotes.
+				scratch = append(scratch, ` [label="`...)
+				scratch = strconv.AppendInt(scratch, weight, 10)
+				scratch = append(scratch, '"', ']')
 			}
-			line := fmt.Sprintf("  %s %s %s%s;\n", quote(srcName), edgeOp, quote(dstName), label)
-			if _, err := bw.WriteString(line); err != nil {
+			scratch = append(scratch, ';', '\n')
+			if _, err := bw.Write(scratch); err != nil {
 				metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 				return err
 			}

@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -170,6 +171,9 @@ func encodeEdge(enc *xml.Encoder, src, dst string, weight int64) error {
 	}
 	return enc.EncodeElement(edgeElem{
 		Source: src, Target: dst,
-		Data: dataElem{Key: "w", Value: fmt.Sprintf("%d", weight)},
+		// strconv.FormatInt is byte-identical to fmt.Sprintf("%d", …) for an
+		// int64 but avoids the fmt reflection/pp-buffer allocation; the result
+		// string itself is the encoding/xml chardata floor.
+		Data: dataElem{Key: "w", Value: strconv.FormatInt(weight, 10)},
 	}, xml.StartElement{Name: xml.Name{Local: "edge"}})
 }
