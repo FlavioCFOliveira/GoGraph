@@ -260,6 +260,24 @@ soak lane (env-precondition skip when git/tag/toolchain unavailable); a fast
 HEAD-as-prior smoke runs on short. -race + goleak clean, lint 0. No new label
 or edge type. **The 5-phase DST simulator (P1-P5 + P5b) is COMPLETE.**
 
+Incrementally synced at commits `43383a9`..`7a342e0` (2026-06-23, sprints 226
+S-MT2 / 227 S-BL1 / 228 S-BL2, all CLOSED): +10 `Commit`s, +3 `Sprint`s
+(226/227/228). Bounded sync — Commit→Feature provenance only (the Sprint→Task
+layer for sprints ~202-225 remains UNSYNCED, a pre-existing gap; this entry does
+not back-fill it). Edges: `Sprint 226 -[CONTAINS]->` 43383a9/528b371; `Sprint
+227 -[CONTAINS]->` b7053b8/1edfa57/b5a3729/92b6fc6; `Sprint 228 -[CONTAINS]->`
+51b7c69/7a342e0. `43383a9/528b371/92b6fc6 -[IMPROVES]->` Feature `Search &
+Path-finding` (parallel Floyd-Warshall #1680 3.29x, parallel WCC #1679 1.63x,
+stateful SSSP validate-once #1516 102x); `b7053b8/51b7c69 -[FIXES]->` `Cypher
+Engine` (DateValue.String expanded-year inverse #1658; per-instance reltype on
+the multigraph reverse hop #1634 — handle disambiguation in exec.Expand +
+storage-key-keyed type resolution in cypher/api, TCK 3897 held); `1edfa57
+-[FIXES]->` `Observability & Metrics` (one IO latency sample at the Ctx layer
+#1524); `34285c3 -[IMPROVES]->` `Examples & Tutorials`. Touched Features
+re-stamped to gitDate 2026-06-23. #1634 surfaced 3 new BACKLOG bugs (#1683 MERGE
+distinct-type, #1684 opposite-direction reltype collapse, #1685 VLE/shortestPath
+collapse) — tracked in rmp, not yet modelled. No new label or edge type.
+
 ---
 
 ## Node labels
