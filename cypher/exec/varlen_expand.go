@@ -118,10 +118,56 @@ const defaultMaxTotalEdgesTraversed = 100_000_000
 // regresses (#1478).
 const defaultMaxUnboundedHops = 65_536
 
+// VLEHopStride is the per-hop element count of the flat alternating path list
+// that [VarLengthExpand] emits. The list is
+//
+//	[srcNodeID, fwdPos0, dstNode0, dir0, fwdPos1, dstNode1, dir1, …]
+//
+// so an N-hop path occupies 1 + VLEHopStride*N elements: the leading source
+// node id, then one (forward edge position, destination node id, direction
+// marker) triple per hop. The direction marker is [VLEDirForward] or
+// [VLEDirReverse]. Readers in the cypher package (the path/relationship-list
+// hydrators) and [appendExcludedFromValue] index the list with this stride; it
+// is exported so those readers share the single source of truth (rmp #1685).
+//
+// Before #1685 the stride was 2 ((edgePos, dst) pairs) and the edge position
+// was synthetic for a reverse hop, which lost both the physical-edge identity
+// and the traversal direction the hydrator needs for per-instance type and
+// property reporting on multigraph parallel edges.
+const VLEHopStride = 3
+
+// VLEDirForward and VLEDirReverse are the direction-marker values stored at the
+// third slot of each hop triple in the [VarLengthExpand] flat path list
+// (stride [VLEHopStride]). A reverse marker tells the relationship hydrator to
+// swap the storage endpoints when resolving the edge's per-instance type and
+// properties, and tells the path renderer to emit `<-[…]-` (rmp #1685).
+const (
+	VLEDirForward = 0
+	VLEDirReverse = 1
+)
+
 // edgeStep is one hop in a BFS path.
+//
+// fwdPos is the FORWARD-CSR position of the physical edge this hop traverses —
+// the handle-disambiguated per-instance position, NOT a synthetic reverse
+// position. Both a forward hop and a reverse hop over the same physical edge
+// record the SAME fwdPos, so the hop is decodable by the relationship hydrator
+// ([cypher].edgeHandleAtFwdPos), which keys off a forward position to recover
+// the stable per-edge handle (rmp #1685). reversed marks whether this hop was
+// taken against storage direction (an undirected/reverse traversal of a
+// stored src->dst edge): the path renderer needs it to emit `<-[…]-`, and the
+// hydrator needs it to swap the storage endpoints when resolving the edge's
+// per-instance type and properties.
+//
+// Before #1685 this field held the absolute position (forward position for a
+// forward hop, but a SYNTHETIC base+pos for a reverse hop) which overloaded
+// physical-edge identity and direction into one integer the hydrator could not
+// decode — so a reverse hop over a multigraph parallel edge collapsed onto the
+// first forward slot's type and the coalesced per-pair property union.
 type edgeStep struct {
-	edgePos uint64 // absolute edge position in the forward CSR edges array
-	dstID   uint64 // destination node ID
+	fwdPos   uint64 // forward-CSR position of the physical edge (handle-disambiguated)
+	dstID    uint64 // destination node ID
+	reversed bool   // true when traversed against storage direction (reverse/undirected hop)
 }
 
 // pathState is the state of one BFS path being explored.
@@ -154,18 +200,35 @@ type VarLengthExpand struct {
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
 	// CSR snapshots (valid after Init).
-	fwdVerts []uint64
-	fwdEdges []graph.NodeID
-	revVerts []uint64
-	revEdges []graph.NodeID
+	fwdVerts   []uint64
+	fwdEdges   []graph.NodeID
+	fwdHandles []uint64 // forward per-slot stable handles (nil unless a multigraph snapshot)
+	revVerts   []uint64
+	revEdges   []graph.NodeID
+	revHandles []uint64 // reverse per-slot stable handles (nil for DirOut / non-multigraph)
 
 	// revToFwd maps a reverse-CSR edge position to its corresponding
 	// forward-CSR edge position. Used by the relationship-uniqueness
 	// bitset to recognise that a reverse traversal of the same physical
-	// edge is NOT a distinct edge. Built lazily in Init for DirBoth
-	// traversals only. Entry ^uint64(0) means "unresolved" (e.g.
-	// out-of-range vertex IDs); callers fall back to the synthetic
-	// reverse absPos in that rare case.
+	// edge is NOT a distinct edge, and (rmp #1685) to record the FORWARD
+	// position on each reverse hop so the relationship hydrator can recover
+	// the edge's stable handle and report its per-instance type/properties.
+	// Built lazily in Init for ANY reverse-traversing direction — DirIn as
+	// well as DirBoth (rmp #1689/D2), since a pure-reverse hop needs the same
+	// forward position for per-instance hydration and type filtering. Entry
+	// ^uint64(0) means "unresolved" (e.g. out-of-range vertex IDs); callers
+	// fall back to the synthetic reverse absPos in that rare case.
+	//
+	// For PARALLEL edges (a multigraph dst->src pair), the mapping is keyed
+	// on the stable per-edge handle when both CSRs carry handles
+	// ([csr.BuildReverse] keeps one handle per logical edge across both
+	// directions), so the k-th reverse slot pairs with the forward slot of
+	// the SAME physical edge — delete-stable and instance-exact. Without
+	// handles it falls back to a positional-ordinal pairing (the n-th
+	// reverse dst->src slot pairs with the n-th forward src->dst... actually
+	// dst->src slot). The handle path mirrors [Expand.lookupFwdEdgePosByHandle]
+	// (the single-hop #1634 fix); the ordinal fallback mirrors its pre-#1634
+	// behaviour for non-multigraph snapshots.
 	revToFwd []uint64
 
 	// BFS state for the current input row. Two slices are kept and ping-ponged
@@ -268,9 +331,11 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
+	op.fwdHandles = op.fwd.HandlesSlice()
 	if op.dir != DirOut && op.rev != nil {
 		op.revVerts = op.rev.VerticesSlice()
 		op.revEdges = op.rev.EdgesSlice()
+		op.revHandles = op.rev.HandlesSlice()
 	}
 	op.queue = op.queue[:0]
 	op.nextQueue = op.nextQueue[:0]
@@ -290,33 +355,105 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 	// this, DirBoth VLE traversal can use the same edge twice (once
 	// forward, once reverse encoding) and produce duplicated paths
 	// (Match9 [3]/[4]).
-	if op.dir == DirBoth && op.revEdges != nil {
-		op.revToFwd = make([]uint64, len(op.revEdges))
-		for revUID := uint64(0); revUID+1 < uint64(len(op.revVerts)); revUID++ {
-			start, end := op.revVerts[revUID], op.revVerts[revUID+1]
-			for revPos := start; revPos < end; revPos++ {
-				fwdSrc := uint64(op.revEdges[revPos])
-				// Find the forward position p such that fwdEdges[p] = revUID
-				// inside fwdSrc's adjacency range. The reverse CSR is the
-				// transpose of the forward CSR, so each reverse entry has
-				// exactly one forward counterpart.
-				if fwdSrc+1 >= uint64(len(op.fwdVerts)) {
-					op.revToFwd[revPos] = ^uint64(0) // unresolved
-					continue
+	//
+	// Built for ANY direction that traverses reverse edges (DirIn and
+	// DirBoth), not DirBoth alone: a pure-reverse hop (DirIn, the `<-[*]-`
+	// pattern) also needs each reverse slot mapped to its handle-disambiguated
+	// FORWARD position so the relationship hydrator recovers the edge's stable
+	// handle and reports its per-instance type and properties — without it a
+	// DirIn hop over a multigraph parallel edge recorded a synthetic reverse
+	// position and collapsed onto the coalesced per-pair type (rmp #1689/D2).
+	if op.dir != DirOut && op.revEdges != nil {
+		op.buildRevToFwd()
+	}
+	return op.input.Init(ctx)
+}
+
+// buildRevToFwd fills op.revToFwd, mapping each reverse-CSR edge position to the
+// forward-CSR position of the SAME physical edge. A reverse slot revPos in
+// revUID's adjacency encodes an edge whose stored direction is
+// (fwdSrc -> revUID), where fwdSrc = revEdges[revPos]; its forward counterpart
+// lives in fwdSrc's forward adjacency at the position whose destination is
+// revUID. The reverse CSR is the transpose of the forward CSR, so the mapping
+// is a bijection per logical edge. Entry ^uint64(0) marks "unresolved" (an
+// out-of-range vertex or a missing forward counterpart); callers fall back to
+// the synthetic reverse position in that rare case.
+//
+// PARALLEL edges (a multigraph fwdSrc->revUID pair with several slots) are the
+// reason this is not a first-match scan (the pre-#1685 bug): every reverse slot
+// would have mapped onto the FIRST forward slot, so the relationship hydrator
+// reported one merged type and the coalesced property union for every parallel
+// reverse hop. Two disambiguation strategies, preferred first:
+//
+//   - Handle-exact (VERIFICATION GATE (a): the reverse CSR DOES expose
+//     HandlesSlice — Expand already snapshots revHandles for the single-hop
+//     #1634 fix). When both CSRs carry handles, match the reverse slot to the
+//     forward slot whose stable handle is identical. csr.BuildReverse keeps one
+//     handle per logical edge across both directions, so this recovers the exact
+//     instance and is delete-stable (it does not mis-map after a parallel
+//     sibling is removed and the neighbour slice is compacted). Mirrors
+//     [Expand.lookupFwdEdgePosByHandle].
+//
+//   - Positional-ordinal (fallback when either CSR lacks handles — a simple
+//     graph or a legacy snapshot). The k-th reverse (fwdSrc->revUID) slot pairs
+//     with the k-th forward (fwdSrc->revUID) slot. A simple graph has exactly
+//     one slot per pair, so this degenerates to the original first-match scan.
+func (op *VarLengthExpand) buildRevToFwd() {
+	op.revToFwd = make([]uint64, len(op.revEdges))
+	useHandles := op.fwdHandles != nil && op.revHandles != nil
+	for revUID := uint64(0); revUID+1 < uint64(len(op.revVerts)); revUID++ {
+		start, end := op.revVerts[revUID], op.revVerts[revUID+1]
+		for revPos := start; revPos < end; revPos++ {
+			fwdSrc := uint64(op.revEdges[revPos])
+			if fwdSrc+1 >= uint64(len(op.fwdVerts)) {
+				op.revToFwd[revPos] = ^uint64(0) // unresolved
+				continue
+			}
+			fStart, fEnd := op.fwdVerts[fwdSrc], op.fwdVerts[fwdSrc+1]
+			if useHandles {
+				op.revToFwd[revPos] = op.matchFwdByHandle(fStart, fEnd, revUID, op.revHandles[revPos])
+				continue
+			}
+			// Positional-ordinal fallback: this reverse slot is the
+			// ordinal-th (fwdSrc -> revUID) reverse entry; pair it with the
+			// ordinal-th matching forward entry.
+			ordinal := uint64(0)
+			for rp := start; rp <= revPos; rp++ {
+				if uint64(op.revEdges[rp]) == fwdSrc {
+					ordinal++
 				}
-				fStart, fEnd := op.fwdVerts[fwdSrc], op.fwdVerts[fwdSrc+1]
-				fwdPos := ^uint64(0)
-				for fp := fStart; fp < fEnd; fp++ {
-					if uint64(op.fwdEdges[fp]) == revUID {
-						fwdPos = fp
-						break
-					}
-				}
-				op.revToFwd[revPos] = fwdPos
+			}
+			op.revToFwd[revPos] = op.matchFwdByOrdinal(fStart, fEnd, revUID, ordinal)
+		}
+	}
+}
+
+// matchFwdByHandle returns the forward position in [fStart,fEnd) whose
+// destination is revUID and whose stable handle equals handle, or ^uint64(0)
+// when none matches.
+func (op *VarLengthExpand) matchFwdByHandle(fStart, fEnd, revUID, handle uint64) uint64 {
+	for fp := fStart; fp < fEnd; fp++ {
+		if uint64(op.fwdEdges[fp]) == revUID && op.fwdHandles[fp] == handle {
+			return fp
+		}
+	}
+	return ^uint64(0)
+}
+
+// matchFwdByOrdinal returns the ordinal-th (1-based) forward position in
+// [fStart,fEnd) whose destination is revUID, or ^uint64(0) when fewer than
+// ordinal such positions exist.
+func (op *VarLengthExpand) matchFwdByOrdinal(fStart, fEnd, revUID, ordinal uint64) uint64 {
+	seen := uint64(0)
+	for fp := fStart; fp < fEnd; fp++ {
+		if uint64(op.fwdEdges[fp]) == revUID {
+			seen++
+			if seen == ordinal {
+				return fp
 			}
 		}
 	}
-	return op.input.Init(ctx)
+	return ^uint64(0)
 }
 
 // Next emits the next (inputRow... || pathEdgesAsListValue || dstNodeID) row.
@@ -436,8 +573,12 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 // row column can carry: IntegerValue (raw edge position from Expand),
 // RelationshipValue (canonical projection form), and ListValue (the
 // alternating-flat representation a sibling VLE emits for the path's
-// edges — every odd-indexed IntegerValue is an edge id). Other types
-// are silently ignored so the no-repeat exclusion stays conservative.
+// edges). For the flat list the edge positions are the FORWARD positions
+// at the first slot of each hop triple (stride [VLEHopStride]); keying the
+// exclusion on the forward position is strictly stronger for the
+// no-repeated-relationships rule, because it rejects the same physical edge
+// regardless of the direction the sibling VLE traversed it (rmp #1685).
+// Other types are silently ignored so the exclusion stays conservative.
 func appendExcludedFromValue(visited []uint64, v expr.Value) []uint64 {
 	switch t := v.(type) {
 	case expr.IntegerValue:
@@ -445,9 +586,10 @@ func appendExcludedFromValue(visited []uint64, v expr.Value) []uint64 {
 	case expr.RelationshipValue:
 		return bitsetAdd(visited, t.ID)
 	case expr.ListValue:
-		// VLE flat encoding: [srcNode, edgePos0, dstNode0, edgePos1,
-		// dstNode1, …]. Odd-indexed entries are edge positions.
-		for i := 1; i < len(t); i += 2 {
+		// VLE flat encoding:
+		// [srcNode, fwdPos0, dstNode0, dir0, fwdPos1, dstNode1, dir1, …].
+		// The forward edge position is at index 1+VLEHopStride*h.
+		for i := 1; i < len(t); i += VLEHopStride {
 			switch x := t[i].(type) {
 			case expr.IntegerValue:
 				visited = bitsetAdd(visited, uint64(x))
@@ -595,24 +737,36 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 			continue
 		}
 
-		// On undirected (DirBoth) traversal, alias the reverse-edge
-		// synthetic position to its forward counterpart so the
-		// relationship-uniqueness bitset rejects a path that uses the
-		// SAME physical edge twice (once forward, once reverse) — see
-		// Match9 [3]/[4]. Without this aliasing the BFS would emit
-		// `(a)-[REL1]->(b)-[REL1 reverse]->(a)` as a length-2 path that
-		// happens to "reuse" the only edge between a and b.
+		// Alias the reverse-edge synthetic position to its forward
+		// counterpart. On undirected (DirBoth) traversal this lets the
+		// relationship-uniqueness bitset reject a path that uses the SAME
+		// physical edge twice (once forward, once reverse) — see Match9
+		// [3]/[4]; without it the BFS would emit `(a)-[REL1]->(b)-[REL1
+		// reverse]->(a)` as a length-2 path that "reuses" the only edge
+		// between a and b. On pure-reverse traversal (DirIn) the same remap
+		// is what lets the relationship hydrator recover the edge's stable
+		// handle from a forward position and report its per-instance type and
+		// properties (rmp #1689/D2) — so the alias runs for ANY direction that
+		// traverses reverse edges, not DirBoth alone.
 		fwdAbsPos := absPos
-		if !isFwd && op.dir == DirBoth && op.revToFwd != nil && pos < uint64(len(op.revToFwd)) {
+		if !isFwd && op.dir != DirOut && op.revToFwd != nil && pos < uint64(len(op.revToFwd)) {
 			if mapped := op.revToFwd[pos]; mapped != ^uint64(0) {
 				fwdAbsPos = mapped
 			}
 		}
 
 		// Edge-type filter (forward only; reverse edges skip type filter).
+		// MEMBERSHIP, not equality: op.edgeTypeFilter is a presence-SET built
+		// by [buildEdgeTypeFilter] holding exactly the positions whose edge
+		// carries one of the pattern's declared types, so a relationship-type
+		// disjunction -[:A|B*]- accepts an edge of EITHER type. Comparing the
+		// looked-up label against the single op.edgeType (= RelTypes[0]) here
+		// silently dropped every edge of a non-first declared type, even on a
+		// simple graph (rmp #1688/D3); the presence test mirrors
+		// [Expand.passesTypeFilter]. op.edgeType stays as the "a filter was
+		// requested" gate, set in lockstep with op.edgeTypeFilter.
 		if isFwd && op.edgeType != "" {
-			t, ok := op.edgeTypeFilter[absPos]
-			if !ok || t != op.edgeType {
+			if _, ok := op.edgeTypeFilter[absPos]; !ok {
 				continue
 			}
 		}
@@ -620,10 +774,15 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		// counterpart position. Without this, reverse traversal would
 		// emit any-type edges even when the pattern declared a type
 		// filter, leading Match9 [3]/[4] to enumerate paths through
-		// edges that should have been filtered out.
-		if !isFwd && op.edgeType != "" && op.dir == DirBoth && fwdAbsPos != absPos {
-			t, ok := op.edgeTypeFilter[fwdAbsPos]
-			if !ok || t != op.edgeType {
+		// edges that should have been filtered out. Same membership test
+		// as the forward branch (rmp #1688/D3). Applies to ANY reverse-
+		// traversing direction (DirIn pure-reverse as well as DirBoth) so
+		// `(a)<-[:T*]-(b)` filters on type rather than traversing every
+		// incoming edge regardless of type (rmp #1689/D2). The fwdAbsPos !=
+		// absPos guard keeps the unresolved-remap fallback (a rare
+		// out-of-range vertex) permissive, matching the prior DirBoth path.
+		if !isFwd && op.edgeType != "" && op.dir != DirOut && fwdAbsPos != absPos {
+			if _, ok := op.edgeTypeFilter[fwdAbsPos]; !ok {
 				continue
 			}
 		}
@@ -635,10 +794,16 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 			continue
 		}
 
-		// Build new path state. The path step stores the absPos for
-		// rendering (so forward/reverse direction is preserved) but the
-		// visited bitset uses fwdAbsPos so a later traversal of the
-		// same edge in the opposite direction is rejected.
+		// Build new path state. The path step records the FORWARD position
+		// (fwdAbsPos) of the physical edge plus a direction marker
+		// (reversed). The relationship hydrator recovers the edge's stable
+		// handle from this forward position to report its per-instance type
+		// and properties, and the renderer uses reversed to emit `<-[…]-`
+		// for an undirected/reverse hop (rmp #1685). The visited bitset
+		// keys on the same fwdAbsPos so a later traversal of the same edge
+		// in the opposite direction is still rejected by
+		// relationship-uniqueness.
+		reversed := !isFwd
 		var newPath []edgeStep
 		var newVisited []uint64
 		hops := 1
@@ -646,10 +811,10 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 			hops = parent.hops + 1
 			newPath = make([]edgeStep, len(parent.path)+1)
 			copy(newPath, parent.path)
-			newPath[len(parent.path)] = edgeStep{edgePos: absPos, dstID: dst}
+			newPath[len(parent.path)] = edgeStep{fwdPos: fwdAbsPos, dstID: dst, reversed: reversed}
 			newVisited = bitsetAdd(parent.visited, fwdAbsPos)
 		} else {
-			newPath = []edgeStep{{edgePos: absPos, dstID: dst}}
+			newPath = []edgeStep{{fwdPos: fwdAbsPos, dstID: dst, reversed: reversed}}
 			newVisited = bitsetAdd(nil, fwdAbsPos)
 		}
 
@@ -665,12 +830,16 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 
 // buildRow writes (inputRow... || pathList || dstID) into out.
 //
-// pathList is a flat alternating ListValue encoding the full path:
+// pathList is a flat alternating ListValue encoding the full path at stride
+// [VLEHopStride]:
 //
-//	[srcNodeID, edgePos0, dstNode0, edgePos1, dstNode1, ..., dstNodeN]
+//	[srcNodeID, fwdPos0, dstNode0, dir0, fwdPos1, dstNode1, dir1, ..., dstNodeN, dirN]
 //
-// For an N-hop path the list has 1 + 2*N elements (srcNode, then N pairs of
-// (edgePos, dstNode)). For a zero-hop path the list is [srcNodeID] (1 element).
+// For an N-hop path the list has 1 + VLEHopStride*N elements (srcNode, then N
+// triples of (forward edge position, dstNode, direction marker)). For a
+// zero-hop path the list is [srcNodeID] (1 element). fwdPosH is the FORWARD-CSR
+// position of hop H's physical edge (handle-disambiguated) and dirH is
+// [VLEDirForward] or [VLEDirReverse] (rmp #1685).
 //
 // dstID is the terminal node ID (same as the last dstNode in pathList, or
 // srcNodeID for zero-hop).
@@ -682,12 +851,18 @@ func (op *VarLengthExpand) buildRow(out *Row, inputRow Row, ps pathState) {
 		srcID = expr.Null
 	}
 
-	// Build flat alternating list: [srcID, edgePos0, dst0, edgePos1, dst1, ...].
-	pathList := make(expr.ListValue, 1+2*len(ps.path))
+	// Build flat alternating list:
+	// [srcID, fwdPos0, dst0, dir0, fwdPos1, dst1, dir1, ...].
+	pathList := make(expr.ListValue, 1+VLEHopStride*len(ps.path))
 	pathList[0] = srcID
 	for i, step := range ps.path {
-		pathList[1+2*i] = expr.IntegerValue(int64(step.edgePos))
-		pathList[2+2*i] = expr.IntegerValue(int64(step.dstID))
+		dir := VLEDirForward
+		if step.reversed {
+			dir = VLEDirReverse
+		}
+		pathList[1+VLEHopStride*i] = expr.IntegerValue(int64(step.fwdPos))
+		pathList[2+VLEHopStride*i] = expr.IntegerValue(int64(step.dstID))
+		pathList[3+VLEHopStride*i] = expr.IntegerValue(int64(dir))
 	}
 
 	var dstID expr.Value

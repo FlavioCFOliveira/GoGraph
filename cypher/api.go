@@ -135,9 +135,11 @@ type edgeVarInfo struct {
 // list emitted by a VarLengthExpand operator for a named path variable. The
 // listCol column contains an expr.ListValue of the form
 //
-//	[srcNodeID, edgePos0, dstNode0, edgePos1, dstNode1, ...]
+//	[srcNodeID, fwdPos0, dstNode0, dir0, fwdPos1, dstNode1, dir1, ...]
 //
-// buildIRProjection uses this to reconstruct an expr.PathValue.
+// (stride [exec.VLEHopStride] — one (forward edge position, destination,
+// direction marker) triple per hop). buildIRProjection uses this to
+// reconstruct an expr.PathValue.
 //
 // For a chained-VLE path pattern (`MATCH p = (a)-[*]->(b)-[*]->(c)`),
 // each VLE in the chain registers a segment in the `segments` field
@@ -163,11 +165,15 @@ type pathVarInfo struct {
 
 // pathVarSegment captures one VarLengthExpand's contribution to a
 // chained-VLE named path. listCol points at the flat alternating
-// ListValue this VLE emits ([srcID, edgePos0, dst0, ...]); edgeType
-// is the first declared RelTypes filter or empty.
+// ListValue this VLE emits ([srcID, fwdPos0, dst0, dir0, ...], stride
+// [exec.VLEHopStride]); edgeType is the first declared RelTypes filter or
+// empty and acceptedTypes is the full RelTypes list, used to disambiguate
+// which stored label to surface when an edge carries more than one accepted
+// type (rmp #1685, mirrors [edgeVarInfo.acceptedTypes]).
 type pathVarSegment struct {
-	listCol  int
-	edgeType string
+	listCol       int
+	edgeType      string
+	acceptedTypes []string
 }
 
 // pathChainStep describes one (relationship, destination-node) hop of a
@@ -194,13 +200,17 @@ type pathChainInfo struct {
 
 // vleRelInfo describes the schema column and edge-type filter for a
 // VarLengthExpand relationship variable. The column holds a flat
-// alternating ListValue [srcID, edgePos0, dst0, edgePos1, dst1, …];
-// buildIRProjection extracts each (edgePos, dst) pair and reconstructs
-// a RelationshipValue per hop so `RETURN r` for variable-length r
-// projects [[:T], [:T], …] instead of the raw integer list.
+// alternating ListValue [srcID, fwdPos0, dst0, dir0, fwdPos1, dst1, dir1, …]
+// (stride [exec.VLEHopStride]); buildIRProjection extracts each
+// (forward edge position, dst, direction) triple and reconstructs a
+// RelationshipValue per hop so `RETURN r` for variable-length r projects
+// [[:T], [:T], …] instead of the raw integer list. acceptedTypes is the full
+// declared RelTypes list, used to surface the correct per-instance type when
+// a parallel edge carries one of several accepted types (rmp #1685).
 type vleRelInfo struct {
-	listCol  int
-	edgeType string
+	listCol       int
+	edgeType      string
+	acceptedTypes []string
 }
 
 type buildOpts struct {
@@ -5354,9 +5364,11 @@ func buildOperator(
 		}
 
 		// VarLengthExpand emits: inputRow... || pathList || dstNodeID.
-		// pathList is a flat alternating ListValue: [srcID, edgePos0, dst0, ...].
-		// Always advance schema by 2 — anonymous slots receive synthetic keys so
-		// schemaWidth(schema) matches the actual row width.
+		// pathList is a flat alternating ListValue
+		// [srcID, fwdPos0, dst0, dir0, ...] (stride [exec.VLEHopStride]).
+		// Always advance schema by 2 — the two emitted COLUMNS (pathList and
+		// dstNodeID), independent of the per-hop list stride; anonymous slots
+		// receive synthetic keys so schemaWidth(schema) matches the row width.
 		schemaBaseVLE := schemaWidth(schema)
 		relKey := p.RelVar
 		if relKey == "" {
@@ -5382,6 +5394,7 @@ func buildOperator(
 			seg := pathVarSegment{listCol: schemaBaseVLE}
 			if len(p.RelTypes) > 0 {
 				seg.edgeType = p.RelTypes[0]
+				seg.acceptedTypes = append([]string(nil), p.RelTypes...)
 			}
 			info, exists := bopts.pathVarMeta[p.PathVar]
 			if !exists {
@@ -5403,6 +5416,7 @@ func buildOperator(
 			info := vleRelInfo{listCol: schemaBaseVLE}
 			if len(p.RelTypes) > 0 {
 				info.edgeType = p.RelTypes[0]
+				info.acceptedTypes = append([]string(nil), p.RelTypes...)
 			}
 			bopts.vleRelMeta[p.RelVar] = info
 		}
@@ -7570,7 +7584,7 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 // bound in the preceding MATCH pattern. Returns (zero, false) when the row
 // does not contain the expected columns or when the leading column does
 // not carry a recognisable node value.
-func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph[string, float64]) (expr.PathValue, bool) {
+func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.PathValue, bool) {
 	if cinfo.leadingCol >= len(row) {
 		return expr.PathValue{}, false
 	}
@@ -7600,48 +7614,25 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph
 			return expr.PathValue{}, false
 		}
 		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
-		et := step.edgeType
-		var edgeProps expr.MapValue
 		pathStart := nodes[len(nodes)-1].ID
 		pathEnd := dstNode.ID
-		storageStart := pathStart
-		storageEnd := pathEnd
-		if g != nil {
-			sKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(pathStart))
-			dKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(pathEnd))
-			if sOK && dOK {
-				if ets := g.EdgeLabels(sKey, dKey); len(ets) > 0 {
-					et = ets[0]
-					edgeProps = edgePropsToExprMap(g, sKey, dKey)
-				} else if ets := g.EdgeLabels(dKey, sKey); len(ets) > 0 {
-					et = ets[0]
-					edgeProps = edgePropsToExprMap(g, dKey, sKey)
-					storageStart = pathEnd
-					storageEnd = pathStart
-				}
-			}
-		}
-		rels = append(rels, expr.RelationshipValue{
-			ID:         uint64(edgeIDVal),
-			StartID:    storageStart,
-			EndID:      storageEnd,
-			Type:       et,
-			Properties: edgeProps,
-		})
+		reversed := leadingHopReversed(g, pathStart, pathEnd)
+		rels = append(rels, resolveHopRel(bopts, g, pathStart, pathEnd, uint64(edgeIDVal), reversed, step.edgeType, nil))
 		nodes = append(nodes, dstNode)
 	}
 	return expr.PathValue{Nodes: nodes, Relationships: rels}, true
 }
 
 // buildPathValueFromVLEMeta reconstructs an [expr.PathValue] from the flat
-// alternating ListValue [srcID, edgePos0, dst0, edgePos1, dst1, …] that the
+// alternating ListValue [srcID, fwdPos0, dst0, dir0, fwdPos1, dst1, dir1, …]
+// (stride [exec.VLEHopStride]) that the
 // VarLengthExpand operator deposits into the named-path column described by
 // pmeta. It mirrors the named-path-VLE fast path in buildIRProjection and is
 // factored out so that buildRowCtx can produce a real PathValue for
 // expression evaluation (e.g. `relationships(p)`, `nodes(p)`,
 // `length(p)` over var-length paths). Returns (zero, false) when the
 // column is missing, not a ListValue, empty, or carries non-integer entries.
-func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[string, float64]) (expr.PathValue, bool) {
+func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.PathValue, bool) {
 	segments := pmeta.segments
 	if len(segments) == 0 {
 		segments = []pathVarSegment{{listCol: pmeta.listCol, edgeType: pmeta.edgeType}}
@@ -7668,38 +7659,8 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 		}
 		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
 		prevID := nodes[len(nodes)-1].ID
-		et := step.edgeType
-		var edgeProps expr.MapValue
-		storageStart, storageEnd := prevID, dstNode.ID
-		if g != nil {
-			sKey, sR := g.AdjList().Mapper().Resolve(graph.NodeID(prevID))
-			dKey, dR := g.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
-			if sR && dR {
-				ets := g.EdgeLabels(sKey, dKey)
-				rawEP := g.EdgeProperties(sKey, dKey)
-				if len(ets) == 0 && len(rawEP) == 0 {
-					ets = g.EdgeLabels(dKey, sKey)
-					rawEP = g.EdgeProperties(dKey, sKey)
-					if len(ets) > 0 || len(rawEP) > 0 {
-						storageStart, storageEnd = dstNode.ID, prevID
-					}
-				}
-				if len(ets) > 0 {
-					et = ets[0]
-				}
-				edgeProps = make(expr.MapValue, len(rawEP))
-				for k, pv := range rawEP {
-					edgeProps[k] = lpgPropToExpr(pv)
-				}
-			}
-		}
-		rels = append(rels, expr.RelationshipValue{
-			ID:         uint64(edgeIDVal),
-			StartID:    storageStart,
-			EndID:      storageEnd,
-			Type:       et,
-			Properties: edgeProps,
-		})
+		reversed := leadingHopReversed(g, prevID, dstNode.ID)
+		rels = append(rels, resolveHopRel(bopts, g, prevID, dstNode.ID, uint64(edgeIDVal), reversed, step.edgeType, nil))
 		nodes = append(nodes, dstNode)
 	}
 	leadingNodeCount := len(nodes)
@@ -7714,7 +7675,7 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 		if len(lv) == 0 {
 			continue
 		}
-		nHops := (len(lv) - 1) / 2
+		nHops := (len(lv) - 1) / exec.VLEHopStride
 		if segIdx == 0 && leadingNodeCount == 0 {
 			leadID, ok2 := lv[0].(expr.IntegerValue)
 			if !ok2 {
@@ -7723,56 +7684,22 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 			nodes = append(nodes, buildNodeValueFromID(graph.NodeID(leadID), g))
 		}
 		for h := 0; h < nHops; h++ {
-			edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
-			dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
-			if !ok1 || !ok2 {
+			fwdPos, ok1 := lv[1+exec.VLEHopStride*h].(expr.IntegerValue)
+			dstIDVal, ok2 := lv[2+exec.VLEHopStride*h].(expr.IntegerValue)
+			dirVal, ok3 := lv[3+exec.VLEHopStride*h].(expr.IntegerValue)
+			if !ok1 || !ok2 || !ok3 {
 				return expr.PathValue{}, false
 			}
 			dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
 			if len(nodes) == 0 {
-				if iv, ok3 := lv[0].(expr.IntegerValue); ok3 {
+				if iv, ok4 := lv[0].(expr.IntegerValue); ok4 {
 					nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), g))
 				}
 			}
 			prev := nodes[len(nodes)-1]
 			nodes = append(nodes, dstNode)
-			et := seg.edgeType
-			var edgeProps expr.MapValue
-			storageStart, storageEnd := prev.ID, dstNode.ID
-			if g != nil {
-				srcKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(prev.ID))
-				dstKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
-				if sOK && dOK {
-					ets := g.EdgeLabels(srcKey, dstKey)
-					rawEP := g.EdgeProperties(srcKey, dstKey)
-					if len(ets) == 0 && len(rawEP) == 0 {
-						// Reverse pass of an undirected VLE: storage
-						// holds the edge as (dstKey -> srcKey). Swap the
-						// reported StartID/EndID so PathValue.String
-						// renders this hop with the inverted arrow
-						// (Match6 [14]).
-						ets = g.EdgeLabels(dstKey, srcKey)
-						rawEP = g.EdgeProperties(dstKey, srcKey)
-						if len(ets) > 0 || len(rawEP) > 0 {
-							storageStart, storageEnd = dstNode.ID, prev.ID
-						}
-					}
-					if len(ets) > 0 {
-						et = ets[0]
-					}
-					edgeProps = make(expr.MapValue, len(rawEP))
-					for k, pv := range rawEP {
-						edgeProps[k] = lpgPropToExpr(pv)
-					}
-				}
-			}
-			rels = append(rels, expr.RelationshipValue{
-				ID:         uint64(edgePos),
-				StartID:    storageStart,
-				EndID:      storageEnd,
-				Type:       et,
-				Properties: edgeProps,
-			})
+			reversed := int(dirVal) == exec.VLEDirReverse
+			rels = append(rels, resolveHopRel(bopts, g, prev.ID, dstNode.ID, uint64(fwdPos), reversed, seg.edgeType, seg.acceptedTypes))
 		}
 	}
 	if len(nodes) == 0 {
@@ -7899,7 +7826,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 		}
 		if bopts != nil && bopts.pathVarChain != nil {
 			if cinfo, isChain := bopts.pathVarChain[varName]; isChain {
-				if pv, ok := buildPathValueFromChainInfo(row, cinfo, g); ok {
+				if pv, ok := buildPathValueFromChainInfo(row, cinfo, g, bopts); ok {
 					ctx[varName] = pv
 					continue
 				}
@@ -7907,7 +7834,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 		}
 		if bopts != nil && bopts.pathVarMeta != nil {
 			if pmeta, isVLE := bopts.pathVarMeta[varName]; isVLE {
-				if pv, ok := buildPathValueFromVLEMeta(row, pmeta, g); ok {
+				if pv, ok := buildPathValueFromVLEMeta(row, pmeta, g, bopts); ok {
 					ctx[varName] = pv
 					continue
 				}
@@ -7915,7 +7842,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 		}
 		if bopts != nil && bopts.vleRelMeta != nil {
 			if rmeta, isVLERel := bopts.vleRelMeta[varName]; isVLERel {
-				if rl, ok := buildVLERelListFromRow(row, rmeta, g); ok {
+				if rl, ok := buildVLERelListFromRow(row, rmeta, g, bopts); ok {
 					ctx[varName] = rl
 					continue
 				}
@@ -8017,11 +7944,12 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 }
 
 // buildVLERelListFromRow reconstructs a List<RelationshipValue> from the
-// flat alternating [src, edgePos, dst, edgePos, dst, ...] ListValue emitted
+// flat alternating [src, fwdPos0, dst0, dir0, fwdPos1, dst1, dir1, ...]
+// ListValue (stride [exec.VLEHopStride]) emitted
 // by VarLengthExpand into the rel-variable column. Returns an empty list
 // for a zero-hop result (the variable evaluates to []) and (nil, false)
 // when the column is absent or not a ListValue.
-func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string, float64]) (expr.ListValue, bool) {
+func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.ListValue, bool) {
 	if rmeta.listCol >= len(row) {
 		return nil, false
 	}
@@ -8032,50 +7960,40 @@ func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string,
 	if len(lv) == 0 {
 		return expr.ListValue{}, true
 	}
-	nHops := (len(lv) - 1) / 2
+	rels := decodeVLEHops(lv, g, bopts, rmeta.edgeType, rmeta.acceptedTypes)
+	return rels, true
+}
+
+// decodeVLEHops walks the flat alternating VLE path list lv (stride
+// [exec.VLEHopStride], leading source node then one
+// (forward edge position, dst, direction) triple per hop) and reconstructs one
+// [expr.RelationshipValue] per hop, each carrying its OWN per-instance type and
+// properties via [resolveHopRel] (rmp #1685). It is the shared decode used by
+// both the `RETURN r` list form ([buildVLERelListFromRow]) and the inline
+// projection rel-list fast path, so the two stay congruent. declaredType /
+// accepted are the segment's relationship-type fallback and accepted-type
+// filter. A hop whose triple is not all integers is skipped, matching the prior
+// per-pair behaviour.
+func decodeVLEHops(lv expr.ListValue, g *lpg.Graph[string, float64], bopts *buildOpts, declaredType string, accepted []string) expr.ListValue {
+	nHops := (len(lv) - 1) / exec.VLEHopStride
 	rels := make(expr.ListValue, 0, nHops)
-	srcID := uint64(0)
-	if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
-		srcID = uint64(iv)
+	prevID := uint64(0)
+	if iv, ok := lv[0].(expr.IntegerValue); ok {
+		prevID = uint64(iv)
 	}
 	for h := 0; h < nHops; h++ {
-		edgeID, ok1 := lv[1+2*h].(expr.IntegerValue)
-		dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
-		if !ok1 || !ok2 {
+		fwdPos, ok1 := lv[1+exec.VLEHopStride*h].(expr.IntegerValue)
+		dstIDVal, ok2 := lv[2+exec.VLEHopStride*h].(expr.IntegerValue)
+		dirVal, ok3 := lv[3+exec.VLEHopStride*h].(expr.IntegerValue)
+		if !ok1 || !ok2 || !ok3 {
 			continue
 		}
 		dstID := uint64(dstIDVal)
-		et := rmeta.edgeType
-		var edgeProps expr.MapValue
-		if g != nil {
-			srcKey, sOK := g.AdjList().Mapper().Resolve(graph.NodeID(srcID))
-			dstKey, dOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
-			if sOK && dOK {
-				if ets := g.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
-					et = ets[0]
-				} else if ets := g.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
-					et = ets[0]
-				}
-				rawEP := g.EdgeProperties(srcKey, dstKey)
-				if len(rawEP) == 0 {
-					rawEP = g.EdgeProperties(dstKey, srcKey)
-				}
-				edgeProps = make(expr.MapValue, len(rawEP))
-				for k, pv := range rawEP {
-					edgeProps[k] = lpgPropToExpr(pv)
-				}
-			}
-		}
-		rels = append(rels, expr.RelationshipValue{
-			ID:         uint64(edgeID),
-			StartID:    srcID,
-			EndID:      dstID,
-			Type:       et,
-			Properties: edgeProps,
-		})
-		srcID = dstID
+		reversed := int(dirVal) == exec.VLEDirReverse
+		rels = append(rels, resolveHopRel(bopts, g, prevID, dstID, uint64(fwdPos), reversed, declaredType, accepted))
+		prevID = dstID
 	}
-	return rels, true
+	return rels
 }
 
 // buildRelationshipValueFromRow reconstructs a [expr.RelationshipValue] from
@@ -8219,6 +8137,113 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 		Type:       edgeType,
 		Properties: edgeProps,
 	}, true
+}
+
+// resolveHopRel hydrates one variable-length / path hop into a
+// [expr.RelationshipValue] carrying that hop's OWN per-instance relationship
+// type and properties, disambiguating multigraph parallel edges by their stable
+// per-edge handle (rmp #1685). It is the multi-hop analogue of
+// [buildRelationshipValueFromRow] and the single resolver every VLE / chained
+// path materialiser routes through, so the per-instance granularity stays
+// identical across the `RETURN r` list form, the `MATCH p=…` named-path form,
+// and both inline projection fast paths.
+//
+// The hop is described in TRAVERSAL terms: prevID is the preceding node, dstID
+// the hop's destination, fwdPos the FORWARD-CSR position of the physical edge
+// (handle-disambiguated by the operator), and reversed marks whether the hop
+// was taken against storage direction. From these:
+//
+//   - Storage endpoints. A forward hop stores the edge as prevID -> dstID, so
+//     the storage pair is (prevKey, dstKey) and the value is emitted with
+//     StartID=prevID / EndID=dstID. A reversed hop stores it as dstID -> prevID,
+//     so the storage pair is SWAPPED to (dstKey, prevKey) and the value is
+//     emitted with StartID=dstID / EndID=prevID. fwdPos always indexes the FIRST
+//     storage endpoint's forward adjacency (the operator's revToFwd resolved the
+//     reverse slot to exactly that forward position), so it pairs with the
+//     swapped storage order on a reversed hop.
+//
+//   - Direction rendering. Emitting the STORAGE StartID/EndID (not the traversal
+//     order) lets [expr.PathValue.String] infer the arrow: it compares the rel's
+//     StartID against the preceding path node, so a reversed hop (StartID=dstID,
+//     which differs from the preceding node prevID) renders `<-[…]-` with zero
+//     value-type change. The same physical edge traversed both ways therefore
+//     also compares EQUAL by relationship identity, because the ID below is the
+//     forward position in both directions.
+//
+//   - Type and properties. Recover the stable handle at fwdPos on the storage
+//     pair via [edgeHandleAtFwdPos]; when the by-handle MEMBERSHIP signal holds
+//     (a non-empty by-handle label set — Cypher CREATE/MERGE always records the
+//     mandatory type by-handle, so this also covers a zero-property parallel
+//     edge) resolve the type from [lpg.Graph.EdgeLabelsByHandle] and the
+//     properties from that ONE edge's by-handle store via [buildEdgeProps]. This
+//     is the same membership predicate and the same fallback ladder the
+//     single-hop path uses: a non-multigraph / legacy / 0-handle edge, and a
+//     Go-API edge that stamped a handle but wrote only the per-pair store, both
+//     fall back to the coalesced per-pair surfaces, byte-identical to the
+//     pre-#1685 build.
+//
+// declaredType is the pattern's relationship-type fallback (the segment's
+// edgeType) used only when the live graph resolves no label; accepted is the
+// pattern's accepted-type filter passed to [pickEdgeType]. g must be non-nil and
+// both endpoints must resolve through the mapper, else the hop is returned with
+// the declared type and no properties (the same degenerate behaviour the prior
+// per-pair materialisers had when resolution failed).
+func resolveHopRel(bopts *buildOpts, g *lpg.Graph[string, float64], prevID, dstID, fwdPos uint64, reversed bool, declaredType string, accepted []string) expr.RelationshipValue {
+	rel := expr.RelationshipValue{
+		ID:      fwdPos,
+		StartID: prevID,
+		EndID:   dstID,
+		Type:    declaredType,
+	}
+	if g == nil {
+		return rel
+	}
+	prevKey, prevOK := g.AdjList().Mapper().Resolve(graph.NodeID(prevID))
+	dstKey, dstOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+	if !prevOK || !dstOK {
+		return rel
+	}
+	// Storage pair and reported endpoints follow the traversal direction.
+	stKey, enKey := prevKey, dstKey
+	if reversed {
+		stKey, enKey = dstKey, prevKey
+		rel.StartID, rel.EndID = dstID, prevID
+	}
+	fwdHandle := edgeHandleAtFwdPos(bopts, g, stKey, enKey, fwdPos)
+	hasByHandleEntry := false
+	ets := g.EdgeLabels(stKey, enKey)
+	if fwdHandle != 0 {
+		if perHandle := g.EdgeLabelsByHandle(stKey, enKey, fwdHandle); len(perHandle) > 0 {
+			ets = perHandle
+			hasByHandleEntry = true
+		}
+	}
+	if len(ets) > 0 {
+		rel.Type = pickEdgeType(ets, accepted)
+	}
+	rel.Properties = buildEdgeProps(g, stKey, enKey, fwdHandle, hasByHandleEntry, nil)
+	return rel
+}
+
+// leadingHopReversed reports whether a fixed-length leading Expand hop from
+// prevID to dstID was traversed against storage direction, used to feed the
+// reversed flag of [resolveHopRel] for the leading-Expand hops that can precede
+// a VLE within the same named path (Match6 [14]). It mirrors the topology probe
+// in [buildRelationshipValueFromRow]: a hop is reversed when the forward edge
+// prevID -> dstID is absent but the reverse edge dstID -> prevID exists, so the
+// edge is stored as dstID -> prevID. When the forward edge exists (including
+// parallel-edge and self-loop cases) the hop is treated as forward. g is
+// assumed non-nil and the endpoints resolvable by the caller's contract.
+func leadingHopReversed(g *lpg.Graph[string, float64], prevID, dstID uint64) bool {
+	if g == nil {
+		return false
+	}
+	prevKey, prevOK := g.AdjList().Mapper().Resolve(graph.NodeID(prevID))
+	dstKey, dstOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+	if !prevOK || !dstOK {
+		return false
+	}
+	return !g.AdjList().HasEdge(prevKey, dstKey) && g.AdjList().HasEdge(dstKey, prevKey)
 }
 
 // relPresencePlaceholder is the non-null sentinel stamped under a presence-only
@@ -8700,10 +8725,15 @@ func buildIRProjection(
 				// VLE relationship-list fast path: reconstruct a list of
 				// RelationshipValues from the flat alternating ListValue
 				// emitted by VarLengthExpand into the rel-variable column.
+				// Shares [decodeVLEHops] with [buildVLERelListFromRow] so the
+				// projection and WHERE-clause forms report identical
+				// per-instance type/properties on multigraph parallel edges
+				// (rmp #1685).
 				if bopts != nil {
 					if rmeta, isVLERel := bopts.vleRelMeta[v.Name]; isVLERel {
 						capturedMeta := rmeta
 						capturedG := g
+						capturedBopts := bopts
 						evalFn = func(row exec.Row) (expr.Value, error) {
 							if capturedMeta.listCol >= len(row) {
 								return expr.Null, nil
@@ -8716,67 +8746,28 @@ func buildIRProjection(
 								// Empty path (0 hops, possible with *0..0 patterns).
 								return expr.ListValue{}, nil
 							}
-							// Flat format: [srcID, edgePos0, dst0, edgePos1, dst1, …].
-							nHops := (len(lv) - 1) / 2
-							rels := make(expr.ListValue, 0, nHops)
-							srcID := uint64(0)
-							if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
-								srcID = uint64(iv)
-							}
-							for h := 0; h < nHops; h++ {
-								edgeID, ok1 := lv[1+2*h].(expr.IntegerValue)
-								dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
-								if !ok1 || !ok2 {
-									continue
-								}
-								dstID := uint64(dstIDVal)
-								et := capturedMeta.edgeType
-								var edgeProps expr.MapValue
-								if capturedG != nil {
-									srcKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
-									dstKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
-									if sOK && dOK {
-										if ets := capturedG.EdgeLabels(srcKey, dstKey); len(ets) > 0 {
-											et = ets[0]
-										} else if ets := capturedG.EdgeLabels(dstKey, srcKey); len(ets) > 0 {
-											// Reverse-edge fall-back.
-											et = ets[0]
-										}
-										rawEP := capturedG.EdgeProperties(srcKey, dstKey)
-										if len(rawEP) == 0 {
-											rawEP = capturedG.EdgeProperties(dstKey, srcKey)
-										}
-										edgeProps = make(expr.MapValue, len(rawEP))
-										for k, pv := range rawEP {
-											edgeProps[k] = lpgPropToExpr(pv)
-										}
-									}
-								}
-								rels = append(rels, expr.RelationshipValue{
-									ID:         uint64(edgeID),
-									StartID:    srcID,
-									EndID:      dstID,
-									Type:       et,
-									Properties: edgeProps,
-								})
-								srcID = dstID
-							}
-							return rels, nil
+							return decodeVLEHops(lv, capturedG, capturedBopts, capturedMeta.edgeType, capturedMeta.acceptedTypes), nil
 						}
 					}
 				}
 				// Path variable fast path: reconstruct PathValue from the flat
 				// alternating ListValue(s) emitted by the VarLengthExpand
 				// operator(s) — one segment per VLE for a chained pattern
-				// (`MATCH p = (a)-[*]->(b)-[*]->(c)`). The segments slice is
-				// populated bottom-up so iteration in slice order walks the
-				// path left-to-right.
+				// (`MATCH p = (a)-[*]->(b)-[*]->(c)`). Delegates to the shared
+				// [buildPathValueFromVLEMeta] so the projection and the
+				// WHERE-clause / RowContext form report identical per-instance
+				// relationship type and properties on multigraph parallel edges
+				// (rmp #1685). The two special cases this fast path adds over
+				// the shared builder are the PathValue-forwarding shortcuts
+				// (post-aggregation and post-projection), handled inline before
+				// and after delegation.
 				if bopts != nil && evalFn == nil {
 					if pmeta, isPMeta := bopts.pathVarMeta[v.Name]; isPMeta {
 						capturedMeta := pmeta
 						capturedG := g
 						capturedName := v.Name
 						capturedSchema := inputSchema
+						capturedBopts := bopts
 						evalFn = func(row exec.Row) (expr.Value, error) {
 							if capturedMeta.listCol >= len(row) {
 								return expr.Null, nil
@@ -8794,160 +8785,24 @@ func buildIRProjection(
 									}
 								}
 							}
-							segments := capturedMeta.segments
-							if len(segments) == 0 {
-								// Legacy shape: synthesise a single segment
-								// from the top-level listCol/edgeType so the
-								// chained reconstruction below covers the
-								// uniform code path.
-								segments = []pathVarSegment{{
-									listCol:  capturedMeta.listCol,
-									edgeType: capturedMeta.edgeType,
-								}}
+							if pv, ok := buildPathValueFromVLEMeta(row, capturedMeta, capturedG, capturedBopts); ok {
+								return pv, nil
 							}
-							var nodes []expr.NodeValue
-							var rels []expr.RelationshipValue
-							// Prepend leading fixed-length Expand hops
-							// captured during plan build so a path that
-							// blends Expand + VLE (Match6 [14]) renders
-							// every hop, not just the VLE segment.
-							for i, lstep := range capturedMeta.leadingSteps {
-								if lstep.edgeCol >= len(row) || lstep.dstCol >= len(row) || lstep.srcCol >= len(row) {
-									break
-								}
-								edgeIDVal, e1 := row[lstep.edgeCol].(expr.IntegerValue)
-								dstIDVal, e2 := row[lstep.dstCol].(expr.IntegerValue)
-								srcIDVal, e3 := row[lstep.srcCol].(expr.IntegerValue)
-								if !e1 || !e2 || !e3 {
-									break
-								}
-								if i == 0 {
-									nodes = append(nodes, buildNodeValueFromID(graph.NodeID(srcIDVal), capturedG))
-								}
-								dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
-								prevID := nodes[len(nodes)-1].ID
-								et := lstep.edgeType
-								var edgeProps expr.MapValue
-								storageStart, storageEnd := prevID, dstNode.ID
-								if capturedG != nil {
-									sKey, sR := capturedG.AdjList().Mapper().Resolve(graph.NodeID(prevID))
-									dKey, dR := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
-									if sR && dR {
-										ets := capturedG.EdgeLabels(sKey, dKey)
-										rawEP := capturedG.EdgeProperties(sKey, dKey)
-										if len(ets) == 0 && len(rawEP) == 0 {
-											ets = capturedG.EdgeLabels(dKey, sKey)
-											rawEP = capturedG.EdgeProperties(dKey, sKey)
-											if len(ets) > 0 || len(rawEP) > 0 {
-												storageStart, storageEnd = dstNode.ID, prevID
-											}
-										}
-										if len(ets) > 0 {
-											et = ets[0]
-										}
-										edgeProps = make(expr.MapValue, len(rawEP))
-										for k, pv := range rawEP {
-											edgeProps[k] = lpgPropToExpr(pv)
-										}
-									}
-								}
-								rels = append(rels, expr.RelationshipValue{
-									ID:         uint64(edgeIDVal),
-									StartID:    storageStart,
-									EndID:      storageEnd,
-									Type:       et,
-									Properties: edgeProps,
-								})
-								nodes = append(nodes, dstNode)
+							// buildPathValueFromVLEMeta returns false when a
+							// segment column does not carry a ListValue. The one
+							// benign case is a single-segment path whose column
+							// already holds a forwarded PathValue (an earlier
+							// projection emitted it); forward it. Otherwise null.
+							segCount := len(capturedMeta.segments)
+							if segCount == 0 {
+								segCount = 1
 							}
-							leadingNodeCountInline := len(nodes)
-							for segIdx, seg := range segments {
-								if seg.listCol >= len(row) {
-									return expr.Null, nil
-								}
-								lv, ok := row[seg.listCol].(expr.ListValue)
-								if !ok {
-									// PathValue forwarded by an earlier
-									// projection; bail with the forwarded
-									// value when this is the only segment.
-									if pv, isPath := row[seg.listCol].(expr.PathValue); isPath && len(segments) == 1 {
-										return pv, nil
-									}
-									return expr.Null, nil
-								}
-								if len(lv) == 0 {
-									// Empty segment is degenerate: it
-									// contributes no hops and no nodes. The
-									// chain continues from the previous
-									// segment's tail.
-									continue
-								}
-								nHops := (len(lv) - 1) / 2
-								if segIdx == 0 && leadingNodeCountInline == 0 {
-									if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
-										nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), capturedG))
-									}
-								}
-								edgeType := seg.edgeType
-								for h := 0; h < nHops; h++ {
-									edgePos, ok1 := lv[1+2*h].(expr.IntegerValue)
-									dstIDVal, ok2 := lv[2+2*h].(expr.IntegerValue)
-									if !ok1 || !ok2 {
-										continue
-									}
-									dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
-									if len(nodes) == 0 {
-										// Defensive: a chained segment without
-										// a leading-node from segment 0 (e.g.
-										// the first segment emitted an empty
-										// list and we proceeded). Seed nodes
-										// from this segment's src.
-										if iv, ok2 := lv[0].(expr.IntegerValue); ok2 {
-											nodes = append(nodes, buildNodeValueFromID(graph.NodeID(iv), capturedG))
-										}
-									}
-									prev := nodes[len(nodes)-1]
-									nodes = append(nodes, dstNode)
-									et := edgeType
-									var edgeProps expr.MapValue
-									storageStart, storageEnd := prev.ID, dstNode.ID
-									if capturedG != nil {
-										srcKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(prev.ID))
-										dstKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstNode.ID))
-										if sOK && dOK {
-											ets := capturedG.EdgeLabels(srcKey, dstKey)
-											rawEP := capturedG.EdgeProperties(srcKey, dstKey)
-											if len(ets) == 0 && len(rawEP) == 0 {
-												// Reverse pass of an undirected VLE
-												// — Match6 [14]'s `<-[…]-` hops.
-												ets = capturedG.EdgeLabels(dstKey, srcKey)
-												rawEP = capturedG.EdgeProperties(dstKey, srcKey)
-												if len(ets) > 0 || len(rawEP) > 0 {
-													storageStart, storageEnd = dstNode.ID, prev.ID
-												}
-											}
-											if len(ets) > 0 {
-												et = ets[0]
-											}
-											edgeProps = make(expr.MapValue, len(rawEP))
-											for k, pv := range rawEP {
-												edgeProps[k] = lpgPropToExpr(pv)
-											}
-										}
-									}
-									rels = append(rels, expr.RelationshipValue{
-										ID:         uint64(edgePos),
-										StartID:    storageStart,
-										EndID:      storageEnd,
-										Type:       et,
-										Properties: edgeProps,
-									})
+							if segCount == 1 {
+								if pv, isPath := row[capturedMeta.listCol].(expr.PathValue); isPath {
+									return pv, nil
 								}
 							}
-							if len(nodes) == 0 {
-								return expr.Null, nil
-							}
-							return expr.PathValue{Nodes: nodes, Relationships: rels}, nil
+							return expr.Null, nil
 						}
 					}
 				}
@@ -9039,8 +8894,6 @@ func buildIRProjection(
 									return expr.Null, nil
 								}
 								dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), capturedG)
-								et := step.edgeType
-								var edgeProps expr.MapValue
 								// pathStart/pathEnd track the path's traversal
 								// order (preceding node → current dst). The
 								// edge's storage direction may run either way;
@@ -9051,34 +8904,21 @@ func buildIRProjection(
 								// alone returns whichever direction happens
 								// to be present, even when the row's edge ID
 								// references the OPPOSITE direction. Resolve
-								// the edge by ID via the bopts resolver to
-								// get the true storage endpoints.
+								// the edge by ID via the bopts resolver to get
+								// the true storage endpoints, then derive the
+								// traversal direction from them and hydrate the
+								// hop's per-instance type/properties through the
+								// shared resolver (rmp #1685).
 								pathStart := nodes[len(nodes)-1].ID
 								pathEnd := dstNode.ID
 								storageStart := pathStart
-								storageEnd := pathEnd
 								if resolver := ensureEdgeIDResolver(capturedBopts, capturedG); resolver != nil {
-									if rss, rsd, ok := resolver(uint64(edgeIDVal)); ok {
-										storageStart, storageEnd = rss, rsd
+									if rss, _, ok := resolver(uint64(edgeIDVal)); ok {
+										storageStart = rss
 									}
 								}
-								if capturedG != nil {
-									sKey, sOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(storageStart))
-									dKey, dOK := capturedG.AdjList().Mapper().Resolve(graph.NodeID(storageEnd))
-									if sOK && dOK {
-										if ets := capturedG.EdgeLabels(sKey, dKey); len(ets) > 0 {
-											et = ets[0]
-											edgeProps = edgePropsToExprMap(capturedG, sKey, dKey)
-										}
-									}
-								}
-								rels = append(rels, expr.RelationshipValue{
-									ID:         uint64(edgeIDVal),
-									StartID:    storageStart,
-									EndID:      storageEnd,
-									Type:       et,
-									Properties: edgeProps,
-								})
+								reversed := storageStart != pathStart
+								rels = append(rels, resolveHopRel(capturedBopts, capturedG, pathStart, pathEnd, uint64(edgeIDVal), reversed, step.edgeType, nil))
 								nodes = append(nodes, dstNode)
 							}
 							return expr.PathValue{Nodes: nodes, Relationships: rels}, nil

@@ -689,10 +689,10 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			// Apply's fresh-schema isolation. Layer a post-Apply
 			// Selection above that filters out rows where any inner
 			// VLE's traversed edge list contains the outer rel's id
-			// (Match4 [7]). The list at a VLE rel-var column is the
-			// flat alternating `[srcNode, edgePos0, dstNode0, …]`
-			// encoding emitted by VarLengthExpand, so the predicate
-			// indexes the odd positions only.
+			// (Match4 [7]). The predicate matches on the forward edge
+			// positions the VarLengthExpand flat list carries (one per
+			// hop triple, stride exec.VLEHopStride), so it is robust to
+			// the flat-list encoding details.
 			outerRels := keysOf(t.outerBoundRels)
 			vleRelVars := collectInnerVLERelVars(body)
 			for _, outerRel := range outerRels {
