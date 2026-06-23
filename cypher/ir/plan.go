@@ -1859,9 +1859,30 @@ type MergeRelationship struct {
 
 // KVAction is a (key, value) pair captured by the IR for MERGE
 // ON CREATE / ON MATCH SET items.
+//
+// A whole-entity REPLACE item (`SET <relVar> = {…}` or `SET <relVar> = node`,
+// the `=` operator) is encoded as a leading sentinel action with Replace=true,
+// Key="" and Value=="" for the map form (RetainKeys lists the RHS keys that
+// must survive the clear) or Value=="<sourceVar>" for the entity-copy form
+// (RetainKeys nil — the retained set is the source entity's live property keys,
+// resolved at write time). The sentinel is immediately followed by the per-key
+// write actions for the map form, so the exec layer clears the edge's existing
+// properties absent from the RHS before applying the writes. The mutate form
+// (`SET <relVar> += {…}`) carries Replace=false and is purely additive.
 type KVAction struct {
 	Key   string
 	Value string // opaque literal string (parsed at physical-build time)
+	// Replace marks the leading sentinel of a whole-entity `=` replace group.
+	// When true the exec layer clears the relationship's existing properties
+	// that are absent from the RHS before applying the subsequent write
+	// actions. Always false for the additive `+=` form and for
+	// single-property `SET <relVar>.<key> = <value>` items.
+	Replace bool
+	// RetainKeys lists the RHS property keys of a Replace map sentinel — the
+	// keys that must NOT be cleared. Nil for an entity-copy Replace sentinel
+	// (the retained set is the source entity's live keys, resolved at write
+	// time) and for non-Replace actions.
+	RetainKeys []string
 }
 
 // NewMergeRelationship creates a MergeRelationship operator without

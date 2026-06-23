@@ -79,10 +79,23 @@ type MergeRelationship struct {
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
-// MergeRelAction is a pre-parsed `SET <relVar>.<key> = <value>` item.
+// MergeRelAction is a pre-parsed `SET <relVar>.<key> = <value>` item, or a
+// whole-entity REPLACE sentinel (#1687).
+//
+// Three shapes:
+//   - Single-property write: key != "", value is the literal string.
+//   - Entity-copy: key == "", value == "<sourceVar>". When replace is true the
+//     edge's properties absent from the source entity are cleared first.
+//   - Replace-map sentinel: key == "", value == "", replace == true. retainKeys
+//     lists the RHS map keys; the edge's properties absent from retainKeys are
+//     cleared. The sentinel is immediately followed by the per-key write actions
+//     for the map, so the clear precedes the writes. An empty (non-nil)
+//     retainKeys clears every property (`SET r = {}`).
 type MergeRelAction struct {
-	key   string
-	value string // opaque literal string, parsed via parsePropValue
+	key        string
+	value      string // opaque literal string, parsed via parsePropValue
+	replace    bool   // whole-entity `=` replace (clear absent keys first)
+	retainKeys []string
 }
 
 // NewMergeRelationship constructs a MergeRelationship operator.
@@ -164,6 +177,22 @@ func (op *MergeRelationship) WithUndirected(u bool) *MergeRelationship {
 // string as it appears in the source query (e.g. `'foo'` or `42`).
 func MergeRelActionFromKV(key, value string) MergeRelAction {
 	return MergeRelAction{key: key, value: value}
+}
+
+// MergeRelActionReplaceFromKV constructs a MergeRelationship ON CREATE / ON
+// MATCH action carrying the whole-entity REPLACE marker (#1687). When replace
+// is true the action is either a replace-map sentinel (key == "", value == "",
+// retainKeys lists the RHS keys to keep) or an entity-copy replace
+// (key == "", value == "<sourceVar>", retainKeys nil → retain the source's
+// live keys). retainKeys is copied defensively so the caller may reuse its
+// slice. When replace is false this is equivalent to MergeRelActionFromKV.
+func MergeRelActionReplaceFromKV(key, value string, replace bool, retainKeys []string) MergeRelAction {
+	var rk []string
+	if retainKeys != nil {
+		rk = make([]string, len(retainKeys))
+		copy(rk, retainKeys)
+	}
+	return MergeRelAction{key: key, value: value, replace: replace, retainKeys: rk}
 }
 
 // Init initialises the operator and its child.
@@ -418,12 +447,26 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 // handle (simple-graph / pre-handle storage): the by-handle mirror is skipped and
 // only the per-pair store is written, byte-identical to the pre-#1684 behaviour.
 //
-// The entity-copy (SET r = node) loop is overwrite-only — it does not clear keys
-// absent from the source — and the by-handle mirror matches that exactly, key by
-// key, so by-handle stays congruent with per-pair for the matched edge.
+// A whole-entity REPLACE item (`SET r = {…}` / `SET r = node` with the `=`
+// operator) carries true openCypher REPLACE semantics (#1687): the edge's
+// existing properties that are absent from the right-hand side are cleared
+// before the RHS is applied. The clear is performed key by key via
+// DelEdgeProperty / DelEdgePropertyByHandle so it lands in the same
+// transaction (the mutator records each deletion's inverse on the undo log,
+// so a rolled-back statement restores the cleared values exactly) and the
+// by-handle store stays congruent with the per-pair store (#1684). The
+// mutate form (`SET r += {…}`) and single-property writes are additive: no
+// clear is performed.
 func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, handle uint64, actions []MergeRelAction) error {
 	for _, act := range actions {
-		// Entity-copy sentinel: key="" carries the source variable name in
+		// Replace-map sentinel: key=="" && value=="" && replace. Clear every
+		// existing edge property absent from retainKeys before the per-key
+		// write actions that follow apply the new values.
+		if act.replace && act.key == "" && act.value == "" {
+			op.clearRelPropsAbsent(srcKey, dstKey, handle, act.retainKeys)
+			continue
+		}
+		// Entity-copy sentinel: key=="" carries the source variable name in
 		// value. Resolve the variable to a node in the current row and
 		// copy every property of that node onto the relationship. Closes
 		// Merge6 [6] / Merge7 [4]: `ON CREATE/MATCH SET r = a`.
@@ -450,12 +493,22 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 			if !ok {
 				continue
 			}
-			// Overwrite-only copy, mirrored key-by-key to the by-handle store so
-			// both stores stay in lock-step (the per-pair `SET r = a` path is
-			// itself overwrite-only — it does not clear keys absent from the
-			// source; the by-handle mirror matches that exactly to keep
-			// by-handle == per-pair for the matched edge).
-			for k, v := range op.mutator.NodeProperties(nodeKey) {
+			srcProps := op.mutator.NodeProperties(nodeKey)
+			// REPLACE (`SET r = node`): clear the edge's properties absent
+			// from the source entity before the copy, so the edge ends up
+			// with exactly the source's property set (#1687). The mutate
+			// form (`SET r += node`) skips the clear and is additive.
+			if act.replace {
+				retain := make([]string, 0, len(srcProps))
+				for k := range srcProps {
+					retain = append(retain, k)
+				}
+				op.clearRelPropsAbsent(srcKey, dstKey, handle, retain)
+			}
+			// Copy, mirrored key-by-key to the by-handle store so both
+			// stores stay in lock-step (by-handle == per-pair for the
+			// matched edge, #1684).
+			for k, v := range srcProps {
 				if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, k, v); setErr != nil {
 					return fmt.Errorf("exec: MergeRelationship: SetEdgeProperty(entity-copy) %q: %w", k, setErr)
 				}
@@ -484,6 +537,39 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 		}
 	}
 	return nil
+}
+
+// clearRelPropsAbsent removes every property currently set on the directed
+// edge (srcKey, dstKey) whose key is NOT in retain, in lock-step on the
+// per-pair store and (when handle != 0) the by-handle store. It implements the
+// clear half of true openCypher REPLACE for `SET r = {…}` / `SET r = node`
+// (#1687).
+//
+// The deletions go through the mutator's DelEdgeProperty /
+// DelEdgePropertyByHandle, each of which records its inverse on the
+// transaction undo log, so a rolled-back statement restores the cleared values
+// exactly (atomicity). The retained set is taken from the per-pair snapshot;
+// because every per-pair write is mirrored by-handle (#1684) the by-handle
+// store holds the same key set, so clearing the same absent keys on both keeps
+// them congruent.
+func (op *MergeRelationship) clearRelPropsAbsent(srcKey, dstKey string, handle uint64, retain []string) {
+	existing := op.mutator.EdgeProperties(srcKey, dstKey)
+	if len(existing) == 0 {
+		return
+	}
+	keep := make(map[string]struct{}, len(retain))
+	for _, k := range retain {
+		keep[k] = struct{}{}
+	}
+	for k := range existing {
+		if _, ok := keep[k]; ok {
+			continue
+		}
+		op.mutator.DelEdgeProperty(srcKey, dstKey, k)
+		if handle != 0 {
+			op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, k)
+		}
+	}
 }
 
 // Close closes the child operator.

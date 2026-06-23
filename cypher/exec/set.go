@@ -524,6 +524,8 @@ func (op *SetProperty) applyToRelationship(ent entityBinding, row Row) error {
 		return op.setRelProp(ent, op.propertyKey, pv)
 	}
 	if op.merge {
+		// SET r += {…}: mutate — add/overwrite the listed keys, leave keys
+		// absent from the map untouched.
 		for _, p := range op.parsedMap {
 			if serr := op.setRelProp(ent, p.key, p.value); serr != nil {
 				return serr
@@ -531,9 +533,24 @@ func (op *SetProperty) applyToRelationship(ent entityBinding, row Row) error {
 		}
 		return nil
 	}
-	// SET r = {…}: replace is a merge for relationships (no full-property
-	// snapshot available without extending GraphMutator; consistent with the
-	// node implementation that reads NodeProperties first).
+	// SET r = {…}: true openCypher REPLACE (#1687). Drop every existing
+	// property on the edge that is absent from the map before writing the
+	// new values, in lock-step on the per-pair store and (when a stable
+	// handle is resolvable) the by-handle store — mirroring the node path
+	// (applyToNode) and the SetAllProperties replace path. The deletions go
+	// through delRelProp → DelEdgeProperty / DelEdgePropertyByHandle, each of
+	// which records its inverse on the transaction undo log, so a rolled-back
+	// statement restores the cleared values exactly.
+	keep := make(map[string]struct{}, len(op.parsedMap))
+	for _, p := range op.parsedMap {
+		keep[p.key] = struct{}{}
+	}
+	for k := range op.mutator.EdgeProperties(ent.relSrcKey, ent.relDstKey) {
+		if _, ok := keep[k]; ok {
+			continue
+		}
+		op.delRelProp(ent, k)
+	}
 	for _, p := range op.parsedMap {
 		if serr := op.setRelProp(ent, p.key, p.value); serr != nil {
 			return serr

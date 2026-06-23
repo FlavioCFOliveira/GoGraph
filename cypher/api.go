@@ -4020,14 +4020,14 @@ func buildOperatorWrite(
 		if len(p.OnCreate) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnCreate))
 			for _, kv := range p.OnCreate {
-				actions = append(actions, exec.MergeRelActionFromKV(kv.Key, kv.Value))
+				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys))
 			}
 			op = op.WithOnCreate(p.RelVar, actions)
 		}
 		if len(p.OnMatch) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnMatch))
 			for _, kv := range p.OnMatch {
-				actions = append(actions, exec.MergeRelActionFromKV(kv.Key, kv.Value))
+				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys))
 			}
 			op = op.WithOnMatch(p.RelVar, actions)
 		}

@@ -314,7 +314,17 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 //   - Literal-map form on relVar: `SET <relVar> = {…}` or
 //     `SET <relVar> += {…}` where the RHS is a *ast.MapLiteral whose
 //     keys are identifiers and values are themselves literals — each
-//     map entry produces a KVAction. Closes Merge6 [7].
+//     map entry produces a KVAction. The `=` (replace) form additionally
+//     prepends a Replace sentinel carrying the RHS key-set so the exec
+//     layer clears the edge's existing properties absent from the map
+//     before applying the writes (true openCypher REPLACE, #1687). The
+//     `+=` (mutate) form is purely additive and emits no sentinel. Closes
+//     Merge6 [7].
+//   - Entity-copy form on relVar: `SET <relVar> = <otherVar>` or
+//     `SET <relVar> += <otherVar>` — a single sentinel KVAction with
+//     Key="" and Value="<otherVar>"; for the `=` form Replace=true so the
+//     exec layer first clears keys absent from the source entity. Closes
+//     Merge6 [6] / Merge7 [4].
 //
 // Returns ok=false when any item is on a different target (label
 // assignment, entity copy from another bound entity, property on a
@@ -341,22 +351,19 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 			out = append(out, KVAction{Key: prop.Key, Value: item.Value.String()})
 			continue
 		}
-		// Literal-map form on relVar: SET relVar = {…} or SET relVar += {…}.
-		// Decompose the map into one KVAction per key. The "+=" form is a
-		// no-op for the property-merge semantics we already implement — each
-		// key is either overwritten or added — so both operators flow
-		// through the same per-key writes. The whole-entity REPLACE
-		// semantics of "=" (drop existing properties first) is NOT
-		// implemented here; only the additive subset.
+		// Whole-entity form on relVar: SET relVar = … or SET relVar += ….
 		if v, isVar := item.Target.(*ast.Variable); isVar && v.Name == relVar {
+			isReplace := item.Operator == "="
 			// Entity-copy form: SET relVar = otherVar — copy every
 			// property of otherVar (a bound node or relationship) onto
 			// the relationship. Encoded as a single sentinel KVAction
 			// with Key="" and Value="<otherVar>"; the exec layer
 			// resolves the source variable from the row at write time.
-			// Closes Merge6 [6] / Merge7 [4].
+			// For the `=` form Replace=true so the exec layer first
+			// clears keys absent from the source entity (true REPLACE,
+			// #1687). Closes Merge6 [6] / Merge7 [4].
 			if src, isSrcVar := item.Value.(*ast.Variable); isSrcVar && src.Name != relVar {
-				out = append(out, KVAction{Key: "", Value: src.Name})
+				out = append(out, KVAction{Key: "", Value: src.Name, Replace: isReplace})
 				continue
 			}
 			ml, isMap := item.Value.(*ast.MapLiteral)
@@ -369,6 +376,21 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 			allLit, _ := allMapValuesLiteral(ml)
 			if !allLit {
 				return nil, false
+			}
+			// For the `=` (replace) form, prepend a sentinel carrying the
+			// full RHS key-set so the exec layer drops every existing edge
+			// property absent from the map before applying the per-key
+			// writes. The `+=` (mutate) form is purely additive: no
+			// sentinel, keys absent from the map are left untouched.
+			if isReplace {
+				retain := make([]string, 0, len(ml.Keys))
+				for i := range ml.Keys {
+					if i >= len(ml.Values) {
+						break
+					}
+					retain = append(retain, ml.Keys[i])
+				}
+				out = append(out, KVAction{Key: "", Value: "", Replace: true, RetainKeys: retain})
 			}
 			for i, key := range ml.Keys {
 				if i >= len(ml.Values) {
