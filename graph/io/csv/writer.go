@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"io"
 	"strconv"
+	"unsafe"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -54,6 +55,14 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	// edge loop does not allocate a fresh []string per edge. csv.Writer.Write
 	// consumes the slice synchronously (it does not retain it), so reuse is safe.
 	row := make([]string, 3)
+	// weightScratch backs the weight cell so the hot loop pays no per-edge
+	// weight allocation: strconv.FormatInt heap-allocates for |weight| >= 100,
+	// whereas AppendInt into a reused buffer plus an unsafe.String view over
+	// it does not. The view is safe for the same reason the reused row is:
+	// csv.Writer.Write copies each field into its own buffer and retains
+	// neither the record nor its strings, so weightScratch is only ever
+	// overwritten after Write has returned (rmp #1523).
+	var weightScratch []byte
 	for id := uint64(0); id < maxID; id++ {
 		if !live[id] {
 			continue
@@ -82,7 +91,9 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if ws != nil {
 				weight = ws[i]
 			}
-			weightCell := strconv.FormatInt(weight, 10)
+			weightScratch = strconv.AppendInt(weightScratch[:0], weight, 10)
+			//nolint:gosec // zero-copy view of weightScratch; csv.Writer.Write consumes it synchronously (see weightScratch comment)
+			weightCell := unsafe.String(unsafe.SliceData(weightScratch), len(weightScratch))
 			if opts.SanitizeFormulae {
 				srcCell = sanitizeFormulaCell(srcCell)
 				dstCell = sanitizeFormulaCell(dstCell)
