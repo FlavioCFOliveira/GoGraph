@@ -236,7 +236,10 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		// label twice is idempotent. Ensure the requested type is
 		// recorded, then run ON MATCH actions.
 		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
-		if err := op.applyRelActions(row, srcKey, dstKey, op.onMatchActions); err != nil {
+		// Resolve the matched edge's by-pair handle so ON MATCH property writes
+		// mirror onto its by-handle store (#1684); 0 ⇒ per-pair store only.
+		matchedHandle, _ := op.mutator.FirstEdgeHandle(srcKey, dstKey)
+		if err := op.applyRelActions(row, srcKey, dstKey, matchedHandle, op.onMatchActions); err != nil {
 			return false, err
 		}
 		emitted := op.emitRow(row, srcID, dstID, srcKey, dstKey)
@@ -261,7 +264,10 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	// Closes Merge5 [13].
 	if op.undirected && op.mutator.HasEdge(dstKey, srcKey) && op.edgeHasRequestedType(dstKey, srcKey) && op.matchesRelProps(dstKey, srcKey) {
 		op.mutator.SetEdgeLabel(dstKey, srcKey, op.relType)
-		if err := op.applyRelActions(row, dstKey, srcKey, op.onMatchActions); err != nil {
+		// Reverse-direction match: the edge is stored (dstKey -> srcKey), so
+		// resolve and mirror against that stored pair (#1684).
+		matchedHandle, _ := op.mutator.FirstEdgeHandle(dstKey, srcKey)
+		if err := op.applyRelActions(row, dstKey, srcKey, matchedHandle, op.onMatchActions); err != nil {
 			return false, err
 		}
 		emitted := op.emitRow(row, dstID, srcID, dstKey, srcKey)
@@ -301,7 +307,10 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 			return false, fmt.Errorf("exec: MergeRelationship: SetEdgePropertyByHandle %q: %w", p.key, setErr)
 		}
 	}
-	if err := op.applyRelActions(row, srcKey, dstKey, op.onCreateActions); err != nil {
+	// ON CREATE actions target the edge just allocated above, so pass its known
+	// handle directly — in a multigraph FirstEdgeHandle could resolve a
+	// pre-existing parallel sibling's slot, not this new edge's (#1684).
+	if err := op.applyRelActions(row, srcKey, dstKey, handle, op.onCreateActions); err != nil {
 		return false, err
 	}
 	*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
@@ -390,16 +399,29 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 	return out
 }
 
-// applyRelActions sets every action's property on the (src, dst) edge
-// via the graph mutator. value parsing reuses parsePropValue (the same
-// helper the literal-property paths use) so the formats accepted are
-// consistent across MERGE / CREATE / SET. A null property value is
-// silently skipped — openCypher SET name = null on a missing property
-// is a no-op (and on an existing property the parsing path already
-// flags ErrPropertyValueIsNull which the SET-clause translator routes
-// to DelEdgeProperty; the merge fast-path simply skips since the
-// edge was just created with no such property).
-func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, actions []MergeRelAction) error {
+// applyRelActions applies each ON MATCH / ON CREATE SET action to the edge
+// (srcKey, dstKey) via the graph mutator. Value parsing reuses parsePropValue
+// (the same helper the literal-property paths use) so the formats accepted are
+// consistent across MERGE / CREATE / SET. A null property value is silently
+// skipped — openCypher SET name = null on a missing property is a no-op (and on
+// an existing property the SET-clause translator routes ErrPropertyValueIsNull
+// to DelEdgeProperty; the merge path simply skips).
+//
+// Every per-pair property write is mirrored onto the edge's by-handle store
+// (#1684) under handle, so the by-handle READ path reports the post-action value
+// rather than a stale CREATE-time snapshot (Merge7 [1]-[5]). handle is the stable
+// per-edge handle of the edge the actions target: the just-allocated handle on
+// the ON CREATE path, or the matched edge's by-PAIR first-slot handle (via
+// [GraphMutator.FirstEdgeHandle]) on the ON MATCH path. MERGE binds a single
+// logical (srcKey, dstKey) edge, so the by-pair handle is the right identity —
+// not a positional instance handle. handle == 0 means the edge carries no stable
+// handle (simple-graph / pre-handle storage): the by-handle mirror is skipped and
+// only the per-pair store is written, byte-identical to the pre-#1684 behaviour.
+//
+// The entity-copy (SET r = node) loop is overwrite-only — it does not clear keys
+// absent from the source — and the by-handle mirror matches that exactly, key by
+// key, so by-handle stays congruent with per-pair for the matched edge.
+func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, handle uint64, actions []MergeRelAction) error {
 	for _, act := range actions {
 		// Entity-copy sentinel: key="" carries the source variable name in
 		// value. Resolve the variable to a node in the current row and
@@ -428,9 +450,19 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, act
 			if !ok {
 				continue
 			}
+			// Overwrite-only copy, mirrored key-by-key to the by-handle store so
+			// both stores stay in lock-step (the per-pair `SET r = a` path is
+			// itself overwrite-only — it does not clear keys absent from the
+			// source; the by-handle mirror matches that exactly to keep
+			// by-handle == per-pair for the matched edge).
 			for k, v := range op.mutator.NodeProperties(nodeKey) {
 				if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, k, v); setErr != nil {
 					return fmt.Errorf("exec: MergeRelationship: SetEdgeProperty(entity-copy) %q: %w", k, setErr)
+				}
+				if handle != 0 {
+					if setErr := op.mutator.SetEdgePropertyByHandle(srcKey, dstKey, handle, k, v); setErr != nil {
+						return fmt.Errorf("exec: MergeRelationship: SetEdgePropertyByHandle(entity-copy) %q: %w", k, setErr)
+					}
 				}
 			}
 			continue
@@ -444,6 +476,11 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, act
 		}
 		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, act.key, v); setErr != nil {
 			return fmt.Errorf("exec: MergeRelationship: SetEdgeProperty: %w", setErr)
+		}
+		if handle != 0 {
+			if setErr := op.mutator.SetEdgePropertyByHandle(srcKey, dstKey, handle, act.key, v); setErr != nil {
+				return fmt.Errorf("exec: MergeRelationship: SetEdgePropertyByHandle: %w", setErr)
+			}
 		}
 	}
 	return nil

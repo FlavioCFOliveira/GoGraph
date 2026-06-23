@@ -63,6 +63,10 @@ type stubMutator struct {
 	// forward-CSR edge position so the write operators exercise the by-handle
 	// dual-write path. nil ⇒ EdgeHandleAtPosition returns 0 (per-pair only).
 	handleAt func(src, dst string, edgePos uint64) uint64
+	// firstHandle, when set, resolves the by-pair first-slot handle so the MERGE
+	// ON MATCH / ON CREATE action path exercises the by-handle dual-write.
+	// nil ⇒ FirstEdgeHandle returns (0, false) (per-pair only).
+	firstHandle func(src, dst string) (uint64, bool)
 }
 
 func newStubMutator() *stubMutator {
@@ -333,6 +337,13 @@ func (s *stubMutator) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint
 		return 0
 	}
 	return s.handleAt(src, dst, edgePos)
+}
+
+func (s *stubMutator) FirstEdgeHandle(src, dst string) (uint64, bool) {
+	if s.firstHandle == nil {
+		return 0, false
+	}
+	return s.firstHandle(src, dst)
 }
 
 // EdgeLabels returns the edge labels for (src, dst). Reads from the

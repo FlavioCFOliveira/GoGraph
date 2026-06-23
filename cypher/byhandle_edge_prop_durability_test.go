@@ -351,3 +351,63 @@ func TestByHandleEdgeProp_SetNull_WALReplay(t *testing.T) {
 	t.Parallel()
 	runByHandleRemoveReopen(t, true, false)
 }
+
+// runByHandleMergeOnMatchReopen mirrors runByHandleSetReopen but mutates the
+// matched edge via MERGE ... ON MATCH SET rather than a bare SET clause. The
+// MERGE ON MATCH / ON CREATE action path mirrors its per-pair property writes
+// onto the matched edge's by-handle store (#1684, the read-routing's foundation
+// in the MERGE path); this asserts that mutation is durable — it survives a store
+// reopen and lands on exactly the matched parallel instance, leaving the sibling
+// untouched. The by-handle write reuses #1686's OpSetEdgePropertyByHandle WAL op,
+// so this also exercises that op being emitted from the MERGE path.
+func runByHandleMergeOnMatchReopen(t *testing.T, snap bool) {
+	t.Helper()
+	dir := t.TempDir()
+	bhWriteCycle(t, dir, snap, `CREATE (a:N {key:'x'})`)
+	bhWriteCycle(t, dir, snap, `CREATE (b:N {key:'y'})`)
+	bhWriteCycle(t, dir, snap, `MATCH (a:N {key:'x'}),(b:N {key:'y'}) CREATE (a)-[:USES {w:1}]->(b)`)
+	bhWriteCycle(t, dir, snap, `MATCH (a:N {key:'x'}),(b:N {key:'y'}) CREATE (a)-[:CALLS {w:2}]->(b)`)
+
+	// MERGE matches the existing USES edge and mutates it via ON MATCH SET; the
+	// by-handle mirror must land on that instance only.
+	bhWriteCycle(t, dir, snap, `MATCH (a:N {key:'x'}),(b:N {key:'y'}) MERGE (a)-[r:USES]->(b) ON MATCH SET r.tag = 'via-merge'`)
+
+	perInstance := byHandleValuesForPair(t, dir, "x", "y")
+	if len(perInstance) != 2 {
+		t.Fatalf("snap=%v: expected 2 parallel by-handle instances, got %d: %v", snap, len(perInstance), perInstance)
+	}
+	withWant, withKey := countByHandleWith(perInstance, "tag", "via-merge")
+	if withWant != 1 || withKey != 1 {
+		t.Fatalf("snap=%v: MERGE ON MATCH SET must touch exactly one by-handle instance: tag='via-merge' on %d, present on %d; full=%v",
+			snap, withWant, withKey, perInstance)
+	}
+	// The CALLS sibling must keep its CREATE-time w and never gain the tag.
+	for _, props := range perInstance {
+		if w, ok := props["w"]; ok {
+			if iv, ok := w.Int64(); ok && iv == 2 {
+				if _, hasTag := props["tag"]; hasTag {
+					t.Fatalf("snap=%v: CALLS sibling corrupted with the MERGE tag: %v", snap, props)
+				}
+			}
+		}
+	}
+	// Per-pair read (authoritative) must also see the tag on the USES match.
+	if got := perPairValueAfterReopen(t, dir, "USES", "tag"); len(got) != 1 || got[0] != "via-merge" {
+		t.Fatalf("snap=%v: per-pair read of USES.tag after reopen = %v, want [via-merge]", snap, got)
+	}
+}
+
+// TestByHandleEdgeProp_MergeOnMatch_WALReplay verifies a MERGE ON MATCH SET on
+// one of two parallel edges maintains the by-handle store on exactly that
+// instance and survives pure WAL-replay recovery (#1684 MERGE-path dual-write).
+func TestByHandleEdgeProp_MergeOnMatch_WALReplay(t *testing.T) {
+	t.Parallel()
+	runByHandleMergeOnMatchReopen(t, false)
+}
+
+// TestByHandleEdgeProp_MergeOnMatch_Snapshot verifies the same across the
+// self-sufficient snapshot recovery path.
+func TestByHandleEdgeProp_MergeOnMatch_Snapshot(t *testing.T) {
+	t.Parallel()
+	runByHandleMergeOnMatchReopen(t, true)
+}

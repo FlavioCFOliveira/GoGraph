@@ -6903,6 +6903,45 @@ func edgePropsToExprMap(g *lpg.Graph[string, float64], srcKey, dstKey string) ex
 	return edgeProps
 }
 
+// edgePropsByHandleToExprMap builds the relationship property map for the SINGLE
+// parallel edge instance identified by handle on the directed pair
+// (srcKey -> dstKey), rather than the latest-wins coalesced union over every
+// parallel slot that [edgePropsToExprMap] returns. It is the per-instance
+// counterpart used to give a bound relationship variable its OWN properties when
+// several parallel edges connect the same node pair (rmp #1684): two edges
+// (a)-[:R1 {w:10}]->(b) and (a)-[:R2 {w:20}]->(b) must each report their own w,
+// not a merged value.
+//
+// It reads the per-handle property store via [lpg.Graph.EdgePropertiesByHandle]
+// (which both write paths — CreateRelationship and MergeRelationship — populate
+// per CSR slot) and applies the SAME [lpgPropToExpr] conversion as the per-pair
+// builder, so the resulting values are byte-identical in shape: temporals stored
+// as SOH-tagged strings decode to native temporal values, and a stored PropTime /
+// PropBytes maps to expr.Null exactly as it would through the coalesced path
+// (the temporal storage contract, graph/lpg/edge_property.go). Returns nil (an
+// absent map) when the handle is 0, was never written, or the pair carries no
+// properties for it — the caller then falls back to the per-pair map.
+//
+// Designed as the reusable by-handle property accessor: it is keyed purely on
+// (srcKey, dstKey, handle) so the same primitive serves the path / VLE renderers
+// (rmp #1685) without a per-call-site copy.
+//
+// Isolation: it returns a freshly owned map and aliases no graph-internal state;
+// it is safe for concurrent use under the same per-shard contract as
+// [lpg.Graph.EdgePropertiesByHandle]. To read a view consistent with the
+// adjacency layer, the caller brackets the correlated reads under [lpg.Graph.View].
+func edgePropsByHandleToExprMap(g *lpg.Graph[string, float64], srcKey, dstKey string, handle uint64) expr.MapValue {
+	raw := g.EdgePropertiesByHandle(srcKey, dstKey, handle)
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(expr.MapValue, len(raw))
+	for name, pv := range raw {
+		out[name] = lpgPropToExpr(pv)
+	}
+	return out
+}
+
 func lpgPropToExpr(pv lpg.PropertyValue) expr.Value {
 	switch pv.Kind() {
 	case lpg.PropString:
@@ -8125,11 +8164,38 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 			// (rmp #1634). Falls back to the positional idx when no handle
 			// column is present or the slot's handle is 0 (a MERGE-created
 			// edge).
+			//
+			// fwdHandle, recovered once here, is the SHARED disambiguator for
+			// both the type and the property resolution of this bound instance
+			// (rmp #1684): it is the stable per-edge handle at the row's forward
+			// CSR position, or 0 when no handle column is present or the slot's
+			// handle is the 0 sentinel. The type path consumes it inline below;
+			// buildEdgeProps reuses the SAME handle so r.foo / properties(r) /
+			// RETURN r report the bound edge's OWN properties rather than the
+			// latest-wins union over parallel siblings — keeping the property
+			// granularity congruent with the type granularity.
 			handled := false
-			if h := edgeHandleAtFwdPos(bopts, g, stKey, enKey, uint64(edgeIDVal)); h != 0 {
-				if perHandle := g.EdgeLabelsByHandle(stKey, enKey, h); len(perHandle) > 0 {
+			fwdHandle := edgeHandleAtFwdPos(bopts, g, stKey, enKey, uint64(edgeIDVal))
+			// hasByHandleEntry is the by-handle MEMBERSHIP signal that gates the
+			// property routing below (rmp #1684). A non-zero fwdHandle is NOT on
+			// its own sufficient: the public Go API (Graph.AddEdge[H] +
+			// Graph.SetEdgeProperty) stamps a handle on the slot but writes the
+			// per-pair store ONLY, leaving the by-handle store with NO entry — so
+			// routing such an edge's reads by-handle would drop all its properties.
+			// Cypher CREATE/MERGE always record the (mandatory, immutable)
+			// relationship TYPE by-handle, so a per-instance edge — even one with
+			// zero properties — always has a by-handle LABEL entry. The label entry
+			// is therefore the reliable presence marker: it survives an emptied
+			// property bag (REMOVE of the last property prunes the bag but never the
+			// label), so a zero-property Cypher parallel edge still routes
+			// by-handle and reports keys(r)=[] / r.x IS NULL without leaking a
+			// propertied sibling's keys. len(perHandle) > 0 captures it here.
+			hasByHandleEntry := false
+			if fwdHandle != 0 {
+				if perHandle := g.EdgeLabelsByHandle(stKey, enKey, fwdHandle); len(perHandle) > 0 {
 					ets = perHandle
 					handled = true
+					hasByHandleEntry = true
 				}
 			}
 			if !handled {
@@ -8143,7 +8209,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 			if len(ets) > 0 {
 				edgeType = pickEdgeType(ets, meta.acceptedTypes)
 			}
-			edgeProps = buildEdgeProps(g, stKey, enKey, relUse)
+			edgeProps = buildEdgeProps(g, stKey, enKey, fwdHandle, hasByHandleEntry, relUse)
 		}
 	}
 	return expr.RelationshipValue{
@@ -8182,15 +8248,60 @@ var relPresencePlaceholder = expr.BoolValue(true)
 //     map for exactly the present presence keys, resolved via
 //     [lpg.Graph.EdgeHasProperty]; absent keys are omitted so IS NULL sees null.
 //
-// C9 holds because EdgeProperties, EdgeHasProperty, and the key enumeration all
-// expose the same per-pair coalesced view. In every field-extractor / presence
-// case the relationship value carries no real property value, so only the
-// scalar/list the function extracts ever escapes into a result row (#1659 / #1638).
-func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, relUse *nodeScalarUse) expr.MapValue {
+// fwdHandle, gated by hasByHandleEntry, disambiguates parallel edges (rmp #1684).
+// hasByHandleEntry is the by-handle MEMBERSHIP signal resolved in
+// [buildRelationshipValueFromRow]: the bound relationship has a by-handle entry
+// (its mandatory type was recorded by-handle by Cypher CREATE/MERGE, or a
+// property was). When it holds (and fwdHandle is non-zero), the row's bound
+// relationship is a SPECIFIC parallel instance and every branch sources from that
+// ONE edge's per-handle property store ([edgePropsByHandleToExprMap]) instead of
+// the latest-wins coalesced union over all parallel slots, so r.foo /
+// properties(r) / RETURN r / keys(r) / r.k IS [NOT] NULL all report THAT edge's
+// own state — congruent with the already-per-instance type(r). A zero-property
+// Cypher parallel edge still routes by-handle (its by-handle TYPE entry sets the
+// signal) and correctly reports keys(r)=[] / r.x IS NULL without leaking a
+// propertied sibling's keys.
+//
+// Otherwise every branch falls back to the per-pair coalesced surfaces,
+// byte-identical to the original build. The fallback covers (a) a non-multigraph
+// / legacy / 0-sentinel edge (fwdHandle == 0), AND (b) an edge created through
+// the public Go API (Graph.AddEdge[H] + Graph.SetEdgeProperty), which stamps a
+// handle but writes the per-pair store ONLY, so it has NO by-handle entry and
+// per-pair is its sole materialised property mapping (hasByHandleEntry false). It
+// is the same fallback ladder the type path uses above.
+//
+// C9 holds because, on each side of the fallback, the value map, the presence
+// test, and the key enumeration expose the same view: per-handle when the by-
+// handle entry is present (all three read the one by-handle map, kind-gated as
+// below), per-pair coalesced otherwise. In every field-extractor / presence case
+// the relationship value carries no real property value, so only the scalar/list
+// the function extracts ever escapes into a result row (#1659 / #1638).
+//
+// Kind gating on the by-handle path: [edgePropsByHandleToExprMap] runs each value
+// through lpgPropToExpr, so a stored PropTime / PropBytes is already expr.Null in
+// the map. keys(r) and the presence test therefore treat a null-mapping key as
+// ABSENT (the same rule [lpg.Graph.EdgeHasProperty]'s kindMapsToNonNullCypher
+// enforces on the per-pair path), keeping keys(r) congruent with
+// r.k IS [NOT] NULL on the bound instance.
+func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, fwdHandle uint64, hasByHandleEntry bool, relUse *nodeScalarUse) expr.MapValue {
+	// useByHandle is the single routing decision shared by all branches so the
+	// whole map, keys(r), and the presence test stay congruent. The property-map
+	// disjunct (a non-empty by-handle bag) is load-bearing for any future writer
+	// that records a by-handle property without a by-handle label; today every
+	// by-handle edge also has its type recorded, which is what hasByHandleEntry
+	// already captures from the type-resolution path.
+	var byHandle expr.MapValue
+	if fwdHandle != 0 {
+		byHandle = edgePropsByHandleToExprMap(g, stKey, enKey, fwdHandle)
+	}
+	useByHandle := fwdHandle != 0 && (hasByHandleEntry || len(byHandle) > 0)
 	if relUse != nil && !relUse.needsWholeNode && len(relUse.keys) == 0 {
 		switch {
 		case relUse.needsKeyNames:
 			// keys(r): enumerate the key set, no value boxing.
+			if useByHandle {
+				return keyNamesFromExprMap(byHandle)
+			}
 			rawEP := g.EdgeProperties(stKey, enKey)
 			if len(rawEP) == 0 {
 				return nil
@@ -8204,7 +8315,7 @@ func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, relUse *
 			// r.k IS [NOT] NULL only (#1638): presence placeholders.
 			var out expr.MapValue
 			for k := range relUse.presenceKeys {
-				if g.EdgeHasProperty(stKey, enKey, k) {
+				if relPresentByHandleOrPair(g, stKey, enKey, useByHandle, byHandle, k) {
 					if out == nil {
 						out = make(expr.MapValue, len(relUse.presenceKeys))
 					}
@@ -8217,12 +8328,54 @@ func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, relUse *
 			return nil
 		}
 	}
-	// Whole-relationship / value-key path (needsWholeNode or use.keys): the full
-	// coalesced property map, byte-identical to the original inline build (C5).
-	// Stream the values straight into the expr map so the transient lpg
-	// map[string]PropertyValue the two-step build allocated per row is gone
-	// (M2 / #1662); #1659's field-extractor partial paths above are unaffected.
+	// Whole-relationship / value-key path (needsWholeNode or use.keys). With a
+	// disambiguating by-handle entry, the bound instance's own properties (#1684);
+	// else the full coalesced property map, byte-identical to the original inline
+	// build (C5). Streaming the per-pair values straight into the expr map keeps
+	// the transient lpg map[string]PropertyValue the two-step build allocated per
+	// row gone (M2 / #1662); #1659's field-extractor partial paths above are
+	// unaffected.
+	if useByHandle {
+		return byHandle
+	}
 	return edgePropsToExprMap(g, stKey, enKey)
+}
+
+// keyNamesFromExprMap projects a value map to a keys(r)-shaped KEY-NAMES map:
+// every key whose value is non-null, each under [relPresencePlaceholder] with no
+// value boxing. A key whose value is expr.Null is dropped, so a property that
+// maps to Cypher null (a stored temporal / bytes value) is absent from keys(r) —
+// congruent with [lpg.Graph.EdgeHasProperty]'s kind gating and with the presence
+// test (rmp #1684). Returns nil (an absent map) when no key survives.
+func keyNamesFromExprMap(m expr.MapValue) expr.MapValue {
+	if len(m) == 0 {
+		return nil
+	}
+	var out expr.MapValue
+	for k, v := range m {
+		if expr.IsNull(v) {
+			continue
+		}
+		if out == nil {
+			out = make(expr.MapValue, len(m))
+		}
+		out[k] = relPresencePlaceholder
+	}
+	return out
+}
+
+// relPresentByHandleOrPair reports whether key k reads back as a NON-NULL Cypher
+// value on the bound relationship. When useByHandle holds (byHandle is the bound
+// instance's converted map) it tests THAT edge's own value — present iff the key
+// is in the map and not expr.Null — so a parallel sibling's value never leaks
+// into the answer (rmp #1684). Otherwise it defers to the per-pair kind-gated
+// fast path [lpg.Graph.EdgeHasProperty], byte-identical to the prior behaviour.
+func relPresentByHandleOrPair(g *lpg.Graph[string, float64], stKey, enKey string, useByHandle bool, byHandle expr.MapValue, k string) bool {
+	if useByHandle {
+		v, ok := byHandle[k]
+		return ok && !expr.IsNull(v)
+	}
+	return g.EdgeHasProperty(stKey, enKey, k)
 }
 
 // edgeHandleAtFwdPos returns the stable per-edge handle stored at forward
@@ -10092,6 +10245,15 @@ func (a *lpgMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64
 	return edgeHandleAtFwdPos(a.bopts, a.g, src, dst, edgePos)
 }
 
+// FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
+// delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
+// ON CREATE action path to mirror per-pair property writes onto the matched
+// edge's by-handle store. The boolean is false (and the handle 0) when no
+// handled src→dst slot exists.
+func (a *lpgMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
+	return a.g.FirstEdgeHandle(src, dst)
+}
+
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 	var out []string
@@ -10629,6 +10791,15 @@ func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // when no handle is resolvable; the caller then mutates the per-pair store only.
 func (a *walMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
 	return edgeHandleAtFwdPos(a.bopts, a.g, src, dst, edgePos)
+}
+
+// FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
+// delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
+// ON CREATE action path to mirror per-pair property writes onto the matched
+// edge's by-handle store. The boolean is false (and the handle 0) when no
+// handled src→dst slot exists.
+func (a *walMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
+	return a.g.FirstEdgeHandle(src, dst)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
