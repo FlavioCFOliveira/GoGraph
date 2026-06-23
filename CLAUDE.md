@@ -326,9 +326,33 @@ The module is organised around three concerns:
 
 ## Examples
 
-Every example under `examples/` serves **two equally important objectives**:
+Examples are **not an integral part of the GoGraph module** — the module neither imports nor depends on them. They are **instruments**: their sole role is to exercise GoGraph's features, both individually and in combination, under realistic conditions so that the module's behaviour can be observed and measured.
 
-1. **Demonstration** — show, in a realistic end-to-end application, how the GoGraph module can be used in practice.
-2. **Exercise and evidence** — drive the GoGraph module through diverse, realistic scenarios in order to observe its behaviour and gather evidence.
+### Organisation
 
-Treat every example as a **real simulation of the graph**, not a throwaway toy. Because the examples exercise the module under realistic conditions, observing them and collecting evidence — performance profiles, memory and allocation behaviour, contention signals, correctness observations — is **strongly encouraged** as a means to improve GoGraph. Feed any insight that emerges back into the project (Knowledge Graph, benchmarks under `docs/benchmarks/`, and the `rmp` backlog) so the examples continuously inform the module's evolution.
+- All demonstrative examples live under a single `examples/` folder at the **root** of the project.
+- Each example is contained in its **own dedicated sub-folder** under `examples/`, used exclusively for that one example. No example shares a sub-folder with another.
+- Each example sub-folder **must** contain a `README.md` that describes, in detail, the example's **scenario**, **objective**, and **purpose** — what real-world situation it models and what it sets out to demonstrate and measure.
+
+### Mandate
+
+Every example must **always** be realistic and a **faithful end-to-end demonstration** of using GoGraph. An example is never a throwaway toy: it is a real simulation of a scenario that, when run, lets us observe GoGraph's behaviour and understand its performance **objectively and empirically**.
+
+Every example serves **three equally important objectives**:
+
+1. **Demonstration** — a didactic, end-to-end illustration of how GoGraph can be used for a given scenario or purpose.
+2. **Exercise** — drive the GoGraph features most appropriate to the example's scenario and overall purpose. Exercise the module not only through its most basic features but also through its most advanced ones, including the **combination of multiple features** working together.
+3. **Evidence** — enable the objective and explicit collection of evidence while the features are exercised, so that **all** of GoGraph's performance vectors — memory (RAM), CPU, and storage — can be evaluated clearly.
+
+### Evidence and tooling
+
+Assess performance empirically, never by intuition: every claim about CPU, RAM, or storage must rest on collected data — the [Measure to decide](#measure-to-decide) principle applied to examples. Use the tools best suited to the Go technology stack to observe each behaviour in detail and to draw conclusions strictly from that data:
+
+- **CPU and heap profiling** — capture `pprof` profiles (`runtime/pprof`, `net/http/pprof`) to attribute CPU time and allocations to specific call sites.
+- **Allocations and latency** — drive the exercised paths under `go test -bench=. -benchmem` and compare runs with `benchstat`.
+- **Live memory and GC** — sample `runtime.MemStats`, and run under `GODEBUG=gctrace=1` where GC behaviour is relevant, to track resident heap and its growth.
+- **Storage footprint** — measure the on-disk size of the store directory and how it grows across the workload.
+
+Each example surfaces its measurements as explicit telemetry so the evidence can be inspected and compared run to run.
+
+Because the examples exercise the module under realistic conditions, treat them as a primary means to evaluate GoGraph and to identify **all** opportunities to improve its use of CPU, RAM, and storage. Feed every insight that emerges back into the project (Knowledge Graph, benchmarks under `docs/benchmarks/`, and the `rmp` backlog) so the examples continuously inform the module's evolution.
