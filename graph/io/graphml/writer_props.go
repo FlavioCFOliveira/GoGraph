@@ -228,7 +228,6 @@ type propKeyDecl struct {
 // declaration only their properties would justify, so an export→import
 // round trip never resurrects deleted data.
 func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) error {
-	defer metrics.Time("graph.io.graphml.WriteWithProps")()
 	err := WriteWithPropsCtx(context.Background(), w, g)
 	if err != nil {
 		metrics.IncCounter("graph.io.graphml.WriteWithProps.errors", 1)
@@ -241,7 +240,7 @@ func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) error {
 //
 //nolint:gocyclo // GraphML typed-property write: key scan + XML emit + node/edge loop
 func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, int64]) error {
-	defer metrics.Time("graph.io.graphml.WriteWithPropsCtx")()
+	defer metrics.Time("graph.io.graphml.WriteWithProps")()
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("graph.io.graphml.WriteWithPropsCtx.errors", 1)
 		return err
@@ -447,7 +446,6 @@ func sortedKeys(m map[string]propKeyDecl) []string {
 // standard "weight" key. The second return value is the number of
 // edges added.
 func ReadWithProps(r io.Reader) (*lpg.Graph[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadWithProps")()
 	g, n, err := ReadWithPropsCtx(context.Background(), r)
 	if err != nil {
 		metrics.IncCounter("graph.io.graphml.ReadWithProps.errors", 1)
@@ -479,7 +477,7 @@ func ReadWithPropsCtx(ctx context.Context, r io.Reader) (*lpg.Graph[string, int6
 //
 //nolint:gocyclo // GraphML typed-property read: key index + node props + edge decode + ctx tick
 func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadWithPropsCappedCtx")()
+	defer metrics.Time("graph.io.graphml.ReadWithProps")()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}

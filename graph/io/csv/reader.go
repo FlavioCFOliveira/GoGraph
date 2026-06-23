@@ -100,7 +100,6 @@ func DefaultOptions() Options {
 // have at least two fields (src, dst); a third field is parsed as
 // a int64 weight.
 func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.csv.ReadInto")()
 	a, rows, err := ReadIntoCtx(context.Background(), r, opts)
 	if err != nil {
 		metrics.IncCounter("graph.io.csv.ReadInto.errors", 1)
@@ -120,7 +119,7 @@ func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, 
 //
 //nolint:gocyclo // csv decode + opt defaults + per-row parse + ctx tick
 func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.csv.ReadIntoCtx")()
+	defer metrics.Time("graph.io.csv.ReadInto")()
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}

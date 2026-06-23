@@ -150,7 +150,7 @@ func driveCSVSample(t *testing.T, be *countingBackend) {
 	if _, err := csv.WriteCtx(context.Background(), &buf, csvAdj, csv.DefaultOptions()); err != nil {
 		t.Fatalf("csv.WriteCtx: %v", err)
 	}
-	expectLatency(t, be, "graph.io.csv.WriteCtx")
+	expectLatency(t, be, "graph.io.csv.Write")
 }
 
 // driveWALSample exercises the store/wal lifecycle.

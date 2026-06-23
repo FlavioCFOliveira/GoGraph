@@ -13,7 +13,6 @@ import (
 // Write streams every edge of a in src,dst,weight order to w.
 // Returns the number of rows written.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, error) {
-	defer metrics.Time("graph.io.csv.Write")()
 	n, err := WriteCtx(context.Background(), w, a, opts)
 	if err != nil {
 		metrics.IncCounter("graph.io.csv.Write.errors", 1)
@@ -27,7 +26,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, e
 //
 //nolint:gocyclo // CSV write loop: header + per-source resolve + per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, error) {
-	defer metrics.Time("graph.io.csv.WriteCtx")()
+	defer metrics.Time("graph.io.csv.Write")()
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}

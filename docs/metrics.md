@@ -193,22 +193,25 @@ with no return value).
 
 ### `graph/io`
 
+Each logical IO operation records exactly one latency sample, under its
+base operation name. The context-aware variant (e.g. `WriteCtx`,
+`ReadIntoCappedCtx`) owns the timer; the convenience wrapper that
+supplies `context.Background()` delegates to it without timing again, so
+a call records a single sample regardless of entry point (rmp #1524).
+
 | Metric                              | Description                                                        |
 | ----------------------------------- | ------------------------------------------------------------------ |
 | `graph.io.csv.ReadInto`             | CSV edge-list reader.                                              |
-| `graph.io.csv.ReadIntoCtx`          | CSV reader with context.                                           |
 | `graph.io.csv.Write`                | CSV edge-list writer.                                              |
-| `graph.io.csv.WriteCtx`             | CSV writer with context.                                           |
 | `graph.io.dot.Write`                | Graphviz DOT writer.                                               |
-| `graph.io.dot.WriteCtx`             | DOT writer with context.                                           |
 | `graph.io.graphml.ReadInto`         | GraphML reader.                                                    |
-| `graph.io.graphml.ReadIntoCtx`      | GraphML reader with context.                                       |
+| `graph.io.graphml.ReadWithProps`    | GraphML property-graph reader.                                    |
 | `graph.io.graphml.Write`            | GraphML writer.                                                    |
-| `graph.io.graphml.WriteCtx`         | GraphML writer with context.                                       |
+| `graph.io.graphml.WriteWithProps`   | GraphML property-graph writer.                                    |
 | `graph.io.jsonl.ReadInto`           | JSON Lines reader.                                                 |
-| `graph.io.jsonl.ReadIntoCtx`        | JSON Lines reader with context.                                    |
+| `graph.io.jsonl.ReadWithProps`      | JSON Lines property-graph reader.                                 |
 | `graph.io.jsonl.Write`              | JSON Lines writer.                                                 |
-| `graph.io.jsonl.WriteCtx`           | JSON Lines writer with context.                                    |
+| `graph.io.jsonl.WriteWithProps`     | JSON Lines property-graph writer.                                 |
 
 ### `store/wal`
 

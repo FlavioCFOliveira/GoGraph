@@ -95,7 +95,6 @@ type docElement struct {
 // Returns the loaded list, the number of edges added, and an error
 // on parse failure.
 func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadInto")()
 	a, n, err := ReadIntoCtx(context.Background(), r)
 	if err != nil {
 		metrics.IncCounter("graph.io.graphml.ReadInto.errors", 1)
@@ -126,7 +125,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 //
 //nolint:gocyclo // GraphML decode + key lookup + per-edge parse + ctx tick
 func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadIntoCappedCtx")()
+	defer metrics.Time("graph.io.graphml.ReadInto")()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}

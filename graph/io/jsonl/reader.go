@@ -82,7 +82,6 @@ type Record struct {
 // adjacency list. Node records pre-intern endpoints; edge records
 // add the edge with optional weight.
 func ReadInto(r io.Reader, cfg adjlist.Config) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.jsonl.ReadInto")()
 	a, n, err := ReadIntoCtx(context.Background(), r, cfg)
 	if err != nil {
 		metrics.IncCounter("graph.io.jsonl.ReadInto.errors", 1)
@@ -110,7 +109,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 //
 //nolint:gocyclo // JSONL decode + per-row parse + node/edge dispatch + ctx tick
 func ReadIntoCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.jsonl.ReadIntoCappedCtx")()
+	defer metrics.Time("graph.io.jsonl.ReadInto")()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}
@@ -180,7 +179,6 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, max
 // record types. Property records must appear after the "node" record
 // for the referenced ID.
 func ReadWithProps(r io.Reader, cfg adjlist.Config) (*lpg.Graph[string, int64], int, error) {
-	defer metrics.Time("graph.io.jsonl.ReadWithProps")()
 	g, n, err := ReadWithPropsCtx(context.Background(), r, cfg)
 	if err != nil {
 		metrics.IncCounter("graph.io.jsonl.ReadWithProps.errors", 1)
@@ -210,7 +208,7 @@ func ReadWithPropsCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*lp
 //
 //nolint:gocyclo // JSONL decode + node/edge/property dispatch + kind decode + ctx tick
 func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
-	defer metrics.Time("graph.io.jsonl.ReadWithPropsCappedCtx")()
+	defer metrics.Time("graph.io.jsonl.ReadWithProps")()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}

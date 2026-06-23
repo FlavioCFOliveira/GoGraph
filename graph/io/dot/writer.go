@@ -22,7 +22,6 @@ var _ = io.Discard
 // uses 'digraph' for directed graphs and 'graph' for undirected.
 // Edge weights are emitted as a label="..." attribute when non-zero.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
-	defer metrics.Time("graph.io.dot.Write")()
 	err := WriteCtx(context.Background(), w, a)
 	if err != nil {
 		metrics.IncCounter("graph.io.dot.Write.errors", 1)
@@ -36,7 +35,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 //
 //nolint:gocyclo // DOT write: header + per-source resolve + per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
-	defer metrics.Time("graph.io.dot.WriteCtx")()
+	defer metrics.Time("graph.io.dot.Write")()
 	bw := bufio.NewWriterSize(w, 64*1024)
 	edgeOp := "->"
 	header := "digraph G {\n"
