@@ -33,7 +33,10 @@ import (
 // #1633), stored by value, so a 1-2-label edge instance pays a small slice
 // instead of a ~300 B Go map.
 type edgeInstanceLabelShard struct {
-	mu sync.Mutex
+	// mu guards m. Writers (SetEdgeLabelAt, RemoveEdgeInstance) take the
+	// write lock; EdgeLabelsAt reads under a read lock so concurrent
+	// per-instance label reads on a shard proceed in parallel.
+	mu sync.RWMutex
 	m  map[edgeKey]map[int64]labelBag
 }
 
@@ -104,8 +107,8 @@ func (g *Graph[N, W]) EdgeLabelsAt(src, dst N, idx int64) []string {
 	}
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeInstanceLabelShardFor(k)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
 	byIdx, ok := sh.m[k]
 	if !ok {
 		return nil
