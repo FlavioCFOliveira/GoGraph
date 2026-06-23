@@ -125,6 +125,51 @@ func TestMatch_Multigraph_ParallelSelfLoops_Undirected(t *testing.T) {
 	}
 }
 
+// TestMerge_Multigraph_DistinctType_CreatesParallelEdge is the #1683
+// regression: MERGE of a second, distinctly-typed relationship between an
+// existing pair must CREATE the parallel edge (not bind to the first
+// edge), and each must report its own type. Before the fix, MERGE's match
+// used a type-agnostic HasEdge, so MERGE (a)-[:T2]->(b) bound to the T1
+// edge and no T2 edge was created.
+func TestMerge_Multigraph_DistinctType_CreatesParallelEdge(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+	seed := []string{
+		`CREATE (a:A {id: 1})`,
+		`CREATE (b:B {id: 2})`,
+		`MATCH (a:A), (b:B) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:T1]->(b)`,
+		`MATCH (a:A), (b:B) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:T2]->(b)`,
+	}
+	for _, q := range seed {
+		res, err := eng.RunAny(ctx, q, nil)
+		if err != nil {
+			t.Fatalf("seed %q: %v", q, err)
+		}
+		for res.Next() {
+		}
+		if err := res.Err(); err != nil {
+			t.Fatalf("seed drain %q: %v", q, err)
+		}
+		res.Close()
+	}
+	// Two distinctly-typed parallel edges, each reporting its own type.
+	if got := collectRelTypes(t, eng, `MATCH (a:A)-[r]->(b:B) RETURN type(r) AS t`); !equalStrs(got, []string{"T1", "T2"}) {
+		t.Fatalf("after two distinct-type MERGEs, types = %v, want [T1 T2]", got)
+	}
+	// Idempotency: re-MERGE an existing type must NOT create a third edge.
+	res, err := eng.RunAny(ctx, `MATCH (a:A), (b:B) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:T1]->(b)`, nil)
+	if err != nil {
+		t.Fatalf("idempotent MERGE: %v", err)
+	}
+	for res.Next() {
+	}
+	res.Close()
+	if got := collectRelTypes(t, eng, `MATCH (a:A)-[r]->(b:B) RETURN type(r) AS t`); !equalStrs(got, []string{"T1", "T2"}) {
+		t.Fatalf("after idempotent re-MERGE of T1, types = %v, want [T1 T2] (a third edge was created)", got)
+	}
+}
+
 func equalStrs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

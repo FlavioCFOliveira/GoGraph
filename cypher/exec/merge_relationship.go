@@ -226,10 +226,12 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	}
 	// Match if an edge already exists with the requested type AND the
 	// inline property predicate (if any) holds against the live edge
-	// property map. HasEdge is per-pair; combined with the per-pair
-	// label model the check accepts any (src, dst) edge whose label set
-	// contains relType. The single-writer guarantee makes this safe.
-	if op.mutator.HasEdge(srcKey, dstKey) && op.matchesRelProps(srcKey, dstKey) {
+	// property map. The type check is essential on a multigraph: HasEdge
+	// is type-agnostic per (src, dst) pair, so without edgeHasRequestedType
+	// a `MERGE (a)-[:T2]->(b)` issued after a `T1` edge already exists
+	// would bind to the T1 edge and never create the distinct T2 parallel
+	// edge (rmp #1683). The single-writer guarantee makes this safe.
+	if op.mutator.HasEdge(srcKey, dstKey) && op.edgeHasRequestedType(srcKey, dstKey) && op.matchesRelProps(srcKey, dstKey) {
 		// Edge labels are per-(src,dst) in the LPG; adding the same
 		// label twice is idempotent. Ensure the requested type is
 		// recorded, then run ON MATCH actions.
@@ -257,7 +259,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	// exists from dst → src that satisfies the same type-and-property
 	// predicate, bind to that edge rather than creating a new one.
 	// Closes Merge5 [13].
-	if op.undirected && op.mutator.HasEdge(dstKey, srcKey) && op.matchesRelProps(dstKey, srcKey) {
+	if op.undirected && op.mutator.HasEdge(dstKey, srcKey) && op.edgeHasRequestedType(dstKey, srcKey) && op.matchesRelProps(dstKey, srcKey) {
 		op.mutator.SetEdgeLabel(dstKey, srcKey, op.relType)
 		if err := op.applyRelActions(row, dstKey, srcKey, op.onMatchActions); err != nil {
 			return false, err
@@ -273,16 +275,30 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 	// No matching edge — create one, tag it, write inline rel properties,
-	// and run ON CREATE actions.
-	if _, _, addErr := op.mutator.AddEdge(srcKey, dstKey, 0); addErr != nil {
+	// and run ON CREATE actions. Use AddEdgeH (not AddEdge) so the new
+	// edge carries a stable per-edge handle, and record the type/properties
+	// by that handle as well as the per-pair union. Without the per-handle
+	// identity, two MERGE-created parallel edges of distinct types would
+	// share the per-pair label union and the read path would report a
+	// single merged type for both (rmp #1683); the handle lets the read
+	// path resolve each parallel edge's own type, exactly as a parallel
+	// CREATE does. The per-pair SetEdgeLabel is retained so the match path
+	// above (edgeHasRequestedType, which reads the pair union) keeps
+	// recognising the type on a subsequent idempotent MERGE.
+	_, _, handle, addErr := op.mutator.AddEdgeH(srcKey, dstKey, 0)
+	if addErr != nil {
 		return false, fmt.Errorf("exec: MergeRelationship: AddEdge: %w", addErr)
 	}
 	if op.relType != "" {
 		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
+		op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, op.relType)
 	}
 	for _, p := range op.relPropPreds {
 		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); setErr != nil {
 			return false, fmt.Errorf("exec: MergeRelationship: SetEdgeProperty %q: %w", p.key, setErr)
+		}
+		if setErr := op.mutator.SetEdgePropertyByHandle(srcKey, dstKey, handle, p.key, p.value); setErr != nil {
+			return false, fmt.Errorf("exec: MergeRelationship: SetEdgePropertyByHandle %q: %w", p.key, setErr)
 		}
 	}
 	if err := op.applyRelActions(row, srcKey, dstKey, op.onCreateActions); err != nil {
@@ -315,6 +331,26 @@ func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string) bool {
 		}
 	}
 	return true
+}
+
+// edgeHasRequestedType reports whether the directed edge (src, dst)
+// carries op.relType among its labels. MERGE always declares exactly one
+// relationship type (the empty case is rejected upstream), so a match
+// requires that type to be present on the pair; otherwise the pattern
+// must create its own (possibly parallel) edge. On a multigraph the pair
+// label set is the union over every parallel edge, so this answers "does
+// SOME edge of this type already exist between the pair" — the right
+// pair-level question for MERGE's match-or-create decision (rmp #1683).
+func (op *MergeRelationship) edgeHasRequestedType(srcKey, dstKey string) bool {
+	if op.relType == "" {
+		return true
+	}
+	for _, l := range op.mutator.EdgeLabels(srcKey, dstKey) {
+		if l == op.relType {
+			return true
+		}
+	}
+	return false
 }
 
 // emitRow returns the output row for a successfully matched-or-created
