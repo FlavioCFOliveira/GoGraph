@@ -257,13 +257,26 @@ func (e *Engine[N, W]) pruneTombstones(bm *roaring64.Bitmap) {
 // filterByPreds removes NodeIDs that fail any predicate. When
 // skipLabel is true, WithLabel predicates are skipped (already
 // applied by seedFromPreds).
+//
+// Before the per-node scan, any property/range predicate that a covering
+// secondary index can serve is satisfied by an index seek that intersects the
+// match set into bm in place (see seekIndexablePreds and index_seek.go). A
+// served predicate is then skipped by the scan loop: the index is the
+// authoritative mirror of the graph for its (label, property) pair, so seek and
+// scan return the identical set, and the seek replaces an O(working-set)
+// property read with an O(log n)/O(1) lookup plus a bitmap intersection.
+// Predicates with no covering index keep the per-node scan path unchanged.
 func (p *Pattern[N, W]) filterByPreds(bm *roaring64.Bitmap, preds []Predicate[N, W], skipLabel bool) *roaring64.Bitmap {
+	served := p.seekIndexablePreds(bm, preds)
 	out := roaring64.New()
 	it := bm.Iterator()
 	for it.HasNext() {
 		id := graph.NodeID(it.Next())
 		keep := true
-		for _, pr := range preds {
+		for i, pr := range preds {
+			if served[i] {
+				continue
+			}
 			if _, isLabel := pr.(withLabel[N, W]); isLabel && skipLabel {
 				continue
 			}
@@ -277,6 +290,29 @@ func (p *Pattern[N, W]) filterByPreds(bm *roaring64.Bitmap, preds []Predicate[N,
 		}
 	}
 	return out
+}
+
+// seekIndexablePreds attempts to serve every property and range predicate in
+// preds from a covering secondary index, intersecting each index result into bm
+// in place, and returns a parallel slice marking which predicates were served
+// (and so must be skipped by the per-node scan in filterByPreds). A predicate
+// with no covering index — or when the graph has no index manager — is left
+// for the scan: its entry in the returned slice stays false. Label predicates
+// are never index-served here (the label seed already applied them). The label
+// names the predicate set constrains scope which bound indexes may serve a
+// property seek (a bound index is label-scoped).
+func (p *Pattern[N, W]) seekIndexablePreds(bm *roaring64.Bitmap, preds []Predicate[N, W]) []bool {
+	served := make([]bool, len(preds))
+	labels := labelsInPreds(preds)
+	for i, pr := range preds {
+		switch pred := pr.(type) {
+		case withProperty[N, W]:
+			served[i] = p.trySeekProperty(bm, pred, labels)
+		case withRange[N, W]:
+			served[i] = p.trySeekRange(bm, pred, labels)
+		}
+	}
+	return served
 }
 
 // Out expands the working set to the out-neighbours of every node
