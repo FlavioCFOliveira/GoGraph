@@ -127,7 +127,13 @@ SCALAR     : 'SCALAR';
 OF         : 'OF';
 ADD        : 'ADD';
 DROP       : 'DROP';
-REDUCE     : 'REDUCE';
+
+// NB: there is deliberately no REDUCE keyword token. The reduce(acc = init, x
+// IN list | expr) construct is handled by a hand-written post-generation patch
+// (gen-patches.patch, section E) that intercepts the identifier "reduce"/
+// "REDUCE" lexed as ID. Introducing a REDUCE token here would shift every
+// subsequent token id and force a full ATN rewrite of the generated parser, so
+// it is intentionally omitted to keep the generated parser stable.
 
 ID: LetterOrDigit+;
 

@@ -1,4 +1,4 @@
-// Code generated from /Users/flaviocfo/dev/xumiga/GoGraph/cypher/parser/grammar/CypherParser.g4 by ANTLR 4.13.1. DO NOT EDIT.
+// Code generated from cypher/parser/grammar/CypherParser.g4 by ANTLR 4.13.1. DO NOT EDIT.
 
 package gen // CypherParser
 import (

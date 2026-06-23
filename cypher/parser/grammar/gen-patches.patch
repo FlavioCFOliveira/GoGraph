@@ -1,0 +1,840 @@
+diff --git a/cypher/parser/gen/cypher_parser.go b/cypher/parser/gen/cypher_parser.go
+index e95683e..a3883ae 100644
+--- a/cypher/parser/gen/cypher_parser.go
++++ b/cypher/parser/gen/cypher_parser.go
+@@ -4,6 +4,7 @@ package gen // CypherParser
+ import (
+ 	"fmt"
+ 	"strconv"
++	"strings"
+ 	"sync"
+ 
+ 	"github.com/antlr4-go/antlr/v4"
+@@ -12,6 +13,7 @@ import (
+ // Suppress unused import errors
+ var _ = fmt.Printf
+ var _ = strconv.Itoa
++var _ = strings.EqualFold
+ var _ = sync.Once{}
+ 
+ type CypherParser struct {
+@@ -79,7 +81,7 @@ func cypherparserParserInit() {
+ 		"listComprehension", "filterExpression", "countAll", "expressionChain",
+ 		"caseExpression", "parameter", "literal", "rangeLit", "boolLit", "numLit",
+ 		"stringLit", "charLit", "listLit", "mapLit", "mapPair", "name", "symbol",
+-		"reservedWord",
++		"reservedWord", "reduceExpression",
+ 	}
+ 	staticData.PredictionContextCache = antlr.NewPredictionContextCache()
+ 	staticData.serializedATN = []int32{
+@@ -692,6 +694,7 @@ const (
+ 	CypherParserRULE_name                      = 87
+ 	CypherParserRULE_symbol                    = 88
+ 	CypherParserRULE_reservedWord              = 89
++	CypherParserRULE_reduceExpression          = 90
+ )
+ 
+ // IScriptContext is an interface to support dynamic dispatch.
+@@ -3538,85 +3541,126 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+ 	}
+ }
+ 
++// peekHasWithBeforeReturn looks ahead in the token stream to determine
++// whether another top-level WITH clause appears before the next RETURN or
++// end-of-input. It is used by [MultiPartQ] to decide whether to loop for
++// another (updatingStatement* withSt) iteration after the current WITH.
++//
++// Top-level means: not nested inside parentheses or brackets — so EXISTS{},
++// COUNT{}, and CALL { … } subqueries that happen to contain a WITH do not
++// trigger a false positive.
++func (p *CypherParser) peekHasWithBeforeReturn() bool {
++	const maxLook = 4096
++	depth := 0
++	for i := 1; i <= maxLook; i++ {
++		tok := p.GetTokenStream().LT(i).GetTokenType()
++		switch tok {
++		case antlr.TokenEOF, CypherParserRETURN:
++			return false
++		case CypherParserWITH:
++			if depth == 0 {
++				return true
++			}
++		case CypherParserLPAREN, CypherParserLBRACK, CypherParserLBRACE:
++			depth++
++		case CypherParserRPAREN, CypherParserRBRACK, CypherParserRBRACE:
++			if depth > 0 {
++				depth--
++			}
++		}
++	}
++	return false
++}
++
++// MultiPartQ is patched to handle chained WITH clauses (e.g.
++// `WITH x AS y UNWIND … WITH z AS w RETURN w`). The ANTLR-generated body
++// uses AdaptivePredict to decide whether to loop, which the regenerated ATN
++// fails on certain valid multi-WITH shapes; the hand-written loop below
++// inspects the token stream directly via [peekHasWithBeforeReturn] and is
++// robust against grammar regeneration.
+ func (p *CypherParser) MultiPartQ() (localctx IMultiPartQContext) {
+ 	localctx = NewMultiPartQContext(p, p.GetParserRuleContext(), p.GetState())
+ 	p.EnterRule(localctx, 30, CypherParserRULE_multiPartQ)
+ 	var _la int
+ 
+-	var _alt int
+-
+ 	p.EnterOuterAlt(localctx, 1)
+-	p.SetState(290)
+-	p.GetErrorHandler().Sync(p)
+-	if p.HasError() {
+-		goto errorExit
++
++	// readingStatementMask is the set of token types that can start a
++	// readingStatement: MATCH, OPTIONAL MATCH, UNWIND, and in-query CALL.
++	const readingStatementMask = (int64(1) << CypherParserMATCH) |
++		(int64(1) << CypherParserOPTIONAL) |
++		(int64(1) << CypherParserUNWIND) |
++		(int64(1) << CypherParserCALL)
++
++	// isReadingStart reports whether token type _la can start a readingStatement.
++	isReadingStart := func(la int) bool {
++		return (int64(la) & ^0x3f) == 0 && (int64(1)<<la)&readingStatementMask != 0
+ 	}
+-	_la = p.GetTokenStream().LA(1)
+ 
+-	for (int64(_la) & ^0x3f) == 0 && ((int64(1)<<_la)&577727389967056896) != 0 {
+-		{
+-			p.SetState(287)
+-			p.ReadingStatement()
+-		}
++	// updatingStatementMask: CREATE, DELETE, DETACH, MERGE, REMOVE, SET.
++	const updatingStatementMask = (int64(1) << CypherParserCREATE) |
++		(int64(1) << CypherParserDELETE) |
++		(int64(1) << CypherParserDETACH) |
++		(int64(1) << CypherParserMERGE) |
++		(int64(1) << CypherParserREMOVE) |
++		(int64(1) << CypherParserSET)
+ 
+-		p.SetState(292)
+-		p.GetErrorHandler().Sync(p)
++	isUpdatingStart := func(la int) bool {
++		return (int64(la) & ^0x3f) == 0 && (int64(1)<<la)&updatingStatementMask != 0
++	}
++
++	// Consume the initial readingStatement* before the first WITH.
++	_la = p.GetTokenStream().LA(1)
++	for isReadingStart(_la) {
++		p.ReadingStatement()
+ 		if p.HasError() {
+ 			goto errorExit
+ 		}
+ 		_la = p.GetTokenStream().LA(1)
+ 	}
+-	p.SetState(300)
+-	p.GetErrorHandler().Sync(p)
+-	if p.HasError() {
+-		goto errorExit
+-	}
+-	_alt = 1
+-	for ok := true; ok; ok = _alt != 2 && _alt != antlr.ATNInvalidAltNumber {
+-		switch _alt {
+-		case 1:
+-			p.SetState(296)
+-			p.GetErrorHandler().Sync(p)
++
++	// Main loop: (readingStatement* updatingStatement* withSt)+
++	// The first iteration is always taken (the grammar guarantees at least one
++	// WITH in a multiPartQ).
++	for {
++		// updatingStatement*
++		_la = p.GetTokenStream().LA(1)
++		for isUpdatingStart(_la) {
++			p.UpdatingStatement()
+ 			if p.HasError() {
+ 				goto errorExit
+ 			}
+ 			_la = p.GetTokenStream().LA(1)
+-
+-			for (int64(_la) & ^0x3f) == 0 && ((int64(1)<<_la)&22820363834490880) != 0 {
+-				{
+-					p.SetState(293)
+-					p.UpdatingStatement()
+-				}
+-
+-				p.SetState(298)
+-				p.GetErrorHandler().Sync(p)
+-				if p.HasError() {
+-					goto errorExit
+-				}
+-				_la = p.GetTokenStream().LA(1)
+-			}
+-			{
+-				p.SetState(299)
+-				p.WithSt()
+-			}
+-
+-		default:
+-			p.SetError(antlr.NewNoViableAltException(p, nil, nil, nil, nil, nil))
+-			goto errorExit
+ 		}
+ 
+-		p.SetState(302)
+-		p.GetErrorHandler().Sync(p)
+-		_alt = p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 23, p.GetParserRuleContext())
++		// withSt (required)
++		p.WithSt()
+ 		if p.HasError() {
+ 			goto errorExit
+ 		}
+-	}
+-	{
+-		p.SetState(304)
+-		p.SinglePartQ()
++
++		// After the WITH, decide whether to loop: loop only if there is another
++		// WITH before the next RETURN/EOF.
++		if !p.peekHasWithBeforeReturn() {
++			break
++		}
++
++		// More WITH clauses ahead — consume the readingStatement* segment that
++		// precedes the next updatingStatement*/withSt group.
++		_la = p.GetTokenStream().LA(1)
++		for isReadingStart(_la) {
++			p.ReadingStatement()
++			if p.HasError() {
++				goto errorExit
++			}
++			_la = p.GetTokenStream().LA(1)
++		}
+ 	}
+ 
++	// Terminal singlePartQ handles the final RETURN and any reading/updating
++	// clauses that follow the last WITH.
++	p.SinglePartQ()
++
+ errorExit:
+ 	if p.HasError() {
+ 		v := p.GetError()
+@@ -11080,6 +11124,7 @@ type IAtomContext interface {
+ 	ListComprehension() IListComprehensionContext
+ 	PatternComprehension() IPatternComprehensionContext
+ 	FilterWith() IFilterWithContext
++	ReduceExpression() IReduceExpressionContext
+ 	RelationshipsChainPattern() IRelationshipsChainPatternContext
+ 	ParenthesizedExpression() IParenthesizedExpressionContext
+ 	FunctionInvocation() IFunctionInvocationContext
+@@ -11235,6 +11280,22 @@ func (s *AtomContext) FilterWith() IFilterWithContext {
+ 	return t.(IFilterWithContext)
+ }
+ 
++func (s *AtomContext) ReduceExpression() IReduceExpressionContext {
++	var t antlr.RuleContext
++	for _, ctx := range s.GetChildren() {
++		if _, ok := ctx.(IReduceExpressionContext); ok {
++			t = ctx.(antlr.RuleContext)
++			break
++		}
++	}
++
++	if t == nil {
++		return nil
++	}
++
++	return t.(IReduceExpressionContext)
++}
++
+ func (s *AtomContext) RelationshipsChainPattern() IRelationshipsChainPatternContext {
+ 	var t antlr.RuleContext
+ 	for _, ctx := range s.GetChildren() {
+@@ -11366,11 +11427,30 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
+ 	p.EnterRule(localctx, 116, CypherParserRULE_atom)
+ 	p.SetState(613)
+ 	p.GetErrorHandler().Sync(p)
++
++	var atomAlt int
+ 	if p.HasError() {
+ 		goto errorExit
+ 	}
+-
+-	switch p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 67, p.GetParserRuleContext()) {
++	atomAlt = p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 67, p.GetParserRuleContext())
++	// atomNumericIDFix: a purely-numeric token (e.g. "3", "42") was lexed as ID
++	// instead of DIGIT due to lexer-rule ordering. AdaptivePredict picks the
++	// Symbol alternative (11) for it; force the Literal alternative (1) so the
++	// integer flows through NumLit and becomes an IntLiteral in the AST.
++	if atomAlt == 11 && isNumericIDToken(p.GetTokenStream().LT(1)) {
++		atomAlt = 1
++	}
++	// atomReduceFix: reduce(acc = init, x IN list | expr) is parsed as a dedicated
++	// production. The REDUCE keyword lexes as ID (no keyword token in the ATN).
++	// AdaptivePredict may pick FunctionInvocation (10) or Symbol (11) depending on
++	// look-ahead; intercept both when the ID text is "reduce"/"REDUCE" followed by
++	// LPAREN and redirect to the hand-written ReduceExpression() rule (alt 100).
++	if (atomAlt == 10 || atomAlt == 11) && isReduceToken(p.GetTokenStream().LT(1)) &&
++		p.GetTokenStream().LT(2).GetTokenType() == CypherParserLPAREN {
++		atomAlt = 100
++	}
++
++	switch atomAlt {
+ 	case 1:
+ 		p.EnterOuterAlt(localctx, 1)
+ 		{
+@@ -11462,6 +11542,13 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
+ 			p.SubqueryCount()
+ 		}
+ 
++	case 100:
++		// atomReduceFix: hand-written alternative for reduce(acc = init, x IN list | expr).
++		p.EnterOuterAlt(localctx, 100)
++		{
++			p.ReduceExpression()
++		}
++
+ 	case antlr.ATNInvalidAltNumber:
+ 		goto errorExit
+ 	}
+@@ -13526,6 +13613,276 @@ errorExit:
+ 	return localctx
+ }
+ 
++// IReduceExpressionContext is an interface to support dynamic dispatch.
++// It represents a reduce(acc = init, x IN list | expr) expression.
++type IReduceExpressionContext interface {
++	antlr.ParserRuleContext
++
++	// GetParser returns the parser.
++	GetParser() antlr.Parser
++
++	// Getter signatures
++	LPAREN() antlr.TerminalNode
++	Symbol() ISymbolContext
++	ASSIGN() antlr.TerminalNode
++	AllExpression() []IExpressionContext
++	Expression(i int) IExpressionContext
++	COMMA() antlr.TerminalNode
++	FilterExpression() IFilterExpressionContext
++	STICK() antlr.TerminalNode
++	RPAREN() antlr.TerminalNode
++
++	// IsReduceExpressionContext differentiates from other interfaces.
++	IsReduceExpressionContext()
++}
++
++type ReduceExpressionContext struct {
++	antlr.BaseParserRuleContext
++	parser antlr.Parser
++}
++
++func NewEmptyReduceExpressionContext() *ReduceExpressionContext {
++	var p = new(ReduceExpressionContext)
++	antlr.InitBaseParserRuleContext(&p.BaseParserRuleContext, nil, -1)
++	p.RuleIndex = CypherParserRULE_reduceExpression
++	return p
++}
++
++func InitEmptyReduceExpressionContext(p *ReduceExpressionContext) {
++	antlr.InitBaseParserRuleContext(&p.BaseParserRuleContext, nil, -1)
++	p.RuleIndex = CypherParserRULE_reduceExpression
++}
++
++func (*ReduceExpressionContext) IsReduceExpressionContext() {}
++
++func NewReduceExpressionContext(parser antlr.Parser, parent antlr.ParserRuleContext, invokingState int) *ReduceExpressionContext {
++	var p = new(ReduceExpressionContext)
++	antlr.InitBaseParserRuleContext(&p.BaseParserRuleContext, parent, invokingState)
++	p.parser = parser
++	p.RuleIndex = CypherParserRULE_reduceExpression
++	return p
++}
++
++func (s *ReduceExpressionContext) GetParser() antlr.Parser { return s.parser }
++
++func (s *ReduceExpressionContext) LPAREN() antlr.TerminalNode {
++	return s.GetToken(CypherParserLPAREN, 0)
++}
++
++func (s *ReduceExpressionContext) Symbol() ISymbolContext {
++	var t antlr.RuleContext
++	for _, ctx := range s.GetChildren() {
++		if _, ok := ctx.(ISymbolContext); ok {
++			t = ctx.(antlr.RuleContext)
++			break
++		}
++	}
++	if t == nil {
++		return nil
++	}
++	return t.(ISymbolContext)
++}
++
++func (s *ReduceExpressionContext) ASSIGN() antlr.TerminalNode {
++	return s.GetToken(CypherParserASSIGN, 0)
++}
++
++func (s *ReduceExpressionContext) AllExpression() []IExpressionContext {
++	children := s.GetChildren()
++	len := 0
++	for _, ctx := range children {
++		if _, ok := ctx.(IExpressionContext); ok {
++			len++
++		}
++	}
++	tst := make([]IExpressionContext, len)
++	i := 0
++	for _, ctx := range children {
++		if t, ok := ctx.(IExpressionContext); ok {
++			tst[i] = t.(IExpressionContext)
++			i++
++		}
++	}
++	return tst
++}
++
++func (s *ReduceExpressionContext) Expression(i int) IExpressionContext {
++	var t antlr.RuleContext
++	j := 0
++	for _, ctx := range s.GetChildren() {
++		if _, ok := ctx.(IExpressionContext); ok {
++			if j == i {
++				t = ctx.(antlr.RuleContext)
++				break
++			}
++			j++
++		}
++	}
++	if t == nil {
++		return nil
++	}
++	return t.(IExpressionContext)
++}
++
++func (s *ReduceExpressionContext) COMMA() antlr.TerminalNode {
++	return s.GetToken(CypherParserCOMMA, 0)
++}
++
++func (s *ReduceExpressionContext) FilterExpression() IFilterExpressionContext {
++	var t antlr.RuleContext
++	for _, ctx := range s.GetChildren() {
++		if _, ok := ctx.(IFilterExpressionContext); ok {
++			t = ctx.(antlr.RuleContext)
++			break
++		}
++	}
++	if t == nil {
++		return nil
++	}
++	return t.(IFilterExpressionContext)
++}
++
++func (s *ReduceExpressionContext) STICK() antlr.TerminalNode {
++	return s.GetToken(CypherParserSTICK, 0)
++}
++
++func (s *ReduceExpressionContext) RPAREN() antlr.TerminalNode {
++	return s.GetToken(CypherParserRPAREN, 0)
++}
++
++func (s *ReduceExpressionContext) GetRuleContext() antlr.RuleContext {
++	return s
++}
++
++func (s *ReduceExpressionContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string {
++	return antlr.TreesStringTree(s, ruleNames, recog)
++}
++
++func (s *ReduceExpressionContext) EnterRule(listener antlr.ParseTreeListener) {
++	if listenerT, ok := listener.(CypherParserListener); ok {
++		listenerT.EnterReduceExpression(s)
++	}
++}
++
++func (s *ReduceExpressionContext) ExitRule(listener antlr.ParseTreeListener) {
++	if listenerT, ok := listener.(CypherParserListener); ok {
++		listenerT.ExitReduceExpression(s)
++	}
++}
++
++func (s *ReduceExpressionContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
++	switch t := visitor.(type) {
++	case CypherParserVisitor:
++		return t.VisitReduceExpression(s)
++	default:
++		return t.VisitChildren(s)
++	}
++}
++
++// ReduceExpression parses: reduce(acc = init, x IN list | expr)
++// This is a hand-written parser function (not ATN-driven) because the REDUCE
++// keyword lexes as ID and the '|' inside the argument list is not valid in the
++// standard expressionChain production. It is called from Atom() when the
++// current token is an ID whose text is "reduce" (case-insensitive) followed by
++// a LPAREN.
++func (p *CypherParser) ReduceExpression() (localctx IReduceExpressionContext) {
++	localctx = NewReduceExpressionContext(p, p.GetParserRuleContext(), p.GetState())
++	p.EnterRule(localctx, 180, CypherParserRULE_reduceExpression)
++
++	p.EnterOuterAlt(localctx, 1)
++
++	// Consume the REDUCE identifier token (lexed as ID).
++	{
++		tok := p.GetTokenStream().LT(1)
++		p.GetTokenStream().Consume()
++		localctx.AddTokenNode(tok) //nolint:staticcheck // generated-parser pattern
++	}
++
++	// LPAREN
++	{
++		p.Match(CypherParserLPAREN)
++		if p.HasError() {
++			goto errorExit
++		}
++	}
++
++	// Symbol: accumulator variable name
++	{
++		p.Symbol()
++	}
++
++	// ASSIGN '='
++	{
++		p.Match(CypherParserASSIGN)
++		if p.HasError() {
++			goto errorExit
++		}
++	}
++
++	// Expression: initial value
++	{
++		p.Expression()
++	}
++
++	// COMMA ','
++	{
++		p.Match(CypherParserCOMMA)
++		if p.HasError() {
++			goto errorExit
++		}
++	}
++
++	// FilterExpression: "x IN list" (with optional WHERE)
++	{
++		p.FilterExpression()
++	}
++
++	// STICK '|'
++	{
++		p.Match(CypherParserSTICK)
++		if p.HasError() {
++			goto errorExit
++		}
++	}
++
++	// Expression: the map/accumulation expression
++	{
++		p.Expression()
++	}
++
++	// RPAREN ')'
++	{
++		p.Match(CypherParserRPAREN)
++		if p.HasError() {
++			goto errorExit
++		}
++	}
++
++errorExit:
++	if p.HasError() {
++		v := p.GetError()
++		localctx.SetException(v)
++		p.GetErrorHandler().ReportError(p, v)
++		p.GetErrorHandler().Recover(p, v)
++		p.SetError(nil)
++	}
++	p.ExitRule()
++	return localctx
++}
++
++// isReduceToken reports whether tok is an ID token whose text is "reduce"
++// (case-insensitive). Used by the atomReduceFix in Atom().
++func isReduceToken(tok antlr.Token) bool {
++	if tok == nil {
++		return false
++	}
++	if tok.GetTokenType() != CypherParserID {
++		return false
++	}
++	text := tok.GetText()
++	return strings.EqualFold(text, "reduce")
++}
++
+ // IPatternComprehensionContext is an interface to support dynamic dispatch.
+ type IPatternComprehensionContext interface {
+ 	antlr.ParserRuleContext
+@@ -15247,9 +15604,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+ 	localctx = NewLiteralContext(p, p.GetParserRuleContext(), p.GetState())
+ 	p.EnterRule(localctx, 156, CypherParserRULE_literal)
+ 	p.SetState(789)
+-	p.GetErrorHandler().Sync(p)
+-	if p.HasError() {
+-		goto errorExit
++	// literalSyncFix: skip the ATN Sync when the next token is a purely-numeric
++	// ID (e.g. "3", "42"). The ATN prediction set for this state does not
++	// include ID, so Sync would report a spurious syntax error. We know the
++	// token is valid for the NumLit alternative (handled below), so the Sync is
++	// safe to skip in this targeted case.
++	if !isNumericIDToken(p.GetTokenStream().LT(1)) {
++		p.GetErrorHandler().Sync(p)
++		if p.HasError() {
++			goto errorExit
++		}
+ 	}
+ 
+ 	switch p.GetTokenStream().LA(1) {
+@@ -15267,6 +15631,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+ 			p.NumLit()
+ 		}
+ 
++	case CypherParserID:
++		// literalNumericIDFix: a purely-numeric token was lexed as ID instead of
++		// DIGIT due to lexer-rule ordering. Treat it as a NumLit so that integer
++		// literals are correctly parsed in expressions (e.g. 3 IN [1, 2, 3]).
++		if isNumericIDToken(p.GetTokenStream().LT(1)) {
++			p.EnterOuterAlt(localctx, 2)
++			{
++				p.SetState(783)
++				p.NumLit()
++			}
++		} else {
++			p.SetError(antlr.NewNoViableAltException(p, nil, nil, nil, nil, nil))
++			goto errorExit
++		}
++
+ 	case CypherParserNULL_W:
+ 		p.EnterOuterAlt(localctx, 3)
+ 		{
+@@ -15454,7 +15833,6 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+ 	localctx = NewRangeLitContext(p, p.GetParserRuleContext(), p.GetState())
+ 	p.EnterRule(localctx, 158, CypherParserRULE_rangeLit)
+-	var _la int
+ 
+ 	p.EnterOuterAlt(localctx, 1)
+ 	{
+@@ -15465,28 +15843,19 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+ 			goto errorExit
+ 		}
+ 	}
++	// rangeLitNumericIDFix: consume an optional lower bound (DIGIT or
++	// purely-numeric ID such as "1" or "10") BEFORE the ATN Sync at state 793
++	// so the error-recovery logic does not fire on a valid numeric ID token.
++	// The visitor extracts the bounds via ctx.GetText(), so consuming the
++	// token here is sufficient.
++	p.rangeNumBound()
+ 	p.SetState(793)
+ 	p.GetErrorHandler().Sync(p)
+ 	if p.HasError() {
+ 		goto errorExit
+ 	}
+-	_la = p.GetTokenStream().LA(1)
+-
+-	if _la == CypherParserDIGIT {
+-		{
+-			p.SetState(792)
+-			p.NumLit()
+-		}
+-
+-	}
+-	p.SetState(799)
+-	p.GetErrorHandler().Sync(p)
+-	if p.HasError() {
+-		goto errorExit
+-	}
+-	_la = p.GetTokenStream().LA(1)
+ 
+-	if _la == CypherParserRANGE {
++	if p.GetTokenStream().LA(1) == CypherParserRANGE {
+ 		{
+ 			p.SetState(795)
+ 			p.Match(CypherParserRANGE)
+@@ -15495,20 +15864,13 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+ 				goto errorExit
+ 			}
+ 		}
++		// Consume an optional upper bound with the same ID-aware helper.
++		p.rangeNumBound()
+ 		p.SetState(797)
+ 		p.GetErrorHandler().Sync(p)
+ 		if p.HasError() {
+ 			goto errorExit
+ 		}
+-		_la = p.GetTokenStream().LA(1)
+-
+-		if _la == CypherParserDIGIT {
+-			{
+-				p.SetState(796)
+-				p.NumLit()
+-			}
+-
+-		}
+ 
+ 	}
+ 
+@@ -15722,7 +16084,18 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
+ 	localctx = NewNumLitContext(p, p.GetParserRuleContext(), p.GetState())
+ 	p.EnterRule(localctx, 162, CypherParserRULE_numLit)
+ 	p.EnterOuterAlt(localctx, 1)
+-	{
++
++	// numLitNumericIDFix: accept a purely-numeric ID token in addition to DIGIT,
++	// since positive integers tokenise as ID due to lexer-rule ordering. When
++	// the next token is a numeric ID, consume it and attach it to the rule
++	// context so ctx.GetText() returns the integer text (e.g. "3", "42"). The
++	// DIGIT() accessor will still return nil, but VisitNumLit reads GetText()
++	// instead.
++	if isNumericIDToken(p.GetTokenStream().LT(1)) {
++		tok := p.GetTokenStream().LT(1)
++		p.GetTokenStream().Consume()
++		localctx.AddTokenNode(tok) //nolint:staticcheck // generated-parser pattern
++	} else {
+ 		p.SetState(803)
+ 		p.Match(CypherParserDIGIT)
+ 		if p.HasError() {
+@@ -17128,3 +17501,67 @@ func (p *CypherParser) ReservedWord() (localctx IReservedWordContext) {
+ 	p.ExitRule()
+ 	return localctx
+ }
++
++// ─────────────────────────────────────────────────────────────────────────────
++// Numeric-ID workarounds (vendored from the post-generation patch suite)
++//
++// The vendored Cypher grammar's lexer orders `ID: LetterOrDigit+` before
++// `DIGIT: ...`, so positive integers in expressions (e.g. `3`, `42`, range
++// bounds inside `[r*1..3]`) tokenise as ID rather than DIGIT. The Atom,
++// Literal, NumLit, and RangeLit rules above call into the helpers below so
++// numeric-ID tokens are accepted wherever the grammar expects DIGIT.
++//
++// These helpers are kept at the end of the file so they survive ANTLR
++// regeneration (the generator never emits anything at this location). If you
++// re-run `make generate-cypher-parser`, you MUST re-apply the surgical edits
++// to Atom, Literal, NumLit, and RangeLit, plus restore this block — see
++// docs/tck/parser-report.md for the canonical recipe.
++// ─────────────────────────────────────────────────────────────────────────────
++
++// isNumericIDToken reports whether tok is an ID token whose text consists
++// entirely of ASCII decimal digits (e.g. "3", "42", "100"). This is the
++// canonical check used by the numeric-ID workarounds throughout this file.
++func isNumericIDToken(tok antlr.Token) bool {
++	if tok == nil {
++		return false
++	}
++	if tok.GetTokenType() != CypherParserID {
++		return false
++	}
++	text := tok.GetText()
++	if len(text) == 0 {
++		return false
++	}
++	for _, ch := range text {
++		if ch < '0' || ch > '9' {
++			return false
++		}
++	}
++	return true
++}
++
++// rangeNumBound consumes a DIGIT or a purely-numeric ID token and adds it as a
++// child terminal of the current rule context. This is a targeted workaround
++// for the ANTLR lexer ambiguity where single- or multi-digit integers inside a
++// range-literal (e.g. [r*1..3]) are tokenised as ID instead of DIGIT because
++// the ID rule (LetterOrDigit+) appears before DIGIT in the lexer grammar.
++//
++// The approach:
++//  1. Peek at the next token. Accept it if it is DIGIT, or if it is ID and its
++//     text consists entirely of ASCII digits.
++//  2. Consume the token so the token-stream cursor advances past it.
++//  3. Wrap the consumed token in a TerminalNode and add it to the current
++//     rule context so ctx.GetText() returns the expected concatenated text
++//     (e.g. "*1..3").
++//
++// If the next token is neither DIGIT nor a numeric ID, this is a no-op.
++func (p *CypherParser) rangeNumBound() {
++	tok := p.GetTokenStream().LT(1)
++	if tok == nil {
++		return
++	}
++	if tok.GetTokenType() == CypherParserDIGIT || isNumericIDToken(tok) {
++		p.GetTokenStream().Consume()
++		p.GetParserRuleContext().AddTokenNode(tok) //nolint:staticcheck // generated-parser pattern
++	}
++}
+diff --git a/cypher/parser/gen/cypherparser_base_listener.go b/cypher/parser/gen/cypherparser_base_listener.go
+index 7792023..1636b1b 100644
+--- a/cypher/parser/gen/cypherparser_base_listener.go
++++ b/cypher/parser/gen/cypherparser_base_listener.go
+@@ -443,6 +443,12 @@ func (s *BaseCypherParserListener) EnterFilterWith(ctx *FilterWithContext) {}
+ // ExitFilterWith is called when production filterWith is exited.
+ func (s *BaseCypherParserListener) ExitFilterWith(ctx *FilterWithContext) {}
+ 
++// EnterReduceExpression is called when production reduceExpression is entered.
++func (s *BaseCypherParserListener) EnterReduceExpression(ctx *ReduceExpressionContext) {}
++
++// ExitReduceExpression is called when production reduceExpression is exited.
++func (s *BaseCypherParserListener) ExitReduceExpression(ctx *ReduceExpressionContext) {}
++
+ // EnterPatternComprehension is called when production patternComprehension is entered.
+ func (s *BaseCypherParserListener) EnterPatternComprehension(ctx *PatternComprehensionContext) {}
+ 
+diff --git a/cypher/parser/gen/cypherparser_base_visitor.go b/cypher/parser/gen/cypherparser_base_visitor.go
+index 976f131..583a9f7 100644
+--- a/cypher/parser/gen/cypherparser_base_visitor.go
++++ b/cypher/parser/gen/cypherparser_base_visitor.go
+@@ -287,6 +287,10 @@ func (v *BaseCypherParserVisitor) VisitFilterWith(ctx *FilterWithContext) interf
+ 	return v.VisitChildren(ctx)
+ }
+ 
++func (v *BaseCypherParserVisitor) VisitReduceExpression(ctx *ReduceExpressionContext) interface{} {
++	return v.VisitChildren(ctx)
++}
++
+ func (v *BaseCypherParserVisitor) VisitPatternComprehension(ctx *PatternComprehensionContext) interface{} {
+ 	return v.VisitChildren(ctx)
+ }
+diff --git a/cypher/parser/gen/cypherparser_listener.go b/cypher/parser/gen/cypherparser_listener.go
+index 8655e57..987bfbd 100644
+--- a/cypher/parser/gen/cypherparser_listener.go
++++ b/cypher/parser/gen/cypherparser_listener.go
+@@ -217,6 +217,9 @@ type CypherParserListener interface {
+ 	// EnterFilterWith is called when entering the filterWith production.
+ 	EnterFilterWith(c *FilterWithContext)
+ 
++	// EnterReduceExpression is called when entering the reduceExpression production.
++	EnterReduceExpression(c *ReduceExpressionContext)
++
+ 	// EnterPatternComprehension is called when entering the patternComprehension production.
+ 	EnterPatternComprehension(c *PatternComprehensionContext)
+ 
+@@ -487,6 +490,9 @@ type CypherParserListener interface {
+ 	// ExitFilterWith is called when exiting the filterWith production.
+ 	ExitFilterWith(c *FilterWithContext)
+ 
++	// ExitReduceExpression is called when exiting the reduceExpression production.
++	ExitReduceExpression(c *ReduceExpressionContext)
++
+ 	// ExitPatternComprehension is called when exiting the patternComprehension production.
+ 	ExitPatternComprehension(c *PatternComprehensionContext)
+ 
+diff --git a/cypher/parser/gen/cypherparser_visitor.go b/cypher/parser/gen/cypherparser_visitor.go
+index ef9cf37..8eb0b73 100644
+--- a/cypher/parser/gen/cypherparser_visitor.go
++++ b/cypher/parser/gen/cypherparser_visitor.go
+@@ -217,6 +217,9 @@ type CypherParserVisitor interface {
+ 	// Visit a parse tree produced by CypherParser#filterWith.
+ 	VisitFilterWith(ctx *FilterWithContext) interface{}
+ 
++	// Visit a parse tree produced by CypherParser#reduceExpression.
++	VisitReduceExpression(ctx *ReduceExpressionContext) interface{}
++
+ 	// Visit a parse tree produced by CypherParser#patternComprehension.
+ 	VisitPatternComprehension(ctx *PatternComprehensionContext) interface{}
+ 

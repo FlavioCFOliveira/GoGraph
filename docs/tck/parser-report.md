@@ -117,10 +117,29 @@ contain a pattern).
 
 ## Post-generation parser patches
 
-Two classes of surgical edits are applied to the ANTLR-generated parser
-after each regeneration. They are **not** captured by the grammar
-(`.g4`) files — they live directly in `cypher/parser/gen/cypher_parser.go`
-and must be re-applied after every `make generate-cypher-parser` run.
+Several classes of surgical edits are applied to the ANTLR-generated parser
+after each regeneration. They are **not** captured by the grammar (`.g4`)
+files — they live in `cypher/parser/gen/cypher_parser.go` and the generated
+visitor/listener files.
+
+These edits are now captured as a single checked-in unified diff,
+`cypher/parser/grammar/gen-patches.patch`, which the
+`make generate-cypher-parser` target re-applies automatically (via
+`git apply`) after the ANTLR run, the `scripts/fix-antlr-gen.py` post-process,
+and `goimports`. As a result a clean `make generate-cypher-parser` reproduces
+the checked-in `cypher/parser/gen/` **byte-for-byte** with no behaviour change.
+The sections below document each patch class so the diff can be understood and,
+if a future grammar change shifts the surrounding generated code, regenerated:
+re-apply the edits by hand, then refresh the patch with
+`git diff cypher/parser/gen/ > cypher/parser/grammar/gen-patches.patch`.
+
+The pipeline, end to end:
+
+```
+ANTLR 4.13.1  →  scripts/fix-antlr-gen.py (vet clean-up + header normalise)
+              →  goimports (import grouping)
+              →  git apply cypher/parser/grammar/gen-patches.patch
+```
 
 ### A. Numeric-ID workarounds (task #375, refreshed in task #396)
 

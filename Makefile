@@ -241,6 +241,11 @@ generate-cypher-parser: ## Regenerate cypher/parser/gen/ from ANTLR grammar (req
 	  echo "Run 'make install-antlr' first."; \
 	  exit 1; \
 	}
+	@command -v goimports >/dev/null 2>&1 || { \
+	  echo "goimports not found (install: go install golang.org/x/tools/cmd/goimports@latest)"; \
+	  exit 1; \
+	}
+	# 1. Generate the parser/lexer from the vendored grammar.
 	$(JAVA) -jar "$(ANTLR_JAR)" \
 	  -Dlanguage=Go \
 	  -package gen \
@@ -248,7 +253,14 @@ generate-cypher-parser: ## Regenerate cypher/parser/gen/ from ANTLR grammar (req
 	  -o "$$(pwd)/$(CYPHER_GEN_DIR)" \
 	  "$$(pwd)/$(CYPHER_GRAMMAR_DIR)/CypherLexer.g4" \
 	  "$$(pwd)/$(CYPHER_GRAMMAR_DIR)/CypherParser.g4"
-	python3 scripts/fix-antlr-gen.py "$(CYPHER_GEN_DIR)/cypher_parser.go"
+	# 2. 'go vet' clean-up + checkout-independent header normalisation.
+	python3 scripts/fix-antlr-gen.py "$(CYPHER_GEN_DIR)"
+	# 3. Canonical import grouping (matches the checked-in gen).
+	goimports -w "$(CYPHER_GEN_DIR)"
+	# 4. Re-apply the hand-written parser patches that cannot live in the grammar
+	#    (numeric-ID workarounds, chained-WITH, optional CALL parens, reduce()).
+	#    See cypher/parser/grammar/README.md and docs/tck/parser-report.md.
+	git apply --whitespace=nowarn "$(CYPHER_GRAMMAR_DIR)/gen-patches.patch"
 	$(GO) vet ./$(CYPHER_GEN_DIR)/...
 
 .PHONY: clean

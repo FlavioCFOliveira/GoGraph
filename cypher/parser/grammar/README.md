@@ -43,9 +43,27 @@ the openCypher project or Neo4j.
 3. Update the pinned commit hash and date in both this `README.md` and
    `NOTICE.txt`.
 
-4. Re-run code generation (see `cypher/parser/tools.go` and the project
-   Makefile target, when available) to regenerate the Go parser from the
-   updated grammars.
+4. Re-run code generation with the project Makefile target:
+
+   ```bash
+   make generate-cypher-parser
+   ```
+
+   The target runs ANTLR, then `scripts/fix-antlr-gen.py` (`go vet` clean-up
+   plus checkout-independent header normalisation), then `goimports`, then
+   re-applies the hand-written parser patches captured in `gen-patches.patch`
+   (see `docs/tck/parser-report.md` — numeric-ID workarounds, chained-WITH,
+   optional CALL parentheses, and `reduce()`). For an unchanged grammar this
+   reproduces `cypher/parser/gen/` byte-for-byte.
+
+   If a grammar change shifts the code the patches target, the `git apply`
+   step will fail. In that case re-apply the affected hand edits manually,
+   confirm `go test ./cypher/parser/...` and the full TCK still pass, then
+   refresh the patch:
+
+   ```bash
+   git diff cypher/parser/gen/ > cypher/parser/grammar/gen-patches.patch
+   ```
 
 5. Run the full test suite:
 

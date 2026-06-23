@@ -297,7 +297,10 @@ atom
     | listComprehension
     | patternComprehension
     | filterWith
-    | reduceExpression
+    // NB: reduce(...) is intentionally absent from this grammar; it is matched by
+    // a hand-written post-generation patch (gen-patches.patch, section E) that
+    // intercepts the "reduce"/"REDUCE" identifier (lexed as ID) followed by
+    // LPAREN, before the symbol/functionInvocation alternatives below run.
     | relationshipsChainPattern
     | parenthesizedExpression
     | functionInvocation
@@ -349,10 +352,6 @@ parenthesizedExpression
 
 filterWith
     : (ALL | ANY | NONE | SINGLE) LPAREN filterExpression RPAREN
-    ;
-
-reduceExpression
-    : REDUCE LPAREN symbol ASSIGN expression COMMA filterExpression STICK expression RPAREN
     ;
 
 patternComprehension
@@ -446,7 +445,6 @@ symbol
     | ANY
     | NONE
     | SINGLE
-    | REDUCE
     ;
 
 reservedWord
