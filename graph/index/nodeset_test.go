@@ -95,17 +95,17 @@ func TestNodeSet_PromotionThreshold(t *testing.T) {
 	for i := 0; i < smallSetMax; i++ {
 		s.Add(uint64(i))
 	}
-	if s.bm != nil {
+	if s.tag() == stateBitmap {
 		t.Fatalf("set promoted to bitmap at cardinality %d, want inline", s.Cardinality())
 	}
 	s.Add(uint64(smallSetMax)) // crosses the threshold
-	if s.bm == nil {
+	if s.tag() != stateBitmap {
 		t.Fatalf("set did not promote to bitmap at cardinality %d", s.Cardinality())
 	}
 	for i := 0; i < smallSetMax; i++ {
 		s.Remove(uint64(i))
 	}
-	if s.bm == nil {
+	if s.tag() != stateBitmap {
 		t.Fatalf("set demoted from bitmap after removals — must never demote")
 	}
 	if s.Cardinality() != 1 {
@@ -115,23 +115,26 @@ func TestNodeSet_PromotionThreshold(t *testing.T) {
 
 func TestNodeSet_StateRepresentations(t *testing.T) {
 	t.Parallel()
-	// Empty.
+	// Empty: the zero value is ptr==nil, meta==0 (stateEmpty).
 	var s NodeSet
-	if !s.IsEmpty() || s.bm != nil || s.ids != nil || s.count != 0 {
-		t.Fatalf("zero NodeSet not empty: %+v", s)
+	if !s.IsEmpty() || s.tag() != stateEmpty || s.ptr != nil || s.meta != 0 {
+		t.Fatalf("zero NodeSet not empty: tag=%d ptr=%v meta=%d", s.tag(), s.ptr, s.meta)
 	}
-	// Singleton.
+	// Singleton: id packed inline in meta, ptr stays nil.
 	s.Add(42)
-	if s.bm != nil || s.ids != nil || s.count != 1 || s.single != 42 {
-		t.Fatalf("singleton state wrong: %+v", s)
+	if s.tag() != stateSingleton || s.ptr != nil || s.Cardinality() != 1 || s.Minimum() != 42 {
+		t.Fatalf("singleton state wrong: tag=%d ptr=%v card=%d min=%d", s.tag(), s.ptr, s.Cardinality(), s.Minimum())
 	}
 	if got := s.Minimum(); got != 42 {
 		t.Fatalf("Minimum = %d, want 42", got)
 	}
-	// Small.
+	// Small: backing array, ptr non-nil, sorted ascending.
 	s.Add(7)
-	if s.bm != nil || len(s.ids) != 2 || s.ids[0] != 7 || s.ids[1] != 42 {
-		t.Fatalf("small state not sorted: %+v", s)
+	if s.tag() != stateSmall || s.ptr == nil {
+		t.Fatalf("small state wrong: tag=%d ptr=%v", s.tag(), s.ptr)
+	}
+	if ids := s.ToArray(); len(ids) != 2 || ids[0] != 7 || ids[1] != 42 {
+		t.Fatalf("small state not sorted: %v", s.ToArray())
 	}
 	if got := s.Minimum(); got != 7 {
 		t.Fatalf("Minimum = %d, want 7", got)
@@ -146,19 +149,20 @@ func TestNodeSet_AddRangePromotesAndStaysBitmap(t *testing.T) {
 	s.Add(100)
 	s.Add(5)
 	s.AddRange(10, 20) // inclusive
-	if s.bm == nil {
+	if s.tag() != stateBitmap {
 		t.Fatalf("AddRange did not promote to bitmap")
 	}
 	ref := roaring64.New()
 	ref.Add(5)
 	ref.Add(100)
 	ref.AddRange(10, 21)
-	if !s.bm.Equals(ref) {
-		t.Fatalf("AddRange union mismatch: got %v want %v", s.bm.ToArray(), ref.ToArray())
+	if bm, _ := s.Bitmap(); !bm.Equals(ref) {
+		got, _ := s.Bitmap()
+		t.Fatalf("AddRange union mismatch: got %v want %v", got.ToArray(), ref.ToArray())
 	}
 	// A subsequent Add keeps it a bitmap.
 	s.Add(7)
-	if s.bm == nil {
+	if s.tag() != stateBitmap {
 		t.Fatalf("Add after AddRange demoted the set")
 	}
 }
@@ -170,14 +174,15 @@ func TestNodeSet_DenseAddRangeStaysRunContainerTiny(t *testing.T) {
 	var s NodeSet
 	const n = 10_000_000
 	s.AddRange(0, n-1)
-	if s.bm == nil {
+	if s.tag() != stateBitmap {
 		t.Fatalf("dense AddRange not on bitmap tier")
 	}
 	if got := s.Cardinality(); got != n {
 		t.Fatalf("cardinality = %d, want %d", got, n)
 	}
-	s.bm.RunOptimize()
-	if sz := s.bm.GetSerializedSizeInBytes(); sz > 4096 {
+	bm, _ := s.Bitmap()
+	bm.RunOptimize()
+	if sz := bm.GetSerializedSizeInBytes(); sz > 4096 {
 		t.Fatalf("dense band serialized size = %d bytes, expected run-container-tiny", sz)
 	}
 }
@@ -198,10 +203,10 @@ func TestNodeSet_FromSorted(t *testing.T) {
 		ref := roaring64.New()
 		ref.AddMany(ids)
 		assertParity(t, &s, ref)
-		if len(ids) > smallSetMax && s.bm == nil {
+		if len(ids) > smallSetMax && s.tag() != stateBitmap {
 			t.Fatalf("FromSorted(%d ids) did not promote", len(ids))
 		}
-		if len(ids) > 0 && len(ids) <= smallSetMax && s.bm != nil {
+		if len(ids) > 0 && len(ids) <= smallSetMax && s.tag() == stateBitmap {
 			t.Fatalf("FromSorted(%d ids) over-promoted to bitmap", len(ids))
 		}
 	}
@@ -213,15 +218,15 @@ func TestNodeSet_FromBitmap_DownConvert(t *testing.T) {
 	small := roaring64.New()
 	small.AddMany([]uint64{3, 1, 2})
 	s := NodeSetFromBitmap(small)
-	if s.bm != nil {
-		t.Fatalf("small bitmap did not down-convert: %+v", s)
+	if s.tag() == stateBitmap {
+		t.Fatalf("small bitmap did not down-convert: tag=%d", s.tag())
 	}
 	assertParity(t, &s, small)
 
 	dense := roaring64.New()
 	dense.AddRange(0, 1000)
 	d := NodeSetFromBitmap(dense)
-	if d.bm == nil {
+	if d.tag() != stateBitmap {
 		t.Fatalf("dense bitmap was down-converted, must stay a bitmap")
 	}
 	assertParity(t, &d, dense)

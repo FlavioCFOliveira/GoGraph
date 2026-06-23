@@ -48,7 +48,7 @@ func craftGoldenString(t *testing.T, entries []struct {
 // stays 1 and the byte layout is unchanged (auditor C1/C2).
 func TestSerialize_GoldenBytes_String(t *testing.T) {
 	t.Parallel()
-	// Use enough distinct keys to force several leaf splits at fanout 64, so
+	// Use enough distinct keys to force several leaf splits at fanout 128, so
 	// the multi-leaf chain is exercised by the in-order walk.
 	const n = 200
 	idx := New[string]()

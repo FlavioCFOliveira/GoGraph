@@ -13,7 +13,7 @@ import (
 // It measures LIVE heap bytes per entry for a high-cardinality index shape
 // (1M distinct keys, one node each) two ways: the OLD per-key
 // *roaring64.Bitmap representation (~286 B/entry, the audited baseline) and
-// the NEW by-value NodeSet representation (target <= 32 B/entry). The probe
+// the NEW 16-byte packed NodeSet representation (target ~56 B/entry). The probe
 // pins the populated structure across two GC cycles so HeapAlloc reflects
 // only retained memory, then divides by the entry count.
 //
@@ -99,30 +99,31 @@ func TestMem_OldBitmapBaseline(t *testing.T) {
 	}
 }
 
-// TestMem_NewNodeSetSingleton is the regression guard for the SAFE by-value
-// NodeSet (sprint 206 DECISION: 48-byte value, no unsafe union). A singleton
-// key costs no separate heap object, so a high-cardinality index of 1M
-// singletons retains ~134 B/entry — about 2.1x lighter than the ~286 B/entry
-// per-key *roaring64.Bitmap baseline.
+// TestMem_NewNodeSetSingleton is the regression guard for the 16-byte packed
+// NodeSet ({ptr unsafe.Pointer; meta uint64}, #1596). A singleton key costs no
+// separate heap object and the value itself is two machine words, so a
+// high-cardinality index of 1M singletons retains ~56 B/entry — about 5.1x
+// lighter than the ~286 B/entry per-key *roaring64.Bitmap baseline, and ~2.4x
+// lighter than the 48-byte safe-union predecessor's ~134 B/entry (#1584/#1585).
 //
 // The guard's job is to catch a re-introduction of the per-singleton roaring
-// object (which would push the cost back toward the baseline), NOT to police
-// single-byte drift on a noisy resident-heap measurement. It therefore checks
-// both an absolute ceiling generously above the observed ~134 B and a RATIO
-// against the same-process bitmap baseline: a regression that re-adds a roaring
-// object per key collapses the ratio and trips this test. The tighter ~16 B
-// target belongs to the deferred unsafe-union variant, not this safe design.
+// object (which would push the cost back toward the baseline) OR a struct-bloat
+// regression that loses the 16-byte packing, NOT to police single-byte drift on
+// a noisy resident-heap measurement. It therefore checks both an absolute
+// ceiling above the observed ~56 B and a RATIO against the same-process bitmap
+// baseline: either a re-added per-key roaring object or a re-widened value
+// collapses the ratio and trips this test.
 func TestMem_NewNodeSetSingleton(t *testing.T) {
 	const (
-		// absCeiling sits well above the measured ~134 B (noise margin) yet
-		// far below the ~286 B baseline, so a re-added per-key roaring object
-		// breaches it.
-		absCeiling = 200.0
-		// maxFractionOfBaseline requires the safe NodeSet to retain at most
-		// ~65% of the per-key-bitmap baseline. Observed ~134/286 ≈ 0.47, so
-		// this passes with headroom while still catching a regression toward
-		// the bitmap cost.
-		maxFractionOfBaseline = 0.65
+		// absCeiling sits above the measured ~56 B (noise margin) yet below the
+		// ~134 B of the 48-byte predecessor, so losing the 16-byte packing (or
+		// re-adding a per-key roaring object) breaches it.
+		absCeiling = 90.0
+		// maxFractionOfBaseline requires the packed NodeSet to retain at most
+		// ~30% of the per-key-bitmap baseline. Observed ~56/286 ≈ 0.20, so this
+		// passes with headroom while still catching a regression toward the
+		// 48-byte (~0.47) or bitmap cost.
+		maxFractionOfBaseline = 0.30
 	)
 	baseline := oldBitmapBytesPerEntry(t)
 	perEntry := newNodeSetBytesPerEntry(t)
@@ -131,8 +132,8 @@ func TestMem_NewNodeSetSingleton(t *testing.T) {
 
 	if perEntry > absCeiling {
 		t.Fatalf("NodeSet singleton entry = %.1f B/entry, want <= %.0f "+
-			"(safe-design target ~134 B); a per-singleton roaring object may "+
-			"have been re-introduced", perEntry, absCeiling)
+			"(16-byte packing target ~56 B); the 2-word packing may have been "+
+			"lost or a per-singleton roaring object re-introduced", perEntry, absCeiling)
 	}
 	if baseline > 0 && perEntry > maxFractionOfBaseline*baseline {
 		t.Fatalf("NodeSet singleton entry = %.1f B/entry is %.0f%% of the "+
