@@ -187,6 +187,10 @@ func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) 
 // (nil, wrapped ctx.Err()).
 func DijkstraCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
 	defer metrics.Time("search.DijkstraCtx")()
+	if err := validateDijkstraWeights(c.WeightsSlice()); err != nil {
+		metrics.IncCounter("search.DijkstraCtx.errors", 1)
+		return nil, err
+	}
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)
@@ -231,6 +235,10 @@ func DijkstraInto[W Weight](
 		metrics.IncCounter("search.DijkstraInto.errors", 1)
 		return ErrBufferTooSmall
 	}
+	if err := validateDijkstraWeights(c.WeightsSlice()); err != nil {
+		metrics.IncCounter("search.DijkstraInto.errors", 1)
+		return err
+	}
 	h := acquireDijkHeap[W]()
 	defer releaseDijkHeap(h)
 	err := dijkstraCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID], h)
@@ -240,12 +248,36 @@ func DijkstraInto[W Weight](
 	return err
 }
 
-// dijkstraCore is the shared traversal body invoked by both
-// [DijkstraCtx] and [DijkstraInto]. Pre-conditions:
+// validateDijkstraWeights checks that c's weight column is admissible for
+// a non-negative-weight shortest-path traversal: no NaN/+-Inf (float
+// Weight types only; integer W short-circuits in O(1)) and no weight
+// strictly below the zero value of W. It returns [ErrInvalidInput] or
+// [ErrNegativeWeight] respectively, or nil. The scan is O(E); callers
+// that issue many queries against the same immutable snapshot validate
+// once (see [SSSP]) rather than per call (rmp #1516).
+func validateDijkstraWeights[W Weight](weights []W) error {
+	// Float Weight types: NaN / +/-Inf in an edge weight silently
+	// drops every relaxation (cand<dist is always false against NaN).
+	if anyFloatInvalid(weights) {
+		return ErrInvalidInput
+	}
+	var zero W
+	for _, w := range weights {
+		if w < zero {
+			return ErrNegativeWeight
+		}
+	}
+	return nil
+}
+
+// dijkstraCore is the shared traversal body invoked by [DijkstraCtx],
+// [DijkstraInto], and [SSSP.From]. It assumes the caller has already
+// validated the weight column via [validateDijkstraWeights]; it performs
+// no validation itself. Pre-conditions:
 //   - len(dist), len(parent), len(found) all equal c.MaxNodeID();
 //   - heap has been reset to empty.
 //
-//nolint:gocyclo // canonical Dijkstra: NaN/Inf gate + negative-weight scan + heap loop + relaxation
+//nolint:gocyclo // canonical Dijkstra: heap loop + relaxation
 func dijkstraCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -256,19 +288,7 @@ func dijkstraCore[W Weight](
 	h *dijkHeap[W],
 ) error {
 	weights := c.WeightsSlice()
-	// Float Weight types: NaN / +/-Inf in an edge weight silently
-	// drops every relaxation (cand<dist is always false against NaN).
-	// Fail fast at the public boundary; integer W short-circuits.
-	if anyFloatInvalid(weights) {
-		return ErrInvalidInput
-	}
 	var zero W
-	for _, w := range weights {
-		if w < zero {
-			return ErrNegativeWeight
-		}
-	}
-
 	for i := range dist {
 		dist[i] = zero
 		parent[i] = 0
