@@ -18,7 +18,10 @@ import (
 // #1633), stored by value, so a 1-2-property edge instance pays a small slice
 // instead of a ~300 B Go map.
 type edgeInstancePropShard struct {
-	mu sync.Mutex
+	// mu guards m. Writers (SetEdgePropertyAt, RemoveEdgeInstance) take the
+	// write lock; EdgePropertiesAt reads under a read lock so concurrent
+	// per-instance property reads on a shard proceed in parallel.
+	mu sync.RWMutex
 	m  map[edgeKey]map[int64]propBag
 }
 
@@ -96,8 +99,8 @@ func (g *Graph[N, W]) EdgePropertiesAt(src, dst N, idx int64) map[string]Propert
 	}
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeInstancePropShardFor(k)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
 	byIdx, ok := sh.m[k]
 	if !ok {
 		return nil
