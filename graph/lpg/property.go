@@ -192,9 +192,12 @@ type propertyKeyNames struct {
 // snapshot at least as new as the one Intern published. Resolve
 // therefore never misses a live id.
 type PropertyKeyRegistry struct {
-	// mu serialises Intern (write path) and guards forward. It is never
-	// taken on the read path.
-	mu      sync.Mutex
+	// mu serialises Intern (write path) and guards forward. Lookup
+	// (name→id) reads forward under a read lock, so concurrent lookups —
+	// the hot path for property predicates — proceed in parallel and only
+	// the rare Intern of a previously unseen name takes the write lock.
+	// Resolve (id→name) is fully lock-free via snap and never takes mu.
+	mu      sync.RWMutex
 	forward map[string]PropertyKeyID
 	// snap holds the immutable id→name table. Loaded lock-free by
 	// Resolve; swapped under mu by Intern.
@@ -227,10 +230,12 @@ func (r *PropertyKeyRegistry) Intern(name string) PropertyKeyID {
 	return id
 }
 
-// Lookup returns the PropertyKeyID for name and true when known.
+// Lookup returns the PropertyKeyID for name and true when known. It takes
+// only a read lock, so concurrent lookups (the per-row hot path for
+// property predicates) do not serialise against one another.
 func (r *PropertyKeyRegistry) Lookup(name string) (PropertyKeyID, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	id, ok := r.forward[name]
 	return id, ok
 }
