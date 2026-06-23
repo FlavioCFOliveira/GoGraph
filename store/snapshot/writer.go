@@ -433,29 +433,38 @@ func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
 // before the CSR write, before the manifest write, and before the
 // atomic rename. On cancellation the temporary staging directory is
 // cleaned up and the wrapped ctx.Err is returned.
+func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) error {
+	return writeSnapshotCSRCtxWith(ctx, osBackend{}, dir, c)
+}
+
+// writeSnapshotCSRCtxWith is the filesystem-seam implementation behind
+// [WriteSnapshotCSRCtx]: every filesystem operation of the legacy CSR-only
+// snapshot publish routes through fsys, so the OS backend reproduces the
+// historical bytes and durability ordering exactly while the simulator can
+// supply an in-memory disk.
 //
 //nolint:gocyclo // snapshot publish: dir prep + CSR write + manifest write + atomic rename + ctx ticks
-func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) error {
+func writeSnapshotCSRCtxWith[W any](ctx context.Context, fsys fileSystem, dir string, c *csr.CSR[W]) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotCSRCtx")()
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
+	if err := fsys.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
 	tmp := dir + ".tmp"
-	if err := os.RemoveAll(tmp); err != nil {
+	if err := fsys.RemoveAll(tmp); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
-	if err := os.MkdirAll(tmp, 0o750); err != nil {
+	if err := fsys.MkdirAll(tmp, 0o750); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
 	csrPath := filepath.Join(tmp, CSRFile)
-	f, err := createSnapshotFile(csrPath)
+	f, err := fsys.Create(csrPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
@@ -486,12 +495,12 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 		},
 	}
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
 	manifestPath := filepath.Join(tmp, "manifest.json")
-	mf, err := createSnapshotFile(manifestPath)
+	mf, err := fsys.Create(manifestPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
@@ -512,7 +521,7 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err
 	}
@@ -523,8 +532,8 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 	// canonical crash-safe ordering documented on the v2/v3 path
 	// ([writeSnapshotFullCore]): write+fsync components -> fsync staging
 	// dir -> rename -> fsync parent. No-op on Windows (see [dirFsync]).
-	if err := dirFsync(tmp); err != nil {
-		_ = os.RemoveAll(tmp) // best-effort: staging cleanup, fsync err preserved
+	if err := fsys.DirSync(tmp); err != nil {
+		_ = fsys.RemoveAll(tmp) // best-effort: staging cleanup, fsync err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return fmt.Errorf("snapshot: staging dir fsync: %w", err)
 	}
@@ -541,19 +550,19 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 	bak := dir + ".bak"
 	// Clean up a stale backup from a prior interrupted publish (idempotent;
 	// recovery may already have promoted or discarded it).
-	_ = os.RemoveAll(bak) // best-effort: stale backup cleanup
+	_ = fsys.RemoveAll(bak) // best-effort: stale backup cleanup
 	notePublishStep("archive", bak)
 	// Atomically archive the current live snapshot. When dir does not yet
 	// exist (first checkpoint), Rename fails with os.ErrNotExist — fine.
-	if err := os.Rename(dir, bak); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := fsys.Rename(dir, bak); err != nil && !errors.Is(err, os.ErrNotExist) {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return fmt.Errorf("snapshot: archive live snapshot: %w", err)
 	}
 	notePublishStep("rename", tmp)
-	if err := os.Rename(tmp, dir); err != nil {
+	if err := fsys.Rename(tmp, dir); err != nil {
 		// Restore: undo the archive so the caller retries against an
 		// intact live snapshot.
-		_ = os.Rename(bak, dir) // best-effort: archive restore, rename err preserved
+		_ = fsys.Rename(bak, dir) // best-effort: archive restore, rename err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish rename: %w", err)
 	}
@@ -561,13 +570,13 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 	// new directory entry survives a crash within the journal
 	// writeback window. No-op on platforms that lack a directory
 	// fsync primitive (Windows).
-	if err := parentDirFsync(dir); err != nil {
+	if err := fsys.ParentDirSync(dir); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish parent fsync: %w", err)
 	}
 	// Drop the backup only AFTER the parent-dir fsync: a crash after the
 	// publish rename but before the fsync may lose the new dirent, and the
 	// backup is then the only surviving copy of the previous snapshot.
-	_ = os.RemoveAll(bak) // best-effort: happy-path backup cleanup
+	_ = fsys.RemoveAll(bak) // best-effort: happy-path backup cleanup
 	return nil
 }

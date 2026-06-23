@@ -138,8 +138,8 @@ func WriteSnapshotFullCtx[N comparable, W any](
 	// No codec: the mapper is persisted only for string-keyed graphs
 	// (the historical v3 behaviour). writeMapperIfStringKeyed performs
 	// the string-only probe.
-	return writeSnapshotFullCore(ctx, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-		return writeMapperIfStringKeyed(c2, tmp, g)
+	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+		return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
 	})
 }
 
@@ -160,8 +160,8 @@ func WriteSnapshotFullWithMapperCodecCtx[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecCtx.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	return writeSnapshotFullCore(ctx, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-		return writeMapperWithCodec(c2, tmp, g, codec)
+	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+		return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
 	})
 }
 
@@ -182,9 +182,9 @@ func WriteSnapshotFullWithConstraints[N comparable, W any](
 	constraints []ConstraintSpec,
 ) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraints")()
-	err := writeSnapshotFullCore(context.Background(), dir, c, g, constraints,
+	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints,
 		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperIfStringKeyed(c2, tmp, g)
+			return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
 		})
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithConstraints.errors", 1)
@@ -211,9 +211,46 @@ func WriteSnapshotFullWithMapperCodecAndConstraints[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	err := writeSnapshotFullCore(context.Background(), dir, c, g, constraints,
+	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints,
 		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperWithCodec(c2, tmp, g, codec)
+			return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
+		})
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
+	}
+	return err
+}
+
+// WriteSnapshotFullWithMapperCodecAndConstraintsFS is the filesystem-seam
+// variant of [WriteSnapshotFullWithMapperCodecAndConstraints]: it routes every
+// filesystem operation of the snapshot publish through fsys instead of the
+// default OS backend. It is the entry point the deterministic-simulation
+// harness (internal/sim) uses to back a snapshot with an in-memory disk so it
+// can crash mid-publish and during the WAL prefix-truncate that follows a
+// checkpoint.
+//
+// The fsys parameter type ([fileSystem]) is intentionally unexported: an
+// external package cannot name it but can still supply a value that satisfies
+// it (mirroring wal.OpenWith). Passing osBackend{} reproduces
+// [WriteSnapshotFullWithMapperCodecAndConstraints] byte-for-byte.
+//
+// codec must not be nil. constraints may be nil or empty (no constraints.bin).
+func WriteSnapshotFullWithMapperCodecAndConstraintsFS[N comparable, W any](
+	fsys fileSystem,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+	constraints []ConstraintSpec,
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints")()
+	if codec == nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
+		return errors.New("snapshot: nil mapper codec")
+	}
+	err := writeSnapshotFullCore(context.Background(), fsys, dir, c, g, constraints,
+		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+			return writeMapperWithCodec(c2, fsys, tmp, g, codec)
 		})
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
@@ -232,6 +269,7 @@ func WriteSnapshotFullWithMapperCodecAndConstraints[N comparable, W any](
 //nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + manifest + atomic rename + ctx ticks
 func writeSnapshotFullCore[N comparable, W any](
 	ctx context.Context,
+	fsys fileSystem,
 	dir string,
 	c *csr.CSR[W],
 	g *lpg.Graph[N, W],
@@ -242,67 +280,67 @@ func writeSnapshotFullCore[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
+	if err := fsys.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 	tmp := dir + ".tmp"
-	if err := os.RemoveAll(tmp); err != nil {
+	if err := fsys.RemoveAll(tmp); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
-	if err := os.MkdirAll(tmp, 0o750); err != nil {
+	if err := fsys.MkdirAll(tmp, 0o750); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	// csr.bin
 	csrPath := filepath.Join(tmp, CSRFile)
-	csrSize, csrCRC, err := writeAndSync(csrPath, func(w io.Writer) (int64, uint32, error) {
+	csrSize, csrCRC, err := writeAndSync(fsys, csrPath, func(w io.Writer) (int64, uint32, error) {
 		return WriteCSR(w, c)
 	})
 	if err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	// labels.bin
 	labelsPath := filepath.Join(tmp, LabelsFile)
-	labelsSize, labelsCRC, err := writeAndSync(labelsPath, func(w io.Writer) (int64, uint32, error) {
+	labelsSize, labelsCRC, err := writeAndSync(fsys, labelsPath, func(w io.Writer) (int64, uint32, error) {
 		return WriteLabels(w, g)
 	})
 	if err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	// properties.bin
 	propertiesPath := filepath.Join(tmp, PropertiesFile)
-	propsSize, propsCRC, err := writeAndSync(propertiesPath, func(w io.Writer) (int64, uint32, error) {
+	propsSize, propsCRC, err := writeAndSync(fsys, propertiesPath, func(w io.Writer) (int64, uint32, error) {
 		return WriteProperties(w, g)
 	})
 	if err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -318,13 +356,13 @@ func writeSnapshotFullCore[N comparable, W any](
 	// contract.
 	mapperSize, mapperCRC, haveMapper, err := writeMapper(ctx, tmp)
 	if err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -342,18 +380,18 @@ func writeSnapshotFullCore[N comparable, W any](
 	haveTombstones := g.TombstoneCount() > 0
 	if haveTombstones {
 		tombstonesPath := filepath.Join(tmp, TombstonesFile)
-		tombSize, tombCRC, err = writeAndSync(tombstonesPath, func(w io.Writer) (int64, uint32, error) {
+		tombSize, tombCRC, err = writeAndSync(fsys, tombstonesPath, func(w io.Writer) (int64, uint32, error) {
 			return WriteTombstones(w, g)
 		})
 		if err != nil {
-			_ = os.RemoveAll(tmp)
+			_ = fsys.RemoveAll(tmp)
 			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 			return err
 		}
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -372,15 +410,15 @@ func writeSnapshotFullCore[N comparable, W any](
 	var edgeHandleCRC uint32
 	var haveEdgeHandles bool
 	edgeHandlesPath := filepath.Join(tmp, EdgeHandlesFile)
-	edgeHandleSize, edgeHandleCRC, haveEdgeHandles, err = writeEdgeHandlesComponent(edgeHandlesPath, g)
+	edgeHandleSize, edgeHandleCRC, haveEdgeHandles, err = writeEdgeHandlesComponent(fsys, edgeHandlesPath, g)
 	if err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -397,18 +435,18 @@ func writeSnapshotFullCore[N comparable, W any](
 	haveConstraints := len(constraints) > 0
 	if haveConstraints {
 		constraintsPath := filepath.Join(tmp, ConstraintsFile)
-		constraintsSize, constraintsCRC, err = writeAndSync(constraintsPath, func(w io.Writer) (int64, uint32, error) {
+		constraintsSize, constraintsCRC, err = writeAndSync(fsys, constraintsPath, func(w io.Writer) (int64, uint32, error) {
 			return WriteConstraints(w, constraints)
 		})
 		if err != nil {
-			_ = os.RemoveAll(tmp)
+			_ = fsys.RemoveAll(tmp)
 			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 			return err
 		}
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -418,9 +456,9 @@ func writeSnapshotFullCore[N comparable, W any](
 	// support are silently skipped (rebuild-on-restart contract).
 	var idxEntries []IndexFileEntry
 	if mgr := g.IndexManager(); mgr != nil && mgr.Count() > 0 {
-		entries, ierr := WriteIndexes(tmp, mgr)
+		entries, ierr := writeIndexesWith(fsys, tmp, mgr)
 		if ierr != nil {
-			_ = os.RemoveAll(tmp)
+			_ = fsys.RemoveAll(tmp)
 			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 			return ierr
 		}
@@ -428,7 +466,7 @@ func writeSnapshotFullCore[N comparable, W any](
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -492,32 +530,32 @@ func writeSnapshotFullCore[N comparable, W any](
 	}
 
 	manifestPath := filepath.Join(tmp, "manifest.json")
-	mf, err := createSnapshotFile(manifestPath)
+	mf, err := fsys.Create(manifestPath)
 	if err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 	if err := WriteManifest(mf, m); err != nil {
-		_ = mf.Close()        // best-effort: already on error path, WriteManifest err preserved
-		_ = os.RemoveAll(tmp) // best-effort: tmp dir cleanup, WriteManifest err preserved
+		_ = mf.Close()          // best-effort: already on error path, WriteManifest err preserved
+		_ = fsys.RemoveAll(tmp) // best-effort: tmp dir cleanup, WriteManifest err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 	if err := mf.Sync(); err != nil {
-		_ = mf.Close()        // best-effort: already on error path, sync err preserved
-		_ = os.RemoveAll(tmp) // best-effort: tmp dir cleanup, sync err preserved
+		_ = mf.Close()          // best-effort: already on error path, sync err preserved
+		_ = fsys.RemoveAll(tmp) // best-effort: tmp dir cleanup, sync err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 	if err := mf.Close(); err != nil {
-		_ = os.RemoveAll(tmp) // best-effort: tmp dir cleanup, close err preserved
+		_ = fsys.RemoveAll(tmp) // best-effort: tmp dir cleanup, close err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
 
 	if err := ctx.Err(); err != nil {
-		_ = os.RemoveAll(tmp)
+		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
 	}
@@ -533,8 +571,8 @@ func writeSnapshotFullCore[N comparable, W any](
 	// ordering is therefore: write+fsync components -> fsync staging dir
 	// -> rename -> fsync parent. No-op on platforms without a directory
 	// fsync primitive (Windows). See [dirFsync].
-	if err := dirFsync(tmp); err != nil {
-		_ = os.RemoveAll(tmp) // best-effort: staging cleanup, fsync err preserved
+	if err := fsys.DirSync(tmp); err != nil {
+		_ = fsys.RemoveAll(tmp) // best-effort: staging cleanup, fsync err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: staging dir fsync: %w", err)
 	}
@@ -554,19 +592,19 @@ func writeSnapshotFullCore[N comparable, W any](
 	bak := dir + ".bak"
 	// Clean up a stale backup from a prior interrupted publish (idempotent;
 	// recovery may already have promoted or discarded it).
-	_ = os.RemoveAll(bak) // best-effort: stale backup cleanup
+	_ = fsys.RemoveAll(bak) // best-effort: stale backup cleanup
 	notePublishStep("archive", bak)
 	// Atomically archive the current live snapshot. When dir does not yet
 	// exist (first checkpoint), Rename fails with os.ErrNotExist — fine.
-	if err := os.Rename(dir, bak); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := fsys.Rename(dir, bak); err != nil && !errors.Is(err, os.ErrNotExist) {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: archive live snapshot: %w", err)
 	}
 	notePublishStep("rename", tmp)
-	if err := os.Rename(tmp, dir); err != nil {
+	if err := fsys.Rename(tmp, dir); err != nil {
 		// Restore: undo the archive so the caller retries against an
 		// intact live snapshot.
-		_ = os.Rename(bak, dir) // best-effort: archive restore, rename err preserved
+		_ = fsys.Rename(bak, dir) // best-effort: archive restore, rename err preserved
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish rename: %w", err)
 	}
@@ -574,14 +612,14 @@ func writeSnapshotFullCore[N comparable, W any](
 	// new directory entry survives a crash within the journal
 	// writeback window. No-op on platforms that lack a directory
 	// fsync primitive (Windows).
-	if err := parentDirFsync(dir); err != nil {
+	if err := fsys.ParentDirSync(dir); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: publish parent fsync: %w", err)
 	}
 	// Drop the backup only AFTER the parent-dir fsync: a crash after the
 	// publish rename but before the fsync may lose the new dirent, and the
 	// backup is then the only surviving copy of the previous snapshot.
-	_ = os.RemoveAll(bak) // best-effort: happy-path backup cleanup
+	_ = fsys.RemoveAll(bak) // best-effort: happy-path backup cleanup
 	return nil
 }
 
@@ -599,6 +637,7 @@ func writeSnapshotFullCore[N comparable, W any](
 // before this change.
 func writeMapperIfStringKeyed[N comparable, W any](
 	ctx context.Context,
+	fsys fileSystem,
 	tmp string,
 	g *lpg.Graph[N, W],
 ) (size int64, crc uint32, ok bool, err error) {
@@ -616,7 +655,7 @@ func writeMapperIfStringKeyed[N comparable, W any](
 		return 0, 0, false, nil
 	}
 	mapperPath := filepath.Join(tmp, MapperFile)
-	mSize, mCRC, werr := writeAndSync(mapperPath, func(w io.Writer) (int64, uint32, error) {
+	mSize, mCRC, werr := writeAndSync(fsys, mapperPath, func(w io.Writer) (int64, uint32, error) {
 		return WriteMapperString(w, stringMapper)
 	})
 	if werr != nil {
@@ -632,6 +671,7 @@ func writeMapperIfStringKeyed[N comparable, W any](
 // or encode failure (callers must clean tmp and surface the error).
 func writeMapperWithCodec[N comparable, W any](
 	ctx context.Context,
+	fsys fileSystem,
 	tmp string,
 	g *lpg.Graph[N, W],
 	codec keyEncoder[N],
@@ -641,7 +681,7 @@ func writeMapperWithCodec[N comparable, W any](
 	}
 	mapper := g.AdjList().Mapper()
 	mapperPath := filepath.Join(tmp, MapperFile)
-	mSize, mCRC, werr := writeAndSync(mapperPath, func(w io.Writer) (int64, uint32, error) {
+	mSize, mCRC, werr := writeAndSync(fsys, mapperPath, func(w io.Writer) (int64, uint32, error) {
 		return WriteMapper(w, mapper, codec)
 	})
 	if werr != nil {
@@ -657,9 +697,9 @@ func writeMapperWithCodec[N comparable, W any](
 // graph that never used handles, and reports emitted=false so the caller omits
 // the manifest entry. The byte-stable, version-tagged, CRC-covered shape
 // mirrors the tombstones.bin component.
-func writeEdgeHandlesComponent[N comparable, W any](path string, g *lpg.Graph[N, W]) (size int64, crc uint32, emitted bool, err error) {
+func writeEdgeHandlesComponent[N comparable, W any](fsys fileSystem, path string, g *lpg.Graph[N, W]) (size int64, crc uint32, emitted bool, err error) {
 	var produced bool
-	size, crc, err = writeAndSync(path, func(w io.Writer) (int64, uint32, error) {
+	size, crc, err = writeAndSync(fsys, path, func(w io.Writer) (int64, uint32, error) {
 		s, c, e, werr := WriteEdgeHandles(w, g)
 		if werr != nil {
 			return 0, 0, werr
@@ -673,7 +713,7 @@ func writeEdgeHandlesComponent[N comparable, W any](path string, g *lpg.Graph[N,
 	if !produced {
 		// Nothing to persist: drop the empty file so the snapshot omits the
 		// component entirely (the absent-component backward-compat contract).
-		_ = os.Remove(path) // best-effort: empty optional component cleanup
+		_ = fsys.Remove(path) // best-effort: empty optional component cleanup
 		return 0, 0, false, nil
 	}
 	return size, crc, true, nil
@@ -686,26 +726,27 @@ func writeEdgeHandlesComponent[N comparable, W any](path string, g *lpg.Graph[N,
 // removes the file on any error (best effort) so a half-written
 // component never lingers.
 func writeAndSync(
+	fsys fileSystem,
 	path string,
 	write func(io.Writer) (int64, uint32, error),
 ) (size int64, crc uint32, err error) {
-	f, err := createSnapshotFile(path)
+	f, err := fsys.Create(path)
 	if err != nil {
 		return 0, 0, err
 	}
 	size, crc, werr := write(f)
 	if werr != nil {
-		_ = f.Close()       // best-effort: already on error path, write err preserved
-		_ = os.Remove(path) // best-effort: partial file cleanup, write err preserved
+		_ = f.Close()         // best-effort: already on error path, write err preserved
+		_ = fsys.Remove(path) // best-effort: partial file cleanup, write err preserved
 		return 0, 0, werr
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()       // best-effort: already on error path, sync err preserved
-		_ = os.Remove(path) // best-effort: partial file cleanup, sync err preserved
+		_ = f.Close()         // best-effort: already on error path, sync err preserved
+		_ = fsys.Remove(path) // best-effort: partial file cleanup, sync err preserved
 		return 0, 0, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(path) // best-effort: partial file cleanup, close err preserved
+		_ = fsys.Remove(path) // best-effort: partial file cleanup, close err preserved
 		return 0, 0, err
 	}
 	return size, crc, nil
@@ -724,9 +765,26 @@ func writeAndSync(
 // verification use the same TeeReader pattern so a corrupted
 // component surfaces as [ErrCorrupted].
 func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
+	return loadSnapshotFullWith(osBackend{}, dir)
+}
+
+// LoadSnapshotFullFS is the filesystem-seam variant of [LoadSnapshotFull]:
+// it routes every read of the snapshot through fsys instead of the default
+// OS backend. It is the entry point the deterministic-simulation harness
+// (internal/sim) uses to load a snapshot backed by an in-memory disk.
+// Passing osBackend{} reproduces [LoadSnapshotFull] exactly.
+func LoadSnapshotFullFS(fsys fileSystem, dir string) (LoadedSnapshot, error) {
+	return loadSnapshotFullWith(fsys, dir)
+}
+
+// loadSnapshotFullWith is the seam-threaded implementation behind
+// [LoadSnapshotFull] and [LoadSnapshotFullFS]: every filesystem read goes
+// through fsys, so the OS backend reproduces the historical behaviour
+// byte-for-byte while the simulator can supply an in-memory disk.
+func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 	defer metrics.Time("store.snapshot.LoadSnapshotFull")()
 	manifestPath := filepath.Join(dir, "manifest.json")
-	m, err := ReadManifestFile(manifestPath)
+	m, err := readManifestFileWith(fsys, manifestPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 		return LoadedSnapshot{}, err
@@ -738,7 +796,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		return LoadedSnapshot{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
 	}
 
-	csrParsed, err := readVerifiedCSR(filepath.Join(dir, CSRFile), csrEntry.CRC32C, csrEntry.Size)
+	csrParsed, err := readVerifiedCSR(fsys, filepath.Join(dir, CSRFile), csrEntry.CRC32C, csrEntry.Size)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 		return LoadedSnapshot{}, err
@@ -746,7 +804,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 
 	var labelsParsed LabelsReadback
 	if labelsEntry != nil {
-		labelsParsed, err = readVerifiedLabels(filepath.Join(dir, LabelsFile), labelsEntry.CRC32C, labelsEntry.Size)
+		labelsParsed, err = readVerifiedLabels(fsys, filepath.Join(dir, LabelsFile), labelsEntry.CRC32C, labelsEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -755,7 +813,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 
 	var propsParsed PropertiesReadback
 	if propsEntry != nil {
-		propsParsed, err = readVerifiedProperties(filepath.Join(dir, PropertiesFile), propsEntry.CRC32C, propsEntry.Size)
+		propsParsed, err = readVerifiedProperties(fsys, filepath.Join(dir, PropertiesFile), propsEntry.CRC32C, propsEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -765,7 +823,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	var mapperParsed MapperReadback
 	if mapperEntry != nil {
 		mapperPath := filepath.Join(dir, MapperFile)
-		ver, verr := peekMapperVersion(mapperPath)
+		ver, verr := peekMapperVersion(fsys, mapperPath)
 		if verr != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, verr
@@ -776,9 +834,9 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 		// lets a single LoadSnapshotFull serve both layouts without a
 		// codec of its own.
 		if ver == mapperFormatVersionCodec {
-			mapperParsed, err = readVerifiedMapperBytes(mapperPath, mapperEntry.CRC32C, mapperEntry.Size)
+			mapperParsed, err = readVerifiedMapperBytes(fsys, mapperPath, mapperEntry.CRC32C, mapperEntry.Size)
 		} else {
-			mapperParsed, err = readVerifiedMapper(mapperPath, mapperEntry.CRC32C, mapperEntry.Size)
+			mapperParsed, err = readVerifiedMapper(fsys, mapperPath, mapperEntry.CRC32C, mapperEntry.Size)
 		}
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
@@ -792,7 +850,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	// verified exactly like the other components.
 	var tombParsed TombstonesReadback
 	if tombEntry != nil {
-		tombParsed, err = readVerifiedTombstones(filepath.Join(dir, TombstonesFile), tombEntry.CRC32C)
+		tombParsed, err = readVerifiedTombstones(fsys, filepath.Join(dir, TombstonesFile), tombEntry.CRC32C)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -805,7 +863,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	// CRC32C is verified exactly like the other components.
 	var edgeHandlesParsed EdgeHandlesReadback
 	if ehEntry := findEntry(m.Files, EdgeHandlesFile); ehEntry != nil {
-		edgeHandlesParsed, err = readVerifiedEdgeHandles(filepath.Join(dir, EdgeHandlesFile), ehEntry.CRC32C, ehEntry.Size)
+		edgeHandlesParsed, err = readVerifiedEdgeHandles(fsys, filepath.Join(dir, EdgeHandlesFile), ehEntry.CRC32C, ehEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -818,7 +876,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	// is verified exactly like the other components.
 	var constraintsParsed ConstraintsReadback
 	if ccEntry := findEntry(m.Files, ConstraintsFile); ccEntry != nil {
-		constraintsParsed, err = readVerifiedConstraints(filepath.Join(dir, ConstraintsFile), ccEntry.CRC32C)
+		constraintsParsed, err = readVerifiedConstraints(fsys, filepath.Join(dir, ConstraintsFile), ccEntry.CRC32C)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -830,7 +888,7 @@ func LoadSnapshotFull(dir string) (LoadedSnapshot, error) {
 	// from the LPG rather than aborting.
 	var idxReadback []IndexReadback
 	if len(m.Indexes) > 0 {
-		idxReadback, err = LoadIndexes(dir, m.Indexes)
+		idxReadback, err = loadIndexesWith(fsys, dir, m.Indexes)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -908,8 +966,8 @@ func boundedComponentReader(r io.Reader, size int64) io.Reader {
 // records than the file could hold is rejected before any allocation.
 // The file is opened with O_NOFOLLOW (via openSnapshotComponent) so a
 // component symlinked outside the snapshot dir is rejected.
-func readVerifiedCSR(path string, expected uint32, size int64) (CSRReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedCSR(fsys fileSystem, path string, expected uint32, size int64) (CSRReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return CSRReadback{}, err
 	}
@@ -937,8 +995,8 @@ func readVerifiedCSR(path string, expected uint32, size int64) (CSRReadback, err
 // [io.LimitReader] so a malicious header declaring more records than the file
 // could hold cannot drive the parser's append loop past the real on-disk size
 // (the structural reader then fails fail-stop on the truncated record).
-func readVerifiedLabels(path string, expected uint32, size int64) (LabelsReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedLabels(fsys fileSystem, path string, expected uint32, size int64) (LabelsReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return LabelsReadback{}, err
 	}
@@ -963,8 +1021,8 @@ func readVerifiedLabels(path string, expected uint32, size int64) (LabelsReadbac
 
 // readVerifiedEdgeHandles is the dual of [readVerifiedCSR] for
 // edgehandles.bin. size bounds the body reader (see [readVerifiedLabels]).
-func readVerifiedEdgeHandles(path string, expected uint32, size int64) (EdgeHandlesReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedEdgeHandles(fsys fileSystem, path string, expected uint32, size int64) (EdgeHandlesReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return EdgeHandlesReadback{}, err
 	}
@@ -989,8 +1047,8 @@ func readVerifiedEdgeHandles(path string, expected uint32, size int64) (EdgeHand
 
 // readVerifiedTombstones is the dual of [readVerifiedCSR] for
 // tombstones.bin.
-func readVerifiedTombstones(path string, expected uint32) (TombstonesReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedTombstones(fsys fileSystem, path string, expected uint32) (TombstonesReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return TombstonesReadback{}, err
 	}
@@ -1015,8 +1073,8 @@ func readVerifiedTombstones(path string, expected uint32) (TombstonesReadback, e
 
 // readVerifiedConstraints is the dual of [readVerifiedCSR] for
 // constraints.bin.
-func readVerifiedConstraints(path string, expected uint32) (ConstraintsReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedConstraints(fsys fileSystem, path string, expected uint32) (ConstraintsReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return ConstraintsReadback{}, err
 	}
@@ -1041,8 +1099,8 @@ func readVerifiedConstraints(path string, expected uint32) (ConstraintsReadback,
 
 // readVerifiedProperties is the dual of [readVerifiedCSR] for
 // properties.bin. size bounds the body reader (see [readVerifiedLabels]).
-func readVerifiedProperties(path string, expected uint32, size int64) (PropertiesReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedProperties(fsys fileSystem, path string, expected uint32, size int64) (PropertiesReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return PropertiesReadback{}, err
 	}

@@ -5,7 +5,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	pathpkg "path"
+	"strings"
 	"sync"
+	"time"
 )
 
 // sectorSize is the granularity of the fault bitmap. Each 512-byte sector can
@@ -67,14 +70,34 @@ type SimDisk struct {
 	files     map[string]*simFile
 	faultRate float64
 	seed      *Seed
+	// dirs tracks the dirent durability of DIRECTORIES that were published by
+	// a directory rename (the snapshot publish renames a whole staging
+	// directory onto the live name). The value is whether the directory's own
+	// name in its parent is durable; a directory absent from this map is
+	// implicitly durable (it was created in place via MkdirAll, never via a
+	// publish rename). A [SimDisk.Crash] drops every directory whose dirent is
+	// not yet durable, taking its entire subtree with it.
+	dirs map[string]bool
 }
 
 // simFile is the in-memory backing store for one path. data holds the file
 // bytes; faulted marks, per sector index, whether writes into that sector are
 // corrupted.
+//
+// direntDurable models POSIX directory-entry durability: it is the in-memory
+// analogue of whether the name->inode link of this path is on stable storage.
+// A create or rename links a name with direntDurable=false; only a
+// [SimDisk.DirSync] of the containing directory (the fsync(2)-on-a-directory
+// primitive the snapshot/csrfile publish protocol relies on) flips it true. A
+// [SimDisk.Crash] drops every dirent that is not yet durable, exactly as a
+// real crash within the kernel writeback window loses a rename whose parent
+// directory was never fsync'd. The file's DATA durability is modelled
+// separately by the per-Sync fault and the torn-write sector bitmap; this flag
+// is only about the name's link surviving a crash.
 type simFile struct {
-	data    []byte
-	faulted map[int]bool
+	data          []byte
+	faulted       map[int]bool
+	direntDurable bool
 }
 
 // NewSimDisk returns an empty in-memory filesystem. faultRate is the
@@ -92,6 +115,7 @@ func NewSimDisk(seed *Seed, faultRate float64) *SimDisk {
 		files:     make(map[string]*simFile),
 		faultRate: faultRate,
 		seed:      seed,
+		dirs:      make(map[string]bool),
 	}
 }
 
@@ -109,7 +133,14 @@ func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 		if flag&os.O_CREATE == 0 {
 			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 		}
-		f = &simFile{faulted: make(map[int]bool)}
+		// A freshly linked name's dirent is not yet durable: it survives a
+		// crash only after a DirSync of its parent directory. The exception is
+		// a root-level file (parent ".") such as the WAL: those are governed by
+		// the long-standing data-durability model (per-Sync fault), not the
+		// dirent model the snapshot/csrfile publish protocol exercises, so they
+		// are treated as durably linked on creation to keep WAL-only crash
+		// recovery byte-compatible with Phase 2.
+		f = &simFile{faulted: make(map[int]bool), direntDurable: isRootLevel(path)}
 		d.files[path] = f
 	}
 	if flag&os.O_TRUNC != 0 {
@@ -123,20 +154,76 @@ func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 	return h, nil
 }
 
-// Rename atomically moves the file at oldPath to newPath, replacing any
-// existing destination. It returns an error wrapping fs.ErrNotExist when the
-// source is absent.
+// Rename atomically moves oldPath to newPath, replacing any existing
+// destination. It handles both a single file (oldPath is a file key) and a
+// directory (oldPath has child keys prefixed oldPath+"/"): the snapshot
+// publish protocol renames a whole staging directory onto the live name, so a
+// directory rename must move every child key, re-rooting its prefix. The moved
+// dirent(s) become NOT durable — only a [SimDisk.DirSync] of the new parent
+// makes the new name crash-survivable — which is what lets the simulator crash
+// in the publish window between the rename and the parent-dir fsync. It returns
+// an error wrapping fs.ErrNotExist when the source is absent.
 func (d *SimDisk) Rename(oldPath, newPath string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	f, ok := d.files[oldPath]
-	if !ok {
+	if f, ok := d.files[oldPath]; ok {
+		// Single-file rename: replace any destination, link the new name with
+		// a not-yet-durable dirent (unless root-level — see [isRootLevel] and
+		// the rationale in OpenFile — so the WAL's own renames stay governed by
+		// the data-durability model, not the dirent model).
+		delete(d.files, oldPath)
+		f.direntDurable = isRootLevel(newPath)
+		d.files[newPath] = f
+		return nil
+	}
+
+	// Directory rename: move every child key under oldPath/ to newPath/,
+	// preserving each child's own dirent durability — children travel inside
+	// the moved directory inode, so a prior DirSync(oldPath) that made them
+	// durable still holds. What is NOT yet durable is the directory's own name
+	// in its parent: tracked in d.dirs, set false here and made durable only
+	// by a later ParentDirSync(newPath). A crash before that parent fsync
+	// drops the whole subtree (the rename is lost), exactly the window the
+	// publish protocol's post-rename parent fsync closes.
+	prefix := oldPath + "/"
+	moved := make(map[string]*simFile)
+	for p, f := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			moved[newPath+"/"+p[len(prefix):]] = f
+		}
+	}
+	if len(moved) == 0 {
 		return &fs.PathError{Op: "rename", Path: oldPath, Err: fs.ErrNotExist}
 	}
-	delete(d.files, oldPath)
-	d.files[newPath] = f
+	// Drop any pre-existing destination subtree (replace semantics).
+	d.removeSubtreeLocked(newPath)
+	delete(d.dirs, oldPath)
+	for p := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			delete(d.files, p)
+		}
+	}
+	for np, f := range moved {
+		d.files[np] = f
+	}
+	// The directory's own dirent under its parent is not durable until a
+	// ParentDirSync(newPath); root-level directories are durably linked on
+	// creation, mirroring root-level files (see [isRootLevel]).
+	d.dirs[newPath] = isRootLevel(newPath)
 	return nil
+}
+
+// removeSubtreeLocked deletes path and every key under path/. The caller holds
+// d.mu.
+func (d *SimDisk) removeSubtreeLocked(path string) {
+	delete(d.files, path)
+	prefix := path + "/"
+	for p := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			delete(d.files, p)
+		}
+	}
 }
 
 // MkdirAll is a no-op for the in-memory filesystem: there is no directory tree,
@@ -152,6 +239,170 @@ func (d *SimDisk) Remove(path string) error {
 	delete(d.files, path)
 	return nil
 }
+
+// RemoveAll deletes path and every file under path/. Removing an absent path is
+// a no-op, matching os.RemoveAll and the staging/backup cleanup the snapshot
+// writer relies on.
+func (d *SimDisk) RemoveAll(path string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.removeSubtreeLocked(path)
+	return nil
+}
+
+// Stat reports a minimal [fs.FileInfo] for a file at path. It returns an error
+// wrapping fs.ErrNotExist when no file is present, which is exactly the probe
+// the snapshot and recovery paths rely on (testing for manifest.json / wal
+// presence). Directories have no standalone entry in the opaque-key model;
+// Stat reports a directory when any child key is prefixed path+"/".
+func (d *SimDisk) Stat(path string) (fs.FileInfo, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if f, ok := d.files[path]; ok {
+		return simFileInfo{name: baseName(path), size: int64(len(f.data))}, nil
+	}
+	prefix := path + "/"
+	for p := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			return simFileInfo{name: baseName(path), dir: true}, nil
+		}
+	}
+	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+}
+
+// ReadFile returns a copy of the whole contents of the file at path, or an
+// error wrapping fs.ErrNotExist when absent. The copy keeps the returned slice
+// independent of later writes, mirroring os.ReadFile.
+func (d *SimDisk) ReadFile(path string) ([]byte, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	out := make([]byte, len(f.data))
+	copy(out, f.data)
+	return out, nil
+}
+
+// TruncatePath resizes the file at path to size bytes (zero-filling on grow),
+// the path-based analogue of os.Truncate used by the csrfile writer. It returns
+// an error wrapping fs.ErrNotExist when the file is absent.
+func (d *SimDisk) TruncatePath(path string, size int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return &fs.PathError{Op: "truncate", Path: path, Err: fs.ErrNotExist}
+	}
+	if size < 0 {
+		return errors.New("sim: negative truncate size")
+	}
+	if size <= int64(len(f.data)) {
+		f.data = f.data[:size]
+		return nil
+	}
+	grown := make([]byte, size)
+	copy(grown, f.data)
+	f.data = grown
+	return nil
+}
+
+// DirSync makes every dirent in directory dir durable: it is the in-memory
+// analogue of fsync(2) on a directory descriptor. The snapshot/csrfile publish
+// protocol calls it on the staging directory before the publish rename and on
+// the parent directory after it; only after DirSync does a freshly created or
+// renamed name survive a [SimDisk.Crash]. A DirSync of a directory with no
+// entries is a harmless no-op (it models fsync of an empty directory).
+func (d *SimDisk) DirSync(dir string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for p, f := range d.files {
+		if pathpkg.Dir(p) == dir {
+			f.direntDurable = true
+		}
+	}
+	// A directory whose parent is dir has its own name made durable too: this
+	// is how the post-publish ParentDirSync(live) durabilises the live
+	// snapshot directory's name.
+	for dp := range d.dirs {
+		if pathpkg.Dir(dp) == dir {
+			d.dirs[dp] = true
+		}
+	}
+	return nil
+}
+
+// ParentDirSync makes the dirent of childPath durable by DirSyncing its parent
+// directory. It is the analogue of the post-rename parent-directory fsync the
+// publish protocols issue.
+func (d *SimDisk) ParentDirSync(childPath string) error {
+	return d.DirSync(pathpkg.Dir(childPath))
+}
+
+// Crash models a host crash / kill -9: it drops every dirent that is not yet
+// durable, exactly as a real crash within the kernel writeback window loses a
+// create or rename whose parent directory was never fsync'd. A name becomes
+// durable only after a [SimDisk.DirSync] of its parent; until then it is the
+// load-bearing job of the publish protocol's directory fsyncs to make the name
+// survive, and removing one of those fsyncs makes the corresponding name vanish
+// here — which is what the non-vacuity guard test asserts. File DATA that was
+// never Sync'd is handled separately by the per-Sync fault and the torn-write
+// sectors; Crash only revokes the not-yet-durable name links.
+//
+// Crash mutates the SimDisk in place and is driven from the single simulation
+// goroutine; it must not run concurrently with disk I/O.
+func (d *SimDisk) Crash() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Drop directories whose own dirent never became durable, taking their
+	// whole subtree with them (a lost directory rename loses every child).
+	for dp, durable := range d.dirs {
+		if !durable {
+			d.removeSubtreeLocked(dp)
+			delete(d.dirs, dp)
+		}
+	}
+	// Drop individual files whose dirent never became durable.
+	for p, f := range d.files {
+		if !f.direntDurable {
+			delete(d.files, p)
+		}
+	}
+}
+
+// baseName returns the final path element, for the synthetic [fs.FileInfo].
+func baseName(p string) string { return pathpkg.Base(p) }
+
+// isRootLevel reports whether p sits at the filesystem root (its parent is "."
+// or "/" or itself). Root-level names — notably the WAL at [simWALPath] — are
+// treated as durably linked on creation, so the long-standing WAL data-
+// durability model (per-Sync fault) is unaffected by the dirent model the
+// snapshot/csrfile publish protocol exercises in subdirectories.
+func isRootLevel(p string) bool {
+	dir := pathpkg.Dir(p)
+	return dir == "." || dir == "/" || dir == p
+}
+
+// simFileInfo is the minimal [fs.FileInfo] SimDisk.Stat returns: callers only
+// consult existence, Size, and IsDir.
+type simFileInfo struct {
+	name string
+	size int64
+	dir  bool
+}
+
+func (fi simFileInfo) Name() string { return fi.name }
+func (fi simFileInfo) Size() int64  { return fi.size }
+func (fi simFileInfo) Mode() fs.FileMode {
+	if fi.dir {
+		return fs.ModeDir | 0o755
+	}
+	return 0o600
+}
+func (fi simFileInfo) ModTime() time.Time { return time.Time{} }
+func (fi simFileInfo) IsDir() bool        { return fi.dir }
+func (fi simFileInfo) Sys() any           { return nil }
 
 // Exists reports whether a file is present at path.
 func (d *SimDisk) Exists(path string) bool {
@@ -208,6 +459,18 @@ func (h *SimFileHandle) Read(p []byte) (int, error) {
 	n := copy(p, h.file.data[h.pos:])
 	h.pos += int64(n)
 	return n, nil
+}
+
+// Stat returns a minimal [fs.FileInfo] for the open handle, reporting the
+// current file size. The snapshot index writer calls it to record the
+// component's on-disk size in the manifest.
+func (h *SimFileHandle) Stat() (fs.FileInfo, error) {
+	if h.closed {
+		return nil, fs.ErrClosed
+	}
+	h.disk.mu.Lock()
+	defer h.disk.mu.Unlock()
+	return simFileInfo{name: baseName(h.path), size: int64(len(h.file.data))}, nil
 }
 
 // Write copies p to the file at the current position, growing the file as

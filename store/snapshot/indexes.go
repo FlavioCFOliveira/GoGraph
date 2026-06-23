@@ -90,15 +90,23 @@ type IndexReadback struct {
 // could leave the indexes/ directory entry for one or more index files
 // absent on the next mount, making those indexes appear missing to
 // recovery even though their data is intact on disk.
+func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
+	return writeIndexesWith(osBackend{}, dir, m)
+}
+
+// writeIndexesWith is the filesystem-seam implementation behind
+// [WriteIndexes]: every filesystem operation routes through fsys, so the
+// OS backend reproduces the historical behaviour byte-for-byte while the
+// simulator can supply an in-memory disk.
 //
 //nolint:gocyclo // per-index write + per-index serialize + per-index sync
-func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
+func writeIndexesWith(fsys fileSystem, dir string, m *index.Manager) ([]IndexFileEntry, error) {
 	defer metrics.Time("store.snapshot.WriteIndexes")()
 	if m == nil || m.Count() == 0 {
 		return nil, nil
 	}
 	idxDir := filepath.Join(dir, IndexesDir)
-	if err := os.MkdirAll(idxDir, 0o750); err != nil {
+	if err := fsys.MkdirAll(idxDir, 0o750); err != nil {
 		metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
 		return nil, err
 	}
@@ -123,14 +131,14 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 		// indexes/<name>.bin stays inside idxDir — enforced at both the
 		// write and the read boundary.
 		if err := validateIndexName(name); err != nil {
-			_ = os.RemoveAll(idxDir)
+			_ = fsys.RemoveAll(idxDir)
 			metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
 			return nil, err
 		}
 		filename := filepath.Join(idxDir, name+".bin")
-		size, crc, werr := writeAndSyncIndex(filename, ser)
+		size, crc, werr := writeAndSyncIndex(fsys, filename, ser)
 		if werr != nil {
-			_ = os.RemoveAll(idxDir)
+			_ = fsys.RemoveAll(idxDir)
 			metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
 			return nil, fmt.Errorf("snapshot: index %q: %w", name, werr)
 		}
@@ -145,8 +153,8 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 	// is called after the loop — once for all files — to amortise the
 	// directory open/fsync/close cost across every index written.
 	if len(out) > 0 {
-		if err := dirFsync(idxDir); err != nil {
-			_ = os.RemoveAll(idxDir)
+		if err := fsys.DirSync(idxDir); err != nil {
+			_ = fsys.RemoveAll(idxDir)
 			metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
 			return nil, fmt.Errorf("snapshot: fsync indexes dir %q: %w", idxDir, err)
 		}
@@ -160,31 +168,31 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 // on-disk payload (including the magic header and the index's own
 // internal CRC trailer). Mirroring [writeAndSync] used for the other
 // snapshot components keeps the layout uniform.
-func writeAndSyncIndex(path string, ser index.Serializer) (size int64, crc uint32, err error) {
-	f, err := createSnapshotFile(path)
+func writeAndSyncIndex(fsys fileSystem, path string, ser index.Serializer) (size int64, crc uint32, err error) {
+	f, err := fsys.Create(path)
 	if err != nil {
 		return 0, 0, err
 	}
 	hasher := crc32.New(castagnoli)
 	tee := io.MultiWriter(f, hasher)
 	if serr := ser.Serialize(tee); serr != nil {
-		_ = f.Close()       // best-effort: already on error path, serialize err preserved
-		_ = os.Remove(path) // best-effort: partial file cleanup, serialize err preserved
+		_ = f.Close()         // best-effort: already on error path, serialize err preserved
+		_ = fsys.Remove(path) // best-effort: partial file cleanup, serialize err preserved
 		return 0, 0, serr
 	}
 	st, err := f.Stat()
 	if err != nil {
-		_ = f.Close()       // best-effort: already on error path, stat err preserved
-		_ = os.Remove(path) // best-effort: partial file cleanup, stat err preserved
+		_ = f.Close()         // best-effort: already on error path, stat err preserved
+		_ = fsys.Remove(path) // best-effort: partial file cleanup, stat err preserved
 		return 0, 0, err
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()       // best-effort: already on error path, sync err preserved
-		_ = os.Remove(path) // best-effort: partial file cleanup, sync err preserved
+		_ = f.Close()         // best-effort: already on error path, sync err preserved
+		_ = fsys.Remove(path) // best-effort: partial file cleanup, sync err preserved
 		return 0, 0, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(path) // best-effort: partial file cleanup, close err preserved
+		_ = fsys.Remove(path) // best-effort: partial file cleanup, close err preserved
 		return 0, 0, err
 	}
 	return st.Size(), hasher.Sum32(), nil
@@ -201,12 +209,20 @@ func writeAndSyncIndex(path string, ser index.Serializer) (size int64, crc uint3
 // snapshot does not carry persisted indexes (forward compat with
 // snapshots produced before this format extension).
 func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) {
+	return loadIndexesWith(osBackend{}, dir, entries)
+}
+
+// loadIndexesWith is the filesystem-seam implementation behind
+// [LoadIndexes]: every filesystem read routes through fsys, so the OS
+// backend reproduces the historical behaviour exactly while the simulator
+// can supply an in-memory disk.
+func loadIndexesWith(fsys fileSystem, dir string, entries []IndexFileEntry) ([]IndexReadback, error) {
 	defer metrics.Time("store.snapshot.LoadIndexes")()
 	if len(entries) == 0 {
 		return nil, nil
 	}
 	idxDir := filepath.Join(dir, IndexesDir)
-	if _, err := os.Stat(idxDir); err != nil {
+	if _, err := fsys.Stat(idxDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// Manifest references indexes but the directory is gone.
 			// Treat every entry as corrupted (rebuild path).
@@ -231,7 +247,7 @@ func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) 
 			return nil, err
 		}
 		filename := filepath.Join(idxDir, e.Name+".bin")
-		buf, err := readIndexFile(filename)
+		buf, err := readIndexFile(fsys, filename)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
 			out = append(out, IndexReadback{Name: e.Name})
@@ -252,8 +268,8 @@ func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) 
 // an untrusted snapshot directory is rejected (O_NOFOLLOW) rather than
 // dereferenced. It is the symlink-safe replacement for os.ReadFile on the
 // snapshot read path.
-func readIndexFile(path string) ([]byte, error) {
-	f, err := openSnapshotComponent(path)
+func readIndexFile(fsys fileSystem, path string) ([]byte, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return nil, err
 	}

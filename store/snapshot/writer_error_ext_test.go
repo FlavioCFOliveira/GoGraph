@@ -45,7 +45,7 @@ func TestWriteAndSync_WriteFailure(t *testing.T) {
 	path := filepath.Join(tmp, "partial.bin")
 
 	sentinel := errors.New("write kaboom")
-	_, _, err := writeAndSync(path, func(_ io.Writer) (int64, uint32, error) {
+	_, _, err := writeAndSync(osBackend{}, path, func(_ io.Writer) (int64, uint32, error) {
 		return 0, 0, sentinel
 	})
 	if !errors.Is(err, sentinel) {
@@ -80,7 +80,7 @@ func TestWriteAndSync_SuccessReturnValues(t *testing.T) {
 	path := filepath.Join(tmp, "ok.bin")
 
 	payload := []byte("hello, writeAndSync")
-	size, _, err := writeAndSync(path, func(w io.Writer) (int64, uint32, error) {
+	size, _, err := writeAndSync(osBackend{}, path, func(w io.Writer) (int64, uint32, error) {
 		n, werr := w.Write(payload)
 		return int64(n), 0, werr
 	})
@@ -118,7 +118,7 @@ func TestWriteAndSyncIndex_SerializeFailure(t *testing.T) {
 	path := filepath.Join(tmp, "idx.bin")
 
 	sentinel := errors.New("serialize kaboom")
-	_, _, err := writeAndSyncIndex(path, &failSerializer{err: sentinel})
+	_, _, err := writeAndSyncIndex(osBackend{}, path, &failSerializer{err: sentinel})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("writeAndSyncIndex serialize-failure = %v, want %v", err, sentinel)
 	}

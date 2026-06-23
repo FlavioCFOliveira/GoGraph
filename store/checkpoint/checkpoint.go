@@ -129,6 +129,14 @@ type Checkpointer[N comparable, W any] struct {
 	// [WithClock] to drive checkpoints by virtual time.
 	clk clock.Clock
 
+	// snap is the snapshot-publish/probe backend. It defaults to
+	// [osSnapshotBackend] in [New] (byte-identical production path); the
+	// deterministic simulation harness injects an in-memory backend via
+	// [WithSnapshotFS] so it can crash mid-snapshot and before the WAL
+	// prefix-truncate. The checkpointer performs no direct filesystem call
+	// of its own — only this backend and the injected WAL writer do.
+	snap snapshotBackend[N, W]
+
 	// afterCaptureHook, when non-nil, is invoked at the START of phase 2 —
 	// immediately after the phase-1 commit lock is released and BEFORE the
 	// lock-free snapshot write. It is a test-only seam (set by white-box tests
@@ -262,6 +270,25 @@ func WithClock[N comparable, W any](clk clock.Clock) Option[N, W] {
 	}
 }
 
+// WithSnapshotFS injects the backend the checkpointer publishes snapshots to
+// and reads the manifest back from. It exists for the deterministic-simulation
+// harness (internal/sim), which supplies an in-memory backend so a checkpoint
+// runs entirely against its in-memory disk and a crash can be injected
+// mid-snapshot or before the WAL prefix-truncate. The backend parameter type
+// is unexported (mirroring
+// [github.com/FlavioCFOliveira/GoGraph/store/wal.OpenWith]); production code
+// omits this option and the checkpointer uses the OS-backed snapshot writers,
+// which are byte-identical to the pre-seam path.
+//
+// A nil backend is ignored (the checkpointer keeps the OS backend).
+func WithSnapshotFS[N comparable, W any](backend snapshotBackend[N, W]) Option[N, W] {
+	return func(c *Checkpointer[N, W]) {
+		if backend != nil {
+			c.snap = backend
+		}
+	}
+}
+
 // New returns a Checkpointer; call Start to launch the goroutine.
 //
 // storeMu is the serialisation the checkpointer holds across the
@@ -305,6 +332,9 @@ func New[N comparable, W any](
 	}
 	if c.clk == nil {
 		c.clk = clock.Real()
+	}
+	if c.snap == nil {
+		c.snap = osSnapshotBackend[N, W]{}
 	}
 	return c
 }
@@ -643,7 +673,7 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int6
 	// snapshot is correctly judged not self-sufficient and the WAL prefix
 	// holding that DDL is retained (#1334 / #1464 fail-safe, re-checked under
 	// the phase-3 lock per the #1508 audit condition C2).
-	selfSufficient, err := snapshotIsSelfSufficient(snapDir, c.g.HasConstraints())
+	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, c.g.HasConstraints())
 	if err != nil {
 		c.setErr(err)
 		return err
@@ -694,10 +724,7 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int6
 // constraints.bin component (nil or empty emits no constraints.bin, and
 // the output is byte-identical to the constraint-unaware writers).
 func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W], constraints []snapshot.ConstraintSpec) error {
-	if c.codec != nil {
-		return snapshot.WriteSnapshotFullWithMapperCodecAndConstraints(snapDir, cs, c.g, c.codec, constraints)
-	}
-	return snapshot.WriteSnapshotFullWithConstraints(snapDir, cs, c.g, constraints)
+	return c.snap.WriteSnapshot(snapDir, cs, c.g, c.codec, constraints)
 }
 
 func (c *Checkpointer[N, W]) setErr(err error) {
@@ -730,8 +757,8 @@ func (c *Checkpointer[N, W]) setErr(err error) {
 // correct if the version scheme evolves: the snapshot is self-sufficient
 // iff its manifest lists [snapshot.MapperFile] (and
 // [snapshot.ConstraintsFile] when needConstraints is set).
-func snapshotIsSelfSufficient(dir string, needConstraints bool) (bool, error) {
-	m, err := snapshot.ReadManifestFile(filepath.Join(dir, "manifest.json"))
+func (c *Checkpointer[N, W]) snapshotIsSelfSufficient(dir string, needConstraints bool) (bool, error) {
+	m, err := c.snap.ReadManifest(manifestPath(dir))
 	if err != nil {
 		return false, fmt.Errorf("checkpoint: read snapshot manifest: %w", err)
 	}

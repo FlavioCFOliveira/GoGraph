@@ -743,9 +743,35 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")
 	}
-	res, err := openCodec[N, W](ctx, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
+	res, err := openCodec[N, W](ctx, osBackend{}, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
 	if err != nil {
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
+	}
+	return res, err
+}
+
+// OpenFS is [Open] over a caller-supplied filesystem backend. It exists for
+// the deterministic-simulation harness (internal/sim), which passes an
+// in-memory backend so it can recover a snapshot + WAL image from its
+// in-memory disk and crash across the snapshot-promote boundary. The backend
+// parameter type is unexported (mirroring
+// [github.com/FlavioCFOliveira/GoGraph/store/wal.OpenWith]); production code
+// calls [Open], which supplies the OS backend. Passing the OS backend here is
+// behaviourally equivalent to [Open].
+func OpenFS[N comparable, W any](fsys recoveryFS, dir string, opts Options[N, W]) (Result[N, W], error) {
+	return OpenCtxFS[N, W](context.Background(), fsys, dir, opts)
+}
+
+// OpenCtxFS is the context-aware variant of [OpenFS].
+func OpenCtxFS[N comparable, W any](ctx context.Context, fsys recoveryFS, dir string, opts Options[N, W]) (Result[N, W], error) {
+	defer metrics.Time("store.recovery.OpenCtxFS")()
+	if opts.Codec == nil {
+		metrics.IncCounter("store.recovery.OpenCtxFS.errors", 1)
+		return Result[N, W]{}, errors.New("recovery: nil codec")
+	}
+	res, err := openCodec[N, W](ctx, fsys, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
+	if err != nil {
+		metrics.IncCounter("store.recovery.OpenCtxFS.errors", 1)
 	}
 	return res, err
 }
@@ -829,6 +855,7 @@ func recoveryGraphConfig(gc *snapshot.GraphConfig) adjlist.Config {
 //nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
 func openCodec[N comparable, W any](
 	ctx context.Context,
+	fsys recoveryFS,
 	dir string,
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
@@ -854,10 +881,10 @@ func openCodec[N comparable, W any](
 	// checkpoint and only ever duplicates state that is fully
 	// reconstructable from the (promoted) snapshot plus the WAL.
 	snapBak := snapDir + ".bak"
-	_ = os.RemoveAll(snapDir + ".tmp") // best-effort: stale staging cleanup
-	if _, statErr := os.Stat(filepath.Join(snapDir, "manifest.json")); errors.Is(statErr, os.ErrNotExist) {
-		if _, bakErr := os.Stat(filepath.Join(snapBak, "manifest.json")); bakErr == nil {
-			if renErr := os.Rename(snapBak, snapDir); renErr != nil {
+	_ = fsys.RemoveAll(snapDir + ".tmp") // best-effort: stale staging cleanup
+	if _, statErr := fsys.Stat(filepath.Join(snapDir, "manifest.json")); errors.Is(statErr, os.ErrNotExist) {
+		if _, bakErr := fsys.Stat(filepath.Join(snapBak, "manifest.json")); bakErr == nil {
+			if renErr := fsys.Rename(snapBak, snapDir); renErr != nil {
 				// Fail-stop, never fail-silent: the backup is the only
 				// surviving copy of the checkpointed state; proceeding
 				// without it would silently recover an empty graph.
@@ -882,7 +909,7 @@ func openCodec[N comparable, W any](
 			// the parent-dir fsync the snapshot publish path issues after
 			// its own publish rename. No-op on platforms without a
 			// directory-fsync primitive (Windows).
-			if fsErr := parentDirFsync(snapDir); fsErr != nil {
+			if fsErr := fsys.ParentDirSync(snapDir); fsErr != nil {
 				// Fail-stop: the promotion is not durable, so continuing
 				// risks the silent-total-loss outcome on a subsequent crash.
 				metrics.IncCounter("store.recovery.openCodec.errors", 1)
@@ -929,8 +956,8 @@ func openCodec[N comparable, W any](
 	// that depend on multigraph — replay exactly as before.
 	var loaded snapshot.LoadedSnapshot
 	haveManifest := false
-	if _, err := os.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
-		loaded, err = snapshot.LoadSnapshotFull(snapDir)
+	if _, err := fsys.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
+		loaded, err = fsys.LoadSnapshot(snapDir)
 		if err != nil {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			// On a snapshot-load failure no config is available; build the
@@ -1051,7 +1078,7 @@ func openCodec[N comparable, W any](
 
 	walPath := filepath.Join(dir, "wal")
 	walMissing := false
-	if _, err := os.Stat(walPath); err != nil {
+	if _, err := fsys.Stat(walPath); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			return res, err
@@ -1059,7 +1086,7 @@ func openCodec[N comparable, W any](
 		walMissing = true
 	}
 	if !walMissing {
-		r, err := wal.OpenReader(walPath)
+		r, err := fsys.OpenWALReader(walPath)
 		if err != nil {
 			metrics.IncCounter("store.recovery.openCodec.errors", 1)
 			return res, err

@@ -48,10 +48,17 @@ type Reader struct {
 	// Read takes it for reading (callers may run in parallel); Close
 	// takes it for writing, so the Unmap cannot run while any Read is
 	// in flight and no reader can observe a half-released mapping.
-	mu          sync.RWMutex
-	f           *os.File
-	mm          mmap.MMap
-	header      Header
+	mu     sync.RWMutex
+	f      *os.File
+	mm     mmap.MMap
+	header Header
+	// buf is the backing region. For an mmap-backed Reader (the
+	// production [Open] path) it aliases mm. For a byte-backed Reader
+	// (the in-memory DST backend, via [openBytes]) it is a heap buffer
+	// whose base address is 8-byte aligned so the zero-copy
+	// reinterpretation in bindSlices stays sound. mm is then nil and
+	// Close releases nothing but the slices.
+	buf         []byte
 	vertices    []uint64
 	edges       []graph.NodeID
 	weightBytes []byte
@@ -101,7 +108,7 @@ func Open(path string) (*Reader, error) {
 		return nil, fmt.Errorf("%w: crc32c", ErrFileCorrupted)
 	}
 
-	r := &Reader{f: f, mm: mm, header: h}
+	r := &Reader{f: f, mm: mm, buf: mm, header: h}
 	r.bindSlices()
 	if err := r.validateCSRSemantics(); err != nil {
 		_ = mm.Unmap() // best-effort: already on error path, semantic err preserved
@@ -109,6 +116,78 @@ func Open(path string) (*Reader, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// OpenWith opens a csrfile through a caller-supplied filesystem backend.
+// For the production OS backend it is byte-for-byte equivalent to [Open]
+// (it mmaps the file). For an alternate (in-memory) backend — supplied by
+// the deterministic-simulation harness (internal/sim) — it reads the whole
+// file into an 8-byte-aligned buffer and binds the typed slices off it,
+// because there is no real file to mmap. The backend parameter type is
+// unexported, mirroring
+// [github.com/FlavioCFOliveira/GoGraph/store/wal.OpenWith]; production code
+// calls [Open].
+func OpenWith(fsys fs, path string) (*Reader, error) {
+	if isOS(fsys) {
+		return Open(path)
+	}
+	raw, err := fsys.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Copy into an 8-byte-aligned buffer: the backend's ReadFile makes no
+	// alignment promise, and bindSlices reinterprets the buffer in place.
+	buf := allocAligned8(len(raw))
+	copy(buf, raw)
+	return openBytes(buf)
+}
+
+// openBytes builds a Reader over an already-read, 8-byte-aligned byte
+// buffer instead of an mmap. It runs the identical header/CRC/semantic
+// validation [Open] runs over the mmap region, then binds the typed
+// slices off buf. It backs the in-memory DST filesystem, where there is
+// no real file to mmap: the simulator reads the whole csrfile image out
+// of its [github.com/FlavioCFOliveira/GoGraph/internal/sim.SimDisk] and
+// hands the bytes here.
+//
+// Precondition: buf's base address is 8-byte aligned (the only callers
+// allocate it via [allocAligned8]). The bind below reuses the same
+// unsafe reinterpretation as the mmap path, so an unaligned buffer would
+// trip the alignment assertion the production layout already guarantees.
+func openBytes(buf []byte) (*Reader, error) {
+	if len(buf) < HeaderSize+4 {
+		return nil, ErrHeaderTooShort
+	}
+	h, err := DecodeHeader(buf)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.validate(len(buf)); err != nil {
+		return nil, err
+	}
+	gotCRC := binary.LittleEndian.Uint32(buf[h.TailCRCOffset:])
+	wantCRC := crc32.Update(0, castagnoli, buf[:h.TailCRCOffset])
+	if gotCRC != wantCRC {
+		return nil, fmt.Errorf("%w: crc32c", ErrFileCorrupted)
+	}
+	r := &Reader{buf: buf, header: h}
+	r.bindSlices()
+	if err := r.validateCSRSemantics(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// allocAligned8 returns a zeroed byte slice of length n whose base
+// address is guaranteed 8-byte aligned, by allocating it as a []uint64
+// and reslicing. A plain make([]byte, n) carries no alignment guarantee,
+// which would make the zero-copy reinterpretation in bindSlices trip the
+// alignment assertion in [Reinterpret] on some allocations; routing the
+// in-memory read through this helper keeps the byte-backed Reader sound.
+func allocAligned8(n int) []byte {
+	words := (n + 7) / 8
+	backing := make([]uint64, words)
+	return unsafe.Slice((*byte)(unsafe.Pointer(&backing[0])), words*8)[:n] //nolint:gosec // 8-byte-aligned reinterpret of []uint64 backing
 }
 
 // bindSlices reinterprets the mmap'd byte regions as typed slices
@@ -123,18 +202,18 @@ func Open(path string) (*Reader, error) {
 func (r *Reader) bindSlices() {
 	if r.header.NVertices > 0 {
 		off := r.header.VerticesOffset
-		bytes := r.mm[off : off+8*r.header.NVertices]
-		r.vertices = unsafe.Slice((*uint64)(unsafe.Pointer(&bytes[0])), r.header.NVertices) //nolint:gosec // intentional zero-copy reinterpretation of mmap region
+		bytes := r.buf[off : off+8*r.header.NVertices]
+		r.vertices = unsafe.Slice((*uint64)(unsafe.Pointer(&bytes[0])), r.header.NVertices) //nolint:gosec // intentional zero-copy reinterpretation of backing region
 	}
 	if r.header.NEdges > 0 {
 		off := r.header.EdgesOffset
-		bytes := r.mm[off : off+8*r.header.NEdges]
-		r.edges = unsafe.Slice((*graph.NodeID)(unsafe.Pointer(&bytes[0])), r.header.NEdges) //nolint:gosec // intentional zero-copy reinterpretation of mmap region
+		bytes := r.buf[off : off+8*r.header.NEdges]
+		r.edges = unsafe.Slice((*graph.NodeID)(unsafe.Pointer(&bytes[0])), r.header.NEdges) //nolint:gosec // intentional zero-copy reinterpretation of backing region
 	}
 	if r.header.Weight != WeightAbsent && r.header.NEdges > 0 {
 		off := r.header.WeightsOffset
 		size := uint64(r.header.Weight.Size()) * r.header.NEdges
-		r.weightBytes = r.mm[off : off+size]
+		r.weightBytes = r.buf[off : off+size]
 	}
 }
 
@@ -238,7 +317,7 @@ func (r *Reader) WeightsRaw() []byte { return r.weightBytes }
 func (r *Reader) Read(fn func(vertices []uint64, edges []graph.NodeID, weights []byte) error) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.mm == nil {
+	if r.buf == nil {
 		return ErrReaderClosed
 	}
 	return fn(r.vertices, r.edges, r.weightBytes)
@@ -276,8 +355,14 @@ func (r *Reader) WeightsFloat64() ([]float64, bool) {
 func (r *Reader) SetHint(pattern AccessPattern) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.mm == nil {
+	if r.buf == nil {
 		return ErrReaderClosed
+	}
+	// A byte-backed Reader (the in-memory DST backend) has no mmap to
+	// advise: madvise is meaningless on a heap buffer, so the hint is a
+	// no-op there, exactly as it already is on platforms without madvise.
+	if r.mm == nil {
+		return nil
 	}
 	return r.setHint(pattern)
 }
@@ -294,11 +379,22 @@ func (r *Reader) SetHint(pattern AccessPattern) error {
 func (r *Reader) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.buf == nil {
+		return nil
+	}
+	// Byte-backed Reader (in-memory DST backend): no mmap, no file. Drop
+	// the buffer reference so the slices become unreachable and a second
+	// Close is the documented idempotent no-op.
 	if r.mm == nil {
+		r.buf = nil
+		r.vertices = nil
+		r.edges = nil
+		r.weightBytes = nil
 		return nil
 	}
 	err := r.mm.Unmap()
 	r.mm = nil
+	r.buf = nil
 	if cerr := r.f.Close(); cerr != nil && err == nil {
 		err = cerr
 	}

@@ -7,7 +7,6 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
-	"os"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -38,6 +37,29 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 // struct{} for unweighted graphs. Unsupported types produce
 // [ErrUnknownWeightKind].
 func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
+	return writeToFileWith(osFS{}, path, c)
+}
+
+// WriteToFileWith is [WriteToFile] over a caller-supplied filesystem
+// backend. It exists for the deterministic-simulation harness
+// (internal/sim), which passes an in-memory backend so it can crash
+// between any two of the write/fsync/rename/parent-fsync steps and replay
+// the result. The backend parameter type is unexported (mirroring
+// [github.com/FlavioCFOliveira/GoGraph/store/wal.OpenWith]); production
+// code calls [WriteToFile], which supplies the OS backend. Passing the OS
+// backend here is byte-for-byte equivalent to [WriteToFile].
+func WriteToFileWith[W any](fsys fs, path string, c *csr.CSR[W]) (Header, error) {
+	return writeToFileWith(fsys, path, c)
+}
+
+// writeToFileWith is the seam-threaded core of [WriteToFile]: every
+// filesystem operation goes through fsys. The production caller passes
+// [osFS], whose methods delegate verbatim to the os.* calls the function
+// used before the seam existed, so the published-file bytes and the
+// durability ordering (write -> fsync file -> rename -> fsync parent) are
+// unchanged. The deterministic-simulation harness passes an in-memory
+// backend so it can crash between any two of those steps.
+func writeToFileWith[W any](fsys fs, path string, c *csr.CSR[W]) (Header, error) {
 	weightKind, err := weightKindOf[W]()
 	if err != nil {
 		return Header{}, err
@@ -55,13 +77,13 @@ func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 	// Create the temp file mode 0600: the CSR payload contains full
 	// edge and weight data, so it must not be world- or group-readable.
 	// os.Rename preserves the mode, so the published file is 0600 too.
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // caller-supplied path
+	f, err := fsys.Create(tmp)
 	if err != nil {
 		return Header{}, err
 	}
-	if err := os.Truncate(tmp, int64(total)); err != nil {
-		_ = f.Close()      // best-effort: already on error path, truncate err preserved
-		_ = os.Remove(tmp) // best-effort: tmp file cleanup, truncate err preserved
+	if err := fsys.Truncate(tmp, int64(total)); err != nil {
+		_ = f.Close()        // best-effort: already on error path, truncate err preserved
+		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, truncate err preserved
 		return Header{}, err
 	}
 	bw := bufio.NewWriterSize(f, 1<<20)
@@ -69,33 +91,33 @@ func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 	tee := io.MultiWriter(bw, h)
 
 	if err := writeSections(tee, h, header, verts, edges, c.WeightsSlice()); err != nil {
-		_ = f.Close()      // best-effort: already on error path, writeSections err preserved
-		_ = os.Remove(tmp) // best-effort: tmp file cleanup, writeSections err preserved
+		_ = f.Close()        // best-effort: already on error path, writeSections err preserved
+		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, writeSections err preserved
 		return Header{}, err
 	}
 
 	// Append the trailing CRC32C over every preceding byte.
 	if err := binary.Write(bw, binary.LittleEndian, h.Sum32()); err != nil {
-		_ = f.Close()      // best-effort: already on error path, CRC write err preserved
-		_ = os.Remove(tmp) // best-effort: tmp file cleanup, CRC write err preserved
+		_ = f.Close()        // best-effort: already on error path, CRC write err preserved
+		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, CRC write err preserved
 		return Header{}, err
 	}
 	if err := bw.Flush(); err != nil {
-		_ = f.Close()      // best-effort: already on error path, flush err preserved
-		_ = os.Remove(tmp) // best-effort: tmp file cleanup, flush err preserved
+		_ = f.Close()        // best-effort: already on error path, flush err preserved
+		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, flush err preserved
 		return Header{}, err
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()      // best-effort: already on error path, sync err preserved
-		_ = os.Remove(tmp) // best-effort: tmp file cleanup, sync err preserved
+		_ = f.Close()        // best-effort: already on error path, sync err preserved
+		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, sync err preserved
 		return Header{}, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp) // best-effort: tmp file cleanup, close err preserved
+		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, close err preserved
 		return Header{}, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // best-effort: tmp file cleanup, rename err preserved
+	if err := fsys.Rename(tmp, path); err != nil {
+		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, rename err preserved
 		return Header{}, fmt.Errorf("csrfile: publish rename: %w", err)
 	}
 	notePublishStep("rename", path)
@@ -105,7 +127,7 @@ func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 	// the parent directory and this single post-rename fsync covers both
 	// the unlink of tmp and the link of path. No-op on platforms that
 	// lack a directory-fsync primitive (Windows); see [parentDirFsync].
-	if err := parentDirFsync(path); err != nil {
+	if err := fsys.ParentDirSync(path); err != nil {
 		return Header{}, fmt.Errorf("csrfile: publish parent fsync: %w", err)
 	}
 	notePublishStep("parent-fsync", path)

@@ -227,7 +227,17 @@ func (s *SimStore) Clean() bool { return s.clean }
 // Crash deliberately does NOT call s.wlog.Close(): a clean Close would flush and
 // fsync the buffer, which is the opposite of a crash. Dropping the references
 // lets the GC reclaim them; the only durable state is the SimDisk image.
+//
+// Crash also revokes every not-yet-dir-fsync'd dirent on the SimDisk (see
+// [SimDisk.Crash]), modelling the loss of a create or rename whose parent
+// directory was never fsync'd. For a WAL-only store the WAL is a root-level
+// file treated as durably linked on creation, so this is a no-op; once
+// snapshots back onto the same SimDisk it drops an interrupted snapshot publish
+// exactly as production would.
 func (s *SimStore) Crash() {
+	if s.disk != nil {
+		s.disk.Crash()
+	}
 	s.engine = nil
 	s.store = nil
 	s.wlog = nil

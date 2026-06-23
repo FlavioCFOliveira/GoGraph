@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"os"
 	"path/filepath"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -28,9 +27,18 @@ type LoadedCSR struct {
 // manifest entry. Future versions may load additional components
 // (labels.bin, properties.bin, schema.bin) by extending Manifest.Files.
 func Open(dir string) (LoadedCSR, error) {
+	return openWith(osBackend{}, dir)
+}
+
+// openWith is the filesystem-seam implementation behind [Open]: the
+// manifest and csr.bin reads route through fsys, so the OS backend
+// reproduces the historical behaviour exactly (csr.bin via a plain open
+// without O_NOFOLLOW, as before) while the simulator can supply an
+// in-memory disk.
+func openWith(fsys fileSystem, dir string) (LoadedCSR, error) {
 	defer metrics.Time("store.snapshot.Open")()
 	manifestPath := filepath.Join(dir, "manifest.json")
-	m, err := ReadManifestFile(manifestPath)
+	m, err := readManifestFileWith(fsys, manifestPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, err
@@ -47,7 +55,7 @@ func Open(dir string) (LoadedCSR, error) {
 		return LoadedCSR{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
 	}
 	csrPath := filepath.Join(dir, CSRFile)
-	f, err := os.Open(csrPath) //nolint:gosec // caller-supplied path
+	f, err := fsys.Open(csrPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, err

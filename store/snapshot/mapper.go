@@ -510,8 +510,8 @@ func ReadMapperString(r io.Reader) (MapperReadback, error) {
 // surfaces as [ErrCorrupted]. Mirrors [readVerifiedCSR] /
 // [readVerifiedLabels] / [readVerifiedProperties] in shape. size bounds the
 // body reader (see [readVerifiedLabels]).
-func readVerifiedMapper(path string, expected uint32, size int64) (MapperReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedMapper(fsys fileSystem, path string, expected uint32, size int64) (MapperReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return MapperReadback{}, err
 	}
@@ -538,8 +538,8 @@ func readVerifiedMapper(path string, expected uint32, size int64) (MapperReadbac
 // mapper.bin file so the loader can choose the right reader without a
 // full parse. A bad magic surfaces as [ErrMapperCorrupted]; an I/O or
 // open error surfaces verbatim.
-func peekMapperVersion(path string) (uint16, error) {
-	f, err := openSnapshotComponent(path)
+func peekMapperVersion(fsys fileSystem, path string) (uint16, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return 0, err
 	}
@@ -566,8 +566,8 @@ func peekMapperVersion(path string) (uint16, error) {
 // per-record key bytes in [MapperReadback.RawPairs] for the caller to
 // decode through the matching codec. Any disagreement surfaces as
 // [ErrCorrupted]. size bounds the body reader (see [readVerifiedLabels]).
-func readVerifiedMapperBytes(path string, expected uint32, size int64) (MapperReadback, error) {
-	f, err := openSnapshotComponent(path)
+func readVerifiedMapperBytes(fsys fileSystem, path string, expected uint32, size int64) (MapperReadback, error) {
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return MapperReadback{}, err
 	}

@@ -151,8 +151,25 @@ func LoadManifest(r io.Reader) (Manifest, error) {
 // a manifest.json that is a symlink in an untrusted snapshot directory is
 // rejected rather than dereferenced.
 func ReadManifestFile(path string) (Manifest, error) {
+	return readManifestFileWith(osBackend{}, path)
+}
+
+// ReadManifestFileFS is the filesystem-seam variant of [ReadManifestFile]:
+// it opens the manifest through fsys instead of the default OS backend. It
+// is the entry point the deterministic-simulation harness (internal/sim)
+// uses to read a manifest backed by an in-memory disk. Passing osBackend{}
+// reproduces [ReadManifestFile] exactly.
+func ReadManifestFileFS(fsys fileSystem, path string) (Manifest, error) {
+	return readManifestFileWith(fsys, path)
+}
+
+// readManifestFileWith is the seam-threaded implementation behind
+// [ReadManifestFile] and [ReadManifestFileFS]: the manifest open routes
+// through fsys, so the OS backend (which calls [openSnapshotComponent] with
+// its O_NOFOLLOW guard) reproduces the historical behaviour exactly.
+func readManifestFileWith(fsys fileSystem, path string) (Manifest, error) {
 	defer metrics.Time("store.snapshot.ReadManifestFile")()
-	f, err := openSnapshotComponent(path)
+	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.ReadManifestFile.errors", 1)
 		return Manifest{}, err
