@@ -23,7 +23,17 @@ import (
 //
 //   - ParallelScan: spawns one splitter goroutine plus N worker goroutines
 //     during Init. Workers exit when the output channel is closed or ctx is
-//     cancelled. This is the only exec operator that directly calls go func.
+//     cancelled.
+//   - ParallelCountScan: spawns up to GOMAXPROCS worker goroutines during Init,
+//     each accumulating a private count. Workers exit when the work channel drains
+//     or ctx is cancelled; Next joins via wg.Wait, Close cancels then joins.
+//   - ParallelScanProject (#1682): spawns up to GOMAXPROCS worker goroutines
+//     during Init, each building and draining an independent fused
+//     scan→filter→project sub-plan over its morsels into a private buffer. Workers
+//     exit when the work channel drains, a sub-plan errors, or ctx is cancelled;
+//     the first Next joins via wg.Wait, and Close cancels then joins any worker a
+//     never-called or partially-drained Next left running. No closer goroutine —
+//     the join happens on the Next/Close goroutine.
 //   - Apply, SemiApply, AntiSemiApply, CorrelatedApply, OptionalExpand,
 //     RollupApply: drive inner pipelines synchronously; no goroutines spawned.
 //   - EagerAggregation, GlobalAggregateAdapter, Sort, Top, Distinct, Union:

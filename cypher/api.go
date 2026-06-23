@@ -3424,15 +3424,40 @@ func finalizeResult(r *Result) {
 
 // lpgNodeWalker adapts *lpg.Graph[string, float64] to the exec.nodeWalker
 // interface expected by [exec.AllNodesScan].
+//
+// morsel, when non-nil, restricts WalkNodeIDs to that caller-owned slice of
+// NodeIDs instead of walking the whole graph. It is set only on the per-worker
+// walkers the morsel-parallel fused scan builds (#1682): each worker reruns the
+// normal physical build over its own *lpgNodeWalker{g, morsel}, so the resulting
+// AllNodesScan→Filter→Projection subtree is byte-for-byte the serial build except
+// that it scans only the morsel. The g field still points at the real graph, so
+// the Filter/Projection builders' `walker.(*lpgNodeWalker)` graph lookups resolve
+// the live graph exactly as on the serial path. A morsel walker is only ever
+// passed to [buildOperator] (the subtree rebuild); it is never the recognizer's
+// live walker, so [useParallelScan]'s LiveOrder read never sees a morsel.
 type lpgNodeWalker struct {
-	g *lpg.Graph[string, float64]
+	g      *lpg.Graph[string, float64]
+	morsel []graph.NodeID // nil = walk the whole graph; non-nil = scan this slice only
 }
 
 // WalkNodeIDs implements nodeWalkerIface. Tombstoned node IDs (those
 // removed via the GraphMutator's RemoveNode) are skipped so
 // AllNodesScan, count(*), and downstream scans treat deleted nodes
-// as absent.
+// as absent. When a morsel is set, only that slice is iterated (still skipping
+// tombstones, so a morsel collected before a concurrent in-barrier tombstone
+// cannot resurrect a deleted node).
 func (w *lpgNodeWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
+	if w.morsel != nil {
+		for _, id := range w.morsel {
+			if w.g.IsTombstoned(id) {
+				continue
+			}
+			if !fn(id) {
+				return
+			}
+		}
+		return
+	}
 	w.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
 		if w.g.IsTombstoned(id) {
 			return true // skip but continue iteration
@@ -4606,10 +4631,20 @@ func buildPlanEngine(
 	cols = pr.Columns
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
+
 	child, err := buildOperator(pr.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 	if err != nil {
 		return nil, nil, err
 	}
+	return wrapWithColumnPassthrough(child, cols, schema)
+}
+
+// wrapWithColumnPassthrough builds the final result projection that selects the
+// declared output columns cols from child's rows by their schema index. A column
+// absent from schema projects Null. It is the shared tail of [buildPlanEngine]'s
+// ProduceResults handling for both the serial and the morsel-parallel (#1682)
+// build paths.
+func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[string]int) (exec.Operator, []string, error) {
 	items := make([]exec.ProjectionItem, len(cols))
 	for i, col := range cols {
 		if colIdx, exists := schema[col]; exists {
@@ -4768,6 +4803,19 @@ func buildOperator(
 		}), nil
 
 	case *ir.Projection:
+		// Morsel-parallel fused scan (#1682): when this Projection sits directly
+		// over an optional Selection over a bare AllNodesScan, its items are scalar,
+		// and the live node count exceeds the threshold, replace the serial
+		// scan→filter→project subtree with a ParallelScanProject that runs an
+		// independent copy of the subtree per worker. It populates schema exactly as
+		// the serial buildIRProjection would, so any operator above (Sort, Limit, the
+		// final column passthrough) consumes its rows unchanged. Falls through to the
+		// serial build for every non-eligible shape.
+		if op, ok, perr := tryBuildParallelScanProject(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); perr != nil {
+			return nil, perr
+		} else if ok {
+			return op, nil
+		}
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
@@ -5569,6 +5617,308 @@ func buildOperator(
 		}
 		return nil, fmt.Errorf("cypher: unsupported IR node %T", plan)
 	}
+}
+
+// parallelScanProjectBuildCount counts how many times the planner has emitted
+// the morsel-parallel fused scan→filter→project in place of the serial pipeline
+// (#1682). It is a diagnostic seam read only by the in-package differential test
+// to assert the structural trigger actually fired (or, under a guard, did not).
+// Process-global and monotonic; tests snapshot it before/after a query.
+var parallelScanProjectBuildCount atomic.Uint64
+
+// tryBuildParallelScanProject returns a [exec.ParallelScanProject] and true when
+// child is the single shape a morsel-parallel fused scan can serve while staying
+// result-multiset-identical to the serial AllNodesScan → Filter → Projection
+// pipeline (#1682): a scalar-only Projection over an optional Selection over a
+// bare AllNodesScan, on the live LPG walker, above the parallel-scan threshold.
+//
+// The recognised shape is:
+//
+//   - child is an [*ir.Projection] whose every item is scalar — no aggregate,
+//     EXISTS/COUNT subquery, pattern predicate, or comprehension (those escape or
+//     reshape rows and are routed to the serial path);
+//   - the projection's child is a bare [*ir.AllNodesScan], optionally wrapped in
+//     a single [*ir.Selection] (the WHERE filter) — nothing else (no Expand,
+//     Unwind, Apply, EagerAggregation, Sort, Top, Limit, label/index/range scan)
+//     may sit between the projection and the scan;
+//   - the parallel scan is enabled and the live node count exceeds the threshold
+//     (delegated to [useParallelScan]).
+//
+// When it fires it populates schema exactly as the serial build would (by running
+// the serial subtree build once on the calling goroutine to validate the shape
+// and fill the schema), then returns a ParallelScanProject whose factory rebuilds
+// that same subtree per worker over a per-worker walker and a per-worker buildOpts
+// copy. Every declined shape leaves schema in whatever state the serial fallback
+// will (re)populate, and returns (nil, false, nil). A genuine build error from the
+// validating build is returned as (nil, false, err).
+//
+//nolint:gocyclo // structural shape match — one guard per rejected IR shape; no hidden branches
+func tryBuildParallelScanProject(
+	proj *ir.Projection,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	// Gate: parallel scan enabled AND live count over threshold AND live walker.
+	if !useParallelScan(walker, bopts) {
+		return nil, false, nil
+	}
+	lw, ok := walker.(*lpgNodeWalker)
+	if !ok || lw.morsel != nil {
+		// Only the live full walker is eligible; a morsel walker means we are
+		// already inside a per-worker rebuild and must never recurse.
+		return nil, false, nil
+	}
+
+	// Shape: Projection(scalar) → [Selection] → AllNodesScan.
+	if !projectionItemsAreScalar(proj.Items) {
+		return nil, false, nil
+	}
+	var sel *ir.Selection // optional
+	scanPlan := proj.Child
+	if s, isSel := scanPlan.(*ir.Selection); isSel {
+		sel = s
+		scanPlan = s.Child
+	}
+	if _, isScan := scanPlan.(*ir.AllNodesScan); !isScan {
+		return nil, false, nil
+	}
+
+	// Per-worker subplan factory. Each call rebuilds the SAME subtree over a
+	// per-worker walker restricted to the morsel and a per-worker buildOpts copy
+	// whose lazily-written fields are zeroed (so two workers never race writing
+	// bopts.nodeResolver et al). The morsel walker (morsel != nil) short-circuits
+	// this recognizer, so the rebuild is always the SERIAL subtree — no recursion.
+	// The build runs on the worker goroutine but writes only its own per-worker
+	// schema map and per-worker buildOpts copy; all shared inputs (params, reg, the
+	// read-only analysis/meta maps on bopts) are read-only after the
+	// single-threaded probe below.
+	g := lw.g
+	captSel := sel
+	scanVar := scanVarOf(scanPlan)
+	buildSubtree := func(morsel []graph.NodeID, sc map[string]int, bo *buildOpts) (exec.Operator, error) {
+		wWalker := &lpgNodeWalker{g: g, morsel: morsel}
+		var subChild ir.LogicalPlan = ir.NewAllNodesScan(scanVar)
+		if captSel != nil {
+			subChild = &ir.Selection{Predicate: captSel.Predicate, PredicateExpr: captSel.PredicateExpr, Child: subChild}
+		}
+		subProj := &ir.Projection{Items: proj.Items, Child: subChild}
+		return buildOperator(subProj, wWalker, labelSrc, reg, params, sc, idxMgr, procReg, nil, bo)
+	}
+
+	// Validate-and-populate: build the serial subtree once on the calling
+	// goroutine over an EMPTY morsel walker (zero rows, but schema is populated at
+	// build time regardless of data). This fills the caller's schema with the
+	// projection's output layout exactly as the serial path would, and surfaces any
+	// genuine build error before workers launch. The probe is discarded (Closed);
+	// the executed trees are built per-worker by the factory.
+	probe, err := buildSubtree([]graph.NodeID{}, schema, bopts.forWorker())
+	if err != nil {
+		return nil, false, err
+	}
+	_ = probe.Close()
+
+	factory := func(morsel []graph.NodeID) (exec.Operator, error) {
+		return buildSubtree(morsel, make(map[string]int), bopts.forWorker())
+	}
+
+	parallelScanProjectBuildCount.Add(1)
+	return exec.NewParallelScanProject(lw, factory, 0), true, nil
+}
+
+// scanVarOf returns the bound variable of an AllNodesScan IR node, or "" when
+// plan is not an AllNodesScan (the recognizer has already asserted it is).
+func scanVarOf(plan ir.LogicalPlan) string {
+	if s, ok := plan.(*ir.AllNodesScan); ok {
+		return s.NodeVar
+	}
+	return ""
+}
+
+// projectionItemsAreScalar reports whether every projection item is a per-row
+// scalar expression safe to evaluate inside a parallel worker and to materialise
+// into an escaping result row (#1682). It rejects items that aggregate, dedup, or
+// carry an evaluator that could retain the per-row evaluation context across the
+// goroutine boundary: aggregates, EXISTS/COUNT subqueries, pattern predicates,
+// and list/pattern comprehensions. A nil item AST (string-only legacy item)
+// disqualifies the whole projection conservatively. Aggregates are already lifted
+// to EagerAggregation IR by the translator, so a Projection directly over a scan
+// cannot carry a top-level aggregate; the aggregate check is belt-and-braces.
+func projectionItemsAreScalar(items []ir.ProjectionItem) bool {
+	for i := range items {
+		if items[i].Expr == nil {
+			return false
+		}
+		if exprHasNonScalar(items[i].Expr) {
+			return false
+		}
+	}
+	return true
+}
+
+// nonDeterministicFuncs is the deny-set of scalar functions whose result is NOT
+// (pure ∧ row-local): two evaluations of the same call can yield different
+// values. A projection item containing any of them must NOT be fused into the
+// morsel-parallel scan (#1682), because evaluating it independently per worker
+// would change the projected VALUE multiset versus the serial single-threaded
+// path — a genuine semantic divergence the openCypher TCK does not cover.
+//
+// Two groups (cypher-expert sign-off):
+//
+//   - rand / randomUUID: non-deterministic per call;
+//   - the zero-argument "clock" temporal constructors: even though GoGraph freezes
+//     one per-query "now" in the shared registry (newNowAwareRegistry) so the
+//     workers would in fact observe the same instant, they are rejected as cheap,
+//     unambiguous insurance — these queries are rare and the safety margin is worth
+//     more than fusing them. Argument-bearing temporal forms (date('2020-01-01'),
+//     datetime(n.ts)) are pure and are NOT in this set.
+//
+// Names are matched case-insensitively against the call's bare function name; the
+// no-namespace assumption matches the built-in registry's flat namespace.
+var nonDeterministicFuncs = map[string]struct{}{
+	"rand":          {},
+	"randomuuid":    {},
+	"timestamp":     {},
+	"date":          {},
+	"datetime":      {},
+	"localdatetime": {},
+	"time":          {},
+	"localtime":     {},
+}
+
+// exprHasNonScalar reports whether e contains any construct that disqualifies a
+// projection item from the morsel-parallel fused scan: an aggregate function
+// call, a non-deterministic / clock-dependent function ([nonDeterministicFuncs]),
+// an EXISTS/COUNT subquery, a pattern comprehension, a list comprehension, or a
+// reduce (the latter two evaluate per element but are excluded conservatively so
+// the fused set stays the simple per-row pure-scalar shapes signed off).
+//
+// A zero-argument call to a temporal constructor is the clock form (rejected); the
+// argument-bearing form is pure (accepted), so the deny-set membership is gated on
+// len(Args) == 0 for the temporal names while rand/randomUUID reject unconditionally.
+func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node dispatch; no hidden branches
+	switch n := e.(type) {
+	case nil:
+		return false
+	case *ast.ExistsSubquery, *ast.CountSubquery, *ast.PatternComprehension,
+		*ast.ListComprehension, *ast.ReduceExpr:
+		return true
+	case *ast.FunctionInvocation:
+		if ir.IsAggregateFunc(n.Name) || n.CountStar {
+			return true
+		}
+		if isNonDeterministicCall(n) {
+			return true
+		}
+		for _, a := range n.Args {
+			if exprHasNonScalar(a) {
+				return true
+			}
+		}
+	case *ast.BinaryOp:
+		return exprHasNonScalar(n.Left) || exprHasNonScalar(n.Right)
+	case *ast.UnaryOp:
+		return exprHasNonScalar(n.Operand)
+	case *ast.Property:
+		return exprHasNonScalar(n.Receiver)
+	case *ast.SubscriptExpr:
+		return exprHasNonScalar(n.Expr) || exprHasNonScalar(n.Index)
+	case *ast.SliceExpr:
+		return exprHasNonScalar(n.Expr) || exprHasNonScalar(n.From) || exprHasNonScalar(n.To)
+	case *ast.ListLiteral:
+		for _, el := range n.Elements {
+			if exprHasNonScalar(el) {
+				return true
+			}
+		}
+	case *ast.MapLiteral:
+		for _, v := range n.Values {
+			if exprHasNonScalar(v) {
+				return true
+			}
+		}
+	case *ast.CaseExpression:
+		if exprHasNonScalar(n.Subject) || exprHasNonScalar(n.ElseExpr) {
+			return true
+		}
+		for _, alt := range n.Alternatives {
+			if exprHasNonScalar(alt.Condition) || exprHasNonScalar(alt.Consequent) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNonDeterministicCall reports whether fn is a call this engine must not
+// evaluate independently per worker (#1682): rand / randomUUID (always
+// non-deterministic), or a ZERO-ARGUMENT temporal clock constructor (date(),
+// datetime(), localdatetime(), time(), localtime(), timestamp()). The temporal
+// names are only non-deterministic in their no-argument clock form; an
+// argument-bearing call (date('2020-01-01'), datetime(n.ts)) is pure and is not
+// rejected. rand / randomUUID are rejected regardless of arguments.
+func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
+	if len(fn.Namespace) != 0 {
+		return false // namespaced calls (apoc.*, …) are not the built-in clock/rand forms
+	}
+	name := strings.ToLower(fn.Name)
+	if _, ok := nonDeterministicFuncs[name]; !ok {
+		return false
+	}
+	switch name {
+	case "rand", "randomuuid":
+		return true // non-deterministic for any argument shape
+	default:
+		// Temporal constructor: only the zero-argument clock form is rejected.
+		return len(fn.Args) == 0
+	}
+}
+
+// forWorker returns a value copy of bopts that is fully independent of every
+// other worker's copy for the morsel-parallel fused scan→filter→project subtree
+// (#1682), so two workers building (and then running) their own copy of the
+// subtree never race on a shared field or map. It resets two classes of field:
+//
+//   - LAZILY-WRITTEN-AT-EVAL fields. nodeResolver is assigned by lazyResolver on
+//     first use WITHOUT synchronisation and is reachable from both the Filter
+//     predicate and the Projection via expr.LazyNodeValue — the genuine eval-time
+//     race on the node-only scan path. fwdCSR / fwdCSRReady / edgeIDResolver are
+//     relationship-reconstruction caches the fused shape never touches; reset
+//     defensively.
+//
+//   - BUILD-WRITTEN maps. The per-worker subtree rebuild runs buildOperator /
+//     buildIRProjection on the worker goroutine, and those WRITE bopts maps
+//     (projAliasScalarCols, scalarCols, and the Expand/path meta maps). Resetting
+//     them to nil makes each worker allocate and populate its OWN maps, so a
+//     concurrent write from another worker cannot alias the same map. The reset is
+//     sound for the fused shape because the subtree is self-contained: every map
+//     entry the build needs is (re)written from the subtree's own IR, never read
+//     from a pre-existing entry. The query-scope read-only fields (subEval,
+//     patEval, queryCtx, params/reg captured by closures, maxCollectItems, the
+//     enablement flags) are shared by the value copy and never written post-build.
+func (b *buildOpts) forWorker() *buildOpts {
+	cp := *b
+	// Lazily-written-at-eval fields.
+	cp.nodeResolver = nil
+	cp.fwdCSR = nil
+	cp.fwdCSRReady = false
+	cp.edgeIDResolver = nil
+	// Build-written maps: nil so each worker allocates its own (no shared-map race).
+	cp.scalarCols = nil
+	cp.projAliasScalarCols = nil
+	cp.aggKeyScalarCols = nil
+	cp.preprojectedCols = nil
+	cp.edgeVarMeta = nil
+	cp.pathVarMeta = nil
+	cp.pathVarChain = nil
+	cp.vleRelMeta = nil
+	cp.expandTripletSeq = nil
+	return &cp
 }
 
 // tryBuildParallelCountScan returns a [exec.ParallelCountScan] and true when p

@@ -49,6 +49,16 @@ func isAggregateFunc(name string) bool {
 	return aggFunctions[strings.ToLower(name)]
 }
 
+// IsAggregateFunc reports whether name (case-insensitive, no namespace) is a
+// Cypher aggregate function (count, sum, avg, min, max, collect, stdev,
+// percentileCont, percentileDisc, …). It is the exported form of the internal
+// aggregate-name check, used by the physical planner (#1682) to keep its
+// morsel-parallel fused-scan recognizer's notion of "scalar" consistent with the
+// IR translator's notion of "aggregate".
+func IsAggregateFunc(name string) bool {
+	return isAggregateFunc(name)
+}
+
 // detectAggregation inspects proj and returns the grouping keys, parsed
 // grouping-key AST expressions (one entry per groupBy, nil where the key is a
 // bare alias), aggregate descriptors, and whether any aggregates were found.
