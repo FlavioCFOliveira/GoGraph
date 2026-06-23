@@ -42,9 +42,10 @@ type GraphMutator interface {
 	// slot. The returned handle keys the *ByHandle metadata setters below
 	// so a parallel CREATE's type and properties are resolvable on the
 	// read path by an identity that survives sibling-edge deletion. Used
-	// by CreateRelationship; MERGE keeps using AddEdge (its read path
-	// falls back to the per-pair union). The handle is always non-zero on
-	// success.
+	// by CreateRelationship and by MergeRelationship's create path (rmp
+	// #1683) so a MERGE-built parallel edge of a distinct type keeps its
+	// own per-instance identity instead of collapsing onto the per-pair
+	// label union. The handle is always non-zero on success.
 	AddEdgeH(src, dst string, w float64) (srcID, dstID graph.NodeID, handle uint64, err error)
 
 	// RemoveEdge removes the directed edge from src to dst (no-op if absent).

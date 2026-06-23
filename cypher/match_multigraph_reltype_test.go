@@ -170,6 +170,39 @@ func TestMerge_Multigraph_DistinctType_CreatesParallelEdge(t *testing.T) {
 	}
 }
 
+// TestMerge_Multigraph_Undirected_DistinctType_CreatesParallelEdge covers
+// the undirected MERGE probe (the reverse-direction match also gained the
+// type check): two distinct-type undirected MERGEs create two edges, and
+// re-MERGE of an existing type is idempotent.
+func TestMerge_Multigraph_Undirected_DistinctType_CreatesParallelEdge(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+	stmts := []string{
+		`CREATE (a:A {id: 1})`,
+		`CREATE (b:B {id: 2})`,
+		`MATCH (a:A), (b:B) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:T1]-(b)`,
+		`MATCH (a:A), (b:B) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:T2]-(b)`,
+		`MATCH (a:A), (b:B) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:T1]-(b)`, // idempotent
+	}
+	for _, q := range stmts {
+		res, err := eng.RunAny(ctx, q, nil)
+		if err != nil {
+			t.Fatalf("stmt %q: %v", q, err)
+		}
+		for res.Next() {
+		}
+		if err := res.Err(); err != nil {
+			t.Fatalf("drain %q: %v", q, err)
+		}
+		res.Close()
+	}
+	// Undirected MERGE stores a single direction; read it back directed.
+	if got := collectRelTypes(t, eng, `MATCH (a:A)-[r]->(b:B) RETURN type(r) AS t`); !equalStrs(got, []string{"T1", "T2"}) {
+		t.Fatalf("undirected distinct-type MERGEs (+ idempotent re-MERGE) types = %v, want [T1 T2]", got)
+	}
+}
+
 func equalStrs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
