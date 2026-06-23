@@ -1272,6 +1272,15 @@ func replayWALInto[N comparable, W any](
 	iAcc *indexSet,
 ) (ReplayResult, error) {
 	var res ReplayResult
+	// Bracket the whole replay in ONE adjacency commit window (task #1526): WAL
+	// recovery is single-threaded with no concurrent reader and no concurrent
+	// PinSnapshot, so it is the sanctioned exclusive-build mode. Within the
+	// window each shard's slot array is cloned once on first touch and mutated
+	// in place thereafter, restoring the pre-COW write cost (O(shards touched)
+	// instead of O(ops)) for the dominant bulk-rebuild path. EndCommit freezes
+	// the builders before the graph is returned to the caller.
+	g.AdjList().BeginCommit()
+	defer g.AdjList().EndCommit()
 	// pending buffers the ops of an in-flight v3 transaction until its
 	// OpCommit marker is read. The store serialises commits (single
 	// writer), so a transaction's frames are contiguous and never

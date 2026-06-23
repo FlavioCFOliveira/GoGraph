@@ -414,8 +414,15 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
 	g.visMu.Lock()
 	g.barrier.stampWriter(gid)
+	// Open the adjacency commit window for exactly the visMu-held region so the
+	// transaction's adjacency writes clone each touched shard once (then mutate
+	// in place) instead of once per op (task #1526). EndCommit must run while
+	// visMu is still held — it freezes the per-shard builders — so it is
+	// deferred AFTER Unlock to run BEFORE it on the LIFO unwind.
+	g.adj.BeginCommit()
 	defer g.visMu.Unlock()
 	defer g.barrier.clearWriter(gid)
+	defer g.adj.EndCommit()
 	return fn()
 }
 
@@ -444,6 +451,12 @@ func (g *Graph[N, W]) LockBarrier() {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
 	g.visMu.Lock()
 	g.barrier.stampWriter(gid)
+	// Open the adjacency commit window for the whole explicit-transaction
+	// lifetime; UnlockBarrier closes it. This makes the window span every
+	// statement applied via ApplyInsideLocked under this barrier, so the
+	// transaction's adjacency writes share the per-shard clone-once dedup
+	// (task #1526).
+	g.adj.BeginCommit()
 }
 
 // UnlockBarrier releases the transaction-visibility write lock acquired via
@@ -453,6 +466,10 @@ func (g *Graph[N, W]) LockBarrier() {
 // called again from any goroutine.
 func (g *Graph[N, W]) UnlockBarrier() {
 	gid := goID()
+	// Close the adjacency commit window while visMu is still held (freezes the
+	// per-shard builders), matching the BeginCommit in LockBarrier, before
+	// releasing the barrier.
+	g.adj.EndCommit()
 	g.barrier.clearWriter(gid)
 	g.visMu.Unlock()
 }
