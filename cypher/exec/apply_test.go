@@ -891,17 +891,33 @@ func TestShortestPath_DirectEdge(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	pv, ok := rows[0][2].(expr.PathValue)
+	lv, ok := rows[0][2].(expr.ListValue)
 	if !ok {
-		t.Fatalf("col[2] is %T, want PathValue", rows[0][2])
+		t.Fatalf("col[2] is %T, want ListValue", rows[0][2])
 	}
-	if len(pv.Nodes) != 2 || len(pv.Relationships) != 1 {
-		t.Errorf("path = %v nodes, %v rels; want 2 nodes 1 rel", len(pv.Nodes), len(pv.Relationships))
+	if got := hopsFromList(t, lv); got != 1 {
+		t.Errorf("path = %d hops; want 1 (2 nodes, 1 rel)", got)
 	}
 }
 
+// hopsFromList returns the hop count encoded in a ShortestPath/AllShortestPaths
+// flat alternating list [srcID, fwdPos0, dst0, dir0, …]: an N-hop path has
+// 1 + exec.VLEHopStride*N elements.
+func hopsFromList(t *testing.T, lv expr.ListValue) int {
+	t.Helper()
+	if len(lv) == 0 {
+		t.Fatalf("empty path list")
+	}
+	rem := len(lv) - 1
+	if rem%exec.VLEHopStride != 0 {
+		t.Fatalf("path list length %d is not 1 + %d*N", len(lv), exec.VLEHopStride)
+	}
+	return rem / exec.VLEHopStride
+}
+
 func TestShortestPath_Unreachable(t *testing.T) {
-	// Graph: 0→1. No path from 1 to 0 (directed).
+	// Graph: 0→1. No path from 1 to 0 (directed). Under the default (MATCH) the
+	// row is dropped; under OPTIONAL MATCH a Null-path row is kept.
 	fwd := buildCSR(2, [][2]int{{0, 1}})
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
@@ -912,21 +928,30 @@ func TestShortestPath_Unreachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1 (Null path)", len(rows))
+	if len(rows) != 0 {
+		t.Fatalf("MATCH: got %d rows, want 0 (unreachable, row dropped)", len(rows))
 	}
-	if rows[0][2] != expr.Null {
-		t.Errorf("path = %v, want Null (unreachable)", rows[0][2])
+
+	input2 := newSliceOperator(exec.Row{expr.IntegerValue(1), expr.IntegerValue(0)})
+	opt := exec.NewShortestPath(input2, fwd, rev, exec.DirOut, 0, 1).WithOptional(true)
+	rows2, err := exec.Drain(context.Background(), opt)
+	if err != nil {
+		t.Fatalf("Drain (optional): %v", err)
+	}
+	if len(rows2) != 1 || rows2[0][2] != expr.Null {
+		t.Fatalf("OPTIONAL: got %d rows (want 1 Null), col=%v", len(rows2), rows2[0][2])
 	}
 }
 
 func TestShortestPath_SameNodeZeroHop(t *testing.T) {
-	// src == dst → zero-hop path with 1 node and 0 relationships.
+	// src == dst with a 0 lower bound → zero-hop path ([srcID], 0 hops). The
+	// default lower bound is 1 (matching `-[*]-`), so the zero-length path is
+	// only reported when minHops == 0 (`-[*0..]-`).
 	fwd := buildCSR(3, [][2]int{{0, 1}})
 	rev := buildCSR(3, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(1), expr.IntegerValue(1)})
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1).WithHopBounds(0, shortestNoMaxHopsForTest)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -935,11 +960,15 @@ func TestShortestPath_SameNodeZeroHop(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	pv := rows[0][2].(expr.PathValue)
-	if len(pv.Nodes) != 1 || len(pv.Relationships) != 0 {
-		t.Errorf("zero-hop path: got %d nodes, %d rels", len(pv.Nodes), len(pv.Relationships))
+	lv := rows[0][2].(expr.ListValue)
+	if got := hopsFromList(t, lv); got != 0 {
+		t.Errorf("zero-hop path: got %d hops, want 0", got)
 	}
 }
+
+// shortestNoMaxHopsForTest mirrors the operator's "no upper bound" sentinel (0)
+// for tests that need to set hop bounds explicitly.
+const shortestNoMaxHopsForTest = 0
 
 func TestShortestPath_LongerPath(t *testing.T) {
 	// Path: 0→1→2→3. Shortest path from 0 to 3 should be length 3.
@@ -956,13 +985,10 @@ func TestShortestPath_LongerPath(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	pv := rows[0][2].(expr.PathValue)
-	// Path 0→1→2→3: 4 nodes, 3 rels.
-	if len(pv.Nodes) != 4 {
-		t.Errorf("path nodes = %d, want 4", len(pv.Nodes))
-	}
-	if len(pv.Relationships) != 3 {
-		t.Errorf("path rels = %d, want 3", len(pv.Relationships))
+	lv := rows[0][2].(expr.ListValue)
+	// Path 0→1→2→3: 3 hops (4 nodes, 3 rels).
+	if got := hopsFromList(t, lv); got != 3 {
+		t.Errorf("path hops = %d, want 3", got)
 	}
 }
 
@@ -981,10 +1007,10 @@ func TestShortestPath_ShortestAmongMultiple(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	pv := rows[0][2].(expr.PathValue)
+	lv := rows[0][2].(expr.ListValue)
 	// Must be length 2 (3 nodes, 2 rels).
-	if len(pv.Nodes) != 3 {
-		t.Errorf("path nodes = %d, want 3", len(pv.Nodes))
+	if got := hopsFromList(t, lv); got != 2 {
+		t.Errorf("path hops = %d, want 2", got)
 	}
 }
 
@@ -1005,7 +1031,8 @@ func TestShortestPath_EmptyInput(t *testing.T) {
 }
 
 func TestShortestPath_InvalidInputColumns(t *testing.T) {
-	// srcCol/dstCol out of bounds → Null path emitted.
+	// Non-integer endpoint columns: under the default (MATCH) the row is
+	// dropped; under OPTIONAL MATCH a Null-path row is emitted.
 	fwd := buildCSR(2, [][2]int{{0, 1}})
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
@@ -1016,11 +1043,22 @@ func TestShortestPath_InvalidInputColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rows))
+	if len(rows) != 0 {
+		t.Fatalf("MATCH: got %d rows, want 0 (invalid row dropped)", len(rows))
 	}
-	if rows[0][2] != expr.Null {
-		t.Errorf("expected Null for non-integer columns, got %v", rows[0][2])
+
+	// OPTIONAL variant keeps the row with a Null path.
+	input2 := newSliceOperator(exec.Row{expr.StringValue("not-an-int"), expr.StringValue("not-an-int")})
+	opt := exec.NewShortestPath(input2, fwd, rev, exec.DirOut, 0, 1).WithOptional(true)
+	rows2, err := exec.Drain(context.Background(), opt)
+	if err != nil {
+		t.Fatalf("Drain (optional): %v", err)
+	}
+	if len(rows2) != 1 {
+		t.Fatalf("OPTIONAL: got %d rows, want 1", len(rows2))
+	}
+	if rows2[0][2] != expr.Null {
+		t.Errorf("expected Null for non-integer columns, got %v", rows2[0][2])
 	}
 }
 
@@ -1045,9 +1083,9 @@ func TestAllShortestPaths_TwoPaths(t *testing.T) {
 	}
 	// Both paths must have length 2 (3 nodes, 2 rels).
 	for i, row := range rows {
-		pv := row[2].(expr.PathValue)
-		if len(pv.Nodes) != 3 || len(pv.Relationships) != 2 {
-			t.Errorf("rows[%d] path: %d nodes %d rels, want 3 nodes 2 rels", i, len(pv.Nodes), len(pv.Relationships))
+		lv := row[2].(expr.ListValue)
+		if got := hopsFromList(t, lv); got != 2 {
+			t.Errorf("rows[%d] path: %d hops, want 2", i, got)
 		}
 	}
 }
@@ -1073,7 +1111,8 @@ func TestAllShortestPaths_SameNode(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(0)})
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1)
+	// minHops 0 admits the zero-length src==dst path.
+	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1).WithHopBounds(0, shortestNoMaxHopsForTest)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1159,9 +1198,9 @@ func TestAllShortestPaths_PicksShorterNotLonger(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1 (only direct edge)", len(rows))
 	}
-	pv := rows[0][2].(expr.PathValue)
-	if len(pv.Relationships) != 1 {
-		t.Errorf("path len = %d, want 1", len(pv.Relationships))
+	lv := rows[0][2].(expr.ListValue)
+	if got := hopsFromList(t, lv); got != 1 {
+		t.Errorf("path len = %d hops, want 1", got)
 	}
 }
 
@@ -1443,14 +1482,17 @@ func TestShortestPath_DeterministicTieBreaking(t *testing.T) {
 		if len(rows) != 1 {
 			t.Fatalf("run %d: got %d rows, want 1", run, len(rows))
 		}
-		pv, ok := rows[0][2].(expr.PathValue)
+		lv, ok := rows[0][2].(expr.ListValue)
 		if !ok {
-			t.Fatalf("run %d: not a PathValue: %T", run, rows[0][2])
+			t.Fatalf("run %d: not a ListValue: %T", run, rows[0][2])
 		}
-		if len(pv.Nodes) != 3 {
-			t.Fatalf("run %d: nodes = %d, want 3", run, len(pv.Nodes))
+		if got := hopsFromList(t, lv); got != 2 {
+			t.Fatalf("run %d: hops = %d, want 2", run, got)
 		}
-		s := sample{mid: pv.Nodes[1].ID}
+		// Flat list [srcID, fwdPos0, dst0, dir0, fwdPos1, dst1, dir1]: the
+		// intermediate node is the first hop's destination at index 2.
+		mid, _ := lv[2].(expr.IntegerValue)
+		s := sample{mid: uint64(mid)}
 		if run == 0 {
 			first = s
 			continue

@@ -379,81 +379,16 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 // out-of-range vertex or a missing forward counterpart); callers fall back to
 // the synthetic reverse position in that rare case.
 //
-// PARALLEL edges (a multigraph fwdSrc->revUID pair with several slots) are the
-// reason this is not a first-match scan (the pre-#1685 bug): every reverse slot
-// would have mapped onto the FIRST forward slot, so the relationship hydrator
-// reported one merged type and the coalesced property union for every parallel
-// reverse hop. Two disambiguation strategies, preferred first:
-//
-//   - Handle-exact (VERIFICATION GATE (a): the reverse CSR DOES expose
-//     HandlesSlice — Expand already snapshots revHandles for the single-hop
-//     #1634 fix). When both CSRs carry handles, match the reverse slot to the
-//     forward slot whose stable handle is identical. csr.BuildReverse keeps one
-//     handle per logical edge across both directions, so this recovers the exact
-//     instance and is delete-stable (it does not mis-map after a parallel
-//     sibling is removed and the neighbour slice is compacted). Mirrors
-//     [Expand.lookupFwdEdgePosByHandle].
-//
-//   - Positional-ordinal (fallback when either CSR lacks handles — a simple
-//     graph or a legacy snapshot). The k-th reverse (fwdSrc->revUID) slot pairs
-//     with the k-th forward (fwdSrc->revUID) slot. A simple graph has exactly
-//     one slot per pair, so this degenerates to the original first-match scan.
+// The disambiguation strategy (handle-exact, with a positional-ordinal
+// fallback for simple/legacy graphs) lives in the package-level [buildRevToFwd]
+// free function, which [ShortestPath] and [AllShortestPaths] share so the
+// per-instance mapping is computed identically across all three operators
+// (rmp #1692). This method is a thin adapter over the operator's CSR snapshots.
 func (op *VarLengthExpand) buildRevToFwd() {
-	op.revToFwd = make([]uint64, len(op.revEdges))
-	useHandles := op.fwdHandles != nil && op.revHandles != nil
-	for revUID := uint64(0); revUID+1 < uint64(len(op.revVerts)); revUID++ {
-		start, end := op.revVerts[revUID], op.revVerts[revUID+1]
-		for revPos := start; revPos < end; revPos++ {
-			fwdSrc := uint64(op.revEdges[revPos])
-			if fwdSrc+1 >= uint64(len(op.fwdVerts)) {
-				op.revToFwd[revPos] = ^uint64(0) // unresolved
-				continue
-			}
-			fStart, fEnd := op.fwdVerts[fwdSrc], op.fwdVerts[fwdSrc+1]
-			if useHandles {
-				op.revToFwd[revPos] = op.matchFwdByHandle(fStart, fEnd, revUID, op.revHandles[revPos])
-				continue
-			}
-			// Positional-ordinal fallback: this reverse slot is the
-			// ordinal-th (fwdSrc -> revUID) reverse entry; pair it with the
-			// ordinal-th matching forward entry.
-			ordinal := uint64(0)
-			for rp := start; rp <= revPos; rp++ {
-				if uint64(op.revEdges[rp]) == fwdSrc {
-					ordinal++
-				}
-			}
-			op.revToFwd[revPos] = op.matchFwdByOrdinal(fStart, fEnd, revUID, ordinal)
-		}
-	}
-}
-
-// matchFwdByHandle returns the forward position in [fStart,fEnd) whose
-// destination is revUID and whose stable handle equals handle, or ^uint64(0)
-// when none matches.
-func (op *VarLengthExpand) matchFwdByHandle(fStart, fEnd, revUID, handle uint64) uint64 {
-	for fp := fStart; fp < fEnd; fp++ {
-		if uint64(op.fwdEdges[fp]) == revUID && op.fwdHandles[fp] == handle {
-			return fp
-		}
-	}
-	return ^uint64(0)
-}
-
-// matchFwdByOrdinal returns the ordinal-th (1-based) forward position in
-// [fStart,fEnd) whose destination is revUID, or ^uint64(0) when fewer than
-// ordinal such positions exist.
-func (op *VarLengthExpand) matchFwdByOrdinal(fStart, fEnd, revUID, ordinal uint64) uint64 {
-	seen := uint64(0)
-	for fp := fStart; fp < fEnd; fp++ {
-		if uint64(op.fwdEdges[fp]) == revUID {
-			seen++
-			if seen == ordinal {
-				return fp
-			}
-		}
-	}
-	return ^uint64(0)
+	op.revToFwd = buildRevToFwd(
+		op.fwdVerts, op.fwdEdges, op.fwdHandles,
+		op.revVerts, op.revEdges, op.revHandles,
+	)
 }
 
 // Next emits the next (inputRow... || pathEdgesAsListValue || dstNodeID) row.
@@ -750,7 +685,7 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		// traverses reverse edges, not DirBoth alone.
 		fwdAbsPos := absPos
 		if !isFwd && op.dir != DirOut && op.revToFwd != nil && pos < uint64(len(op.revToFwd)) {
-			if mapped := op.revToFwd[pos]; mapped != ^uint64(0) {
+			if mapped := op.revToFwd[pos]; mapped != unresolvedFwdPos {
 				fwdAbsPos = mapped
 			}
 		}

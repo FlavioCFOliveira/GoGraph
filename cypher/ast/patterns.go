@@ -145,6 +145,23 @@ type PathElement struct {
 	Next         *PathElement         // nil for the last node
 }
 
+// ShortestKind classifies a path pattern wrapped in shortestPath(...) or
+// allShortestPaths(...). ShortestNone (the zero value) means an ordinary
+// (non-shortest) path. The parser records the kind by stripping the wrapper
+// keyword in a pre-lex normalizer and stamping it back onto the matching named
+// PathPattern after the AST is built (rmp #1690): the grammar itself is left
+// untouched, so the proven TCK-green parser is unchanged.
+type ShortestKind uint8
+
+const (
+	// ShortestNone is an ordinary path pattern (no shortest-path wrapper).
+	ShortestNone ShortestKind = iota
+	// ShortestSingle is shortestPath(...): a single minimum-hop path.
+	ShortestSingle
+	// ShortestAll is allShortestPaths(...): every minimum-hop path.
+	ShortestAll
+)
+
 // PathPattern represents a single path within a pattern:
 // (a)-[r]->(b)-[s]->(c).
 type PathPattern struct {
@@ -152,26 +169,40 @@ type PathPattern struct {
 	EndPos   Position
 	Variable *string      // path variable, nil when absent
 	Head     *PathElement // linked list of alternating node/rel steps
+	// Shortest classifies a shortestPath()/allShortestPaths() wrapper around
+	// this path (ShortestNone for an ordinary path). Set by the parser's
+	// post-AST shortest-path pass (rmp #1690).
+	Shortest ShortestKind
 }
 
 func (*PathPattern) astNode()  {}
 func (*PathPattern) exprNode() {}
 
-// String returns the Cypher path pattern.
+// String returns the Cypher path pattern, re-wrapping a shortestPath /
+// allShortestPaths pattern in its function form so the rendering round-trips.
 func (p *PathPattern) String() string {
 	out := ""
 	if p.Variable != nil {
 		out += *p.Variable + " = "
 	}
+	inner := ""
 	el := p.Head
 	for el != nil {
 		if el.Relationship != nil {
-			out += el.Relationship.String()
+			inner += el.Relationship.String()
 		}
 		if el.Node != nil {
-			out += el.Node.String()
+			inner += el.Node.String()
 		}
 		el = el.Next
+	}
+	switch p.Shortest {
+	case ShortestSingle:
+		out += "shortestPath(" + inner + ")"
+	case ShortestAll:
+		out += "allShortestPaths(" + inner + ")"
+	default:
+		out += inner
 	}
 	return out
 }

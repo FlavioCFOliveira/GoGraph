@@ -5352,6 +5352,9 @@ func buildOperator(
 		}
 		return exec.NewOptionalExpand(child, fwd, rev, cfg), nil
 
+	case *ir.ShortestPath:
+		return buildShortestPath(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+
 	case *ir.VarLengthExpand:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
@@ -10961,6 +10964,119 @@ func collectAllInstanceLabels(g *lpg.Graph[string, float64], srcStr, dstStr stri
 		}
 	}
 	return out
+}
+
+// buildShortestPath lowers an [ir.ShortestPath] to an [exec.ShortestPath] or
+// [exec.AllShortestPaths] operator (rmp #1692). The operator emits ONE new
+// column holding the flat alternating path list ([srcID, fwdPos0, dst0, dir0,
+// …], stride [exec.VLEHopStride]); the path variable is registered in
+// bopts.pathVarMeta (single segment, mirroring the VarLengthExpand case) so the
+// shared [resolveHopRel] hydrator reconstructs a per-instance-typed PathValue,
+// and — when the inner relationship is named — bopts.vleRelMeta so
+// `relationships(p)` / `RETURN r` render a RelationshipValue per hop.
+//
+// When no graph is available the child is returned unchanged (the same
+// degenerate fallback the VarLengthExpand case uses).
+func buildShortestPath(
+	p *ir.ShortestPath,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
+) (exec.Operator, error) {
+	child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+	if err != nil {
+		return nil, err
+	}
+
+	srcCol := 0
+	if col, ok := schema[p.FromVar]; ok {
+		srcCol = col
+	}
+	dstCol := 0
+	if col, ok := schema[p.ToVar]; ok {
+		dstCol = col
+	}
+
+	// The operator appends one COLUMN: the flat alternating path list. Allocate
+	// it and register the path variable's metadata against it.
+	pathCol := schemaWidth(schema)
+	pathKey := p.PathVar
+	if pathKey == "" {
+		pathKey = fmt.Sprintf("__anon_sp_%d", pathCol)
+	}
+	schema[pathKey] = pathCol
+
+	if p.PathVar != "" && bopts != nil {
+		if bopts.pathVarMeta == nil {
+			bopts.pathVarMeta = make(map[string]pathVarInfo)
+		}
+		seg := pathVarSegment{listCol: pathCol}
+		if len(p.RelTypes) > 0 {
+			seg.edgeType = p.RelTypes[0]
+			seg.acceptedTypes = append([]string(nil), p.RelTypes...)
+		}
+		info := pathVarInfo{listCol: seg.listCol, edgeType: seg.edgeType}
+		info.segments = append(info.segments, seg)
+		bopts.pathVarMeta[p.PathVar] = info
+	}
+	// When the inner relationship is named, render it as a list of
+	// RelationshipValues over the same flat list.
+	if p.RelVar != "" && bopts != nil {
+		if bopts.vleRelMeta == nil {
+			bopts.vleRelMeta = make(map[string]vleRelInfo)
+		}
+		info := vleRelInfo{listCol: pathCol}
+		if len(p.RelTypes) > 0 {
+			info.edgeType = p.RelTypes[0]
+			info.acceptedTypes = append([]string(nil), p.RelTypes...)
+		}
+		bopts.vleRelMeta[p.RelVar] = info
+		schema[p.RelVar] = pathCol
+	}
+
+	var g *lpg.Graph[string, float64]
+	if lw, ok := walker.(*lpgNodeWalker); ok {
+		g = lw.g
+	}
+	if g == nil {
+		return child, nil
+	}
+
+	fwd, rev := csrPairFromGraph(g)
+	dir := irDirToExec(p.Direction)
+
+	edgeType := ""
+	var etFilter map[uint64]string
+	if len(p.RelTypes) > 0 {
+		edgeType = p.RelTypes[0]
+		etFilter = buildEdgeTypeFilter(g, p.RelTypes)
+	}
+
+	// Translate the IR's "unbounded" sentinel (math.MaxInt) to the operator's
+	// no-upper-bound sentinel (0); a real maximum is passed verbatim.
+	maxHops := p.MaxDepth
+	if maxHops == math.MaxInt {
+		maxHops = 0
+	}
+
+	if p.All {
+		op := exec.NewAllShortestPaths(child, fwd, rev, dir, srcCol, dstCol).
+			WithTypeFilter(edgeType, etFilter).
+			WithHopBounds(p.MinDepth, maxHops).
+			WithOptional(p.Optional)
+		return op, nil
+	}
+	op := exec.NewShortestPath(child, fwd, rev, dir, srcCol, dstCol).
+		WithTypeFilter(edgeType, etFilter).
+		WithHopBounds(p.MinDepth, maxHops).
+		WithOptional(p.Optional)
+	return op, nil
 }
 
 // irDirToExec converts an IR Direction to the corresponding exec Direction.

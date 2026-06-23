@@ -1201,6 +1201,13 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 		boundVars = map[string]struct{}{}
 	}
 
+	// A named shortestPath()/allShortestPaths() binding is translated to a
+	// dedicated ShortestPath node rather than the ordinary scan/expand chain
+	// (rmp #1692). The leading endpoint is scanned here ("" sharedLeadVar).
+	if pp.Shortest != ast.ShortestNone {
+		return t.matchShortestPath(pp, optional, "", 0, boundVars)
+	}
+
 	el := pp.Head
 
 	// The first element is always a node; translate it as a scan unless the
@@ -1288,6 +1295,14 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 	if boundVars == nil {
 		boundVars = map[string]struct{}{}
 	}
+
+	// A named shortestPath()/allShortestPaths() binding whose leading endpoint
+	// is shared with outer scope: translate to a ShortestPath node with an
+	// Argument leaf carrying the shared tag (rmp #1692).
+	if pp.Shortest != ast.ShortestNone {
+		return t.matchShortestPath(pp, optional, sharedLeadVar, argTag, boundVars)
+	}
+
 	el := pp.Head
 	if el.Node == nil || el.Node.Variable == nil || *el.Node.Variable != sharedLeadVar {
 		return nil, fmt.Errorf("ir: matchPathPatternWithArg called with mismatched shared variable")
@@ -1358,6 +1373,129 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 	}
 	plan = applyPathVar(pp, plan)
 	return plan, nil
+}
+
+// matchShortestPath translates a named shortestPath()/allShortestPaths()
+// binding (pp.Shortest != ShortestNone) into a [ShortestPath] IR node. By the
+// time sema has run the inner pattern is guaranteed to be exactly one
+// relationship between two node patterns (a, b); this builder relies on that
+// shape.
+//
+// The Child plan must produce both endpoint columns. The leading endpoint is
+// bound either from outer scope (sharedLeadVar non-empty → an Argument leaf
+// carrying argTag, the same mechanism matchPathPatternWithArg uses) or by a
+// fresh scan. The trailing endpoint is reused when already in boundVars
+// (`MATCH (a),(b) MATCH p=shortestPath((a)-[*]-(b))`, the canonical form) and
+// otherwise scanned and cross-joined. Inline label/property predicates on
+// either endpoint are enforced as Selections so the operator only searches
+// between matching anchors.
+func (t *translator) matchShortestPath(pp *ast.PathPattern, optional bool, sharedLeadVar string, argTag uint32, boundVars map[string]struct{}) (LogicalPlan, error) {
+	from := pp.Head.Node
+	if from == nil || pp.Head.Next == nil || pp.Head.Next.Relationship == nil || pp.Head.Next.Node == nil {
+		return nil, fmt.Errorf("ir: shortestPath inner pattern is not a single relationship between two nodes")
+	}
+	rp := pp.Head.Next.Relationship
+	to := pp.Head.Next.Node
+
+	// Assign synthetic names to anonymous endpoints so the ShortestPath node has
+	// concrete FromVar/ToVar columns to read.
+	if from.Variable == nil {
+		v := t.freshAnonVar()
+		from.Variable = &v
+	}
+	if to.Variable == nil {
+		v := t.freshAnonVar()
+		to.Variable = &v
+	}
+	fromVar := *from.Variable
+	toVar := *to.Variable
+
+	// Build the leading-endpoint subtree.
+	var child LogicalPlan
+	if sharedLeadVar != "" {
+		// Leading endpoint shared with outer scope: re-emit the outer row.
+		child = NewArgumentWithTag([]string{sharedLeadVar}, argTag)
+		boundVars[sharedLeadVar] = struct{}{}
+		if len(from.Labels) > 0 {
+			child = t.matchApplyNodeLabels(from, fromVar, child)
+		}
+		if from.Properties != nil {
+			child = buildPropertySelection(fromVar, from.Properties, child)
+		}
+	} else if _, bound := boundVars[fromVar]; bound {
+		// Already bound by the cumulative plan but not the shared lead (e.g. a
+		// second path in the same MATCH). An Argument leaf with no tag re-emits
+		// it; the matchPattern driver wraps us in Apply/CorrelatedApply.
+		child = NewArgument([]string{fromVar})
+	} else {
+		child = t.matchNodeScan(from)
+		boundVars[fromVar] = struct{}{}
+	}
+
+	// Bind the trailing endpoint. When already in scope it travels on the row;
+	// otherwise scan it and cross-join (Apply) so both columns are present.
+	if _, bound := boundVars[toVar]; !bound {
+		toScan := t.matchNodeScan(to)
+		child = NewApply(child, toScan)
+		boundVars[toVar] = struct{}{}
+	} else {
+		// Re-enforce inline label/property predicates on the bound endpoint.
+		if len(to.Labels) > 0 {
+			child = t.matchApplyNodeLabels(to, toVar, child)
+		}
+		if to.Properties != nil {
+			child = buildPropertySelection(toVar, to.Properties, child)
+		}
+	}
+
+	relVar := ""
+	if rp.Variable != nil {
+		relVar = *rp.Variable
+	}
+	relTypes := make([]string, len(rp.Types))
+	copy(relTypes, rp.Types)
+	dir := relDirection(rp.Direction)
+
+	// Hop bounds. A fixed-length inner relationship (no Range) means *1..1; a
+	// variable-length one uses its quantifier (sema has constrained the lower
+	// bound to 0 or 1). Unbounded upper is encoded as math.MaxInt, matching
+	// VarLengthExpand.
+	minDepth, maxDepth := 1, 1
+	if rp.Range != nil {
+		minDepth, maxDepth = 1, math.MaxInt
+		if rp.Range.Min != nil {
+			minDepth = int(*rp.Range.Min)
+		}
+		if rp.Range.Max != nil {
+			maxDepth = int(*rp.Range.Max)
+		}
+	}
+
+	pathVar := ""
+	if pp.Variable != nil {
+		pathVar = *pp.Variable
+	}
+
+	return NewShortestPath(
+		pp.Shortest == ast.ShortestAll, optional,
+		fromVar, toVar, pathVar, relVar, relTypes, dir, minDepth, maxDepth, child,
+	), nil
+}
+
+// matchApplyNodeLabels wraps plan with a LabelPredicate Selection enforcing the
+// node pattern's labels on an already-emitted node column. Used by
+// [matchShortestPath] to re-check a bound endpoint's labels.
+func (t *translator) matchApplyNodeLabels(np *ast.NodePattern, nodeVar string, plan LogicalPlan) LogicalPlan {
+	if len(np.Labels) == 0 {
+		return plan
+	}
+	labels := make([]string, len(np.Labels))
+	copy(labels, np.Labels)
+	lp := &ast.LabelPredicate{
+		Receiver: &ast.Variable{Name: nodeVar},
+		Labels:   labels,
+	}
+	return NewSelectionExpr(lp.String(), lp, plan)
 }
 
 // matchNodeScan produces AllNodesScan or NodeByLabelScan for a NodePattern,

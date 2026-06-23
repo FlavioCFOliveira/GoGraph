@@ -997,6 +997,12 @@ func (a *analyser) pathPatternIntroduce(pp *ast.PathPattern) {
 	if pp == nil {
 		return
 	}
+	// Validate a shortestPath()/allShortestPaths() wrapper before the ordinary
+	// scoping pass (rmp #1691). The check is structural; the variables it
+	// introduces (path, relationship-list) are still bound by the code below.
+	if pp.Shortest != ast.ShortestNone {
+		a.checkShortestPath(pp)
+	}
 	// Path variable (p = (a)-[r]->(b)) — introduce into scope. Re-using a
 	// previously-bound name as a path raises VariableTypeConflict unless the
 	// existing binding is also a path (which it cannot be in practice — path
@@ -1026,6 +1032,45 @@ func (a *analyser) pathPatternIntroduce(pp *ast.PathPattern) {
 			a.relPatternIntroduce(el.Relationship)
 		}
 		el = el.Next
+	}
+}
+
+// checkShortestPath enforces the openCypher 9 structural rules for a
+// shortestPath() / allShortestPaths() binding (rmp #1691):
+//
+//   - The binding must be named (`p = shortestPath(...)`). The parser only
+//     rewrites the named MATCH form; an unnamed wrapper is rejected here.
+//   - The inner pattern must be exactly one relationship between two node
+//     patterns (`(a)-[*]-(b)`); a chained multi-segment inner pattern is
+//     rejected.
+//   - When the inner relationship is variable-length, its minimal length must
+//     be 0 or 1 (`[*2..5]` is rejected). An omitted lower bound (default 1) and
+//     an explicit 0 or 1 are accepted.
+func (a *analyser) checkShortestPath(pp *ast.PathPattern) {
+	if pp.Variable == nil {
+		a.error(invalidShortestPathError(
+			"shortestPath requires a named path binding (p = shortestPath(...))", pp.Pos))
+		return
+	}
+	head := pp.Head
+	// Inner pattern must be node-rel-node with no further segments.
+	if head == nil || head.Node == nil || head.Next == nil ||
+		head.Next.Relationship == nil || head.Next.Node == nil {
+		a.error(invalidShortestPathError(
+			"shortestPath requires a single relationship between two nodes", pp.Pos))
+		return
+	}
+	if head.Next.Next != nil {
+		a.error(invalidShortestPathError(
+			"shortestPath does not support multi-segment patterns; use a single relationship between two nodes", pp.Pos))
+		return
+	}
+	rp := head.Next.Relationship
+	if rp.Range != nil && rp.Range.Min != nil {
+		if m := *rp.Range.Min; m != 0 && m != 1 {
+			a.error(invalidShortestPathError(
+				"shortestPath does not support a minimal length different from 0 or 1", rp.Pos))
+		}
 	}
 }
 
@@ -1560,6 +1605,15 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		a.countSubquery(v)
 
 	case *ast.PathPattern:
+		// A shortestPath()/allShortestPaths() wrapper in expression context
+		// (WHERE / RETURN / EXISTS{} / COUNT{}) is not supported: the parser
+		// only rewrites the named MATCH binding form, so a stamped wrapper here
+		// is rejected with a clear message rather than mis-evaluated (rmp #1691).
+		if v.Shortest != ast.ShortestNone {
+			a.error(invalidShortestPathError(
+				"shortestPath is only supported as a named path binding in MATCH / OPTIONAL MATCH", v.Pos))
+			return
+		}
 		// PathPattern in expression context (a bare pattern predicate in
 		// WHERE, e.g. `WHERE (a)-[r]->(b)`). Per openCypher, a bare
 		// pattern predicate may NOT introduce new variables — every node

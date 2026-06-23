@@ -427,6 +427,84 @@ func (v *VarLengthExpand) Vars() []string { return []string{v.RelVar, v.ToVar} }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ShortestPath computes the shortest (fewest-hops) path, or — when All is true
+// — every minimum-length path, between two already-bound endpoint node
+// variables. It is the IR node for a named `MATCH p = shortestPath((a)-[*]-(b))`
+// / `allShortestPaths(...)` binding (rmp #1692): the parser's pre-lex normaliser
+// strips the wrapper keyword and stamps the kind onto the inner named
+// [ast.PathPattern] (rmp #1690), and [translator.matchShortestPath] turns the
+// stamped pattern into this node.
+//
+// Both endpoints are produced by Child (bound from an outer clause or scanned
+// when unbound). The physical builder lowers this to an
+// [github.com/FlavioCFOliveira/GoGraph/cypher/exec.ShortestPath] or
+// [github.com/FlavioCFOliveira/GoGraph/cypher/exec.AllShortestPaths] operator,
+// which emits the flat alternating path list the path variable's metadata
+// hydrates into a per-instance-typed PathValue.
+type ShortestPath struct {
+	// All selects allShortestPaths (every minimum-length path) over
+	// shortestPath (a single arbitrary minimum-length path).
+	All bool
+	// Optional reports whether the binding sits under OPTIONAL MATCH. When a
+	// pair has no path: a non-optional binding eliminates the row; an optional
+	// one keeps the row with the path variable bound to null.
+	Optional bool
+	// FromVar / ToVar are the endpoint node variables, both produced by Child.
+	FromVar string
+	ToVar   string
+	// PathVar is the named path variable bound to the resulting path. Always
+	// non-empty (the parser only rewrites the named binding form).
+	PathVar string
+	// RelVar is the inner relationship variable name, or empty when the inner
+	// relationship is anonymous. Bound as LIST<RELATIONSHIP> for the path.
+	RelVar string
+	// RelTypes is the inner relationship's accepted type set (OR semantics). An
+	// empty slice means any type.
+	RelTypes []string
+	// Direction is the inner relationship's traversal direction relative to
+	// FromVar.
+	Direction Direction
+	// MinDepth / MaxDepth bound the path length. MinDepth is 0 or 1 (enforced by
+	// sema). MaxDepth uses math.MaxInt for "unbounded".
+	MinDepth int
+	MaxDepth int
+	// Child is the subplan that produces FromVar and ToVar.
+	Child LogicalPlan
+}
+
+// NewShortestPath creates a ShortestPath IR node.
+func NewShortestPath(all, optional bool, fromVar, toVar, pathVar, relVar string, relTypes []string, dir Direction, minDepth, maxDepth int, child LogicalPlan) *ShortestPath {
+	rt := make([]string, len(relTypes))
+	copy(rt, relTypes)
+	return &ShortestPath{
+		All:       all,
+		Optional:  optional,
+		FromVar:   fromVar,
+		ToVar:     toVar,
+		PathVar:   pathVar,
+		RelVar:    relVar,
+		RelTypes:  rt,
+		Direction: dir,
+		MinDepth:  minDepth,
+		MaxDepth:  maxDepth,
+		Child:     child,
+	}
+}
+
+// Children implements LogicalPlan.
+func (s *ShortestPath) Children() []LogicalPlan { return []LogicalPlan{s.Child} }
+
+// Vars implements LogicalPlan. The path variable, and the relationship-list
+// variable when named, are introduced by this node.
+func (s *ShortestPath) Vars() []string {
+	if s.RelVar != "" {
+		return []string{s.PathVar, s.RelVar}
+	}
+	return []string{s.PathVar}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ProjectEndpoints projects the start and/or end nodes of a relationship
 // variable that is already in scope.
 type ProjectEndpoints struct {

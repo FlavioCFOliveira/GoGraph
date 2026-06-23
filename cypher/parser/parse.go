@@ -187,6 +187,13 @@ func Parse(query string) (ast.Query, error) {
 		return nil, err
 	}
 
+	// Strip shortestPath()/allShortestPaths() wrappers from named MATCH path
+	// bindings into the plain patterns they wrap, recording each as a marker to
+	// stamp back onto the AST after the build (rmp #1690). Runs before the other
+	// normalizers so the unwrapped inner pattern's variable-length bounds are
+	// normalized as usual. A query with no such wrapper is returned untouched.
+	query, spMarkers := rewriteShortestPath(query)
+
 	query = applyNormalizers(query)
 
 	// Lex.
@@ -231,9 +238,11 @@ func Parse(query string) (ast.Query, error) {
 	// built, so no post-pass is required here. See cypher/parser/rebalance.go
 	// for the rationale.
 	if q, ok := result.(ast.Query); ok {
+		applyShortestMarkers(q, spMarkers)
 		return q, nil
 	}
 	if sq, ok := result.(*ast.SingleQuery); ok {
+		applyShortestMarkers(sq, spMarkers)
 		return sq, nil
 	}
 

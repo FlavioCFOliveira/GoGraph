@@ -107,6 +107,16 @@ const (
 	// The limit [maxExprDepth] is generous for any legitimate Cypher expression.
 	KindExpressionTooDeep ErrorKind = "EXPRESSION_TOO_DEEP"
 
+	// KindInvalidShortestPath is reported when a shortestPath() /
+	// allShortestPaths() binding violates an openCypher structural rule: a lower
+	// hop bound other than 0 or 1, an inner pattern that is not exactly a single
+	// relationship between two node patterns, or a placement the parser does not
+	// rewrite into a named binding (an unnamed wrapper, or a wrapper in an
+	// expression / subquery context). openCypher 9 restricts shortestPath to a
+	// named binding over a single (variable-length) relationship whose minimal
+	// length is 0 or 1.
+	KindInvalidShortestPath ErrorKind = "INVALID_SHORTEST_PATH"
+
 	// KindTypeMismatch is reported for static type mismatches in clauses that
 	// require a specific operand type:
 	//   - SET/REMOVE of a label on a non-node receiver (`SET r:Foo` where r is
@@ -295,6 +305,16 @@ func invalidIntegerArgumentError(clause, gotKind string, pos ast.Position) *Scop
 	}
 }
 
+// invalidShortestPathError constructs a KindInvalidShortestPath ScopeError with
+// a specific human-readable reason.
+func invalidShortestPathError(reason string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindInvalidShortestPath,
+		Pos:     pos,
+		Message: reason,
+	}
+}
+
 // labelOnNonNodeError constructs a KindTypeMismatch ScopeError for a
 // SET/REMOVE label item whose target is not a node (e.g. a relationship).
 // Relationships have a single immutable type and carry no labels.
@@ -398,6 +418,11 @@ const (
 	// There is no matching openCypher TCK category; this is an implementation
 	// limit surfaced as SyntaxError to signal that the query is malformed.
 	SubTypeExpressionTooDeep = "ExpressionTooDeep"
+
+	// SubTypeInvalidShortestPath is the sub-type for a shortestPath() /
+	// allShortestPaths() binding that violates an openCypher structural rule
+	// (see [KindInvalidShortestPath]). Surfaced as SyntaxError.
+	SubTypeInvalidShortestPath = "InvalidShortestPath"
 )
 
 // SemanticError is the engine-facing wrapper around one or more
@@ -474,6 +499,7 @@ var kindMappings = []boltMapping{
 	{Kind: KindNoVariablesInScope, Category: CategorySyntaxError, SubType: SubTypeNoVariablesInScope},
 	{Kind: KindNoExpressionAlias, Category: CategorySyntaxError, SubType: SubTypeNoExpressionAlias},
 	{Kind: KindExpressionTooDeep, Category: CategorySyntaxError, SubType: SubTypeExpressionTooDeep},
+	{Kind: KindInvalidShortestPath, Category: CategorySyntaxError, SubType: SubTypeInvalidShortestPath},
 	{Kind: KindTypeMismatch, Category: CategoryTypeError, SubType: SubTypeInvalidArgumentType},
 }
 
