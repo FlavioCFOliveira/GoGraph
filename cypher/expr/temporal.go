@@ -122,9 +122,23 @@ func (v DateValue) Hash() uint64 {
 	return h ^ (h >> 32)
 }
 
-// String renders the date in ISO-8601 extended form: YYYY-MM-DD.
+// String renders the date in ISO-8601 form. Four-digit years use the
+// plain calendar form YYYY-MM-DD; years outside that range use the
+// ISO-8601 expanded form with an explicit sign — +YYYYY for years beyond
+// 9999 and -YYYY for negative years. The sign matters: a five-digit year
+// emitted without the leading '+' (e.g. "10000-01-01") matches none of
+// [ParseDate]'s forms and would round-trip as a plain string rather than
+// a Date, so String stays the exact inverse of ParseDate across the
+// whole year domain (rmp #1658).
 func (v DateValue) String() string {
-	return fmt.Sprintf("%04d-%02d-%02d", v.Year, v.Month, v.Day)
+	switch {
+	case v.Year > 9999:
+		return fmt.Sprintf("+%d-%02d-%02d", v.Year, v.Month, v.Day)
+	case v.Year < 0:
+		return fmt.Sprintf("-%04d-%02d-%02d", -v.Year, v.Month, v.Day)
+	default:
+		return fmt.Sprintf("%04d-%02d-%02d", v.Year, v.Month, v.Day)
+	}
 }
 
 // Equal implements [Value] with 3VL semantics.
