@@ -75,6 +75,36 @@ MATCH (a)-[:KNOWS*1..3]->(b)
 RETURN a, b
 ```
 
+A relationship-type disjunction matches an edge of any listed type, in any
+traversal direction:
+
+```cypher
+MATCH (a)-[:KNOWS|FOLLOWS*1..3]-(b)
+RETURN b
+```
+
+**Shortest paths.** `shortestPath(...)` returns one minimum-hop path (an
+arbitrary one when several are tied); `allShortestPaths(...)` returns every
+minimum-hop path. Both wrap a single relationship pattern between two node
+patterns and bind the result to a path variable. The endpoints are normally
+already bound by a preceding clause:
+
+```cypher
+MATCH (a:Person {id: 1}), (b:Person {id: 2})
+MATCH p = shortestPath((a)-[:KNOWS*]-(b))
+RETURN length(p), [r IN relationships(p) | type(r)]
+
+MATCH (a:Person {id: 1}), (b:Person {id: 2})
+MATCH p = allShortestPaths((a)-[*]-(b))
+RETURN p
+```
+
+The hop count is the only metric (unweighted). The lower hop bound must be
+`0` or `1`. When no path exists, `MATCH` produces no row and `OPTIONAL MATCH`
+produces one row with the path variable set to `null`. Over a multigraph,
+each relationship in the returned path reports its own type and properties
+(parallel edges of different types are not collapsed).
+
 ### WHERE
 
 Filters rows produced by the preceding clause.
@@ -747,4 +777,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-06-17 against commit `088bce9`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-23 against commit `f4c4ab3`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
