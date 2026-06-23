@@ -260,6 +260,32 @@ soak lane (env-precondition skip when git/tag/toolchain unavailable); a fast
 HEAD-as-prior smoke runs on short. -race + goleak clean, lint 0. No new label
 or edge type. **The 5-phase DST simulator (P1-P5 + P5b) is COMPLETE.**
 
+Incrementally synced at commit `620a4b2` (2026-06-23, task #1686 — per-instance
+by-handle edge properties maintained durably on a relationship SET / REMOVE /
+SET +=): +1 `Commit` (`620a4b2`). Bounded sync — Commit→Feature/Package
+provenance only (task #1686 is not modelled as a `Task` node; the Sprint→Task
+layer remains a pre-existing gap not back-filled here). Edges: `Commit
+-[FIXES]->` Features `ACID Transactions` (9736), `Cypher Engine` (12659),
+`WAL & Recovery` (11553), `Stable Element Identity` (13477); `Commit -[TOUCHES]->`
+Packages `store/txn` (70), `store/recovery` (27), `graph/lpg` (448), `cypher`
+(73), `cypher/exec` (39), `cmd/crashinject-helper` (227). Those four Features and
+six Packages were re-stamped to gitDate 2026-06-23. The change makes `SET r.x`,
+`SET r += {…}`, `SET r = {…}`, `REMOVE r.x` and `SET r.x = null` maintain the
+per-instance by-handle edge-property store durably (dual-written with the per-pair
+store, which stays authoritative for reads — read routing is deferred to #1684,
+which #1686 unblocks). New WAL op `OpDelEdgePropertyByHandle` (appended at the end
+of the `OpKind` enum) + recovery applier `applyDelEdgePropertyByHandle`; new
+`lpg.Graph.DelEdgePropertyByHandle` (+ NodeID dual); the bound parallel instance's
+stable handle is resolved from its forward-CSR edge position via the new
+`GraphMutator.EdgeHandleAtPosition` (reusing the read-path `edgeHandleAtFwdPos`,
+plumbed through `RelCols.EdgeCol`); the by-handle write, its WAL frame, the
+secondary-index enqueue and a new undo inverse all land in the one
+`ApplyAtomically` window and the one transaction as the per-pair write.
+storage-engine-auditor certified ACID + recovery; cypher-expert certified
+TCK-neutrality. TCK held at 3897; -race / golangci / staticcheck / govulncheck
+clean. Local commit, not pushed. No new label or edge type (`FIXES`/`TOUCHES`
+already in use in the live graph).
+
 Incrementally synced at commits `43383a9`..`7a342e0` (2026-06-23, sprints 226
 S-MT2 / 227 S-BL1 / 228 S-BL2, all CLOSED): +10 `Commit`s, +3 `Sprint`s
 (226/227/228). Bounded sync — Commit→Feature provenance only (the Sprint→Task
