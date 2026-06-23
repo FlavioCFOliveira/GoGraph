@@ -67,6 +67,13 @@ type csrAdjacency interface {
 	VerticesSlice() []uint64
 	// EdgesSlice returns the flat neighbour array.
 	EdgesSlice() []graph.NodeID
+	// HandlesSlice returns the per-slot stable edge handles parallel to
+	// EdgesSlice, or nil when the snapshot carries no handles (a
+	// non-multigraph never built via AddEdgeH). The forward and reverse
+	// CSRs of the same graph carry the SAME handle for a given logical
+	// edge, which is what lets the reverse traversal recover per-instance
+	// edge identity across parallel edges (rmp #1634).
+	HandlesSlice() []uint64
 }
 
 // Expand is a Volcano pipeline operator that, for each input row, expands
@@ -90,12 +97,14 @@ type Expand struct {
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
 	// current expansion state
-	srcID    int64          // current source NodeID
-	fwdVerts []uint64       // snapshot of fwd.VerticesSlice()
-	fwdEdges []graph.NodeID // snapshot of fwd.EdgesSlice()
-	revVerts []uint64       // snapshot of rev.VerticesSlice() (nil for DirOut)
-	revEdges []graph.NodeID // snapshot of rev.EdgesSlice() (nil for DirOut)
-	inputRow Row            // current input row (borrowed reference)
+	srcID      int64          // current source NodeID
+	fwdVerts   []uint64       // snapshot of fwd.VerticesSlice()
+	fwdEdges   []graph.NodeID // snapshot of fwd.EdgesSlice()
+	fwdHandles []uint64       // snapshot of fwd.HandlesSlice() (nil unless multigraph)
+	revVerts   []uint64       // snapshot of rev.VerticesSlice() (nil for DirOut)
+	revEdges   []graph.NodeID // snapshot of rev.EdgesSlice() (nil for DirOut)
+	revHandles []uint64       // snapshot of rev.HandlesSlice() (nil for DirOut / non-multigraph)
+	inputRow   Row            // current input row (borrowed reference)
 	// expansion cursors
 	fwdStart, fwdEnd uint64
 	revStart, revEnd uint64
@@ -168,9 +177,11 @@ func (op *Expand) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
+	op.fwdHandles = op.fwd.HandlesSlice()
 	if op.dir != DirOut && op.rev != nil {
 		op.revVerts = op.rev.VerticesSlice()
 		op.revEdges = op.rev.EdgesSlice()
+		op.revHandles = op.rev.HandlesSlice()
 	}
 	op.srcID = -1
 	op.fwdDone = true
@@ -321,7 +332,19 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	// same edge. This is required for openCypher 9 §3.2.2: an undirected
 	// `(:Label2)--()` step that follows a previous forward hop must
 	// reject the same edge being matched in the reverse direction.
-	fwdPos, hasFwd := op.lookupFwdEdgePos(uint64(dst), uint64(op.srcID))
+	var fwdPos uint64
+	var hasFwd bool
+	if op.revHandles != nil && op.fwdHandles != nil {
+		// Multigraph: recover the SPECIFIC forward edge instance by
+		// matching the stable handle that travelled with this reverse
+		// slot (csr.BuildReverse keeps one handle per logical edge across
+		// both directions). Without this, parallel edges (dst -> src)
+		// would all collapse onto the first forward position and report a
+		// single merged relationship type on the reverse hop (rmp #1634).
+		fwdPos, hasFwd = op.lookupFwdEdgePosByHandle(uint64(dst), uint64(op.srcID), op.revHandles[pos])
+	} else {
+		fwdPos, hasFwd = op.lookupFwdEdgePos(uint64(dst), uint64(op.srcID))
+	}
 	var edgeID int64
 	if hasFwd {
 		edgeID = int64(fwdPos)
@@ -348,6 +371,27 @@ func (op *Expand) lookupFwdEdgePos(src, dst uint64) (uint64, bool) {
 	end := op.fwdVerts[src+1]
 	for pos := start; pos < end; pos++ {
 		if uint64(op.fwdEdges[pos]) == dst {
+			return pos, true
+		}
+	}
+	return 0, false
+}
+
+// lookupFwdEdgePosByHandle returns the forward-CSR position of the edge
+// (src -> dst) whose stable handle equals handle, or (0, false) when no
+// such edge exists. Unlike [lookupFwdEdgePos] it disambiguates parallel
+// edges — multiple src -> dst slots — by their per-instance handle, so a
+// reverse traversal recovers the exact forward edge instance it came
+// from rather than always the first (rmp #1634). The caller guarantees
+// op.fwdHandles is non-nil (a multigraph snapshot).
+func (op *Expand) lookupFwdEdgePosByHandle(src, dst, handle uint64) (uint64, bool) {
+	if src+1 >= uint64(len(op.fwdVerts)) {
+		return 0, false
+	}
+	start := op.fwdVerts[src]
+	end := op.fwdVerts[src+1]
+	for pos := start; pos < end; pos++ {
+		if uint64(op.fwdEdges[pos]) == dst && op.fwdHandles[pos] == handle {
 			return pos, true
 		}
 	}

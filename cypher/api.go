@@ -8105,24 +8105,26 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 			// by it. This is delete-stable — unlike the positional
 			// instance idx (edgeInstanceIdxFor), it does not mis-map
 			// after a parallel sibling is deleted and the neighbour
-			// slice is compacted. Only applies when the storage
-			// direction was NOT inverted above (the handle column is
-			// keyed on the forward (srcKey, dstKey) pair). Falls back to
-			// the positional idx when no handle column is present or the
-			// slot's handle is 0 (a MERGE-created edge).
+			// slice is compacted. Both per-instance lookups are keyed on
+			// the STORAGE pair (stKey -> enKey), not the row's
+			// (srcKey, dstKey): for the undirected reverse hop the storage
+			// direction is inverted (storage holds enKey <- ... actually
+			// stKey -> enKey), and edgeIDVal is the forward-CSR position in
+			// stKey's adjacency that Expand resolved per parallel instance
+			// (rmp #1634). Falls back to the positional idx when no handle
+			// column is present or the slot's handle is 0 (a MERGE-created
+			// edge).
 			handled := false
-			if storageStart == srcID && storageEnd == dstID {
-				if h := edgeHandleAtFwdPos(bopts, g, srcKey, dstKey, uint64(edgeIDVal)); h != 0 {
-					if perHandle := g.EdgeLabelsByHandle(srcKey, dstKey, h); len(perHandle) > 0 {
-						ets = perHandle
-						handled = true
-					}
+			if h := edgeHandleAtFwdPos(bopts, g, stKey, enKey, uint64(edgeIDVal)); h != 0 {
+				if perHandle := g.EdgeLabelsByHandle(stKey, enKey, h); len(perHandle) > 0 {
+					ets = perHandle
+					handled = true
 				}
 			}
 			if !handled {
-				instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(bopts, g, srcKey, dstKey, uint64(edgeIDVal))
+				instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(bopts, g, stKey, enKey, uint64(edgeIDVal))
 				if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
-					if perInstance := g.EdgeLabelsAt(srcKey, dstKey, instanceIdx); len(perInstance) > 0 {
+					if perInstance := g.EdgeLabelsAt(stKey, enKey, instanceIdx); len(perInstance) > 0 {
 						ets = perInstance
 					}
 				}

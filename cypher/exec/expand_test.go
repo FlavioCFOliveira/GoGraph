@@ -21,6 +21,7 @@ import (
 type staticCSR struct {
 	vertices []uint64
 	edges    []graph.NodeID
+	handles  []uint64 // optional per-slot stable handles (nil = non-multigraph)
 }
 
 func buildCSR(maxNode int, edgeList [][2]int) *staticCSR {
@@ -46,6 +47,7 @@ func buildCSR(maxNode int, edgeList [][2]int) *staticCSR {
 
 func (c *staticCSR) VerticesSlice() []uint64    { return c.vertices }
 func (c *staticCSR) EdgesSlice() []graph.NodeID { return c.edges }
+func (c *staticCSR) HandlesSlice() []uint64     { return c.handles }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Expand DirOut — basic single-hop
