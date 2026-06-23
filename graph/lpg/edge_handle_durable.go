@@ -320,3 +320,44 @@ func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 	bag.set(pid, value)
 	byHandle[handle] = bag
 }
+
+// DelEdgePropertyByHandleID removes exactly key from the property bag of the
+// edge identified by `handle` on the directed (srcID, dstID) NodeID pair. It
+// is the NodeID-keyed dual of [Graph.DelEdgePropertyByHandle], provided for
+// parity with the other durable NodeID-keyed setters; the WAL recovery path
+// itself uses the natural-key [Graph.DelEdgePropertyByHandle] because its
+// endpoints are codec-decoded natural keys at replay time. No-op when handle
+// is 0, when the key was never interned, when no handle store exists for the
+// pair, or when the handle never carried key. Empties are pruned exactly as
+// [Graph.DelEdgePropertyByHandle] prunes them.
+//
+// DelEdgePropertyByHandleID is safe for concurrent use.
+func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string) {
+	if handle == 0 {
+		return
+	}
+	pid, ok := g.pkeys.Lookup(key)
+	if !ok {
+		return
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeHandlePropShardFor(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	byHandle, ok := sh.m[k]
+	if !ok {
+		return
+	}
+	bag, ok := byHandle[handle]
+	if !ok {
+		return
+	}
+	if bag.del(pid) {
+		delete(byHandle, handle)
+		if len(byHandle) == 0 {
+			delete(sh.m, k)
+		}
+		return
+	}
+	byHandle[handle] = bag
+}

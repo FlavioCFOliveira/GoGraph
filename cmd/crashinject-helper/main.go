@@ -125,6 +125,9 @@ func run() int {
 		runRecoveryPromoteCrash(dir)
 	case "constraint.drop.post-wal-sync":
 		runConstraintDropCrash(dir)
+	case "edgehandle.setprop.post-wal-sync",
+		"edgehandle.delprop.post-wal-sync":
+		runEdgeHandlePropCrash(dir, scenario)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
 		return 1
@@ -541,4 +544,100 @@ func runConstraintDropCrash(dir string) {
 		log.Fatalf("wal.Close: %v", cerr)
 	}
 	fmt.Println("runConstraintDropCrash: completed without crash (GOGRAPH_CRASH_AT != constraint.drop.post-wal-sync)")
+}
+
+// Edge-handle property crash scenario constants. The parent test reconstructs
+// these to assert the recovered per-instance (by-handle) property state.
+const (
+	edgeHandleSrcKey = "src"
+	edgeHandleDstKey = "dst"
+	edgeHandleH1     = uint64(1) // first parallel edge's stable handle
+	edgeHandleH2     = uint64(2) // sibling parallel edge's stable handle
+)
+
+// runEdgeHandlePropCrash exercises the crash-durability of the per-instance
+// (by-handle) edge-property store maintained on a relationship SET/REMOVE
+// (#1686). It commits, through the typed Store/Tx API, two parallel edges
+// between the same ordered (src, dst) pair — each carrying its own stable
+// handle and a distinct CREATE-time `w` property — then:
+//
+//   - edgehandle.setprop.post-wal-sync: commits a durable
+//     OpSetEdgePropertyByHandle that sets tag='set' on the FIRST handle only,
+//     fsyncs, and crashes. Recovery must show tag on handle 1 only, the sibling
+//     untouched, exactly two parallel edges (no doubling), and the handle
+//     high-water re-seeded so no post-recovery AddEdgeH re-mints a live handle.
+//
+//   - edgehandle.delprop.post-wal-sync: seeds tag='seed' on the FIRST handle at
+//     CREATE, then commits a durable OpDelEdgePropertyByHandle removing tag from
+//     that handle, fsyncs, and crashes. Recovery must show tag absent on handle
+//     1 and the sibling's own state intact.
+//
+// The artefacts (the WAL carrying the durable frames) are left in
+// GOGRAPH_CRASH_DIR for the parent to recover from.
+func runEdgeHandlePropCrash(dir, scenario string) {
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	delScenario := scenario == "edgehandle.delprop.post-wal-sync"
+
+	// Tx 1 — build the two parallel edges, each with its own handle and a
+	// distinct per-instance `w`. For the DEL scenario, also seed tag on h1 so
+	// the later durable DEL has something to remove.
+	tx := store.Begin()
+	if e := tx.AddEdgeWithHandle(edgeHandleSrcKey, edgeHandleDstKey, 1, edgeHandleH1); e != nil {
+		log.Fatalf("AddEdgeWithHandle h1: %v", e)
+	}
+	if e := tx.SetEdgePropertyByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH1, "w", lpg.Int64Value(1)); e != nil {
+		log.Fatalf("SetEdgePropertyByHandle h1 w: %v", e)
+	}
+	if e := tx.AddEdgeWithHandle(edgeHandleSrcKey, edgeHandleDstKey, 1, edgeHandleH2); e != nil {
+		log.Fatalf("AddEdgeWithHandle h2: %v", e)
+	}
+	if e := tx.SetEdgePropertyByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH2, "w", lpg.Int64Value(2)); e != nil {
+		log.Fatalf("SetEdgePropertyByHandle h2 w: %v", e)
+	}
+	if delScenario {
+		if e := tx.SetEdgePropertyByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH1, "tag", lpg.StringValue("seed")); e != nil {
+			log.Fatalf("SetEdgePropertyByHandle h1 tag(seed): %v", e)
+		}
+	}
+	if e := tx.Commit(); e != nil {
+		log.Fatalf("Commit(build): %v", e)
+	}
+
+	// Tx 2 — the durable per-instance mutation under test on h1 only.
+	tx2 := store.Begin()
+	if delScenario {
+		if e := tx2.DelEdgePropertyByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH1, "tag"); e != nil {
+			log.Fatalf("DelEdgePropertyByHandle h1 tag: %v", e)
+		}
+	} else {
+		if e := tx2.SetEdgePropertyByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH1, "tag", lpg.StringValue("set")); e != nil {
+			log.Fatalf("SetEdgePropertyByHandle h1 tag(set): %v", e)
+		}
+	}
+	if e := tx2.Commit(); e != nil {
+		log.Fatalf("Commit(mutate): %v", e)
+	}
+	if e := w.Sync(); e != nil {
+		log.Fatalf("Sync: %v", e)
+	}
+
+	// Crash here — the mutation frame is durable. SIGKILL delivered immediately
+	// under the crash harness.
+	crashinject.Breakpoint(scenario)
+
+	// Reached only on the non-crash self-test path.
+	if cerr := w.Close(); cerr != nil {
+		log.Fatalf("wal.Close: %v", cerr)
+	}
+	fmt.Printf("runEdgeHandlePropCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
 }

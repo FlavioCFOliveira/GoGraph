@@ -42,11 +42,17 @@ import (
 // the (src, dst) endpoint keys when the bound entity is a relationship rather
 // than a node.
 //
-// The edgeCol (schema[entityVar]) holds the edge-position counter; SrcCol and
-// DstCol hold the corresponding endpoint NodeIDs as IntegerValue.
+// SrcCol and DstCol hold the endpoint NodeIDs as IntegerValue. EdgeCol holds
+// the forward-CSR edge-position counter (= schema[entityVar]); it is used to
+// resolve the bound parallel instance's stable handle via
+// [GraphMutator.EdgeHandleAtPosition] so a relationship SET/REMOVE maintains
+// the per-instance by-handle property store (#1686). EdgeCol may be 0 only when
+// it genuinely is column 0; callers distinguish "no handle" by the resolver
+// returning 0, not by the column index.
 type RelCols struct {
-	SrcCol int
-	DstCol int
+	SrcCol  int
+	DstCol  int
+	EdgeCol int
 }
 
 // errSetNullTarget is the sentinel resolveEntity returns when the schema
@@ -193,7 +199,7 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 
 	if ent.isRel {
 		// Relationship target: dispatch to edge property methods.
-		if err := op.applyToRelationship(ent.relSrcKey, ent.relDstKey, childRow); err != nil {
+		if err := op.applyToRelationship(ent, childRow); err != nil {
 			return false, err
 		}
 	} else {
@@ -216,6 +222,14 @@ type entityBinding struct {
 	nodeKey   string // valid when !isRel
 	relSrcKey string // valid when isRel
 	relDstKey string // valid when isRel
+	// relHandle is the stable per-edge handle of the bound parallel
+	// relationship instance, resolved from its forward-CSR edge position
+	// (valid when isRel). It is 0 when no handle is resolvable — the edge
+	// carries no stable handle (simple-graph storage), the binding came from a
+	// post-projection RelationshipValue that carries no edge position, or the
+	// position did not resolve — in which case the per-instance by-handle store
+	// is left untouched and only the per-pair store is written (#1686).
+	relHandle uint64
 }
 
 // resolveEntity extracts the node or relationship identity from the column at
@@ -248,7 +262,7 @@ func (op *SetProperty) resolveEntity(varName string, row Row) (entityBinding, er
 		// Raw Expand output: either a NodeID (node variable) or an edge-position
 		// counter (relationship variable). Distinguish by relCols.
 		if op.relCols != nil {
-			return resolveRelBinding(op.relCols.SrcCol, op.relCols.DstCol, row, op.mutator)
+			return resolveRelBinding(op.relCols, row, op.mutator)
 		}
 		nodeKey, resolved := op.mutator.ResolveNodeLabel(graph.NodeID(v))
 		if !resolved {
@@ -274,9 +288,15 @@ func (op *SetProperty) resolveEntity(varName string, row Row) (entityBinding, er
 	}
 }
 
-// resolveRelBinding resolves a relationship entity from the (srcCol, dstCol)
-// pair of row columns that hold endpoint NodeIDs as IntegerValue.
-func resolveRelBinding(srcCol, dstCol int, row Row, mut GraphMutator) (entityBinding, error) {
+// resolveRelBinding resolves a relationship entity from the (SrcCol, DstCol)
+// pair of row columns that hold endpoint NodeIDs as IntegerValue. It also
+// resolves the bound parallel instance's stable handle from the forward-CSR
+// edge position at rc.EdgeCol (when that column holds an IntegerValue), so a
+// relationship SET/REMOVE can maintain the per-instance by-handle property
+// store (#1686). A handle of 0 (no stable identity / unresolved) leaves the
+// by-handle store untouched downstream.
+func resolveRelBinding(rc *RelCols, row Row, mut GraphMutator) (entityBinding, error) {
+	srcCol, dstCol := rc.SrcCol, rc.DstCol
 	if srcCol >= len(row) || dstCol >= len(row) {
 		return entityBinding{}, fmt.Errorf("relationship endpoint columns (%d, %d) out of range (row len %d)", srcCol, dstCol, len(row))
 	}
@@ -290,7 +310,30 @@ func resolveRelBinding(srcCol, dstCol int, row Row, mut GraphMutator) (entityBin
 	if !srcResolved || !dstResolved {
 		return entityBinding{}, fmt.Errorf("cannot resolve relationship endpoint NodeIDs (%d, %d)", graph.NodeID(srcIV), graph.NodeID(dstIV))
 	}
-	return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+	return entityBinding{
+		isRel:     true,
+		relSrcKey: srcKey,
+		relDstKey: dstKey,
+		relHandle: resolveRelHandle(rc, row, srcKey, dstKey, mut),
+	}, nil
+}
+
+// resolveRelHandle resolves the stable handle of the bound relationship
+// instance from the forward-CSR edge position at rc.EdgeCol. It returns 0 (the
+// no-handle sentinel) when the edge-position column is out of range or does not
+// hold an IntegerValue (e.g. a post-projection RelationshipValue, which carries
+// endpoints but no edge position), or when the position does not resolve to a
+// stable handle. A 0 result means "mutate the per-pair store only" — never the
+// wrong parallel instance.
+func resolveRelHandle(rc *RelCols, row Row, srcKey, dstKey string, mut GraphMutator) uint64 {
+	if rc.EdgeCol < 0 || rc.EdgeCol >= len(row) {
+		return 0
+	}
+	edgePos, ok := row[rc.EdgeCol].(expr.IntegerValue)
+	if !ok || edgePos < 0 {
+		return 0
+	}
+	return mut.EdgeHandleAtPosition(srcKey, dstKey, uint64(edgePos))
 }
 
 // applyToNode applies the configured property mutation to a node identified by
@@ -446,10 +489,14 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 	return nil
 }
 
-// applyToRelationship applies the configured property mutation to a
-// relationship identified by its endpoint keys. Constraint enforcement is not
+// applyToRelationship applies the configured property mutation to the bound
+// relationship instance. Every per-pair write is mirrored to the per-instance
+// by-handle store (dual-write, #1686) via setRelProp / delRelProp so a SET/
+// REMOVE on one parallel edge maintains that edge's own properties without
+// corrupting siblings; the by-handle write is a no-op when the instance has no
+// resolvable stable handle (ent.relHandle == 0). Constraint enforcement is not
 // performed for relationships (the constraint registry is node-label-scoped).
-func (op *SetProperty) applyToRelationship(srcKey, dstKey string, row Row) error {
+func (op *SetProperty) applyToRelationship(ent entityBinding, row Row) error {
 	if op.propertyKey != "" {
 		if op.valueEvalFn != nil {
 			pv, isNull, hasValue, evalErr := op.valueEvalFn(row)
@@ -457,28 +504,28 @@ func (op *SetProperty) applyToRelationship(srcKey, dstKey string, row Row) error
 				return evalErr
 			}
 			if isNull {
-				op.mutator.DelEdgeProperty(srcKey, dstKey, op.propertyKey)
+				op.delRelProp(ent, op.propertyKey)
 				return nil
 			}
 			if !hasValue {
 				return nil
 			}
-			return op.mutator.SetEdgeProperty(srcKey, dstKey, op.propertyKey, pv)
+			return op.setRelProp(ent, op.propertyKey, pv)
 		}
 		pv, parseErr := parsePropValueWithParams(op.valueExpr, op.params)
 		if parseErr != nil {
 			if errors.Is(parseErr, ErrPropertyValueIsNull) {
 				// openCypher: SET r.k = null removes the property k from r.
-				op.mutator.DelEdgeProperty(srcKey, dstKey, op.propertyKey)
+				op.delRelProp(ent, op.propertyKey)
 				return nil
 			}
 			return nil // non-literal expression: no-op for current IR
 		}
-		return op.mutator.SetEdgeProperty(srcKey, dstKey, op.propertyKey, pv)
+		return op.setRelProp(ent, op.propertyKey, pv)
 	}
 	if op.merge {
 		for _, p := range op.parsedMap {
-			if serr := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); serr != nil {
+			if serr := op.setRelProp(ent, p.key, p.value); serr != nil {
 				return serr
 			}
 		}
@@ -488,11 +535,38 @@ func (op *SetProperty) applyToRelationship(srcKey, dstKey string, row Row) error
 	// snapshot available without extending GraphMutator; consistent with the
 	// node implementation that reads NodeProperties first).
 	for _, p := range op.parsedMap {
-		if serr := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); serr != nil {
+		if serr := op.setRelProp(ent, p.key, p.value); serr != nil {
 			return serr
 		}
 	}
 	return nil
+}
+
+// setRelProp writes key=value to the bound relationship's per-pair store and
+// mirrors it to the per-instance by-handle store. The by-handle write is a
+// no-op when ent.relHandle is 0. The per-pair write is authoritative for reads
+// (until #1684 routes reads by-handle); both land in the same transaction and
+// visibility barrier.
+func (op *SetProperty) setRelProp(ent entityBinding, key string, value lpg.PropertyValue) error {
+	if err := op.mutator.SetEdgeProperty(ent.relSrcKey, ent.relDstKey, key, value); err != nil {
+		return err
+	}
+	if ent.relHandle != 0 {
+		if err := op.mutator.SetEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// delRelProp removes key from the bound relationship's per-pair store and
+// mirrors the removal to the per-instance by-handle store (no-op when
+// ent.relHandle is 0).
+func (op *SetProperty) delRelProp(ent entityBinding, key string) {
+	op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, key)
+	if ent.relHandle != 0 {
+		op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, key)
+	}
 }
 
 // Close closes the child operator.

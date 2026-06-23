@@ -374,12 +374,13 @@ func (op *SetAllProperties) applyMap(target entityBinding) {
 }
 
 // clearTarget removes every property from the target entity. Used to
-// implement `SET n = …` (replace) semantics.
+// implement `SET n = …` (replace) semantics. For relationships the per-pair
+// removal is mirrored to the per-instance by-handle store (#1686).
 func (op *SetAllProperties) clearTarget(target entityBinding) {
 	if target.isRel {
 		props := op.mutator.EdgeProperties(target.relSrcKey, target.relDstKey)
 		for k := range props {
-			op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, k)
+			op.deleteOne(target, k)
 		}
 		return
 	}
@@ -391,10 +392,16 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 
 // writeOne writes a single (key, value) pair to the target, dispatching to
 // the node or relationship mutator method. Constraint enforcement is
-// applied for node writes when a registry is attached.
+// applied for node writes when a registry is attached. For relationships the
+// per-pair write is mirrored to the per-instance by-handle store (#1686).
 func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg.PropertyValue) {
 	if target.isRel {
-		_ = op.mutator.SetEdgeProperty(target.relSrcKey, target.relDstKey, key, value)
+		if serr := op.mutator.SetEdgeProperty(target.relSrcKey, target.relDstKey, key, value); serr != nil {
+			return
+		}
+		if target.relHandle != 0 {
+			_ = op.mutator.SetEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key, value)
+		}
 		return
 	}
 	if op.reg != nil {
@@ -413,10 +420,14 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 }
 
 // deleteOne removes a single property from the target, dispatching to the
-// node or relationship mutator method.
+// node or relationship mutator method. For relationships the per-pair removal
+// is mirrored to the per-instance by-handle store (#1686).
 func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 	if target.isRel {
 		op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key)
+		if target.relHandle != 0 {
+			op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key)
+		}
 		return
 	}
 	op.mutator.DelNodeProperty(target.nodeKey, key)
@@ -451,7 +462,7 @@ func resolveEntityBinding(
 	switch v := row[colIdx].(type) {
 	case expr.IntegerValue:
 		if relCols != nil {
-			return resolveRelBinding(relCols.SrcCol, relCols.DstCol, row, mut)
+			return resolveRelBinding(relCols, row, mut)
 		}
 		nodeKey, resolved := mut.ResolveNodeLabel(graph.NodeID(v))
 		if !resolved {

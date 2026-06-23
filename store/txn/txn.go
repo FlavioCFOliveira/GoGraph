@@ -253,6 +253,22 @@ const (
 	// index is removed. It is replayed on recovery to suppress an earlier
 	// OpCreateIndex for the same name. The op mutates no graph state.
 	OpDropIndex
+
+	// OpDelEdgePropertyByHandle buffers a DelEdgePropertyByHandle(src, dst,
+	// handle, key) mutation, removing exactly one property key from one parallel
+	// edge's per-instance property bag while leaving sibling handles untouched.
+	// It is the single-key removal analogue of [OpSetEdgePropertyByHandle] and
+	// the handle-keyed analogue of [OpDelEdgeProperty]: the body is the
+	// edge-property body (NO value — the value-append guard in
+	// [encodeOpEdgeProperty] omits it for any kind other than the two Set kinds)
+	// followed by the 8-byte little-endian handle, byte-symmetric to how
+	// [OpDelEdgeProperty] relates to [OpSetEdgeProperty]. It is appended after the
+	// schema-DDL kinds so every pre-existing OpKind value keeps its stable wire
+	// identity; a WAL written by an older binary never carries it, and a reader
+	// that predates it surfaces it as an unknown kind. Emitted by the Cypher
+	// write path (walMutatorAdapter) for REMOVE r.x / SET r.x = null on a bound
+	// parallel relationship, so the per-instance removal survives recovery.
+	OpDelEdgePropertyByHandle
 )
 
 // ConstraintKind is the wire tag distinguishing UNIQUE from NOT NULL in an
@@ -953,6 +969,20 @@ func (t *Tx[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, propKey st
 	return nil
 }
 
+// DelEdgePropertyByHandle buffers an [OpDelEdgePropertyByHandle] operation,
+// removing exactly propKey from one parallel edge's per-instance property bag
+// keyed to its stable `handle` on the (src, dst) pair, leaving sibling handles
+// untouched. The single-key removal analogue of
+// [Tx.SetEdgePropertyByHandle]; emitted for REMOVE r.x / SET r.x = null on a
+// bound parallel relationship.
+func (t *Tx[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, propKey string) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpDelEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey})
+	return nil
+}
+
 // RemoveEdgeInstanceByHandle buffers an [OpRemoveEdgeInstanceByHandle]
 // operation, dropping the per-handle label and property metadata for one
 // logical edge on DELETE while leaving sibling handles untouched.
@@ -1500,8 +1530,11 @@ func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec
 			return nil, err
 		}
 		return binary.LittleEndian.AppendUint64(buf, op.Handle), nil
-	case OpSetEdgePropertyByHandle:
-		// Edge-property body followed by the 8-byte stable handle.
+	case OpSetEdgePropertyByHandle, OpDelEdgePropertyByHandle:
+		// Edge-property body followed by the 8-byte stable handle. The value is
+		// appended only for the Set kind (the guard inside encodeOpEdgeProperty
+		// omits it for OpDelEdgePropertyByHandle), so the Del frame is
+		// byte-symmetric to OpDelEdgeProperty plus the trailing handle.
 		var err error
 		if buf, err = encodeOpEdgeProperty(buf, op, codec); err != nil {
 			return nil, err
@@ -1996,6 +2029,8 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		g.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
 	case OpSetEdgePropertyByHandle:
 		return g.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
+	case OpDelEdgePropertyByHandle:
+		g.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
 	case OpRemoveEdgeInstanceByHandle:
 		g.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
 	case OpSetNodeLabel:

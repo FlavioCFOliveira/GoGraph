@@ -305,6 +305,65 @@ func (g *Graph[N, W]) FirstEdgeHandle(src, dst N) (uint64, bool) {
 	return 0, false
 }
 
+// DelEdgePropertyByHandle removes exactly key from the property bag of the
+// edge identified by handle on the (src, dst) pair, leaving every other
+// property of that handle — and every sibling handle on the same pair —
+// untouched. No-op when handle is 0 (the no-handle sentinel), when either
+// endpoint is unknown to the mapper, when no handle store exists for the
+// pair, or when the handle never carried key. When the removal empties the
+// handle's bag the inner byHandle[handle] entry is pruned, and when that
+// leaves the pair with no handles the outer sh.m[k] entry is pruned too,
+// mirroring the pruning [Graph.RemoveEdgeInstanceByHandle] performs.
+//
+// It is the single-key analogue of [Graph.RemoveEdgeInstanceByHandle] (which
+// drops ALL of a handle's labels and properties): a Cypher REMOVE r.x or
+// SET r.x = null on one parallel edge must delete only x from that one
+// instance, not the whole instance. The per-pair coalesced store is mutated
+// separately by the caller (dual-write); this method only touches the
+// handle-keyed per-instance store.
+//
+// DelEdgePropertyByHandle is safe for concurrent use.
+func (g *Graph[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key string) {
+	if handle == 0 {
+		return
+	}
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return
+	}
+	pid, ok := g.pkeys.Lookup(key)
+	if !ok {
+		// The key was never interned, so no handle can carry it.
+		return
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeHandlePropShardFor(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	byHandle, ok := sh.m[k]
+	if !ok {
+		return
+	}
+	bag, ok := byHandle[handle]
+	if !ok {
+		return
+	}
+	// propBag is stored by value: mutate a local copy and either write it back
+	// or drop the entry when the removal emptied it.
+	if bag.del(pid) {
+		delete(byHandle, handle)
+		if len(byHandle) == 0 {
+			delete(sh.m, k)
+		}
+		return
+	}
+	byHandle[handle] = bag
+}
+
 // RemoveEdgeInstanceByHandle discards every per-handle label and property
 // for (src, dst) at handle so subsequent reads (EdgeLabelsByHandle /
 // EdgePropertiesByHandle) return empty. The handle-keyed analogue of

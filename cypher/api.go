@@ -3545,6 +3545,17 @@ func buildPlanWithMutatorFull(
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
+	// Give the write adapter the SAME bopts (and its cached forward-CSR
+	// snapshot) the read-side builders use, so a relationship SET/REMOVE
+	// resolves the bound parallel instance's stable handle via the exact
+	// read-path mechanism ([edgeHandleAtFwdPos]) rather than a divergent one
+	// (#1686). Only the concrete write adapters carry a bopts field.
+	switch m := mutator.(type) {
+	case *walMutatorAdapter:
+		m.bopts = bopts
+	case *lpgMutatorAdapter:
+		m.bopts = bopts
+	}
 
 	// When the IR root is a ProduceResults, use its declared columns; otherwise
 	// treat the plan as a write-only query with no output columns. A CREATE
@@ -3713,7 +3724,7 @@ func buildOperatorWrite(
 		}
 		if bopts != nil {
 			if info, isRel := bopts.edgeVarMeta[p.EntityVar]; isRel {
-				sp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+				sp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol})
 			}
 		}
 		// AST-eval path for non-literal RHS expressions (SET n.num = n.num + 1,
@@ -3788,11 +3799,11 @@ func buildOperatorWrite(
 		}
 		if bopts != nil {
 			if info, isRel := bopts.edgeVarMeta[p.EntityVar]; isRel {
-				sap.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+				sap.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol})
 			}
 			if p.SourceVar != "" {
 				if info, isRel := bopts.edgeVarMeta[p.SourceVar]; isRel {
-					sap.WithSourceRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+					sap.WithSourceRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol})
 				}
 			}
 		}
@@ -3818,7 +3829,7 @@ func buildOperatorWrite(
 		}
 		if bopts != nil {
 			if info, isRel := bopts.edgeVarMeta[p.EntityVar]; isRel {
-				rp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol})
+				rp.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol})
 			}
 		}
 		return rp, nil
@@ -9692,6 +9703,12 @@ type lpgMutatorAdapter struct {
 	g    *lpg.Graph[string, float64]
 	buf  *exec.IndexBuffer // nil for read-only
 	undo *undoLog          // nil for read-only / non-transactional
+	// bopts is the per-query build options carrying the cached forward-CSR
+	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
+	// resolve a bound relationship instance's stable handle from its forward-CSR
+	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
+	// It may be nil (resolution then falls back to a fresh CSR build).
+	bopts *buildOpts
 }
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
@@ -10023,8 +10040,14 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
-// EdgePropertiesByHandle / RemoveEdgeInstanceByHandle delegate to the
-// stable-handle keyed metadata stores on the underlying [lpg.Graph].
+// DelEdgePropertyByHandle / EdgePropertiesByHandle / RemoveEdgeInstanceByHandle
+// delegate to the stable-handle keyed metadata stores on the underlying
+// [lpg.Graph]. SetEdgePropertyByHandle and DelEdgePropertyByHandle record an
+// undo inverse so a failed statement's per-handle write to a PRE-EXISTING edge
+// (a SET/REMOVE on one parallel relationship instance) is rolled back inside
+// the visibility barrier — there is no enclosing edge-removal to lean on as
+// there is on the CREATE path (#1686/#1282). The store-less engine has no WAL,
+// so these buffer no transaction op; their durability is the in-memory graph.
 func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
 }
@@ -10032,13 +10055,41 @@ func (a *lpgMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) [
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
 }
 func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
-	return a.g.SetEdgePropertyByHandle(src, dst, handle, key, value)
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() && handle != 0 {
+		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+	}
+	if err := a.g.SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
+		return err
+	}
+	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
+	return nil
+}
+func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() && handle != 0 {
+		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+	}
+	a.g.DelEdgePropertyByHandle(src, dst, handle, key)
+	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+}
+
+// EdgeHandleAtPosition resolves the bound relationship instance's stable handle
+// from its forward-CSR edge position, reusing the read-path mechanism so the
+// write path identifies the exact same parallel instance reads would. Returns 0
+// when no handle is resolvable; the caller then mutates the per-pair store only.
+func (a *lpgMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
+	return edgeHandleAtFwdPos(a.bopts, a.g, src, dst, edgePos)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
@@ -10152,6 +10203,12 @@ type walMutatorAdapter struct {
 	tx   *txn.Tx[string, float64]
 	buf  *exec.IndexBuffer // nil for read-only (never reached via RunInTx)
 	undo *undoLog          // nil for read-only (never reached via RunInTx)
+	// bopts is the per-query build options carrying the cached forward-CSR
+	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
+	// resolve a bound relationship instance's stable handle from its forward-CSR
+	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
+	// It may be nil (resolution then falls back to a fresh CSR build).
+	bopts *buildOpts
 }
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
@@ -10511,11 +10568,21 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
-// EdgePropertiesByHandle / RemoveEdgeInstanceByHandle delegate to the
-// stable-handle keyed metadata stores on the underlying [lpg.Graph] AND
-// buffer the matching durable WAL op so a recovered parallel edge keeps its
-// per-CREATE type and properties (Stage 2). The read-only accessors
-// (EdgeLabelsByHandle / EdgePropertiesByHandle) buffer nothing.
+// DelEdgePropertyByHandle / EdgePropertiesByHandle / RemoveEdgeInstanceByHandle
+// delegate to the stable-handle keyed metadata stores on the underlying
+// [lpg.Graph] AND buffer the matching durable WAL op so a recovered parallel
+// edge keeps its per-instance type and properties (Stage 2). The read-only
+// accessors (EdgeLabelsByHandle / EdgePropertiesByHandle) buffer nothing.
+//
+// SetEdgePropertyByHandle and DelEdgePropertyByHandle additionally record an
+// undo inverse (#1686): a SET/REMOVE on one parallel relationship instance can
+// land on a PRE-EXISTING edge whose creation is not part of this statement, so
+// — unlike the CREATE path, where the enclosing AddEdge inverse already removes
+// the edge and its per-handle metadata — the per-handle change must be inverted
+// explicitly when a later row in the same statement fails. The in-memory
+// mutation, the buffered WAL op, and the undo entry all land inside the one
+// [lpg.Graph.ApplyAtomically] window and the one transaction the per-pair write
+// uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
 	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
@@ -10524,11 +10591,29 @@ func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) [
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() && handle != 0 {
+		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+	}
 	if err := a.g.SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
 	}
+	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	_ = a.tx.SetEdgePropertyByHandle(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	return nil
+}
+func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() && handle != 0 {
+		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+	}
+	a.g.DelEdgePropertyByHandle(src, dst, handle, key)
+	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
+	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) //nolint:errcheck // ErrTxFinished impossible here
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
@@ -10536,6 +10621,14 @@ func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
 	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
+}
+
+// EdgeHandleAtPosition resolves the bound relationship instance's stable handle
+// from its forward-CSR edge position, reusing the read-path mechanism so the
+// write path identifies the exact same parallel instance reads would. Returns 0
+// when no handle is resolvable; the caller then mutates the per-pair store only.
+func (a *walMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
+	return edgeHandleAtFwdPos(a.bopts, a.g, src, dst, edgePos)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.

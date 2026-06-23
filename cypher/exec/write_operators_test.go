@@ -8,6 +8,7 @@ package exec_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -54,6 +55,14 @@ type stubMutator struct {
 	edgeProps  map[string]map[string]lpg.PropertyValue // "src|dst" → prop map
 	tombstones map[graph.NodeID]struct{}               // RemoveNode'd ids
 	handleSeq  uint64                                  // monotone source for AddEdgeH synthetic handles
+	// byHandleProps tracks the per-instance (by-handle) edge-property store so
+	// tests can assert that a SET/REMOVE on one parallel edge instance touches
+	// only that instance (#1686). Keyed by "src|dst|handle" → prop map.
+	byHandleProps map[string]map[string]lpg.PropertyValue
+	// handleAt, when set, resolves the stable handle of the instance at a
+	// forward-CSR edge position so the write operators exercise the by-handle
+	// dual-write path. nil ⇒ EdgeHandleAtPosition returns 0 (per-pair only).
+	handleAt func(src, dst string, edgePos uint64) uint64
 }
 
 func newStubMutator() *stubMutator {
@@ -254,17 +263,77 @@ func (s *stubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg.Pro
 }
 func (s *stubMutator) RemoveEdgeInstance(string, string, int64) {}
 
-// The stable-handle keyed metadata stubs are inert for the same reason as
-// the *At stubs above.
+// The stable-handle keyed label stubs are inert; the property stubs track a
+// real per-(src,dst,handle) store so the by-handle dual-write (#1686) can be
+// asserted (sibling isolation, durability mirror).
 func (s *stubMutator) SetEdgeLabelByHandle(string, string, uint64, string) {}
 func (s *stubMutator) EdgeLabelsByHandle(string, string, uint64) []string  { return nil }
-func (s *stubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) error {
+
+func byHandleKey(src, dst string, handle uint64) string {
+	return fmt.Sprintf("%s|%s|%d", src, dst, handle)
+}
+
+func (s *stubMutator) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
+	if handle == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byHandleProps == nil {
+		s.byHandleProps = make(map[string]map[string]lpg.PropertyValue)
+	}
+	k := byHandleKey(src, dst, handle)
+	if s.byHandleProps[k] == nil {
+		s.byHandleProps[k] = make(map[string]lpg.PropertyValue)
+	}
+	s.byHandleProps[k][key] = value
 	return nil
 }
-func (s *stubMutator) EdgePropertiesByHandle(string, string, uint64) map[string]lpg.PropertyValue {
-	return nil
+
+func (s *stubMutator) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
+	if handle == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byHandleProps == nil {
+		return
+	}
+	k := byHandleKey(src, dst, handle)
+	if s.byHandleProps[k] != nil {
+		delete(s.byHandleProps[k], key)
+		if len(s.byHandleProps[k]) == 0 {
+			delete(s.byHandleProps, k)
+		}
+	}
 }
-func (s *stubMutator) RemoveEdgeInstanceByHandle(string, string, uint64) {}
+
+func (s *stubMutator) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src0 := s.byHandleProps[byHandleKey(src, dst, handle)]
+	if src0 == nil {
+		return nil
+	}
+	out := make(map[string]lpg.PropertyValue, len(src0))
+	for k, v := range src0 {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *stubMutator) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.byHandleProps, byHandleKey(src, dst, handle))
+}
+
+func (s *stubMutator) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
+	if s.handleAt == nil {
+		return 0
+	}
+	return s.handleAt(src, dst, edgePos)
+}
 
 // EdgeLabels returns the edge labels for (src, dst). Reads from the
 // edgeLabel set populated by SetEdgeLabel; returns nil when absent.

@@ -1506,6 +1506,9 @@ func applyOpCodec[N comparable, W any](
 	case txn.OpSetEdgePropertyByHandle:
 		return applySetEdgePropertyByHandle(g, src, dst, rest)
 
+	case txn.OpDelEdgePropertyByHandle:
+		return applyDelEdgePropertyByHandle(g, src, dst, rest)
+
 	case txn.OpRemoveEdgeInstanceByHandle:
 		return applyRemoveEdgeInstanceByHandle(g, src, dst, rest)
 
@@ -1674,6 +1677,40 @@ func applySetEdgePropertyByHandle[N comparable, W any](g *lpg.Graph[N, W], src, 
 	if err := g.SetEdgePropertyByHandle(src, dst, handle, key, val); err != nil {
 		return false
 	}
+	g.SeedEdgeHandle(handle + 1)
+	return true
+}
+
+// applyDelEdgePropertyByHandle applies an [txn.OpDelEdgePropertyByHandle]
+// frame. rest is the body after the two decoded endpoints: a
+// uint16-length-prefixed key (NO property value — the Del op carries none)
+// followed by the 8-byte stable handle. It removes exactly key from one
+// parallel edge's per-instance property bag keyed to its handle, leaving
+// sibling handles untouched.
+//
+// It uses the natural-key [lpg.Graph.DelEdgePropertyByHandle] because src and
+// dst are codec-decoded natural keys at this point, mirroring
+// [applySetEdgePropertyByHandle]. The handle high-water counter is re-seeded
+// so a post-recovery edge creation never re-mints a handle this frame named —
+// load-bearing for invariant I5 when the only durable frame referencing the
+// handle is this removal (e.g. a snapshot that lacked the handle plus a WAL
+// tail that only deletes a key on it).
+func applyDelEdgePropertyByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N, rest []byte) bool {
+	if len(rest) < 2 {
+		return false
+	}
+	kLen := binary.LittleEndian.Uint16(rest)
+	rest = rest[2:]
+	if uint64(len(rest)) < uint64(kLen) {
+		return false
+	}
+	key := string(rest[:kLen])
+	rest = rest[kLen:]
+	handle, ok := trailingHandle(rest)
+	if !ok {
+		return false
+	}
+	g.DelEdgePropertyByHandle(src, dst, handle, key)
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }

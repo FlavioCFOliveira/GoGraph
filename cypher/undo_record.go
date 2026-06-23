@@ -186,6 +186,46 @@ func (m mutationUndo) recordDelEdgeProperty(src, dst, key string, prev lpg.Prope
 	m.undo.record(func() { _ = m.g.SetEdgeProperty(src, dst, key, prev) })
 }
 
+// recordSetEdgePropertyByHandle records the inverse of
+// SetEdgePropertyByHandle(src, dst, handle, key, …) using the per-handle prior
+// value (prev, had) the adapter captured BEFORE the write: when the handle
+// already carried key the inverse restores the old value, otherwise it deletes
+// the key the statement added on that handle.
+//
+// This inverse is mandatory for SET on a PRE-EXISTING parallel edge: unlike the
+// CREATE path — where the enclosing AddEdge inverse removes the whole edge (and
+// with it the handle's metadata) — a SET/REMOVE on an edge a prior committed
+// statement created has no enclosing edge-removal to lean on, so the per-handle
+// property change must be inverted explicitly. On a CREATE rollback this entry
+// is harmless: the LIFO replay runs it first (deleting the just-added handle
+// property) and then the AddEdge inverse drops the pair, so the two are
+// order-independent and idempotent (mirrors recordRemoveEdge's self-sufficient
+// per-handle restore).
+func (m mutationUndo) recordSetEdgePropertyByHandle(src, dst string, handle uint64, key string, prev lpg.PropertyValue, had bool) {
+	if !m.active() || handle == 0 {
+		return
+	}
+	m.undo.record(func() {
+		if had {
+			_ = m.g.SetEdgePropertyByHandle(src, dst, handle, key, prev)
+		} else {
+			m.g.DelEdgePropertyByHandle(src, dst, handle, key)
+		}
+	})
+}
+
+// recordDelEdgePropertyByHandle records the inverse of
+// DelEdgePropertyByHandle(src, dst, handle, key) using the per-handle prior
+// value captured before deletion: when the handle carried key the inverse
+// re-sets it, otherwise the delete was a no-op on that handle and nothing is
+// recorded.
+func (m mutationUndo) recordDelEdgePropertyByHandle(src, dst string, handle uint64, key string, prev lpg.PropertyValue, had bool) {
+	if !m.active() || handle == 0 || !had {
+		return
+	}
+	m.undo.record(func() { _ = m.g.SetEdgePropertyByHandle(src, dst, handle, key, prev) })
+}
+
 // recordIncEdgeCreateCount records the inverse of bumping the CREATE-multiplicity
 // counter for edge (src, dst): decrement it. The counter is metadata only and
 // DecEdgeCreateCount floors at zero, so the inverse is exact for the increment

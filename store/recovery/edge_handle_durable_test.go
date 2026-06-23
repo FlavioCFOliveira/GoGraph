@@ -172,3 +172,67 @@ func TestRecovery_HandleOps_RemoveInstance(t *testing.T) {
 		t.Fatalf("handle metadata survived RemoveEdgeInstanceByHandle: %v", got)
 	}
 }
+
+// TestRecovery_HandleOps_DelProperty confirms an OpDelEdgePropertyByHandle frame
+// removes exactly one property key from one parallel edge's per-instance bag on
+// replay, leaving its other properties and the sibling handle untouched. This is
+// the producer→WAL→recovery byte-symmetry proof for the new single-key removal
+// op (#1686), exercised in the short layer (no crash harness).
+func TestRecovery_HandleOps_DelProperty(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "wal")
+
+	w, err := wal.Open(walPath)
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+
+	const h1 uint64 = 1
+	const h2 uint64 = 2
+	tx := s.Begin()
+	mustTx(t, tx.AddNode("x"))
+	mustTx(t, tx.AddNode("y"))
+	// h1 carries two props (w, tag); h2 carries one (w). Remove only tag from h1.
+	mustTx(t, tx.AddEdgeWithHandle("x", "y", 1, h1))
+	mustTx(t, tx.SetEdgePropertyByHandle("x", "y", h1, "w", lpg.Int64Value(1)))
+	mustTx(t, tx.SetEdgePropertyByHandle("x", "y", h1, "tag", lpg.StringValue("seed")))
+	mustTx(t, tx.AddEdgeWithHandle("x", "y", 1, h2))
+	mustTx(t, tx.SetEdgePropertyByHandle("x", "y", h2, "w", lpg.Int64Value(2)))
+	mustTx(t, tx.DelEdgePropertyByHandle("x", "y", h1, "tag"))
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	res, err := Open[string, float64](dir, edgeHandleOpts())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	rg := res.Graph
+	h1Props := rg.EdgePropertiesByHandle("x", "y", h1)
+	if _, ok := h1Props["tag"]; ok {
+		t.Fatalf("OpDelEdgePropertyByHandle did not remove tag on replay: %v", h1Props)
+	}
+	if v, ok := h1Props["w"]; !ok {
+		t.Fatalf("h1 lost its other property w after a single-key DEL: %v", h1Props)
+	} else if iv, _ := v.Int64(); iv != 1 {
+		t.Fatalf("h1 w = %d, want 1", iv)
+	}
+	h2Props := rg.EdgePropertiesByHandle("x", "y", h2)
+	if iv, _ := h2Props["w"].Int64(); iv != 2 {
+		t.Fatalf("sibling h2 w = %d, want 2 (untouched by DEL on h1)", iv)
+	}
+	// I5: post-recovery handle must exceed the max replayed handle even though
+	// the last frame referencing h1 was a DEL (SeedEdgeHandle on the DEL path).
+	if next := rg.NextEdgeHandle(); next <= h2 {
+		t.Fatalf("post-recovery NextEdgeHandle = %d, want > %d (high-water not seeded by DEL)", next, h2)
+	}
+}

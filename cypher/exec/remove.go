@@ -111,7 +111,14 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 
 	if op.propertyKey != "" {
 		if ent.isRel {
+			// Per-pair removal (authoritative for reads), mirrored to the
+			// per-instance by-handle store so REMOVE r.x affects only the bound
+			// parallel edge (#1686). The by-handle removal is a no-op when the
+			// instance has no resolvable stable handle.
 			op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey)
+			if ent.relHandle != 0 {
+				op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+			}
 		} else {
 			// Release the constrained value before removing the property so
 			// the slot is freed in the registry.
@@ -235,6 +242,11 @@ type resolvedEntity struct {
 	nodeKey   string // valid when !isRel
 	relSrcKey string // valid when isRel
 	relDstKey string // valid when isRel
+	// relHandle is the stable per-edge handle of the bound parallel
+	// relationship instance (valid when isRel), or 0 when no handle is
+	// resolvable. A REMOVE r.x mirrors its per-pair removal to the per-instance
+	// by-handle store only when relHandle is non-zero (#1686).
+	relHandle uint64
 }
 
 // resolveEntityFromRow extracts the node or relationship identity from the
@@ -295,8 +307,8 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 	}
 	switch v := row[colIdx].(type) {
 	case expr.IntegerValue:
-		_ = v // edge-position counter; use endpoint columns
-		return resolveRelBindingFromRow(rc.SrcCol, rc.DstCol, row, mut)
+		_ = v // edge-position counter; use endpoint columns + handle resolution
+		return resolveRelBindingFromRow(rc, row, mut)
 	case expr.RelationshipValue:
 		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
 		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
@@ -311,10 +323,14 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 	return resolvedEntity{}, fmt.Errorf("variable %q is not IntegerValue/RelationshipValue for relationship entity (got %T)", varName, row[colIdx])
 }
 
-// resolveRelBindingFromRow resolves a relationship entity from the (srcCol,
-// dstCol) pair of row columns that hold endpoint NodeIDs as IntegerValue.
-// Mirrors resolveRelBinding in set.go but returns resolvedEntity.
-func resolveRelBindingFromRow(srcCol, dstCol int, row Row, mut GraphMutator) (resolvedEntity, error) {
+// resolveRelBindingFromRow resolves a relationship entity from the (SrcCol,
+// DstCol) pair of row columns that hold endpoint NodeIDs as IntegerValue, and
+// resolves the bound parallel instance's stable handle from the forward-CSR
+// edge position at rc.EdgeCol (when present) so REMOVE r.x can maintain the
+// per-instance by-handle store (#1686). Mirrors resolveRelBinding in set.go but
+// returns resolvedEntity.
+func resolveRelBindingFromRow(rc *RelCols, row Row, mut GraphMutator) (resolvedEntity, error) {
+	srcCol, dstCol := rc.SrcCol, rc.DstCol
 	if srcCol >= len(row) || dstCol >= len(row) {
 		return resolvedEntity{}, fmt.Errorf("relationship endpoint columns (%d, %d) out of range (row len %d)", srcCol, dstCol, len(row))
 	}
@@ -328,7 +344,12 @@ func resolveRelBindingFromRow(srcCol, dstCol int, row Row, mut GraphMutator) (re
 	if !srcResolved || !dstResolved {
 		return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoint NodeIDs (%d, %d)", graph.NodeID(srcIV), graph.NodeID(dstIV))
 	}
-	return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+	return resolvedEntity{
+		isRel:     true,
+		relSrcKey: srcKey,
+		relDstKey: dstKey,
+		relHandle: resolveRelHandle(rc, row, srcKey, dstKey, mut),
+	}, nil
 }
 
 // resolveNodeIDFromRow extracts the NodeID stored at the column position of

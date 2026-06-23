@@ -164,6 +164,13 @@ type GraphMutator interface {
 	// by the stable `handle` on the (src, dst) pair. No-op when handle is 0.
 	// Returns any error returned by the installed SchemaValidator.
 	SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error
+	// DelEdgePropertyByHandle removes exactly `key` from the property bag of
+	// the edge identified by the stable `handle` on the (src, dst) pair,
+	// leaving sibling handles untouched. No-op when handle is 0 or the handle
+	// never carried the key. The single-key removal analogue of
+	// RemoveEdgeInstanceByHandle (which drops ALL of a handle's metadata); used
+	// by REMOVE r.x / SET r.x = null on one parallel relationship instance.
+	DelEdgePropertyByHandle(src, dst string, handle uint64, key string)
 	// EdgePropertiesByHandle returns the property map recorded for the edge
 	// identified by `handle` on the (src, dst) pair, or nil when none.
 	EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue
@@ -171,6 +178,22 @@ type GraphMutator interface {
 	// associated with (src, dst) at `handle`. Used by DELETE to discard a
 	// specific logical edge while leaving sibling handles untouched.
 	RemoveEdgeInstanceByHandle(src, dst string, handle uint64)
+
+	// EdgeHandleAtPosition resolves the stable per-edge handle of the bound
+	// relationship instance whose forward-CSR edge position is `edgePos` (the
+	// edge-position counter the Expand operator places in a relationship
+	// variable's column). It returns the exact handle of that one parallel
+	// instance, or 0 when no handle is resolvable — the edge carries no stable
+	// handle (simple-graph / pre-handle storage), either endpoint is unknown,
+	// the position is out of range, or the slot does not point at dst. Callers
+	// that get 0 must fall back to the per-pair store only and must NOT mutate
+	// any by-handle instance, so a SET/REMOVE never corrupts the wrong instance.
+	//
+	// It is the write-path counterpart of the read path's position→handle
+	// resolution and reads the same per-query forward-CSR snapshot, so it is
+	// exact for parallel edges and consistent with how reads identify the bound
+	// instance.
+	EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64
 
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.
