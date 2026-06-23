@@ -87,6 +87,44 @@ func TestMatch_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
 	}
 }
 
+// TestMatch_Multigraph_ParallelSelfLoops_Undirected pins that two
+// parallel typed self-loops report distinct per-instance types on an
+// undirected match. Self-loops are emitted by the forward pass and
+// deduplicated on the reverse pass (tryRevEdge skips dst == srcID), so
+// this exercises the forward per-instance path rather than the reverse
+// fix — it must stay correct.
+//
+// NOT covered here (tracked as a separate same-family defect, rmp #1684):
+// OPPOSITE-direction parallel edges (a)-[:T1]->(b) and (b)-[:T2]->(a)
+// still collapse type(r) on an undirected hop, because the storage
+// direction probe in buildRelationshipValueFromRow cannot tell which
+// stored direction an emitted edge came from when both directions exist.
+func TestMatch_Multigraph_ParallelSelfLoops_Undirected(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+	seed := []string{
+		`CREATE (a:A {id: 1})`,
+		`MATCH (a:A) WHERE a.id = 1 CREATE (a)-[:T1]->(a)`,
+		`MATCH (a:A) WHERE a.id = 1 CREATE (a)-[:T2]->(a)`,
+	}
+	for _, q := range seed {
+		res, err := eng.RunAny(ctx, q, nil)
+		if err != nil {
+			t.Fatalf("seed %q: %v", q, err)
+		}
+		for res.Next() {
+		}
+		if err := res.Err(); err != nil {
+			t.Fatalf("seed drain %q: %v", q, err)
+		}
+		res.Close()
+	}
+	if got := collectRelTypes(t, eng, `MATCH (n:A)-[r]-(m:A) RETURN type(r) AS t`); !equalStrs(got, []string{"T1", "T2"}) {
+		t.Fatalf("undirected parallel self-loops types = %v, want [T1 T2]", got)
+	}
+}
+
 func equalStrs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
