@@ -7474,7 +7474,12 @@ func lazyResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) expr.NodeReso
 // (the DELETE operator stamps it as a Deleted [expr.NodeValue] carrying a frozen
 // property snapshot), so it never reaches the IntegerValue branch here and the
 // DeletedEntityAccess contract is preserved by construction.
-func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse, bopts *buildOpts) expr.Value {
+// When arena is non-nil it is the pooled-RowContext lifecycle (the non-escaping
+// path), and the lazy node is drawn from its reusable struct arena instead of a
+// fresh per-row allocation (#1697); the borrowed node is valid only until the
+// arena is released and must not escape the row. arena is nil on every escaping
+// / eager caller, which allocates a fresh struct exactly as before.
+func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse, bopts *buildOpts, arena *pooledRowCtx) expr.Value {
 	if g == nil || use == nil || use.needsWholeNode {
 		return upgradeNodeIDToValue(v, g)
 	}
@@ -7485,6 +7490,9 @@ func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], us
 	id := graph.NodeID(iv)
 	if _, resolved := g.AdjList().Mapper().Resolve(id); !resolved {
 		return v
+	}
+	if arena != nil {
+		return arena.borrowLazy(uint64(id), lazyResolver(bopts, g))
 	}
 	return expr.NewLazyNodeValue(uint64(id), lazyResolver(bopts, g))
 }
@@ -7751,78 +7759,129 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 // partially-materialised node would serialise a truncated property map.
 func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
-	populateRowCtx(ctx, row, schema, g, bopts, scalarUse)
+	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
+	// must allocate fresh lazy nodes too — no reuse, no pooled lifecycle.
+	populateRowCtx(ctx, row, schema, g, bopts, scalarUse, nil)
 	return ctx
 }
 
-// rowCtxPool recycles the per-row RowContext map for the non-escaping
+// pooledRowCtx bundles a recyclable per-row RowContext map with a co-located
+// arena of reusable [expr.LazyNodeValue] structs (#1697). Both are recycled
+// together as one unit so the lazy structs share the map's single-goroutine
+// ownership: each pooledRowCtx is held by exactly one goroutine for the span of
+// one row's evaluation, so a struct handed out of its arena is never read or
+// written by a second goroutine. Tying the arena to the map (rather than a
+// separate package-level pool) is what makes the struct reuse race-free — a
+// global arena would let two concurrent query goroutines clobber each other's
+// node ids. See [acquireRowCtx]/[releaseRowCtx] and the soundness invariant on
+// [populateRowCtx].
+type pooledRowCtx struct {
+	ctx  expr.RowContext      // the per-row variable bindings map
+	lazy []expr.LazyNodeValue // arena of reusable lazy node structs
+	used int                  // cursor into lazy; reset to 0 on each acquire
+}
+
+// rowCtxPool recycles per-row [pooledRowCtx] units for the non-escaping
 // evaluation sites (the WHERE-predicate and scalar-projection closures), where
 // the map is built, passed to one [evalRow], and discarded. Reusing the outer
 // map container removes the per-row map allocation that a heap profile of
-// `RETURN count(r)` flagged as a top allocator (#1575). Only the map container
-// is recycled — the Values it holds are independently owned (a scalar
-// projection returns a fresh property value, not the map), so clearing and
-// returning the map cannot recycle a value that escaped into a result row.
+// `RETURN count(r)` flagged as a top allocator (#1575); reusing the co-located
+// lazy-node arena removes the per-row [expr.LazyNodeValue] allocation that a
+// later profile flagged as ~50% of the filter path's objects (#1697). Only the
+// map container and the arena structs are recycled — the scalar Values the
+// evaluator returns are independently owned (a scalar projection returns a
+// fresh property value, not the map nor a lazy node), so clearing and returning
+// the unit cannot recycle a value that escaped into a result row.
 //
 // Safety rests on the same gate that drives partial materialisation: a pooled
-// map is used ONLY when scalarUse != nil, which [analyseNodeScalarUse] sets
+// unit is used ONLY when scalarUse != nil, which [analyseNodeScalarUse] sets
 // only for expressions with no subquery / comprehension / pattern (it bails to
 // nil otherwise). Those bailed-out kinds are exactly the ones whose evaluator
-// could retain the RowContext beyond the call, so the gate guarantees no
-// evaluator keeps a reference to a map we are about to recycle.
-var rowCtxPool = sync.Pool{New: func() any { return make(expr.RowContext, 8) }}
+// could retain the RowContext (or a lazy node) beyond the call, so the gate
+// guarantees no evaluator keeps a reference to anything we are about to recycle.
+var rowCtxPool = sync.Pool{New: func() any { return &pooledRowCtx{ctx: make(expr.RowContext, 8)} }}
 
 // rowCtxPoolMaxSchema bounds which schemas use the pool: a very wide row would
 // retain an oversized map in the pool forever. Schemas wider than this allocate
 // a fresh map (the common case is 1–8 variables).
 const rowCtxPoolMaxSchema = 16
 
-// acquireRowCtx returns a cleared RowContext sized for schemaLen, drawn from
-// rowCtxPool for small schemas and freshly allocated for wide ones. The
-// companion [releaseRowCtx] returns it to the pool.
-func acquireRowCtx(schemaLen int) expr.RowContext {
+// acquireRowCtx returns a cleared [pooledRowCtx] sized for schemaLen, drawn from
+// rowCtxPool for small schemas and freshly allocated for wide ones. Its lazy
+// arena cursor is reset, so the first [pooledRowCtx.borrowLazy] call reuses the
+// arena's first slot. The companion [releaseRowCtx] returns it to the pool.
+func acquireRowCtx(schemaLen int) *pooledRowCtx {
 	if schemaLen > rowCtxPoolMaxSchema {
-		return make(expr.RowContext, schemaLen)
+		return &pooledRowCtx{ctx: make(expr.RowContext, schemaLen)}
 	}
-	ctx, _ := rowCtxPool.Get().(expr.RowContext)
-	if ctx == nil {
-		ctx = make(expr.RowContext, rowCtxPoolMaxSchema)
+	p, _ := rowCtxPool.Get().(*pooledRowCtx)
+	if p == nil {
+		p = &pooledRowCtx{ctx: make(expr.RowContext, rowCtxPoolMaxSchema)}
 	}
-	clear(ctx)
-	return ctx
+	clear(p.ctx)
+	p.used = 0
+	return p
 }
 
-// releaseRowCtx returns a RowContext acquired from [acquireRowCtx] to the pool.
-// The caller must not retain ctx (or any reference into it) after this call.
-// Wide maps that bypassed the pool on acquire are simply dropped.
-func releaseRowCtx(ctx expr.RowContext) {
-	if ctx == nil || len(ctx) > rowCtxPoolMaxSchema {
+// borrowLazy returns a reusable [*expr.LazyNodeValue] from the unit's arena,
+// rebound to (id, res). The pointer is owned by this pooledRowCtx and is valid
+// only until the unit is released; it must never escape the row it is read in
+// (guaranteed by the scalarUse gate). Each distinct node variable in a row draws
+// a distinct arena slot (the cursor advances per call within one populateRowCtx
+// pass), so two variables in the same row never alias one struct.
+func (p *pooledRowCtx) borrowLazy(id uint64, res expr.NodeResolver) *expr.LazyNodeValue {
+	if p.used < len(p.lazy) {
+		v := &p.lazy[p.used]
+		p.used++
+		v.Reset(id, res)
+		return v
+	}
+	p.lazy = append(p.lazy, expr.LazyNodeValue{})
+	v := &p.lazy[len(p.lazy)-1]
+	p.used++
+	v.Reset(id, res)
+	return v
+}
+
+// releaseRowCtx returns a [pooledRowCtx] acquired from [acquireRowCtx] to the
+// pool. The caller must not retain the unit, its ctx map, or any lazy node
+// borrowed from it after this call. Units whose map bypassed the pool on
+// acquire (wide schemas) are simply dropped.
+func releaseRowCtx(p *pooledRowCtx) {
+	if p == nil || len(p.ctx) > rowCtxPoolMaxSchema {
 		return
 	}
-	rowCtxPool.Put(ctx) //nolint:staticcheck // map is a reference type; SA6002 false positive — clear() on acquire resets it
+	rowCtxPool.Put(p)
 }
 
 // evalRowPooled builds a RowContext for row and evaluates e against it. For the
 // non-escaping case (scalarUse != nil — set only for ctx-safe expressions; see
-// [rowCtxPool]) it draws the map from the pool and returns it afterwards; only
-// the evaluation result escapes, never the map. When scalarUse is nil it falls
-// back to a freshly allocated RowContext (the historical behaviour), preserving
-// exact semantics. It is the shared body of the non-escaping Filter-predicate
-// and scalar-projection evaluation closures.
+// [rowCtxPool]) it draws the unit from the pool and returns it afterwards; only
+// the evaluation result escapes, never the map nor a borrowed lazy node. When
+// scalarUse is nil it falls back to a freshly allocated RowContext (the
+// historical behaviour), preserving exact semantics. It is the shared body of
+// the non-escaping Filter-predicate and scalar-projection evaluation closures.
 func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
 	if scalarUse == nil {
 		return evalRow(bopts, e, buildRowCtxWithUse(row, schema, g, bopts, nil), params, reg)
 	}
-	ctx := acquireRowCtx(len(schema))
-	defer releaseRowCtx(ctx)
-	populateRowCtx(ctx, row, schema, g, bopts, scalarUse)
-	return evalRow(bopts, e, ctx, params, reg)
+	p := acquireRowCtx(len(schema))
+	defer releaseRowCtx(p)
+	populateRowCtx(p.ctx, row, schema, g, bopts, scalarUse, p)
+	return evalRow(bopts, e, p.ctx, params, reg)
 }
 
 // populateRowCtx fills ctx (which the caller sized/cleared) with the row's
 // variable bindings. It is the shared core of [buildRowCtxWithUse] and the
 // pooled non-escaping evaluation sites.
-func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) {
+// arena, when non-nil, supplies reusable [expr.LazyNodeValue] structs from a
+// pooled-RowContext lifecycle so a node referenced only through scalar reads
+// does not allocate a fresh lazy node per row (#1697). It is non-nil ONLY on the
+// pooled non-escaping path (evalRowPooled with scalarUse != nil); every other
+// caller passes nil and gets a freshly allocated lazy node per row, preserving
+// the exact prior behaviour and escape safety. A borrowed lazy node is valid
+// only until the arena's pooledRowCtx is released and must never escape the row.
+func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
@@ -7939,7 +7998,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 					continue
 				}
 			}
-			ctx[varName] = upgradeNodeIDToValuePartial(row[colIdx], g, use, bopts)
+			ctx[varName] = upgradeNodeIDToValuePartial(row[colIdx], g, use, bopts, arena)
 			continue
 		}
 		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)

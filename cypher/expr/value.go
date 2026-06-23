@@ -554,8 +554,19 @@ type NodeResolver interface {
 //
 // It is a pointer type so that storing it in a [RowContext] costs a single
 // small allocation (the struct itself) rather than the NodeValue box plus a
-// per-row property map. Like every [Value] it is immutable after construction
-// and safe for concurrent reads (the resolver performs its own locking).
+// per-row property map.
+//
+// Concurrency and mutability: a freshly [NewLazyNodeValue]-constructed instance
+// is immutable after construction and safe for concurrent reads (the resolver
+// performs its own locking). The engine additionally REUSES a per-node-variable
+// instance across the rows of one query on its pooled non-escaping evaluation
+// path, calling [LazyNodeValue.Reset] to rebind it each row. A reused instance
+// is therefore mutable and is NOT safe to publish or share across goroutines:
+// it is owned exclusively by, and lives exactly as long as, the single
+// goroutine-owned pooled RowContext it accompanies, and the static analysis
+// (see the engine's analyseNodeScalarUse) guarantees it never escapes the row
+// in which it is read. Callers outside that pooled lifecycle must treat
+// instances as immutable and must not call [LazyNodeValue.Reset].
 type LazyNodeValue struct {
 	id  uint64
 	res NodeResolver
@@ -564,6 +575,19 @@ type LazyNodeValue struct {
 // NewLazyNodeValue constructs a [LazyNodeValue] for node id backed by res.
 func NewLazyNodeValue(id uint64, res NodeResolver) *LazyNodeValue {
 	return &LazyNodeValue{id: id, res: res}
+}
+
+// Reset rebinds the receiver to node id backed by res, so a single instance can
+// be reused across the rows of one query on the engine's pooled non-escaping
+// evaluation path instead of allocating a fresh struct per row. It writes BOTH
+// fields (a recycled instance may carry a stale resolver from a prior query
+// that reused the same pooled RowContext, possibly against a different graph),
+// so the caller must always supply the current id AND res. It must only be used
+// on an instance owned by a single goroutine for the duration of one row's
+// evaluation; see the mutability note on [LazyNodeValue].
+func (v *LazyNodeValue) Reset(id uint64, res NodeResolver) {
+	v.id = id
+	v.res = res
 }
 
 // ID returns the node's storage-layer identifier.
