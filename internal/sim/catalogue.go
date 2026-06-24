@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -15,18 +16,35 @@ import (
 // Standard scenario names. They are the kebab-case keys the CLI and the
 // integration tests use to select a scenario from [DefaultRegistry].
 const (
-	ScenarioCrashStorm   = "crash-storm"
-	ScenarioWriteHeavy   = "write-heavy"
-	ScenarioReadHeavy    = "read-heavy"
-	ScenarioSchemaChaos  = "schema-chaos"
-	ScenarioSearch       = "search"
-	ScenarioSearchCrash  = "search-crash"
-	ScenarioBadActors    = "bad-actors"
-	ScenarioOverload     = "overload"
-	ScenarioBulkVsOnline = "bulk-vs-online"
-	ScenarioLongRunning  = "long-running"
-	ScenarioDiskFull     = "disk-full"
-	ScenarioMemPressure  = "mem-pressure"
+	ScenarioCrashStorm    = "crash-storm"
+	ScenarioWriteHeavy    = "write-heavy"
+	ScenarioReadHeavy     = "read-heavy"
+	ScenarioSchemaChaos   = "schema-chaos"
+	ScenarioSearch        = "search"
+	ScenarioSearchCrash   = "search-crash"
+	ScenarioBadActors     = "bad-actors"
+	ScenarioOverload      = "overload"
+	ScenarioBulkVsOnline  = "bulk-vs-online"
+	ScenarioLongRunning   = "long-running"
+	ScenarioDiskFull      = "disk-full"
+	ScenarioMemPressure   = "mem-pressure"
+	ScenarioCPUStarvation = "cpu-starvation"
+)
+
+// cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
+// imposes for the duration of its run: a single OS thread runs the whole goroutine
+// fleet, so a compute-heavy actor competes directly with honest short queries for
+// the one core. It exercises the CLAUDE.md fair-scheduling mandate — long
+// operations must yield so latency tails stay bounded and the system still makes
+// forward progress (the liveness watchdog asserts convergence, not a deadlock).
+const cpuStarvationGOMAXPROCS = 1
+
+// cpuStarvationConns / cpuStarvationOps bound the contention workload. They are
+// kept modest so the short layer stays well under budget while still oversubscribing
+// the single clamped core with many goroutines.
+const (
+	cpuStarvationConns = 12
+	cpuStarvationOps   = 12
 )
 
 // memPressureMaxResultRows and memPressureMaxCollectItems are the clamped
@@ -71,7 +89,53 @@ func DefaultRegistry() (*Registry, error) {
 		longRunningScenario(),
 		diskFullScenario(),
 		memPressureScenario(),
+		cpuStarvationScenario(),
 	)
+}
+
+// cpuStarvationScenario stresses fair scheduling under CPU starvation: it clamps
+// GOMAXPROCS to a single core (see [runCPUStarvation]) and runs a hog-heavy
+// concurrent safety phase (60% overload / giant UNWIND + Cartesian + deep VLE
+// competing with honest writers and readers), then asserts the liveness phase
+// CONVERGES within budget. The system must keep making forward progress despite
+// the compute hog monopolising the one core — no deadlock, no livelock
+// (RESONANCE), no panic, no goroutine leak. It is concurrent (leak/no-panic +
+// convergence guarded), not bit-reproducible.
+func cpuStarvationScenario() Scenario {
+	return Scenario{
+		Name:        ScenarioCPUStarvation,
+		Description: "compute hog vs honest queries on a single clamped core (fair scheduling: forward progress, no resonance)",
+		Mode:        ModeLiveness,
+		DefaultSeed: 0xC9057A40,
+		Connections: cpuStarvationConns,
+		OpsPerConn:  cpuStarvationOps,
+		Mix:         &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
+		run:         runCPUStarvation,
+	}
+}
+
+// runCPUStarvation clamps GOMAXPROCS to a single core for the duration of the
+// run, so the hog-heavy safety phase and the liveness convergence phase both
+// contend for one OS thread, then delegates to the standard liveness flow. The
+// clamp is process-global, so the integration test must not run in parallel; it
+// is always restored on return. The liveness watchdog classifies a stuck run as
+// RESONANCE (deadlock/livelock), which is the real fair-scheduling failure this
+// scenario hunts — latency percentiles are deliberately NOT asserted (they are
+// statistical and would flake).
+func runCPUStarvation(ctx context.Context, seed uint64) (*SimReport, error) {
+	prev := runtime.GOMAXPROCS(cpuStarvationGOMAXPROCS)
+	defer runtime.GOMAXPROCS(prev)
+
+	// Delegate to the standard liveness dispatch via a scenario value WITHOUT a
+	// run override (so Run routes to runLiveness rather than recursing here).
+	inner := Scenario{
+		Name:        ScenarioCPUStarvation,
+		Mode:        ModeLiveness,
+		Connections: cpuStarvationConns,
+		OpsPerConn:  cpuStarvationOps,
+		Mix:         &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
+	}
+	return inner.Run(ctx, seed)
 }
 
 // memPressureScenario drives an honest writer alongside an OverloadReader that
