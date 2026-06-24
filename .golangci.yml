@@ -153,6 +153,13 @@ linters:
       - linters: [gosec]
         path: "search/"
         text: "G115"
+      # gosec G115 in internal/sim/: the DST search oracle casts between dense node
+      # indices and graph.NodeID when building CSRs and collecting reachable sets;
+      # the indices are bounded by the modelled node count, which fits addressable
+      # memory. Mirrors the search/ and graph/ bounded-conversion exclusions.
+      - linters: [gosec]
+        path: "internal/sim/"
+        text: "G115"
       # gosec G115 in store/: WAL offsets, snapshot sizes, and codec widths are
       # bounded by 64-bit address space; the narrowing casts mirror the on-disk
       # format widths which are always within range.

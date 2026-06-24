@@ -26,6 +26,11 @@ const (
 	ViolationACIDDurability  ViolationKind = "ACID_DURABILITY"
 	ViolationGraphIntegrity  ViolationKind = "GRAPH_INTEGRITY"
 	ViolationOracleDeviation ViolationKind = "ORACLE_DEVIATION"
+	// ViolationSearchDivergence is a disagreement between a search/ algorithm and
+	// its independent naive reference on the oracle graph (see [CheckSearch]). It
+	// indicates a bug in the traversal/path-finding/analytics code, distinct from
+	// an engine-vs-oracle structural divergence (which is GRAPH_INTEGRITY).
+	ViolationSearchDivergence ViolationKind = "SEARCH_DIVERGENCE"
 )
 
 // Violation is a single detected invariant breach, tagged with its kind, a

@@ -18,6 +18,7 @@ const (
 	ScenarioWriteHeavy   = "write-heavy"
 	ScenarioReadHeavy    = "read-heavy"
 	ScenarioSchemaChaos  = "schema-chaos"
+	ScenarioSearch       = "search"
 	ScenarioBadActors    = "bad-actors"
 	ScenarioOverload     = "overload"
 	ScenarioBulkVsOnline = "bulk-vs-online"
@@ -39,6 +40,7 @@ func DefaultRegistry() (*Registry, error) {
 		writeHeavyScenario(),
 		readHeavyScenario(),
 		schemaChaosScenario(),
+		searchScenario(),
 		badActorsScenario(),
 		overloadScenario(),
 		bulkVsOnlineScenario(),
@@ -103,6 +105,26 @@ func schemaChaosScenario() Scenario {
 		Workload:    WriteHeavyWorkload,
 		Checks:      CheckSelection{IndexConsistency: true, IndexSpecs: []IndexSpec{{Label: "Person", Property: "name"}}},
 		run:         runSchemaChaos,
+	}
+}
+
+// searchScenario drives a deterministic write-heavy workload to build a
+// Person/KNOWS graph, then runs the search-algorithm battery ([CheckSearch])
+// periodically (every SearchEvery ticks) and once more at the end. Each
+// exercised search/ algorithm is cross-checked against an independent naive
+// reference, and the engine graph is held to full structural parity with the
+// oracle model. It is bit-reproducible, so a failure replays and shrinks like
+// any other deterministic scenario.
+func searchScenario() Scenario {
+	return Scenario{
+		Name:        ScenarioSearch,
+		Description: "search/ battery (BFS/DFS/WCC) over the live graph + full engine-vs-oracle structural parity",
+		Mode:        ModeDeterministic,
+		DefaultSeed: 0x5EA4C8,
+		MaxTicks:    800,
+		Workload:    WriteHeavyWorkload,
+		SearchEvery: 200,
+		Checks:      CheckSelection{Search: true},
 	}
 }
 

@@ -75,6 +75,13 @@ type CheckSelection struct {
 	// They are declared by the scenario because the engine's index manager
 	// exposes only opaque names, not (label, property) pairs.
 	IndexSpecs []IndexSpec
+	// Search runs the search-algorithm battery ([CheckSearch]) — structural
+	// parity between the engine graph and the oracle model, plus per-algorithm
+	// correctness against independent naive references — once at the end of the
+	// run. The search scenario also sets [Scenario.SearchEvery] for periodic
+	// in-loop checks. It is meaningful only for the deterministic mode (the
+	// battery needs a consistent, quiescent view of the graph).
+	Search bool
 }
 
 // Scenario is a named, self-contained simulation configuration: a default seed,
@@ -106,6 +113,11 @@ type Scenario struct {
 	// full-graph parity probes do not dominate a millions-of-ops workload (the
 	// scenario's value there is heap/goroutine stability, not per-tick parity).
 	CheckEvery int
+	// SearchEvery is the in-loop cadence (in ticks) for the search battery
+	// (ModeDeterministic): [runDeterministic] sets it on the simulator. 0 disables
+	// periodic search checks; the terminal search check still runs when
+	// Checks.Search is set. See [Simulator.searchEvery] and [CheckSearch].
+	SearchEvery int
 	// Workload is the deterministic-mode actor mix factory. When nil,
 	// [DefaultWorkload] is used. It is a factory (not a built Workload) so each
 	// run gets a fresh, seed-parameterised mix.
@@ -199,6 +211,9 @@ func (sc *Scenario) runDeterministic(ctx context.Context, seed uint64) (*SimRepo
 		return nil, fmt.Errorf("sim: scenario %q new: %w", sc.Name, err)
 	}
 	defer func() { _ = sm.Close() }()
+	// Opt the simulator into periodic search checks for the search scenario; 0
+	// (every other scenario) leaves them off.
+	sm.searchEvery = sc.SearchEvery
 
 	report, err := sm.Run(ctx)
 	if err != nil {
@@ -209,6 +224,11 @@ func (sc *Scenario) runDeterministic(ctx context.Context, seed uint64) (*SimRepo
 	}
 	if sc.Checks.IndexConsistency {
 		if v := CheckIndexConsistency(int64(cfg.MaxTicks), sm.Oracle(), sm.engine, sc.Checks.IndexSpecs...); len(v) > 0 {
+			return finalReport(seed, int64(cfg.MaxTicks), sm.Oracle(), v), nil
+		}
+	}
+	if sc.Checks.Search {
+		if v := CheckSearch(int64(cfg.MaxTicks), sm.Oracle(), sm.engine); len(v) > 0 {
 			return finalReport(seed, int64(cfg.MaxTicks), sm.Oracle(), v), nil
 		}
 	}

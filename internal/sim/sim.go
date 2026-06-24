@@ -86,6 +86,13 @@ type Simulator struct {
 	// crashCount and replayedOps accumulate run statistics for reports and tests.
 	crashCount  int
 	replayedOps int
+	// searchEvery, when > 0, runs the full search-algorithm battery
+	// ([CheckSearch]) every searchEvery ticks in the deterministic loop, on top of
+	// any terminal check the scenario runs. It lives on the Simulator (not Config)
+	// because the battery is far more expensive than the per-tick parity probe and
+	// only the search scenario opts in; runDeterministic sets it from the
+	// scenario. Zero (the default) disables periodic search checks.
+	searchEvery int
 }
 
 // New builds a Simulator with a fresh in-memory engine, oracle, checker, clock,
@@ -189,6 +196,15 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 
 		if tick%int64(s.cfg.CheckEvery) == 0 {
 			if violations := s.checker.Check(tick, s.oracle, s.engine); len(violations) > 0 {
+				return s.report(tick, op, violations), nil
+			}
+		}
+
+		// The search battery runs on its own (coarser) cadence: it extracts the
+		// whole graph and runs the search/ algorithms, so it is gated off by
+		// default and opted into only by the search scenario.
+		if s.searchEvery > 0 && tick%int64(s.searchEvery) == 0 {
+			if violations := CheckSearch(tick, s.oracle, s.engine); len(violations) > 0 {
 				return s.report(tick, op, violations), nil
 			}
 		}
