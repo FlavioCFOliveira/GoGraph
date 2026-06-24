@@ -124,8 +124,15 @@ func (rs *ResultSet) Next() bool {
 		return false
 	}
 
-	var row Row
-	ok, err := rs.plan.Next(&row)
+	// Receive the row directly into the reused rs.curRow field rather than a
+	// fresh local: a local `var row Row` whose address is passed to the
+	// interface method rs.plan.Next escapes to the heap, costing one slice-header
+	// allocation per row (measured at ~39% of serial scalar-projection allocs in
+	// the 2026-06-24 audit). rs.curRow is a field of the already-heap-allocated
+	// ResultSet, so taking its address allocates nothing per call. The operator
+	// overwrites *out wholesale (`*out = <its buffer>`; it never reads *out), so
+	// reusing the field as the receiver is safe.
+	ok, err := rs.plan.Next(&rs.curRow)
 	if err != nil {
 		rs.err = err
 		return false
@@ -134,13 +141,12 @@ func (rs *ResultSet) Next() bool {
 		return false
 	}
 
-	// Retain only the positional view of the row. The map projection into
-	// rs.current is built lazily by Record/TakeRow, so a caller that consumes
-	// rows positionally (or never reads them at all — e.g. a count(*) drain, or
+	// rs.curRow now holds the positional view of the row. The map projection
+	// into rs.current is built lazily by Record/TakeRecord, so a caller that
+	// consumes rows positionally (or never reads them — e.g. a count(*) drain or
 	// the materialisation path) pays no per-row map-rehash cost. The operator
-	// owns row's backing array and reuses it on the next Next, so callers that
+	// owns curRow's backing array and reuses it on the next Next, so callers that
 	// retain it across Next must copy (the godoc contract on Row says so).
-	rs.curRow = row
 	return true
 }
 
