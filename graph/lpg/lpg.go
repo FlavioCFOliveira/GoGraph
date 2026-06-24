@@ -166,11 +166,21 @@ type edgeKey struct {
 }
 
 // propMapShards is the number of independent locks striping the
-// per-vertex and per-edge property maps. Sized to keep contention
-// below 5% on workloads with up to a few hundred concurrent
-// readers/writers; not as wide as adjlist's 256 because property
-// access is less hot than adjacency.
-const propMapShards = 16
+// per-vertex and per-edge property maps. It MUST stay a power of two (the
+// shard index is NodeID & (propMapShards-1)). It is a runtime-only
+// concurrency-striping constant — no on-disk format or snapshot depends on
+// it, so it can change freely between versions.
+//
+// The 2026-06-24 performance audit measured that per-row property reads
+// (NodePropertyByID, hit once per scanned row per reader) ARE hot under
+// concurrent full-table scans: at high core counts the per-shard RWMutex
+// reader-count atomic bounces its cache line. Widening from 16 to 64 spreads
+// those reader-count atomics across 4x more cache lines, so a full scan's
+// readers collide on a given shard far less often. (The fully lock-free
+// per-shard read remains the deferred F3/#1671 COW epic; this widening is the
+// cheap, ACID-neutral mitigation.) 64 is still well below adjlist's 256; the
+// extra empty shards cost only a few KB per graph.
+const propMapShards = 64
 
 // nodePropShard is one stripe of the per-vertex property map. The inner
 // per-node bag is a compact tiered [propBag] (sprint 207, #1587) stored by
