@@ -16,19 +16,20 @@ import (
 // Standard scenario names. They are the kebab-case keys the CLI and the
 // integration tests use to select a scenario from [DefaultRegistry].
 const (
-	ScenarioCrashStorm    = "crash-storm"
-	ScenarioWriteHeavy    = "write-heavy"
-	ScenarioReadHeavy     = "read-heavy"
-	ScenarioSchemaChaos   = "schema-chaos"
-	ScenarioSearch        = "search"
-	ScenarioSearchCrash   = "search-crash"
-	ScenarioBadActors     = "bad-actors"
-	ScenarioOverload      = "overload"
-	ScenarioBulkVsOnline  = "bulk-vs-online"
-	ScenarioLongRunning   = "long-running"
-	ScenarioDiskFull      = "disk-full"
-	ScenarioMemPressure   = "mem-pressure"
-	ScenarioCPUStarvation = "cpu-starvation"
+	ScenarioCrashStorm        = "crash-storm"
+	ScenarioWriteHeavy        = "write-heavy"
+	ScenarioReadHeavy         = "read-heavy"
+	ScenarioSchemaChaos       = "schema-chaos"
+	ScenarioSearch            = "search"
+	ScenarioSearchCrash       = "search-crash"
+	ScenarioBadActors         = "bad-actors"
+	ScenarioOverload          = "overload"
+	ScenarioBulkVsOnline      = "bulk-vs-online"
+	ScenarioLongRunning       = "long-running"
+	ScenarioDiskFull          = "disk-full"
+	ScenarioMemPressure       = "mem-pressure"
+	ScenarioCPUStarvation     = "cpu-starvation"
+	ScenarioConstraintEnforce = "constraint-enforce"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -90,6 +91,7 @@ func DefaultRegistry() (*Registry, error) {
 		diskFullScenario(),
 		memPressureScenario(),
 		cpuStarvationScenario(),
+		constraintEnforceScenario(),
 	)
 }
 

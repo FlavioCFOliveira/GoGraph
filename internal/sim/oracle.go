@@ -86,6 +86,15 @@ type GraphOracle struct {
 	edges      map[edgeKey]*EdgeState
 	nextNodeID uint64
 	ops        []OracleOp
+	// uniqueOnName, when true, models an active UNIQUE constraint on
+	// (Person, name): a CREATE of a name that already exists must be REJECTED
+	// by the engine (a typed constraint-violation error, no state change), which
+	// createPerson predicts. It is off by default, so every constraint-free
+	// scenario keeps the prior "CREATE always commits" behaviour. The constraint
+	// is engine schema (it survives crash/recovery via the WAL), so the oracle
+	// keeps modelling it across a crash — the recovered engine must still enforce
+	// it. See [GraphOracle.SetUniqueOnName].
+	uniqueOnName bool
 }
 
 // edgeKey identifies an edge by source, destination, and label, matching the
@@ -138,14 +147,36 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 	}
 }
 
+// SetUniqueOnName declares (or clears) an active UNIQUE constraint on
+// (Person, name) in the model, so the oracle predicts the engine will REJECT a
+// CREATE of a duplicate name. It is called by the constraint-enforcement
+// scenario after it creates the constraint in the engine, and again after a
+// crash/recovery to assert the constraint is still modelled as enforced.
+func (o *GraphOracle) SetUniqueOnName(active bool) { o.uniqueOnName = active }
+
+// UniqueOnName reports whether the oracle models an active UNIQUE (Person, name)
+// constraint.
+func (o *GraphOracle) UniqueOnName() bool { return o.uniqueOnName }
+
 // createPerson adds a Person node. The workload binds unique names; if a name
 // somehow repeats, the engine still creates a second node (CREATE is not
 // idempotent), so the oracle does too and overwrites the name index to the
 // latest id (the checker only samples existence, not name→id bijection).
+//
+// Under an active UNIQUE (Person, name) constraint ([GraphOracle.SetUniqueOnName])
+// a CREATE of an already-present name is instead predicted REJECTED: the engine
+// must raise a typed constraint-violation error and apply nothing, so the oracle
+// returns a non-committed result and changes no state.
 func (o *GraphOracle) createPerson(params map[string]any) OracleResult {
 	name, ok := paramString(params, "name")
 	if !ok {
 		return OracleResult{ErrorMsg: "oracle: createPerson missing name"}
+	}
+	if o.uniqueOnName {
+		if _, dup := o.byName[name]; dup {
+			// Predicted UNIQUE violation: the engine rejects, nothing changes.
+			return OracleResult{Committed: false, ErrorMsg: "oracle: UNIQUE(Person.name) violation"}
+		}
 	}
 	age := params["age"]
 	id := o.nextNodeID
