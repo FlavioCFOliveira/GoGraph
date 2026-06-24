@@ -14,6 +14,13 @@ import (
 // message lists, so a wholesale divergence cannot produce an unbounded report.
 const maxDivergenceSamples = 8
 
+// maxDenseCheckNodes caps the node count at which the O(n^2) checks (those that
+// materialise the full forward-reachability matrix: SCC and transitive closure)
+// run. Above it those two are skipped to keep the per-check cost bounded; the
+// cheaper checks still run. The search scenario's graph stays far below this, so
+// the cap is a safety valve, not a coverage limit in practice.
+const maxDenseCheckNodes = 4000
+
 // CheckSearch runs the search-algorithm battery against the current graph and
 // returns any violations it finds (a clean check returns nil). It performs two
 // independent families of check:
@@ -114,6 +121,17 @@ func searchAlgorithmViolations(tick int64, g *nameGraph) []Violation {
 		want := g.naiveReachable(src)
 		vs = appendReachabilityViolation(vs, tick, "BFS", g.names[src], want, bfsReachable(c, src, n))
 		vs = appendReachabilityViolation(vs, tick, "DFS", g.names[src], want, dfsReachable(c, src, n))
+	}
+
+	// Ordering and strong connectivity: topological sort is validated (its order
+	// is not unique); SCC and transitive closure are compared to references built
+	// from the forward-reachability matrix, which is O(n^2) and so gated by the
+	// node cap (the search scenario stays well under it).
+	vs = append(vs, topoViolations(tick, g, c)...)
+	if n <= maxDenseCheckNodes {
+		fwd := g.forwardReachAll()
+		vs = append(vs, sccViolations(tick, g, c, fwd)...)
+		vs = append(vs, tcViolations(tick, g, c, fwd)...)
 	}
 	return vs
 }

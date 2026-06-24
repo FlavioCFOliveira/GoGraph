@@ -168,15 +168,16 @@ func (g *nameGraph) checkSources() []int {
 	}
 }
 
-// naiveReachable returns the sorted dense ids reachable from src along directed
-// edges, computed by a textbook BFS over the adjacency lists. It is the
-// independent reference the search-package BFS/DFS reachability is compared to.
-func (g *nameGraph) naiveReachable(src int) []int {
+// reachMask returns a length-n bitmap of the dense ids reachable from src along
+// directed edges (src itself included), computed by a textbook BFS over the
+// adjacency lists. It is the shared reference primitive for the reachability,
+// SCC, and transitive-closure checks.
+func (g *nameGraph) reachMask(src int) []bool {
 	n := len(g.names)
-	if src < 0 || src >= n {
-		return nil
-	}
 	seen := make([]bool, n)
+	if src < 0 || src >= n {
+		return seen
+	}
 	seen[src] = true
 	queue := []int{src}
 	for len(queue) > 0 {
@@ -189,7 +190,107 @@ func (g *nameGraph) naiveReachable(src int) []int {
 			}
 		}
 	}
-	return boolsToSortedIDs(seen)
+	return seen
+}
+
+// naiveReachable returns the sorted dense ids reachable from src. It is the
+// independent reference the search-package BFS/DFS reachability is compared to.
+func (g *nameGraph) naiveReachable(src int) []int {
+	return boolsToSortedIDs(g.reachMask(src))
+}
+
+// forwardReachAll returns the full forward-reachability matrix: fwd[u][v] is
+// true iff v is reachable from u (u itself included). It backs the SCC and
+// transitive-closure references; its O(n^2) footprint is why the callers gate it
+// behind a node-count cap.
+func (g *nameGraph) forwardReachAll() [][]bool {
+	n := len(g.names)
+	fwd := make([][]bool, n)
+	for u := 0; u < n; u++ {
+		fwd[u] = g.reachMask(u)
+	}
+	return fwd
+}
+
+// incidentMask returns a length-n bitmap of the nodes that take part in at least
+// one edge as source or destination. The search package's SCC and topological
+// sort cover exactly these nodes (isolated nodes are omitted), so the references
+// must restrict to the same universe.
+func (g *nameGraph) incidentMask() []bool {
+	n := len(g.names)
+	m := make([]bool, n)
+	for u := 0; u < n; u++ {
+		if len(g.out[u]) > 0 {
+			m[u] = true
+		}
+		for _, v := range g.out[u] {
+			m[v] = true
+		}
+	}
+	return m
+}
+
+// isAcyclic reports whether the directed graph has no cycle, via an independent
+// three-colour DFS (white/grey/black); a grey-target back edge — including a
+// self-loop — is a cycle. It decides which branch the topological-sort check
+// expects (a valid order vs ErrCycle).
+func (g *nameGraph) isAcyclic() bool {
+	n := len(g.names)
+	const (
+		white int8 = 0
+		grey  int8 = 1
+		black int8 = 2
+	)
+	color := make([]int8, n)
+	var dfs func(int) bool // reports whether a cycle is reachable from u
+	dfs = func(u int) bool {
+		color[u] = grey
+		for _, v := range g.out[u] {
+			if color[v] == grey {
+				return true
+			}
+			if color[v] == white && dfs(v) {
+				return true
+			}
+		}
+		color[u] = black
+		return false
+	}
+	for u := 0; u < n; u++ {
+		if color[u] == white && dfs(u) {
+			return false
+		}
+	}
+	return true
+}
+
+// naiveSCC returns the strongly-connected components (over edge-incident nodes
+// only, matching the search package) computed from the forward-reachability
+// matrix: u and v share a component iff each reaches the other. Each component is
+// a slice of dense ids.
+func (g *nameGraph) naiveSCC(fwd [][]bool) [][]int {
+	n := len(g.names)
+	incident := g.incidentMask()
+	assigned := make([]bool, n)
+	var comps [][]int
+	for u := 0; u < n; u++ {
+		if assigned[u] || !incident[u] {
+			continue
+		}
+		comp := []int{u}
+		assigned[u] = true
+		for v := u + 1; v < n; v++ {
+			if assigned[v] || !incident[v] {
+				continue
+			}
+			if fwd[u][v] && fwd[v][u] {
+				comp = append(comp, v)
+				assigned[v] = true
+			}
+		}
+		comps = append(comps, comp)
+	}
+	return comps
 }
 
 // naiveWCC returns a component label per node computed by a textbook union-find
@@ -264,6 +365,34 @@ func componentPartitionSig(labels []int) string {
 	sort.Slice(ordered, func(a, b int) bool { return ordered[a][0] < ordered[b][0] })
 	var sb strings.Builder
 	for bi, members := range ordered {
+		if bi > 0 {
+			sb.WriteByte(';')
+		}
+		for mi, m := range members {
+			if mi > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(strconv.Itoa(m))
+		}
+	}
+	return sb.String()
+}
+
+// componentsToSig renders a list of components (each a list of dense ids) as a
+// canonical signature of the partition, independent of component order: every
+// component is sorted, and the components are ordered by their minimum member.
+// Two component lists produce the same signature iff they describe the same
+// partition. The input components must be non-empty and disjoint.
+func componentsToSig(comps [][]int) string {
+	cc := make([][]int, len(comps))
+	for i, c := range comps {
+		cs := slices.Clone(c)
+		sort.Ints(cs)
+		cc[i] = cs
+	}
+	sort.Slice(cc, func(a, b int) bool { return cc[a][0] < cc[b][0] })
+	var sb strings.Builder
+	for bi, members := range cc {
 		if bi > 0 {
 			sb.WriteByte(';')
 		}
