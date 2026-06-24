@@ -206,6 +206,26 @@ SimDisk survives. The store is then reopened through the real recovery path
 A recovery that detects genuine corruption fails stop (a typed error), which the
 run surfaces rather than swallowing.
 
+### Snapshot + WAL-tail crash recovery
+
+Beyond the WAL-only path, the harness exercises the **snapshot + WAL-tail**
+recovery on the live engine: a self-sufficient snapshot of the committed state is
+published to the SimDisk, further commits append to the WAL tail, and a crash
+drops the in-memory engine. Recovery through `recovery.OpenFS` promotes the last
+fully-published snapshot and folds the WAL tail back, reconstructing the exact
+committed state (`internal/sim/checkpoint_crash_test.go` — both the
+snapshot+tail and snapshot-only arms). The durability-ordering boundary itself
+(snapshot published *before* the WAL prefix is truncated, crash mid-publish drops
+the staging dirents and the full WAL replays) is proven at the component level in
+`disk_fullstack_test.go` / `disk_checkpoint_test.go`.
+
+A *Checkpointer-driven* checkpoint (which additionally truncates the WAL prefix
+via `wal.Writer.TruncatePrefix`) is not yet wired into the live SimDisk stack:
+that truncation requires a path-backed WAL writer, while the SimDisk WAL is
+handle-backed. Closing that gap needs a WAL filesystem seam and is tracked
+separately; the recovery fold it would feed is already covered by the tests
+above.
+
 ## Disk exhaustion (ENOSPC)
 
 `SimDisk` carries an optional byte budget (`SetCapacity`, surfaced as
