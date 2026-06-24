@@ -55,6 +55,22 @@ func RangeSeekVariantPair() (EngineVariant, EngineVariant) {
 		EngineVariant{Name: "no-range-seek", Options: cypher.EngineOptions{DisableRangeIndexSeek: true}}
 }
 
+// ParallelScanVariantPair returns the PARALLELISM differential pair: the
+// morsel-parallel count fast path (#1672) versus the serial EagerAggregation
+// pipeline, proving they produce a BIT-IDENTICAL observable result. Variant A
+// lowers ParallelScanThreshold to 1 so the parallel count reduce engages on the
+// small trace graph (it is gated on a 50k-node default that a scripted trace
+// never reaches); variant B forces the serial path with DisableParallelScan.
+// The post-op count(n)/count(r) signatures stepSignature computes therefore come
+// from the parallel reduce on A and the serial path on B, so any divergence in
+// the parallel reduce surfaces here. The int64 partial-sum reduce is associative
+// and partition-invariant, so the two MUST agree exactly. This brings the
+// engine's multithread/parallel count path under the DST differential.
+func ParallelScanVariantPair() (EngineVariant, EngineVariant) {
+	return EngineVariant{Name: "parallel-scan", Options: cypher.EngineOptions{ParallelScanThreshold: 1}},
+		EngineVariant{Name: "serial-scan", Options: cypher.EngineOptions{DisableParallelScan: true}}
+}
+
 // DiffResult is the outcome of a differential run: whether the two variants
 // agreed, and on a divergence the first op index, the op, and the two
 // (canonicalised) observable signatures that differed.

@@ -239,7 +239,16 @@ edge was actually added.
 - **Differential**, **upgrade**, **cross-release**, and **metrics-oracle** modes
   cross-check equivalent engine configurations, WAL data-compatibility across
   releases, and metrics against the oracle. See the corresponding `*_test.go`
-  files in `internal/sim/`.
+  files in `internal/sim/`. The differential variant pairs prove that
+  result-equivalent engine toggles produce byte-identical observable output on
+  the same trace: `DefaultVariantPair` (hash-join on/off), `RangeSeekVariantPair`
+  (range index seek on/off), and `ParallelScanVariantPair` (the morsel-parallel
+  count reduce versus the serial path) — the last brings the engine's
+  multithread/parallel count path under the DST. The serial-vs-parallel CREATE
+  INDEX backfill is proven content-identical at the engine level
+  (`cypher.TestBackfillNodeHashIndex_SerialVsParallelIdentical`, via
+  `EngineOptions.DisableParallelBackfill`), since a backfill engages its parallel
+  phase only above 8192 nodes — more than a scripted trace builds.
 
 ## Command-line usage
 

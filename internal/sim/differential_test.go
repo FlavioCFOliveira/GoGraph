@@ -42,6 +42,23 @@ func TestDifferential_IdenticalVariantsAgreeShort(t *testing.T) {
 	}
 }
 
+// TestDifferential_ParallelScanAgreesShort is the short-layer parallelism
+// differential: the morsel-parallel count reduce (threshold lowered to 1 so it
+// engages on the small trace graph) must produce byte-identical observable
+// output to the forced-serial path. It brings the engine's parallel count path
+// under the DST on every PR; the full seed sweep is in the soak matrix below.
+func TestDifferential_ParallelScanAgreesShort(t *testing.T) {
+	trace := recordTraceForDiff(t, 0x5217E, 120)
+	a, b := ParallelScanVariantPair()
+	res, err := DifferentialTrace(context.Background(), trace, &a, &b)
+	if err != nil {
+		t.Fatalf("DifferentialTrace: %v", err)
+	}
+	if !res.Agreed {
+		t.Fatalf("parallel-scan and serial-scan diverged (a parallel-reduce regression):\n%s", res.String())
+	}
+}
+
 // TestDifferential_IdenticalVariantsAgree is the PRIMARY positive case: the
 // engine's default plan and the same engine with the hash-join (and,
 // separately, the range-seek) optimisation disabled MUST produce byte-identical
@@ -59,6 +76,7 @@ func TestDifferential_IdenticalVariantsAgree(t *testing.T) {
 	}{
 		{"hash-join", DefaultVariantPair},
 		{"range-seek", RangeSeekVariantPair},
+		{"parallel-scan", ParallelScanVariantPair},
 	}
 	seeds := []uint64{0x5217E, 0xC0FFEE, 0xDA7A}
 	for _, p := range pairs {
