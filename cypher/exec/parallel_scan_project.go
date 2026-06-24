@@ -72,7 +72,6 @@ package exec
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"runtime/pprof"
 	"sync"
 
@@ -105,6 +104,7 @@ type ParallelScanProject struct {
 	g          nodeWalker
 	morselSize int
 	factory    SubplanFactory
+	gov        *ParallelGovernor // adaptive worker-budget governor (nil = unbounded)
 
 	ctx     context.Context    //nolint:containedctx // stored for per-Next ctx check
 	cancel  context.CancelFunc // cancels the worker context
@@ -112,6 +112,7 @@ type ParallelScanProject struct {
 	results [][]Row // one private result buffer per worker; read only after wg.Wait
 	workErr chan error
 	initErr error // error captured during Init (e.g. cancellation, factory build)
+	entered bool  // true once gov.Enter ran, so Close calls gov.Leave exactly once
 
 	joined bool  // true once the workers have been joined
 	combo  []Row // concatenated worker results, streamed by Next
@@ -121,11 +122,11 @@ type ParallelScanProject struct {
 // NewParallelScanProject creates a ParallelScanProject over g whose per-worker
 // fused sub-plans are built by factory. morselSize controls the chunk size per
 // worker; pass 0 to use [DefaultMorselSize].
-func NewParallelScanProject(g nodeWalker, factory SubplanFactory, morselSize int) *ParallelScanProject {
+func NewParallelScanProject(g nodeWalker, factory SubplanFactory, morselSize int, gov *ParallelGovernor) *ParallelScanProject {
 	if morselSize <= 0 {
 		morselSize = DefaultMorselSize
 	}
-	return &ParallelScanProject{g: g, morselSize: morselSize, factory: factory}
+	return &ParallelScanProject{g: g, morselSize: morselSize, factory: factory, gov: gov}
 }
 
 // Init collects all node IDs, partitions them into morsels, builds one
@@ -179,10 +180,12 @@ func (op *ParallelScanProject) Init(ctx context.Context) error {
 
 	morsels := splitMorsels(nodeIDs, op.morselSize)
 
-	nWorkers := runtime.GOMAXPROCS(0)
-	if nWorkers > len(morsels) {
-		nWorkers = len(morsels)
-	}
+	// Adaptive worker budget: divide the GOMAXPROCS pool by the number of
+	// parallel leaves in flight across all concurrent queries, so N concurrent
+	// scans don't each spawn GOMAXPROCS workers (#1705). Register here (after we
+	// know there is work) and deregister in Close, guarded by op.entered.
+	nWorkers := op.gov.Enter(len(morsels))
+	op.entered = true
 
 	// Bounded work channel pre-filled with every morsel (cap == morsel count),
 	// so no send blocks and the channel is closed before any worker starts.
@@ -348,5 +351,9 @@ func (op *ParallelScanProject) Close() error {
 		op.cancel()
 	}
 	op.wg.Wait()
+	if op.entered {
+		op.gov.Leave()
+		op.entered = false
+	}
 	return nil
 }

@@ -354,6 +354,12 @@ type buildOpts struct {
 	// zero only when the graph is empty — so the resolved Engine value is always
 	// positive.
 	parallelScanThreshold int
+	// parallelGov is the engine-shared adaptive worker-budget governor (#1705),
+	// set from the Engine field on the read-path build and handed to every
+	// morsel-parallel leaf constructed for this query. nil on every other build
+	// path (write path, public BuildPlanWithMutator, tests), which means the leaf
+	// gets the full unbounded GOMAXPROCS budget — the prior behaviour.
+	parallelGov *exec.ParallelGovernor
 	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
 	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
 	// the stable per-edge handle and the per-CREATE instance index at a forward
@@ -670,6 +676,13 @@ type Engine struct {
 	// the constructor.
 	parallelScanThreshold int
 
+	// parallelGov is the engine-shared adaptive worker-budget governor (#1705)
+	// passed to every morsel-parallel leaf (ParallelCountScan, ParallelScanProject)
+	// this engine builds. It divides the GOMAXPROCS worker pool across the parallel
+	// queries currently in flight so concurrent scans do not oversubscribe the
+	// cores. Created once per Engine; safe for concurrent use.
+	parallelGov *exec.ParallelGovernor
+
 	// writeMu is the engine-level single-writer serialisation used ONLY when
 	// the engine is store-less (store == nil). A WAL-backed engine instead
 	// serialises every write on the store's own single-writer mutex (taken in
@@ -873,6 +886,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 
 		parallelScanEnabled:   !opts.DisableParallelScan,
 		parallelScanThreshold: resolveParallelScanThreshold(opts.ParallelScanThreshold),
+		parallelGov:           &exec.ParallelGovernor{},
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
 		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },
@@ -1455,6 +1469,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// pipeline.
 		bopts.parallelScanEnabled = e.parallelScanEnabled
 		bopts.parallelScanThreshold = e.parallelScanThreshold
+		bopts.parallelGov = e.parallelGov
 		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
 			buildErr = err
@@ -5741,7 +5756,7 @@ func tryBuildParallelScanProject(
 	}
 
 	parallelScanProjectBuildCount.Add(1)
-	return exec.NewParallelScanProject(lw, factory, 0), true, nil
+	return exec.NewParallelScanProject(lw, factory, 0, bopts.parallelGov), true, nil
 }
 
 // scanVarOf returns the bound variable of an AllNodesScan IR node, or "" when
@@ -5996,8 +6011,12 @@ func tryBuildParallelCountScan(
 		}
 		bopts.scalarCols[agg.OutputName] = struct{}{}
 	}
+	var gov *exec.ParallelGovernor
+	if bopts != nil {
+		gov = bopts.parallelGov
+	}
 	parallelCountScanBuildCount.Add(1)
-	return exec.NewParallelCountScan(walker, 0), true
+	return exec.NewParallelCountScan(walker, 0, gov), true
 }
 
 // buildEagerAggregation builds the physical EagerAggregation operator from the

@@ -67,7 +67,6 @@ package exec
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"runtime/pprof"
 	"sync"
 
@@ -84,12 +83,14 @@ import (
 type ParallelCountScan struct {
 	g          nodeWalker
 	morselSize int
+	gov        *ParallelGovernor // adaptive worker-budget governor (nil = unbounded)
 
 	ctx      context.Context    //nolint:containedctx // stored for per-Next ctx check
 	cancel   context.CancelFunc // cancels the worker context
 	wg       sync.WaitGroup
 	partials []int64 // one private counter per worker; read only after wg.Wait
 	initErr  error   // error captured during Init (e.g. cancellation)
+	entered  bool    // true once gov.Enter ran, so Close calls gov.Leave exactly once
 
 	joined bool // true once the workers have been joined and the total combined
 	total  int64
@@ -97,12 +98,13 @@ type ParallelCountScan struct {
 }
 
 // NewParallelCountScan creates a ParallelCountScan over g. morselSize controls
-// the chunk size per worker; pass 0 to use [DefaultMorselSize].
-func NewParallelCountScan(g nodeWalker, morselSize int) *ParallelCountScan {
+// the chunk size per worker; pass 0 to use [DefaultMorselSize]. gov is the
+// engine-shared adaptive worker-budget governor (nil = unbounded GOMAXPROCS).
+func NewParallelCountScan(g nodeWalker, morselSize int, gov *ParallelGovernor) *ParallelCountScan {
 	if morselSize <= 0 {
 		morselSize = DefaultMorselSize
 	}
-	return &ParallelCountScan{g: g, morselSize: morselSize}
+	return &ParallelCountScan{g: g, morselSize: morselSize, gov: gov}
 }
 
 // Init collects all node IDs, partitions them into morsels, and launches worker
@@ -143,10 +145,12 @@ func (op *ParallelCountScan) Init(ctx context.Context) error {
 
 	morsels := splitMorsels(nodeIDs, op.morselSize)
 
-	nWorkers := runtime.GOMAXPROCS(0)
-	if nWorkers > len(morsels) {
-		nWorkers = len(morsels)
-	}
+	// Adaptive worker budget shared across concurrent queries (#1705): divide
+	// the GOMAXPROCS pool by the number of parallel leaves in flight so N
+	// concurrent scans don't each spawn GOMAXPROCS workers. Register here (work
+	// exists) and deregister in Close, guarded by op.entered.
+	nWorkers := op.gov.Enter(len(morsels))
+	op.entered = true
 
 	// Bounded work channel pre-filled with every morsel (cap == morsel count),
 	// so no send blocks and the channel is closed before any worker starts.
@@ -227,5 +231,9 @@ func (op *ParallelCountScan) Close() error {
 		op.cancel()
 	}
 	op.wg.Wait()
+	if op.entered {
+		op.gov.Leave()
+		op.entered = false
+	}
 	return nil
 }

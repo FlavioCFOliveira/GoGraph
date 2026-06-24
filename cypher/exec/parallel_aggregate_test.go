@@ -21,7 +21,7 @@ import (
 // drainCount runs a ParallelCountScan and returns the single emitted count.
 func drainCount(t *testing.T, walker *staticNodeWalker, morselSize int) int64 {
 	t.Helper()
-	op := exec.NewParallelCountScan(walker, morselSize)
+	op := exec.NewParallelCountScan(walker, morselSize, nil)
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
@@ -95,7 +95,7 @@ func TestParallelCountScan_Cancellation(t *testing.T) {
 
 	const n = 1_000_000
 	walker := buildWalker(n)
-	op := exec.NewParallelCountScan(walker, exec.DefaultMorselSize)
+	op := exec.NewParallelCountScan(walker, exec.DefaultMorselSize, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -124,7 +124,7 @@ func TestParallelCountScan_RaceClean(t *testing.T) {
 	results := make(chan int64, goroutines)
 	for range goroutines {
 		go func() {
-			op := exec.NewParallelCountScan(walker, 64)
+			op := exec.NewParallelCountScan(walker, 64, nil)
 			rows, err := exec.Drain(context.Background(), op)
 			if err != nil || len(rows) != 1 {
 				results <- -1
@@ -146,7 +146,7 @@ func TestParallelCountScan_RaceClean(t *testing.T) {
 func TestParallelCountScan_CloseWithoutNext(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	op := exec.NewParallelCountScan(buildWalker(100_000), 16)
+	op := exec.NewParallelCountScan(buildWalker(100_000), 16, nil)
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

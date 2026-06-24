@@ -64,7 +64,7 @@ func serialEvenTimesTen(ids []graph.NodeID) []int64 {
 // values it emits, sorted (a full scan is unordered).
 func drainProject(t *testing.T, walker *staticNodeWalker, factory exec.SubplanFactory, morselSize int) []int64 {
 	t.Helper()
-	op := exec.NewParallelScanProject(walker, factory, morselSize)
+	op := exec.NewParallelScanProject(walker, factory, morselSize, nil)
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
@@ -176,7 +176,7 @@ func TestParallelScanProject_Cancellation(t *testing.T) {
 
 	const n = 1_000_000
 	walker := buildWalker(n)
-	op := exec.NewParallelScanProject(walker, evenTimesTenFactory, exec.DefaultMorselSize)
+	op := exec.NewParallelScanProject(walker, evenTimesTenFactory, exec.DefaultMorselSize, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -212,7 +212,7 @@ func TestParallelScanProject_SubplanError(t *testing.T) {
 		}})
 	}
 
-	op := exec.NewParallelScanProject(buildWalker(5000), failFactory, 64)
+	op := exec.NewParallelScanProject(buildWalker(5000), failFactory, 64, nil)
 	_, err := exec.Drain(context.Background(), op)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Drain error = %v, want it to wrap %v", err, sentinel)
@@ -226,7 +226,7 @@ func TestParallelScanProject_FactoryError(t *testing.T) {
 	sentinel := errors.New("factory failed")
 	op := exec.NewParallelScanProject(buildWalker(5000), func(_ []graph.NodeID) (exec.Operator, error) {
 		return nil, sentinel
-	}, 64)
+	}, 64, nil)
 	_, err := exec.Drain(context.Background(), op)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Drain error = %v, want it to wrap %v", err, sentinel)
@@ -237,7 +237,7 @@ func TestParallelScanProject_FactoryError(t *testing.T) {
 func TestParallelScanProject_CloseWithoutNext(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	op := exec.NewParallelScanProject(buildWalker(100_000), evenTimesTenFactory, 16)
+	op := exec.NewParallelScanProject(buildWalker(100_000), evenTimesTenFactory, 16, nil)
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestParallelScanProject_RaceClean(t *testing.T) {
 	results := make(chan bool, goroutines)
 	for range goroutines {
 		go func() {
-			op := exec.NewParallelScanProject(walker, evenTimesTenFactory, 64)
+			op := exec.NewParallelScanProject(walker, evenTimesTenFactory, 64, nil)
 			rows, err := exec.Drain(context.Background(), op)
 			if err != nil {
 				results <- false
