@@ -211,7 +211,11 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 		}
 	}
 
-	nodeRecs, err := collectNodePropertyRecords(g, keys)
+	// One value arena shared by the node and edge collectors: the collected
+	// records' ValueBytes are sub-slices into its chunks, which stay alive until
+	// they are written below.
+	arena := &propValueArena{}
+	nodeRecs, err := collectNodePropertyRecords(g, keys, arena)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 		return 0, 0, err
@@ -234,7 +238,7 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 		nodeBytes += nb
 	}
 
-	edgeRecs, err := collectEdgePropertyRecords(g, keys)
+	edgeRecs, err := collectEdgePropertyRecords(g, keys, arena)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 		return 0, 0, err
@@ -358,29 +362,49 @@ func snapshotPropertyKeys(reg *lpg.PropertyKeyRegistry) []string {
 func collectNodePropertyRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
 	keys []string,
+	arena *propValueArena,
 ) ([]NodePropertyEntry, error) {
 	idx := buildKeyIndex(keys)
 	out := make([]NodePropertyEntry, 0, 32)
-	// Snapshot node IDs inside Mapper.Walk; resolve properties afterwards via the
-	// lock-free [lpg.Graph.NodePropertiesByID]. Resolving inside the callback
-	// would re-enter the Mapper and deadlock against a concurrent intern
-	// (#1648 — see [collectInternedNodeIDs]).
+	// Snapshot node IDs inside Mapper.Walk; resolve properties afterwards by
+	// streaming each node's bag through the lock-free
+	// [lpg.Graph.NodePropertiesByIDFunc], which holds only the property-shard
+	// read lock and never re-enters the Mapper (so it is safe against a
+	// concurrent intern, #1648 — see [collectInternedNodeIDs]). Streaming avoids
+	// the throwaway map[string]PropertyValue that NodePropertiesByID allocates
+	// per node, and the values are packed into the shared arena rather than a
+	// []byte per value — the two dominant allocations of the prior collector.
+	// The visit closure is defined ONCE and reused for every node (it captures
+	// the stable idx/arena/out plus a per-node curNodeID), so NodePropertiesByIDFunc
+	// does not allocate a fresh escaping closure per node.
+	var visitErr error
+	var curNodeID uint64
+	visit := func(key string, val lpg.PropertyValue) {
+		if visitErr != nil {
+			return
+		}
+		ki, ok := idx[key]
+		if !ok {
+			visitErr = fmt.Errorf("snapshot: node property key %q not in registry snapshot", key)
+			return
+		}
+		vb, encErr := encodePropertyValueInto(arena, val)
+		if encErr != nil {
+			visitErr = encErr
+			return
+		}
+		out = append(out, NodePropertyEntry{
+			NodeID:     curNodeID,
+			KeyIdx:     ki,
+			Kind:       val.Kind(),
+			ValueBytes: vb,
+		})
+	}
 	for _, id := range collectInternedNodeIDs(g) {
-		for key, val := range g.NodePropertiesByID(id) {
-			ki, ok := idx[key]
-			if !ok {
-				return nil, fmt.Errorf("snapshot: node property key %q not in registry snapshot", key)
-			}
-			vb, encErr := encodePropertyValue(val)
-			if encErr != nil {
-				return nil, encErr
-			}
-			out = append(out, NodePropertyEntry{
-				NodeID:     uint64(id),
-				KeyIdx:     ki,
-				Kind:       val.Kind(),
-				ValueBytes: vb,
-			})
+		curNodeID = uint64(id)
+		g.NodePropertiesByIDFunc(id, visit)
+		if visitErr != nil {
+			return nil, visitErr
 		}
 	}
 	return out, nil
@@ -395,37 +419,67 @@ func collectNodePropertyRecords[N comparable, W any](
 func collectEdgePropertyRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
 	keys []string,
+	arena *propValueArena,
 ) ([]EdgePropertyEntry, error) {
 	idx := buildKeyIndex(keys)
 	out := make([]EdgePropertyEntry, 0, 32)
 	adj := g.AdjList()
+	// seen dedups the (possibly parallel-edge) destinations of one source so each
+	// (src,dst) pair is emitted once; coalesce reproduces EdgePropertiesByID's
+	// per-pair last-write-wins map by keyIdx. Both are allocated ONCE and cleared
+	// per source / per pair, replacing the per-source `seen` map and the per-pair
+	// map that EdgePropertiesByID allocates (the dominant edge-path allocations);
+	// values are packed into the shared arena rather than a []byte each.
+	//
 	// Snapshot source IDs inside Mapper.Walk; resolve adjacency and edge
 	// properties afterwards via the lock-free [adjlist.AdjList.LoadEntry] and
-	// [lpg.Graph.EdgePropertiesByID]. Neither re-enters the Mapper, so this is
-	// safe against a concurrent intern (#1648 — see [collectInternedNodeIDs]).
+	// [lpg.Graph.ForEachEdgePropertyByID]. Neither re-enters the Mapper, so this
+	// is safe against a concurrent intern (#1648 — see [collectInternedNodeIDs]).
+	seen := make(map[graph.NodeID]struct{}, 16)
+	coalesce := make(map[uint32]lpg.PropertyValue, 4)
+	var visitErr error
+	// The visit closure is defined ONCE and reused for every pair (it captures
+	// the stable idx and the reused coalesce map), so ForEachEdgePropertyByID does
+	// not allocate a fresh escaping closure per pair. It coalesces the pair's
+	// properties last-write-wins by keyIdx, matching EdgePropertiesByID (which
+	// builds the same map and is itself defined in terms of ForEachEdgePropertyByID).
+	visit := func(key string, val lpg.PropertyValue) {
+		if visitErr != nil {
+			return
+		}
+		ki, ok := idx[key]
+		if !ok {
+			visitErr = fmt.Errorf("snapshot: edge property key %q not in registry snapshot", key)
+			return
+		}
+		coalesce[ki] = val
+	}
 	for _, srcID := range collectInternedNodeIDs(g) {
 		neighbours, _ := adj.LoadEntry(srcID)
 		if len(neighbours) == 0 {
 			continue
 		}
-		seen := make(map[graph.NodeID]struct{}, len(neighbours))
+		src := uint64(srcID)
+		clear(seen)
 		for _, dstID := range neighbours {
 			if _, dup := seen[dstID]; dup {
 				continue
 			}
 			seen[dstID] = struct{}{}
-			for key, val := range g.EdgePropertiesByID(srcID, dstID) {
-				ki, ok := idx[key]
-				if !ok {
-					return nil, fmt.Errorf("snapshot: edge property key %q not in registry snapshot", key)
-				}
-				vb, encErr := encodePropertyValue(val)
+			clear(coalesce)
+			g.ForEachEdgePropertyByID(srcID, dstID, visit)
+			if visitErr != nil {
+				return nil, visitErr
+			}
+			dst := uint64(dstID)
+			for ki, val := range coalesce {
+				vb, encErr := encodePropertyValueInto(arena, val)
 				if encErr != nil {
 					return nil, encErr
 				}
 				out = append(out, EdgePropertyEntry{
-					Src:        uint64(srcID),
-					Dst:        uint64(dstID),
+					Src:        src,
+					Dst:        dst,
 					KeyIdx:     ki,
 					Kind:       val.Kind(),
 					ValueBytes: vb,
@@ -516,6 +570,93 @@ func encodeListPropertyValue(v lpg.PropertyValue) ([]byte, error) {
 		buf = append(buf, payload...)
 	}
 	return buf, nil
+}
+
+// propValueArena packs encoded property-value bytes into chunked backing
+// buffers so the snapshot writer allocates a handful of chunks instead of one
+// []byte per property value. A value's bytes are a three-index sub-slice of a
+// chunk; when a chunk cannot fit the next value a fresh chunk is started,
+// leaving the previous chunk alive via the sub-slices already handed out (which
+// the collected records retain until they are written). It is owned by the
+// single snapshot-writer goroutine and is NOT safe for concurrent use.
+type propValueArena struct{ chunk []byte }
+
+// propValueArenaChunk is the default backing-chunk size; a value larger than it
+// gets its own exact-sized chunk.
+const propValueArenaChunk = 64 << 10
+
+// reserve returns a sub-slice of length n (capped to n) for the caller to write
+// the value bytes into. The region is drawn from freshly-extended, zero-filled
+// chunk capacity, so it never aliases a previously returned slice.
+func (a *propValueArena) reserve(n int) []byte {
+	if n == 0 {
+		return nil
+	}
+	if cap(a.chunk)-len(a.chunk) < n {
+		sz := propValueArenaChunk
+		if n > sz {
+			sz = n
+		}
+		a.chunk = make([]byte, 0, sz)
+	}
+	start := len(a.chunk)
+	a.chunk = a.chunk[:start+n]
+	return a.chunk[start : start+n : start+n]
+}
+
+// encodePropertyValueInto is the arena-backed counterpart of
+// [encodePropertyValue]: it writes v's on-disk bytes into the arena and returns
+// the owning sub-slice, byte-identical to encodePropertyValue's output but
+// without a per-value heap allocation. PropList falls back to the recursive
+// encoder + one copy (lists are rare and nested lists are rejected).
+func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, error) {
+	switch v.Kind() {
+	case lpg.PropString:
+		s, _ := v.String()
+		b := a.reserve(len(s))
+		copy(b, s)
+		return b, nil
+	case lpg.PropInt64:
+		i, _ := v.Int64()
+		b := a.reserve(fixed64ValueSize)
+		binary.LittleEndian.PutUint64(b, uint64(i))
+		return b, nil
+	case lpg.PropFloat64:
+		f, _ := v.Float64()
+		b := a.reserve(fixed64ValueSize)
+		binary.LittleEndian.PutUint64(b, math.Float64bits(f))
+		return b, nil
+	case lpg.PropBool:
+		bb, _ := v.Bool()
+		b := a.reserve(1)
+		if bb {
+			b[0] = 0x01
+		} else {
+			b[0] = 0x00
+		}
+		return b, nil
+	case lpg.PropTime:
+		t, _ := v.Time()
+		b := a.reserve(timeValueSize)
+		binary.LittleEndian.PutUint64(b[0:8], uint64(t.Unix()))
+		binary.LittleEndian.PutUint64(b[8:16], uint64(t.Nanosecond()))
+		return b, nil
+	case lpg.PropBytes:
+		src, _ := v.Bytes()
+		b := a.reserve(len(src))
+		copy(b, src)
+		return b, nil
+	case lpg.PropList:
+		payload, err := encodeListPropertyValue(v)
+		if err != nil {
+			return nil, err
+		}
+		b := a.reserve(len(payload))
+		copy(b, payload)
+		return b, nil
+	default:
+		return nil, fmt.Errorf("snapshot: unknown property kind %d", v.Kind())
+	}
 }
 
 // ReadProperties parses a properties.bin payload produced by
