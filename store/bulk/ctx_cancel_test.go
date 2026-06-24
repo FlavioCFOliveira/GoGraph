@@ -66,8 +66,20 @@ func TestLoader_CtxCancelMidDrain(t *testing.T) {
 		done <- result{n, err}
 	}()
 
-	// Cancel after the goroutine has had time to consume the buffered edges.
-	time.Sleep(10 * time.Millisecond)
+	// Wait until Drain has consumed all 5 buffered edges, then cancel mid-drain.
+	// Synchronising on len(ch)==0 (safe to read concurrently with the receiving
+	// goroutine) makes the "n >= 5" guarantee deterministic rather than relying
+	// on a fixed sleep that flakes under the loaded -race suite's scheduler
+	// pressure (the edges are buffered, so the receiver drains them promptly and
+	// then blocks on the un-closed channel — exactly the mid-drain state we want
+	// to cancel from).
+	consumeDeadline := time.Now().Add(2 * time.Second)
+	for len(ch) > 0 {
+		if time.Now().After(consumeDeadline) {
+			t.Fatal("Drain did not consume the buffered edges within 2s")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 
 	select {
@@ -78,8 +90,8 @@ func TestLoader_CtxCancelMidDrain(t *testing.T) {
 		if r.n < 5 {
 			t.Fatalf("Drain returned %d, want at least 5 (buffered edges before cancel)", r.n)
 		}
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("Drain did not return within 50ms after context cancel")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not return within 2s after context cancel")
 	}
 
 	if l.Rows() < 5 {
