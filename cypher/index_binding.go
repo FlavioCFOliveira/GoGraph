@@ -177,7 +177,10 @@ func (e *Engine) backfillNodeHashIndex(ctx context.Context, idx *indexhash.Index
 	}
 
 	workers := runtime.GOMAXPROCS(0)
-	if len(refs) < backfillParallelMinNodes || workers <= 1 {
+	// A forced-serial backfill (EngineOptions.DisableParallelBackfill) takes the
+	// single-goroutine path regardless of size; both paths populate identical
+	// index contents, which the serial-vs-parallel differential test relies on.
+	if !e.parallelBackfillEnabled || len(refs) < backfillParallelMinNodes || workers <= 1 {
 		return processRange(0, len(refs))
 	}
 	if workers > len(refs) {

@@ -576,6 +576,18 @@ type EngineOptions struct {
 	// spawning workers only happens when there is enough work to amortise it.
 	// Ignored when [DisableParallelScan] is true.
 	ParallelScanThreshold int
+
+	// DisableParallelBackfill turns OFF the morsel-parallel phase-2 of a
+	// CREATE INDEX backfill ([Engine.backfillNodeHashIndex]). When false (the
+	// default) a backfill over at least backfillParallelMinNodes nodes is
+	// partitioned across a bounded worker pool (capped at GOMAXPROCS); setting it
+	// true forces the serial single-goroutine backfill. The two paths populate
+	// byte-identical index contents (insertion is set-semantic and
+	// order-independent), so this exists for the differential test that proves
+	// serial and parallel backfill agree, and as an operational escape hatch. It
+	// never changes durability or the registered index — only the backfill's
+	// internal concurrency.
+	DisableParallelBackfill bool
 }
 
 // DefaultParallelScanThreshold is the default minimum live node count above
@@ -668,6 +680,12 @@ type Engine struct {
 	// by default; set false by EngineOptions.DisableParallelScan. When false the
 	// planner always builds the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
+
+	// parallelBackfillEnabled gates the morsel-parallel phase-2 of a CREATE INDEX
+	// backfill. True by default; set false by EngineOptions.DisableParallelBackfill.
+	// When false the backfill always runs serially. Both paths produce identical
+	// index contents.
+	parallelBackfillEnabled bool
 
 	// parallelScanThreshold is the minimum live node count (strict >) above which
 	// the planner prefers the parallel count reduce over the serial
@@ -884,9 +902,10 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		hashJoinEnabled:  !opts.DisableHashJoin,
 		rangeSeekEnabled: !opts.DisableRangeIndexSeek,
 
-		parallelScanEnabled:   !opts.DisableParallelScan,
-		parallelScanThreshold: resolveParallelScanThreshold(opts.ParallelScanThreshold),
-		parallelGov:           &exec.ParallelGovernor{},
+		parallelScanEnabled:     !opts.DisableParallelScan,
+		parallelBackfillEnabled: !opts.DisableParallelBackfill,
+		parallelScanThreshold:   resolveParallelScanThreshold(opts.ParallelScanThreshold),
+		parallelGov:             &exec.ParallelGovernor{},
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
 		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },

@@ -73,6 +73,50 @@ func TestBackfillNodeHashIndex_ParallelContentsIdentical(t *testing.T) {
 	}
 }
 
+// TestBackfillNodeHashIndex_SerialVsParallelIdentical drives the SAME
+// above-threshold graph through both the parallel backfill (the default) and the
+// forced-serial backfill (EngineOptions.DisableParallelBackfill ⇒
+// parallelBackfillEnabled=false) and asserts the two indexes are content-identical
+// for every seeded name. This is the engine half of the parallel-differential DST
+// dimension (#1747): a serial/parallel mismatch is sharper than -race alone (a
+// race-clean run can still drop a node under a hot-shard partition).
+func TestBackfillNodeHashIndex_SerialVsParallelIdentical(t *testing.T) {
+	t.Parallel()
+	const n = backfillParallelMinNodes*3 + 77 // well above the parallel floor
+
+	build := func(parallel bool) map[string]uint64 {
+		g, names := seedLabeledNamed(t, n, "Person")
+		e := NewEngine(g)
+		e.parallelBackfillEnabled = parallel // white-box toggle of the gate
+		idx, err := newBoundNodeHashIndex(e.g, "Person", "name")
+		if err != nil {
+			t.Fatalf("newBoundNodeHashIndex: %v", err)
+		}
+		if berr := e.backfillNodeHashIndex(context.Background(), idx, "Person", "name"); berr != nil {
+			t.Fatalf("backfill (parallel=%v): %v", parallel, berr)
+		}
+		card := make(map[string]uint64, len(names))
+		for name := range names {
+			card[name] = idx.Lookup(name).GetCardinality()
+		}
+		return card
+	}
+
+	par := build(true)
+	ser := build(false)
+	if len(par) != len(ser) {
+		t.Fatalf("name-set size differs: parallel=%d serial=%d", len(par), len(ser))
+	}
+	for name, pc := range par {
+		if sc := ser[name]; sc != pc {
+			t.Fatalf("cardinality mismatch for %q: parallel=%d serial=%d", name, pc, sc)
+		}
+		if pc != 1 {
+			t.Fatalf("Lookup(%q) cardinality = %d, want 1", name, pc)
+		}
+	}
+}
+
 // TestBackfillNodeHashIndex_ContextCancelled verifies the parallel backfill
 // honours an already-cancelled context: it stops and returns the context error
 // (the partial index is discarded by the caller, never registered).
