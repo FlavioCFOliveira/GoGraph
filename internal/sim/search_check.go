@@ -133,6 +133,10 @@ func searchAlgorithmViolations(tick int64, g *nameGraph) []Violation {
 		vs = append(vs, sccViolations(tick, g, c, fwd)...)
 		vs = append(vs, tcViolations(tick, g, c, fwd)...)
 	}
+
+	// Weighted shortest paths: SSSP/APSP over a deterministically-weighted view
+	// of the same graph (see search_sssp.go), compared on distance maps.
+	vs = append(vs, ssspViolations(tick, g)...)
 	return vs
 }
 

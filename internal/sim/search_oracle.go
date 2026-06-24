@@ -2,6 +2,7 @@ package sim
 
 import (
 	"context"
+	"hash/fnv"
 	"slices"
 	"sort"
 	"strconv"
@@ -148,6 +149,85 @@ func (g *nameGraph) toCSR() *csr.CSR[float64] {
 		}
 	}
 	return csr.FromArrays[float64](vertices, edges, nil, uint64(n), total)
+}
+
+// edgeWeight returns a deterministic, small, positive, integer-valued weight for
+// a directed edge, as a float64. Integer-valued weights keep float64 path sums
+// exact (well within 2^53), so the weighted-algorithm comparisons stay bit-stable.
+//
+// The weight is synthesised from the endpoint names rather than read from the
+// engine, so the weighted checks need no change to the workload, the oracle, or
+// the engine's stored data: both the algorithm input ([nameGraph.toWeightedCSR])
+// and the naive references derive weights from this one function, so they agree
+// by construction. Validating the engine's STORED edge weights is a separate
+// concern (edge-property coverage), not this algorithm-correctness check.
+func edgeWeight(src, dst string) float64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(src))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(dst))
+	return float64(1 + h.Sum32()%16) // 1..16
+}
+
+// toWeightedCSR materialises the graph as an immutable CSR carrying the
+// deterministic [edgeWeight] of each edge in the parallel weights column. It is
+// the input to the weighted shortest-path checks; the dense labelling matches
+// [nameGraph.toCSR].
+func (g *nameGraph) toWeightedCSR() *csr.CSR[float64] {
+	n := len(g.names)
+	if n == 0 {
+		return csr.FromArrays[float64]([]uint64{0}, nil, nil, 0, 0)
+	}
+	vertices := make([]uint64, n+1)
+	var total uint64
+	for i := 0; i < n; i++ {
+		vertices[i] = total
+		total += uint64(len(g.out[i]))
+	}
+	vertices[n] = total
+	edges := make([]graph.NodeID, 0, total)
+	weights := make([]float64, 0, total)
+	for i := 0; i < n; i++ {
+		for _, j := range g.out[i] {
+			edges = append(edges, graph.NodeID(j))
+			weights = append(weights, edgeWeight(g.names[i], g.names[j]))
+		}
+	}
+	return csr.FromArrays[float64](vertices, edges, weights, uint64(n), total)
+}
+
+// naiveSSSP returns the shortest-path distances and reachability from src over
+// the weighted graph, computed by Bellman-Ford (V-1 relaxations). All weights
+// are positive so no negative cycle exists. It is the independent reference for
+// the SSSP/APSP checks (it never calls search/, so a shared bug cannot hide).
+func (g *nameGraph) naiveSSSP(src int) (dist []float64, reachable []bool) {
+	n := len(g.names)
+	dist = make([]float64, n)
+	reachable = make([]bool, n)
+	if src < 0 || src >= n {
+		return dist, reachable
+	}
+	reachable[src] = true
+	for iter := 0; iter < n-1; iter++ {
+		changed := false
+		for u := 0; u < n; u++ {
+			if !reachable[u] {
+				continue
+			}
+			for _, v := range g.out[u] {
+				w := edgeWeight(g.names[u], g.names[v])
+				if !reachable[v] || dist[u]+w < dist[v] {
+					reachable[v] = true
+					dist[v] = dist[u] + w
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return dist, reachable
 }
 
 // checkSources returns a small, deterministic set of source node ids the
