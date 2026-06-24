@@ -60,20 +60,6 @@ type labelNames struct {
 	names []string
 }
 
-// LabelRegistry interns label names and assigns sequential LabelIDs.
-// It is safe for concurrent use.
-//
-// The read path ([LabelRegistry.Resolve]) is lock-free: it loads an
-// immutable id→name snapshot through an [atomic.Pointer] and indexes
-// into it without taking any lock. The write path ([LabelRegistry.Intern]
-// of a previously unseen name — a rare event) serialises under a mutex,
-// builds a new immutable snapshot extended by one entry, and atomically
-// publishes it. Because LabelIDs are only ever appended (never reused or
-// renamed) and Intern publishes the snapshot carrying names[id] before
-// returning id — i.e. before id can be stored into any node/edge bag —
-// every reader that observes an id in a bag observes, by release/acquire
-// ordering through that bag's own publication, a snapshot at least as new
-// as the one Intern published. Resolve therefore never misses a live id.
 // forwardLabelName is the immutable name→id table published by
 // [LabelRegistry] via copy-on-write. Once stored it is never mutated;
 // interning a previously unseen name allocates a fresh map. Readers
@@ -83,6 +69,20 @@ type forwardLabelName struct {
 	m map[string]LabelID
 }
 
+// LabelRegistry interns label names and assigns sequential LabelIDs.
+// It is safe for concurrent use.
+//
+// Both read paths are fully lock-free: [LabelRegistry.Lookup] (name→id)
+// loads the immutable forward table through an [atomic.Pointer] and
+// [LabelRegistry.Resolve] (id→name) loads the immutable id→name snapshot,
+// neither taking any lock. The write path ([LabelRegistry.Intern] of a
+// previously unseen name — a rare event) serialises under a mutex, builds
+// fresh immutable tables extended by one entry, and publishes them — the
+// id→name snapshot before the name→id table — so any reader that observes
+// an id from Lookup can already Resolve it, and any reader that observes an
+// id in a bag observes (by release/acquire ordering through that bag's own
+// publication) tables at least as new as the ones Intern published. Lookup
+// and Resolve therefore never miss a live id.
 type LabelRegistry struct {
 	// mu serialises Intern (the write path) only; the read paths never take
 	// it. The steady-state label vocabulary is small and stable, so Intern
