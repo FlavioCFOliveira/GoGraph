@@ -27,7 +27,7 @@ import (
 // Concurrency: WeightedBetweenness is safe to invoke concurrently
 // on a shared CSR.
 func WeightedBetweenness(c *csr.CSR[float64]) ([]float64, error) {
-	defer metrics.Time("search.centrality.WeightedBetweenness")()
+	defer metrics.Time("search.centrality.WeightedBetweenness").Stop()
 	return WeightedBetweennessCtx(context.Background(), c)
 }
 
@@ -35,7 +35,7 @@ func WeightedBetweenness(c *csr.CSR[float64]) ([]float64, error) {
 // [WeightedBetweenness]. ctx.Err() is checked once per source vertex;
 // on cancellation returns (nil, wrapped ctx.Err()).
 func WeightedBetweennessCtx(ctx context.Context, c *csr.CSR[float64]) ([]float64, error) {
-	defer metrics.Time("search.centrality.WeightedBetweennessCtx")()
+	defer metrics.Time("search.centrality.WeightedBetweennessCtx").Stop()
 	n := int(c.MaxNodeID())
 	cb := make([]float64, n)
 	if n == 0 {

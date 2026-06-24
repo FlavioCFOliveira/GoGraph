@@ -41,7 +41,7 @@ import (
 // without synchronisation and is safe to invoke concurrently on a
 // shared CSR; every worker owns its private scratch.
 func WeightedBetweennessParallel(c *csr.CSR[float64], numWorkers int) ([]float64, error) {
-	defer metrics.Time("search.centrality.WeightedBetweennessParallel")()
+	defer metrics.Time("search.centrality.WeightedBetweennessParallel").Stop()
 	return WeightedBetweennessParallelCtx(context.Background(), c, numWorkers)
 }
 
@@ -50,7 +50,7 @@ func WeightedBetweennessParallel(c *csr.CSR[float64], numWorkers int) ([]float64
 // source vertex inside every worker; on cancellation returns
 // (nil, wrapped ctx.Err()).
 func WeightedBetweennessParallelCtx(ctx context.Context, c *csr.CSR[float64], numWorkers int) ([]float64, error) {
-	defer metrics.Time("search.centrality.WeightedBetweennessParallelCtx")()
+	defer metrics.Time("search.centrality.WeightedBetweennessParallelCtx").Stop()
 	n := int(c.MaxNodeID())
 	cb := make([]float64, n)
 	if n == 0 {

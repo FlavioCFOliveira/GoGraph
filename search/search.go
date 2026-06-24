@@ -121,7 +121,7 @@ func bitsetWordsFor(maxID graph.NodeID) int {
 // the next level is built in a separate buffer; the two buffers swap
 // per level.
 func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
-	defer metrics.Time("search.BFS")()
+	defer metrics.Time("search.BFS").Stop()
 	_ = BFSCtx(context.Background(), c, src, visit)
 }
 
@@ -130,7 +130,7 @@ func BFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 // wrapped ctx.Err() without invoking visit on the partially-explored
 // frontier.
 func BFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
-	defer metrics.Time("search.BFSCtx")()
+	defer metrics.Time("search.BFSCtx").Stop()
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
 		return nil
 	}
@@ -181,7 +181,7 @@ func BFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit f
 //
 // DFS is allocation-free on the hot path after the first call.
 func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
-	defer metrics.Time("search.DFS")()
+	defer metrics.Time("search.DFS").Stop()
 	_ = DFSCtx(context.Background(), c, src, visit)
 }
 
@@ -189,7 +189,7 @@ func DFS[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, d
 // every 4096 frame pops; on cancellation the traversal returns
 // the wrapped ctx.Err() without further visit invocations.
 func DFSCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
-	defer metrics.Time("search.DFSCtx")()
+	defer metrics.Time("search.DFSCtx").Stop()
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) {
 		return nil
 	}

@@ -99,16 +99,31 @@ func ObserveLatency(name string, d time.Duration) {
 	current().ObserveLatency(name, d)
 }
 
-// Time is a convenience helper that observes the elapsed time from
-// invocation until the returned function is called. Usage:
+// Stopwatch measures the latency of one operation. Obtain it from [Time] and
+// call [Stopwatch.Stop] — typically deferred — to record the elapsed time under
+// the operation's name.
 //
-//	defer metrics.Time("search.dijkstra")()
+// Unlike a returned closure (which escapes to the heap), a Stopwatch is a value
+// returned by value, so the idiomatic `defer metrics.Time("op").Stop()` records
+// no per-call heap allocation: the value lives in the caller's frame and the
+// deferred value-receiver call is open-coded.
+type Stopwatch struct {
+	name  string
+	start time.Time
+}
+
+// Time starts a [Stopwatch] for the named operation. Usage:
 //
-// On the no-op backend the overhead is two atomic loads + a
-// time.Now pair (~50 ns), payable once per call site.
-func Time(name string) func() {
-	start := time.Now()
-	return func() {
-		current().ObserveLatency(name, time.Since(start))
-	}
+//	defer metrics.Time("search.dijkstra").Stop()
+//
+// On the no-op backend the overhead is two atomic loads + a time.Now pair
+// (~50 ns) and no allocation, payable once per call site.
+func Time(name string) Stopwatch {
+	return Stopwatch{name: name, start: time.Now()}
+}
+
+// Stop records the time elapsed since the Stopwatch was started, as the latency
+// of its operation on the current backend.
+func (s Stopwatch) Stop() {
+	current().ObserveLatency(s.name, time.Since(s.start))
 }

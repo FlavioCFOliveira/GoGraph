@@ -20,7 +20,7 @@ import (
 // (n-1)(n-2)/2 (undirected) or (n-1)(n-2) (directed) for the
 // classical normalised score.
 func Betweenness[W any](c *csr.CSR[W]) []float64 {
-	defer metrics.Time("search.centrality.Betweenness")()
+	defer metrics.Time("search.centrality.Betweenness").Stop()
 	out, _ := BetweennessCtx(context.Background(), c)
 	return out
 }
@@ -29,7 +29,7 @@ func Betweenness[W any](c *csr.CSR[W]) []float64 {
 // ctx.Err() is checked once per source vertex; on cancellation
 // returns (nil, wrapped ctx.Err()).
 func BetweennessCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]float64, error) {
-	defer metrics.Time("search.centrality.BetweennessCtx")()
+	defer metrics.Time("search.centrality.BetweennessCtx").Stop()
 	maxID := int(c.MaxNodeID())
 	cb := make([]float64, maxID)
 	if maxID == 0 {

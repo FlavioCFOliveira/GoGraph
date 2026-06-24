@@ -45,7 +45,7 @@ const floydParallelMinDim = 128
 // synchronisation and allocates its own working buffers per call, so it
 // is safe to invoke concurrently on a shared CSR.
 func FloydWarshallParallel[W Weight](c *csr.CSR[W], numWorkers int) *APSP[W] {
-	defer metrics.Time("search.FloydWarshallParallel")()
+	defer metrics.Time("search.FloydWarshallParallel").Stop()
 	out, err := FloydWarshallParallelCtx(context.Background(), c, numWorkers)
 	if err != nil {
 		metrics.IncCounter("search.FloydWarshallParallel.errors", 1)
@@ -63,7 +63,7 @@ func FloydWarshallParallel[W Weight](c *csr.CSR[W], numWorkers int) *APSP[W] {
 // (NaN/Inf float weight), [ErrNegativeCycle] (negative-weight cycle), or
 // the underlying ctx.Err() on cancellation.
 func FloydWarshallParallelCtx[W Weight](ctx context.Context, c *csr.CSR[W], numWorkers int) (*APSP[W], error) {
-	defer metrics.Time("search.FloydWarshallParallelCtx")()
+	defer metrics.Time("search.FloydWarshallParallelCtx").Stop()
 	if anyFloatInvalid(c.WeightsSlice()) {
 		metrics.IncCounter("search.FloydWarshallParallelCtx.errors", 1)
 		return nil, ErrInvalidInput

@@ -39,7 +39,7 @@ import (
 // divided across numWorkers, plus O(numWorkers * V) for the per-worker
 // per-node buffers.
 func CountTrianglesParallel[W any](c *csr.CSR[W], numWorkers int) (total int64, perNode []int64) {
-	defer metrics.Time("search.CountTrianglesParallel")()
+	defer metrics.Time("search.CountTrianglesParallel").Stop()
 	total, perNode, _ = CountTrianglesParallelCtx(context.Background(), c, numWorkers)
 	return total, perNode
 }
@@ -49,7 +49,7 @@ func CountTrianglesParallel[W any](c *csr.CSR[W], numWorkers int) (total int64, 
 // pair iterations inside each worker; on cancellation returns
 // (0, nil, wrapped ctx.Err()).
 func CountTrianglesParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorkers int) (total int64, perNode []int64, err error) {
-	defer metrics.Time("search.CountTrianglesParallelCtx")()
+	defer metrics.Time("search.CountTrianglesParallelCtx").Stop()
 	if cerr := ctx.Err(); cerr != nil {
 		metrics.IncCounter("search.CountTrianglesParallelCtx.errors", 1)
 		return 0, nil, cerr

@@ -28,7 +28,7 @@ func DefaultLabelPropagationOptions() LabelPropagationOptions {
 //
 // Complexity is O(k * (V + E)) for k iterations.
 func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partition {
-	defer metrics.Time("search.community.LabelPropagation")()
+	defer metrics.Time("search.community.LabelPropagation").Stop()
 	out, _ := LabelPropagationCtx(context.Background(), c, opts)
 	return out
 }
@@ -39,7 +39,7 @@ func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partit
 //
 //nolint:gocyclo // textbook label propagation: defaults + live mask + iteration loop + tie-break
 func LabelPropagationCtx[W any](ctx context.Context, c *csr.CSR[W], opts LabelPropagationOptions) (Partition, error) {
-	defer metrics.Time("search.community.LabelPropagationCtx")()
+	defer metrics.Time("search.community.LabelPropagationCtx").Stop()
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 16
 	}

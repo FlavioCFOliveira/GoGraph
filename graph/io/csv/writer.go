@@ -27,7 +27,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, e
 //
 //nolint:gocyclo // CSV write loop: header + per-source resolve + per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, error) {
-	defer metrics.Time("graph.io.csv.Write")()
+	defer metrics.Time("graph.io.csv.Write").Stop()
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}

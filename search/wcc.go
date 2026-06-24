@@ -21,7 +21,7 @@ import (
 //
 // Concurrency: WCC is safe to invoke concurrently on a shared CSR.
 func WCC[W any](c *csr.CSR[W]) (component []int, k int, err error) {
-	defer metrics.Time("search.WCC")()
+	defer metrics.Time("search.WCC").Stop()
 	component, k, err = WCCCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.WCC.errors", 1)
@@ -40,7 +40,7 @@ func WCC[W any](c *csr.CSR[W]) (component []int, k int, err error) {
 // to preserve the public contract — ghost / isolated slots report -1 —
 // but the disjoint-set arithmetic runs in the compact [0, live) space.
 func WCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (component []int, k int, err error) {
-	defer metrics.Time("search.WCCCtx")()
+	defer metrics.Time("search.WCCCtx").Stop()
 	if cerr := ctx.Err(); cerr != nil {
 		metrics.IncCounter("search.WCCCtx.errors", 1)
 		return nil, 0, cerr

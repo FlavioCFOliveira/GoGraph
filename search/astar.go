@@ -35,7 +35,7 @@ func AStar[W Weight](
 	src, dst graph.NodeID,
 	h func(graph.NodeID) W,
 ) ([]graph.NodeID, W, error) {
-	defer metrics.Time("search.AStar")()
+	defer metrics.Time("search.AStar").Stop()
 	path, cost, err := AStarCtx(context.Background(), c, src, dst, h)
 	if err != nil {
 		metrics.IncCounter("search.AStar.errors", 1)
@@ -55,7 +55,7 @@ func AStarCtx[W Weight](
 	src, dst graph.NodeID,
 	h func(graph.NodeID) W,
 ) ([]graph.NodeID, W, error) {
-	defer metrics.Time("search.AStarCtx")()
+	defer metrics.Time("search.AStarCtx").Stop()
 	var zero W
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
@@ -89,7 +89,7 @@ func AStarInto[W Weight](
 	found []bool,
 	path *[]graph.NodeID,
 ) (W, error) {
-	defer metrics.Time("search.AStarInto")()
+	defer metrics.Time("search.AStarInto").Stop()
 	var zero W
 	maxID := uint64(c.MaxNodeID())
 	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {

@@ -42,7 +42,7 @@ import (
 // Complexity: O(V * (V + E) * log V) total work as [JohnsonAPSP],
 // divided across numWorkers for the Dijkstra pass.
 func JohnsonAPSPParallel[W Weight](c *csr.CSR[W], numWorkers int) (*APSP[W], error) {
-	defer metrics.Time("search.JohnsonAPSPParallel")()
+	defer metrics.Time("search.JohnsonAPSPParallel").Stop()
 	res, err := JohnsonAPSPParallelCtx(context.Background(), c, numWorkers)
 	if err != nil {
 		metrics.IncCounter("search.JohnsonAPSPParallel.errors", 1)
@@ -56,7 +56,7 @@ func JohnsonAPSPParallel[W Weight](c *csr.CSR[W], numWorkers int) (*APSP[W], err
 // and once per source vertex inside every Dijkstra worker; on
 // cancellation returns (nil, wrapped ctx.Err()).
 func JohnsonAPSPParallelCtx[W Weight](ctx context.Context, c *csr.CSR[W], numWorkers int) (*APSP[W], error) {
-	defer metrics.Time("search.JohnsonAPSPParallelCtx")()
+	defer metrics.Time("search.JohnsonAPSPParallelCtx").Stop()
 	p, err := johnsonPrepare[W](ctx, c)
 	if err != nil {
 		metrics.IncCounter("search.JohnsonAPSPParallelCtx.errors", 1)

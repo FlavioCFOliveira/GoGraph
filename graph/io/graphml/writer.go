@@ -30,7 +30,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 //
 //nolint:gocyclo // GraphML write: XML header + key declaration + graph open + nodes + edges + close
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
-	defer metrics.Time("graph.io.graphml.Write")()
+	defer metrics.Time("graph.io.graphml.Write").Stop()
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("graph.io.graphml.WriteCtx.errors", 1)
 		return err

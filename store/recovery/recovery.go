@@ -359,7 +359,7 @@ var ErrTransactionTooLarge = errors.New("recovery: v3 transaction exceeds the pe
 //     with [ErrUnsupportedRecordVersion] rather than mis-decoding the
 //     non-invertible fmt.Sprintf layout.
 func Decode(payload []byte) (Op, error) {
-	defer metrics.Time("store.recovery.Decode")()
+	defer metrics.Time("store.recovery.Decode").Stop()
 	if len(payload) < 1 {
 		metrics.IncCounter("store.recovery.Decode.errors", 1)
 		return Op{}, errors.New("recovery: short payload")
@@ -725,7 +725,7 @@ func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
 // otherwise permanently embed the corruption and drop every committed op
 // past the bad frame.
 func Open[N comparable, W any](dir string, opts Options[N, W]) (Result[N, W], error) {
-	defer metrics.Time("store.recovery.Open")()
+	defer metrics.Time("store.recovery.Open").Stop()
 	res, err := OpenCtx[N, W](context.Background(), dir, opts)
 	if err != nil {
 		metrics.IncCounter("store.recovery.Open.errors", 1)
@@ -738,7 +738,7 @@ func Open[N comparable, W any](dir string, opts Options[N, W]) (Result[N, W], er
 // replayed; on cancellation the function returns the partially-
 // recovered Result paired with the wrapped ctx.Err.
 func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[N, W]) (Result[N, W], error) {
-	defer metrics.Time("store.recovery.OpenCtx")()
+	defer metrics.Time("store.recovery.OpenCtx").Stop()
 	if opts.Codec == nil {
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")
@@ -764,7 +764,7 @@ func OpenFS[N comparable, W any](fsys recoveryFS, dir string, opts Options[N, W]
 
 // OpenCtxFS is the context-aware variant of [OpenFS].
 func OpenCtxFS[N comparable, W any](ctx context.Context, fsys recoveryFS, dir string, opts Options[N, W]) (Result[N, W], error) {
-	defer metrics.Time("store.recovery.OpenCtxFS")()
+	defer metrics.Time("store.recovery.OpenCtxFS").Stop()
 	if opts.Codec == nil {
 		metrics.IncCounter("store.recovery.OpenCtxFS.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")

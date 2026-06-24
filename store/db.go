@@ -232,7 +232,7 @@ func (d *DB) Close() error {
 // always closed — abandoning them on ctx cancellation would reintroduce the
 // goroutine/file-handle leak this type exists to prevent.
 func (d *DB) CloseCtx(ctx context.Context) error {
-	defer metrics.Time("store.DB.Close")()
+	defer metrics.Time("store.DB.Close").Stop()
 	d.closeOnce.Do(func() {
 		err := d.closeOnce0(ctx)
 		d.closeErrSetter.Lock()

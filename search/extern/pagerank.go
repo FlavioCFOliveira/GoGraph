@@ -63,7 +63,7 @@ func DefaultPageRankOptions() PageRankOptions {
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared csrfile.Reader.
 func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
-	defer metrics.Time("search.extern.PageRank")()
+	defer metrics.Time("search.extern.PageRank").Stop()
 	ranks, iterations, err = PageRankCtx(context.Background(), r, opts)
 	if err != nil {
 		metrics.IncCounter("search.extern.PageRank.errors", 1)
@@ -83,7 +83,7 @@ func PageRank(r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterati
 // closed, PageRankCtx returns (nil, 0, [csrfile.ErrReaderClosed])
 // without touching the mapping.
 func PageRankCtx(ctx context.Context, r *csrfile.Reader, opts PageRankOptions) (ranks []float64, iterations int, err error) {
-	defer metrics.Time("search.extern.PageRankCtx")()
+	defer metrics.Time("search.extern.PageRankCtx").Stop()
 	if hasInvalidFloat(opts.Damping, opts.Tolerance) {
 		metrics.IncCounter("search.extern.PageRankCtx.errors", 1)
 		return nil, 0, ErrInvalidInput

@@ -170,7 +170,7 @@ const propertiesCapHintMax = 1 << 20
 //
 //nolint:gocyclo // properties write: header + key table + node records + edge records, each guarded
 func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteProperties")()
+	defer metrics.Time("store.snapshot.WriteProperties").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<20)
 	hasher := crc32.New(castagnoli)
@@ -672,7 +672,7 @@ func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, er
 //
 //nolint:gocyclo // properties read: header + key table + node records + edge records, each bounds-checked
 func ReadProperties(r io.Reader) (PropertiesReadback, error) {
-	defer metrics.Time("store.snapshot.ReadProperties")()
+	defer metrics.Time("store.snapshot.ReadProperties").Stop()
 	br := bufio.NewReader(r)
 
 	var magic uint32
@@ -1034,7 +1034,7 @@ func decodeListPropertyValue(raw []byte) (lpg.PropertyValue, error) {
 //
 //nolint:gocyclo // apply: bounds + mapper resolve + edge resolve + kind decode
 func ApplyPropertiesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb PropertiesReadback) error {
-	defer metrics.Time("store.snapshot.ApplyPropertiesToGraph")()
+	defer metrics.Time("store.snapshot.ApplyPropertiesToGraph").Stop()
 	adj := g.AdjList()
 	for i := range rb.NodeProperties {
 		np := &rb.NodeProperties[i]

@@ -138,7 +138,7 @@ type edgeHandleRaw struct {
 //
 //nolint:gocyclo // edgehandles write: collect + two string tables + per-record labels + per-record props, each guarded
 func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, emitted bool, err error) {
-	defer metrics.Time("store.snapshot.WriteEdgeHandles")()
+	defer metrics.Time("store.snapshot.WriteEdgeHandles").Stop()
 
 	raws, labelNames, keyNames := collectEdgeHandleRecords(g)
 	if len(raws) == 0 {
@@ -335,7 +335,7 @@ func sortedSetKeys(set map[string]struct{}) []string {
 //
 //nolint:gocyclo // edgehandles read: header + two string tables + per-record labels + per-record props, each bounds-checked
 func ReadEdgeHandles(r io.Reader) (EdgeHandlesReadback, error) {
-	defer metrics.Time("store.snapshot.ReadEdgeHandles")()
+	defer metrics.Time("store.snapshot.ReadEdgeHandles").Stop()
 	br := bufio.NewReader(r)
 
 	var magic, version uint32
@@ -517,7 +517,7 @@ func readEdgeHandleProp(br *bufio.Reader, keys []string) (string, lpg.PropertyVa
 // record so a post-recovery edge creation never re-mints a live handle
 // (invariant I5).
 func ApplyEdgeHandlesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb EdgeHandlesReadback) {
-	defer metrics.Time("store.snapshot.ApplyEdgeHandlesToGraph")()
+	defer metrics.Time("store.snapshot.ApplyEdgeHandlesToGraph").Stop()
 	for i := range rb.Records {
 		rec := &rb.Records[i]
 		srcID := graph.NodeID(rec.Src)

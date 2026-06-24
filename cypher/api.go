@@ -1373,7 +1373,7 @@ func checkContext(ctx context.Context) error {
 // intercepted and returned as an error wrapping [ErrInternalPanic]; it never
 // unwinds past this method to crash the embedding process.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
-	defer cmetrics.Time("cypher.Run")()
+	defer cmetrics.Time("cypher.Run").Stop()
 	defer func() {
 		if err != nil {
 			cmetrics.IncCounter("cypher.Run.errors", 1)
@@ -9915,7 +9915,7 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 // work — with an error wrapping the context error (matchable via [errors.Is]
 // against [context.Canceled] / [context.DeadlineExceeded]).
 func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
-	defer cmetrics.Time("cypher.RunInTx")()
+	defer cmetrics.Time("cypher.RunInTx").Stop()
 	defer func() {
 		if err != nil {
 			cmetrics.IncCounter("cypher.RunInTx.errors", 1)

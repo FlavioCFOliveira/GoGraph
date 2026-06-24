@@ -74,7 +74,7 @@ func (t *TC) Reachable(src, dst graph.NodeID) bool {
 // Concurrency: TransitiveClosure is safe to invoke concurrently on
 // a shared CSR; the returned [TC] is safe for concurrent reads.
 func TransitiveClosure[W any](c *csr.CSR[W]) *TC {
-	defer metrics.Time("search.TransitiveClosure")()
+	defer metrics.Time("search.TransitiveClosure").Stop()
 	out, _ := TransitiveClosureCtx(context.Background(), c)
 	return out
 }
@@ -90,7 +90,7 @@ func TransitiveClosure[W any](c *csr.CSR[W]) *TC {
 // identical to the uncompacted computation for every live NodeID because
 // reachability is invariant under vertex relabelling.
 func TransitiveClosureCtx[W any](ctx context.Context, c *csr.CSR[W]) (*TC, error) {
-	defer metrics.Time("search.TransitiveClosureCtx")()
+	defer metrics.Time("search.TransitiveClosureCtx").Stop()
 	maxID := int(c.MaxNodeID())
 	if maxID == 0 {
 		return &TC{}, nil

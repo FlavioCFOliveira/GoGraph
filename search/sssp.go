@@ -35,7 +35,7 @@ type SSSP[W Weight] struct {
 // that serves repeated queries without re-validating. A nil error
 // guarantees every subsequent [SSSP.From] skips the O(E) weight scan.
 func NewSSSP[W Weight](c *csr.CSR[W]) (*SSSP[W], error) {
-	defer metrics.Time("search.NewSSSP")()
+	defer metrics.Time("search.NewSSSP").Stop()
 	if err := validateDijkstraWeights(c.WeightsSlice()); err != nil {
 		metrics.IncCounter("search.NewSSSP.errors", 1)
 		return nil, err
@@ -55,7 +55,7 @@ func (s *SSSP[W]) From(src graph.NodeID) (*Distances[W], error) {
 // construction, so FromCtx performs no per-query weight scan; the only
 // error it can surface is the context error.
 func (s *SSSP[W]) FromCtx(ctx context.Context, src graph.NodeID) (*Distances[W], error) {
-	defer metrics.Time("search.SSSP.From")()
+	defer metrics.Time("search.SSSP.From").Stop()
 	maxID := uint64(s.c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)

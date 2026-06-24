@@ -24,7 +24,7 @@ var ErrNoEulerian = errors.New("search: graph has no Eulerian circuit or path")
 // or the graph is not connected through its non-zero degree
 // vertices.
 func Hierholzer[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
-	defer metrics.Time("search.Hierholzer")()
+	defer metrics.Time("search.Hierholzer").Stop()
 	res, err := HierholzerCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.Hierholzer.errors", 1)
@@ -36,7 +36,7 @@ func Hierholzer[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
 // is checked every 4096 trail steps; on cancellation returns
 // (nil, wrapped ctx.Err()).
 func HierholzerCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
-	defer metrics.Time("search.HierholzerCtx")()
+	defer metrics.Time("search.HierholzerCtx").Stop()
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()

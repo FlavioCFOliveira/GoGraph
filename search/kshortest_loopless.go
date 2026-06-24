@@ -59,7 +59,7 @@ type KShortestPathsLooplessOpts struct {
 // Safe for concurrent use against an immutable CSR; the call holds no
 // shared state across invocations.
 func KShortestPathsLoopless[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
-	defer metrics.Time("search.KShortestPathsLoopless")()
+	defer metrics.Time("search.KShortestPathsLoopless").Stop()
 	out, _ := KShortestPathsLooplessCtx(context.Background(), c, src, dst, k)
 	return out
 }
@@ -70,7 +70,7 @@ func KShortestPathsLoopless[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k in
 //
 // For an explicit resource cap use [KShortestPathsLooplessCtxWithOpts].
 func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
-	defer metrics.Time("search.KShortestPathsLooplessCtx")()
+	defer metrics.Time("search.KShortestPathsLooplessCtx").Stop()
 	return KShortestPathsLooplessCtxWithOpts(ctx, c, src, dst, k, KShortestPathsLooplessOpts{})
 }
 
@@ -94,7 +94,7 @@ func KShortestPathsLooplessCtxWithOpts[W Weight](
 	k int,
 	opts KShortestPathsLooplessOpts,
 ) ([]YenPath[W], error) {
-	defer metrics.Time("search.KShortestPathsLooplessCtxWithOpts")()
+	defer metrics.Time("search.KShortestPathsLooplessCtxWithOpts").Stop()
 	if k <= 0 {
 		return nil, nil
 	}

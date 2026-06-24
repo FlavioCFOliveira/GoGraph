@@ -52,7 +52,7 @@ import (
 // Concurrency: CountTriangles is safe to invoke concurrently on a
 // shared CSR.
 func CountTriangles[W any](c *csr.CSR[W]) (total int64, perNode []int64) {
-	defer metrics.Time("search.CountTriangles")()
+	defer metrics.Time("search.CountTriangles").Stop()
 	total, perNode, _ = CountTrianglesCtx(context.Background(), c)
 	return total, perNode
 }
@@ -65,7 +65,7 @@ func CountTriangles[W any](c *csr.CSR[W]) (total int64, perNode []int64) {
 // O(deg(v)^2): at a star-hub vertex (degree in the millions) a single
 // outer iteration would otherwise run O(V^2) with no ctx check.
 func CountTrianglesCtx[W any](ctx context.Context, c *csr.CSR[W]) (total int64, perNode []int64, err error) {
-	defer metrics.Time("search.CountTrianglesCtx")()
+	defer metrics.Time("search.CountTrianglesCtx").Stop()
 	if cerr := ctx.Err(); cerr != nil {
 		metrics.IncCounter("search.CountTrianglesCtx.errors", 1)
 		return 0, nil, cerr

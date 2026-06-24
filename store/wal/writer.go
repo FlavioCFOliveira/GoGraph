@@ -152,7 +152,7 @@ type Writer struct {
 // genuine corruption (for example [ErrCRCMismatch] or [ErrBadMagic])
 // are left byte-for-byte intact.
 func Open(path string) (*Writer, error) {
-	defer metrics.Time("store.wal.Open")()
+	defer metrics.Time("store.wal.Open").Stop()
 
 	// Acquire an exclusive OS-level lock on the WAL directory before
 	// touching any WAL data. The lock is held for the lifetime of this
@@ -299,7 +299,7 @@ func discardTornTail(f *os.File) error {
 // the frame and returns the original sync error; see the [Writer]
 // type documentation.
 func (w *Writer) Append(payload []byte) error {
-	defer metrics.Time("store.wal.Append")()
+	defer metrics.Time("store.wal.Append").Stop()
 	err := w.AppendCtx(context.Background(), payload)
 	if err != nil {
 		metrics.IncCounter("store.wal.Append.errors", 1)
@@ -311,7 +311,7 @@ func (w *Writer) Append(payload []byte) error {
 // is checked before acquiring the internal mutex and again before
 // writing; on cancellation returns the wrapped ctx.Err.
 func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
-	defer metrics.Time("store.wal.AppendCtx")()
+	defer metrics.Time("store.wal.AppendCtx").Stop()
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return err
@@ -360,7 +360,7 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 // Append/Sync returns the original error; see the [Writer] type
 // documentation.
 func (w *Writer) Sync() error {
-	defer metrics.Time("store.wal.Sync")()
+	defer metrics.Time("store.wal.Sync").Stop()
 	err := w.SyncCtx(context.Background())
 	if err != nil {
 		metrics.IncCounter("store.wal.Sync.errors", 1)
@@ -372,7 +372,7 @@ func (w *Writer) Sync() error {
 // is checked before acquiring the internal mutex; on cancellation
 // returns the wrapped ctx.Err without flushing.
 func (w *Writer) SyncCtx(ctx context.Context) error {
-	defer metrics.Time("store.wal.SyncCtx")()
+	defer metrics.Time("store.wal.SyncCtx").Stop()
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return err
@@ -476,7 +476,7 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 // Concurrency: safe for concurrent calls; it serialises on the same internal
 // mutex as Append/Sync and guarantees a single leader per fsync round.
 func (w *Writer) SyncGroup() error {
-	defer metrics.Time("store.wal.SyncGroup")()
+	defer metrics.Time("store.wal.SyncGroup").Stop()
 	if w.closed.Load() {
 		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
 		return ErrWriterClosed
@@ -672,7 +672,7 @@ func (w *Writer) Stats() Stats {
 // On error the WAL may be in a partially-truncated state; callers
 // should not continue using the Writer.
 func (w *Writer) Truncate() (int64, error) {
-	defer metrics.Time("store.wal.Truncate")()
+	defer metrics.Time("store.wal.Truncate").Stop()
 	if w.closed.Load() {
 		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return 0, ErrWriterClosed
@@ -797,7 +797,7 @@ func (w *Writer) DurableOffset() int64 {
 //     suffix. The committed data is safe on disk; only the in-memory handle
 //     is abandoned.
 func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
-	defer metrics.Time("store.wal.TruncatePrefix")()
+	defer metrics.Time("store.wal.TruncatePrefix").Stop()
 	if w.closed.Load() {
 		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
 		return 0, ErrWriterClosed
@@ -995,7 +995,7 @@ func (w *Writer) reopenAfterPrefixTruncate(suffixLen int64) error {
 // because the Truncate has already shrunk the file — the fsync can
 // only confirm the reduced EOF, never resurrect data above it.
 func (w *Writer) Close() error {
-	defer metrics.Time("store.wal.Close")()
+	defer metrics.Time("store.wal.Close").Stop()
 	if !w.closed.CompareAndSwap(false, true) {
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return ErrWriterClosed

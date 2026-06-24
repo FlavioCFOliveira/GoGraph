@@ -86,7 +86,7 @@ type LoadedSnapshot struct {
 // using [WriteSnapshotCSR]; it writes a v1-shaped directory that
 // future readers (including this one) accept transparently.
 func WriteSnapshotFull[N comparable, W any](dir string, c *csr.CSR[W], g *lpg.Graph[N, W]) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotFull")()
+	defer metrics.Time("store.snapshot.WriteSnapshotFull").Stop()
 	err := WriteSnapshotFullCtx(context.Background(), dir, c, g)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFull.errors", 1)
@@ -114,7 +114,7 @@ func WriteSnapshotFullWithMapperCodec[N comparable, W any](
 	g *lpg.Graph[N, W],
 	codec keyEncoder[N],
 ) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodec")()
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodec").Stop()
 	err := WriteSnapshotFullWithMapperCodecCtx(context.Background(), dir, c, g, codec)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodec.errors", 1)
@@ -134,7 +134,7 @@ func WriteSnapshotFullCtx[N comparable, W any](
 	c *csr.CSR[W],
 	g *lpg.Graph[N, W],
 ) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotFullCtx")()
+	defer metrics.Time("store.snapshot.WriteSnapshotFullCtx").Stop()
 	// No codec: the mapper is persisted only for string-keyed graphs
 	// (the historical v3 behaviour). writeMapperIfStringKeyed performs
 	// the string-only probe.
@@ -155,7 +155,7 @@ func WriteSnapshotFullWithMapperCodecCtx[N comparable, W any](
 	g *lpg.Graph[N, W],
 	codec keyEncoder[N],
 ) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecCtx")()
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecCtx").Stop()
 	if codec == nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecCtx.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
@@ -181,7 +181,7 @@ func WriteSnapshotFullWithConstraints[N comparable, W any](
 	g *lpg.Graph[N, W],
 	constraints []ConstraintSpec,
 ) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraints")()
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraints").Stop()
 	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints,
 		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 			return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
@@ -206,7 +206,7 @@ func WriteSnapshotFullWithMapperCodecAndConstraints[N comparable, W any](
 	codec keyEncoder[N],
 	constraints []ConstraintSpec,
 ) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints")()
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints").Stop()
 	if codec == nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
@@ -243,7 +243,7 @@ func WriteSnapshotFullWithMapperCodecAndConstraintsFS[N comparable, W any](
 	codec keyEncoder[N],
 	constraints []ConstraintSpec,
 ) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints")()
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints").Stop()
 	if codec == nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
@@ -782,7 +782,7 @@ func LoadSnapshotFullFS(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 // through fsys, so the OS backend reproduces the historical behaviour
 // byte-for-byte while the simulator can supply an in-memory disk.
 func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
-	defer metrics.Time("store.snapshot.LoadSnapshotFull")()
+	defer metrics.Time("store.snapshot.LoadSnapshotFull").Stop()
 	manifestPath := filepath.Join(dir, "manifest.json")
 	m, err := readManifestFileWith(fsys, manifestPath)
 	if err != nil {

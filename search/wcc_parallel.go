@@ -47,7 +47,7 @@ const wccParallelMinEdges = 1 << 16
 // synchronisation and allocates its own working storage per call, so it
 // is safe to invoke concurrently on a shared CSR.
 func WCCParallel[W any](c *csr.CSR[W], numWorkers int) (component []int, k int, err error) {
-	defer metrics.Time("search.WCCParallel")()
+	defer metrics.Time("search.WCCParallel").Stop()
 	component, k, err = WCCParallelCtx(context.Background(), c, numWorkers)
 	if err != nil {
 		metrics.IncCounter("search.WCCParallel.errors", 1)
@@ -59,7 +59,7 @@ func WCCParallel[W any](c *csr.CSR[W], numWorkers int) (component []int, k int, 
 // is checked once before the union sweep and once before the relabel
 // sweep; on cancellation returns (nil, 0, wrapped ctx.Err()).
 func WCCParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorkers int) (component []int, k int, err error) {
-	defer metrics.Time("search.WCCParallelCtx")()
+	defer metrics.Time("search.WCCParallelCtx").Stop()
 	if cerr := ctx.Err(); cerr != nil {
 		metrics.IncCounter("search.WCCParallelCtx.errors", 1)
 		return nil, 0, cerr

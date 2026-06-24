@@ -30,7 +30,7 @@ type Matching struct {
 //
 // Complexity O(E * sqrt(V)).
 func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
-	defer metrics.Time("search.HopcroftKarp")()
+	defer metrics.Time("search.HopcroftKarp").Stop()
 	out, _ := HopcroftKarpCtx(context.Background(), c, nLeft)
 	return out
 }
@@ -43,7 +43,7 @@ func HopcroftKarp[W any](c *csr.CSR[W], nLeft int) Matching {
 // c.MaxNodeID(), which would cause an index-out-of-range panic in the inner
 // loop (the sibling [HungarianCtx] validates its analogous bound the same way).
 func HopcroftKarpCtx[W any](ctx context.Context, c *csr.CSR[W], nLeft int) (Matching, error) {
-	defer metrics.Time("search.HopcroftKarpCtx")()
+	defer metrics.Time("search.HopcroftKarpCtx").Stop()
 	maxID := int(c.MaxNodeID())
 	if nLeft < 0 || nLeft > maxID {
 		return Matching{}, fmt.Errorf("search: HopcroftKarp: nLeft %d exceeds MaxNodeID %d: %w",

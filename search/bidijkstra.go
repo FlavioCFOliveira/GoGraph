@@ -31,7 +31,7 @@ import (
 // it validates that no edge weight is NaN or +/-Inf and returns
 // [ErrInvalidInput] otherwise; integer Weight types skip that pass.
 func BidirectionalDijkstra[W Weight](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, W, error) {
-	defer metrics.Time("search.BidirectionalDijkstra")()
+	defer metrics.Time("search.BidirectionalDijkstra").Stop()
 	rev := c.BuildReverse()
 	path, cost, err := BidirectionalDijkstraOnCtx(context.Background(), c, rev, src, dst)
 	if err != nil {
@@ -45,7 +45,7 @@ func BidirectionalDijkstra[W Weight](c *csr.CSR[W], src, dst graph.NodeID) ([]gr
 // queries on the same graph; the reverse-CSR construction is O(V+E)
 // and is the only allocation outside the algorithm's working state.
 func BidirectionalDijkstraOn[W Weight](c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, W, error) {
-	defer metrics.Time("search.BidirectionalDijkstraOn")()
+	defer metrics.Time("search.BidirectionalDijkstraOn").Stop()
 	path, cost, err := BidirectionalDijkstraOnCtx(context.Background(), c, rev, src, dst)
 	if err != nil {
 		metrics.IncCounter("search.BidirectionalDijkstraOn.errors", 1)
@@ -59,7 +59,7 @@ func BidirectionalDijkstraOn[W Weight](c, rev *csr.CSR[W], src, dst graph.NodeID
 //
 //nolint:gocyclo // canonical bidirectional Dijkstra: NaN/Inf gate + negative-weight scan + dual heap loop + meet bookkeeping + path stitching
 func BidirectionalDijkstraOnCtx[W Weight](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, W, error) {
-	defer metrics.Time("search.BidirectionalDijkstraOnCtx")()
+	defer metrics.Time("search.BidirectionalDijkstraOnCtx").Stop()
 	var zero W
 	weights := c.WeightsSlice()
 	// Float Weight types: NaN / +/-Inf silently corrupts the heap-key

@@ -20,7 +20,7 @@ type MinCutResult struct {
 //
 // Complexity O(V^3) with the simple maximum-adjacency form.
 func StoerWagner(weights []int, n int) MinCutResult {
-	defer metrics.Time("search.flow.StoerWagner")()
+	defer metrics.Time("search.flow.StoerWagner").Stop()
 	out, _ := StoerWagnerCtx(context.Background(), weights, n)
 	return out
 }
@@ -29,7 +29,7 @@ func StoerWagner(weights []int, n int) MinCutResult {
 // ctx.Err() is checked at every phase boundary; on cancellation
 // returns (zero MinCutResult, wrapped ctx.Err()).
 func StoerWagnerCtx(ctx context.Context, weights []int, n int) (MinCutResult, error) {
-	defer metrics.Time("search.flow.StoerWagnerCtx")()
+	defer metrics.Time("search.flow.StoerWagnerCtx").Stop()
 	if n <= 1 {
 		return MinCutResult{Weight: 0}, nil
 	}

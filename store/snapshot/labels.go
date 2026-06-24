@@ -98,7 +98,7 @@ type LabelsReadback struct {
 //
 //nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
 func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteLabels")()
+	defer metrics.Time("store.snapshot.WriteLabels").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<20)
 	hasher := crc32.New(castagnoli)
@@ -368,7 +368,7 @@ func buildNameIndex(names []string) map[string]uint32 {
 //
 //nolint:gocyclo // labels read: header + string table + node records + edge records, each bounds-checked
 func ReadLabels(r io.Reader) (LabelsReadback, error) {
-	defer metrics.Time("store.snapshot.ReadLabels")()
+	defer metrics.Time("store.snapshot.ReadLabels").Stop()
 	br := bufio.NewReader(r)
 
 	var magic uint32
@@ -515,7 +515,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 // `store.snapshot.ApplyLabels.edgeMissing`; this matches
 // [lpg.Graph.SetEdgeLabel]'s own no-op-on-missing-edge contract.
 func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadback) error {
-	defer metrics.Time("store.snapshot.ApplyLabelsToGraph")()
+	defer metrics.Time("store.snapshot.ApplyLabelsToGraph").Stop()
 	adj := g.AdjList()
 	for _, nl := range rb.NodeLabels {
 		if uint64(nl.StringIdx) >= uint64(len(rb.Strings)) {

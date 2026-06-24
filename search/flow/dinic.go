@@ -57,7 +57,7 @@ func (g *Network) AddEdge(src, dst, capacity int) {
 // accumulation (see [ErrCapacityOverflow]), MaxFlow returns 0 rather
 // than a wrapped value; use [MaxFlowCtx] to receive the typed error.
 func MaxFlow(g *Network, src, sink int) int {
-	defer metrics.Time("search.flow.MaxFlow")()
+	defer metrics.Time("search.flow.MaxFlow").Stop()
 	out, _ := MaxFlowCtx(context.Background(), g, src, sink)
 	return out
 }
@@ -73,7 +73,7 @@ func MaxFlow(g *Network, src, sink int) int {
 // int64 flow accumulation, returning (0, [ErrCapacityOverflow]) when
 // they could; see [ErrCapacityOverflow] for the exact bound.
 func MaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
-	defer metrics.Time("search.flow.MaxFlowCtx")()
+	defer metrics.Time("search.flow.MaxFlowCtx").Stop()
 	if err := validateEndpoints(g.N(), src, sink); err != nil {
 		metrics.IncCounter("search.flow.MaxFlowCtx.errors", 1)
 		return 0, err

@@ -36,7 +36,7 @@ var ErrNotUndirected = errors.New("search: BiBFS requires an undirected (symmetr
 // O(b^(d/2)) instead of O(b^d) for forward-only BFS, where b is the
 // branching factor and d is the path length.
 func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
-	defer metrics.Time("search.BiBFS")()
+	defer metrics.Time("search.BiBFS").Stop()
 	res, err := BiBFSCtx(context.Background(), c, src, dst)
 	if err != nil {
 		metrics.IncCounter("search.BiBFS.errors", 1)
@@ -55,7 +55,7 @@ func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) 
 // out via [BiBFSOnCtx]. The level-complete intersection rule
 // documented on [BiBFS] is preserved.
 func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
-	defer metrics.Time("search.BiBFSCtx")()
+	defer metrics.Time("search.BiBFSCtx").Stop()
 	var (
 		res []graph.NodeID
 		err error
@@ -78,7 +78,7 @@ func BiBFSCtx[W any](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID) 
 // level-complete intersection rule documented on [BiBFS] is
 // preserved.
 func BiBFSOn[W any](c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
-	defer metrics.Time("search.BiBFSOn")()
+	defer metrics.Time("search.BiBFSOn").Stop()
 	res, err := BiBFSOnCtx(context.Background(), c, rev, src, dst)
 	if err != nil {
 		metrics.IncCounter("search.BiBFSOn.errors", 1)
@@ -95,7 +95,7 @@ func BiBFSOn[W any](c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, 
 //
 //nolint:gocyclo // canonical bidirectional BFS with separate forward/reverse adjacencies
 func BiBFSOnCtx[W any](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
-	defer metrics.Time("search.BiBFSOnCtx")()
+	defer metrics.Time("search.BiBFSOnCtx").Stop()
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) ||
 		uint64(dst)+1 >= uint64(len(c.VerticesSlice())) {
 		metrics.IncCounter("search.BiBFSOnCtx.errors", 1)

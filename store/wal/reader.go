@@ -28,7 +28,7 @@ type Reader struct {
 
 // OpenReader opens path for read-only frame iteration.
 func OpenReader(path string) (*Reader, error) {
-	defer metrics.Time("store.wal.OpenReader")()
+	defer metrics.Time("store.wal.OpenReader").Stop()
 	f, err := os.Open(path) //nolint:gosec // caller-supplied path is by-design
 	if err != nil {
 		metrics.IncCounter("store.wal.OpenReader.errors", 1)
@@ -111,7 +111,7 @@ func (r *Reader) decodeOne() (Frame, error) {
 // caller. After Replay returns, TailOffset/TailError describe where
 // and why iteration stopped (frame-level errors).
 func (r *Reader) Replay(apply func(Frame) error) error {
-	defer metrics.Time("store.wal.Replay")()
+	defer metrics.Time("store.wal.Replay").Stop()
 	for f := range r.Frames() {
 		if err := apply(f); err != nil {
 			metrics.IncCounter("store.wal.Replay.errors", 1)

@@ -29,7 +29,7 @@ import (
 // are acquired from a pool; in the steady state BFSDirectionOpt is
 // zero-allocation per call.
 func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) {
-	defer metrics.Time("search.BFSDirectionOpt")()
+	defer metrics.Time("search.BFSDirectionOpt").Stop()
 	_ = bfsDoCore(context.Background(), c, src, visit, nil)
 }
 
@@ -45,7 +45,7 @@ func BFSDirectionOpt[W any](c *csr.CSR[W], src graph.NodeID, visit func(node gra
 // power-law graphs; the in-scan 4096-node check bounds cancellation
 // latency within that phase as well.
 func BFSDirectionOptCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
-	defer metrics.Time("search.BFSDirectionOptCtx")()
+	defer metrics.Time("search.BFSDirectionOptCtx").Stop()
 	return bfsDoCore(ctx, c, src, visit, nil)
 }
 

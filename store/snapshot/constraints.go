@@ -88,7 +88,7 @@ type ConstraintsReadback struct {
 // in deterministic order (kind, label, property, name) so the component is
 // byte-identical across writes of the same logical state.
 func WriteConstraints(w io.Writer, specs []ConstraintSpec) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteConstraints")()
+	defer metrics.Time("store.snapshot.WriteConstraints").Stop()
 
 	ordered := append([]ConstraintSpec(nil), specs...)
 	sort.Slice(ordered, func(i, j int) bool {
@@ -168,7 +168,7 @@ func writeConstraintRecord(w io.Writer, c ConstraintSpec) (int64, error) {
 // the file bytes ([LoadSnapshotFull] does this); this function only enforces
 // the structural contract.
 func ReadConstraints(r io.Reader) (ConstraintsReadback, error) {
-	defer metrics.Time("store.snapshot.ReadConstraints")()
+	defer metrics.Time("store.snapshot.ReadConstraints").Stop()
 	br := bufio.NewReader(r)
 
 	var magic uint32

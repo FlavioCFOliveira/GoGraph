@@ -18,7 +18,7 @@ import (
 //
 // Deprecated: use [KShortestPathsLoopless].
 func EppsteinKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
-	defer metrics.Time("search.EppsteinKShortest")()
+	defer metrics.Time("search.EppsteinKShortest").Stop()
 	return KShortestPathsLoopless(c, src, dst, k)
 }
 
@@ -27,6 +27,6 @@ func EppsteinKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []
 //
 // Deprecated: use [KShortestPathsLooplessCtx].
 func EppsteinKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
-	defer metrics.Time("search.EppsteinKShortestCtx")()
+	defer metrics.Time("search.EppsteinKShortestCtx").Stop()
 	return KShortestPathsLooplessCtx(ctx, c, src, dst, k)
 }

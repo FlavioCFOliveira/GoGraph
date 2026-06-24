@@ -174,7 +174,7 @@ type dijkstraState[W Weight] struct {
 // (e.g. Yen's k-shortest-paths), prefer the zero-allocation primitive
 // [DijkstraInto].
 func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
-	defer metrics.Time("search.Dijkstra")()
+	defer metrics.Time("search.Dijkstra").Stop()
 	res, err := DijkstraCtx(context.Background(), c, src)
 	if err != nil {
 		metrics.IncCounter("search.Dijkstra.errors", 1)
@@ -186,7 +186,7 @@ func Dijkstra[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) 
 // is checked every 4096 heap pops; on cancellation it returns
 // (nil, wrapped ctx.Err()).
 func DijkstraCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
-	defer metrics.Time("search.DijkstraCtx")()
+	defer metrics.Time("search.DijkstraCtx").Stop()
 	if err := validateDijkstraWeights(c.WeightsSlice()); err != nil {
 		metrics.IncCounter("search.DijkstraCtx.errors", 1)
 		return nil, err
@@ -229,7 +229,7 @@ func DijkstraInto[W Weight](
 	parent []graph.NodeID,
 	found []bool,
 ) error {
-	defer metrics.Time("search.DijkstraInto")()
+	defer metrics.Time("search.DijkstraInto").Stop()
 	maxID := uint64(c.MaxNodeID())
 	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {
 		metrics.IncCounter("search.DijkstraInto.errors", 1)

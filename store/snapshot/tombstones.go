@@ -75,7 +75,7 @@ type TombstonesReadback struct {
 // emitted in ascending order ([lpg.Graph.TombstonedIDs] sorts it) so the
 // component is deterministic across writes of the same logical state.
 func WriteTombstones[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteTombstones")()
+	defer metrics.Time("store.snapshot.WriteTombstones").Stop()
 
 	ids := g.TombstonedIDs()
 
@@ -120,7 +120,7 @@ func WriteTombstones[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 // matches the file bytes (the [LoadSnapshotFull] helper does this); this
 // function only enforces the structural contract.
 func ReadTombstones(r io.Reader) (TombstonesReadback, error) {
-	defer metrics.Time("store.snapshot.ReadTombstones")()
+	defer metrics.Time("store.snapshot.ReadTombstones").Stop()
 	br := bufio.NewReader(r)
 
 	var magic uint32
@@ -181,7 +181,7 @@ func ReadTombstones(r io.Reader) (TombstonesReadback, error) {
 // preserving the chronology of a delete→recreate cycle that straddles the
 // snapshot boundary.
 func ApplyTombstonesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb TombstonesReadback) {
-	defer metrics.Time("store.snapshot.ApplyTombstonesToGraph")()
+	defer metrics.Time("store.snapshot.ApplyTombstonesToGraph").Stop()
 	if len(rb.IDs) == 0 {
 		return
 	}

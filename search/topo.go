@@ -24,7 +24,7 @@ var ErrCycle = errors.New("search: cycle detected in directed graph")
 // gaps in the NodeID space (NodeIDs that were never assigned by the
 // Mapper) are omitted from the output.
 func TopologicalSort[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
-	defer metrics.Time("search.TopologicalSort")()
+	defer metrics.Time("search.TopologicalSort").Stop()
 	res, err := TopologicalSortCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.TopologicalSort.errors", 1)
@@ -36,7 +36,7 @@ func TopologicalSort[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
 // ctx.Err() is checked every 4096 emits; on cancellation returns
 // (nil, wrapped ctx.Err()).
 func TopologicalSortCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
-	defer metrics.Time("search.TopologicalSortCtx")()
+	defer metrics.Time("search.TopologicalSortCtx").Stop()
 	maxID := uint64(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()

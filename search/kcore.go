@@ -20,7 +20,7 @@ import (
 //
 // Concurrency: KCore is safe to invoke concurrently on a shared CSR.
 func KCore[W any](c *csr.CSR[W]) []int {
-	defer metrics.Time("search.KCore")()
+	defer metrics.Time("search.KCore").Stop()
 	out, _ := KCoreCtx(context.Background(), c)
 	return out
 }
@@ -31,7 +31,7 @@ func KCore[W any](c *csr.CSR[W]) []int {
 //
 //nolint:gocyclo // canonical Batagelj-Zaversnik bucket-peel
 func KCoreCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]int, error) {
-	defer metrics.Time("search.KCoreCtx")()
+	defer metrics.Time("search.KCoreCtx").Stop()
 	n := int(c.MaxNodeID())
 	if n == 0 {
 		return nil, nil

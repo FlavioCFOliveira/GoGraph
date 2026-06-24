@@ -24,7 +24,7 @@ import (
 // edge reads stay sequential, maximising the benefit of any
 // MADV_SEQUENTIAL hint configured on the reader.
 func BFS(r *csrfile.Reader, src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
-	defer metrics.Time("search.extern.BFS")()
+	defer metrics.Time("search.extern.BFS").Stop()
 	err := BFSCtx(context.Background(), r, src, visit)
 	if err != nil {
 		metrics.IncCounter("search.extern.BFS.errors", 1)
@@ -42,7 +42,7 @@ func BFS(r *csrfile.Reader, src graph.NodeID, visit func(node graph.NodeID, dept
 // If the Reader is already closed, BFSCtx returns
 // [csrfile.ErrReaderClosed] without touching the mapping.
 func BFSCtx(ctx context.Context, r *csrfile.Reader, src graph.NodeID, visit func(node graph.NodeID, depth int) bool) error {
-	defer metrics.Time("search.extern.BFSCtx")()
+	defer metrics.Time("search.extern.BFSCtx").Stop()
 	err := r.Read(func(verts []uint64, edges []graph.NodeID, _ []byte) error {
 		if uint64(src)+1 >= uint64(len(verts)) {
 			return nil

@@ -76,7 +76,7 @@ type Frame struct {
 // Encode writes f to w as a single binary frame. It returns the
 // number of bytes written and any underlying writer error.
 func Encode(w io.Writer, f Frame) (int, error) {
-	defer metrics.Time("store.wal.Encode")()
+	defer metrics.Time("store.wal.Encode").Stop()
 	if f.Version == 0 {
 		f.Version = CurrentVersion
 	}
@@ -124,7 +124,7 @@ func Encode(w io.Writer, f Frame) (int, error) {
 // version, and ErrCRCMismatch on integrity failure. Any other error
 // is propagated from the underlying reader.
 func Decode(r io.Reader) (Frame, error) {
-	defer metrics.Time("store.wal.Decode")()
+	defer metrics.Time("store.wal.Decode").Stop()
 	var head [HeaderSize]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {

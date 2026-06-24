@@ -29,7 +29,7 @@ import (
 // below ~1024) the parallel overhead dominates and the serial
 // [Betweenness] is preferable.
 func BetweennessParallel[W any](c *csr.CSR[W], numWorkers int) []float64 {
-	defer metrics.Time("search.centrality.BetweennessParallel")()
+	defer metrics.Time("search.centrality.BetweennessParallel").Stop()
 	out, _ := BetweennessParallelCtx(context.Background(), c, numWorkers)
 	return out
 }
@@ -39,7 +39,7 @@ func BetweennessParallel[W any](c *csr.CSR[W], numWorkers int) []float64 {
 // source vertex inside every worker; on cancellation returns
 // (nil, wrapped ctx.Err()).
 func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorkers int) ([]float64, error) {
-	defer metrics.Time("search.centrality.BetweennessParallelCtx")()
+	defer metrics.Time("search.centrality.BetweennessParallelCtx").Stop()
 	n := int(c.MaxNodeID())
 	cb := make([]float64, n)
 	if n == 0 {

@@ -27,7 +27,7 @@ import (
 // Concurrency: PrimMST is safe to invoke concurrently on a shared
 // CSR — it allocates its own working storage.
 func PrimMST[W Weight](c *csr.CSR[W], src graph.NodeID) (parent []graph.NodeID, found []bool, totalWeight W, err error) {
-	defer metrics.Time("search.PrimMST")()
+	defer metrics.Time("search.PrimMST").Stop()
 	parent, found, totalWeight, err = PrimMSTCtx(context.Background(), c, src)
 	if err != nil {
 		metrics.IncCounter("search.PrimMST.errors", 1)
@@ -39,7 +39,7 @@ func PrimMST[W Weight](c *csr.CSR[W], src graph.NodeID) (parent []graph.NodeID, 
 // checked every 4096 heap pops; on cancellation returns
 // (nil, nil, zero, wrapped ctx.Err()).
 func PrimMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (parent []graph.NodeID, found []bool, totalWeight W, err error) {
-	defer metrics.Time("search.PrimMSTCtx")()
+	defer metrics.Time("search.PrimMSTCtx").Stop()
 	verts := c.VerticesSlice()
 	if uint64(src)+1 >= uint64(len(verts)) {
 		return nil, nil, totalWeight, nil

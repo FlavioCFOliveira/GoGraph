@@ -18,7 +18,7 @@ import (
 // rather than a wrapped value; use [EdmondsKarpCtx] to receive the
 // typed error.
 func EdmondsKarp(g *Network, src, sink int) int {
-	defer metrics.Time("search.flow.EdmondsKarp")()
+	defer metrics.Time("search.flow.EdmondsKarp").Stop()
 	out, _ := EdmondsKarpCtx(context.Background(), g, src, sink)
 	return out
 }
@@ -32,7 +32,7 @@ func EdmondsKarp(g *Network, src, sink int) int {
 // int64 flow accumulation, returning (0, [ErrCapacityOverflow]) when
 // they could.
 func EdmondsKarpCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
-	defer metrics.Time("search.flow.EdmondsKarpCtx")()
+	defer metrics.Time("search.flow.EdmondsKarpCtx").Stop()
 	if err := validateEndpoints(g.N(), src, sink); err != nil {
 		metrics.IncCounter("search.flow.EdmondsKarpCtx.errors", 1)
 		return 0, err

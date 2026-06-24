@@ -66,7 +66,7 @@ func (g *CostNetwork) AddCostEdge(src, dst, capacity, cost int) {
 // [ErrCapacityOverflow]), MinCostMaxFlow returns (0, 0) rather than
 // wrapped values; use [MinCostMaxFlowCtx] to receive the typed error.
 func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
-	defer metrics.Time("search.flow.MinCostMaxFlow")()
+	defer metrics.Time("search.flow.MinCostMaxFlow").Stop()
 	out, c, _ := MinCostMaxFlowCtx(context.Background(), g, src, sink)
 	return out, c
 }
@@ -86,7 +86,7 @@ func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
 //
 //nolint:gocyclo // canonical SSP with potentials: BF bootstrap + per-iteration Dijkstra + augmentation
 func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (totalFlow, totalCost int, err error) {
-	defer metrics.Time("search.flow.MinCostMaxFlowCtx")()
+	defer metrics.Time("search.flow.MinCostMaxFlowCtx").Stop()
 	n := g.N()
 	if verr := validateEndpoints(n, src, sink); verr != nil {
 		metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)

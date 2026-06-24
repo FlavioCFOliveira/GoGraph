@@ -31,7 +31,7 @@ var ErrNegativeEdgeAPSP = errors.New("search: DijkstraAPSP requires non-negative
 //
 // Complexity: O(V * (V + E) * log V).
 func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
-	defer metrics.Time("search.DijkstraAPSP")()
+	defer metrics.Time("search.DijkstraAPSP").Stop()
 	res, err := DijkstraAPSPCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.DijkstraAPSP.errors", 1)
@@ -43,7 +43,7 @@ func DijkstraAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 // ctx.Err() is checked once per source vertex; on cancellation
 // returns (nil, wrapped ctx.Err()).
 func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
-	defer metrics.Time("search.DijkstraAPSPCtx")()
+	defer metrics.Time("search.DijkstraAPSPCtx").Stop()
 	// Float Weight types: NaN / +/-Inf in any edge silently breaks
 	// every per-source Dijkstra. Fail fast at the public boundary
 	// (each inner Dijkstra would re-detect it but at higher cost);
@@ -160,7 +160,7 @@ func DijkstraAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], er
 // Complexity: O(V * (V + E) * log V) for the Dijkstra pass plus
 // O(V * E) for the Bellman-Ford pass (SPFA worst-case bound).
 func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
-	defer metrics.Time("search.JohnsonAPSP")()
+	defer metrics.Time("search.JohnsonAPSP").Stop()
 	res, err := JohnsonAPSPCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.JohnsonAPSP.errors", 1)
@@ -173,7 +173,7 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 // pass and at every relaxation-round boundary during the
 // Bellman-Ford pass; on cancellation returns (nil, wrapped ctx.Err()).
 func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
-	defer metrics.Time("search.JohnsonAPSPCtx")()
+	defer metrics.Time("search.JohnsonAPSPCtx").Stop()
 	p, err := johnsonPrepare[W](ctx, c)
 	if err != nil {
 		metrics.IncCounter("search.JohnsonAPSPCtx.errors", 1)

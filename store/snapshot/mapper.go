@@ -136,7 +136,7 @@ type MapperReadback struct {
 // The CRC32C covers the entire on-disk file, including the magic
 // header. The reader recomputes the CRC end-to-end at load time.
 func WriteMapperString(w io.Writer, m *graph.Mapper[string]) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteMapperString")()
+	defer metrics.Time("store.snapshot.WriteMapperString").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<20)
 	hasher := crc32.New(castagnoli)
@@ -253,7 +253,7 @@ type keyDecoder[N comparable] interface {
 // deterministically. The CRC32C covers the entire on-disk file,
 // including the magic header.
 func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder[N]) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteMapper")()
+	defer metrics.Time("store.snapshot.WriteMapper").Stop()
 
 	// String keys reuse the frozen version-1 path so the bytes stay
 	// identical to the pre-codec writer. The any() probe matches the
@@ -360,7 +360,7 @@ func collectEncodedMapperPairs[N comparable](m *graph.Mapper[N], codec keyEncode
 // surrounding manifest CRC ([readVerifiedMapperBytes] does this); this
 // function enforces only the structural contract.
 func ReadMapperBytes(r io.Reader) (MapperReadback, error) {
-	defer metrics.Time("store.snapshot.ReadMapperBytes")()
+	defer metrics.Time("store.snapshot.ReadMapperBytes").Stop()
 	br := bufio.NewReader(r)
 
 	var magic uint32
@@ -437,7 +437,7 @@ func ReadMapperBytes(r io.Reader) (MapperReadback, error) {
 // CRC matches the file bytes ([LoadSnapshotFull] does this); this
 // function only enforces the structural contract.
 func ReadMapperString(r io.Reader) (MapperReadback, error) {
-	defer metrics.Time("store.snapshot.ReadMapperString")()
+	defer metrics.Time("store.snapshot.ReadMapperString").Stop()
 	br := bufio.NewReader(r)
 
 	var magic uint32

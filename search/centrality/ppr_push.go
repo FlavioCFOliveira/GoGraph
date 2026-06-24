@@ -41,7 +41,7 @@ func DefaultPPRPushOptions() PPRPushOptions {
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR.
 func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
-	defer metrics.Time("search.centrality.PersonalisedPushPageRank")()
+	defer metrics.Time("search.centrality.PersonalisedPushPageRank").Stop()
 	res, err := PersonalisedPushPageRankCtx(context.Background(), c, src, opts)
 	if err != nil {
 		metrics.IncCounter("search.centrality.PersonalisedPushPageRank.errors", 1)
@@ -55,7 +55,7 @@ func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPu
 //
 //nolint:gocyclo // canonical ACL push: defaults + worklist loop + dangling teleport
 func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
-	defer metrics.Time("search.centrality.PersonalisedPushPageRankCtx")()
+	defer metrics.Time("search.centrality.PersonalisedPushPageRankCtx").Stop()
 	if hasInvalidFloat(opts.Damping, opts.Epsilon) {
 		metrics.IncCounter("search.centrality.PersonalisedPushPageRankCtx.errors", 1)
 		return nil, ErrInvalidInput

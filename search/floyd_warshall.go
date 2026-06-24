@@ -81,7 +81,7 @@ func (a *APSP[W]) N() int { return a.live }
 // Concurrency: safe to invoke from any number of goroutines on a
 // shared CSR; allocates its own working buffers per call.
 func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
-	defer metrics.Time("search.FloydWarshall")()
+	defer metrics.Time("search.FloydWarshall").Stop()
 	out, _ := FloydWarshallCtx(context.Background(), c)
 	return out
 }
@@ -94,7 +94,7 @@ func FloydWarshall[W Weight](c *csr.CSR[W]) *APSP[W] {
 // [ErrNegativeCycle] (negative-weight cycle detected post-DP),
 // or the underlying ctx.Err() on cancellation.
 func FloydWarshallCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
-	defer metrics.Time("search.FloydWarshallCtx")()
+	defer metrics.Time("search.FloydWarshallCtx").Stop()
 	// Float Weight types: NaN / +/-Inf silently corrupts every
 	// k-pivot relaxation. Fail fast at the public boundary; integer
 	// W short-circuits in O(1).

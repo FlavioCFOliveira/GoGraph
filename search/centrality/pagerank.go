@@ -103,7 +103,7 @@ func DefaultPageRankOptions() PageRankOptions {
 // scheduling. Smaller graphs use the serial push form unchanged and pay
 // neither the reverse-CSR transpose nor any goroutine overhead.
 func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
-	defer metrics.Time("search.centrality.PageRank")()
+	defer metrics.Time("search.centrality.PageRank").Stop()
 	ranks, iterations, err = PageRankCtx(context.Background(), c, opts)
 	if err != nil {
 		metrics.IncCounter("search.centrality.PageRank.errors", 1)
@@ -124,7 +124,7 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 //
 //nolint:gocyclo // canonical power-iteration: defaults + live detection + iteration loop
 func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
-	defer metrics.Time("search.centrality.PageRankCtx")()
+	defer metrics.Time("search.centrality.PageRankCtx").Stop()
 	opts, err = validatePageRankOptions(opts)
 	if err != nil {
 		metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
@@ -544,7 +544,7 @@ func NewPageRanker[W any](c *csr.CSR[W]) *PageRanker[W] {
 // invocation and consumes the same shared core, so reusing cached state
 // changes only the allocation profile, never the output.
 func (p *PageRanker[W]) Run(ctx context.Context, opts PageRankOptions) (ranks []float64, iterations int, err error) {
-	defer metrics.Time("search.centrality.PageRanker.Run")()
+	defer metrics.Time("search.centrality.PageRanker.Run").Stop()
 	opts, err = validatePageRankOptions(opts)
 	if err != nil {
 		metrics.IncCounter("search.centrality.PageRanker.Run.errors", 1)

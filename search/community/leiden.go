@@ -92,7 +92,7 @@ type Partition struct {
 // equal-modularity tie-breaking threshold for typical inputs but
 // pathological cases at exact equality may diverge.
 func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
-	defer metrics.Time("search.community.Leiden")()
+	defer metrics.Time("search.community.Leiden").Stop()
 	out, _ := LeidenCtx(context.Background(), c, opts)
 	return out
 }
@@ -103,7 +103,7 @@ func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 //
 //nolint:gocyclo // canonical Leiden: defaults + pass loop dispatches three phases through helpers
 func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (Partition, error) {
-	defer metrics.Time("search.community.LeidenCtx")()
+	defer metrics.Time("search.community.LeidenCtx").Stop()
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 64
 	}

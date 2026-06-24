@@ -99,7 +99,7 @@ func TestPprofCapture(t *testing.T) {
 				} else {
 					_, _ = search.Dijkstra(snap, src)
 				}
-				done()
+				done.Stop()
 				runtime.Gosched()
 			}
 		}(i)

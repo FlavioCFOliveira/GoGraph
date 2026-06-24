@@ -20,7 +20,7 @@ import (
 // 0 rather than a wrapped value; use [PushRelabelMaxFlowCtx] to receive
 // the typed error.
 func PushRelabelMaxFlow(g *Network, src, sink int) int {
-	defer metrics.Time("search.flow.PushRelabelMaxFlow")()
+	defer metrics.Time("search.flow.PushRelabelMaxFlow").Stop()
 	out, _ := PushRelabelMaxFlowCtx(context.Background(), g, src, sink)
 	return out
 }
@@ -37,7 +37,7 @@ func PushRelabelMaxFlow(g *Network, src, sink int) int {
 //
 //nolint:gocyclo // textbook FIFO push-relabel with gap heuristic
 func PushRelabelMaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
-	defer metrics.Time("search.flow.PushRelabelMaxFlowCtx")()
+	defer metrics.Time("search.flow.PushRelabelMaxFlowCtx").Stop()
 	n := g.N()
 	if err := validateEndpoints(n, src, sink); err != nil {
 		metrics.IncCounter("search.flow.PushRelabelMaxFlowCtx.errors", 1)

@@ -35,7 +35,7 @@ var ErrMapperApply = errors.New("snapshot: cannot apply mapper")
 // with mutations or reads on g. It is intended for the one-shot
 // snapshot-load phase of recovery.
 func ApplyMapperToGraph[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadback) error {
-	defer metrics.Time("store.snapshot.ApplyMapperToGraph")()
+	defer metrics.Time("store.snapshot.ApplyMapperToGraph").Stop()
 	if len(rb.Pairs) == 0 {
 		return nil
 	}
@@ -80,7 +80,7 @@ func ApplyMapperToGraph[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadba
 // wrapping the codec error; a structural violation surfaces as
 // [ErrMapperApply] wrapping the relevant [graph.ErrMapper…] sentinel.
 func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadback, codec keyDecoder[N]) error {
-	defer metrics.Time("store.snapshot.ApplyMapperToGraphWithCodec")()
+	defer metrics.Time("store.snapshot.ApplyMapperToGraphWithCodec").Stop()
 	if len(rb.RawPairs) == 0 {
 		return nil
 	}
@@ -142,7 +142,7 @@ func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb Map
 //
 //nolint:gocyclo // CSR apply walks every src slot, resolves endpoints, decodes weight by W type
 func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) error {
-	defer metrics.Time("store.snapshot.ApplyCSRToGraph")()
+	defer metrics.Time("store.snapshot.ApplyCSRToGraph").Stop()
 	if len(rb.Vertices) == 0 {
 		return nil
 	}

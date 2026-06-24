@@ -102,7 +102,7 @@ func capHint(count uint64, maxCap int) int {
 // to read one more byte after the weights array: present → handles follow,
 // EOF → none (the backward-compatible read branch).
 func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteCSR")()
+	defer metrics.Time("store.snapshot.WriteCSR").Stop()
 	bw := bufio.NewWriterSize(w, 1<<20)
 	hasher := crc32.New(castagnoli)
 	tee := io.MultiWriter(bw, hasher)
@@ -271,7 +271,7 @@ func ReadCSR(r io.Reader) (CSRReadback, error) {
 // effective per-count limit is the smaller of the two so the precise
 // bound never relaxes the backstop.
 func readCSRLimited(r io.Reader, maxBytes int64) (CSRReadback, error) {
-	defer metrics.Time("store.snapshot.ReadCSR")()
+	defer metrics.Time("store.snapshot.ReadCSR").Stop()
 	br := bufio.NewReader(r)
 	var nV, nE uint64
 	if err := binary.Read(br, binary.LittleEndian, &nV); err != nil {
@@ -420,7 +420,7 @@ func weightsByteLen(wsize uint8, nE uint64, maxBytes int64, byteBudget uint64) (
 // achieved by assembling the snapshot under dir + ".tmp" and
 // renaming it to dir on success.
 func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotCSR")()
+	defer metrics.Time("store.snapshot.WriteSnapshotCSR").Stop()
 	err := WriteSnapshotCSRCtx(context.Background(), dir, c)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSR.errors", 1)
@@ -445,7 +445,7 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 //
 //nolint:gocyclo // snapshot publish: dir prep + CSR write + manifest write + atomic rename + ctx ticks
 func writeSnapshotCSRCtxWith[W any](ctx context.Context, fsys fileSystem, dir string, c *csr.CSR[W]) error {
-	defer metrics.Time("store.snapshot.WriteSnapshotCSRCtx")()
+	defer metrics.Time("store.snapshot.WriteSnapshotCSRCtx").Stop()
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotCSRCtx.errors", 1)
 		return err

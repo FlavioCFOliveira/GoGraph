@@ -125,7 +125,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 //
 //nolint:gocyclo // GraphML decode + key lookup + per-edge parse + ctx tick
 func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadInto")()
+	defer metrics.Time("graph.io.graphml.ReadInto").Stop()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}

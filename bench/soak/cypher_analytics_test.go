@@ -139,7 +139,7 @@ func runCypherAnalytics(t *testing.T, dur time.Duration) {
 				}
 				stop := metrics.Time("bench.soak.analytics.read")
 				res, err := eng.Run(ctx, "MATCH (n) RETURN n", nil)
-				stop()
+				stop.Stop()
 				if err != nil {
 					runtime.Gosched()
 					continue
@@ -171,7 +171,7 @@ func runCypherAnalytics(t *testing.T, dur time.Duration) {
 			i++
 			stop := metrics.Time("bench.soak.analytics.write")
 			res, err := eng.RunInTx(ctx, q, nil)
-			stop()
+			stop.Stop()
 			if err != nil {
 				continue
 			}
@@ -201,7 +201,7 @@ func runCypherAnalytics(t *testing.T, dur time.Duration) {
 			}
 			stopPR := metrics.Time("bench.soak.analytics.pagerank")
 			_, _, err := centrality.PageRankCtx(ctx, snap, centrality.DefaultPageRankOptions())
-			stopPR()
+			stopPR.Stop()
 			if err != nil {
 				// ctx cancelled or empty graph — both are expected during teardown.
 				log.Printf("analytics_soak: PageRankCtx: %v", err)

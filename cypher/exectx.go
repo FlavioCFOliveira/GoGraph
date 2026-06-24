@@ -219,7 +219,7 @@ type ExplicitTx struct {
 // read-committed isolation scope: concurrent readers block while this transaction
 // is open and observe only the committed state once it ends (task #1412).
 func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
-	defer cmetrics.Time("cypher.BeginTx")()
+	defer cmetrics.Time("cypher.BeginTx").Stop()
 	if err := checkContext(ctx); err != nil {
 		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
 		return nil, err
@@ -290,7 +290,7 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 // promptly with an error wrapping the context error (matchable via [errors.Is]
 // against [context.Canceled] / [context.DeadlineExceeded]).
 func (e *Engine) BeginReadTx(ctx context.Context) (*ExplicitTx, error) {
-	defer cmetrics.Time("cypher.BeginReadTx")()
+	defer cmetrics.Time("cypher.BeginReadTx").Stop()
 	if err := checkContext(ctx); err != nil {
 		cmetrics.IncCounter("cypher.BeginReadTx.errors", 1)
 		return nil, err
@@ -328,7 +328,7 @@ func (e *Engine) BeginReadTx(ctx context.Context) (*ExplicitTx, error) {
 // Exec returns [ErrTxFinished] if the transaction has already been committed or
 // rolled back, or if ctx (the BeginTx context) is already done.
 func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Result, err error) {
-	defer cmetrics.Time("cypher.ExplicitTx.Exec")()
+	defer cmetrics.Time("cypher.ExplicitTx.Exec").Stop()
 	if tx.finished {
 		return nil, ErrTxFinished
 	}
@@ -435,7 +435,7 @@ func (tx *ExplicitTx) ExecAny(query string, params map[string]any) (*Result, err
 // rolled back, and [ErrTxPoisoned] if a prior [ExplicitTx.Exec] call returned
 // an [ErrStatementPipeline] error (call [ExplicitTx.Rollback] instead).
 func (tx *ExplicitTx) Commit() (err error) {
-	defer cmetrics.Time("cypher.ExplicitTx.Commit")()
+	defer cmetrics.Time("cypher.ExplicitTx.Commit").Stop()
 	if tx.finished {
 		return ErrTxFinished
 	}
@@ -505,7 +505,7 @@ func (tx *ExplicitTx) Commit() (err error) {
 // reconciles to the durable state and a store-less engine cannot. It returns
 // [ErrTxFinished] if the transaction was already committed or rolled back.
 func (tx *ExplicitTx) Rollback() (err error) {
-	defer cmetrics.Time("cypher.ExplicitTx.Rollback")()
+	defer cmetrics.Time("cypher.ExplicitTx.Rollback").Stop()
 	if tx.finished {
 		return ErrTxFinished
 	}

@@ -46,7 +46,7 @@ var ErrNegativeCycle = errors.New("search: negative cycle reachable from source"
 // For hot loops where the caller can amortise buffer allocation,
 // prefer the zero-allocation primitive [BellmanFordInto].
 func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
-	defer metrics.Time("search.BellmanFord")()
+	defer metrics.Time("search.BellmanFord").Stop()
 	res, err := BellmanFordCtx(context.Background(), c, src)
 	if err != nil {
 		metrics.IncCounter("search.BellmanFord.errors", 1)
@@ -58,7 +58,7 @@ func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], erro
 // ctx.Err() is checked at every relaxation round boundary; on
 // cancellation returns (nil, wrapped ctx.Err()).
 func BellmanFordCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
-	defer metrics.Time("search.BellmanFordCtx")()
+	defer metrics.Time("search.BellmanFordCtx").Stop()
 	maxID := uint64(c.MaxNodeID())
 	st := acquireDijkstra[W](maxID)
 	defer releaseDijkstra(st)
@@ -86,7 +86,7 @@ func BellmanFordInto[W Weight](
 	parent []graph.NodeID,
 	found []bool,
 ) error {
-	defer metrics.Time("search.BellmanFordInto")()
+	defer metrics.Time("search.BellmanFordInto").Stop()
 	maxID := uint64(c.MaxNodeID())
 	if uint64(len(dist)) < maxID || uint64(len(parent)) < maxID || uint64(len(found)) < maxID {
 		metrics.IncCounter("search.BellmanFordInto.errors", 1)

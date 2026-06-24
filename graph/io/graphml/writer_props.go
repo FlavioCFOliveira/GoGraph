@@ -240,7 +240,7 @@ func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) error {
 //
 //nolint:gocyclo // GraphML typed-property write: key scan + XML emit + node/edge loop
 func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, int64]) error {
-	defer metrics.Time("graph.io.graphml.WriteWithProps")()
+	defer metrics.Time("graph.io.graphml.WriteWithProps").Stop()
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("graph.io.graphml.WriteWithPropsCtx.errors", 1)
 		return err
@@ -477,7 +477,7 @@ func ReadWithPropsCtx(ctx context.Context, r io.Reader) (*lpg.Graph[string, int6
 //
 //nolint:gocyclo // GraphML typed-property read: key index + node props + edge decode + ctx tick
 func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
-	defer metrics.Time("graph.io.graphml.ReadWithProps")()
+	defer metrics.Time("graph.io.graphml.ReadWithProps").Stop()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}

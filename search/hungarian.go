@@ -69,7 +69,7 @@ type Assignment struct {
 // Integer-weighted assignment is therefore deferred; callers with
 // integer cost matrices should currently convert to float64.
 func Hungarian(cost []float64, n, m int) (Assignment, error) {
-	defer metrics.Time("search.Hungarian")()
+	defer metrics.Time("search.Hungarian").Stop()
 	res, err := HungarianCtx(context.Background(), cost, n, m)
 	if err != nil {
 		metrics.IncCounter("search.Hungarian.errors", 1)
@@ -87,7 +87,7 @@ func Hungarian(cost []float64, n, m int) (Assignment, error) {
 //
 //nolint:gocyclo // textbook Hungarian: validation + dual update + augment
 func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, error) {
-	defer metrics.Time("search.HungarianCtx")()
+	defer metrics.Time("search.HungarianCtx").Stop()
 	if n == 0 || m == 0 {
 		return Assignment{RowToCol: make([]int, n)}, nil
 	}

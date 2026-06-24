@@ -36,7 +36,7 @@ type BCCResult struct {
 // The implementation uses an explicit DFS stack (no recursion) so
 // it survives deep graphs.
 func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
-	defer metrics.Time("search.HopcroftTarjanBCC")()
+	defer metrics.Time("search.HopcroftTarjanBCC").Stop()
 	out, _ := HopcroftTarjanBCCCtx(context.Background(), c)
 	return out
 }
@@ -47,7 +47,7 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 //
 //nolint:gocyclo // canonical Hopcroft-Tarjan: DFS frame stack + edge-stack + articulation + bridge detection
 func HopcroftTarjanBCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (BCCResult, error) {
-	defer metrics.Time("search.HopcroftTarjanBCCCtx")()
+	defer metrics.Time("search.HopcroftTarjanBCCCtx").Stop()
 	maxID := int(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()

@@ -164,7 +164,7 @@ func New(opts Options) *Loader {
 // Add ingests one edge. Returns [ErrTooManyRows] when the row cap is
 // exceeded.
 func (l *Loader) Add(e Edge) error {
-	defer metrics.Time("store.bulk.Add")()
+	defer metrics.Time("store.bulk.Add").Stop()
 	if l.opts.MaxRows > 0 && l.rows >= l.opts.MaxRows {
 		metrics.IncCounter("store.bulk.Add.errors", 1)
 		return ErrTooManyRows
@@ -187,7 +187,7 @@ func (l *Loader) Add(e Edge) error {
 // on the first edge that would cross the cap; edges accepted before
 // that point remain ingested.
 func (l *Loader) AddBatch(es []Edge) error {
-	defer metrics.Time("store.bulk.AddBatch")()
+	defer metrics.Time("store.bulk.AddBatch").Stop()
 	for k := range es {
 		if err := l.Add(es[k]); err != nil {
 			metrics.IncCounter("store.bulk.AddBatch.errors", 1)
@@ -201,7 +201,7 @@ func (l *Loader) AddBatch(es []Edge) error {
 // Returns the number of edges drained and any error from the input
 // channel ([ErrTooManyRows] when the row cap is exceeded).
 func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
-	defer metrics.Time("store.bulk.Drain")()
+	defer metrics.Time("store.bulk.Drain").Stop()
 	drained := 0
 	for {
 		select {
@@ -233,7 +233,7 @@ func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 // fsync): the parallel build completes fully in memory before the
 // single publication, so a crash mid-build leaves no partial csrfile.
 func (l *Loader) Finalise() (int, *csr.CSR[int64], error) {
-	defer metrics.Time("store.bulk.Finalise")()
+	defer metrics.Time("store.bulk.Finalise").Stop()
 
 	if l.opts.Parallel {
 		if err := l.buildBuffered(); err != nil {

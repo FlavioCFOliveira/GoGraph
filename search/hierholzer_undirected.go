@@ -20,7 +20,7 @@ import (
 // exactly two vertices may have odd degree (these become the path's
 // endpoints).
 func HierholzerUndirected[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
-	defer metrics.Time("search.HierholzerUndirected")()
+	defer metrics.Time("search.HierholzerUndirected").Stop()
 	res, err := HierholzerUndirectedCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.HierholzerUndirected.errors", 1)
@@ -34,7 +34,7 @@ func HierholzerUndirected[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
 //
 //nolint:gocyclo // canonical Hierholzer with twin-edge consumption
 func HierholzerUndirectedCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
-	defer metrics.Time("search.HierholzerUndirectedCtx")()
+	defer metrics.Time("search.HierholzerUndirectedCtx").Stop()
 	maxID := int(c.MaxNodeID())
 	if maxID == 0 {
 		return nil, nil

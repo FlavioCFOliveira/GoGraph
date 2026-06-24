@@ -26,7 +26,7 @@ type tarjanFrame struct {
 // destination) are considered; NodeIDs that were assigned by the
 // Mapper but never gained an edge are not emitted as singleton SCCs.
 func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
-	defer metrics.Time("search.TarjanSCC")()
+	defer metrics.Time("search.TarjanSCC").Stop()
 	out, _ := TarjanSCCCtx(context.Background(), c)
 	return out
 }
@@ -39,7 +39,7 @@ func TarjanSCC[W any](c *csr.CSR[W]) [][]graph.NodeID {
 // giant cycle) is explored from a single root, so the whole O(V+E)
 // traversal would otherwise be one uninterruptible outer iteration.
 func TarjanSCCCtx[W any](ctx context.Context, c *csr.CSR[W]) ([][]graph.NodeID, error) {
-	defer metrics.Time("search.TarjanSCCCtx")()
+	defer metrics.Time("search.TarjanSCCCtx").Stop()
 	maxID := uint64(c.MaxNodeID())
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()

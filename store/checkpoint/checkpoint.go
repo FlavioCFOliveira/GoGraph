@@ -372,7 +372,7 @@ func (c *Checkpointer[N, W]) Stop() {
 // of the loop) can still delay Trigger until the loop drains it; prefer
 // TriggerCtx in production code to bound that latency with a deadline.
 func (c *Checkpointer[N, W]) Trigger() error {
-	defer metrics.Time("store.checkpoint.Trigger")()
+	defer metrics.Time("store.checkpoint.Trigger").Stop()
 	err := c.TriggerCtx(context.Background())
 	if err != nil {
 		metrics.IncCounter("store.checkpoint.Trigger.errors", 1)
@@ -400,7 +400,7 @@ func (c *Checkpointer[N, W]) Trigger() error {
 //     still completes here rather than waiting forever on a result the
 //     departed loop will never send.
 func (c *Checkpointer[N, W]) TriggerCtx(ctx context.Context) error {
-	defer metrics.Time("store.checkpoint.TriggerCtx")()
+	defer metrics.Time("store.checkpoint.TriggerCtx").Stop()
 	// Fast path: never enter the buffered send once the loop is gone, or
 	// the request could sit unread in the buffer until GC with no one to
 	// answer it.

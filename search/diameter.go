@@ -25,7 +25,7 @@ import (
 // CSR. The implementation expects c to encode an undirected graph
 // (symmetric directed CSR).
 func Diameter[W any](c *csr.CSR[W]) (lo, hi int, exact bool) {
-	defer metrics.Time("search.Diameter")()
+	defer metrics.Time("search.Diameter").Stop()
 	lo, hi, exact, _ = DiameterCtx(context.Background(), c)
 	return lo, hi, exact
 }
@@ -39,7 +39,7 @@ func Diameter[W any](c *csr.CSR[W]) (lo, hi int, exact bool) {
 //
 //nolint:gocyclo // 2-sweep + iFUB refinement: precondition checks + sweeps + level walk
 func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact bool, err error) {
-	defer metrics.Time("search.DiameterCtx")()
+	defer metrics.Time("search.DiameterCtx").Stop()
 	n := int(c.MaxNodeID())
 	if n == 0 {
 		return 0, 0, true, nil

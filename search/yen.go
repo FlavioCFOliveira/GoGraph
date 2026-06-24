@@ -49,7 +49,7 @@ type YenPath[W Weight] struct {
 // Returned []YenPath retains pointers into the CSR vertex/edge
 // arrays — do NOT free the underlying CSR while iterating.
 func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
-	defer metrics.Time("search.YenKShortest")()
+	defer metrics.Time("search.YenKShortest").Stop()
 	out, _ := YenKShortestCtx(context.Background(), c, src, dst, k)
 	return out
 }
@@ -65,7 +65,7 @@ func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPa
 //
 //nolint:gocyclo // canonical Yen: NaN/Inf gate + initial Dijkstra + k-1 spur rounds + candidate sort
 func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
-	defer metrics.Time("search.YenKShortestCtx")()
+	defer metrics.Time("search.YenKShortestCtx").Stop()
 	if k <= 0 {
 		return nil, nil
 	}

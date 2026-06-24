@@ -120,7 +120,7 @@ type Manifest struct {
 //
 //nolint:gocritic // public API: Manifest is passed by value to preserve the existing call sites; the encoder only reads from it.
 func WriteManifest(w io.Writer, m Manifest) error {
-	defer metrics.Time("store.snapshot.WriteManifest")()
+	defer metrics.Time("store.snapshot.WriteManifest").Stop()
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(m); err != nil {
@@ -133,7 +133,7 @@ func WriteManifest(w io.Writer, m Manifest) error {
 // LoadManifest parses m from r. Returns [ErrManifestUnsupported]
 // when the version is newer than this build.
 func LoadManifest(r io.Reader) (Manifest, error) {
-	defer metrics.Time("store.snapshot.LoadManifest")()
+	defer metrics.Time("store.snapshot.LoadManifest").Stop()
 	var m Manifest
 	if err := json.NewDecoder(r).Decode(&m); err != nil {
 		metrics.IncCounter("store.snapshot.LoadManifest.errors", 1)
@@ -168,7 +168,7 @@ func ReadManifestFileFS(fsys fileSystem, path string) (Manifest, error) {
 // through fsys, so the OS backend (which calls [openSnapshotComponent] with
 // its O_NOFOLLOW guard) reproduces the historical behaviour exactly.
 func readManifestFileWith(fsys fileSystem, path string) (Manifest, error) {
-	defer metrics.Time("store.snapshot.ReadManifestFile")()
+	defer metrics.Time("store.snapshot.ReadManifestFile").Stop()
 	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.ReadManifestFile.errors", 1)

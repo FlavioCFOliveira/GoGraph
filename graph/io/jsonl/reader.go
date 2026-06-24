@@ -109,7 +109,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 //
 //nolint:gocyclo // JSONL decode + per-row parse + node/edge dispatch + ctx tick
 func ReadIntoCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
-	defer metrics.Time("graph.io.jsonl.ReadInto")()
+	defer metrics.Time("graph.io.jsonl.ReadInto").Stop()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}
@@ -208,7 +208,7 @@ func ReadWithPropsCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*lp
 //
 //nolint:gocyclo // JSONL decode + node/edge/property dispatch + kind decode + ctx tick
 func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
-	defer metrics.Time("graph.io.jsonl.ReadWithProps")()
+	defer metrics.Time("graph.io.jsonl.ReadWithProps").Stop()
 	if maxBytes > 0 {
 		r = newLimitReader(r, maxBytes)
 	}

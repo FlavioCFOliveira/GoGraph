@@ -43,7 +43,7 @@ type MSTEdge[W Weight] struct {
 // Concurrency: KruskalMST is safe to invoke from any number of
 // goroutines on a shared CSR — it allocates its own working storage.
 func KruskalMST[W Weight](c *csr.CSR[W]) (edges []MSTEdge[W], totalWeight W, err error) {
-	defer metrics.Time("search.KruskalMST")()
+	defer metrics.Time("search.KruskalMST").Stop()
 	edges, totalWeight, err = KruskalMSTCtx(context.Background(), c)
 	if err != nil {
 		metrics.IncCounter("search.KruskalMST.errors", 1)
@@ -61,7 +61,7 @@ func KruskalMST[W Weight](c *csr.CSR[W]) (edges []MSTEdge[W], totalWeight W, err
 // reported in the original NodeID space; only the internal union
 // arithmetic runs in the compact [0, live) index space.
 func KruskalMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (edges []MSTEdge[W], totalWeight W, err error) {
-	defer metrics.Time("search.KruskalMSTCtx")()
+	defer metrics.Time("search.KruskalMSTCtx").Stop()
 	if cerr := ctx.Err(); cerr != nil {
 		metrics.IncCounter("search.KruskalMSTCtx.errors", 1)
 		return nil, totalWeight, cerr

@@ -36,7 +36,7 @@ func Open(dir string) (LoadedCSR, error) {
 // without O_NOFOLLOW, as before) while the simulator can supply an
 // in-memory disk.
 func openWith(fsys fileSystem, dir string) (LoadedCSR, error) {
-	defer metrics.Time("store.snapshot.Open")()
+	defer metrics.Time("store.snapshot.Open").Stop()
 	manifestPath := filepath.Join(dir, "manifest.json")
 	m, err := readManifestFileWith(fsys, manifestPath)
 	if err != nil {

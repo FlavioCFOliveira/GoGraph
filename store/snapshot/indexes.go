@@ -101,7 +101,7 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 //
 //nolint:gocyclo // per-index write + per-index serialize + per-index sync
 func writeIndexesWith(fsys fileSystem, dir string, m *index.Manager) ([]IndexFileEntry, error) {
-	defer metrics.Time("store.snapshot.WriteIndexes")()
+	defer metrics.Time("store.snapshot.WriteIndexes").Stop()
 	if m == nil || m.Count() == 0 {
 		return nil, nil
 	}
@@ -217,7 +217,7 @@ func LoadIndexes(dir string, entries []IndexFileEntry) ([]IndexReadback, error) 
 // backend reproduces the historical behaviour exactly while the simulator
 // can supply an in-memory disk.
 func loadIndexesWith(fsys fileSystem, dir string, entries []IndexFileEntry) ([]IndexReadback, error) {
-	defer metrics.Time("store.snapshot.LoadIndexes")()
+	defer metrics.Time("store.snapshot.LoadIndexes").Stop()
 	if len(entries) == 0 {
 		return nil, nil
 	}

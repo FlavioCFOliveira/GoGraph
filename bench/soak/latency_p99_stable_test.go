@@ -157,7 +157,7 @@ func TestLatencyP99_Stable(t *testing.T) {
 				dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
 				dialErr := boltDial(dialCtx, addr, query)
 				dialCancel()
-				done()
+				done.Stop()
 				if dialErr != nil {
 					failures.Add(1)
 					runtime.Gosched()

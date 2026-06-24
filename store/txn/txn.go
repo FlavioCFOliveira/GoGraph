@@ -510,7 +510,7 @@ func resolveMaxTxnOps(maxTxnOps int) int {
 // non-zero weight returns [ErrNoWeightCodec]. Callers that need
 // durable weighted edges should use [NewStoreWithOptions].
 func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N]) *Store[N, W] {
-	defer metrics.Time("store.txn.NewStoreWithCodec")()
+	defer metrics.Time("store.txn.NewStoreWithCodec").Stop()
 	return NewStoreWithCodecCapped(g, wlog, codec, 0)
 }
 
@@ -524,7 +524,7 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 // codec must not be nil. The returned store has no [WeightCodec]; see
 // [NewStoreWithCodec] for the weight-handling contract.
 func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
-	defer metrics.Time("store.txn.NewStoreWithCodecCapped")()
+	defer metrics.Time("store.txn.NewStoreWithCodecCapped").Stop()
 	s := &Store[N, W]{
 		sem:       make(chan struct{}, 1),
 		g:         g,
@@ -557,7 +557,7 @@ func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.
 // opts.Codec must not be nil; opts.WeightCodec must not be nil.
 // Passing the legacy fmt codec via opts.Codec is undefined behaviour.
 func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W]) *Store[N, W] {
-	defer metrics.Time("store.txn.NewStoreWithOptions")()
+	defer metrics.Time("store.txn.NewStoreWithOptions").Stop()
 	return NewStoreWithOptionsCapped(g, wlog, opts, 0)
 }
 
@@ -570,7 +570,7 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 //
 // opts.Codec and opts.WeightCodec must not be nil.
 func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
-	defer metrics.Time("store.txn.NewStoreWithOptionsCapped")()
+	defer metrics.Time("store.txn.NewStoreWithOptionsCapped").Stop()
 	s := &Store[N, W]{
 		sem:       make(chan struct{}, 1),
 		g:         g,
@@ -671,7 +671,7 @@ func (s *Store[N, W]) release() { <-s.sem }
 // Concurrency: safe to call from any goroutine; it serialises against every
 // transaction on the store.
 func (s *Store[N, W]) RunUnderCommitLock(fn func() error) error {
-	defer metrics.Time("store.txn.RunUnderCommitLock")()
+	defer metrics.Time("store.txn.RunUnderCommitLock").Stop()
 	// acquire(context.Background()) cannot fail, so the held token is
 	// guaranteed and the deferred release is always paired with it.
 	_ = s.acquire(context.Background())
@@ -728,7 +728,7 @@ func (s *Store[N, W]) drainInflight() {
 // store's single-writer lock until Commit or Rollback runs. The acquire is
 // uncancellable; callers that need a deadline must use [Store.BeginCtx].
 func (s *Store[N, W]) Begin() *Tx[N, W] {
-	defer metrics.Time("store.txn.Begin")()
+	defer metrics.Time("store.txn.Begin").Stop()
 	tx, _ := s.BeginCtx(context.Background())
 	return tx
 }
@@ -743,7 +743,7 @@ func (s *Store[N, W]) Begin() *Tx[N, W] {
 // nil error the returned Tx holds the lock until Commit or Rollback runs;
 // once held, further ctx checks happen at the caller's discretion.
 func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
-	defer metrics.Time("store.txn.BeginCtx")()
+	defer metrics.Time("store.txn.BeginCtx").Stop()
 	if err := s.acquire(ctx); err != nil {
 		metrics.IncCounter("store.txn.BeginCtx.errors", 1)
 		return nil, err
@@ -1057,7 +1057,7 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // the batch at any point recovers all of the transaction or none of it
 // (audit gap F1, see docs/acid-audit.md).
 func (t *Tx[N, W]) Commit() error {
-	defer metrics.Time("store.txn.Commit")()
+	defer metrics.Time("store.txn.Commit").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return ErrTxFinished
@@ -1168,7 +1168,7 @@ func (t *Tx[N, W]) Commit() error {
 // eagerly inside the visibility barrier, and CommitWALOnly returning only after
 // the covering fsync preserves durable-before-visible.
 func (t *Tx[N, W]) CommitWALOnly() error {
-	defer metrics.Time("store.txn.CommitWALOnly")()
+	defer metrics.Time("store.txn.CommitWALOnly").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 		return ErrTxFinished
@@ -1323,7 +1323,7 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 
 // Rollback discards buffered ops without touching the WAL or graph.
 func (t *Tx[N, W]) Rollback() error {
-	defer metrics.Time("store.txn.Rollback")()
+	defer metrics.Time("store.txn.Rollback").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.Rollback.errors", 1)
 		return ErrTxFinished

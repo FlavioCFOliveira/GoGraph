@@ -53,7 +53,7 @@ func TestSetBackendDispatches(t *testing.T) {
 	IncCounter("hits", 3)
 	stop := Time("lat")
 	time.Sleep(1 * time.Millisecond)
-	stop()
+	stop.Stop()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
