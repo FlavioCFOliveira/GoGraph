@@ -231,6 +231,24 @@ back (here via an `ENOSPC` WAL sync, but any rollback triggers it) deleted the
 pre-existing committed edge. The fix gates the edge bookkeeping on whether the
 edge was actually added.
 
+## Concurrency hypotheses chased
+
+The mem-pressure and cpu-starvation scenarios are backed by two focused
+concurrent regression tests in `cypher/` that chase specific
+fair-scheduling / barrier hypotheses, each under a deadlock watchdog:
+
+- **Aggregator cap inside the write barrier.** Many concurrent aggregating
+  writes that trip `MaxCollectItems` *inside* the visibility barrier run
+  alongside honest reads and writes. The error path releases the barrier on
+  every iteration (no held-`visMu` deadlock), and the engine stays usable —
+  evidence the in-barrier error path is leak-free.
+- **Parallel CREATE INDEX backfill.** An above-threshold parallel backfill runs
+  concurrently with honest readers. The backfill scan runs *before* registration
+  and *outside* the visibility barrier (a reader's plan build sees either no
+  index or a fully populated one), so readers are never blocked by a held
+  barrier; the test asserts forward progress (no deadlock, no wedge) rather than
+  interleaving, which is statistical. Neither hypothesis was a real defect.
+
 ## Swarm, coverage, and cross-checking modes
 
 - **Swarm** (`--swarm`) runs many seeds across a bounded worker pool, time- or
