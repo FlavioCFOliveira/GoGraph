@@ -55,7 +55,7 @@ oracle is a bug.
 |---|---|---|
 | Seed | `seed.go` | PCG-based PRNG ([`math/rand/v2`](https://pkg.go.dev/math/rand/v2)); the single source of randomness. Sub-seeds for the checker and the disk are XOR-derived so the workload draw stream is independent of check cadence and fault injection. |
 | Virtual clock | `clock.go`, `internal/clock` | A 1 ms-per-tick logical clock injected into checkpoint cadence and the Bolt transaction reaper, so time-dependent behaviour is deterministic. |
-| SimDisk | `disk.go`, `diskfs.go` | An in-memory faulting disk backing the WAL and the checkpoint/snapshot, with seed-driven sector-fault injection and a `Crash()` that revokes not-yet-`fsync`-ed directory entries. |
+| SimDisk | `disk.go`, `diskfs.go` | An in-memory faulting disk backing the WAL and the checkpoint/snapshot, with seed-driven sector-fault injection, a finite-capacity budget that injects disk-full (`ENOSPC`) on the WAL append+sync path, and a `Crash()` that revokes not-yet-`fsync`-ed directory entries. |
 | GraphOracle | `oracle.go` | The shadow model: a minimal, obviously-correct map of the nodes and edges the engine must hold after the workload's operations. It advances only on a committed write, so it always equals the engine's durable, acknowledged state. |
 | InvariantChecker | `checker.go` | Compares the engine against the oracle: count parity, sampled existence, full post-recovery durability, and index consistency. |
 | Actors and workloads | `actor.go`, `workload.go` | Honest writer/reader, bounded-churn writer, malformed sender, and the concurrent-mode bad actors (Bolt abuser, overload actor, slow consumer, schema changer). A workload is a weighted mix of actors. |
@@ -176,6 +176,7 @@ schedule, budget, mode, checks). `cmd/sim --list-scenarios` prints them.
 | Scenario | Mode | Stresses |
 |---|---|---|
 | `crash-storm` | deterministic | Frequent crash + recovery via the SimDisk WAL path (durability). |
+| `disk-full` | deterministic | Honest writes against a finite SimDisk: `ENOSPC` on the WAL append+sync path plus crash/recovery. Asserts atomic fail-stop durability — a commit that cannot durably write never advances the oracle, and after recovery no acknowledged commit is lost and no uncommitted state leaks in. |
 | `write-heavy` | deterministic | 80/20 write/read; the write path and oracle parity. |
 | `read-heavy` | deterministic | 20/80 write/read; the read path and isolation. |
 | `schema-chaos` | deterministic | Index create/drop/re-create under write load + full index-consistency check. |
@@ -202,6 +203,31 @@ SimDisk survives. The store is then reopened through the real recovery path
 
 A recovery that detects genuine corruption fails stop (a typed error), which the
 run surfaces rather than swallowing.
+
+## Disk exhaustion (ENOSPC)
+
+`SimDisk` carries an optional byte budget (`SetCapacity`, surfaced as
+`DiskConfig` on a scenario). When set, a WAL append or checkpoint write that
+would grow the disk past the budget returns an `ENOSPC` `os.PathError` on the
+*real* WAL append+sync path — either eagerly at the growing `Write` or, in
+delayed-allocation mode, at the covering `Sync` (the harder commit boundary).
+The budget check is a pure function of the byte total and draws nothing from the
+seed, so it never perturbs the reproducible fault stream.
+
+The `disk-full` scenario drives the honest write workload against a finite disk
+with crash/recovery on top, asserting the engine's ACID contract under
+exhaustion: a commit that cannot durably write fails atomically (the oracle
+advances only on a committed write, so engine and oracle stay in lock-step), the
+WAL writer fail-stops, and after recovery the durability check confirms no
+acknowledged commit was lost (`ACID_DURABILITY`) and no uncommitted state leaked
+in (`ACID_ATOMICITY`).
+
+This scenario found a real ACID bug on first run: on a simple (non-multigraph)
+graph, re-`CREATE`ing an already-existing edge is a storage no-op, but the
+in-memory undo log recorded a `RemoveEdge` inverse, so rolling the transaction
+back (here via an `ENOSPC` WAL sync, but any rollback triggers it) deleted the
+pre-existing committed edge. The fix gates the edge bookkeeping on whether the
+edge was actually added.
 
 ## Swarm, coverage, and cross-checking modes
 

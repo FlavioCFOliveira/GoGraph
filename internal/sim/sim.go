@@ -55,6 +55,25 @@ type Config struct {
 	// OnOp it is an observation hook and must not mutate state or draw
 	// randomness.
 	OnCrash func(tick int64, replayedWALOps int)
+	// Disk, when its CapacityBytes > 0, bounds the SimDisk-backed durable store
+	// to a finite size so the run drives the engine through a disk-full (ENOSPC)
+	// condition on the real WAL append+sync path. A non-zero capacity implies the
+	// durable store even when Crash is disabled; the zero value leaves the disk
+	// unbounded (the prior behaviour). See [DiskConfig].
+	Disk DiskConfig
+}
+
+// DiskConfig bounds the simulated disk so the harness can drive the engine
+// through a disk-full (ENOSPC) condition. The zero value (CapacityBytes == 0)
+// leaves the disk unbounded.
+type DiskConfig struct {
+	// CapacityBytes, when > 0, is the total byte budget across all files in the
+	// SimDisk-backed store. A WAL append or checkpoint write that would breach it
+	// returns an ENOSPC error on the real durability path.
+	CapacityBytes int64
+	// ENOSPCOnSync selects where the out-of-space condition surfaces: false
+	// (eager, at the growing Write) or true (delayed, at Sync). See [SimDisk].
+	ENOSPCOnSync bool
 }
 
 // Simulator drives the real cypher.Engine against a shadow [GraphOracle] under
@@ -86,6 +105,11 @@ type Simulator struct {
 	// crashCount and replayedOps accumulate run statistics for reports and tests.
 	crashCount  int
 	replayedOps int
+	// rejectedWrites counts write-shaped operations the engine did NOT commit
+	// (committed == false). Under the disk-full scenario this is the non-vacuity
+	// guard that ENOSPC actually fired: an honest write fails only when the
+	// durable WAL path could not persist it. The oracle stays frozen for each.
+	rejectedWrites int
 	// searchEvery, when > 0, runs the full search-algorithm battery
 	// ([CheckSearch]) every searchEvery ticks in the deterministic loop, on top of
 	// any terminal check the scenario runs. It lives on the Simulator (not Config)
@@ -134,12 +158,19 @@ func New(cfg Config) (*Simulator, error) {
 		crash: NewCrashSchedule(NewSeed(cfg.Seed^crashSeedMix), cfg.Crash),
 	}
 
-	if cfg.Crash.Enabled {
-		// Crash mode: drive the real SimDisk-backed persistence stack so a crash
-		// can drop the engine and recovery can replay the durable WAL bytes.
+	if cfg.Crash.Enabled || cfg.Disk.CapacityBytes > 0 {
+		// Durable mode: drive the real SimDisk-backed persistence stack so a crash
+		// can drop the engine and recovery can replay the durable WAL bytes, and so
+		// a finite disk can drive the WAL append+sync path through ENOSPC. A
+		// non-zero disk capacity opts in even without crashes.
 		store, err := OpenSimStore(disk, simulatorStoreConfig())
 		if err != nil {
 			return nil, fmt.Errorf("sim: open SimDisk-backed store: %w", err)
+		}
+		// Apply the byte budget AFTER the initial open so the store's first WAL
+		// setup is never starved; the budget then bounds the workload's growth.
+		if cfg.Disk.CapacityBytes > 0 {
+			disk.SetCapacity(cfg.Disk.CapacityBytes, cfg.Disk.ENOSPCOnSync)
 		}
 		s.store = store
 		s.engine = NewEngineAdapter(store.Engine())
@@ -191,6 +222,9 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 		}
 
 		committed := s.execute(ctx, op)
+		if !committed && op.Kind.IsWrite() {
+			s.rejectedWrites++
+		}
 		s.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
 
@@ -449,6 +483,11 @@ func (s *Simulator) CrashCount() int { return s.crashCount }
 // ReplayedOps returns the cumulative number of WAL ops recovery replayed across
 // every crash cycle in the run.
 func (s *Simulator) ReplayedOps() int { return s.replayedOps }
+
+// RejectedWrites returns how many write-shaped operations the engine did not
+// commit during the run. Under the disk-full scenario it is the non-vacuity
+// guard that ENOSPC fired; it is 0 for a run that never exhausts the disk.
+func (s *Simulator) RejectedWrites() int { return s.rejectedWrites }
 
 // Close releases the simulator's durable resources. In crash mode it gracefully
 // closes the live SimDisk-backed store (flushing and releasing the WAL writer)

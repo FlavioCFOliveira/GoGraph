@@ -24,7 +24,16 @@ const (
 	ScenarioOverload     = "overload"
 	ScenarioBulkVsOnline = "bulk-vs-online"
 	ScenarioLongRunning  = "long-running"
+	ScenarioDiskFull     = "disk-full"
 )
+
+// diskFullCapacityBytes is the byte budget for the disk-full scenario. It is
+// sized (empirically) to a fraction of the WAL bytes a full write-heavy run
+// would produce, so the disk fills partway through and the remaining commits
+// hit ENOSPC on the real WAL append+sync path — exercising the engine's
+// poison/fail-stop durability contract while a non-trivial committed graph
+// already exists to keep the parity and durability checks meaningful.
+const diskFullCapacityBytes = 24 * 1024
 
 // DefaultRegistry builds the standard Phase-4 scenario catalogue. It holds no
 // global mutable state — every call returns a freshly-built [Registry] — so two
@@ -47,7 +56,30 @@ func DefaultRegistry() (*Registry, error) {
 		overloadScenario(),
 		bulkVsOnlineScenario(),
 		longRunningScenario(),
+		diskFullScenario(),
 	)
+}
+
+// diskFullScenario drives the honest write-heavy workload against a finite
+// SimDisk so the WAL append+sync path is forced through a disk-full (ENOSPC)
+// condition, with deterministic crash+recovery cycles on top. It verifies the
+// engine's ACID contract under exhaustion: a commit that cannot durably write
+// fails atomically (the oracle never advances for it, so engine/oracle parity
+// holds), the WAL writer fail-stops, and after recovery no acknowledged commit
+// is lost (ACID_DURABILITY) and no uncommitted state leaks in (ACID_ATOMICITY).
+// It uses delayed-allocation ENOSPC (the harder fsync-commit path) and is
+// bit-reproducible.
+func diskFullScenario() Scenario {
+	return Scenario{
+		Name:        ScenarioDiskFull,
+		Description: "honest writes against a finite disk: ENOSPC on the WAL path + crash/recovery (atomic fail-stop durability)",
+		Mode:        ModeDeterministic,
+		DefaultSeed: 0xD15CF011,
+		MaxTicks:    500,
+		Workload:    WriteHeavyWorkload,
+		Disk:        DiskConfig{CapacityBytes: diskFullCapacityBytes, ENOSPCOnSync: true},
+		Crash:       CrashConfig{Enabled: true, CrashProb: 1.0 / 80.0, StabilityWindow: 25},
+	}
 }
 
 // crashStormScenario crashes and recovers frequently via the SimDisk WAL path,

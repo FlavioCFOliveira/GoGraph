@@ -11,7 +11,7 @@ import (
 )
 
 // TestDefaultRegistry_ListsAllScenarios verifies the catalogue registers exactly
-// the ten named scenarios.
+// the named scenarios.
 func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 	t.Parallel()
 	r, err := DefaultRegistry()
@@ -19,7 +19,7 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	want := []string{
-		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCrashStorm, ScenarioLongRunning,
+		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCrashStorm, ScenarioDiskFull, ScenarioLongRunning,
 		ScenarioOverload, ScenarioReadHeavy, ScenarioSchemaChaos, ScenarioSearch, ScenarioSearchCrash,
 		ScenarioWriteHeavy,
 	}

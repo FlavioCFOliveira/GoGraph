@@ -124,6 +124,10 @@ type Scenario struct {
 	Workload func(*Seed) *Workload
 	// Crash configures deterministic crash/recovery injection (ModeDeterministic).
 	Crash CrashConfig
+	// Disk, when its CapacityBytes > 0, bounds the SimDisk-backed store to a
+	// finite size so the run drives the engine through a disk-full (ENOSPC)
+	// condition (ModeDeterministic). See [DiskConfig].
+	Disk DiskConfig
 	// Checks selects the extra invariant checks.
 	Checks CheckSelection
 
@@ -197,6 +201,7 @@ func (sc *Scenario) DeterministicConfig(seed uint64) Config {
 		MaxTicks:   ticks,
 		Workload:   wl(NewSeed(seed)),
 		Crash:      sc.Crash,
+		Disk:       sc.Disk,
 		CheckEvery: sc.CheckEvery,
 	}
 }
