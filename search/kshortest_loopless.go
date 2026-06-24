@@ -40,8 +40,15 @@ type KShortestPathsLooplessOpts struct {
 // Concrete example: a diamond-chain of depth D plus a single expensive
 // s-t shortcut forces 2^D pops even for k=2.
 //
-// Use ctx cancellation or [KShortestPathsLooplessCtxWithOpts] with a
-// MaxPops/MaxQueueBytes bound when operating on arbitrary graphs.
+// This bare entry is UNBOUNDED: it has no error return and runs until it
+// finds k paths or exhausts the (possibly exponential) candidate set. On
+// untrusted or arbitrary graphs you MUST instead call
+// [KShortestPathsLooplessCtxWithOpts] with a MaxPops and/or MaxQueueBytes
+// bound (or at least drive [KShortestPathsLooplessCtx] under a deadline
+// context). A default pop budget is deliberately NOT imposed on this entry:
+// it cannot signal truncation (no error return, so a cap would silently drop
+// paths), and no single pop budget is correct across all graph sizes and k —
+// the explicit WithOpts bound is the supported, observable remedy.
 //
 // This is NOT the heap-of-heaps construction of Eppstein 1998 ("Finding
 // the k Shortest Paths", SIAM J. Comput.). That algorithm builds an
