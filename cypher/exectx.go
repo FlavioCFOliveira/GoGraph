@@ -376,7 +376,7 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return nil, err
 	}
-	if err := tx.eng.checkParamTypes(plan, params); err != nil {
+	if err := checkParamTypesCached(entry, params); err != nil {
 		return nil, err
 	}
 

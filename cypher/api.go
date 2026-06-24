@@ -1198,20 +1198,19 @@ func (e *Engine) Procs() *procs.Registry {
 // ErrorKind→Bolt mapping used. Callers may use [errors.As] to recover the
 // typed error and inspect Category / SubType.
 //
-// checkParamTypes validates the supplied params against the types inferred from
-// plan. Property-vs-parameter equalities are typed from the index that backs
-// the property when one exists (an int64 index proves an Integer property, a
-// string index a String property); absent an index the inference defaults to
-// String. It is a no-op when params is empty.
-func (e *Engine) checkParamTypes(plan ir.LogicalPlan, params map[string]expr.Value) error {
+// checkParamTypesCached validates the supplied params against the per-parameter
+// types memoised on entry by [Engine.parseAndAnalyse]: inferred once from the
+// plan and the index schema (an int64 index proves an Integer property, a string
+// index a String property; absent an index the inference defaults to String),
+// and invalidated with the entry by [Engine.ClearPlanCache] on any schema
+// change. Using the memoised map avoids repeating the InferParamTypes walk on
+// every Run. It is a no-op when params is empty (entry.paramTypes is then nil,
+// which CheckParams treats as no inferred constraints — identical behaviour).
+func checkParamTypesCached(entry *planCacheEntry, params map[string]expr.Value) error {
 	if len(params) == 0 {
 		return nil
 	}
-	idxMgr := e.g.IndexManager()
-	resolve := func(label, property string) (expr.Kind, bool) {
-		return indexedPropKind(idxMgr, label, property)
-	}
-	return sema.CheckParams(sema.InferParamTypesWithResolver(plan, resolve), params)
+	return sema.CheckParams(entry.paramTypes, params)
 }
 
 // checkParamPresence validates that every parameter name referenced by the
@@ -1411,7 +1410,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return nil, err
 	}
-	if err := e.checkParamTypes(plan, params); err != nil {
+	if err := checkParamTypesCached(entry, params); err != nil {
 		return nil, err
 	}
 
@@ -1460,7 +1459,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// would observe the changed row order. Both must hold; otherwise the
 		// planner falls back to the legacy nested-loop Cartesian plan.
 		bopts.hashJoinEnabled = e.hashJoinEnabled
-		bopts.hashJoinOrderSafe = hashJoinOrderSafe(plan)
+		bopts.hashJoinOrderSafe = entry.hashJoinSafe
 		bopts.rangeSeekEnabled = e.rangeSeekEnabled
 		// Parallel-count gating (#1672): the parallel count reduce replaces the
 		// serial EagerAggregation pipeline only when the Engine permits it AND the
@@ -2614,6 +2613,17 @@ type planCacheEntry struct {
 	// attached to every Result for this query (e.g. a Cartesian-product warning,
 	// #1483). nil when the query produces none.
 	notifications []Notification
+	// hashJoinSafe memoises hashJoinOrderSafe(plan) — a full whole-query IR walk
+	// that is a pure function of the (cached, immutable) plan, so it is computed
+	// once at entry creation rather than on every Run (#1719).
+	hashJoinSafe bool
+	// paramTypes memoises sema.InferParamTypesWithResolver(plan, …) — the
+	// per-parameter type inference. It depends on the plan AND the index schema,
+	// so it is valid only while this entry lives; every schema mutation
+	// (CREATE/DROP INDEX|CONSTRAINT) calls [Engine.ClearPlanCache], dropping the
+	// entry and forcing a recompute on the next miss. nil for parameter-less
+	// queries (len(paramRefs) == 0), where the inference is the empty map anyway.
+	paramTypes map[string]expr.Kind
 }
 
 // planFor returns the cached logical plan for query, or parses, translates,
@@ -2659,7 +2669,29 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	if note := analyseCartesianProductQuery(astNode); note != nil {
 		notifications = []Notification{*note}
 	}
-	entry := &planCacheEntry{plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications}
+	// Memoise the two computations the execution path otherwise repeats on every
+	// Run: hashJoinOrderSafe (a whole-query IR walk run on every Run) and, for
+	// parameterised queries, InferParamTypes. Both are pure functions of the plan
+	// (paramTypes additionally of the index schema). The entry is immutable after
+	// loadOrStore, so this is safe for concurrent cache readers; paramTypes is
+	// invalidated with the entry by ClearPlanCache on any schema-changing DDL.
+	// Skipped for semantically-invalid entries, which never reach execution.
+	hashJoinSafe := false
+	var paramTypes map[string]expr.Kind
+	if semaErr == nil {
+		hashJoinSafe = hashJoinOrderSafe(plan)
+		if len(paramRefs) > 0 {
+			idxMgr := e.g.IndexManager()
+			resolve := func(label, property string) (expr.Kind, bool) {
+				return indexedPropKind(idxMgr, label, property)
+			}
+			paramTypes = sema.InferParamTypesWithResolver(plan, resolve)
+		}
+	}
+	entry := &planCacheEntry{
+		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
+		hashJoinSafe: hashJoinSafe, paramTypes: paramTypes,
+	}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
 }
@@ -9973,7 +10005,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return nil, err
 	}
-	if err := e.checkParamTypes(plan, params); err != nil {
+	if err := checkParamTypesCached(entry, params); err != nil {
 		return nil, err
 	}
 
