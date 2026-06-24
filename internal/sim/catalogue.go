@@ -30,6 +30,7 @@ const (
 	ScenarioMemPressure       = "mem-pressure"
 	ScenarioCPUStarvation     = "cpu-starvation"
 	ScenarioConstraintEnforce = "constraint-enforce"
+	ScenarioTypeCoverage      = "type-coverage"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -92,6 +93,7 @@ func DefaultRegistry() (*Registry, error) {
 		memPressureScenario(),
 		cpuStarvationScenario(),
 		constraintEnforceScenario(),
+		typeCoverageScenario(),
 	)
 }
 

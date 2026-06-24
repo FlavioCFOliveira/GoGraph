@@ -91,6 +91,27 @@ func (a *EngineAdapter) scalarCount(query string) (int64, error) {
 	return n, nil
 }
 
+// projectRowStrings runs a single-row read query and returns the canonical
+// String() rendering of each of the first ncols projected columns. It returns
+// (nil, nil) when the query yields no row, so the type-coverage checker can
+// distinguish a missing node from a value mismatch. It routes through the real
+// engine read path so the values are exactly what a workload query would see.
+func (a *EngineAdapter) projectRowStrings(ctx context.Context, query string, ncols int) ([]string, error) {
+	res, err := a.eng.Run(ctx, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+	if !res.Next() {
+		return nil, res.Err()
+	}
+	out := make([]string, ncols)
+	for i := 0; i < ncols; i++ {
+		out[i] = res.ValueAt(i).String()
+	}
+	return out, res.Err()
+}
+
 // resultAdapter projects a *cypher.Result onto the checker's [Result].
 type resultAdapter struct {
 	res      *cypher.Result
@@ -158,9 +179,16 @@ func toExprParams(params map[string]any) (map[string]expr.Value, error) {
 	return out, nil
 }
 
-// toExprValue maps a single Go value to its expr.Value.
+// toExprValue maps a single Go value to its expr.Value. It supports the scalar
+// kinds the workload binds (string, int, float, bool), a nil (→ the NULL
+// singleton), and a homogeneous-or-mixed list ([]any of supported kinds → an
+// expr.ListValue), so the type-coverage scenario can bind list- and null-valued
+// properties. Temporal values are bound as ISO-8601 strings (the canonical
+// Cypher-visible temporal storage contract), so they need no separate case.
 func toExprValue(v any) (expr.Value, error) {
 	switch t := v.(type) {
+	case nil:
+		return expr.Null, nil
 	case string:
 		return expr.StringValue(t), nil
 	case int64:
@@ -171,7 +199,31 @@ func toExprValue(v any) (expr.Value, error) {
 		return expr.FloatValue(t), nil
 	case bool:
 		return expr.BoolValue(t), nil
+	case []any:
+		items := make(expr.ListValue, 0, len(t))
+		for i, e := range t {
+			ev, err := toExprValue(e)
+			if err != nil {
+				return nil, fmt.Errorf("list element %d: %w", i, err)
+			}
+			items = append(items, ev)
+		}
+		return items, nil
 	default:
 		return nil, fmt.Errorf("unsupported param type %T", v)
 	}
+}
+
+// canonicalValueString renders a Go value (as bound by the workload) to the same
+// canonical string the engine's expr.Value yields, so the type-coverage checker
+// can compare a read-back property against the oracle's modelled value across all
+// supported kinds without per-type equality logic. A value that cannot be mapped
+// renders as a distinctive marker so a mismatch surfaces loudly rather than
+// comparing equal by accident.
+func canonicalValueString(v any) string {
+	ev, err := toExprValue(v)
+	if err != nil {
+		return fmt.Sprintf("<unmappable:%T>", v)
+	}
+	return ev.String()
 }

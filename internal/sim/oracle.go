@@ -24,7 +24,17 @@ const (
 	tmplDetachDelete = "MATCH (n:Person {name:$name}) DETACH DELETE n"
 	// tmplMergePerson merges a Person by name, marking newly-created ones.
 	tmplMergePerson = "MERGE (n:Person {name:$name}) ON CREATE SET n.created=true"
+	// tmplCreateTyped creates one Typed node carrying a property of every
+	// round-tripping Cypher kind — string, integer, float, boolean, list, and an
+	// ISO-8601 temporal string — keyed by a unique integer id. The type-coverage
+	// scenario uses it to verify each kind survives commit + crash/recovery.
+	tmplCreateTyped = "CREATE (n:Typed {id:$id, s:$s, i:$i, f:$f, b:$b, lst:$lst, ts:$ts})"
 )
+
+// typedPropKeys are the property keys a [tmplCreateTyped] node carries, in a
+// fixed order, plus the never-set key "absent" the checker verifies reads NULL.
+// The checker projects exactly these so engine and oracle compare the same set.
+var typedPropKeys = []string{"id", "s", "i", "f", "b", "lst", "ts", "absent"}
 
 // NodeState is the oracle's record of a single node: its synthetic oracle id,
 // labels, and properties. It mirrors what the engine must hold, not how the
@@ -86,6 +96,11 @@ type GraphOracle struct {
 	edges      map[edgeKey]*EdgeState
 	nextNodeID uint64
 	ops        []OracleOp
+	// typed models [tmplCreateTyped] nodes keyed by their unique integer id,
+	// storing the full property map (string/int/float/bool/list/temporal-string)
+	// so the type-coverage checker can read each back from the engine and confirm
+	// it round-trips and survives recovery. Empty for every other scenario.
+	typed map[int64]map[string]any
 	// uniqueOnName, when true, models an active UNIQUE constraint on
 	// (Person, name): a CREATE of a name that already exists must be REJECTED
 	// by the engine (a typed constraint-violation error, no state change), which
@@ -112,6 +127,7 @@ func NewGraphOracle() *GraphOracle {
 		byName:     make(map[nameKey]uint64),
 		edges:      make(map[edgeKey]*EdgeState),
 		nextNodeID: 1,
+		typed:      make(map[int64]map[string]any),
 	}
 }
 
@@ -142,9 +158,53 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 		return o.recordOp(cypher, params, o.createPerson(params))
 	case tmplCreateKnows:
 		return o.recordOp(cypher, params, o.createKnows(params))
+	case tmplCreateTyped:
+		return o.recordOp(cypher, params, o.createTyped(params))
 	default:
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled CREATE"})
 	}
+}
+
+// createTyped models [tmplCreateTyped]: it records the full typed property set
+// of a Typed node, keyed by its unique integer id, so the type-coverage checker
+// can verify every kind round-trips. CREATE always commits (no constraint here).
+func (o *GraphOracle) createTyped(params map[string]any) OracleResult {
+	idv, ok := params["id"].(int64)
+	if !ok {
+		return OracleResult{ErrorMsg: "oracle: createTyped missing/!int64 id"}
+	}
+	props := make(map[string]any, len(typedPropKeys))
+	for _, k := range typedPropKeys {
+		if k == "absent" {
+			continue // never set; the checker verifies it reads NULL
+		}
+		props[k] = params[k]
+	}
+	o.typed[idv] = props
+	// Also register a plain node so node-count parity holds.
+	nid := o.nextNodeID
+	o.nextNodeID++
+	o.nodes[nid] = &NodeState{ID: nid, Labels: []string{"Typed"}, Properties: props}
+	return OracleResult{Committed: true, NodesCreated: 1}
+}
+
+// TypedNode returns the modelled property map for the Typed node with the given
+// id, and whether it exists. The returned map is the oracle's own and must not
+// be mutated.
+func (o *GraphOracle) TypedNode(id int64) (map[string]any, bool) {
+	p, ok := o.typed[id]
+	return p, ok
+}
+
+// TypedIDs returns the ids of every modelled Typed node in ascending order
+// (deterministic, for reproducible checker iteration).
+func (o *GraphOracle) TypedIDs() []int64 {
+	out := make([]int64, 0, len(o.typed))
+	for id := range o.typed {
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // SetUniqueOnName declares (or clears) an active UNIQUE constraint on
