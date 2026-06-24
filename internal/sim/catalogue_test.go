@@ -20,7 +20,7 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 	}
 	want := []string{
 		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioConstraintEnforce,
-		ScenarioCrashStorm, ScenarioCypherPaths, ScenarioDiskFull, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioLongRunning, ScenarioMemPressure, ScenarioOverload,
+		ScenarioCrashStorm, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDiskFull, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioLongRunning, ScenarioMemPressure, ScenarioOverload,
 		ScenarioReadHeavy, ScenarioSchemaChaos, ScenarioSearch, ScenarioSearchCrash, ScenarioTypeCoverage,
 		ScenarioWriteHeavy,
 	}

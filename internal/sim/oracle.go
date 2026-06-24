@@ -464,6 +464,73 @@ func (o *GraphOracle) NodeNames() []string {
 	return out
 }
 
+// personAges returns the ascending-sorted int64 ages of every modelled Person
+// node that carries an integer age, for the Cypher-surface aggregate/filter
+// invariants (sum, avg, WHERE n.age >= k). Persons without an integer age (none
+// in the cypher-surface workload, which always sets age) are excluded, matching
+// Cypher's null-skipping aggregation.
+func (o *GraphOracle) personAges() []int64 {
+	var ages []int64
+	for _, n := range o.nodes {
+		if !hasLabel(n, "Person") {
+			continue
+		}
+		if a, ok := n.Properties["age"].(int64); ok {
+			ages = append(ages, a)
+		}
+	}
+	slices.Sort(ages)
+	return ages
+}
+
+// personCount returns how many modelled nodes carry the Person label.
+func (o *GraphOracle) personCount() int {
+	c := 0
+	for _, n := range o.nodes {
+		if hasLabel(n, "Person") {
+			c++
+		}
+	}
+	return c
+}
+
+// personNamesSorted returns the ascending-sorted names of every modelled Person,
+// for the ORDER BY invariant. Names are distinct in the cypher-surface workload.
+func (o *GraphOracle) personNamesSorted() []string {
+	var names []string
+	for _, n := range o.nodes {
+		if !hasLabel(n, "Person") {
+			continue
+		}
+		if nm, ok := n.Properties["name"].(string); ok {
+			names = append(names, nm)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// knowsCount returns how many KNOWS edges the oracle models.
+func (o *GraphOracle) knowsCount() int {
+	c := 0
+	for k := range o.edges {
+		if k.label == "KNOWS" {
+			c++
+		}
+	}
+	return c
+}
+
+// hasLabel reports whether node n carries label l.
+func hasLabel(n *NodeState, l string) bool {
+	for _, lbl := range n.Labels {
+		if lbl == l {
+			return true
+		}
+	}
+	return false
+}
+
 // edgeStates returns a freshly-allocated slice of the modelled edges in a
 // deterministic order (by source id, then destination id, then label) so the
 // checker's seed-driven sampling is reproducible. The returned EdgeState values
