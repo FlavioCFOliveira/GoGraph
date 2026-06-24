@@ -3,6 +3,7 @@ package sim
 import (
 	"context"
 	"fmt"
+	"strconv"
 )
 
 // maxSamplesPerKind bounds how many oracle nodes and oracle edges the checker
@@ -389,6 +390,12 @@ type IndexSpec struct {
 	Label string
 	// Property is the property key the index covers (e.g. "name").
 	Property string
+	// Numeric declares the indexed property as integer-valued, so the
+	// consistency check groups the full scan by integer value and binds the
+	// index-seek probe with an integer parameter. The default (false) treats the
+	// property as string-valued. It lets the checker cover numeric (btree) indexes
+	// alongside string ones; the seek-vs-scan invariant is identical for either.
+	Numeric bool
 }
 
 // indexConsistencyEngine is the slice of the [Engine] surface
@@ -486,10 +493,10 @@ func (c *InvariantChecker) scanByValue(engine indexConsistencyEngine, spec Index
 	out := make(map[string]map[int64]struct{})
 	for res.Next() {
 		id, okID := res.IntAt(0)
-		val, okVal := res.StringAt(1)
+		val, okVal := indexValueKey(res, spec.Numeric)
 		if !okID || !okVal {
-			// The index-consistency scenarios index string-valued properties only;
-			// a non-string value is not part of this check's contract.
+			// A value of the wrong kind for this spec is not part of the check's
+			// contract (string spec sees a non-string, or numeric sees a non-int).
 			continue
 		}
 		ids := out[val]
@@ -505,11 +512,36 @@ func (c *InvariantChecker) scanByValue(engine indexConsistencyEngine, spec Index
 	return out, nil
 }
 
+// indexValueKey reads the indexed value of the current scan row as a canonical
+// string KEY: column 1 as a string for a string spec, or column 0... no —
+// column 1 as an int (rendered decimal) for a numeric spec. The key is only an
+// identity for grouping/seeking; seekByValue parses it back to the right kind.
+func indexValueKey(res Result, numeric bool) (string, bool) {
+	if numeric {
+		v, ok := res.IntAt(1)
+		if !ok {
+			return "", false
+		}
+		return strconv.FormatInt(v, 10), true
+	}
+	return res.StringAt(1)
+}
+
 // seekByValue runs the index-seek probe for one value and returns the node-id
 // set the engine resolves — which flows through the index when one is present.
+// For a numeric spec it binds the value as an integer so the seek matches the
+// engine's typed property; otherwise it binds a string.
 func (c *InvariantChecker) seekByValue(engine indexConsistencyEngine, spec IndexSpec, value string) (map[int64]struct{}, error) {
 	query := fmt.Sprintf("MATCH (n:%s {%s:$v}) RETURN id(n)", spec.Label, spec.Property)
-	res, err := engine.Run(context.Background(), query, map[string]any{"v": value})
+	var param any = value
+	if spec.Numeric {
+		n, perr := strconv.ParseInt(value, 10, 64)
+		if perr != nil {
+			return nil, fmt.Errorf("numeric index seek: bad int key %q: %w", value, perr)
+		}
+		param = n
+	}
+	res, err := engine.Run(context.Background(), query, map[string]any{"v": param})
 	if err != nil {
 		return nil, err
 	}
