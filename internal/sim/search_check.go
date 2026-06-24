@@ -61,6 +61,10 @@ func CheckSearch(tick int64, oracle *GraphOracle, engine Engine) []Violation {
 	vs = append(vs, flowViolations(tick)...)
 	vs = append(vs, matchingViolations(tick)...)
 	vs = append(vs, eulerViolations(tick)...)
+	vs = append(vs, centralityViolations(tick)...)
+	vs = append(vs, pagerankViolations(tick)...)
+	vs = append(vs, communityViolations(tick)...)
+	vs = append(vs, kshortestViolations(tick)...)
 	return vs
 }
 
@@ -148,6 +152,12 @@ func searchAlgorithmViolations(tick int64, g *nameGraph) []Violation {
 	// Minimum spanning forest over the undirected weighted view (see
 	// search_mst.go), compared on total weight plus spanning-forest validity.
 	vs = append(vs, mstViolations(tick, g)...)
+
+	// k-core and biconnected components over the undirected view (see
+	// search_kcore_bcc.go), compared on coreness and the articulation/bridge sets
+	// against definition-based references.
+	vs = append(vs, kcoreViolations(tick, g)...)
+	vs = append(vs, bccViolations(tick, g)...)
 	return vs
 }
 
