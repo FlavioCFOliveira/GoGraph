@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"runtime"
+	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -104,33 +106,34 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// levels strictly below k are bounded above by 2*(k-1); when
 	// that bound is no greater than the current lo, no further
 	// improvement is possible and the bounds have converged.
+	// Serial eccentricity scratch, reused across levels; the parallel path
+	// (wide levels) allocates private per-worker scratch.
 	distInner := make([]int, n)
+	numWorkers := runtime.GOMAXPROCS(0)
+	var levelVerts []int
 	for k := maxLevel; k > 0; k-- {
 		if err := ctx.Err(); err != nil {
 			metrics.IncCounter("search.DiameterCtx.errors", 1)
 			return lo, hi, false, err
 		}
+		// Collect the vertices at BFS level k. Each costs a full O(V+E)
+		// eccentricity BFS and the sweeps are independent, so a wide level is
+		// computed in parallel. The level contribution is an integer max, so the
+		// refined lower bound is identical regardless of worker count or order —
+		// the (lo, hi, exact) result stays bit-identical to the serial walk.
+		levelVerts = levelVerts[:0]
 		for v := 0; v < n; v++ {
-			if distFromU[v] != k {
-				continue
+			if distFromU[v] == k {
+				levelVerts = append(levelVerts, v)
 			}
-			// Each vertex at this level costs a full O(V+E) BFS, so
-			// poll before every sweep rather than once per level —
-			// this bounds cancellation latency to a single inner BFS.
-			if err := ctx.Err(); err != nil {
-				metrics.IncCounter("search.DiameterCtx.errors", 1)
-				return lo, hi, false, err
-			}
-			_, distV := bfsFarthest(verts, edges, graph.NodeID(v), distInner)
-			ecc := 0
-			for _, d := range distV {
-				if d > ecc {
-					ecc = d
-				}
-			}
-			if ecc > lo {
-				lo = ecc
-			}
+		}
+		maxEcc, err := levelMaxEccentricity(ctx, verts, edges, levelVerts, n, numWorkers, distInner)
+		if err != nil {
+			metrics.IncCounter("search.DiameterCtx.errors", 1)
+			return lo, hi, false, err
+		}
+		if maxEcc > lo {
+			lo = maxEcc
 		}
 		// After this level, the best the unprocessed levels (< k)
 		// can prove is 2*(k-1). The upper bound is max(lo, 2*(k-1)).
@@ -147,6 +150,88 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 		hi = lo
 	}
 	return lo, hi, hi == lo, nil
+}
+
+// diameterParallelMinLevel is the level-vertex count at or above which one
+// iFUB level's independent eccentricity sweeps are run in parallel. Below it
+// the fan-out overhead is not worth it (and 2-sweep-converging inputs — the
+// common road-network case — never reach the refinement loop at all).
+const diameterParallelMinLevel = 8
+
+// levelMaxEccentricity returns the maximum eccentricity over levelVerts. With
+// enough vertices and workers it runs the independent eccentricity BFS sweeps
+// in parallel, each worker holding private scratch, and reduces by integer max;
+// the result is identical to the serial walk regardless of worker count or
+// scheduling, so DiameterCtx's refined bound stays bit-identical. The serial
+// path reuses the caller's serialScratch; the parallel path allocates private
+// per-worker scratch (only for wide levels, where the O(V+E) sweeps dwarf it).
+// ctx is polled before every sweep so cancellation latency is one inner BFS.
+func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.NodeID, levelVerts []int, n, numWorkers int, serialScratch []int) (int, error) {
+	if numWorkers <= 1 || len(levelVerts) < diameterParallelMinLevel {
+		maxEcc := 0
+		for _, v := range levelVerts {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			_, distV := bfsFarthest(verts, edges, graph.NodeID(v), serialScratch)
+			ecc := 0
+			for _, d := range distV {
+				if d > ecc {
+					ecc = d
+				}
+			}
+			if ecc > maxEcc {
+				maxEcc = ecc
+			}
+		}
+		return maxEcc, nil
+	}
+	if numWorkers > len(levelVerts) {
+		numWorkers = len(levelVerts)
+	}
+	localMax := make([]int, numWorkers)
+	localErr := make([]error, numWorkers)
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			dist := make([]int, n) // private per-worker scratch
+			m := 0
+			for i := w; i < len(levelVerts); i += numWorkers {
+				if err := ctx.Err(); err != nil {
+					localErr[w] = err
+					return
+				}
+				_, distV := bfsFarthest(verts, edges, graph.NodeID(levelVerts[i]), dist)
+				ecc := 0
+				for _, d := range distV {
+					if d > ecc {
+						ecc = d
+					}
+				}
+				if ecc > m {
+					m = ecc
+				}
+			}
+			localMax[w] = m
+		}(w)
+	}
+	wg.Wait()
+	maxEcc := 0
+	var firstErr error
+	for w := 0; w < numWorkers; w++ {
+		if localErr[w] != nil && firstErr == nil {
+			firstErr = localErr[w]
+		}
+		if localMax[w] > maxEcc {
+			maxEcc = localMax[w]
+		}
+	}
+	if firstErr != nil {
+		return 0, firstErr
+	}
+	return maxEcc, nil
 }
 
 // bfsFarthest runs a single BFS from src and returns the farthest
