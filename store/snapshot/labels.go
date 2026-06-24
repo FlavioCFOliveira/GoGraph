@@ -262,13 +262,28 @@ func collectNodeLabelRecords[N comparable, W any](
 ) ([]NodeLabelEntry, error) {
 	idx := buildNameIndex(names)
 	out := make([]NodeLabelEntry, 0, 32)
+	// Stream each node's labels through ForEachNodeLabelByID instead of the
+	// []string that NodeLabelsByID allocates per node; the visit closure is
+	// defined once (capturing the stable idx/out plus a per-node curNodeID) so it
+	// does not allocate per node either.
+	var visitErr error
+	var curNodeID uint64
+	visit := func(name string) {
+		if visitErr != nil {
+			return
+		}
+		si, ok := idx[name]
+		if !ok {
+			visitErr = fmt.Errorf("snapshot: node label %q not in registry snapshot", name)
+			return
+		}
+		out = append(out, NodeLabelEntry{NodeID: curNodeID, StringIdx: si})
+	}
 	for _, id := range collectInternedNodeIDs(g) {
-		for _, name := range g.NodeLabelsByID(id) {
-			si, ok := idx[name]
-			if !ok {
-				return nil, fmt.Errorf("snapshot: node label %q not in registry snapshot", name)
-			}
-			out = append(out, NodeLabelEntry{NodeID: uint64(id), StringIdx: si})
+		curNodeID = uint64(id)
+		g.ForEachNodeLabelByID(id, visit)
+		if visitErr != nil {
+			return nil, visitErr
 		}
 	}
 	return out, nil
@@ -291,31 +306,41 @@ func collectEdgeLabelRecords[N comparable, W any](
 	idx := buildNameIndex(names)
 	out := make([]EdgeLabelEntry, 0, 32)
 	adj := g.AdjList()
+	// seen dedups parallel-edge destinations so each (src,dst) pair is emitted
+	// once (v1 collapses parallel edges into one edgeBag); it is allocated ONCE
+	// and cleared per source. The visit closure streams each pair's distinct
+	// labels via ForEachEdgeLabelByID (no per-pair []string) and is defined once,
+	// capturing the stable idx/out plus the per-pair curSrc/curDst.
+	seen := make(map[graph.NodeID]struct{}, 16)
+	var visitErr error
+	var curSrc, curDst uint64
+	visit := func(name string) {
+		if visitErr != nil {
+			return
+		}
+		si, ok := idx[name]
+		if !ok {
+			visitErr = fmt.Errorf("snapshot: edge label %q not in registry snapshot", name)
+			return
+		}
+		out = append(out, EdgeLabelEntry{Src: curSrc, Dst: curDst, StringIdx: si})
+	}
 	for _, srcID := range collectInternedNodeIDs(g) {
 		neighbours, _ := adj.LoadEntry(srcID)
 		if len(neighbours) == 0 {
 			continue
 		}
-		// De-duplicate parallel edges: emit each (src, dst) endpoint pair once.
-		// v1 edge-label semantics already collapse parallel edges into a single
-		// edgeBag entry, so the on-disk format preserves that by visiting each
-		// pair exactly once.
-		seen := make(map[graph.NodeID]struct{}, len(neighbours))
+		curSrc = uint64(srcID)
+		clear(seen)
 		for _, dstID := range neighbours {
 			if _, dup := seen[dstID]; dup {
 				continue
 			}
 			seen[dstID] = struct{}{}
-			for _, name := range g.EdgeLabelsByID(srcID, dstID) {
-				si, ok := idx[name]
-				if !ok {
-					return nil, fmt.Errorf("snapshot: edge label %q not in registry snapshot", name)
-				}
-				out = append(out, EdgeLabelEntry{
-					Src:       uint64(srcID),
-					Dst:       uint64(dstID),
-					StringIdx: si,
-				})
+			curDst = uint64(dstID)
+			g.ForEachEdgeLabelByID(srcID, dstID, visit)
+			if visitErr != nil {
+				return nil, visitErr
 			}
 		}
 	}

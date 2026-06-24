@@ -82,3 +82,45 @@ func (g *Graph[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
 	}
 	return out
 }
+
+// ForEachEdgeLabelByID streams the distinct labels of the directed edge (src,
+// dst), invoking visit once per resolved label name without materialising the
+// []string that [Graph.EdgeLabelsByID] returns. It is the allocation-fusing
+// counterpart of EdgeLabelsByID — the edge-label analogue of
+// [Graph.ForEachNodeLabelByID] — chiefly for the snapshot writer.
+//
+// The distinct label ids (inline slots + overflow, deduplicated) are gathered
+// under the edge-label shard read lock; names are resolved and visited after the
+// lock is released, exactly as EdgeLabelsByID does, so visit may safely read the
+// graph. The dedup scratch is the same small per-call slice EdgeLabelsByID uses;
+// the saving is the []string result slice the caller would otherwise range over.
+func (g *Graph[N, W]) ForEachEdgeLabelByID(srcID, dstID graph.NodeID, visit func(name string)) {
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.RLock()
+	var ids []LabelID
+	seen := func(lid LabelID) bool {
+		for _, x := range ids {
+			if x == lid {
+				return true
+			}
+		}
+		return false
+	}
+	g.slotLabelsForPair(srcID, dstID, func(lid LabelID) {
+		if !seen(lid) {
+			ids = append(ids, lid)
+		}
+	})
+	for _, lid := range sh.overflow[k] {
+		if !seen(lid) {
+			ids = append(ids, lid)
+		}
+	}
+	sh.mu.RUnlock()
+	for _, lid := range ids {
+		if name, ok := g.reg.Resolve(lid); ok {
+			visit(name)
+		}
+	}
+}

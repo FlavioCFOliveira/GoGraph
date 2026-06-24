@@ -1616,6 +1616,34 @@ func (g *Graph[N, W]) NodeLabelsByID(id graph.NodeID) []string {
 	return out
 }
 
+// ForEachNodeLabelByID streams the labels of the node identified by id, invoking
+// visit once per resolved label name without materialising the []string that
+// [Graph.NodeLabelsByID] returns. It is the allocation-fusing counterpart of
+// NodeLabelsByID — the label analogue of [Graph.NodePropertiesByIDFunc] —
+// chiefly for the snapshot writer, which re-keys every label into its own
+// string table and would otherwise allocate a throwaway slice per node.
+//
+// Concurrency: visit runs while the node-label shard's read lock is held, so it
+// observes a consistent snapshot of the node's labels relative to any concurrent
+// writer holding the shard write lock — identical to [Graph.NodeLabelsByID].
+// visit therefore MUST NOT call back into any Graph method that takes a
+// node-label-shard lock (it would deadlock); copying the name string out is safe.
+func (g *Graph[N, W]) ForEachNodeLabelByID(id graph.NodeID, visit func(name string)) {
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	bag, ok := sh.m[id]
+	if !ok {
+		sh.mu.RUnlock()
+		return
+	}
+	bag.forEach(func(lid LabelID) {
+		if name, ok := g.reg.Resolve(lid); ok {
+			visit(name)
+		}
+	})
+	sh.mu.RUnlock()
+}
+
 // HasNodeLabelByID is the NodeID-keyed, allocation-free counterpart of
 // [Graph.HasNodeLabel]: it reports whether the node identified by id carries
 // the named label without the external-key → NodeID Mapper lookup and without
