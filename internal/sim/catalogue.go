@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/store/bulk"
 )
 
@@ -25,6 +26,18 @@ const (
 	ScenarioBulkVsOnline = "bulk-vs-online"
 	ScenarioLongRunning  = "long-running"
 	ScenarioDiskFull     = "disk-full"
+	ScenarioMemPressure  = "mem-pressure"
+)
+
+// memPressureMaxResultRows and memPressureMaxCollectItems are the clamped
+// logical-resource budgets for the mem-pressure scenario. They are small enough
+// that the over-budget OverloadReader statements (a 5000-row UNWIND, a 160k-row
+// Cartesian, a whole-graph collect) breach them every tick, yet large enough
+// that the honest workload and the harness's own count/LIMIT queries stay well
+// within budget.
+const (
+	memPressureMaxResultRows   = 200
+	memPressureMaxCollectItems = 50
 )
 
 // diskFullCapacityBytes is the byte budget for the disk-full scenario. It is
@@ -57,7 +70,31 @@ func DefaultRegistry() (*Registry, error) {
 		bulkVsOnlineScenario(),
 		longRunningScenario(),
 		diskFullScenario(),
+		memPressureScenario(),
 	)
+}
+
+// memPressureScenario drives an honest writer alongside an OverloadReader that
+// issues over-budget reads, with the engine's logical-resource budgets
+// (MaxResultRows / MaxCollectItems) clamped low. It verifies the CLAUDE.md
+// bounded-resources / backpressure-never-panic / graceful-degradation contract
+// deterministically: every over-budget read is refused with a typed error and
+// changes no state, so engine and oracle stay in lock-step and the honest writes
+// still commit. The caps fire on integer counters (not heap), so it is fully
+// bit-reproducible.
+func memPressureScenario() Scenario {
+	return Scenario{
+		Name:        ScenarioMemPressure,
+		Description: "over-budget reads against clamped logical budgets (bounded-resource graceful degradation; no panic, oracle in lock-step)",
+		Mode:        ModeDeterministic,
+		DefaultSeed: 0x3E308E55,
+		MaxTicks:    500,
+		Workload:    MemPressureWorkload,
+		EngineOpts: cypher.EngineOptions{
+			MaxResultRows:   memPressureMaxResultRows,
+			MaxCollectItems: memPressureMaxCollectItems,
+		},
+	}
 }
 
 // diskFullScenario drives the honest write-heavy workload against a finite

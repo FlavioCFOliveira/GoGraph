@@ -254,6 +254,44 @@ func (HonestReader) NextOp(seed *Seed, _ *GraphOracle) Op {
 	return op
 }
 
+// overloadReadTemplates are deterministic, self-contained read statements whose
+// result deliberately exceeds a clamped logical-resource budget (MaxResultRows
+// or MaxCollectItems): a large UNWIND, a self-Cartesian UNWIND product, a
+// whole-graph collect, and a deep variable-length expansion. The first two are
+// graph-independent so they over-run the row budget on every tick regardless of
+// graph contents; the latter two scale with the live graph. Each is a pure read,
+// so a budget refusal changes no state and the oracle stays in lock-step.
+var overloadReadTemplates = []string{
+	"UNWIND range(1, 5000) AS x RETURN x",
+	"UNWIND range(1, 400) AS a UNWIND range(1, 400) AS b RETURN a, b",
+	"MATCH (n:Person) RETURN collect(n.name)",
+	"MATCH p=(a:Person)-[:KNOWS*1..4]->(b) RETURN length(p)",
+}
+
+// OverloadReader is the deterministic, engine-API counterpart of the wire-only
+// [OverloadActor]: it emits over-budget READ statements (see
+// [overloadReadTemplates]) to drive the engine's bounded-resource / graceful-
+// degradation contract under the mem-pressure scenario. With the engine's
+// logical budgets clamped low, each over-budget read is refused with a typed
+// resource-exhausted error during the result drain — never a panic, never a
+// partial result — and, being a read, changes no modelled state. The oracle
+// records it as a no-op read, so engine and oracle stay in lock-step.
+//
+// # Concurrency contract
+//
+// OverloadReader is NOT safe for concurrent use; it is invoked from the single
+// simulation goroutine.
+type OverloadReader struct{}
+
+// Name returns the actor's identifier.
+func (OverloadReader) Name() string { return "OverloadReader" }
+
+// NextOp returns one over-budget read, chosen by a single seed draw so the op
+// stream stays a pure function of the seed.
+func (OverloadReader) NextOp(seed *Seed, _ *GraphOracle) Op {
+	return Op{Kind: OpMatch, Cypher: overloadReadTemplates[seed.IntN(len(overloadReadTemplates))]}
+}
+
 // malformedKindCount is the number of distinct malformed-operation families
 // [MalformedSender] rotates through. It must equal the number of cases in
 // [MalformedSender.NextOp]; the unit test asserts every family is reachable.

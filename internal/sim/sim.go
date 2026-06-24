@@ -61,6 +61,15 @@ type Config struct {
 	// durable store even when Crash is disabled; the zero value leaves the disk
 	// unbounded (the prior behaviour). See [DiskConfig].
 	Disk DiskConfig
+	// EngineOpts configures the in-memory engine the deterministic loop drives
+	// (the non-crash, non-disk path). The zero value is byte-identical to
+	// [cypher.NewEngine], so a scenario that does not set it is unaffected. The
+	// mem-pressure scenario clamps the logical-resource budgets here
+	// (MaxResultRows / MaxResultBytes / MaxCollectItems) so over-budget ops are
+	// refused with a typed error, exercising graceful degradation deterministically.
+	// It is applied only on the in-memory path; the durable (crash/disk) path uses
+	// the recovery-config engine.
+	EngineOpts cypher.EngineOptions
 }
 
 // DiskConfig bounds the simulated disk so the harness can drive the engine
@@ -110,6 +119,12 @@ type Simulator struct {
 	// guard that ENOSPC actually fired: an honest write fails only when the
 	// durable WAL path could not persist it. The oracle stays frozen for each.
 	rejectedWrites int
+	// rejectedReads counts read-shaped operations whose result drain returned an
+	// error (committed == false). Under the mem-pressure scenario this is the
+	// non-vacuity guard that a logical-resource budget actually fired: an
+	// over-budget read is refused with a typed error and changes no state, so the
+	// oracle stays in lock-step.
+	rejectedReads int
 	// searchEvery, when > 0, runs the full search-algorithm battery
 	// ([CheckSearch]) every searchEvery ticks in the deterministic loop, on top of
 	// any terminal check the scenario runs. It lives on the Simulator (not Config)
@@ -176,9 +191,11 @@ func New(cfg Config) (*Simulator, error) {
 		s.engine = NewEngineAdapter(store.Engine())
 	} else {
 		// Default (no-crash) path: a plain in-memory engine with no durable
-		// layer, byte-identical to the pre-crash simulator.
+		// layer, byte-identical to the pre-crash simulator. EngineOpts is the zero
+		// value for every scenario except mem-pressure (which clamps the logical
+		// budgets); a zero EngineOptions is byte-identical to cypher.NewEngine.
 		g := lpg.New[string, float64](adjlist.Config{Directed: true})
-		s.engine = NewEngineAdapter(cypher.NewEngine(g))
+		s.engine = NewEngineAdapter(cypher.NewEngineWithOptions(g, cfg.EngineOpts))
 	}
 
 	return s, nil
@@ -222,8 +239,12 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 		}
 
 		committed := s.execute(ctx, op)
-		if !committed && op.Kind.IsWrite() {
-			s.rejectedWrites++
+		if !committed {
+			if op.Kind.IsWrite() {
+				s.rejectedWrites++
+			} else {
+				s.rejectedReads++
+			}
 		}
 		s.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
@@ -488,6 +509,11 @@ func (s *Simulator) ReplayedOps() int { return s.replayedOps }
 // commit during the run. Under the disk-full scenario it is the non-vacuity
 // guard that ENOSPC fired; it is 0 for a run that never exhausts the disk.
 func (s *Simulator) RejectedWrites() int { return s.rejectedWrites }
+
+// RejectedReads returns how many read-shaped operations the engine refused
+// (drain error) during the run. Under the mem-pressure scenario it is the
+// non-vacuity guard that a logical-resource budget fired.
+func (s *Simulator) RejectedReads() int { return s.rejectedReads }
 
 // Close releases the simulator's durable resources. In crash mode it gracefully
 // closes the live SimDisk-backed store (flushing and releasing the WAL writer)

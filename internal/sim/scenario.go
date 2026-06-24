@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
@@ -128,6 +129,10 @@ type Scenario struct {
 	// finite size so the run drives the engine through a disk-full (ENOSPC)
 	// condition (ModeDeterministic). See [DiskConfig].
 	Disk DiskConfig
+	// EngineOpts configures the in-memory engine the deterministic loop drives.
+	// The mem-pressure scenario clamps the logical-resource budgets here; every
+	// other scenario leaves it zero (byte-identical to the default engine).
+	EngineOpts cypher.EngineOptions
 	// Checks selects the extra invariant checks.
 	Checks CheckSelection
 
@@ -202,6 +207,7 @@ func (sc *Scenario) DeterministicConfig(seed uint64) Config {
 		Workload:   wl(NewSeed(seed)),
 		Crash:      sc.Crash,
 		Disk:       sc.Disk,
+		EngineOpts: sc.EngineOpts,
 		CheckEvery: sc.CheckEvery,
 	}
 }

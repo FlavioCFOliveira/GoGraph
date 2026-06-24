@@ -56,6 +56,20 @@ func BadActorWorkload(_ *Seed) *Workload {
 	}
 }
 
+// MemPressureWorkload returns a mix that drives the engine's bounded-resource
+// contract: an honest writer keeps a real graph populated (50%) while an
+// [OverloadReader] (50%) issues over-budget reads. With the engine's logical
+// budgets clamped (the mem-pressure scenario's EngineOpts), the overload reads
+// are refused with typed resource-exhausted errors and change no state, so the
+// honest writes and the oracle stay in lock-step throughout — graceful
+// degradation, never a panic or partial result.
+func MemPressureWorkload(_ *Seed) *Workload {
+	return &Workload{
+		Actors:  []Actor{HonestWriter{}, OverloadReader{}},
+		Weights: []float64{0.5, 0.5},
+	}
+}
+
 // SteadyStateWorkload returns a mix tuned to keep the modelled graph BOUNDED
 // over a very long run: a writer that creates and deletes in equal measure
 // (via [BoundedChurnWriter]) plus a reader. It is the long-running scenario's
