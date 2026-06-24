@@ -125,6 +125,44 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 	}
 }
 
+// FromArrays assembles a CSR directly from caller-supplied, already
+// final-sized adjacency arrays, bypassing [BuildFromAdjList] and its
+// source [adjlist.AdjList]. It is the building block for high-throughput
+// loaders (see store/bulk) that compute the offsets, flat edge array, and
+// parallel weights in a single counting-sort pass and would otherwise pay
+// for an intermediate mutable adjacency list.
+//
+// The arguments map one-to-one onto the fields [BuildFromAdjList]
+// produces, and the caller is responsible for supplying values that are
+// already consistent with that builder's output:
+//
+//   - vertices is the length V+1 offsets array; vertices[id] is the start
+//     of node id's out-neighbours and vertices[len-1] is the total edge
+//     count. For an empty graph it is exactly []uint64{0}.
+//   - edges is the flat out-neighbour array, length vertices[len-1],
+//     grouped by source in ascending NodeID order; within a source the
+//     order is the caller's (the bulk loader preserves input order).
+//   - weights is parallel to edges, or nil for an unweighted/weightless
+//     snapshot (rendered as the zero W by [CSR.NeighboursByID]).
+//   - order is the number of distinct nodes; size is the number of edges
+//     (it must equal vertices[len-1]).
+//
+// FromArrays does not copy: it retains the supplied slices, which must
+// therefore be treated as immutable from the call onward, exactly like a
+// CSR returned by [BuildFromAdjList]. The handle column is always nil;
+// loaders that need stable per-slot edge handles must use the adjacency
+// path. The function performs no validation beyond what the type system
+// enforces — supplying inconsistent arrays yields a malformed snapshot.
+func FromArrays[W any](vertices []uint64, edges []graph.NodeID, weights []W, order, size uint64) *CSR[W] {
+	return &CSR[W]{
+		vertices: vertices,
+		edges:    edges,
+		weights:  weights,
+		order:    order,
+		size:     size,
+	}
+}
+
 // hasWeights returns true unless W is the empty struct, in which case
 // the weights array carries no information and can be omitted to
 // save memory and allocation time.

@@ -235,14 +235,32 @@ func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 func (l *Loader) Finalise() (int, *csr.CSR[int64], error) {
 	defer metrics.Time("store.bulk.Finalise").Stop()
 
-	if l.opts.Parallel {
+	var c *csr.CSR[int64]
+	switch {
+	case l.opts.Parallel && l.csrDirectEligible():
+		// Build the CSR straight from the buffered edge stream with a
+		// counting sort, bypassing the mutable adjacency list entirely. The
+		// result is byte-for-byte identical to BuildFromAdjList(l.adj) for the
+		// directed case (see buildCSRDirect), at a fraction of the
+		// allocations: the per-source copy-on-write growth that dominated the
+		// adjacency path is gone.
+		c = l.buildCSRDirect()
+	case l.opts.Parallel:
+		// Buffered, but not CSR-direct eligible (e.g. a capacity-capped
+		// adjacency the white-box atomicity test injects): replay the buffer
+		// into the adjacency, then build from it. This preserves the
+		// ErrShardFull / all-or-nothing publication contract.
 		if err := l.buildBuffered(); err != nil {
 			metrics.IncCounter("store.bulk.Finalise.errors", 1)
 			return l.rows, nil, err
 		}
+		c = csr.BuildFromAdjList(l.adj)
+	default:
+		// Sequential (default) mode: edges already went straight into the
+		// adjacency on Add, so build the CSR from it.
+		c = csr.BuildFromAdjList(l.adj)
 	}
 
-	c := csr.BuildFromAdjList(l.adj)
 	if l.opts.OutputPath != "" {
 		if _, err := csrfile.WriteToFile(l.opts.OutputPath, c); err != nil {
 			metrics.IncCounter("store.bulk.Finalise.errors", 1)
@@ -250,6 +268,149 @@ func (l *Loader) Finalise() (int, *csr.CSR[int64], error) {
 		}
 	}
 	return l.rows, c, nil
+}
+
+// csrDirectEligible reports whether the buffered load qualifies for the
+// CSR-direct counting-sort build. It applies to DIRECTED graphs only:
+// undirected loads mirror each edge onto the (dst, src) entry, and a
+// stable counting sort over the forward stream alone cannot reproduce
+// BuildFromAdjList byte-for-byte for the mirrored entries, so those fall
+// back to the adjacency path. A capacity-capped adjacency
+// (MaxShardCapacity > 0) also falls back, because the cap's ErrShardFull
+// is enforced by the adjacency's storeEntry and must surface before the
+// single csrfile publication (see the parallel atomicity test); the
+// counting sort does not consult the cap. The public Options exposes no
+// cap knob, so production loaders are always CSR-direct eligible.
+//
+// Both directed multigraph and directed simple graphs are eligible: the
+// counting sort reproduces simple-graph first-occurrence dedup and the
+// multigraph keep-all behaviour exactly (see buildCSRDirect).
+func (l *Loader) csrDirectEligible() bool {
+	if !l.opts.Directed {
+		return false
+	}
+	return l.adj.Config().MaxShardCapacity == 0
+}
+
+// buildCSRDirect builds the immutable CSR from the buffered edge stream
+// with a two-pass counting sort, without ever touching the mutable
+// adjacency list. For a DIRECTED graph the output is byte-for-byte
+// identical to csr.BuildFromAdjList(l.adj) had the same edges been
+// replayed through AddEdge — the determinism gate the byte-identity tests
+// enforce — while allocating O(1) large arrays instead of the
+// O(distinct-sources) per-source copy-on-write growth the adjacency path
+// incurs. It must only be called when csrDirectEligible reports true.
+//
+// Byte-identity rests on three facts established from the adjacency and
+// CSR builders:
+//
+//  1. NodeID assignment. addEdge interns Src then Dst per edge in input
+//     order; interning here in the same per-edge order assigns the
+//     identical NodeIDs (graph.Mapper assigns ids first-seen, per shard).
+//     A node first seen as a destination is still interned, so it occupies
+//     its (zero out-degree) NodeID slot exactly as in the adjacency path.
+//  2. Offsets. csr.BuildFromAdjList walks NodeID 0..maxID-1 and lays out
+//     each source's neighbours contiguously, so the offsets are the
+//     exclusive prefix sum of per-source out-degree over the DENSE NodeID
+//     space. NodeIDs are sparse (NodeID = (intraIdx<<8)|shard), so the
+//     prefix sum spans the full [0, maxID] range with absent ("ghost")
+//     NodeIDs contributing a zero-width slot.
+//  3. Within-row order and dedup. The adjacency appends a source's
+//     neighbours in input order; in simple-graph mode a repeat (src, dst)
+//     is a no-op that keeps the first occurrence (and its weight) and
+//     drops the later one, while a multigraph keeps every parallel edge.
+//     A stable scatter (a per-source running cursor over the SAME
+//     post-dedup stream pass 1 counted) reproduces both exactly.
+func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
+	edges := l.buffered
+	mapper := l.adj.Mapper()
+	simple := !l.opts.Multigraph
+
+	// Pass 1: resolve every endpoint to its NodeID in input order (fixing
+	// the same assignment the adjacency path would), and count out-degree
+	// per source. The resolved ids are retained so pass 2 does not re-intern.
+	src := make([]graph.NodeID, len(edges))
+	dst := make([]graph.NodeID, len(edges))
+	// keep[k] is false for an edge dropped by simple-graph dedup; pass 2
+	// must consume the SAME post-dedup stream pass 1 counted, so the count
+	// and the scatter cannot diverge. It stays nil for a multigraph, where
+	// every edge is kept (no per-edge flag, no allocation).
+	var keep []bool
+	var seen map[[2]graph.NodeID]struct{}
+	if simple {
+		keep = make([]bool, len(edges))
+		seen = make(map[[2]graph.NodeID]struct{}, len(edges))
+	}
+
+	for k := range edges {
+		s := mapper.Intern(edges[k].Src)
+		d := mapper.Intern(edges[k].Dst)
+		src[k] = s
+		dst[k] = d
+		if simple {
+			pair := [2]graph.NodeID{s, d}
+			if _, dup := seen[pair]; dup {
+				continue // drop the duplicate, exactly as upsertEdge does
+			}
+			seen[pair] = struct{}{}
+			keep[k] = true
+		}
+	}
+
+	// maxID is the canonical NodeID-indexed array size the CSR builder uses:
+	// adj.MaxNodeID() == mapper.MaxNodeID() == packNodeID(255, maxIntra-1)+1,
+	// driven by the deepest Mapper shard's fill — NOT max(assigned id)+1. The
+	// NodeID space is sparse (NodeID = (intraIdx<<8)|shard), so this value is
+	// read once after all endpoints are interned, reproducing the offsets
+	// array length BuildFromAdjList produces exactly. Computing it after
+	// pass 1 also captures destination-only nodes (interned above).
+	maxID := uint64(mapper.MaxNodeID())
+
+	// Empty input: reproduce BuildFromAdjList's empty-graph shape exactly
+	// (vertices == []uint64{0}, everything else nil/zero), so the csrfile
+	// is byte-identical down to the offsets section.
+	if maxID == 0 {
+		return csr.FromArrays[int64]([]uint64{0}, nil, nil, 0, 0)
+	}
+
+	// vertices doubles as the per-source out-degree counter in this pass,
+	// then is converted in place to the exclusive-prefix-sum offsets array.
+	// Indexing by the full NodeID over [0, maxID] gives ghost NodeIDs their
+	// natural zero-width slot.
+	vertices := make([]uint64, maxID+1)
+	for k := range edges {
+		if simple && !keep[k] {
+			continue
+		}
+		vertices[uint64(src[k])]++
+	}
+	var total uint64
+	for id := uint64(0); id < maxID; id++ {
+		c := vertices[id]
+		vertices[id] = total
+		total += c
+	}
+	vertices[maxID] = total
+
+	// Pass 2: scatter each kept edge into its source's slot range using a
+	// per-source running cursor, so within-row order is the input order
+	// (stable). cursor starts at the source's offset; weights travel in
+	// lockstep with the neighbour array.
+	flat := make([]graph.NodeID, total)
+	weights := make([]int64, total)
+	cursor := make([]uint64, maxID)
+	for k := range edges {
+		if simple && !keep[k] {
+			continue
+		}
+		s := uint64(src[k])
+		pos := vertices[s] + cursor[s]
+		flat[pos] = dst[k]
+		weights[pos] = edges[k].Weight
+		cursor[s]++
+	}
+
+	return csr.FromArrays(vertices, flat, weights, uint64(mapper.Len()), total)
 }
 
 // buildBuffered drains the buffered edge stream into l.adj. It chooses
