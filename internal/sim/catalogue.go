@@ -19,6 +19,7 @@ const (
 	ScenarioReadHeavy    = "read-heavy"
 	ScenarioSchemaChaos  = "schema-chaos"
 	ScenarioSearch       = "search"
+	ScenarioSearchCrash  = "search-crash"
 	ScenarioBadActors    = "bad-actors"
 	ScenarioOverload     = "overload"
 	ScenarioBulkVsOnline = "bulk-vs-online"
@@ -41,6 +42,7 @@ func DefaultRegistry() (*Registry, error) {
 		readHeavyScenario(),
 		schemaChaosScenario(),
 		searchScenario(),
+		searchCrashScenario(),
 		badActorsScenario(),
 		overloadScenario(),
 		bulkVsOnlineScenario(),
@@ -125,6 +127,26 @@ func searchScenario() Scenario {
 		Workload:    WriteHeavyWorkload,
 		SearchEvery: 200,
 		Checks:      CheckSelection{Search: true},
+	}
+}
+
+// searchCrashScenario is the crash-enabled variant of the search scenario: it
+// drives the same write-heavy workload and search battery but injects
+// deterministic crash+recovery cycles, so the search/ algorithms are validated
+// against the graph that survives WAL recovery (the simulator runs the full
+// search battery immediately after every recovery, on top of the periodic and
+// terminal checks). It is bit-reproducible.
+func searchCrashScenario() Scenario {
+	return Scenario{
+		Name:        ScenarioSearchCrash,
+		Description: "search/ battery validated on the crash+recovery-survived graph (durability x algorithms)",
+		Mode:        ModeDeterministic,
+		DefaultSeed: 0x5EA4C2A5,
+		MaxTicks:    500,
+		Workload:    WriteHeavyWorkload,
+		SearchEvery: 150,
+		Checks:      CheckSelection{Search: true},
+		Crash:       CrashConfig{Enabled: true, CrashProb: 1.0 / 80.0, StabilityWindow: 25},
 	}
 }
 

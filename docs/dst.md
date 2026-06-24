@@ -1,0 +1,278 @@
+# Deterministic Simulation Testing (DST)
+
+This document describes GoGraph's Deterministic Simulation Testing harness:
+its architecture, the invariants it enforces, the scenario catalogue, and how
+to run, reproduce, replay, and shrink a failing run.
+
+The harness lives in [`internal/sim/`](../internal/sim) with a command-line
+driver in [`cmd/sim/`](../cmd/sim). It is modelled on TigerBeetle's VOPR
+(Viewstamped Operation Replicator simulator), adapted from a distributed
+consensus system to a single-node graph database: the fault surface here is the
+Bolt protocol, the WAL/snapshot recovery path, and the ACID-commit liveness of
+the engine, rather than network partitions and view changes.
+
+For the broader production-readiness battery (shape generators, invariant
+checkers, fault-injection packages, dataset loaders), see
+[docs/test-battery.md](test-battery.md). For the three test layers (short /
+soak / nightly), see [docs/test-layers.md](test-layers.md).
+
+---
+
+## Table of contents
+
+1. [Why deterministic simulation](#why-deterministic-simulation)
+2. [Architecture](#architecture)
+3. [Execution modes](#execution-modes)
+4. [Determinism and reproducibility](#determinism-and-reproducibility)
+5. [Invariants checked](#invariants-checked)
+6. [The search-algorithm battery](#the-search-algorithm-battery)
+7. [Scenario catalogue](#scenario-catalogue)
+8. [Crash and recovery](#crash-and-recovery)
+9. [Swarm, coverage, and cross-checking modes](#swarm-coverage-and-cross-checking-modes)
+10. [Command-line usage](#command-line-usage)
+11. [Reproduce, replay, and shrink](#reproduce-replay-and-shrink)
+12. [Extending the harness](#extending-the-harness)
+
+---
+
+## Why deterministic simulation
+
+A deterministic simulation drives the real engine through a long, randomised
+sequence of operations and faults, where **every source of non-determinism is
+seeded from a single master seed**. The entire run is therefore a pure function
+of that seed: a failure found on seed *S* reproduces exactly on seed *S*, on any
+machine, every time. This turns a rare, timing-dependent bug into a
+deterministic, replayable, shrinkable artefact.
+
+The engine is checked against a **correct-by-construction oracle** — an
+independent shadow model of what the graph must contain — after operations and
+at every crash-recovery boundary. Any divergence between the engine and the
+oracle is a bug.
+
+## Architecture
+
+| Component | File | Responsibility |
+|---|---|---|
+| Seed | `seed.go` | PCG-based PRNG ([`math/rand/v2`](https://pkg.go.dev/math/rand/v2)); the single source of randomness. Sub-seeds for the checker and the disk are XOR-derived so the workload draw stream is independent of check cadence and fault injection. |
+| Virtual clock | `clock.go`, `internal/clock` | A 1 ms-per-tick logical clock injected into checkpoint cadence and the Bolt transaction reaper, so time-dependent behaviour is deterministic. |
+| SimDisk | `disk.go`, `diskfs.go` | An in-memory faulting disk backing the WAL and the checkpoint/snapshot, with seed-driven sector-fault injection and a `Crash()` that revokes not-yet-`fsync`-ed directory entries. |
+| GraphOracle | `oracle.go` | The shadow model: a minimal, obviously-correct map of the nodes and edges the engine must hold after the workload's operations. It advances only on a committed write, so it always equals the engine's durable, acknowledged state. |
+| InvariantChecker | `checker.go` | Compares the engine against the oracle: count parity, sampled existence, full post-recovery durability, and index consistency. |
+| Actors and workloads | `actor.go`, `workload.go` | Honest writer/reader, bounded-churn writer, malformed sender, and the concurrent-mode bad actors (Bolt abuser, overload actor, slow consumer, schema changer). A workload is a weighted mix of actors. |
+| Simulator | `sim.go` | The single-goroutine, tick-driven safety loop: select an actor, run its operation, advance the oracle, check invariants, and (when enabled) crash and recover. |
+| Search battery | `search_check.go` and `search_*.go` | Runs the `search/` algorithms and validates their answers against independent references (see [below](#the-search-algorithm-battery)). |
+
+## Execution modes
+
+`cmd/sim --mode` selects the harness:
+
+- **`engine`** (default) — the single-goroutine, tick-driven safety loop over the
+  real `cypher.Engine`. Fully bit-reproducible from the seed; this is the only
+  mode that trace recording, scripted replay, and shrinking operate on.
+- **`wire`** — drives the *real* `bolt/server` over an in-memory `net.Listener`
+  (`SimListener`/`SimConn`) with a Bolt v5 client (`WireClient`), exercising the
+  genuine protocol path without a TCP socket.
+- **`concurrent`** — N real client goroutines over the Bolt wire; interleaving is
+  not seed-controlled, so correctness is an eventual-consistency oracle plus
+  `goleak`/no-panic guards rather than bit-reproducibility.
+- **`liveness`** — the two-phase safety→liveness flow: after the safety phase,
+  faults are healed and the harness asserts the system *converges* (all in-flight
+  work drains, the oracle equals the engine) within a bounded budget, with a
+  watchdog that classifies a non-converging run as resonance (deadlock/livelock)
+  versus budget-exceeded.
+
+## Determinism and reproducibility
+
+Determinism is a **load-bearing invariant** of the harness, not a nicety: it is
+what makes a failure replayable and shrinkable. The deterministic mode
+guarantees that the same seed yields the same operations, the same fault
+schedule, and the same verdict. Concretely:
+
+- All randomness flows from one `Seed`; the checker and disk draw from
+  XOR-derived sub-seeds so changing the check cadence or fault rate never
+  perturbs the workload.
+- No Go map-iteration order is ever allowed to influence an operation, a check
+  result, or a violation message. Accessors that feed seed-driven choices sort
+  their output first.
+- The search battery uses integer-valued weights so its comparisons are exact;
+  the only floating-point comparisons (centrality, PageRank) use an explicit
+  epsilon with a pinned worker count, because a parallel float reduction is not
+  bit-identical.
+
+## Invariants checked
+
+The `InvariantChecker` (`checker.go`) classifies every breach with a typed
+`ViolationKind`:
+
+| Kind | Meaning |
+|---|---|
+| `ACID_ATOMICITY` | A write applied partially, or uncommitted state leaked in at a crash boundary. |
+| `ACID_CONSISTENCY` | The engine disagrees with the oracle's node/edge counts, or an index disagrees with its base data. |
+| `ACID_ISOLATION` | A reader observed the partial writes of an in-flight transaction. |
+| `ACID_DURABILITY` | A committed operation did not survive crash recovery. |
+| `GRAPH_INTEGRITY` | A structural invariant broke (e.g. an edge with a missing endpoint, or the engine graph diverging from the model). |
+| `ORACLE_DEVIATION` | An engine/oracle disagreement not more specifically classified. |
+| `SEARCH_DIVERGENCE` | A `search/` algorithm disagreed with its independent reference. |
+
+The base checks are: node- and edge-count parity; sampled existence of oracle
+nodes and edges in the engine; a full (non-sampled) durability scan at every
+crash boundary; and a thorough index-consistency check that cross-checks the
+index-seek path against a full scan.
+
+## The search-algorithm battery
+
+The `search/` package — traversal, path-finding, and analytics — is the
+module's headline capability. `CheckSearch` (`search_check.go`) brings it under
+the DST. It runs only in the single-goroutine deterministic loop (it needs a
+quiescent view of the graph) and performs two independent families of check.
+
+**1. Structural parity.** The engine's full node-set and `(src,dst)` edge-set are
+extracted via the *public Cypher read path* — the same path the workload uses,
+so no engine-internals API is added — and compared exactly to the oracle's
+shadow model. This is strictly stronger than the base checker's count-plus-sample
+probes: it proves the engine graph is identical to the model, which lets the
+algorithm checks run on the model as a faithful stand-in for the engine's
+contents.
+
+**2. Algorithm correctness.** Each `search/` algorithm is run on the graph and
+its answer is compared to an **independent naive reference** computed directly
+from the oracle's edge set — never from the data structure handed to `search/`,
+so a builder bug cannot hide. The cardinal rule is to **compare an invariant of
+the answer, never a non-unique witness**:
+
+| Family | Algorithms | Comparison invariant |
+|---|---|---|
+| Reachability | BFS, DFS | The reachable **set** from a source (order-independent). |
+| Components | WCC | The partition, **up to relabelling**. |
+| Strong connectivity | Tarjan SCC | The partition, up to relabelling (double-reachability reference). |
+| Ordering | topological sort | *Validated* as a valid order (every edge forward; a permutation of the edge-incident nodes), since the order is not unique; cyclic graphs must return `ErrCycle`. |
+| Closure | transitive closure | Per-pair reachability over edge-incident nodes. |
+| SSSP / APSP | Dijkstra, Bellman-Ford, bidirectional Dijkstra, A\*, Floyd-Warshall, Johnson, Dijkstra-APSP | The **distance map**, not path identity; serial and parallel variants must agree exactly. |
+| MST | Kruskal, Prim | The **total weight** plus spanning-forest validity, not the edge set. |
+| Flow | max-flow (Dinic), Edmonds-Karp, Stoer-Wagner | The flow **value** / cut **weight**, with max-flow = min-cut as a second invariant. |
+| Matching | Hopcroft-Karp, Hungarian | Matching **cardinality** / assignment **total cost**, not the matching itself. |
+| Euler | Hierholzer | *Validated* circuit (uses every edge once, closed); non-Eulerian graphs must return `ErrNoEulerian`. |
+| Centrality | betweenness (parallel, weighted) | Per-node value within an epsilon, against a from-definition Brandes reference, with a pinned worker count. |
+| PageRank | PageRank | The rank vector within a convergence-aware epsilon, against an independent power-iteration reference matching the damping, dangling-mass redistribution, and teleport model. |
+| Community | Leiden, label propagation | Determinism, partition validity, and **no planted clique is split** (a merge is legitimate — the modularity resolution limit), not exact recovery. |
+| Cohesion | k-core, biconnected components | Per-node coreness; the articulation-point and bridge sets, against remove-and-recount references. |
+| K-shortest | Yen, bounded loopless, Eppstein | The **sorted cost multiset** of the first *k* paths, against a brute-force simple-path enumeration; the loopless worst case is bounded via `MaxPops`. |
+
+Weights for the weighted algorithms are synthesised deterministically per edge,
+so the algorithm checks need no change to the workload or the engine's stored
+data; the families that need a specific shape (flow networks, bipartite graphs,
+Eulerian graphs) generate their own deterministic fixtures from the tick.
+
+The `search` scenario runs this battery periodically and at the end of a run;
+the `search-crash` scenario additionally runs it immediately after every
+crash-recovery cycle, so the algorithms are validated against a graph that has
+actually survived WAL recovery — the DST-unique value for `search/`.
+
+## Scenario catalogue
+
+A scenario is a named, self-contained configuration (seed, workload, fault
+schedule, budget, mode, checks). `cmd/sim --list-scenarios` prints them.
+
+| Scenario | Mode | Stresses |
+|---|---|---|
+| `crash-storm` | deterministic | Frequent crash + recovery via the SimDisk WAL path (durability). |
+| `write-heavy` | deterministic | 80/20 write/read; the write path and oracle parity. |
+| `read-heavy` | deterministic | 20/80 write/read; the read path and isolation. |
+| `schema-chaos` | deterministic | Index create/drop/re-create under write load + full index-consistency check. |
+| `search` | deterministic | The `search/` algorithm battery over the live graph + structural parity. |
+| `search-crash` | deterministic | The `search/` battery validated on the crash + recovery-survived graph. |
+| `bad-actors` | deterministic | 100% malformed/abuse workload; every op rejected with a typed error, no state change. |
+| `overload` | concurrent | Giant transactions / huge `UNWIND` / large result sets / deep variable-length expansion; bounded-resource graceful degradation. |
+| `bulk-vs-online` | bulk-vs-online | A concurrent offline bulk CSR load alongside transactional online writes; resource stability. |
+| `long-running` | deterministic | Millions of small bounded-churn ops; oracle parity plus heap/goroutine stability (soak). |
+
+## Crash and recovery
+
+When a scenario enables crashes, the simulator drives a real SimDisk-backed
+persistence stack. A scheduled crash is a SIGKILL-equivalent: the live engine
+is dropped *without* a graceful close, so any buffered-but-unsynced frame is
+lost exactly as a real crash would lose it, while the durable byte image in the
+SimDisk survives. The store is then reopened through the real recovery path
+(WAL replay, and snapshot promotion where a checkpoint was published), and:
+
+- the **durability check** verifies every acknowledged-committed operation
+  survived and nothing uncommitted leaked in; and
+- when the search battery is enabled, the **full search battery** runs on the
+  recovered graph, so the algorithms are exercised against crash-survived state.
+
+A recovery that detects genuine corruption fails stop (a typed error), which the
+run surfaces rather than swallowing.
+
+## Swarm, coverage, and cross-checking modes
+
+- **Swarm** (`--swarm`) runs many seeds across a bounded worker pool, time- or
+  count-boxed, and reports pass/fail counts plus a reproduction command per
+  failure.
+- **Coverage** (`--coverage-report`, `--bias`) tracks which scenarios have been
+  exercised and can bias selection toward under-covered ones.
+- **Differential**, **upgrade**, **cross-release**, and **metrics-oracle** modes
+  cross-check equivalent engine configurations, WAL data-compatibility across
+  releases, and metrics against the oracle. See the corresponding `*_test.go`
+  files in `internal/sim/`.
+
+## Command-line usage
+
+```bash
+# Build the simulator.
+go build ./cmd/sim
+
+# Run a single deterministic simulation (seed is a leading positional argument).
+go run ./cmd/sim 42 --ticks=100000
+
+# List the scenario catalogue.
+go run ./cmd/sim --list-scenarios
+
+# Run a named scenario (note the '=' form — a bare token is parsed as the seed).
+go run ./cmd/sim --scenario=search
+go run ./cmd/sim --scenario=search-crash 12345
+
+# Run a swarm of seeds, time- or count-boxed.
+go run ./cmd/sim --scenario=search --swarm --runs=200
+go run ./cmd/sim --swarm --duration=30s --coverage-report
+
+# Drive the real Bolt wire / concurrent / liveness harnesses.
+go run ./cmd/sim --mode=wire
+go run ./cmd/sim --mode=concurrent --conns=16 --ops-per-conn=25
+
+# Inject deterministic crash + recovery cycles.
+go run ./cmd/sim 7 --crashes
+```
+
+Flags of note: `--workload` (`default|write-heavy|read-heavy|bad-actor`),
+`--check-every` (invariant-check cadence), `--verbose` (print each operation),
+and `--replay` (see below).
+
+## Reproduce, replay, and shrink
+
+Every failing run prints a `Reproduce with: go run ./cmd/sim <seed>` line.
+Because the deterministic mode is a pure function of the seed, re-running that
+command reproduces the failure exactly.
+
+`--replay` re-runs the seed in verbose, full-trace debug; on a violation it
+applies delta-debugging (`ddmin`) to shrink the operation trace to a minimal
+reproducer — the smallest sub-sequence of operations that still triggers the
+violation — which is what you attach to a bug report.
+
+## Extending the harness
+
+- **A new invariant check** is a function returning `[]Violation`; wire it into
+  the checker or into `CheckSearch` and give it a typed `ViolationKind`.
+- **A new search algorithm check** follows the pattern in `search_*.go`: build
+  the input (from the live graph or a deterministic shaped fixture), run the
+  algorithm, compute an **independent** reference, and compare an **invariant**
+  of the answer (never a non-unique witness). Add the call to `CheckSearch`.
+- **A new scenario** is a `Scenario` value registered in `DefaultRegistry`
+  (`catalogue.go`); it is then automatically available to `--scenario`,
+  `--list-scenarios`, `--swarm`, and the coverage report.
+- **A new actor** implements the `Actor` interface (`actor.go`) and is added to a
+  workload mix; the oracle must model its operations so engine and model stay in
+  lock-step.
+
+All new code must preserve bit-reproducibility (no map-iteration order in any
+output) and must keep the full suite green under `go test -race ./internal/sim
+./cmd/sim`.

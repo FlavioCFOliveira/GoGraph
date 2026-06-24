@@ -146,30 +146,31 @@ func TestCommunity_CanonicalSig_DetectsWrongPartition(t *testing.T) {
 	}
 }
 
-// TestCommunity_CheckPlantedRecovery_FlagsWrongPartition proves the recovery
-// check returns an error when handed a partition that does NOT match the planted
-// cliques, so a real algorithm regression (a merged or split community) would be
-// caught rather than silently passed.
-func TestCommunity_CheckPlantedRecovery_FlagsWrongPartition(t *testing.T) {
+// TestCommunity_CheckPlantedRecovery_FlagsSplit proves the recovery check flags a
+// partition that SPLITS a planted clique (a real regression), while tolerating a
+// legitimate MERGE of whole cliques (the modularity resolution limit), which the
+// sound invariant must not reject.
+func TestCommunity_CheckPlantedRecovery_FlagsSplit(t *testing.T) {
 	t.Parallel()
 	f := communityCliqueChain("two-cliques-3-3", []int{3, 3})
 
-	// Correct recovery: two blocks matching the plant -> no error.
+	// Exact recovery: two blocks matching the plant -> no error.
 	good := community.Partition{Community: []int{0, 0, 0, 1, 1, 1}, NumCommunities: 2}
 	if err := checkPlantedRecovery(good, f); err != nil {
-		t.Fatalf("correct partition wrongly flagged: %v", err)
+		t.Fatalf("exact recovery wrongly flagged: %v", err)
 	}
 
-	// Wrong count: all one community -> error.
+	// Legitimate merge: both cliques folded into one community. No clique is split,
+	// so this must NOT be flagged (it is the resolution limit, not a bug).
 	merged := community.Partition{Community: []int{0, 0, 0, 0, 0, 0}, NumCommunities: 1}
-	if err := checkPlantedRecovery(merged, f); err == nil {
-		t.Fatalf("merged-into-one partition was not flagged")
+	if err := checkPlantedRecovery(merged, f); err != nil {
+		t.Fatalf("a legitimate merge (no split) must not be flagged: %v", err)
 	}
 
-	// Right count, wrong grouping: a node crosses the clique boundary -> error.
-	misgrouped := community.Partition{Community: []int{0, 0, 1, 0, 1, 1}, NumCommunities: 2}
-	if err := checkPlantedRecovery(misgrouped, f); err == nil {
-		t.Fatalf("mis-grouped partition with the right community count was not flagged")
+	// Split: node 2 of clique 0 crosses into clique 1's community -> error.
+	split := community.Partition{Community: []int{0, 0, 1, 0, 1, 1}, NumCommunities: 2}
+	if err := checkPlantedRecovery(split, f); err == nil {
+		t.Fatalf("a partition that splits a planted clique was not flagged")
 	}
 }
 

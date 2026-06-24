@@ -337,6 +337,17 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	if violations := s.checker.CheckDurability(tick, s.oracle, s.engine); len(violations) > 0 {
 		return s.report(tick, Op{Kind: OpMatch, Cypher: "<crash recovery>"}, violations), nil
 	}
+
+	// When the search battery is enabled, run it on the recovered graph too: this
+	// is the DST-unique value for search — the traversal/path-finding/analytics
+	// algorithms are validated against a graph that has actually survived a crash
+	// and WAL recovery, not just a freshly-built in-memory one. Gated on
+	// searchEvery so non-search scenarios pay nothing.
+	if s.searchEvery > 0 {
+		if violations := CheckSearch(tick, s.oracle, s.engine); len(violations) > 0 {
+			return s.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery search>"}, violations), nil
+		}
+	}
 	return nil, nil
 }
 

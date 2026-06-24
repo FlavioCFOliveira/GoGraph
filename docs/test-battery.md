@@ -7,7 +7,11 @@ the suite, add a new shape, or integrate a new algorithm into the
 correctness pipeline.
 
 For the three-layer test discipline and CI integration, see
-[docs/test-layers.md](test-layers.md).
+[docs/test-layers.md](test-layers.md). For the Deterministic Simulation Testing
+harness — the seed-reproducible, VOPR-modelled simulator that drives the engine
+through randomised operations and faults and checks it against a
+correct-by-construction oracle (including the `search/` algorithm battery) — see
+[docs/dst.md](dst.md).
 
 ---
 
