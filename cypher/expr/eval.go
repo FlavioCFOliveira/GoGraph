@@ -323,11 +323,20 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 	// restored on return rather than blindly deleted.
 	//
 	// A nil RowContext (a legal input: an expression with no variable
-	// bindings) has no slot to toggle, so allocate a one-entry map for it —
-	// there is nothing to copy, so this is not the clone the optimisation
-	// removes.
+	// bindings) has no slot to toggle, so it needs a one-entry map to carry
+	// the sentinel holder — there is nothing to copy, so this is not the clone
+	// the optimisation removes. Binding-free expressions (RETURN 1, constant
+	// projections, parameter-only predicates) hit this on every evaluated row,
+	// so the map is drawn from a pool and returned on exit instead of freshly
+	// allocated each call (#1721). The map's lifetime is exactly this single,
+	// single-goroutine call: the sentinel is the only key ever written to it
+	// (every binding-introducing form — list/pattern comprehension — clones
+	// into a fresh inner map, never our row), and it is deleted again below, so
+	// the map is observably empty when released.
+	pooledRow := false
 	if row == nil {
-		row = make(RowContext, 1)
+		row = bindingFreeRowPool.Get().(RowContext)
+		pooledRow = true
 	}
 	// The holder + its embedded budget were the dominant per-row allocation on
 	// the common (no-subquery) evaluation path (#1589): every EvalWith call
@@ -361,8 +370,23 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 		delete(row, subqueryContextKey)
 	}
 	releaseSubqueryContext(scv)
+	// Recycle the pooled binding-free map only once it is observably empty (the
+	// sentinel deleted above, no binding written in place). The guard keeps a
+	// future in-place writer from poisoning the pool: a non-empty map is simply
+	// dropped for the GC rather than reused.
+	if pooledRow && len(row) == 0 {
+		bindingFreeRowPool.Put(row)
+	}
 	return v, err
 }
+
+// bindingFreeRowPool recycles the single-entry RowContext that [EvalWith] needs
+// when called with a nil row (a binding-free expression). The map exists only
+// to carry the pooled subquery-context holder under subqueryContextKey and is
+// emptied again before EvalWith returns, so it is reused across calls instead
+// of freshly allocated each time. RowContext is a map — pointer-shaped — so
+// boxing it into the pool's any allocates nothing.
+var bindingFreeRowPool = sync.Pool{New: func() any { return make(RowContext, 1) }}
 
 // subqueryContextPool recycles the per-evaluation holder allocated by
 // [EvalWith]. The holder's lifetime is exactly one EvalWith call (it is
