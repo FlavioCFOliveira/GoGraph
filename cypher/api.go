@@ -932,7 +932,9 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 			// constraint or a recovered plain index already claimed the name.
 			var sub index.Subscriber
 			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, d.Label, d.Property); bidxErr == nil {
-				e.backfillNodeHashIndex(boundIdx, d.Label, d.Property)
+				// Recovery must complete: a background context never cancels, so
+				// the backfill never returns an error here.
+				_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
 				sub = boundIdx
 			} else {
 				sub = exec.NewUniqueBackingIndex()
@@ -2021,7 +2023,11 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		if kind == exec.ConstraintUnique {
 			boundIdx, bidxErr := newBoundNodeHashIndex(e.g, p.Label, p.Property)
 			if bidxErr == nil {
-				e.backfillNodeHashIndex(boundIdx, p.Label, p.Property)
+				// Cancellation before registration aborts the constraint with
+				// nothing registered or made durable (atomicity preserved).
+				if berr := e.backfillNodeHashIndex(ctx, boundIdx, p.Label, p.Property); berr != nil {
+					return berr
+				}
 				op.WithBackingIndex(boundIdx)
 			}
 			// On binding error fall through: the operator uses an unbound
@@ -2170,7 +2176,9 @@ func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kin
 	op := exec.NewCreateConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
 	if kind == exec.ConstraintUnique {
 		if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, label, prop); bidxErr == nil {
-			e.backfillNodeHashIndex(boundIdx, label, prop)
+			// The rewind is uncancellable by design (see runDDLOp below): a
+			// background context never cancels, so the backfill cannot error.
+			_ = e.backfillNodeHashIndex(context.Background(), boundIdx, label, prop)
 			op.WithBackingIndex(boundIdx)
 		}
 	}

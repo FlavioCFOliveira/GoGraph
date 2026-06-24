@@ -29,7 +29,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
@@ -100,6 +102,15 @@ func newBoundNodeHashIndex(
 	})
 }
 
+// backfillParallelMinNodes is the snapshot size at or above which the lock-free
+// phase-2 of [Engine.backfillNodeHashIndex] is partitioned across a bounded
+// worker pool. Below it the goroutine fan-out costs more than it saves, and the
+// common small-graph CREATE INDEX stays a serial loop. The per-node phase-2
+// work (tombstone + label + property + project + insert) is cheap, so the floor
+// is set well above the fan-out break-even; the win the parallel path targets
+// is wall-clock on a huge (millions-of-nodes) DDL backfill.
+const backfillParallelMinNodes = 8192
+
 // backfillNodeHashIndex inserts every live node of label whose prop holds an
 // indexable string into idx. Callers must hold the engine's writer
 // serialisation so no write transaction can interleave with the scan.
@@ -109,7 +120,23 @@ func newBoundNodeHashIndex(
 // (id, key) pairs under the mapper shard locks and touches nothing else;
 // phase 2 resolves tombstone, label, and property state with no shard lock
 // held, so a queued writer on a mapper shard cannot deadlock a nested lookup.
-func (e *Engine) backfillNodeHashIndex(idx *indexhash.Index[string], label, prop string) {
+//
+// Phase 2 is partitioned across a bounded worker pool (capped at GOMAXPROCS)
+// for large snapshots (#1723): the graph reads it performs are the same
+// concurrent-safe reads any read query issues, idx (a hash.Index) is documented
+// safe for concurrent use, and per-key insertion is commutative (set
+// semantics), so the resulting index contents are identical regardless of
+// worker count or scheduling. CREATE INDEX runs under the single-writer DDL
+// lock, so the only effect is shorter wall-clock on the blocking DDL — but that
+// matters: a 100M-node index build must not freeze writers for minutes.
+//
+// ctx is polled every 4096 nodes. On cancellation the backfill stops and
+// returns ctx.Err(); the caller aborts the CREATE INDEX/CONSTRAINT, and because
+// the index is registered only after a successful backfill, a cancelled partial
+// index is discarded and never observed (atomicity preserved). Callers that
+// must not be interruptible (recovery, constraint-drop rewind) pass a
+// background context, for which this never returns an error.
+func (e *Engine) backfillNodeHashIndex(ctx context.Context, idx *indexhash.Index[string], label, prop string) error {
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
@@ -122,22 +149,65 @@ func (e *Engine) backfillNodeHashIndex(idx *indexhash.Index[string], label, prop
 		return true
 	})
 
-	for i := range refs {
-		r := refs[i]
-		if e.g.IsTombstoned(r.id) {
-			continue
+	// processRange runs the lock-free phase-2 over refs[lo:hi], inserting into
+	// the concurrent-safe hash index and polling ctx every 4096 nodes.
+	processRange := func(lo, hi int) error {
+		for i := lo; i < hi; i++ {
+			if i&0xFFF == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			r := refs[i]
+			if e.g.IsTombstoned(r.id) {
+				continue
+			}
+			if !e.g.HasNodeLabel(r.key, label) {
+				continue
+			}
+			pv, ok := e.g.GetNodeProperty(r.key, prop)
+			if !ok {
+				continue
+			}
+			if s, ok := projectStringPropValue(pv); ok {
+				idx.Insert(s, r.id)
+			}
 		}
-		if !e.g.HasNodeLabel(r.key, label) {
-			continue
+		return nil
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if len(refs) < backfillParallelMinNodes || workers <= 1 {
+		return processRange(0, len(refs))
+	}
+	if workers > len(refs) {
+		workers = len(refs)
+	}
+	chunk := (len(refs) + workers - 1) / workers
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		lo := w * chunk
+		if lo >= len(refs) {
+			break
 		}
-		pv, ok := e.g.GetNodeProperty(r.key, prop)
-		if !ok {
-			continue
+		hi := lo + chunk
+		if hi > len(refs) {
+			hi = len(refs)
 		}
-		if s, ok := projectStringPropValue(pv); ok {
-			idx.Insert(s, r.id)
+		wg.Add(1)
+		go func(w, lo, hi int) {
+			defer wg.Done()
+			errs[w] = processRange(lo, hi)
+		}(w, lo, hi)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // numericCompanionSuffix is the reserved name suffix of the internal numeric
@@ -438,7 +508,9 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			// pre-existing data — the worst outcome is a NodeByIndexSeek miss
 			// that is equivalent to the pre-fix behaviour.
 			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, d.Label, d.Property); bidxErr == nil {
-				e.backfillNodeHashIndex(boundIdx, d.Label, d.Property)
+				// Recovery must complete: a background context never cancels, so
+				// the backfill never returns an error here.
+				_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
 				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
 			} else {
 				sub := indexhash.New[string]()
@@ -543,8 +615,12 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	}
 
 	// Backfill BEFORE registration: a concurrent reader's plan build either
-	// misses the index (scan+filter, correct) or sees it fully populated.
-	e.backfillNodeHashIndex(idx, p.Label, p.Property)
+	// misses the index (scan+filter, correct) or sees it fully populated. A
+	// cancelled backfill returns before registration, so the partial index is
+	// discarded (and tx is rolled back by the caller) — nothing is observed.
+	if berr := e.backfillNodeHashIndex(ctx, idx, p.Label, p.Property); berr != nil {
+		return nil, berr
+	}
 
 	if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
 		if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
