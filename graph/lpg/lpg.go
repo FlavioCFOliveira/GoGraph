@@ -74,14 +74,23 @@ type labelNames struct {
 // every reader that observes an id in a bag observes, by release/acquire
 // ordering through that bag's own publication, a snapshot at least as new
 // as the one Intern published. Resolve therefore never misses a live id.
+// forwardLabelName is the immutable name→id table published by
+// [LabelRegistry] via copy-on-write. Once stored it is never mutated;
+// interning a previously unseen name allocates a fresh map. Readers
+// (Lookup) load the pointer once with zero synchronisation, so the name→id
+// read path is fully lock-free — matching the id→name Resolve path.
+type forwardLabelName struct {
+	m map[string]LabelID
+}
+
 type LabelRegistry struct {
-	// mu serialises Intern (write path) and guards forward. Lookup
-	// (name→id) reads forward under a read lock, so concurrent lookups —
-	// the hot path for label predicates — proceed in parallel and only the
-	// rare Intern of a previously unseen name takes the write lock. Resolve
-	// (id→name) is fully lock-free via snap and never takes mu.
-	mu      sync.RWMutex
-	forward map[string]LabelID
+	// mu serialises Intern (the write path) only; the read paths never take
+	// it. The steady-state label vocabulary is small and stable, so Intern
+	// is contended only while the vocabulary is first built up.
+	mu sync.Mutex
+	// fwd holds the immutable name→id table. Loaded lock-free by Lookup;
+	// swapped under mu by Intern.
+	fwd atomic.Pointer[forwardLabelName]
 	// snap holds the immutable id→name table. Loaded lock-free by
 	// Resolve; swapped under mu by Intern.
 	snap atomic.Pointer[labelNames]
@@ -89,40 +98,51 @@ type LabelRegistry struct {
 
 // NewLabelRegistry returns an empty registry.
 func NewLabelRegistry() *LabelRegistry {
-	r := &LabelRegistry{forward: make(map[string]LabelID)}
+	r := &LabelRegistry{}
 	r.snap.Store(&labelNames{})
+	r.fwd.Store(&forwardLabelName{m: make(map[string]LabelID)})
 	return r
 }
 
 // Intern returns a stable LabelID for name, allocating one on first
-// encounter. It runs on the write path only (label assignment), so it
-// serialises under the write mutex; the steady-state label vocabulary is
-// small and stable, so the mutex is contended only while the vocabulary
-// is first built up.
+// encounter. It runs on the write path only (label assignment). A
+// lock-free fast path returns an already-interned id without taking the
+// mutex; only the first interning of a previously unseen name serialises
+// under mu to publish the extended tables. The steady-state label
+// vocabulary is small and stable.
 func (r *LabelRegistry) Intern(name string) LabelID {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if id, ok := r.forward[name]; ok {
+	if id, ok := r.fwd.Load().m[name]; ok {
 		return id
 	}
-	cur := r.snap.Load()
-	id := LabelID(len(cur.names))
-	next := &labelNames{names: make([]string, len(cur.names)+1)}
-	copy(next.names, cur.names)
-	next.names[id] = name
-	r.snap.Store(next)
-	r.forward[name] = id
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur := r.fwd.Load()
+	if id, ok := cur.m[name]; ok { // re-check under the lock
+		return id
+	}
+	names := r.snap.Load()
+	id := LabelID(len(names.names))
+	nextNames := &labelNames{names: make([]string, len(names.names)+1)}
+	copy(nextNames.names, names.names)
+	nextNames.names[id] = name
+	nextFwd := &forwardLabelName{m: make(map[string]LabelID, len(cur.m)+1)}
+	for k, v := range cur.m {
+		nextFwd.m[k] = v
+	}
+	nextFwd.m[name] = id
+	// Publish id→name before name→id so a reader that observes the new id
+	// via Lookup can already Resolve it.
+	r.snap.Store(nextNames)
+	r.fwd.Store(nextFwd)
 	return id
 }
 
-// Lookup returns the LabelID for name and true, or 0 and false when
-// name has not been interned. It takes only a read lock, so concurrent
-// lookups (the per-row hot path for label predicates) do not serialise
-// against one another.
+// Lookup returns the LabelID for name and true, or 0 and false when name
+// has not been interned. It is lock-free: it loads the immutable name→id
+// table once and reads it, so concurrent per-row label-predicate lookups
+// never serialise nor bounce a shared reader-count cache line.
 func (r *LabelRegistry) Lookup(name string) (LabelID, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	id, ok := r.forward[name]
+	id, ok := r.fwd.Load().m[name]
 	return id, ok
 }
 

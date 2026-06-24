@@ -177,28 +177,42 @@ type propertyKeyNames struct {
 	names []string
 }
 
+// forwardKeyName is the immutable name→id table published by
+// [PropertyKeyRegistry] via copy-on-write. Once stored it is never
+// mutated; interning a previously unseen name allocates a fresh map.
+// Readers (Lookup) load the pointer once with zero synchronisation, so the
+// name→id read path is fully lock-free — matching the id→name Resolve path.
+type forwardKeyName struct {
+	m map[string]PropertyKeyID
+}
+
 // PropertyKeyRegistry interns property names and assigns sequential
 // PropertyKeyIDs. It is safe for concurrent use.
 //
-// The read path ([PropertyKeyRegistry.Resolve]) is lock-free: it loads
-// an immutable id→name snapshot through an [atomic.Pointer] and indexes
-// into it without taking any lock. The write path
+// Both read paths are fully lock-free: [PropertyKeyRegistry.Lookup]
+// (name→id) loads the immutable forward table through an [atomic.Pointer]
+// and [PropertyKeyRegistry.Resolve] (id→name) loads the immutable id→name
+// snapshot, neither taking any lock. The write path
 // ([PropertyKeyRegistry.Intern] of a previously unseen name) serialises
-// under a mutex, builds a new immutable snapshot extended by one entry,
-// and atomically publishes it. The ordering guarantee is identical to
-// [LabelRegistry]: Intern publishes the snapshot carrying names[id]
-// before returning id, so any reader that observes id in a property bag
-// observes (by release/acquire ordering through that bag's publication) a
-// snapshot at least as new as the one Intern published. Resolve
-// therefore never misses a live id.
+// under a mutex, builds fresh immutable tables extended by one entry, and
+// publishes them — the id→name snapshot first, then the name→id table — so
+// any reader that observes an id from Lookup can already Resolve it, and
+// any reader that observes id in a property bag observes (by
+// release/acquire ordering through that bag's own publication) tables at
+// least as new as the ones Intern published. Lookup/Resolve therefore
+// never miss a live id. Per-row property predicates hit Lookup once per
+// access per reader; making it lock-free removes the RWMutex reader-count
+// atomic that otherwise bounces across cores under concurrent scans. The
+// O(n) copy on intern is a deliberate trade: the property-key vocabulary
+// is append-mostly schema, interned at warm-up and read billions of times.
 type PropertyKeyRegistry struct {
-	// mu serialises Intern (write path) and guards forward. Lookup
-	// (name→id) reads forward under a read lock, so concurrent lookups —
-	// the hot path for property predicates — proceed in parallel and only
-	// the rare Intern of a previously unseen name takes the write lock.
-	// Resolve (id→name) is fully lock-free via snap and never takes mu.
-	mu      sync.RWMutex
-	forward map[string]PropertyKeyID
+	// mu serialises Intern (the write path) only; the read paths never take
+	// it. The steady-state property vocabulary is small and stable, so
+	// Intern is contended only while the vocabulary is first built up.
+	mu sync.Mutex
+	// fwd holds the immutable name→id table. Loaded lock-free by Lookup;
+	// swapped under mu by Intern.
+	fwd atomic.Pointer[forwardKeyName]
 	// snap holds the immutable id→name table. Loaded lock-free by
 	// Resolve; swapped under mu by Intern.
 	snap atomic.Pointer[propertyKeyNames]
@@ -206,37 +220,50 @@ type PropertyKeyRegistry struct {
 
 // NewPropertyKeyRegistry returns an empty registry.
 func NewPropertyKeyRegistry() *PropertyKeyRegistry {
-	r := &PropertyKeyRegistry{forward: make(map[string]PropertyKeyID)}
+	r := &PropertyKeyRegistry{}
 	r.snap.Store(&propertyKeyNames{})
+	r.fwd.Store(&forwardKeyName{m: make(map[string]PropertyKeyID)})
 	return r
 }
 
 // Intern returns a stable PropertyKeyID for name. It runs on the write
-// path only (property assignment), so it serialises under the write
-// mutex; the steady-state property vocabulary is small and stable.
+// path only (property assignment). A lock-free fast path returns an
+// already-interned id without taking the mutex; only the first interning
+// of a previously unseen name serialises under mu to publish the extended
+// tables. The steady-state property vocabulary is small and stable.
 func (r *PropertyKeyRegistry) Intern(name string) PropertyKeyID {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if id, ok := r.forward[name]; ok {
+	if id, ok := r.fwd.Load().m[name]; ok {
 		return id
 	}
-	cur := r.snap.Load()
-	id := PropertyKeyID(len(cur.names))
-	next := &propertyKeyNames{names: make([]string, len(cur.names)+1)}
-	copy(next.names, cur.names)
-	next.names[id] = name
-	r.snap.Store(next)
-	r.forward[name] = id
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur := r.fwd.Load()
+	if id, ok := cur.m[name]; ok { // re-check under the lock
+		return id
+	}
+	names := r.snap.Load()
+	id := PropertyKeyID(len(names.names))
+	nextNames := &propertyKeyNames{names: make([]string, len(names.names)+1)}
+	copy(nextNames.names, names.names)
+	nextNames.names[id] = name
+	nextFwd := &forwardKeyName{m: make(map[string]PropertyKeyID, len(cur.m)+1)}
+	for k, v := range cur.m {
+		nextFwd.m[k] = v
+	}
+	nextFwd.m[name] = id
+	// Publish id→name before name→id so a reader that observes the new id
+	// via Lookup can already Resolve it.
+	r.snap.Store(nextNames)
+	r.fwd.Store(nextFwd)
 	return id
 }
 
-// Lookup returns the PropertyKeyID for name and true when known. It takes
-// only a read lock, so concurrent lookups (the per-row hot path for
-// property predicates) do not serialise against one another.
+// Lookup returns the PropertyKeyID for name and true when known. It is
+// lock-free: it loads the immutable name→id table once and reads it, so
+// concurrent per-row property-predicate lookups never serialise nor bounce
+// a shared reader-count cache line.
 func (r *PropertyKeyRegistry) Lookup(name string) (PropertyKeyID, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	id, ok := r.forward[name]
+	id, ok := r.fwd.Load().m[name]
 	return id, ok
 }
 
