@@ -8,6 +8,7 @@ import (
 	pathpkg "path"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -78,6 +79,26 @@ type SimDisk struct {
 	// publish rename). A [SimDisk.Crash] drops every directory whose dirent is
 	// not yet durable, taking its entire subtree with it.
 	dirs map[string]bool
+	// capacityBytes, when > 0, bounds the total number of bytes the in-memory
+	// filesystem may hold across all files. It models a finite disk so the DST
+	// can drive the engine through a disk-full (ENOSPC) condition. Zero (the
+	// default) means unbounded, so every pre-existing caller is byte-for-byte
+	// unaffected. The budget check is a PURE function of the current byte total
+	// and the requested growth — it draws NOTHING from the [Seed] — so turning a
+	// capacity on never perturbs the reproducible torn-write/Sync fault stream.
+	capacityBytes int64
+	// enospcOnSync selects WHERE the out-of-space condition surfaces:
+	//
+	//   - false (eager mode, the default): a Write / Truncate / TruncatePath
+	//     that would grow the total past capacityBytes returns an ENOSPC
+	//     [os.PathError] and grows nothing — modelling allocate-on-write.
+	//   - true (delayed-allocation mode): growth is buffered in memory and
+	//     succeeds, but Sync returns ENOSPC whenever the total exceeds
+	//     capacityBytes — modelling the common case where a full disk only
+	//     surfaces at fsync. This is the harder path for the WAL commit contract.
+	//
+	// It has no effect when capacityBytes is 0.
+	enospcOnSync bool
 }
 
 // simFile is the in-memory backing store for one path. data holds the file
@@ -117,6 +138,57 @@ func NewSimDisk(seed *Seed, faultRate float64) *SimDisk {
 		seed:      seed,
 		dirs:      make(map[string]bool),
 	}
+}
+
+// SetCapacity bounds the disk to capacityBytes total bytes across all files,
+// modelling a finite disk. When enospcOnSync is false the out-of-space
+// condition surfaces eagerly at the growing Write/Truncate; when true it
+// surfaces at Sync (delayed allocation). A capacityBytes of 0 removes the bound
+// (the default). It must be called before the store is driven, from the single
+// simulation goroutine; it draws nothing from the seed, so it never perturbs
+// the reproducible fault stream. See the field docs on [SimDisk] for the model.
+func (d *SimDisk) SetCapacity(capacityBytes int64, enospcOnSync bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if capacityBytes < 0 {
+		capacityBytes = 0
+	}
+	d.capacityBytes = capacityBytes
+	d.enospcOnSync = enospcOnSync
+}
+
+// totalBytesLocked returns the sum of every file's data length. The caller must
+// hold d.mu. It is O(files); the simulated store holds only a handful of files
+// (the WAL plus the checkpoint components), so the linear scan is negligible and
+// avoids the bookkeeping-drift risk of a running counter.
+func (d *SimDisk) totalBytesLocked() int64 {
+	var total int64
+	for _, f := range d.files {
+		total += int64(len(f.data))
+	}
+	return total
+}
+
+// enospc builds the ENOSPC [os.PathError] the eager and delayed paths return.
+// It matches the shape internal/testfs uses, so both errors.Is(err,
+// syscall.ENOSPC) and the WAL's errno classifier recognise it.
+func enospc(op, path string) error {
+	return &os.PathError{Op: op, Path: path, Err: syscall.ENOSPC}
+}
+
+// wouldExceedLocked reports whether growing a file from oldLen to newLen bytes
+// would push the disk's total past its capacity. It is a pure function of the
+// current byte total (no seed draw). With no capacity, or in delayed-allocation
+// mode (where growth is always buffered and Sync enforces the budget), it never
+// blocks a write. The caller must hold d.mu.
+func (d *SimDisk) wouldExceedLocked(oldLen, newLen int64) bool {
+	if d.capacityBytes <= 0 || d.enospcOnSync {
+		return false
+	}
+	if newLen <= oldLen {
+		return false
+	}
+	return d.totalBytesLocked()-oldLen+newLen > d.capacityBytes
 }
 
 // OpenFile opens (creating when os.O_CREATE is set) the file at path and
@@ -302,6 +374,9 @@ func (d *SimDisk) TruncatePath(path string, size int64) error {
 		f.data = f.data[:size]
 		return nil
 	}
+	if d.wouldExceedLocked(int64(len(f.data)), size) {
+		return enospc("truncate", path)
+	}
 	grown := make([]byte, size)
 	copy(grown, f.data)
 	f.data = grown
@@ -485,7 +560,14 @@ func (h *SimFileHandle) Write(p []byte) (int, error) {
 	defer h.disk.mu.Unlock()
 
 	end := h.pos + int64(len(p))
-	if end > int64(len(h.file.data)) {
+	oldLen := int64(len(h.file.data))
+	if end > oldLen {
+		// Disk full: in eager mode a growing write that would breach the budget
+		// returns ENOSPC and grows nothing (no partial write), matching real
+		// allocate-on-write and the internal/testfs ReturnENOSPC contract.
+		if h.disk.wouldExceedLocked(oldLen, end) {
+			return 0, enospc("write", h.path)
+		}
 		grown := make([]byte, end)
 		copy(grown, h.file.data)
 		h.file.data = grown
@@ -559,6 +641,9 @@ func (h *SimFileHandle) Truncate(size int64) error {
 	if size <= int64(len(h.file.data)) {
 		h.file.data = h.file.data[:size]
 	} else {
+		if h.disk.wouldExceedLocked(int64(len(h.file.data)), size) {
+			return enospc("truncate", h.path)
+		}
 		grown := make([]byte, size)
 		copy(grown, h.file.data)
 		h.file.data = grown
@@ -582,6 +667,14 @@ func (h *SimFileHandle) Sync() error {
 	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	// Delayed-allocation disk-full: the bytes were buffered by Write but the
+	// backing blocks cannot be allocated, so the out-of-space condition only
+	// surfaces here at fsync. Checked before the seed draw and gated on a
+	// non-zero capacity, so the default (capacity 0) Sync fault stream is
+	// unchanged.
+	if h.disk.enospcOnSync && h.disk.capacityBytes > 0 && h.disk.totalBytesLocked() > h.disk.capacityBytes {
+		return enospc("fsync", h.path)
+	}
 	if h.disk.seed.Bool(h.disk.faultRate) {
 		return ErrSimFault
 	}
