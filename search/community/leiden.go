@@ -258,10 +258,15 @@ func splitDisconnectedPartition(comm []int, mask []bool, verts []uint64, edges [
 // smaller one whose nodes are refined communities.
 
 type aggGraph struct {
-	n       int       // number of nodes
-	verts   []int     // length n+1, CSR-style offsets
-	edges   []int     // adjacency (compact node IDs)
-	weights []float64 // parallel to edges
+	n     int   // number of nodes
+	verts []int // length n+1, CSR-style offsets
+	edges []int // adjacency (compact node IDs)
+	// weights is parallel to edges. A nil weights means every edge has the
+	// implicit unit weight 1.0 — this is the level-0 (unweighted) graph,
+	// whose 8·E-byte all-ones array carries no information and is elided.
+	// Read it only through weightAt, never by direct index. Aggregated
+	// levels (≥1) always carry a real, non-nil weights array.
+	weights []float64
 	deg     []float64 // node degree (sum of incident weights, including self-loop *2)
 	loop    []float64 // self-loop weight per node (carries internal mass after aggregation)
 	m2      float64   // 2 * total edge weight (sum of deg)
@@ -316,7 +321,9 @@ func aggGraphFromCSR[W any](c *csr.CSR[W], mask []bool) (g *aggGraph, idMap []in
 		verts[i] += verts[i-1]
 	}
 	edges := make([]int, verts[n])
-	weights := make([]float64, verts[n])
+	// The level-0 graph is unweighted: every edge carries weight 1.0. We do
+	// not materialise an 8·E-byte all-ones weights array — g.weights stays
+	// nil and weightAt returns 1.0 for it. Reads go through weightAt.
 	cursor := make([]int, n)
 	for src := 0; src < maxID; src++ {
 		if !mask[src] {
@@ -331,7 +338,6 @@ func aggGraphFromCSR[W any](c *csr.CSR[W], mask []bool) (g *aggGraph, idMap []in
 			d := compact[dst]
 			off := verts[s] + cursor[s]
 			edges[off] = d
-			weights[off] = 1.0 // unweighted
 			cursor[s]++
 		}
 	}
@@ -339,9 +345,12 @@ func aggGraphFromCSR[W any](c *csr.CSR[W], mask []bool) (g *aggGraph, idMap []in
 	loop := make([]float64, n)
 	var m2 float64
 	for v := 0; v < n; v++ {
-		for k := verts[v]; k < verts[v+1]; k++ {
-			deg[v] += weights[k]
-		}
+		// Each level-0 edge weighs exactly 1.0, so the incident-weight sum
+		// is the out-degree count. Summing N ones equals float64(N) exactly
+		// for any realistic N (well within IEEE-754 integer exactness), so
+		// this is bit-identical to deg[v] += weights[k] over the all-ones
+		// array it replaces.
+		deg[v] = float64(verts[v+1] - verts[v])
 		m2 += deg[v]
 	}
 	lifted := make([]int, n)
@@ -360,13 +369,28 @@ func aggGraphFromCSR[W any](c *csr.CSR[W], mask []bool) (g *aggGraph, idMap []in
 		n:       n,
 		verts:   verts,
 		edges:   edges,
-		weights: weights,
+		weights: nil, // level-0 is unweighted; weightAt yields 1.0
 		deg:     deg,
 		loop:    loop,
 		m2:      m2,
 		lifted:  lifted,
 	}
 	return g, idMap
+}
+
+// weightAt returns the weight of edge k. When g.weights is nil (the
+// level-0 unweighted graph) every edge has the implicit unit weight 1.0;
+// otherwise it indexes the real weights array. The nil-or-not state is
+// fixed for the whole life of a given g (nil only at level 0, non-nil at
+// every aggregated level), so the branch is perfectly predicted and adds
+// no measurable cost to the inner loops. It returns exactly 1.0 at level
+// 0, making the modularity / local-move / refine / aggregate arithmetic
+// bit-identical to the previous explicit all-ones array.
+func (g *aggGraph) weightAt(k int) float64 {
+	if g.weights == nil {
+		return 1.0
+	}
+	return g.weights[k]
 }
 
 // modularity computes Q for the given partition on this aggregation graph.
@@ -389,7 +413,7 @@ func (g *aggGraph) modularity(comm []int, resolution float64) float64 {
 		for k := g.verts[v]; k < g.verts[v+1]; k++ {
 			u := g.edges[k]
 			if comm[u] == c {
-				sigmaIn[c] += g.weights[k]
+				sigmaIn[c] += g.weightAt(k)
 			}
 		}
 	}
@@ -442,7 +466,7 @@ func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
 				if kvcArr[cu] == 0 {
 					touched = append(touched, cu)
 				}
-				kvcArr[cu] += g.weights[k]
+				kvcArr[cu] += g.weightAt(k)
 			}
 			// Pretend v is removed from cv for the candidate
 			// evaluation: subtract its degree from sigmaTot[cv]. The
@@ -531,7 +555,7 @@ func (g *aggGraph) refine(parent []int, opts LeidenOptions) []int {
 				if kvcArr[ru] == 0 {
 					touched = append(touched, ru)
 				}
-				kvcArr[ru] += g.weights[k]
+				kvcArr[ru] += g.weightAt(k)
 			}
 			sigmaTot[cv] -= g.deg[v]
 			bestC := cv
@@ -808,7 +832,7 @@ func (g *aggGraph) aggregate(parent, refined []int, out *graphBufs) (newG *aggGr
 		deg[a] += g.loop[v] // self-loop's contribution to degree
 		for k := g.verts[v]; k < g.verts[v+1]; k++ {
 			b := remap[refined[g.edges[k]]]
-			w := g.weights[k]
+			w := g.weightAt(k)
 			deg[a] += w
 			if a == b {
 				loop[a] += w
@@ -833,7 +857,7 @@ func (g *aggGraph) aggregate(parent, refined []int, out *graphBufs) (newG *aggGr
 			}
 			pos := srcStart[a] + fill[a]
 			ordDst[pos] = b
-			ordW[pos] = g.weights[k]
+			ordW[pos] = g.weightAt(k)
 			fill[a]++
 		}
 	}
@@ -871,6 +895,16 @@ func (g *aggGraph) aggregate(parent, refined []int, out *graphBufs) (newG *aggGr
 	// per distinct super-edge), so they need no zeroing on reuse.
 	edges := growReuseInts(out.edges, verts[nNew], false)
 	weights := growReuseFloats(out.weights, verts[nNew], false)
+	// Every aggregated level carries a real, non-nil weights array — nil is
+	// reserved as the level-0 unweighted sentinel that weightAt reads as
+	// 1.0. growReuseFloats returns a nil slice when it reslices a nil/empty
+	// recycled buffer to length 0 (a super-graph with no inter-community
+	// edges), which would otherwise make this level alias the level-0
+	// sentinel. Pin it non-nil so weightAt never takes the 1.0 path for an
+	// aggregated graph.
+	if weights == nil {
+		weights = []float64{}
+	}
 	// Pass B: coalesce and emit each source's distinct targets in
 	// first-emission order, summing weights in emission order.
 	for a := 0; a < nNew; a++ {
