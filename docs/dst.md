@@ -257,6 +257,21 @@ back (here via an `ENOSPC` WAL sync, but any rollback triggers it) deleted the
 pre-existing committed edge. The fix gates the edge bookkeeping on whether the
 edge was actually added.
 
+## Read-only transaction isolation
+
+The `BeginReadTx` read-only transaction is covered by two focused tests in
+`internal/sim/` (`read_tx_test.go`):
+
+- **Write rejection.** Every writing/DDL statement issued inside a read-only
+  transaction is rejected with the typed `cypher.ErrWriteInReadOnlyTx` and
+  applies nothing, while reads continue to work.
+- **No dirty reads.** A writer commits nodes in atomic batches of five while many
+  concurrent read-only transactions repeatedly count them; the engine's
+  visibility barrier flips each transaction's writes visible as one step, so
+  every observed count is a multiple of five — observing an intermediate value
+  would be a partial-transaction (dirty) read across the isolation barrier. The
+  test is `-race`- and `goleak`-guarded with a deadlock watchdog.
+
 ## Concurrency hypotheses chased
 
 The mem-pressure and cpu-starvation scenarios are backed by two focused
