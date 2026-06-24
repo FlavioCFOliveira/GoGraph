@@ -291,6 +291,28 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 	return bm
 }
 
+// LookupAppend appends the NodeIDs associated with value to dst and returns the
+// extended slice — the allocation-light equivalent of [Index.Lookup] for
+// callers that iterate the result once, the dominant equality-seek shape. A
+// singleton or small posting list appends straight from the set's inline fields
+// with no heap allocation when dst has spare capacity (e.g. a reused seek
+// buffer), where Lookup clones (or materialises) a full roaring bitmap. Only a
+// promoted bitmap entry allocates a single iterator.
+//
+// Matching uses the total order, so LookupAppend(NaN) appends the NaN entry
+// when one exists, exactly as [Index.Lookup] returns it. An unknown value
+// appends nothing. The appended ids are an independent snapshot the caller may
+// iterate after the call returns, with the same ownership as Lookup's clone.
+func (i *Index[V]) LookupAppend(value V, dst []uint64) []uint64 {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	set := i.tree.get(value)
+	if set == nil {
+		return dst
+	}
+	return set.AppendTo(dst)
+}
+
 // Cardinality returns the number of NodeIDs associated with value,
 // matched under the total order (see [Index.Lookup]).
 func (i *Index[V]) Cardinality(value V) uint64 {
