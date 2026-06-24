@@ -3440,6 +3440,19 @@ type lpgNodeWalker struct {
 	morsel []graph.NodeID // nil = walk the whole graph; non-nil = scan this slice only
 }
 
+// LiveOrderHint returns an upper-bound estimate of how many NodeIDs
+// WalkNodeIDs will yield, for pre-sizing collection slices on the scan path.
+// For a morsel-restricted walker it is the morsel length; otherwise it is the
+// graph's live (tombstone-excluded) node count. It is a hint only — tombstones
+// make the whole-graph figure an over-estimate at worst, never an under-count,
+// so a caller that pre-sizes to it never re-grows.
+func (w *lpgNodeWalker) LiveOrderHint() int {
+	if w.morsel != nil {
+		return len(w.morsel)
+	}
+	return int(w.g.LiveOrder())
+}
+
 // WalkNodeIDs implements nodeWalkerIface. Tombstoned node IDs (those
 // removed via the GraphMutator's RemoveNode) are skipped so
 // AllNodesScan, count(*), and downstream scans treat deleted nodes

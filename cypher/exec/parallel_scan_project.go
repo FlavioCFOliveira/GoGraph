@@ -76,6 +76,7 @@ import (
 	"runtime/pprof"
 	"sync"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
@@ -145,6 +146,15 @@ func (op *ParallelScanProject) Init(ctx context.Context) error {
 	// the workers run; each worker's morsel scan reads only its immutable
 	// sub-slice of this owned slice.
 	var nodeIDs []graph.NodeID
+	// Pre-size the collection slice from the walker's live-node-count hint when
+	// it exposes one (the *lpgNodeWalker does), removing the O(log N) geometric
+	// re-grows of a potentially large slice. The hint is an upper bound
+	// (tombstones make it an over-estimate at worst), so this never under-sizes.
+	if h, ok := op.g.(interface{ LiveOrderHint() int }); ok {
+		if n := h.LiveOrderHint(); n > 0 {
+			nodeIDs = make([]graph.NodeID, 0, n)
+		}
+	}
 	var cancelled bool
 	var count int
 	op.g.WalkNodeIDs(func(id graph.NodeID) bool {
@@ -241,7 +251,20 @@ func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.Nod
 	if err := sub.Init(ctx); err != nil {
 		return nil, err
 	}
-	var rows []Row
+	// Per-worker row arena: instead of allocating a fresh backing slice per
+	// result row (the old append(Row(nil), row...)), pack every row's values into
+	// a pre-sized flat slab and hand out three-index sub-slices into it. A morsel
+	// scan→filter→project yields at most one row per morsel node, so one slab of
+	// len(morsel)*width holds the whole morsel in a single allocation. The
+	// overflow guard re-chunks if a future fused shape ever exceeds that bound;
+	// older sub-slices stay valid because they alias the prior, still-referenced
+	// slab. The slab is owned solely by this worker until wg.Wait, so it needs no
+	// synchronisation. Row headers are independent (Project reuses one outBuf
+	// across Next calls); the element Values are escaping-safe (fully-materialised,
+	// never a reused lazy node), so copying the values into the slab and sharing
+	// them is sufficient and correct.
+	rows := make([]Row, 0, len(morsel))
+	var slab []expr.Value
 	var row Row
 	for {
 		ok, err := sub.Next(&row)
@@ -251,12 +274,21 @@ func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.Nod
 		if !ok {
 			break
 		}
-		// Deep-copy the row header: Project reuses one outBuf backing slice across
-		// Next calls (project.go), so the slice we just read is overwritten by the
-		// next iteration. The element Values are escaping-safe (the projection
-		// writes fully-materialised values, never a reused lazy node), so copying
-		// the header and sharing the elements is sufficient and correct.
-		rows = append(rows, append(Row(nil), row...))
+		w := len(row)
+		if w == 0 {
+			rows = append(rows, Row{})
+			continue
+		}
+		if cap(slab)-len(slab) < w {
+			n := len(morsel) * w
+			if n < w {
+				n = w
+			}
+			slab = make([]expr.Value, 0, n)
+		}
+		start := len(slab)
+		slab = append(slab, row...)
+		rows = append(rows, slab[start:start+w:start+w])
 	}
 	return rows, nil
 }
@@ -284,13 +316,18 @@ func (op *ParallelScanProject) Next(out *Row) (bool, error) {
 		// Concatenate per-worker buffers in worker index order. The order is
 		// irrelevant to correctness (a full scan is unordered), but a fixed order
 		// keeps the stream deterministic for a given partition.
-		total := 0
-		for _, r := range op.results {
-			total += len(r)
-		}
-		op.combo = make([]Row, 0, total)
-		for _, r := range op.results {
-			op.combo = append(op.combo, r...)
+		if len(op.results) == 1 {
+			// Single worker: stream its buffer directly, eliding the concat copy.
+			op.combo = op.results[0]
+		} else {
+			total := 0
+			for _, r := range op.results {
+				total += len(r)
+			}
+			op.combo = make([]Row, 0, total)
+			for _, r := range op.results {
+				op.combo = append(op.combo, r...)
+			}
 		}
 	}
 
