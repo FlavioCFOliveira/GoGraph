@@ -59,6 +59,8 @@ func CheckSearch(tick int64, oracle *GraphOracle, engine Engine) []Violation {
 	// deterministic fixtures from the tick rather than the live graph; see
 	// search_flow.go etc.
 	vs = append(vs, flowViolations(tick)...)
+	vs = append(vs, matchingViolations(tick)...)
+	vs = append(vs, eulerViolations(tick)...)
 	return vs
 }
 
