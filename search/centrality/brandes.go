@@ -121,6 +121,15 @@ func (a *predArena) add(w, v int) {
 	a.pos[w] = p + 1
 }
 
+// reset clears w's predecessor region by returning its write cursor to the
+// region base. The weighted (Dijkstra) Brandes uses this when a strictly
+// shorter path to w is found, discarding the predecessors recorded at the
+// previous, longer distance; the unweighted BFS never needs it (BFS distances
+// are monotonic so a vertex's predecessors are never invalidated). Because each
+// in-neighbour relaxes w at most once per source, the total adds to w between
+// resets never exceed w's in-degree, so the region never overflows. O(1).
+func (a *predArena) reset(w int) { a.pos[w] = a.off[w] }
+
 // computeInDegrees returns, for every vertex id in [0,n), the number
 // of edges that point at it. For an undirected CSR this equals the
 // out-degree; computing it directly from the edge targets is correct

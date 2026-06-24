@@ -60,7 +60,10 @@ func WeightedBetweennessCtx(ctx context.Context, c *csr.CSR[float64]) ([]float64
 	sigma := make([]float64, n)
 	dist := make([]float64, n)
 	delta := make([]float64, n)
-	pred := make([][]int, n)
+	// Flat predecessor arena (shared #1515 infrastructure) instead of a
+	// slice-of-slices: one contiguous backing sized to the in-degrees, with no
+	// per-vertex inner slice and no per-source re-growth.
+	pred := newPredArena(n, computeInDegrees(n, verts, edges))
 	stack := make([]int, 0, n)
 	h := newWeightedHeap(n)
 
@@ -77,12 +80,15 @@ func WeightedBetweennessCtx(ctx context.Context, c *csr.CSR[float64]) ([]float64
 	return cb, nil
 }
 
-func weightedBrandesSource(s, n int, verts []uint64, edges []graph.NodeID, weights, sigma, dist, delta []float64, pred [][]int, cb []float64, stack *[]int, h *weightedHeap) {
+func weightedBrandesSource(s, n int, verts []uint64, edges []graph.NodeID, weights, sigma, dist, delta []float64, pred *predArena, cb []float64, stack *[]int, h *weightedHeap) {
+	// Fold the per-vertex predecessor-cursor reset into the same O(n) sweep that
+	// re-initialises sigma/dist/delta, returning each region's write cursor to
+	// its fixed base (identical to the unweighted brandesSource).
 	for i := 0; i < n; i++ {
 		sigma[i] = 0
 		dist[i] = math.Inf(1)
 		delta[i] = 0
-		pred[i] = pred[i][:0]
+		pred.pos[i] = pred.off[i]
 	}
 	sigma[s] = 1
 	dist[s] = 0
@@ -102,17 +108,24 @@ func weightedBrandesSource(s, n int, verts []uint64, edges []graph.NodeID, weigh
 			if cand < dist[w] {
 				dist[w] = cand
 				sigma[w] = sigma[v]
-				pred[w] = append(pred[w][:0], v)
+				// Strictly shorter path: discard w's predecessors recorded at the
+				// previous distance, then record v as the sole predecessor.
+				pred.reset(w)
+				pred.add(w, v)
 				h.push(w, cand)
 			} else if cand == dist[w] {
 				sigma[w] += sigma[v]
-				pred[w] = append(pred[w], v)
+				pred.add(w, v)
 			}
 		}
 	}
+	flat := pred.flat
 	for i := len(*stack) - 1; i >= 0; i-- {
 		w := (*stack)[i]
-		for _, v := range pred[w] {
+		// Walk w's predecessor region as a contiguous flat scan in insertion
+		// order, matching the former `range pred[w]` so the dependency sum
+		// accumulates identically and stays bit-identical.
+		for _, v := range flat[pred.off[w]:pred.pos[w]] {
 			delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w])
 		}
 		if w != s {

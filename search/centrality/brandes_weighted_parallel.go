@@ -93,6 +93,10 @@ func WeightedBetweennessParallelCtx(ctx context.Context, c *csr.CSR[float64], nu
 		cb  []float64
 		err error
 	}
+	// Shared, read-only in-degree array: each worker's predecessor arena reads
+	// it to size its per-vertex regions, so computing it once here avoids an
+	// O(E) pass per worker. newPredArena only reads indeg (never mutates it).
+	indeg := computeInDegrees(n, verts, edges)
 	results := make([]result, numWorkers)
 	var wg sync.WaitGroup
 	for w := 0; w < numWorkers; w++ {
@@ -109,7 +113,10 @@ func WeightedBetweennessParallelCtx(ctx context.Context, c *csr.CSR[float64], nu
 					sigma := make([]float64, n)
 					dist := make([]float64, n)
 					delta := make([]float64, n)
-					pred := make([][]int, n)
+					// Per-worker flat predecessor arena (shared #1515
+					// infrastructure); off is sized from the shared read-only
+					// indeg, pos/flat are this worker's private scratch.
+					pred := newPredArena(n, indeg)
 					stack := make([]int, 0, n)
 					h := newWeightedHeap(n)
 					for s := w; s < n; s += numWorkers {
