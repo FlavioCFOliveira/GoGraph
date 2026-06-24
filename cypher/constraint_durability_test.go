@@ -346,3 +346,52 @@ func TestConstraint_DistinctValueSurvivesReopen(t *testing.T) {
 		t.Fatalf("got %v, want one wrapping exec.ErrConstraintViolation", dupErr)
 	}
 }
+
+// TestExistenceConstraint_WALBackedEnforcedAndSurvivesRecovery is the #1754 AC on
+// the WAL-backed engine: a NOT NULL constraint is enforced on the WAL-backed
+// write path (a CREATE omitting the property is rejected), AND a recovered engine
+// re-registers the constraint via recovery.Constraints and continues to enforce
+// it on NEW writes — confirming no recovery-side change is needed (recovery
+// replays only committed, already-valid transactions).
+func TestExistenceConstraint_WALBackedEnforcedAndSurvivesRecovery(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Cycle 1: declare the constraint and insert a VALID node (with the prop), so
+	// the WAL carries the constraint op plus one good node.
+	if err := cdCycle(t, dir, false,
+		`CREATE CONSTRAINT acct_email_nn ON (n:Acct) ASSERT n.email IS NOT NULL`,
+		`CREATE (n:Acct {id: 1, email: 'a@x'})`,
+	); err != nil {
+		t.Fatalf("cycle 1 (declare + valid insert): %v", err)
+	}
+
+	// Cycle 1b: on the same WAL-backed path, a CREATE omitting email must be
+	// rejected with exec.ErrConstraintViolation (commit-time enforcement on the
+	// WAL adapter), and must leave nothing durable.
+	omitErr := cdCycle(t, dir, false, `CREATE (n:Acct {id: 2})`)
+	if omitErr == nil {
+		t.Fatal("WAL-backed CREATE omitting the constrained property was accepted")
+	}
+	if !errors.Is(omitErr, exec.ErrConstraintViolation) {
+		t.Fatalf("WAL-backed omit: got %v, want one wrapping exec.ErrConstraintViolation", omitErr)
+	}
+
+	// Cycle 2: reopen in a FRESH cycle. The recovered engine
+	// (NewEngineWithStoreAndConstraints) re-registers the constraint, so a NEW
+	// write omitting the property is still rejected — proving recovery-side
+	// enforcement works with no recovery change.
+	afterRecoveryErr := cdCycle(t, dir, false, `CREATE (n:Acct {id: 3})`)
+	if afterRecoveryErr == nil {
+		t.Fatal("after recovery, a CREATE omitting the constrained property was accepted; the constraint did not survive recovery")
+	}
+	if !errors.Is(afterRecoveryErr, exec.ErrConstraintViolation) {
+		t.Fatalf("after recovery: got %v, want one wrapping exec.ErrConstraintViolation", afterRecoveryErr)
+	}
+
+	// And a valid insert after recovery is still accepted (enforcement, not a
+	// blanket reject).
+	if err := cdCycle(t, dir, false, `CREATE (n:Acct {id: 4, email: 'd@x'})`); err != nil {
+		t.Fatalf("valid insert after recovery rejected: %v", err)
+	}
+}

@@ -384,6 +384,46 @@ func (r *ConstraintRegistry) HasNotNull(label, prop string) bool {
 	return ok
 }
 
+// HasAnyNotNull reports whether at least one NOT NULL (property-existence)
+// constraint is registered. It is the cheap gate the engine consults at every
+// commit before doing any touched-node existence-constraint work: when it
+// returns false the commit-time check is a no-op and the per-transaction
+// touched-node recording is skipped entirely, so a workload with no existence
+// constraints pays only this single lock-protected length read per commit.
+//
+// HasAnyNotNull is safe for concurrent use.
+func (r *ConstraintRegistry) HasAnyNotNull() bool {
+	r.mu.RLock()
+	n := len(r.notNull)
+	r.mu.RUnlock()
+	return n > 0
+}
+
+// NotNullProperties returns the property keys for which a NOT NULL constraint is
+// registered on label, or nil when label carries no existence constraint. It is
+// the per-label lookup the commit-time existence check uses to test only the
+// constrained properties of a touched node's labels.
+//
+// The returned slice is freshly allocated and owned by the caller. Most labels
+// carry zero or one existence constraint, so the common return is nil or a
+// one-element slice. NotNullProperties is safe for concurrent use.
+func (r *ConstraintRegistry) NotNullProperties(label string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.notNull) == 0 {
+		return nil
+	}
+	var out []string
+	for key := range r.notNull {
+		// A key is "label.prop"; match on the label segment via the canonical
+		// splitter so a label that itself contains a dot is handled correctly.
+		if l, p := splitConstraintKey(key); l == label {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // CheckSetProperty validates that setting prop = value on a node with the
 // given labels does not violate any registered constraint. mgr is used for
 // unique-constraint index lookups (hash index Cardinality check) as a

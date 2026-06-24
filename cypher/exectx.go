@@ -153,6 +153,13 @@ type ExplicitTx struct {
 	// reverse on Rollback; discarded on Commit. Shared by all statement mutators.
 	undo *undoLog
 
+	// touched accumulates, across every statement, the node keys the transaction
+	// created, labelled, or stripped a property from, for the commit-time NOT
+	// NULL existence check (#1754). It is nil unless the engine had at least one
+	// existence constraint active when BeginTx ran, so a transaction with none
+	// records nothing. Shared by all statement mutators; checked once at Commit.
+	touched *touchedNodes
+
 	// walTx is the single WAL transaction backing the whole explicit transaction,
 	// non-nil only on a WAL-backed engine. It holds the store's single-writer
 	// mutex from BeginTx until Commit/Rollback. nil on a store-less engine, where
@@ -234,6 +241,11 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 		buf:          &exec.IndexBuffer{},
 		undo:         &undoLog{},
 		unlockWriter: unlockWriter,
+	}
+	// Allocate the touched-node set only when an existence constraint is active,
+	// so a transaction with none records nothing (#1754).
+	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
+		tx.touched = &touchedNodes{}
 	}
 	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx takes the
 	// store's single-writer lock (so the store-less writer mutex above is a
@@ -385,9 +397,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// references; no graph reads happen until execUnderBarrier runs it under visMu.
 	var mutator exec.GraphMutator
 	if tx.walTx != nil {
-		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo}
+		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched}
 	} else {
-		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo}
+		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched}
 	}
 
 	// Route through ApplyInsideLocked when the barrier is held for the whole tx
@@ -396,7 +408,7 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	if tx.barrierHeld {
 		applyFn = tx.eng.g.ApplyInsideLocked
 	}
-	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn)
+	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn, tx.touched)
 	if buildErr != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
@@ -457,11 +469,27 @@ func (tx *ExplicitTx) Commit() (err error) {
 	defer tx.release()
 
 	var walErr error
+	var notNullErr error
 	applyFn := tx.eng.g.ApplyAtomically
 	if tx.barrierHeld {
 		applyFn = tx.eng.g.ApplyInsideLocked
 	}
 	_ = applyFn(func() error {
+		// Commit-time NOT NULL existence check (#1754, ACID Consistency). Runs
+		// FIRST, inside the barrier, BEFORE the WAL fsync, so a node left in its
+		// final committed state carrying a constrained label but lacking the
+		// required property rejects the WHOLE transaction atomically: the
+		// accumulated in-memory undo is replayed and the index/WAL rolled back,
+		// exactly like the fsync-failure branch below. touched is nil (check a
+		// no-op) unless the engine had an existence constraint active at BeginTx.
+		if nnErr := tx.touched.checkNotNullConstraints(tx.eng.constraintReg, tx.eng.g); nnErr != nil {
+			cmetrics.IncCounter("cypher.ExplicitTx.constraint.notNullViolations", 1)
+			notNullErr = nnErr
+			if undoOK := tx.rollbackInBarrierLocked(); !undoOK {
+				notNullErr = wrapUndoFailure(notNullErr)
+			}
+			return nil
+		}
 		// Durability before visibility: fsync the WAL FIRST so the whole
 		// transaction is durable the instant its writes are allowed to remain
 		// observable past the barrier (#1281). Only then commit the secondary
@@ -484,6 +512,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 		tx.undo = nil
 		return nil
 	})
+	if notNullErr != nil {
+		return notNullErr
+	}
 	if walErr != nil {
 		return fmt.Errorf("cypher: commit WAL: %w", walErr)
 	}

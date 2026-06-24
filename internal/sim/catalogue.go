@@ -97,6 +97,7 @@ func DefaultRegistry() (*Registry, error) {
 		memPressureScenario(),
 		cpuStarvationScenario(),
 		constraintEnforceScenario(),
+		constraintExistenceScenario(),
 		typeCoverageScenario(),
 		cypherPathsScenario(),
 		edgePropertiesScenario(),

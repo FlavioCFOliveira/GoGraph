@@ -28,14 +28,28 @@ import (
 // mutationUndo records the inverse of each in-memory mutation on undo. Both
 // adapters embed one; g aliases the adapter's graph and undo is the per-
 // statement log (nil ⇒ recording disabled).
+//
+// touched is the per-transaction set of node keys whose final-state label or
+// property set may bring a NOT NULL constraint into play (#1754). It is nil
+// unless the engine has at least one existence constraint active, so the
+// touched-node recording is skipped entirely on the common path. See
+// constraint_check.go.
 type mutationUndo struct {
-	g    *lpg.Graph[string, float64]
-	undo *undoLog
+	g       *lpg.Graph[string, float64]
+	undo    *undoLog
+	touched *touchedNodes
 }
 
 // active reports whether undo recording is enabled. The helpers short-circuit
 // on a nil log so a read-only adapter pays nothing.
 func (m mutationUndo) active() bool { return m.undo != nil }
+
+// touch records node key n in the per-transaction touched-node set when one is
+// threaded (i.e. the engine has a NOT NULL constraint active). It is the seam
+// the commit-time existence check (constraint_check.go) reads at commit. A nil
+// touched set makes it a no-op, so the common no-existence-constraint path pays
+// nothing.
+func (m mutationUndo) touch(n string) { m.touched.touch(n) }
 
 // recordAddNode records the inverse of an AddNode that freshly created (or
 // revived a tombstoned) node key n. wasNew is the adapter's determination that
@@ -47,7 +61,15 @@ func (m mutationUndo) active() bool { return m.undo != nil }
 // per-query +nodes delta the openCypher TCK asserts does not retain the
 // rolled-back creation.
 func (m mutationUndo) recordAddNode(n string, wasNew bool) {
-	if !m.active() || !wasNew {
+	if !wasNew {
+		return
+	}
+	// A freshly created node may carry a constrained label without the required
+	// property, so record it for the commit-time existence check (#1754). Touch
+	// is independent of undo activity (undo is always active in a write tx, but
+	// the touch set is gated on constraints being present, not on undo).
+	m.touch(n)
+	if !m.active() {
 		return
 	}
 	m.undo.record(func() {
@@ -65,6 +87,15 @@ func (m mutationUndo) recordAddNode(n string, wasNew bool) {
 // AddEdge interns endpoints itself without routing through the mutator's
 // AddNode.
 func (m mutationUndo) recordAddEdge(src, dst string, srcNew, dstNew bool) {
+	// An endpoint freshly created by AddEdge may carry a constrained label
+	// without the required property, so record each new endpoint for the
+	// commit-time existence check (#1754).
+	if srcNew {
+		m.touch(src)
+	}
+	if dstNew {
+		m.touch(dst)
+	}
 	if !m.active() {
 		return
 	}
@@ -89,7 +120,14 @@ func (m mutationUndo) recordAddEdge(src, dst string, srcNew, dstNew bool) {
 // so nothing is recorded and the undo leaves the pre-existing label intact; only
 // a label the statement actually added is detached on undo.
 func (m mutationUndo) recordSetNodeLabel(n, label string, hadLabel bool) {
-	if !m.active() || hadLabel {
+	if hadLabel {
+		return
+	}
+	// Adding a label can bring an existence constraint into play on a node that
+	// lacks the required property, so record the node for the commit-time check
+	// (#1754). Only a label the statement actually added matters (hadLabel=false).
+	m.touch(n)
+	if !m.active() {
 		return
 	}
 	m.undo.record(func() { m.g.RemoveNodeLabel(n, label) })
@@ -144,7 +182,15 @@ func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValu
 // (had) is the value captured before deletion; when it existed the inverse
 // re-sets it, otherwise the delete was a no-op and nothing is recorded.
 func (m mutationUndo) recordDelNodeProperty(n, key string, prev lpg.PropertyValue, had bool) {
-	if !m.active() || !had {
+	if !had {
+		return
+	}
+	// Removing a property (including SET n.prop = null, a removal in the Cypher
+	// data model) can violate an existence constraint if the node still carries
+	// the constrained label in its final state, so record it for the commit-time
+	// check (#1754). Only a real removal (had=true) matters.
+	m.touch(n)
+	if !m.active() {
 		return
 	}
 	m.undo.record(func() { _ = m.g.SetNodeProperty(n, key, prev) })

@@ -2846,6 +2846,18 @@ type Result struct {
 	// read queries and write queries on an engine with no active constraints.
 	constraintReg *exec.ConstraintRegistry
 	g             *lpg.Graph[string, float64]
+	// touched is the per-transaction set of node keys this write statement
+	// created, labelled, or stripped a property from, used by the commit-time
+	// NOT NULL existence check (#1754). It is nil unless the engine has at least
+	// one existence constraint active. See constraint_check.go.
+	touched *touchedNodes
+	// notNullErr is set non-nil by commitUnderBarrier when the commit-time NOT
+	// NULL existence check found a touched node that, in its final committed
+	// state, carries a constrained label but lacks the required property (#1754).
+	// The write was rolled back inside the barrier (eager mutations undone, index
+	// and WAL rolled back), so it is neither visible nor durable. RunInTx surfaces
+	// it to the caller; Err also reports it. It wraps [exec.ErrConstraintViolation].
+	notNullErr error
 	// walErr is set non-nil when the in-barrier WAL fsync (CommitWALOnly)
 	// failed for an otherwise-successful write (#1281, durable-then-visible).
 	// The eager in-memory mutations have ALREADY been rolled back (undo
@@ -3212,6 +3224,18 @@ func (r *Result) commitUnderBarrier() {
 		r.rollbackUnderBarrier()
 		return
 	}
+	// Commit-time NOT NULL existence check (#1754, ACID Consistency). Runs on the
+	// success path, INSIDE the barrier, BEFORE the WAL fsync, so a node left in
+	// its final committed state carrying a constrained label but lacking the
+	// required property rejects the WHOLE transaction atomically — exactly like
+	// the SET-to-null path and the fsync-failure branch below. touched is nil
+	// (and the check a no-op) unless the engine has an existence constraint active.
+	if nnErr := r.touched.checkNotNullConstraints(r.constraintReg, r.g); nnErr != nil {
+		cmetrics.IncCounter("cypher.RunInTx.constraint.notNullViolations", 1)
+		r.notNullErr = nnErr
+		r.rollbackUnderBarrier()
+		return
+	}
 	// Success path: durability before visibility. fsync the WAL before the
 	// index commit so the transaction is durable the instant its writes are
 	// allowed to remain observable past the barrier.
@@ -3344,6 +3368,9 @@ func reseedConstraintsInsideBarrier(reg *exec.ConstraintRegistry, g *lpg.Graph[s
 func (r *Result) Err() error {
 	if r.rowsErr != nil {
 		return r.rowsErr
+	}
+	if r.notNullErr != nil {
+		return r.notNullErr
 	}
 	if r.walErr != nil {
 		return r.walErr
@@ -10055,6 +10082,16 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	unlockWriter := e.lockWriter()
 	defer unlockWriter()
 
+	// touched tracks the node keys this statement creates, labels, or strips a
+	// property from, so the commit-time NOT NULL existence check (#1754) re-checks
+	// only those nodes. It is allocated ONLY when the engine has at least one
+	// existence constraint active, so a workload with none records nothing and
+	// pays only this single HasAnyNotNull gate. nil ⇒ no commit-time check.
+	var touched *touchedNodes
+	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
+		touched = &touchedNodes{}
+	}
+
 	// The WAL transaction is opened OUTSIDE the visibility barrier: BeginCtx
 	// takes the store's single-writer lock and must not nest under visMu. The
 	// acquire is context-aware: under write contention a caller with a
@@ -10068,12 +10105,12 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		if err != nil {
 			return nil, err
 		}
-		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo}
+		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched}
 	} else {
-		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo}
+		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched}
 	}
 
-	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically)
+	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically, touched)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
@@ -10090,6 +10127,14 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		werr := r.walErr
 		_ = r.Close()
 		return nil, fmt.Errorf("cypher: commit WAL: %w", werr)
+	}
+	// A commit-time NOT NULL existence violation (#1754) rolled the write back
+	// inside the barrier; surface the typed violation instead of a Result for a
+	// write that is neither visible nor durable, mirroring the walErr handling.
+	if r != nil && r.notNullErr != nil {
+		nnErr := r.notNullErr
+		_ = r.Close()
+		return nil, nnErr
 	}
 	return r, nil
 }
@@ -10144,6 +10189,7 @@ func (e *Engine) execUnderBarrier(
 	walTx *txn.Tx[string, float64],
 	commit bool,
 	applyFn func(func() error) error,
+	touched *touchedNodes,
 ) (r *Result, buildErr error) {
 	_ = applyFn(func() error {
 		// Roll the in-memory graph back BEFORE this panic leaves the barrier; see
@@ -10164,6 +10210,7 @@ func (e *Engine) execUnderBarrier(
 			// constraint registry's UNIQUE value-sets after an undo replay (#1342).
 			r = newWriteResult(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes, e.constraintReg, e.g)
 			r.undo = undo
+			r.touched = touched
 			r.materialize()
 			r.commitUnderBarrier()
 			return nil
@@ -10199,6 +10246,10 @@ type lpgMutatorAdapter struct {
 	g    *lpg.Graph[string, float64]
 	buf  *exec.IndexBuffer // nil for read-only
 	undo *undoLog          // nil for read-only / non-transactional
+	// touched is the per-transaction set of node keys to re-check against NOT
+	// NULL constraints at commit (#1754). It is nil unless the engine has at
+	// least one existence constraint active, so the common path records nothing.
+	touched *touchedNodes
 	// bopts is the per-query build options carrying the cached forward-CSR
 	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
 	// resolve a bound relationship instance's stable handle from its forward-CSR
@@ -10209,7 +10260,9 @@ type lpgMutatorAdapter struct {
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
-func (a *lpgMutatorAdapter) rec() mutationUndo { return mutationUndo{g: a.g, undo: a.undo} }
+func (a *lpgMutatorAdapter) rec() mutationUndo {
+	return mutationUndo{g: a.g, undo: a.undo, touched: a.touched}
+}
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
 // when the key has not been interned yet.
@@ -10720,6 +10773,10 @@ type walMutatorAdapter struct {
 	tx   *txn.Tx[string, float64]
 	buf  *exec.IndexBuffer // nil for read-only (never reached via RunInTx)
 	undo *undoLog          // nil for read-only (never reached via RunInTx)
+	// touched is the per-transaction set of node keys to re-check against NOT
+	// NULL constraints at commit (#1754). It is nil unless the engine has at
+	// least one existence constraint active, so the common path records nothing.
+	touched *touchedNodes
 	// bopts is the per-query build options carrying the cached forward-CSR
 	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
 	// resolve a bound relationship instance's stable handle from its forward-CSR
@@ -10730,7 +10787,9 @@ type walMutatorAdapter struct {
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
-func (a *walMutatorAdapter) rec() mutationUndo { return mutationUndo{g: a.g, undo: a.undo} }
+func (a *walMutatorAdapter) rec() mutationUndo {
+	return mutationUndo{g: a.g, undo: a.undo, touched: a.touched}
+}
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 	id, ok := a.g.AdjList().Mapper().Lookup(n)

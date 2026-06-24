@@ -9,9 +9,12 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -636,15 +639,45 @@ func TestEngine_NotNullConstraint_Violation(t *testing.T) {
 	// Create the NOT NULL constraint.
 	drainResult(t, mustRun(t, ctx, eng, `CREATE CONSTRAINT person_name_nn ON (n:Person) ASSERT n.name IS NOT NULL`))
 
-	// Insert a node without the "name" property — must succeed (no name property
-	// means no SetProperty call for "name", so the constraint is not triggered
-	// at insert time; NOT NULL is enforced only on explicit SET of null).
-	// This tests that a node without the property is allowed.
-	res, err := eng.RunInTx(ctx, `CREATE (n:Person)`, nil)
-	if err != nil {
-		t.Fatalf("insert without property error: %v", err)
+	// CREATE (n:Person) omits the constrained "name" property. The constraint is
+	// a commit-time, how-agnostic invariant (#1754): a node carrying :Person in
+	// its final committed state MUST have "name" present and non-null. The omit
+	// must therefore be REJECTED, atomically, with a typed constraint-violation
+	// error — previously this was wrongly accepted because enforcement only ran on
+	// the SET-property path.
+	if _, err := eng.RunInTx(ctx, `CREATE (n:Person)`, nil); err == nil {
+		t.Fatal("expected NOT NULL constraint violation for CREATE (n:Person) omitting name, got nil")
+	} else if !errors.Is(err, exec.ErrConstraintViolation) {
+		t.Fatalf("expected ErrConstraintViolation, got %v", err)
 	}
-	drainResult(t, res)
+
+	// Atomicity: the rejected CREATE must leave no live node behind.
+	if got := countNodes(t, ctx, eng); got != 0 {
+		t.Fatalf("rejected CREATE leaked %d node(s); want 0", got)
+	}
+}
+
+// countNodes returns the number of live nodes via MATCH (n) RETURN count(n).
+func countNodes(t *testing.T, ctx context.Context, eng *cypher.Engine) int64 { //nolint:revive // t is first by testing convention; ctx follows
+	t.Helper()
+	res, err := eng.Run(ctx, `MATCH (n) RETURN count(n) AS c`, nil)
+	if err != nil {
+		t.Fatalf("count query error: %v", err)
+	}
+	defer func() { _ = res.Close() }()
+	if !res.Next() {
+		t.Fatalf("count query returned no rows")
+	}
+	rec := res.Record()
+	v, ok := rec["c"]
+	if !ok {
+		t.Fatalf("count query missing column c: %v", rec)
+	}
+	iv, ok := v.(expr.IntegerValue)
+	if !ok {
+		t.Fatalf("count column not an integer: %T", v)
+	}
+	return int64(iv)
 }
 
 // mustRun executes a query and returns the result, failing the test on error.

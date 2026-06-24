@@ -118,6 +118,14 @@ type GraphOracle struct {
 	// keeps modelling it across a crash — the recovered engine must still enforce
 	// it. See [GraphOracle.SetUniqueOnName].
 	uniqueOnName bool
+	// existenceOnEmail, when true, models an active NOT NULL (Acct, email)
+	// existence constraint: an Acct CREATE that OMITS the email property must be
+	// REJECTED by the engine (a typed constraint-violation error, no state
+	// change), which createAcct predicts; an email-bearing Acct CREATE commits.
+	// Off by default. Like the UNIQUE flag it is engine schema that survives
+	// crash/recovery, so the oracle keeps modelling it across a crash (#1754).
+	// See [GraphOracle.SetExistenceOnEmail].
+	existenceOnEmail bool
 }
 
 // edgeKey identifies an edge by source, destination, and label, matching the
@@ -170,9 +178,32 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 		return o.recordOp(cypher, params, o.createTyped(params))
 	case tmplCreateKnowsProps:
 		return o.recordOp(cypher, params, o.createKnowsProps(params))
+	case tmplCreateAcctWithEmail:
+		return o.recordOp(cypher, params, o.createAcct(params, true))
+	case tmplCreateAcctNoEmail:
+		return o.recordOp(cypher, params, o.createAcct(params, false))
 	default:
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled CREATE"})
 	}
+}
+
+// createAcct models an Acct CREATE for the existence scenario. hasEmail reports
+// whether the CREATE supplied the constrained `email` property. Under an active
+// NOT NULL (Acct, email) constraint ([GraphOracle.SetExistenceOnEmail]) an
+// email-omitting CREATE is predicted REJECTED (the engine raises a typed
+// constraint-violation error and applies nothing); otherwise the node commits.
+func (o *GraphOracle) createAcct(params map[string]any, hasEmail bool) OracleResult {
+	if o.existenceOnEmail && !hasEmail {
+		return OracleResult{Committed: false, ErrorMsg: "oracle: NOT NULL(Acct.email) violation"}
+	}
+	props := map[string]any{"id": params["id"]}
+	if hasEmail {
+		props["email"] = params["email"]
+	}
+	id := o.nextNodeID
+	o.nextNodeID++
+	o.nodes[id] = &NodeState{ID: id, Labels: []string{"Acct"}, Properties: props}
+	return OracleResult{Committed: true, NodesCreated: 1}
 }
 
 // createTyped models [tmplCreateTyped]: it records the full typed property set
@@ -227,6 +258,17 @@ func (o *GraphOracle) SetUniqueOnName(active bool) { o.uniqueOnName = active }
 // UniqueOnName reports whether the oracle models an active UNIQUE (Person, name)
 // constraint.
 func (o *GraphOracle) UniqueOnName() bool { return o.uniqueOnName }
+
+// SetExistenceOnEmail declares (or clears) an active NOT NULL (Acct, email)
+// existence constraint in the model, so the oracle predicts the engine REJECTS an
+// email-omitting Acct CREATE. It is called by the existence scenario after it
+// creates the constraint in the engine; the oracle keeps modelling it across a
+// crash so the recovered engine must still enforce it (#1754).
+func (o *GraphOracle) SetExistenceOnEmail(active bool) { o.existenceOnEmail = active }
+
+// ExistenceOnEmail reports whether the oracle models an active NOT NULL (Acct,
+// email) existence constraint.
+func (o *GraphOracle) ExistenceOnEmail() bool { return o.existenceOnEmail }
 
 // createPerson adds a Person node. The workload binds unique names; if a name
 // somehow repeats, the engine still creates a second node (CREATE is not
