@@ -63,3 +63,21 @@ func TestCypherPaths_DetectsWrongReference(t *testing.T) {
 		t.Fatalf("baseline shortestPath check should pass, got %d violations: %v", len(v), v[0].Message)
 	}
 }
+
+// TestBFSShortestPathCount_Reference unit-checks the shortest-path COUNT
+// reference (used for allShortestPaths) so a reference bug cannot mask an engine
+// bug. The diamond a->b->d, a->c->d has TWO shortest a->d paths.
+func TestBFSShortestPathCount_Reference(t *testing.T) {
+	adj := map[string][]string{"a": {"b", "c"}, "b": {"d"}, "c": {"d"}, "d": {"e"}}
+	cases := []struct {
+		a, b string
+		want int64
+	}{
+		{"a", "a", 1}, {"a", "b", 1}, {"a", "d", 2}, {"a", "e", 2}, {"e", "a", 0}, {"a", "z", 0},
+	}
+	for _, c := range cases {
+		if got := bfsShortestPathCount(adj, c.a, c.b); got != c.want {
+			t.Errorf("bfsShortestPathCount(%q,%q)=%d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}

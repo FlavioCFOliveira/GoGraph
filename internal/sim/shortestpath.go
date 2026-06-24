@@ -75,8 +75,86 @@ func CheckShortestPath(tick int64, oracle *GraphOracle, engine *EngineAdapter) [
 			vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "shortestPath length",
 				Message: fmt.Sprintf("shortestPath(%q->%q): engine length=%d, BFS reference=%d", a, b, got, want)})
 		}
+
+		// allShortestPaths: every returned path must have the minimal length, and
+		// the NUMBER of returned paths must equal an independent BFS count of
+		// distinct shortest paths.
+		vs = append(vs, checkAllShortestPaths(ctx, engine, adj, a, b, want, tick)...)
 	}
 	return vs
+}
+
+// checkAllShortestPaths verifies the Cypher allShortestPaths() operator: every
+// returned path length equals the minimal-hop reference want (-1 == unreachable
+// => no rows), and the count of returned paths equals an independent BFS count
+// of distinct shortest paths.
+func checkAllShortestPaths(ctx context.Context, engine *EngineAdapter, adj map[string][]string, a, b string, want int64, tick int64) []Violation {
+	q := fmt.Sprintf(
+		"MATCH p=allShortestPaths((a:Person {name:'%s'})-[:KNOWS*]->(b:Person {name:'%s'})) RETURN length(p)",
+		a, b)
+	res, err := engine.Run(ctx, q, nil)
+	if err != nil {
+		return []Violation{{Kind: ViolationGraphIntegrity, Tick: tick, Op: "allShortestPaths",
+			Message: fmt.Sprintf("allShortestPaths(%q->%q) query error: %v", a, b, err)}}
+	}
+	var count int64
+	var badLen bool
+	for res.Next() {
+		count++
+		if l, ok := res.IntAt(0); ok && l != want {
+			badLen = true
+		}
+	}
+	drainErr := res.Err()
+	_ = res.Close()
+	if drainErr != nil {
+		return []Violation{{Kind: ViolationGraphIntegrity, Tick: tick, Op: "allShortestPaths",
+			Message: fmt.Sprintf("allShortestPaths(%q->%q) drain error: %v", a, b, drainErr)}}
+	}
+	var vs []Violation
+	if badLen {
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "allShortestPaths length",
+			Message: fmt.Sprintf("allShortestPaths(%q->%q): a returned path is not minimal length (want %d)", a, b, want)})
+	}
+	wantCount := bfsShortestPathCount(adj, a, b)
+	if count != wantCount {
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "allShortestPaths count",
+			Message: fmt.Sprintf("allShortestPaths(%q->%q): engine returned %d paths, BFS reference=%d", a, b, count, wantCount)})
+	}
+	return vs
+}
+
+// bfsShortestPathCount returns the number of DISTINCT shortest (minimal-hop)
+// directed KNOWS paths from src to dst, the independent reference for
+// allShortestPaths. It is a layered BFS counting paths into each node at its
+// minimal distance: ways[v] accumulates the count of shortest paths reaching v.
+// Returns 0 when dst is unreachable, and 1 for src==dst (the trivial empty path,
+// matching length 0).
+func bfsShortestPathCount(adj map[string][]string, src, dst string) int64 {
+	if src == dst {
+		return 1
+	}
+	dist := map[string]int64{src: 0}
+	ways := map[string]int64{src: 1}
+	frontier := []string{src}
+	var level int64
+	for len(frontier) > 0 {
+		level++
+		var next []string
+		for _, u := range frontier {
+			for _, v := range adj[u] {
+				if _, seen := dist[v]; !seen {
+					dist[v] = level // first discovery: v's minimal distance
+					ways[v] = ways[u]
+					next = append(next, v)
+				} else if dist[v] == level {
+					ways[v] += ways[u] // another shortest path to v at this layer
+				}
+			}
+		}
+		frontier = next
+	}
+	return ways[dst] // 0 when dst was never reached
 }
 
 // bfsHops returns the minimum number of directed KNOWS hops from src to dst over
