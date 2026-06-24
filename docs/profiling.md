@@ -46,6 +46,44 @@ go tool pprof -http=:0 cpu.pprof
 | `wal.Reader.Replay`                   | 3.95 GB/s                  |
 | `csrfile.Reinterpret[uint64]`         | 1.31 ns/op, 0 allocs       |
 
+## GC tuning for read-heavy workloads
+
+Under sustained concurrent read load the per-row allocation rate of the
+scan/projection path drives the Go runtime's page **scavenger**: each GC
+cycle frees the per-row garbage and `madvise(2)`s the freed pages back to the
+OS, which then fault them back in on the next batch. The 2026-06-24
+performance audit measured `runtime.madvise` at **~29 %** of CPU on a
+concurrent per-row filter at `GOMAXPROCS=10` — a co-cause of the read-path
+multicore plateau.
+
+The primary cure is **allocating less** (the sprint S-PA7 read-path work:
+lock-free copy-on-write registries, the `ParallelScanProject` per-worker row
+arena, and reusing the result-row field in `ResultSet.Next`), which removes
+the garbage at the source. GC tuning is the complementary **deployment**
+lever.
+
+GoGraph deliberately **does not set any process-global GC state itself**: a
+library that called `debug.SetGCPercent` / `debug.SetMemoryLimit` from a
+constructor would silently override the embedding process's policy — the
+kind of hidden global state the reliability mandate forbids. The knobs belong
+to the application that owns the process. For a steady read-heavy deployment:
+
+- **`GOMEMLIMIT`** — set a soft memory ceiling (the `GOMEMLIMIT` env var, or
+  `runtime/debug.SetMemoryLimit`) at ~70–80 % of the container/RAM budget.
+  With a soft limit the scavenger keeps the heap resident up to the limit
+  instead of returning pages every cycle, so the `madvise` traffic collapses
+  while resident memory stays bounded (predictable degradation under
+  pressure).
+- **`GOGC`** — raise it (for example `GOGC=200` or higher, via the env var or
+  `runtime/debug.SetGCPercent`) so the heap grows further between
+  collections: fewer GC cycles and less scavenging. Always pair it with
+  `GOMEMLIMIT` so memory still degrades predictably rather than growing
+  unbounded.
+
+Set both once at process startup. Confirm the effect by re-running the read
+workload under `GODEBUG=gctrace=1` and checking that `runtime.madvise` falls
+in a fresh CPU profile.
+
 ## Optimisation pass discipline
 
 Per `CLAUDE.md` mandates:
