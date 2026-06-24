@@ -660,11 +660,16 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		fresh[k].entries = make(map[V]index.NodeSet)
 	}
 
+	// scratch de-reflects the per-key fixed headers (keyLen, idCount): the
+	// previous binary.Read(br, LE, &scalar) boxed the destination pointer into
+	// `any`, costing one allocation per scalar per key. io.ReadFull into a reused
+	// 8-byte buffer + binary.LittleEndian is byte-identical and allocation-free.
+	var scratch [8]byte
 	for e := uint64(0); e < entryCount; e++ {
-		var keyLen uint32
-		if err := binary.Read(br, binary.LittleEndian, &keyLen); err != nil {
+		if _, err := io.ReadFull(br, scratch[:4]); err != nil {
 			return fmt.Errorf("%w: keyLen: %w", index.ErrIndexCorrupted, err)
 		}
+		keyLen := binary.LittleEndian.Uint32(scratch[:4])
 		if uint64(keyLen) > uint64(len(body)) {
 			return fmt.Errorf("%w: implausible keyLen %d",
 				index.ErrIndexCorrupted, keyLen)
@@ -677,10 +682,10 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 		if derr != nil {
 			return derr
 		}
-		var idCount uint64
-		if err := binary.Read(br, binary.LittleEndian, &idCount); err != nil {
+		if _, err := io.ReadFull(br, scratch[:8]); err != nil {
 			return fmt.Errorf("%w: idCount: %w", index.ErrIndexCorrupted, err)
 		}
+		idCount := binary.LittleEndian.Uint64(scratch[:8])
 		if idCount > uint64(len(body)) {
 			return fmt.Errorf("%w: implausible idCount %d",
 				index.ErrIndexCorrupted, idCount)
