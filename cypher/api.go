@@ -10227,6 +10227,7 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
+	edgeExisted := a.g.AdjList().HasEdge(src, dst)
 	if err := a.g.AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -10238,8 +10239,13 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	a.g.IncrEdgesAdded()
-	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	// See [walMutatorAdapter.AddEdge]: only count and record-undo a real add, so a
+	// rolled-back no-op CREATE on a simple graph cannot delete the pre-existing
+	// edge. Multigraph always adds (edgeAdded == true), so behaviour is unchanged.
+	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
+		a.g.IncrEdgesAdded()
+		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	}
 	return srcID, dstID, nil
 }
 
@@ -10248,6 +10254,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
+	edgeExisted := a.g.AdjList().HasEdge(src, dst)
 	handle, err := a.g.AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -10260,8 +10267,13 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	a.g.IncrEdgesAdded()
-	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	// See [walMutatorAdapter.AddEdge]: only count and record-undo a real add, so a
+	// rolled-back no-op CREATE on a simple graph cannot delete the pre-existing
+	// edge. Multigraph always adds (edgeAdded == true), so behaviour is unchanged.
+	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
+		a.g.IncrEdgesAdded()
+		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	}
 	return srcID, dstID, handle, nil
 }
 
@@ -10735,6 +10747,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
+	edgeExisted := a.g.AdjList().HasEdge(src, dst)
 	if err := a.g.AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -10747,8 +10760,16 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	a.g.IncrEdgesAdded()
-	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	// On a simple graph a duplicate (src,dst) AddEdge is a documented no-op;
+	// counting it and recording a RemoveEdge undo inverse would let a rolled-back
+	// transaction DELETE the pre-existing committed edge — an Atomicity breach the
+	// DST disk-full scenario found. Bookkeep only a real add. On a multigraph
+	// every AddEdge adds a parallel edge, so edgeAdded is always true and the
+	// behaviour (and the CREATE relationships-created stat) is byte-identical.
+	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
+		a.g.IncrEdgesAdded()
+		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	}
 	return srcID, dstID, nil
 }
 
@@ -10763,6 +10784,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
+	edgeExisted := a.g.AdjList().HasEdge(src, dst)
 	handle, err := a.g.AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -10776,8 +10798,13 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	a.g.IncrEdgesAdded()
-	a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	// See [walMutatorAdapter.AddEdge]: only count and record-undo a real add, so
+	// a rolled-back no-op CREATE on a simple graph cannot delete the pre-existing
+	// edge. Multigraph always adds (edgeAdded == true), so behaviour is unchanged.
+	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
+		a.g.IncrEdgesAdded()
+		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+	}
 	return srcID, dstID, handle, nil
 }
 
