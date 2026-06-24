@@ -54,6 +54,11 @@ func CheckSearch(tick int64, oracle *GraphOracle, engine Engine) []Violation {
 	// parity has already established it equals the engine's contents, so an
 	// algorithm divergence here is a bug in the algorithm, not in the engine.
 	vs = append(vs, searchAlgorithmViolations(tick, ora)...)
+	// Shaped-fixture algorithm families that need a specific graph structure
+	// (flow networks, bipartite/assignment, Eulerian) generate their own
+	// deterministic fixtures from the tick rather than the live graph; see
+	// search_flow.go etc.
+	vs = append(vs, flowViolations(tick)...)
 	return vs
 }
 
@@ -137,6 +142,10 @@ func searchAlgorithmViolations(tick int64, g *nameGraph) []Violation {
 	// Weighted shortest paths: SSSP/APSP over a deterministically-weighted view
 	// of the same graph (see search_sssp.go), compared on distance maps.
 	vs = append(vs, ssspViolations(tick, g)...)
+
+	// Minimum spanning forest over the undirected weighted view (see
+	// search_mst.go), compared on total weight plus spanning-forest validity.
+	vs = append(vs, mstViolations(tick, g)...)
 	return vs
 }
 
