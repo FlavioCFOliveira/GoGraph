@@ -32,6 +32,7 @@ const (
 	ScenarioConstraintEnforce = "constraint-enforce"
 	ScenarioTypeCoverage      = "type-coverage"
 	ScenarioCypherPaths       = "cypher-paths"
+	ScenarioEdgeProperties    = "edge-properties"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -96,6 +97,7 @@ func DefaultRegistry() (*Registry, error) {
 		constraintEnforceScenario(),
 		typeCoverageScenario(),
 		cypherPathsScenario(),
+		edgePropertiesScenario(),
 	)
 }
 

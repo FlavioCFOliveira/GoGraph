@@ -29,7 +29,15 @@ const (
 	// ISO-8601 temporal string — keyed by a unique integer id. The type-coverage
 	// scenario uses it to verify each kind survives commit + crash/recovery.
 	tmplCreateTyped = "CREATE (n:Typed {id:$id, s:$s, i:$i, f:$f, b:$b, lst:$lst, ts:$ts})"
+	// tmplCreateKnowsProps links two existing Person nodes with a KNOWS edge that
+	// carries an ISO-8601 `since` string and a float `weight`, for the
+	// edge-property coverage scenario.
+	tmplCreateKnowsProps = "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREATE (a)-[:KNOWS {since:$since, weight:$weight}]->(b)"
 )
+
+// knowsEdgePropKeys are the property keys a [tmplCreateKnowsProps] edge carries,
+// in a fixed order; the edge-property checker projects exactly these.
+var knowsEdgePropKeys = []string{"since", "weight"}
 
 // typedPropKeys are the property keys a [tmplCreateTyped] node carries, in a
 // fixed order, plus the never-set key "absent" the checker verifies reads NULL.
@@ -160,6 +168,8 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 		return o.recordOp(cypher, params, o.createKnows(params))
 	case tmplCreateTyped:
 		return o.recordOp(cypher, params, o.createTyped(params))
+	case tmplCreateKnowsProps:
+		return o.recordOp(cypher, params, o.createKnowsProps(params))
 	default:
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled CREATE"})
 	}
@@ -268,6 +278,67 @@ func (o *GraphOracle) createKnows(params map[string]any) OracleResult {
 	k := edgeKey{src: srcID, dst: dstID, label: "KNOWS"}
 	o.edges[k] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: map[string]any{}}
 	return OracleResult{Committed: true, EdgesCreated: 1}
+}
+
+// createKnowsProps adds a KNOWS edge carrying `since` and `weight` properties
+// between the Person nodes named $a and $b. Like createKnows it is a committed
+// no-effect result when either endpoint is missing. The caller guarantees the
+// pair has no existing KNOWS edge (so this never overwrites an edge's properties
+// — a simple-graph re-CREATE of an existing edge is a no-op the engine would not
+// re-propertise).
+func (o *GraphOracle) createKnowsProps(params map[string]any) OracleResult {
+	a, okA := paramString(params, "a")
+	b, okB := paramString(params, "b")
+	if !okA || !okB {
+		return OracleResult{ErrorMsg: "oracle: createKnowsProps missing endpoint"}
+	}
+	srcID, srcOK := o.byName[a]
+	dstID, dstOK := o.byName[b]
+	if !srcOK || !dstOK {
+		return OracleResult{Committed: true} // MATCH found nothing; no edge created.
+	}
+	k := edgeKey{src: srcID, dst: dstID, label: "KNOWS"}
+	if _, exists := o.edges[k]; exists {
+		// A simple-graph re-CREATE of an existing edge is a no-op; do not mutate.
+		return OracleResult{Committed: true}
+	}
+	props := map[string]any{"since": params["since"], "weight": params["weight"]}
+	o.edges[k] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: props}
+	return OracleResult{Committed: true, EdgesCreated: 1}
+}
+
+// HasKnowsByName reports whether the oracle models a KNOWS edge between the
+// Person nodes named a and b. The edge-property writer uses it to avoid creating
+// a duplicate edge (a simple-graph no-op that would desync edge properties).
+func (o *GraphOracle) HasKnowsByName(a, b string) bool {
+	srcID, okA := o.byName[a]
+	dstID, okB := o.byName[b]
+	if !okA || !okB {
+		return false
+	}
+	return o.HasEdge(srcID, dstID, "KNOWS")
+}
+
+// KnowsEdgesByName returns every modelled KNOWS edge as (srcName, dstName,
+// properties) triples in deterministic order, for the edge-property checker.
+func (o *GraphOracle) KnowsEdgesByName() []EdgeByName {
+	var out []EdgeByName
+	for _, e := range o.edgeStates() {
+		if e.Label != "KNOWS" || len(e.Properties) == 0 {
+			continue
+		}
+		out = append(out, EdgeByName{
+			Src: o.nameOf(e.SrcID), Dst: o.nameOf(e.DstID), Props: e.Properties,
+		})
+	}
+	return out
+}
+
+// EdgeByName is a KNOWS edge identified by its endpoint Person names plus its
+// modelled properties, the form the edge-property checker probes the engine with.
+type EdgeByName struct {
+	Src, Dst string
+	Props    map[string]any
 }
 
 // ApplyMatch models read-only and SET templates. Pure reads ([RETURN]/aggregate
