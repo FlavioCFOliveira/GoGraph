@@ -64,6 +64,29 @@ type translator struct {
 	// rooted at an Argument leaf). matchPattern saves and restores this
 	// set per call so nested patterns observe the correct scope.
 	outerBoundRels map[string]struct{}
+	// clausePatternRels carries the relationship-variable names bound by
+	// the path patterns that precede the current one WITHIN THE SAME
+	// comma-separated MATCH clause. openCypher applies relationship-
+	// isomorphism (cyphermorphism) across the entire MATCH clause
+	// (openCypher 9 §3.2.2; Francis et al. SIGMOD 2018 §3), so two
+	// comma-separated patterns must not bind the same physical edge to two
+	// DISTINCT relationship variables. matchPattern grows this set as it
+	// walks the comma-separated path list and the per-path builders seed
+	// each pattern's sibling/excluded-rel set from it. It is DISTINCT from
+	// [outerBoundRels]: that set carries rels bound by preceding MATCH/WITH
+	// CLAUSES, where the no-repeat rule does NOT apply between distinct
+	// variables (two different rel vars in separate clauses may bind the
+	// same edge) — it only matters there for a single rel variable reused
+	// across clauses, which the VLE exclusion handles via outerBoundRels.
+	// matchPattern saves and restores clausePatternRels per call so nested
+	// patterns observe the correct scope.
+	clausePatternRels map[string]struct{}
+	// clauseVLERels marks which entries of clausePatternRels are bound by a
+	// variable-length relationship pattern (and therefore hold a LIST of
+	// edges rather than a single edge). The single-edge endpoint-pair
+	// predicate used for the cross-pattern no-repeat-relationship filter
+	// cannot address a list, so VLE clause rels are skipped by that filter.
+	clauseVLERels map[string]struct{}
 }
 
 // freshAnonVar returns a unique internal variable name for an anonymous node

@@ -621,6 +621,18 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 	prevOuterRels := t.outerBoundRels
 	t.outerBoundRels = liveRelVars(child)
 	defer func() { t.outerBoundRels = prevOuterRels }()
+	// Reset the per-clause cross-pattern relationship-variable accumulator
+	// (save/restore for nested matchPattern calls). It starts empty: the
+	// no-repeat-relationship rule binds the comma-separated patterns of THIS
+	// MATCH clause together, not against rels from preceding clauses.
+	prevClauseRels := t.clausePatternRels
+	prevClauseVLERels := t.clauseVLERels
+	t.clausePatternRels = map[string]struct{}{}
+	t.clauseVLERels = map[string]struct{}{}
+	defer func() {
+		t.clausePatternRels = prevClauseRels
+		t.clauseVLERels = prevClauseVLERels
+	}()
 
 	for _, pp := range pat.Paths {
 		leadVar := leadingNodeVar(pp)
@@ -640,6 +652,7 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			for _, v := range pathPatternVars(pp) {
 				boundVars[v] = struct{}{}
 			}
+			t.recordClauseRels(pp)
 			continue
 		}
 
@@ -652,6 +665,7 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			for _, v := range pathPatternVars(pp) {
 				boundVars[v] = struct{}{}
 			}
+			t.recordClauseRels(pp)
 			continue
 		}
 
@@ -693,12 +707,36 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			// positions the VarLengthExpand flat list carries (one per
 			// hop triple, stride exec.VLEHopStride), so it is robust to
 			// the flat-list encoding details.
-			outerRels := keysOf(t.outerBoundRels)
+			// Outer-scope rels (reused rel variables from preceding
+			// MATCH/WITH clauses) PLUS prior comma-separated patterns of
+			// THIS MATCH clause: an inner VLE step must not re-traverse the
+			// single edge bound to any of them. The clause-pattern rels
+			// enforce relationship-isomorphism across the comma boundary
+			// (openCypher 9 §3.2.2); they are single-hop Expand rels that
+			// live in the outer (left) side of the Apply, so the endpoint-
+			// pair comparison in buildVLENoRepeatRelPredicate addresses them
+			// correctly. Single-edge rels only — a prior VLE list cannot be
+			// fed to startNode/endNode, so VLE clause rels are skipped here
+			// (the VLE-vs-VLE same-edge case does not arise on the simple
+			// graph the TCK runs under and is not exercised).
+			noRepeatRels := keysOf(t.outerBoundRels)
+			for _, v := range keysOf(t.clausePatternRels) {
+				if _, isVLE := t.clauseVLERels[v]; isVLE {
+					continue
+				}
+				noRepeatRels = append(noRepeatRels, v)
+			}
 			vleRelVars := collectInnerVLERelVars(body)
-			for _, outerRel := range outerRels {
+			seenPred := map[string]struct{}{}
+			for _, outerRel := range noRepeatRels {
 				for _, vleRel := range vleRelVars {
 					pred := buildVLENoRepeatRelPredicate(outerRel, vleRel)
-					combined = NewSelectionExpr(pred.String(), pred, combined)
+					key := pred.String()
+					if _, dup := seenPred[key]; dup {
+						continue
+					}
+					seenPred[key] = struct{}{}
+					combined = NewSelectionExpr(key, pred, combined)
 				}
 			}
 			plan = combined
@@ -706,8 +744,60 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 		for _, v := range pathPatternVars(pp) {
 			boundVars[v] = struct{}{}
 		}
+		t.recordClauseRels(pp)
 	}
 	return plan, nil
+}
+
+// recordClauseRels adds every relationship variable bound by pp (named or
+// synthetic, single-hop or variable-length) to the per-clause cross-pattern
+// accumulator t.clausePatternRels, and records which of them are VLE rels in
+// t.clauseVLERels. matchPattern calls it after each comma-separated path
+// pattern so the NEXT pattern's relationship-isomorphism enforcement excludes
+// the edges these patterns bind (openCypher 9 §3.2.2). VLE rels are tracked
+// separately because they bind a LIST of edges, which the single-edge
+// endpoint-pair predicate cannot address.
+func (t *translator) recordClauseRels(pp *ast.PathPattern) {
+	if t.clausePatternRels == nil {
+		t.clausePatternRels = map[string]struct{}{}
+	}
+	if t.clauseVLERels == nil {
+		t.clauseVLERels = map[string]struct{}{}
+	}
+	el := pp.Head
+	for el != nil {
+		if el.Relationship != nil && el.Relationship.Variable != nil {
+			if v := *el.Relationship.Variable; v != "" {
+				t.clausePatternRels[v] = struct{}{}
+				if el.Relationship.Range != nil {
+					t.clauseVLERels[v] = struct{}{}
+				}
+			}
+		}
+		el = el.Next
+	}
+}
+
+// clauseSiblingSeed returns the stable-ordered list of single-edge
+// relationship variables bound by preceding comma-separated patterns in the
+// current MATCH clause. It seeds the within-pattern siblingRels accumulator so
+// a plain single-hop Expand excludes those edges (via SiblingRelVars →
+// exec.Expand.RelCols), enforcing relationship-isomorphism across the comma
+// boundary (openCypher 9 §3.2.2). Variable-length clause rels are excluded
+// because the RelCols mechanism addresses a single-edge column, not a list.
+func (t *translator) clauseSiblingSeed() []string {
+	if len(t.clausePatternRels) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(t.clausePatternRels))
+	for v := range t.clausePatternRels {
+		if _, isVLE := t.clauseVLERels[v]; isVLE {
+			continue
+		}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // keysOf returns the keys of a string-set map as a stable-ordered
@@ -1236,7 +1326,13 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 	// the relationship-isomorphism (cyphermorphism) guard can refer to their
 	// edge column by name when later hops in the same pattern need to
 	// exclude already-traversed edges.
-	siblingRels := []string{}
+	//
+	// Seed the accumulator with the single-edge relationship variables bound
+	// by PRECEDING comma-separated patterns in this MATCH clause so the first
+	// (and every) Expand of this pattern also excludes their edges —
+	// relationship-isomorphism applies across the entire MATCH clause, not
+	// just within one connected path (openCypher 9 §3.2.2).
+	siblingRels := t.clauseSiblingSeed()
 	el = el.Next
 	for el != nil {
 		if el.Relationship != nil && el.Node != nil {
@@ -1335,7 +1431,12 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 	// subsequent hop can reference the destination column emitted by the
 	// preceding Expand (without a name, fromVar="" forces the next step to
 	// scan from an empty schema key and the chain breaks — see Match3 [17]).
-	siblingRels := []string{}
+	//
+	// Seed the accumulator with single-edge relationship variables bound by
+	// preceding comma-separated patterns in this MATCH clause so the shared-
+	// variable (CorrelatedApply) branch also enforces relationship-
+	// isomorphism across the comma boundary (openCypher 9 §3.2.2).
+	siblingRels := t.clauseSiblingSeed()
 	el = el.Next
 	for el != nil {
 		if el.Relationship != nil && el.Node != nil {
@@ -1670,6 +1771,22 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 			addExclude(v)
 		}
 		for v := range t.outerBoundRels {
+			addExclude(v)
+		}
+		// Single-edge relationship variables bound by PRECEDING comma-
+		// separated patterns in this MATCH clause: a VLE step must not
+		// re-traverse their edges either (relationship-isomorphism across
+		// the entire MATCH clause, openCypher 9 §3.2.2). For the shared-
+		// variable (CorrelatedApply) build the inner subtree shares the
+		// schema, so the name resolves to the outer rel column here; for the
+		// plain-Apply build the name resolves to no inner column and is a
+		// soft no-op — that case is covered by the post-Apply
+		// buildVLENoRepeatRelPredicate in matchPattern instead. VLE clause
+		// rels are skipped (a list cannot be excluded by single-edge id).
+		for v := range t.clausePatternRels {
+			if _, isVLE := t.clauseVLERels[v]; isVLE {
+				continue
+			}
 			addExclude(v)
 		}
 		var plan LogicalPlan = vle
