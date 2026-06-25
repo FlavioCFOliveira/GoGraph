@@ -20,8 +20,10 @@
 //     [ErrSyncFailed] under the same discard semantics.
 //   - [Faults.CorruptOnRead] — when non-nil, is called with the
 //     current file offset and the number of bytes about to be read;
-//     returning true flips the first byte of the result (simulates
-//     a bit-flip or CRC corruption at the given position).
+//     returning true inverts all bits of the FIRST byte of the read
+//     buffer (p[0] ^= 0xFF) to simulate a bit-flip / CRC corruption.
+//     The corruption always lands on the head of each Read call's
+//     buffer, not at an arbitrary in-buffer position.
 //
 // [FaultFile] implements [File], the minimal filesystem interface
 // accepted by store/wal.OpenWith and store/snapshot write paths.
@@ -103,8 +105,13 @@ type Faults struct {
 
 	// CorruptOnRead, when non-nil, is called with the current file
 	// offset and the number of bytes about to be read. Returning true
-	// flips the MSB of the first byte in the result buffer to simulate
-	// a bit-flip or CRC-corrupting storage error.
+	// inverts ALL bits of the first byte of the result buffer
+	// (p[0] ^= 0xFF) to simulate a bit-flip or CRC-corrupting storage
+	// error. Fidelity note: the corruption always lands on the head of
+	// each Read call's buffer (p[0]); it does not model a flip at an
+	// arbitrary in-buffer byte or a fixed file offset. The (offset, n)
+	// arguments let a caller decide WHETHER to corrupt a given read, not
+	// WHERE within the buffer.
 	CorruptOnRead func(offset, n int64) bool
 }
 

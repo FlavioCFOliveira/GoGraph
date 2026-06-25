@@ -55,6 +55,32 @@ func TestPassThrough(t *testing.T) {
 	}
 }
 
+// TestCorruptOnRead_InvertsHeadByteFully is the #1771 gate: CorruptOnRead
+// inverts ALL bits of the first byte of the read buffer (xor-delta 0xFF, not an
+// 0x80 MSB-only flip) and leaves the rest of the buffer untouched (head-only).
+func TestCorruptOnRead_InvertsHeadByteFully(t *testing.T) {
+	ff := tempFaultFile(t, testfs.Faults{
+		CorruptOnRead: func(_, _ int64) bool { return true },
+	})
+	orig := []byte{0x04, 0xBB, 0xCC, 0xDD}
+	if _, err := ff.Write(orig); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := ff.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	got := make([]byte, len(orig))
+	if _, err := io.ReadFull(ff, got); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if delta := orig[0] ^ got[0]; delta != 0xFF {
+		t.Errorf("head byte xor-delta = %#x, want 0xFF (full-byte invert, not an MSB-only 0x80 flip)", delta)
+	}
+	if !bytes.Equal(got[1:], orig[1:]) {
+		t.Errorf("non-head bytes changed: got %x, want %x (corruption must be head-only)", got[1:], orig[1:])
+	}
+}
+
 // TestFailWritesAfterBytes verifies that writes succeed up to the
 // budget and then return ErrPartialWrite.
 func TestFailWritesAfterBytes(t *testing.T) {

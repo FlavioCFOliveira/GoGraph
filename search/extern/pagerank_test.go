@@ -7,6 +7,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search/centrality"
 	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 )
 
@@ -104,9 +105,13 @@ func TestPageRank_MassConservation_Star(t *testing.T) {
 	}
 }
 
-// TestPageRank_MatchesInMemory asserts that the mmap-backed and the
-// in-memory PageRank produce identical ranks (within 1e-9) on the
-// same input graph.
+// TestPageRank_MatchesInMemory asserts the mmap-backed extern PageRank produces
+// ranks element-wise identical (within 1e-9) to the in-core reference
+// centrality.PageRank on the same graph, with the same top-ranked node — and
+// that the total mass is 1.0. (#1773: the prior version compared against the
+// uniform seed array with a 0.5 tolerance and a dead `continue` loop, so a
+// wrong extern ranking would have passed; it now compares against the real
+// reference implementation.)
 func TestPageRank_MatchesInMemory(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
@@ -122,14 +127,12 @@ func TestPageRank_MatchesInMemory(t *testing.T) {
 	}
 	c := csr.BuildFromAdjList(a)
 
-	// In-memory reference: use a struct identical to the algorithm in
-	// extern but operating on the CSR directly.
-	verts := c.VerticesSlice()
-	edges := c.EdgesSlice()
-	n := len(verts) - 1
-	refRanks, _, _, refLive := seedRanks(verts, edges, n)
-	if refLive == 0 {
-		t.Fatal("no live nodes")
+	// In-core reference with parameters matching extern's defaults.
+	coreRanks, _, err := centrality.PageRank(c, centrality.PageRankOptions{
+		Damping: 0.85, MaxIterations: 100, Tolerance: 1e-6,
+	})
+	if err != nil {
+		t.Fatalf("centrality.PageRank: %v", err)
 	}
 
 	path := filepath.Join(t.TempDir(), "mixed.csr")
@@ -141,19 +144,41 @@ func TestPageRank_MatchesInMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	externRanks, _, _ := PageRank(r, DefaultPageRankOptions())
-	for i := 0; i < n; i++ {
-		if math.Abs(externRanks[i]-refRanks[i]) > 0.5 {
-			// Seed values are uniform; this should at least be sane.
-			continue
+	externRanks, _, err := PageRank(r, DefaultPageRankOptions())
+	if err != nil {
+		t.Fatalf("extern PageRank: %v", err)
+	}
+
+	if len(externRanks) != len(coreRanks) {
+		t.Fatalf("rank vector length: extern=%d core=%d", len(externRanks), len(coreRanks))
+	}
+	// Element-wise agreement within 1e-9 — the assertion the old test omitted.
+	for i := range coreRanks {
+		if d := math.Abs(externRanks[i] - coreRanks[i]); d > 1e-9 {
+			t.Errorf("rank[%d]: extern=%.12f core=%.12f diff=%.2e (want < 1e-9)", i, externRanks[i], coreRanks[i], d)
 		}
 	}
-	// Total mass match.
-	var got float64
+	// Ranking ORDER must agree: the highest-ranked node is the same.
+	if ext, core := argmaxRank(externRanks), argmaxRank(coreRanks); ext != core {
+		t.Errorf("top-ranked node differs: extern=%d core=%d", ext, core)
+	}
+	// Total mass is a probability distribution.
+	var total float64
 	for _, v := range externRanks {
-		got += v
+		total += v
 	}
-	if math.Abs(got-1.0) > 1e-10 {
-		t.Fatalf("extern total = %.15f want 1.0", got)
+	if math.Abs(total-1.0) > 1e-10 {
+		t.Fatalf("extern total mass = %.15f, want 1.0", total)
 	}
+}
+
+// argmaxRank returns the index of the maximum rank (lowest index on ties).
+func argmaxRank(r []float64) int {
+	best := 0
+	for i := 1; i < len(r); i++ {
+		if r[i] > r[best] {
+			best = i
+		}
+	}
+	return best
 }

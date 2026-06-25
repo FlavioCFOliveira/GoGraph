@@ -10,8 +10,11 @@ import (
 // or [Fake.Set] is called. It never reads wall time, so code driven by a Fake
 // replays identically for a given sequence of advances. Timers and tickers
 // created from a Fake fire synchronously during the Advance that crosses their
-// deadline, with their delivery channels buffered so a fire is never dropped
-// even if no goroutine is waiting.
+// deadline. A one-shot timer's single fire is never dropped (its buffered
+// channel always holds the pending fire even with no goroutine waiting). A
+// ticker, however, coalesces: its cap-1 channel drops a tick on a full buffer
+// exactly as [time.Ticker] does, so a single Advance crossing several periods
+// leaves at most one pending tick, not one per period.
 //
 // Fake is intended for tests and for the deterministic simulation harness.
 //
