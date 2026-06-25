@@ -88,9 +88,9 @@ func TestGlobalAggregateAdapter_EmptyInputEmitsNeutralRow(t *testing.T) {
 	if !ok || int64(c) != 0 {
 		t.Errorf("row[0] = %v (%T), want IntegerValue(0)", row[0], row[0])
 	}
-	// sum → NULL
-	if !expr.IsNull(row[1]) {
-		t.Errorf("row[1] = %v, want NULL", row[1])
+	// sum → IntegerValue(0) per openCypher ("sum(null) returns 0"; #1759)
+	if s, ok := row[1].(expr.IntegerValue); !ok || int64(s) != 0 {
+		t.Errorf("row[1] = %v (%T), want IntegerValue(0)", row[1], row[1])
 	}
 	// collect → empty ListValue
 	lv, ok := row[2].(expr.ListValue)

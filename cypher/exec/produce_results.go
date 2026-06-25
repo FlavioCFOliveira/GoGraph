@@ -107,6 +107,14 @@ func Run(ctx context.Context, plan Operator, cols []string) *ResultSet {
 		ctx:  ctx,
 	}
 	if err := plan.Init(ctx); err != nil {
+		// A partially-initialised plan may already hold resources: a child
+		// operator whose own Init succeeded (e.g. ParallelScanProject, which
+		// has called gov.Enter and spawned workers) must still receive Close,
+		// per the Operator contract ("Close ... must be called exactly once
+		// ... even when Next returned an error"). Marking the ResultSet closed
+		// makes the caller's deferred Close a no-op, so we must release here
+		// ourselves; operator Close is idempotent (#1760).
+		plan.Close()
 		rs.err = fmt.Errorf("exec: plan init: %w", err)
 		rs.closed = true
 	}
