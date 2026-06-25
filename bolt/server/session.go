@@ -348,6 +348,26 @@ func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
 // dispatch routes msg to the correct per-state handler. It is the inner switch
 // of [Session.HandleMessage].
 func (s *Session) dispatch(ctx context.Context, msg any) ([]any, error) {
+	// Bolt v5: once an AUTHENTICATED connection is FAILED, a query/transaction
+	// message is answered with IGNORED — not executed, not re-failed — until the
+	// client RESETs (#1781). Scoped deliberately:
+	//   - Only the request-phase messages (RUN/PULL/DISCARD/BEGIN/COMMIT/
+	//     ROLLBACK/ROUTE) are ignored. The auth messages HELLO/LOGON/LOGOFF keep
+	//     their dedicated handlers, which enforce the pre-auth/re-auth security
+	//     gates (a failed HELLO / illegal LOGON in FAILED must FAIL, not be
+	//     IGNORED — see the auth-bypass regression tests). RESET/GOODBYE escape
+	//     FAILED (handled below and in Transition).
+	//   - Only when s.authenticated: an UNAUTHENTICATED FAILED connection (e.g.
+	//     a failed HELLO) keeps its hard FAILURE/terminal behaviour so a query
+	//     can never be softly ignored into an auth bypass.
+	// It also guarantees no write/DDL runs while an authenticated session is FAILED.
+	if s.state == StateFailed && s.authenticated {
+		switch msg.(type) {
+		case *proto.Run, *proto.Pull, *proto.Discard, *proto.Begin,
+			*proto.Commit, *proto.Rollback, *proto.Route:
+			return []any{&proto.Ignored{}}, nil
+		}
+	}
 	switch m := msg.(type) {
 	case *proto.Hello:
 		return s.handleHello(m)

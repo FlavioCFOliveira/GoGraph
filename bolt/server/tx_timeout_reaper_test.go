@@ -108,9 +108,12 @@ func TestTxTimeout_IdleOpenTransactionIsReaped(t *testing.T) {
 				}
 				return
 			}
-			if _, isFail := resp.(*proto.Failure); isFail {
-				// Gentle reap: the transaction was rolled back and the session
-				// moved to FAILED, so the no-op LOGON now returns a FAILURE.
+			// Gentle reap: the transaction was rolled back and the session moved
+			// to FAILED. In FAILED, a non-RESET/GOODBYE message (here the no-op
+			// LOGON ping) is answered with IGNORED per the Bolt v5 spec (#1781);
+			// older builds replied FAILURE. Either response signals the reap.
+			switch resp.(type) {
+			case *proto.Failure, *proto.Ignored:
 				select {
 				case aReaped <- time.Since(txOpened):
 				default:

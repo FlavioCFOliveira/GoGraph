@@ -99,8 +99,14 @@ func TestTxTimeout_FakeClockDrivesReap(t *testing.T) {
 			reaped = true // hard reap: connection closed
 			break
 		}
-		if _, isFail := resp.(*proto.Failure); isFail {
-			reaped = true // gentle reap: session moved to FAILED
+		// Gentle reap: session moved to FAILED. In FAILED a non-RESET/GOODBYE
+		// message (the no-op LOGON ping) is answered with IGNORED per the Bolt
+		// v5 spec (#1781); older builds replied FAILURE. Either signals the reap.
+		switch resp.(type) {
+		case *proto.Failure, *proto.Ignored:
+			reaped = true
+		}
+		if reaped {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -136,8 +142,13 @@ func TestTxTimeout_DefaultClockStillReaps(t *testing.T) {
 			reaped = true
 			break
 		}
-		if _, isFail := resp.(*proto.Failure); isFail {
+		// Gentle reap → FAILED → LOGON ping answered with IGNORED (or FAILURE on
+		// older builds) per the Bolt v5 spec (#1781). Either signals the reap.
+		switch resp.(type) {
+		case *proto.Failure, *proto.Ignored:
 			reaped = true
+		}
+		if reaped {
 			break
 		}
 		time.Sleep(txTimeout / 4)

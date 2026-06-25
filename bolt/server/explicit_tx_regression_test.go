@@ -230,9 +230,20 @@ func TestExplicitTx_TxTimeoutDefaultBoundsHold(t *testing.T) {
 	// deadline, so the engine must reject it promptly.
 	time.Sleep(300 * time.Millisecond)
 	cA.sendRequest(t, &proto.Run{Query: "CREATE (:Late {v:1})", Parameters: map[string]any{}, Extra: map[string]any{}})
-	fail := cA.recvFailure(t)
-	if fail.Code == "" {
-		t.Fatalf("expected a typed FAILURE code on a timed-out tx RUN, got empty")
+	// The tx deadline has elapsed. Two valid outcomes prove the tx was terminated
+	// and the writer lock released (verified below): the RUN raced ahead of the
+	// reaper and hit its expired context → a typed FAILURE; OR the reaper already
+	// rolled the tx back and moved the session to FAILED, in which case this RUN
+	// is answered with IGNORED per the Bolt v5 spec (#1781). Either is acceptable.
+	switch resp := cA.recvResponse(t).(type) {
+	case *proto.Failure:
+		if resp.Code == "" {
+			t.Fatalf("expected a typed FAILURE code on a timed-out tx RUN, got empty")
+		}
+	case *proto.Ignored:
+		// reaper won the race; the session is FAILED and awaiting RESET.
+	default:
+		t.Fatalf("timed-out tx RUN: got %T, want *proto.Failure or *proto.Ignored", resp)
 	}
 
 	// The writer mutex must be free afterwards: a fresh session writes promptly.
