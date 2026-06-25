@@ -44,6 +44,28 @@ No Critical. The two High items are clear conformance/observability defects.
   raises `ArithmeticError`. Fix by aligning with Neo4j (fail-stop) **or**
   documenting the `null` result as a sanctioned divergence + gate.
 
+## Remediation — all 11 addressed (same day)
+
+Each fix carries a regression gate; TCK held at 3897, ACID preserved, `-race` clean.
+
+| # | Commit | Resolution |
+|---|---|---|
+| 1764 | `ec737a0` | `toString()` preserves `.0` on integer-valued floats |
+| 1765 | `ec737a0` | Bolt maps `ArithmeticOverflow`/`ArithmeticError`/`ArgumentError` to `Neo.ClientError.Statement.*` |
+| 1766 | `ec737a0` | integer `/0`/`%0` raise `ArithmeticError` (user-approved; float by-zero stays IEEE-754) |
+| 1767 | `ec737a0` | invalid calendar date components rejected (→ null, the engine's invalid-date contract) — no silent wrong date |
+| 1768 | `ec737a0` | `substring`/`left`/`right` negative args raise `ArgumentError` |
+| 1769 | `4474305` | GraphML/JSONL preserve the temporal time-zone offset on export |
+| 1771 | `23f83f6` | testfs `CorruptOnRead` doc matches code (full-byte invert) + head-only documented |
+| 1772 | `23f83f6` | fake-clock doc scoped (one-shot no-drop; tickers coalesce) |
+| 1773 | `23f83f6` | `search/extern` PageRank test now compares vs `centrality.PageRank` (was vacuous) |
+| 1774 | `bc835fe` | hardening gates: checkpoint phase-2-DDL retention + BeginReadTx isolation |
+| 1770 | `b46ac9c` | map projection documented as unimplemented + SyntaxError pinned; full impl tracked as #1775 (needs ANTLR/JVM) |
+
+#1766 raise-on-divide-by-zero and #1770 document-vs-implement were user decisions.
+#1775 (full map-projection grammar implementation) is deferred only because the
+ANTLR regen requires a JVM absent from the audit environment.
+
 ## Verified sound (negative results)
 
 Round-1 storage code (DROP durability, corruption fail-stop, counter-drift,
