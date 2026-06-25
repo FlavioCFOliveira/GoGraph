@@ -662,6 +662,19 @@ func fnRange(args []expr.Value) (expr.Value, error) {
 // Type conversion
 // ─────────────────────────────────────────────────────────────────────────────
 
+// formatFloatToString renders a FLOAT for toString() so its FLOAT-ness survives:
+// an integer-valued finite float keeps an explicit ".0" suffix ("1.0", not "1"),
+// matching openCypher/Neo4j (toString(1.0)='1.0') and the engine's own TCK
+// comparison formatter. Non-integer floats and NaN/±Inf are unchanged from the
+// prior shortest-fixed-point form (#1764). The 1e21 ceiling avoids emitting an
+// astronomically long fixed-point digit string for huge magnitudes.
+func formatFloatToString(f float64) string {
+	if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) && math.Abs(f) < 1e21 {
+		return strconv.FormatFloat(f, 'f', 1, 64)
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
 func fnToString(args []expr.Value) (expr.Value, error) {
 	if err := requireArity("toString", args, 1); err != nil {
 		return nil, err
@@ -675,7 +688,7 @@ func fnToString(args []expr.Value) (expr.Value, error) {
 	case expr.IntegerValue:
 		return expr.StringValue(strconv.FormatInt(int64(v), 10)), nil
 	case expr.FloatValue:
-		return expr.StringValue(strconv.FormatFloat(float64(v), 'f', -1, 64)), nil
+		return expr.StringValue(formatFloatToString(float64(v))), nil
 	case expr.BoolValue:
 		if bool(v) {
 			return expr.StringValue("true"), nil
@@ -1031,7 +1044,10 @@ func fnSubstring(args []expr.Value) (expr.Value, error) {
 	runes := []rune(string(sv))
 	start := int(int64(startV))
 	if start < 0 {
-		start = 0
+		// Neo4j raises ArgumentError for a negative start index rather than
+		// clamping (#1768). A start beyond the end still returns "" (a value
+		// query, below) — only a negative start is an error.
+		return nil, &expr.EvalError{Msg: fmt.Sprintf("ArgumentError: substring: negative start index %d", start)}
 	}
 	if start > len(runes) {
 		return expr.StringValue(""), nil
@@ -1046,7 +1062,7 @@ func fnSubstring(args []expr.Value) (expr.Value, error) {
 		}
 		length := int(int64(lenV))
 		if length < 0 {
-			length = 0
+			return nil, &expr.EvalError{Msg: fmt.Sprintf("ArgumentError: substring: negative length %d", length)}
 		}
 		// Compute the end bound overflow-safely. start ∈ [0, len(runes)] and
 		// length ≥ 0 at this point, so len(runes)-start ≥ 0 cannot underflow.
@@ -1171,7 +1187,7 @@ func fnLeft(args []expr.Value) (expr.Value, error) {
 	runes := []rune(string(sv))
 	n := int(int64(nv))
 	if n < 0 {
-		n = 0
+		return nil, &expr.EvalError{Msg: fmt.Sprintf("ArgumentError: left: negative length %d", n)}
 	}
 	if n > len(runes) {
 		n = len(runes)
@@ -1197,7 +1213,7 @@ func fnRight(args []expr.Value) (expr.Value, error) {
 	runes := []rune(string(sv))
 	n := int(int64(nv))
 	if n < 0 {
-		n = 0
+		return nil, &expr.EvalError{Msg: fmt.Sprintf("ArgumentError: right: negative length %d", n)}
 	}
 	if n > len(runes) {
 		n = len(runes)

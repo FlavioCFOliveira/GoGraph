@@ -78,10 +78,12 @@ func TestSec_Cypher_IntegerOverflow_TypedEvalError(t *testing.T) {
 	}
 }
 
-// TestSec_Cypher_DivModByZero_Null asserts that integer division and modulo by
-// zero evaluate to NULL (openCypher semantics) — exactly one row, the projected
-// column is null, and there is no error.
-func TestSec_Cypher_DivModByZero_Null(t *testing.T) {
+// TestSec_Cypher_IntDivModByZero_Raises asserts that INTEGER division and modulo
+// by zero RAISE a typed *expr.EvalError (ArithmeticError) rather than silently
+// evaluating to NULL — matching Neo4j (openCypher leaves it implementation-
+// defined; the silent NULL was a reliability hazard, #1766). Float by-zero stays
+// IEEE-754 (+Inf / NaN) and is asserted separately below.
+func TestSec_Cypher_IntDivModByZero_Raises(t *testing.T) {
 	t.Parallel()
 	eng := secCypherNewEngine(t)
 	cases := []struct {
@@ -99,29 +101,50 @@ func TestSec_Cypher_DivModByZero_Null(t *testing.T) {
 			q := "RETURN " + tc.expr + " AS x"
 			res, err := eng.Run(context.Background(), q, nil)
 			if err != nil {
-				t.Fatalf("%q: unexpected Run error %v; want one NULL row", q, err)
+				secCypherAssertEvalError(t, err, q)
+				return
 			}
-			defer func() { _ = res.Close() }()
 			rows := 0
-			gotNull := false
 			for res.Next() {
-				// Record() values are interface{}; assert to expr.Value before
-				// the NULL test. A non-Value would itself be a contract breach.
-				v, ok := res.Record()["x"].(expr.Value)
-				if !ok {
-					t.Fatalf("%q: column x is %T, not an expr.Value", q, res.Record()["x"])
-				}
-				gotNull = expr.IsNull(v)
 				rows++
 			}
-			if err := res.Err(); err != nil {
-				t.Fatalf("%q: unexpected Result.Err() %v; want one NULL row", q, err)
+			iterErr := res.Err()
+			_ = res.Close()
+			secCypherAssertEvalError(t, iterErr, q)
+			if rows != 0 {
+				t.Fatalf("%q: produced %d rows; integer divide/modulo by zero must yield no successful row", q, rows)
 			}
-			if rows != 1 {
-				t.Fatalf("%q: produced %d rows; want exactly 1", q, rows)
+		})
+	}
+}
+
+// TestSec_Cypher_FloatDivModByZero_IEEE confirms FLOAT by-zero is unchanged:
+// x/0.0 → +Inf, x%0.0 → NaN (IEEE-754), one successful row, no error (#1766).
+func TestSec_Cypher_FloatDivModByZero_IEEE(t *testing.T) {
+	t.Parallel()
+	eng := secCypherNewEngine(t)
+	for _, tc := range []struct {
+		name  string
+		expr  string
+		check func(float64) bool
+	}{
+		{"div_inf", "5.0 / 0.0", func(f float64) bool { return math.IsInf(f, 1) }},
+		{"mod_nan", "5.0 % 0.0", func(f float64) bool { return math.IsNaN(f) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			q := "RETURN " + tc.expr + " AS x"
+			res, err := eng.Run(context.Background(), q, nil)
+			if err != nil {
+				t.Fatalf("%q: unexpected Run error %v", q, err)
 			}
-			if !gotNull {
-				t.Fatalf("%q: column x is not NULL; want NULL (division/modulo by zero is NULL in openCypher)", q)
+			defer func() { _ = res.Close() }()
+			if !res.Next() {
+				t.Fatalf("%q: produced no row", q)
+			}
+			fv, ok := res.Record()["x"].(expr.FloatValue)
+			if !ok || !tc.check(float64(fv)) {
+				t.Fatalf("%q: x = %v (%T), want the IEEE-754 result", q, res.Record()["x"], res.Record()["x"])
 			}
 		})
 	}

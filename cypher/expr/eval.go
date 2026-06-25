@@ -1382,7 +1382,10 @@ func evalIntArith(op string, a, b int64) (Value, error) {
 		return IntegerValue(a * b), nil
 	case "/":
 		if b == 0 {
-			return Null, nil // division by zero → NULL in Cypher
+			// Integer division by zero raises (matches Neo4j; openCypher leaves
+			// it implementation-defined). Float /0 stays IEEE-754 (+Inf), handled
+			// in the float arithmetic path. (#1766)
+			return Null, &EvalError{Msg: "ArithmeticError: / by zero"}
 		}
 		if a == math.MinInt64 && b == -1 {
 			return Null, &EvalError{Msg: fmt.Sprintf("ArithmeticOverflow: %d / -1 is not representable as Int64", a)}
@@ -1390,7 +1393,9 @@ func evalIntArith(op string, a, b int64) (Value, error) {
 		return IntegerValue(a / b), nil
 	case "%":
 		if b == 0 {
-			return Null, nil
+			// Integer modulo by zero raises (matches Neo4j). Float %0 stays
+			// IEEE-754 (NaN), handled in the float arithmetic path. (#1766)
+			return Null, &EvalError{Msg: "ArithmeticError: % by zero"}
 		}
 		return IntegerValue(a % b), nil
 	case "^":

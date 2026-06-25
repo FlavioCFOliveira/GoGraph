@@ -5,6 +5,7 @@ package funcs_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -611,10 +612,10 @@ func TestFn_Left_Null(t *testing.T) {
 }
 
 func TestFn_Left_NegativeN(t *testing.T) {
-	// Negative length → empty string.
-	v := mustCall(t, "left", expr.StringValue("hello"), expr.IntegerValue(-1))
-	if v != expr.StringValue("") {
-		t.Errorf("left(hello, -1) = %v, want empty string", v)
+	// Negative length raises ArgumentError (matches Neo4j; #1768).
+	_, err := call(t, "left", expr.StringValue("hello"), expr.IntegerValue(-1))
+	if err == nil || !strings.Contains(err.Error(), "ArgumentError") {
+		t.Errorf("left(hello, -1) error = %v, want an ArgumentError", err)
 	}
 }
 
@@ -634,9 +635,10 @@ func TestFn_Right_Null(t *testing.T) {
 }
 
 func TestFn_Right_NegativeN(t *testing.T) {
-	v := mustCall(t, "right", expr.StringValue("hello"), expr.IntegerValue(-1))
-	if v != expr.StringValue("") {
-		t.Errorf("right(hello, -1) = %v, want empty string", v)
+	// Negative length raises ArgumentError (matches Neo4j; #1768).
+	_, err := call(t, "right", expr.StringValue("hello"), expr.IntegerValue(-1))
+	if err == nil || !strings.Contains(err.Error(), "ArgumentError") {
+		t.Errorf("right(hello, -1) error = %v, want an ArgumentError", err)
 	}
 }
 

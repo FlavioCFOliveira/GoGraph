@@ -186,6 +186,15 @@ func evalErrorCode(ee *expr.EvalError) (code string, ok bool) {
 		return "Neo.ClientError.Statement.TypeError", true
 	case strings.HasPrefix(ee.Msg, "EntityNotFound:"):
 		return "Neo.ClientError.Statement.EntityNotFound", true
+	case strings.HasPrefix(ee.Msg, "ArgumentError:"):
+		return "Neo.ClientError.Statement.ArgumentError", true
+	// Runtime arithmetic faults are deterministic client conditions, not server
+	// faults: integer divide/modulo by zero ("ArithmeticError:") and overflow
+	// ("ArithmeticOverflow:") both map to ArithmeticError so the real message is
+	// forwarded rather than replaced with generic internal-error text (#1765, #1766).
+	case strings.HasPrefix(ee.Msg, "ArithmeticError:"),
+		strings.HasPrefix(ee.Msg, "ArithmeticOverflow:"):
+		return "Neo.ClientError.Statement.ArithmeticError", true
 	}
 	return "", false
 }

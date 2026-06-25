@@ -256,8 +256,8 @@ func TestEval_Arithmetic(t *testing.T) {
 		// NULL propagation
 		{"null_add_int", nullLit(), "+", intLit(1), expr.Null},
 		{"int_add_null", intLit(1), "+", nullLit(), expr.Null},
-		// Division by zero → NULL
-		{"div_zero", intLit(5), "/", intLit(0), expr.Null},
+		// Integer division by zero now RAISES (see TestEval_IntDivMod_ByZero_Raises);
+		// it is no longer a value case here (#1766).
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

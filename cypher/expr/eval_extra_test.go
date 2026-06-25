@@ -4,6 +4,7 @@ package expr_test
 // coverage gate. Targets uncovered branches in eval.go and value.go.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
@@ -64,11 +65,18 @@ func TestEval_FloatArith_DivByZero(t *testing.T) {
 	}
 }
 
-// Integer arithmetic - modulo by zero → NULL
-func TestEval_IntMod_Zero(t *testing.T) {
-	v := eval(t, binary(intLit(7), "%", intLit(0)), nil, nil)
-	if !expr.IsNull(v) {
-		t.Errorf("7 %% 0 should be null, got %v", v)
+// Integer division and modulo by zero RAISE an ArithmeticError (matches Neo4j;
+// openCypher leaves it implementation-defined). Float by-zero stays IEEE-754
+// (+Inf / NaN), covered separately. (#1766)
+func TestEval_IntDivMod_ByZero_Raises(t *testing.T) {
+	for _, tc := range []struct{ op string }{{"/"}, {"%"}} {
+		_, err := evalBinaryInt(t, tc.op, 7, 0)
+		if err == nil {
+			t.Fatalf("7 %s 0: want an error, got nil", tc.op)
+		}
+		if !strings.Contains(err.Error(), "ArithmeticError") {
+			t.Errorf("7 %s 0: error = %q, want it to contain \"ArithmeticError\"", tc.op, err.Error())
+		}
 	}
 }
 

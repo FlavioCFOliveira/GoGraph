@@ -96,10 +96,32 @@ type DateValue struct {
 }
 
 // NewDate constructs a [DateValue] from y/m/d, normalising overflow via
-// [time.Date] semantics (e.g. month 13 wraps to next year).
+// [time.Date] semantics (e.g. month 13 wraps to next year). It is used
+// internally by date arithmetic, where normalisation is intended; callers
+// PARSING untrusted strings must use [newDateChecked] so out-of-range
+// components are rejected rather than silently wrapped.
 func NewDate(y, m, d int) DateValue {
 	t := time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC)
 	return DateValue{Year: t.Year(), Month: int(t.Month()), Day: t.Day()}
+}
+
+// newDateChecked constructs a [DateValue] from explicit calendar components,
+// rejecting an out-of-range month or day with an error instead of wrapping it
+// into a valid date the way [NewDate]/[time.Date] would (#1767). It is the
+// constructor the string-parsing path uses so date('2020-13-01') and
+// date('2020-02-30') fail rather than silently becoming 2021-01-01 / 2020-03-01.
+// Day 0 / month 0 are also rejected. Year may be any value.
+func newDateChecked(y, m, d int) (DateValue, error) {
+	if m < 1 || m > 12 {
+		return DateValue{}, fmt.Errorf("invalid date: month %d out of range [1,12]", m)
+	}
+	// Days in month m of year y, via the time package's own normalisation: day 0
+	// of month m+1 is the last day of month m.
+	maxDay := time.Date(y, time.Month(m)+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	if d < 1 || d > maxDay {
+		return DateValue{}, fmt.Errorf("invalid date: day %d out of range [1,%d] for %04d-%02d", d, maxDay, y, m)
+	}
+	return DateValue{Year: y, Month: m, Day: d}, nil
 }
 
 // DateFromTime builds a DateValue from the calendar date of t (in t's own
@@ -632,7 +654,7 @@ func ParseDate(s string) (DateValue, error) {
 			m, ok2 := parseUint(s[5:7])
 			d, ok3 := parseUint(s[8:])
 			if ok1 && ok2 && ok3 && s[4] == '-' && s[7] == '-' {
-				return NewDate(int(y), int(m), int(d)), nil
+				return newDateChecked(int(y), int(m), int(d))
 			}
 		}
 		// YYYY-MM
@@ -640,7 +662,7 @@ func ParseDate(s string) (DateValue, error) {
 			y, ok1 := parseUint(s[:4])
 			m, ok2 := parseUint(s[5:])
 			if ok1 && ok2 {
-				return NewDate(int(y), int(m), 1), nil
+				return newDateChecked(int(y), int(m), 1)
 			}
 		}
 	} else {
@@ -650,7 +672,7 @@ func ParseDate(s string) (DateValue, error) {
 			m, ok2 := parseUint(s[4:6])
 			d, ok3 := parseUint(s[6:])
 			if ok1 && ok2 && ok3 {
-				return NewDate(int(y), int(m), int(d)), nil
+				return newDateChecked(int(y), int(m), int(d))
 			}
 		}
 		// YYYYMM
@@ -658,7 +680,7 @@ func ParseDate(s string) (DateValue, error) {
 			y, ok1 := parseUint(s[:4])
 			m, ok2 := parseUint(s[4:])
 			if ok1 && ok2 {
-				return NewDate(int(y), int(m), 1), nil
+				return newDateChecked(int(y), int(m), 1)
 			}
 		}
 		// YYYY
