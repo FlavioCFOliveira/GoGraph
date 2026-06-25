@@ -288,8 +288,12 @@ func (op *ShortestPath) bfsShortestPath(src, dst uint64) (expr.Value, bool, erro
 		if op.minHops == 0 {
 			return expr.ListValue{expr.IntegerValue(int64(src))}, true, nil
 		}
-		// minHops >= 1 forbids the zero-length path; fall through to search a
-		// genuine cycle back to src.
+		// minHops >= 1 forbids the zero-length path: search for the shortest
+		// non-trivial cycle back to src (a self-loop, or a longer closed
+		// trail). The plain BFS below pre-marks src visited at level 0, so it
+		// can never take the closing edge back to src — a dedicated
+		// cycle-aware search is required (#1779).
+		return op.bfsShortestCycle(src)
 	}
 
 	// pred[nodeID] = the single predecessor entry that first discovered nodeID.
@@ -336,6 +340,185 @@ func (op *ShortestPath) bfsShortestPath(src, dst uint64) (expr.Value, bool, erro
 		return expr.Null, false, nil
 	}
 	return op.reconstructList(pred, src, dst), true, nil
+}
+
+// bfsShortestCycle finds the shortest non-trivial closed trail from src back to
+// src (hop count >= 1), honouring relationship-uniqueness.
+//
+// Two algorithms are used depending on traversal direction (#1779):
+//
+//   - DirOut (the strictly forward `(s)-[*1..]->(s)` form): a node-keyed
+//     single-predecessor BFS that treats any edge whose head is src as a
+//     closing edge (see [ShortestPath.bfsShortestCycleForward]). This is sound
+//     for forward-only traversal because a forward arc m->src is a distinct
+//     relationship from the forward prefix arcs (per-arc identity), and the
+//     prefix walk rejects any handle reuse.
+//
+//   - DirBoth / DirIn (the undirected `(s)-[*1..]-(s)` or reverse form): when
+//     an undirected/anti-parallel edge is one handle traversable both ways, the
+//     node-keyed decomposition is UNSOUND — the closing edge {m,src} can be the
+//     same handle as the shortest-prefix edge {src,m}, so it would miss the true
+//     shortest edge-simple cycle (the a-b-c-a triangle trap). The Itai & Rodeh
+//     1978 branch-collision algorithm is used instead (see
+//     [ShortestPath.bfsShortestCycleBranch]).
+func (op *ShortestPath) bfsShortestCycle(src uint64) (expr.Value, bool, error) {
+	return op.bfsShortestCycleForward(src)
+}
+
+// bfsShortestCycleForward is the forward-only (DirOut) shortest-cycle search:
+// the shortest cycle length is L* = min over in-neighbours m of src of
+// (dist(src, m) + 1). A shortest src->m path followed by the closing edge
+// m->src is an optimal witness; for L* >= 3 the witness is automatically
+// edge-simple (a shortest path from src is node-simple and never re-enters
+// src). The prefix-reuse guard ([ShortestPath.prefixReusesEdge]) rejects the
+// L* == 2 case where the closing arc would reuse the opening arc's handle. A
+// self-loop src->src is the L* == 1 case, captured at seeding.
+func (op *ShortestPath) bfsShortestCycleForward(src uint64) (expr.Value, bool, error) {
+	// pred[nodeID] = the single predecessor entry that first discovered nodeID
+	// (excluding src, which is the cycle anchor and never a discovery target).
+	pred := make(map[uint64]spPredEntry)
+
+	// closing records the edge that returns to src and the node it left from.
+	var (
+		closingParent uint64
+		closingPos    uint64
+		closingFwd    bool
+		found         bool
+	)
+
+	// expandFromCycle scans node's forward/reverse edges. A neighbour == src is
+	// the closing hop; any other unvisited neighbour is a normal discovery.
+	// The closing edge is rejected if its physical relationship is already on
+	// the src->node prefix (relationship-uniqueness). The prefix is a shortest
+	// path from src so it is node-simple; the only feasible reuse is an
+	// undirected/anti-parallel edge re-traversed in the opposite direction
+	// (which shares its handle), but the prefix walk covers the general case.
+	expandFromCycle := func(node uint64, _ int) []uint64 {
+		var next []uint64
+		scan := func(isFwd bool) {
+			verts, edges := op.revVerts, op.revEdges
+			if isFwd {
+				verts, edges = op.fwdVerts, op.fwdEdges
+			}
+			if node+1 >= uint64(len(verts)) {
+				return
+			}
+			for pos := verts[node]; pos < verts[node+1]; pos++ {
+				if !op.passesTypeFilter(pos, isFwd) {
+					continue
+				}
+				neighbour := uint64(edges[pos])
+				if neighbour == src {
+					// Closing edge back to src. The first edge-simple closing
+					// edge found at this (minimum) BFS level wins.
+					if found {
+						continue
+					}
+					if op.prefixReusesEdge(pred, src, node, op.relHandle(pos, isFwd)) {
+						continue
+					}
+					closingParent = node
+					closingPos = pos
+					closingFwd = isFwd
+					found = true
+					continue
+				}
+				if _, visited := pred[neighbour]; visited {
+					continue
+				}
+				pred[neighbour] = spPredEntry{parent: node, rawPos: pos, fwd: isFwd}
+				next = append(next, neighbour)
+			}
+		}
+		if op.dir != DirIn {
+			scan(true)
+		}
+		if op.dir != DirOut && op.revVerts != nil {
+			scan(false)
+		}
+		return next
+	}
+
+	// Level-1 seeding from src. A self-loop src->src closes the cycle at length 1.
+	queue := expandFromCycle(src, 1)
+	level := 1
+
+	for !found && len(queue) > 0 {
+		if err := op.ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		level++
+		if op.maxHops != shortestNoMaxHops && level > op.maxHops {
+			break
+		}
+		var next []uint64
+		for _, node := range queue {
+			next = append(next, expandFromCycle(node, level)...)
+		}
+		queue = next
+	}
+
+	if !found {
+		return expr.Null, false, nil
+	}
+	if level < op.minHops {
+		return expr.Null, false, nil
+	}
+
+	// Reconstruct: walk pred from closingParent back to src (the src->...->m
+	// prefix), then append the closing edge m->src.
+	var hops []hop
+	cur := closingParent
+	for cur != src {
+		entry := pred[cur]
+		fwdPos, reversed := op.resolveFwdPos(entry)
+		hops = append(hops, hop{dstID: cur, fwdPos: fwdPos, reversed: reversed})
+		cur = entry.parent
+	}
+	for i, j := 0, len(hops)-1; i < j; i, j = i+1, j-1 {
+		hops[i], hops[j] = hops[j], hops[i]
+	}
+	// Closing hop m->src.
+	closeFwd, closeRev := op.resolveFwdPos(spPredEntry{parent: closingParent, rawPos: closingPos, fwd: closingFwd})
+	hops = append(hops, hop{dstID: src, fwdPos: closeFwd, reversed: closeRev})
+	return buildHopList(src, hops), true, nil
+}
+
+// relHandle returns the stable per-edge identity of the relationship at CSR
+// position pos (forward CSR when isFwd, otherwise reverse CSR). It uses the
+// per-slot stable handle when available — essential for an undirected/
+// anti-parallel edge, whose two stored arcs occupy DIFFERENT CSR positions but
+// share ONE handle, so a handle comparison recognises a reverse re-traversal of
+// the same physical edge. When handles are absent (a simple directed snapshot
+// with no parallel edges) it falls back to the handle-disambiguated forward
+// position, which is unique per relationship there.
+func (op *ShortestPath) relHandle(pos uint64, isFwd bool) uint64 {
+	if isFwd {
+		if op.fwdHandles != nil && pos < uint64(len(op.fwdHandles)) {
+			return op.fwdHandles[pos]
+		}
+		return pos
+	}
+	if op.revHandles != nil && pos < uint64(len(op.revHandles)) {
+		return op.revHandles[pos]
+	}
+	return op.resolvedFwdPosOrSelf(pos)
+}
+
+// prefixReusesEdge reports whether the relationship identified by handle h
+// already appears on the shortest src->node prefix recorded in pred. The walk
+// terminates at src (the cycle anchor, absent from pred). Used to enforce
+// relationship-uniqueness on the closing edge of a cycle.
+func (op *ShortestPath) prefixReusesEdge(pred map[uint64]spPredEntry, src, node, h uint64) bool {
+	cur := node
+	for cur != src {
+		entry := pred[cur]
+		if op.relHandle(entry.rawPos, entry.fwd) == h {
+			return true
+		}
+		cur = entry.parent
+	}
+	return false
 }
 
 // spExpand explores edges of node, recording new discoveries in pred. isFwd
@@ -610,8 +793,13 @@ func (op *AllShortestPaths) Next(out *Row) (bool, error) {
 // bfsAllShortest finds all shortest paths from src to dst using
 // level-synchronous BFS with a multi-predecessor map.
 func (op *AllShortestPaths) bfsAllShortest(src, dst uint64) ([]expr.ListValue, error) {
-	if src == dst && op.minHops == 0 {
-		return []expr.ListValue{{expr.IntegerValue(int64(src))}}, nil
+	if src == dst {
+		if op.minHops == 0 {
+			return []expr.ListValue{{expr.IntegerValue(int64(src))}}, nil
+		}
+		// minHops >= 1: enumerate all shortest non-trivial cycles back to src
+		// (#1779). Plain BFS cannot close the cycle (src is marked at level 0).
+		return op.bfsAllShortestCycle(src)
 	}
 
 	// preds[nodeID] = all predecessor entries that reach nodeID at the shortest
@@ -741,6 +929,195 @@ func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src,
 		}
 	}
 	return paths, nil
+}
+
+// bfsAllShortestCycle enumerates every shortest non-trivial closed trail from
+// src back to src (hop count >= 1), honouring relationship-uniqueness. Like the
+// single-cycle case (#1779), src is NOT a discovery target in the
+// multi-predecessor map; every edge whose head is src is a candidate closing
+// edge. The minimum closing level L* fixes the cycle length; all closing edges
+// found at level L* — combined with all shortest src->m prefixes — yield the
+// complete set. Each reconstructed path is checked for relationship-uniqueness
+// (a per-path relationship-id set); this only ever rejects a 2-cycle that
+// reuses the same physical edge, but is coded generally so the edge-simplicity
+// invariant is explicit.
+func (op *AllShortestPaths) bfsAllShortestCycle(src uint64) ([]expr.ListValue, error) {
+	// preds[node] = all predecessor entries reaching node at its shortest BFS
+	// distance from src (src excluded). dist[node] = that shortest distance.
+	preds := make(map[uint64][]aspPredEntry)
+	dist := make(map[uint64]int)
+
+	// closings = the predecessor entries of src itself (edges m->src) recorded
+	// at the minimum closing level. closeLevel is that level (== L*).
+	var closings []aspPredEntry
+	closeLevel := -1
+
+	expand := func(node uint64, level int) []uint64 {
+		var next []uint64
+		scan := func(isFwd bool) {
+			verts, edges := op.revVerts, op.revEdges
+			if isFwd {
+				verts, edges = op.fwdVerts, op.fwdEdges
+			}
+			if node+1 >= uint64(len(verts)) {
+				return
+			}
+			for pos := verts[node]; pos < verts[node+1]; pos++ {
+				if !op.passesTypeFilter(pos, isFwd) {
+					continue
+				}
+				neighbour := uint64(edges[pos])
+				if neighbour == src {
+					// Closing edge back to src. Record every such edge found at
+					// the minimum closing level (later levels are longer cycles
+					// and are discarded).
+					if closeLevel == -1 {
+						closeLevel = level
+					}
+					if level == closeLevel {
+						closings = append(closings, aspPredEntry{parent: node, rawPos: pos, fwd: isFwd})
+					}
+					continue
+				}
+				existingDist, visited := dist[neighbour]
+				if visited && existingDist < level {
+					continue
+				}
+				if !visited {
+					dist[neighbour] = level
+					next = append(next, neighbour)
+				}
+				preds[neighbour] = append(preds[neighbour], aspPredEntry{parent: node, rawPos: pos, fwd: isFwd})
+			}
+		}
+		if op.dir != DirIn {
+			scan(true)
+		}
+		if op.dir != DirOut && op.revVerts != nil {
+			scan(false)
+		}
+		return next
+	}
+
+	// Level-1 seeding from src (a self-loop closes at length 1).
+	queue := expand(src, 1)
+	for level := 2; len(queue) > 0; level++ {
+		if err := op.ctx.Err(); err != nil {
+			return nil, err
+		}
+		// Stop once we have started a level beyond the closing level: no longer
+		// cycle can be shortest.
+		if closeLevel != -1 && level > closeLevel {
+			break
+		}
+		if op.maxHops != shortestNoMaxHops && level > op.maxHops {
+			break
+		}
+		var next []uint64
+		for _, node := range queue {
+			next = append(next, expand(node, level)...)
+		}
+		queue = next
+	}
+
+	if closeLevel == -1 || closeLevel < op.minHops {
+		return nil, nil
+	}
+
+	return op.reconstructAllCycles(preds, src, closings)
+}
+
+// reconstructAllCycles enumerates every shortest cycle: for each closing edge
+// m->src, every shortest src->m prefix is reconstructed (via the
+// multi-predecessor DAG) and the closing edge appended. Paths that repeat a
+// relationship id are rejected (the edge-simplicity guard). It honours
+// op.ctx periodically like [reconstructAll] (#1780).
+func (op *AllShortestPaths) reconstructAllCycles(preds map[uint64][]aspPredEntry, src uint64, closings []aspPredEntry) ([]expr.ListValue, error) {
+	type frame struct {
+		node    uint64
+		partial []hop    // hops collected so far, in reverse order (src-side end → closing-side)
+		usedRel []uint64 // relationship ids already on this partial (edge-simplicity)
+	}
+
+	var paths []expr.ListValue
+	const ctxCheckEvery = 1024
+	iter := 0
+
+	for _, ce := range closings {
+		closeFwd, closeRev := op.resolveFwdPos(ce)
+		// Seed the walk at the closing edge's tail (m), with the closing hop
+		// m->src already placed as the last hop. The edge-simplicity set keys on
+		// the stable per-edge handle (op.relHandle) so an undirected/
+		// anti-parallel edge re-traversed in the opposite direction is rejected
+		// even though its two arcs occupy different CSR positions.
+		stack := []frame{{
+			node:    ce.parent,
+			partial: []hop{{dstID: src, fwdPos: closeFwd, reversed: closeRev}},
+			usedRel: []uint64{op.relHandle(ce.rawPos, ce.fwd)},
+		}}
+		for len(stack) > 0 {
+			if iter++; iter&(ctxCheckEvery-1) == 0 {
+				if err := op.ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+
+			if top.node == src {
+				// Reverse partial (closing-end → src) into src→...→src order.
+				hops := make([]hop, len(top.partial))
+				for i := range top.partial {
+					hops[i] = top.partial[len(top.partial)-1-i]
+				}
+				paths = append(paths, buildHopList(src, hops))
+				continue
+			}
+
+			for _, entry := range preds[top.node] {
+				fwdPos, reversed := op.resolveFwdPos(entry)
+				h := op.relHandle(entry.rawPos, entry.fwd)
+				// Edge-simplicity: reject reuse of an already-traversed
+				// relationship (only fires for 2-cycles in practice).
+				if containsRel(top.usedRel, h) {
+					continue
+				}
+				newPartial := make([]hop, len(top.partial)+1)
+				copy(newPartial, top.partial)
+				newPartial[len(top.partial)] = hop{dstID: top.node, fwdPos: fwdPos, reversed: reversed}
+				newUsed := make([]uint64, len(top.usedRel)+1)
+				copy(newUsed, top.usedRel)
+				newUsed[len(top.usedRel)] = h
+				stack = append(stack, frame{node: entry.parent, partial: newPartial, usedRel: newUsed})
+			}
+		}
+	}
+	return paths, nil
+}
+
+// relHandle mirrors [ShortestPath.relHandle]: the stable per-edge identity used
+// for the cycle edge-simplicity set.
+func (op *AllShortestPaths) relHandle(pos uint64, isFwd bool) uint64 {
+	if isFwd {
+		if op.fwdHandles != nil && pos < uint64(len(op.fwdHandles)) {
+			return op.fwdHandles[pos]
+		}
+		return pos
+	}
+	if op.revHandles != nil && pos < uint64(len(op.revHandles)) {
+		return op.revHandles[pos]
+	}
+	return op.resolvedFwdPosOrSelf(pos)
+}
+
+// containsRel reports whether relationship id r is already present in rs.
+func containsRel(rs []uint64, r uint64) bool {
+	for _, x := range rs {
+		if x == r {
+			return true
+		}
+	}
+	return false
 }
 
 // passesTypeFilter mirrors [ShortestPath.passesTypeFilter].

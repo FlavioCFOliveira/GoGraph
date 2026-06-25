@@ -364,3 +364,39 @@ them is not mistaken for a working feature.
   grammar change plus an ANTLR regen (`make generate-cypher-parser`, which needs
   a JVM + the ANTLR jar). Tracked for implementation; pinned by a parser test
   asserting the `SyntaxError`.
+
+- **`shortestPath`/`allShortestPaths` over an UNDIRECTED pattern with the same
+  source and destination** (`shortestPath((a)-[*1..]-(a))`, the shortest-cycle
+  case): **under-reports — never wrong.** The DIRECTED form
+  (`shortestPath((a)-[*1..]->(a))`) is fully supported and returns the shortest
+  edge-simple cycle (a self-loop, a directed 2-cycle of two distinct arcs, or a
+  longer directed cycle); the `*0..` zero-length self path returns length 0
+  (#1779). The UNDIRECTED form is the open gap: an undirected edge is stored as
+  two CSR arcs sharing one stable handle, so a node-keyed BFS cannot find the
+  undirected shortest cycle (e.g. the `a-b-c-a` triangle) without re-traversing
+  a shared-handle edge. The engine deliberately **declines** such a closure —
+  it returns **no row** rather than emit an edge-reusing (invalid) cycle, so the
+  relationship-uniqueness invariant is never violated; it simply under-reports
+  the true length-3 cycle. The correct fix is the Itai & Rodeh 1978
+  branch-collision (minimum-circuit-through-a-vertex) algorithm; it is tracked
+  as a follow-up. There are **zero** `shortestPath`/`allShortestPaths` scenarios
+  in the execution TCK, so neither the directed support nor this undirected gap
+  affects the 3 897/3 897 baseline. Pinned by
+  `cypher/shortest_cycle_undirected_test.go`, which asserts the undirected
+  triangle never yields a cycle of length < 3 (i.e. never an invalid one).
+
+- **Whole-path predicates fused onto `shortestPath`/`allShortestPaths`**
+  (`MATCH p = shortestPath((a)-[*]->(c)) WHERE length(p) > 1 ...`): **applied as
+  a post-filter, not during the search.** In Neo4j, a predicate that must
+  inspect the whole matched path (such as `length(p) > 1`) triggers an
+  exhaustive search that returns the shortest path *satisfying* the predicate.
+  GoGraph instead computes the single unconstrained shortest path and then
+  filters it with a `Selection` above the operator, so when a shorter path fails
+  the predicate the row is dropped even though a longer satisfying path exists
+  (e.g. with a direct `a->c` edge of length 1 and an `a->b->c` path of length 2,
+  `WHERE length(p) > 1` yields no row rather than the length-2 path). Predicates
+  that do not reference the whole path are unaffected. Implementing the
+  exhaustive-fallback semantics is a larger change (the operator must receive and
+  evaluate the path predicate during enumeration); it is tracked as a follow-up.
+  Again TCK-invisible (no shortest-path scenarios). Pinned by
+  `cypher/shortest_path_where_test.go`.
