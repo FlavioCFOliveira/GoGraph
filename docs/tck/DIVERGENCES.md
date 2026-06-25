@@ -345,3 +345,22 @@ the full closure record.
   The runner's value-to-string formatter in `cypher/tck/compare_test.go`
   now quotes strings, preserves the `.0` suffix on integer-valued floats,
   and renders nodes as `(:Label)`.
+
+---
+
+## Unimplemented openCypher extensions (outside the TCK)
+
+These features are part of the broader openCypher language but have **no
+scenarios in the execution TCK**, so their absence does not affect the
+3 897/3 897 baseline. They are listed here so the partial support code behind
+them is not mistaken for a working feature.
+
+- **Map projection** (`n{.name, .age, .*, k: expr}`, openCypher CIP2014-12-12):
+  **not reachable.** The `*ast.MapProjection` node, its evaluator
+  (`cypher/expr` `evalMapProjection`) and its semantic-analysis handling exist,
+  but `cypher/parser/grammar/CypherParser.g4` has **no map-projection
+  production**, so the parser rejects `n{...}` with a `SyntaxError` and never
+  constructs the node — the support code is currently dead. Wiring it requires a
+  grammar change plus an ANTLR regen (`make generate-cypher-parser`, which needs
+  a JVM + the ANTLR jar). Tracked for implementation; pinned by a parser test
+  asserting the `SyntaxError`.
