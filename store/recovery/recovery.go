@@ -110,11 +110,15 @@ type Result[N comparable, W any] struct {
 	//   - Genuine corruption inside an already-durable frame
 	//     ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
 	//     [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
-	//     [ErrUnsupportedRecordVersion], or [ErrTransactionTooLarge]). The
-	//     committed prefix up to the bad frame is still placed in Graph for
-	//     diagnostics, but the same error is returned as the function error
-	//     and [Result.IsClean] reports false, so a caller cannot accidentally
-	//     append to a corrupt WAL.
+	//     [wal.ErrTornFrameMasksData], [ErrUnsupportedRecordVersion], or
+	//     [ErrTransactionTooLarge]). The committed prefix up to the bad frame
+	//     is still placed in Graph for diagnostics, but the same error is
+	//     returned as the function error and [Result.IsClean] reports false, so
+	//     a caller cannot accidentally append to a corrupt WAL.
+	//     [wal.ErrTornFrameMasksData] is the case where a corrupt length field
+	//     over-declared past EOF and swallowed the durable frames that followed
+	//     it: it looks like a torn tail but is treated as corruption so those
+	//     frames are never silently dropped.
 	TailErr error
 	// WALTailOffset is the byte offset of the last durable frame boundary
 	// in the WAL. It equals the WAL file size when every frame was
@@ -164,6 +168,14 @@ func tailErrIsCorruption(err error) bool {
 		return false
 	}
 	switch {
+	case errors.Is(err, wal.ErrTornFrameMasksData):
+		// A corrupt length field over-declared past EOF and swallowed durable
+		// frames that follow it. This masquerades as a torn tail but is genuine
+		// mid-stream corruption: the swallowed frames would be silently lost.
+		// Checked BEFORE the benign ErrTornFrame case. (The sentinel is
+		// distinct and does not wrap ErrTornFrame, so the ordering is
+		// belt-and-braces, not load-bearing.)
+		return true
 	case errors.Is(err, wal.ErrTornFrame):
 		return false
 	case errors.Is(err, wal.ErrCRCMismatch),

@@ -56,6 +56,17 @@ var (
 	// ErrTornFrame indicates the underlying reader returned EOF
 	// before the frame was fully read.
 	ErrTornFrame = errors.New("wal: torn frame at end of input")
+	// ErrTornFrameMasksData indicates a frame's declared payload length
+	// over-declared past the end of input AND the bytes it would have
+	// consumed contain at least one further valid (CRC-checking) frame.
+	// This is genuine mid-stream corruption masquerading as a benign torn
+	// tail: a corrupt length field swallowed durable frames that follow it.
+	// Unlike [ErrTornFrame] (a benign final partial write), this is a hard
+	// error — it MUST fail-stop so the durable frames the bad length hid are
+	// never silently dropped. It is a DISTINCT sentinel (it deliberately does
+	// not wrap [ErrTornFrame]) so recovery's corruption classifier treats it
+	// as corruption rather than a benign tail.
+	ErrTornFrameMasksData = errors.New("wal: torn frame hides later valid frames (corrupt length)")
 	// ErrFrameTooLarge indicates the frame's declared payload length
 	// exceeds maxFrameSize. A length field this large is treated as
 	// corruption: the frame is rejected before any allocation, so a
@@ -158,9 +169,28 @@ func Decode(r io.Reader) (Frame, error) {
 
 	payload := make([]byte, plen)
 	if plen > 0 {
-		if _, err := io.ReadFull(r, payload); err != nil {
+		if n, err := io.ReadFull(r, payload); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				metrics.IncCounter("store.wal.Decode.errors", 1)
+				// The payload read ran short of the declared length, hitting
+				// the end of input. This is normally a benign torn tail: the
+				// writer crashed mid-write of the last frame. But a corrupted
+				// length field that OVER-declares past EOF produces the same
+				// EOF — and in that case the bytes the over-long read consumed
+				// (payload[:n]) are not opaque payload at all, they are the
+				// durable frame(s) that physically follow this one. If a valid,
+				// CRC-checking frame begins anywhere inside those consumed
+				// bytes, this "torn" frame is genuine mid-stream corruption
+				// that would otherwise silently swallow durable committed data.
+				// Promote it to a hard error so recovery fail-stops instead of
+				// accepting a truncated prefix as clean. A benign tail's opaque
+				// payload bytes do not form a CRC-valid frame except with the
+				// ~2^-32 per-offset probability of a CRC collision, so a true
+				// torn tail is not misclassified.
+				if embedsValidFrame(payload[:n]) {
+					metrics.IncCounter("store.wal.Decode.tornMasksData", 1)
+					return Frame{}, ErrTornFrameMasksData
+				}
 				return Frame{}, ErrTornFrame
 			}
 			metrics.IncCounter("store.wal.Decode.errors", 1)
@@ -174,4 +204,57 @@ func Decode(r io.Reader) (Frame, error) {
 		return Frame{}, ErrCRCMismatch
 	}
 	return Frame{Version: version, Payload: payload}, nil
+}
+
+// embedsValidFrame reports whether buf contains, at any byte offset, the start
+// of a structurally complete and CRC-valid WAL frame. It is the discriminator
+// used by [Decode] to tell a benign torn tail (the writer crashed mid-write of
+// the final frame, so buf holds only that frame's opaque partial payload) from
+// genuine corruption (a frame's length field over-declared past EOF, so the
+// over-long read consumed the durable frames that physically follow it, and buf
+// holds those frames' bytes).
+//
+// The check is deliberately strict: a candidate frame must have the magic, a
+// supported version, a length that fits entirely within buf, AND a CRC32C that
+// matches the bytes it covers. The CRC match is the load-bearing signal — it is
+// what makes a false positive (opaque payload bytes accidentally read as a
+// frame) a ~2^-32 per-offset event rather than a structural near-certainty.
+//
+// The scan offset advances one byte at a time because the start of the swallowed
+// frame sits at the true (now-unknown) end of the corrupt frame's real payload,
+// which need not be aligned to any boundary the reader can compute from the
+// corrupt header. The scan is bounded by len(buf) and runs only on the torn
+// path (once, during recovery), so its O(len(buf)) cost is not on any hot path.
+func embedsValidFrame(buf []byte) bool {
+	// A frame needs at least a full header plus the CRC bytes to be verifiable.
+	for off := 0; off+HeaderSize <= len(buf); off++ {
+		if buf[off] != Magic[0] || buf[off+1] != Magic[1] ||
+			buf[off+2] != Magic[2] || buf[off+3] != Magic[3] {
+			continue
+		}
+		version := binary.LittleEndian.Uint16(buf[off+4 : off+6])
+		if version == 0 || version > CurrentVersion {
+			continue
+		}
+		plen := binary.LittleEndian.Uint32(buf[off+6 : off+10])
+		if plen > maxFrameSize {
+			continue
+		}
+		end := off + HeaderSize + int(plen)
+		if end > len(buf) || end < off {
+			// The candidate frame would extend past the bytes we actually
+			// have, so its CRC cannot be verified here. A genuinely swallowed
+			// frame is fully present in buf (it was durable on disk before the
+			// corrupt one), so an unverifiable candidate is not the signal we
+			// want; keep scanning.
+			continue
+		}
+		expectCRC := binary.LittleEndian.Uint32(buf[off+10 : off+14])
+		gotCRC := crc32.Update(0, castagnoli, buf[off:off+10])
+		gotCRC = crc32.Update(gotCRC, castagnoli, buf[off+HeaderSize:end])
+		if gotCRC == expectCRC {
+			return true
+		}
+	}
+	return false
 }

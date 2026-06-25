@@ -43,6 +43,21 @@ Torn writes — partial last frames — are detected by the length /
 CRC mismatch and reported as `ErrTornFrame`. Readers stop cleanly
 at the last fully-readable frame; recovery resumes from there.
 
+A corrupt `length` field that *over-declares* past the end of the
+file produces the same end-of-input that a genuine torn tail does,
+because the decoder reaches EOF while reading the (impossibly long)
+payload before it can verify the CRC that covers the length field.
+To stop such corruption from masquerading as a benign tail — which
+would silently discard every durable frame physically located after
+the corrupt one — the decoder inspects the bytes the over-long read
+actually consumed. If a structurally complete, CRC-valid frame begins
+anywhere inside those bytes, the consumed region was not opaque
+payload but the durable frames that follow, so the decoder returns
+`ErrTornFrameMasksData` (a hard error) instead of `ErrTornFrame`.
+A real torn tail's opaque payload bytes match a CRC-valid frame only
+with the ~2⁻³² per-offset probability of a CRC collision, so a
+legitimate crash tail is not misclassified.
+
 As a defence-in-depth measure, the decoder rejects any frame whose
 declared `length` exceeds 1 GiB (`maxFrameSize`) with `ErrFrameTooLarge`
 *before* allocating the payload buffer. The `length` field is a uint32,
