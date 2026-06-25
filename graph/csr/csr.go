@@ -17,6 +17,8 @@
 package csr
 
 import (
+	"errors"
+	"fmt"
 	"iter"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -152,7 +154,12 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 // CSR returned by [BuildFromAdjList]. The handle column is always nil;
 // loaders that need stable per-slot edge handles must use the adjacency
 // path. The function performs no validation beyond what the type system
-// enforces — supplying inconsistent arrays yields a malformed snapshot.
+// enforces — it is the zero-copy bulk-load fast path and intentionally
+// carries no O(E) scan. Supplying inconsistent arrays yields a malformed
+// snapshot whose later traversal panics with a raw out-of-range index.
+// A caller that does not fully trust its inputs should call [CSR.Validate]
+// once after construction to obtain a typed [ErrMalformedCSR] at the
+// boundary instead.
 func FromArrays[W any](vertices []uint64, edges []graph.NodeID, weights []W, order, size uint64) *CSR[W] {
 	return &CSR[W]{
 		vertices: vertices,
@@ -161,6 +168,45 @@ func FromArrays[W any](vertices []uint64, edges []graph.NodeID, weights []W, ord
 		order:    order,
 		size:     size,
 	}
+}
+
+// ErrMalformedCSR is returned (wrapped) by [CSR.Validate] when the snapshot's
+// backing arrays are internally inconsistent — for example an out-of-range
+// destination NodeID or a non-monotonic offsets array. It signals a caller
+// contract violation at the [FromArrays] boundary, not a runtime fault.
+var ErrMalformedCSR = errors.New("csr: malformed snapshot")
+
+// Validate checks that the snapshot's backing arrays are internally
+// consistent and returns a wrapped [ErrMalformedCSR] describing the first
+// violation, or nil when the snapshot is well-formed. It is the opt-in
+// boundary check for callers of [FromArrays] that pass untrusted arrays;
+// snapshots produced by [BuildFromAdjList] / [BuildReverse] are always
+// well-formed and need not be validated.
+//
+// Validate is O(order + size). It does not allocate and never panics.
+func (c *CSR[W]) Validate() error {
+	if len(c.vertices) == 0 {
+		return fmt.Errorf("%w: vertices offsets array is empty (must be at least []uint64{0})", ErrMalformedCSR)
+	}
+	last := len(c.vertices) - 1
+	if uint64(len(c.edges)) != c.vertices[last] {
+		return fmt.Errorf("%w: vertices[%d]=%d does not equal len(edges)=%d", ErrMalformedCSR, last, c.vertices[last], len(c.edges))
+	}
+	for i := 1; i < len(c.vertices); i++ {
+		if c.vertices[i] < c.vertices[i-1] {
+			return fmt.Errorf("%w: offsets not monotonic non-decreasing at vertices[%d]=%d < vertices[%d]=%d", ErrMalformedCSR, i, c.vertices[i], i-1, c.vertices[i-1])
+		}
+	}
+	if c.weights != nil && len(c.weights) != len(c.edges) {
+		return fmt.Errorf("%w: len(weights)=%d does not equal len(edges)=%d", ErrMalformedCSR, len(c.weights), len(c.edges))
+	}
+	maxNode := uint64(last) // valid destination NodeIDs are in [0, last)
+	for k, dst := range c.edges {
+		if uint64(dst) >= maxNode {
+			return fmt.Errorf("%w: edges[%d]=%d is out of range for a snapshot of %d nodes", ErrMalformedCSR, k, dst, maxNode)
+		}
+	}
+	return nil
 }
 
 // hasWeights returns true unless W is the empty struct, in which case
