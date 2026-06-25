@@ -29,6 +29,17 @@ var ErrNoPath = errors.New("search: no path between endpoints")
 // validates that h never returns NaN or ±Inf at each push; a poisoned
 // heuristic returns [ErrInvalidInput] rather than a spurious [ErrNoPath].
 //
+// Integer-Weight overflow precondition. The priority-queue key is the
+// f-score f = g + h, accumulated in W's own arithmetic with no overflow
+// guard on the hot path (mirroring [Dijkstra]'s cumulative-distance
+// precondition). For an integer Weight type the caller must ensure that
+// maxEdgeWeight·diameter + maxHeuristic fits W; otherwise f wraps and the
+// heap mis-orders exploration. Note the returned cost is dist[dst] — the
+// true g-value, tracked separately from the f-score key — so it remains
+// correct even if an f-score wraps; only the exploration order (hence
+// which equal-cost alternative is settled) is affected. The NaN/±Inf gate
+// above covers only floating-point W.
+//
 // For hot loops, prefer the zero-allocation primitive [AStarInto].
 func AStar[W Weight](
 	c *csr.CSR[W],
