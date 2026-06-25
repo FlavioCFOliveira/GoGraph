@@ -259,11 +259,14 @@ func (a *SumAgg) Step(v expr.Value) error {
 	return nil
 }
 
-// Result returns NULL if no non-NULL values were accumulated, otherwise the
-// sum as IntegerValue or FloatValue.
+// Result returns the sum as IntegerValue or FloatValue. Per openCypher (Neo4j
+// Cypher Manual: "sum(null) returns 0"; null values are excluded), an empty or
+// all-NULL input yields integer 0 — NOT NULL. This mirrors the EagerAggregation
+// contract (cypher/exec/eager_aggregation.go: "sum → 0"); contrast avg, which
+// returns NULL on no input.
 func (a *SumAgg) Result() expr.Value {
 	if !a.hasAny {
-		return expr.Null
+		return expr.IntegerValue(0)
 	}
 	if a.isF {
 		return expr.FloatValue(a.fSum)

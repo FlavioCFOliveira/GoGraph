@@ -147,16 +147,18 @@ func TestSumAgg(t *testing.T) {
 			t.Errorf("got %v, want 4", result)
 		}
 	})
-	t.Run("all-null-returns-null", func(t *testing.T) {
+	// openCypher: "Any null values are excluded from the calculation. sum(null)
+	// returns 0." So an all-NULL or empty input yields integer 0, NOT NULL (#1759).
+	t.Run("all-null-returns-zero", func(t *testing.T) {
 		result := feedAll(newAgg(funcs.NewSumAgg()), expr.Null, expr.Null)
-		if !expr.IsNull(result) {
-			t.Errorf("got %v, want NULL", result)
+		if result != expr.IntegerValue(0) {
+			t.Errorf("got %v, want IntegerValue(0)", result)
 		}
 	})
-	t.Run("empty-returns-null", func(t *testing.T) {
+	t.Run("empty-returns-zero", func(t *testing.T) {
 		result := feedAll(newAgg(funcs.NewSumAgg()))
-		if !expr.IsNull(result) {
-			t.Errorf("got %v, want NULL", result)
+		if result != expr.IntegerValue(0) {
+			t.Errorf("got %v, want IntegerValue(0)", result)
 		}
 	})
 }

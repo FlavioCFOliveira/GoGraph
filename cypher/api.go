@@ -6217,9 +6217,10 @@ func buildEagerAggregation(
 		}
 		// DISTINCT inside aggregation: wrap each per-group instance with a
 		// "seen-values" set so repeated identical inputs are skipped.
-		// Equality uses [expr.Value.Hash] + per-value Equal (via
-		// IsTruthy(a.Equal(b))), so list/map values with the same shape
-		// dedup correctly.
+		// Dedup uses equivalence semantics ([expr.EquivalentHash] +
+		// [expr.Equivalent]) — NOT comparability — so NaN ≡ NaN and nulls
+		// nested inside lists/maps dedup correctly, matching the standalone
+		// DISTINCT operator (openCypher CIP2016-06-14 equivalence).
 		if aggExpr.Distinct {
 			inner := factory
 			factory = func() funcs.Aggregator {
@@ -6389,10 +6390,12 @@ func buildEagerAggregation(
 
 // distinctAggregator wraps a [funcs.Aggregator] with a "seen-values" set
 // so the inner Step receives only the first occurrence of each distinct
-// value within the same group. The hash bucket holds full Values so
-// list/map equality (which falls outside a usable Hash collision) still
-// resolves correctly via [expr.Value.Equal]. NULL is silently skipped
-// per openCypher aggregation semantics.
+// value within the same group. Dedup uses openCypher EQUIVALENCE (not
+// comparability): the hash bucket is keyed by [expr.EquivalentHash] and
+// collisions are resolved with [expr.Equivalent], so NaN ≡ NaN and nulls
+// nested inside lists/maps collapse to a single occurrence — identical to
+// the standalone DISTINCT operator (cypher/exec/distinct.go). NULL is
+// silently skipped per openCypher aggregation semantics.
 //
 // distinctAggregator is NOT safe for concurrent use.
 type distinctAggregator struct {
@@ -6415,9 +6418,9 @@ func (d *distinctAggregator) Step(v expr.Value) error {
 		// that behaviour and skip the dedup bookkeeping too.
 		return d.inner.Step(v)
 	}
-	h := v.Hash()
+	h := expr.EquivalentHash(v)
 	for _, prev := range d.seen[h] {
-		if expr.IsTruthy(prev.Equal(v)) {
+		if expr.Equivalent(prev, v) {
 			return nil
 		}
 	}

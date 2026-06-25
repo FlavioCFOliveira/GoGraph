@@ -319,12 +319,11 @@ func TestAggregation_EmptyInputNeutralRow(t *testing.T) {
 	// On empty input, the GlobalAggregateAdapter constructs a fresh aggregator
 	// per slot and calls Result(). The per-aggregator identity element is:
 	//   count(*) / count(x) → IntegerValue(0)
-	//   sum / avg / min / max → expr.Null (no rows ever observed)
+	//   sum → IntegerValue(0)   (openCypher: "sum(null) returns 0"; #1759)
+	//   avg / min / max → expr.Null (no rows ever observed)
 	//   collect → empty ListValue
 	mustInt(t, "c", row["c"], 0)
-	if v := row["s"]; !expr.IsNull(v.(expr.Value)) {
-		t.Errorf("sum on empty = %v, want NULL", v)
-	}
+	mustInt(t, "s", row["s"], 0)
 	if v := row["a"]; !expr.IsNull(v.(expr.Value)) {
 		t.Errorf("avg on empty = %v, want NULL", v)
 	}
