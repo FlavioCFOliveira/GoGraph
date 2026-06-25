@@ -662,7 +662,7 @@ func (op *AllShortestPaths) bfsAllShortest(src, dst uint64) ([]expr.ListValue, e
 		return nil, nil
 	}
 
-	return op.reconstructAll(preds, src, dst), nil
+	return op.reconstructAll(preds, src, dst)
 }
 
 // aspExpand expands edges of node at the given BFS level. isFwd selects forward
@@ -697,8 +697,12 @@ func (op *AllShortestPaths) aspExpand(node uint64, dist map[uint64]int, preds ma
 }
 
 // reconstructAll reconstructs all shortest paths via a stack walk over the
-// predecessor map, walking backwards from dst to src.
-func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src, dst uint64) []expr.ListValue {
+// predecessor map, walking backwards from dst to src. The number of shortest
+// paths can be exponential in a dense/layered graph, so the walk checks
+// op.ctx periodically and aborts with the context error rather than running
+// unbounded — openCypher requires returning ALL shortest paths, but a deadline
+// or cancellation must still interrupt the enumeration (#1780).
+func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src, dst uint64) ([]expr.ListValue, error) {
 	type frame struct {
 		node    uint64
 		partial []hop // hops collected so far, in reverse order (dst→src)
@@ -707,7 +711,14 @@ func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src,
 	var paths []expr.ListValue
 	stack := []frame{{node: dst}}
 
+	const ctxCheckEvery = 1024
+	iter := 0
 	for len(stack) > 0 {
+		if iter++; iter&(ctxCheckEvery-1) == 0 {
+			if err := op.ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		top := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
@@ -729,7 +740,7 @@ func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src,
 			stack = append(stack, frame{node: entry.parent, partial: newPartial})
 		}
 	}
-	return paths
+	return paths, nil
 }
 
 // passesTypeFilter mirrors [ShortestPath.passesTypeFilter].
