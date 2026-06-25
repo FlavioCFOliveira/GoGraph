@@ -51,6 +51,16 @@ type Partition struct {
 // Leiden runs the Traag-Waltman-van Eck Leiden community-detection
 // algorithm on the undirected graph c.
 //
+// # Edge weights are ignored (unit-weight model)
+//
+// Leiden treats every edge as having weight 1.0 regardless of the CSR's
+// weight type W: the modularity objective is computed over unweighted
+// degrees and edge counts. The generic parameter W is accepted only so
+// the same entry point works for any CSR instantiation; the edge weights
+// in c.WeightsSlice() are NOT consulted. Callers that need weighted
+// community detection must not rely on Leiden to honour weights — there
+// is no weighted variant at present. (Reliability audit #1758.)
+//
 // Three phases per pass:
 //  1. Local moving — each node greedily moves to the community that
 //     maximises the modularity gain ΔQ (Newman's formula).

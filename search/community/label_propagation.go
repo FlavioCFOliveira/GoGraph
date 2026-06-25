@@ -23,6 +23,12 @@ func DefaultLabelPropagationOptions() LabelPropagationOptions {
 // neighbours, breaking ties deterministically by the smaller label
 // ID. Converges when no node changes label or after MaxIterations.
 //
+// Edge weights are ignored: a neighbour contributes a unit vote to its
+// label regardless of the CSR's weight type W, which is accepted only so
+// the same entry point works for any CSR instantiation. The weights in
+// c.WeightsSlice() are NOT consulted, and there is no weighted variant.
+// (Reliability audit #1758.)
+//
 // Only live NodeIDs participate; ghost slots receive the sentinel -1
 // in the returned partition.
 //
