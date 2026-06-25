@@ -2,39 +2,21 @@ package cypher_test
 
 // union_test.go — end-to-end tests for UNION and UNION ALL operators (T699).
 //
-// UNION / UNION ALL are parsed and translated to *ir.Union / *ir.UnionAll by
-// the IR layer, but buildPlanEngine currently rejects any plan whose root is
-// not *ir.ProduceResults. As a result all tests below are skipped until the
-// execution engine gains UNION support.
-//
-// Documented behavior when implemented:
+// UNION / UNION ALL are implemented in the execution engine:
 //   - UNION:     deduplicates rows across both legs (set semantics).
 //   - UNION ALL: preserves all rows including duplicates (bag semantics).
 //
-// The skip guard uses a live Run call so the tests auto-enable once the
-// engine is wired.
+// The earlier "not yet implemented" skip guards were stale and have been
+// removed so a future regression fails loudly instead of skipping (#1761).
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
-
-// isUnionUnsupportedErr returns true when the error originates from the engine
-// rejecting a UNION plan root, which is the expected failure mode until UNION
-// execution is implemented.
-func isUnionUnsupportedErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "*ir.Union") || strings.Contains(s, "*ir.UnionAll") ||
-		strings.Contains(s, "unsupported IR node")
-}
 
 // newUnionGraph creates a directed graph with 2 Person nodes (alice, bob) and
 // 2 Movie nodes (matrix, inception). All nodes are created via RunInTx so the
@@ -72,9 +54,6 @@ func TestUnion_TwoBranches_Dedup(t *testing.T) {
 
 	const q = `MATCH (n:Person) RETURN n.name AS name UNION MATCH (m:Movie) RETURN m.title AS name`
 	res, err := eng.Run(context.Background(), q, nil)
-	if isUnionUnsupportedErr(err) {
-		t.Skip("UNION not yet implemented in execution engine")
-	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -100,9 +79,6 @@ func TestUnionAll_TwoBranches_NoDedup(t *testing.T) {
 
 	const q = `MATCH (n:Person) RETURN n.name AS name UNION ALL MATCH (m:Movie) RETURN m.title AS name`
 	res, err := eng.Run(context.Background(), q, nil)
-	if isUnionUnsupportedErr(err) {
-		t.Skip("UNION ALL not yet implemented in execution engine")
-	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -150,9 +126,6 @@ func TestUnion_DedupAcrossLabels(t *testing.T) {
 		MATCH (m:Movie)  RETURN m.title   AS name
 	`
 	res, err := eng.Run(context.Background(), q, nil)
-	if isUnionUnsupportedErr(err) {
-		t.Skip("UNION not yet implemented in execution engine")
-	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -190,9 +163,6 @@ func TestUnionAll_PreservesDuplicates(t *testing.T) {
 		MATCH (n:Actor)  RETURN n.name AS name
 	`
 	res, err := eng.Run(context.Background(), q, nil)
-	if isUnionUnsupportedErr(err) {
-		t.Skip("UNION ALL not yet implemented in execution engine")
-	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

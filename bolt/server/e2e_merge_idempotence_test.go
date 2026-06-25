@@ -1,17 +1,13 @@
 package server_test
 
-// e2e_merge_idempotence_test.go — T802: MERGE idempotence.
+// e2e_merge_idempotence_test.go — T802: MERGE idempotence over the Bolt wire.
 //
-// Known server limitation — MERGE searchFn is a stub:
-//   The cypher engine's MERGE operator always takes the ON CREATE path because
-//   its searchFn always returns no matches (see cypher/api.go near line 1013).
-//   Consequently, a second MERGE creates a second node instead of being a
-//   no-op. The idempotence acceptance criteria (AC#2: second MERGE creates
-//   zero nodes, AC#3: final count is 1) cannot be satisfied with the current
-//   implementation.
-//
-//   This test documents the actual server behaviour and is skipped for AC#2/3
-//   until the MERGE match function is implemented.
+// The cypher engine's MERGE operator matches an existing node via
+// NewMergeSearchFnFromPattern (cypher/api.go), so a second identical MERGE is a
+// no-op rather than a duplicate-create. This test verifies that idempotence
+// end-to-end over Bolt: AC#1 first MERGE creates one node, AC#2 second MERGE
+// creates zero, AC#3 final count is exactly 1. (The skip that previously hid
+// AC#2/AC#3 was stale — the MERGE search function is implemented; #1761.)
 
 import (
 	"context"
@@ -20,11 +16,9 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
-// TestE2E_MergeIdempotence verifies MERGE behaviour.
-//
-// AC#1 (first MERGE creates the node) is verified.
-// AC#2 and AC#3 are skipped because the MERGE searchFn is a stub that always
-// takes ON CREATE, creating a duplicate instead of matching the existing node.
+// TestE2E_MergeIdempotence verifies MERGE idempotence over Bolt:
+// AC#1 first MERGE creates the node, AC#2 second MERGE creates zero nodes,
+// AC#3 final count is exactly 1.
 func TestE2E_MergeIdempotence(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
@@ -49,13 +43,10 @@ func TestE2E_MergeIdempotence(t *testing.T) {
 		t.Errorf("after first MERGE: count = %d, want >= 1", cnt1)
 	}
 
-	// Second MERGE — idempotence not yet implemented.
-	// KNOWN GAP: the MERGE searchFn stub always does ON CREATE, so a second
-	// MERGE will create a duplicate. AC#2 and AC#3 are skipped.
-	t.Skip("MERGE searchFn is a stub — always ON CREATE; second MERGE creates a duplicate. " +
-		"AC#2 (zero nodes created) and AC#3 (final count = 1) cannot be satisfied until " +
-		"the MERGE match function is implemented (see cypher/api.go ~line 1013).")
-
+	// Second MERGE — must match the existing node (idempotence). The engine's
+	// MERGE search function is implemented (NewMergeSearchFnFromPattern), so a
+	// second identical MERGE is a no-op: AC#2 (zero nodes created) and AC#3
+	// (final count = 1) are asserted over the live Bolt wire (#1761).
 	s2 := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer s2.Close(ctx) //nolint:errcheck
 

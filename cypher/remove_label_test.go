@@ -107,8 +107,9 @@ func TestRemoveLabel_MultipleLabelsAtOnce(t *testing.T) {
 	for res.Next() {
 	}
 	if iterErr := res.Err(); iterErr != nil {
-		// If multi-label REMOVE is not yet supported, skip rather than fail.
-		t.Skipf("REMOVE n:Person:Employee not supported: %v", iterErr)
+		// Multi-label REMOVE is implemented; a non-nil error here is a real
+		// regression (#1761 — the stale "not supported" skip was removed).
+		t.Fatalf("REMOVE n:Person:Employee: %v", iterErr)
 	}
 	res.Close()
 
