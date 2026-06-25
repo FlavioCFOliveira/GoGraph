@@ -151,7 +151,12 @@ func BidirectionalDijkstraOnCtx[W Weight](ctx context.Context, c, rev *csr.CSR[W
 			end := verts[uint64(top.node)+1]
 			for k := start; k < end; k++ {
 				nb := edges[k]
-				cand := top.dist + weights[k]
+				// weights nil for a weightless-mode CSR → zero weight (#1776).
+				var w W
+				if weights != nil {
+					w = weights[k]
+				}
+				cand := top.dist + w
 				if !fSt.found[uint64(nb)] || cand < fSt.dist[uint64(nb)] {
 					fSt.dist[uint64(nb)] = cand
 					fSt.parent[uint64(nb)] = top.node
@@ -177,7 +182,12 @@ func BidirectionalDijkstraOnCtx[W Weight](ctx context.Context, c, rev *csr.CSR[W
 			end := revVerts[uint64(top.node)+1]
 			for k := start; k < end; k++ {
 				nb := revEdges[k]
-				cand := top.dist + revWeights[k]
+				// revWeights nil for a weightless-mode CSR → zero weight (#1776).
+				var w W
+				if revWeights != nil {
+					w = revWeights[k]
+				}
+				cand := top.dist + w
 				if !rSt.found[uint64(nb)] || cand < rSt.dist[uint64(nb)] {
 					rSt.dist[uint64(nb)] = cand
 					rSt.parent[uint64(nb)] = top.node

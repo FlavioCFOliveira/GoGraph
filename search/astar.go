@@ -195,7 +195,12 @@ func aStarCore[W Weight](
 		end := verts[uint64(top.node)+1]
 		for k := start; k < end; k++ {
 			nb := edges[k]
-			cand := gCurrent + weights[k]
+			// weights nil for a weightless-mode CSR → zero weight (#1776).
+			var w W
+			if weights != nil {
+				w = weights[k]
+			}
+			cand := gCurrent + w
 			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
 				hNb := h(nb)
 				if floatInvalid(hNb) {

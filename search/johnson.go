@@ -285,13 +285,19 @@ func johnsonPrepare[W Weight](ctx context.Context, c *csr.CSR[W]) (johnsonPlan[W
 	weights := c.WeightsSlice()
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
-	reweighted := make([]W, len(weights))
+	// Size by len(edges), not len(weights): a weightless-mode CSR has nil
+	// weights (len 0) but real edges; the absent column is the zero weight (#1776).
+	reweighted := make([]W, len(edges))
 	for u := 0; u < maxID; u++ {
 		start := verts[u]
 		end := verts[u+1]
 		for k := start; k < end; k++ {
 			v := uint64(edges[k])
-			reweighted[k] = weights[k] + h[u] - h[v]
+			var w W
+			if weights != nil {
+				w = weights[k]
+			}
+			reweighted[k] = w + h[u] - h[v]
 		}
 	}
 	return johnsonPlan[W]{
@@ -401,11 +407,16 @@ func bellmanFordVirtualSource[W Weight](ctx context.Context, c *csr.CSR[W], h []
 		end := verts[uint64(v)+1]
 		for k := start; k < end; k++ {
 			nb := uint64(edges[k])
-			cand := dv + weights[k]
+			// weights nil for a weightless-mode CSR → zero weight (#1776).
+			var w W
+			if weights != nil {
+				w = weights[k]
+			}
+			cand := dv + w
 			// Debug builds (-tags gograph_debug) trap an integer
 			// cumulative-distance overflow in Johnson's reweighting
 			// pass here; a no-op otherwise.
-			assertNoRelaxOverflow(dv, weights[k], cand)
+			assertNoRelaxOverflow(dv, w, cand)
 			if cand < h[nb] {
 				h[nb] = cand
 				if !inQueue[nb] {

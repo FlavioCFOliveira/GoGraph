@@ -324,7 +324,14 @@ func dijkstraCore[W Weight](
 		end := verts[uint64(top.node)+1]
 		for k := start; k < end; k++ {
 			nb := edges[k]
-			cand := top.dist + weights[k]
+			// weights is nil for a weightless-mode CSR (csr.BuildFromAdjList on a
+			// Weightless adjlist, or csr.FromArrays with nil weights); treat the
+			// absent column as the zero weight (#1776), matching FloydWarshall/Prim.
+			var w W
+			if weights != nil {
+				w = weights[k]
+			}
+			cand := top.dist + w
 			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
 				dist[uint64(nb)] = cand
 				parent[uint64(nb)] = top.node
@@ -398,13 +405,18 @@ func dijkstraCoreWithWeights[W Weight](
 		end := verts[uint64(top.node)+1]
 		for k := start; k < end; k++ {
 			nb := edges[k]
-			cand := top.dist + weights[k]
+			// weights nil for a weightless-mode CSR → zero weight (#1776).
+			var w W
+			if weights != nil {
+				w = weights[k]
+			}
+			cand := top.dist + w
 			// Debug builds (-tags gograph_debug) trap an integer
 			// cumulative-distance overflow in Johnson's reweighted
 			// inner Dijkstra here; a no-op otherwise. (The plain
 			// dijkstraCore path is intentionally not instrumented; see
 			// its godoc precondition.)
-			assertNoRelaxOverflow(top.dist, weights[k], cand)
+			assertNoRelaxOverflow(top.dist, w, cand)
 			if !found[uint64(nb)] || cand < dist[uint64(nb)] {
 				dist[uint64(nb)] = cand
 				parent[uint64(nb)] = top.node

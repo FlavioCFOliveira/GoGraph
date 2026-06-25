@@ -186,10 +186,15 @@ func bellmanFordCore[W Weight](
 		end := verts[uint64(v)+1]
 		for k := start; k < end; k++ {
 			nb := uint64(edges[k])
-			cand := dv + weights[k]
+			// weights nil for a weightless-mode CSR → zero weight (#1776).
+			var w W
+			if weights != nil {
+				w = weights[k]
+			}
+			cand := dv + w
 			// Debug builds (-tags gograph_debug) trap an integer
 			// cumulative-distance overflow here; a no-op otherwise.
-			assertNoRelaxOverflow(dv, weights[k], cand)
+			assertNoRelaxOverflow(dv, w, cand)
 			if !found[nb] || cand < dist[nb] {
 				dist[nb] = cand
 				parent[nb] = v
