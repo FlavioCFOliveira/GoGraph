@@ -127,7 +127,10 @@ func serialisePropertyValue(v lpg.PropertyValue) string {
 		return "false"
 	case lpg.PropTime:
 		t, _ := v.Time()
-		return t.UTC().Format(time.RFC3339Nano)
+		// Format in the value's own location so a non-UTC offset round-trips
+		// faithfully (instant AND offset survive), instead of silently
+		// normalising to UTC (#1769). RFC3339Nano renders the offset or "Z".
+		return t.Format(time.RFC3339Nano)
 	case lpg.PropBytes:
 		b, _ := v.Bytes()
 		return base64.StdEncoding.EncodeToString(b)

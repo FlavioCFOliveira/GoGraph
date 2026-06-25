@@ -258,7 +258,10 @@ func encodePropertyValue(pv lpg.PropertyValue) (kind, value string) {
 		return "bool", strconv.FormatBool(b)
 	case lpg.PropTime:
 		t, _ := pv.Time()
-		return "time", t.UTC().Format(time.RFC3339Nano)
+		// Format in the value's own location so a non-UTC offset round-trips
+		// faithfully (instant AND offset survive), instead of silently
+		// normalising to UTC (#1769). RFC3339Nano renders the offset or "Z".
+		return "time", t.Format(time.RFC3339Nano)
 	case lpg.PropBytes:
 		b, _ := pv.Bytes()
 		return "bytes", base64.StdEncoding.EncodeToString(b)
