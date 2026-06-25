@@ -58,6 +58,14 @@ type LoadedSnapshot struct {
 	// entry (older snapshots, or any snapshot taken with no constraints
 	// declared) — the backward-compatibility contract.
 	Constraints ConstraintsReadback
+	// IndexDefs is the durable secondary-index definition set restored from
+	// indexdefs.bin (each index's label/property/kind/name). It is empty for
+	// snapshots that carry no indexdefs.bin entry (older snapshots, or any
+	// snapshot taken with no indexes declared) — the backward-compatibility
+	// contract. It is DISTINCT from [LoadedSnapshot.Indexes], which holds the
+	// optional per-index byte payloads; the definition set is what recovery
+	// rebuilds each index from (#1755).
+	IndexDefs IndexDefsReadback
 }
 
 // WriteSnapshotFull is the v2/v3 high-level helper: it lays out a
@@ -138,7 +146,7 @@ func WriteSnapshotFullCtx[N comparable, W any](
 	// No codec: the mapper is persisted only for string-keyed graphs
 	// (the historical v3 behaviour). writeMapperIfStringKeyed performs
 	// the string-only probe.
-	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 		return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
 	})
 }
@@ -160,7 +168,7 @@ func WriteSnapshotFullWithMapperCodecCtx[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecCtx.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 		return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
 	})
 }
@@ -182,12 +190,40 @@ func WriteSnapshotFullWithConstraints[N comparable, W any](
 	constraints []ConstraintSpec,
 ) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraints").Stop()
-	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints,
+	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, nil,
 		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 			return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
 		})
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithConstraints.errors", 1)
+	}
+	return err
+}
+
+// WriteSnapshotFullWithConstraintsAndIndexDefs is [WriteSnapshotFullWithConstraints]
+// plus a durable indexdefs.bin component carrying the engine's secondary-index
+// definition set. It is the snapshot entry point a checkpointer must use when
+// the engine has indexes declared: without the component a checkpoint that
+// truncated the WAL prefix which first declared an index would lose that index
+// definition (a durability defect — #1755), the index analogue of the
+// constraints case.
+//
+// Both constraints and indexDefs may be nil or empty; when both are empty the
+// output is byte-identical to [WriteSnapshotFull].
+func WriteSnapshotFullWithConstraintsAndIndexDefs[N comparable, W any](
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	constraints []ConstraintSpec,
+	indexDefs []IndexDefSpec,
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs").Stop()
+	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, indexDefs,
+		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+			return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
+		})
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs.errors", 1)
 	}
 	return err
 }
@@ -211,12 +247,44 @@ func WriteSnapshotFullWithMapperCodecAndConstraints[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints,
+	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, nil,
 		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 			return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
 		})
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
+	}
+	return err
+}
+
+// WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs is the codec-aware
+// variant of [WriteSnapshotFullWithConstraintsAndIndexDefs]: it threads codec
+// into the mapper.bin writer (so the snapshot is self-sufficient for any key
+// type) AND persists BOTH the constraint set and the index-definition set. This
+// is the entry point a checkpointer over a non-string store uses when either
+// constraints or indexes are declared.
+//
+// codec must not be nil. constraints and indexDefs may each be nil or empty
+// (the corresponding component is then omitted).
+func WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs[N comparable, W any](
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+	constraints []ConstraintSpec,
+	indexDefs []IndexDefSpec,
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs").Stop()
+	if codec == nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
+		return errors.New("snapshot: nil mapper codec")
+	}
+	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, indexDefs,
+		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+			return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
+		})
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
 	}
 	return err
 }
@@ -248,12 +316,50 @@ func WriteSnapshotFullWithMapperCodecAndConstraintsFS[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	err := writeSnapshotFullCore(context.Background(), fsys, dir, c, g, constraints,
+	err := writeSnapshotFullCore(context.Background(), fsys, dir, c, g, constraints, nil,
 		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
 			return writeMapperWithCodec(c2, fsys, tmp, g, codec)
 		})
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
+	}
+	return err
+}
+
+// WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefsFS is the
+// filesystem-seam variant of
+// [WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs]: it routes every
+// filesystem operation of the snapshot publish through fsys instead of the
+// default OS backend, persisting BOTH the constraint set and the
+// index-definition set. It is the entry point the deterministic-simulation
+// harness (internal/sim) uses to back a snapshot with an in-memory disk so the
+// simulated checkpoint also carries durable index definitions (#1755).
+//
+// The fsys parameter type ([fileSystem]) is intentionally unexported (mirroring
+// wal.OpenWith). Passing osBackend{} reproduces
+// [WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs] byte-for-byte.
+//
+// codec must not be nil. constraints and indexDefs may each be nil or empty.
+func WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefsFS[N comparable, W any](
+	fsys fileSystem,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+	constraints []ConstraintSpec,
+	indexDefs []IndexDefSpec,
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs").Stop()
+	if codec == nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
+		return errors.New("snapshot: nil mapper codec")
+	}
+	err := writeSnapshotFullCore(context.Background(), fsys, dir, c, g, constraints, indexDefs,
+		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
+			return writeMapperWithCodec(c2, fsys, tmp, g, codec)
+		})
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
 	}
 	return err
 }
@@ -266,7 +372,7 @@ func WriteSnapshotFullWithMapperCodecAndConstraintsFS[N comparable, W any](
 // err). When haveMapper is false the snapshot is stamped v2 (no
 // mapper.bin) exactly as before; when true it is stamped v3.
 //
-//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + manifest + atomic rename + ctx ticks
+//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + indexdefs + manifest + atomic rename + ctx ticks
 func writeSnapshotFullCore[N comparable, W any](
 	ctx context.Context,
 	fsys fileSystem,
@@ -274,6 +380,7 @@ func writeSnapshotFullCore[N comparable, W any](
 	c *csr.CSR[W],
 	g *lpg.Graph[N, W],
 	constraints []ConstraintSpec,
+	indexDefs []IndexDefSpec,
 	writeMapper func(ctx context.Context, tmp string) (size int64, crc uint32, haveMapper bool, err error),
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -451,6 +558,38 @@ func writeSnapshotFullCore[N comparable, W any](
 		return err
 	}
 
+	// indexdefs.bin — the durable secondary-index DEFINITION set. Emitted ONLY
+	// when the caller supplies at least one index def, so a snapshot of a graph
+	// with no indexes is byte-identical to one produced before this component
+	// existed. It is DISTINCT from the indexes/ payload directory below: the
+	// definition (label/property/kind/name) is the load-bearing component that
+	// recovery rebuilds each index from, whereas indexes/<name>.bin is a
+	// best-effort payload speed-up. Without this component an index declared and
+	// committed before a checkpoint would not survive WAL truncation: the WAL op
+	// that declared it lives only in the truncated prefix, so the checkpoint must
+	// carry the definition forward itself (#1755, the index analogue of
+	// constraints.bin).
+	var indexDefsSize int64
+	var indexDefsCRC uint32
+	haveIndexDefs := len(indexDefs) > 0
+	if haveIndexDefs {
+		indexDefsPath := filepath.Join(tmp, IndexDefsFile)
+		indexDefsSize, indexDefsCRC, err = writeAndSync(fsys, indexDefsPath, func(w io.Writer) (int64, uint32, error) {
+			return WriteIndexDefs(w, indexDefs)
+		})
+		if err != nil {
+			_ = fsys.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return err
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		_ = fsys.RemoveAll(tmp)
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+		return err
+	}
+
 	// indexes/<name>.bin — one file per registered index that
 	// implements [index.Serializer]. Subscribers without serializer
 	// support are silently skipped (rebuild-on-restart contract).
@@ -507,6 +646,14 @@ func writeSnapshotFullCore[N comparable, W any](
 	// set so a checkpoint + WAL truncate does not lose constraints.
 	if haveConstraints {
 		files = append(files, FileEntry{Name: ConstraintsFile, Size: constraintsSize, CRC32C: constraintsCRC})
+	}
+	// The indexdefs.bin entry is likewise additive and does not change the
+	// manifest version: present only when indexes are declared. A reader that
+	// predates it ignores the unknown file name; this reader restores the
+	// definition set so a checkpoint + WAL truncate does not lose index
+	// definitions (#1755).
+	if haveIndexDefs {
+		files = append(files, FileEntry{Name: IndexDefsFile, Size: indexDefsSize, CRC32C: indexDefsCRC})
 	}
 
 	// Persist the originating graph's directed/multigraph shape so
@@ -883,6 +1030,19 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 		}
 	}
 
+	// indexdefs.bin — optional secondary-index definition set. Absent for older
+	// snapshots and for any snapshot taken with no indexes declared: the
+	// readback stays empty (backward compatibility). When present its CRC32C is
+	// verified exactly like the other components.
+	var indexDefsParsed IndexDefsReadback
+	if idEntry := findEntry(m.Files, IndexDefsFile); idEntry != nil {
+		indexDefsParsed, err = readVerifiedIndexDefs(fsys, filepath.Join(dir, IndexDefsFile), idEntry.CRC32C)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, err
+		}
+	}
+
 	// indexes/<name>.bin — best-effort load. Corruption surfaces as
 	// nil Bytes on the IndexReadback so the recovery path can rebuild
 	// from the LPG rather than aborting.
@@ -905,6 +1065,7 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 		Tombstones:  tombParsed,
 		EdgeHandles: edgeHandlesParsed,
 		Constraints: constraintsParsed,
+		IndexDefs:   indexDefsParsed,
 	}, nil
 }
 
@@ -1093,6 +1254,31 @@ func readVerifiedConstraints(fsys fileSystem, path string, expected uint32) (Con
 	if got := hasher.Sum32(); got != expected {
 		return ConstraintsReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
 			ErrCorrupted, ConstraintsFile, got, expected)
+	}
+	return parsed, nil
+}
+
+// readVerifiedIndexDefs is the dual of [readVerifiedCSR] for indexdefs.bin.
+func readVerifiedIndexDefs(fsys fileSystem, path string, expected uint32) (IndexDefsReadback, error) {
+	f, err := fsys.OpenComponent(path)
+	if err != nil {
+		return IndexDefsReadback{}, err
+	}
+	// best-effort: read-only file, close err is non-actionable for callers.
+	defer func() { _ = f.Close() }()
+
+	hasher := crc32.New(castagnoli)
+	tee := io.TeeReader(f, hasher)
+	parsed, err := ReadIndexDefs(tee)
+	if err != nil {
+		return IndexDefsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if _, err := io.Copy(io.Discard, tee); err != nil {
+		return IndexDefsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
+	}
+	if got := hasher.Sum32(); got != expected {
+		return IndexDefsReadback{}, fmt.Errorf("%w: %s crc32c=%d want=%d",
+			ErrCorrupted, IndexDefsFile, got, expected)
 	}
 	return parsed, nil
 }

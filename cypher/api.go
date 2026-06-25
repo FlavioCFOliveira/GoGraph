@@ -650,6 +650,23 @@ type Engine struct {
 	store         *txn.Store[string, float64] // non-nil when WAL-backed
 	reg           expr.FunctionRegistry
 	constraintReg *exec.ConstraintRegistry
+	// indexDefReg is the engine's live registry of USER secondary-index
+	// definitions (label/property/kind/name), the index analogue of
+	// constraintReg. It is the single durable source IndexSpecsForSnapshot reads
+	// to thread index definitions into a checkpoint (checkpoint.WithIndexSpecs),
+	// so an index survives a checkpoint that truncates the WAL prefix which first
+	// declared it (#1755). The internal numeric companion (numericBTreeName /
+	// "_btree_num") and the UNIQUE constraint backing indexes
+	// (exec.UniqueIndexName) are NEVER recorded here — they are re-derived on
+	// recovery from the user index def / constraint def respectively, and the
+	// index.Manager (which holds them) exposes no label/property anyway.
+	//
+	// It is internally synchronised (its own mutex) so IndexSpecsForSnapshot can
+	// read it concurrently with the checkpointer while a write query mutates it
+	// under the engine's single-writer serialisation. Every mutation
+	// (recordIndexDef / forgetIndexDef) is followed by syncIndexCount under that
+	// same write lock so the graph's lock-free HasIndexes gate stays in step.
+	indexDefReg   *indexDefRegistry
 	procReg       *procs.Registry
 	cache         *planCache
 	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
@@ -894,6 +911,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		store:            opts.Store,
 		reg:              reg,
 		constraintReg:    exec.NewConstraintRegistry(),
+		indexDefReg:      newIndexDefRegistry(),
 		procReg:          procs.NewRegistry(),
 		cache:            newPlanCache(opts.PlanCacheCapacity),
 		maxResultRows:    resolveMaxResultRows(opts.MaxResultRows),
@@ -941,6 +959,11 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 // write. (CREATE CONSTRAINT itself, in contrast, rejects pre-existing
 // duplicates — but that is the creation path, not recovery.)
 func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
+	// The engine is now the authoritative owner of this graph's constraints, so
+	// discard any store-direct constraint count recovery seeded for the
+	// engine-less case (#1756) — the engine's own SetActiveConstraintCount below
+	// drives HasConstraints from here on.
+	e.g.ClearStoreConstraints()
 	for i := range defs {
 		d := defs[i]
 		if d.Unique {
@@ -1101,6 +1124,39 @@ func (e *Engine) ConstraintSpecsForSnapshot() []snapshot.ConstraintSpec {
 // direction that could cause silent constraint loss across a checkpoint (#1464).
 func (e *Engine) syncConstraintCount() {
 	e.g.SetActiveConstraintCount(int64(e.constraintReg.Count()))
+}
+
+// IndexSpecsForSnapshot converts the engine's current USER secondary-index
+// definitions into the [store/snapshot.IndexDefSpec] slice that
+// [store/snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs] (and its
+// mapper-codec variant) persists into a snapshot's indexdefs.bin component. A
+// checkpointer calls e.IndexSpecsForSnapshot() and hands the result to the
+// writer so a checkpoint + WAL truncate does not lose index definitions (#1755).
+//
+// The set is sourced from the engine's own index-def registry (indexDefReg),
+// not reconstructed from the index.Manager: the registry holds every user index
+// def — including one whose backing subscriber is unbound after a recovery
+// empty-graph fallback, which a Manager BoundNode() probe would miss — and never
+// holds the internal numeric companion or a UNIQUE constraint backing index, so
+// only the definitions recovery is expected to surface in res.Indexes are
+// persisted.
+func (e *Engine) IndexSpecsForSnapshot() []snapshot.IndexDefSpec {
+	return e.indexDefReg.specs()
+}
+
+// syncIndexCount mirrors the engine's current user-index-definition count onto
+// the graph (Graph.SetActiveIndexCount) so the checkpointer can tell — via
+// Graph.HasIndexes — whether a snapshot must carry indexdefs.bin before the WAL
+// is truncated. It is called under the engine's single-writer lock after every
+// index registration, drop, and recovery re-seed. Sourcing the value from the
+// live registry (not an inc/dec delta) keeps it from ever under-counting a
+// durably-registered index — the only direction that could cause silent index
+// loss across a checkpoint (#1755). It is required because the engine's CREATE
+// INDEX commits via Tx.CommitWALOnly, which never replays through the store
+// apply path, so the store-direct storeIndexActive gate alone is blind to every
+// engine-declared index.
+func (e *Engine) syncIndexCount() {
+	e.g.SetActiveIndexCount(int64(e.indexDefReg.count()))
 }
 
 // ListIndexes returns the names of every secondary index currently registered
@@ -1828,6 +1884,12 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 			return nil, err
 		}
 	}
+	// Record the user index def in the engine registry (registered ⇔ durable ⇔
+	// recorded). Reached only on a fully-registered, durably-committed index, so
+	// the registry — the source IndexSpecsForSnapshot persists into a checkpoint
+	// — stays exactly in step with the index.Manager and the WAL (#1755). The
+	// numeric companion is internal and is NOT recorded.
+	e.recordIndexDef(p.Name, false /* btree */, p.Label, p.Property)
 	return emptyDDLResult(ctx), nil
 }
 
@@ -1854,6 +1916,10 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		if err != nil {
 			return nil, err
 		}
+		// Forget the user index def from the engine registry so a later checkpoint
+		// no longer persists it (#1755). Idempotent: an IF EXISTS no-op on a
+		// missing name simply finds nothing to forget.
+		e.forgetIndexDef(p.Name)
 		if hadCoverage {
 			dropNumericCompanionIfOrphaned(idxMgr, lbl, prop)
 		}
@@ -1884,6 +1950,9 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		if err := commitIndexTx(tx, txn.OpDropIndex, 0, "", "", p.Name); err != nil {
 			return nil, err
 		}
+		// The user index is now durably dropped; forget its def from the engine
+		// registry so a later checkpoint no longer persists it (#1755).
+		e.forgetIndexDef(p.Name)
 		// The user index is now durably dropped; remove its numeric companion
 		// when no other user btree still covers the same (label, property). The
 		// companion is not separately persisted, so this in-memory cleanup keeps

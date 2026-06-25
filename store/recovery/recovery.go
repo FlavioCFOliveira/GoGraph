@@ -992,6 +992,20 @@ func openCodec[N comparable, W any](
 				Name:     c.Name,
 			})
 		}
+		// Seed the index accumulator with the snapshot's durable index-definition
+		// set so a checkpoint that truncated the WAL prefix which first declared
+		// an index does not lose it; WAL ops replayed below layer on top
+		// (last-writer-wins by name) — the index analogue of the constraint seed
+		// (#1755). Until this change indexes had no snapshot component, so the set
+		// came WAL-only; now the snapshot carries it across a WAL truncate.
+		for _, d := range loaded.IndexDefs.Specs {
+			iAcc.applyCreate(IndexRecord{
+				Kind:     txn.IndexKind(d.Kind),
+				Name:     d.Name,
+				Label:    d.Label,
+				Property: d.Property,
+			})
+		}
 		haveSnapLabels = len(loaded.Labels.NodeLabels) > 0 || len(loaded.Labels.EdgeLabels) > 0
 		haveSnapProps = len(loaded.Properties.NodeProperties) > 0 || len(loaded.Properties.EdgeProperties) > 0
 		haveSnapEdgeHandles = len(loaded.EdgeHandles.Records) > 0
@@ -1112,9 +1126,36 @@ func openCodec[N comparable, W any](
 	// surfaces its constraints.
 	res.Constraints = cAcc.snapshot()
 
-	// Finalise the recovered index definitions from WAL-replayed
-	// CREATE/DROP INDEX ops.
+	// Re-seed the graph's store-direct constraint count from the recovered set
+	// so a txn.Store-direct embedder (one that never wires a cypher engine, so
+	// nothing calls SetActiveConstraintCount) keeps Graph.HasConstraints true
+	// across the restart. Without this, the first checkpoint after a
+	// store-direct restart would judge its snapshot self-sufficient and discard
+	// the constraint frames a second time (#1756). The engine path overwrites
+	// its own constraintActive on open via syncConstraintCount, and the two
+	// counters are independent, so this is safe whether or not an engine is
+	// later wired in.
+	for i := range res.Constraints {
+		g.AddStoreConstraint(uint8(res.Constraints[i].Kind), res.Constraints[i].Label, res.Constraints[i].Property)
+	}
+
+	// Finalise the recovered index definitions: the snapshot's durable index
+	// defs reconciled with the WAL-replayed CREATE/DROP INDEX ops.
 	res.Indexes = iAcc.snapshot()
+
+	// Re-seed the graph's store-direct index count from the recovered set so a
+	// txn.Store-direct embedder (one that never wires a cypher engine, so
+	// nothing calls SetActiveIndexCount) keeps Graph.HasIndexes true across the
+	// restart. Without this, the first checkpoint after a store-direct restart
+	// would judge its snapshot self-sufficient and discard the index frames a
+	// second time (#1755). The engine path overwrites its own indexActive on
+	// open via syncIndexCount and clears this store-direct count via
+	// ClearStoreIndexes, and the two counters are independent, so this is safe
+	// whether or not an engine is later wired in. It mirrors the constraint
+	// re-seed above.
+	for i := range res.Indexes {
+		g.AddStoreIndex(res.Indexes[i].Name)
+	}
 
 	// Mapper-less (v2) path only: apply snapshot-side labels after the WAL
 	// is fully applied so the mapper has every node interned that the WAL

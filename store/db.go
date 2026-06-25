@@ -185,7 +185,8 @@ func WithFinalCheckpoint() Option {
 //	cp := checkpoint.New(cfg, g, wlog, &unusedMu,
 //		checkpoint.WithCommitSerialiser[string, float64](st.RunUnderCommitLock),
 //		checkpoint.WithMapperCodec[string, float64](st.Codec()),
-//		checkpoint.WithConstraintSpecs[string, float64](eng.ConstraintSpecsForSnapshot))
+//		checkpoint.WithConstraintSpecs[string, float64](eng.ConstraintSpecsForSnapshot),
+//		checkpoint.WithIndexSpecs[string, float64](eng.IndexSpecsForSnapshot))
 //	cp.Start(ctx)
 //	db := store.New(wlog,
 //		store.WithCheckpointer(cp),

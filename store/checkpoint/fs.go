@@ -28,9 +28,10 @@ import (
 // live typed graph and CSR without boxing.
 type snapshotBackend[N comparable, W any] interface {
 	// WriteSnapshot publishes a self-sufficient snapshot of g to snapDir,
-	// emitting mapper.bin via codec (nil selects the string-only mapper) and
-	// constraints.bin from constraints (nil/empty emits none).
-	WriteSnapshot(snapDir string, cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], constraints []snapshot.ConstraintSpec) error
+	// emitting mapper.bin via codec (nil selects the string-only mapper),
+	// constraints.bin from constraints (nil/empty emits none) and indexdefs.bin
+	// from indexDefs (nil/empty emits none).
+	WriteSnapshot(snapDir string, cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error
 	// ReadManifest reads the manifest at path (used to verify snapshot
 	// self-sufficiency before truncating the WAL).
 	ReadManifest(path string) (snapshot.Manifest, error)
@@ -41,11 +42,11 @@ type snapshotBackend[N comparable, W any] interface {
 // the manifest read are byte-identical to the pre-seam checkpointer.
 type osSnapshotBackend[N comparable, W any] struct{}
 
-func (osSnapshotBackend[N, W]) WriteSnapshot(snapDir string, cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], constraints []snapshot.ConstraintSpec) error {
+func (osSnapshotBackend[N, W]) WriteSnapshot(snapDir string, cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
 	if codec != nil {
-		return snapshot.WriteSnapshotFullWithMapperCodecAndConstraints(snapDir, cs, g, codec, constraints)
+		return snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs(snapDir, cs, g, codec, constraints, indexDefs)
 	}
-	return snapshot.WriteSnapshotFullWithConstraints(snapDir, cs, g, constraints)
+	return snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs(snapDir, cs, g, constraints, indexDefs)
 }
 
 func (osSnapshotBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, error) {

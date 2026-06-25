@@ -121,6 +121,14 @@ type Checkpointer[N comparable, W any] struct {
 	// truncates the WAL prefix which first declared a constraint would
 	// otherwise silently lose it.
 	constraintsFn func() []snapshot.ConstraintSpec
+	// indexDefsFn, when non-nil, is called once per checkpoint run to collect
+	// the current secondary-index definition set for persistence in
+	// indexdefs.bin (see WithIndexSpecs). When nil no indexdefs.bin component is
+	// emitted, which is only safe when the owning engine declares no indexes: a
+	// checkpoint that truncates the WAL prefix which first declared an index
+	// would otherwise silently lose its definition (#1755, the index analogue of
+	// constraintsFn).
+	indexDefsFn func() []snapshot.IndexDefSpec
 
 	// clk is the wall-clock source for the cadence loop (ticker, MaxAge
 	// elapsed comparison, duration measurement). It defaults to
@@ -218,6 +226,39 @@ func WithConstraintSpecs[N comparable, W any](fn func() []snapshot.ConstraintSpe
 	return func(c *Checkpointer[N, W]) {
 		if fn != nil {
 			c.constraintsFn = fn
+		}
+	}
+}
+
+// WithIndexSpecs supplies a callback the checkpointer invokes at each checkpoint
+// to capture the current secondary-index definitions for persistence in the
+// snapshot's indexdefs.bin component. Wire cypher's
+// Engine.IndexSpecsForSnapshot here so user-created indexes survive a checkpoint
+// that truncates the WAL prefix that first declared them:
+//
+//	cp := checkpoint.New(cfg, store.Graph(), wlog, &unusedMu,
+//		checkpoint.WithCommitSerialiser[string, float64](store.RunUnderCommitLock),
+//		checkpoint.WithMapperCodec[string, float64](store.Codec()),
+//		checkpoint.WithConstraintSpecs[string, float64](eng.ConstraintSpecsForSnapshot),
+//		checkpoint.WithIndexSpecs[string, float64](eng.IndexSpecsForSnapshot))
+//
+// Why this matters: the engine persists each CREATE INDEX as a WAL op, so a
+// plain reopen replays it. A checkpoint, however, folds the WAL into a snapshot
+// and truncates the log — without this option the snapshot carries no index
+// definitions, so after one checkpoint + restart every user index is silently
+// gone and index seeks degrade to full scans with no error (#1755). Only the
+// index DEFINITION (label/property/kind/name) is persisted; recovery rebuilds
+// each index by backfilling it from the recovered graph.
+//
+// The callback runs under the checkpoint's commit serialisation (see
+// WithCommitSerialiser), so the captured set is transaction-boundary consistent
+// with the snapshot it is persisted into.
+//
+// A nil callback is ignored (no indexdefs.bin emitted).
+func WithIndexSpecs[N comparable, W any](fn func() []snapshot.IndexDefSpec) Option[N, W] {
+	return func(c *Checkpointer[N, W]) {
+		if fn != nil {
+			c.indexDefsFn = fn
 		}
 	}
 }
@@ -565,6 +606,7 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		watermark int64
 	)
 	var constraints []snapshot.ConstraintSpec
+	var indexDefs []snapshot.IndexDefSpec
 	if err := c.runUnderCommitLock(func() error {
 		// W is the durable WAL offset at a transaction boundary. Captured under
 		// the quiesce boundary (RunUnderCommitLock drains in-flight commits), so
@@ -580,6 +622,11 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		if c.constraintsFn != nil {
 			constraints = c.constraintsFn()
 		}
+		// Capture the index-definition set in the same locked window, for the
+		// same transaction-boundary consistency (see WithIndexSpecs).
+		if c.indexDefsFn != nil {
+			indexDefs = c.indexDefsFn()
+		}
 		return nil
 	}); err != nil {
 		c.setErr(err)
@@ -594,15 +641,15 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	}
 
 	// --- Phase 2: write + publish the snapshot LOCK-FREE, then prefix-truncate. ---
-	return c.writeAndTruncate(cs, constraints, watermark)
+	return c.writeAndTruncate(cs, constraints, indexDefs, watermark)
 }
 
 // writeAndTruncate is phases 2 and 3 of the non-blocking checkpoint: it writes
 // the self-sufficient snapshot from the captured image (lock-free, so writers
 // commit concurrently), then re-acquires the commit lock to prefix-truncate the
-// WAL up to the captured watermark. cs and constraints are the phase-1 capture;
-// watermark is the durable WAL offset W those reflect.
-func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, watermark int64) error {
+// WAL up to the captured watermark. cs, constraints, and indexDefs are the
+// phase-1 capture; watermark is the durable WAL offset W those reflect.
+func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec, watermark int64) error {
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
 	// Durability invariant (audit gaps F2/F3): the snapshot MUST be a
 	// self-sufficient image of the committed state — CSR adjacency PLUS
@@ -624,12 +671,16 @@ func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snap
 	// engine has constraints declared (WithConstraintSpecs), the snapshot
 	// must carry them in constraints.bin BEFORE the WAL prefix that first
 	// declared them is truncated, or every constraint silently vanishes
-	// on the next restart (#1334).
+	// on the next restart (#1334). Identically for secondary indexes: when the
+	// engine has indexes declared (WithIndexSpecs), the snapshot must carry
+	// their definitions in indexdefs.bin BEFORE the WAL prefix that first
+	// declared them is truncated, or every index silently vanishes on the next
+	// restart (#1755).
 	// Phase 2 disk I/O runs WITHOUT the commit lock: writers commit
 	// concurrently and append frames past the captured watermark, paying no
 	// stall for this (potentially multi-second) write. The snapshot is a
 	// self-sufficient image of the phase-1 boundary state.
-	if err := c.writeSnapshot(snapDir, cs, constraints); err != nil {
+	if err := c.writeSnapshot(snapDir, cs, constraints, indexDefs); err != nil {
 		c.setErr(err)
 		return err
 	}
@@ -661,27 +712,29 @@ func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snap
 // truncatePrefixLocked is phase 3 of the non-blocking checkpoint: it runs
 // under the store's commit lock (the quiesce boundary) so no concurrent commit
 // races the WAL prefix truncation. It re-verifies snapshot self-sufficiency —
-// a constraint DDL may have committed during the lock-free phase-2 write, in
-// which case the snapshot (captured at the watermark, before the DDL) cannot
-// stand alone and the WAL must be retained — then discards only the WAL bytes
-// in [0, watermark), preserving every frame committed during phase 2.
+// a constraint or index DDL may have committed during the lock-free phase-2
+// write, in which case the snapshot (captured at the watermark, before the DDL)
+// cannot stand alone and the WAL must be retained — then discards only the WAL
+// bytes in [0, watermark), preserving every frame committed during phase 2.
 func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int64) error {
-	// Re-source needConstraints from the graph's own constraint count, NOT from
-	// the phase-1 len(constraints): a constraint DDL committed during the
-	// lock-free phase-2 write makes HasConstraints true while the snapshot
-	// (captured before the DDL) carries no constraints.bin for it, so the
-	// snapshot is correctly judged not self-sufficient and the WAL prefix
-	// holding that DDL is retained (#1334 / #1464 fail-safe, re-checked under
-	// the phase-3 lock per the #1508 audit condition C2).
-	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, c.g.HasConstraints())
+	// Re-source needConstraints / needIndexes from the graph's own counts, NOT
+	// from the phase-1 captured slices: a constraint or index DDL committed
+	// during the lock-free phase-2 write makes HasConstraints / HasIndexes true
+	// while the snapshot (captured before the DDL) carries no constraints.bin /
+	// indexdefs.bin for it, so the snapshot is correctly judged not
+	// self-sufficient and the WAL prefix holding that DDL is retained (#1334 /
+	// #1464 / #1755 fail-safe, re-checked under the phase-3 lock per the #1508
+	// audit condition C2).
+	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, c.g.HasConstraints(), c.g.HasIndexes())
 	if err != nil {
 		c.setErr(err)
 		return err
 	}
 	if !selfSufficient {
 		// The snapshot cannot reconstruct the graph on its own (no mapper.bin
-		// for this key type, or a constraint set that did not land in
-		// constraints.bin), so truncating the WAL would lose committed data.
+		// for this key type, a constraint set that did not land in
+		// constraints.bin, or an index set that did not land in indexdefs.bin),
+		// so truncating the WAL would lose committed data.
 		// Skip truncation: the WAL is retained and replayed on top of the
 		// snapshot at recovery, preserving Durability at the cost of unbounded
 		// WAL growth. Surfaced via a metric so operators can detect the mode.
@@ -723,8 +776,8 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int6
 // this run; when non-empty it is persisted as the snapshot's
 // constraints.bin component (nil or empty emits no constraints.bin, and
 // the output is byte-identical to the constraint-unaware writers).
-func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W], constraints []snapshot.ConstraintSpec) error {
-	return c.snap.WriteSnapshot(snapDir, cs, c.g, c.codec, constraints)
+func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
+	return c.snap.WriteSnapshot(snapDir, cs, c.g, c.codec, constraints, indexDefs)
 }
 
 func (c *Checkpointer[N, W]) setErr(err error) {
@@ -753,28 +806,41 @@ func (c *Checkpointer[N, W]) setErr(err error) {
 // truncating after it would silently drop every constraint on the next
 // restart (#1334).
 //
+// needIndexes is the analogue for secondary indexes: an index DEFINITION
+// lives only in the OpCreateIndex WAL frame and in the snapshot's
+// [snapshot.IndexDefsFile] component — never reconstructible from the CSR
+// alone — so when the graph has any index declared, a snapshot lacking
+// indexdefs.bin cannot stand alone; truncating after it would silently
+// drop every index on the next restart (#1755).
+//
 // Detection is by manifest content, not version number, so it stays
 // correct if the version scheme evolves: the snapshot is self-sufficient
 // iff its manifest lists [snapshot.MapperFile] (and
-// [snapshot.ConstraintsFile] when needConstraints is set).
-func (c *Checkpointer[N, W]) snapshotIsSelfSufficient(dir string, needConstraints bool) (bool, error) {
+// [snapshot.ConstraintsFile] when needConstraints is set, and
+// [snapshot.IndexDefsFile] when needIndexes is set).
+func (c *Checkpointer[N, W]) snapshotIsSelfSufficient(dir string, needConstraints, needIndexes bool) (bool, error) {
 	m, err := c.snap.ReadManifest(manifestPath(dir))
 	if err != nil {
 		return false, fmt.Errorf("checkpoint: read snapshot manifest: %w", err)
 	}
-	var hasMapper, hasConstraints bool
+	var hasMapper, hasConstraints, hasIndexDefs bool
 	for _, f := range m.Files {
 		switch f.Name {
 		case snapshot.MapperFile:
 			hasMapper = true
 		case snapshot.ConstraintsFile:
 			hasConstraints = true
+		case snapshot.IndexDefsFile:
+			hasIndexDefs = true
 		}
 	}
 	if !hasMapper {
 		return false, nil
 	}
 	if needConstraints && !hasConstraints {
+		return false, nil
+	}
+	if needIndexes && !hasIndexDefs {
 		return false, nil
 	}
 	return true, nil

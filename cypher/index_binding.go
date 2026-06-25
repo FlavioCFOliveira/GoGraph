@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -40,6 +41,7 @@ import (
 	indexbtree "github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
 	indexhash "github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
@@ -486,6 +488,104 @@ func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuf
 	}
 }
 
+// indexDefEntry is one user secondary-index definition tracked by the engine's
+// [indexDefRegistry]. It carries exactly the durable fields a checkpoint must
+// persist (and recovery rebuild from): kind, name, label, property.
+type indexDefEntry struct {
+	hash     bool // true: hash index; false: btree index
+	label    string
+	property string
+}
+
+// indexDefRegistry is the engine's live registry of USER secondary-index
+// definitions, keyed by index name (the identity recovery dedups on). It is the
+// index analogue of [exec.ConstraintRegistry] for the snapshot path: the
+// checkpointer reads it (via [Engine.IndexSpecsForSnapshot]) to persist
+// indexdefs.bin so an index survives a WAL-truncating checkpoint (#1755).
+//
+// It is internally synchronised: mutations (record / forget) run under the
+// engine's single-writer serialisation, but snapshot reads happen concurrently
+// from the checkpointer goroutine, so every access takes the mutex. The numeric
+// companion and UNIQUE backing indexes never enter this registry, so it contains
+// exactly the user-named indexes a plain CREATE INDEX declares — no name-suffix
+// filtering is needed on read.
+type indexDefRegistry struct {
+	mu     sync.Mutex
+	byName map[string]indexDefEntry
+}
+
+// newIndexDefRegistry returns an empty registry.
+func newIndexDefRegistry() *indexDefRegistry {
+	return &indexDefRegistry{byName: make(map[string]indexDefEntry)}
+}
+
+// record inserts or replaces the definition for a user index (last-writer-wins
+// by name, matching recovery's indexSet). It is idempotent on a repeated CREATE
+// of the same name.
+func (r *indexDefRegistry) record(name string, e indexDefEntry) {
+	r.mu.Lock()
+	r.byName[name] = e
+	r.mu.Unlock()
+}
+
+// forget removes the definition for name, the dual of record for DROP INDEX.
+// Dropping a name that was never recorded is a no-op.
+func (r *indexDefRegistry) forget(name string) {
+	r.mu.Lock()
+	delete(r.byName, name)
+	r.mu.Unlock()
+}
+
+// count returns the number of user index definitions currently registered.
+func (r *indexDefRegistry) count() int {
+	r.mu.Lock()
+	n := len(r.byName)
+	r.mu.Unlock()
+	return n
+}
+
+// specs returns the registered definitions as snapshot index-def specs in
+// deterministic order (by name), for IndexSpecsForSnapshot. nil when empty.
+func (r *indexDefRegistry) specs() []snapshot.IndexDefSpec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.byName) == 0 {
+		return nil
+	}
+	out := make([]snapshot.IndexDefSpec, 0, len(r.byName))
+	for name, e := range r.byName {
+		kind := uint8(txn.IndexKindBTree)
+		if e.hash {
+			kind = uint8(txn.IndexKindHash)
+		}
+		out = append(out, snapshot.IndexDefSpec{
+			Kind:     kind,
+			Name:     name,
+			Label:    e.label,
+			Property: e.property,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// recordIndexDef records a user index definition in the engine registry and
+// re-syncs the graph's lock-free index-count gate. Callers hold the engine's
+// single-writer serialisation. The numeric companion and UNIQUE backing index
+// are NOT recorded through this method (their creation sites do not call it).
+func (e *Engine) recordIndexDef(name string, hash bool, label, property string) {
+	e.indexDefReg.record(name, indexDefEntry{hash: hash, label: label, property: property})
+	e.syncIndexCount()
+}
+
+// forgetIndexDef drops a user index definition from the engine registry and
+// re-syncs the graph's lock-free index-count gate. Callers hold the engine's
+// single-writer serialisation.
+func (e *Engine) forgetIndexDef(name string) {
+	e.indexDefReg.forget(name)
+	e.syncIndexCount()
+}
+
 // registerRecoveredIndexes re-creates each durable index that was recovered
 // from the WAL (or from the snapshot) and registers it on the engine's
 // [index.Manager] so the planner's NodeByIndexSeek rewrites stay effective
@@ -500,9 +600,22 @@ func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuf
 // not conflict with the WAL replay that also carries a CREATE INDEX op for
 // the same name.
 func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
+	// The engine is now the authoritative owner of this graph's indexes, so
+	// discard any store-direct index count recovery seeded for the engine-less
+	// case (#1755) — the engine's own SetActiveIndexCount (via syncIndexCount
+	// below) drives HasIndexes from here on. Mirrors registerRecoveredConstraints'
+	// ClearStoreConstraints.
+	e.g.ClearStoreIndexes()
 	idxMgr := e.g.IndexManager()
 	for i := range defs {
 		d := defs[i]
+		// Seed the engine index-def registry from the recovered def. This is the
+		// gap-closing step of #1755 option (b): the def carries label/property
+		// even when the bound-index build below falls back to an unbound
+		// subscriber (empty-graph binding failure), so IndexSpecsForSnapshot can
+		// re-persist it on the next checkpoint regardless of bind state — a
+		// reconstruction from the index.Manager via BoundNode() could not.
+		e.indexDefReg.record(d.Name, indexDefEntry{hash: d.Hash, label: d.Label, property: d.Property})
 		if d.Hash {
 			// Build a bound hash index and backfill it from the recovered graph
 			// so index seeks on the re-opened engine return the correct rows.
@@ -555,6 +668,11 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			}
 		}
 	}
+	// Mirror the recovered index set onto the graph's lock-free gate so a
+	// post-recovery checkpoint knows indexes exist even when the embedder did not
+	// wire checkpoint.WithIndexSpecs (#1755). Synced once after the loop rather
+	// than per-record since recovery seeds the registry directly.
+	e.syncIndexCount()
 }
 
 // runCreateHashIndex executes CREATE INDEX for the hash kind: it builds a
@@ -649,5 +767,11 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 			return nil, err
 		}
 	}
+	// Record the user index def in the engine registry (registered ⇔ durable ⇔
+	// recorded). Reached only on a fully-registered, durably-committed hash
+	// index, so the registry — the source IndexSpecsForSnapshot persists into a
+	// checkpoint — stays exactly in step with the index.Manager and the WAL
+	// (#1755).
+	e.recordIndexDef(p.Name, true /* hash */, p.Label, p.Property)
 	return emptyDDLResult(ctx), nil
 }

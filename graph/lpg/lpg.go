@@ -368,6 +368,48 @@ type Graph[N comparable, W any] struct {
 	// Engine.syncConstraintCount under the engine's single-writer lock.
 	constraintActive atomic.Int64
 
+	// indexActive mirrors the cypher engine's secondary-index-definition count
+	// as a lock-free gate, the exact index analogue of constraintActive. The
+	// engine's CREATE INDEX commits via Tx.CommitWALOnly, which appends the WAL
+	// frame but does NOT replay it through the store apply path, so the
+	// store-direct storeIndexActive counter never sees an engine index. The
+	// checkpointer's phase-3 self-sufficiency re-check therefore consults
+	// HasIndexes, which ORs this engine-mirrored count with the store-direct one,
+	// so a CREATE INDEX committed during the lock-free snapshot-write window is
+	// caught and the WAL prefix holding it is retained (#1755). It is maintained
+	// by Engine.syncIndexCount under the engine's single-writer lock.
+	indexActive atomic.Int64
+
+	// storeConstraints tracks the schema constraints declared through the
+	// txn.Store-direct API (txn.Tx.CreateConstraint / DropConstraint) for an
+	// embedder that does NOT drive the graph through the cypher engine and so
+	// never calls SetActiveConstraintCount. It is keyed by (kind, label,
+	// property) — the same identity recovery dedups on — so re-declaring the
+	// same constraint is idempotent and a drop removes exactly one slot. The
+	// store-layer checkpoint fail-safe (Graph.HasConstraints) consults its
+	// count via storeConstraintActive so a store-direct constraint is never
+	// silently dropped by a WAL-truncating checkpoint (#1756). It is a separate
+	// source from constraintActive so an embedder that mixes the engine and the
+	// store on one graph cannot corrupt either counter.
+	storeConstraintMu     sync.Mutex
+	storeConstraints      map[storeConstraintKey]struct{}
+	storeConstraintActive atomic.Int64
+
+	// storeIndexes tracks the secondary indexes declared through the
+	// txn.Store-direct API (txn.Tx.CreateIndex / DropIndex) for an embedder
+	// that does NOT drive the graph through the cypher engine and so never goes
+	// through Engine.registerRecoveredIndexes. It is keyed by index NAME — the
+	// index identity recovery dedups on (indexSet.byName, last-writer-wins) — so
+	// re-declaring the same index is idempotent and a drop removes exactly one
+	// slot. The store-layer checkpoint fail-safe (Graph.HasIndexes) consults its
+	// count via storeIndexActive so a store-direct index definition is never
+	// silently dropped by a WAL-truncating checkpoint (#1755). It is a separate
+	// source from the cypher engine's own index-def registry so an embedder that
+	// mixes the engine and the store on one graph cannot corrupt either count.
+	storeIndexMu     sync.Mutex
+	storeIndexes     map[string]struct{}
+	storeIndexActive atomic.Int64
+
 	// nodesAddedCount / nodesRemovedCount / edgesAddedCount /
 	// edgesRemovedCount track per-direction counters used by the TCK
 	// side-effect comparator. Net Order() / Size() can't distinguish a
@@ -1402,7 +1444,164 @@ func (g *Graph[N, W]) TombstoneCount() int { return int(g.tombstoneActive.Load()
 // self-sufficiency requirement (#1464).
 //
 // HasConstraints is safe for concurrent use.
-func (g *Graph[N, W]) HasConstraints() bool { return g.constraintActive.Load() > 0 }
+//
+// It reports true when EITHER the engine-maintained count
+// (SetActiveConstraintCount) OR the store-direct count
+// (AddStoreConstraint, maintained by the txn.Store apply path) is positive,
+// so the checkpoint fail-safe is correct whether the constraint was declared
+// through the cypher engine or directly through txn.Tx.CreateConstraint
+// (#1756).
+func (g *Graph[N, W]) HasConstraints() bool {
+	return g.constraintActive.Load() > 0 || g.storeConstraintActive.Load() > 0
+}
+
+// storeConstraintKey identifies one store-direct constraint slot. Name is
+// deliberately excluded so re-declaring a constraint on the same (kind, label,
+// property) under a different name updates the one slot rather than adding a
+// second — matching the recovery accumulator's dedup identity.
+type storeConstraintKey struct {
+	kind     uint8
+	label    string
+	property string
+}
+
+// AddStoreConstraint records that a schema constraint of the given kind on
+// (label, property) is declared through the txn.Store-direct API. It is the
+// store-layer dual of the cypher engine's syncConstraintCount: the txn.Store
+// commit-apply path calls it for every committed OpCreateConstraint so that
+// Graph.HasConstraints reports the constraint to a WAL-truncating checkpoint,
+// independent of whether a cypher engine is wired in (#1756).
+//
+// The (kind, label, property) key makes re-declaring the same constraint
+// idempotent — the active count never over-counts a single durable
+// constraint, the only direction that could let a checkpoint silently drop it.
+//
+// AddStoreConstraint is safe for concurrent use.
+func (g *Graph[N, W]) AddStoreConstraint(kind uint8, label, property string) {
+	key := storeConstraintKey{kind: kind, label: label, property: property}
+	g.storeConstraintMu.Lock()
+	if g.storeConstraints == nil {
+		g.storeConstraints = make(map[storeConstraintKey]struct{}, 1)
+	}
+	if _, dup := g.storeConstraints[key]; !dup {
+		g.storeConstraints[key] = struct{}{}
+		g.storeConstraintActive.Add(1)
+	}
+	g.storeConstraintMu.Unlock()
+}
+
+// RemoveStoreConstraint drops the store-direct constraint slot identified by
+// (kind, label, property), the dual of [Graph.AddStoreConstraint] for a
+// committed OpDropConstraint. Dropping a constraint that was never recorded is
+// a no-op, so a DROP that suppresses a CREATE folded away by a prior checkpoint
+// cannot drive the active count negative.
+//
+// RemoveStoreConstraint is safe for concurrent use.
+func (g *Graph[N, W]) RemoveStoreConstraint(kind uint8, label, property string) {
+	key := storeConstraintKey{kind: kind, label: label, property: property}
+	g.storeConstraintMu.Lock()
+	if _, ok := g.storeConstraints[key]; ok {
+		delete(g.storeConstraints, key)
+		g.storeConstraintActive.Add(-1)
+	}
+	g.storeConstraintMu.Unlock()
+}
+
+// ClearStoreConstraints empties the store-direct constraint set, returning the
+// store-direct count to zero. The cypher engine calls it when it takes
+// ownership of a recovered graph: from that point the engine's own count
+// (SetActiveConstraintCount) is the authoritative source for HasConstraints, so
+// the store-direct count — seeded by recovery for the engine-less case — must
+// not linger and force a checkpoint to over-retain the WAL after the engine
+// later drops a constraint.
+//
+// ClearStoreConstraints is safe for concurrent use.
+func (g *Graph[N, W]) ClearStoreConstraints() {
+	g.storeConstraintMu.Lock()
+	if len(g.storeConstraints) > 0 {
+		g.storeConstraints = nil
+		g.storeConstraintActive.Store(0)
+	}
+	g.storeConstraintMu.Unlock()
+}
+
+// HasIndexes reports whether any secondary index has been declared through the
+// txn.Store-direct API on this graph. It reads a lock-free counter maintained
+// by the txn.Store apply path (AddStoreIndex / RemoveStoreIndex), so it is
+// cheap enough for the checkpointer to consult on every checkpoint to gate the
+// indexdefs.bin self-sufficiency requirement: a checkpoint that truncates the
+// WAL prefix which first declared an index must carry the index definition in
+// the snapshot, or the index is silently lost on the next reopen (#1755).
+//
+// It reports true when EITHER the engine-maintained count (SetActiveIndexCount)
+// OR the store-direct count (AddStoreIndex, maintained by the txn.Store apply
+// path) is positive, so the checkpoint fail-safe is correct whether the index
+// was declared through the cypher engine or directly through txn.Tx.CreateIndex
+// (#1755). Two sources are required because the engine's CREATE INDEX commits
+// via Tx.CommitWALOnly, which never replays through the store apply path, so
+// storeIndexActive alone would be blind to every engine-declared index.
+//
+// HasIndexes is safe for concurrent use.
+func (g *Graph[N, W]) HasIndexes() bool {
+	return g.indexActive.Load() > 0 || g.storeIndexActive.Load() > 0
+}
+
+// AddStoreIndex records that a secondary index named name is declared through
+// the txn.Store-direct API. It is the store-layer dual of the cypher engine's
+// index-def registry: the txn.Store commit-apply path calls it for every
+// committed OpCreateIndex so that Graph.HasIndexes reports the index to a
+// WAL-truncating checkpoint, independent of whether a cypher engine is wired in
+// (#1755).
+//
+// The index NAME key makes re-declaring the same index idempotent — the active
+// count never over-counts a single durable index, the only direction that could
+// let a checkpoint silently drop it.
+//
+// AddStoreIndex is safe for concurrent use.
+func (g *Graph[N, W]) AddStoreIndex(name string) {
+	g.storeIndexMu.Lock()
+	if g.storeIndexes == nil {
+		g.storeIndexes = make(map[string]struct{}, 1)
+	}
+	if _, dup := g.storeIndexes[name]; !dup {
+		g.storeIndexes[name] = struct{}{}
+		g.storeIndexActive.Add(1)
+	}
+	g.storeIndexMu.Unlock()
+}
+
+// RemoveStoreIndex drops the store-direct index slot identified by name, the
+// dual of [Graph.AddStoreIndex] for a committed OpDropIndex. Dropping an index
+// that was never recorded is a no-op, so a DROP that suppresses a CREATE folded
+// away by a prior checkpoint cannot drive the active count negative.
+//
+// RemoveStoreIndex is safe for concurrent use.
+func (g *Graph[N, W]) RemoveStoreIndex(name string) {
+	g.storeIndexMu.Lock()
+	if _, ok := g.storeIndexes[name]; ok {
+		delete(g.storeIndexes, name)
+		g.storeIndexActive.Add(-1)
+	}
+	g.storeIndexMu.Unlock()
+}
+
+// ClearStoreIndexes empties the store-direct index set, returning the
+// store-direct count to zero. The cypher engine calls it when it takes
+// ownership of a recovered graph: from that point the engine's own index-def
+// registry is the authoritative source it threads into the checkpoint, so the
+// store-direct count — seeded by recovery for the engine-less case — must not
+// linger and force a checkpoint to over-retain the WAL after the engine later
+// drops an index.
+//
+// ClearStoreIndexes is safe for concurrent use.
+func (g *Graph[N, W]) ClearStoreIndexes() {
+	g.storeIndexMu.Lock()
+	if len(g.storeIndexes) > 0 {
+		g.storeIndexes = nil
+		g.storeIndexActive.Store(0)
+	}
+	g.storeIndexMu.Unlock()
+}
 
 // SetActiveConstraintCount records the number of schema constraints currently
 // registered, for HasConstraints to report. The cypher engine calls it under
@@ -1412,6 +1611,17 @@ func (g *Graph[N, W]) HasConstraints() bool { return g.constraintActive.Load() >
 //
 // SetActiveConstraintCount is safe for concurrent use.
 func (g *Graph[N, W]) SetActiveConstraintCount(n int64) { g.constraintActive.Store(n) }
+
+// SetActiveIndexCount records the number of secondary indexes currently
+// registered in the cypher engine's index-def registry, for HasIndexes to
+// report. The cypher engine calls it under its single-writer lock after every
+// index registration, drop, and recovery re-seed (Engine.syncIndexCount), so
+// the value never under-counts a durably-registered index that a concurrent
+// checkpoint might otherwise miss — the index analogue of
+// SetActiveConstraintCount (#1755).
+//
+// SetActiveIndexCount is safe for concurrent use.
+func (g *Graph[N, W]) SetActiveIndexCount(n int64) { g.indexActive.Store(n) }
 
 // RestoreTombstones marks every id in ids as removed, reconstructing the
 // tombstone set captured by [Graph.TombstonedIDs] at snapshot time. It is

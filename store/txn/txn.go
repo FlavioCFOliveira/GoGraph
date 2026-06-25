@@ -2070,6 +2070,33 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		return g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:
 		g.DelEdgeProperty(op.Src, op.Dst, op.Key)
+	case OpCreateConstraint:
+		// The store keeps no constraint registry of its own (constraint
+		// enforcement lives in the cypher engine), so the only in-memory effect
+		// is to drive the graph's store-direct constraint count. That count
+		// makes Graph.HasConstraints true for a txn.Store-direct embedder that
+		// never goes through the engine's SetActiveConstraintCount, so a
+		// WAL-truncating checkpoint correctly judges its snapshot NOT
+		// self-sufficient and retains the OpCreateConstraint frame (#1756).
+		g.AddStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+	case OpDropConstraint:
+		// Mirror the create: drop the store-direct constraint slot so the count
+		// falls back to zero once the last constraint is removed.
+		g.RemoveStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+	case OpCreateIndex:
+		// As with constraints, the store keeps no index registry of its own
+		// (index maintenance lives in the cypher engine), so the only in-memory
+		// effect is to drive the graph's store-direct index count. That count
+		// makes Graph.HasIndexes true for a txn.Store-direct embedder that never
+		// goes through the engine's index-def registry, so a WAL-truncating
+		// checkpoint correctly judges its snapshot NOT self-sufficient and
+		// retains the OpCreateIndex frame (#1755). ConstraintName carries the
+		// index name for the index ops (see Tx.CreateIndex / Tx.DropIndex).
+		g.AddStoreIndex(op.ConstraintName)
+	case OpDropIndex:
+		// Mirror the create: drop the store-direct index slot so the count falls
+		// back to zero once the last index is removed.
+		g.RemoveStoreIndex(op.ConstraintName)
 	}
 	return nil
 }
