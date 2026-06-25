@@ -803,6 +803,13 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	if s.state != StateStreaming && s.state != StateTxStreaming {
 		return s.failTransition(m)
 	}
+	// The single open stream always has qid -1 (RUN reports qid=-1, and a new RUN
+	// is rejected while streaming). An explicit qid >= 0 names a stream that does
+	// not exist and must FAIL rather than be served against the current one (#1783).
+	if m.QID >= 0 {
+		return s.failWith("Neo.ClientError.Request.Invalid",
+			fmt.Sprintf("no such query: qid %d", m.QID)), nil
+	}
 
 	n := m.N
 	if n == 0 {
@@ -956,6 +963,11 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 	if s.state != StateStreaming && s.state != StateTxStreaming {
 		return s.failTransition(m)
+	}
+	// As in handlePull: an explicit qid >= 0 names a non-existent stream (#1783).
+	if m.QID >= 0 {
+		return s.failWith("Neo.ClientError.Request.Invalid",
+			fmt.Sprintf("no such query: qid %d", m.QID)), nil
 	}
 
 	// Defense-in-depth: if the open cursor already carries a statement error,

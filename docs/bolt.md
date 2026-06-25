@@ -80,6 +80,26 @@ fall back to a default when left at the zero value:
 | IGNORED    | Server → Client | Request was ignored (failed state)      |
 | RECORD     | Server → Client | One row of result data                  |
 
+`IGNORED` is emitted for a request-phase message (RUN/PULL/DISCARD/BEGIN/
+COMMIT/ROLLBACK/ROUTE) received on an authenticated connection that is in the
+FAILED state, until the client sends `RESET` (per the Bolt v5 spec).
+
+### Protocol conformance notes
+
+The server is strictly single-stream (a `RUN` is rejected while a result is
+already streaming), which bounds the following intentional limitations:
+
+- **`qid`** — the single open result stream always has `qid = -1`. A `PULL` or
+  `DISCARD` carrying an explicit `qid >= 0` names a stream that does not exist
+  and is rejected with `Neo.ClientError.Request.Invalid`; `qid = -1` (the
+  default, "current stream") is served normally.
+- **`DISCARD {n}`** — the `n` (fetch-size) field is currently ignored: `DISCARD`
+  always discards the entire remaining stream and reports `has_more = false`.
+  Partial discard (honouring `n` and reporting `has_more`) is not yet
+  implemented. (`PULL {n}` does honour `n`.)
+- **`tx_metadata`** — accepted in `BEGIN`/`RUN` extras and silently ignored; the
+  server stores and echoes no transaction metadata.
+
 ## Auto-commit and explicit transactions
 
 Both read and write queries may run in auto-commit mode (no `BEGIN`/`COMMIT`).
