@@ -66,6 +66,15 @@ type Session struct {
 	// result.Next() call.
 	peeked *[]packstream.Value
 
+	// pendingTermErr, when non-nil, is a SERVER-INITIATED termination (the
+	// tx-timeout reaper) whose typed FAILURE has not yet reached the client. The
+	// reaper moves the session to FAILED asynchronously, so — unlike a
+	// client-error FAILED, whose FAILURE was already sent — the client's NEXT
+	// request-phase message must receive this typed FAILURE (once) before the
+	// FAILED→IGNORED loop, so the client learns WHY its transaction ended (#1784).
+	// Consumed by [Session.dispatch]; cleared on RESET.
+	pendingTermErr *proto.Failure
+
 	// records, when non-nil, is the per-connection sink that [Session.handlePull]
 	// streams RECORD messages to as it iterates the result cursor, instead of
 	// accumulating them in the returned response slice. The serve loop installs
@@ -365,6 +374,15 @@ func (s *Session) dispatch(ctx context.Context, msg any) ([]any, error) {
 		switch msg.(type) {
 		case *proto.Run, *proto.Pull, *proto.Discard, *proto.Begin,
 			*proto.Commit, *proto.Rollback, *proto.Route:
+			// A pending server-initiated termination (tx-timeout reap) is
+			// delivered ONCE as a typed FAILURE on the first request-phase
+			// message, so the client learns why the tx ended (#1784); subsequent
+			// messages then IGNORE until RESET.
+			if s.pendingTermErr != nil {
+				f := s.pendingTermErr
+				s.pendingTermErr = nil
+				return []any{f}, nil
+			}
 			return []any{&proto.Ignored{}}, nil
 		}
 	}
@@ -618,6 +636,10 @@ func (s *Session) handleReset() ([]any, error) {
 	if s.state == StateDefunct {
 		return s.failTransition(&proto.Reset{})
 	}
+
+	// A RESET before the pending termination FAILURE was delivered discards it:
+	// the client chose to recover rather than read the diagnostic (#1784).
+	s.pendingTermErr = nil
 
 	// Drain any open result cursor.
 	s.drainResult()
@@ -985,18 +1007,61 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 		}
 	}
 
-	s.drainResult()
+	// Honour the n (fetch-size) field: discard up to n records and report
+	// has_more if more remain, mirroring handlePull (#1787). n <= 0 means
+	// "discard all". Records are dropped, not emitted.
+	n := m.N
+	if n == 0 {
+		n = -1
+	}
+	discarded := int64(0)
+	if s.peeked != nil { // a row pre-fetched by a prior PULL/DISCARD counts as discarded
+		s.peeked = nil
+		discarded++
+	}
+	for n <= 0 || discarded < n {
+		if !s.result.Next() {
+			break
+		}
+		discarded++
+	}
+	if err := s.result.Err(); err != nil {
+		s.enterFailed()
+		s.log.Error("bolt: result stream error", slog.String("session", s.id), slog.String("err", err.Error()))
+		return []any{&proto.Failure{
+			Code:    FailureCode(err),
+			Message: s.sanitiseErr(err),
+		}}, nil
+	}
 
-	next, err := Transition(s.state, m, true)
-	if err != nil {
+	// Peek ahead to determine has_more only when we stopped at the n limit
+	// (n <= 0 discarded everything). The peeked row is retained for the next
+	// PULL/DISCARD, exactly as handlePull does.
+	var hasMore bool
+	if n > 0 && discarded == n && s.result.Next() {
+		row := make([]packstream.Value, len(s.columns))
+		for i := range s.columns {
+			row[i] = exprToPackstream(s.result.ValueAt(i), s.boltVersion.Major)
+		}
+		s.peeked = &row
+		hasMore = true
+	}
+
+	next, transErr := StreamingTransition(s.state, hasMore)
+	if transErr != nil {
 		return s.failTransition(m)
+	}
+	if !hasMore {
+		s.drainResult()
+		s.peeked = nil
 	}
 	s.state = next
 
-	return []any{&proto.Success{Metadata: map[string]packstream.Value{
-		"has_more": false,
-		"bookmark": s.bookmark,
-	}}}, nil
+	meta := map[string]packstream.Value{"has_more": hasMore}
+	if !hasMore {
+		meta["bookmark"] = s.bookmark
+	}
+	return []any{&proto.Success{Metadata: meta}}, nil
 }
 
 func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error) {
@@ -1258,6 +1323,14 @@ func (s *Session) reapTimedOutTx() {
 	incCounter(metricTxTimedOut)
 	s.enterFailed()
 	s.txDeadline = time.Time{}
+	// Server-initiated termination: arm a typed FAILURE for the client's next
+	// request-phase message so it learns the transaction timed out, rather than
+	// silently receiving IGNORED (#1784). Cleared when delivered (dispatch) or
+	// on RESET.
+	s.pendingTermErr = &proto.Failure{
+		Code:    "Neo.ClientError.Transaction.TransactionTimedOut",
+		Message: "the transaction has been terminated because it exceeded its timeout; the writer lock was released",
+	}
 }
 
 func (s *Session) enterFailed() {

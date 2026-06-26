@@ -93,10 +93,6 @@ already streaming), which bounds the following intentional limitations:
   `DISCARD` carrying an explicit `qid >= 0` names a stream that does not exist
   and is rejected with `Neo.ClientError.Request.Invalid`; `qid = -1` (the
   default, "current stream") is served normally.
-- **`DISCARD {n}`** — the `n` (fetch-size) field is currently ignored: `DISCARD`
-  always discards the entire remaining stream and reports `has_more = false`.
-  Partial discard (honouring `n` and reporting `has_more`) is not yet
-  implemented. (`PULL {n}` does honour `n`.)
 - **`tx_metadata`** — accepted in `BEGIN`/`RUN` extras and silently ignored; the
   server stores and echoes no transaction metadata.
 
