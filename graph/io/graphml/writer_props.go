@@ -100,52 +100,89 @@ func graphMLAttrType(k lpg.PropertyKind) string {
 // conformant GraphML parsers (NetworkX, the Java stack) accept them — Go's
 // native "+Inf"/"-Inf" text is rejected by xs:double. Other kinds fall
 // back to fmt.Sprintf.
-func serialisePropertyValue(v lpg.PropertyValue) string {
+func serialisePropertyValue(v lpg.PropertyValue) (string, error) {
+	return serialisePropertyValueDepth(v, 0)
+}
+
+const (
+	// maxEncodedListDepth bounds list-property nesting during serialisation,
+	// guarding the recursive encoder's stack (matches packstream's maxValueDepth).
+	maxEncodedListDepth = 128
+	// maxEncodedPropertyBytes caps the serialised size of a single property
+	// value. The list encoding embeds each nested level as a re-escaped JSON
+	// string, so serialised size grows ~4x per nesting level (#1792); without a
+	// cap a list nested a few dozen deep OOMs/hangs the writer from a trivially
+	// small in-memory value. The cap trips at the innermost level that first
+	// exceeds it, bounding writer memory. Realistic values are orders below this.
+	maxEncodedPropertyBytes = 64 << 20 // 64 MiB
+)
+
+// ErrPropertyValueTooLarge is the fail-stop guard against the nested-list
+// re-escaping blowup (#1792); ErrPropertyNestingTooDeep guards recursion depth.
+var (
+	ErrPropertyValueTooLarge  = errors.New("graphml: encoded property value exceeds size limit")
+	ErrPropertyNestingTooDeep = errors.New("graphml: property value nesting too deep")
+)
+
+func serialisePropertyValueDepth(v lpg.PropertyValue, depth int) (string, error) {
+	if depth > maxEncodedListDepth {
+		return "", ErrPropertyNestingTooDeep
+	}
 	switch v.Kind() {
 	case lpg.PropString:
 		s, _ := v.String()
-		return s
+		return s, nil
 	case lpg.PropInt64:
 		i, _ := v.Int64()
-		return strconv.FormatInt(i, 10)
+		return strconv.FormatInt(i, 10), nil
 	case lpg.PropFloat64:
 		f, _ := v.Float64()
 		switch {
 		case math.IsNaN(f):
-			return "NaN"
+			return "NaN", nil
 		case math.IsInf(f, 1):
-			return "INF"
+			return "INF", nil
 		case math.IsInf(f, -1):
-			return "-INF"
+			return "-INF", nil
 		}
-		return strconv.FormatFloat(f, 'g', -1, 64)
+		return strconv.FormatFloat(f, 'g', -1, 64), nil
 	case lpg.PropBool:
 		b, _ := v.Bool()
 		if b {
-			return "true"
+			return "true", nil
 		}
-		return "false"
+		return "false", nil
 	case lpg.PropTime:
 		t, _ := v.Time()
 		// Format in the value's own location so a non-UTC offset round-trips
 		// faithfully (instant AND offset survive), instead of silently
 		// normalising to UTC (#1769). RFC3339Nano renders the offset or "Z".
-		return t.Format(time.RFC3339Nano)
+		return t.Format(time.RFC3339Nano), nil
 	case lpg.PropBytes:
 		b, _ := v.Bytes()
-		return base64.StdEncoding.EncodeToString(b)
+		return base64.StdEncoding.EncodeToString(b), nil
 	case lpg.PropList:
 		elems, _ := v.List()
 		// Encode as a JSON array of [kindString, encodedValueString] pairs.
 		// This mirrors the JSONL wire format so the two encoders stay in sync.
 		pairs := make([][2]string, len(elems))
 		for i, elem := range elems {
-			pairs[i] = [2]string{graphMLAttrType(elem.Kind()), serialisePropertyValue(elem)}
+			ev, err := serialisePropertyValueDepth(elem, depth+1)
+			if err != nil {
+				return "", err
+			}
+			pairs[i] = [2]string{graphMLAttrType(elem.Kind()), ev}
 		}
-		b, _ := json.Marshal(pairs)
-		return string(b)
+		b, err := json.Marshal(pairs)
+		if err != nil {
+			return "", err
+		}
+		if len(b) > maxEncodedPropertyBytes {
+			return "", ErrPropertyValueTooLarge
+		}
+		return string(b), nil
 	default:
-		return fmt.Sprintf("%v", v)
+		return fmt.Sprintf("%v", v), nil
 	}
 }
 
@@ -372,7 +409,11 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 			if !ok {
 				continue
 			}
-			sv := serialisePropertyValue(v)
+			sv, sErr := serialisePropertyValue(v)
+			if sErr != nil {
+				encErr = fmt.Errorf("graphml: node %q property %q: %w", name, kn, sErr)
+				return false
+			}
 			if encErr = validateXMLText(sv); encErr != nil {
 				encErr = fmt.Errorf("graphml: node %q property %q: %w", name, kn, encErr)
 				return false

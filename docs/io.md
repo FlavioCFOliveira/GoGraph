@@ -111,6 +111,20 @@ The two encoders handle them as follows:
 
 Both encoders round-trip every non-finite value exactly within GoGraph.
 
+## List property value limits
+
+Both encoders serialise a list (`PropList`) property as a JSON array of
+`[kind, value]` pairs, embedding each nested level as a re-escaped JSON
+string. The escaping makes the serialised size grow by roughly a factor of
+four per nesting level, so to keep the writer's memory bounded each encoder
+fails fast — rather than exhausting memory — when a single property value
+either nests deeper than **128 levels** (`ErrPropertyNestingTooDeep`) or
+serialises to more than **64 MiB** (`ErrPropertyValueTooLarge`). Realistic
+list properties are orders of magnitude below both limits; the guards exist
+solely to reject pathological values that would otherwise OOM or hang the
+writer (the `WriteWithProps` call returns the typed error and writes
+nothing further for that graph).
+
 ## Tooling compatibility matrix
 
 | Tool                | CSV | GraphML | DOT | JSON Lines |

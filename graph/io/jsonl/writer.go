@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"time"
@@ -14,6 +16,29 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
+
+const (
+	// maxEncodedListDepth bounds list-property nesting during serialisation,
+	// guarding the recursive encoder's stack. Matches packstream's maxValueDepth.
+	maxEncodedListDepth = 128
+	// maxEncodedPropertyBytes caps the serialised size of a single property
+	// value. The JSONL list encoding embeds each nested level as a re-escaped
+	// JSON string, so serialised size grows ~4x per nesting level (#1792);
+	// without a cap a list nested a few dozen deep OOMs/hangs the writer from a
+	// trivially small in-memory value. The cap trips at the innermost level that
+	// first exceeds it — before the outer levels multiply it further — so writer
+	// memory stays bounded. Realistic property values are orders below this.
+	maxEncodedPropertyBytes = 64 << 20 // 64 MiB
+)
+
+// ErrPropertyValueTooLarge is returned when a single property value serialises
+// to more than [maxEncodedPropertyBytes]; it is the fail-stop guard against the
+// nested-list re-escaping blowup (#1792).
+var ErrPropertyValueTooLarge = errors.New("jsonl: encoded property value exceeds size limit")
+
+// ErrPropertyNestingTooDeep is returned when a list property nests deeper than
+// [maxEncodedListDepth].
+var ErrPropertyNestingTooDeep = errors.New("jsonl: property value nesting too deep")
 
 // Write streams every node and edge of a to w as JSON Lines. Nodes
 // come first, then edges, so that on-read every endpoint is known
@@ -204,7 +229,12 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 					return written, cerr
 				}
 			}
-			kindStr, valStr := encodePropertyValue(pv)
+			kindStr, valStr, perr := encodePropertyValue(pv)
+			if perr != nil {
+				_ = bw.Flush()
+				metrics.IncCounter("graph.io.jsonl.WriteWithPropsCtx.errors", 1)
+				return written, fmt.Errorf("jsonl: property %q on node %q: %w", propName, nodeKey, perr)
+			}
 			if err := enc.Encode(Record{
 				Type:  "property",
 				ID:    nodeKey,
@@ -242,42 +272,62 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 // strconv.ParseFloat). External consumers expecting a numeric float should
 // be aware these three values are non-numeric string tokens; see
 // docs/io.md.
-func encodePropertyValue(pv lpg.PropertyValue) (kind, value string) {
+func encodePropertyValue(pv lpg.PropertyValue) (kind, value string, err error) {
+	return encodePropertyValueDepth(pv, 0)
+}
+
+// encodePropertyValueDepth is the depth-tracked recursive worker behind
+// [encodePropertyValue]. It fails fast with [ErrPropertyNestingTooDeep] or
+// [ErrPropertyValueTooLarge] rather than allowing the nested-list re-escaping
+// blowup to exhaust memory (#1792).
+func encodePropertyValueDepth(pv lpg.PropertyValue, depth int) (kind, value string, err error) {
+	if depth > maxEncodedListDepth {
+		return "", "", ErrPropertyNestingTooDeep
+	}
 	switch pv.Kind() {
 	case lpg.PropString:
 		s, _ := pv.String()
-		return "string", s
+		return "string", s, nil
 	case lpg.PropInt64:
 		i, _ := pv.Int64()
-		return "int64", strconv.FormatInt(i, 10)
+		return "int64", strconv.FormatInt(i, 10), nil
 	case lpg.PropFloat64:
 		f, _ := pv.Float64()
-		return "float64", strconv.FormatFloat(f, 'g', -1, 64)
+		return "float64", strconv.FormatFloat(f, 'g', -1, 64), nil
 	case lpg.PropBool:
 		b, _ := pv.Bool()
-		return "bool", strconv.FormatBool(b)
+		return "bool", strconv.FormatBool(b), nil
 	case lpg.PropTime:
 		t, _ := pv.Time()
 		// Format in the value's own location so a non-UTC offset round-trips
 		// faithfully (instant AND offset survive), instead of silently
 		// normalising to UTC (#1769). RFC3339Nano renders the offset or "Z".
-		return "time", t.Format(time.RFC3339Nano)
+		return "time", t.Format(time.RFC3339Nano), nil
 	case lpg.PropBytes:
 		b, _ := pv.Bytes()
-		return "bytes", base64.StdEncoding.EncodeToString(b)
+		return "bytes", base64.StdEncoding.EncodeToString(b), nil
 	case lpg.PropList:
 		elems, _ := pv.List()
 		// Encode as a JSON array of [kindString, encodedValueString] pairs.
 		pairs := make([][2]string, len(elems))
 		for i, elem := range elems {
-			k, v := encodePropertyValue(elem)
+			k, v, e := encodePropertyValueDepth(elem, depth+1)
+			if e != nil {
+				return "", "", e
+			}
 			pairs[i] = [2]string{k, v}
 		}
-		b, _ := json.Marshal(pairs)
-		return "list", string(b)
+		b, e := json.Marshal(pairs)
+		if e != nil {
+			return "", "", e
+		}
+		if len(b) > maxEncodedPropertyBytes {
+			return "", "", ErrPropertyValueTooLarge
+		}
+		return "list", string(b), nil
 	default:
 		// Zero or unknown kind: emit as empty string; readers will fail
 		// gracefully on the unknown kind tag.
-		return "unknown", ""
+		return "unknown", "", nil
 	}
 }

@@ -200,9 +200,9 @@ func TestDecodePropertyValue(t *testing.T) {
 // branch of encodePropertyValue.
 func TestEncodePropertyValue_Default(t *testing.T) {
 	t.Parallel()
-	kind, value := encodePropertyValue(lpg.PropertyValue{})
-	if kind != "unknown" || value != "" {
-		t.Fatalf("encodePropertyValue(zero) = (%q,%q), want (\"unknown\",\"\")", kind, value)
+	kind, value, err := encodePropertyValue(lpg.PropertyValue{})
+	if kind != "unknown" || value != "" || err != nil {
+		t.Fatalf("encodePropertyValue(zero) = (%q,%q,%v), want (\"unknown\",\"\",nil)", kind, value, err)
 	}
 }
 
