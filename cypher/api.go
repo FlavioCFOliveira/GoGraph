@@ -383,6 +383,18 @@ type buildOpts struct {
 	// workers never touch bopts).
 	fwdCSR      *csr.CSR[float64]
 	fwdCSRReady bool
+	// pendingPathPred maps a named path variable to a whole-path predicate that a
+	// WHERE Selection above a shortestPath()/allShortestPaths() binding wants
+	// fused INTO the operator (#1786). The Selection registers the predicate
+	// keyed on the path variable before building its child; the ShortestPath
+	// physical builder consumes a matching entry (deleting it) and runs an
+	// exhaustive search returning the shortest SATISFYING path. consumedPathPred
+	// records which keys were consumed so the Selection can drop its now-redundant
+	// post-filter. This indirection is needed because the path-binding operator is
+	// not the Selection's direct child: an outer MATCH (a),(c) binds the endpoints,
+	// so the ShortestPath sits inside a CorrelatedApply below the WHERE Selection.
+	pendingPathPred  map[string]ast.Expression
+	consumedPathPred map[string]struct{}
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -4906,6 +4918,20 @@ func buildOperator(
 		return buildIndexSeekOperator(p, params, schema, idxMgr)
 
 	case *ir.Selection:
+		// Whole-path predicate fused onto shortestPath/allShortestPaths (#1786):
+		// when this Selection sits directly above a ShortestPath node and its
+		// predicate references the path variable, the unconstrained shortest path
+		// may fail the predicate even though a longer SATISFYING path exists
+		// (e.g. `shortestPath((a)-[*]->(c)) WHERE length(p) > 1` with a direct
+		// a->c edge plus a->b->c). Neo4j answers this with an exhaustive search
+		// returning the shortest path that satisfies the predicate. Push the
+		// predicate INTO the operator so it returns the shortest satisfying path
+		// rather than the unconstrained shortest post-filtered away.
+		if op, ok, err := tryBuildShortestPathWithPredicate(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
+		}
 		// Disconnected-equi-join hash join (#1506): when this Selection sits
 		// directly above a plain Apply and carries an equi-join predicate
 		// straddling the two arms, replace the nested-loop Cartesian product with
@@ -8805,13 +8831,39 @@ func resolveHopRel(bopts *buildOpts, g *lpg.Graph[string, float64], prevID, dstI
 	if !prevOK || !dstOK {
 		return rel
 	}
-	// Storage pair and reported endpoints follow the traversal direction.
-	stKey, enKey := prevKey, dstKey
+	// The fwdPos the operator recorded is a valid forward-CSR position in the
+	// ENCODED traversal orientation: prevKey->dstKey, or dstKey->prevKey when the
+	// hop is flagged reversed. Recover the stable edge handle from that
+	// orientation (where the position indexes the real arc).
+	encStKey, encEnKey := prevKey, dstKey
 	if reversed {
-		stKey, enKey = dstKey, prevKey
-		rel.StartID, rel.EndID = dstID, prevID
+		encStKey, encEnKey = dstKey, prevKey
 	}
-	fwdHandle := edgeHandleAtFwdPos(bopts, g, stKey, enKey, fwdPos)
+	fwdHandle := edgeHandleAtFwdPos(bopts, g, encStKey, encEnKey, fwdPos)
+
+	// The reported endpoints and the type/property lookup follow the edge's
+	// CREATE-direction storage pair. For a DIRECTED edge that is the encoded
+	// orientation; for an UNDIRECTED edge the search may have recorded EITHER of
+	// the two symmetric arcs, but the per-instance type and properties live under
+	// the single CREATE-direction pair. Pick the orientation whose by-handle
+	// store actually carries this handle; without this an undirected reverse hop
+	// renders an empty type (#1785). The probe leaves a directed edge untouched.
+	stKey, enKey := encStKey, encEnKey
+	stID, enID := prevID, dstID
+	if reversed {
+		stID, enID = dstID, prevID
+	}
+	if fwdHandle != 0 {
+		swKey, swEn := enKey, stKey
+		hereByHandle := len(g.EdgeLabelsByHandle(stKey, enKey, fwdHandle)) > 0
+		thereByHandle := len(g.EdgeLabelsByHandle(swKey, swEn, fwdHandle)) > 0
+		if !hereByHandle && thereByHandle {
+			stKey, enKey = swKey, swEn
+			stID, enID = enID, stID
+		}
+	}
+	rel.StartID, rel.EndID = stID, enID
+
 	hasByHandleEntry := false
 	ets := g.EdgeLabels(stKey, enKey)
 	if fwdHandle != 0 {
@@ -11647,6 +11699,149 @@ func buildShortestPath(
 	argByTag map[uint32]*exec.Argument,
 	bopts *buildOpts,
 ) (exec.Operator, error) {
+	// Consume a whole-path predicate a WHERE Selection above this binding
+	// registered for fusion (#1786). The closure is built inside
+	// buildShortestPathWithPred AFTER the path column is registered in the local
+	// schema, so the predicate's path-variable reference resolves to the correct
+	// column; consume only when a graph is available (the operator can run the
+	// exhaustive search) so the Selection knows whether its post-filter is
+	// redundant.
+	var predExpr ast.Expression
+	if bopts != nil && p.PathVar != "" && bopts.pendingPathPred != nil {
+		if pp, ok := bopts.pendingPathPred[p.PathVar]; ok {
+			var g *lpg.Graph[string, float64]
+			if lw, lok := walker.(*lpgNodeWalker); lok {
+				g = lw.g
+			}
+			if g != nil {
+				predExpr = pp
+				delete(bopts.pendingPathPred, p.PathVar)
+				if bopts.consumedPathPred == nil {
+					bopts.consumedPathPred = map[string]struct{}{}
+				}
+				bopts.consumedPathPred[p.PathVar] = struct{}{}
+			}
+		}
+	}
+	return buildShortestPathWithPred(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts, predExpr)
+}
+
+// tryBuildShortestPathWithPredicate detects a Selection whose child is a
+// shortestPath()/allShortestPaths() binding and whose predicate references the
+// bound path variable, and fuses the predicate INTO the operator as a whole-path
+// predicate evaluated DURING the (exhaustive) search (#1786). It returns
+// (op, true, nil) when the fusion applies, (nil, false, nil) when it does not
+// (the caller then builds the ordinary post-filter Selection).
+//
+// The fusion is gated to the case the divergence describes: the predicate
+// references the path variable, so the unconstrained shortest path could fail
+// it while a longer satisfying path exists. A predicate that does NOT reference
+// the path variable (only the endpoints, say) constrains nothing the operator
+// can use, so it is left as an ordinary post-filter.
+func tryBuildShortestPathWithPredicate(
+	sel *ir.Selection,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	if sel.PredicateExpr == nil || bopts == nil {
+		return nil, false, nil
+	}
+	// The path-binding operator may be the Selection's direct child OR nested in
+	// the right arm of a CorrelatedApply/Apply (the common case, where an outer
+	// MATCH binds the endpoints). Find the ShortestPath whose path variable the
+	// predicate references.
+	sp := findShortestPathForPathVar(sel.Child, sel.PredicateExpr)
+	if sp == nil {
+		return nil, false, nil
+	}
+	var g *lpg.Graph[string, float64]
+	if lw, lok := walker.(*lpgNodeWalker); lok {
+		g = lw.g
+	}
+	if g == nil {
+		return nil, false, nil
+	}
+
+	pathVar := sp.PathVar
+	// Register the predicate EXPRESSION (not a closure) for fusion: the closure
+	// must be built where the ShortestPath operator's own schema is in scope (the
+	// inner arm of the surrounding CorrelatedApply), because that schema is where
+	// the path column is registered — the outer Selection's schema indexes the
+	// path variable differently. buildShortestPathWithPred builds the closure
+	// against its local schema.
+	if bopts.pendingPathPred == nil {
+		bopts.pendingPathPred = map[string]ast.Expression{}
+	}
+	if bopts.consumedPathPred == nil {
+		bopts.consumedPathPred = map[string]struct{}{}
+	}
+	bopts.pendingPathPred[pathVar] = sel.PredicateExpr
+
+	child, err := buildOperator(sel.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, consumed := bopts.consumedPathPred[pathVar]; !consumed {
+		// The ShortestPath builder did not consume the predicate (e.g. no graph
+		// was available, so it returned the child unchanged). Leave the pending
+		// entry cleared and fall back to the ordinary post-filter Selection.
+		delete(bopts.pendingPathPred, pathVar)
+		return nil, false, nil
+	}
+	// Predicate is now enforced inside the operator; the post-filter Selection is
+	// redundant and is dropped.
+	return child, true, nil
+}
+
+// findShortestPathForPathVar descends a plan looking for an [ir.ShortestPath]
+// whose (non-empty) path variable is referenced by pred. It follows the
+// right-arm-of-Apply chains that wrap a correlated shortestPath binding (the
+// endpoints bound by an outer MATCH), as well as the direct-child case. It does
+// NOT cross another Selection/Projection that could reshape the path variable.
+func findShortestPathForPathVar(plan ir.LogicalPlan, pred ast.Expression) *ir.ShortestPath {
+	switch n := plan.(type) {
+	case *ir.ShortestPath:
+		if n.PathVar != "" && exprReferencesVarName(pred, n.PathVar) {
+			return n
+		}
+		return nil
+	case *ir.Apply:
+		return findShortestPathForPathVar(n.Inner, pred)
+	case *ir.CorrelatedApply:
+		return findShortestPathForPathVar(n.Inner, pred)
+	case *ir.OptionalApply:
+		return findShortestPathForPathVar(n.Inner, pred)
+	}
+	return nil
+}
+
+// buildShortestPathWithPred is [buildShortestPath] with an optional whole-path
+// predicate expression (#1786). When predExpr is non-nil the operator runs an
+// EXHAUSTIVE search returning the shortest path that SATISFIES the predicate
+// (rather than the unconstrained shortest, post-filtered). The predicate closure
+// is built HERE, after the path column is registered in this local schema, so
+// the path-variable reference resolves to the correct column and hydrates via
+// the pathVarMeta registered just below.
+func buildShortestPathWithPred(
+	p *ir.ShortestPath,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
+	predExpr ast.Expression,
+) (exec.Operator, error) {
 	child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 	if err != nil {
 		return nil, err
@@ -11706,6 +11901,24 @@ func buildShortestPath(
 		return child, nil
 	}
 
+	// Build the fused whole-path predicate closure now that the path column and
+	// its hydration metadata are registered in this local schema (#1786). The
+	// closure snapshots the schema so a later mutation cannot shift the columns
+	// it reads; it evaluates the predicate against a candidate's full output row,
+	// where the path variable hydrates to a PathValue through pathVarMeta.
+	var pathPred func(exec.Row) (bool, error)
+	if predExpr != nil {
+		predSchema := copySchema(schema)
+		capturedG := g
+		pathPred = func(out exec.Row) (bool, error) {
+			v, perr := evalRowPooled(bopts, predExpr, out, predSchema, capturedG, params, reg, nil)
+			if perr != nil {
+				return false, perr
+			}
+			return v == expr.BoolValue(true), nil
+		}
+	}
+
 	fwd, rev := csrPairFromGraph(g)
 	dir := irDirToExec(p.Direction)
 
@@ -11728,12 +11941,18 @@ func buildShortestPath(
 			WithTypeFilter(edgeType, etFilter).
 			WithHopBounds(p.MinDepth, maxHops).
 			WithOptional(p.Optional)
+		if pathPred != nil {
+			op = op.WithPathPredicate(pathPred)
+		}
 		return op, nil
 	}
 	op := exec.NewShortestPath(child, fwd, rev, dir, srcCol, dstCol).
 		WithTypeFilter(edgeType, etFilter).
 		WithHopBounds(p.MinDepth, maxHops).
 		WithOptional(p.Optional)
+	if pathPred != nil {
+		op = op.WithPathPredicate(pathPred)
+	}
 	return op, nil
 }
 

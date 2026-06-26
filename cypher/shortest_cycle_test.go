@@ -236,3 +236,84 @@ func sprintfV(v expr.Value) string {
 	}
 	return v.String()
 }
+
+// scStringList extracts a list of string values from a result column (a
+// ListValue of StringValues), used to assert per-hop relationship types.
+func scStringList(t *testing.T, v expr.Value) []string {
+	t.Helper()
+	lv, ok := v.(expr.ListValue)
+	if !ok {
+		t.Fatalf("expected ListValue, got %T (%v)", v, v)
+	}
+	out := make([]string, 0, len(lv))
+	for _, e := range lv {
+		if sv, ok := e.(expr.StringValue); ok {
+			out = append(out, string(sv))
+		} else {
+			out = append(out, "")
+		}
+	}
+	return out
+}
+
+// scIntList extracts a list of int64 values from a result column.
+func scIntList(t *testing.T, v expr.Value) []int64 {
+	t.Helper()
+	lv, ok := v.(expr.ListValue)
+	if !ok {
+		t.Fatalf("expected ListValue, got %T (%v)", v, v)
+	}
+	out := make([]int64, 0, len(lv))
+	for _, e := range lv {
+		if iv, ok := e.(expr.IntegerValue); ok {
+			out = append(out, int64(iv))
+		} else {
+			t.Fatalf("expected IntegerValue element, got %T", e)
+		}
+	}
+	return out
+}
+
+// scTypeSetEqual reports whether got and want hold the same multiset of strings
+// (order-independent), used to assert a cycle's per-hop types are a permutation
+// of the expected set.
+func scTypeSetEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	m := map[string]int{}
+	for _, g := range got {
+		m[g]++
+	}
+	for _, w := range want {
+		m[w]--
+	}
+	for _, c := range m {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// scIntSliceEqual reports element-wise equality of two int64 slices.
+func scIntSliceEqual(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// scIntKey renders an int64 slice as a stable comparable key.
+func scIntKey(a []int64) string {
+	b := make([]byte, 0, len(a)*4)
+	for _, x := range a {
+		b = append(b, byte(x), byte(x>>8), byte(x>>16), byte(x>>24), '|')
+	}
+	return string(b)
+}
