@@ -249,13 +249,6 @@ func deserialisePropertyValue(attrType, s string) (lpg.PropertyValue, error) {
 	}
 }
 
-// propKeyDecl is the metadata kept per property <key> declaration.
-type propKeyDecl struct {
-	attrName string
-	attrType string
-	forElem  string // "node" or "edge"
-}
-
 // WriteWithProps writes a GraphML document to w for the LPG g.
 // A <key> declaration is emitted for every property key encountered
 // across all nodes, with attr.type set to the GraphML equivalent
@@ -300,23 +293,24 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		}
 	}
 
-	// First pass: collect all property keys and their GraphML types
-	// by walking every node's property bag.
-	// keyMeta maps property-key name → propKeyDecl (first-seen type wins).
-	keyMeta := make(map[string]propKeyDecl)
+	// First pass: collect, for every property-key name, the SET of value kinds
+	// observed across all live nodes. GraphML declares attr.type per <key>, so a
+	// name carrying more than one kind needs one <key> per kind to round-trip
+	// faithfully (#1791); a name with a single kind keeps the legacy single
+	// declaration (and id) so homogeneous exports are byte-identical.
+	keyKinds := make(map[string]map[lpg.PropertyKind]struct{})
 	a.Mapper().Walk(func(id graph.NodeID, name string) bool {
 		if _, gone := dead[id]; gone {
 			return true
 		}
 		props := g.NodeProperties(name)
 		for k, v := range props {
-			if _, seen := keyMeta[k]; !seen {
-				keyMeta[k] = propKeyDecl{
-					attrName: k,
-					attrType: graphMLAttrType(v.Kind()),
-					forElem:  "node",
-				}
+			set, ok := keyKinds[k]
+			if !ok {
+				set = make(map[lpg.PropertyKind]struct{})
+				keyKinds[k] = set
 			}
+			set[v.Kind()] = struct{}{}
 		}
 		return true
 	})
@@ -346,25 +340,29 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		return err
 	}
 
-	// Emit one <key> per discovered node-property.
-	// Use a deterministic ordering: sort by key name length then
-	// lexicographically to avoid map-iteration non-determinism.
-	propKeyNames := sortedKeys(keyMeta)
+	// Emit <key> declarations. A homogeneous name gets one declaration with the
+	// legacy "p_<name>" id; a heterogeneous name gets one declaration per kind,
+	// each with a per-kind id, so every value round-trips with its own type.
+	// Deterministic ordering: names lexicographically, kinds by attr.type.
+	propKeyNames := sortedNames(keyKinds)
 	for _, kn := range propKeyNames {
 		if err := validateXMLText(kn); err != nil {
 			metrics.IncCounter("graph.io.graphml.WriteWithPropsCtx.errors", 1)
 			return fmt.Errorf("graphml: property key %q: %w", kn, err)
 		}
-		decl := keyMeta[kn]
-		if err := enc.EncodeElement(struct {
-			XMLName  xml.Name `xml:"key"`
-			ID       string   `xml:"id,attr"`
-			For      string   `xml:"for,attr"`
-			AttrName string   `xml:"attr.name,attr"`
-			AttrType string   `xml:"attr.type,attr"`
-		}{ID: propKeyID(kn), For: decl.forElem, AttrName: decl.attrName, AttrType: decl.attrType},
-			xml.StartElement{Name: xml.Name{Local: "key"}}); err != nil {
-			return err
+		kinds := sortedKinds(keyKinds[kn])
+		multi := len(kinds) > 1
+		for _, kind := range kinds {
+			if err := enc.EncodeElement(struct {
+				XMLName  xml.Name `xml:"key"`
+				ID       string   `xml:"id,attr"`
+				For      string   `xml:"for,attr"`
+				AttrName string   `xml:"attr.name,attr"`
+				AttrType string   `xml:"attr.type,attr"`
+			}{ID: graphMLKeyID(kn, kind, multi), For: "node", AttrName: kn, AttrType: graphMLAttrType(kind)},
+				xml.StartElement{Name: xml.Name{Local: "key"}}); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -418,7 +416,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 				encErr = fmt.Errorf("graphml: node %q property %q: %w", name, kn, encErr)
 				return false
 			}
-			encErr = encodeDataElem(enc, propKeyID(kn), sv)
+			encErr = encodeDataElem(enc, graphMLKeyID(kn, v.Kind(), len(keyKinds[kn]) > 1), sv)
 			if encErr != nil {
 				return false
 			}
@@ -462,13 +460,23 @@ func encodeDataElem(enc *xml.Encoder, key, value string) error {
 		xml.StartElement{Name: xml.Name{Local: "data"}})
 }
 
-// propKeyID returns the <key id="..."> value for a property-key name.
-// We prefix with "p_" to avoid collision with the reserved "w" edge-weight key.
-func propKeyID(name string) string { return "p_" + name }
+// graphMLKeyID returns the <key id="..."> for property (name, kind). We prefix
+// with "p_" to avoid collision with the reserved "w" edge-weight key. A name
+// observed with a single kind keeps the legacy "p_<name>" id so homogeneous
+// exports are byte-identical; a name observed with multiple kinds gets a
+// per-kind id "p_<name>_<attrType>" so each value round-trips with its own
+// type (#1791). attr.type values are drawn from a fixed underscore-free
+// vocabulary, so distinct (name, kind) pairs always yield distinct ids.
+func graphMLKeyID(name string, kind lpg.PropertyKind, multiKind bool) string {
+	if multiKind {
+		return "p_" + name + "_" + graphMLAttrType(kind)
+	}
+	return "p_" + name
+}
 
-// sortedKeys returns the map keys in a stable lexicographic order so
-// the GraphML output is deterministic regardless of map-iteration order.
-func sortedKeys(m map[string]propKeyDecl) []string {
+// sortedNames returns the map keys in a stable lexicographic order so the
+// GraphML output is deterministic regardless of map-iteration order.
+func sortedNames[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -477,6 +485,24 @@ func sortedKeys(m map[string]propKeyDecl) []string {
 	for i := 1; i < len(out); i++ {
 		j := i
 		for j > 0 && out[j-1] > out[j] {
+			out[j-1], out[j] = out[j], out[j-1]
+			j--
+		}
+	}
+	return out
+}
+
+// sortedKinds returns the kinds in a set ordered by their GraphML attr.type
+// string, so the per-kind <key> declarations for a heterogeneous name are
+// emitted deterministically.
+func sortedKinds(set map[lpg.PropertyKind]struct{}) []lpg.PropertyKind {
+	out := make([]lpg.PropertyKind, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	for i := 1; i < len(out); i++ {
+		j := i
+		for j > 0 && graphMLAttrType(out[j-1]) > graphMLAttrType(out[j]) {
 			out[j-1], out[j] = out[j], out[j-1]
 			j--
 		}

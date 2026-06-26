@@ -67,6 +67,17 @@ The reader accepts the conventional shape:
 configuration. Other attributes on `<node>` / `<edge>` /
 `<graph>` are accepted and ignored.
 
+GraphML declares `attr.type` per `<key>`, not per value. When a property
+name carries the *same* kind on every node, the writer emits a single
+`<key id="p_<name>">` (the legacy, byte-stable form). When the same name
+appears with *different* kinds across nodes (e.g. `v=42` on one node,
+`v="hello"` on another), the writer emits one `<key>` per kind — each with
+its own id `p_<name>_<attr.type>` and the shared `attr.name` — and every
+`<data>` references the id matching that value's kind, so each value
+round-trips with its own type rather than failing the import or silently
+degrading (#1791). The reader resolves each `<data>` purely by its key id,
+so this is transparent and back-compatible with single-key files.
+
 ## DOT (Graphviz)
 
 DOT is write-only in v1. The exporter emits a `digraph G` (or
