@@ -299,6 +299,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	// faithfully (#1791); a name with a single kind keeps the legacy single
 	// declaration (and id) so homogeneous exports are byte-identical.
 	keyKinds := make(map[string]map[lpg.PropertyKind]struct{})
+	anyLabels := false
 	a.Mapper().Walk(func(id graph.NodeID, name string) bool {
 		if _, gone := dead[id]; gone {
 			return true
@@ -311,6 +312,9 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 				keyKinds[k] = set
 			}
 			set[v.Kind()] = struct{}{}
+		}
+		if len(g.NodeLabels(name)) > 0 {
+			anyLabels = true
 		}
 		return true
 	})
@@ -338,6 +342,22 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		AttrType string   `xml:"attr.type,attr"`
 	}{ID: "w", For: "edge", AttrName: "weight", AttrType: "long"}, xml.StartElement{Name: xml.Name{Local: "key"}}); err != nil {
 		return err
+	}
+
+	// Emit the reserved node-label <key> only when some node is labelled, so a
+	// label-less graph's output stays byte-identical and back-compatible (#1793).
+	// Its id (labelsKeyID) never collides with a property key (those are
+	// "p_<name>"-prefixed), mirroring the reserved "w" weight key.
+	if anyLabels {
+		if err := enc.EncodeElement(struct {
+			XMLName  xml.Name `xml:"key"`
+			ID       string   `xml:"id,attr"`
+			For      string   `xml:"for,attr"`
+			AttrName string   `xml:"attr.name,attr"`
+			AttrType string   `xml:"attr.type,attr"`
+		}{ID: labelsKeyID, For: "node", AttrName: "labels", AttrType: "string"}, xml.StartElement{Name: xml.Name{Local: "key"}}); err != nil {
+			return err
+		}
 	}
 
 	// Emit <key> declarations. A homogeneous name gets one declaration with the
@@ -421,6 +441,22 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 				return false
 			}
 		}
+		// Emit the node's labels under the reserved label key (#1793). Labels
+		// are JSON-encoded so any label text (including commas) round-trips.
+		if labels := g.NodeLabels(name); len(labels) > 0 {
+			lj, mErr := json.Marshal(labels)
+			if mErr != nil {
+				encErr = fmt.Errorf("graphml: node %q labels: %w", name, mErr)
+				return false
+			}
+			if encErr = validateXMLText(string(lj)); encErr != nil {
+				encErr = fmt.Errorf("graphml: node %q labels: %w", name, encErr)
+				return false
+			}
+			if encErr = encodeDataElem(enc, labelsKeyID, string(lj)); encErr != nil {
+				return false
+			}
+		}
 		encErr = enc.EncodeToken(nodeStart.End())
 		return encErr == nil
 	})
@@ -459,6 +495,11 @@ func encodeDataElem(enc *xml.Encoder, key, value string) error {
 	return enc.EncodeElement(dataElem{Key: key, Value: value},
 		xml.StartElement{Name: xml.Name{Local: "data"}})
 }
+
+// labelsKeyID is the reserved <key id> carrying a node's labels (#1793). Like
+// the "w" weight key it has no "p_" prefix, so it never collides with a
+// property key (which graphMLKeyID always prefixes with "p_").
+const labelsKeyID = "labels"
 
 // graphMLKeyID returns the <key id="..."> for property (name, kind). We prefix
 // with "p_" to avoid collision with the reserved "w" edge-weight key. A name
@@ -583,6 +624,24 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 		// decoder populates it (the docElement struct unmarshals
 		// <data> children of <node> via xml:"data").
 		for _, d := range n.Data {
+			// Reserved node-label key (#1793): the value is a JSON array of
+			// label strings; restore them via SetNodeLabel rather than decoding
+			// a property. Handled before the keyIndex lookup so it works even if
+			// a writer ever omits the <key> declaration.
+			if d.Key == labelsKeyID {
+				var labels []string
+				if err := json.Unmarshal([]byte(d.Value), &labels); err != nil {
+					metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
+					return nil, 0, fmt.Errorf("graphml: node %q labels: %w", n.ID, err)
+				}
+				for _, lbl := range labels {
+					if err := g.SetNodeLabel(n.ID, lbl); err != nil {
+						metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
+						return nil, 0, fmt.Errorf("graphml: node %q SetNodeLabel(%q): %w", n.ID, lbl, err)
+					}
+				}
+				continue
+			}
 			decl, ok := keyIndex[d.Key]
 			if !ok {
 				continue

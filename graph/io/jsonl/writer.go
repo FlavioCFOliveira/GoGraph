@@ -175,7 +175,14 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		if !live[id] {
 			continue
 		}
-		if err := enc.Encode(Record{Type: "node", ID: names[id]}); err != nil {
+		// Carry node labels so a labelled graph round-trips faithfully
+		// (#1793). Omitted from the wire when the node has none (omitempty),
+		// keeping label-less output byte-identical and back-compatible.
+		labels := g.NodeLabels(names[id])
+		if len(labels) == 0 {
+			labels = nil
+		}
+		if err := enc.Encode(Record{Type: "node", ID: names[id], Labels: labels}); err != nil {
 			metrics.IncCounter("graph.io.jsonl.WriteWithPropsCtx.errors", 1)
 			return written, err
 		}

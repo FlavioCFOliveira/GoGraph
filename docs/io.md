@@ -104,6 +104,26 @@ The reader/writer accept the `Record` shape and the writer
 suppresses HTML escaping so the output matches conventional JSON
 tooling.
 
+## Node labels
+
+The property-aware encoders (`WriteWithProps` / `ReadWithProps`) carry node
+labels so a labelled graph round-trips faithfully (#1793):
+
+- **JSON Lines** adds a `labels` array to each `node` record, e.g.
+  `{"type":"node","id":"alice","labels":["Person"]}`. The field is omitted
+  when the node has no labels, so label-less output is byte-identical and
+  older files (which never wrote the field) still import.
+- **GraphML** emits a reserved `<key id="labels" for="node"
+  attr.name="labels" attr.type="string"/>` (only when at least one node is
+  labelled) and one `<data key="labels">` per labelled node holding the
+  labels as a JSON array, so any label text — including commas — round-trips.
+  The reserved id never collides with a property key (those are `p_`-prefixed).
+
+The reader restores labels via `SetNodeLabel`. **CSV** (an edge list) and
+**DOT** (a write-only visualisation format) cannot carry node labels; a graph
+exported through them preserves topology but not labels. Edge labels are not
+carried by any format yet.
+
 ## Non-finite float properties
 
 Float (`PropFloat64`) property values may be `NaN`, `+Inf`, or `-Inf`.

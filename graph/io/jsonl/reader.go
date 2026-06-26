@@ -76,6 +76,11 @@ type Record struct {
 	Key    string `json:"key,omitempty"`    // property key — used by "property" records
 	Value  string `json:"value,omitempty"`  // property value serialised as a string
 	Kind   string `json:"kind,omitempty"`   // property kind: "string","int64","float64","bool","time","bytes"
+
+	// Labels carries the node's labels on "node" records (#1793). Omitted
+	// when empty so label-less files stay byte-identical and older files
+	// (which never wrote the field) decode to a nil slice — back-compatible.
+	Labels []string `json:"labels,omitempty"`
 }
 
 // ReadInto consumes a JSON Lines stream from r and builds an
@@ -251,6 +256,13 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config
 			if err := g.AddNode(rec.ID); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: AddNode: %w", rows, err)
+			}
+			// Restore node labels (#1793). Absent on label-less / older files.
+			for _, lbl := range rec.Labels {
+				if err := g.SetNodeLabel(rec.ID, lbl); err != nil {
+					metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
+					return nil, rows, fmt.Errorf("jsonl row %d: SetNodeLabel(%q): %w", rows, lbl, err)
+				}
 			}
 		case "edge":
 			if rec.Src == "" || rec.Dst == "" {
