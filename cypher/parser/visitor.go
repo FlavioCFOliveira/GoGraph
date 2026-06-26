@@ -1895,6 +1895,9 @@ func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 	if fi := ctx.FunctionInvocation(); fi != nil {
 		return v.visit(fi)
 	}
+	if mp := ctx.MapProjection(); mp != nil {
+		return v.visit(mp)
+	}
 	if sym := ctx.Symbol(); sym != nil {
 		name := symbolText(sym)
 		// Detect hex (0x…/0X…) and octal (0o…/0O…) integer literals that overflow
@@ -2605,6 +2608,87 @@ func (v *visitor) VisitMapPair(ctx *gen.MapPairContext) interface{} {
 		return &SemaError{Rule: "mapPair", Pos: positionOf(ctx), Message: err.Error()}
 	}
 	return &mapPair{key: key, value: val}
+}
+
+// VisitMapProjection builds an [ast.MapProjection] from a map-projection
+// expression (openCypher CIP2014-12-12): a variable subject followed by a
+// brace-enclosed list of projection items, e.g. n{.name, .age, .*, extra: 1}.
+//
+// The subject is always a variable (the grammar restricts the head to a
+// symbol). Each item is built by [VisitMapProjectionItem].
+func (v *visitor) VisitMapProjection(ctx *gen.MapProjectionContext) interface{} {
+	sym := ctx.Symbol()
+	if sym == nil {
+		return unsupported(ctx, "mapProjection", "map projection requires a variable subject")
+	}
+	mp := &ast.MapProjection{
+		Pos:    positionOf(ctx),
+		EndPos: endPositionOf(ctx),
+		Subject: &ast.Variable{
+			Pos:    positionOf(sym),
+			EndPos: endPositionOf(sym),
+			Name:   symbolText(sym),
+		},
+	}
+	for _, itemCtx := range ctx.AllMapProjectionItem() {
+		r := v.visit(itemCtx)
+		if err := firstError(r); err != nil {
+			return err
+		}
+		item, ok := r.(*ast.MapProjectionItem)
+		if !ok {
+			return unsupported(itemCtx, "mapProjection", "internal: expected map projection item")
+		}
+		mp.Items = append(mp.Items, item)
+	}
+	return mp
+}
+
+// VisitMapProjectionItem builds one [ast.MapProjectionItem]. The grammar
+// admits four forms:
+//
+//   - ".*"            — all-properties selector  (IsAll = true)
+//   - ".name"         — property selector        (Key set, Value nil)
+//   - "key: expr"     — literal entry            (Key set, Value = expr)
+//   - "var"           — variable selector        (Key empty, Value = *ast.Variable)
+func (v *visitor) VisitMapProjectionItem(ctx *gen.MapProjectionItemContext) interface{} {
+	item := &ast.MapProjectionItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
+
+	// ".*" — all-properties selector.
+	if ctx.DOT() != nil && ctx.MULT() != nil {
+		item.IsAll = true
+		return item
+	}
+
+	// ".name" — property selector (Value left nil).
+	if ctx.DOT() != nil && ctx.Name() != nil {
+		item.Key = nameText(ctx.Name())
+		return item
+	}
+
+	// "key: expr" — literal entry.
+	if ctx.COLON() != nil && ctx.Name() != nil {
+		item.Key = nameText(ctx.Name())
+		val, err := asExpr(v.visit(ctx.Expression()))
+		if err != nil {
+			return &SemaError{Rule: "mapProjectionItem", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		item.Value = val
+		return item
+	}
+
+	// "var" — variable selector; the key is derived from the variable name by
+	// evalMapProjection, so Key stays empty and Value carries the variable.
+	if sym := ctx.Symbol(); sym != nil {
+		item.Value = &ast.Variable{
+			Pos:    positionOf(sym),
+			EndPos: endPositionOf(sym),
+			Name:   symbolText(sym),
+		}
+		return item
+	}
+
+	return unsupported(ctx, "mapProjectionItem", "unknown map projection item")
 }
 
 // -------------------------------------------------------------------------

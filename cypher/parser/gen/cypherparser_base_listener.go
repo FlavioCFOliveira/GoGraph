@@ -376,6 +376,18 @@ func (s *BaseCypherParserListener) EnterAtom(ctx *AtomContext) {}
 // ExitAtom is called when production atom is exited.
 func (s *BaseCypherParserListener) ExitAtom(ctx *AtomContext) {}
 
+// EnterMapProjection is called when production mapProjection is entered.
+func (s *BaseCypherParserListener) EnterMapProjection(ctx *MapProjectionContext) {}
+
+// ExitMapProjection is called when production mapProjection is exited.
+func (s *BaseCypherParserListener) ExitMapProjection(ctx *MapProjectionContext) {}
+
+// EnterMapProjectionItem is called when production mapProjectionItem is entered.
+func (s *BaseCypherParserListener) EnterMapProjectionItem(ctx *MapProjectionItemContext) {}
+
+// ExitMapProjectionItem is called when production mapProjectionItem is exited.
+func (s *BaseCypherParserListener) ExitMapProjectionItem(ctx *MapProjectionItemContext) {}
+
 // EnterLhs is called when production lhs is entered.
 func (s *BaseCypherParserListener) EnterLhs(ctx *LhsContext) {}
 

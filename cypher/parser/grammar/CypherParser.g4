@@ -307,6 +307,31 @@ atom
     | symbol
     | subqueryExist
     | subqueryCount
+    // Map projection (openCypher CIP2014-12-12): a variable followed by a
+    // brace-enclosed projection list, e.g. n{.name, .age, .*, extra: 1}.
+    // Listed last to keep the existing atom alternative numbering stable for
+    // the hand-written post-generation patches (gen-patches.patch, sections
+    // intercepting the Symbol/FunctionInvocation alternatives). ANTLR's
+    // adaptive LL(*) disambiguates `symbol LBRACE …` (map projection) from a
+    // bare `symbol` and from `functionInvocation` (which requires LPAREN) by
+    // full look-ahead, so declaration order does not affect which alternative
+    // is selected.
+    | mapProjection
+    ;
+
+// mapProjection is the map-projection expression (openCypher CIP2014-12-12).
+// The subject is a variable; each element is one of: a property selector
+// (`.name`), the all-properties selector (`.*`), a literal entry
+// (`key: expression`), or a variable selector (`var`).
+mapProjection
+    : symbol LBRACE (mapProjectionItem (COMMA mapProjectionItem)*)? RBRACE
+    ;
+
+mapProjectionItem
+    : DOT MULT            // .*  — all-properties selector
+    | DOT name            // .name — property selector
+    | name COLON expression  // key: expression — literal entry
+    | symbol              // var — variable selector
     ;
 
 lhs

@@ -348,19 +348,19 @@ the full closure record.
 
 ---
 
-## Unimplemented openCypher extensions (outside the TCK)
+## openCypher extensions outside the TCK
 
 These features are part of the broader openCypher language but have **no
-scenarios in the execution TCK**, so their absence does not affect the
-3 897/3 897 baseline. They are listed here so the partial support code behind
-them is not mistaken for a working feature.
+scenarios in the execution TCK**, so they do not affect the 3 897/3 897
+baseline. They are implemented and listed here for completeness.
 
 - **Map projection** (`n{.name, .age, .*, k: expr}`, openCypher CIP2014-12-12):
-  **not reachable.** The `*ast.MapProjection` node, its evaluator
-  (`cypher/expr` `evalMapProjection`) and its semantic-analysis handling exist,
-  but `cypher/parser/grammar/CypherParser.g4` has **no map-projection
-  production**, so the parser rejects `n{...}` with a `SyntaxError` and never
-  constructs the node — the support code is currently dead. Wiring it requires a
-  grammar change plus an ANTLR regen (`make generate-cypher-parser`, which needs
-  a JVM + the ANTLR jar). Tracked for implementation; pinned by a parser test
-  asserting the `SyntaxError`.
+  **implemented.** The grammar provides the `mapProjection` / `mapProjectionItem`
+  productions (an `atom` alternative — a variable subject followed by a
+  brace-enclosed list of property selectors `.name`, the all-properties selector
+  `.*`, literal entries `key: expr`, and variable selectors `var`). The parser
+  visitor (`cypher/parser` `VisitMapProjection`) builds an `*ast.MapProjection`,
+  which is evaluated by `cypher/expr` `evalMapProjection` and type-checked by the
+  semantic analyser. A missing property selector yields `null`; a `null` subject
+  yields `null`. Map projection is not part of the openCypher TCK, so it does not
+  affect TCK conformance.

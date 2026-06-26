@@ -243,6 +243,14 @@ func (v *BaseCypherParserVisitor) VisitAtom(ctx *AtomContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
+func (v *BaseCypherParserVisitor) VisitMapProjection(ctx *MapProjectionContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseCypherParserVisitor) VisitMapProjectionItem(ctx *MapProjectionItemContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BaseCypherParserVisitor) VisitLhs(ctx *LhsContext) interface{} {
 	return v.VisitChildren(ctx)
 }

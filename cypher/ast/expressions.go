@@ -290,15 +290,15 @@ func (m *MapProjectionItem) String() string {
 
 // MapProjection is a map projection expression: n {.name, .age, extra: $x}.
 //
-// NOT REACHABLE today: the ANTLR grammar (cypher/parser/grammar/CypherParser.g4)
-// has no map-projection production, so the parser rejects `n{...}` with a
-// SyntaxError and never constructs a *MapProjection. The evaluation
+// The map-projection production lives in the ANTLR grammar
+// (cypher/parser/grammar/CypherParser.g4, the mapProjection / mapProjectionItem
+// rules); the parser visitor
+// ([github.com/FlavioCFOliveira/GoGraph/cypher/parser] VisitMapProjection)
+// constructs this node, which is then evaluated by
 // ([github.com/FlavioCFOliveira/GoGraph/cypher/expr] evalMapProjection) and
-// semantic-analysis support for this node exist but are currently dead code.
-// Map projection is an accepted openCypher CIP (CIP2014-12-12) but is NOT part
-// of the openCypher TCK, so its absence does not affect TCK conformance.
-// Wiring it requires a grammar change plus an ANTLR regen — see
-// docs/tck/DIVERGENCES.md and the tracking task.
+// type-checked by the semantic analyser. Map projection is an accepted
+// openCypher extension (CIP2014-12-12); it is NOT part of the openCypher TCK,
+// so it does not affect TCK conformance.
 type MapProjection struct {
 	Pos     Position
 	EndPos  Position

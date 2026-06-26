@@ -184,6 +184,12 @@ type CypherParserVisitor interface {
 	// Visit a parse tree produced by CypherParser#atom.
 	VisitAtom(ctx *AtomContext) interface{}
 
+	// Visit a parse tree produced by CypherParser#mapProjection.
+	VisitMapProjection(ctx *MapProjectionContext) interface{}
+
+	// Visit a parse tree produced by CypherParser#mapProjectionItem.
+	VisitMapProjectionItem(ctx *MapProjectionItemContext) interface{}
+
 	// Visit a parse tree produced by CypherParser#lhs.
 	VisitLhs(ctx *LhsContext) interface{}
 

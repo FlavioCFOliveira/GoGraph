@@ -184,6 +184,12 @@ type CypherParserListener interface {
 	// EnterAtom is called when entering the atom production.
 	EnterAtom(c *AtomContext)
 
+	// EnterMapProjection is called when entering the mapProjection production.
+	EnterMapProjection(c *MapProjectionContext)
+
+	// EnterMapProjectionItem is called when entering the mapProjectionItem production.
+	EnterMapProjectionItem(c *MapProjectionItemContext)
+
 	// EnterLhs is called when entering the lhs production.
 	EnterLhs(c *LhsContext)
 
@@ -456,6 +462,12 @@ type CypherParserListener interface {
 
 	// ExitAtom is called when exiting the atom production.
 	ExitAtom(c *AtomContext)
+
+	// ExitMapProjection is called when exiting the mapProjection production.
+	ExitMapProjection(c *MapProjectionContext)
+
+	// ExitMapProjectionItem is called when exiting the mapProjectionItem production.
+	ExitMapProjectionItem(c *MapProjectionItemContext)
 
 	// ExitLhs is called when exiting the lhs production.
 	ExitLhs(c *LhsContext)
