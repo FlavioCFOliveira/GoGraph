@@ -16,6 +16,10 @@
 //	--workload    actor mix: default | write-heavy | read-heavy | bad-actor
 //	--verbose     print each operation as it runs
 //	--crashes     inject deterministic crash+recovery cycles
+//	--checkpoint  enable in-loop checkpointing (full-stack WAL + snapshot store);
+//	              periodically publishes a real snapshot and truncates the WAL
+//	              prefix, so a crash recovers via the full snapshot+WAL path
+//	--checkpoint-every  tick cadence between checkpoints (0 = default cadence)
 //	--mode        engine | wire | concurrent | liveness (default "engine")
 //	--conns       concurrent connections for the concurrent/liveness modes
 //	--ops-per-conn  operations per connection for those modes
@@ -87,6 +91,8 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	workloadName := fs.String("workload", "default", "actor mix: default | write-heavy | read-heavy | bad-actor")
 	verbose := fs.Bool("verbose", false, "print each operation as it runs")
 	crashes := fs.Bool("crashes", false, "inject deterministic crash+recovery cycles (drives the real SimDisk-backed persistence stack)")
+	checkpoint := fs.Bool("checkpoint", false, "enable in-loop checkpointing: open the store full-stack (WAL + snapshot) and periodically publish a real snapshot and truncate the WAL prefix, so a crash recovers via the full snapshot+WAL path")
+	checkpointEvery := fs.Int("checkpoint-every", 0, "tick cadence between checkpoints when -checkpoint is set (0 = the default cadence)")
 	mode := fs.String("mode", "engine", "execution mode: engine | wire | concurrent | liveness")
 	conns := fs.Int("conns", 16, "concurrent connections (concurrent/liveness modes)")
 	opsPerConn := fs.Int("ops-per-conn", 25, "operations per connection (concurrent/liveness modes)")
@@ -188,8 +194,11 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	if *crashes {
 		cfg.Crash = sim.CrashConfig{Enabled: true}
 	}
+	if *checkpoint {
+		cfg.Checkpoint = sim.CheckpointConfig{Enabled: true, Every: *checkpointEvery}
+	}
 	if *verbose {
-		stdout.printf("Running simulation: seed=%d ticks=%d workload=%s crashes=%v\n", seed, *ticks, *workloadName, *crashes)
+		stdout.printf("Running simulation: seed=%d ticks=%d workload=%s crashes=%v checkpoint=%v\n", seed, *ticks, *workloadName, *crashes, *checkpoint)
 		cfg.OnOp = func(tick int64, op sim.Op) {
 			stdout.printf("  tick=%d %s %q %v\n", tick, op.Kind, op.Cypher, op.Params)
 		}
@@ -213,10 +222,16 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 		stderr.printf("%s", report.String())
 		return 1
 	}
-	if *crashes {
+	switch {
+	case *crashes && *checkpoint:
+		stdout.printf("Simulation passed. Seed: %d, Ticks: %d, Crashes: %d, Replayed WAL ops: %d, Checkpoints: %d\n",
+			seed, *ticks, sm.CrashCount(), sm.ReplayedOps(), sm.CheckpointCount())
+	case *crashes:
 		stdout.printf("Simulation passed. Seed: %d, Ticks: %d, Crashes: %d, Replayed WAL ops: %d\n",
 			seed, *ticks, sm.CrashCount(), sm.ReplayedOps())
-	} else {
+	case *checkpoint:
+		stdout.printf("Simulation passed. Seed: %d, Ticks: %d, Checkpoints: %d\n", seed, *ticks, sm.CheckpointCount())
+	default:
 		stdout.printf("Simulation passed. Seed: %d, Ticks: %d\n", seed, *ticks)
 	}
 	return 0

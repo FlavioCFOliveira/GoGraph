@@ -196,12 +196,18 @@ func diskFullScenario() Scenario {
 	}
 }
 
-// crashStormScenario crashes and recovers frequently via the SimDisk WAL path,
-// stressing the durability/recovery loop. It is deterministic and replayable.
+// crashStormScenario crashes and recovers frequently via the FULL snapshot+WAL
+// path on the SimDisk, stressing the durability/recovery loop. In-loop
+// checkpointing is enabled (#1740): the loop periodically publishes a real
+// self-sufficient snapshot and truncates the WAL prefix, so a crash that follows
+// a checkpoint recovers by reconstructing the graph from the snapshot and
+// replaying only the WAL suffix — exercising [recovery.OpenFS], not just
+// WAL-only replay. The ACID-D durability oracle is asserted after every recovery
+// regardless of which path ran. It is deterministic and replayable.
 func crashStormScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioCrashStorm,
-		Description: "frequent crash+recovery via the SimDisk WAL path (durability stress)",
+		Description: "frequent crash+recovery via the full snapshot+WAL path with in-loop checkpoints (durability stress)",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xC4A5,
 		MaxTicks:    600,
@@ -209,6 +215,10 @@ func crashStormScenario() Scenario {
 		// A high crash probability with a short stability window packs many
 		// crash/recovery cycles into the budget.
 		Crash: CrashConfig{Enabled: true, CrashProb: 1.0 / 60.0, StabilityWindow: 25},
+		// Checkpoint frequently (well inside the crash stability window) so most
+		// crashes are preceded by at least one snapshot+WAL-truncate, driving the
+		// full snapshot+WAL recovery path on the in-memory disk.
+		Checkpoint: CheckpointConfig{Enabled: true, Every: 30},
 	}
 }
 

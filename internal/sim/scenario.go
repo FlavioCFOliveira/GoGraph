@@ -125,6 +125,12 @@ type Scenario struct {
 	Workload func(*Seed) *Workload
 	// Crash configures deterministic crash/recovery injection (ModeDeterministic).
 	Crash CrashConfig
+	// Checkpoint configures deterministic in-loop checkpointing (ModeDeterministic):
+	// the store is opened in full-stack mode (WAL + snapshot) and the loop
+	// publishes a real snapshot + truncates the WAL prefix on the configured
+	// cadence, so a subsequent crash recovers via the full snapshot+WAL path. The
+	// zero value disables it. See [CheckpointConfig].
+	Checkpoint CheckpointConfig
 	// Disk, when its CapacityBytes > 0, bounds the SimDisk-backed store to a
 	// finite size so the run drives the engine through a disk-full (ENOSPC)
 	// condition (ModeDeterministic). See [DiskConfig].
@@ -206,6 +212,7 @@ func (sc *Scenario) DeterministicConfig(seed uint64) Config {
 		MaxTicks:   ticks,
 		Workload:   wl(NewSeed(seed)),
 		Crash:      sc.Crash,
+		Checkpoint: sc.Checkpoint,
 		Disk:       sc.Disk,
 		EngineOpts: sc.EngineOpts,
 		CheckEvery: sc.CheckEvery,

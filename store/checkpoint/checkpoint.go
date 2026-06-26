@@ -559,6 +559,34 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 	return c.runNonBlocking()
 }
 
+// RunCheckpoint performs ONE checkpoint synchronously on the calling goroutine
+// and returns its error, without starting (or requiring) the background cadence
+// loop. It runs the identical three-phase critical section [Trigger] drives —
+// capture under the commit lock, lock-free snapshot publish, prefix-truncate
+// under the commit lock — so it is subject to exactly the same ACID guarantees
+// (the snapshot is transaction-boundary consistent and the WAL prefix is
+// reclaimed only after the self-sufficient snapshot is durable).
+//
+// It exists for the deterministic-simulation harness (internal/sim), which
+// drives the whole store from a single goroutine and so must trigger a
+// checkpoint inline — with no extra goroutine to keep the run reproducible —
+// rather than via [Start]+[Trigger]. Production code uses [Start]/[Trigger].
+//
+// RunCheckpoint is safe to interleave with [Trigger]/loop runs because every
+// run serialises on the same commit lock; the simulator never does both.
+func (c *Checkpointer[N, W]) RunCheckpoint() error {
+	defer metrics.Time("store.checkpoint.RunCheckpoint").Stop()
+	// runCheckpoint -> runNonBlocking already increments the checkpoints counter
+	// and records LastError on every completed run, so the Stats surface is
+	// identical to a loop/Trigger-driven checkpoint; we only add the call-site
+	// error metric.
+	err := c.runCheckpoint()
+	if err != nil {
+		metrics.IncCounter("store.checkpoint.RunCheckpoint.errors", 1)
+	}
+	return err
+}
+
 // runUnderCommitLock runs fn under the store's commit serialisation: the
 // store's PRIVATE commit semaphore when a serialiser is wired
 // (WithCommitSerialiser, the engine path — it also drains in-flight group

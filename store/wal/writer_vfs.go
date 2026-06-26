@@ -157,6 +157,19 @@ func OpenFS(fsys walFS, path string) (*Writer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal: OpenFS: open %q: %w", path, err)
 	}
+	// fsync the parent directory so the WAL file's directory entry is durable.
+	// [Open] does this only on create (an append mutates the inode, not the
+	// dirent, so a per-Sync dir fsync would be wasted on the hot path); OpenFS is
+	// called once at open and cannot cheaply tell create from reopen through the
+	// minimal walFS surface, so it fsyncs unconditionally. This is the
+	// load-bearing fix for a WAL that lives below the filesystem root (dir/wal in
+	// the full-stack layout): without it a crash before the first directory fsync
+	// could drop the newly-linked WAL dirent and lose every committed frame — a
+	// Durability violation that does not arise for a root-level WAL.
+	if err := fsys.ParentDirSync(path); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("wal: OpenFS: fsync parent dir of %q: %w", path, err)
+	}
 	// Seek to the end so Append is append-only and the durable baseline is the
 	// current (already torn-tail-free, per the contract above) file size: bytes
 	// present at open time are presumed durable, so a later sync failure rolls

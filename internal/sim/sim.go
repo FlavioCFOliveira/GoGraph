@@ -17,6 +17,17 @@ const defaultTickSize = time.Millisecond
 // operation.
 const defaultCheckEvery = 1
 
+// defaultCheckpointEvery is the default tick cadence between in-loop checkpoints
+// when [CheckpointConfig.Every] is not set. It is short enough that a default
+// crash-storm budget sees several checkpoint+crash cycles exercising the full
+// snapshot+WAL recovery path.
+const defaultCheckpointEvery = 40
+
+// defaultCheckpointDir is the SimDisk directory the snapshot and WAL live under
+// when [CheckpointConfig.Dir] is not set. The WAL is placed at <dir>/wal and the
+// snapshot at <dir>/snapshot so recovery uses the full snapshot+WAL path.
+const defaultCheckpointDir = "db"
+
 // checkerSeedMix and diskSeedMix derive independent sub-seeds for the checker
 // and the disk from the master seed, so neither the check cadence nor (in
 // Phase 2) the disk fault stream perturbs the workload draw stream. The
@@ -70,6 +81,33 @@ type Config struct {
 	// It is applied only on the in-memory path; the durable (crash/disk) path uses
 	// the recovery-config engine.
 	EngineOpts cypher.EngineOptions
+	// Checkpoint configures deterministic, in-loop checkpointing of the
+	// SimDisk-backed store. The zero value disables it (Enabled == false), so a
+	// run that does not opt in is byte-identical to before. When enabled, the
+	// durable store is opened in FULL-STACK mode (WAL + snapshot under a checkpoint
+	// directory) and the loop publishes a real snapshot + truncates the WAL prefix
+	// every [CheckpointConfig.Every] ticks, so a subsequent crash recovers through
+	// the full snapshot+WAL path. It requires the durable store, so it implies the
+	// SimDisk-backed stack even when [Config.Crash] is disabled. See
+	// [CheckpointConfig].
+	Checkpoint CheckpointConfig
+}
+
+// CheckpointConfig parameterises deterministic in-loop checkpointing. The zero
+// value disables it (Enabled == false), the safe default: a run that does not
+// opt in never checkpoints and keeps the legacy WAL-only durable layout.
+type CheckpointConfig struct {
+	// Enabled turns in-loop checkpointing on. When true the durable store is
+	// opened in full-stack mode and the loop checkpoints on the cadence below.
+	Enabled bool
+	// Every is the tick cadence between checkpoints. A non-positive value falls
+	// back to [defaultCheckpointEvery]. The first checkpoint fires at the first
+	// tick that is a positive multiple of Every.
+	Every int
+	// Dir is the SimDisk directory the snapshot and WAL live under. A non-empty
+	// dir places the WAL at dir/wal and the snapshot at dir/snapshot. When empty
+	// it falls back to [defaultCheckpointDir].
+	Dir string
 }
 
 // DiskConfig bounds the simulated disk so the harness can drive the engine
@@ -132,6 +170,16 @@ type Simulator struct {
 	// only the search scenario opts in; runDeterministic sets it from the
 	// scenario. Zero (the default) disables periodic search checks.
 	searchEvery int
+	// checkpointEvery, when > 0, drives a real snapshot+WAL-truncate checkpoint of
+	// the SimDisk-backed store every checkpointEvery ticks (see
+	// [Simulator.maybeCheckpoint]). It is set from [Config.Checkpoint] in [New] and
+	// is 0 (disabled) for any run that does not opt in. When enabled the store is
+	// opened in full-stack mode so a subsequent crash recovers via the full
+	// snapshot+WAL path.
+	checkpointEvery int
+	// checkpointCount accumulates the number of successful in-loop checkpoints for
+	// reports and tests.
+	checkpointCount int
 }
 
 // New builds a Simulator with a fresh in-memory engine, oracle, checker, clock,
@@ -173,12 +221,28 @@ func New(cfg Config) (*Simulator, error) {
 		crash: NewCrashSchedule(NewSeed(cfg.Seed^crashSeedMix), cfg.Crash),
 	}
 
-	if cfg.Crash.Enabled || cfg.Disk.CapacityBytes > 0 {
+	if cfg.Crash.Enabled || cfg.Disk.CapacityBytes > 0 || cfg.Checkpoint.Enabled {
 		// Durable mode: drive the real SimDisk-backed persistence stack so a crash
 		// can drop the engine and recovery can replay the durable WAL bytes, and so
 		// a finite disk can drive the WAL append+sync path through ENOSPC. A
-		// non-zero disk capacity opts in even without crashes.
-		store, err := OpenSimStore(disk, simulatorStoreConfig())
+		// non-zero disk capacity, or in-loop checkpointing, opts in even without
+		// crashes.
+		storeCfg := simulatorStoreConfig()
+		if cfg.Checkpoint.Enabled {
+			// Full-stack layout: WAL + snapshot under a checkpoint directory so a
+			// real Checkpointer can publish a snapshot and truncate the WAL prefix,
+			// and a crash recovers through the full snapshot+WAL path.
+			dir := cfg.Checkpoint.Dir
+			if dir == "" {
+				dir = defaultCheckpointDir
+			}
+			storeCfg.dir = dir
+			s.checkpointEvery = cfg.Checkpoint.Every
+			if s.checkpointEvery <= 0 {
+				s.checkpointEvery = defaultCheckpointEvery
+			}
+		}
+		store, err := OpenSimStore(disk, storeCfg)
 		if err != nil {
 			return nil, fmt.Errorf("sim: open SimDisk-backed store: %w", err)
 		}
@@ -218,6 +282,16 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 			return nil, err
 		}
 		tick := s.clock.Tick()
+
+		// Checkpoint for this tick BEFORE the crash decision, so a checkpoint that
+		// lands just before a crash is the realistic ordering the full snapshot+WAL
+		// recovery path must survive: the snapshot folds (and the WAL prefix loses)
+		// the committed prefix, then the crash drops the engine and recovery must
+		// rebuild from snapshot + the WAL suffix. A checkpoint failure is a hard
+		// durability fault the run must surface.
+		if err := s.maybeCheckpoint(tick); err != nil {
+			return nil, err
+		}
 
 		// Decide a crash for this tick BEFORE running the op. A scheduled crash
 		// drops the live engine and reopens from the durable SimDisk image via
@@ -369,9 +443,12 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	// SIGKILL-equivalent: discard the live engine and store WITHOUT a graceful
 	// close, so any buffered-but-unsynced frame is lost exactly as a real crash
 	// would lose it. The durable WAL byte image in the SimDisk survives.
-	s.store.Crash()
-
-	store, err := OpenSimStore(s.disk, simulatorStoreConfig())
+	// Reopen with the SAME store configuration the crashed store used — crucially
+	// the same durable layout. In full-stack mode (cfg.dir set) this reopens the
+	// WAL at dir/wal and recovers via the full snapshot+WAL path; reopening with
+	// the default WAL-only config here would point recovery at the wrong (empty)
+	// root-level WAL key and drop every committed op.
+	store, err := OpenSimStore(s.disk, s.store.Config())
 	if err != nil {
 		// A genuine recovery failure (e.g. corruption fail-stop) is a hard fault
 		// the run must surface, not swallow.
@@ -404,6 +481,36 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 		}
 	}
 	return nil, nil
+}
+
+// maybeCheckpoint runs a real snapshot+WAL-truncate checkpoint of the
+// SimDisk-backed store when in-loop checkpointing is enabled and the tick is on
+// the configured cadence. It is a cheap no-op when checkpointing is disabled
+// (checkpointEvery == 0) or there is no durable store. A checkpoint publishes a
+// self-sufficient snapshot to <dir>/snapshot and prefix-truncates the WAL, so
+// the NEXT crash recovery exercises the full [recovery.OpenFS] snapshot+WAL path
+// rather than WAL-only replay.
+//
+// A checkpoint error is returned to the caller as a hard fault: a checkpoint
+// that cannot publish its snapshot or truncate the WAL is a durability failure
+// the run must surface, never swallow. This is intentionally STRICTER than the
+// production background checkpointer ([checkpoint.Checkpointer.Start]/Trigger),
+// whose periodic fires record the error in Stats and retry on the next cadence
+// (a transient ENOSPC merely defers WAL reclamation without compromising
+// durability); the simulator must not mask a durability-machinery break, so it
+// fails the run.
+func (s *Simulator) maybeCheckpoint(tick int64) error {
+	if s.checkpointEvery <= 0 || s.store == nil {
+		return nil
+	}
+	if tick <= 0 || tick%int64(s.checkpointEvery) != 0 {
+		return nil
+	}
+	if err := s.store.Checkpoint(); err != nil {
+		return fmt.Errorf("sim: checkpoint at tick %d: %w", tick, err)
+	}
+	s.checkpointCount++
+	return nil
 }
 
 // execute runs op against the engine via the read or write path per its kind
@@ -504,6 +611,16 @@ func (s *Simulator) CrashCount() int { return s.crashCount }
 // ReplayedOps returns the cumulative number of WAL ops recovery replayed across
 // every crash cycle in the run.
 func (s *Simulator) ReplayedOps() int { return s.replayedOps }
+
+// CheckpointCount returns how many in-loop checkpoints the run published (always
+// 0 when checkpointing is disabled). Each checkpoint published a self-sufficient
+// snapshot and truncated the WAL prefix it folded.
+func (s *Simulator) CheckpointCount() int { return s.checkpointCount }
+
+// Disk returns the SimDisk backing the durable store, for tests that inspect the
+// durable image (e.g. asserting a snapshot directory exists after a checkpoint).
+// It is non-nil whenever a durable store is in use.
+func (s *Simulator) Disk() *SimDisk { return s.disk }
 
 // RejectedWrites returns how many write-shaped operations the engine did not
 // commit during the run. Under the disk-full scenario it is the non-vacuity
