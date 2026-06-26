@@ -249,8 +249,10 @@ func TestCompare_IntraType(t *testing.T) {
 }
 
 func TestCompare_CrossType_Order(t *testing.T) {
-	// openCypher 9 cross-type canonical order (non-null):
-	// Path < Node < Relationship < Map < List < String < Boolean < Float < Integer
+	// openCypher 9 / CIP2016-06-14 cross-type canonical order (non-null):
+	// Map < Node < Relationship < List < Path < String < Boolean < NUMBER < Null.
+	// Integer and Float form a SINGLE Number tier compared by magnitude (#1789),
+	// so they are NOT separately ordered — see the same-tier assertion below.
 	path := expr.PathValue{Nodes: []expr.NodeValue{{ID: 1}}}
 	node := expr.NodeValue{ID: 1}
 	rel := expr.RelationshipValue{ID: 1}
@@ -258,18 +260,24 @@ func TestCompare_CrossType_Order(t *testing.T) {
 	list := expr.ListValue{expr.IntegerValue(1)}
 	str := expr.StringValue("x")
 	boolV := expr.BoolValue(true)
-	flt := expr.FloatValue(1.0)
-	intV := expr.IntegerValue(1)
+	num := expr.FloatValue(1.0) // single representative of the Number tier
 
-	// openCypher cross-type sort order: Map < Node < Relationship <
-	// List < Path < String < Boolean < Float < Integer.
-	ordered := []expr.Value{mapV, node, rel, list, path, str, boolV, flt, intV}
+	ordered := []expr.Value{mapV, node, rel, list, path, str, boolV, num}
 	for i := range ordered {
 		for j := i + 1; j < len(ordered); j++ {
 			if c := expr.Compare(ordered[i], ordered[j]); c >= 0 {
 				t.Errorf("expected Compare(%v, %v) < 0, got %d", ordered[i].Kind(), ordered[j].Kind(), c)
 			}
 		}
+	}
+
+	// Within the Number tier, Integer and Float compare by magnitude, not kind:
+	// equal magnitudes are equal regardless of representation.
+	if c := expr.Compare(expr.FloatValue(1.0), expr.IntegerValue(1)); c != 0 {
+		t.Errorf("Compare(1.0, 1) = %d, want 0 (single Number tier)", c)
+	}
+	if c := expr.Compare(expr.FloatValue(1.5), expr.IntegerValue(1)); c <= 0 {
+		t.Errorf("Compare(1.5, 1) = %d, want > 0", c)
 	}
 }
 

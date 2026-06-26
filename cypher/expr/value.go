@@ -889,6 +889,14 @@ func Compare(a, b Value) int {
 		return -1
 	}
 
+	// Number tier: Integer and Float are a SINGLE orderable type
+	// (CIP2016-06-14), compared by magnitude as if promoted to unlimited
+	// precision — NOT by kind weight. Without this, every Float sorts below
+	// every Integer regardless of value (#1789).
+	if (ka == KindInteger || ka == KindFloat) && (kb == KindInteger || kb == KindFloat) {
+		return compareNumericCross(a, b)
+	}
+
 	// Different non-null types: order by kind weight.
 	oa, ob := kindOrder(ka), kindOrder(kb)
 	if oa != ob {
@@ -937,6 +945,73 @@ func cmpFloat64(a, b float64) int {
 	}
 	if a > b {
 		return 1
+	}
+	return 0
+}
+
+// compareNumericCross orders two values both known to be Integer or Float as a
+// single Number tier (CIP2016-06-14): by magnitude, as if both were promoted to
+// unlimited precision. NaN sorts after every number (consistent with cmpFloat64).
+func compareNumericCross(a, b Value) int {
+	switch av := a.(type) {
+	case IntegerValue:
+		switch bv := b.(type) {
+		case IntegerValue:
+			return cmpInt64(int64(av), int64(bv))
+		case FloatValue:
+			return cmpInt64Float64(int64(av), float64(bv))
+		}
+	case FloatValue:
+		switch bv := b.(type) {
+		case IntegerValue:
+			return -cmpInt64Float64(int64(bv), float64(av))
+		case FloatValue:
+			return cmpFloat64(float64(av), float64(bv))
+		}
+	}
+	// Unreachable: caller guarantees both kinds are Integer or Float.
+	return 0
+}
+
+// cmpInt64Float64 compares an int64 against a float64 EXACTLY, returning -1, 0,
+// or +1 (i relative to f). Per CIP2016-06-14 the two are compared as unlimited-
+// precision numbers, so we cannot simply do float64(i) < f when |i| ≥ 2^53
+// (where the int→float conversion loses precision). NaN sorts after all numbers,
+// matching cmpFloat64's ASC placement.
+func cmpInt64Float64(i int64, f float64) int {
+	if math.IsNaN(f) {
+		return -1 // i precedes NaN (NaN sorts last)
+	}
+	if math.IsInf(f, 1) {
+		return -1
+	}
+	if math.IsInf(f, -1) {
+		return 1
+	}
+	// Fast, exact path: |i| ≤ 2^53 ⇒ float64(i) is exact.
+	const exact = int64(1) << 53
+	if i >= -exact && i <= exact {
+		return cmpFloat64(float64(i), f)
+	}
+	// Large magnitude: compare via the integral part of f. Floats this large
+	// have no fractional part, but guard the int64 conversion against overflow
+	// (2^63 is exactly representable; maxint64 = 2^63−1 is not, so any f ≥ 2^63
+	// strictly exceeds every int64, and any f < −2^63 is below every int64).
+	fl := math.Floor(f)
+	const twoTo63 = 9223372036854775808.0 // 2^63
+	if fl >= twoTo63 {
+		return -1 // i < f
+	}
+	if fl < -twoTo63 {
+		return 1 // i > f
+	}
+	fi := int64(fl)
+	if i != fi {
+		return cmpInt64(i, fi)
+	}
+	// Integer parts equal; a positive fractional part makes f the larger value.
+	if f > fl {
+		return -1
 	}
 	return 0
 }

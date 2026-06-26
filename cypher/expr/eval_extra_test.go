@@ -463,10 +463,12 @@ func TestValue_Compare(t *testing.T) {
 		// Same-type booleans.
 		{"bool_lt", expr.BoolValue(false), expr.BoolValue(true), -1},
 		{"bool_eq", expr.BoolValue(true), expr.BoolValue(true), 0},
-		// Cross-type: String(5) before Bool(6) before Float(7) before Integer(8).
+		// Cross-type: String < Bool < Number (Integer & Float share one tier).
 		{"str_before_bool", expr.StringValue("x"), expr.BoolValue(true), -1},
 		{"bool_before_float", expr.BoolValue(true), expr.FloatValue(1.0), -1},
-		{"float_before_int", expr.FloatValue(1.0), expr.IntegerValue(1), -1},
+		// Integer and Float compare by magnitude within one Number tier (#1789).
+		{"float_eq_int", expr.FloatValue(1.0), expr.IntegerValue(1), 0},
+		{"float_lt_int_by_magnitude", expr.FloatValue(1.0), expr.IntegerValue(2), -1},
 		// Node comparison by ID (cmpUint64).
 		{"node_lt", expr.NodeValue{ID: 1}, expr.NodeValue{ID: 2}, -1},
 		{"node_eq", expr.NodeValue{ID: 5}, expr.NodeValue{ID: 5}, 0},
