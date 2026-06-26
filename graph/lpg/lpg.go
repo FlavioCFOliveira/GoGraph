@@ -1672,6 +1672,23 @@ func (g *Graph[N, W]) IsTombstoned(id graph.NodeID) bool {
 	return ok
 }
 
+// LiveNodeFilter returns a predicate reporting whether a NodeID is live (not
+// tombstoned), or nil when the graph carries no tombstones at all. It is the
+// liveness argument for [csr.BuildFromAdjListLive]: passing it builds a search
+// CSR that omits the ghost edges left behind by [Graph.RemoveNode] (which
+// tombstones a node without stripping its incident edges), while the nil return
+// on a tombstone-free graph preserves the zero-overhead build fast path (#1790).
+//
+// The returned predicate is a point-in-time view: it closes over the graph and
+// re-reads tombstone state on each call, so it must be used against a quiescent
+// graph (the same single state the CSR build snapshots).
+func (g *Graph[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
+	if g.tombstoneActive.Load() == 0 {
+		return nil
+	}
+	return func(id graph.NodeID) bool { return !g.IsTombstoned(id) }
+}
+
 // LiveOrder returns the number of non-tombstoned interned nodes.
 func (g *Graph[N, W]) LiveOrder() uint64 {
 	total := g.adj.Order()

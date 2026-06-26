@@ -47,7 +47,104 @@ type CSR[W any] struct {
 // Complexity is O(V + E) work plus O(V + E) memory for the resulting
 // arrays. The function performs no concurrent fan-out and never
 // blocks the caller on adjacency mutations.
+//
+// BuildFromAdjList is tombstone-agnostic: it faithfully reflects the raw
+// adjacency it is given. When the source is an [lpg.Graph]'s adjacency that may
+// hold nodes removed via RemoveNode (which tombstones the node but does not
+// strip its incident edges), those nodes' arcs would survive into the snapshot
+// as ghost edges. Callers building a search snapshot from such a graph must use
+// [BuildFromAdjListLive] with the graph's live-node predicate (#1790).
 func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
+	return BuildFromAdjListLive(adj, nil)
+}
+
+// BuildFromAdjListLive is [BuildFromAdjList] with an optional liveness filter:
+// any arc whose source or destination fails live is omitted from the snapshot,
+// so a CSR built from an [lpg.Graph] holding tombstoned-but-not-stripped nodes
+// reflects exactly the live topology rather than ghost edges (#1790).
+//
+// When live is nil the build is identical to [BuildFromAdjList] — the common,
+// zero-overhead fast path. lpg callers pass [lpg.Graph.LiveNodeFilter], which
+// returns nil when the graph carries no tombstones, so a tombstone-free graph
+// never pays the per-arc predicate cost. Complexity is O(V + E) either way.
+//
+//nolint:gocyclo // two-pass build with optional per-arc liveness branch.
+func BuildFromAdjListLive[N comparable, W any](adj *adjlist.AdjList[N, W], live func(graph.NodeID) bool) *CSR[W] {
+	if live == nil {
+		return buildFromAdjListRaw(adj)
+	}
+	maxID := uint64(adj.MaxNodeID())
+	if maxID == 0 {
+		return &CSR[W]{vertices: []uint64{0}}
+	}
+
+	vertices := make([]uint64, maxID+1)
+	keepArc := func(src, dst graph.NodeID) bool { return live(src) && live(dst) }
+
+	// Pass 1: count surviving out-edges per source.
+	var total uint64
+	var anyHandles bool
+	for id := uint64(0); id < maxID; id++ {
+		nb, _, h := adj.LoadEntryH(graph.NodeID(id))
+		vertices[id] = total
+		if !live(graph.NodeID(id)) {
+			continue // tombstoned source contributes no arcs
+		}
+		for _, dst := range nb {
+			if live(dst) {
+				total++
+			}
+		}
+		if h != nil {
+			anyHandles = true
+		}
+	}
+	vertices[maxID] = total
+
+	edges := make([]graph.NodeID, total)
+	var weights []W
+	if hasWeights[W]() && !adj.Weightless() {
+		weights = make([]W, total)
+	}
+	var handles []uint64
+	if anyHandles {
+		handles = make([]uint64, total)
+	}
+
+	// Pass 2: write surviving out-edges element-by-element so the parallel
+	// weights/handles columns stay arc-aligned after filtering.
+	for id := uint64(0); id < maxID; id++ {
+		if !live(graph.NodeID(id)) {
+			continue
+		}
+		nb, ws, h := adj.LoadEntryH(graph.NodeID(id))
+		pos := vertices[id]
+		for j, dst := range nb {
+			if !keepArc(graph.NodeID(id), dst) {
+				continue
+			}
+			edges[pos] = dst
+			if weights != nil {
+				weights[pos] = ws[j]
+			}
+			if handles != nil && h != nil {
+				handles[pos] = h[j]
+			}
+			pos++
+		}
+	}
+
+	return &CSR[W]{
+		vertices: vertices,
+		edges:    edges,
+		weights:  weights,
+		handles:  handles,
+		order:    uint64(adj.Order()),
+		size:     total,
+	}
+}
+
+func buildFromAdjListRaw[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 	maxID := uint64(adj.MaxNodeID())
 	if maxID == 0 {
 		return &CSR[W]{

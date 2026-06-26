@@ -11477,7 +11477,13 @@ func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // for lock-free concurrent reads after construction.
 func csrPairFromGraph(g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]) {
 	adj := g.AdjList()
-	fwd = csr.BuildFromAdjList(adj)
+	// Build live: omit arcs incident to tombstoned nodes so search never
+	// traverses a logically-deleted node (#1790). LiveNodeFilter returns nil
+	// on a tombstone-free graph, so this is the zero-overhead fast path in the
+	// common case; when tombstones exist their edges have already been stripped
+	// by the delete path, so filtering removes nothing and edge positions (used
+	// as edge IDs by Expand/edgeIDResolver) are unchanged.
+	fwd = csr.BuildFromAdjListLive(adj, g.LiveNodeFilter())
 	rev = fwd.BuildReverse()
 	return
 }
@@ -11539,12 +11545,12 @@ func ensureFwdCSR(bopts *buildOpts, g *lpg.Graph[string, float64]) *csr.CSR[floa
 		return nil
 	}
 	if bopts == nil {
-		return csr.BuildFromAdjList(g.AdjList())
+		return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
 	}
 	if bopts.fwdCSRReady {
 		return bopts.fwdCSR
 	}
-	bopts.fwdCSR = csr.BuildFromAdjList(g.AdjList())
+	bopts.fwdCSR = csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
 	bopts.fwdCSRReady = true
 	return bopts.fwdCSR
 }
