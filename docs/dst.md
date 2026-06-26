@@ -55,7 +55,7 @@ oracle is a bug.
 |---|---|---|
 | Seed | `seed.go` | PCG-based PRNG ([`math/rand/v2`](https://pkg.go.dev/math/rand/v2)); the single source of randomness. Sub-seeds for the checker and the disk are XOR-derived so the workload draw stream is independent of check cadence and fault injection. |
 | Virtual clock | `clock.go`, `internal/clock` | A 1 ms-per-tick logical clock injected into checkpoint cadence and the Bolt transaction reaper, so time-dependent behaviour is deterministic. |
-| SimDisk | `disk.go`, `diskfs.go` | An in-memory faulting disk backing the WAL and the checkpoint/snapshot, with seed-driven sector-fault injection, a finite-capacity budget that injects disk-full (`ENOSPC`) on the WAL append+sync path, and a `Crash()` that revokes not-yet-`fsync`-ed directory entries. |
+| SimDisk | `disk.go`, `diskfs.go` | An in-memory faulting disk backing the WAL and the checkpoint/snapshot, with seed-driven sector-fault injection, a finite-capacity budget that injects disk-full (`ENOSPC`) on the WAL append+sync path, and a `Crash()` that revokes not-yet-`fsync`-ed directory entries. It satisfies the filesystem seams of every persistence package — `store/snapshot`, `store/csrfile`, `store/recovery`, `store/checkpoint`, and `store/wal` (via `wal.OpenFS` / `simWALFS`, so the WAL writer's crash-safe prefix truncation runs over the in-memory disk) — so the whole stack, not just the WAL, is backed by the simulated disk. |
 | GraphOracle | `oracle.go` | The shadow model: a minimal, obviously-correct map of the nodes and edges the engine must hold after the workload's operations. It advances only on a committed write, so it always equals the engine's durable, acknowledged state. |
 | InvariantChecker | `checker.go` | Compares the engine against the oracle: count parity, sampled existence, full post-recovery durability, and index consistency. |
 | Actors and workloads | `actor.go`, `workload.go` | Honest writer/reader, bounded-churn writer, malformed sender, and the concurrent-mode bad actors (Bolt abuser, overload actor, slow consumer, schema changer). A workload is a weighted mix of actors. |
@@ -175,7 +175,7 @@ schedule, budget, mode, checks). `cmd/sim --list-scenarios` prints them.
 
 | Scenario | Mode | Stresses |
 |---|---|---|
-| `crash-storm` | deterministic | Frequent crash + recovery via the SimDisk WAL path (durability). |
+| `crash-storm` | deterministic | Frequent crash + recovery via the full snapshot + WAL path on the SimDisk (durability). In-loop checkpointing publishes a real self-sufficient snapshot and truncates the WAL prefix every 30 ticks, so a crash that follows a checkpoint recovers from the snapshot plus the WAL tail through `recovery.OpenFS`; the durability oracle is asserted after every recovery regardless of which path ran. |
 | `disk-full` | deterministic | Honest writes against a finite SimDisk: `ENOSPC` on the WAL append+sync path plus crash/recovery. Asserts atomic fail-stop durability — a commit that cannot durably write never advances the oracle, and after recovery no acknowledged commit is lost and no uncommitted state leaks in. |
 | `write-heavy` | deterministic | 80/20 write/read; the write path and oracle parity. |
 | `read-heavy` | deterministic | 20/80 write/read; the read path and isolation. |
@@ -212,25 +212,58 @@ SimDisk survives. The store is then reopened through the real recovery path
 A recovery that detects genuine corruption fails stop (a typed error), which the
 run surfaces rather than swallowing.
 
-### Snapshot + WAL-tail crash recovery
+### Snapshot + WAL crash recovery (full-stack checkpointing)
 
-Beyond the WAL-only path, the harness exercises the **snapshot + WAL-tail**
-recovery on the live engine: a self-sufficient snapshot of the committed state is
-published to the SimDisk, further commits append to the WAL tail, and a crash
-drops the in-memory engine. Recovery through `recovery.OpenFS` promotes the last
-fully-published snapshot and folds the WAL tail back, reconstructing the exact
-committed state (`internal/sim/checkpoint_crash_test.go` — both the
-snapshot+tail and snapshot-only arms). The durability-ordering boundary itself
-(snapshot published *before* the WAL prefix is truncated, crash mid-publish drops
-the staging dirents and the full WAL replays) is proven at the component level in
-`disk_fullstack_test.go` / `disk_checkpoint_test.go`.
+Beyond the WAL-only path, the harness drives a **real `checkpoint.Checkpointer`**
+over the SimDisk and recovers through the full snapshot + WAL path. A scenario
+opts in via `CheckpointConfig{Enabled, Every, Dir}` (the `crash-storm` scenario
+sets it); when enabled the durable store is opened in **full-stack mode**: the
+WAL lives at `<dir>/wal` and the snapshot at `<dir>/snapshot` (default `dir` is
+`db`), rather than the legacy WAL-only root-level `wal` key.
 
-A *Checkpointer-driven* checkpoint (which additionally truncates the WAL prefix
-via `wal.Writer.TruncatePrefix`) is not yet wired into the live SimDisk stack:
-that truncation requires a path-backed WAL writer, while the SimDisk WAL is
-handle-backed. Closing that gap needs a WAL filesystem seam and is tracked
-separately; the recovery fold it would feed is already covered by the tests
-above.
+Every `Every` ticks the tick loop runs one synchronous checkpoint
+(`SimStore.Checkpoint` → `checkpoint.Checkpointer.RunCheckpoint`) that publishes
+a self-sufficient snapshot of the committed state to `<dir>/snapshot` and then
+**truncates the WAL prefix it folded** via `wal.Writer.TruncatePrefix`. The
+checkpoint runs the identical three-phase critical section the production
+background checkpointer drives — capture under the store commit lock
+(`txn.Store.RunUnderCommitLock`), lock-free snapshot publish, prefix-truncate
+under the commit lock — so the snapshot is transaction-boundary consistent and
+the WAL prefix is reclaimed only after the self-sufficient snapshot is durable
+(`docs/acid-audit.md` F3.5). The mapper codec, constraint specs and
+index-definition specs are all wired so a checkpoint that truncates the WAL
+prefix which first declared a constraint or index cannot lose it.
+
+When a crash then fires, the store is reopened with the same layout and recovery
+chooses its core by what is durable on disk
+(`internal/sim/simstore.go` `recoverSimGraph`):
+
+- a published snapshot exists (`<dir>/snapshot/manifest.json`) →
+  **`recovery.OpenFS`** reconstructs the graph from the self-sufficient snapshot
+  (honouring its persisted directed/multigraph shape) and replays the WAL tail
+  on top, promoting the last fully-published snapshot (or its `.bak`) where the
+  publish was interrupted; or
+- no snapshot yet (a crash before the first checkpoint) → **`recovery.ReplayWAL`**
+  replays the committed WAL prefix into a graph built with the simulator's
+  configured shape.
+
+In both cases the benign torn WAL tail is truncated to the last durable frame
+boundary before the WAL is reopened for append, and genuine corruption
+fail-stops with a typed error the run surfaces. The **durability check** runs
+after *every* recovery and asserts every acknowledged-committed operation
+survived — so a checkpoint that lost the folded prefix, or a truncation that
+dropped a committed frame, fails the run.
+
+The WAL filesystem seam this relies on is `wal.OpenFS`: a path-backed WAL
+`Writer` whose `TruncatePrefix` temp-write, rename, parent-directory fsync and
+reopen route through an injected filesystem (`internal/sim/diskfs.go`
+`simWALFS` over the SimDisk), with the default OS-backed path
+(`wal.Open` → `osWALFS`) byte-identical to before. The standalone snapshot
+publish/promote ordering boundary (snapshot published *before* the WAL prefix is
+truncated; a crash mid-publish drops the staging dirents and the full WAL
+replays) is also proven at the component level in `disk_fullstack_test.go`,
+`disk_checkpoint_test.go`, `checkpoint_crash_test.go`, and the seam itself in
+`disk_wal_truncate_test.go`.
 
 ## Disk exhaustion (ENOSPC)
 
@@ -337,11 +370,16 @@ go run ./cmd/sim --mode=concurrent --conns=16 --ops-per-conn=25
 
 # Inject deterministic crash + recovery cycles.
 go run ./cmd/sim 7 --crashes
+
+# Add full-stack checkpointing: periodically publish a real snapshot and
+# truncate the WAL prefix, so a crash recovers via the full snapshot+WAL path.
+go run ./cmd/sim 7 --crashes --checkpoint --checkpoint-every=20
 ```
 
 Flags of note: `--workload` (`default|write-heavy|read-heavy|bad-actor`),
 `--check-every` (invariant-check cadence), `--verbose` (print each operation),
-and `--replay` (see below).
+`--crashes` / `--checkpoint` / `--checkpoint-every` (the durable crash-recovery
+and full-stack checkpoint stack), and `--replay` (see below).
 
 ## Reproduce, replay, and shrink
 
