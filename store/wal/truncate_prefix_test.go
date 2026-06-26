@@ -280,7 +280,7 @@ func TestTruncatePrefix_PostRenamePoisons(t *testing.T) {
 	}
 }
 
-// pathlessFile is a minimal walFile with no real filesystem path, used to
+// pathlessFile is a minimal WALFile with no real filesystem path, used to
 // verify TruncatePrefix rejects an OpenWith-constructed (path-less) writer.
 type pathlessFile struct{ pos int64 }
 

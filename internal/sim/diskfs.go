@@ -99,6 +99,26 @@ func (s simRecoveryFS) LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, er
 	return snapshot.LoadSnapshotFullFS(simSnapshotFS(s), snapDir)
 }
 
+// simWALFS adapts a [SimDisk] to the store/wal path-based filesystem seam
+// (wal.OpenFS), so the WAL writer's crash-safe prefix truncation
+// (temp-write -> rename -> parent-dir fsync -> reopen) runs entirely against
+// the in-memory disk. OpenFile returns a *SimFileHandle, which satisfies the
+// wal package's open-handle interface (Write/Read/Seek/Sync/Truncate/Close);
+// the structural satisfaction check for wal's unexported walFS happens at the
+// wal.OpenFS call site (OpenSimStore), exactly as wal.OpenWith resolves
+// *SimFileHandle there.
+type simWALFS struct{ disk *SimDisk }
+
+func (s simWALFS) OpenFile(path string, flag int) (wal.WALFile, error) {
+	return s.disk.OpenFile(path, flag)
+}
+
+func (s simWALFS) Rename(oldPath, newPath string) error { return s.disk.Rename(oldPath, newPath) }
+
+func (s simWALFS) Remove(path string) error { return s.disk.Remove(path) }
+
+func (s simWALFS) ParentDirSync(childPath string) error { return s.disk.ParentDirSync(childPath) }
+
 // simCheckpointBackend adapts a [SimDisk] to the store/checkpoint snapshot
 // backend seam, routing the snapshot write and the manifest read-back through
 // the in-memory disk via [simSnapshotFS]. It is typed on the store's key/weight

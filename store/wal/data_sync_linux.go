@@ -44,11 +44,11 @@ import (
 // metadata — not just the data and size — durable.
 //
 // dataSync requires the concrete *os.File handle to obtain the file
-// descriptor for fdatasync(2). For any other walFile implementation (the
+// descriptor for fdatasync(2). For any other WALFile implementation (the
 // fault-injection *testfs.FaultFile, the benchmark discardFile) it falls
 // back to the interface's Sync method, so those test seams keep their exact
 // behaviour. A nil-fd or otherwise unusable *os.File falls back to Sync too.
-func dataSync(f walFile) error {
+func dataSync(f WALFile) error {
 	osf, ok := f.(*os.File)
 	if !ok {
 		// Synthetic test file (FaultFile / discardFile): preserve its own

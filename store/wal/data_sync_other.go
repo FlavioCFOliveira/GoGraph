@@ -13,9 +13,9 @@ package wal
 // behaviour and durability are byte-for-byte identical to the pre-#1510 code
 // on these platforms.
 //
-// Delegating to the walFile's own Sync (rather than a type-asserted
+// Delegating to the WALFile's own Sync (rather than a type-asserted
 // *os.File) also preserves the fault-injection seam: a *testfs.FaultFile's
 // Sync still fires its injected faults unchanged.
-func dataSync(f walFile) error {
+func dataSync(f WALFile) error {
 	return f.Sync()
 }

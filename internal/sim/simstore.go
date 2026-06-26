@@ -147,14 +147,15 @@ func OpenSimStore(disk *SimDisk, cfg simStoreConfig) (*SimStore, error) {
 		}
 	}
 
-	// Open the WAL for append over the (now clean-tailed) SimDisk image.
-	wh, err := disk.OpenFile(simWALPath, os.O_CREATE|os.O_RDWR|os.O_APPEND)
+	// Open the WAL for append over the (now clean-tailed) SimDisk image through
+	// the path-backed FS seam (wal.OpenFS), so a Checkpointer driving this store
+	// can reclaim the WAL prefix via Writer.TruncatePrefix — the temp-write,
+	// rename, parent-dir fsync and reopen all route through the SimDisk. The
+	// benign torn tail was already discarded above (auditor finding F1), which is
+	// the precondition OpenFS documents in lieu of its own discardTornTail.
+	wlog, err := wal.OpenFS(simWALFS{disk: disk}, simWALPath)
 	if err != nil {
-		return nil, fmt.Errorf("sim: open WAL for append: %w", err)
-	}
-	wlog, err := wal.OpenWith(wh)
-	if err != nil {
-		return nil, fmt.Errorf("sim: WAL OpenWith: %w", err)
+		return nil, fmt.Errorf("sim: WAL OpenFS: %w", err)
 	}
 	store := txn.NewStoreWithOptions(g, wlog, txn.Options[string, float64]{
 		Codec:       codec,

@@ -69,7 +69,7 @@ type Stats struct {
 // which re-validates the tail.
 type Writer struct {
 	mu     sync.Mutex
-	f      walFile
+	f      WALFile
 	bw     *bufio.Writer
 	closed atomic.Bool
 
@@ -87,10 +87,18 @@ type Writer struct {
 	// nil after a constructor runs.
 	dirFsync func(string) error
 
+	// fsys is the path-based filesystem backend [Writer.TruncatePrefix] uses
+	// for its temp-write / rename / remove during crash-safe prefix truncation.
+	// [Open] installs [osWALFS] (the os.* calls, byte-identical to the pre-seam
+	// path); [OpenFS] installs the caller's backend (the simulator's in-memory
+	// disk in DST). It is nil for a path-less [OpenWith] Writer, which rejects
+	// TruncatePrefix before ever touching fsys.
+	fsys walFS
+
 	// lockFile is the open handle of the WAL directory LOCK file whose
 	// flock(2) / O_EXCL lifetime is tied to this Writer. It is non-nil
 	// only for Writers created via [Open] (not [OpenWith], which is used
-	// exclusively by tests that supply synthetic walFile implementations).
+	// exclusively by tests that supply synthetic WALFile implementations).
 	// Released by Close via releaseLock.
 	lockFile *os.File
 
@@ -222,6 +230,7 @@ func Open(path string) (*Writer, error) {
 	w := &Writer{
 		f:            f,
 		path:         path,
+		fsys:         osWALFS{},
 		dirFsync:     parentDirFsync,
 		lockFile:     lockFile,
 		bw:           bufio.NewWriterSize(f, 64*1024),
@@ -845,7 +854,7 @@ func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
 	if err := w.writeSuffixTmp(tmpPath, upTo, suffixLen); err != nil {
 		// Best-effort cleanup of a partial temp file; the original WAL is
 		// untouched, so the checkpoint simply fails and may retry.
-		_ = os.Remove(tmpPath)
+		_ = w.fsys.Remove(tmpPath)
 		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
 		return 0, err
 	}
@@ -859,8 +868,8 @@ func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
 
 	// Atomically replace the WAL with the suffix-only file. After this the
 	// old inode (full WAL) is unlinked and path names the suffix-only inode.
-	if err := os.Rename(tmpPath, w.path); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := w.fsys.Rename(tmpPath, w.path); err != nil {
+		_ = w.fsys.Remove(tmpPath)
 		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
 		return 0, fmt.Errorf("wal: TruncatePrefix: rename %q: %w", w.path, err)
 	}
@@ -935,15 +944,18 @@ func (w *Writer) poisonAfterRename(err error) {
 // writeSuffixTmp copies the WAL bytes in [from, from+length) to tmpPath and
 // fsyncs it, so the surviving suffix is durable before the caller renames it
 // over the live WAL. Called by [Writer.TruncatePrefix] with w.mu held. It
-// reads through the walFile's own handle (seeking it; the caller restores no
+// reads through the WALFile's own handle (seeking it; the caller restores no
 // position because the handle is discarded by the subsequent reopen).
 func (w *Writer) writeSuffixTmp(tmpPath string, from, length int64) error {
 	if _, err := w.f.Seek(from, io.SeekStart); err != nil {
 		return fmt.Errorf("wal: TruncatePrefix: seek to suffix: %w", err)
 	}
-	// 0o600: the suffix carries the same graph mutation stream as the WAL and
-	// must not be world-readable.
-	tmp, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // sibling of caller-supplied WAL path
+	// 0o600 (enforced by the fsys backend): the suffix carries the same graph
+	// mutation stream as the WAL and must not be world-readable. tmp.Sync below
+	// is the handle's own full-fsync Sync (NOT dataSync): the temp's creation
+	// and grown size are inode metadata that a per-commit fdatasync would not
+	// guarantee, and they must be durable before the rename publishes the temp.
+	tmp, err := w.fsys.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("wal: TruncatePrefix: create temp: %w", err)
 	}
@@ -967,7 +979,7 @@ func (w *Writer) writeSuffixTmp(tmpPath string, from, length int64) error {
 // held, after the atomic rename. The old handle is closed best-effort: it
 // points at the unlinked full-WAL inode and is no longer usable.
 func (w *Writer) reopenAfterPrefixTruncate(suffixLen int64) error {
-	nf, err := os.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // caller-supplied path is by-design
+	nf, err := w.fsys.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_APPEND)
 	if err != nil {
 		return fmt.Errorf("wal: TruncatePrefix: reopen %q: %w", w.path, err)
 	}

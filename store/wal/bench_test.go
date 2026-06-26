@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// discardFile is a no-op walFile: it satisfies the (unexported) walFile
+// discardFile is a no-op WALFile: it satisfies the (unexported) WALFile
 // interface that OpenWith accepts but discards every byte and treats Sync /
 // Truncate as cheap no-ops. It lets BenchmarkAppend isolate the cost of frame
 // encoding plus buffered append from the cost of a real fsync(2), so the
@@ -40,7 +40,7 @@ func (d *discardFile) Sync() error               { return nil }
 func (d *discardFile) Truncate(size int64) error { d.size = size; return nil }
 func (d *discardFile) Close() error              { return nil }
 
-// Read satisfies the walFile io.Reader requirement (added for
+// Read satisfies the WALFile io.Reader requirement (added for
 // TruncatePrefix). The benchmark never reads back, so it reports EOF.
 func (d *discardFile) Read(_ []byte) (int, error) { return 0, io.EOF }
 

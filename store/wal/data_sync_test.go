@@ -57,7 +57,7 @@ func TestDataSync_RealFile_DurableRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDataSync_FallsBackToInterfaceSync confirms that for any walFile that is
+// TestDataSync_FallsBackToInterfaceSync confirms that for any WALFile that is
 // not a concrete *os.File, dataSync delegates to the value's own Sync method
 // rather than reaching for a file descriptor. This is the seam that keeps the
 // fault-injection (*testfs.FaultFile) and benchmark (discardFile) paths
