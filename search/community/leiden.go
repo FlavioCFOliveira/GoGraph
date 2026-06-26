@@ -129,6 +129,24 @@ func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (P
 	}
 	mask := c.LiveMask()
 
+	// free holds aggGraph output buffer-sets retired from earlier levels,
+	// reused to build later levels (see aggregate's pooling note and the
+	// graphBufs type). Because aggregate reads only the current g and never
+	// an older level, the buffer-set displaced by `g = nextG` below is
+	// fully dead and safe to recycle on the next pass; the surviving g is
+	// never pushed here, so the final projection's g stays valid.
+	//
+	// The free list itself is borrowed from a cross-call pool (#1725) so a
+	// later Leiden invocation inherits this call's retired buffer-sets and
+	// skips the first aggregation level's fresh allocation. It is returned
+	// (trimmed to a bounded working set) on the way out. It MUST NOT be
+	// released until after the final projection below has finished reading g,
+	// because g's buffers are not in the free list but a future call's
+	// aggregate() must not be handed buffers still aliased by this call's g —
+	// the deferred release runs after the function body, so g is already dead.
+	free := acquireBufFreeList()
+	defer releaseBufFreeList(free)
+
 	// Build the compact aggregation-graph view of c.
 	g, idMap := aggGraphFromCSR(c, mask)
 	if g.n == 0 {
@@ -142,13 +160,6 @@ func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (P
 	}
 
 	prevQ := g.modularity(comm, opts.Resolution)
-	// free holds aggGraph output buffer-sets retired from earlier levels,
-	// reused to build later levels (see aggregate's pooling note and the
-	// graphBufs type). Because aggregate reads only the current g and never
-	// an older level, the buffer-set displaced by `g = nextG` below is
-	// fully dead and safe to recycle on the next pass; the surviving g is
-	// never pushed here, so the final projection's g stays valid.
-	var free graphBufFreeList
 	for pass := 0; pass < opts.MaxPasses; pass++ {
 		if err := ctx.Err(); err != nil {
 			metrics.IncCounter("search.community.LeidenCtx.errors", 1)
@@ -647,6 +658,57 @@ func (f *graphBufFreeList) get() *graphBufs {
 
 // put returns a dead buffer-set for later reuse.
 func (f *graphBufFreeList) put(b *graphBufs) { f.bufs = append(f.bufs, b) }
+
+// reset clears the free list's length, retaining at most keep buffer-sets so
+// their backing arrays survive into a later Leiden call via the cross-call pool
+// (#1725). Entries beyond keep are dropped (left to the GC) so the pool never
+// pins an unbounded number of large arrays after a one-off huge graph. keep
+// matches the within-call working set: the pass loop holds at most one displaced
+// level at a time, and the final displaced g adds a second, so two recycled
+// buffer-sets cover the common steady state without retaining stale bulk.
+func (f *graphBufFreeList) reset(keep int) {
+	if len(f.bufs) > keep {
+		// Drop the surplus references so the GC can reclaim the largest
+		// arrays from a one-off oversized graph.
+		for i := keep; i < len(f.bufs); i++ {
+			f.bufs[i] = nil
+		}
+		f.bufs = f.bufs[:keep]
+	}
+}
+
+// graphBufFreeListPool recycles graphBufFreeList values (and, with them, the
+// aggregate() level buffer-sets they hold) ACROSS Leiden calls (#1725). Within a
+// single call the free list already recycles a displaced level's output arrays
+// into the next level; without the pool, however, every fresh Leiden invocation
+// starts from an empty free list and allocates the first aggregation level's
+// arrays from scratch. A workload that runs Leiden repeatedly (a service
+// answering many community-detection queries, or a streaming re-run on an
+// evolving graph) therefore pays that first-level allocation on every call.
+//
+// Reuse is sound and determinism-preserving because aggregate() treats a
+// recycled buffer-set from a prior CALL exactly as it treats one from a prior
+// PASS: every output array is either zeroed (deg, loop, verts) or fully
+// overwritten (edges, weights, lifted) before it is read, so no residual content
+// from an earlier graph can influence the result. The buffer-sets carry only
+// scratch capacity, never live state, between calls. Leiden's bit-for-bit
+// reproducibility contract (a second run on the same CSR yields an identical
+// Partition) is exercised by the determinism tests in this package and holds
+// because the recycled capacity changes nothing the algorithm reads.
+var graphBufFreeListPool = sync.Pool{New: func() any { return &graphBufFreeList{} }}
+
+// acquireBufFreeList borrows a (possibly pre-populated) free list from the
+// cross-call pool.
+func acquireBufFreeList() *graphBufFreeList {
+	return graphBufFreeListPool.Get().(*graphBufFreeList)
+}
+
+// releaseBufFreeList returns a free list to the cross-call pool after trimming
+// it to a bounded working set (see graphBufFreeList.reset).
+func releaseBufFreeList(f *graphBufFreeList) {
+	f.reset(2)
+	graphBufFreeListPool.Put(f)
+}
 
 // intBuf is a reusable, capacity-growing []int scratch slot.
 type intBuf []int
