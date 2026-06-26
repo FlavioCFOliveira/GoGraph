@@ -287,6 +287,39 @@ func TestNormalizeArithmeticMinus(t *testing.T) {
 			want:  "RETURN 1.5E-3",
 		},
 		{
+			name:  "exponent without dot preserved",
+			input: "RETURN 1e-3",
+			want:  "RETURN 1e-3",
+		},
+		{
+			// #1796: identifier ending in 'e' is NOT a float exponent.
+			name:  "identifier ending in e gets spacing",
+			input: "RETURN age-1",
+			want:  "RETURN age - 1",
+		},
+		{
+			name:  "identifier ending in E gets spacing",
+			input: "RETURN scopE-1",
+			want:  "RETURN scopE - 1",
+		},
+		{
+			// #1798: hex literal ending in 'E' is NOT a float exponent.
+			name:  "hex ending in E gets spacing",
+			input: "RETURN 0x1E-1",
+			want:  "RETURN 0x1E - 1",
+		},
+		{
+			// #1797: subtraction after a closing bracket must be spaced.
+			name:  "minus after close paren gets spacing",
+			input: "RETURN (5)-1",
+			want:  "RETURN (5) - 1",
+		},
+		{
+			name:  "minus after close square gets spacing",
+			input: "RETURN x[0]-1",
+			want:  "RETURN x[0] - 1",
+		},
+		{
 			name:  "negative literal at start not rewritten",
 			input: "RETURN -42",
 			want:  "RETURN -42",

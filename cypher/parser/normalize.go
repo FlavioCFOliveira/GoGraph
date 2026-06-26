@@ -35,6 +35,39 @@ import (
 //
 // Fast path: return unchanged if q contains no '-' byte.
 //
+// endsWithDecimalFloatExponentMarker reports whether buf ends with an 'e'/'E'
+// that is the exponent marker of a DECIMAL float literal (e.g. "1.5e", "1e",
+// ".5e"). In that case a following "-<digit>" is the exponent sign and must
+// stay attached so the lexer reads a single FLOAT token. It returns false when
+// the trailing 'e'/'E' is merely an identifier letter (preceded by a non-digit,
+// e.g. "age" → #1796) or the trailing hex digit of a 0x/0o/0b literal
+// (e.g. "0x1E" → #1798); in both cases the following '-' is binary subtraction.
+func endsWithDecimalFloatExponentMarker(buf []byte) bool {
+	n := len(buf)
+	if n < 2 || (buf[n-1] != 'e' && buf[n-1] != 'E') {
+		return false
+	}
+	// The char before the e/E must be a decimal digit or '.' for a float
+	// mantissa; a letter (e.g. the 'g' of "age") rules out an exponent.
+	if c := buf[n-2]; (c < '0' || c > '9') && c != '.' {
+		return false
+	}
+	// Walk back over the decimal mantissa (digits and the optional '.').
+	i := n - 2
+	for i >= 0 && ((buf[i] >= '0' && buf[i] <= '9') || buf[i] == '.') {
+		i--
+	}
+	// If the mantissa run is the body of a 0x/0o/0b radix literal, the trailing
+	// e/E is a hex digit, not an exponent (e.g. "0x1E" stops the loop at 'x').
+	if i >= 0 {
+		switch buf[i] {
+		case 'x', 'X', 'o', 'O', 'b', 'B':
+			return false
+		}
+	}
+	return true
+}
+
 //nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeVarlenBounds
 func normalizeArithmeticMinus(q string) string {
 	if !hasByte(q, '-') {
@@ -127,24 +160,29 @@ func normalizeArithmeticMinus(q string) string {
 			continue
 		}
 
-		// ch == '-': check for IdentChar - Digit pattern.
-		if len(buf) > 0 && isIdentChar(buf[len(buf)-1]) &&
-			i+1 < n && q[i+1] >= '0' && q[i+1] <= '9' {
-			// Guard: do not rewrite scientific notation exponents such as
-			// "1.5e-3" or ".1e-5". When the preceding character is 'e' or 'E'
-			// (the exponent marker in a float literal), the '-' is part of the
-			// exponent sign, not a binary subtraction operator.
+		// ch == '-': binary subtraction written without spaces, where the left
+		// operand is a value and the right operand starts with a digit. The
+		// left operand is a "value" when the preceding char closes one: an
+		// identifier char, or a closing ')' / ']' / '}' (#1797). Insert spaces
+		// so the lexer cannot consume '-N' as a single DIGIT token.
+		if len(buf) > 0 && i+1 < n && q[i+1] >= '0' && q[i+1] <= '9' {
 			prev := buf[len(buf)-1]
-			if prev == 'e' || prev == 'E' {
-				buf = append(buf, ch)
+			valueClosing := isIdentChar(prev) || prev == ')' || prev == ']' || prev == '}'
+			if valueClosing {
+				// Keep '-N' attached ONLY for a genuine decimal-float exponent
+				// such as "1.5e-3". An identifier ending in 'e'/'E' (e.g.
+				// "age", "scope", #1796) or a hex/oct literal ending in 'e'/'E'
+				// (e.g. "0x1E", #1798) is binary subtraction, not an exponent,
+				// and must be space-separated.
+				if (prev == 'e' || prev == 'E') && endsWithDecimalFloatExponentMarker(buf) {
+					buf = append(buf, ch)
+					i++
+					continue
+				}
+				buf = append(buf, ' ', '-', ' ')
 				i++
 				continue
 			}
-			// Binary subtraction written without spaces: insert spaces around '-'
-			// so the lexer cannot consume '-N' as a single DIGIT token.
-			buf = append(buf, ' ', '-', ' ')
-			i++
-			continue
 		}
 
 		buf = append(buf, ch)
@@ -1447,11 +1485,16 @@ func normalizeNegHexOct(q string) string {
 		}
 
 		// ch == '-': check if this is a unary minus before a hex/octal literal.
-		// Skip if preceded by an identifier character (binary subtraction).
-		if len(buf) > 0 && isIdentChar(buf[len(buf)-1]) {
-			buf = append(buf, ch)
-			i++
-			continue
+		// Skip when the '-' follows a value (binary subtraction): an identifier
+		// char, or a closing ')' / ']' / '}' (#1797). Treating '(5)-0x1' as
+		// unary would rewrite it to '(5)(-1)' — two adjacent expressions.
+		if len(buf) > 0 {
+			pc := buf[len(buf)-1]
+			if isIdentChar(pc) || pc == ')' || pc == ']' || pc == '}' {
+				buf = append(buf, ch)
+				i++
+				continue
+			}
 		}
 
 		// Look ahead for 0x<hexdigit> or 0o<octdigit>.
