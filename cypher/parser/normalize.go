@@ -288,9 +288,26 @@ func normalizeVarlenBounds(q string) string {
 			continue
 		}
 
-		// We are at '['. Copy until we find '*' (or ']' closes the bracket).
+		// We are at '['. Only treat this bracket as a variable-length
+		// relationship range when it is a relationship-detail bracket, i.e. the
+		// immediately preceding character is '-' (as in -[r*N..M]->). A list
+		// literal, list comprehension, or pattern comprehension bracket
+		// ([1,2,3], [x IN xs | x*10], [p = (a)-->(b) | p]) is NOT preceded by
+		// '-', and any '*' inside it is ordinary multiplication that must not be
+		// rewritten to a negative literal (which would otherwise survive into a
+		// real BinaryExpr and silently negate the result — see #1788). This
+		// mirrors the discriminator already used by normalizeVarlenDotDot.
+		//
+		// When this is not a relationship bracket we copy only the '[' and let
+		// the outer loop continue scanning the body, so a relationship bracket
+		// nested inside a pattern comprehension (e.g. [(a)-[r*2]->(b) | a]) is
+		// still rewritten when its own '[' is reached.
+		prevIsHyphen := len(buf) > 0 && buf[len(buf)-1] == '-'
 		buf = append(buf, ch)
 		i++
+		if !prevIsHyphen {
+			continue
+		}
 		depth := 1
 		for i < n && depth > 0 {
 			c := q[i]
