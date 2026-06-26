@@ -36,11 +36,19 @@ weightless-mode.
 | 1782 | Medium | WHERE on shortestPath applied as post-filter, not during search | `92c1db9` documented + pinned (full fix → #1786) |
 | 1783 | Low | Bolt qid not validated / DISCARD ignores n / tx_metadata dropped | `739684a` qid validation; n + tx_metadata documented (partial-DISCARD → #1787) |
 
-### Deferred (documented + tracked backlog)
+### Deferred follow-ups — since COMPLETED (sprint 245)
 
-Three findings had a correct, focused fix shipped plus a larger full
-implementation tracked, because forcing the larger change would have risked
-destabilising a correct path or shipping a worse result:
+The four items below were initially deferred (focused fix shipped + larger full
+implementation tracked) to avoid destabilising a correct path or shipping a
+worse result. Under a follow-up "fix all findings" directive they were **all
+implemented** (commits `e5af3a6`, `dee1100`): #1784 (typed Terminated FAILURE on
+the reaper path), #1785 (undirected src==dst shortest cycle via Itai–Rodeh
+branch-collision, with correct per-hop relationship-type hydration — which also
+fixed a latent VLE undirected-reverse-hop empty-type bug), #1786 (WHERE
+whole-path predicate evaluated during the shortestPath search, exhaustive
+fallback), and #1787 (partial `DISCARD {n}`). TCK held at 3897; `-race` clean.
+
+Original deferral rationale (for the record):
 
 - **#1785** — undirected src==dst shortest cycle (Itai–Rodeh branch-collision).
   An undirected edge is stored as two CSR arcs sharing one handle, so node-keyed
