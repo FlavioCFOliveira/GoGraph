@@ -727,6 +727,26 @@ The openCypher TCK execution suite is fully green: all 3897 scenarios pass
 (100%), enforced by `tckExecutionBaseline` in `cypher/tck/runner_test.go`. For
 the full divergence taxonomy, see [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md).
 
+### String + number concatenation
+
+The `+` operator concatenates only when **both** operands are strings. A mixed
+string + number expression returns `null` rather than implicitly coercing the
+number to text:
+
+```cypher
+RETURN 'a' + 1                   // → null
+RETURN 'count: ' + 5             // → null
+RETURN 1 + '2'                   // → null
+RETURN 'count: ' + toString(5)   // → 'count: 5'
+```
+
+openCypher deliberately leaves implicit `string + number` coercion
+underspecified (openCypher issue #189 notes the conversion is internally
+inconsistent), and the manual steers users to `toString()`. GoGraph therefore
+requires an explicit `toString()` for mixed concatenation, mirroring the
+`date()`-returns-`null`-on-invalid-input choice. This is pinned by a regression
+test so the behaviour cannot drift silently.
+
 ### Element identity: `id()` and `elementId()`
 
 `id()` returns an integer identifier for a node or relationship, with an
