@@ -61,12 +61,13 @@ type ParallelScan struct {
 	g          nodeWalker
 	morselSize int
 
-	ctx     context.Context    //nolint:containedctx // stored for per-Next ctx check
-	outCh   chan expr.Value    // carries IntegerValue NodeIDs
-	errCh   chan error         // first worker error, capacity 1
-	cancel  context.CancelFunc // cancels the worker context
-	wg      sync.WaitGroup
-	initErr error // error set during Init if any
+	ctx      context.Context    //nolint:containedctx // stored for per-Next ctx check
+	outCh    chan expr.Value    // carries IntegerValue NodeIDs
+	errCh    chan error         // first worker error, capacity 1
+	cancel   context.CancelFunc // cancels the worker context
+	wg       sync.WaitGroup     // joins the worker goroutines
+	closerWG sync.WaitGroup     // joins the closer goroutine (#1795)
+	initErr  error              // error set during Init if any
 }
 
 // NewParallelScan creates a ParallelScan over g. morselSize controls the
@@ -152,8 +153,14 @@ func (op *ParallelScan) Init(ctx context.Context) error {
 	}
 
 	// Closer goroutine: when all workers finish, close the output channel so
-	// Next() gets the end-of-stream signal.
+	// Next() gets the end-of-stream signal. Tracked in its own WaitGroup so
+	// Close() joins it too — otherwise a caller that abandons the operator
+	// without draining outCh leaves the closer blocked on op.wg.Wait() until the
+	// workers exit, and Close() returns before the closer has actually finished
+	// (#1795).
+	op.closerWG.Add(1)
 	go pprof.Do(wCtx, pprof.Labels("component", "cypher-parallel-scan-closer"), func(_ context.Context) {
+		defer op.closerWG.Done()
 		op.wg.Wait()
 		close(outCh)
 	})
@@ -215,12 +222,15 @@ func (op *ParallelScan) Next(out *Row) (bool, error) {
 	}
 }
 
-// Close cancels workers and waits for them to exit.
+// Close cancels workers and waits for them — and the closer goroutine — to
+// exit. Joining closerWG (not just wg) guarantees no goroutine outlives Close,
+// even when the caller never drained outCh (#1795).
 func (op *ParallelScan) Close() error {
 	if op.cancel != nil {
 		op.cancel()
 	}
 	op.wg.Wait()
+	op.closerWG.Wait()
 	return nil
 }
 
