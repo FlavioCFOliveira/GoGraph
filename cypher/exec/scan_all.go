@@ -106,3 +106,12 @@ func (op *AllNodesScan) Close() error {
 	op.pos = len(op.nodeIDs) // mark as exhausted
 	return nil
 }
+
+// rowCountHint reports the exact number of rows this scan will emit: one per
+// collected NodeID. Init has already walked the graph and filled op.nodeIDs by
+// the time a consumer queries the hint, so the bound is exact (and therefore a
+// valid upper bound). It satisfies [rowCountHinter] so the materialise drain can
+// presize its backing slice for a full-node scan (#1720).
+func (op *AllNodesScan) rowCountHint() (int, bool) {
+	return len(op.nodeIDs), true
+}

@@ -65,17 +65,18 @@ func (s *LPGLabelSource) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 //
 // NodeByLabelScan is NOT safe for concurrent use.
 type NodeByLabelScan struct {
-	label string
-	src   labelResolver
-	ctx   context.Context //nolint:containedctx // stored for per-Next ctx check
-	iter  roaring64.IntPeekable64
-	count int           // iteration counter for ctx check cadence
-	buf   [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	label    string
+	src      labelResolver
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
+	iter     roaring64.IntPeekable64
+	cardHint int           // bitmap cardinality captured in Init; -1 before Init
+	count    int           // iteration counter for ctx check cadence
+	buf      [1]expr.Value // fixed backing buffer — zero-alloc per Next
 }
 
 // NewNodeByLabelScan creates a NodeByLabelScan for the given label.
 func NewNodeByLabelScan(labelName string, src labelResolver) *NodeByLabelScan {
-	return &NodeByLabelScan{label: labelName, src: src}
+	return &NodeByLabelScan{label: labelName, src: src, cardHint: -1}
 }
 
 // Init resolves the label to a bitmap and initialises the iterator.
@@ -83,6 +84,10 @@ func (op *NodeByLabelScan) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.count = 0
 	bm := op.src.ResolveLabelBitmap(op.label)
+	// GetCardinality is the bitmap's element count — the exact number of rows
+	// this scan will emit. Capture it now (the bitmap is consumed by the
+	// iterator below) so rowCountHint can report it after Init (#1720).
+	op.cardHint = int(bm.GetCardinality())
 	op.iter = bm.Iterator()
 	return nil
 }
@@ -111,4 +116,16 @@ func (op *NodeByLabelScan) Next(out *Row) (bool, error) {
 func (op *NodeByLabelScan) Close() error {
 	op.iter = nil
 	return nil
+}
+
+// rowCountHint reports the exact number of rows this scan will emit: the
+// cardinality of the resolved label bitmap, captured in Init. It is therefore a
+// valid upper bound. ok is false before Init has run (cardHint == -1). It
+// satisfies [rowCountHinter] so the materialise drain can presize its backing
+// slice for a label scan (#1720).
+func (op *NodeByLabelScan) rowCountHint() (int, bool) {
+	if op.cardHint < 0 {
+		return 0, false
+	}
+	return op.cardHint, true
 }

@@ -3087,6 +3087,32 @@ func (r *Result) materialize() {
 	// first Record() call, not here: a result drained positionally (RowAt/
 	// ValueAt — the Bolt PULL path) or never read at all must not pay for a map
 	// it never uses (#1499 follow-up).
+	//
+	// Presize the flat matRows backing slice when the plan exposes a sound upper
+	// bound on its output cardinality (#1720). A full-node scan (and a label
+	// scan) materialises its candidate set in Init, so the row count is knowable
+	// before the drain begins; the hint propagates up through the strict 1:1
+	// final projection BuildPlan wraps every plan in. Allocating the backing
+	// array once removes the O(log N) geometric reallocation/copy that an
+	// un-presized append pays across a large scan. The hint is an UPPER BOUND,
+	// not an exact count, so it never changes which rows materialise; a wrong or
+	// missing hint only affects how much capacity is reserved. When a row cap is
+	// active the drain stops early, so the reservation is clamped to maxRows+1
+	// (the cap check trips one row past the limit) to avoid over-reserving for a
+	// capped query that touches only a prefix of a huge scan.
+	if r.matRowLen > 0 {
+		if hint, ok := r.rs.RowCountHint(); ok && hint > 0 {
+			if r.maxRows > 0 && int64(hint) > r.maxRows {
+				hint = int(r.maxRows) + 1
+			}
+			// hint*matRowLen is the total flat-slice length for a full drain.
+			// Guard against a pathological overflow on 32-bit platforms by only
+			// presizing when the product stays within int range.
+			if total := hint * r.matRowLen; total/r.matRowLen == hint && total > cap(r.matRows) {
+				r.matRows = make([]expr.Value, 0, total)
+			}
+		}
+	}
 	var byteCount int64
 	for r.rs.Next() {
 		// Read the row positionally — no per-row map allocation. Each value is

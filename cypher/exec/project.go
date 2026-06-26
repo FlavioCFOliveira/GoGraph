@@ -117,3 +117,16 @@ func (op *Project) Next(out *Row) (bool, error) {
 func (op *Project) Close() error {
 	return op.child.Close()
 }
+
+// rowCountHint forwards the child's upper-bound row count unchanged. Project is
+// a strict 1:1 pass-through — exactly one output row per input row, never
+// dropped, multiplied, or collapsed — so the child's bound is the operator's
+// bound. It satisfies [rowCountHinter] so a presize hint propagates from a leaf
+// scan through the final projection that BuildPlan wraps every plan in (#1720).
+// If the child exposes no hint, neither does Project.
+func (op *Project) rowCountHint() (int, bool) {
+	if h, ok := op.child.(rowCountHinter); ok {
+		return h.rowCountHint()
+	}
+	return 0, false
+}
