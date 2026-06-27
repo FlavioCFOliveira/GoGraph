@@ -9,7 +9,8 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
-// EigenvectorOptions configures [Eigenvector].
+// EigenvectorOptions configures [Eigenvector]. It is an immutable value with no
+// shared state and is safe for concurrent use (copy it freely across goroutines).
 type EigenvectorOptions struct {
 	MaxIterations int
 	Tolerance     float64

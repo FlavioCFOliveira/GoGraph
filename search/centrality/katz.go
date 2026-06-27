@@ -10,7 +10,8 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
-// KatzOptions configures [Katz].
+// KatzOptions configures [Katz]. It is an immutable value with no shared state
+// and is safe for concurrent use (copy it freely across goroutines).
 //
 // Alpha is the attenuation factor. Convergence of the Katz series requires
 // Alpha < 1/λ_max, where λ_max is the largest eigenvalue of the adjacency
