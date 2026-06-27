@@ -5475,11 +5475,14 @@ func buildOperator(
 			topG = lw.g
 		}
 		keys := irSortKeys(p.SortItems, schema, topG, params, reg, bopts)
-		if len(keys) == 0 || p.Limit <= 0 {
-			// Degenerate: no sort keys or zero limit — return child unchanged.
+		if len(keys) == 0 || p.Limit < 0 {
+			// Degenerate: no resolvable sort keys, or a negative no-limit
+			// sentinel — return child unchanged. (LIMIT 0 is NOT degenerate;
+			// it must yield an empty result — see #1801.)
 			return child, nil
 		}
-		// exec.NewTop requires n ≥ 1 (int); ir.Top.Limit is int64.
+		// exec.NewTop requires n ≥ 0 (int); ir.Top.Limit is int64. n == 0 is the
+		// ORDER BY … LIMIT 0 case and produces an empty result.
 		n := int(p.Limit)
 		if int64(n) != p.Limit {
 			// Limit overflows int — clamp to a large safe value.

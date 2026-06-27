@@ -52,13 +52,14 @@ type Top struct {
 //
 //   - child: the upstream operator to consume.
 //   - keys: ORDER BY specification. Must not be empty.
-//   - n: number of rows to return. Must be ≥ 1.
+//   - n: number of rows to return. Must be ≥ 0; n == 0 yields an empty result
+//     while still draining the child (ORDER BY … LIMIT 0, see #1801).
 func NewTop(child Operator, keys []SortKey, n int) (*Top, error) {
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("exec: Top requires at least one SortKey")
 	}
-	if n < 1 {
-		return nil, fmt.Errorf("exec: Top n must be ≥ 1, got %d", n)
+	if n < 0 {
+		return nil, fmt.Errorf("exec: Top n must be ≥ 0, got %d", n)
 	}
 	return &Top{child: child, keys: keys, n: n}, nil
 }

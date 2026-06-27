@@ -737,10 +737,30 @@ func TestTop_MatchesSortLimit(t *testing.T) {
 }
 
 func TestTop_InvalidN(t *testing.T) {
-	_, err := exec.NewTop(newSliceOperator(),
+	// n == 0 is now VALID — it yields an empty result while draining the child
+	// (ORDER BY … LIMIT 0, #1801). Only a negative n is rejected.
+	if _, err := exec.NewTop(newSliceOperator(),
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 0); err != nil {
+		t.Fatalf("n=0 must be accepted (ORDER BY LIMIT 0), got %v", err)
+	}
+	if _, err := exec.NewTop(newSliceOperator(),
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, -1); err == nil {
+		t.Fatal("expected error for n=-1, got nil")
+	}
+}
+
+func TestTop_NZeroEmptyResult_1801(t *testing.T) {
+	op, err := exec.NewTop(newSliceOperator(),
 		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 0)
-	if err == nil {
-		t.Fatal("expected error for n=0, got nil")
+	if err != nil {
+		t.Fatalf("NewTop n=0: %v", err)
+	}
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("Top n=0 returned %d rows, want 0", len(rows))
 	}
 }
 
