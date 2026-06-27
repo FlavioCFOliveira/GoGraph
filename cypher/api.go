@@ -9306,6 +9306,63 @@ func exprContainsAggregate(e ast.Expression) bool {
 	return false
 }
 
+// exprHasVarMissingFromSchema reports whether e references at least one
+// *ast.Variable whose name is NOT present in schema. The projection builder
+// uses it to detect a post-aggregation grouping-key expression whose source
+// variable was dropped by the aggregation (e.g. `n.a + 1` after grouping by it):
+// re-evaluating the AST would resolve the missing variable to null, so the
+// precomputed grouping column should be read instead (#1803). Returning false
+// is always safe (the builder falls back to normal evaluation), so an
+// unrecognised node type simply yields no fast-path rather than a wrong result.
+func exprHasVarMissingFromSchema(e ast.Expression, schema map[string]int) bool {
+	missing := false
+	var walk func(ast.Expression)
+	walk = func(x ast.Expression) {
+		if x == nil || missing {
+			return
+		}
+		switch n := x.(type) {
+		case *ast.Variable:
+			if _, ok := schema[n.Name]; !ok {
+				missing = true
+			}
+		case *ast.Property:
+			walk(n.Receiver)
+		case *ast.LabelPredicate:
+			walk(n.Receiver)
+		case *ast.BinaryOp:
+			walk(n.Left)
+			walk(n.Right)
+		case *ast.UnaryOp:
+			walk(n.Operand)
+		case *ast.FunctionInvocation:
+			for _, a := range n.Args {
+				walk(a)
+			}
+		case *ast.SubscriptExpr:
+			walk(n.Expr)
+			walk(n.Index)
+		case *ast.SliceExpr:
+			walk(n.Expr)
+			walk(n.From)
+			walk(n.To)
+		case *ast.CaseExpression:
+			walk(n.Subject)
+			for _, alt := range n.Alternatives {
+				walk(alt.Condition)
+				walk(alt.Consequent)
+			}
+			walk(n.ElseExpr)
+		case *ast.ListLiteral:
+			for _, el := range n.Elements {
+				walk(el)
+			}
+		}
+	}
+	walk(e)
+	return missing
+}
+
 // exprReferencesVarName reports whether e directly or transitively references
 // a *ast.Variable whose Name equals target. Used by the projection builder to
 // detect colliding-alias situations where a projection expression references
@@ -9959,6 +10016,25 @@ func buildIRProjection(
 							}
 							return expr.Null, nil
 						}
+					}
+				}
+			}
+			if evalFn == nil {
+				// Post-aggregation grouping-key fast path (#1803): when the item's
+				// expression names an existing input-schema column (the grouping
+				// column EagerAggregation emitted under the expression's string
+				// form) AND the expression references a variable the aggregation
+				// dropped, read that precomputed column instead of re-evaluating
+				// the AST — which would resolve the missing variable to null
+				// (e.g. `RETURN n.a + 1, count(*)`). Aliased keys are untouched:
+				// their column is named by the alias, not by exprStr.
+				if colIdx, ok := schema[exprStr]; ok && exprHasVarMissingFromSchema(item.Expr, schema) {
+					idx := colIdx
+					evalFn = func(row exec.Row) (expr.Value, error) {
+						if idx < len(row) {
+							return row[idx], nil
+						}
+						return expr.Null, nil
 					}
 				}
 			}
