@@ -53,6 +53,16 @@ algorithm has unit tests under the same package.
 | PageRank (in-memory power iter)    | `search/centrality/pagerank.go`       |
 | Personalised PageRank (push)       | `search/centrality/ppr_push.go`       |
 | PageRank (semi-external mmap)      | `search/extern/pagerank.go`           |
+| Closeness (Wasserman-Faust)        | BFS per source, disconnected-safe; `search/centrality/closeness.go` |
+| Harmonic (Boldi-Vigna)             | sum of 1/d, well-defined on disconnected graphs; `search/centrality/harmonic.go` |
+| Eigenvector (power iter, I+A)      | left/in-edge convention; `ErrMaxStepsExceeded` on non-convergence; `search/centrality/eigenvector.go` |
+| Katz                               | α auto-bounded by max degree; β baseline; `search/centrality/katz.go` |
+
+The four measures above operate on outgoing edges (closeness/harmonic) or the
+left/in-edge convention (eigenvector/Katz); pass `c.BuildReverse()` for the
+opposite orientation. On an undirected snapshot both coincide. Eigenvector and
+Katz score only participating nodes (≥1 incident edge); isolated/ghost slots
+get 0.
 
 ## Community detection
 
