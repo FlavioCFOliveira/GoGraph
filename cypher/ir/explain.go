@@ -120,9 +120,13 @@ func operatorName(plan LogicalPlan) string {
 	case *UnionAll:
 		return "UnionAll"
 
-	// Apply-family operators
+	// Apply-family operators. A plain (uncorrelated) Apply implements
+	// Cartesian-product semantics — a disconnected MATCH such as
+	// MATCH (a), (b). Label it CartesianProduct in EXPLAIN to match Neo4j's
+	// operator name and make the cardinality-blowup join greppable (#1807).
+	// The correlated variant is CorrelatedApply below.
 	case *Apply:
-		return "Apply"
+		return "CartesianProduct"
 	case *CorrelatedApply:
 		return "CorrelatedApply"
 	case *OptionalApply:

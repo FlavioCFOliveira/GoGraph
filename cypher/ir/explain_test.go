@@ -202,7 +202,7 @@ func TestExplain_Apply(t *testing.T) {
 	)
 	want := `
 ProduceResults [n, m]
-└─ Apply [n, m]
+└─ CartesianProduct [n, m]
    ├─ AllNodesScan [n]
    └─ AllNodesScan [m]
 `
