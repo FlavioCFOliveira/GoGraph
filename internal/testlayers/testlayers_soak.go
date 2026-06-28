@@ -1,12 +1,14 @@
-//go:build soak || nightly
+//go:build soak || nightly || soakfull || stress
 
 package testlayers
 
-// IsSoak reports, at compile time, whether the binary was built
-// with the `soak` or `nightly` build tag. The variant of this
-// constant defined here is true; the inverse (`!soak && !nightly`)
+// IsSoak reports, at compile time, whether the binary was built with a build
+// tag in the soak family. The variant defined here is true; the inverse
 // variant in testlayers_soak_stub.go sets it to false.
-// Nightly implies soak: any binary built with -tags=nightly also
-// activates the soak layer, consistent with the layer hierarchy
-// documented in docs/test-layers.md.
+//
+// The soak family is `soak`, `nightly`, `soakfull`, and `stress`: nightly
+// implies soak (the layer hierarchy), and the pre-existing `soakfull`/`stress`
+// tags are documented as part of the soak family (docs/test-layers.md). Honour
+// them here so a test gated by both a `//go:build soakfull` header and
+// RequireSoak does not skip under its own `-tags=soakfull` invocation (#1810).
 const IsSoak = true
