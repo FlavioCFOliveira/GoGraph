@@ -304,8 +304,15 @@ func (ff *FaultFile) Sync() error {
 // mirrors the post-"fsyncgate" kernel contract — after fsync(2)
 // reports an error the previously-dirty pages are marked clean and
 // their content must be assumed lost — so the file is left holding
-// exactly the durable prefix a crash would preserve, which is the
-// state crash-recovery tests need to observe.
+// the durable prefix a crash would preserve, which is the state
+// crash-recovery tests need to observe.
+//
+// LIMITATION (#1809): the model is SUFFIX-ONLY. It truncates everything beyond
+// syncedSize but does NOT revert a write that seeked back and overwrote bytes
+// WITHIN the already-synced prefix; a real fsync failure would lose those dirty
+// pages too. This is intentional and sufficient for the engine's write-forward
+// callers (WAL, snapshot, csrfile never overwrite a synced prefix). A future
+// writer that overwrites in place would need a stronger dirty-page model.
 func (ff *FaultFile) failSyncLocked() error {
 	if ff.syncBaseErr != nil {
 		return errors.Join(ErrSyncFailed, ff.syncBaseErr)
