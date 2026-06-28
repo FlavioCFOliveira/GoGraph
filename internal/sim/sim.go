@@ -443,6 +443,15 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	// SIGKILL-equivalent: discard the live engine and store WITHOUT a graceful
 	// close, so any buffered-but-unsynced frame is lost exactly as a real crash
 	// would lose it. The durable WAL byte image in the SimDisk survives.
+	//
+	// Revoke not-yet-durable directory entries too (#1811): a real power-loss
+	// crash loses any create/rename whose parent directory was never fsync'd.
+	// SimDisk.Crash() models exactly that. The dedicated crash tests already
+	// call it; invoking it here exercises the dirent-revocation model in the
+	// INTEGRATED crash-storm / full-stack loop, so a future async-checkpoint or
+	// mid-publish window cannot silently promote a snapshot a real crash would
+	// have lost. Harmless under the current synchronous-checkpoint ordering.
+	s.disk.Crash()
 	// Reopen with the SAME store configuration the crashed store used — crucially
 	// the same durable layout. In full-stack mode (cfg.dir set) this reopens the
 	// WAL at dir/wal and recovers via the full snapshot+WAL path; reopening with
