@@ -129,7 +129,7 @@ func TestSec_Cypher_FloatDivModByZero_IEEE(t *testing.T) {
 		check func(float64) bool
 	}{
 		{"div_inf", "5.0 / 0.0", func(f float64) bool { return math.IsInf(f, 1) }},
-		{"mod_nan", "5.0 % 0.0", func(f float64) bool { return math.IsNaN(f) }},
+		{"mod_nan", "5.0 % 0.0", math.IsNaN},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

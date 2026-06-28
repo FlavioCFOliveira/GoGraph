@@ -92,14 +92,14 @@ func TestVarlenBoundsStillWork_1788(t *testing.T) {
 	}
 	// Spot-check a concrete count: a-[*1..1]->(x) is exactly the single direct
 	// neighbour b. This pins that the bound rewrite still yields correct hops.
-	if got := runVarlenCount(t, eng, ctx, `MATCH (a {k:'a'})-[*1..1]->(x) RETURN count(*) AS r`); got != "1" {
+	if got := runVarlenCount(t, eng, `MATCH (a {k:'a'})-[*1..1]->(x) RETURN count(*) AS r`); got != "1" {
 		t.Errorf("varlen 1..1 from a: got %s want 1", got)
 	}
 }
 
-func runVarlenCount(t *testing.T, eng *cypher.Engine, ctx context.Context, q string) string {
+func runVarlenCount(t *testing.T, eng *cypher.Engine, q string) string {
 	t.Helper()
-	res, err := eng.Run(ctx, q, nil)
+	res, err := eng.Run(context.Background(), q, nil)
 	if err != nil {
 		t.Fatalf("query %q error: %v", q, err)
 	}

@@ -61,7 +61,7 @@ func TestFailSync_SuffixOnlyModel_1809(t *testing.T) {
 	if _, err := ff.Write([]byte("AAAAAAAAAA")); err != nil { // 10 bytes
 		t.Fatalf("write: %v", err)
 	}
-	if err := ff.Sync(); err != nil { // syncedSize = 10
+	if err := ff.Sync(); err != nil { // first Sync succeeds; durable size becomes 10
 		t.Fatalf("first Sync: %v", err)
 	}
 	if _, err := ff.Seek(0, 0); err != nil {

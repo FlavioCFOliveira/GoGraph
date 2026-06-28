@@ -113,8 +113,10 @@ func Run(ctx context.Context, plan Operator, cols []string) *ResultSet {
 		// per the Operator contract ("Close ... must be called exactly once
 		// ... even when Next returned an error"). Marking the ResultSet closed
 		// makes the caller's deferred Close a no-op, so we must release here
-		// ourselves; operator Close is idempotent (#1760).
-		plan.Close()
+		// ourselves; operator Close is idempotent (#1760). The Close error is
+		// deliberately discarded — we are already on the init-error path and the
+		// original err (set below) is what the caller must observe.
+		_ = plan.Close()
 		rs.err = fmt.Errorf("exec: plan init: %w", err)
 		rs.closed = true
 	}

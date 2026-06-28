@@ -2,6 +2,7 @@ package sim
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"testing"
 
@@ -126,7 +127,7 @@ func TestWAL_OpenWith_TruncatePrefixUnsupported(t *testing.T) {
 	if err := w.SyncGroup(); err != nil {
 		t.Fatalf("SyncGroup: %v", err)
 	}
-	if _, err := w.TruncatePrefix(1); err != wal.ErrPrefixTruncateUnsupported {
+	if _, err := w.TruncatePrefix(1); !errors.Is(err, wal.ErrPrefixTruncateUnsupported) {
 		t.Fatalf("OpenWith TruncatePrefix err = %v, want ErrPrefixTruncateUnsupported", err)
 	}
 }

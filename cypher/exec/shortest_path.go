@@ -453,7 +453,8 @@ func (op *ShortestPath) exhaustiveShortestPath(src, dst uint64, inputRow Row) (e
 		var next []partial
 		for _, pp := range frontier {
 			for _, arc := range op.exhArcs(pp.node) {
-				if iter++; iter&(ctxCheckEvery-1) == 0 {
+				iter++
+				if iter&(ctxCheckEvery-1) == 0 {
 					if err := op.ctx.Err(); err != nil {
 						return nil, false, err
 					}
@@ -1430,7 +1431,8 @@ func (op *AllShortestPaths) exhaustiveAllShortest(src, dst uint64, inputRow Row)
 		var next []partial
 		for _, pp := range frontier {
 			for _, arc := range op.exhArcs(pp.node) {
-				if iter++; iter&(ctxCheckEvery-1) == 0 {
+				iter++
+				if iter&(ctxCheckEvery-1) == 0 {
 					if err := op.ctx.Err(); err != nil {
 						return nil, err
 					}
@@ -1528,7 +1530,8 @@ func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src,
 	const ctxCheckEvery = 1024
 	iter := 0
 	for len(stack) > 0 {
-		if iter++; iter&(ctxCheckEvery-1) == 0 {
+		iter++
+		if iter&(ctxCheckEvery-1) == 0 {
 			if err := op.ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -1682,7 +1685,8 @@ func (op *AllShortestPaths) reconstructAllCycles(preds map[uint64][]aspPredEntry
 			usedRel: []uint64{op.relHandle(ce.rawPos, ce.fwd)},
 		}}
 		for len(stack) > 0 {
-			if iter++; iter&(ctxCheckEvery-1) == 0 {
+			iter++
+			if iter&(ctxCheckEvery-1) == 0 {
 				if err := op.ctx.Err(); err != nil {
 					return nil, err
 				}
@@ -1946,7 +1950,8 @@ func (op *AllShortestPaths) bfsAllShortestCycleBranch(src uint64) ([]expr.ListVa
 	const ctxCheckEvery = 1024
 	iter := 0
 	checkCtx := func() error {
-		if iter++; iter&(ctxCheckEvery-1) == 0 {
+		iter++
+		if iter&(ctxCheckEvery-1) == 0 {
 			return op.ctx.Err()
 		}
 		return nil

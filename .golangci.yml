@@ -30,6 +30,12 @@ linters:
     # in the install-antlr / generate-cypher-parser Makefile targets.
     paths:
       - cypher/parser/gen
+      # .claude/worktrees holds transient git worktrees created by tooling
+      # agents (isolated copies of the repo). They are gitignored and never
+      # part of the module under test, but `golangci-lint run ./...` would
+      # otherwise descend into any local copy; exclude them so a developer's
+      # in-progress agent worktree cannot pollute the lint result.
+      - \.claude/
     rules:
       # defer/inline res.Close() without error check is intentional in tests;
       # teardown failures are surfaced via t.Fatalf in the test body.
@@ -211,6 +217,31 @@ linters:
       - linters: [errcheck]
         path: "examples/.*\\.go"
         text: "Error return value of `fmt\\.Fprint(f|ln)?` is not checked"
+      # gocritic hugeParam: internal/sim's SimConfig is an immutable setup
+      # snapshot (~248 B) passed by VALUE on purpose — the deterministic
+      # simulator copies it once at construction (NewSimulator / trace / the
+      # scenario test helpers) so a run can never alias and mutate shared
+      # config. The one-time copy is negligible; pass-by-pointer would buy
+      # nothing and invite aliasing bugs in the harness.
+      - linters: [gocritic]
+        path: "internal/sim/"
+        text: "hugeParam: cfg is heavy"
+      # revive unexported-return: internal/sim.SimStore.Config returns the
+      # package-internal simStoreConfig deliberately — it exists only so the
+      # in-package crash loop can reopen the store with the SAME durable layout
+      # (sim.go maybeCrash). The type is not meant to be constructed by callers,
+      # so exporting it would widen the surface for no benefit.
+      - linters: [revive]
+        path: "internal/sim/simstore\\.go"
+        text: "unexported-return"
+      # revive exported (stutter): store/wal.WALFile is the deliberately
+      # descriptive name of the minimal open-handle interface a Writer needs
+      # (the OpenFS/SimDisk seam). Renaming to wal.File would be less clear at
+      # call sites and is an exported-API change for a published package; the
+      # explicit "WAL" qualifier is intentional.
+      - linters: [revive]
+        path: "store/wal/writer_vfs\\.go"
+        text: "type name will be used as wal.WALFile"
   settings:
     errorlint:
       errorf: true

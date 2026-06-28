@@ -223,7 +223,7 @@ func TestAllShortestPaths_Cycle_TwoTied(t *testing.T) {
 }
 
 func dumpLens(rows []map[string]expr.Value) []string {
-	var out []string
+	out := make([]string, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, sprintfV(r["len"]))
 	}

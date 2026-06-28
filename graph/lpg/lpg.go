@@ -1477,8 +1477,8 @@ type storeConstraintKey struct {
 // constraint, the only direction that could let a checkpoint silently drop it.
 //
 // AddStoreConstraint is safe for concurrent use.
-func (g *Graph[N, W]) AddStoreConstraint(kind uint8, label, property string) {
-	key := storeConstraintKey{kind: kind, label: label, property: property}
+func (g *Graph[N, W]) AddStoreConstraint(kind uint8, labelName, property string) {
+	key := storeConstraintKey{kind: kind, label: labelName, property: property}
 	g.storeConstraintMu.Lock()
 	if g.storeConstraints == nil {
 		g.storeConstraints = make(map[storeConstraintKey]struct{}, 1)
@@ -1497,8 +1497,8 @@ func (g *Graph[N, W]) AddStoreConstraint(kind uint8, label, property string) {
 // cannot drive the active count negative.
 //
 // RemoveStoreConstraint is safe for concurrent use.
-func (g *Graph[N, W]) RemoveStoreConstraint(kind uint8, label, property string) {
-	key := storeConstraintKey{kind: kind, label: label, property: property}
+func (g *Graph[N, W]) RemoveStoreConstraint(kind uint8, labelName, property string) {
+	key := storeConstraintKey{kind: kind, label: labelName, property: property}
 	g.storeConstraintMu.Lock()
 	if _, ok := g.storeConstraints[key]; ok {
 		delete(g.storeConstraints, key)

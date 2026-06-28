@@ -111,10 +111,9 @@ func TestRecovery_BenignTornTail_StillClean(t *testing.T) {
 	// Truncate inside the LAST frame's payload: keep its full header and the
 	// first payload byte, then cut. This is the canonical crash-after-fsync
 	// torn tail — the committed prefix (every earlier frame) is intact.
-	lastStart := boundaries[len(boundaries)-1] // end of the last full frame
 	// boundaries' final entry is the file end; the last frame starts at the
 	// previous boundary.
-	lastStart = boundaries[len(boundaries)-2]
+	lastStart := boundaries[len(boundaries)-2]
 	cut := lastStart + int64(wal.HeaderSize) + 1
 	if cut >= int64(len(data)) {
 		t.Fatalf("last frame too small to cut its payload (cut=%d len=%d)", cut, len(data))

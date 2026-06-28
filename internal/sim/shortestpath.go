@@ -88,7 +88,7 @@ func CheckShortestPath(tick int64, oracle *GraphOracle, engine *EngineAdapter) [
 // returned path length equals the minimal-hop reference want (-1 == unreachable
 // => no rows), and the count of returned paths equals an independent BFS count
 // of distinct shortest paths.
-func checkAllShortestPaths(ctx context.Context, engine *EngineAdapter, adj map[string][]string, a, b string, want int64, tick int64) []Violation {
+func checkAllShortestPaths(ctx context.Context, engine *EngineAdapter, adj map[string][]string, a, b string, want, tick int64) []Violation {
 	q := fmt.Sprintf(
 		"MATCH p=allShortestPaths((a:Person {name:'%s'})-[:KNOWS*]->(b:Person {name:'%s'})) RETURN length(p)",
 		a, b)
