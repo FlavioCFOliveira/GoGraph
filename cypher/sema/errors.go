@@ -36,6 +36,12 @@ const (
 	// type is only known at runtime are not flagged.
 	KindInvalidArgumentType ErrorKind = "INVALID_ARGUMENT_TYPE"
 
+	// KindNestedAggregation is reported when an aggregate function call appears
+	// inside the argument of another aggregate function (e.g. count(count(*))).
+	// openCypher forbids nesting aggregates; the TCK expects a SyntaxError with
+	// detail NestedAggregation (Return6 [14]).
+	KindNestedAggregation ErrorKind = "NESTED_AGGREGATION"
+
 	// KindInvalidAggregation is reported when an aggregation function call
 	// appears in an ORDER BY item but the surrounding projection does not
 	// itself contain any aggregation. Aggregations only fold over groups
@@ -205,6 +211,16 @@ func invalidAggregationError(pos ast.Position) *ScopeError {
 		Kind:    KindInvalidAggregation,
 		Pos:     pos,
 		Message: "aggregation in ORDER BY requires a matching aggregation in the projection",
+	}
+}
+
+// nestedAggregationError constructs a KindNestedAggregation ScopeError for an
+// aggregate function call nested inside another aggregate's argument.
+func nestedAggregationError(pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindNestedAggregation,
+		Pos:     pos,
+		Message: "aggregate functions may not be nested inside other aggregate functions",
 	}
 }
 

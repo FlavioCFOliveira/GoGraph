@@ -88,6 +88,7 @@ var scopeKindToTCKType = map[sema.ErrorKind]string{
 	sema.KindRelationshipUniqueness:         "RelationshipUniquenessViolation",
 	sema.KindNegativeIntegerArgument:        "NegativeIntegerArgument",
 	sema.KindInvalidAggregation:             "InvalidAggregation",
+	sema.KindNestedAggregation:              "NestedAggregation",
 	sema.KindAmbiguousAggregationExpression: "AmbiguousAggregationExpression",
 	sema.KindNoVariablesInScope:             "NoVariablesInScope",
 	sema.KindNoExpressionAlias:              "NoExpressionAlias",
@@ -217,11 +218,12 @@ func sortedFidelityKeys[V any](m map[string]V) []string {
 // matches break down as: UndefinedVariable 69, InvalidAggregation 29,
 // VariableAlreadyBound 9, AmbiguousAggregationExpression 5, NegativeInteger-
 // Argument 4, and ColumnNameConflict / NoExpressionAlias / NoVariablesInScope /
-// RelationshipUniquenessViolation / UnknownFunction 1 each. The ambiguous
-// InvalidArgumentType (158 same-token raises) and the numeric/argument family
-// are intentionally excluded (see classifyTCKErrorType) and await explicit
-// engine error tagging in a later cycle, which will ratchet this upward.
-const tckErrorFidelityBaseline = 121
+// RelationshipUniquenessViolation / UnknownFunction 1 each, plus NestedAggregation
+// 1 (#1804). The ambiguous InvalidArgumentType (158 same-token raises) and the
+// numeric/argument family are intentionally excluded (see classifyTCKErrorType)
+// and await explicit engine error tagging in a later cycle, which will ratchet
+// this upward.
+const tckErrorFidelityBaseline = 122
 
 // TestTCKFidelityGateCheck_DetectsRegression is the negative test for the
 // fidelity gate (mirrors TestTCKGateCheck_DetectsFailedScenarios): it proves

@@ -441,6 +441,7 @@ func (a *analyser) withClause(w *ast.With) {
 	// aggregation. Otherwise the aggregation has no group to fold over.
 	a.checkOrderByAggregation(w.Projection)
 	a.checkAmbiguousAggregation(w.Projection)
+	a.checkNestedAggregation(w.Projection)
 
 	// 3. Reset scope: only projected names survive.
 	a.scope.reset()
@@ -1243,6 +1244,7 @@ func (a *analyser) projectionCheck(proj *ast.Projection) {
 		a.checkExpr(item.Expr)
 	}
 	a.checkAmbiguousAggregation(proj)
+	a.checkNestedAggregation(proj)
 	// Introduce projected aliases (and bare-Variable projections) so that
 	// ORDER BY / SKIP / LIMIT references resolve. Redeclaration errors are
 	// suppressed here because the alias often shadows a pre-existing name
@@ -1737,6 +1739,109 @@ func nonListLiteralKind(e ast.Expression) (string, bool) {
 		return "Map", true
 	}
 	return "", false
+}
+
+// isAggregateFuncName reports whether name (case-insensitive) is one of the
+// built-in aggregate functions.
+func isAggregateFuncName(name string) bool {
+	switch strings.ToLower(name) {
+	case "count", "sum", "avg", "min", "max", "collect",
+		"stdev", "stdevp", "percentilecont", "percentiledisc":
+		return true
+	}
+	return false
+}
+
+// nestedAggPos returns the position of an aggregate function call that has an
+// aggregate inside one of its arguments (e.g. count(count(*))), if any.
+func nestedAggPos(e ast.Expression) (ast.Position, bool) {
+	var found bool
+	var pos ast.Position
+	var walk func(ast.Expression)
+	walk = func(x ast.Expression) {
+		if x == nil || found {
+			return
+		}
+		if fn, ok := x.(*ast.FunctionInvocation); ok && len(fn.Namespace) == 0 && isAggregateFuncName(fn.Name) {
+			for _, arg := range fn.Args {
+				if containsAggregation(arg) {
+					found = true
+					pos = positionOf(fn)
+					return
+				}
+			}
+		}
+		switch v := x.(type) {
+		case *ast.FunctionInvocation:
+			for _, arg := range v.Args {
+				walk(arg)
+			}
+		case *ast.BinaryOp:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.UnaryOp:
+			walk(v.Operand)
+		case *ast.Property:
+			walk(v.Receiver)
+		case *ast.LabelPredicate:
+			walk(v.Receiver)
+		case *ast.SubscriptExpr:
+			walk(v.Expr)
+			walk(v.Index)
+		case *ast.SliceExpr:
+			walk(v.Expr)
+			walk(v.From)
+			walk(v.To)
+		case *ast.CaseExpression:
+			walk(v.Subject)
+			for _, alt := range v.Alternatives {
+				walk(alt.Condition)
+				walk(alt.Consequent)
+			}
+			walk(v.ElseExpr)
+		case *ast.ListLiteral:
+			for _, el := range v.Elements {
+				walk(el)
+			}
+		case *ast.MapLiteral:
+			for _, val := range v.Values {
+				walk(val)
+			}
+		case *ast.ReduceExpr:
+			walk(v.Init)
+			walk(v.Source)
+			walk(v.Projection)
+		}
+	}
+	walk(e)
+	return pos, found
+}
+
+// checkNestedAggregation enforces openCypher's prohibition on an aggregate
+// function nested inside another aggregate's argument (e.g. count(count(*))).
+// The TCK expects a SyntaxError with detail NestedAggregation (Return6 [14]).
+func (a *analyser) checkNestedAggregation(proj *ast.Projection) {
+	if proj == nil {
+		return
+	}
+	for _, item := range proj.Items {
+		if item == nil {
+			continue
+		}
+		if pos, ok := nestedAggPos(item.Expr); ok {
+			a.error(nestedAggregationError(pos))
+			return
+		}
+	}
+	for _, s := range proj.OrderBy {
+		if s == nil {
+			continue
+		}
+		if pos, ok := nestedAggPos(s.Expr); ok {
+			a.error(nestedAggregationError(pos))
+			return
+		}
+	}
 }
 
 // checkAmbiguousAggregation enforces openCypher 9 §5.3.3: when a
