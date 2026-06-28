@@ -707,16 +707,17 @@ func (w *Writer) Truncate() (int64, error) {
 	// truncates to a stale (pre-Truncate) size.
 	w.durableSize = 0
 	w.appendedSize = 0
-	// Crash-injection point: the file has just been shrunk to zero on
-	// disk but the truncation has not yet been fully finalised (seek +
-	// metadata sync + buffer reset). A crash here models a tear in the
-	// middle of a checkpoint's WAL truncation; recovery must reconstruct
-	// the full state from the (already durable, self-sufficient)
-	// snapshot alone, since the WAL is now empty. No-op in production
-	// (GOGRAPH_CRASH_AT unset). The hook lives here because os.File
-	// truncation is where the WAL prefix is physically discarded; see
-	// store/checkpoint.runCheckpoint for the surrounding sequence.
-	crashpoint.Breakpoint("checkpoint.mid-truncate")
+	// NOTE (#1812): this full zero-length Truncate is NOT a production
+	// checkpoint path — the non-blocking checkpoint cuts the WAL via
+	// TruncatePrefix (which keeps the post-watermark suffix and carries its own
+	// crash-injection points, covered by the checkpoint-prefix-crash scenarios).
+	// Truncate() is a test/maintenance helper that discards the WHOLE WAL after
+	// a self-sufficient snapshot. A former "checkpoint.mid-truncate" crashpoint
+	// here was dead — no SIGKILL scenario dispatched it and its "checkpoint"
+	// naming was stale — so it was removed rather than left as misleading,
+	// unexercised instrumentation. Recovery after a complete Truncate() (WAL
+	// empty, snapshot self-sufficient) is proven by the store/recovery and
+	// cypher durability tests that call it.
 	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
 		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return sz, err
