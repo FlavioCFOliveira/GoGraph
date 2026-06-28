@@ -20,7 +20,12 @@ env:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The job runs the FULL `make release-preflight` (vet + build + `go test
+    # -race ./...` + golangci-lint + TCK + cover-gate + headline bench) and THEN
+    # goreleaser cross-compiles four platforms with SBOM generation. On a
+    # GitHub-hosted runner that exceeds 20m — it cancelled the v0.6.0 run at
+    # 20m15s; 45m gives the preflight + build comfortable headroom.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

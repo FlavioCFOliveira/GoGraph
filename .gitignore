@@ -6,6 +6,8 @@
 bin/
 build/
 dist/
+# goreleaser SBOM before-hook output (regenerated each build; embedded in archives)
+gograph.cdx.json
 
 # Test and coverage artefacts
 *.test
