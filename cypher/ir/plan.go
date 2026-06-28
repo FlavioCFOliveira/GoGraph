@@ -73,6 +73,11 @@ type ProjectionItem struct {
 	// legacy or string-only callers. When non-nil, the executor evaluates it
 	// via expr.Eval rather than falling back to a schema-key lookup.
 	Expr ast.Expression
+	// Hidden marks a synthetic passthrough item added only so a downstream
+	// Sort can resolve an ORDER BY reference to a pre-projection variable. It
+	// is emitted into the row stream but MUST be excluded from the final
+	// ProduceResults output columns (#1805).
+	Hidden bool
 }
 
 // AggregateExpr is a named aggregate function in an EagerAggregation operator.

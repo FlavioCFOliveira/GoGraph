@@ -390,6 +390,7 @@ func appendOrderByPassthrough(items []ProjectionItem, proj *ast.Projection, preV
 			Name:       v,
 			Expression: v,
 			Expr:       &ast.Variable{Name: v},
+			Hidden:     true, // ORDER-BY passthrough; excluded from output cols (#1805)
 		})
 		itemNames[v] = struct{}{}
 	}

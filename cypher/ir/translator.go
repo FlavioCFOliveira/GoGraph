@@ -403,10 +403,15 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	// when no SKIP is present.
 	plan = applyProjectionTail(plan, proj)
 
-	// Collect output column names for ProduceResults.
-	cols := make([]string, len(items))
-	for i, it := range items {
-		cols[i] = it.Name
+	// Collect output column names for ProduceResults. Hidden items are
+	// synthetic ORDER-BY passthroughs (#1805): they are emitted into the row
+	// for the Sort to read but must NOT appear as result columns.
+	cols := make([]string, 0, len(items))
+	for _, it := range items {
+		if it.Hidden {
+			continue
+		}
+		cols = append(cols, it.Name)
 	}
 	return NewProduceResults(cols, plan), nil
 }
