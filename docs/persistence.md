@@ -1056,4 +1056,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-06-15 against commit `aaed75c`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-06-28 against commit `3b51a5b`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
