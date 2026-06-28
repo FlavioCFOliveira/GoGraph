@@ -961,7 +961,7 @@ func (a *analyser) whereClause(w *ast.Where) {
 	// count/sum/… here would be ambiguous (the aggregator has no group
 	// to fold over).
 	if containsAggregation(w.Predicate) {
-		a.error(invalidAggregationError(positionOf(w.Predicate)))
+		a.error(aggregationInWhereError(positionOf(w.Predicate)))
 	}
 	// A bare Variable predicate must reference a Boolean-compatible value.
 	// When the scope-symbol type proves the reference is a node,

@@ -224,6 +224,19 @@ func nestedAggregationError(pos ast.Position) *ScopeError {
 	}
 }
 
+// aggregationInWhereError constructs a KindInvalidAggregation ScopeError for an
+// aggregate function used in a WHERE clause (forbidden — the filter applies
+// per row, before any grouping). Same kind as [invalidAggregationError] so the
+// TCK error-type classification is unchanged; only the message names WHERE
+// rather than ORDER BY (#1806).
+func aggregationInWhereError(pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindInvalidAggregation,
+		Pos:     pos,
+		Message: "aggregation is not allowed in WHERE",
+	}
+}
+
 // ambiguousAggregationError constructs a KindAmbiguousAggregationExpression
 // ScopeError for a non-grouped Variable / Property reference that appears
 // outside an aggregate call in an aggregating projection item.
