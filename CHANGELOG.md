@@ -4,6 +4,177 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-06-28
+
+The eighth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release. Its headline is a substantially **wider analytics and Cypher
+surface**: four new centrality measures (Closeness, Harmonic,
+Eigenvector, Katz), node-label round-trip in the JSONL and GraphML
+exporters, Cypher **map projection** (`n{.name, .*, k: expr}`), and
+`shortestPath()`/`allShortestPaths()` with **per-instance relationship
+typing**. The release also lands a deep reliability and openCypher
+conformance hardening pass and a deterministic-simulation-testing (DST)
+infrastructure expansion.
+
+The bump is **MINOR** under [Semantic Versioning](https://semver.org/):
+every change in this release is **additive** over `v0.5.0` (new exported
+functions, new Cypher features, new options) or an **internal** fix that
+restores a previously-documented contract. No breaking change to the
+exported Go API ships in this release. As a `0.y.z` release the public
+API remains unstable; pin the exact version you depend on.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios, 16 006 / 16 006 steps) and **100 %
+ACID-compliant** across the in-memory engine and every persistence
+backend. The Go toolchain remains **go1.26.4** (unchanged), and
+`govulncheck ./...` stays clean.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.6.0
+```
+
+### Added
+
+- **Four new centrality measures (`search/centrality`).** `Closeness`
+  (Wasserman–Faust normalisation), `Harmonic` (Boldi–Vigna),
+  `Eigenvector`, and `Katz`, each with a context-aware `…Ctx` variant.
+  `Eigenvector` and `Katz` take an options struct and return the
+  iteration count alongside the score vector. (#1800)
+- **Node-label round-trip in the interchange exporters.** The JSONL and
+  GraphML writers now carry node labels through export, so a graph
+  exported and re-imported preserves its label set. (#1793)
+- **Cypher map projection.** `RETURN n{.name, .*, k: expr, var}` is now
+  supported — selected-property, all-properties (`.*`), literal-entry,
+  and variable-selector forms, composable in a single projection.
+  (#1775)
+- **`shortestPath()` / `allShortestPaths()` with per-instance
+  relationship typing.** Path functions honour relationship-type
+  predicates and per-instance relationship types, including across
+  parallel edges in a multigraph. (#1685, #1690, #1691, #1692)
+- **Per-instance by-handle edge properties.** `SET` and `REMOVE` on a
+  bound relationship now maintain per-instance edge properties addressed
+  by handle, correct under parallel edges. (#1684, #1686, #1688, #1689)
+- **`MERGE` of a distinct relationship type creates the parallel edge.**
+  `MERGE` now creates a parallel edge when its type differs from an
+  existing edge between the same endpoints. (#1683)
+- **`CSR.Validate` boundary check.** A new `CSR.Validate` method and the
+  `ErrMalformedCSR` sentinel detect a structurally malformed CSR
+  snapshot at the boundary before it reaches a search hot path. (#1762)
+- **Columnar edge-property storage tier.** Edge properties are stored in
+  a de-boxed, per-`(key, kind)` columnar tier with a validity bitmap,
+  cutting per-edge resident memory substantially on property-heavy
+  graphs.
+- **Deterministic-simulation-testing (DST) infrastructure.** A
+  `SimDisk`-backed filesystem seam (`OpenFS`) now backs snapshot, CSR
+  file, and checkpoint paths, and the crash-storm scenario exercises
+  full snapshot + WAL crash-recovery end to end. (#1546, #1740, #1752)
+- **`EngineOptions.DisableParallelBackfill` toggle.** Opts a deployment
+  out of parallel index backfill when single-threaded backfill is
+  preferred. (#1747)
+
+### Changed
+
+- **`EXPLAIN` labels a disconnected `MATCH` as `CartesianProduct`.** A
+  query whose `MATCH` patterns share no variable is now reported as a
+  `CartesianProduct` in the `EXPLAIN` plan, surfacing the accidental
+  cross-product to the query author. (#1807)
+- **String + number concatenation returns null.** This behaviour is now
+  pinned and documented, with a `SyntaxError` raised where the
+  openCypher specification requires it. (#1770, #1794)
+
+### Fixed
+
+- **`ORDER BY … LIMIT 0` yields an empty result**, not all rows. (#1801)
+- **Integer and Float order as one Number tier** in comparison and
+  `ORDER BY`, matching openCypher numeric ordering. (#1789)
+- **Nested aggregation is rejected at compile time** rather than
+  producing an undefined result. (#1804)
+- **A non-aliased compound grouping key reads its precomputed column**
+  instead of evaluating to null. (#1803)
+- **`ORDER BY` passthrough variable dropped from result columns** so a
+  sort key does not leak into the projection. (#1805)
+- **Aggregation-in-`WHERE` error names `WHERE`**, not `ORDER BY`. (#1806)
+- **Parser: compact subtraction disambiguation.** The lexer now
+  correctly discriminates a binary minus from a signed literal in
+  compact subtraction expressions, and the variable-length bound rewrite
+  is scoped to relationship brackets. (#1788, #1796, #1797, #1798)
+- **Relationship-uniqueness enforced across comma-separated `MATCH`
+  patterns**, preventing a single relationship from binding twice across
+  patterns. (#1777)
+- **`shortestPath` / `allShortestPaths` find directed `src == dst`
+  cycles; the undirected case is safe.** Context cancellation is now
+  honoured during `allShortestPaths` enumeration. (#1779, #1780, #1782)
+- **Shortest-path relaxers guard nil weights** on a weightless CSR
+  rather than panicking. (#1776)
+- **GraphML: per-`(name, kind)` keys** so heterogeneous node and edge
+  property keys round-trip without collision. (#1791)
+- **Nested-list property serialisation is bounded** to prevent writer
+  out-of-memory on deeply nested values. (#1792)
+- **Temporal time-zone offset preserved on export.** (#1769)
+- **Tombstone-aware CSR build** drops ghost edges from the search
+  snapshot. (#1790)
+- **WAL torn-tail detection.** A corrupt length field that would mask
+  durable frames as a torn tail is now detected, preventing silent data
+  loss. (#1778)
+- **Schema DDL durably persists across a WAL-truncating checkpoint.**
+  Index and constraint definitions survive a checkpoint that truncates
+  the WAL. (#1755, #1756)
+- **`NOT NULL` existence constraints enforced at commit time**, covering
+  omit-at-`CREATE` and set-label paths, not only `SET`-to-null. (#1754)
+- **A rolled-back no-op edge `CREATE` no longer deletes a pre-existing
+  edge** between the same endpoints. (#1751)
+- **`SET r = map` / `SET r = node` have true `REPLACE` semantics.**
+  (#1687)
+- **Bolt protocol hardening.** Typed `Terminated` `FAILURE` on the reaper
+  path, partial `DISCARD {n}` handling, `qid` validation, and query
+  messages ignored on an authenticated `FAILED` connection. (#1781,
+  #1783, #1784, #1787)
+- **`ParallelScan` closer goroutine is joined in `Close`** and the
+  `Run` plan is closed when root `Init` fails — no goroutine leak on the
+  error path. (#1760, #1795)
+- **Round-2 reliability-audit conformance fixes** across the Cypher and
+  Bolt surfaces. (#1764–#1768, #1771–#1773)
+- **`DateValue.String` is the inverse of `ParseDate` for expanded
+  years.** (#1658)
+- **Aggregate `DISTINCT` equivalence and `sum()` empty-input identity**
+  match openCypher semantics.
+
+### Performance
+
+- Numerous hot-path optimisations landed across the search, Cypher
+  execution, storage, and analytics layers, including a columnar
+  edge-property tier, registry copy-on-write, scan arena reuse, an
+  adaptive-parallelism governor, snapshot write-path reductions, parallel
+  index backfill, and parallel variants of additional graph algorithms.
+  These are tracked per change in
+  [`docs/benchmarks/history/`](docs/benchmarks/history/) and summarised
+  for this release in
+  [`docs/benchmarks/v0.6.0.md`](docs/benchmarks/v0.6.0.md). Every
+  optimisation preserves the documented API contracts and both
+  compliance invariants.
+
+### Documentation
+
+- New centrality functions carry an explicit concurrency contract.
+  (#1800 follow-up)
+- A* integer f-score overflow precondition, the Leiden / Label
+  Propagation unit-weight contract, GC tuning guidance for read-heavy
+  workloads, and the full-stack checkpoint + WAL crash-recovery flow are
+  documented. (#1758, #1763, #1706, #1741)
+- Release-gate cleanup: `golangci-lint` and `staticcheck` cleared, and
+  the gated-documentation freshness footers re-stamped after
+  verification against the current code. (#1813, #1814, #1815)
+
+### Examples
+
+- All 26 examples were upgraded to a common standard: seeded generators,
+  scale knobs, subject-appropriate evidence collection (CPU, RAM,
+  storage), and machine-readable telemetry.
+
 ## [0.5.0] — 2026-06-17
 
 The seventh published release of **GoGraph**, a Go module for graph
