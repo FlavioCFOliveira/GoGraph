@@ -321,10 +321,26 @@ func (ff *FaultFile) failSyncLocked() error {
 }
 
 // Truncate resizes the file to size bytes.
+//
+// When the truncation shrinks the file below the recorded durable size, the
+// durable size is clamped down too: those bytes no longer exist, so a later
+// firing sync fault must not re-extend the file back to the stale syncedSize
+// (which would fabricate zero-filled "durable" data that was never written —
+// #1808). A grow-truncate leaves syncedSize unchanged (the appended region is
+// unsynced and a fault would still discard it).
 func (ff *FaultFile) Truncate(size int64) error {
 	ff.mu.Lock()
 	defer ff.mu.Unlock()
-	return ff.f.Truncate(size)
+	if err := ff.f.Truncate(size); err != nil {
+		return err
+	}
+	if size < ff.syncedSize {
+		ff.syncedSize = size
+	}
+	if size < ff.offset {
+		ff.offset = size
+	}
+	return nil
 }
 
 // Close releases the underlying OS file.
