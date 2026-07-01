@@ -117,6 +117,7 @@ func buildDefaultRegistry() *Registry {
 
 	// ── Graph accessors ────────────────────────────────────────────────────────
 	r.Register("id", fnID)
+	r.Register("elementId", fnElementID)
 	r.Register("labels", fnLabels)
 	r.Register("type", fnType)
 	r.Register("startnode", fnStartNode)
@@ -139,9 +140,18 @@ func buildDefaultRegistry() *Registry {
 	r.Register("tointeger", fnToInteger)
 	r.Register("tofloat", fnToFloat)
 	r.Register("toboolean", fnToBoolean)
+	r.Register("toStringList", fnToStringList)
+	r.Register("toIntegerList", fnToIntegerList)
+	r.Register("toFloatList", fnToFloatList)
+	r.Register("toBooleanList", fnToBooleanList)
 
 	// ── NULL handling ──────────────────────────────────────────────────────────
 	r.Register("coalesce", fnCoalesce)
+
+	// ── Predicates / identity / scalar utilities ───────────────────────────────
+	r.Register("isNaN", fnIsNaN)
+	r.Register("timestamp", fnTimestamp)
+	r.Register("randomUUID", fnRandomUUID)
 
 	// ── Math ───────────────────────────────────────────────────────────────────
 	r.Register("abs", fnAbs)

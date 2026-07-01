@@ -139,6 +139,9 @@ var funcRegistry = map[string]CypherType{
 
 	// Scalar
 	"id":            TypeInteger,
+	"elementid":     TypeString,
+	"timestamp":     TypeInteger,
+	"isnan":         TypeBoolean,
 	"size":          TypeInteger,
 	"length":        TypeInteger,
 	"type":          TypeString,
@@ -180,10 +183,15 @@ var funcRegistry = map[string]CypherType{
 	"radians":  TypeFloat,
 
 	// Type-conversion (keys must be lowercase — lookupFunc lowercases the input)
-	"tostring":  TypeString,
-	"tointeger": TypeInteger,
-	"tofloat":   TypeFloat,
-	"toboolean": TypeBoolean,
+	"tostring":      TypeString,
+	"tointeger":     TypeInteger,
+	"tofloat":       TypeFloat,
+	"toboolean":     TypeBoolean,
+	"tostringlist":  TypeList,
+	"tointegerlist": TypeList,
+	"tofloatlist":   TypeList,
+	"tobooleanlist": TypeList,
+	"randomuuid":    TypeString,
 
 	// String functions
 	"tolower":   TypeString,

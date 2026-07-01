@@ -81,6 +81,19 @@ func (r *nowAwareRegistry) Resolve(name string) (expr.BuiltinFn, bool) {
 			}
 			return fn(args)
 		}, true
+	case "timestamp":
+		// timestamp() returns milliseconds since the Unix epoch at the statement's
+		// frozen instant, so every call within a query — and across rows — yields
+		// the same value. Derive it from r.now (the per-query frozen instant),
+		// bypassing the process-global funcs.StatementNow exactly as the five
+		// temporal constructors above do. timestamp() takes no arguments.
+		now := r.now
+		return func(args []expr.Value) (expr.Value, error) {
+			if len(args) == 0 {
+				return expr.IntegerValue(now.UnixMilli()), nil
+			}
+			return fn(args)
+		}, true
 	}
 	return fn, true
 }
