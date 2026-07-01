@@ -52,6 +52,50 @@ var ErrManifestUnsupported = errors.New("snapshot: manifest version unsupported"
 // as JSON or its file list disagrees with what is on disk.
 var ErrManifestCorrupted = errors.New("snapshot: manifest corrupted")
 
+// ErrManifestTooLarge is returned by the file-backed manifest readers
+// ([ReadManifestFile] / [ReadManifestFileFS]) when a manifest.json exceeds
+// [DefaultMaxManifestBytes]. Inspect with [errors.Is]. It bounds the transient
+// allocation an attacker-supplied or corrupt snapshot directory can force at
+// store-open time, mirroring the DefaultMaxBytes ceiling every sibling loader
+// (csv/jsonl/graphml, the WAL frame decoder, the csrfile loader) already
+// applies.
+var ErrManifestTooLarge = errors.New("snapshot: manifest exceeds maximum size")
+
+// DefaultMaxManifestBytes is the upper bound the file-backed manifest readers
+// impose on a manifest.json. A manifest is a small JSON document — a version
+// header plus one FileEntry/IndexFileEntry per snapshot component — so even a
+// graph with thousands of on-disk index files stays in the low single-digit
+// MiB. 32 MiB is far above any legitimate manifest yet stops a hostile or
+// corrupt manifest.json (a giant array or string field) from driving a
+// multi-gigabyte transient decode allocation at recovery before any version or
+// CRC check bounds it.
+const DefaultMaxManifestBytes = 32 << 20 // 32 MiB
+
+// manifestLimitReader wraps an [io.Reader] and returns [ErrManifestTooLarge]
+// once total consumption would exceed maxBytes. Unlike [io.LimitReader] — which
+// reports a clean EOF at the limit and would surface as a truncation-induced
+// JSON parse error — it fails with a distinct typed error so the fail-stop is
+// non-silent. It mirrors graph/io/csv.limitReader.
+type manifestLimitReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+// Read implements [io.Reader]. It never returns more than remaining bytes and
+// fails with [ErrManifestTooLarge] the moment the underlying reader would push
+// total consumption past the configured ceiling.
+func (l *manifestLimitReader) Read(p []byte) (int, error) {
+	if l.remaining <= 0 {
+		return 0, ErrManifestTooLarge
+	}
+	if int64(len(p)) > l.remaining {
+		p = p[:l.remaining]
+	}
+	n, err := l.r.Read(p)
+	l.remaining -= int64(n)
+	return n, err
+}
+
 // FileEntry records one component file inside a snapshot directory.
 type FileEntry struct {
 	Name   string `json:"name"`
@@ -176,7 +220,15 @@ func readManifestFileWith(fsys fileSystem, path string) (Manifest, error) {
 	}
 	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
-	m, err := LoadManifest(f)
+	// Bound the decode: manifest.json is an untrusted store file (an attacker or
+	// corruption controls the whole snapshot directory), and json.Decode grows
+	// its slices/strings proportionally to the input, so a giant manifest would
+	// drive a multi-gigabyte transient allocation at open before any version or
+	// CRC check runs. Cap it with DefaultMaxManifestBytes, mirroring the
+	// DefaultMaxBytes ceiling every sibling loader applies. A manifest above the
+	// ceiling fails with ErrManifestTooLarge (non-silent).
+	lr := &manifestLimitReader{r: f, remaining: DefaultMaxManifestBytes}
+	m, err := LoadManifest(lr)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.ReadManifestFile.errors", 1)
 	}
