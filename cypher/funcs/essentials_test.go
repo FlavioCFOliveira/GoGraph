@@ -201,10 +201,16 @@ func TestFn_Coalesce(t *testing.T) {
 			t.Errorf("got %v, want null", v)
 		}
 	})
-	t.Run("empty_args_null", func(t *testing.T) {
-		v := mustCall(t, "coalesce")
-		if !expr.IsNull(v) {
-			t.Errorf("got %v, want null", v)
+	t.Run("empty_args_error", func(t *testing.T) {
+		// openCypher/Neo4j require coalesce to take at least one argument.
+		// Zero args is a typed ArityError, not a fail-open null (audit F11 #1835).
+		_, err := call(t, "coalesce")
+		if err == nil {
+			t.Fatal("coalesce() with zero args returned nil error; want a typed ArityError")
+		}
+		var ae *funcs.ArityError
+		if !errors.As(err, &ae) {
+			t.Fatalf("coalesce() zero-arg error = %v (%T); want *funcs.ArityError", err, err)
 		}
 	})
 	t.Run("first_arg_non_null", func(t *testing.T) {

@@ -818,7 +818,12 @@ func fnToBoolean(args []expr.Value) (expr.Value, error) {
 // This respects 3VL: NULL inputs are simply skipped.
 func fnCoalesce(args []expr.Value) (expr.Value, error) {
 	if len(args) == 0 {
-		return expr.Null, nil
+		// openCypher/Neo4j define coalesce as requiring at least one argument.
+		// Returning null here was a fail-open divergence where every other
+		// function fails-stop via requireArity; return a typed ArityError
+		// instead. TCK-neutral: no TCK scenario invokes coalesce() with zero
+		// arguments.
+		return nil, &ArityError{Function: "coalesce", Got: 0, Want: "at least 1"}
 	}
 	for _, a := range args {
 		if !expr.IsNull(a) {
