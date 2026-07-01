@@ -155,6 +155,20 @@ type Session struct {
 	// the production server, which always installs a finite default).
 	defaultTxTimeout time.Duration
 
+	// defaultStmtTimeout is the bounded timeout applied to an AUTOCOMMIT
+	// statement (a bare RUN outside an explicit transaction) when the client
+	// supplies no per-statement "timeout" of its own. It is the autocommit
+	// counterpart of defaultTxTimeout: a finite value guarantees an
+	// authenticated client cannot pin a CPU core indefinitely with a
+	// super-linear-runtime / single-row-result statement (a disconnected
+	// multi-pattern Cartesian product whose result-row and byte caps never
+	// fire). Seeded from [Options.DefaultStatementTimeout] /
+	// [DefaultStatementTimeout]. A client-supplied timeout takes precedence;
+	// maxStmtTimeout, when set, additionally clamps the effective value. Zero
+	// means no default bound (not used by the production server, which always
+	// installs a finite default).
+	defaultStmtTimeout time.Duration
+
 	// boltVersion is the Bolt protocol version negotiated during the handshake.
 	// It is set once by setBoltVersion immediately after proto.Negotiate and is
 	// read-only thereafter. Used by exprToPackstream to select the correct
@@ -177,15 +191,16 @@ type Session struct {
 // (e.g. unit tests).
 func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session {
 	return &Session{
-		id:               randomID(),
-		eng:              eng,
-		auth:             auth,
-		state:            StateNegotiation,
-		localAddr:        localAddr,
-		log:              slog.Default(),
-		maxInFlight:      DefaultMaxInFlightPerConnection,
-		defaultTxTimeout: DefaultTxTimeout,
-		clk:              clock.Real(),
+		id:                 randomID(),
+		eng:                eng,
+		auth:               auth,
+		state:              StateNegotiation,
+		localAddr:          localAddr,
+		log:                slog.Default(),
+		maxInFlight:        DefaultMaxInFlightPerConnection,
+		defaultTxTimeout:   DefaultTxTimeout,
+		defaultStmtTimeout: DefaultStatementTimeout,
+		clk:                clock.Real(),
 	}
 }
 
@@ -227,6 +242,44 @@ func (s *Session) setDefaultTxTimeout(d time.Duration) {
 	if d > 0 {
 		s.defaultTxTimeout = d
 	}
+}
+
+// setDefaultStmtTimeout sets the bounded timeout applied to an autocommit
+// statement when the client supplies no per-statement "timeout". Non-positive
+// values are ignored, leaving the default in place. Intended for the server
+// bootstrap path so the operator-configured [Options.DefaultStatementTimeout]
+// takes effect.
+func (s *Session) setDefaultStmtTimeout(d time.Duration) {
+	if d > 0 {
+		s.defaultStmtTimeout = d
+	}
+}
+
+// resolveStmtTimeout computes the effective wall-clock bound for an autocommit
+// statement from the three inputs, applying the server's timeout policy:
+//
+//   - a positive client-supplied timeout takes precedence;
+//   - otherwise the server default floor (def) applies — this is the #1828 fix
+//     that guarantees a default-configured server never runs an autocommit
+//     statement without a wall-clock bound;
+//   - the server-side cap (max), when positive, additionally clamps the result
+//     so a client can never request (nor the default grant) a longer bound than
+//     the operator permits.
+//
+// A zero (or negative) return means no bound is applied. In the production
+// server def is always positive (seeded from DefaultStatementTimeout), so the
+// only way to reach an unbounded autocommit statement is an explicit
+// non-positive Options.DefaultStatementTimeout together with an unset
+// MaxStatementTimeout — a deliberate operator choice, not the default.
+func resolveStmtTimeout(client, def, max time.Duration) time.Duration {
+	effective := client
+	if effective <= 0 {
+		effective = def
+	}
+	if max > 0 && (effective <= 0 || effective > max) {
+		effective = max
+	}
+	return effective
 }
 
 // maxClientTimeoutMillis is the largest client-supplied timeout, in
@@ -740,15 +793,18 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 			}
 		}
 	}
-	effective := s.stmtTimeout
-	if s.maxStmtTimeout > 0 {
-		switch {
-		case effective <= 0:
-			effective = s.maxStmtTimeout
-		case effective > s.maxStmtTimeout:
-			effective = s.maxStmtTimeout
-		}
-	}
+	// Resolve the effective wall-clock bound for this autocommit statement. A
+	// client-supplied timeout wins; otherwise the mandatory autocommit default
+	// floor applies (#1828). Without that floor, a default-configured server
+	// (MaxStatementTimeout left at zero) had no wall-clock bound on an autocommit
+	// statement, so an authenticated client could pin a CPU core indefinitely
+	// with a super-linear-runtime / single-row-result query (e.g. a disconnected
+	// multi-pattern Cartesian product) whose result-row and byte caps never fire.
+	// This mirrors handleBegin, which applies defaultTxTimeout unconditionally to
+	// every explicit transaction; the bound here only governs the autocommit
+	// RunAny path below (an explicit transaction carries its own deadline
+	// installed at BEGIN and ignores runCtx).
+	effective := resolveStmtTimeout(s.stmtTimeout, s.defaultStmtTimeout, s.maxStmtTimeout)
 
 	// Build execution context with optional deadline.
 	runCtx := ctx

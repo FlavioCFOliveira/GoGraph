@@ -69,6 +69,24 @@ const (
 	// MaxStatementTimeout, when set, additionally clamps it.
 	DefaultTxTimeout = 30 * time.Second
 
+	// DefaultStatementTimeout is the default value applied to
+	// Options.DefaultStatementTimeout when the caller leaves it at zero. It
+	// bounds an AUTOCOMMIT statement (a bare RUN outside an explicit
+	// transaction) when the client supplies no per-statement timeout of its
+	// own. A finite default is mandatory for the same reason it is for explicit
+	// transactions: an authenticated client can submit a statement whose runtime
+	// is super-linear in the graph size yet whose result collapses to a single
+	// row (a disconnected multi-pattern Cartesian product such as
+	// `MATCH (a),(b),(c),(d),(e) RETURN count(*)`), so the result-row / byte caps
+	// never fire and the statement pins a CPU core indefinitely. Explicit
+	// transactions already receive DefaultTxTimeout unconditionally; without a
+	// symmetric floor here, autocommit RUN was the sole unbounded-runtime path
+	// under a default server configuration (#1828). The default of 30 s matches
+	// DefaultTxTimeout; operators may set a larger value for long-running
+	// analytical statements. A client-supplied `timeout` takes precedence, and
+	// MaxStatementTimeout, when set, additionally clamps the effective value.
+	DefaultStatementTimeout = 30 * time.Second
+
 	// DefaultHandshakeTimeout is the deadline that bounds the unauthenticated
 	// version-negotiation handshake — the cheapest phase for an attacker to
 	// abuse, since it requires no valid protocol bytes (a client may open a
@@ -161,6 +179,19 @@ type Options struct {
 	// MaxStatementTimeout, when set, additionally clamps the effective value. Set
 	// a larger value for long-lived batch transactions.
 	DefaultTxTimeout time.Duration
+
+	// DefaultStatementTimeout is the bounded timeout applied to an AUTOCOMMIT
+	// statement (a bare RUN outside an explicit transaction) when the client
+	// supplies no per-statement `timeout` of its own. It is the autocommit
+	// counterpart of DefaultTxTimeout: without it, a default-configured server
+	// (MaxStatementTimeout left at zero) has no wall-clock bound on an
+	// autocommit statement, so an authenticated client can pin a CPU core
+	// indefinitely with a super-linear-runtime / single-row-result query whose
+	// result-row and byte caps never fire (#1828). Zero or negative values
+	// default to [DefaultStatementTimeout] (30 s). A client-supplied `timeout`
+	// takes precedence; MaxStatementTimeout, when set, additionally clamps the
+	// effective value. Set a larger value for long-running analytical statements.
+	DefaultStatementTimeout time.Duration
 
 	// TLSConfig, when non-nil, wraps accepted connections with TLS using
 	// the given configuration verbatim. nil means plain TCP (no TLS).
@@ -279,6 +310,9 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 	}
 	if opts.DefaultTxTimeout <= 0 {
 		opts.DefaultTxTimeout = DefaultTxTimeout
+	}
+	if opts.DefaultStatementTimeout <= 0 {
+		opts.DefaultStatementTimeout = DefaultStatementTimeout
 	}
 	log := opts.Logger
 	if log == nil {
@@ -631,6 +665,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess.setMaxInFlight(s.opts.MaxInFlightPerConnection)
 	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)
 	sess.setDefaultTxTimeout(s.opts.DefaultTxTimeout)
+	sess.setDefaultStmtTimeout(s.opts.DefaultStatementTimeout)
 	sess.setClock(s.clk)
 
 	// Stream RECORD messages incrementally: handlePull hands each record to
