@@ -2,6 +2,7 @@ package parser
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -258,6 +259,63 @@ func TestGuardRejectsLongOperatorChain(t *testing.T) {
 	}
 }
 
+// TestGuardRejectsTightArithmeticChain is the gate test for audit finding F4
+// (#1831): a byte-tight arithmetic chain of '-' (or '*') used to bypass the
+// pre-parse operator guard entirely (the symbols were excluded), forcing the
+// ANTLR parser + visitor to build a ~500k-node AST (~0.9 s CPU, ~1.2 GB
+// transient) before the sema depth backstop fired — uninterruptible by any
+// deadline. The guard now counts arithmetic-context '-'/'*', so the chain is
+// rejected in O(n) before any AST is built.
+func TestGuardRejectsTightArithmeticChain(t *testing.T) {
+	t.Run("minus-chain", func(t *testing.T) {
+		// RETURN 1-1-1-…-1 with 600 '-' operators (> maxBinaryOpTokens 512).
+		var b strings.Builder
+		b.WriteString("RETURN 1")
+		for i := 0; i < 600; i++ {
+			b.WriteString("-1")
+		}
+		_, err := Parse(b.String())
+		pe := asParseError(t, err)
+		if !strings.Contains(pe.Message, "operator") {
+			t.Fatalf("expected an operator-count error for a tight '-' chain, got: %v", pe)
+		}
+	})
+	t.Run("times-chain", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("RETURN 2")
+		for i := 0; i < 600; i++ {
+			b.WriteString("*2")
+		}
+		_, err := Parse(b.String())
+		pe := asParseError(t, err)
+		if !strings.Contains(pe.Message, "operator") {
+			t.Fatalf("expected an operator-count error for a tight '*' chain, got: %v", pe)
+		}
+	})
+}
+
+// TestGuardAllowsPatternDenseQuery is the false-positive guard for audit finding
+// F4: a legitimate query with hundreds of relationship arrows and a
+// variable-length pattern (far more '-' and '*' bytes than a rejected
+// arithmetic chain) must NOT be rejected, proving the arithmetic-context rule
+// never miscounts pattern tokens.
+func TestGuardAllowsPatternDenseQuery(t *testing.T) {
+	// A long chain of relationship hops: (n0)-[r1]->(n1)-[r2]->…-(n300).
+	var b strings.Builder
+	b.WriteString("MATCH (n0)")
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&b, "-[r%d:R*1..3]->(n%d)", i, i)
+	}
+	b.WriteString(" RETURN n0")
+	q := b.String()
+	if err := guardInput(q); err != nil {
+		t.Fatalf("guard rejected a legitimate pattern-dense query (%d '-' and 300 '*' bytes): %v", strings.Count(q, "-"), err)
+	}
+	if c := countBinaryOpTokens(q); c != 0 {
+		t.Fatalf("countBinaryOpTokens miscounted pattern tokens as %d arithmetic operators; want 0", c)
+	}
+}
+
 // TestGuardAllowsLegitimateComplexQuery verifies the guard does NOT reject a
 // legitimate query with a small number of CASE expressions and operators.
 func TestGuardAllowsLegitimateComplexQuery(t *testing.T) {
@@ -310,12 +368,28 @@ func TestCountBinaryOpTokens(t *testing.T) {
 		{name: "empty", in: "", count: 0},
 		{name: "no_ops", in: "RETURN 1 AS n", count: 0},
 		{name: "plus", in: "RETURN 1 + 2", count: 1},
-		// '-' and '*' are deliberately not counted — they appear in relationship
-		// patterns '(a)-[r]->(b)' and VLE patterns '[:REL*1..n]' respectively,
-		// and counting them would produce false positives on large CREATE/MATCH
-		// queries, breaking TCK conformance.
-		{name: "minus_not_counted", in: "RETURN 1 - 2", count: 0},
-		{name: "times_not_counted", in: "RETURN 1 * 2", count: 0},
+		// '-' and '*' are counted ONLY in tight arithmetic context (both
+		// neighbours operand bytes, '*' also outside '[...]' or digit-left). Spaced
+		// forms are not counted (a space is not an operand byte) — acceptable, as
+		// the guard targets the maximally dense byte-tight chain a hostile client
+		// uses; and no relationship/VLE pattern token is ever counted.
+		{name: "minus_spaced_not_counted", in: "RETURN 1 - 2", count: 0},
+		{name: "times_spaced_not_counted", in: "RETURN 1 * 2", count: 0},
+		{name: "minus_tight_counted", in: "RETURN 1-2", count: 1},
+		{name: "times_tight_counted", in: "RETURN 2*3", count: 1},
+		{name: "minus_ident_counted", in: "RETURN a-b", count: 1},
+		{name: "minus_property_counted", in: "RETURN n.x-n.y", count: 1},
+		{name: "minus_chain_counted", in: "RETURN 1-1-1-1", count: 3},
+		{name: "rel_arrow_dash_not_counted", in: "MATCH (a)-[r]->(b) RETURN a", count: 0},
+		{name: "rel_undirected_dash_not_counted", in: "MATCH (a)-[r]-(b) RETURN a", count: 0},
+		{name: "rel_bare_dash_not_counted", in: "MATCH (a)-->(b) RETURN a", count: 0},
+		{name: "vle_star_not_counted", in: "MATCH (a)-[:R*1..5]->(b) RETURN a", count: 0},
+		{name: "vle_anon_star_not_counted", in: "MATCH (a)-[*2..4]->(b) RETURN a", count: 0},
+		{name: "vle_var_star_not_counted", in: "MATCH p=(a)-[r*]->(b) RETURN p", count: 0},
+		{name: "count_star_not_counted", in: "RETURN count(*)", count: 0},
+		{name: "return_star_not_counted", in: "MATCH (n) RETURN *", count: 0},
+		{name: "map_projection_star_not_counted", in: "MATCH (n) RETURN n{.*}", count: 0},
+		{name: "times_in_list_digit_counted", in: "RETURN [1*2]", count: 1},
 		{name: "divide", in: "RETURN 1 / 2", count: 1},
 		{name: "mod", in: "RETURN 1 % 2", count: 1},
 		{name: "power", in: "RETURN 2 ^ 3", count: 1},

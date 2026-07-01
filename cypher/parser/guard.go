@@ -42,11 +42,27 @@ const (
 	maxCASEKeywords = maxNestingDepth // 256
 
 	// maxBinaryOpTokens is the maximum number of binary infix operator tokens
-	// (AND, OR, XOR, NOT, +, /, %, ^) accepted in a single query. Long
-	// left-recursive chains create a left-deep BinaryOp AST whose checkExpr
-	// recursion depth equals the operator count. 512 is generous for any real query.
-	// Note: '-' and '*' are excluded — they appear structurally in relationship
-	// arrows and variable-length path patterns respectively.
+	// (AND, OR, XOR, NOT, +, /, %, ^, and arithmetic-context - and *) accepted
+	// in a single query. Long left-recursive chains create a left-deep BinaryOp
+	// AST whose checkExpr recursion depth equals the operator count. Without a
+	// pre-parse bound a maximal 1 MiB chain of ~500k operators forces the ANTLR
+	// parser + visitor to build the whole AST (measured ~0.9 s CPU + ~1.2 GB
+	// transient allocation) before the sema depth-1000 backstop can fire, and
+	// Parse takes no context so no deadline can interrupt it — a CPU/GC
+	// amplification DoS under a concurrent burst (#1831). 512 is generous for any
+	// real query yet rejects such a chain in O(n) before any AST is built.
+	//
+	// '-' and '*' USED to be excluded because they appear structurally in
+	// relationship arrows '(a)-[r]->(b)' and variable-length path patterns
+	// '[:REL*1..n]'. They are now counted, but ONLY in unambiguous arithmetic
+	// context (see [countBinaryOpNormal]): a '-'/'*' is counted only when both
+	// immediate neighbours are operand bytes (identifier char or '.'), and '*'
+	// additionally only outside '[...]' brackets unless its left neighbour is a
+	// digit. Every relationship/VLE form places a non-operand byte ('[', ']',
+	// '>', '<', '(', ')', ':', another '-', or a bracket) immediately beside the
+	// symbol, so no legitimate pattern token is ever counted — the count is
+	// TCK-neutral (no TCK scenario contains hundreds of arithmetic operators in
+	// one expression).
 	maxBinaryOpTokens = 512
 )
 
@@ -371,30 +387,30 @@ func matchKeywordOp(query string, i int, prevIsIdent bool, kw string) int {
 //
 //   - Keyword operators: AND, OR, XOR, NOT (case-insensitive, word-bounded)
 //   - Symbol operators:  +  /  %  ^
-//
-// Note: '-' and '*' are deliberately excluded. In Cypher '-' is overwhelmingly
-// used in relationship arrows '(a)-[r]->(b)' and '*' is used in variable-length
-// path patterns '[:REL*1..n]'. Counting them would produce false positives on
-// legitimate large CREATE/MATCH queries, breaking TCK conformance. The recursion
-// risk targeted here is expression-level BinaryOp chains (AND/OR/XOR/NOT/+/%/^),
-// which do not suffer from this ambiguity.
+//   - Arithmetic-context '-' and '*' (see [countBinaryOpNormal] for the exact,
+//     false-positive-free rule that distinguishes them from relationship arrows
+//     and variable-length path patterns).
 //
 // Long left-recursive chains of these operators build left-deep BinaryOp AST
 // nodes whose checkExpr recursion depth equals the operator count. A query with
-// more than [maxBinaryOpTokens] such tokens can therefore drive unbounded
-// recursion with no bracket nesting.
+// more than [maxBinaryOpTokens] such tokens can therefore drive an expensive,
+// uninterruptible parse+visitor pass with no bracket nesting; the pre-parse
+// count rejects it in O(n) before any AST is built.
 //
-// The scan shares the same lexical-state machine as [maxBracketDepth] and runs
-// in O(n) time with no heap allocation.
+// The scan tracks square-bracket ('[' / ']') nesting depth so the '*' rule can
+// exclude variable-length path patterns; it otherwise shares the same
+// lexical-state machine as [maxBracketDepth] and runs in O(n) time with no heap
+// allocation.
 func countBinaryOpTokens(query string) int {
 	state := stateNormal
 	count := 0
+	sqDepth := 0 // '[' nesting depth in stateNormal, for the '*' arithmetic rule
 
 	for i := 0; i < len(query); i++ {
 		c := query[i]
 		switch state {
 		case stateNormal:
-			count, i, state = countBinaryOpNormal(query, i, c, count, state)
+			count, i, state, sqDepth = countBinaryOpNormal(query, i, c, count, state, sqDepth)
 		case stateSingle:
 			switch c {
 			case '\\':
@@ -428,8 +444,29 @@ func countBinaryOpTokens(query string) int {
 }
 
 // countBinaryOpNormal handles one byte in stateNormal for [countBinaryOpTokens].
-// It returns updated (count, i, state).
-func countBinaryOpNormal(query string, i int, c byte, count int, state scanState) (int, int, scanState) {
+// It returns updated (count, i, state, sqDepth), where sqDepth is the running
+// '[' nesting depth used to disambiguate '*'.
+//
+// The '-' and '*' rules are deliberately conservative so that no legitimate
+// relationship or variable-length-path token is ever counted (that would break
+// TCK conformance), while a dense arithmetic chain — the DoS vector — is still
+// caught:
+//
+//   - '-' is counted only when BOTH immediate neighbours are operand bytes
+//     (identifier char or '.'), i.e. it sits between two operands as in "1-1" or
+//     "a-b" or "n.x-n.y". Every relationship form places a non-operand byte
+//     immediately beside the dash — "-[", "]-", "->", "<-", "--", "-(", ")-" —
+//     so a pattern dash is never counted. Spaced arithmetic ("1 - 2") is also
+//     not counted (a space is not an operand byte); that is acceptable because
+//     the guard targets the maximally dense, byte-tight chain a hostile client
+//     uses to inflate operator count per byte.
+//   - '*' is counted under the same operand-adjacency rule AND only when it is
+//     outside '[...]' brackets, unless its left neighbour is a digit. Every
+//     variable-length form — "[*", "[:T*", "[r*", "[r:T*" — is inside brackets
+//     with a non-digit ('[', ':', or a type-name letter) immediately before the
+//     '*', so it is never counted, while arithmetic "2*3" (or "[1*2]" inside a
+//     list literal) is.
+func countBinaryOpNormal(query string, i int, c byte, count int, state scanState, sqDepth int) (int, int, scanState, int) {
 	prevIsIdent := i > 0 && isIdentByte(query[i-1])
 	switch c {
 	case '\'':
@@ -438,23 +475,37 @@ func countBinaryOpNormal(query string, i int, c byte, count int, state scanState
 		state = stateDouble
 	case '`':
 		state = stateBacktick
+	case '[':
+		sqDepth++
+	case ']':
+		if sqDepth > 0 {
+			sqDepth--
+		}
 	case '/':
 		if i+1 < len(query) {
 			switch query[i+1] {
 			case '/':
 				state = stateLineComment
 				i++
-				return count, i, state
+				return count, i, state, sqDepth
 			case '*':
 				state = stateBlockComment
 				i++
-				return count, i, state
+				return count, i, state, sqDepth
 			}
 		}
 		// '/' not followed by '/' or '*' — divide operator.
 		count++
 	case '+', '%', '^':
 		count++
+	case '-':
+		if operandAdjacent(query, i) {
+			count++
+		}
+	case '*':
+		if operandAdjacent(query, i) && (sqDepth == 0 || isDigitByte(query[i-1])) {
+			count++
+		}
 	case 'A', 'a':
 		if skip := matchKeywordOp(query, i, prevIsIdent, "and"); skip >= 0 {
 			count++
@@ -476,8 +527,25 @@ func countBinaryOpNormal(query string, i int, c byte, count int, state scanState
 			i += skip
 		}
 	}
-	return count, i, state
+	return count, i, state, sqDepth
 }
+
+// operandAdjacent reports whether the byte at query[i] sits directly between two
+// operand bytes (identifier char or '.'), with no intervening whitespace. It is
+// the false-positive-free test the '-' and '*' arithmetic-operator counters use:
+// relationship arrows and variable-length path patterns always place a
+// non-operand byte immediately beside the symbol, so they never satisfy it.
+func operandAdjacent(query string, i int) bool {
+	return i > 0 && i+1 < len(query) && isOperandByte(query[i-1]) && isOperandByte(query[i+1])
+}
+
+// isOperandByte reports whether b can be the last byte of a left operand or the
+// first byte of a right operand of a binary arithmetic operator: an identifier
+// byte (letter, digit, underscore) or '.' (property access / decimal point).
+func isOperandByte(b byte) bool { return isIdentByte(b) || b == '.' }
+
+// isDigitByte reports whether b is an ASCII decimal digit.
+func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
 
 // itoa renders a non-negative int as decimal without importing strconv, keeping
 // the guard's dependency surface minimal. Negative values are not expected here
