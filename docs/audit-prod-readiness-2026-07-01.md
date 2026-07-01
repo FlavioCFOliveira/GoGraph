@@ -33,7 +33,7 @@ each with a regression test, with the TCK held at 100.0% / 3897 and the full
 
 | # | Sev | Domain | Finding | Fix | Commit |
 |---|-----|--------|---------|-----|--------|
-| F1 (#1828) | HIGH | Cypher / Bolt | Autocommit RUN had **no default statement-timeout floor**; a default-configured server let an authenticated client pin a CPU core indefinitely with a super-linear-runtime, single-output-row query (disconnected Cartesian product whose result-row/byte caps never fire). | Mandatory `Options.DefaultStatementTimeout` (30 s, operator-overridable) applied to autocommit via `resolveStmtTimeout`, mirroring the explicit-tx `DefaultTxTimeout` floor. | `9cf6b79` |
+| F1 (#1828) | HIGH | Cypher / Bolt | Autocommit RUN had **no default statement-timeout floor**; a default-configured server let an authenticated client pin a CPU core indefinitely with a super-linear-runtime, single-output-row query (disconnected Cartesian product whose result-row/byte caps never fire). | Mandatory `Options.DefaultStatementTimeout` (30 s, operator-overridable) applied to autocommit via `resolveStmtTimeout`, mirroring the explicit-tx `DefaultTxTimeout` floor. A follow-up (`1ce2b11`) keeps the deadline armed across the RUN→PULL boundary — an autocommit write/DDL commits during the PULL drain — by firing the cancel from the cursor-close funnel instead of at RUN return. | `9cf6b79`, `1ce2b11` |
 | F2 (#1829) | HIGH | Storage / ACID | `edgehandles.bin` reader allocated the per-record property map from a raw untrusted `propCount` (bounded only to 1<<40); `propCount=MaxUint32` forced a tens-of-GiB eager map allocation → OOM at recovery from a hostile/corrupt snapshot. | Clamp the map hint with `capHint(propCount, edgeHandlesCapHintMax)`, restoring the package-wide discipline; truncated body now fails fast with `ErrEdgeHandlesCorrupted`. | `1b859f1` |
 | F3 (#1830) | HIGH | Concurrency / read path | `ParallelScanProject` materialised the **entire** result set before the first row reached the drain, so `MaxResultBytes/MaxResultRows` could not bound peak memory on the parallel path — a memory-DoS reachable by default over any graph past the 50k-node threshold. | Thread the engine budget into the operator via `WithResultBudget`; workers stop accumulating (shared atomics) at the budget, emitting a bounded prefix from which the drain produces the canonical cap error. | `7496423` |
 | F4 (#1831) | MEDIUM¹ | Cypher parser | The pre-parse operator guard excluded `-`/`*`, so a byte-tight arithmetic chain (`1-1-…-1`, ~500k ops) bypassed it and forced an uninterruptible ~0.9 s / ~1.2 GB parse+visitor pass before the sema depth backstop fired. | Count arithmetic-context `-`/`*` (operand-adjacency; `*` gated outside `[...]`/digit-left) so no relationship/VLE token is ever miscounted — TCK-neutral by construction. | `94bad71` |
@@ -87,6 +87,7 @@ TCK-neutral.
 - openCypher TCK: **100.0% / 3897**.
 - `golangci-lint run ./...`, `staticcheck ./...`: clean.
 - `govulncheck ./...`: no vulnerabilities.
+- coverage gate (`scripts/cover_gate.sh`): OK — aggregate **86.4%** ≥ 85%, every package ≥ 75%.
 - `scripts/pre-release.sh`: PASSED 5/5.
 
 Every fix carries its own regression test, so each gate above is also that
