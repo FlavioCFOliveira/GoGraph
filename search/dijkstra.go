@@ -458,6 +458,19 @@ func acquireDijkstra[W Weight](maxID uint64) *dijkstraState[W] {
 		st.parent = st.parent[:maxID]
 		st.found = st.found[:maxID]
 	}
+	// Give a freshly acquired state a heap backing sized to the node
+	// count up front. A pooled state is dropped whenever the GC clears
+	// the sync.Pool, and the replacement starts with cap==0; without a
+	// hint the first traversal grows the backing through a doubling
+	// chain, and that reallocation is charged to the timed call (the
+	// 5th alloc/op in Dijkstra_Large, #1820). One right-sized make keeps
+	// the guard-band at 4 allocs/op independent of GC timing and lowers
+	// per-op bytes, without changing traversal semantics. Denser graphs
+	// whose live heap exceeds maxID grow once more via append (rare) and
+	// retain the larger backing thereafter — maxID is a hint, not a bound.
+	if cap(st.heap.items) == 0 {
+		st.heap.items = make([]dijkItem[W], 0, maxID)
+	}
 	st.heap.items = st.heap.items[:0]
 	return st
 }
