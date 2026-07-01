@@ -57,6 +57,17 @@ type Session struct {
 	// TX_STREAMING states.
 	result *cypher.Result
 
+	// resultCancel cancels the autocommit statement's deadline context (#1828).
+	// The deadline (Options.DefaultStatementTimeout, or a client-supplied
+	// timeout, clamped by MaxStatementTimeout) must bound the WHOLE autocommit
+	// statement — RUN execution AND the subsequent PULL/DISCARD drain, during
+	// which a write or DDL statement performs its commit — not just the RUN leg.
+	// So handleRun stores the cancel here instead of deferring it, and
+	// [Session.drainResult] fires it when the cursor closes. nil when no deadline
+	// is installed (an explicit-transaction statement, whose deadline is the
+	// tx-level reaper's, or a statement with no effective bound).
+	resultCancel context.CancelFunc
+
 	// columns holds the ordered column names of the current result, matching
 	// result.Columns() at the time RUN was processed.
 	columns []string
@@ -262,7 +273,7 @@ func (s *Session) setDefaultStmtTimeout(d time.Duration) {
 //   - otherwise the server default floor (def) applies — this is the #1828 fix
 //     that guarantees a default-configured server never runs an autocommit
 //     statement without a wall-clock bound;
-//   - the server-side cap (max), when positive, additionally clamps the result
+//   - the server-side cap (hardCap), when positive, additionally clamps the result
 //     so a client can never request (nor the default grant) a longer bound than
 //     the operator permits.
 //
@@ -271,13 +282,13 @@ func (s *Session) setDefaultStmtTimeout(d time.Duration) {
 // only way to reach an unbounded autocommit statement is an explicit
 // non-positive Options.DefaultStatementTimeout together with an unset
 // MaxStatementTimeout — a deliberate operator choice, not the default.
-func resolveStmtTimeout(client, def, max time.Duration) time.Duration {
+func resolveStmtTimeout(client, def, hardCap time.Duration) time.Duration {
 	effective := client
 	if effective <= 0 {
 		effective = def
 	}
-	if max > 0 && (effective <= 0 || effective > max) {
-		effective = max
+	if hardCap > 0 && (effective <= 0 || effective > hardCap) {
+		effective = hardCap
 	}
 	return effective
 }
@@ -806,12 +817,17 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	// installed at BEGIN and ignores runCtx).
 	effective := resolveStmtTimeout(s.stmtTimeout, s.defaultStmtTimeout, s.maxStmtTimeout)
 
-	// Build execution context with optional deadline.
+	// Build execution context with optional deadline. The cancel is NOT deferred
+	// here: the deadline must remain armed through the subsequent PULL/DISCARD
+	// drain (an autocommit write or DDL commits during the drain, not on RUN), so
+	// it is stored on the session and fired by drainResult when the cursor
+	// closes. Cancelling at handleRun return — as a defer would — kills the
+	// context before a deferred-commit statement can complete, surfacing a
+	// spurious "context canceled" on PULL (#1828 follow-up).
 	runCtx := ctx
+	var cancel context.CancelFunc
 	if effective > 0 {
-		var cancel context.CancelFunc
 		runCtx, cancel = context.WithTimeout(ctx, effective)
-		defer cancel()
 	}
 
 	// m.Parameters is map[string]packstream.Value, and packstream.Value is an
@@ -849,6 +865,9 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		if result != nil {
 			_ = result.Close() //nolint:errcheck // best-effort close on unexpected path
 		}
+		if cancel != nil {
+			cancel() // no PULL will follow; release the deadline now
+		}
 		return s.failTransition(m)
 	}
 	// A statement that failed to execute inside an explicit transaction computes
@@ -858,6 +877,9 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	s.transitionTo(next)
 
 	if runErr != nil {
+		if cancel != nil {
+			cancel() // statement failed; no PULL will follow, release the deadline
+		}
 		s.log.Error("bolt: query execution failed", slog.String("session", s.id), slog.String("err", runErr.Error()))
 		return []any{&proto.Failure{
 			Code:    FailureCode(runErr),
@@ -867,6 +889,9 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 
 	s.result = result
 	s.columns = result.Columns()
+	// Hand the deadline's cancel to the session so it stays armed across the
+	// PULL/DISCARD drain and is fired by drainResult when the cursor closes.
+	s.resultCancel = cancel
 
 	return []any{&proto.Success{
 		Metadata: map[string]packstream.Value{
@@ -1335,6 +1360,13 @@ func (s *Session) drainResult() {
 		_ = s.result.Close() //nolint:errcheck // best-effort drain; error is not actionable here
 		s.result = nil
 		s.columns = nil
+	}
+	// Fire the autocommit statement's deadline cancel now that the cursor is
+	// closed (the statement — RUN plus its drain/commit — is complete). Idempotent
+	// and safe when nil (explicit-tx statements install no per-statement cancel).
+	if s.resultCancel != nil {
+		s.resultCancel()
+		s.resultCancel = nil
 	}
 }
 

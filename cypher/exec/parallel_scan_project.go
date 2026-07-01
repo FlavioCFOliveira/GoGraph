@@ -174,10 +174,9 @@ func (op *ParallelScanProject) WithResultBudget(maxRows, maxBytes int64, estimat
 // while under budget, so the result multiset is unchanged when the budget is not
 // exceeded.
 func (op *ParallelScanProject) overResultBudget(row Row) bool {
-	over := false
-	if op.maxRows > 0 && op.sharedRows.Add(1) > op.maxRows {
-		over = true
-	}
+	// Increment both fleet-wide counters (short-circuiting the Add when that
+	// dimension is unbounded) and report whether either now exceeds its cap.
+	over := op.maxRows > 0 && op.sharedRows.Add(1) > op.maxRows
 	if op.maxBytes > 0 && op.estimateRow != nil {
 		if op.sharedBytes.Add(op.estimateRow(row)) > op.maxBytes {
 			over = true

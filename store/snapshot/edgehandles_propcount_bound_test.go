@@ -43,8 +43,8 @@ func TestSec_Store_EdgeHandlesPropCountMapBounded(t *testing.T) {
 	putU64(0)              // Src
 	putU64(0)              // Dst
 	putU64(0)              // Handle
-	putU32(0)              // labelCount = 0
-	putU32(math.MaxUint32) // propCount = 0xFFFFFFFF (< edgeHandlesMaxCount, so it reaches the make)
+	putU32(0)              // zero label entries for this record
+	putU32(math.MaxUint32) // hostile propCount 0xFFFFFFFF (below edgeHandlesMaxCount, so it reaches the make)
 	// truncated: no property tuples follow.
 
 	var err error

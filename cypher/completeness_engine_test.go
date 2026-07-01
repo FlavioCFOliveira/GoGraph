@@ -15,7 +15,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-func runScalarRows(t *testing.T, e *Engine, q string, col string) []expr.Value {
+func runScalarRows(t *testing.T, e *Engine, q, col string) []expr.Value {
 	t.Helper()
 	res, err := e.Run(context.Background(), q, nil)
 	if err != nil {

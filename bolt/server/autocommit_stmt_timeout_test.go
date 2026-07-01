@@ -17,9 +17,50 @@ package server
 // a default server gets a finite wall-clock bound.
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
+
+// TestSession_AutocommitWriteCommitsAcrossPull is the regression guard for the
+// #1828 follow-up: the autocommit default statement deadline must remain armed
+// across the RUN -> PULL boundary. A write (or DDL) statement commits during the
+// PULL/DISCARD drain, not on RUN, so cancelling the deadline at handleRun's
+// return (a defer) killed the context before the commit and surfaced a spurious
+// "context canceled" failure. drainResult now fires the cancel when the cursor
+// closes instead. This drives an autocommit CREATE on a default-config session
+// (which installs DefaultStatementTimeout) through RUN then PULL and asserts
+// neither leg fails.
+func TestSession_AutocommitWriteCommitsAcrossPull(t *testing.T) {
+	t.Parallel()
+	sess := newReadySession(t)
+	if sess.defaultStmtTimeout <= 0 {
+		t.Fatalf("precondition: session has no default statement deadline (%v)", sess.defaultStmtTimeout)
+	}
+
+	runMsgs, err := sess.HandleMessage(context.Background(), &proto.Run{
+		Query: "CREATE (:AutoWrite)",
+		Extra: map[string]interface{}{}, // no client timeout -> default floor applies
+	})
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	if f, ok := runMsgs[0].(*proto.Failure); ok {
+		t.Fatalf("RUN returned FAILURE: %s / %s", f.Code, f.Message)
+	}
+
+	pullMsgs, err := sess.HandleMessage(context.Background(), &proto.Pull{N: -1, QID: -1})
+	if err != nil {
+		t.Fatalf("PULL: %v", err)
+	}
+	for _, m := range pullMsgs {
+		if f, ok := m.(*proto.Failure); ok {
+			t.Fatalf("PULL returned FAILURE (deadline cancelled before the write committed?): %s / %s", f.Code, f.Message)
+		}
+	}
+}
 
 // TestResolveStmtTimeout is the core, non-vacuous proof of F1: with no
 // client-supplied timeout and no server cap (the default configuration), the

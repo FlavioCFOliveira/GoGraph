@@ -17,12 +17,12 @@ import (
 	"testing"
 )
 
-func runParallelCappedQuery(t *testing.T, opts EngineOptions, q string) error {
+func runParallelCappedQuery(t *testing.T, opts *EngineOptions, q string) error {
 	t.Helper()
 	// 200 nodes > psTestThreshold so the fused parallel path engages.
 	g := buildPSTestGraph(t, 200)
 	opts.ParallelScanThreshold = psTestThreshold
-	e := NewEngineWithOptions(g, opts)
+	e := NewEngineWithOptions(g, *opts)
 
 	before := parallelScanProjectBuildCount.Load()
 	res, err := e.Run(context.Background(), q, nil)
@@ -41,7 +41,7 @@ func runParallelCappedQuery(t *testing.T, opts EngineOptions, q string) error {
 
 func TestParallelScanProject_ResultRowCapEnforced(t *testing.T) {
 	// MaxResultRows=10 over 200 matching rows on the parallel path.
-	err := runParallelCappedQuery(t, EngineOptions{MaxResultRows: 10}, `MATCH (n) WHERE n.v >= 0 RETURN n.v AS v`)
+	err := runParallelCappedQuery(t, &EngineOptions{MaxResultRows: 10}, `MATCH (n) WHERE n.v >= 0 RETURN n.v AS v`)
 	if !errors.Is(err, ErrResultRowsExceeded) {
 		t.Fatalf("parallel-path drain error = %v; want ErrResultRowsExceeded", err)
 	}
@@ -50,7 +50,7 @@ func TestParallelScanProject_ResultRowCapEnforced(t *testing.T) {
 func TestParallelScanProject_ResultByteCapEnforced(t *testing.T) {
 	// A tiny byte budget over 200 matching rows on the parallel path: the fused
 	// workers stop accumulating and the drain trips the byte cap.
-	err := runParallelCappedQuery(t, EngineOptions{MaxResultBytes: 200}, `MATCH (n) WHERE n.v >= 0 RETURN n.v AS v`)
+	err := runParallelCappedQuery(t, &EngineOptions{MaxResultBytes: 200}, `MATCH (n) WHERE n.v >= 0 RETURN n.v AS v`)
 	if !errors.Is(err, ErrResultBytesExceeded) {
 		t.Fatalf("parallel-path drain error = %v; want ErrResultBytesExceeded", err)
 	}
