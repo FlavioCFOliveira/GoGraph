@@ -57,6 +57,28 @@ package cypher
 // statements in the same transaction because they share the live in-memory graph.
 // (task #1412, isolation option b)
 //
+// # Operational contract: a write transaction blocks all transactional readers
+//
+// Because [Engine.BeginTx] holds the engine-wide visibility barrier
+// ([lpg.Graph.LockBarrier], an exclusive lock) for the ENTIRE lifetime of the
+// transaction, every concurrent transactional read — any [lpg.Graph.View] or
+// [Engine.Run] taking the barrier's read lock — is blocked for as long as the
+// write transaction stays open. That window spans not just the statements'
+// execution but also the client network round-trips and think-time BETWEEN
+// BEGIN, each RUN/PULL, and COMMIT. A single slow or idle-but-open write
+// transaction therefore serialises every reader on the engine (head-of-line
+// blocking), so a long-held write transaction can dominate reader tail latency.
+//
+// Callers must keep write transactions SHORT and must not hold one open across
+// user or network think-time. Prefer autocommit for single-statement writes.
+// For read-only workloads use [Engine.BeginReadTx], which takes neither the
+// writer serialisation nor the visibility barrier and so never blocks — and is
+// never blocked by — readers; the count fast path is likewise barrier-free.
+// This is an inherent property of the single-writer/read-committed isolation
+// design, not a defect; removing it is the deferred copy-on-write snapshot epic
+// (#1671). The reader tail under a held write transaction is characterised by
+// BenchmarkReaderLatencyUnderHeldWriteTx.
+//
 // # Concurrency contract
 //
 // An ExplicitTx is NOT safe for concurrent use: it is owned by a single caller
