@@ -71,13 +71,27 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/pprof"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
+
+// errBudgetReached is an INTERNAL sentinel a worker returns from runMorsel once
+// the fleet-wide result budget (row count or byte estimate) is exceeded. It is
+// never propagated to the caller: runWorker treats it as a clean stop, keeps
+// the rows accumulated so far, and returns them with a nil error. The operator
+// therefore emits a bounded prefix of the result set (~the budget plus a small
+// per-worker overshoot), and the engine's Result-drain layer — which sums the
+// same estimate — produces the canonical ErrResultRowsExceeded /
+// ErrResultBytesExceeded from that bounded set, exactly as it does on the serial
+// path. This keeps the cap error's definition in one place (package cypher)
+// without exec importing it.
+var errBudgetReached = errors.New("exec: parallel scan result budget reached")
 
 // SubplanFactory builds an independent physical sub-plan that scans exactly the
 // NodeIDs in morsel and applies the fused Filter/Projection over them. Each call
@@ -117,6 +131,59 @@ type ParallelScanProject struct {
 	joined bool  // true once the workers have been joined
 	combo  []Row // concatenated worker results, streamed by Next
 	pos    int   // cursor into combo
+
+	// Result-memory budget (#1830). maxRows/maxBytes mirror the engine's
+	// per-query MaxResultRows / MaxResultBytes (0 = unbounded). Without them the
+	// morsel workers would materialise the ENTIRE projected result set before
+	// Next hands the first row to the drain layer, so the drain's incremental
+	// caps — which do protect the serial (lazy Volcano) path — could not bound
+	// peak memory on the parallel path: an untrusted client could force a
+	// multi-gigabyte resident allocation regardless of the 1 GiB default byte
+	// budget. sharedRows/sharedBytes are the fleet-wide running totals the
+	// workers check via overResultBudget so accumulation stops at ~the budget
+	// (plus one in-flight batch per worker) instead of the whole set. estimateRow
+	// is the engine's own coarse row-size estimate, injected so the worker's byte
+	// accounting matches the drain's exactly.
+	maxRows     int64
+	maxBytes    int64
+	estimateRow func(Row) int64
+	sharedRows  atomic.Int64
+	sharedBytes atomic.Int64
+}
+
+// WithResultBudget threads the engine's per-query result-memory budget into the
+// operator so the morsel workers stop accumulating once the fleet-wide total
+// exceeds maxRows or maxBytes, bounding peak memory on the parallel path (#1830).
+// maxRows/maxBytes of 0 leave that dimension unbounded (the engine convention);
+// estimateRow is the engine's coarse per-row byte estimate and may be nil to
+// disable byte-budget enforcement. It returns op for chaining and must be called
+// before Init. When neither bound is set the operator behaves exactly as before
+// (full materialisation), so the result multiset is unchanged under budget.
+func (op *ParallelScanProject) WithResultBudget(maxRows, maxBytes int64, estimateRow func(Row) int64) *ParallelScanProject {
+	op.maxRows = maxRows
+	op.maxBytes = maxBytes
+	op.estimateRow = estimateRow
+	return op
+}
+
+// overResultBudget records one emitted row against the fleet-wide running
+// totals and reports whether the engine's result budget is now exceeded. It is
+// called by every worker (concurrently) after appending a row, so the counters
+// are atomic. When it returns true the worker stops accumulating and the
+// operator emits only the bounded prefix gathered so far. It never drops a row
+// while under budget, so the result multiset is unchanged when the budget is not
+// exceeded.
+func (op *ParallelScanProject) overResultBudget(row Row) bool {
+	over := false
+	if op.maxRows > 0 && op.sharedRows.Add(1) > op.maxRows {
+		over = true
+	}
+	if op.maxBytes > 0 && op.estimateRow != nil {
+		if op.sharedBytes.Add(op.estimateRow(row)) > op.maxBytes {
+			over = true
+		}
+	}
+	return over
 }
 
 // NewParallelScanProject creates a ParallelScanProject over g whose per-worker
@@ -141,6 +208,8 @@ func (op *ParallelScanProject) Init(ctx context.Context) error {
 	op.pos = 0
 	op.combo = nil
 	op.cancel = func() {}
+	op.sharedRows.Store(0)
+	op.sharedBytes.Store(0)
 
 	// Collect all NodeIDs on the calling goroutine (same pattern as
 	// AllNodesScan.Init). This is the ONLY phase that touches graph state before
@@ -234,6 +303,15 @@ func (op *ParallelScanProject) runWorker(ctx context.Context, workCh <-chan []gr
 		}
 		rows, err := op.runMorsel(ctx, morsel)
 		if err != nil {
+			if errors.Is(err, errBudgetReached) {
+				// Fleet-wide result budget exceeded: keep the rows this morsel
+				// produced and stop dequeuing further work. The emitted prefix
+				// already exceeds the budget, so the drain layer trips the
+				// canonical cap error; peak memory is bounded to what is gathered
+				// here rather than the whole result set.
+				out = append(out, rows...)
+				return out, nil
+			}
 			return nil, err
 		}
 		out = append(out, rows...)
@@ -280,6 +358,9 @@ func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.Nod
 		w := len(row)
 		if w == 0 {
 			rows = append(rows, Row{})
+			if op.overResultBudget(nil) {
+				return rows, errBudgetReached
+			}
 			continue
 		}
 		if cap(slab)-len(slab) < w {
@@ -292,6 +373,9 @@ func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.Nod
 		start := len(slab)
 		slab = append(slab, row...)
 		rows = append(rows, slab[start:start+w:start+w])
+		if op.overResultBudget(row) {
+			return rows, errBudgetReached
+		}
 	}
 	return rows, nil
 }

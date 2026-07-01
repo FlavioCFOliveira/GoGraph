@@ -360,6 +360,16 @@ type buildOpts struct {
 	// path (write path, public BuildPlanWithMutator, tests), which means the leaf
 	// gets the full unbounded GOMAXPROCS budget — the prior behaviour.
 	parallelGov *exec.ParallelGovernor
+	// maxResultRows / maxResultBytes mirror the Engine's per-query result-memory
+	// budget (e.maxResultRows / e.maxResultBytes; 0 = unbounded). They are set on
+	// the read-path build and threaded into a morsel-parallel scan leaf via
+	// [exec.ParallelScanProject.WithResultBudget] so its workers stop accumulating
+	// once the fleet-wide total exceeds the budget. Without this the parallel path
+	// materialises the whole result set before the Result drain's incremental caps
+	// can bound peak memory (#1830). Zero on other build paths leaves the leaf
+	// unbounded — the prior behaviour.
+	maxResultRows  int64
+	maxResultBytes int64
 	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
 	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
 	// the stable per-edge handle and the per-CREATE instance index at a forward
@@ -1558,6 +1568,11 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		bopts.parallelScanEnabled = e.parallelScanEnabled
 		bopts.parallelScanThreshold = e.parallelScanThreshold
 		bopts.parallelGov = e.parallelGov
+		// Thread the same result-memory budget the Result drain enforces so the
+		// morsel-parallel scan leaf bounds peak memory instead of materialising
+		// the whole result set (#1830).
+		bopts.maxResultRows = e.maxResultRows
+		bopts.maxResultBytes = e.maxResultBytes
 		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 		if err != nil {
 			buildErr = err
@@ -5966,7 +5981,14 @@ func tryBuildParallelScanProject(
 	}
 
 	parallelScanProjectBuildCount.Add(1)
-	return exec.NewParallelScanProject(lw, factory, 0, bopts.parallelGov), true, nil
+	// Thread the engine's result-memory budget (and its own row-size estimate)
+	// into the leaf so its workers stop accumulating once the fleet-wide total
+	// exceeds the cap, bounding peak memory on the parallel path; the drain layer
+	// then produces the canonical ErrResultRowsExceeded / ErrResultBytesExceeded
+	// from the bounded prefix, exactly as on the serial path (#1830).
+	op := exec.NewParallelScanProject(lw, factory, 0, bopts.parallelGov).
+		WithResultBudget(bopts.maxResultRows, bopts.maxResultBytes, func(r exec.Row) int64 { return estimateRowSize(r) })
+	return op, true, nil
 }
 
 // scanVarOf returns the bound variable of an AllNodesScan IR node, or "" when
