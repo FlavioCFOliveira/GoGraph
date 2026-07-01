@@ -101,7 +101,7 @@ func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (tota
 	// non-negative costs the zero-initialised potential vector
 	// already satisfies the SSP invariant rc>=0.
 	if hasNegativeCost(g) {
-		pot, berr := bellmanFordBootstrap(g, src)
+		pot, berr := bellmanFordBootstrap(ctx, g, src)
 		if berr != nil {
 			metrics.IncCounter("search.flow.MinCostMaxFlowCtx.errors", 1)
 			return 0, 0, berr
@@ -213,7 +213,7 @@ func hasNegativeCost(g *CostNetwork) bool {
 // src is detected.
 //
 //nolint:gocyclo // canonical Bellman-Ford: V-1 relaxation passes + one cycle-detection pass + cleanup
-func bellmanFordBootstrap(g *CostNetwork, src int) ([]int, error) {
+func bellmanFordBootstrap(ctx context.Context, g *CostNetwork, src int) ([]int, error) {
 	n := g.N()
 	const inf = capInf
 	dist := make([]int, n)
@@ -222,6 +222,15 @@ func bellmanFordBootstrap(g *CostNetwork, src int) ([]int, error) {
 	}
 	dist[src] = 0
 	for iter := 0; iter < n-1; iter++ {
+		// Poll cancellation at each relaxation-pass boundary so a deadline on
+		// MinCostMaxFlowCtx bounds the O(V*E) potential bootstrap as well as the
+		// SSP loop that follows (which already polls per iteration). Without
+		// this, a context cancelled during the bootstrap on a large dense
+		// negative-cost network is not observed until the whole bootstrap
+		// completes.
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
 		changed := false
 		for u := 0; u < n; u++ {
 			if dist[u] >= inf {
