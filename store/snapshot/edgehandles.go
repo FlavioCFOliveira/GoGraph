@@ -459,7 +459,19 @@ func readEdgeHandleRecord(br *bufio.Reader, labels, keys []string) (EdgeHandleRe
 		return rec, fmt.Errorf("implausible prop count %d", propCount)
 	}
 	if propCount > 0 {
-		rec.Properties = make(map[string]lpg.PropertyValue, propCount)
+		// Clamp the eager map reservation to edgeHandlesCapHintMax exactly as
+		// every sibling reader (and this file's own string-table reader at
+		// readEdgeHandleStrTable) does: propCount is a u32 read from a possibly
+		// hostile/corrupt file and is validated here only against the loose
+		// edgeHandlesMaxCount (1<<40) plausibility ceiling. make(map, hint)
+		// eagerly pre-allocates hash buckets proportional to the hint, so an
+		// unclamped propCount near uint32-max would attempt a multi-gigabyte
+		// allocation and OOM the process at recovery before the per-property
+		// loop below ever reaches EOF on a truncated body. The loop still grows
+		// the map to the true count for a legitimate file (a few extra rehashes
+		// beyond the clamp), and a truncated hostile body now fails fast in
+		// readEdgeHandleProp (io.ReadFull EOF -> ErrEdgeHandlesCorrupted).
+		rec.Properties = make(map[string]lpg.PropertyValue, capHint(uint64(propCount), edgeHandlesCapHintMax))
 	}
 	for j := uint32(0); j < propCount; j++ {
 		key, val, perr := readEdgeHandleProp(br, keys)
