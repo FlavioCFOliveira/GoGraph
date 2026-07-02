@@ -32,16 +32,18 @@ func secIOReadCSV(t *testing.T, in string, opts csv.Options) (rows int, err erro
 	return n, e
 }
 
-// TestSec_IO_CSVReadManyFieldsBounded feeds one row with a very large number
-// of comma-separated fields. encoding/csv parses it into a single record;
-// the reader uses only the first three fields and the whole row is bounded
-// by MaxBytes. The guard is "no panic, bounded by the cap" — the row is
-// well-formed, so it is accepted, but a far larger version would trip
-// ErrInputTooLarge rather than exhaust memory.
-func TestSec_IO_CSVReadManyFieldsBounded(t *testing.T) {
+// TestSec_IO_CSVReadManyFieldsRejected feeds one row with a very large number
+// of comma-separated fields. encoding/csv would allocate ~40 bytes of per-field
+// metadata for every field (fieldIndexes/fieldPositions/record) even though the
+// reader consumes only the first three columns, amplifying a delimiter-only
+// input ~40× into multi-GiB transient heap — an accepted-input OOM (CWE-789).
+// The per-record field-count guard now rejects such a record with
+// ErrTooManyFields before that allocation happens, well under the byte cap.
+func TestSec_IO_CSVReadManyFieldsRejected(t *testing.T) {
 	t.Parallel()
 
-	// ~1 MiB row: src,dst, then ~500k empty trailing fields.
+	// ~500 KiB row: src,dst, then ~500k empty trailing fields — far past the
+	// per-record field cap, comfortably under the 128 MiB byte cap.
 	const extra = 500_000
 	var b strings.Builder
 	b.Grow(extra + 8)
@@ -51,14 +53,12 @@ func TestSec_IO_CSVReadManyFieldsBounded(t *testing.T) {
 	}
 	b.WriteByte('\n')
 
-	opts := csv.DefaultOptions() // 128 MiB cap — comfortably above ~1 MiB
+	opts := csv.DefaultOptions() // 128 MiB byte cap — the field guard trips first
 	rows, err := secIOReadCSV(t, b.String(), opts)
-	if err != nil {
-		t.Fatalf("wide row rejected unexpectedly: err=%v", err)
+	if !errors.Is(err, csv.ErrTooManyFields) {
+		t.Fatalf("wide row: err = %v, want ErrTooManyFields", err)
 	}
-	if rows != 1 {
-		t.Errorf("rows = %d, want 1 (only src,dst consumed)", rows)
-	}
+	_ = rows
 }
 
 // TestSec_IO_CSVReadManyFieldsCapped confirms that the wide-row case is

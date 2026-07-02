@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -28,18 +29,25 @@ import (
 //
 // # Peak memory
 //
-// The cap bounds the number of bytes drawn from the reader, but
-// [encoding/csv] does not bound the size of a single field. A hostile
-// input — for example an unterminated quoted field — is buffered by the
-// decoder up to MaxBytes, and the decoder's working set (raw buffer plus
-// the parsed record) amplifies that to roughly 4–5× the cap. Peak
-// transient RAM is therefore on the order of 4–5 × MaxBytes, not MaxBytes.
+// Two independent bounds shape the reader's peak transient RAM:
 //
-// DefaultMaxBytes is set to 128 MiB so that this worst-case transient
-// stays well under 1 GiB even on a hostile single-token file. Callers
-// importing larger trusted inputs raise [Options.MaxBytes] explicitly,
-// accepting the proportionally higher peak; callers parsing untrusted
-// input should keep the default or lower it further.
+//   - The byte cap (this value) bounds the total bytes drawn from the
+//     reader. [encoding/csv] does not bound the size of a single field, so a
+//     hostile input such as an unterminated quoted field is buffered up to
+//     MaxBytes and the working set (raw buffer plus the parsed field)
+//     amplifies that to roughly 4–5× the cap.
+//   - A per-record field-count guard (see the internal fieldGuardReader) caps
+//     the delimiter-separated fields in any one record. [encoding/csv]
+//     allocates ~40 bytes of metadata per field, so without this guard a
+//     single delimiter-only record would amplify its bytes ~40× — several GiB
+//     at this cap. The guard bounds that per-record metadata term to a few
+//     MiB regardless of MaxBytes.
+//
+// DefaultMaxBytes is set to 128 MiB; with both bounds in force the worst-case
+// transient stays a small multiple of MaxBytes (dominated by field content,
+// not by per-field metadata), so raising MaxBytes for a trusted large input
+// scales peak RAM proportionally rather than pathologically. Callers parsing
+// untrusted input should keep the default or lower it further.
 const DefaultMaxBytes int64 = 128 << 20 // 128 MiB
 
 // ErrInputTooLarge is returned by [ReadInto] and [ReadIntoCtx] when the
@@ -137,7 +145,18 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 	if bom, _ := br.Peek(3); len(bom) == 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF {
 		_, _ = br.Discard(3)
 	}
-	c := csv.NewReader(br)
+	// Bound the number of fields encoding/csv may allocate per record. Without
+	// it a single delimiter-only record amplifies its bytes ~40x into
+	// per-field metadata, turning one accepted file into a multi-GiB OOM
+	// (CWE-789/CWE-1284); see [fieldGuardReader]. The guard is byte-oriented,
+	// so it engages only for a single-byte (ASCII) delimiter — the norm; a
+	// multi-byte delimiter rune (application-chosen, never file-chosen) relies
+	// on the byte cap alone.
+	var src io.Reader = br
+	if opts.Delimiter < utf8.RuneSelf {
+		src = newFieldGuardReader(br, byte(opts.Delimiter))
+	}
+	c := csv.NewReader(src)
 	c.Comma = opts.Delimiter
 	c.Comment = opts.Comment
 	c.FieldsPerRecord = -1
