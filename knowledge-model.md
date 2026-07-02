@@ -304,6 +304,37 @@ re-stamped to gitDate 2026-06-23. #1634 surfaced 3 new BACKLOG bugs (#1683 MERGE
 distinct-type, #1684 opposite-direction reltype collapse, #1685 VLE/shortestPath
 collapse) — tracked in rmp, not yet modelled. No new label or edge type.
 
+Incrementally synced at commit `8bb0356` (2026-07-02, task #1856, sprint 262
+"Audit remediation 2026-07-02", OPEN): +1 `Sprint` (262); +1 `Commit`
+(`8bb0356`); +1 `Task` (`1856`, COMPLETED). Fixed finding F1 from a same-day
+6-specialist production-readiness audit (report `docs/audit-production-
+readiness-2026-07-02.md`, not modelled as a `Spec` node — audit reports are
+not part of the curated Spec layer): the Cypher engine, constructed over the
+documented default non-multigraph config, silently discarded a second
+relationship created between an already-connected node pair instead of
+storing it — openCypher CREATE never deduplicates (TCK `Create3.feature`),
+so this was both silent write loss and a conformance gap on the shipped
+default path. Fix: a fail-fast guard (new sentinel `cypher.
+ErrParallelEdgeInSimpleGraph`) at `lpgMutatorAdapter`/`walMutatorAdapter`'s
+`AddEdge`/`AddEdgeH` in `cypher/api.go`, raised before any mutation or WAL
+frame; a one-time constructor warning; every Cypher-facing example/doc
+switched to `Multigraph: true`; a new regression test file
+(`cypher/parallel_edge_multigraph_guard_test.go`); two pre-existing
+`rollback_noop_edge_test.go` tests that had pinned the old silent no-op (from
+the narrower #1751 fix) reconciled to the new contract; and a latent
+always-undirected shared test engine in `bolt/server/
+e2e_shape_roundtrip_test.go` fixed as a direct, independently-confirmed
+consequence. Edges: `Sprint 262 -[CONTAINS]-> Commit`; `Task 1856
+-[IMPLEMENTED_IN]-> Commit`; `Commit -[FIXES]->` Features `Cypher Engine`
+(id 12659, matched by `id(f)` per the documented hidden-character gotcha) and
+`Examples & Tutorials` (id 8536); `Commit -[TOUCHES]->` Packages `cypher`
+(id 73) and `bolt/server` (id 98). Those two Features and two Packages were
+re-stamped to gitDate 2026-07-02. Certified by three specialist reviews
+(cypher-expert-consultant: conformant per TCK evidence; storage-engine-
+auditor: ACID-sound, subsumes #1751 by construction; go-developer:
+idiomatic) plus a green TCK run (3897/3897) and a clean full-module `-race`
+run. No new label or edge type. Local commit, not pushed.
+
 ---
 
 ## Node labels
