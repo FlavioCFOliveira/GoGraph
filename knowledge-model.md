@@ -417,6 +417,29 @@ where both triangle-counting files live). Feature and Package re-stamped to
 gitDate 2026-07-02. No new label or edge type. TCK 3897/3897 unaffected.
 Local commit, not pushed.
 
+Incrementally synced at commit `6dfa4a0` (2026-07-02, task #1863, sprint
+262, still OPEN): +1 `Commit` (`6dfa4a0`); +1 `Task` (`1863`, COMPLETED).
+Closed finding P4 from the same audit (test-only, no production behaviour
+change): `bench/cypher_alloc`'s four `TestZeroAlloc_*` gates seeded their
+walker from NodeID 0, entirely inside the range Go's runtime boxes for free
+via a shared `staticuint64s` array (0-255), always reporting 0 allocs/op
+regardless of the operator's real cost. Switching to NodeID 1000+ surfaced
+that `AllNodesScan.Next` genuinely boxes 1 allocation per call, forwarded
+unchanged through `Filter`/`Project`/`ResultSet`; `cypher/exec/scan_all_test.go`'s
+similarly misleadingly-named `BenchmarkAllNodesScan_ZeroAlloc` (which already
+used realistic IDs and measured ~759 allocs/op) was renamed to
+`BenchmarkAllNodesScan_PerNodeAllocCost`. A go-developer review of the
+initial fix caught a second instance of the same defect class: the
+`ResultSet` gate's claimed 2nd allocation (a `Record` map re-box) was never
+actually measured (its closure only called `Next`, never `Record`); a direct
+measurement showed `Next`+`Record` together cost exactly 1, not 2 — both
+corrected in the same commit. Edges: `Sprint 262 -[CONTAINS]-> Commit`;
+`Task 1863 -[IMPLEMENTED_IN]-> Commit`; `Commit -[IMPROVES]->` Feature
+`Benchmarking & Profiling` (id 13375); `Commit -[TOUCHES]->` Packages
+`cypher/exec` (id 39) and `bench/cypher_alloc` (id 242). Feature and both
+Packages re-stamped to gitDate 2026-07-02. No new label or edge type. TCK
+3897/3897 held, full-module `-race` clean. Local commit, not pushed.
+
 ---
 
 ## Node labels
