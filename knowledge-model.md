@@ -529,6 +529,47 @@ re-verified). 16 new tests (`cypher/merge_pattern_test.go`,
 `cypher/run_rejects_write_test.go`, both new files). TCK 3897/3897 held,
 full-module `-race` clean (98 packages). Local commit, not pushed.
 
+Incrementally synced at commit `f66e31c` (2026-07-02, task #1867, sprint
+263, still OPEN): +1 `Commit` (`f66e31c`); +1 `Task` (`1867`, COMPLETED).
+Fixed the other HIGH finding from the round-2 audit:
+`distinctAggregator` (`cypher/api.go`, backs `count/sum/avg/min/max/
+collect(DISTINCT …)`) kept a seen-values dedup map with neither a count
+cap nor a byte budget, unlike every sibling pipeline-breaker
+(`exec.Distinct`, `exec.EagerAggregation`, `funcs.CollectAgg`). For a
+streaming aggregator (count/sum/avg/min/max hold O(1) state and never
+trip a budget of their own), the seen-values set was the only thing
+growing per distinct value, unbounded. Fix: a new
+`DefaultMaxAggregateDistinctValues` constant (10M, matching the
+sibling row/value-count convention) plus an optional byte-budget
+dimension reusing the EXISTING per-query byte ceiling
+(`bopts.maxResultBytes` via `resultByteBudget`) and per-value
+estimator (`estimateValueSize`) every other breaker already shares —
+no new configuration knob introduced, deliberately matching
+`exec.Distinct`/`exec.EagerAggregation`'s own precedent of NOT
+exposing a dedicated `EngineOptions` field (only the collect-family
+aggregators do, via the pre-existing `MaxCollectItems`). Both caps are
+checked before the value reaches the inner aggregator, so a rejected
+value leaves no partial trace — never a wrong result, only the new
+typed sentinel `ErrAggregateDistinctMemoryExceeded`.
+`newDistinctAggregator` gained a `WithByteBudget` builder method
+(mirroring `exec.Distinct.WithByteBudget`'s chained-after-construction
+shape) after a go-developer review flagged the initial all-in-the-
+constructor signature as inconsistent with the codebase's 5-for-5
+builder convention for this pattern. Edges: `Sprint 263 -[CONTAINS]->
+Commit`; `Task 1867 -[IMPLEMENTED_IN]-> Commit`; `Commit -[FIXES]->`
+Feature `Cypher Engine` (id 12659); `Commit -[TOUCHES]->` Package
+`cypher` (73). Feature and Package re-stamped to gitDate 2026-07-02.
+Certified by cypher-expert-consultant (CERTIFIED — independently
+re-ran the full TCK rather than trusting the reported gate, traced
+`collect(DISTINCT x)`'s interaction with its own separate
+`funcs.DefaultMaxCollectItems` cap, confirmed no off-by-one against
+every TCK DISTINCT-in-aggregation scenario, which tops out at 3
+distinct values) and go-developer (APPROVED WITH FOLLOW-UPS — the
+builder-method suggestion, applied in the same commit). 7 new tests
+(`cypher/distinct_aggregator_internal_test.go` white-box,
+`cypher/aggregate_distinct_cap_test.go` end-to-end engine wiring).
+TCK 3897/3897 held, `-race` clean. Local commit, not pushed.
+
 ---
 
 ## Node labels
