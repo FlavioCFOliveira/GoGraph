@@ -364,6 +364,29 @@ modelled or fixed here (out of scope for F2). No new label or edge type. TCK
 flake in `cypher/exec` reproduced clean 3/3 in isolation and on a full
 re-run). Local commit, not pushed.
 
+Incrementally synced at commit `a9b5f54` (2026-07-02, task #1860, sprint 262,
+still OPEN): +1 `Package` (`bench/cypher_scale`, `kind:'bench'`); +1
+`Commit` (`a9b5f54`); +1 `Task` (`1860`, COMPLETED); +1 `Spec`
+(`docs/benchmarks/cypher-scale.md`, no `SPECIFIED_IN` edge — matching the
+sibling `docs/benchmarks/cypher.md` (id 12388), per-benchmark docs are
+outside the curated `SPECIFIED_IN` mapping, which covers only
+`docs/profiling.md`/`docs/optimisations.md`). Closed finding P3 from the
+same audit (test-only, no behaviour change): the only pre-existing
+Cypher-engine benchmark suite (`bench/cypher_ldbc`) runs over a 1000-node
+seed, so the P1/P2 boxing costs the audit measured at 100k nodes had no
+permanent regression gate at that scale. New package `bench/cypher_scale`
+seeds a shared 120k-node graph once and benchmarks three shapes (scan+
+aggregate, scan+filter+project, type-filtered 1-hop expand); the measured
+numbers land close to the audit's own findings. Edges: `Sprint 262
+-[CONTAINS]-> Commit`; `Task 1860 -[IMPLEMENTED_IN]-> Commit`; `Commit
+-[IMPROVES]->` Feature `Benchmarking & Profiling` (id 13375); `Commit
+-[TOUCHES]->` the new Package. Feature and Package re-stamped to gitDate
+2026-07-02. Certified idiomatic by go-developer (deterministic edge seeding
+verified collision-free by exhaustive brute force over all 120 000 nodes;
+smoke test measured well under the short-layer budget; gofmt/vet/staticcheck
+clean). No new label or edge type. TCK 3897/3897 unaffected. Local commit,
+not pushed.
+
 ---
 
 ## Node labels
