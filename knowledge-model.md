@@ -615,6 +615,40 @@ merge-as-is, only cosmetic style notes). 6 new tests across
 `cypher/exec/hash_join_test.go`. TCK 3897/3897 held, `-race` clean.
 Local commit, not pushed.
 
+Incrementally synced at commit `224a1cc` (2026-07-03, task #1876, new
+backlog task added to sprint 263 and closed the same session): +1
+`Commit` (`224a1cc`); +1 `Task` (`1876`, COMPLETED). Fixed the
+`MapValue.Equal` finding the `Task` `1868` review surfaced:
+`MapValue.Equal` (`cypher/expr/value.go`) returned `Null` as soon as
+it saw the first `Null`-yielding entry comparison while iterating the
+map via a plain `range` loop — Go's map iteration order is randomized
+per call, so a map pair containing BOTH a `Null`-yielding entry and a
+`FALSE`-yielding entry could nondeterministically compare as `Null`
+or `BoolValue(false)` across different calls on the identical inputs,
+depending purely on visit order. openCypher's compound List/Map
+equality is a three-valued-logic conjunction (CIP2016-06-14) where a
+definitive `FALSE` always wins over a `NULL` regardless of order —
+exactly the pattern the sibling `ListValue.Equal` already implements
+correctly via its `sawNull` tracking (it iterates an ordered slice by
+index and never had this exposure). `MapValue.Equal` now tracks
+`sawNull` the same way. `MapValue.Hash` was independently checked and
+found already safe (pure XOR accumulation, provably order-independent).
+Verified the fix and its test are non-vacuous by reverting just the
+implementation change and confirming the new 200-trial test failed
+within the first two trials, then restoring it. Edges: `Sprint 263
+-[CONTAINS]-> Commit`; `Task 1876 -[IMPLEMENTED_IN]-> Commit`; `Commit
+-[FIXES]->` Feature `Cypher Engine` (id 12659); `Commit -[TOUCHES]->`
+Package `cypher/expr` (141); `Task 1868 -[FOLLOWED_BY]-> Task 1876`.
+Feature and Package re-stamped to gitDate 2026-07-03. Certified against
+CIP2016-06-14 (List/Map equality defined as a conjunction of a
+size/key-set check with pairwise entry equality) and the current Neo4j
+Cypher Manual, with no blocking findings — the openCypher TCK's own
+`Comparison1.feature` map-equality scenarios never combine a
+definitively-false entry with a null one in the same pair, a genuine
+coverage gap this fix's own test closes independently of the TCK gate.
+No new label or edge type. TCK 3897/3897 held, `-race` clean, full
+module `go test ./...` green. Local commit, not pushed.
+
 ---
 
 ## Node labels
