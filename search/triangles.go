@@ -16,6 +16,17 @@ import (
 // directed CSR (each undirected edge appears as both (u, v) and
 // (v, u)) — typical of [adjlist.AdjList] with Directed=false.
 //
+// # Input contract: simple graph
+//
+// c must be a simple graph: no self-loops and no parallel edges between the
+// same pair of vertices. The node-iterator algorithm below counts a
+// triangle once per pair of neighbours found on both sides of the
+// degree-ordered rank split, so a self-loop or a parallel edge on a
+// triangle's lowest-ranked vertex is walked more than once and silently
+// over-counts that triangle — CountTriangles does not detect or reject
+// this; it is the caller's responsibility on an [adjlist.AdjList] built
+// with Multigraph: true or otherwise capable of self-loops.
+//
 // # Algorithm
 //
 // The implementation is the node-iterator algorithm with degree

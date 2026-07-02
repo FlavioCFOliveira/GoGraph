@@ -16,7 +16,9 @@ import (
 // with the same degree-ordered node-iterator algorithm as
 // [CountTriangles] but with the outer per-vertex loop striped across a
 // bounded worker pool. c must be a symmetric directed CSR (each
-// undirected edge present as both (u, v) and (v, u)).
+// undirected edge present as both (u, v) and (v, u)) and — like
+// [CountTriangles] — a simple graph: see [CountTriangles]'s "Input
+// contract" for the self-loop/parallel-edge over-counting hazard.
 //
 // The result is bit-identical to [CountTriangles]. The triangle count
 // is an integer-addition monoid: each triangle is tallied exactly once
