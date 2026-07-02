@@ -387,6 +387,20 @@ smoke test measured well under the short-layer budget; gofmt/vet/staticcheck
 clean). No new label or edge type. TCK 3897/3897 unaffected. Local commit,
 not pushed.
 
+Incrementally synced at commit `715a5cd` (2026-07-02, task #1861, sprint
+262, still OPEN): +1 `Commit` (`715a5cd`); +1 `Task` (`1861`, COMPLETED).
+Closed finding A1 from the same audit (doc-only, no behaviour change):
+`search/centrality/brandes.go`'s `Betweenness` godoc told callers to divide
+the undirected raw output by `(n-1)(n-2)/2`, 2x too small, since Brandes'
+source loop is ordered-endpoint-based for both directed and undirected
+graphs — the same single `(n-1)(n-2)` divisor the sibling
+`WeightedBetweenness` doc already uses correctly. Edges: `Sprint 262
+-[CONTAINS]-> Commit`; `Task 1861 -[IMPLEMENTED_IN]-> Commit`; `Commit
+-[FIXES]->` Feature `Search & Path-finding` (id 10375); `Commit
+-[TOUCHES]->` Package `search/centrality` (id 54). Feature and Package
+re-stamped to gitDate 2026-07-02. No new label or edge type. TCK 3897/3897
+unaffected. Local commit, not pushed.
+
 ---
 
 ## Node labels
