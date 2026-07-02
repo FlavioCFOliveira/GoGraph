@@ -547,12 +547,18 @@ func fnLast(args []expr.Value) (expr.Value, error) {
 // maxRangeElements bounds the number of integers a single range() call may
 // materialise. It guards against untrusted queries such as
 // range(1, 9223372036854775807), whose unbounded element count previously
-// caused a makeslice panic or an out-of-memory kill. The limit (1e8) is far
-// above any value used by an openCypher TCK scenario (the largest TCK bound is
-// on the order of a few thousand) while keeping the worst-case allocation
-// bounded. A request that exceeds it returns a typed [expr.EvalError] rather
-// than allocating.
-const maxRangeElements = 100_000_000
+// caused a makeslice panic or an out-of-memory kill. It is kept equal to
+// expr.DefaultMaxListElements (1e7) so a single range() obeys the same
+// per-call ceiling as every other list builder; range() is dispatched through
+// the generic function registry, whose caller (cypher/expr/eval.go
+// evalFunction) additionally charges the returned list against the cumulative
+// per-evaluation list-element budget, so multi-column compounding
+// (RETURN range(1, N), range(1, N), …) shares one budget rather than
+// allocating tens of GB. The limit is five orders of magnitude above any value
+// used by an openCypher TCK scenario (the largest TCK bound is on the order of
+// a few thousand). A request that exceeds it returns a typed [expr.EvalError]
+// rather than allocating.
+const maxRangeElements = 10_000_000
 
 // errRangeTooLarge builds the typed error returned when a range() call would
 // materialise more than maxRangeElements integers. quotient is the floor of

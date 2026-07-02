@@ -1628,7 +1628,28 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 		}
 		args[i] = v
 	}
-	return fn(args)
+	result, err := fn(args)
+	if err != nil {
+		return nil, err
+	}
+	// A registry function that materialises a list (range, split, keys, labels,
+	// nodes, …) is dispatched here without threading the per-evaluation
+	// list-element budget, so charge its result length against that budget now.
+	// This bounds a single call (an untrusted range(1, 1e8) would otherwise
+	// allocate ~2.4 GB) and, because the budget is cumulative across one row
+	// evaluation, also closes multi-column compounding
+	// (RETURN range(1, N), range(1, N), …). Comprehensions and reduce() are
+	// handled above and charge their growth directly, so they never reach this
+	// path; the charge here is conservative (a function returning an existing
+	// list re-charges it) but the ceiling is DefaultMaxListElements, five orders
+	// of magnitude above any TCK-covered list, so it never rejects a legitimate
+	// query.
+	if lv, ok := result.(ListValue); ok {
+		if cerr := chargeListGrowth(row, int64(len(lv))); cerr != nil {
+			return nil, cerr
+		}
+	}
+	return result, nil
 }
 
 // evalQuantifier handles all(x IN list WHERE pred), any(...), none(...), single(...).

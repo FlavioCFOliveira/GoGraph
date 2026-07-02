@@ -3384,6 +3384,24 @@ func resultByteBudget(bopts *buildOpts) (int64, func(exec.Row) int64) {
 	return bopts.maxResultBytes, func(r exec.Row) int64 { return estimateRowSize(r) }
 }
 
+// applyProjectionRowBudget threads the per-row byte guard (#1852) into a Project
+// built at an expression-evaluating projection site (the RETURN/WITH projection
+// and the aggregation pre-projection), reusing the same maxResultBytes ceiling
+// and estimateValueSize deep-counter as the drain's aggregate result budget. It
+// bounds the transient peak of a single row's construction — closing the
+// multi-column range() memory-exhaustion (RETURN range(1,1e7), range(1,1e7), …)
+// where each column is under the per-evaluation list budget but their sum is
+// not. It is TCK-neutral: every conforming result already fits the drain's
+// per-result byte budget, so no single conforming row can exceed that same
+// ceiling. A nil/unbudgeted bopts leaves the guard disabled (the bare BuildPlan
+// path is unaffected).
+func applyProjectionRowBudget(p *exec.Project, bopts *buildOpts) *exec.Project {
+	if p == nil || bopts == nil || bopts.maxResultBytes <= 0 {
+		return p
+	}
+	return p.WithRowByteBudget(bopts.maxResultBytes, func(v expr.Value) int64 { return estimateValueSize(v) })
+}
+
 // estimateValueSize returns a coarse, allocation-free byte estimate for a single
 // column value. It takes any because a materialised [exec.Record] is a
 // map[string]interface{} (its values are [expr.Value] instances boxed as the
@@ -6619,6 +6637,7 @@ func buildEagerAggregation(
 	if err != nil {
 		return nil, fmt.Errorf("cypher: EagerAggregation pre-projection: %w", err)
 	}
+	preProj = applyProjectionRowBudget(preProj, bopts)
 
 	op, err := exec.NewEagerAggregation(preProj, keyCols, aggFactories, 0)
 	if err != nil {
@@ -10399,7 +10418,11 @@ func buildIRProjection(
 	for k, v := range keep {
 		schema[k] = v
 	}
-	return exec.NewProject(child, projItems)
+	p, err := exec.NewProject(child, projItems)
+	if err != nil {
+		return nil, err
+	}
+	return applyProjectionRowBudget(p, bopts), nil
 }
 
 // execLabelAdapter bridges labelResolverIface to the exec.labelResolver

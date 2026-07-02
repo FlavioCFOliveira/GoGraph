@@ -24,10 +24,19 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
+
+// ErrProjectionRowTooLarge is returned by [Project.Next] when the estimated
+// size of a single assembled output row exceeds the configured per-row byte
+// budget. It bounds the transient peak of one row's construction (e.g. a
+// RETURN that projects several large list columns) to the ceiling plus one
+// column, independent of the column count, so a query cannot OOM the process by
+// compounding many big columns into one row (#1852).
+var ErrProjectionRowTooLarge = errors.New("exec: projection row memory cap exceeded")
 
 // ProjectionItem describes a single column in a projection.  Eval is evaluated
 // against the input row; Alias names the resulting output column.
@@ -50,6 +59,28 @@ type Project struct {
 	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
 	outBuf   Row             // reusable output backing slice; len = len(items)
 	inputRow Row             // reusable scratch header for the child's row (see Next)
+	// maxRowBytes and estimateValue bound the estimated size of a single
+	// assembled output row (0 = disabled). See WithRowByteBudget.
+	maxRowBytes   int64
+	estimateValue func(expr.Value) int64
+}
+
+// WithRowByteBudget bounds the estimated size of a single assembled output row
+// by maxRowBytes, using estimateValue for the per-column estimate. It is
+// enforced INCREMENTALLY inside Next — after each column is evaluated, before
+// the next — so a projection of several large columns (e.g. RETURN range(1,N),
+// range(1,N), …) is rejected before the whole row is materialised, bounding the
+// transient peak to maxRowBytes plus one column regardless of the column count.
+// It complements the drain's aggregate per-result byte budget, which is a
+// retention guard on the SUM of already-built rows and therefore fires only
+// after Next has assembled the row; this per-row guard moves the same
+// accounting earlier and makes it per-column so construction cannot OOM (#1852).
+// A non-positive maxRowBytes or nil estimateValue leaves the guard disabled
+// (behaviour-preserving). Returns op for chaining; call before Init.
+func (op *Project) WithRowByteBudget(maxRowBytes int64, estimateValue func(expr.Value) int64) *Project {
+	op.maxRowBytes = maxRowBytes
+	op.estimateValue = estimateValue
+	return op
 }
 
 // NewProject creates a Project operator.  items defines the output schema;
@@ -101,12 +132,24 @@ func (op *Project) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
+	var rowBytes int64
 	for i, item := range op.items {
 		v, err := item.Eval(op.inputRow)
 		if err != nil {
 			return false, fmt.Errorf("exec: Project item %q eval: %w", item.Alias, err)
 		}
 		op.outBuf[i] = v
+		// Charge the just-built column against the per-row byte budget
+		// incrementally — before evaluating the next column — so a row that
+		// compounds several large columns is rejected before it is fully
+		// materialised (bounding the transient peak to the ceiling plus one
+		// column). Disabled when no budget is configured. See WithRowByteBudget.
+		if op.maxRowBytes > 0 && op.estimateValue != nil {
+			rowBytes += op.estimateValue(v)
+			if rowBytes > op.maxRowBytes {
+				return false, ErrProjectionRowTooLarge
+			}
+		}
 	}
 
 	*out = op.outBuf
