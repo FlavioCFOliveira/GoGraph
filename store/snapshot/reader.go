@@ -55,7 +55,10 @@ func openWith(fsys fileSystem, dir string) (LoadedCSR, error) {
 		return LoadedCSR{}, fmt.Errorf("%w: manifest missing %q", ErrCorrupted, CSRFile)
 	}
 	csrPath := filepath.Join(dir, CSRFile)
-	f, err := fsys.Open(csrPath)
+	// OpenComponent (not Open) applies O_NOFOLLOW on unix, so a symlinked
+	// csr.bin in an untrusted snapshot directory is rejected rather than
+	// followed — consistent with the hardened LoadSnapshotFull path (CWE-59).
+	f, err := fsys.OpenComponent(csrPath)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, err

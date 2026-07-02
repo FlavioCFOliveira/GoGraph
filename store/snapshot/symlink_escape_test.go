@@ -89,6 +89,43 @@ func TestLoadSnapshotFull_RejectManifestSymlink(t *testing.T) {
 	}
 }
 
+// TestOpen_RejectCSRSymlink confirms the legacy exported Open (CSR-only load)
+// also refuses a symlinked csr.bin, now that it reads via OpenComponent
+// (O_NOFOLLOW) instead of a plain open. Security assessment 2026-07-02 (#1847,
+// CWE-59).
+func TestOpen_RejectCSRSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("O_NOFOLLOW is a no-op on Windows; symlink escape is governed by separate OS controls")
+	}
+	t.Parallel()
+	dir := writeValidFullSnapshot(t)
+
+	secret := filepath.Join(t.TempDir(), "secret.bin")
+	if err := os.WriteFile(secret, []byte("OUTSIDE-SECRET"), 0o600); err != nil {
+		t.Fatalf("WriteFile secret: %v", err)
+	}
+	replaceWithSymlink(t, filepath.Join(dir, CSRFile), secret)
+
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open on a symlinked csr.bin = nil error, want rejection")
+	}
+}
+
+// TestOpen_NormalUnchanged confirms the OpenComponent switch is
+// behaviour-preserving: Open loads a legitimate snapshot (regular csr.bin)
+// without error. #1847.
+func TestOpen_NormalUnchanged(t *testing.T) {
+	t.Parallel()
+	dir := writeValidFullSnapshot(t)
+	loaded, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open on a normal snapshot = %v, want nil", err)
+	}
+	if len(loaded.CSR.Vertices) == 0 {
+		t.Fatal("loaded CSR has no vertices; snapshot did not round-trip through Open")
+	}
+}
+
 // TestLoadSnapshotFull_NormalSnapshotUnchanged confirms the O_NOFOLLOW
 // guard does not perturb a legitimate snapshot whose component files are
 // regular files. Finding I4.
