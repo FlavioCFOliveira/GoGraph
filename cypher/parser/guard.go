@@ -42,15 +42,25 @@ const (
 	maxCASEKeywords = maxNestingDepth // 256
 
 	// maxBinaryOpTokens is the maximum number of binary infix operator tokens
-	// (AND, OR, XOR, NOT, +, /, %, ^, and arithmetic-context - and *) accepted
-	// in a single query. Long left-recursive chains create a left-deep BinaryOp
-	// AST whose checkExpr recursion depth equals the operator count. Without a
-	// pre-parse bound a maximal 1 MiB chain of ~500k operators forces the ANTLR
-	// parser + visitor to build the whole AST (measured ~0.9 s CPU + ~1.2 GB
-	// transient allocation) before the sema depth-1000 backstop can fire, and
-	// Parse takes no context so no deadline can interrupt it — a CPU/GC
-	// amplification DoS under a concurrent burst (#1831). 512 is generous for any
-	// real query yet rejects such a chain in O(n) before any AST is built.
+	// accepted in a single query. The counted set is:
+	//
+	//   - Arithmetic / boolean: AND, OR, XOR, NOT, +, /, %, ^, and
+	//     arithmetic-context - and *.
+	//   - Comparison: =, <, >, <=, >=, <>, and the regex operator =~.
+	//   - String / list / null predicates: IN, CONTAINS, STARTS WITH, ENDS WITH,
+	//     and IS (the operator word of IS NULL / IS NOT NULL).
+	//
+	// Long left-recursive chains create a left-deep AST whose checkExpr recursion
+	// depth (or, for a flat comparison chain, its node count) equals the operator
+	// count. Without a pre-parse bound a maximal 1 MiB chain of ~500k operators
+	// forces the ANTLR parser + visitor to build the whole AST (measured
+	// ~0.9 s CPU + ~1.2 GB transient allocation) before the sema depth-1000
+	// backstop can fire, and Parse takes no context so no deadline can interrupt
+	// it — a CPU/GC amplification DoS under a concurrent burst. This was first
+	// closed for the arithmetic operators (#1831) and is extended here to the
+	// comparison and string/list/null predicate class, which a byte-tight chain
+	// (e.g. RETURN 1=1=1…, ~2 bytes/op) exploited identically. 512 is generous
+	// for any real query yet rejects such a chain in O(n) before any AST is built.
 	//
 	// '-' and '*' USED to be excluded because they appear structurally in
 	// relationship arrows '(a)-[r]->(b)' and variable-length path patterns
@@ -58,11 +68,18 @@ const (
 	// context (see [countBinaryOpNormal]): a '-'/'*' is counted only when both
 	// immediate neighbours are operand bytes (identifier char or '.'), and '*'
 	// additionally only outside '[...]' brackets unless its left neighbour is a
-	// digit. Every relationship/VLE form places a non-operand byte ('[', ']',
-	// '>', '<', '(', ')', ':', another '-', or a bracket) immediately beside the
-	// symbol, so no legitimate pattern token is ever counted — the count is
-	// TCK-neutral (no TCK scenario contains hundreds of arithmetic operators in
-	// one expression).
+	// digit. The comparison operators '<'/'>' are counted with the analogous
+	// arrow-exclusion rule (a '<' is not counted when it opens an incoming arrow
+	// '<-', a '>' is not counted when it closes an outgoing arrow '->'), and '='
+	// only in operand-adjacent context so a path assignment 'p=(…)' or a
+	// 'SET n={…}' is never counted. The two-byte forms '<=', '>=', '<>', '=~'
+	// are unambiguous (no relationship/VLE form produces those adjacent bytes),
+	// so they are counted unconditionally, exactly as '+', '/', '%', '^' are.
+	// Every relationship/VLE form places a non-operand byte ('[', ']', '>', '<',
+	// '(', ')', ':', another '-', or a bracket) immediately beside the symbol, so
+	// no legitimate pattern token is ever counted — the count is TCK-neutral (no
+	// TCK scenario contains hundreds of operators in one expression), verified by
+	// the full 3897-scenario suite.
 	maxBinaryOpTokens = 512
 )
 
@@ -381,15 +398,75 @@ func matchKeywordOp(query string, i int, prevIsIdent bool, kw string) int {
 	return n - 1 // bytes to advance beyond the first char
 }
 
+// matchTwoWordKeywordOp reports whether query[i:] begins with the two-word
+// keyword operator "w1 w2" (case-insensitive, e.g. "starts with"), with a clear
+// word boundary before w1 and after w2 and only ASCII spaces/tabs between the
+// two words, and returns the number of extra bytes to skip past the whole
+// operator (so the caller advances i to its last byte). It returns -1 when there
+// is no match. prevIsIdent must be true when query[i-1] is an identifier byte
+// (the left boundary is then NOT clear). Both w1 and w2 must be lowercase.
+func matchTwoWordKeywordOp(query string, i int, prevIsIdent bool, w1, w2 string) int {
+	if prevIsIdent {
+		return -1
+	}
+	// Match w1 case-insensitively.
+	n1 := len(w1)
+	if i+n1 > len(query) {
+		return -1
+	}
+	for j := 0; j < n1; j++ {
+		b := query[i+j]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != w1[j] {
+			return -1
+		}
+	}
+	// Require at least one separating space or tab, then skip the run.
+	j := i + n1
+	if j >= len(query) || (query[j] != ' ' && query[j] != '\t') {
+		return -1
+	}
+	for j < len(query) && (query[j] == ' ' || query[j] == '\t') {
+		j++
+	}
+	// Match w2 case-insensitively.
+	n2 := len(w2)
+	if j+n2 > len(query) {
+		return -1
+	}
+	for k := 0; k < n2; k++ {
+		b := query[j+k]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != w2[k] {
+			return -1
+		}
+	}
+	// Right word boundary after w2.
+	end := j + n2
+	if end < len(query) && isIdentByte(query[end]) {
+		return -1
+	}
+	return end - i - 1 // bytes to advance beyond the first char
+}
+
 // countBinaryOpTokens returns the number of binary infix operator tokens in
 // query that appear in normal code context — outside string literals, escaped
 // identifiers, and comments. Counted tokens are:
 //
 //   - Keyword operators: AND, OR, XOR, NOT (case-insensitive, word-bounded)
+//   - Predicate keywords: IN, CONTAINS, STARTS WITH, ENDS WITH, IS
+//     (case-insensitive, word-bounded; IS is the operator word of the
+//     IS NULL / IS NOT NULL predicates)
 //   - Symbol operators:  +  /  %  ^
-//   - Arithmetic-context '-' and '*' (see [countBinaryOpNormal] for the exact,
-//     false-positive-free rule that distinguishes them from relationship arrows
-//     and variable-length path patterns).
+//   - Comparison operators:  =  <  >  <=  >=  <>  =~
+//   - Arithmetic-context '-' and '*' and arrow-disambiguated '<'/'>'/'=' (see
+//     [countBinaryOpNormal] for the exact, false-positive-free rules that
+//     distinguish them from relationship arrows and variable-length path
+//     patterns).
 //
 // Long left-recursive chains of these operators build left-deep BinaryOp AST
 // nodes whose checkExpr recursion depth equals the operator count. A query with
@@ -466,6 +543,22 @@ func countBinaryOpTokens(query string) int {
 //     with a non-digit ('[', ':', or a type-name letter) immediately before the
 //     '*', so it is never counted, while arithmetic "2*3" (or "[1*2]" inside a
 //     list literal) is.
+//
+// The comparison and predicate operators are counted with the same discipline:
+//
+//   - The two-byte comparison tokens '<=', '>=', '<>' and the regex operator
+//     '=~' are counted unconditionally (like '+'/'/'): no relationship or VLE
+//     form ever places those two bytes adjacent, so they are unambiguous.
+//   - A single '<' is counted unless it opens an incoming relationship arrow,
+//     i.e. unless its right neighbour is '-' ("<-", "<--", "<-["). A single '>'
+//     is counted unless it closes an outgoing arrow, i.e. unless its left
+//     neighbour is '-' ("->", "-->", "]->"). Every arrow therefore stays
+//     uncounted while a byte-tight comparison chain "a<b<c" / "1>2>3" is caught.
+//   - A single '=' is counted only when operand-adjacent on both sides (as for
+//     '-'), so a comparison "1=1" is caught while a path assignment "p=(…)" or a
+//     "SET n={…}" — whose right neighbour is '(' or '{' — is never counted.
+//   - The predicate keywords IN, CONTAINS, STARTS WITH, ENDS WITH and IS are
+//     counted word-bounded via [matchKeywordOp] / [matchTwoWordKeywordOp].
 func countBinaryOpNormal(query string, i int, c byte, count int, state scanState, sqDepth int) (int, int, scanState, int) {
 	prevIsIdent := i > 0 && isIdentByte(query[i-1])
 	switch c {
@@ -506,6 +599,35 @@ func countBinaryOpNormal(query string, i int, c byte, count int, state scanState
 		if operandAdjacent(query, i) && (sqDepth == 0 || isDigitByte(query[i-1])) {
 			count++
 		}
+	case '=':
+		// '=~' regex operator (unambiguous two-byte token); otherwise a bare '='
+		// counted only in operand-adjacent comparison context.
+		if i+1 < len(query) && query[i+1] == '~' {
+			count++
+			i++
+		} else if operandAdjacent(query, i) {
+			count++
+		}
+	case '<':
+		// '<=' / '<>' are unambiguous two-byte comparison operators; a single
+		// '<' is a comparison unless it opens an incoming arrow "<-".
+		if i+1 < len(query) {
+			if b := query[i+1]; b == '=' || b == '>' {
+				count++
+				i++
+			} else if b != '-' {
+				count++
+			}
+		}
+	case '>':
+		// '>=' is an unambiguous two-byte comparison operator; a single '>' is a
+		// comparison unless it closes an outgoing arrow "->".
+		if i+1 < len(query) && query[i+1] == '=' {
+			count++
+			i++
+		} else if i > 0 && query[i-1] != '-' {
+			count++
+		}
 	case 'A', 'a':
 		if skip := matchKeywordOp(query, i, prevIsIdent, "and"); skip >= 0 {
 			count++
@@ -523,6 +645,29 @@ func countBinaryOpNormal(query string, i int, c byte, count int, state scanState
 		}
 	case 'N', 'n':
 		if skip := matchKeywordOp(query, i, prevIsIdent, "not"); skip >= 0 {
+			count++
+			i += skip
+		}
+	case 'I', 'i':
+		if skip := matchKeywordOp(query, i, prevIsIdent, "in"); skip >= 0 {
+			count++
+			i += skip
+		} else if skip := matchKeywordOp(query, i, prevIsIdent, "is"); skip >= 0 {
+			count++
+			i += skip
+		}
+	case 'C', 'c':
+		if skip := matchKeywordOp(query, i, prevIsIdent, "contains"); skip >= 0 {
+			count++
+			i += skip
+		}
+	case 'S', 's':
+		if skip := matchTwoWordKeywordOp(query, i, prevIsIdent, "starts", "with"); skip >= 0 {
+			count++
+			i += skip
+		}
+	case 'E', 'e':
+		if skip := matchTwoWordKeywordOp(query, i, prevIsIdent, "ends", "with"); skip >= 0 {
 			count++
 			i += skip
 		}

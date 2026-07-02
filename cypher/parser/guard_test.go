@@ -294,6 +294,50 @@ func TestGuardRejectsTightArithmeticChain(t *testing.T) {
 	})
 }
 
+// TestGuardRejectsTightComparisonChain is the gate test for the 2026-07-02
+// audit finding (unfixed sibling of #1831): the pre-parse operator guard counted
+// only arithmetic/boolean operators, so a byte-tight chain of comparison or
+// string/list/null predicate operators (=, <, >, <=, >=, <>, =~, IN, CONTAINS,
+// STARTS WITH, ENDS WITH, IS) still bypassed it — a ~2-byte-per-op '=' chain
+// packed ~490k operators into a sub-1 MiB query and forced the ANTLR parser +
+// visitor to build the whole AST (~0.9 s CPU, ~1.2 GB transient) uninterruptibly.
+// The guard now counts the comparison/predicate class, so each chain is rejected
+// in O(n) before any AST is built.
+func TestGuardRejectsTightComparisonChain(t *testing.T) {
+	// Each case builds "RETURN <seed><op>…" with 600 operators (> the 512 cap).
+	cases := []struct {
+		name string
+		seed string
+		op   string
+	}{
+		{name: "equals-chain", seed: "1", op: "=1"},
+		{name: "lt-chain", seed: "1", op: "<1"},
+		{name: "gt-chain", seed: "1", op: ">1"},
+		{name: "lte-chain", seed: "1", op: "<=1"},
+		{name: "gte-chain", seed: "1", op: ">=1"},
+		{name: "neq-chain", seed: "1", op: "<>1"},
+		{name: "regex-chain", seed: "'a'", op: "=~'a'"},
+		{name: "in-chain", seed: "1", op: " IN[1]"},
+		{name: "contains-chain", seed: "'a'", op: " CONTAINS 'a'"},
+		{name: "starts-with-chain", seed: "'a'", op: " STARTS WITH 'a'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			b.WriteString("RETURN ")
+			b.WriteString(tc.seed)
+			for i := 0; i < 600; i++ {
+				b.WriteString(tc.op)
+			}
+			_, err := Parse(b.String())
+			pe := asParseError(t, err)
+			if !strings.Contains(pe.Message, "operator") {
+				t.Fatalf("expected an operator-count error for a tight %q chain, got: %v", tc.op, pe)
+			}
+		})
+	}
+}
+
 // TestGuardAllowsPatternDenseQuery is the false-positive guard for audit finding
 // F4: a legitimate query with hundreds of relationship arrows and a
 // variable-length pattern (far more '-' and '*' bytes than a rejected
@@ -405,6 +449,40 @@ func TestCountBinaryOpTokens(t *testing.T) {
 		{name: "not_word_boundary_skipped", in: "RETURN ANDROID", count: 0},
 		{name: "div_not_comment", in: "RETURN 4 / 2", count: 1},
 		{name: "line_comment_div", in: "// a / b\nRETURN 1", count: 0},
+		// Comparison operators: single '='/'<'/'>' counted only in comparison
+		// context; the two-byte forms '<='/'>='/'<>'/'=~' are unambiguous.
+		{name: "equals_tight_counted", in: "RETURN 1=1", count: 1},
+		{name: "equals_chain_counted", in: "RETURN 1=1=1", count: 2},
+		{name: "equals_spaced_not_counted", in: "RETURN 1 = 1", count: 0},
+		{name: "lt_counted", in: "RETURN a<b", count: 1},
+		{name: "gt_counted", in: "RETURN a>b", count: 1},
+		{name: "lt_chain_counted", in: "RETURN 1<2<3", count: 2},
+		{name: "lte_counted", in: "RETURN 1<=2", count: 1},
+		{name: "gte_counted", in: "RETURN 1>=2", count: 1},
+		{name: "neq_counted", in: "RETURN 1<>2", count: 1},
+		{name: "regex_counted", in: "RETURN x=~'a'", count: 1},
+		// Comparison operators must never miscount relationship arrows or a path
+		// assignment / SET map (right neighbour '(' or '{').
+		{name: "incoming_arrow_not_counted", in: "MATCH (a)<-[r]-(b) RETURN a", count: 0},
+		{name: "bare_incoming_arrow_not_counted", in: "MATCH (a)<--(b) RETURN a", count: 0},
+		{name: "outgoing_arrow_gt_not_counted", in: "MATCH (a)-[r]->(b) RETURN a", count: 0},
+		{name: "path_assign_arrow_not_counted", in: "MATCH p=(a)-->(b) RETURN p", count: 0},
+		{name: "set_map_not_counted", in: "MATCH (n) SET n={x:1} RETURN n", count: 0},
+		// Predicate keywords: IN, CONTAINS, STARTS WITH, ENDS WITH, IS.
+		{name: "in_counted", in: "RETURN 1 IN[2]", count: 1},
+		{name: "in_lowercase_counted", in: "RETURN 1 in [2]", count: 1},
+		{name: "contains_counted", in: "RETURN s CONTAINS 't'", count: 1},
+		{name: "starts_with_counted", in: "RETURN s STARTS WITH 'a'", count: 1},
+		{name: "ends_with_counted", in: "RETURN s ENDS WITH 'a'", count: 1},
+		{name: "is_null_counted", in: "RETURN x IS NULL", count: 1},
+		{name: "is_not_null_counted", in: "RETURN x IS NOT NULL", count: 2},
+		// Predicate keywords must respect word boundaries (identifiers that merely
+		// start with a keyword are not operators).
+		{name: "in_prefix_ident_not_counted", in: "RETURN inner", count: 0},
+		{name: "is_prefix_ident_not_counted", in: "RETURN island", count: 0},
+		{name: "starts_prefix_ident_not_counted", in: "RETURN starts", count: 0},
+		{name: "contains_prefix_ident_not_counted", in: "RETURN containsfoo", count: 0},
+		{name: "keyword_in_string_not_counted", in: "RETURN 'a STARTS WITH b' AS s", count: 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
