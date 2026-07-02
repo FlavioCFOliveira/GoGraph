@@ -68,10 +68,16 @@ func openWith(fsys fileSystem, dir string) (LoadedCSR, error) {
 
 	hasher := crc32.New(castagnoli)
 	tee := io.TeeReader(f, hasher)
-	// Pass the manifest-recorded size as the precise remaining-bytes
-	// bound: a header that declares more vertices/edges/weights than
-	// csrEntry.Size bytes could hold is rejected before any allocation.
-	parsed, err := readCSRLimited(tee, csrEntry.Size)
+	// Bound the allocation by min(manifest size, real on-disk size): a header
+	// that declares more vertices/edges/weights than the file could hold — even
+	// under a manifest that lies about the size (e.g. size:0 to force the
+	// backstop) — is rejected before any allocation. See [safeCSRAllocBound].
+	bound, err := safeCSRAllocBound(fsys, csrPath, csrEntry.Size)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.Open.errors", 1)
+		return LoadedCSR{}, err
+	}
+	parsed, err := readCSRLimited(tee, bound)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, fmt.Errorf("%w: %w", ErrCorrupted, err)

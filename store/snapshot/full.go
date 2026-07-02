@@ -1119,14 +1119,44 @@ func boundedComponentReader(r io.Reader, size int64) io.Reader {
 	return io.LimitReader(r, size)
 }
 
+// safeCSRAllocBound returns the byte bound [readCSRLimited] may assume is
+// available for CSR records, derived from the ACTUAL on-disk file size rather
+// than the attacker-controlled manifest [FileEntry.Size]. A poisoned store
+// directory (a tampered backup or a shared filesystem) can set the manifest
+// size to 0 — or any inflated value — which would otherwise collapse
+// readCSRLimited's precise bound to the 128 GiB backstop [maxCSRCount] and let
+// an 18-byte csr.bin declaring nVertices=1<<34 drive a ~128 GiB eager make()
+// and an out-of-memory fatal crash on recovery, before any CRC check
+// (CWE-789 / CWE-770). The real file size is a fact of the bytes on disk and
+// cannot be inflated by the manifest; content integrity remains CRC-guarded by
+// the caller. We return min(manifestSize, realSize) (realSize when the manifest
+// size is non-positive), so a legitimate snapshot (manifest size == real size)
+// is bounded exactly as before while a lying manifest can only make the bound
+// tighter, never exceed the real bytes. The store directory is static during
+// recovery, so the stat/open ordering carries no meaningful TOCTOU: an attacker
+// able to swap files mid-recovery already holds write access to the store.
+func safeCSRAllocBound(fsys fileSystem, path string, manifestSize int64) (int64, error) {
+	info, err := fsys.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("%w: stat %s: %w", ErrCorrupted, CSRFile, err)
+	}
+	bound := info.Size()
+	if manifestSize > 0 && manifestSize < bound {
+		bound = manifestSize
+	}
+	return bound, nil
+}
+
 // readVerifiedCSR opens path, runs the file bytes through CRC32C and
 // the structural CSR reader simultaneously, and returns the parsed
 // snapshot iff the CRC matches expected. Any disagreement surfaces
-// as [ErrCorrupted]. size is the manifest-recorded file size, passed as
-// the precise remaining-bytes bound so a malicious header declaring more
-// records than the file could hold is rejected before any allocation.
-// The file is opened with O_NOFOLLOW (via openSnapshotComponent) so a
-// component symlinked outside the snapshot dir is rejected.
+// as [ErrCorrupted]. size is the manifest-recorded file size; the allocation
+// bound passed to [readCSRLimited] is [safeCSRAllocBound]'s min of it and the
+// real on-disk size, so a malicious header declaring more records than the file
+// could hold — even under a manifest that lies about the size — is rejected
+// before any allocation. The file is opened with O_NOFOLLOW (via
+// openSnapshotComponent) so a component symlinked outside the snapshot dir is
+// rejected.
 func readVerifiedCSR(fsys fileSystem, path string, expected uint32, size int64) (CSRReadback, error) {
 	f, err := fsys.OpenComponent(path)
 	if err != nil {
@@ -1135,9 +1165,13 @@ func readVerifiedCSR(fsys fileSystem, path string, expected uint32, size int64) 
 	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
 
+	bound, err := safeCSRAllocBound(fsys, path, size)
+	if err != nil {
+		return CSRReadback{}, err
+	}
 	hasher := crc32.New(castagnoli)
 	tee := io.TeeReader(f, hasher)
-	parsed, err := readCSRLimited(tee, size)
+	parsed, err := readCSRLimited(tee, bound)
 	if err != nil {
 		return CSRReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)
 	}
