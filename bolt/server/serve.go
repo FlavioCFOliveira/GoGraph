@@ -328,6 +328,14 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 		// Admit every client but warn loudly that authentication is disabled.
 		log.Warn("bolt: server started with no authentication (Options.Auth is NoAuthHandler) — every client is admitted without credential validation; set Options.Auth to a real AuthHandler before exposing this server on a network")
 	}
+	if opts.TLSConfig == nil {
+		// Plaintext transport: without a TLSConfig the server serves plain TCP,
+		// so Bolt LOGON credentials and all query traffic travel unencrypted.
+		// This is a deliberate default for an embeddable engine (the operator
+		// owns the listener), but it must be a conscious choice — warn so it is
+		// never a silent exposure, mirroring the NoAuthHandler warning above.
+		log.Warn("bolt: server started with no TLS (Options.TLSConfig is nil) — connections are unencrypted and Bolt credentials travel in cleartext; set Options.TLSConfig (see DefaultTLSConfig) before exposing this server on a network")
+	}
 	if eng != nil && eng.ResultRowCap() == 0 {
 		// The engine was built with cypher.MaxResultRowsUnlimited, so a single
 		// authenticated RUN/PULL of a Cartesian product or whole-graph MATCH can
@@ -895,8 +903,13 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 					slog.String("remote", remote),
 					slog.String("err", handlerErr.Error()))
 				if !s.writeResponse(cw, conn, &proto.Failure{
-					Code:    "Neo.DatabaseError.General.UnknownError",
-					Message: handlerErr.Error(),
+					Code: "Neo.DatabaseError.General.UnknownError",
+					// Route through sanitiseErr so this branch upholds the same
+					// no-internal-leak invariant as every other FAILURE path: a
+					// future handler returning an unwrapped internal error must
+					// not disclose Go internals/paths to the client (CWE-209).
+					// The full error is already logged server-side just above.
+					Message: sess.sanitiseErr(handlerErr),
 				}, remote) {
 					return
 				}

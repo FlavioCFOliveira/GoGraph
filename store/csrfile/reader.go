@@ -185,6 +185,12 @@ func openBytes(buf []byte) (*Reader, error) {
 // alignment assertion in [Reinterpret] on some allocations; routing the
 // in-memory read through this helper keeps the byte-backed Reader sound.
 func allocAligned8(n int) []byte {
+	if n <= 0 {
+		// A zero (or negative) length would make backing empty and &backing[0]
+		// panic. Return nil so the caller (openBytes) reports the clean
+		// ErrHeaderTooShort for an empty image rather than crashing.
+		return nil
+	}
 	words := (n + 7) / 8
 	backing := make([]uint64, words)
 	return unsafe.Slice((*byte)(unsafe.Pointer(&backing[0])), words*8)[:n] //nolint:gosec // 8-byte-aligned reinterpret of []uint64 backing
