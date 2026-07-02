@@ -192,13 +192,19 @@ func streamGraphMLFirstGraph(
 // enforced over the whole root element (a document that overflows the cap in its
 // trailing bytes is still rejected), while a large trailing <graph> is skipped
 // in O(1) memory rather than materialised. A single oversized trailing token is
-// still bounded by the byte cap on the underlying reader.
+// still bounded by the byte cap on the underlying reader. A truncated document
+// (input ending before the root </graphml>) is rejected (fail-stop): in
+// practice encoding/xml reports an unclosed-element syntax error at the err
+// branch below before a clean EOF is seen, and the io.EOF branch is the
+// belt-and-braces backstop that keeps the all-or-nothing contract even if the
+// tokenizer ever returned a clean EOF with the root still open — a partial
+// parse must never silently succeed.
 func drainToGraphMLEnd(dec *xml.Decoder) error {
 	depth := 0 // nesting below the (already-open) <graphml> root
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return fmt.Errorf("graphml: parse: %w", io.ErrUnexpectedEOF)
 		}
 		if err != nil {
 			return fmt.Errorf("graphml: parse: %w", err)

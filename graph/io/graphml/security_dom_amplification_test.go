@@ -93,3 +93,41 @@ func TestSec_IO_GraphMLNodeEdgeFloodStreamsAtScale(t *testing.T) {
 		t.Fatalf("nodes folded = %d, want %d", got, n)
 	}
 }
+
+// TestSec_IO_GraphMLTruncatedTailRejected pins the fail-stop, all-or-nothing
+// contract of the streaming reader: a document with a fully-valid first <graph>
+// but truncated before </graphml> must be rejected with a parse error and a nil
+// graph, never accepted as a partial parse. (The rejection comes from the XML
+// tokenizer's unclosed-element error, backed by drainToGraphMLEnd's EOF guard.)
+// A well-formed document still loads — the guard fires only on the truncated
+// tail.
+func TestSec_IO_GraphMLTruncatedTailRejected(t *testing.T) {
+	t.Parallel()
+	const good = `<?xml version="1.0"?><graphml><graph edgedefault="directed">` +
+		`<node id="a"/><node id="b"/><edge source="a" target="b"/></graph></graphml>`
+	// Truncated: everything up to and including </graph>, but no </graphml>.
+	truncated := strings.TrimSuffix(good, `</graphml>`)
+
+	a, _, err := graphml.ReadIntoCtx(context.Background(), strings.NewReader(truncated))
+	if err == nil {
+		t.Fatal("truncated document (no </graphml>) accepted; want a parse error (fail-stop)")
+	}
+	if !strings.Contains(err.Error(), "graphml: parse") {
+		t.Fatalf("truncated document err = %v, want a graphml parse error", err)
+	}
+	if a != nil {
+		t.Fatal("truncated document returned a non-nil graph; import must be all-or-nothing")
+	}
+	if g, _, err := graphml.ReadWithPropsCtx(context.Background(), strings.NewReader(truncated)); err == nil || g != nil {
+		t.Fatalf("ReadWithProps truncated: err=%v graph=%v, want a parse error and nil graph", err, g)
+	}
+
+	// Well-formed control still loads.
+	good2, added, err := graphml.ReadIntoCtx(context.Background(), strings.NewReader(good))
+	if err != nil {
+		t.Fatalf("well-formed document rejected: %v", err)
+	}
+	if added != 1 || good2.Order() != 2 {
+		t.Fatalf("well-formed load: edges=%d order=%d, want 1 and 2", added, good2.Order())
+	}
+}
