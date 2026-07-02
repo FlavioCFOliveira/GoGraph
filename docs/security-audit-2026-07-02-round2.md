@@ -224,6 +224,37 @@ observation) was folded into the #1849 fix.
   injection is well defended.
 - **Dependencies** clean (`govulncheck`, no known vulnerabilities).
 
+## Follow-up hardening (sprint 261)
+
+To leave nothing deferred, the non-blocking certification caveats and the
+accepted INFO observations were also closed (rmp sprint **261**, tasks
+**#1853–#1855**):
+
+- **#1853 (`d2cff11`)** — the storage-engine-auditor's recommended defense-in-
+  depth: `Stat()` was added to the `ReadFile` seam and `safeCSRAllocBound` now
+  **fstats the open descriptor** instead of re-stat'ing the path, so the CSR
+  allocation bound reflects exactly the bytes read and the residual stat/open
+  TOCTOU noted for #1850 is eliminated. Both backends already satisfied `Stat`;
+  behaviour is identical for a well-formed snapshot. **Re-certified GO by the
+  storage-engine-auditor.**
+- **#1854 (`d39ac0f`)** — the go-developer's truncated-tail caveat: the GraphML
+  reader now rejects a document truncated before `</graphml>` as a parse error
+  with a nil graph. In practice `encoding/xml` already reports an unclosed-
+  element syntax error on such input; `drainToGraphMLEnd`'s EOF guard is the
+  belt-and-braces backstop that keeps the all-or-nothing contract regardless of
+  tokenizer behaviour.
+- **#1855 (`6d35d4a`)** — the accepted INFO observations are now documented
+  faithfully in-code: the JSONL 1 GiB default cap is safe because the reader
+  streams line-at-a-time with no struct-per-element amplification, and the
+  `graph.Mapper` FNV shard hash is intentionally unseeded (determinism) and is
+  not a hash-flooding DoS (per-shard Go maps are flood-resistant; the write path
+  is single-writer-serialised). No behaviour change.
+
+The `split()` note (a large string parameter) was already closed by #1852 — a
+list-returning function's result is now charged against the per-evaluation
+budget. The GOMEMLIMIT-gated ceilings remain a deliberate, documented design
+choice (see the operational note below), not a defect.
+
 ## Verdict
 
 GoGraph is **production-ready from a security standpoint** on `main` after this
