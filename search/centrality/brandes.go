@@ -16,9 +16,15 @@ import (
 // node in c using Brandes' algorithm (2001). Returns a slice
 // indexed by NodeID. Unweighted: O(V * E).
 //
-// The result is not normalised — callers can divide by
-// (n-1)(n-2)/2 (undirected) or (n-1)(n-2) (directed) for the
-// classical normalised score.
+// The result is not normalised — callers can divide by (n-1)(n-2) for the
+// classical normalised score. This same divisor applies whether c is
+// directed or undirected: Brandes' source loop runs over every vertex
+// regardless of orientation, so the raw output is already on an
+// ordered-pair basis for both (an undirected edge is walked in both
+// directions during the shortest-path search). Dividing an undirected
+// result by (n-1)(n-2)/2 instead double-counts and can push the
+// normalised score above 1.0 — see [WeightedBetweenness], which uses the
+// same uniform 1/((n-1)(n-2)) factor.
 func Betweenness[W any](c *csr.CSR[W]) []float64 {
 	defer metrics.Time("search.centrality.Betweenness").Stop()
 	out, _ := BetweennessCtx(context.Background(), c)
