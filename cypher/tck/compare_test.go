@@ -368,11 +368,18 @@ func skipQuoted(s string, i int) int {
 // And steps — side effects
 // ─────────────────────────────────────────────────────────────────────────────
 
-// noSideEffects is a no-op assertion.
+// noSideEffects is a no-op assertion: a scenario's "no side effects" step
+// never checks that the graph was actually left unchanged. See
+// package tck's "Gate scope" doc (conformance_history.go) for how this
+// bounds what the 3897/3897 execution gate does and does not verify.
 func (w *world) noSideEffects(_ context.Context) error { return nil }
 
 // sideEffectsTable performs a lightweight check: if the table declares "+nodes N"
-// or "+relationships N", it verifies that the graph grew by at least that amount.
+// or "+relationships N", it verifies that the graph grew by at least that
+// amount (a lower bound, not an exact count). "+properties"/"-properties" and
+// "+labels"/"-labels" rows are silently ignored by the switch below — no
+// property or label side effect is checked at all. See package tck's
+// "Gate scope" doc (conformance_history.go) for the full picture.
 func (w *world) sideEffectsTable(_ context.Context, table *godog.Table) error {
 	if table == nil || len(table.Rows) == 0 {
 		return nil

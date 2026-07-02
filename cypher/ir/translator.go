@@ -507,6 +507,15 @@ func projectionColumnName(it *ast.ProjectionItem) string {
 // exception of [*ast.Property] whose receiver is wrapped in parens
 // when the receiver itself is not a bare variable (matching the TCK
 // canonical form `(list[1]).existing`).
+//
+// This always re-serialises from the AST node (n.Operator, precedence
+// tables below) — it never reads any source-text span. So an implicit
+// (un-aliased) header such as `RETURN age-1` producing the column name
+// "age - 1" is this function choosing canonical TCK spacing, not a leak
+// from [cypher/parser.normalizeArithmeticMinus]'s lexer-disambiguation
+// rewrite (which happens earlier, before parsing, and whose own spacing
+// this function would reproduce identically even if normalize.go inserted
+// none at all). An explicit `AS` alias always overrides this rendering.
 func exprToColumnName(e ast.Expression) string {
 	switch n := e.(type) {
 	case *ast.BinaryOp:

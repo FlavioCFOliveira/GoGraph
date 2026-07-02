@@ -19,9 +19,12 @@ var ErrNegativeCycle = errors.New("search: negative cycle reachable from source"
 // detects negative cycles reachable from the source, returning
 // [ErrNegativeCycle] in that case.
 //
-// The algorithm is the textbook O(V*E) variant: for each of V-1
-// rounds it relaxes every edge once; an additional round detects
-// negative cycles by reporting any further successful relaxation.
+// The algorithm is SPFA (Shortest Path Faster Algorithm) with SLF
+// (Smallest Label First) deque ordering, not the textbook full-edge-sweep
+// variant: see [bellmanFordCore] for the worklist-driven relaxation and
+// negative-cycle detection this entails. Worst-case complexity remains
+// O(V*E), matching textbook Bellman-Ford, but SPFA typically revisits far
+// fewer nodes on graphs without adversarial structure.
 //
 // The implementation reuses the [Distances] result type and the
 // per-W pooled state of [Dijkstra]; the inner relaxation loop is
