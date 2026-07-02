@@ -86,12 +86,46 @@ func Equivalent(a, b Value) bool {
 }
 
 // hashFloatBits returns the equivalence-consistent hash for the canonical
-// (non-NaN) float64 representation f. Shared by the FloatValue and
-// IntegerValue branches of [EquivalentHash]: [Value.Equal] compares a
-// cross-type Integer/Float pair via float64(a) == float64(b), so both types
-// must hash through this exact same float64 domain to keep the two
-// consistent — whatever precision the comparison tolerates, the hash must
-// tolerate identically.
+// (non-NaN) float64 representation f. Shared by the FloatValue, IntegerValue,
+// NodeValue, RelationshipValue, and *LazyNodeValue branches of
+// [EquivalentHash]: [Value.Equal] compares a cross-type Integer/Float pair
+// (and, symmetrically, an Integer against a node/relationship's raw ID) via
+// float64(a) == float64(b), so every one of these types must hash through
+// this exact same float64 domain to stay consistent — whatever precision the
+// comparison tolerates, the hash must tolerate identically.
+//
+// # Hash-quality trade-off above 2^53 is unavoidable, not a shortcut
+//
+// float64 has a 53-bit mantissa, so two distinct int64/uint64 values beyond
+// 2^53 can round to the identical float64 bit pattern (e.g. 2^53+1 and 2^53
+// both round to 2^53) — and [Value.Equal] itself, via the float64(a)==
+// float64(b) comparison above, ALREADY treats such a pair as equal. Any hash
+// function kept consistent with that comparison (the [EquivalentHash]
+// contract this whole file exists to satisfy) MUST therefore also collapse
+// that pair to the same hash — there is no lossless-above-2^53 hash domain
+// that stays consistent with a comparison that is itself lossy there. The
+// alternative (routing IntegerValue/NodeValue/etc. through their own
+// lossless raw-bit hash instead) was tried independently in
+// cypher/exec/hash_join.go's canonicalKeyHash and produced exactly the
+// opposite defect: a hash that DISAGREED with Equal for such a pair, so a
+// HashJoin silently dropped a matching row instead of erroring (rmp #1865,
+// fixed by making canonicalKeyHash delegate to EquivalentHash instead of
+// reimplementing this fold independently).
+//
+// The measurable consequence is bounded, not unbounded: DISTINCT/GROUP BY
+// over adjacent integers beyond 2^53 degrades to a longer collision chain
+// (measured 7.7-10.9x slower for that specific access pattern, chain length
+// bounded by the number of distinct float64 bit patterns reachable in the
+// probed range — roughly 1024-2048 for adjacent-integer inputs, 2026-07-02
+// production-readiness audit round 2) rather than the correctness this
+// function exists to preserve. The package-cypher aggregate-DISTINCT value
+// cap and [exec.DefaultMaxDistinct]/[exec.DefaultMaxGroups] independently
+// bound the absolute amount of work any single query can force regardless
+// of this collision behaviour, so the trade-off is a measured, cited,
+// structurally bounded performance characteristic — not a data-safety or
+// DoS concern —
+// and changing it would reopen the exact inconsistency this file's own
+// [Equivalent]/[EquivalentHash] split exists to close.
 func hashFloatBits(f float64) uint64 {
 	// Canonicalise -0.0 → +0.0 so both map to the same hash.
 	// (IEEE 754: -0.0 == +0.0, so they must be equivalent.)
@@ -108,13 +142,22 @@ func hashFloatBits(f float64) uint64 {
 // This differs from v.Hash() in three cases:
 //   - All NaN bit-patterns map to one canonical hash (NaN ≡ NaN).
 //   - -0.0 maps to the same hash as 0.0 (−0.0 == 0.0 in IEEE 754).
-//   - IntegerValue hashes through the same float64 domain as FloatValue (see
-//     [hashFloatBits]), so an Integer and a numerically-equal Float — which
-//     [Equivalent] already treats as equivalent — always land in the same
-//     hash bucket. [IntegerValue.Hash] does not have this property (it folds
-//     the raw int64 bits, unrelated to the IEEE-754 float64 bit pattern),
-//     which is exactly why DISTINCT/grouping must call EquivalentHash and
-//     never IntegerValue.Hash/Value.Hash directly.
+//   - IntegerValue, [NodeValue], [*LazyNodeValue], and [RelationshipValue]
+//     all hash through the same float64 domain as FloatValue (see
+//     [hashFloatBits]), so any pair of these that [Value.Equal] treats as
+//     equal — an Integer and a numerically-equal Float, or a node/
+//     relationship and an IntegerValue carrying its raw ID (the in-pipeline
+//     encoding NodeScan/Expand emit, per [NodeValue.Equal] /
+//     [RelationshipValue.Equal] / [LazyNodeValue.Equal]) — always lands in
+//     the same hash bucket. Each of their own [Value.Hash] methods folds
+//     raw ID/int64 bits directly, unrelated to the IEEE-754 float64 bit
+//     pattern, which is exactly why DISTINCT/grouping must call
+//     EquivalentHash and never call Hash directly on any of these types.
+//     A NodeValue/RelationshipValue ID exceeding 2^53 hashes lossily (the
+//     same accepted, bounded hash-quality trade-off IntegerValue already
+//     has above that threshold — see hashFloatBits) rather than producing a
+//     wrong equivalence result: a hash collision only costs a linear
+//     collision-chain comparison, resolved exactly by [Equivalent].
 func EquivalentHash(v Value) uint64 {
 	if fv, ok := v.(FloatValue); ok {
 		f := float64(fv)
@@ -128,6 +171,15 @@ func EquivalentHash(v Value) uint64 {
 	}
 	if iv, ok := v.(IntegerValue); ok {
 		return hashFloatBits(float64(iv))
+	}
+	if nv, ok := v.(NodeValue); ok {
+		return hashFloatBits(float64(nv.ID))
+	}
+	if lnv, ok := v.(*LazyNodeValue); ok {
+		return hashFloatBits(float64(lnv.ID()))
+	}
+	if rv, ok := v.(RelationshipValue); ok {
+		return hashFloatBits(float64(rv.ID))
 	}
 	if lv, ok := v.(ListValue); ok {
 		const (

@@ -319,22 +319,33 @@ func isUnjoinableKey(v expr.Value) bool {
 // canonicalKeyHash returns a hash that is identical for any two values that
 // openCypher `=` treats as equal. The decisive case is cross-type numeric
 // equality: integer 1 and float 1.0 are equal, but their default Value.Hash()
-// implementations diverge (the integer folds its int bits, the float folds its
-// IEEE-754 bits). Fold every integral float to the integer hash so equal
-// numbers share a bucket; non-integral floats and all non-numeric values use
-// their native Hash().
+// implementations diverge (the integer folds its int bits, the float folds
+// its IEEE-754 bits).
+//
+// Delegates to [expr.EquivalentHash] rather than reimplementing the
+// cross-type fold independently: an earlier, independent version of this
+// function converted an integral float to an int64 and hashed THAT (the
+// opposite direction from EquivalentHash's fix, which routes an integer
+// through the float64 domain) — the two hash domains disagreed for any pair
+// where the int64-vs-float64 rounding differs, e.g. an integer beyond 2^53
+// and its float64-truncated neighbour, which [expr.Value.Equal] itself
+// compares via float64(a)==float64(b) and therefore treats as equal. That
+// mismatch silently dropped a matching row from the join output — a bucket
+// miss is indistinguishable from "no match" to a caller, so the failure was
+// never an error, just a wrong (too-small) result (rmp #1865).
+//
+// EquivalentHash's contract — Equivalent(a,b) ⟹ same hash — is safe to reuse
+// here even though HashJoin's own equality semantics are Equal (`=`), not
+// Equivalent: EquivalentHash's Equivalent-specific behaviour (NaN≡NaN,
+// null≡null) only differs from Equal for a NaN or null operand, and both are
+// unconditionally excluded from the build table before canonicalKeyHash is
+// ever called (see the package doc's Algorithm section) — so within
+// canonicalKeyHash's actual input domain, Equivalent(a,b) and
+// IsTruthy(a.Equal(b)) coincide for every type, making EquivalentHash a
+// correct (and now single-source-of-truth) hash for HashJoin's bucketing too.
 //
 // Callers MUST still verify a bucket hit with expr.Value.Equal — the hash only
 // guarantees equal values collide, never that colliding values are equal.
 func canonicalKeyHash(v expr.Value) uint64 {
-	if f, ok := v.(expr.FloatValue); ok {
-		ff := float64(f)
-		// Fold an integral float to the integer hash so 1.0 buckets with 1.
-		// Guard the int64 range so a huge float does not wrap on conversion.
-		if ff == math.Trunc(ff) && !math.IsInf(ff, 0) &&
-			ff >= math.MinInt64 && ff < math.MaxInt64 {
-			return expr.IntegerValue(int64(ff)).Hash()
-		}
-	}
-	return v.Hash()
+	return expr.EquivalentHash(v)
 }

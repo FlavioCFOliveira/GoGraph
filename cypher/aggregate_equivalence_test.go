@@ -218,3 +218,36 @@ func TestUnion_IntFloat_Equivalence(t *testing.T) {
 		t.Errorf("(RETURN 1) UNION (RETURN 1.0) produced %d rows, want 1 (1 and 1.0 are equivalent)", len(rows))
 	}
 }
+
+// #1868 (F2 follow-up) — count(DISTINCT …) must collapse a NodeValue and an
+// IntegerValue carrying its raw ID into one equivalence class, exactly as
+// F2 fixed for Integer/Float. This is the audit's exact repro: `n` (a
+// NodeValue after WITH re-binds it) and `id(n)` (an IntegerValue) refer to
+// the same node, so NodeValue.Equal already treats them as equal — the bug
+// was EquivalentHash disagreeing and hiding that equality from DISTINCT.
+func TestAggDistinct_NodeInteger_Equivalence(t *testing.T) {
+	t.Parallel()
+	eng := newAggEngine(t)
+	drainRunInTx(t, eng, `CREATE (:P {k: 'a'})`)
+	row := singleRow(t, eng, `MATCH (n:P {k: 'a'}) WITH n, id(n) AS nid UNWIND [n, nid] AS x RETURN count(DISTINCT x) AS c`)
+	got, ok := row["c"].(expr.IntegerValue)
+	if !ok {
+		t.Fatalf("c: want IntegerValue, got %T (%v)", row["c"], row["c"])
+	}
+	if int64(got) != 1 {
+		t.Errorf("count(DISTINCT n, id(n)) = %d, want 1 (n and id(n) refer to the same node)", int64(got))
+	}
+}
+
+// #1868 (F2 follow-up) — negative control: a node and an unrelated integer
+// must NOT collapse.
+func TestAggDistinct_NodeInteger_NotCollapsedForDistinctValues(t *testing.T) {
+	t.Parallel()
+	eng := newAggEngine(t)
+	drainRunInTx(t, eng, `CREATE (:P {k: 'a'})`)
+	row := singleRow(t, eng, `MATCH (n:P {k: 'a'}) WITH n, id(n) AS nid UNWIND [n, nid + 1] AS x RETURN count(DISTINCT x) AS c`)
+	got := row["c"].(expr.IntegerValue)
+	if int64(got) != 2 {
+		t.Errorf("count(DISTINCT n, id(n)+1) = %d, want 2 (distinct node and integer)", int64(got))
+	}
+}

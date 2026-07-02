@@ -208,6 +208,56 @@ func TestCanonicalKeyHash_IntFloatAgree(t *testing.T) {
 	}
 }
 
+// TestCanonicalKeyHash_LargeIntFloatAgree is the regression gate for rmp
+// #1865/#1868: an independent, opposite-direction cross-type fold
+// (float→integer, converting an integral float to an int64 and hashing
+// THAT) disagreed with expr.EquivalentHash's integer→float direction for any
+// pair where float64 rounding makes an out-of-int64-mantissa-range integer
+// and a float collapse to the same float64 value — exactly the pair
+// expr.Value.Equal itself treats as equal (it compares via
+// float64(a)==float64(b)). Before the fix this silently dropped a matching
+// row from the join output instead of erroring.
+func TestCanonicalKeyHash_LargeIntFloatAgree(t *testing.T) {
+	// 2^53+1 is not exactly representable in float64; it rounds to 2^53, the
+	// same value float64(2^53) already has — so Equal treats the pair as
+	// equal, and canonicalKeyHash must agree.
+	const big = int64(1) << 53
+	huge := expr.IntegerValue(big + 1)
+	rounded := expr.FloatValue(float64(big))
+	if !toBoolValue(t, huge.Equal(rounded)) {
+		t.Fatalf("precondition failed: Equal(%v, %v) = false, want true (float64 rounding collapses both to %g)", huge, rounded, float64(big))
+	}
+	if canonicalKeyHash(huge) != canonicalKeyHash(rounded) {
+		t.Fatalf("canonicalKeyHash(%v)=%d != canonicalKeyHash(%v)=%d, but Equal says they match — a HashJoin would silently drop this row",
+			huge, canonicalKeyHash(huge), rounded, canonicalKeyHash(rounded))
+	}
+}
+
+// TestHashJoin_LargeIntFloatMatches drives the same scenario through the
+// real HashJoin operator end-to-end, proving the fix closes the actual
+// silently-wrong-result bug, not just the unit-level hash disagreement.
+func TestHashJoin_LargeIntFloatMatches(t *testing.T) {
+	const big = int64(1) << 53
+	probe := &sliceSource{rows: []Row{{expr.IntegerValue(big + 1)}}}
+	build := &sliceSource{rows: []Row{{expr.FloatValue(float64(big))}}}
+	hj := NewHashJoin(build, probe, keyCol(0), keyCol(0), false)
+	got := drainJoin(t, hj)
+	if len(got) != 1 {
+		t.Fatalf("HashJoin(2^53+1, float64(2^53)) produced %d rows, want 1 — Equal treats them as equal (both round to the same float64), so the join must not silently drop this match", len(got))
+	}
+}
+
+// toBoolValue unwraps an expr.Value known to be a BoolValue (as Equal always
+// returns for two non-null operands), failing the test on any other shape.
+func toBoolValue(t *testing.T, v expr.Value) bool {
+	t.Helper()
+	b, ok := v.(expr.BoolValue)
+	if !ok {
+		t.Fatalf("expected BoolValue, got %T (%v)", v, v)
+	}
+	return bool(b)
+}
+
 func TestIsUnjoinableKey(t *testing.T) {
 	cases := []struct {
 		v    expr.Value

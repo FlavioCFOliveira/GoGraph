@@ -94,3 +94,59 @@ func TestEquivalentHash_FloatNaNAndZero(t *testing.T) {
 		t.Errorf("+0.0 and -0.0 must hash identically: %d != %d", EquivalentHash(posZero), EquivalentHash(negZero))
 	}
 }
+
+// TestEquivalentHash_NodeRelationshipIntegerInvariant is the regression gate
+// for rmp #1868 (F2 follow-up): NodeValue.Equal/RelationshipValue.Equal/
+// LazyNodeValue.Equal all treat an IntegerValue carrying the raw ID as equal
+// to the node/relationship (the in-pipeline encoding NodeScan/Expand emit —
+// see NodeValue.Equal's doc), so EquivalentHash must agree for every such
+// pair, exactly like the IntegerValue/FloatValue pairing F2 fixed. Repro:
+// `MATCH(n:P{k:'a'}) WITH n,id(n) AS nid UNWIND[n,nid] AS x RETURN
+// count(DISTINCT x)` returned 2 (should be 1) before this fix.
+func TestEquivalentHash_NodeRelationshipIntegerInvariant(t *testing.T) {
+	const id = uint64(42)
+	cases := []struct {
+		name string
+		a, b Value
+	}{
+		{"NodeValue vs IntegerValue", NodeValue{ID: id}, IntegerValue(id)},
+		{"IntegerValue vs NodeValue (reversed)", IntegerValue(id), NodeValue{ID: id}},
+		{"RelationshipValue vs IntegerValue", RelationshipValue{ID: id}, IntegerValue(id)},
+		{"LazyNodeValue vs IntegerValue", NewLazyNodeValue(id, nil), IntegerValue(id)},
+		{"LazyNodeValue vs NodeValue", NewLazyNodeValue(id, nil), NodeValue{ID: id}},
+		{"NodeValue vs LazyNodeValue (reversed)", NodeValue{ID: id}, NewLazyNodeValue(id, nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !Equivalent(tc.a, tc.b) {
+				t.Fatalf("precondition failed: Equivalent(%v, %v) = false, want true", tc.a, tc.b)
+			}
+			ha, hb := EquivalentHash(tc.a), EquivalentHash(tc.b)
+			if ha != hb {
+				t.Errorf("Equivalent(%v, %v) is true but EquivalentHash disagrees: %d != %d", tc.a, tc.b, ha, hb)
+			}
+		})
+	}
+}
+
+// TestEquivalentHash_NodeRelationship_NotCollapsedForDistinctValues is a
+// negative control: the fix must not make every node/relationship/integer
+// combination hash identically — only pairs referring to the same ID.
+func TestEquivalentHash_NodeRelationship_NotCollapsedForDistinctValues(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b Value
+	}{
+		{"NodeValue(1) vs NodeValue(2)", NodeValue{ID: 1}, NodeValue{ID: 2}},
+		{"NodeValue(1) vs IntegerValue(2)", NodeValue{ID: 1}, IntegerValue(2)},
+		{"RelationshipValue(1) vs IntegerValue(2)", RelationshipValue{ID: 1}, IntegerValue(2)},
+		{"NodeValue(1) vs RelationshipValue(1)", NodeValue{ID: 1}, RelationshipValue{ID: 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if Equivalent(tc.a, tc.b) {
+				t.Fatalf("precondition failed: Equivalent(%v, %v) = true, want false", tc.a, tc.b)
+			}
+		})
+	}
+}
