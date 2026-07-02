@@ -401,6 +401,22 @@ graphs — the same single `(n-1)(n-2)` divisor the sibling
 re-stamped to gitDate 2026-07-02. No new label or edge type. TCK 3897/3897
 unaffected. Local commit, not pushed.
 
+Incrementally synced at commit `6bbe332` (2026-07-02, task #1862, sprint
+262, still OPEN): +1 `Commit` (`6bbe332`); +1 `Task` (`1862`, COMPLETED).
+Closed finding A2 from the same audit (doc-only, no behaviour change):
+`search/triangles.go`'s `CountTriangles` (and `search/triangles_parallel.go`'s
+`CountTrianglesParallel`) is correct only on a simple graph — a self-loop or
+a parallel edge on a triangle's lowest-ranked vertex is walked more than
+once by the degree-ordered node-iterator algorithm, silently over-counting
+that triangle. The function never checked or documented this, and
+`adjlist.Config{Multigraph: true}` can represent both. Both docs now state
+the precondition. Edges: `Sprint 262 -[CONTAINS]-> Commit`; `Task 1862
+-[IMPLEMENTED_IN]-> Commit`; `Commit -[FIXES]->` Feature `Search &
+Path-finding` (id 10375); `Commit -[TOUCHES]->` Package `search` (id 131,
+where both triangle-counting files live). Feature and Package re-stamped to
+gitDate 2026-07-02. No new label or edge type. TCK 3897/3897 unaffected.
+Local commit, not pushed.
+
 ---
 
 ## Node labels
