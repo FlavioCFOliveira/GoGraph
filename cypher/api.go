@@ -6689,8 +6689,14 @@ func buildEagerAggregation(
 		// DISTINCT operator (openCypher CIP2016-06-14 equivalence).
 		if aggExpr.Distinct {
 			inner := factory
+			// Resolve the byte dimension once per aggregate (it does not vary
+			// per group): reuses the same query-wide byte ceiling
+			// (bopts.maxResultBytes) and per-value estimator every other
+			// pipeline-breaker (Sort/Distinct/Eager/EagerAggregation/HashJoin)
+			// already consumes, rather than introducing a dedicated knob.
+			distinctMaxBytes, _ := resultByteBudget(capturedBopts)
 			factory = func() funcs.Aggregator {
-				return newDistinctAggregator(inner())
+				return newDistinctAggregator(inner(), 0).WithByteBudget(distinctMaxBytes, func(v expr.Value) int64 { return estimateValueSize(v) })
 			}
 		}
 		aggFactories = append(aggFactories, factory)
@@ -6857,6 +6863,24 @@ func buildEagerAggregation(
 	return topOp, nil
 }
 
+// DefaultMaxAggregateDistinctValues is the default upper bound on the number
+// of distinct values a [distinctAggregator] retains for one group before
+// Step returns [ErrAggregateDistinctMemoryExceeded]. Matches the sibling
+// pipeline-breaker caps' 10-million convention ([exec.DefaultMaxDistinct],
+// [funcs.DefaultMaxCollectItems]) high enough that ordinary queries — and the
+// entire openCypher TCK — never reach it, yet finite so an unbounded
+// count/sum/avg/min/max(DISTINCT …) fails fast instead of growing its
+// seen-values set without limit. Not independently configurable via
+// [EngineOptions], exactly like [exec.DefaultMaxDistinct]/
+// [exec.DefaultMaxGroups] — only the buffering aggregators family
+// ([EngineOptions.MaxCollectItems]) exposes a dedicated knob.
+const DefaultMaxAggregateDistinctValues = 10_000_000
+
+// ErrAggregateDistinctMemoryExceeded is returned by [distinctAggregator.Step]
+// once the number of distinct values seen for one group — or their estimated
+// retained size — exceeds its configured bound. Matchable with [errors.Is].
+var ErrAggregateDistinctMemoryExceeded = errors.New("cypher: aggregate DISTINCT memory cap exceeded")
+
 // distinctAggregator wraps a [funcs.Aggregator] with a "seen-values" set
 // so the inner Step receives only the first occurrence of each distinct
 // value within the same group. Dedup uses openCypher EQUIVALENCE (not
@@ -6866,19 +6890,63 @@ func buildEagerAggregation(
 // the standalone DISTINCT operator (cypher/exec/distinct.go). NULL is
 // silently skipped per openCypher aggregation semantics.
 //
+// The seen-values set is bounded by a count cap (maxValues, default
+// [DefaultMaxAggregateDistinctValues]) and, when estimateVal is non-nil, an
+// estimated-byte budget — the same two-dimensional shape [exec.Distinct] and
+// [exec.EagerAggregation] use, so a handful of large-valued distinct inputs
+// cannot exceed memory before the count cap would fire. Before this cap
+// every streaming aggregator (count/sum/avg/min/max) wrapped in DISTINCT held
+// an entirely unbounded seen-values set, since those inner aggregators
+// themselves hold O(1) state and never trip a budget of their own.
+//
 // distinctAggregator is NOT safe for concurrent use.
 type distinctAggregator struct {
 	inner funcs.Aggregator
 	seen  map[uint64][]expr.Value
+	count int
+
+	maxValues int
+	// maxBytes/estimateVal mirror byteBudget's shape at the single-value
+	// granularity distinctAggregator operates at (funcs.Aggregator.Step
+	// receives one value, not a whole exec.Row). maxBytes<=0 or a nil
+	// estimateVal disables the byte dimension, matching byteBudget's own
+	// disabled-by-default convention.
+	maxBytes    int64
+	usedBytes   int64
+	estimateVal func(expr.Value) int64
 }
 
-func newDistinctAggregator(inner funcs.Aggregator) *distinctAggregator {
-	return &distinctAggregator{inner: inner, seen: map[uint64][]expr.Value{}}
+// newDistinctAggregator wraps inner with DISTINCT dedup bookkeeping.
+// maxValues is the count-cap override; pass 0 to use
+// [DefaultMaxAggregateDistinctValues] (mirrors [exec.NewDistinct]'s
+// zero-means-default convention). The byte dimension is disabled until
+// [distinctAggregator.WithByteBudget] is called.
+func newDistinctAggregator(inner funcs.Aggregator, maxValues int) *distinctAggregator {
+	if maxValues <= 0 {
+		maxValues = DefaultMaxAggregateDistinctValues
+	}
+	return &distinctAggregator{
+		inner:     inner,
+		seen:      map[uint64][]expr.Value{},
+		maxValues: maxValues,
+	}
+}
+
+// WithByteBudget enables the optional byte dimension, mirroring
+// [exec.Distinct.WithByteBudget]'s chained-after-construction shape. A
+// non-positive maxBytes or a nil estimateVal leaves the byte dimension
+// disabled (the zero-value default). Returns d for chaining.
+func (d *distinctAggregator) WithByteBudget(maxBytes int64, estimateVal func(expr.Value) int64) *distinctAggregator {
+	d.maxBytes = maxBytes
+	d.estimateVal = estimateVal
+	return d
 }
 
 func (d *distinctAggregator) Init() {
 	d.inner.Init()
 	d.seen = map[uint64][]expr.Value{}
+	d.count = 0
+	d.usedBytes = 0
 }
 
 func (d *distinctAggregator) Step(v expr.Value) error {
@@ -6893,14 +6961,29 @@ func (d *distinctAggregator) Step(v expr.Value) error {
 			return nil
 		}
 	}
+	// New distinct value: check the resource bounds BEFORE doing any work,
+	// so a value that would breach either cap never reaches the inner
+	// aggregator and leaves no partial trace in the seen-values set.
+	if d.count >= d.maxValues {
+		return ErrAggregateDistinctMemoryExceeded
+	}
+	var sz int64
+	if d.maxBytes > 0 && d.estimateVal != nil {
+		sz = d.estimateVal(v)
+		if d.usedBytes+sz > d.maxBytes {
+			return ErrAggregateDistinctMemoryExceeded
+		}
+	}
 	// Forward to the inner aggregator first; only record the value as "seen"
 	// once it has been accepted. When the inner aggregator rejects the value
-	// (e.g. its per-group element budget is exceeded), the typed error
+	// (e.g. its own per-group element budget is exceeded), the typed error
 	// propagates and the dedup set is left unchanged.
 	if err := d.inner.Step(v); err != nil {
 		return err
 	}
 	d.seen[h] = append(d.seen[h], v)
+	d.count++
+	d.usedBytes += sz
 	return nil
 }
 
