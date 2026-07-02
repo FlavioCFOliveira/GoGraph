@@ -162,9 +162,12 @@ type IntegerValue int64
 // Kind implements [Value].
 func (v IntegerValue) Kind() Kind { return KindInteger }
 
-// Hash implements [Value].
+// Hash implements [Value]. This folds the raw int64 bits and is unrelated to
+// [FloatValue.Hash]'s IEEE-754 bit pattern, so a numerically-equal Integer and
+// Float (1 and 1.0, equal per [IntegerValue.Equal]) hash differently here.
+// DISTINCT/grouping/UNION need cross-type consistency and must use
+// [EquivalentHash] instead, never this method directly.
 func (v IntegerValue) Hash() uint64 {
-	// XOR-fold so that integer and float hashes agree for representable values.
 	return uint64(v) ^ (uint64(v) >> 32)
 }
 

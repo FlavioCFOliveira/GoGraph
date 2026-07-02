@@ -85,12 +85,36 @@ func Equivalent(a, b Value) bool {
 	return IsTruthy(a.Equal(b))
 }
 
+// hashFloatBits returns the equivalence-consistent hash for the canonical
+// (non-NaN) float64 representation f. Shared by the FloatValue and
+// IntegerValue branches of [EquivalentHash]: [Value.Equal] compares a
+// cross-type Integer/Float pair via float64(a) == float64(b), so both types
+// must hash through this exact same float64 domain to keep the two
+// consistent — whatever precision the comparison tolerates, the hash must
+// tolerate identically.
+func hashFloatBits(f float64) uint64 {
+	// Canonicalise -0.0 → +0.0 so both map to the same hash.
+	// (IEEE 754: -0.0 == +0.0, so they must be equivalent.)
+	if f == 0 {
+		f = 0.0 // force positive zero bit pattern
+	}
+	bits := math.Float64bits(f)
+	return bits ^ (bits >> 32)
+}
+
 // EquivalentHash returns a hash for v that is consistent with [Equivalent]:
 // two values that are Equivalent always produce the same EquivalentHash.
 //
-// This differs from v.Hash() for FloatValue in two cases:
+// This differs from v.Hash() in three cases:
 //   - All NaN bit-patterns map to one canonical hash (NaN ≡ NaN).
 //   - -0.0 maps to the same hash as 0.0 (−0.0 == 0.0 in IEEE 754).
+//   - IntegerValue hashes through the same float64 domain as FloatValue (see
+//     [hashFloatBits]), so an Integer and a numerically-equal Float — which
+//     [Equivalent] already treats as equivalent — always land in the same
+//     hash bucket. [IntegerValue.Hash] does not have this property (it folds
+//     the raw int64 bits, unrelated to the IEEE-754 float64 bit pattern),
+//     which is exactly why DISTINCT/grouping must call EquivalentHash and
+//     never IntegerValue.Hash/Value.Hash directly.
 func EquivalentHash(v Value) uint64 {
 	if fv, ok := v.(FloatValue); ok {
 		f := float64(fv)
@@ -100,13 +124,10 @@ func EquivalentHash(v Value) uint64 {
 			const nanHash uint64 = 0x7FF8000000000001 // canonical qNaN bits
 			return nanHash ^ (nanHash >> 32)
 		}
-		// Canonicalise -0.0 → +0.0 so both map to the same hash.
-		// (IEEE 754: -0.0 == +0.0, so they must be equivalent.)
-		if f == 0 {
-			f = 0.0 // force positive zero bit pattern
-		}
-		bits := math.Float64bits(f)
-		return bits ^ (bits >> 32)
+		return hashFloatBits(f)
+	}
+	if iv, ok := v.(IntegerValue); ok {
+		return hashFloatBits(float64(iv))
 	}
 	if lv, ok := v.(ListValue); ok {
 		const (

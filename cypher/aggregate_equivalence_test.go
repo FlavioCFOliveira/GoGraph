@@ -10,6 +10,12 @@ package cypher_test
 // These drive the real aggregate path through Engine.Run (the bug lived in the
 // distinctAggregator wrapper and SumAgg.Result, not in the standalone DISTINCT
 // operator that the cypher/exec unit tests exercise).
+//
+// Also gates the 2026-07-02 production-readiness audit finding F2:
+// DISTINCT/grouping/UNION dedup by [expr.EquivalentHash], which used to
+// disagree with [expr.Equivalent] for a cross-type Integer/Float pair (see
+// cypher/expr/equiv_test.go for the unit-level fix), causing an over-count
+// whenever the same logical number appeared as both an INTEGER and a FLOAT.
 
 import (
 	"context"
@@ -143,5 +149,72 @@ func TestAggSum_Controls(t *testing.T) {
 	}
 	if c := singleRow(t, eng, `MATCH (n:Nonexist) RETURN count(n.x) AS c`)["c"]; int64(c.(expr.IntegerValue)) != 0 {
 		t.Errorf("count(empty) = %v, want 0", c)
+	}
+}
+
+// F2 — count(DISTINCT …) must collapse an INTEGER and a numerically-equal
+// FLOAT into one equivalence class, exactly as it already does for NaN/null.
+func TestAggDistinct_IntFloat_Equivalence(t *testing.T) {
+	t.Parallel()
+	eng := newAggEngine(t)
+	row := singleRow(t, eng, `UNWIND [1, 1.0, 2] AS x RETURN count(DISTINCT x) AS c`)
+	got, ok := row["c"].(expr.IntegerValue)
+	if !ok {
+		t.Fatalf("c: want IntegerValue, got %T (%v)", row["c"], row["c"])
+	}
+	if int64(got) != 2 {
+		t.Errorf("count(DISTINCT 1, 1.0, 2) = %d, want 2 (1 and 1.0 are equivalent)", int64(got))
+	}
+}
+
+// F2 — collect(DISTINCT …) over an Integer/Float pair keeps a single element,
+// not a duplicate.
+func TestAggDistinct_IntFloat_Collect(t *testing.T) {
+	t.Parallel()
+	eng := newAggEngine(t)
+	row := singleRow(t, eng, `UNWIND [1, 1.0] AS x RETURN collect(DISTINCT x) AS c`)
+	lst, ok := row["c"].(expr.ListValue)
+	if !ok {
+		t.Fatalf("c: want ListValue, got %T (%v)", row["c"], row["c"])
+	}
+	if len(lst) != 1 {
+		t.Errorf("collect(DISTINCT 1, 1.0) = %v (len %d), want a single-element list", lst, len(lst))
+	}
+}
+
+// F2 — grouping by an expression must merge rows whose group key is an
+// Integer in one row and the equal Float in another into one group.
+func TestAggGroupBy_IntFloat_Equivalence(t *testing.T) {
+	t.Parallel()
+	eng := newAggEngine(t)
+	res, err := eng.Run(context.Background(), `UNWIND [1, 1.0, 2] AS x RETURN x, count(*) AS c`, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rows := collectRecords(t, res)
+	if len(rows) != 2 {
+		t.Fatalf("grouping [1, 1.0, 2] by x produced %d groups, want 2 (1 and 1.0 merge)", len(rows))
+	}
+	var total int64
+	for _, r := range rows {
+		total += int64(r["c"].(expr.IntegerValue))
+	}
+	if total != 3 {
+		t.Errorf("group counts sum to %d, want 3 (one per input row)", total)
+	}
+}
+
+// F2 — UNION deduplicates by equivalence, so RETURN 1 UNION RETURN 1.0 must
+// yield a single row.
+func TestUnion_IntFloat_Equivalence(t *testing.T) {
+	t.Parallel()
+	eng := newAggEngine(t)
+	res, err := eng.Run(context.Background(), `RETURN 1 AS x UNION RETURN 1.0 AS x`, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rows := collectRecords(t, res)
+	if len(rows) != 1 {
+		t.Errorf("(RETURN 1) UNION (RETURN 1.0) produced %d rows, want 1 (1 and 1.0 are equivalent)", len(rows))
 	}
 }
