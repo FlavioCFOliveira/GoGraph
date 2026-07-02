@@ -593,100 +593,92 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 		r = newLimitReader(r, maxBytes)
 	}
 	dec := xml.NewDecoder(r)
-	var doc docElement
-	if err := dec.Decode(&doc); err != nil {
-		metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-		return nil, 0, fmt.Errorf("graphml: parse: %w", err)
-	}
 
-	// Index <key> declarations by id so data elements can be resolved
-	// in O(1). Keep track of the weight key separately.
-	keyIndex := make(map[string]keyDecl, len(doc.Keys))
-	for _, k := range doc.Keys {
-		keyIndex[k.ID] = k
-	}
-	weightKey := findWeightKey(doc.Keys)
-
-	if len(doc.Graphs) == 0 {
-		return lpg.New[string, int64](adjlist.Config{Directed: true}), 0, nil
-	}
-	gr := doc.Graphs[0]
-	cfg := adjlist.Config{Directed: gr.EdgeDefault != "undirected"}
-	g := lpg.New[string, int64](cfg)
-
-	// Add nodes and decode their properties.
-	for _, n := range gr.Nodes {
-		if err := g.AddNode(n.ID); err != nil {
-			metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-			return nil, 0, fmt.Errorf("graphml: AddNode(%q): %w", n.ID, err)
-		}
-		// Re-use the nodeElement's inline Data field when the XML
-		// decoder populates it (the docElement struct unmarshals
-		// <data> children of <node> via xml:"data").
-		for _, d := range n.Data {
-			// Reserved node-label key (#1793): the value is a JSON array of
-			// label strings; restore them via SetNodeLabel rather than decoding
-			// a property. Handled before the keyIndex lookup so it works even if
-			// a writer ever omits the <key> declaration.
-			if d.Key == labelsKeyID {
-				var labels []string
-				if err := json.Unmarshal([]byte(d.Value), &labels); err != nil {
-					metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-					return nil, 0, fmt.Errorf("graphml: node %q labels: %w", n.ID, err)
-				}
-				for _, lbl := range labels {
-					if err := g.SetNodeLabel(n.ID, lbl); err != nil {
-						metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-						return nil, 0, fmt.Errorf("graphml: node %q SetNodeLabel(%q): %w", n.ID, lbl, err)
+	var (
+		g         *lpg.Graph[string, int64]
+		keyIndex  map[string]keyDecl
+		weightKey string
+		added     int
+	)
+	err := streamGraphMLFirstGraph(ctx, dec,
+		func(keys []keyDecl, directed bool) error {
+			// Index <key> declarations by id so data elements resolve in O(1);
+			// track the weight key separately. Keys precede <graph> per the
+			// GraphML spec and this package's writer, so the index is complete
+			// before any node/edge is folded.
+			keyIndex = make(map[string]keyDecl, len(keys))
+			for _, k := range keys {
+				keyIndex[k.ID] = k
+			}
+			weightKey = findWeightKey(keys)
+			g = lpg.New[string, int64](adjlist.Config{Directed: directed})
+			return nil
+		},
+		func(n *nodeElement) error {
+			if err := g.AddNode(n.ID); err != nil {
+				return fmt.Errorf("graphml: AddNode(%q): %w", n.ID, err)
+			}
+			for _, d := range n.Data {
+				// Reserved node-label key (#1793): the value is a JSON array of
+				// label strings; restore them via SetNodeLabel rather than
+				// decoding a property. Handled before the keyIndex lookup so it
+				// works even if a writer ever omits the <key> declaration.
+				if d.Key == labelsKeyID {
+					var labels []string
+					if err := json.Unmarshal([]byte(d.Value), &labels); err != nil {
+						return fmt.Errorf("graphml: node %q labels: %w", n.ID, err)
 					}
+					for _, lbl := range labels {
+						if err := g.SetNodeLabel(n.ID, lbl); err != nil {
+							return fmt.Errorf("graphml: node %q SetNodeLabel(%q): %w", n.ID, lbl, err)
+						}
+					}
+					continue
 				}
-				continue
-			}
-			decl, ok := keyIndex[d.Key]
-			if !ok {
-				continue
-			}
-			// Skip the edge-weight key if it appears on a node.
-			if d.Key == weightKey {
-				continue
-			}
-			pv, err := deserialisePropertyValue(decl.AttrType, d.Value)
-			if err != nil {
-				metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-				return nil, 0, fmt.Errorf("graphml: node %q key %q: %w", n.ID, decl.AttrName, err)
-			}
-			if err := g.SetNodeProperty(n.ID, decl.AttrName, pv); err != nil {
-				metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-				return nil, 0, fmt.Errorf("graphml: SetNodeProperty(%q, %q): %w", n.ID, decl.AttrName, err)
-			}
-		}
-	}
-
-	// Add edges.
-	added := 0
-	for _, e := range gr.Edges {
-		if added&0xFFF == 0 {
-			if err := ctx.Err(); err != nil {
-				metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-				return nil, added, err
-			}
-		}
-		var w int64
-		for _, d := range e.Data {
-			if d.Key == weightKey && weightKey != "" {
-				v, err := strconv.ParseInt(d.Value, 10, 64)
+				decl, ok := keyIndex[d.Key]
+				if !ok {
+					continue
+				}
+				// Skip the edge-weight key if it appears on a node.
+				if d.Key == weightKey {
+					continue
+				}
+				pv, err := deserialisePropertyValue(decl.AttrType, d.Value)
 				if err != nil {
-					metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-					return nil, added, fmt.Errorf("graphml: edge (%q,%q) weight %q: %w", e.Source, e.Target, d.Value, err)
+					return fmt.Errorf("graphml: node %q key %q: %w", n.ID, decl.AttrName, err)
 				}
-				w = v
+				if err := g.SetNodeProperty(n.ID, decl.AttrName, pv); err != nil {
+					return fmt.Errorf("graphml: SetNodeProperty(%q, %q): %w", n.ID, decl.AttrName, err)
+				}
 			}
-		}
-		if err := g.AdjList().AddEdge(e.Source, e.Target, w); err != nil {
-			metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
-			return nil, added, fmt.Errorf("graphml: AddEdge(%q, %q): %w", e.Source, e.Target, err)
-		}
-		added++
+			return nil
+		},
+		func(e *edgeElement) error {
+			var w int64
+			for _, d := range e.Data {
+				if d.Key == weightKey && weightKey != "" {
+					v, err := strconv.ParseInt(d.Value, 10, 64)
+					if err != nil {
+						return fmt.Errorf("graphml: edge (%q,%q) weight %q: %w", e.Source, e.Target, d.Value, err)
+					}
+					w = v
+				}
+			}
+			if err := g.AdjList().AddEdge(e.Source, e.Target, w); err != nil {
+				return fmt.Errorf("graphml: AddEdge(%q, %q): %w", e.Source, e.Target, err)
+			}
+			added++
+			return nil
+		},
+	)
+	if err != nil {
+		metrics.IncCounter("graph.io.graphml.ReadWithPropsCtx.errors", 1)
+		return nil, added, err
+	}
+	// No <graph> element: an empty directed graph (matches the prior
+	// len(doc.Graphs) == 0 behaviour).
+	if g == nil {
+		return lpg.New[string, int64](adjlist.Config{Directed: true}), 0, nil
 	}
 	return g, added, nil
 }
