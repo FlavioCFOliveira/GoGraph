@@ -17,7 +17,11 @@ import (
     "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-g   := lpg.New[string, float64](adjlist.Config{})
+// Multigraph: true is required — openCypher's data model is a multigraph, so a
+// CREATE always adds a relationship (including a parallel edge between an
+// existing node pair). Constructing the engine over a non-multigraph graph makes
+// such a CREATE fail with cypher.ErrParallelEdgeInSimpleGraph.
+g   := lpg.New[string, float64](adjlist.Config{Multigraph: true})
 eng := cypher.NewEngine(g)
 
 res, err := eng.RunInTx(context.Background(),

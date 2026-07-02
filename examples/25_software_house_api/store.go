@@ -28,10 +28,13 @@ var ErrStoreClosed = errors.New("data store is closed")
 
 // lpgConfig is the adjacency-list configuration for the example's graph.
 // Every relationship type in the model is directional, so the backend is
-// directed. The same config writes the initial empty snapshot and is the
-// shape recovery reconstructs on open.
+// directed. Multigraph: true is required because the API serves openCypher
+// writes, whose data model is a multigraph: a CREATE always adds a
+// relationship, including a second relationship between an existing node
+// pair. The same config writes the initial empty snapshot and is the shape
+// recovery reconstructs on open.
 func lpgConfig() adjlist.Config {
-	return adjlist.Config{Directed: true}
+	return adjlist.Config{Directed: true, Multigraph: true}
 }
 
 // dataDirPaths returns the canonical WAL file and snapshot directory

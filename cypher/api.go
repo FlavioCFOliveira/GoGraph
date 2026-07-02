@@ -947,6 +947,18 @@ func resolveMaxResultBytes(opt int64) int64 {
 //nolint:gocritic // public API: EngineOptions is passed by value to preserve every existing call site; the constructor only reads from it.
 func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *Engine {
 	ensureIndexManager(g)
+	// openCypher's data model is a multigraph: every CREATE adds a relationship,
+	// including a second relationship between an existing ordered node pair. A
+	// non-multigraph adjacency cannot store such a parallel edge, so any write
+	// that would create one fails fast with [ErrParallelEdgeInSimpleGraph]. Warn
+	// once at construction so the misconfiguration surfaces before the first
+	// write rather than only when a parallel-edge CREATE is attempted.
+	if !g.AdjList().Multigraph() {
+		slog.Default().Warn("cypher: engine constructed over a non-multigraph graph; "+
+			"a CREATE or MERGE that adds a parallel relationship between an existing node pair "+
+			"will fail because openCypher requires multigraph semantics",
+			slog.String("hint", "construct the graph with adjlist.Config{Multigraph: true}"))
+	}
 	reg := opts.Registry
 	if reg == nil {
 		reg = funcs.DefaultRegistry
@@ -10758,11 +10770,24 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	return id, nil
 }
 
+// ErrParallelEdgeInSimpleGraph is returned by a Cypher write that would add a
+// second relationship between an ordered node pair that already has one when the
+// backing graph is not a multigraph and therefore cannot store the parallel
+// edge. openCypher's data model is a multigraph in which every CREATE adds a
+// relationship, so the Cypher engine must be constructed over a graph built with
+// adjlist.Config{Multigraph: true}. The write fails fast and aborts the
+// transaction rather than silently discarding the edge, upholding the module's
+// fail-stop, never-fail-silent contract.
+var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel edge on a non-multigraph graph; construct the engine over a graph created with adjlist.Config{Multigraph: true}")
+
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	if !a.g.AdjList().Multigraph() && edgeExisted {
+		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
+	}
 	if err := a.g.AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -10774,9 +10799,10 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	// See [walMutatorAdapter.AddEdge]: only count and record-undo a real add, so a
-	// rolled-back no-op CREATE on a simple graph cannot delete the pre-existing
-	// edge. Multigraph always adds (edgeAdded == true), so behaviour is unchanged.
+	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
+	// used to be a silent no-op is now rejected above, before any mutation, so
+	// this branch is never skipped. Kept explicit for symmetry with
+	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
@@ -10790,6 +10816,9 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	if !a.g.AdjList().Multigraph() && edgeExisted {
+		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
+	}
 	handle, err := a.g.AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -10802,9 +10831,10 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	// See [walMutatorAdapter.AddEdge]: only count and record-undo a real add, so a
-	// rolled-back no-op CREATE on a simple graph cannot delete the pre-existing
-	// edge. Multigraph always adds (edgeAdded == true), so behaviour is unchanged.
+	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
+	// used to be a silent no-op is now rejected above, before any mutation, so
+	// this branch is never skipped. Kept explicit for symmetry with
+	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
@@ -11289,6 +11319,9 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	if !a.g.AdjList().Multigraph() && edgeExisted {
+		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
+	}
 	if err := a.g.AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -11301,12 +11334,14 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	// On a simple graph a duplicate (src,dst) AddEdge is a documented no-op;
-	// counting it and recording a RemoveEdge undo inverse would let a rolled-back
-	// transaction DELETE the pre-existing committed edge — an Atomicity breach the
-	// DST disk-full scenario found. Bookkeep only a real add. On a multigraph
-	// every AddEdge adds a parallel edge, so edgeAdded is always true and the
-	// behaviour (and the CREATE relationships-created stat) is byte-identical.
+	// A duplicate (src,dst) AddEdge on a non-multigraph graph used to be treated
+	// as a storage no-op; counting it and recording a RemoveEdge undo inverse
+	// let a rolled-back transaction DELETE the pre-existing committed edge — an
+	// Atomicity breach the DST disk-full scenario found (#1751). The guard above
+	// now rejects that case before any mutation (rmp #1856: openCypher CREATE
+	// never deduplicates), so edgeAdded is always true here: on a multigraph
+	// every AddEdge adds a parallel edge, and on a simple graph reaching this
+	// line already implies !edgeExisted.
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
@@ -11326,6 +11361,9 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	if !a.g.AdjList().Multigraph() && edgeExisted {
+		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
+	}
 	handle, err := a.g.AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -11339,9 +11377,10 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.g.IncrNodesAdded()
 	}
-	// See [walMutatorAdapter.AddEdge]: only count and record-undo a real add, so
-	// a rolled-back no-op CREATE on a simple graph cannot delete the pre-existing
-	// edge. Multigraph always adds (edgeAdded == true), so behaviour is unchanged.
+	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
+	// used to be a silent no-op is now rejected above, before any mutation, so
+	// this branch is never skipped. Kept explicit for symmetry with
+	// [lpgMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)

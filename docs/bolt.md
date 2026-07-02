@@ -13,7 +13,10 @@ import (
     "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-g := lpg.New[string, float64](adjlist.Config{})
+// Multigraph: true is required — openCypher's data model is a multigraph, so a
+// CREATE always adds a relationship (including a parallel edge between an
+// existing node pair).
+g := lpg.New[string, float64](adjlist.Config{Multigraph: true})
 eng := cypher.NewEngine(g)
 srv := server.NewServer(eng, server.Options{MaxConnections: 1024})
 go srv.ListenAndServe(context.Background(), ":7687")
@@ -176,7 +179,9 @@ import (
 )
 
 func main() {
-    g   := lpg.New[string, float64](adjlist.Config{})
+    // Multigraph: true — openCypher's data model is a multigraph (a CREATE
+    // always adds a relationship, including a parallel edge between a pair).
+    g   := lpg.New[string, float64](adjlist.Config{Multigraph: true})
     eng := cypher.NewEngine(g)
     srv := server.NewServer(eng, server.Options{MaxConnections: 1024})
 

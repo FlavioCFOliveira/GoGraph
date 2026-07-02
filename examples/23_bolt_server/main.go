@@ -169,7 +169,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "config.seed=%d\n", cfg.seed)
 
 	// Engine over an in-memory labelled property graph, seeded from cfg.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	// Multigraph: true is required for openCypher semantics — CREATE always adds
+	// a relationship, including a parallel edge between an existing node pair.
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	eng := cypher.NewEngine(g)
 	stats, err := seed(ctx, g, cfg)
 	if err != nil {
