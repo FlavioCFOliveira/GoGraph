@@ -104,11 +104,13 @@ var ErrTooManyKeys = errors.New("graphml: too many <key> declarations")
 // streamGraphMLFirstGraph tokenises dec and drives the callbacks as each
 // element is decoded, retaining at most one <node>/<edge> element at a time
 // plus the (capped) <key> declarations — never the whole document. Per the
-// GraphML spec (and this package's own writer) every <key> precedes <graph>,
-// so onGraph fires with the fully-collected keys before any onNode/onEdge; a
-// <key> that appears after <graph> in malformed input is simply not seen by the
-// key index (its typed <data> is treated as an unknown key, exactly as the
-// prior DOM reader treated an unresolved key). Only the first <graph> is
+// GraphML content model graphml ::= (desc?, key*, (data|graph)*) (and this
+// package's own writer) every <key> precedes <graph>, so onGraph fires with the
+// fully-collected keys before any onNode/onEdge. A <key> that appears after
+// <graph> violates the content model; its typed <data> is then treated as an
+// unknown key and skipped (the prior whole-document decode collected keys
+// regardless of position and would have resolved it — a deliberate, spec-safe
+// strictening for malformed input). Only the first <graph> is
 // processed, matching the prior reader's doc.Graphs[0] behaviour. onGraph is
 // not called when the document contains no <graph>. Decode/token (parse) errors
 // are wrapped as "graphml: parse: %w"; callback errors are returned verbatim so
