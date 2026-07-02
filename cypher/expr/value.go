@@ -429,6 +429,17 @@ func (v MapValue) Equal(other Value) Value {
 	if !ok || len(v) != len(o) {
 		return BoolValue(false)
 	}
+	// Three-valued map equality per openCypher, mirroring ListValue.Equal: a
+	// single FALSE entry comparison short-circuits to FALSE (overrides any
+	// prior NULLs); a pure mix of TRUEs and NULLs yields NULL; all-TRUE
+	// yields TRUE. Go's map iteration order is randomized per run, so a
+	// NULL-yielding entry must NOT short-circuit the whole comparison the
+	// way the FALSE case does — doing so (as an earlier version of this
+	// method did) made the overall result depend on which entry the
+	// randomized iteration happened to visit first, silently returning a
+	// different Value (Null vs. BoolValue(false)) for the identical pair of
+	// maps across different calls.
+	sawNull := false
 	for k, val := range v {
 		oval, exists := o[k]
 		if !exists {
@@ -436,11 +447,15 @@ func (v MapValue) Equal(other Value) Value {
 		}
 		r := val.Equal(oval)
 		if IsNull(r) {
-			return Null
+			sawNull = true
+			continue
 		}
 		if !IsTruthy(r) {
 			return BoolValue(false)
 		}
+	}
+	if sawNull {
+		return Null
 	}
 	return BoolValue(true)
 }

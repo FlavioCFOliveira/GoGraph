@@ -172,6 +172,55 @@ func TestEqual_ListNullPropagation(t *testing.T) {
 	}
 }
 
+func TestEqual_MapNullPropagation(t *testing.T) {
+	a := expr.MapValue{"x": expr.IntegerValue(1), "y": expr.Null}
+	b := expr.MapValue{"x": expr.IntegerValue(1), "y": expr.IntegerValue(2)}
+	r := a.Equal(b)
+	if !expr.IsNull(r) {
+		t.Errorf("map equal with an embedded-null entry (all other entries equal) should return Null, got %v", r)
+	}
+}
+
+// TestEqual_MapFalseWinsOverNullDeterministically is the regression gate for
+// a map-iteration-order bug surfaced during the rmp #1868 cypher-expert
+// review: an earlier version of MapValue.Equal returned as soon as it saw
+// ANY entry comparison yield Null, instead of continuing to check for a
+// later, decisive FALSE — so whether the overall result was Null or
+// BoolValue(false) depended on which of Go's randomized map-iteration
+// entries happened to be visited first, for the IDENTICAL pair of map
+// inputs. openCypher three-valued logic requires FALSE to always win over
+// NULL (mirroring ListValue.Equal, which already gets this right via its
+// sawNull tracking) — repeated here across enough map sizes/trials that the
+// old bug would almost certainly have surfaced at least one Null result
+// among the BoolValue(false) results.
+func TestEqual_MapFalseWinsOverNullDeterministically(t *testing.T) {
+	// A large map so Go's randomized iteration order varies substantially
+	// across calls, maximising the chance the old bug would visit the
+	// null-causing key first on at least one of the trials below.
+	a := expr.MapValue{}
+	b := expr.MapValue{}
+	for i := 0; i < 20; i++ {
+		k := string(rune('a' + i))
+		a[k] = expr.IntegerValue(int64(i))
+		b[k] = expr.IntegerValue(int64(i))
+	}
+	a["null-key"] = expr.Null
+	b["null-key"] = expr.IntegerValue(99) // a.Equal(b) on this entry: Null
+	a["false-key"] = expr.IntegerValue(1)
+	b["false-key"] = expr.IntegerValue(2) // a.Equal(b) on this entry: false
+
+	for trial := 0; trial < 200; trial++ {
+		r := a.Equal(b)
+		bv, ok := r.(expr.BoolValue)
+		if !ok {
+			t.Fatalf("trial %d: Equal returned %v (%T), want BoolValue(false) — FALSE must always win over NULL regardless of map iteration order", trial, r, r)
+		}
+		if bool(bv) {
+			t.Fatalf("trial %d: Equal returned BoolValue(true), want BoolValue(false)", trial)
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. Hash consistency — equal values must have equal hashes
 // ─────────────────────────────────────────────────────────────────────────────
