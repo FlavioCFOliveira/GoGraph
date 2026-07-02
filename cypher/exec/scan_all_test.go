@@ -115,10 +115,20 @@ func TestAllNodesScan_CloseAlwaysCalled(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. AllNodesScan — zero alloc after Init (benchmark)
+// 5. AllNodesScan — per-scanned-node allocation cost (benchmark)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func BenchmarkAllNodesScan_ZeroAlloc(b *testing.B) {
+// BenchmarkAllNodesScan_PerNodeAllocCost measures AllNodesScan's real
+// allocation cost on a fixture large enough (1000 NodeIDs) to exceed Go's
+// staticuint64s fast path (small integers 0-255 box without a heap
+// allocation), unlike a fixture confined to IDs < 256, which would report
+// 0 allocs/op regardless of whether the operator is actually zero-alloc.
+// This benchmark measures ~759 allocs/op — AllNodesScan is NOT zero-alloc
+// for realistic NodeID ranges; the scan leaf boxes one expr.IntegerValue per
+// scanned node (2026-07-02 production-readiness audit finding P1). This
+// benchmark was previously named BenchmarkAllNodesScan_ZeroAlloc, which
+// claimed a property its own measured numbers contradicted (finding P4).
+func BenchmarkAllNodesScan_PerNodeAllocCost(b *testing.B) {
 	const n = 1000
 	ids := make([]graph.NodeID, n)
 	for i := range ids {

@@ -5,15 +5,37 @@
 // # Gate tests (TestZeroAlloc_*)
 //
 // Each gate test pre-initialises the operator tree outside testing.AllocsPerRun
-// and measures a single Next() call inside the closure. This isolates per-call
-// heap cost from the constant setup cost of Init/NewXxx.
+// and measures a single Next() call inside the closure (TestZeroAlloc_ResultSet
+// measures a Next+Record pair, since Record is where a real caller reads a
+// row). This isolates per-call heap cost from the constant setup cost of
+// Init/NewXxx.
 //
-// Expected allocs per Next() call:
+// The gate walkers start at NodeID [gateAllocNodeIDStart] (>= 256), not 0:
+// Go's runtime boxes a small integer (0-255) into an interface via a shared
+// staticuint64s array with no heap allocation, so a gate confined to IDs < 256
+// would report 0 allocs/op regardless of whether the operator actually
+// allocates for realistic NodeIDs. This project's own
+// BenchmarkAllNodesScan_PerNodeAllocCost (cypher/exec/scan_all_test.go)
+// measures ~759 allocs/op on 1000 realistic NodeIDs — these gates previously
+// used newWalker(200) (IDs 0-199, all inside the free range) and so were
+// vacuous, always reporting 0 regardless of the operator's real cost
+// (production-readiness audit finding P4).
 //
-//	AllNodesScan: 0  — reuses a fixed [1]expr.Value backing buffer
-//	Filter:       0  — delegates to child; predicate is stack-only
-//	Project:      1  — boxes expr.IntegerValue into the expr.Value interface slot
-//	ResultSet:    2  — Project boxing + re-box into Record map[string]interface{}
+// Expected allocs per Next() call on a realistic (>= 256) NodeID:
+//
+//	AllNodesScan: 1  — boxes the scanned NodeID into an expr.IntegerValue in
+//	                   op.buf[0] (the single allocation site for this whole
+//	                   pipeline; see AllNodesScan.Next in scan_all.go)
+//	Filter:       1  — delegates to child; the predicate is stack-only, so
+//	                   Filter contributes nothing beyond AllNodesScan's box
+//	Project:      1  — projFirst is a pass-through (`return row[0], nil`), so
+//	                   it forwards the already-boxed interface value from
+//	                   AllNodesScan without a second allocation
+//	ResultSet:    1  — Next forwards the same box; Record's map write
+//	                   (map[string]interface{}[col] = row[i]) does not add a
+//	                   second allocation, since widening an already-boxed
+//	                   interface value and overwriting an existing map key
+//	                   are both allocation-free (see TestZeroAlloc_ResultSet)
 //
 // # Benchmarks (Benchmark*)
 //
@@ -52,11 +74,30 @@ func (w *staticWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
 	}
 }
 
-// newWalker returns a staticWalker with n sequentially-numbered NodeIDs.
+// newWalker returns a staticWalker with n sequentially-numbered NodeIDs
+// starting at 0.
 func newWalker(n int) *staticWalker {
+	return newWalkerFrom(0, n)
+}
+
+// gateAllocNodeIDStart is the first NodeID used by the TestZeroAlloc_* gates
+// below. It must be >= 256: Go's runtime keeps a shared staticuint64s array
+// for small integers 0-255, so boxing a NodeID in that range into an
+// expr.Value interface never allocates, regardless of whether the exercised
+// operator is actually zero-alloc. A gate walker confined to IDs < 256 (as
+// these gates originally were, via newWalker(200)) would report 0 allocs/op
+// even for a genuinely allocating operator — see BenchmarkAllNodesScan_
+// PerNodeAllocCost in cypher/exec/scan_all_test.go, which measures ~759
+// allocs/op for the identical operator on realistic NodeIDs (production-
+// readiness audit finding P4).
+const gateAllocNodeIDStart = 1000
+
+// newWalkerFrom returns a staticWalker with n sequentially-numbered NodeIDs
+// starting at start.
+func newWalkerFrom(start, n int) *staticWalker {
 	ids := make([]graph.NodeID, n)
 	for i := range ids {
-		ids[i] = graph.NodeID(i)
+		ids[i] = graph.NodeID(start + i)
 	}
 	return &staticWalker{ids: ids}
 }
@@ -109,13 +150,16 @@ func drainOp(op exec.Operator) (int, error) {
 // AllNodesScan
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TestZeroAlloc_AllNodesScan asserts that AllNodesScan.Next allocates nothing
-// per call after Init. The operator is pre-initialised on a 200-node graph
-// outside the AllocsPerRun closure; only a single Next() call sits inside.
-// 200 nodes gives 200 clean iterations before exhaustion.
+// TestZeroAlloc_AllNodesScan asserts that AllNodesScan.Next allocates at
+// most 1 heap object per call after Init: reusing the fixed [1]expr.Value
+// backing buffer itself costs nothing, but boxing the scanned NodeID into
+// an expr.IntegerValue interface value does, for any NodeID >= 256 (see the
+// package doc). The operator is pre-initialised on a 200-node graph outside
+// the AllocsPerRun closure; only a single Next() call sits inside. 200 nodes
+// gives 200 clean iterations before exhaustion.
 func TestZeroAlloc_AllNodesScan(t *testing.T) {
 	ctx := context.Background()
-	w := newWalker(200)
+	w := newWalkerFrom(gateAllocNodeIDStart, 200)
 	op := exec.NewAllNodesScan(w)
 	if err := op.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -127,10 +171,10 @@ func TestZeroAlloc_AllNodesScan(t *testing.T) {
 		_, _ = op.Next(&row)
 	})
 
-	// AllNodesScan.Next reuses a fixed [1]expr.Value backing buffer and
-	// performs no heap allocations after Init. The measured budget is 0.
-	if allocs > 0 {
-		t.Errorf("AllNodesScan.Next: want 0 allocs/op, got %.2f", allocs)
+	// 1 alloc/op: boxing the scanned NodeID into op.buf[0]. The [1]expr.Value
+	// backing buffer itself is reused across calls and costs nothing.
+	if allocs > 1 {
+		t.Errorf("AllNodesScan.Next: want <=1 alloc/op, got %.2f", allocs)
 	}
 }
 
@@ -165,12 +209,13 @@ func BenchmarkAllNodesScan(b *testing.B) {
 // FilterOp (exec.Filter)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TestZeroAlloc_FilterOp asserts that Filter.Next allocates nothing per call.
-// The operator tree is pre-initialised outside AllocsPerRun; only one Next()
-// call sits inside the measured closure.
+// TestZeroAlloc_FilterOp asserts that Filter.Next contributes nothing of its
+// own beyond whatever its child allocates. The operator tree is
+// pre-initialised outside AllocsPerRun; only one Next() call sits inside the
+// measured closure.
 func TestZeroAlloc_FilterOp(t *testing.T) {
 	ctx := context.Background()
-	w := newWalker(200)
+	w := newWalkerFrom(gateAllocNodeIDStart, 200)
 	scan := exec.NewAllNodesScan(w)
 	filter := exec.NewFilter(scan, predTrue)
 	if err := filter.Init(ctx); err != nil {
@@ -183,10 +228,11 @@ func TestZeroAlloc_FilterOp(t *testing.T) {
 		_, _ = filter.Next(&row)
 	})
 
-	// Filter.Next delegates to AllNodesScan.Next (0 alloc) and calls the
-	// predicate (stack-only). Budget: 0 allocs/op.
-	if allocs > 0 {
-		t.Errorf("Filter.Next: want 0 allocs/op, got %.2f", allocs)
+	// 1 alloc/op: Filter.Next delegates to AllNodesScan.Next (1 alloc, the
+	// NodeID boxing) and calls the predicate, which is stack-only. Budget:
+	// <=1 allocs/op — Filter itself must add nothing on top of its child.
+	if allocs > 1 {
+		t.Errorf("Filter.Next: want <=1 alloc/op, got %.2f", allocs)
 	}
 }
 
@@ -224,17 +270,16 @@ func BenchmarkFilterOp(b *testing.B) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TestZeroAlloc_Project asserts that Project.Next allocates at most 1 heap
-// object per call. The operator tree is pre-initialised outside AllocsPerRun.
-//
-// Project.Next declares "var inputRow Row" — a nil slice header — and passes
-// its address to the child. When AllNodesScan writes "*out = op.buf[:]" the
-// slice header is stored on the Project stack frame. The child value row[0] is
-// then copied into outBuf[0]. The expr.IntegerValue (an int64-based named type)
-// must be boxed into the expr.Value interface slot in outBuf, which costs one
-// allocation. This is the only expected per-call allocation.
+// object per call, and that the 1 it does allocate is not its own —
+// projFirst is a pass-through ("return row[0], nil"), so op.outBuf[i] = v
+// is a plain interface-to-interface copy (no allocation): the single
+// allocation is the child's (AllNodesScan boxing the scanned NodeID),
+// forwarded through Project unchanged. Project's own scratch state (the
+// reused op.inputRow header) is stack/struct-resident and costs nothing.
+// The operator tree is pre-initialised outside AllocsPerRun.
 func TestZeroAlloc_Project(t *testing.T) {
 	ctx := context.Background()
-	w := newWalker(200)
+	w := newWalkerFrom(gateAllocNodeIDStart, 200)
 	scan := exec.NewAllNodesScan(w)
 	filter := exec.NewFilter(scan, predTrue)
 	proj, err := exec.NewProject(filter, []exec.ProjectionItem{projFirst})
@@ -251,11 +296,10 @@ func TestZeroAlloc_Project(t *testing.T) {
 		_, _ = proj.Next(&row)
 	})
 
-	// 1 alloc/op: boxing expr.IntegerValue into the expr.Value interface slot
-	// of Project.outBuf. The slice header for "var inputRow Row" is stack-
-	// allocated.
+	// 1 alloc/op: the NodeID box forwarded from AllNodesScan, unchanged.
+	// Budget: <=1 allocs/op — Project itself must add nothing on top.
 	if allocs > 1 {
-		t.Errorf("Project.Next: want ≤1 alloc/op, got %.2f", allocs)
+		t.Errorf("Project.Next: want <=1 alloc/op, got %.2f", allocs)
 	}
 }
 
@@ -298,21 +342,31 @@ func BenchmarkProjectOp(b *testing.B) {
 // ResultSet (exec.Run)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TestZeroAlloc_ResultSet asserts that ResultSet.Next allocates at most 2 heap
-// objects per call. The operator tree is pre-initialised via exec.Run outside
-// AllocsPerRun; only one Next() call sits inside the closure.
+// TestZeroAlloc_ResultSet asserts that a full ResultSet.Next + Record read
+// cycle allocates at most 1 heap object per call — the same single
+// allocation forwarded all the way from AllNodesScan (see
+// TestZeroAlloc_AllNodesScan / TestZeroAlloc_Project), with nothing added by
+// either Next or Record. The operator tree is pre-initialised via exec.Run
+// outside AllocsPerRun; Record's lazily-allocated backing map is warmed up
+// by one untimed Next+Record pair before the measured closure, matching the
+// steady-state cost a real multi-row query pays after its first row.
 //
-// Breakdown of the 2 expected allocations:
-//  1. Project.Next boxes expr.IntegerValue into outBuf[0] (see TestZeroAlloc_Project).
-//  2. ResultSet.Next assigns row[0] (a boxed expr.Value) into the Record map
-//     (type map[string]interface{}); the runtime re-boxes the interface value
-//     into the interface{} map slot.
-//
-// The Record map itself is pre-allocated once in exec.Run and reused across
-// every Next call, so no per-row map allocation occurs.
+// Record's map write does not cost a second allocation: fillCurrent (in
+// produce_results.go) does `rs.current[col] = rs.curRow[i]`, writing an
+// already-boxed expr.Value into an existing map[string]interface{} key.
+// Converting an interface value to a wider interface type reuses its
+// existing (type, data) word pair — it does not re-box the underlying
+// concrete value — and overwriting an existing map key never grows the map.
+// This was verified empirically (not assumed): an earlier version of this
+// gate asserted <=2 allocs/op for a claimed "map re-box" allocation that
+// TestZeroAlloc_ResultSet never actually measured (its closure called only
+// Next, never Record); measuring the two separately confirmed a plain
+// Next-only cycle and a Next+Record cycle both cost exactly 1 allocs/op —
+// the same class of unverified-threshold gap this whole file's fix (audit
+// finding P4) exists to close.
 func TestZeroAlloc_ResultSet(t *testing.T) {
 	ctx := context.Background()
-	w := newWalker(200)
+	w := newWalkerFrom(gateAllocNodeIDStart, 200)
 	scan := exec.NewAllNodesScan(w)
 	filter := exec.NewFilter(scan, predTrue)
 	proj, err := exec.NewProject(filter, []exec.ProjectionItem{projFirst})
@@ -322,14 +376,18 @@ func TestZeroAlloc_ResultSet(t *testing.T) {
 	rs := exec.Run(ctx, proj, []string{"n"})
 	t.Cleanup(func() { _ = rs.Close() })
 
+	rs.Next()
+	rs.Record()
+
 	allocs := testing.AllocsPerRun(100, func() {
-		rs.Next() //nolint:errcheck // gate test; error checked outside
+		rs.Next()
+		rs.Record()
 	})
 
-	// 2 allocs/op: (1) IntegerValue boxing in Project, (2) interface{} re-box
-	// in the Record map assignment.
-	if allocs > 2 {
-		t.Errorf("ResultSet.Next: want ≤2 allocs/op, got %.2f", allocs)
+	// 1 alloc/op: the NodeID box forwarded from AllNodesScan. Neither Next
+	// nor Record adds anything of its own for this pass-through projection.
+	if allocs > 1 {
+		t.Errorf("ResultSet.Next+Record: want <=1 alloc/op, got %.2f", allocs)
 	}
 }
 
