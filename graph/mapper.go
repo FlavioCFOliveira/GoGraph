@@ -10,6 +10,17 @@ import (
 // FNV-1a 64-bit constants. Kept inline (not via hash/fnv) so the fast
 // paths in [mapperShardFor] run zero-allocation; hash/fnv.New64a
 // returns an interface and forces a heap allocation per call.
+//
+// The hash is intentionally UNSEEDED (fixed FNV offset basis), which makes
+// shard placement deterministic — a requirement for reproducible runs and the
+// deterministic-simulation harness. This is deliberately NOT a hash-flooding
+// DoS vector: the shard hash only distributes keys across independently locked
+// shards for write parallelism; an attacker who collapses many keys into one
+// shard forfeits only that parallelism (no algorithmic blow-up), the per-shard
+// containers are Go maps which are themselves internally flood-resistant
+// (randomised seed), and the mutating path is single-writer-serialised
+// regardless. Seeding the shard hash would buy no security and break
+// determinism, so it is left fixed.
 const (
 	fnvOffset uint64 = 14695981039346656037
 	fnvPrime  uint64 = 1099511628211

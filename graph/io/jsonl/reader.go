@@ -39,6 +39,18 @@ var ErrUnknownType = errors.New("jsonl: unknown record type")
 // files (a crafted multi-gigabyte line, for example). The capped
 // variants ([ReadIntoCappedCtx], [ReadWithPropsCappedCtx]) accept an
 // explicit ceiling; a value of zero or less disables the cap.
+//
+// # Why 1 GiB (8x the CSV/GraphML default)
+//
+// Unlike a struct-per-element DOM parser, this reader is streaming: it
+// consumes one line at a time under a per-line 16 MiB token cap and folds each
+// record straight into the graph, so peak transient memory tracks the output
+// graph plus one record — there is no small-input-to-huge-heap amplification
+// class here (contrast the GraphML full-DOM amplification that motivated its
+// 128 MiB default). The higher default therefore bounds only the total input
+// bytes, not a multiple of them, and does not expose an OOM. Callers parsing
+// untrusted input on a memory-constrained host may still pass a lower explicit
+// cap to the capped variants.
 const DefaultMaxBytes int64 = 1 << 30 // 1 GiB
 
 // ErrInputTooLarge is returned by the read functions when the input
