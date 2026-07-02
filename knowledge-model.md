@@ -335,6 +335,35 @@ auditor: ACID-sound, subsumes #1751 by construction; go-developer:
 idiomatic) plus a green TCK run (3897/3897) and a clean full-module `-race`
 run. No new label or edge type. Local commit, not pushed.
 
+Incrementally synced at commit `beedc31` (2026-07-02, task #1857, sprint 262,
+still OPEN): +1 `Commit` (`beedc31`); +1 `Task` (`1857`, COMPLETED). Fixed
+finding F2 from the same audit: `cypher/expr/equiv.go`'s `EquivalentHash`
+disagreed with its own sibling `Equivalent` for a cross-type Integer/Float
+pair — `Equivalent(IntegerValue(1), FloatValue(1.0))` was already `true`
+(`Equal` compares via `float64(a)==float64(b)`), but `EquivalentHash` hashed
+a Float via its IEEE-754 bit pattern and an Integer via the unrelated raw
+int64-bit fold, breaking the hash invariant DISTINCT/grouping/UNION rely on
+(`count(DISTINCT [1, 1.0])` returned 2, not 1). Fix: a new `hashFloatBits`
+helper (the pre-existing −0.0-canonicalise + `Float64bits` fold) shared by
+both the `FloatValue` and a new `IntegerValue` branch, so an Integer now
+hashes through the identical cast `Equal` already performs; `Equal`,
+`Hash()`, and the general-purpose `Value.Hash()` contract are untouched, per
+this file's own documented Equal/Equivalent split. Edges: `Sprint 262
+-[CONTAINS]-> Commit`; `Task 1857 -[IMPLEMENTED_IN]-> Commit`; `Commit
+-[FIXES]->` Feature `Cypher Engine` (id 12659); `Commit -[TOUCHES]->`
+Packages `cypher` (id 73) and `cypher/expr` (id 141, first `TOUCHES` target
+in that package). Feature and both Packages re-stamped to gitDate
+2026-07-02. Certified by cypher-expert-consultant (hashing through the exact
+cast `Equal` performs is the only self-consistent fix, verified
+exhaustively) and go-developer (idiomatic, 0 lint/vet/staticcheck). Surfaced
+a separate, pre-existing, unrelated bug in `cypher/exec/hash_join.go`'s
+`canonicalKeyHash` (an independent, opposite-direction lossy Float→Integer
+cast for join-key hashing) — recorded as new backlog `Task` `1865`, not
+modelled or fixed here (out of scope for F2). No new label or edge type. TCK
+3897/3897 held, full `-race` clean (one transient, unrelated goroutine-count
+flake in `cypher/exec` reproduced clean 3/3 in isolation and on a full
+re-run). Local commit, not pushed.
+
 ---
 
 ## Node labels
