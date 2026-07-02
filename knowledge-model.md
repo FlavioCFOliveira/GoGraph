@@ -570,6 +570,51 @@ builder-method suggestion, applied in the same commit). 7 new tests
 `cypher/aggregate_distinct_cap_test.go` end-to-end engine wiring).
 TCK 3897/3897 held, `-race` clean. Local commit, not pushed.
 
+Incrementally synced at commit `6fafb42` (2026-07-03, task #1868,
+sprint 263, still OPEN): +1 `Commit` (`6fafb42`); +1 `Task` (`1868`,
+COMPLETED). Closed the F2 (`Task` `1857`) follow-up: two more type
+families needed the same `EquivalentHash` treatment F2 gave
+`IntegerValue`/`FloatValue`. `NodeValue.Equal`/`RelationshipValue.Equal`/
+`LazyNodeValue.Equal` (`cypher/expr/value.go`) all treat an
+`IntegerValue` carrying the raw ID as equal (the in-pipeline encoding
+NodeScan/Expand emit), but `EquivalentHash` had no branch for these
+three types — they fell through to their own native ID-bit-fold hash
+instead of the shared `hashFloatBits` route, so
+`count(DISTINCT [n, id(n)])` returned 2 instead of 1. Added matching
+`EquivalentHash` branches for all three (`cypher/expr/equiv.go`).
+Separately fixed rmp backlog `Task` `1865`
+(pre-existing, tracked, not yet modelled as a graph node — resolved
+directly in this commit rather than separately): `cypher/exec/
+hash_join.go`'s `canonicalKeyHash` reimplemented the SAME cross-type
+numeric fold independently, in the OPPOSITE direction (float→integer
+instead of integer→float), so it could disagree with `EquivalentHash`
+for a pair where float64 rounding matters, silently dropping a
+matching row from a hash join's output instead of erroring.
+`canonicalKeyHash` now delegates to `expr.EquivalentHash` directly —
+safe because HashJoin discards null/NaN keys before ever calling it,
+so `Equal` and `Equivalent` coincide in its actual input domain. The
+residual hash-quality trade-off above 2^53 (a bounded, measured
+collision-chain slowdown, not unbounded, further bounded by `Task`
+`1867`'s new caps) is documented as mathematically unavoidable — any
+hash consistent with `Equal`'s own `float64(a)==float64(b)`
+comparison must lose the same information — rather than fixed
+further. Edges: `Sprint 263 -[CONTAINS]-> Commit`; `Task 1868
+-[IMPLEMENTED_IN]-> Commit`; `Commit -[FIXES]->` Feature `Cypher
+Engine` (id 12659); `Commit -[TOUCHES]->` Packages `cypher` (73),
+`cypher/exec` (39), `cypher/expr` (141). Feature and all three
+Packages re-stamped to gitDate 2026-07-03. Certified by
+cypher-expert-consultant (CERTIFIED WITH FOLLOW-UPS — independently
+re-derived every proof, reverted the fix to confirm the new tests
+fail correctly against the pre-fix code, then restored it; verified
+the `canonicalKeyHash` delegation holds unconditionally including for
+list/map join keys; surfaced a new, unrelated, NOT-YET-FIXED finding:
+`MapValue.Equal`'s Go-map-iteration-order nondeterminism, see the next
+entry) and go-developer (APPROVED WITH FOLLOW-UPS — explicit
+merge-as-is, only cosmetic style notes). 6 new tests across
+`cypher/expr/equiv_test.go`, `cypher/aggregate_equivalence_test.go`,
+`cypher/exec/hash_join_test.go`. TCK 3897/3897 held, `-race` clean.
+Local commit, not pushed.
+
 ---
 
 ## Node labels
