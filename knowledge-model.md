@@ -476,6 +476,59 @@ KG-sync entry): `d531ad6` (audit report), `8bb0356`+`f6ae4d1` (F1),
 `beedc31`+`791a78a` (F2), `a9b5f54`+`afd022e` (P3), `715a5cd`+`e480371`
 (A1), `6bbe332`+`fff3f3a` (A2), `6dfa4a0`+`3408c18` (P4), `e753852` (INFO).
 
+Incrementally synced at commit `d0e9650` (2026-07-02, task #1866, new
+`Sprint 263` "Audit remediation Round 2 2026-07-02", OPEN): +1 `Sprint`
+(263); +1 `Commit` (`d0e9650`); +2 `Task`s (`1866` COMPLETED, `1875`
+BACKLOG). Fixed the HIGH finding from a same-day round-2 audit (report
+`docs/audit-production-readiness-2026-07-02-round2.md`, not modelled as a
+`Spec` node, matching the round-1 report's precedent): `MERGE (a:L1{...})
+-[:REL]->(b:L2{...})` with at least one endpoint not already bound by an
+earlier clause — the single most common Cypher graph-building idiom —
+used to silently create only the first node, dropping the relationship
+and second node with no error (a genuine openCypher TCK coverage gap:
+every `Merge*.feature` scenario pre-binds both endpoints). Fix: a new IR
+node family (`ir.MergePattern`/`MergePatternEndpoint`/`MergePatternHop`
+in `cypher/ir/plan.go`) and physical operator (`exec.MergePattern`,
+`cypher/exec/merge_pattern.go`, new file) implement openCypher's
+whole-pattern match-or-create semantics via a left-deep join search
+(`GraphMutator.OutNeighbours`/`InNeighbours`) with an atomic
+create-everything-missing fallback, for any chain the narrow, unchanged
+`MergeRelationship` fast path does not cover — fresh endpoints, multi-hop
+chains, node-targeted ON CREATE/ON MATCH actions, undirected/incoming
+direction, literal/parameter/dynamic properties, and UNIQUE/NOT NULL
+constraint enforcement (mirroring `Merge`/`CreateNode`, added after a
+go-developer review caught its initial omission). New translator function
+`buildMergePatternChain` in `cypher/ir/writes.go`, wired into `mergeClause`;
+new `case *ir.MergePattern:` in `cypher/api.go`'s `buildOperatorWrite`.
+Two adjacent bugs fixed in the same commit: `Engine.Run` (`cypher/api.go`)
+gave an opaque "unsupported IR node" error for ANY write-clause query — a
+genuinely pre-existing gap, confirmed to also affect the already-shipped
+`MergeRelationship`, unrelated to this task — now rejects clearly,
+wrapping the existing `ErrWriteInReadOnlyTx` sentinel; a cyclic MERGE
+pattern re-referencing the same fresh variable (`MERGE (a)-[:R1]->(b)
+-[:R2]->(a)`) now rejects at plan-build time in `buildMergePatternChain`
+instead of a confusing runtime "bound variable is null" error. Edges:
+`Sprint 263 -[CONTAINS]-> Commit`; `Task 1866 -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[FIXES]->` Feature `Cypher Engine` (id 12659); `Commit
+-[TOUCHES]->` Packages `cypher` (73), `cypher/exec` (39), `cypher/ir`
+(91); `Task 1866 -[FOLLOWED_BY]-> Task 1875` (new edge type — a task
+spawning a tracked, non-blocking follow-up, distinct from `DEPENDS_ON`'s
+prerequisite semantics). Feature and all three Packages re-stamped to
+gitDate 2026-07-02. Certified by cypher-expert-consultant (CERTIFIED WITH
+FOLLOW-UPS against all 9 `Merge*.feature` files read in full — one
+narrow, TCK-invisible, non-data-corrupting gap found: `MergePattern`
+under-counts relationship multiplicity when 2+ parallel qualifying
+relationships already exist between a matched node pair, since its
+`binding` type tracks only node identity; filed as `Task 1875`, not
+modelled with its own Commit/edges since it is unscheduled backlog work,
+matching the #1865 precedent of doc-only tracking for an unscheduled
+follow-up) and go-developer (initial review: CHANGES REQUIRED — missing
+constraint enforcement was the blocking finding, plus `errors.Is`
+consistency, a dead-code branch, and DRY duplication; all fixed and
+re-verified). 16 new tests (`cypher/merge_pattern_test.go`,
+`cypher/run_rejects_write_test.go`, both new files). TCK 3897/3897 held,
+full-module `-race` clean (98 packages). Local commit, not pushed.
+
 ---
 
 ## Node labels
@@ -539,9 +592,24 @@ All edges carry `gitCommit` and `gitDate`.
 | `SPECIFIED_IN` | `(Feature)-[:SPECIFIED_IN]->(Spec)` | A feature is documented in a specification file. |
 | `CONTAINS` | `(Sprint)-[:CONTAINS]->(Commit)` | A sprint contains a commit that delivered work within it. |
 | `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
+| `IMPROVES` | `(Commit)-[:IMPROVES]->(Feature)` | A commit improves (perf/observability/tests) a feature area without fixing a defect. |
+| `TOUCHES` | `(Commit)-[:TOUCHES]->(Package\|Type\|Function\|Spec)` | A commit's diff touched this element; drives provenance re-stamping. |
+| `IMPLEMENTED_IN` | `(Task)-[:IMPLEMENTED_IN]->(Commit)` | The commit that delivered a task's work. |
+| `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. |
+| `FOLLOWED_BY` | `(Task)-[:FOLLOWED_BY]->(Task)` | A completed task's work surfaced a distinct, non-blocking follow-up tracked as a new task — NOT a prerequisite (contrast `DEPENDS_ON`). Introduced 2026-07-02 (task #1866 → #1875). |
 | `ABOUT` | `(Memory)-[:ABOUT]->(Feature\|Sprint)` | A memory concerns a feature area or sprint. |
 | `CONSULTED_BY` | `(Memory)-[:CONSULTED_BY]->(Agent\|Skill)` | A memory exists primarily for that agent's/skill's use. |
 | `SPECIALISES_IN` | `(Agent)-[:SPECIALISES_IN]->(Feature)` | A sub-agent's mandated speciality area (curated from `CLAUDE.md`). |
+
+**Data-quality note (observed 2026-07-02, not remediated here):** the live graph has
+accumulated several more edge types across incremental syncs than this table documents in
+full (`BELONGS_TO`, `PART_OF`, `CLOSES`, `FROM_AUDIT`, `REMEDIATED_BY`, `CONCERNS`,
+`DELIVERS`, `FOUND`, `TESTS`, `LIVES_IN`, `RELEASES`, `IMPLEMENTED_BY`, `DOCUMENTED_BY`,
+`DELIVERED_BY`, `HARDENED_IN`, `MODIFIES` — 29 distinct types total per a live `MATCH ()
+-[r]->() RETURN type(r), count(r)` query, vs. the ~11 documented above). This table was
+extended just enough to cover the edge types touched by this sync (`IMPLEMENTED_IN`,
+`TOUCHES`, `DEPENDS_ON`, `FOLLOWED_BY`, `IMPROVES`); a full reconciliation of the remaining
+~16 types is a separate hygiene task, not part of this commit's sync.
 
 ### Counts by edge type (commit `567253c` + worktree, 2026-06-11)
 
