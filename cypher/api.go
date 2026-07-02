@@ -509,6 +509,30 @@ type EngineOptions struct {
 	//     only when memory is bounded by another means.
 	MaxResultBytes int64
 
+	// GlobalMaxResultBytes is the engine-wide ceiling on the SUM of estimated
+	// bytes held by all concurrently-materialised results, complementing the
+	// per-result [MaxResultBytes]. The per-result cap bounds ONE query; this
+	// bounds the AGGREGATE across every connection sharing the engine, so N
+	// concurrent clients each running a per-query-capped-but-large result cannot
+	// sum to an out-of-memory condition (the residual load-dependent memory-DoS
+	// #1842). When materialising a result would push the engine-wide total over
+	// this ceiling, [Result.Err] reports [ErrGlobalMemoryExceeded] and that
+	// result serves no rows; results that close first free their charge, so the
+	// query succeeds on retry — hence a transient, not a permanent, error.
+	//
+	// The value is interpreted as follows:
+	//
+	//   - Zero (the default) derives the ceiling from the Go soft memory limit:
+	//     half of GOMEMLIMIT when the operator has set one (the recommended
+	//     practice under memory pressure), else unlimited. This gives default-on
+	//     protection sized to the operator's own declared budget, and never
+	//     rejects a legitimate workload on a host whose total memory the module
+	//     cannot know. Operators deploying under extreme concurrency should set
+	//     GOMEMLIMIT (whereupon this activates automatically) or a positive value.
+	//   - A positive value overrides the default (a byte count).
+	//   - [GlobalMaxResultBytesUnlimited] (-1) disables the ceiling entirely.
+	GlobalMaxResultBytes int64
+
 	// MaxCollectItems bounds the number of values a single buffering aggregator
 	// — collect(), collect(DISTINCT …), percentileCont(), percentileDisc() —
 	// retains in one group. A grouping-key-free aggregate such as
@@ -698,6 +722,12 @@ type Engine struct {
 	// EngineOptions.MaxResultBytes field is mapped onto it by resolveMaxResultBytes
 	// (0 → DefaultMaxResultBytes, MaxResultBytesUnlimited → 0, positive verbatim).
 	maxResultBytes int64
+	// globalMem is the engine-wide ceiling on the aggregate estimated size of all
+	// concurrently-materialised results (EngineOptions.GlobalMaxResultBytes,
+	// #1842). A single instance is shared by every Result the engine produces, so
+	// it bounds memory across all connections of a Bolt server sharing this
+	// engine. nil when the ceiling is unlimited (the resolved limit is <= 0).
+	globalMem *globalMemBudget
 	// maxCollectItems is the per-group element budget for buffering aggregators,
 	// threaded into every plan build via buildOpts. The encoding mirrors the
 	// public EngineOptions.MaxCollectItems field (0 → default, <0 → no cap,
@@ -964,6 +994,9 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// also create an index entry; registerRecoveredIndexes silently absorbs
 	// ErrIndexExists for any name already claimed by the constraint path.
 	e.registerRecoveredIndexes(opts.RecoveredIndexes)
+	if gl := resolveGlobalMaxResultBytes(opts.GlobalMaxResultBytes); gl > 0 {
+		e.globalMem = &globalMemBudget{limit: gl}
+	}
 	return e
 }
 
@@ -1580,6 +1613,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		}
 		rs := exec.Run(ctx, op, cols)
 		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
+		r.globalMem = e.globalMem
 		r.notifications = entry.notifications
 		r.materialize()
 	})
@@ -2577,6 +2611,86 @@ const DefaultMaxResultBytes int64 = 1 << 30 // 1 GiB
 // the graph's visibility barrier.
 const MaxResultBytesUnlimited int64 = -1
 
+// ErrGlobalMemoryExceeded is returned by [Result.Err] when materialising this
+// result would push the engine-wide sum of concurrently-materialised result
+// bytes over [EngineOptions.GlobalMaxResultBytes]. Where [ErrResultBytesExceeded]
+// bounds ONE result, this bounds the AGGREGATE across all in-flight results on
+// the engine — the residual memory-DoS the per-query cap alone cannot stop, in
+// which N concurrent connections each materialise a per-query-capped result and
+// their sum exhausts the host (#1842). It is a transient, load-dependent
+// condition: the same query succeeds once other results close and free their
+// charge, so it maps to a Neo.TransientError rather than a client error.
+var ErrGlobalMemoryExceeded = errors.New("cypher: global result memory budget exceeded")
+
+// GlobalMaxResultBytesUnlimited is the explicit opt-out sentinel for
+// [EngineOptions.GlobalMaxResultBytes]: set the field to this value to disable
+// the engine-wide aggregate ceiling. It is distinct from the zero value, which
+// selects the GOMEMLIMIT-derived default (see [EngineOptions.GlobalMaxResultBytes]).
+const GlobalMaxResultBytesUnlimited int64 = -1
+
+// globalMemChargeChunk is the granularity at which [Result.materialize] flushes
+// its estimated size to the shared engine counter. Charging every row would
+// contend a single atomic across every concurrent materialising query on the hot
+// read path; charging in ~1 MiB chunks bounds both the atomic traffic and the
+// worst-case overshoot beyond the ceiling to one chunk per in-flight query.
+const globalMemChargeChunk int64 = 1 << 20 // 1 MiB
+
+// globalMemBudget is the engine-wide running total of estimated bytes held by
+// concurrently-materialised results, bounded by limit. A single instance is
+// shared by every [Result] the engine produces, so it spans all connections of a
+// Bolt server that share one engine. It is safe for concurrent use; limit is
+// immutable after construction and used is atomic. A nil *globalMemBudget, or one
+// with limit <= 0, disables the ceiling.
+type globalMemBudget struct {
+	limit int64
+	used  atomic.Int64
+}
+
+// charge adds n to the running total and reports whether the ceiling is now
+// exceeded. The caller must still [globalMemBudget.release] n even when this
+// returns true, so the counter stays balanced. A no-op returning false when the
+// budget is disabled.
+func (b *globalMemBudget) charge(n int64) bool {
+	if b == nil || b.limit <= 0 || n <= 0 {
+		return false
+	}
+	return b.used.Add(n) > b.limit
+}
+
+// release returns n bytes to the budget when a result closes.
+func (b *globalMemBudget) release(n int64) {
+	if b == nil || b.limit <= 0 || n <= 0 {
+		return
+	}
+	b.used.Add(-n)
+}
+
+// resolveGlobalMaxResultBytes maps the public [EngineOptions.GlobalMaxResultBytes]
+// value to the engine-internal ceiling (0 = unlimited):
+//
+//   - 0 (the zero value)               → the GOMEMLIMIT-derived default: half of
+//     the Go soft memory limit when the operator has set one (via GOMEMLIMIT or
+//     [runtime/debug.SetMemoryLimit]), else 0 (unlimited). Tying the default to
+//     the operator's own declared memory budget gives default-on protection
+//     precisely when a budget exists, and never rejects a legitimate workload on
+//     a host whose memory the module cannot know.
+//   - [GlobalMaxResultBytesUnlimited]  → 0 (unlimited, the explicit opt-out)
+//   - a positive value                 → used verbatim (bytes)
+func resolveGlobalMaxResultBytes(opt int64) int64 {
+	switch {
+	case opt == GlobalMaxResultBytesUnlimited:
+		return 0
+	case opt > 0:
+		return opt
+	default: // zero value → derive from the Go soft memory limit, if any
+		lim := debug.SetMemoryLimit(-1) // read-only: -1 returns the current limit
+		if lim > 0 && lim < math.MaxInt64 {
+			return lim / 2
+		}
+		return 0
+	}
+}
+
 // MaxCollectItemsUnlimited is the explicit opt-out sentinel for
 // [EngineOptions.MaxCollectItems]: set the field to this value to disable the
 // per-group element budget entirely and allow an unbounded buffering aggregator
@@ -2979,6 +3093,15 @@ type Result struct {
 	// honour.
 	maxBytes int64
 
+	// globalMem is the engine-wide aggregate-memory ceiling shared by every
+	// Result of the engine (EngineOptions.GlobalMaxResultBytes, #1842); nil when
+	// unlimited. globalCharged is the number of bytes this Result has charged
+	// against it during materialisation, released in closeLocked so the shared
+	// counter stays balanced across the Result's whole lifetime (charge on
+	// materialise, hold while the caller drains, release on Close).
+	globalMem     *globalMemBudget
+	globalCharged int64
+
 	// notifications holds the out-of-band plan-time advisories for this query
 	// (e.g. a Cartesian-product warning, #1483). They are exposed verbatim via
 	// [Result.Notifications] and never affect the rows iterated.
@@ -3129,6 +3252,10 @@ func (r *Result) materialize() {
 		}
 	}
 	var byteCount int64
+	// pendingGlobal accumulates this result's estimated bytes not yet flushed to
+	// the shared engine-wide counter; it is charged in ~1 MiB chunks to bound
+	// atomic contention on the hot read path (#1842).
+	var pendingGlobal int64
 	for r.rs.Next() {
 		// Read the row positionally — no per-row map allocation. Each value is
 		// copied into the flat backing slice because the operator tree reuses the
@@ -3158,12 +3285,41 @@ func (r *Result) materialize() {
 		// sooner — never miss — so the additions are deliberately unguarded against
 		// overflow. With the column-oriented store (#1499) the estimate reads the
 		// positional row slice directly — no map lookup per column.
-		if r.maxBytes > 0 {
-			byteCount += estimateRowSize(row)
-			if byteCount > r.maxBytes {
-				r.rowsErr = ErrResultBytesExceeded
-				break
+		if r.maxBytes > 0 || r.globalMem != nil {
+			sz := estimateRowSize(row)
+			if r.maxBytes > 0 {
+				byteCount += sz
+				if byteCount > r.maxBytes {
+					r.rowsErr = ErrResultBytesExceeded
+					break
+				}
 			}
+			// Engine-wide aggregate ceiling (#1842): flush this result's estimate
+			// to the shared counter in ~1 MiB chunks. When the chunk pushes the
+			// engine-wide total over the ceiling, stop — the charge stays booked
+			// (released in closeLocked) so the counter is balanced, and the result
+			// serves no rows, exactly like the per-query caps above.
+			if r.globalMem != nil {
+				pendingGlobal += sz
+				if pendingGlobal >= globalMemChargeChunk {
+					r.globalCharged += pendingGlobal
+					over := r.globalMem.charge(pendingGlobal)
+					pendingGlobal = 0
+					if over {
+						r.rowsErr = ErrGlobalMemoryExceeded
+						break
+					}
+				}
+			}
+		}
+	}
+	// Flush the final sub-chunk of this result's global charge (only when the
+	// drain completed without a cap tripping; a break above already booked its
+	// pending chunk into globalCharged before setting rowsErr).
+	if r.globalMem != nil && pendingGlobal > 0 && r.rowsErr == nil {
+		r.globalCharged += pendingGlobal
+		if r.globalMem.charge(pendingGlobal) {
+			r.rowsErr = ErrGlobalMemoryExceeded
 		}
 	}
 	r.matOn = true
@@ -3553,6 +3709,13 @@ func (r *Result) Close() error {
 // closed flag (set via CompareAndSwap by [Result.Close] or by the finalizer)
 // to ensure exactly-once semantics across both call sites.
 func (r *Result) closeLocked() error {
+	// Return this result's engine-wide memory charge so the shared ceiling frees
+	// up as soon as the caller closes (or the finalizer reclaims) the result
+	// (#1842). Idempotent via the zero-out; closeLocked runs exactly once.
+	if r.globalMem != nil && r.globalCharged > 0 {
+		r.globalMem.release(r.globalCharged)
+		r.globalCharged = 0
+	}
 	err := r.rs.Close()
 	if r.buf != nil && !r.bufHandled {
 		// Fallback path: the index buffer was not flipped under the barrier
@@ -10484,6 +10647,7 @@ func (e *Engine) execUnderBarrier(
 			// Use newWriteResult so that rollbackUnderBarrier can reseed the
 			// constraint registry's UNIQUE value-sets after an undo replay (#1342).
 			r = newWriteResult(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes, e.constraintReg, e.g)
+			r.globalMem = e.globalMem
 			r.undo = undo
 			r.touched = touched
 			r.materialize()
@@ -10497,6 +10661,7 @@ func (e *Engine) execUnderBarrier(
 		// the barrier so the statement observes a consistent snapshot and its
 		// eager writes flip visible atomically with the rest of the open tx.
 		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
+		r.globalMem = e.globalMem
 		r.materialize()
 		return nil
 	})
