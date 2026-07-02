@@ -440,6 +440,42 @@ corrected in the same commit. Edges: `Sprint 262 -[CONTAINS]-> Commit`;
 Packages re-stamped to gitDate 2026-07-02. No new label or edge type. TCK
 3897/3897 held, full-module `-race` clean. Local commit, not pushed.
 
+Incrementally synced at commit `e753852` (2026-07-02, task #1864, sprint
+262 — **CLOSED, 7/7 tasks COMPLETE**): +1 `Commit` (`e753852`); +1 `Task`
+(`1864`, COMPLETED); `Sprint 262` re-stamped `status='CLOSED'`. Closed the
+final finding (INFO) from the same audit — four doc-faithfulness fixes, no
+behaviour change: `search/bellman_ford.go`'s exported doc wrongly claimed
+"textbook O(V*E)" for what is actually SPFA+SLF; `cypher/ir/translator.go`'s
+`exprToColumnName` gained a note correcting the audit's own causal theory —
+an implicit column header like `"age - 1"` comes from AST re-serialisation
+in the canonical TCK form, not from a leak of the parser's
+`normalizeArithmeticMinus` rewrite; `cypher/tck/conformance_history.go` +
+`compare_test.go` gained a "Gate scope" note stating precisely what the
+3897/3897 execution gate verifies (full row/value comparison) versus what
+it does not (exact error type, property/label side effects, "no side
+effects"). The integer-overflow precondition the audit also flagged was
+already documented by an earlier session. Edges: `Sprint 262
+-[CONTAINS]-> Commit`; `Task 1864 -[IMPLEMENTED_IN]-> Commit`; `Commit
+-[FIXES]->` Features `Cypher Engine` (id 12659) and `Search &
+Path-finding` (id 10375); `Commit -[TOUCHES]->` Packages `cypher/ir`
+(id 91), `cypher/tck` (id 29), and `search` (id 131). Both Features and
+all three Packages re-stamped to gitDate 2026-07-02. No new label or edge
+type. TCK 3897/3897 held.
+
+**Sprint 262 summary (2026-07-02 audit remediation, ALL LOCAL, NOT
+PUSHED): 7/7 tasks COMPLETE.** F1 HIGH (silent parallel-edge drop, fixed
+with a fail-fast guard) → F2 MED (int/float DISTINCT hash mismatch, fixed)
+→ P3 MED (120k-node Cypher benchmark added) → A1/A2 LOW (betweenness/
+triangle-count doc fixes) → P4 LOW (vacuous alloc-gate fix, which itself
+uncovered and fixed a second unverified-threshold defect via go-developer
+review) → INFO (4 doc-faithfulness fixes). Every task certified by at
+least one specialist review or, for the lowest-risk doc-only items,
+directly-verified self-review; every commit held the TCK 3897/3897 gate
+and a full-module `-race` run. 13 commits total (the 13th being this very
+KG-sync entry): `d531ad6` (audit report), `8bb0356`+`f6ae4d1` (F1),
+`beedc31`+`791a78a` (F2), `a9b5f54`+`afd022e` (P3), `715a5cd`+`e480371`
+(A1), `6bbe332`+`fff3f3a` (A2), `6dfa4a0`+`3408c18` (P4), `e753852` (INFO).
+
 ---
 
 ## Node labels
