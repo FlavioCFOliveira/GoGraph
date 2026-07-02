@@ -166,6 +166,19 @@ type Decoder struct {
 	// bytes — cumulatively across the whole message, including every level of
 	// nesting. See ErrDecodedMemoryExceeded.
 	decodedRemaining int
+	// shared is the optional engine-wide inbound-decode ceiling (nil = no
+	// aggregate bound). Set per decode via SetInboundBudget; the decoder draws
+	// poolHeld bytes from it in inboundReserveChunk steps and returns them via
+	// ReleaseInboundBudget/Reset. It bounds total decode memory ACROSS
+	// connections, complementing the per-message decodedRemaining. See
+	// [InboundBudget] and ErrInboundBudgetExceeded.
+	shared *InboundBudget
+	// poolHeld is the number of bytes currently reserved from shared (released
+	// in full when the decode completes). poolAvail is the reserved-but-not-yet-
+	// charged slack, so charges consume from a local counter and touch the
+	// shared atomic only once per reserved chunk.
+	poolHeld  int64
+	poolAvail int64
 }
 
 // defaultMaxMessageBytes mirrors proto.DefaultMaxMessageBytes (16 MiB). It is
@@ -216,12 +229,84 @@ func newDecoderFromBufio(r *bufio.Reader) *Decoder {
 // per-message value. It is used by the decode pool to reuse Decoder objects
 // across messages.
 func (d *Decoder) Reset(r io.Reader) {
+	// Self-heal: return any bytes still held from a shared budget (in case a
+	// prior use was not explicitly released) and detach the budget. A pooled
+	// decoder is reused across servers, so it must not carry a stale budget.
+	d.releaseShared()
+	d.shared = nil
 	d.r.Reset(r)
 	if d.maxMessageBytes == 0 {
 		d.maxMessageBytes = defaultMaxMessageBytes
 	}
 	d.remaining = sourceLen(r)
 	d.decodedRemaining = maxDecodedCollectionBytes
+}
+
+// SetInboundBudget attaches an engine-wide inbound-decode ceiling to this
+// decode. A nil or disabled budget leaves the decoder unbounded (only the
+// per-message decodedRemaining applies). Call it once, immediately after
+// obtaining the decoder from the pool and before decoding; pair it with
+// [Decoder.ReleaseInboundBudget] (typically via defer) so the reserved bytes
+// are returned when the decode completes.
+func (d *Decoder) SetInboundBudget(b *InboundBudget) {
+	if b.enabled() {
+		d.shared = b
+	} else {
+		d.shared = nil
+	}
+	d.poolHeld = 0
+	d.poolAvail = 0
+}
+
+// ReleaseInboundBudget returns every byte this decode reserved from its shared
+// budget and detaches it. It is idempotent (a second call is a no-op) and safe
+// to call even when no budget was set. Callers defer it around the decode so
+// the release runs on the normal, error, and panic paths alike.
+func (d *Decoder) ReleaseInboundBudget() {
+	d.releaseShared()
+	d.shared = nil
+}
+
+// releaseShared returns poolHeld bytes to the shared budget and zeroes the
+// local counters. It does not detach d.shared (Reset/ReleaseInboundBudget do).
+func (d *Decoder) releaseShared() {
+	if d.shared != nil && d.poolHeld > 0 {
+		d.shared.release(d.poolHeld)
+	}
+	d.poolHeld = 0
+	d.poolAvail = 0
+}
+
+// reserveShared charges cost bytes against the shared budget, drawing more from
+// the shared pool in inboundReserveChunk steps when the local slack runs out.
+// It returns [ErrInboundBudgetExceeded] when the pool cannot satisfy the charge
+// (fail-fast backpressure) WITHOUT consuming any slack, so the caller can reject
+// the message with the per-message budget left balanced. A nil budget is a
+// no-op.
+func (d *Decoder) reserveShared(cost int64) error {
+	if d.shared == nil || cost <= 0 {
+		return nil
+	}
+	if d.poolAvail >= cost {
+		d.poolAvail -= cost
+		return nil
+	}
+	need := cost - d.poolAvail
+	chunk := need
+	if chunk < inboundReserveChunk {
+		chunk = inboundReserveChunk
+	}
+	if !d.shared.tryReserve(chunk) {
+		// A full chunk will not fit; try the exact remainder before giving up.
+		chunk = need
+		if !d.shared.tryReserve(chunk) {
+			return ErrInboundBudgetExceeded
+		}
+	}
+	d.poolHeld += chunk
+	d.poolAvail += chunk
+	d.poolAvail -= cost
+	return nil
 }
 
 // sourceLen reports the number of unread bytes in r when r is a length-bearing
@@ -276,6 +361,16 @@ func (d *Decoder) chargeDecoded(kind string, n, perElem int) error {
 	if rem < 0 || n > rem/perElem {
 		return fmt.Errorf("%w: %s count %d at %d bytes per decoded element, %d budget bytes remaining",
 			ErrDecodedMemoryExceeded, kind, n, perElem, d.decodedRemaining)
+	}
+	// Also charge the engine-wide inbound ceiling (when one is attached) before
+	// committing the per-message budget, so an aggregate-memory rejection leaves
+	// both budgets balanced. n has already been bounded above (n <= rem/perElem
+	// <= maxDecodedCollectionBytes), so the int64 product cannot overflow.
+	if d.shared != nil {
+		cost := int64(collectionCost) + int64(n)*int64(perElem)
+		if err := d.reserveShared(cost); err != nil {
+			return err
+		}
 	}
 	d.decodedRemaining = rem - n*perElem
 	return nil

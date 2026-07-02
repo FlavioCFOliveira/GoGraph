@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"runtime/debug"
 	"runtime/pprof"
@@ -140,6 +141,37 @@ type Options struct {
 	// indefinitely until the server OOMs.
 	MaxMessageBytes int
 
+	// MaxInboundDecodeBytes is the engine-wide ceiling, in bytes, on the total
+	// decoded-collection memory in flight across ALL connections while messages
+	// are being decoded. MaxMessageBytes bounds a single message and the decoder
+	// bounds a single message's decoded collections, but without this aggregate
+	// bound that per-message cap times MaxConnections is unbounded and reachable
+	// before authentication — a memory-exhaustion DoS (CWE-770). When the pool is
+	// drawn down, further inbound decodes fail fast with a retryable transient
+	// error (backpressure) rather than allocating.
+	//
+	// Interpretation mirrors cypher.EngineOptions.GlobalMaxResultBytes:
+	//   - 0 (the zero value) → derive from the Go soft memory limit: one eighth
+	//     of GOMEMLIMIT when the operator has set one (results already claim half,
+	//     and inbound decode is transient), else unlimited. This gives default-on
+	//     protection precisely when a memory budget is declared, and never rejects
+	//     a legitimate workload on a host whose memory the module cannot know.
+	//   - [MaxInboundDecodeBytesUnlimited] (-1) → unlimited (explicit opt-out).
+	//   - a positive value → used verbatim.
+	//
+	// GOMEMLIMIT alone cannot mitigate the DoS: in-flight decoded values are live,
+	// non-collectable memory during decode, so the ceiling must gate before the
+	// allocation.
+	//
+	// Scope: the ceiling bounds the concurrent DECODE-phase memory across
+	// connections — the simultaneous-allocation vector that is the actual OOM
+	// risk. A message's reserved bytes are returned as soon as it finishes
+	// decoding, so this does not bound a message's lifetime while its handler
+	// runs; a single connection may still transiently hold one decoded message
+	// (bounded by MaxMessageBytes) during handling. This mirrors the result
+	// ceiling's transient-vs-lifetime asymmetry.
+	MaxInboundDecodeBytes int64
+
 	// MaxInFlightPerConnection caps the total number of RUN statements
 	// that may be issued within a single explicit transaction before
 	// COMMIT or ROLLBACK. Zero or negative values default to
@@ -249,6 +281,32 @@ type Options struct {
 // (development and testing only).
 var ErrNoAuthHandler = errors.New("bolt: no auth handler configured; set Options.Auth to a real AuthHandler, or to NoAuthHandler{} to run without authentication")
 
+// MaxInboundDecodeBytesUnlimited is the explicit opt-out sentinel for
+// [Options.MaxInboundDecodeBytes]: set the field to this value to disable the
+// engine-wide inbound-decode ceiling entirely. It is distinct from the zero
+// value, which selects the GOMEMLIMIT-derived default.
+const MaxInboundDecodeBytesUnlimited int64 = -1
+
+// resolveMaxInboundDecodeBytes maps [Options.MaxInboundDecodeBytes] to the
+// concrete ceiling in bytes (0 = unlimited), mirroring
+// cypher's resolveGlobalMaxResultBytes but with a one-eighth GOMEMLIMIT
+// fraction (the result ceiling already claims half; inbound decode is
+// transient).
+func resolveMaxInboundDecodeBytes(opt int64) int64 {
+	switch {
+	case opt == MaxInboundDecodeBytesUnlimited:
+		return 0
+	case opt > 0:
+		return opt
+	default: // zero value → derive from the Go soft memory limit, if any
+		lim := debug.SetMemoryLimit(-1) // read-only: -1 returns the current limit
+		if lim > 0 && lim < math.MaxInt64 {
+			return lim / 8
+		}
+		return 0
+	}
+}
+
 // Server is the Bolt v5 TCP server. It accepts connections from a
 // net.Listener, negotiates the protocol version, and runs the Bolt message
 // loop on each connection.
@@ -259,6 +317,10 @@ type Server struct {
 	opts Options
 	sem  chan struct{} // capacity == MaxConnections
 	log  *slog.Logger
+	// inbound is the engine-wide inbound-decode memory ceiling shared by every
+	// connection's pooled decoder (nil-safe; disabled when the resolved limit is
+	// <= 0). It bounds aggregate pre-auth decode memory across connections.
+	inbound *packstream.InboundBudget
 	// clk is the wall-clock source for the explicit-transaction timeout reaper
 	// (the per-session timeout logic). It defaults to [clock.Real] in
 	// [NewServer] so production behaviour is unchanged; a test (notably the DST
@@ -346,12 +408,13 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 		log.Warn("bolt: server backed by an engine with no result-row cap (cypher.EngineOptions.MaxResultRows is unlimited) — a single client query can materialise an unbounded result set and exhaust server memory; rebuild the engine with a finite MaxResultRows before exposing this server on a network")
 	}
 	return &Server{
-		eng:    eng,
-		opts:   opts,
-		sem:    make(chan struct{}, opts.MaxConnections),
-		log:    log,
-		clk:    clock.Real(),
-		closer: opts.Closer,
+		eng:     eng,
+		opts:    opts,
+		sem:     make(chan struct{}, opts.MaxConnections),
+		log:     log,
+		clk:     clock.Real(),
+		closer:  opts.Closer,
+		inbound: packstream.NewInboundBudget(resolveMaxInboundDecodeBytes(opts.MaxInboundDecodeBytes)),
 	}, nil
 }
 
@@ -856,10 +919,24 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			// so the Decoder is safe to return to the pool the moment it returns,
 			// even on a decode error.
 			reqReader.Reset(res.raw)
-			dec := reqDecPool.Get(&reqReader)
-			msg, decErr := proto.DecodeRequest(dec)
-			reqDecPool.Put(dec)
+			msg, decErr := decodeRequestBudgeted(&reqReader, s.inbound)
 			if decErr != nil {
+				if errors.Is(decErr, packstream.ErrInboundBudgetExceeded) {
+					// The engine-wide inbound-decode memory ceiling was reached:
+					// the server is under aggregate memory pressure. This is
+					// transient backpressure, not a malformed message — reject with
+					// a retryable status and keep the connection alive (framing is
+					// intact; nothing was allocated). #1845 (CWE-770).
+					s.log.Warn("bolt: inbound decode memory budget exceeded",
+						slog.String("remote", remote))
+					if !s.writeResponse(cw, conn, &proto.Failure{
+						Code:    "Neo.TransientError.General.OutOfMemoryError",
+						Message: "server inbound decode memory limit reached; retry later",
+					}, remote) {
+						return
+					}
+					continue
+				}
 				// A message that fails to decode is a CLIENT fault (a malformed or
 				// truncated PackStream frame). The status code already says so
 				// (Neo.ClientError.Request.Invalid); the message must match that
@@ -981,6 +1058,23 @@ func (s *Server) writeResponse(cw *proto.ChunkedWriter, conn net.Conn, msg any, 
 // decoding reuses both the Decoder and the Reader instead of allocating a fresh
 // pair per message. sync.Pool keeps it safe across connections.
 var reqDecPool = packstream.NewDecodePool()
+
+// decodeRequestBudgeted decodes one Bolt request from src through a pooled
+// decoder, charging its decoded collections against the engine-wide inbound
+// budget so aggregate pre-auth decode memory is bounded across connections
+// (#1845). The reserved bytes are returned when decoding completes — on the
+// normal, error, and panic paths alike — via a deferred release, before the
+// decoder is returned to the pool. A nil/disabled budget makes this a plain
+// pooled decode with no extra accounting.
+func decodeRequestBudgeted(src *bytes.Reader, budget *packstream.InboundBudget) (any, error) {
+	dec := reqDecPool.Get(src)
+	dec.SetInboundBudget(budget)
+	defer func() {
+		dec.ReleaseInboundBudget()
+		reqDecPool.Put(dec)
+	}()
+	return proto.DecodeRequest(dec)
+}
 
 // respBuf bundles a reusable encode buffer with the packstream Encoder
 // permanently bound to it. It is pooled so the hot per-message sendResponse path
