@@ -170,6 +170,18 @@ type ShortestPath struct {
 	revHandles []uint64
 	revToFwd   []uint64
 
+	// totalEdgesTraversed is the aggregate per-query edge-traversal count of the
+	// exhaustive path-predicate search, NOT reset per input row, so it bounds the
+	// M × (per-row cost) multiplication an attacker could drive by inflating
+	// source cardinality — the same defence VarLengthExpand applies (#1840).
+	totalEdgesTraversed int
+	// maxEdgesTraversed / maxTotalEdgesTraversed are the per-input-row and
+	// aggregate per-query edge-traversal caps for the exhaustive path-predicate
+	// search. They default to [defaultMaxEdgesTraversed] /
+	// [defaultMaxTotalEdgesTraversed] and are overridable via [WithWorkBudget].
+	maxEdgesTraversed      int
+	maxTotalEdgesTraversed int
+
 	outBuf []expr.Value
 }
 
@@ -189,15 +201,31 @@ func NewShortestPath(input Operator, fwd, rev csrAdjacency, dir Direction, srcCo
 		dir = DirOut
 	}
 	return &ShortestPath{
-		input:   input,
-		fwd:     fwd,
-		rev:     rev,
-		dir:     dir,
-		srcCol:  srcCol,
-		dstCol:  dstCol,
-		minHops: 1,
-		maxHops: shortestNoMaxHops,
+		input:                  input,
+		fwd:                    fwd,
+		rev:                    rev,
+		dir:                    dir,
+		srcCol:                 srcCol,
+		dstCol:                 dstCol,
+		minHops:                1,
+		maxHops:                shortestNoMaxHops,
+		maxEdgesTraversed:      defaultMaxEdgesTraversed,
+		maxTotalEdgesTraversed: defaultMaxTotalEdgesTraversed,
 	}
+}
+
+// WithWorkBudget overrides the exhaustive path-predicate search's per-input-row
+// and aggregate per-query edge-traversal caps (see [ShortestPath.maxEdgesTraversed]).
+// A non-positive value leaves the corresponding default in place. It returns op
+// for chaining and is primarily a testing seam; production uses the defaults.
+func (op *ShortestPath) WithWorkBudget(maxPerRow, maxTotal int) *ShortestPath {
+	if maxPerRow > 0 {
+		op.maxEdgesTraversed = maxPerRow
+	}
+	if maxTotal > 0 {
+		op.maxTotalEdgesTraversed = maxTotal
+	}
+	return op
 }
 
 // WithTypeFilter restricts traversal to edges whose forward position is present
@@ -444,16 +472,31 @@ func (op *ShortestPath) exhaustiveShortestPath(src, dst uint64, inputRow Row) (e
 	}
 	frontier := []partial{{node: src}}
 
+	// Bound the exhaustive enumeration by the same explicit resource budget
+	// VarLengthExpand uses (#1840): a finite hop ceiling when the pattern is
+	// unbounded, plus a per-row and an aggregate edge-traversal cap. Without them
+	// a hostile unsatisfiable path predicate over an unbounded pattern on a dense
+	// graph drives super-exponential frontier growth bounded only by ctx (peak
+	// memory, not wall-clock). Every openCypher TCK graph is tiny, so no
+	// conforming query can approach these bounds (verified by the 3897 suite).
+	effMaxHops := op.maxHops
+	if effMaxHops == shortestNoMaxHops {
+		effMaxHops = defaultMaxUnboundedHops
+	}
 	const ctxCheckEvery = 1024
 	iter := 0
 	for level := 1; len(frontier) > 0; level++ {
-		if op.maxHops != shortestNoMaxHops && level > op.maxHops {
+		if level > effMaxHops {
 			break
 		}
 		var next []partial
 		for _, pp := range frontier {
 			for _, arc := range op.exhArcs(pp.node) {
 				iter++
+				op.totalEdgesTraversed++
+				if iter > op.maxEdgesTraversed || op.totalEdgesTraversed > op.maxTotalEdgesTraversed {
+					return nil, false, ErrVarLenCapExceeded
+				}
 				if iter&(ctxCheckEvery-1) == 0 {
 					if err := op.ctx.Err(); err != nil {
 						return nil, false, err
@@ -1141,6 +1184,16 @@ type AllShortestPaths struct {
 	pendingIdx  int
 	pendingNull bool // emit one Null-path row (OPTIONAL MATCH, no path found)
 
+	// totalEdgesTraversed is the aggregate per-query edge-traversal count of the
+	// exhaustive path-predicate search, NOT reset per input row (see the same
+	// field on [ShortestPath]) (#1840).
+	totalEdgesTraversed int
+	// maxEdgesTraversed / maxTotalEdgesTraversed are the per-input-row and
+	// aggregate per-query edge-traversal caps (see [ShortestPath]); overridable
+	// via [AllShortestPaths.WithWorkBudget].
+	maxEdgesTraversed      int
+	maxTotalEdgesTraversed int
+
 	outBuf []expr.Value
 }
 
@@ -1152,15 +1205,31 @@ func NewAllShortestPaths(input Operator, fwd, rev csrAdjacency, dir Direction, s
 		dir = DirOut
 	}
 	return &AllShortestPaths{
-		input:   input,
-		fwd:     fwd,
-		rev:     rev,
-		dir:     dir,
-		srcCol:  srcCol,
-		dstCol:  dstCol,
-		minHops: 1,
-		maxHops: shortestNoMaxHops,
+		input:                  input,
+		fwd:                    fwd,
+		rev:                    rev,
+		dir:                    dir,
+		srcCol:                 srcCol,
+		dstCol:                 dstCol,
+		minHops:                1,
+		maxHops:                shortestNoMaxHops,
+		maxEdgesTraversed:      defaultMaxEdgesTraversed,
+		maxTotalEdgesTraversed: defaultMaxTotalEdgesTraversed,
 	}
+}
+
+// WithWorkBudget overrides the exhaustive path-predicate search's per-input-row
+// and aggregate per-query edge-traversal caps (see [ShortestPath.WithWorkBudget]).
+// A non-positive value leaves the corresponding default in place. It returns op
+// for chaining and is primarily a testing seam; production uses the defaults.
+func (op *AllShortestPaths) WithWorkBudget(maxPerRow, maxTotal int) *AllShortestPaths {
+	if maxPerRow > 0 {
+		op.maxEdgesTraversed = maxPerRow
+	}
+	if maxTotal > 0 {
+		op.maxTotalEdgesTraversed = maxTotal
+	}
+	return op
 }
 
 // WithTypeFilter restricts traversal to edges whose forward position is present
@@ -1419,10 +1488,17 @@ func (op *AllShortestPaths) exhaustiveAllShortest(src, dst uint64, inputRow Row)
 	frontier := []partial{{node: src}}
 	foundLen := -1
 
+	// Same explicit resource budget as [ShortestPath.exhaustiveShortestPath]
+	// (#1840): finite hop ceiling when unbounded, plus per-row and aggregate
+	// edge-traversal caps. TCK-neutral (every conforming graph is far below).
+	effMaxHops := op.maxHops
+	if effMaxHops == shortestNoMaxHops {
+		effMaxHops = defaultMaxUnboundedHops
+	}
 	const ctxCheckEvery = 1024
 	iter := 0
 	for level := 1; len(frontier) > 0; level++ {
-		if op.maxHops != shortestNoMaxHops && level > op.maxHops {
+		if level > effMaxHops {
 			break
 		}
 		if foundLen != -1 && level > foundLen {
@@ -1432,6 +1508,10 @@ func (op *AllShortestPaths) exhaustiveAllShortest(src, dst uint64, inputRow Row)
 		for _, pp := range frontier {
 			for _, arc := range op.exhArcs(pp.node) {
 				iter++
+				op.totalEdgesTraversed++
+				if iter > op.maxEdgesTraversed || op.totalEdgesTraversed > op.maxTotalEdgesTraversed {
+					return nil, ErrVarLenCapExceeded
+				}
 				if iter&(ctxCheckEvery-1) == 0 {
 					if err := op.ctx.Err(); err != nil {
 						return nil, err
