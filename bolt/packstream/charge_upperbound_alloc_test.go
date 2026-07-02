@@ -78,8 +78,40 @@ func TestDecoder_ChargeUpperBoundsGoAllocation(t *testing.T) {
 			return l
 		})
 		if charge := listBase + int64(n)*listPer; charge < int64(listActual) {
-			t.Errorf("list n=%d: charge %d < real Go allocation %d — decoded-memory budget UNDER-counts lists",
+			t.Errorf("int-list n=%d: charge %d < real Go allocation %d — decoded-memory budget UNDER-counts lists",
 				n, charge, listActual)
+		}
+
+		// String-element list: boxing a string into a Value allocates a ~16-byte
+		// string header. Keys are pre-allocated, so only the box is measured.
+		strActual := measureRetainedAlloc(func() any {
+			l := make([]packstream.Value, n)
+			for i := 0; i < n; i++ {
+				l[i] = keys[i]
+			}
+			return l
+		})
+		if charge := listBase + int64(n)*listPer; charge < int64(strActual) {
+			t.Errorf("string-list n=%d: charge %d < real Go allocation %d — budget UNDER-counts string-element lists",
+				n, charge, strActual)
+		}
+
+		// Bytes-element list: boxing a []byte allocates a 24-byte slice header —
+		// the worst-case element box, and the shape that broke the pre-48
+		// listElemCost. The underlying array is shared (pre-allocated), so only
+		// the per-element slice-header box is measured, mirroring the decoder,
+		// which charges Bytes payload bytes against the wire budget separately.
+		sharedBytes := []byte("payload")
+		bytesActual := measureRetainedAlloc(func() any {
+			l := make([]packstream.Value, n)
+			for i := 0; i < n; i++ {
+				l[i] = sharedBytes
+			}
+			return l
+		})
+		if charge := listBase + int64(n)*listPer; charge < int64(bytesActual) {
+			t.Errorf("bytes-list n=%d: charge %d < real Go allocation %d — budget UNDER-counts []byte-element lists",
+				n, charge, bytesActual)
 		}
 	}
 }

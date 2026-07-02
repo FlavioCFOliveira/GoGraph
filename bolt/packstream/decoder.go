@@ -101,15 +101,19 @@ const maxDecodedCollectionBytes = 128 << 20
 const (
 	// listElemCost is the decoded cost of one List element or Struct field: a
 	// 16-byte interface slot in the presized []Value PLUS the heap box the
-	// element's scalar/string-header content occupies once stored in that
-	// interface (a large int64 or a string header is ~8-16 B, amortising to
-	// ~8 B via the tiny allocator; a measured []Value of large ints costs
-	// ~24 B/elem, ~56 B at n=1). 32 upper-bounds both. Nested collections are
-	// charged recursively by their own chargeDecoded. Elements that box to a
-	// static (small ints, NULL, bool) cost less, so this over-counts them
-	// (safe). The slice backing is presized exactly, so there is no capacity
-	// slack.
-	listElemCost = 32
+	// element's content occupies once stored in that interface. The largest
+	// element box is a []byte value (from ReadBytes): boxing a slice into an
+	// interface allocates a 24-byte slice header, so a Bytes element costs
+	// ~40 B (16 slot + 24 header); a string header boxes to ~16 B and an int64
+	// to ~8 B (amortised via the tiny allocator), both smaller. 48
+	// (= 16 slot + 24 header + 8 margin) upper-bounds every element type for
+	// every n — including small n, where 40 is insufficient (a measured
+	// 64-element list of empty Bytes costs 2712 B > 32 + 64*40). Nested
+	// collections are charged recursively by their own chargeDecoded; elements
+	// that box to a static (small ints, NULL, bool) cost less, so this
+	// over-counts them (safe). The slice backing is presized exactly, so there
+	// is no capacity slack.
+	listElemCost = 48
 	// collectionCost is the fixed decoded cost of a List or Struct container
 	// itself (a slice header boxed into an interface, ~24 B), charged once per
 	// collection so wide fan-outs of tiny or empty collections are accounted.
