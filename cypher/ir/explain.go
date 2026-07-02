@@ -173,6 +173,8 @@ func operatorName(plan LogicalPlan) string {
 		return "DetachDelete"
 	case *Merge:
 		return "Merge"
+	case *MergePattern:
+		return "MergePattern"
 	case *ProcedureCall:
 		return "ProcedureCall"
 

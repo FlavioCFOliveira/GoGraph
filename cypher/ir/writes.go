@@ -1,6 +1,10 @@
 package ir
 
-import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+import (
+	"fmt"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+)
 
 // writes.go — CREATE / MERGE / SET / REMOVE / DELETE translation.
 //
@@ -203,13 +207,19 @@ func collectPlanVars(plan LogicalPlan) map[string]struct{} {
 
 // mergeClause translates a MERGE clause.
 //
-// Special-case: when the pattern is a single-hop relationship between
-// two endpoint variables that are BOTH already bound by the child
-// plan and the MERGE has no ON CREATE / ON MATCH actions, the
-// translator emits [MergeRelationship] — a focused operator that
-// checks for an existing edge and creates one only when absent. All
-// other MERGE shapes (node-only, multi-hop, with ON-actions) keep
-// using the node-oriented [Merge] path.
+// Three IR shapes are emitted, from most to least specialised:
+//
+//   - [MergeRelationship]: the pattern is a single-hop relationship between
+//     two endpoint variables that are BOTH already bound by the child plan,
+//     neither re-asserts labels/properties, and every ON CREATE / ON MATCH
+//     action targets the relationship variable. The narrowest, most
+//     efficient shape: a single HasEdge check plus a single AddEdge.
+//   - [MergePattern]: any other pattern with at least one relationship hop
+//     — one or more fresh (not-yet-bound) endpoints, a multi-hop chain, or
+//     ON CREATE/ON MATCH actions that target a node variable. Implements
+//     openCypher's whole-pattern match-or-create semantics via a
+//     search-then-create algorithm.
+//   - [Merge]: a pattern with no relationship at all (a lone node).
 func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, error) {
 	// Eager pipeline-break when the child contains a DELETE: openCypher
 	// requires DELETE's writes to be visible to a subsequent MERGE's
@@ -263,6 +273,27 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 	onMatch := make([]string, len(m.OnMatch))
 	for i, si := range m.OnMatch {
 		onMatch[i] = si.String()
+	}
+	// Any remaining pattern with at least one relationship hop needs
+	// MergePattern's general whole-pattern search-then-create — the
+	// MergeRelationship fast path above only fires for the narrowest shape
+	// (both endpoints already bound, no new attributes, actions confined to
+	// the relationship). This covers one or more fresh endpoints, multi-hop
+	// chains, and node-targeted ON CREATE/ON MATCH actions.
+	if m.Pattern != nil && m.Pattern.Head != nil && m.Pattern.Head.Next != nil {
+		outer := map[string]struct{}{}
+		for _, v := range collectAllVars(child) {
+			outer[v] = struct{}{}
+		}
+		mp, err := buildMergePatternChain(m.Pattern, outer, onCreate, onMatch, child)
+		if err != nil {
+			return nil, err
+		}
+		var plan LogicalPlan = mp
+		if m.Pattern.Variable != nil {
+			plan = applyPathVar(m.Pattern, plan)
+		}
+		return plan, nil
 	}
 	// BoundVars carry node/relationship variables only. The path variable
 	// (m.Pattern.Variable) is handled separately by applyPathVar below — it
@@ -443,10 +474,13 @@ func mergeSingleHopRel(pp *ast.PathPattern) (singleHopRel, bool) {
 	}
 	if head.Node.Properties != nil || step.Node.Properties != nil ||
 		len(head.Node.Labels) != 0 || len(step.Node.Labels) != 0 {
-		// Re-asserting labels/properties on bound endpoints is the
-		// "Fail when imposing new predicates" scenario; skip
-		// translation here so the node-only Merge path can surface
-		// the appropriate error.
+		// sema's checkMergeNoRebind already rejects (at compile time,
+		// before translation reaches here) any endpoint that is BOTH
+		// already bound AND carries new labels/properties. So an endpoint
+		// with labels/properties at this point is necessarily fresh — this
+		// fast path requires both endpoints pre-bound, so it does not
+		// apply; the caller falls through to buildMergePatternChain, which
+		// searches for and, if absent, creates the fresh endpoint(s).
 		return singleHopRel{}, false
 	}
 	rv := ""
@@ -474,6 +508,114 @@ func mergeSingleHopRel(pp *ast.PathPattern) (singleHopRel, bool) {
 		relProps:   rp,
 		undirected: und,
 	}, true
+}
+
+// buildMergePatternChain translates a MERGE path pattern containing at
+// least one relationship hop into a [MergePattern] IR node — the general
+// case for any shape [mergeSingleHopRel] does not already handle more
+// efficiently: one or more fresh (not-yet-bound) endpoints, a chain of two
+// or more hops, or ON CREATE/ON MATCH actions that target a node variable
+// rather than only the relationship.
+//
+// outer is the set of variables already bound before this MERGE clause (from
+// a leading MATCH/WITH/earlier clause); a node naming one of these is a
+// bound chain position, pinned to its existing value and never
+// independently searched for or created. Every other named or anonymous
+// node position is fresh. A bound position's Labels/Properties are always
+// empty by the time translation reaches here: sema's checkMergeNoRebind
+// rejects (at compile time) any pattern that re-asserts new labels or
+// properties on an already-bound MERGE variable.
+//
+// A cyclic pattern that reuses the SAME freshly-introduced variable at a
+// later chain position — e.g. `MERGE (a)-[:R1]->(b)-[:R2]->(a)` — is
+// rejected outright rather than silently mishandled: the left-to-right
+// search/create algorithm treats each chain position independently, so it
+// has no way to enforce "this position must resolve to the same node as
+// that earlier one" without a materially different (constraint-solving)
+// algorithm. Detected here, before a MergePattern is ever built, so the
+// failure is a clear compile-time-style error instead of a confusing
+// runtime "bound variable is null" from the physical operator failing to
+// resolve a same-pattern forward reference.
+//
+// Every relationship in the chain is guaranteed by sema to have exactly one
+// type, fixed length (never variable-length), and — when a property map is
+// present — never a bare parameter reference (checkPathPatternRelTypes /
+// checkPathPatternParameterProps), so this function only needs to defend
+// against those shapes, never actually route around them.
+func buildMergePatternChain(pp *ast.PathPattern, outer map[string]struct{}, onCreate, onMatch []string, child LogicalPlan) (*MergePattern, error) {
+	if pp == nil || pp.Head == nil || pp.Head.Node == nil {
+		return nil, fmt.Errorf("cypher: ir: MERGE pattern has no leading node")
+	}
+
+	seen := map[string]struct{}{}
+	var buildErr error
+	toEndpoint := func(np *ast.NodePattern) MergePatternEndpoint {
+		v := ""
+		if np.Variable != nil {
+			v = *np.Variable
+		}
+		_, boundOuter := outer[v]
+		_, boundInPattern := seen[v]
+		if v != "" && boundInPattern && !boundOuter && buildErr == nil {
+			buildErr = fmt.Errorf("cypher: ir: MERGE pattern re-references fresh variable %q at a later position in the same pattern (a cyclic pattern) — not supported; split into separate MERGE clauses, e.g. MERGE (%s) ... MERGE (%s)-[...]->(...)", v, v, v)
+		}
+		bound := v != "" && boundOuter
+		if v != "" {
+			seen[v] = struct{}{}
+		}
+		ep := MergePatternEndpoint{Var: v, Bound: bound}
+		if !bound {
+			ep.Labels = append([]string(nil), np.Labels...)
+			if np.Properties != nil {
+				ep.PropsRaw = np.Properties.String()
+				if _, isLiteral := allMapValuesLiteral(np.Properties); !isLiteral {
+					ep.PropsAST = np.Properties
+				}
+			}
+		}
+		return ep
+	}
+
+	nodes := []MergePatternEndpoint{toEndpoint(pp.Head.Node)}
+	if buildErr != nil {
+		return nil, buildErr
+	}
+	var hops []MergePatternHop
+	for el := pp.Head.Next; el != nil; el = el.Next {
+		if el.Relationship == nil || el.Node == nil {
+			return nil, fmt.Errorf("cypher: ir: malformed MERGE pattern: relationship hop missing a node")
+		}
+		rp := el.Relationship
+		if len(rp.Types) != 1 {
+			// Defensive: unreachable post-sema (checkPathPatternRelTypes
+			// rejects any other count as NoSingleRelationshipType at
+			// compile time). Fail loudly rather than silently create an
+			// untyped/multi-typed relationship if that guarantee ever
+			// regresses.
+			return nil, fmt.Errorf("cypher: ir: MERGE relationship must have exactly one type, got %d", len(rp.Types))
+		}
+		hop := MergePatternHop{
+			RelType:    rp.Types[0],
+			Undirected: rp.Direction != ast.RelDirectionOutgoing && rp.Direction != ast.RelDirectionIncoming,
+			Reversed:   rp.Direction == ast.RelDirectionIncoming,
+		}
+		if rp.Variable != nil {
+			hop.RelVar = *rp.Variable
+		}
+		if rp.Properties != nil {
+			hop.RelPropsRaw = rp.Properties.String()
+			if _, isLiteral := allMapValuesLiteral(rp.Properties); !isLiteral {
+				hop.RelPropsAST = rp.Properties
+			}
+		}
+		nodes = append(nodes, toEndpoint(el.Node))
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		hops = append(hops, hop)
+	}
+
+	return NewMergePattern(nodes, hops, onCreate, onMatch, child), nil
 }
 
 // setClause translates a SET clause. Each SetItem becomes one of:

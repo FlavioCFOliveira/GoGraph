@@ -1942,6 +1942,126 @@ func (m *Merge) Children() []LogicalPlan { return []LogicalPlan{m.Child} }
 func (m *Merge) Vars() []string { return m.BoundVars }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// MergePatternEndpoint describes one node position in a [MergePattern] chain.
+//
+// When Bound is true, Var names a variable already bound by an earlier
+// clause (a preceding MATCH/CREATE/MERGE/WITH); the physical operator pins
+// it to its existing value and never searches for or creates a node for it.
+// Labels/PropsRaw/PropsAST are unset in this case — openCypher forbids
+// re-asserting new labels or properties on an already-bound MERGE variable
+// (rejected at compile time by sema's VariableAlreadyBound check).
+//
+// When Bound is false, Var names a variable this MERGE clause introduces
+// fresh: Labels and PropsRaw describe the node-pattern predicate used both
+// to search for a satisfying node and, when the whole pattern's search
+// fails, to create one.
+type MergePatternEndpoint struct {
+	Var      string
+	Bound    bool
+	Labels   []string
+	PropsRaw string // opaque inline `{k: v, ...}` source string, "" when absent
+	// PropsAST carries the property-map AST when it contains non-literal
+	// expressions (variable references, property accesses, parameters).
+	// nil when the map is absent or fully literal, in which case PropsRaw
+	// alone drives both the search predicate and the create-time write.
+	PropsAST ast.Expression
+}
+
+// MergePatternHop describes one relationship connecting two consecutive
+// [MergePatternEndpoint] positions in a [MergePattern] chain (position i to
+// position i+1). Every field is fully resolved by sema before translation
+// reaches this node: exactly one relationship type (zero or multiple types
+// are rejected at compile time as NoSingleRelationshipType), never
+// variable-length (rejected as CreatingVarLength), and the property map, when
+// present, is never a bare parameter reference (rejected as
+// InvalidParameterUse) — so RelPropsRaw/RelPropsAST only ever need to
+// represent a `{k: v, ...}` map literal, exactly like [MergePatternEndpoint].
+type MergePatternHop struct {
+	RelVar      string // "" for an anonymous relationship
+	RelType     string
+	RelPropsRaw string // opaque inline `{k: v, ...}` source string, "" when absent
+	// RelPropsAST carries the property-map AST when it contains non-literal
+	// expressions; nil when the map is absent or fully literal.
+	RelPropsAST ast.Expression
+	Undirected  bool
+	// Reversed is true for an incoming `<-` pattern: chain positions stay in
+	// pattern-declaration order, but the edge is stored/searched from the
+	// NEXT position back to this one rather than this one to the next.
+	Reversed bool
+}
+
+// MergePattern implements the compound MERGE clause: a chain of one or more
+// relationship hops in which at least one node is NOT already bound by an
+// earlier clause, so the whole pattern (every fresh node plus every
+// relationship) must be searched for as one atomic unit and, when no joint
+// match exists, created as one atomic unit — openCypher's whole-pattern
+// MERGE semantics (never independently reuse an existing node for part of a
+// pattern that fails to match as a whole).
+//
+// MergePattern complements [Merge] (a lone node, no relationship) and
+// [MergeRelationship] (a single relationship hop whose endpoints are BOTH
+// already bound and whose ON CREATE/ON MATCH actions target only the
+// relationship — the narrower, more efficient case). The translator
+// (mergeClause in cypher/ir/writes.go) routes a MERGE pattern with at least
+// one relationship hop to whichever of the two IR nodes matches its exact
+// shape, falling back to MergePattern for everything MergeRelationship's
+// narrow fast path does not cover.
+type MergePattern struct {
+	// Nodes holds one entry per chain position; len(Nodes) == len(Hops)+1.
+	Nodes []MergePatternEndpoint
+	// Hops holds one entry per relationship; Hops[i] connects Nodes[i] to
+	// Nodes[i+1].
+	Hops []MergePatternHop
+	// OnCreate / OnMatch are opaque SET-item strings (the same representation
+	// [Merge] uses), parsed by the physical builder via the shared
+	// parseMergeActions helper into actions addressable by any pattern
+	// variable — any Nodes[i].Var or Hops[i].RelVar, not just one entity.
+	OnCreate []string
+	OnMatch  []string
+	Child    LogicalPlan
+}
+
+// NewMergePattern creates a MergePattern operator for the chain described by
+// nodes and hops. len(nodes) must equal len(hops)+1.
+func NewMergePattern(nodes []MergePatternEndpoint, hops []MergePatternHop, onCreate, onMatch []string, child LogicalPlan) *MergePattern {
+	ns := make([]MergePatternEndpoint, len(nodes))
+	copy(ns, nodes)
+	hs := make([]MergePatternHop, len(hops))
+	copy(hs, hops)
+	oc := make([]string, len(onCreate))
+	copy(oc, onCreate)
+	om := make([]string, len(onMatch))
+	copy(om, onMatch)
+	return &MergePattern{
+		Nodes: ns, Hops: hs,
+		OnCreate: oc, OnMatch: om,
+		Child: child,
+	}
+}
+
+// Children implements LogicalPlan.
+func (m *MergePattern) Children() []LogicalPlan { return []LogicalPlan{m.Child} }
+
+// Vars implements LogicalPlan: only the FRESH nodes (and named
+// relationships) are newly bound by this node — an already-bound endpoint
+// was introduced by an earlier clause and must not be reported again here.
+func (m *MergePattern) Vars() []string {
+	var out []string
+	for _, n := range m.Nodes {
+		if !n.Bound && n.Var != "" {
+			out = append(out, n.Var)
+		}
+	}
+	for _, h := range m.Hops {
+		if h.RelVar != "" {
+			out = append(out, h.RelVar)
+		}
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Procedure call operator
 // ─────────────────────────────────────────────────────────────────────────────
 

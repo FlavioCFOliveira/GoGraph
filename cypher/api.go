@@ -1550,6 +1550,21 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	}
 	plan := entry.plan
 
+	// ── 1a-2. Reject a write/DDL query up front, with a clear, actionable
+	// error. Run has no writer lock, no visibility barrier, and no WAL
+	// transaction to record into (buildPlanWithMutatorFull, which wires the
+	// write-capable operator builder, is only invoked by RunInTx), so
+	// without this check a write clause reached the physical builder and
+	// failed several calls deeper with an opaque "unsupported IR node"
+	// error that named an internal type and gave the caller no indication
+	// that Run itself was the wrong entry point. Checked structurally
+	// (ir.ContainsWrite on the already-built plan) rather than by
+	// re-scanning the query text, since the plan is already available and
+	// authoritative.
+	if ir.ContainsWrite(plan) {
+		return nil, fmt.Errorf("cypher: Run does not execute write or DDL statements; use RunInTx or RunAny instead: %w", ErrWriteInReadOnlyTx)
+	}
+
 	// ── 1b. Parameter presence + type check ─────────────────────────────────
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return nil, err
@@ -4500,6 +4515,96 @@ func buildOperatorWrite(
 			op = op.WithOnMatch(p.RelVar, actions)
 		}
 		return op, nil
+
+	case *ir.MergePattern:
+		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		// Snapshot schema before any of this MergePattern's own columns are
+		// added. Every node's PropsEvalFn closure evaluates against the
+		// ORIGINAL driving row (properties are computed once per driving
+		// row, before the pattern's own positions are bound) — mirrors
+		// CreateNode's propsSchema snapshot timing.
+		propsSchema := copySchema(schema)
+
+		mp := exec.NewMergePattern(child, mutator)
+		nodeCols := make([]int, len(p.Nodes))
+		for i, n := range p.Nodes {
+			if exec.PropMapContainsNullLiteral(n.PropsRaw) {
+				return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE pattern contains a null property literal")
+			}
+			if n.Bound {
+				col, ok := schema[n.Var]
+				if !ok {
+					return nil, fmt.Errorf("cypher: MergePattern: bound variable %q unresolved", n.Var)
+				}
+				nodeCols[i] = col
+				mp.AddBoundNode(n.Var, col)
+				continue
+			}
+			// Every fresh position gets a real column, named or synthetic,
+			// so a later hop's path-triplet registration (below) always has
+			// a column to read — mirrors how CREATE's ensureNodeVar gives
+			// every anonymous node a synthetic name and MergeRelationship
+			// gives an anonymous relationship a synthetic schema key.
+			outCol := schemaWidth(schema)
+			nodeKey := n.Var
+			if nodeKey == "" {
+				nodeKey = fmt.Sprintf("__anon_merge_pattern_node_%d_%d", i, outCol)
+			}
+			schema[nodeKey] = outCol
+			nodeCols[i] = outCol
+			mp.AddFreshNode(n.Var, n.Labels, n.PropsRaw, outCol)
+			if ml, isMap := n.PropsAST.(*ast.MapLiteral); isMap && ml != nil {
+				if mapLiteralHasNonLiteralValue(ml) {
+					if fn := buildPropsEvalFn(ml, propsSchema, params, reg, mutator, bopts); fn != nil {
+						mp.WithNodePropsEvalFn(fn)
+					}
+				}
+			}
+		}
+		for i, h := range p.Hops {
+			if exec.PropMapContainsNullLiteral(h.RelPropsRaw) {
+				return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE pattern contains a null property literal")
+			}
+			if ml, isMap := h.RelPropsAST.(*ast.MapLiteral); isMap && ml != nil && mapLiteralHasNonLiteralValue(ml) {
+				// Node properties fall back to a per-row PropsEvalFn for a
+				// genuinely non-literal, non-parameter expression (handled
+				// above); relationship properties on a compound pattern do
+				// not have that fallback wired yet (MergeRelationship's own
+				// fast path does not support it either), so reject loudly
+				// here rather than silently drop the value at write time.
+				return nil, fmt.Errorf("cypher: MergePattern: relationship property map on hop %d contains an unsupported non-literal, non-parameter expression; bind the value with a leading MATCH/WITH first", i)
+			}
+			relCol := schemaWidth(schema)
+			relKey := h.RelVar
+			if relKey == "" {
+				relKey = fmt.Sprintf("__anon_merge_pattern_rel_%d_%d", i, relCol)
+			}
+			schema[relKey] = relCol
+			mp.AddHop(h.RelVar, relCol, h.RelType, h.RelPropsRaw, h.Undirected, h.Reversed)
+			if bopts != nil {
+				srcCol, dstCol := nodeCols[i], nodeCols[i+1]
+				if h.Reversed {
+					srcCol, dstCol = dstCol, srcCol
+				}
+				step := pathChainStep{srcCol: srcCol, edgeCol: relCol, dstCol: dstCol, edgeType: h.RelType}
+				bopts.expandTripletSeq = append(bopts.expandTripletSeq, step)
+			}
+		}
+		if len(params) > 0 {
+			if mp, err = mp.WithParams(params); err != nil {
+				return nil, err
+			}
+		}
+		if mp, err = mp.WithActions(p.OnCreate, p.OnMatch); err != nil {
+			return nil, err
+		}
+		if constraintReg != nil {
+			mp.WithConstraints(constraintReg, idxMgr)
+		}
+		return mp, nil
 
 	case *ir.Merge:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
