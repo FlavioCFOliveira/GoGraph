@@ -37,6 +37,12 @@ type File interface {
 type ReadFile interface {
 	io.Reader
 	Close() error
+	// Stat returns file info for the OPEN descriptor (an fstat, not a path
+	// re-stat), so a size derived from it reflects exactly the bytes this
+	// handle reads — used by the CSR reader's allocation bound to avoid any
+	// stat/open TOCTOU (see safeCSRAllocBound). Both backends already provide
+	// it: osBackend's *os.File natively, and the simulator's *SimFileHandle.
+	Stat() (fs.FileInfo, error)
 }
 
 // fileSystem is the filesystem seam the snapshot package writes and reads

@@ -71,8 +71,9 @@ func openWith(fsys fileSystem, dir string) (LoadedCSR, error) {
 	// Bound the allocation by min(manifest size, real on-disk size): a header
 	// that declares more vertices/edges/weights than the file could hold — even
 	// under a manifest that lies about the size (e.g. size:0 to force the
-	// backstop) — is rejected before any allocation. See [safeCSRAllocBound].
-	bound, err := safeCSRAllocBound(fsys, csrPath, csrEntry.Size)
+	// backstop) — is rejected before any allocation. The bound comes from an
+	// fstat of the open fd (see [safeCSRAllocBound]), so there is no TOCTOU.
+	bound, err := safeCSRAllocBound(f, csrEntry.Size)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.Open.errors", 1)
 		return LoadedCSR{}, err

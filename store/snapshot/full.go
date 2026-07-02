@@ -1132,11 +1132,12 @@ func boundedComponentReader(r io.Reader, size int64) io.Reader {
 // the caller. We return min(manifestSize, realSize) (realSize when the manifest
 // size is non-positive), so a legitimate snapshot (manifest size == real size)
 // is bounded exactly as before while a lying manifest can only make the bound
-// tighter, never exceed the real bytes. The store directory is static during
-// recovery, so the stat/open ordering carries no meaningful TOCTOU: an attacker
-// able to swap files mid-recovery already holds write access to the store.
-func safeCSRAllocBound(fsys fileSystem, path string, manifestSize int64) (int64, error) {
-	info, err := fsys.Stat(path)
+// tighter, never exceed the real bytes. The size is obtained by fstat-ing the
+// already-open descriptor (f.Stat), not by re-stat'ing the path, so it reflects
+// exactly the bytes this handle reads and there is no stat/open TOCTOU: the fd
+// was opened with O_NOFOLLOW, and its size cannot diverge from what is read.
+func safeCSRAllocBound(f ReadFile, manifestSize int64) (int64, error) {
+	info, err := f.Stat()
 	if err != nil {
 		return 0, fmt.Errorf("%w: stat %s: %w", ErrCorrupted, CSRFile, err)
 	}
@@ -1165,7 +1166,7 @@ func readVerifiedCSR(fsys fileSystem, path string, expected uint32, size int64) 
 	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
 
-	bound, err := safeCSRAllocBound(fsys, path, size)
+	bound, err := safeCSRAllocBound(f, size)
 	if err != nil {
 		return CSRReadback{}, err
 	}
