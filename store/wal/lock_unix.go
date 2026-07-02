@@ -25,8 +25,8 @@ import (
 // sentinel avoids any interaction between the flock held here and the
 // O_APPEND writes the [Writer] makes to the WAL data file.
 func acquireLock(path string) (*os.File, error) {
-	//nolint:gosec // caller-supplied WAL directory path
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	//nolint:gosec // caller-supplied WAL directory path; walNoFollow rejects a symlinked LOCK component (CWE-59)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|walNoFollow, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("wal: open lock file %q: %w", path, err)
 	}

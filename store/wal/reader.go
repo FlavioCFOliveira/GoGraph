@@ -29,7 +29,7 @@ type Reader struct {
 // OpenReader opens path for read-only frame iteration.
 func OpenReader(path string) (*Reader, error) {
 	defer metrics.Time("store.wal.OpenReader").Stop()
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path is by-design
+	f, err := os.OpenFile(path, os.O_RDONLY|walNoFollow, 0) //nolint:gosec // caller-supplied path is by-design; walNoFollow rejects a symlinked final component (CWE-59)
 	if err != nil {
 		metrics.IncCounter("store.wal.OpenReader.errors", 1)
 		return nil, fmt.Errorf("wal: open %q: %w", path, err)

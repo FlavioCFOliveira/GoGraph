@@ -116,7 +116,12 @@ var _ walFS = osWALFS{}
 // same restrictive mode [Open] and the pre-seam writeSuffixTmp/reopen used, so
 // the WAL temp and the reopened inode are never world-readable.
 func (osWALFS) OpenFile(path string, flag int) (WALFile, error) {
-	return os.OpenFile(path, flag, 0o600) //nolint:gosec // caller-supplied WAL path is by-design
+	// walNoFollow makes the suffix-temp (O_TRUNC) and post-rename reopen refuse
+	// a symlinked final component (ELOOP) instead of truncating/overwriting an
+	// arbitrary process-writable file (CWE-59). It is applied only in this
+	// production OS backend; the injected walFS backends (sim/testfs) are not
+	// symlink-exposed and their flags are left untouched.
+	return os.OpenFile(path, flag|walNoFollow, 0o600) //nolint:gosec // caller-supplied WAL path is by-design
 }
 
 func (osWALFS) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }

@@ -193,7 +193,7 @@ func Open(path string) (*Writer, error) {
 	// 0o600: the WAL carries the full graph mutation stream and must not
 	// be world-readable (audit finding L2). Append/sync/durability flags
 	// are unchanged; only the create mode is tightened.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // caller-supplied path is by-design
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND|walNoFollow, 0o600) //nolint:gosec // caller-supplied path is by-design; walNoFollow rejects a symlinked final component (CWE-59)
 	if err != nil {
 		releaseLock(lockFile)
 		metrics.IncCounter("store.wal.Open.errors", 1)
