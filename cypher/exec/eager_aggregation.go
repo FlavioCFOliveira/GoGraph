@@ -71,6 +71,7 @@ type EagerAggregation struct {
 	keyCols      []int                     // column indices that form the group key
 	aggFactories []funcs.AggregatorFactory // one factory per aggregate expression
 	maxGroups    int                       // memory cap on distinct group count
+	budget       byteBudget                // estimated-byte cap on retained group keys (#1841)
 
 	// Runtime state — valid between Init and Close.
 	ctx     context.Context          //nolint:containedctx // stored for per-Next ctx check
@@ -108,6 +109,16 @@ func NewEagerAggregation(
 	}, nil
 }
 
+// WithByteBudget bounds the estimated retained size of the group keys by
+// maxBytes. It complements the maxGroups count cap so a few large-valued group
+// keys cannot exceed the engine's result-byte budget before the count cap fires
+// (#1841). A non-positive maxBytes or nil estimateRow leaves the byte dimension
+// disabled. Returns op for chaining and must be called before Init.
+func (op *EagerAggregation) WithByteBudget(maxBytes int64, estimateRow func(Row) int64) *EagerAggregation {
+	op.budget.set(maxBytes, estimateRow)
+	return op
+}
+
 // Init initialises the operator. The blocking consume phase is deferred to the
 // first Next call.
 func (op *EagerAggregation) Init(ctx context.Context) error {
@@ -116,6 +127,7 @@ func (op *EagerAggregation) Init(ctx context.Context) error {
 	op.groups = nil
 	op.order = nil
 	op.emitIdx = 0
+	op.budget.reset()
 	return op.child.Init(ctx)
 }
 
@@ -252,6 +264,9 @@ func (op *EagerAggregation) getOrCreate(row Row) (*groupEntry, error) {
 
 	// New group.
 	if len(op.order) >= op.maxGroups {
+		return nil, ErrAggMemoryExceeded
+	}
+	if op.budget.charge(keyVals) {
 		return nil, ErrAggMemoryExceeded
 	}
 

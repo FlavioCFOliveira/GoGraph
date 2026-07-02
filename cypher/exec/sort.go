@@ -68,12 +68,24 @@ type Sort struct {
 	child   Operator
 	keys    []SortKey
 	maxRows int
+	budget  byteBudget // estimated-byte cap on the buffered rows (#1841)
 
 	// Runtime state.
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 	rows    []Row
 	sorted  bool
 	emitIdx int
+}
+
+// WithByteBudget bounds the estimated retained size of the buffered rows by
+// maxBytes, using estimateRow for the per-row estimate. It complements the
+// maxRows count cap so a few large-valued rows cannot exceed the engine's
+// result-byte budget before the count cap fires (#1841). A non-positive maxBytes
+// or nil estimateRow leaves the byte dimension disabled. Returns op for chaining
+// and must be called before Init.
+func (op *Sort) WithByteBudget(maxBytes int64, estimateRow func(Row) int64) *Sort {
+	op.budget.set(maxBytes, estimateRow)
+	return op
 }
 
 // NewSort creates a Sort operator.
@@ -102,6 +114,7 @@ func (op *Sort) Init(ctx context.Context) error {
 	op.rows = op.rows[:0] // reuse slice backing if already allocated
 	op.sorted = false
 	op.emitIdx = 0
+	op.budget.reset()
 	return op.child.Init(ctx)
 }
 
@@ -161,6 +174,9 @@ func (op *Sort) collectAndSort() error {
 		}
 
 		if len(op.rows) >= op.maxRows {
+			return ErrSortMemoryExceeded
+		}
+		if op.budget.charge(row) {
 			return ErrSortMemoryExceeded
 		}
 

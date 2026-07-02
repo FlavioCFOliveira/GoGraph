@@ -44,11 +44,22 @@ var ErrEagerMemoryExceeded = errors.New("exec: eager memory cap exceeded")
 type Eager struct {
 	child   Operator
 	maxRows int
+	budget  byteBudget // estimated-byte cap on the buffered rows (#1841)
 
 	// Runtime state.
 	rows    []Row
 	emitIdx int
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+}
+
+// WithByteBudget bounds the estimated retained size of the buffered rows by
+// maxBytes. It complements the maxRows count cap so a few large-valued rows
+// cannot exceed the engine's result-byte budget before the count cap fires
+// (#1841). A non-positive maxBytes or nil estimateRow leaves the byte dimension
+// disabled. Returns op for chaining and must be called before Init.
+func (op *Eager) WithByteBudget(maxBytes int64, estimateRow func(Row) int64) *Eager {
+	op.budget.set(maxBytes, estimateRow)
+	return op
 }
 
 // NewEager wraps child in an Eager barrier.
@@ -74,6 +85,7 @@ func (op *Eager) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.rows = nil
 	op.emitIdx = 0
+	op.budget.reset()
 	if err := op.child.Init(ctx); err != nil {
 		return err
 	}
@@ -95,6 +107,9 @@ func (op *Eager) Init(ctx context.Context) error {
 			break
 		}
 		if len(op.rows) >= op.maxRows {
+			return ErrEagerMemoryExceeded
+		}
+		if op.budget.charge(row) {
 			return ErrEagerMemoryExceeded
 		}
 		cp := make(Row, len(row))

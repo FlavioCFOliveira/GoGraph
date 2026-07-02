@@ -58,10 +58,17 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"math"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
+
+// ErrHashJoinMemoryExceeded is returned by the HashJoin build phase when the
+// estimated retained size of the build table exceeds the configured byte budget
+// (#1841). The build table is otherwise unbounded, so without a budget a large
+// build side could exhaust memory before any drain-level guard fires.
+var ErrHashJoinMemoryExceeded = errors.New("exec: hash join memory cap exceeded")
 
 // KeyFn extracts the join-key value from a row. It returns the evaluated key
 // (which may be expr.Null) or an error that halts the pipeline.
@@ -91,6 +98,7 @@ type HashJoin struct {
 	// sets this so the output layout matches the Apply (outer || inner) being
 	// replaced regardless of which side became the build side.
 	buildOnLeft bool
+	budget      byteBudget // estimated-byte cap on the build table (#1841)
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -124,6 +132,16 @@ func NewHashJoin(build, probe Operator, buildFn, probeFn KeyFn, buildOnLeft bool
 	}
 }
 
+// WithByteBudget bounds the estimated retained size of the build table by
+// maxBytes, returning [ErrHashJoinMemoryExceeded] when exceeded. The build table
+// has no count cap, so this is the operator's memory bound (#1841). A
+// non-positive maxBytes or nil estimateRow leaves it unbounded (prior
+// behaviour). Returns op for chaining and must be called before Init.
+func (op *HashJoin) WithByteBudget(maxBytes int64, estimateRow func(Row) int64) *HashJoin {
+	op.budget.set(maxBytes, estimateRow)
+	return op
+}
+
 // Init initialises both child plans and resets join state.
 func (op *HashJoin) Init(ctx context.Context) error {
 	op.ctx = ctx
@@ -135,6 +153,7 @@ func (op *HashJoin) Init(ctx context.Context) error {
 	op.bucketIdx = 0
 	op.probeEOS = false
 	op.outBuf = op.outBuf[:0]
+	op.budget.reset()
 	if err := op.build.Init(ctx); err != nil {
 		return err
 	}
@@ -167,6 +186,9 @@ func (op *HashJoin) buildTable() error {
 		}
 		if isUnjoinableKey(key) {
 			continue
+		}
+		if op.budget.charge(r) {
+			return ErrHashJoinMemoryExceeded
 		}
 		// Own a stable snapshot of the build row across the entire probe phase.
 		cp := make(Row, len(r))

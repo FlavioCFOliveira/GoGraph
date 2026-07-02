@@ -3214,6 +3214,20 @@ func estimateRowSize(row []expr.Value) int64 {
 	return total
 }
 
+// resultByteBudget returns the per-query result-byte budget and the row-size
+// estimator to thread into a pipeline-breaking operator (Sort, Distinct, Eager,
+// EagerAggregation, HashJoin) via its WithByteBudget method (#1841). It returns
+// (0, nil) — leaving the byte dimension disabled, so the breaker is bounded only
+// by its count cap — when bopts is nil or the byte budget is not configured. The
+// estimator reuses [estimateRowSize] so a breaker's byte accounting matches the
+// drain's exactly.
+func resultByteBudget(bopts *buildOpts) (int64, func(exec.Row) int64) {
+	if bopts == nil || bopts.maxResultBytes <= 0 {
+		return 0, nil
+	}
+	return bopts.maxResultBytes, func(r exec.Row) int64 { return estimateRowSize(r) }
+}
+
 // estimateValueSize returns a coarse, allocation-free byte estimate for a single
 // column value. It takes any because a materialised [exec.Record] is a
 // map[string]interface{} (its values are [expr.Value] instances boxed as the
@@ -5478,7 +5492,12 @@ func buildOperator(
 			// No resolvable sort keys — pass through without sorting.
 			return child, nil
 		}
-		return exec.NewSort(child, keys, 0)
+		sortOp, serr := exec.NewSort(child, keys, 0)
+		if serr != nil {
+			return nil, serr
+		}
+		sortMB, sortEst := resultByteBudget(bopts)
+		return sortOp.WithByteBudget(sortMB, sortEst), nil
 
 	case *ir.Top:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -5510,7 +5529,8 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		return exec.NewEager(child, 0), nil
+		eagerMB, eagerEst := resultByteBudget(bopts)
+		return exec.NewEager(child, 0).WithByteBudget(eagerMB, eagerEst), nil
 
 	case *ir.Limit:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -5537,7 +5557,8 @@ func buildOperator(
 		// LIMIT begins consuming. Closes Create6 [10] and similar
 		// SKIP/LIMIT-truncated CREATE scenarios.
 		if ir.ContainsWrite(p.Child) {
-			return exec.NewLimit(exec.NewEager(child, 0), count)
+			limitEagerMB, limitEagerEst := resultByteBudget(bopts)
+			return exec.NewLimit(exec.NewEager(child, 0).WithByteBudget(limitEagerMB, limitEagerEst), count)
 		}
 		return exec.NewLimit(child, count)
 
@@ -5586,7 +5607,8 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		return exec.NewDistinct(child, 0), nil
+		distinctMB, distinctEst := resultByteBudget(bopts)
+		return exec.NewDistinct(child, 0).WithByteBudget(distinctMB, distinctEst), nil
 
 	case *ir.OptionalExpand:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -6439,6 +6461,8 @@ func buildEagerAggregation(
 	if err != nil {
 		return nil, fmt.Errorf("cypher: NewEagerAggregation: %w", err)
 	}
+	aggMB, aggEst := resultByteBudget(bopts)
+	op = op.WithByteBudget(aggMB, aggEst)
 
 	// When there are no group-by keys, openCypher semantics require a single
 	// output row even when the input is empty — e.g.

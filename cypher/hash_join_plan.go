@@ -207,7 +207,9 @@ func tryBuildHashJoin(
 
 	// The Apply emits outer||inner. Here outer is the probe, inner is the build.
 	// Keep that exact column order: probe||build, i.e. buildOnLeft=false.
-	var op exec.Operator = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, false)
+	hjMB, hjEst := resultByteBudget(bopts)
+	var op exec.Operator = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, false).
+		WithByteBudget(hjMB, hjEst)
 
 	// Re-apply every residual conjunct (all but the chosen key) as a Filter on
 	// the combined row, preserving Selection(fullPredicate, …) semantics.

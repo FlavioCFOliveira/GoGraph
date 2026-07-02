@@ -42,11 +42,22 @@ var ErrDistinctMemoryExceeded = errors.New("exec: distinct memory cap exceeded")
 type Distinct struct {
 	child       Operator
 	maxDistinct int
+	budget      byteBudget // estimated-byte cap on the retained distinct rows (#1841)
 
 	// Runtime state.
 	ctx           context.Context  //nolint:containedctx // stored for per-Next ctx check
 	seen          map[uint64][]Row // hash → list of rows (collision chain)
 	distinctCount int              // number of distinct rows STORED across all buckets
+}
+
+// WithByteBudget bounds the estimated retained size of the stored distinct rows
+// by maxBytes. It complements the maxDistinct count cap so a few large-valued
+// distinct rows cannot exceed the engine's result-byte budget before the count
+// cap fires (#1841). A non-positive maxBytes or nil estimateRow leaves the byte
+// dimension disabled. Returns op for chaining and must be called before Init.
+func (op *Distinct) WithByteBudget(maxBytes int64, estimateRow func(Row) int64) *Distinct {
+	op.budget.set(maxBytes, estimateRow)
+	return op
 }
 
 // NewDistinct creates a Distinct operator.
@@ -65,6 +76,7 @@ func (op *Distinct) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.seen = make(map[uint64][]Row)
 	op.distinctCount = 0
+	op.budget.reset()
 	return op.child.Init(ctx)
 }
 
@@ -101,6 +113,9 @@ func (op *Distinct) Next(out *Row) (bool, error) {
 		// resources violation). Storing this row would push the count past the
 		// cap.
 		if op.distinctCount >= op.maxDistinct {
+			return false, ErrDistinctMemoryExceeded
+		}
+		if op.budget.charge(*out) {
 			return false, ErrDistinctMemoryExceeded
 		}
 
