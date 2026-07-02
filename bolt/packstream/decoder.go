@@ -84,22 +84,55 @@ var ErrDecodedMemoryExceeded = errors.New("packstream: decoded collection size e
 // factor for per-element boxing.
 const maxDecodedCollectionBytes = 128 << 20
 
-// Decoded slot costs charged against maxDecodedCollectionBytes. They are
-// conservative lower bounds on what each decoded element really occupies, so
-// the budget can never under-count.
+// Decoded slot costs charged against maxDecodedCollectionBytes. Each is an
+// UPPER bound on the real Go allocation the decoded value occupies, so the
+// budget can never UNDER-count: once it is exhausted, actual heap use is at
+// most maxDecodedCollectionBytes. (A prior revision charged 48 bytes per map
+// entry on the mistaken premise that map entries pack densely; Go allocates a
+// whole hash bucket on the first insert, so a message that is a list of tiny
+// 1-entry maps under-charged real allocation ~3.5x — a ~3.43 MiB pre-auth
+// message forced ~403 MiB of live heap for a ~110 MiB charge. The map costs
+// below now reflect Go's real bucket allocation.)
+// The costs below are UPPER bounds on the real Go allocation, calibrated
+// against measured runtime.MemStats deltas (Go 1.26, 64-bit; see
+// TestDecoder_ChargeUpperBoundsGoAllocation) so the invariant holds for every
+// decoded shape — including collections whose element/value is a boxed scalar
+// or string header, which the earlier per-element-only accounting missed.
 const (
-	// listElemCost is the decoded cost of one List element or Struct field:
-	// one interface slot in a []Value (16 bytes on 64-bit).
-	listElemCost = 16
-	// mapEntryCost is the decoded cost of one Map entry: a string key header
-	// (16 bytes) plus a value interface slot (16 bytes) plus the entry's share
-	// of map bucket overhead (~16 bytes).
-	mapEntryCost = 48
-	// collectionCost is the fixed decoded cost of the collection object
-	// itself (slice header or map header boxed into an interface), charged
-	// once per collection so that wide fan-outs of tiny or empty collections
-	// are also accounted for.
+	// listElemCost is the decoded cost of one List element or Struct field: a
+	// 16-byte interface slot in the presized []Value PLUS the heap box the
+	// element's scalar/string-header content occupies once stored in that
+	// interface (a large int64 or a string header is ~8-16 B, amortising to
+	// ~8 B via the tiny allocator; a measured []Value of large ints costs
+	// ~24 B/elem, ~56 B at n=1). 32 upper-bounds both. Nested collections are
+	// charged recursively by their own chargeDecoded. Elements that box to a
+	// static (small ints, NULL, bool) cost less, so this over-counts them
+	// (safe). The slice backing is presized exactly, so there is no capacity
+	// slack.
+	listElemCost = 32
+	// collectionCost is the fixed decoded cost of a List or Struct container
+	// itself (a slice header boxed into an interface, ~24 B), charged once per
+	// collection so wide fan-outs of tiny or empty collections are accounted.
 	collectionCost = 32
+	// mapEntryCost and mapCollectionCost bound a Go map[string]Value. Unlike a
+	// slice, a map does not pack entries densely: make(map[string]Value, n)
+	// plus n inserts allocates an hmap header (~48 B) plus one 8-slot hash
+	// bucket per ~6.5 entries, and each bucket for map[string]Value is
+	// tophash[8] + 8 string keys (8x16) + 8 interface values (8x16) + an
+	// overflow pointer = 272 B, rounded up to Go's size class. The bucket count
+	// is a power of two, so it can reach ~2x the load-factor threshold; the
+	// measured worst case is ~90 B/entry (n=1000) including the value box.
+	// mapEntryCost (112) upper-bounds that; mapCollectionCost (512) covers the
+	// hmap header plus the first full bucket for small n, where the per-entry
+	// term alone would under-count the fixed first-bucket allocation (a
+	// measured 1-entry map is ~352 B). Together they guarantee charge >= real
+	// allocation for every n, proven empirically by
+	// TestDecoder_ChargeUpperBoundsGoAllocation. This closes the pre-auth
+	// amplification where a ~3.43 MiB list of tiny 1-entry maps forced ~403 MiB
+	// of live heap for a ~110 MiB charge. Map keys' string data is charged
+	// separately against the wire byte budget, not here.
+	mapEntryCost      = 112
+	mapCollectionCost = 512
 )
 
 // Type identifies the PackStream type of the next value in the stream.
@@ -356,8 +389,8 @@ func (d *Decoder) consume(n int) {
 // leaves the budget untouched; n is already validated against the wire byte
 // budget, so charging the declared count up front is conservative: a message
 // that under-delivers its declared elements fails with a decode error anyway.
-func (d *Decoder) chargeDecoded(kind string, n, perElem int) error {
-	rem := d.decodedRemaining - collectionCost
+func (d *Decoder) chargeDecoded(kind string, n, perElem, baseCost int) error {
+	rem := d.decodedRemaining - baseCost
 	if rem < 0 || n > rem/perElem {
 		return fmt.Errorf("%w: %s count %d at %d bytes per decoded element, %d budget bytes remaining",
 			ErrDecodedMemoryExceeded, kind, n, perElem, d.decodedRemaining)
@@ -367,7 +400,7 @@ func (d *Decoder) chargeDecoded(kind string, n, perElem int) error {
 	// both budgets balanced. n has already been bounded above (n <= rem/perElem
 	// <= maxDecodedCollectionBytes), so the int64 product cannot overflow.
 	if d.shared != nil {
-		cost := int64(collectionCost) + int64(n)*int64(perElem)
+		cost := int64(baseCost) + int64(n)*int64(perElem)
 		if err := d.reserveShared(cost); err != nil {
 			return err
 		}
@@ -618,6 +651,16 @@ func (d *Decoder) ReadBytes() ([]byte, error) {
 	if n > d.budget() {
 		return nil, fmt.Errorf("%w: Bytes length %d > %d", ErrLengthExceedsInput, n, d.budget())
 	}
+	// Charge the raw payload against the engine-wide inbound ceiling (when
+	// attached) so the aggregate pre-auth memory bound (#1845) covers Bytes/
+	// String payloads, not only decoded collections. The per-message wire
+	// budget already bounds a single payload (n > d.budget() above); this adds
+	// the cross-connection accounting and is released with the message
+	// (releaseShared/Reset). No-op when no shared budget is attached, so the
+	// default (no GOMEMLIMIT) path is behaviour-preserving.
+	if err := d.reserveShared(int64(n)); err != nil {
+		return nil, err
+	}
 	out := make([]byte, n)
 	_, err = d.readFull(out)
 	return out, err
@@ -659,6 +702,11 @@ func (d *Decoder) ReadString() (string, error) {
 	// ErrLengthExceedsInput.
 	if n > d.budget() {
 		return "", fmt.Errorf("%w: String length %d > %d", ErrLengthExceedsInput, n, d.budget())
+	}
+	// Charge the raw payload against the engine-wide inbound ceiling too (see
+	// ReadBytes); no-op without a shared budget, released with the message.
+	if err := d.reserveShared(int64(n)); err != nil {
+		return "", err
 	}
 	out := make([]byte, n)
 	_, err = d.readFull(out)
@@ -704,7 +752,7 @@ func (d *Decoder) ReadListHeader() (int, error) {
 	if n > d.budget() {
 		return 0, fmt.Errorf("%w: List count %d > %d", ErrLengthExceedsInput, n, d.budget())
 	}
-	if err := d.chargeDecoded("List", n, listElemCost); err != nil {
+	if err := d.chargeDecoded("List", n, listElemCost, collectionCost); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -750,7 +798,7 @@ func (d *Decoder) ReadMapHeader() (int, error) {
 	if half := d.budget() / 2; n > half {
 		return 0, fmt.Errorf("%w: Map count %d > %d", ErrLengthExceedsInput, n, half)
 	}
-	if err := d.chargeDecoded("Map", n, mapEntryCost); err != nil {
+	if err := d.chargeDecoded("Map", n, mapEntryCost, mapCollectionCost); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -782,7 +830,7 @@ func (d *Decoder) ReadStructHeader() (tag byte, n int, err error) {
 	if n > d.budget() {
 		return 0, 0, fmt.Errorf("%w: Struct field count %d > %d", ErrLengthExceedsInput, n, d.budget())
 	}
-	if err := d.chargeDecoded("Struct", n, listElemCost); err != nil {
+	if err := d.chargeDecoded("Struct", n, listElemCost, collectionCost); err != nil {
 		return 0, 0, err
 	}
 	return tag, n, nil

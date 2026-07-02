@@ -208,24 +208,24 @@ func TestChargeDecodedArithmetic(t *testing.T) {
 
 	t.Run("exact_boundary_accepted", func(t *testing.T) {
 		dec := packstream.NewDecoder(bytes.NewReader(nil))
-		if err := dec.ChargeDecodedForTest("List", maxN, elem); err != nil {
+		if err := dec.ChargeDecodedForTest("List", maxN, elem, overhead); err != nil {
 			t.Fatalf("charge at exact boundary failed: %v", err)
 		}
 	})
 
 	t.Run("one_past_boundary_rejected", func(t *testing.T) {
 		dec := packstream.NewDecoder(bytes.NewReader(nil))
-		if err := dec.ChargeDecodedForTest("List", maxN+1, elem); !errors.Is(err, packstream.ErrDecodedMemoryExceeded) {
+		if err := dec.ChargeDecodedForTest("List", maxN+1, elem, overhead); !errors.Is(err, packstream.ErrDecodedMemoryExceeded) {
 			t.Fatalf("charge past boundary error = %v, want ErrDecodedMemoryExceeded", err)
 		}
 	})
 
 	t.Run("failed_charge_consumes_nothing", func(t *testing.T) {
 		dec := packstream.NewDecoder(bytes.NewReader(nil))
-		if err := dec.ChargeDecodedForTest("List", maxN+1, elem); err == nil {
+		if err := dec.ChargeDecodedForTest("List", maxN+1, elem, overhead); err == nil {
 			t.Fatal("oversized charge unexpectedly succeeded")
 		}
-		if err := dec.ChargeDecodedForTest("List", maxN, elem); err != nil {
+		if err := dec.ChargeDecodedForTest("List", maxN, elem, overhead); err != nil {
 			t.Fatalf("budget was consumed by a failed charge: %v", err)
 		}
 	})
@@ -236,27 +236,27 @@ func TestChargeDecodedArithmetic(t *testing.T) {
 		// the account is cumulative (including the per-collection overhead).
 		dec := packstream.NewDecoder(bytes.NewReader(nil))
 		third := maxN / 3
-		if err := dec.ChargeDecodedForTest("List", third, elem); err != nil {
+		if err := dec.ChargeDecodedForTest("List", third, elem, overhead); err != nil {
 			t.Fatalf("first third-charge failed: %v", err)
 		}
-		if err := dec.ChargeDecodedForTest("List", third, elem); err != nil {
+		if err := dec.ChargeDecodedForTest("List", third, elem, overhead); err != nil {
 			t.Fatalf("second third-charge failed: %v", err)
 		}
-		if err := dec.ChargeDecodedForTest("List", third, elem); !errors.Is(err, packstream.ErrDecodedMemoryExceeded) {
+		if err := dec.ChargeDecodedForTest("List", third, elem, overhead); !errors.Is(err, packstream.ErrDecodedMemoryExceeded) {
 			t.Fatalf("third third-charge error = %v, want ErrDecodedMemoryExceeded", err)
 		}
 	})
 
 	t.Run("reset_restores_budget", func(t *testing.T) {
 		dec := packstream.NewDecoder(bytes.NewReader(nil))
-		if err := dec.ChargeDecodedForTest("List", maxN, elem); err != nil {
+		if err := dec.ChargeDecodedForTest("List", maxN, elem, overhead); err != nil {
 			t.Fatalf("initial charge failed: %v", err)
 		}
-		if err := dec.ChargeDecodedForTest("List", maxN, elem); err == nil {
+		if err := dec.ChargeDecodedForTest("List", maxN, elem, overhead); err == nil {
 			t.Fatal("second charge on an exhausted budget unexpectedly succeeded")
 		}
 		dec.Reset(bytes.NewReader(nil))
-		if err := dec.ChargeDecodedForTest("List", maxN, elem); err != nil {
+		if err := dec.ChargeDecodedForTest("List", maxN, elem, overhead); err != nil {
 			t.Fatalf("charge after Reset failed, budget was not restored: %v", err)
 		}
 	})
