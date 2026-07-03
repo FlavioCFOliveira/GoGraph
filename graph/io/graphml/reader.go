@@ -101,6 +101,20 @@ const maxKeyDecls = 1 << 16
 // <key> elements — a schema flood used to amplify memory.
 var ErrTooManyKeys = errors.New("graphml: too many <key> declarations")
 
+// maxDataPerElement bounds the number of <data> children a single <node> or
+// <edge> may carry. Like [maxKeyDecls] it is defence-in-depth against a memory-
+// amplification flood — here one element declaring an enormous number of <data>
+// children. The overall input byte cap already bounds this, but the explicit
+// per-element ceiling yields a clear typed error and stays symmetric with the
+// <key> cap even if the byte cap is later raised. A real element carries one
+// <data> per declared property; 65536 is far above any legitimate element.
+// Exceeding it fails with [ErrTooManyData].
+const maxDataPerElement = 1 << 16
+
+// ErrTooManyData is returned when a single <node> or <edge> carries more than
+// [maxDataPerElement] <data> children.
+var ErrTooManyData = errors.New("graphml: too many <data> children on a single element")
+
 // streamGraphMLFirstGraph tokenises dec and drives the callbacks as each
 // element is decoded, retaining at most one <node>/<edge> element at a time
 // plus the (capped) <key> declarations — never the whole document. Per the
@@ -266,6 +280,9 @@ func streamGraphChildren(
 				if err := dec.DecodeElement(&n, &t); err != nil {
 					return fmt.Errorf("graphml: parse: %w", err)
 				}
+				if len(n.Data) > maxDataPerElement {
+					return ErrTooManyData
+				}
 				if err := onNode(&n); err != nil {
 					return err
 				}
@@ -278,6 +295,9 @@ func streamGraphChildren(
 				var e edgeElement
 				if err := dec.DecodeElement(&e, &t); err != nil {
 					return fmt.Errorf("graphml: parse: %w", err)
+				}
+				if len(e.Data) > maxDataPerElement {
+					return ErrTooManyData
 				}
 				if err := onEdge(&e); err != nil {
 					return err

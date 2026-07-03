@@ -53,6 +53,47 @@ func TestSec_IO_GraphMLKeyFloodRejected(t *testing.T) {
 	}
 }
 
+// TestSec_IO_GraphMLDataFloodRejected builds a single <node> (and a single
+// <edge>) carrying more than the per-element <data> cap (65536) and requires
+// the reader to reject it with ErrTooManyData. This is defence-in-depth
+// symmetric with the <key> cap: without it a single element declaring millions
+// of <data> children would accumulate unbounded (bounded only by the byte cap).
+// The byte cap is disabled (0) so the <data> cap — not ErrInputTooLarge — is
+// the guard under test. #1887.
+func TestSec_IO_GraphMLDataFloodRejected(t *testing.T) {
+	t.Parallel()
+	const data = 70000 // > maxDataPerElement (1<<16 = 65536)
+
+	buildFlood := func(elem string) string {
+		var b strings.Builder
+		b.WriteString(`<?xml version="1.0"?><graphml><graph edgedefault="directed">`)
+		if elem == "node" {
+			b.WriteString(`<node id="n0">`)
+		} else {
+			b.WriteString(`<node id="n0"/><node id="n1"/><edge source="n0" target="n1">`)
+		}
+		for i := 0; i < data; i++ {
+			b.WriteString(`<data key="k">x</data>`)
+		}
+		if elem == "node" {
+			b.WriteString(`</node>`)
+		} else {
+			b.WriteString(`</edge>`)
+		}
+		b.WriteString(`</graph></graphml>`)
+		return b.String()
+	}
+
+	for _, elem := range []string{"node", "edge"} {
+		if _, _, err := graphml.ReadIntoCappedCtx(context.Background(), strings.NewReader(buildFlood(elem)), 0); !errors.Is(err, graphml.ErrTooManyData) {
+			t.Fatalf("ReadInto %s <data> flood: err = %v, want ErrTooManyData", elem, err)
+		}
+		if _, _, err := graphml.ReadWithPropsCappedCtx(context.Background(), strings.NewReader(buildFlood(elem)), 0); !errors.Is(err, graphml.ErrTooManyData) {
+			t.Fatalf("ReadWithProps %s <data> flood: err = %v, want ErrTooManyData", elem, err)
+		}
+	}
+}
+
 // TestSec_IO_GraphMLNodeEdgeFloodStreamsAtScale parses a large node+edge
 // document and asserts every element is folded correctly. It is the
 // streaming-at-scale correctness pin: the reader consumes hundreds of thousands
