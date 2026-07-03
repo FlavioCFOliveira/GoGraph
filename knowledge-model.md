@@ -738,6 +738,79 @@ was folded into the same rewrite before closing. No new label or edge
 type. TCK 3897/3897 held (re-run and confirmed explicitly). Local
 commit, not pushed.
 
+Incrementally synced at commit `73bdaab` (2026-07-03, task #1871,
+sprint 263, still OPEN): +1 `Commit` (`73bdaab`); +4 `Task`s (`1871`
+COMPLETED; `1877`/`1878`/`1879` BACKLOG). Closed the last MEDIUM finding
+from the round-2 audit: `buildEdgeTypeFilter` rebuilt its edge-type
+filter map via a full O(V+E) graph scan on every query execution
+regardless of selectivity — an 8-row-selective query out of 960,000
+possible edges cost the same as an unfiltered full scan. A
+graph-theory-expert design consultation (surveying Neo4j/JanusGraph/
+Dgraph's relationship-type-filtering strategies) preceded
+implementation. Fix: (1) `buildEdgeTypeFilter` (`cypher/api.go`) no
+longer builds its own internal forward CSR — it now takes the caller's
+already-built one (every one of its 4 call sites already has one for
+its own traversal), removing one full redundant O(V+E) pass; (2) a new
+bounded LRU, `edgeTypeFilterCache` (new file
+`cypher/edge_type_filter_cache.go`), caches the filter map keyed by
+(canonicalised relationship-type set, a new `lpg.Graph.TopoGeneration`
+monotonic counter bumped inside the existing `IncrEdgesAdded`/
+`IncrEdgesRemoved`/`DecrEdgesAdded`/`DecrEdgesRemoved`), so a repeat
+query against an unchanged graph hits the cache instead of rebuilding.
+A concurrency-architect review of this design found a real gap the
+above missed: a caller holding `store/txn.Store` directly — bypassing
+the Cypher engine's adapters entirely, the same pattern
+`examples/24_social_network_cli`/`examples/25_software_house_api`
+already use for seeding — could shift an edge's CSR position via a
+direct `Tx.AddEdge`/`Commit` without ever bumping the generation. Fixed
+in the same cycle: `store/txn/txn.go`'s `applyOp` now also bumps it, via
+a new, narrowly-scoped `Graph.BumpTopoGeneration` kept deliberately
+separate from the Cypher-statement-scoped TCK side-effect counters,
+gated on `AddEdgeHIfAbsent`'s own `inserted` signal where available to
+avoid a pointless double-bump on a Cypher-driven write's already-eager
+replay. Measured (`bench/cypher_scale`, extended with 8 new `:MENTORS`
+edges as a deliberately rare type among ~960k `:KNOWS` edges, benchstat
+n=10, p&lt;0.005): a repeated selective query drops from ~190ms/2.16M
+allocs per call to ~30ms/336K allocs per call; a query immediately
+after any edge mutation still pays one full rebuild, down from two —
+an amortised steady-state win, not a complexity-class change for a
+cold query, confirmed independently by both the design-time consult
+and an empirical rust-perf-engineer profiling pass. Task #1871's own
+`rmp` acceptance criteria was revised to state this precisely rather
+than the originally-filed "proportional to selectivity, not graph
+size" wording, which both specialists independently proved false as
+literally written — an unusual departure from normal practice, made
+necessary by that proof rather than mere difficulty. The true
+output-sensitive redesign this would require is filed separately as
+`Task` `1879` (EPIC, explicitly gated on measured real-workload need).
+Two more follow-ups filed, not fixed here: `Task` `1877` (a cheaper
+cold-path allocation win — `graph/lpg.EdgeLabelsByID`'s allocating
+result slice accounts for 87.5% of the cold path's allocations per a
+memory profile, fixable by routing through the existing callback-based
+`ForEachEdgeLabelByID`) and `Task` `1878` (a genuinely pre-existing,
+TCK-uncovered bug found incidentally: an empty backtick-quoted
+relationship type matches every edge instead of none — unrelated to
+and not introduced by this fix). Also fixed incidentally (comment/
+assertion rewording only, zero behaviour change): two unrelated
+pre-existing golangci-lint gocritic false positives in
+`graph/io/csv/fieldguard_test.go` and
+`store/wal/symlink_escape_test.go`. Edges: `Sprint 263 -[CONTAINS]->
+Commit`; `Task 1871 -[IMPLEMENTED_IN]-> Commit`; `Commit -[FIXES]->`
+Feature `Cypher Engine` (id 12659); `Commit -[TOUCHES]->` Packages
+`cypher` (73), `graph/lpg` (448), `store/txn` (70), `graph/io/csv`
+(380), `store/wal` (249) — the last two for the incidental test-only
+lint fixes, matching the #1863 precedent of a `TOUCHES` edge for a
+test-only touch; `Task 1871 -[FOLLOWED_BY]->` `Task`s `1877`/`1878`/
+`1879`. Feature and all five Packages re-stamped to gitDate 2026-07-03.
+19 new tests, 2 new benchmarks. Certified by three independent
+specialist reviews (performance, concurrency, Go idiom) — the
+concurrency review is the one that found and specified the
+`store/txn` fix above; all findings addressed before this commit. No
+new label or edge type. TCK 3897/3897 held, full-module `-race` clean
+(all packages, including the two example programs exercising the
+`store/txn`-direct-write pattern this fix addresses). Local commit,
+not pushed.
+
 ---
 
 ## Node labels
