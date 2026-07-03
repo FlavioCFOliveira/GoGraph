@@ -872,6 +872,70 @@ mismatch before a blind full-property `MERGE`, or use `graph update`'s
 `SET` on a plain `id`-keyed `MATCH` instead of `graph create`'s `MERGE`
 for what is really an update, not a creation.
 
+Incrementally synced at commits `d0ce7d6` + `f2cad22` (2026-07-03,
+tasks #1873 + #1881, sprint 263, still OPEN — only task #1874 remains):
++2 `Commit`s; +3 `Task`s (`1873` COMPLETED, `1881` COMPLETED, `1880`
+BACKLOG). Closed the last MEDIUM/LOW-severity concurrency finding
+from the round-2 audit: `Checkpointer.RunCheckpoint`'s godoc
+falsely claimed it was safe to interleave with `Trigger`/loop runs
+because every run serialises on the same commit lock — false, since
+phase 2 (the dominant-duration snapshot write) is deliberately
+lock-free by design, so two checkpoints in flight at once can collide
+on disk with a real filesystem error. The doc now explicitly forbids
+this usage and explains why real mutual exclusion was deliberately
+not added instead (it would still mask caller misuse as a merely slow
+checkpoint, couple the loop's stop responsiveness to a stranger's
+potentially multi-second call, and add a synchronisation path with
+zero current callers to exercise it). A second, independent defect in
+the same code: `setErr` unconditionally overwrote `Stats().LastError`
+on every call, so an attempt that started earlier but completed later
+could mask a more recently started attempt's already-recorded
+outcome. Fixed with zero new locking: one monotonic sequence number
+minted per attempt at the start of `runNonBlocking`, threaded to
+every `setErr` call site, which now rejects a write whose sequence
+number is lower than the one already recorded.
+
+During the full-module `-race` validation for that fix, its own
+correctness (no longer silently masking errors) surfaced a SEPARATE,
+genuinely pre-existing, fail-stop-safe race: `store/snapshot`'s
+`WriteLabels`/`WriteProperties` each capture their label/property-key
+registry's name table via a lock-free, point-in-time snapshot, then
+separately walk the LIVE graph's node/edge labels/properties with no
+lock spanning both reads — a name/key interned strictly in between is
+visible to the live walk but absent from the captured table, correctly
+detected and rejected (aborting that one checkpoint attempt cleanly,
+nothing written or truncated; the next tick retries and normally
+succeeds) rather than silently mis-recorded. Two stale, FALSE doc
+comments per file (four total) had claimed a registry RLock spans both
+reads, serialising against concurrent mutation — no such lock exists
+for either `LabelRegistry` or `PropertyKeyRegistry`, both lock-free
+copy-on-write structures; all four corrected. This intermittently and
+harmlessly tripped `store/db_test.go`'s
+`TestDBClose_NoLeak_RejectsSubsequentAppend` (confirmed via a dedicated
+investigation to be unrelated to and not caused by the `setErr` fix),
+whose assertion was narrowed to check specifically for the WAL-close-
+ordering symptom it exists to catch, mirroring its own sibling negative
+test's already-established pattern. The deeper structural fix (a
+self-healing registry capture, or a two-pass collection) is filed
+separately as `Task` `1880` (BACKLOG, unscheduled — touches core
+snapshot-serialisation code shared by every checkpoint and recovery,
+needs its own design consultation). Edges: `Sprint 263 -[CONTAINS]->`
+both `Commit`s; `Task 1873/1881 -[IMPLEMENTED_IN]->` their respective
+`Commit`; both `Commit`s `-[FIXES]->` Features `ACID Transactions` (id
+9736) and `WAL & Recovery` (id 11553); `Commit d0ce7d6 -[TOUCHES]->`
+Package `checkpoint` (181); `Commit f2cad22 -[TOUCHES]->` Packages
+`snapshot` (147) and `store` (11138); `Task 1873 -[FOLLOWED_BY]-> Task
+1880` and `Task 1881 -[FOLLOWED_BY]-> Task 1880`. Both Features and all
+three Packages re-stamped to gitDate 2026-07-03. Certified by two
+independent specialist reviews for #1873 (durability/reliability,
+Go idiom) — a `go doc`-verified word-wrap rendering defect and a
+comment-ambiguity nit were fixed before closing. No new label or edge
+type. TCK 3897/3897 held, full-module `-race` clean across repeated
+runs. Sprint 263 ("Audit remediation Round 2 2026-07-02") remains
+OPEN with one task left: #1874 (doc-precision + benchmark-hygiene
+cleanup bundle). Unscheduled backlog now also carries #1875 and
+#1877-1880 forward. Local commits, not pushed.
+
 ---
 
 ## Node labels
