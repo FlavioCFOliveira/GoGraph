@@ -984,6 +984,41 @@ production-readiness audit remediation effort. Unscheduled backlog
 carried forward: `1875`, `1877`, `1878`, `1879`, `1880`. Local
 commits, not pushed.
 
+Incrementally synced at commits `9d88478`..`fe80308` (2026-07-03, sprint
+264 — "Prod-readiness audit remediation R3", CLOSED): +1 `Sprint` (`264`);
++12 `Commit`; +9 new `Task` (`1882`-`1889`, `1865`) plus `1878`/`1880`
+re-stamped COMPLETED, and `1890` filed BACKLOG (a #1880 test-depth
+follow-up). This round remediated a fresh 6-specialist multi-dimensional
+production-readiness audit (Functional/Cypher, Functional/Algorithms,
+Performance, Reliability/ACID, Concurrency, Security). Three MEDIUM
+blockers fixed: **#1884** (`9d88478`) `search/yen.go` `buildEdgeIndex` now
+keys on the minimum-weight parallel edge so Yen's k-shortest paths are
+correct on weighted multigraphs; **#1882** (`a53cad2`) `store/snapshot`
+`ApplyCSRToGraph` rejects a forged CSR `WeightSize` mismatch (was an
+index-out-of-range panic at store-open); **#1883** (`de0823b`)
+`store/wal` `embedsValidFrame` bounds its CRC scan to defeat an
+O(len²) recovery-hang DoS on a crafted WAL. Five LOW defense-in-depth
+alloc/recursion bounds: **#1885** (`35dd706`) index `idCount` bound
+`len(body)/8`; **#1886** (`2e4b942`) snapshot `readLenPrefixedValue`
+value-alloc bound; **#1887** (`f82ddb3`) GraphML per-element `<data>`
+cap; **#1888** (`219ae67`) JSONL nested-list depth cap + CSV `MaxBytes`
+doc; **#1889** (`9a7718d`) WAL `readFramePayload` alloc bound (the WAL
+sibling of #1886). Two conformance/reliability items closed: **#1878**
+(`04a075b`+`3e44878`+`fe80308`) rejects empty relationship-type / node-label
+names at every Cypher pattern site (an empty backtick type previously
+collided with the exec no-filter sentinel and matched every edge); **#1880**
+(`65f390f`+`ef658c6`) makes the snapshot registry-capture race self-heal
+via a bounded retry instead of aborting the checkpoint. `1865` closed as
+already-fixed at HEAD. Edges: `Sprint 264 -[CONTAINS]-> Commit` (12);
+`Commit -[FIXES]-> Feature` (Persistence Backends ×6, Cypher Engine ×3,
+WAL & Recovery ×3, Search & Path-finding ×1); `Task -[IMPLEMENTED_IN]->
+Commit` (12). No new label or edge type. Every fix specialist-certified
+GO (graph-theory / storage-engine-auditor / concurrency-architect /
+cypher-expert / security-researcher), each with a proven non-vacuous
+regression gate. TCK 3897/3897 held throughout; full-module `-race`,
+tagged crash-injection battery, `golangci-lint` (0 issues) and
+`govulncheck` all green. Local commits, not pushed.
+
 ---
 
 ## Node labels
