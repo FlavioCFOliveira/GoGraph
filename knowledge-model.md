@@ -649,6 +649,65 @@ coverage gap this fix's own test closes independently of the TCK gate.
 No new label or edge type. TCK 3897/3897 held, `-race` clean, full
 module `go test ./...` green. Local commit, not pushed.
 
+Incrementally synced at commit `c44f3bb` (2026-07-03, task #1869, sprint
+263, still OPEN): +1 `Commit` (`c44f3bb`); +2 `Task`s (`1869` COMPLETED,
+`1872` SPRINT — pre-existing task, not previously modelled, whose scope
+was broadened by this review rather than a brand-new ticket spawned by
+it). Fixed the MEDIUM finding from the round-2 audit: every DDL
+statement (CREATE/DROP INDEX/CONSTRAINT) applies its real, interruptible
+work first — a backfill scan, then the WAL append and fsync — then
+constructs its returned `*Result` by draining a trivial, always-
+immediate confirmation row (`exec.NewArgument`) via `emptyDDLResult`,
+which reused the caller's original query `ctx` for that drain. A
+cancellation landing in the arbitrarily small window between the real
+work settling and the confirmation row draining was observed via
+`Result.Err()` as `context.Canceled` on a statement that had already
+durably committed — measured 53/60 trials for CREATE INDEX cancelled
+near its commit boundary. `emptyDDLResult` (`cypher/api.go`) now takes
+no `ctx` parameter at all and always drains through
+`context.Background()`: by the time any caller reaches it the DDL's
+outcome is already settled (committed, or a genuine IF NOT EXISTS/IF
+EXISTS no-op with nothing ever pending), and the wrapped
+`exec.NewArgument` operator can never block, so there is no liveness
+reason left to honour cancellation there. `runDDLOp`'s own duplicate
+inline construction of the same confirmation shape now delegates to
+`emptyDDLResult`; `createBTreeIndexLocked`'s now-dead `ctx` parameter
+was removed outright, with its two callers updated. Genuinely-
+cancellable DDL work (the hash-index backfill) is unaffected — it still
+observes the real `ctx` directly. New regression test
+`cypher/ddl_cancel_after_commit_test.go` runs 60 CREATE INDEX trials
+with a self-calibrating cancellation-delay spread (measured against a
+freshly-timed baseline so it stays valid under `-race` instrumentation);
+verified non-vacuous by reverting just the fix and confirming 17-29
+false positives per 60 trials across three separate verification passes,
+then 0/60 with the fix restored across 300+ combined trials. Edges:
+`Sprint 263 -[CONTAINS]-> Commit`; `Task 1869 -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[FIXES]->` Feature `Cypher Engine` (id 12659); `Commit
+-[TOUCHES]->` Package `cypher` (73); `Task 1869 -[FOLLOWED_BY]-> Task
+1872` (reusing the existing edge type for a review-surfaced follow-up,
+here a scope EXPANSION of an already-tracked task rather than a new one
+— the same edge type covers both shapes by design, per the #1866→#1875
+precedent). Feature and Package re-stamped to gitDate 2026-07-03 (via
+`graph update`, since `graph create` cannot carry a `SET` clause).
+Certified by two independent specialist reviews, both with zero required
+changes: one traced the exact real drain timing through the eager
+zero-column result path, independently verified `exec.NewArgument`
+cannot block by reading its implementation, confirmed no other DDL path
+shares this bug class, confirmed concurrent-DDL writer-serialisation
+locking is untouched, and surfaced two adjacent but DIFFERENT-class
+findings — the btree index backfill and the CREATE CONSTRAINT NOT NULL
+validation scan (`scanLabelProperty`) poll no cancellation at all, a
+missing-liveness gap rather than a false-positive-cancellation one —
+folded into `Task 1872`'s scope (previously scoped only to the hash-
+index backfill's poll granularity) instead of blocking this fix. The
+other review verified the API-shape change matches the codebase's own
+convention for deleting dead parameters and approved the new test's
+self-calibrating design as the right call given no cheaper deterministic
+test seam exists for this race window; one optional wording precision
+suggestion was applied to `emptyDDLResult`'s doc in the same commit. TCK
+3897/3897 held, full-module `-race` clean (all packages). Local commit,
+not pushed.
+
 ---
 
 ## Node labels
