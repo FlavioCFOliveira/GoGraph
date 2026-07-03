@@ -29,6 +29,49 @@ func TestYen_KShortest(t *testing.T) {
 	}
 }
 
+// TestYenKShortest_WeightedMultigraph_MinParallelEdge is the regression
+// gate for #1884. On a weighted multigraph, buildEdgeIndex must record the
+// MINIMUM-weight parallel edge per (from,to) pair — the one both Yen
+// Dijkstra passes actually traverse — not the first CSR occurrence. With
+// the pre-fix first-occurrence indexing the 0->1 hop's root cost was
+// charged at 100 (the expensive parallel edge) instead of the traversed 1,
+// inflating [0 1 2 3] to cost 102 and mis-ranking the k-set as
+// [0 1 3]=2, [0 3]=50, [0 1 2 3]=102. The correct k-set is
+// [0 1 3]=2, [0 1 2 3]=3, [0 3]=50.
+func TestYenKShortest_WeightedMultigraph_MinParallelEdge(t *testing.T) {
+	t.Parallel()
+	// The expensive 0->1 edge (100) is inserted first so it lands first in
+	// CSR order; the cheap parallel 0->1 edge (1) is what a shortest-path
+	// search uses. Requires Multigraph:true to retain both parallel edges.
+	c, a := buildWeightedCSRCfg(t, []weightedEdge{
+		{0, 1, 100}, // first CSR occurrence of the (0,1) pair
+		{0, 1, 1},   // minimum-weight parallel edge
+		{1, 2, 1},
+		{2, 3, 1},
+		{1, 3, 1},
+		{0, 3, 50},
+	}, adjlist.Config{Directed: true, Multigraph: true})
+	src, _ := a.Mapper().Lookup(0)
+	dst, _ := a.Mapper().Lookup(3)
+
+	got := YenKShortest(c, src, dst, 3)
+	if len(got) != 3 {
+		t.Fatalf("got %d paths, want 3 (paths: %v)", len(got), got)
+	}
+	// Correct minimum-weight realizations, sorted ascending by cost.
+	wantCosts := []int64{2, 3, 50}
+	for i, w := range wantCosts {
+		if got[i].Cost != w {
+			t.Fatalf("got[%d].Cost = %d, want %d (paths: %v)", i, got[i].Cost, w, got)
+		}
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].Cost > got[i].Cost {
+			t.Fatalf("paths not sorted by cost: %v", got)
+		}
+	}
+}
+
 func TestYen_NoPath(t *testing.T) {
 	t.Parallel()
 	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})

@@ -435,11 +435,21 @@ func reconstructYenPath(parent []graph.NodeID, src, dst graph.NodeID) []graph.No
 }
 
 // buildEdgeIndex constructs a (from, to) -> edge-index map covering
-// every directed edge in c. For multigraphs the first occurrence of
-// each (from, to) pair wins, matching the v1.0 pathCost semantics.
+// every directed edge in c. For a multigraph (parallel edges between the
+// same node pair) the MINIMUM-weight occurrence of each (from, to) pair
+// wins, so the recorded slot matches the edge a shortest-path search
+// actually traverses: both Yen Dijkstra passes (DijkstraInto and
+// dijkstraAvoidingInto) always relax through the cheapest parallel edge,
+// so pathCostFast must charge that same cheapest weight for the hop.
+// Recording the first CSR occurrence instead (as the pre-fix code did)
+// over-reported a root path's cost and could return an entirely wrong
+// k-set on weighted multigraphs. For a weightless CSR (weights == nil)
+// every parallel edge has weight 0, so first-occurrence is already the
+// minimum and the map is unchanged.
 func buildEdgeIndex[W Weight](c *csr.CSR[W]) map[edgeKey]uint64 {
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
+	weights := c.WeightsSlice()
 	maxID := uint64(c.MaxNodeID())
 	idx := make(map[edgeKey]uint64, len(edges))
 	for from := uint64(0); from < maxID; from++ {
@@ -447,7 +457,8 @@ func buildEdgeIndex[W Weight](c *csr.CSR[W]) map[edgeKey]uint64 {
 		end := verts[from+1]
 		for k := start; k < end; k++ {
 			key := edgeKey{from: graph.NodeID(from), to: edges[k]}
-			if _, exists := idx[key]; !exists {
+			cur, exists := idx[key]
+			if !exists || (weights != nil && weights[k] < weights[cur]) {
 				idx[key] = k
 			}
 		}
