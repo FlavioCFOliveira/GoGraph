@@ -20,11 +20,11 @@ env:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
-    # The job runs the FULL `make release-preflight` (vet + build + `go test
-    # -race ./...` + golangci-lint + TCK + cover-gate + headline bench) and THEN
-    # goreleaser cross-compiles four platforms with SBOM generation. On a
-    # GitHub-hosted runner that exceeds 20m — it cancelled the v0.6.0 run at
-    # 20m15s; 45m gives the preflight + build comfortable headroom.
+    # The job runs the fast Phase-A release-accuracy checks and THEN goreleaser
+    # cross-compiles four platforms with SBOM generation. The heavy
+    # correctness/coverage/TCK gates were removed from this job — they run
+    # per-push in ci.yml/tck.yml/crash.yml — so 45m is now a generous ceiling
+    # dominated by the goreleaser build.
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -36,29 +36,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # Release gate: refuse to publish unless the release commit passes the
-      # SAME canonical gate the local `make release` path runs —
-      # `make release-preflight`. That target is the single source of truth:
-      # it enforces the release-accuracy checks (CHANGELOG ## [x.y.z],
-      # release-notes/VERSION.md, README current-release, SECURITY.md version
-      # table, docs/benchmarks/VERSION.md), the coverage gate, the headline
-      # bench gate, AND the correctness gate (scripts/pre-release.sh: vet +
-      # build + test -race + golangci-lint + TCK). Previously this workflow ran
-      # only pre-release.sh, silently bypassing every accuracy gate added in
-      # cce0bc4 — see #1444.
-      - name: Install golangci-lint (needed by the correctness gate)
-        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
-        with:
-          version: v2.12.2
-          install-mode: binary
-          # install-only: just put the golangci-lint binary on PATH for
-          # scripts/pre-release.sh to invoke. Without this the action runs
-          # `golangci-lint run --version`, which fails on v2.x with
-          # "unknown flag: --version" (run has no --version flag) — that
-          # broke the release run.
-          install-only: true
-      - name: Release pre-flight gate (release-accuracy + coverage + bench + correctness)
-        run: VERSION="${GITHUB_REF_NAME}" make release-preflight
+      # Release gate (Phase A only): verify the release paperwork is internally
+      # consistent for this tag — CHANGELOG ## [x.y.z], release-notes/VERSION.md,
+      # README current-release, SECURITY.md version table, docs/benchmarks/VERSION.md.
+      #
+      # Correctness (vet/build/`go test -race ./...`/golangci-lint), the coverage
+      # gate, the full TCK execution and the crash-injection battery are enforced
+      # on EVERY push/PR to main by ci.yml, tck.yml and crash.yml. The tagged
+      # commit is always on main, so those workflows have already validated this
+      # SHA; this job therefore does not re-run them — it only checks release
+      # accuracy, then publishes via goreleaser. NOTE: this job does not itself
+      # block on those workflows; it trusts they ran green on this commit.
+      - name: "Release-accuracy gate (Phase A: release-doc consistency)"
+        run: VERSION="${GITHUB_REF_NAME}" make release-accuracy
       - name: Install cyclonedx-gomod (SBOM generator)
         run: |
           # Pinned to an exact released version so the SBOM generator in the

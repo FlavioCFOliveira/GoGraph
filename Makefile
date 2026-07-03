@@ -186,25 +186,30 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed; install: brew install goreleaser or see https://goreleaser.com/install/"; exit 1; }
 	goreleaser release --snapshot --clean --skip=publish
 
-.PHONY: release-preflight
-release-preflight: ## Canonical release gate (both `make release` and release.yml call this) — release-accuracy + coverage + bench + the full correctness gate (scripts/pre-release.sh)
+.PHONY: release-accuracy
+release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-notes/README/SECURITY/benchmark-doc consistency for VERSION. This is the gate the release.yml CI job runs; correctness (vet/build/-race/lint/TCK), coverage and the crash battery are enforced per-push by ci.yml/tck.yml/crash.yml.
 	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
-	@echo "release-preflight: VERSION=$$VERSION"
+	@echo "release-accuracy: VERSION=$$VERSION"
 	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
 	  grep -q "## \[$$v_no_prefix\]" CHANGELOG.md \
-	  || { echo "release-preflight: CHANGELOG.md is missing a '## [$$v_no_prefix]' entry — promote the Unreleased section first"; exit 1; }
+	  || { echo "release-accuracy: CHANGELOG.md is missing a '## [$$v_no_prefix]' entry — promote the Unreleased section first"; exit 1; }
 	@test -f "release-notes/$$VERSION.md" \
-	  || { echo "release-preflight: release-notes/$$VERSION.md does not exist — draft the long-form notes first"; exit 1; }
-	@echo "release-preflight: checking README 'Current release' names $$VERSION…"
+	  || { echo "release-accuracy: release-notes/$$VERSION.md does not exist — draft the long-form notes first"; exit 1; }
+	@echo "release-accuracy: checking README 'Current release' names $$VERSION…"
 	@pat="Current release: \`$$VERSION\`"; grep -qF "$$pat" README.md \
-	  || { echo "release-preflight: README.md 'Current release' does not name $$VERSION — update the Status block"; exit 1; }
-	@echo "release-preflight: checking SECURITY.md supported-versions table names $$VERSION's release line…"
+	  || { echo "release-accuracy: README.md 'Current release' does not name $$VERSION — update the Status block"; exit 1; }
+	@echo "release-accuracy: checking SECURITY.md supported-versions table names $$VERSION's release line…"
 	@minor_line=$$(echo "$$VERSION" | sed -E 's/^v([0-9]+)\.([0-9]+)\..*/v\1.\2.x/'); \
 	  grep -qF "$$minor_line" SECURITY.md \
-	  || { echo "release-preflight: SECURITY.md supported-versions table does not mention $$minor_line — update the table"; exit 1; }
-	@echo "release-preflight: checking per-release benchmark report docs/benchmarks/$$VERSION.md exists…"
+	  || { echo "release-accuracy: SECURITY.md supported-versions table does not mention $$minor_line — update the table"; exit 1; }
+	@echo "release-accuracy: checking per-release benchmark report docs/benchmarks/$$VERSION.md exists…"
 	@test -f "docs/benchmarks/$$VERSION.md" \
-	  || { echo "release-preflight: docs/benchmarks/$$VERSION.md does not exist — record the per-release benchmark/load-test numbers first"; exit 1; }
+	  || { echo "release-accuracy: docs/benchmarks/$$VERSION.md does not exist — record the per-release benchmark/load-test numbers first"; exit 1; }
+	@echo "release-accuracy: all accuracy checks passed"
+
+.PHONY: release-preflight
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + coverage + bench + the full correctness gate (scripts/pre-release.sh). NOTE: the release.yml CI job runs only `release-accuracy`; -race/TCK/coverage/crash run per-push in ci.yml/tck.yml/crash.yml.
+	@$(MAKE) release-accuracy
 	@echo "release-preflight: running coverage gate…"
 	@$(MAKE) cover-gate
 	@if [ -x scripts/run_headline_bench.sh ]; then \
