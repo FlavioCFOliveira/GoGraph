@@ -11,6 +11,7 @@ package cypher_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -28,7 +29,12 @@ func TestEngine_EmptyRelationshipTypeAndLabel_Rejected(t *testing.T) {
 	ctx := context.Background()
 	// Backticks are literal characters inside a Go double-quoted string, so
 	// "``" below is an empty backtick-quoted identifier in the Cypher text.
-	// Read-side forms go through the read-only Run path.
+	// Read-side forms go through the read-only Run path. This covers the clause
+	// patterns AND the expression-position sites that bypass the
+	// MATCH/CREATE/MERGE clause walkers (pattern comprehension, bare-WHERE
+	// pattern predicate, and the pattern forms of EXISTS {} / COUNT {}) — each
+	// previously reproduced the match-everything defect at an uncovered site
+	// (#1878 completeness).
 	rejectedRead := []struct {
 		name string
 		q    string
@@ -37,6 +43,11 @@ func TestEngine_EmptyRelationshipTypeAndLabel_Rejected(t *testing.T) {
 		{"empty first alternative", "MATCH ()-[r:``|KNOWS]->() RETURN count(r) AS c"},
 		{"empty rel type varlength", "MATCH ()-[r:``*1..2]->() RETURN count(r) AS c"},
 		{"empty node label", "MATCH (n:``) RETURN count(n) AS c"},
+		{"pattern comprehension empty type", "MATCH (a) RETURN size([(a)-[r:``]->(b) | b]) AS n"},
+		{"pattern comprehension empty node label", "MATCH (a) RETURN size([(a)-[r]->(b:``) | b]) AS n"},
+		{"bare WHERE pattern empty type", "MATCH (a) WHERE (a)-[:``]->() RETURN count(a) AS c"},
+		{"EXISTS pattern-form empty type", "MATCH (a) WHERE EXISTS { (a)-[:``]->() } RETURN count(a) AS c"},
+		{"COUNT pattern-form empty type", "MATCH (a) RETURN COUNT { (a)-[:``]->() } AS c"},
 	}
 	for _, tc := range rejectedRead {
 		if _, err := eng.Run(ctx, tc.q, nil); err == nil {
@@ -53,11 +64,21 @@ func TestEngine_EmptyRelationshipTypeAndLabel_Rejected(t *testing.T) {
 		{"create empty rel type", "CREATE ()-[:``]->()"},
 		{"create empty node label", "CREATE (:``)"},
 		{"merge empty rel type", "MERGE ()-[:``]->()"},
+		{"set empty label", "MATCH (n:A) SET n:``"},
+		{"remove empty label", "MATCH (n:A) REMOVE n:``"},
 	}
 	for _, tc := range rejectedWrite {
 		if _, err := eng.RunInTx(ctx, tc.q, nil); err == nil {
 			t.Errorf("%s: %q was accepted; want a semantic rejection", tc.name, tc.q)
 		}
+	}
+
+	// The rejection carries a clear, dedicated message (not the reused
+	// "expects Boolean operands" text).
+	if _, err := eng.Run(ctx, "MATCH ()-[r:``]->() RETURN r", nil); err == nil {
+		t.Error("empty rel type must be rejected")
+	} else if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("error message = %q, want it to mention \"must not be empty\"", err.Error())
 	}
 
 	// Controls: real (non-empty) type/label filters and the unfiltered match

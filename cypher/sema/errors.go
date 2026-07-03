@@ -203,6 +203,18 @@ func invalidBooleanOperandError(op, gotKind string, pos ast.Position) *ScopeErro
 	}
 }
 
+// emptyTypeOrLabelError constructs a ScopeError for an empty relationship-type
+// or node-label name (the empty backtick identifier “). openCypher's property-
+// graph data model has no empty type or label, so such a pattern predicate is
+// rejected at sema. subject is "relationship type" or "node label" (#1878).
+func emptyTypeOrLabelError(subject string, pos ast.Position) *ScopeError {
+	return &ScopeError{
+		Kind:    KindInvalidArgumentType,
+		Pos:     pos,
+		Message: subject + " must not be empty",
+	}
+}
+
 // invalidAggregationError constructs a KindInvalidAggregation ScopeError
 // for an aggregation used in ORDER BY without a matching projection-level
 // aggregation.

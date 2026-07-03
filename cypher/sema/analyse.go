@@ -852,6 +852,7 @@ func (a *analyser) checkSetItem(item *ast.SetItem) {
 	}
 	if len(item.Labels) > 0 {
 		a.checkLabelTargetIsNode(item.Target, item.Pos)
+		a.checkNonEmptyLabelNames(item.Labels, item.Pos)
 		return
 	}
 	// Whole-entity assignment is identified by a Variable target (the
@@ -867,6 +868,7 @@ func (a *analyser) removeClause(r *ast.Remove) {
 		a.checkExpr(item.Target)
 		if len(item.Labels) > 0 {
 			a.checkLabelTargetIsNode(item.Target, item.Pos)
+			a.checkNonEmptyLabelNames(item.Labels, item.Pos)
 		}
 	}
 }
@@ -1592,6 +1594,7 @@ func (a *analyser) checkExpr(e ast.Expression) {
 			}
 		}
 		a.pathPatternIntroduce(v.Pattern)
+		a.checkPathNonEmptyRelTypesAndLabels(v.Pattern)
 		a.checkExpr(v.Predicate)
 		a.checkExpr(v.Projection)
 		a.scope = saved
@@ -1626,6 +1629,7 @@ func (a *analyser) checkExpr(e ast.Expression) {
 		// and relationship variable must already be in scope. We only
 		// check references; we never call Define.
 		a.pathPatternRefCheck(v)
+		a.checkPathNonEmptyRelTypesAndLabels(v)
 		// A bare node pattern such as `WHERE (n)` is not a valid
 		// predicate — openCypher requires at least one relationship in
 		// an expression-position path pattern (existential check). Flag
@@ -1661,6 +1665,7 @@ func (a *analyser) existsSubquery(e *ast.ExistsSubquery) {
 	sub := &analyser{scope: a.scope.Child()}
 	if e.Pattern != nil {
 		sub.patternIntroduce(e.Pattern)
+		sub.checkNonEmptyRelTypesAndLabels(e.Pattern)
 		// Validate any inline WHERE clause that the parser preserved on
 		// the pattern form (e.g. `EXISTS { (n)-->(m) WHERE n.prop = m.prop }`).
 		// The predicate runs in the same scope as the pattern; aggregations
@@ -1679,6 +1684,7 @@ func (a *analyser) countSubquery(c *ast.CountSubquery) {
 	sub := &analyser{scope: a.scope.Child()}
 	if c.Pattern != nil {
 		sub.patternIntroduce(c.Pattern)
+		sub.checkNonEmptyRelTypesAndLabels(c.Pattern)
 	} else if c.Query != nil {
 		sub.singleQuery(c.Query)
 	}
@@ -2772,18 +2778,26 @@ func (a *analyser) checkPathNonEmptyRelTypesAndLabels(pp *ast.PathPattern) {
 	}
 	for el := pp.Head; el != nil; el = el.Next {
 		if el.Node != nil {
-			for _, lbl := range el.Node.Labels {
-				if lbl == "" {
-					a.error(invalidBooleanOperandError("node label", "must not be empty", el.Node.Pos))
-				}
-			}
+			a.checkNonEmptyLabelNames(el.Node.Labels, el.Node.Pos)
 		}
 		if el.Relationship != nil {
 			for _, ty := range el.Relationship.Types {
 				if ty == "" {
-					a.error(invalidBooleanOperandError("relationship type", "must not be empty", el.Relationship.Pos))
+					a.error(emptyTypeOrLabelError("relationship type", el.Relationship.Pos))
 				}
 			}
+		}
+	}
+}
+
+// checkNonEmptyLabelNames rejects any empty label name in labels (an empty
+// backtick identifier). Shared by the pattern checkers and by SET/REMOVE label
+// items, so `SET n:``` / `REMOVE n:``` cannot persist or target an empty label
+// (#1878).
+func (a *analyser) checkNonEmptyLabelNames(labels []string, pos ast.Position) {
+	for _, lbl := range labels {
+		if lbl == "" {
+			a.error(emptyTypeOrLabelError("node label", pos))
 		}
 	}
 }
