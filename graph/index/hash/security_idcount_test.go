@@ -18,9 +18,9 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
-// craftHashForgedIdCount builds a CRC-valid one-entry hash payload (int64 key,
+// craftHashForgedIDCount builds a CRC-valid one-entry hash payload (int64 key,
 // no id bytes) whose per-entry idCount field is set to forged.
-func craftHashForgedIdCount(forged uint64) []byte {
+func craftHashForgedIDCount(forged uint64) []byte {
 	var b bytes.Buffer
 	_ = binary.Write(&b, binary.LittleEndian, hashMagic)
 	_ = binary.Write(&b, binary.LittleEndian, hashFormatVersion)
@@ -42,7 +42,7 @@ func craftHashForgedIdCount(forged uint64) []byte {
 // front with the "implausible idCount" error.
 func TestSec_HashDeserialize_RejectsOverDeclaredIdCount(t *testing.T) {
 	t.Parallel()
-	payload := craftHashForgedIdCount(36) // body is 36 bytes; 36 > 36/8 = 4
+	payload := craftHashForgedIDCount(36) // body is 36 bytes; 36 > 36/8 = 4
 	err := New[int64]().Deserialize(bytes.NewReader(payload))
 	if !errors.Is(err, index.ErrIndexCorrupted) {
 		t.Fatalf("err = %v, want wrapped index.ErrIndexCorrupted", err)

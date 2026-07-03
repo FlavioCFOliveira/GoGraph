@@ -16,7 +16,7 @@ import (
 
 // putCandidateHeader writes a frame header (magic + version + plen + crc) at
 // off. It writes no payload; callers overlap payloads with later headers.
-func putCandidateHeader(buf []byte, off int, version uint16, plen uint32, crc uint32) {
+func putCandidateHeader(buf []byte, off int, version uint16, plen, crc uint32) {
 	copy(buf[off:off+4], Magic[:])
 	binary.LittleEndian.PutUint16(buf[off+4:off+6], version)
 	binary.LittleEndian.PutUint32(buf[off+6:off+10], plen)

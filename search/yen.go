@@ -458,7 +458,7 @@ func buildEdgeIndex[W Weight](c *csr.CSR[W]) map[edgeKey]uint64 {
 		for k := start; k < end; k++ {
 			key := edgeKey{from: graph.NodeID(from), to: edges[k]}
 			cur, exists := idx[key]
-			if !exists || (weights != nil && weights[k] < weights[cur]) {
+			if !exists || (len(weights) != 0 && weights[k] < weights[cur]) {
 				idx[key] = k
 			}
 		}

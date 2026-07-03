@@ -9,6 +9,7 @@
 package wal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -246,8 +247,10 @@ func embedsValidFrame(buf []byte) bool {
 	crcSpent := 0
 	// A frame needs at least a full header plus the CRC bytes to be verifiable.
 	for off := 0; off+HeaderSize <= len(buf); off++ {
-		if buf[off] != Magic[0] || buf[off+1] != Magic[1] ||
-			buf[off+2] != Magic[2] || buf[off+3] != Magic[3] {
+		// off+HeaderSize <= len(buf) and HeaderSize > 4, so buf[off:off+4] is
+		// always in bounds; bytes.Equal keeps the magic check a single slice
+		// expression (no per-byte indexing for the analyser to second-guess).
+		if !bytes.Equal(buf[off:off+4], Magic[:]) {
 			continue
 		}
 		version := binary.LittleEndian.Uint16(buf[off+4 : off+6])

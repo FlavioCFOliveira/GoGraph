@@ -42,11 +42,11 @@ func craftBtreeHeaderOnly(entryCount uint64) []byte {
 	return append(append([]byte{}, body...), tr[:]...)
 }
 
-// craftBtreeForgedIdCount builds a CRC-valid one-entry btree payload (int64
+// craftBtreeForgedIDCount builds a CRC-valid one-entry btree payload (int64
 // key, no id bytes) whose per-entry idCount field is set to forged. The body
 // has no id bytes at all, so any accepted idCount drives make([]uint64, idCount)
 // before the read EOFs.
-func craftBtreeForgedIdCount(forged uint64) []byte {
+func craftBtreeForgedIDCount(forged uint64) []byte {
 	var b bytes.Buffer
 	_ = binary.Write(&b, binary.LittleEndian, btreeMagic)
 	_ = binary.Write(&b, binary.LittleEndian, btreeFormatVersion)
@@ -71,7 +71,7 @@ func craftBtreeForgedIdCount(forged uint64) []byte {
 // the specific message is what distinguishes the pre-alloc rejection).
 func TestSec_BtreeDeserialize_RejectsOverDeclaredIdCount(t *testing.T) {
 	t.Parallel()
-	payload := craftBtreeForgedIdCount(36) // body is 36 bytes; 36 > 36/8 = 4
+	payload := craftBtreeForgedIDCount(36) // body is 36 bytes; 36 > 36/8 = 4
 	err := New[int64]().Deserialize(bytes.NewReader(payload))
 	if !errors.Is(err, index.ErrIndexCorrupted) {
 		t.Fatalf("err = %v, want wrapped index.ErrIndexCorrupted", err)
