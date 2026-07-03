@@ -40,7 +40,12 @@
 // # Benchmarks (Benchmark*)
 //
 // Full 500-node Init→drain→Close cycles with b.ReportAllocs() to surface
-// regressions in CI via `go test -bench=. -benchmem`.
+// regressions in CI via `go test -bench=. -benchmem`. gate500 (like the gate
+// walkers above) starts at [gateAllocNodeIDStart], not 0: an ID range
+// straddling the < 256 free small-int boxing threshold would let roughly
+// half of each run's Next() calls skip the real boxing allocation, quietly
+// deflating the allocs/op these benchmarks report to CI and
+// docs/benchmarks.
 package cypher_alloc_test
 
 import (
@@ -114,13 +119,13 @@ var projFirst = exec.ProjectionItem{
 // gate500 and gate10 are the shared walkers used by benchmarks and gate tests.
 var (
 	gate10  *staticWalker // 10 nodes — fast for AllocsPerRun
-	gate500 *staticWalker // 500 nodes — used by Benchmark* functions
+	gate500 *staticWalker // 500 realistic-NodeID nodes — used by Benchmark* functions
 )
 
 // TestMain seeds fixtures once and runs all tests.
 func TestMain(m *testing.M) {
 	gate10 = newWalker(10)
-	gate500 = newWalker(500)
+	gate500 = newWalkerFrom(gateAllocNodeIDStart, 500)
 	os.Exit(m.Run())
 }
 

@@ -106,15 +106,19 @@ func BellmanFordInto[W Weight](
 // [BellmanFordCtx] and [BellmanFordInto]. Pre-conditions:
 //   - len(dist), len(parent), len(found) all equal c.MaxNodeID().
 //
-// The implementation is SPFA (Shortest Path Faster Algorithm,
-// Bannister-Eppstein 2012 attribution): a worklist-driven relaxation
-// that only revisits nodes whose tentative distance has changed,
-// instead of the V-1 full-edge sweeps of textbook Bellman-Ford.
-// SLF (Smallest Label First) deque ordering pushes nodes with
-// smaller tentative distance to the front of the queue, which
-// usually relaxes their downstream once instead of multiple times.
-// Negative-cycle detection is preserved: any node enqueued more
-// than V times closes a cycle and yields [ErrNegativeCycle].
+// The implementation is SPFA (Shortest Path Faster Algorithm): a
+// worklist-driven relaxation that only revisits nodes whose tentative
+// distance has changed, instead of the V-1 full-edge sweeps of
+// textbook Bellman-Ford. The queue-based technique traces to Moore
+// 1959 ("The Shortest Path Through a Maze"); Duan 1994 (Journal of
+// Southwest Jiaotong University) independently rediscovered it and
+// gave it the SPFA name. SLF (Smallest Label First) deque ordering
+// (Bertsekas 1993, "A Simple and Fast Label Correcting Algorithm for
+// Shortest Paths") pushes nodes with smaller tentative distance to
+// the front of the queue, which usually relaxes their downstream
+// once instead of multiple times. Negative-cycle detection is
+// preserved: any node enqueued more than V times closes a cycle and
+// yields [ErrNegativeCycle].
 //
 // Postconditions identical to [DijkstraInto].
 //

@@ -92,9 +92,14 @@ Expand1Hop-10                1.443 ± ∞ ¹          379.1Mi ± ∞ ¹         
   matching row (roughly 53.8% of 120 000 nodes have `age > 47` given the
   uniform `18 + i%65` distribution).
 - **`Expand1Hop`**: ~6.00M allocs for 960 000 result rows — about 6.25
-  allocs/row, the same order of magnitude the audit measured (~8 allocs/row)
-  for finding P2 (edge-label re-materialisation per candidate edge on top of
-  per-row boxing).
+  allocs/row, attributable entirely to finding P1 (per-row/per-scalar
+  boxing), not P2. `RETURN a.firstName, b.age` binds no relationship
+  variable, so P2's specific mechanism (`buildRelationshipValueFromRow`,
+  edge-label re-materialisation per candidate edge) is never triggered by
+  this query shape; the 2026-07-02 round-2 audit confirmed via a controlled
+  A/B query change (adding a bound relationship variable) that P2 costs a
+  measured +5.000 allocs/row on top of this P1-only baseline when it does
+  fire.
 
 Future work on P1/P2 (tracked separately in the `#1704` de-boxing epic) should
 show a measurable drop in `allocs/op` here, compared with `benchstat` against

@@ -21,11 +21,18 @@ import (
 // c must be a simple graph: no self-loops and no parallel edges between the
 // same pair of vertices. The node-iterator algorithm below counts a
 // triangle once per pair of neighbours found on both sides of the
-// degree-ordered rank split, so a self-loop or a parallel edge on a
-// triangle's lowest-ranked vertex is walked more than once and silently
-// over-counts that triangle — CountTriangles does not detect or reject
+// degree-ordered rank split, so specifically a parallel edge on a
+// triangle's lowest-ranked vertex is walked more than once, silently
+// over-counting that triangle — CountTriangles does not detect or reject
 // this; it is the caller's responsibility on an [adjlist.AdjList] built
-// with Multigraph: true or otherwise capable of self-loops.
+// with Multigraph: true. A self-loop, by contrast, can never trigger this:
+// the rank filter below only pairs neighbours u, w with strictly higher
+// rank than the current vertex v, and a self-loop's neighbour is v itself,
+// which cannot have strictly higher rank than itself — so a self-loop is
+// structurally always excluded by the filter, on every graph configuration,
+// and is listed above only as part of this function's simple-graph
+// precondition (no self-loops at all is still required for the graph to be
+// simple), not as a second over-counting mechanism.
 //
 // # Algorithm
 //
