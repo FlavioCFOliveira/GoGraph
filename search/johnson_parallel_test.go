@@ -202,9 +202,30 @@ func TestJohnsonAPSPParallel_NaNRejected(t *testing.T) {
 // TestJohnsonAPSPParallel_CancellationCascades asserts that cancelling
 // ctx during the Dijkstra pass returns promptly with context.Canceled
 // rather than letting workers grind their full stripes.
+//
+// Graph size is deliberately much larger than the other tests in this
+// file: on a tiny graph every worker can race the 1ms cancel-signal
+// goroutine to completion, especially under the CPU oversubscription a
+// full-suite `go test -coverpkg=./... ./...` run produces (dozens of
+// test binaries competing for the machine's cores), which turns the
+// pass/fail outcome into a coin flip rather than a genuine assertion.
+// n=6000 (numWorkers=8, matching the production default worker count
+// used elsewhere in this file) was chosen empirically, not guessed:
+// measured on this machine with `go test -run ... -v`, an uncancelled
+// JohnsonAPSPParallel(c, 8) on this size reliably took ~260-280ms
+// unraced (5 reps) and ~2.84-2.90s under -race (5 reps) — a ~260-2900x
+// margin over the ~1ms cancellation signal, comfortably the
+// two-to-three-orders-of-magnitude safety margin needed so the
+// cancellation goroutine's scheduling delay (low single-digit ms even
+// under contention, since it never contends for CPU itself — it is
+// asleep, not spinning) cannot plausibly let all 8 workers finish
+// their full stripe first. Candidates n=600 (2.7ms, the original,
+// flaky size) through n=12000 (1.16s) were measured before settling on
+// n=6000 as comfortably within the "hundreds of milliseconds" target
+// without materially extending this package's test time budget.
 func TestJohnsonAPSPParallel_CancellationCascades(t *testing.T) {
 	t.Parallel()
-	const n = 600
+	const n = 6000
 	c := sparseRandomCSR(t, n, 91, 97, 0) // strictly positive: no negative cycle
 
 	ctx, cancel := context.WithCancel(context.Background())
