@@ -686,7 +686,13 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 			return fmt.Errorf("%w: idCount: %w", index.ErrIndexCorrupted, err)
 		}
 		idCount := binary.LittleEndian.Uint64(scratch[:8])
-		if idCount > uint64(len(body)) {
+		// Each id occupies 8 wire bytes, so len(body)/8 is the true ceiling on
+		// how many ids the component's bytes could hold. The prior len(body)
+		// bound admitted an ~8x over-declaration, forcing make([]uint64, idCount)
+		// (plus binary.Read's transient buffer, ~16x total) to allocate before
+		// the short read failed. Bounded amplification, tightened for
+		// defense-in-depth to match the len/elemSize cap-hint pattern elsewhere.
+		if idCount > uint64(len(body))/8 {
 			return fmt.Errorf("%w: implausible idCount %d",
 				index.ErrIndexCorrupted, idCount)
 		}

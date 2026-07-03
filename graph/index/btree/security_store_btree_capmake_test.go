@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
@@ -39,6 +40,46 @@ func craftBtreeHeaderOnly(entryCount uint64) []byte {
 	var tr [4]byte
 	binary.LittleEndian.PutUint32(tr[:], crc)
 	return append(append([]byte{}, body...), tr[:]...)
+}
+
+// craftBtreeForgedIdCount builds a CRC-valid one-entry btree payload (int64
+// key, no id bytes) whose per-entry idCount field is set to forged. The body
+// has no id bytes at all, so any accepted idCount drives make([]uint64, idCount)
+// before the read EOFs.
+func craftBtreeForgedIdCount(forged uint64) []byte {
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.LittleEndian, btreeMagic)
+	_ = binary.Write(&b, binary.LittleEndian, btreeFormatVersion)
+	_ = binary.Write(&b, binary.LittleEndian, uint64(1)) // entryCount
+	_ = binary.Write(&b, binary.LittleEndian, uint32(8)) // keyLen (int64 key)
+	_ = binary.Write(&b, binary.LittleEndian, int64(42)) // 8-byte key bytes
+	_ = binary.Write(&b, binary.LittleEndian, forged)    // idCount (no ids follow)
+	body := b.Bytes()
+	crc := crc32.Checksum(body, castagnoli)
+	var tr [4]byte
+	binary.LittleEndian.PutUint32(tr[:], crc)
+	return append(append([]byte{}, body...), tr[:]...)
+}
+
+// TestSec_BtreeDeserialize_RejectsOverDeclaredIdCount is the regression gate
+// for #1885: each node id occupies 8 wire bytes, so the per-entry idCount
+// ceiling must be len(body)/8, not len(body). Here the 36-byte body carries no
+// id bytes, so len(body)/8 = 4; a forged idCount of 36 sits in the (4, 36] gap
+// the prior len(body) bound admitted, which then made make([]uint64, 36) before
+// EOFing on the absent ids. The tightened bound must reject it up front with the
+// "implausible idCount" error (both bounds ultimately wrap ErrIndexCorrupted, so
+// the specific message is what distinguishes the pre-alloc rejection).
+func TestSec_BtreeDeserialize_RejectsOverDeclaredIdCount(t *testing.T) {
+	t.Parallel()
+	payload := craftBtreeForgedIdCount(36) // body is 36 bytes; 36 > 36/8 = 4
+	err := New[int64]().Deserialize(bytes.NewReader(payload))
+	if !errors.Is(err, index.ErrIndexCorrupted) {
+		t.Fatalf("err = %v, want wrapped index.ErrIndexCorrupted", err)
+	}
+	if !strings.Contains(err.Error(), "implausible idCount") {
+		t.Fatalf("err = %v, want the up-front implausible-idCount rejection "+
+			"(idCount bound must be len(body)/8, not len(body))", err)
+	}
 }
 
 // TestSec_BtreeDeserialize_RejectsTruncatedEntries is the cheap, always-on
