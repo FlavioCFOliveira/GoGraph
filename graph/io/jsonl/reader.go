@@ -313,7 +313,25 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config
 
 // decodePropertyValue reconstructs a [lpg.PropertyValue] from its
 // wire kind tag and value string. The encoding mirrors [encodePropertyValue].
+// maxListNestingDepth bounds how deeply a "list" property value may nest. A
+// list is a JSON array of [kind, encodedValue] pairs, and a nested list
+// re-encodes its children as an escaped string, so a legitimate document nests
+// only a handful of levels. The recursive decode previously had no explicit
+// guard: depth was bounded only implicitly by the ~2x-per-level JSON-escaping
+// growth against the input byte cap — fragile, and it would relax if the byte
+// cap were raised. This explicit ceiling fail-stops a crafted payload before it
+// can exhaust the stack. 64 is far above any legitimate nesting.
+const maxListNestingDepth = 64
+
+// ErrListTooDeep is returned when a "list" property value nests deeper than
+// [maxListNestingDepth].
+var ErrListTooDeep = errors.New("jsonl: list property nesting too deep")
+
 func decodePropertyValue(kind, value string) (lpg.PropertyValue, error) {
+	return decodePropertyValueDepth(kind, value, 0)
+}
+
+func decodePropertyValueDepth(kind, value string, depth int) (lpg.PropertyValue, error) {
 	switch kind {
 	case "string":
 		return lpg.StringValue(value), nil
@@ -348,6 +366,9 @@ func decodePropertyValue(kind, value string) (lpg.PropertyValue, error) {
 		}
 		return lpg.BytesValue(b), nil
 	case "list":
+		if depth >= maxListNestingDepth {
+			return lpg.PropertyValue{}, ErrListTooDeep
+		}
 		// The value is a JSON array of [kindString, encodedValueString] pairs.
 		var pairs [][2]string
 		if err := json.Unmarshal([]byte(value), &pairs); err != nil {
@@ -355,7 +376,7 @@ func decodePropertyValue(kind, value string) (lpg.PropertyValue, error) {
 		}
 		elems := make([]lpg.PropertyValue, len(pairs))
 		for i, p := range pairs {
-			elem, err := decodePropertyValue(p[0], p[1])
+			elem, err := decodePropertyValueDepth(p[0], p[1], depth+1)
 			if err != nil {
 				return lpg.PropertyValue{}, fmt.Errorf("list[%d]: %w", i, err)
 			}

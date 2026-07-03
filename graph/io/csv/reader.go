@@ -73,7 +73,16 @@ type Options struct {
 	Multigraph bool
 	// MaxBytes caps the number of bytes read from the input before the
 	// reader fails with [ErrInputTooLarge]. [DefaultOptions] sets it to
-	// [DefaultMaxBytes]; a value of zero or less disables the cap.
+	// [DefaultMaxBytes].
+	//
+	// SECURITY: a value of zero or less DISABLES the cap entirely, so the
+	// reader will consume unbounded input. Because the zero value of an
+	// Options literal (a bare Options{}) leaves MaxBytes at 0, constructing
+	// Options by hand for UNTRUSTED input silently opts out of the memory
+	// bound. Prefer starting from [DefaultOptions] (which sets MaxBytes to
+	// [DefaultMaxBytes]) and overriding the fields you need, or set an
+	// explicit positive MaxBytes. Leave the cap disabled only for input you
+	// fully trust.
 	MaxBytes int64
 
 	// SanitizeFormulae, when true, neutralises spreadsheet formula
