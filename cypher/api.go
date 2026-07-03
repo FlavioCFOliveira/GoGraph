@@ -1809,7 +1809,9 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 
 // runDDLOp executes a single eager DDL operator (emitting zero rows) and
 // returns an empty Result. Errors surface at Run time rather than lazily
-// during Result.Next.
+// during Result.Next. ctx governs op's own Init/Next only — the DDL's real,
+// interruptible work; see [emptyDDLResult] for why the returned confirmation
+// Result deliberately does not inherit it.
 func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error) {
 	if err := op.Init(ctx); err != nil {
 		return nil, fmt.Errorf("cypher: DDL init: %w", err)
@@ -1822,13 +1824,32 @@ func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error
 	if err := op.Close(); err != nil {
 		return nil, fmt.Errorf("cypher: DDL close: %w", err)
 	}
-	return newResult(exec.Run(ctx, exec.NewArgument(), nil), nil, nil, nil, nil), nil
+	return emptyDDLResult(), nil
 }
 
-// emptyDDLResult returns the canonical zero-row Result that every DDL statement
-// yields once its side effect has been applied.
-func emptyDDLResult(ctx context.Context) *Result {
-	return newResult(exec.Run(ctx, exec.NewArgument(), nil), nil, nil, nil, nil)
+// emptyDDLResult returns the canonical zero-row Result that every DDL
+// statement yields once its side effect has already been applied.
+//
+// Deliberately drives its trivial confirmation row through context.Background
+// rather than the caller's query ctx (rmp #1869): every caller constructs this
+// AFTER the DDL's outcome is already settled — either the real work (the
+// backfill scan, the WAL append and fsync) has unconditionally completed and
+// committed, or the statement resolved to a no-op (an IF NOT EXISTS/IF EXISTS
+// absorption, or a barrier race loss) that never had any work pending in the
+// first place. Either way nothing remains to interrupt. The single-row
+// exec.NewArgument operator this wraps can never block, so there is no
+// liveness reason to honour cancellation here either.
+// Before this fix, a cancellation landing in the (arbitrarily small) window
+// between the real work finishing and this confirmation Result draining was
+// observed via Result.Err() as context.Canceled on a statement that had
+// already durably committed — measured at 53/60 trials for CREATE INDEX
+// cancelled near its commit boundary. A caller that reasonably retries on a
+// reported cancellation then risks double-applying an already-successful
+// write. Genuinely-cancellable DDL work (the backfill scan itself, gated
+// well before this point) is unaffected: it still observes and honours the
+// real query ctx passed to it directly.
+func emptyDDLResult() *Result {
+	return newResult(exec.Run(context.Background(), exec.NewArgument(), nil), nil, nil, nil, nil)
 }
 
 // runCreateBTreeIndex executes CREATE INDEX for the btree kind. Like the hash
@@ -1850,7 +1871,7 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if e.store == nil {
 		e.writeMu.Lock()
 		defer e.writeMu.Unlock()
-		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
+		return e.createBTreeIndexLocked(p, idxMgr, nil)
 	}
 	// WAL-backed: open the serialising transaction before the backfill scan so
 	// no concurrent write can slip between the scan and the registration.
@@ -1858,7 +1879,7 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if err != nil {
 		return nil, err
 	}
-	res, rerr := e.createBTreeIndexLocked(ctx, p, idxMgr, tx)
+	res, rerr := e.createBTreeIndexLocked(p, idxMgr, tx)
 	_ = tx.Rollback() // guarded no-op after CommitWALOnly
 	return res, rerr
 }
@@ -1866,11 +1887,14 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 // createBTreeIndexLocked executes the CREATE INDEX (btree) sequence under the
 // writer serialisation held by the caller; tx is the serialising transaction
 // on a WAL-backed engine (nil on a store-less one). It mirrors
-// [Engine.createHashIndexLocked].
-func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
+// [Engine.createHashIndexLocked]. Unlike the hash path, the btree backfill
+// ([Engine.backfillNodeBTreeIndex]) does not poll for cancellation — a
+// pre-existing, separate scope boundary from this function's own concerns,
+// not something this signature carries a ctx parameter for.
+func (e *Engine) createBTreeIndexLocked(p *ir.CreateIndex, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	if _, gerr := idxMgr.GetIndex(p.Name); gerr == nil {
 		if p.IfNotExists {
-			return emptyDDLResult(ctx), nil
+			return emptyDDLResult(), nil
 		}
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name,
 			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
@@ -1947,7 +1971,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	if !registered {
 		// IF NOT EXISTS absorbed an already-registered name: no schema change,
 		// no WAL record.
-		return emptyDDLResult(ctx), nil
+		return emptyDDLResult(), nil
 	}
 
 	// Durability: append the CREATE INDEX op and fsync (task #1343). On failure
@@ -1978,7 +2002,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// — stays exactly in step with the index.Manager and the WAL (#1755). The
 	// numeric companion is internal and is NOT recorded.
 	e.recordIndexDef(p.Name, false /* btree */, p.Label, p.Property)
-	return emptyDDLResult(ctx), nil
+	return emptyDDLResult(), nil
 }
 
 // runDropIndex executes DROP INDEX via the generic DDL operator, then (on a
@@ -2157,7 +2181,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// writer lock so two concurrent IF NOT EXISTS creations cannot both miss
 	// it and register twice.
 	if p.IfNotExists && e.constraintAlreadyRegistered(kind, p.Label, p.Property) {
-		return emptyDDLResult(ctx), nil
+		return emptyDDLResult(), nil
 	}
 
 	// Validate the pre-existing data and seed the value-set BEFORE registering,
@@ -2238,7 +2262,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			return nil, e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 		}
 	}
-	return emptyDDLResult(ctx), nil
+	return emptyDDLResult(), nil
 }
 
 // unwindConstraintRegistration deregisters a just-registered constraint after
@@ -2318,7 +2342,7 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 	kind, label, prop, found := e.constraintReg.ResolveByName(p.Name)
 	if !found {
 		if p.IfExists {
-			return emptyDDLResult(ctx), nil // clean no-op: nothing removed
+			return emptyDDLResult(), nil // clean no-op: nothing removed
 		}
 		return nil, fmt.Errorf("cypher: DROP CONSTRAINT %q: %w", p.Name, exec.ErrConstraintNotFound)
 	}
@@ -2335,7 +2359,7 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 			return nil, e.rewindConstraintDrop(err, p.Name, label, prop, kind, idxMgr)
 		}
 	}
-	return emptyDDLResult(ctx), nil
+	return emptyDDLResult(), nil
 }
 
 // rewindConstraintDrop re-establishes a just-removed constraint after a failure

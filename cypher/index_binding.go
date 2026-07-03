@@ -724,7 +724,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// errors.Is or asserting on the message observe no change.
 	if _, gerr := idxMgr.GetIndex(p.Name); gerr == nil {
 		if p.IfNotExists {
-			return emptyDDLResult(ctx), nil
+			return emptyDDLResult(), nil
 		}
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name,
 			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
@@ -745,7 +745,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 
 	if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
 		if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
-			return emptyDDLResult(ctx), nil
+			return emptyDDLResult(), nil
 		}
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
 	}
@@ -773,5 +773,5 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// checkpoint — stays exactly in step with the index.Manager and the WAL
 	// (#1755).
 	e.recordIndexDef(p.Name, true /* hash */, p.Label, p.Property)
-	return emptyDDLResult(ctx), nil
+	return emptyDDLResult(), nil
 }
