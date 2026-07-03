@@ -148,6 +148,24 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 	}
 	mapper := g.AdjList().Mapper()
 
+	// Guard the on-disk weight width against this store's actual W before
+	// any weight decode. rb.WeightSize is attacker-controlled on the
+	// recovery trust boundary: a forged/tampered snapshot supplies the CSR
+	// weights-flag byte directly (writer.go readCSRLimited reads flag[1]
+	// without validating it against W). A width that disagrees with
+	// csrWeightSize[W]() means the whole weights section is misaligned, and
+	// a width narrower than the native W (e.g. 1 while W is int64) drives
+	// decodeCSRWeight to read past a short per-edge slice
+	// (binary.LittleEndian.Uint64 over 1 byte) and panic at store-open,
+	// outside the per-connection recover guards — crashing the process. Fail
+	// stop with a typed error instead. A weightless snapshot carries no
+	// weight bytes (HasWeights == false), so the width is irrelevant there.
+	if rb.HasWeights && rb.WeightSize != csrWeightSize[W]() {
+		metrics.IncCounter("store.snapshot.ApplyCSR.corrupt", 1)
+		return fmt.Errorf("%w: CSR weight width %d does not match store weight size %d",
+			ErrCorrupted, rb.WeightSize, csrWeightSize[W]())
+	}
+
 	// CSR vertices is the offset array: vertices[i]..vertices[i+1] is
 	// the half-open edge slice for source NodeID i. Walk every src
 	// slot up to len(vertices)-1. Slots without an interned value are

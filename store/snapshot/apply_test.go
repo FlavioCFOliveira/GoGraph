@@ -290,6 +290,46 @@ func TestApplyCSRToGraph_OffsetOverflowsEdges(t *testing.T) {
 	}
 }
 
+// TestApplyCSRToGraph_MismatchedWeightWidthRejected is the regression gate
+// for #1882: a forged/tampered snapshot whose on-disk CSR weight width
+// disagrees with the store's W must be rejected with a typed ErrCorrupted,
+// never crash the process. Here W is int64 (native 8 bytes) but the
+// readback claims WeightSize 1. Pre-fix, decodeCSRWeight[int64] ran
+// binary.LittleEndian.Uint64 over a 1-byte per-edge slice and panicked at
+// store-open, outside the recover guards. The CSR/edges are real (built
+// from a genuine graph) so an edge resolves and the weight-decode path is
+// actually reached.
+func TestApplyCSRToGraph_MismatchedWeightWidthRejected(t *testing.T) {
+	t.Parallel()
+	orig := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := orig.AddEdge("a", "b", 7); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	c := csr.BuildFromAdjList(orig.AdjList())
+
+	var pairs []MapperPair
+	orig.AdjList().Mapper().Walk(func(id graph.NodeID, k string) bool {
+		pairs = append(pairs, MapperPair{ID: id, Key: k})
+		return true
+	})
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := ApplyMapperToGraph(g, MapperReadback{Pairs: pairs}); err != nil {
+		t.Fatalf("ApplyMapperToGraph: %v", err)
+	}
+
+	rb := &CSRReadback{
+		Vertices:    c.VerticesSlice(),
+		Edges:       c.EdgesSlice(),
+		HasWeights:  true,
+		WeightSize:  1,                                 // forged: int64 store expects 8
+		WeightBytes: make([]byte, len(c.EdgesSlice())), // 1 byte/edge at the forged width
+	}
+	err := ApplyCSRToGraph(g, rb)
+	if !errors.Is(err, ErrCorrupted) {
+		t.Fatalf("ApplyCSRToGraph(forged WeightSize=1, W=int64) = %v, want ErrCorrupted", err)
+	}
+}
+
 // TestApplyCSRToGraph_ValidUnaffectedByGuard confirms the offset-array
 // validation does not change the behaviour of a legitimate, monotonic
 // CSR: the round-trip edge set is preserved exactly. Finding H4.
