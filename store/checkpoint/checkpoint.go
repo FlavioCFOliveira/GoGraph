@@ -88,7 +88,8 @@ type Stats struct {
 //
 // Concurrency: Start, Stop, Trigger, and Stats are safe to call from
 // any number of goroutines. Stop is idempotent (safe to call any
-// number of times serially or concurrently).
+// number of times serially or concurrently). [RunCheckpoint] is the one
+// exception — see its own doc for the narrower contract it requires.
 type Checkpointer[N comparable, W any] struct {
 	cfg     Config
 	g       *lpg.Graph[N, W]
@@ -169,8 +170,22 @@ type Checkpointer[N comparable, W any] struct {
 	checkpoints  atomic.Uint64
 	walTrunc     atomic.Uint64
 	lastDuration atomic.Uint64
-	lastErrMu    sync.Mutex
-	lastErr      string
+	// errSeq mints one sequence number per checkpoint attempt (rmp #1873),
+	// assigned at the start of [Checkpointer.runNonBlocking]. lastErrSeq
+	// records the sequence number of the attempt currently reflected in
+	// lastErr, so [Checkpointer.setErr] can reject a stale write: a run
+	// that STARTED earlier but happens to COMPLETE later (only reachable
+	// today via the documented-unsafe concurrent-RunCheckpoint misuse this
+	// task also tightens the doc against) can no longer overwrite a
+	// more-recently-STARTED run's already-recorded outcome. lastErrSeq and
+	// lastErr are both guarded by lastErrMu — lastErrSeq is deliberately
+	// NOT its own atomic.Uint64 the way errSeq is, so the (seq, error) pair
+	// updates as one atomic unit under the mutex; a reader must never
+	// observe a seq/error pair assembled from two different attempts.
+	errSeq     atomic.Uint64
+	lastErrMu  sync.Mutex
+	lastErrSeq uint64
+	lastErr    string
 }
 
 // Option customises a [Checkpointer] at construction. Options are
@@ -572,8 +587,27 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 // checkpoint inline — with no extra goroutine to keep the run reproducible —
 // rather than via [Start]+[Trigger]. Production code uses [Start]/[Trigger].
 //
-// RunCheckpoint is safe to interleave with [Trigger]/loop runs because every
-// run serialises on the same commit lock; the simulator never does both.
+// Concurrency contract (rmp #1873): do NOT call RunCheckpoint concurrently
+// with itself, nor combine it with a running [Start]ed loop — only phase 1
+// (the capture) and phase 3 (the prefix-truncate) hold the commit lock; phase
+// 2, the dominant-duration snapshot write, is DELIBERATELY lock-free (see the
+// package doc), so two checkpoints in flight at once — via two concurrent
+// RunCheckpoint calls, or one RunCheckpoint racing the loop's own
+// Trigger-driven run — can both be writing to the same snapshot directory
+// simultaneously and collide with a real filesystem error. RunCheckpoint
+// itself does not enforce this with a dedicated mutex: unlike the commit
+// lock (necessarily shared with every writer), a checkpoint-only mutex would
+// not stall commits, but it would still (a) mask caller misuse as a merely
+// slow, redundant checkpoint instead of the loud failure that reveals it,
+// (b) couple the [Start]ed loop's Stop responsiveness to a stranger's
+// potentially multi-second RunCheckpoint call blocking on that same mutex,
+// unable to observe its own stop signal meanwhile, and (c) add a
+// synchronisation path with zero current callers to exercise it. The caller
+// must instead ensure single-goroutine, non-overlapping use, exactly as the
+// simulator already does. [Stats.LastError] remains correctly attributable
+// even if this contract is violated: each attempt is sequence-numbered, and
+// an earlier-started attempt's belated outcome can never overwrite a
+// later-started attempt's already-recorded one.
 func (c *Checkpointer[N, W]) RunCheckpoint() error {
 	defer metrics.Time("store.checkpoint.RunCheckpoint").Stop()
 	// runCheckpoint -> runNonBlocking already increments the checkpoints counter
@@ -628,6 +662,10 @@ func (c *Checkpointer[N, W]) runUnderCommitLock(fn func() error) error {
 // state — see [wal.Writer.TruncatePrefix] for the atomic-rename argument and
 // the per-interleaving crashpoints.
 func (c *Checkpointer[N, W]) runNonBlocking() error {
+	// One sequence number per attempt (rmp #1873), minted before any work
+	// starts so it orders attempts by START time; threaded through every
+	// setErr call this attempt makes, however it exits.
+	seq := c.errSeq.Add(1)
 	// --- Phase 1: capture watermark + CSR under the quiesce boundary. ---
 	var (
 		cs        *csr.CSR[W]
@@ -657,7 +695,7 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		}
 		return nil
 	}); err != nil {
-		c.setErr(err)
+		c.setErr(seq, err)
 		return err
 	}
 
@@ -669,15 +707,17 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	}
 
 	// --- Phase 2: write + publish the snapshot LOCK-FREE, then prefix-truncate. ---
-	return c.writeAndTruncate(cs, constraints, indexDefs, watermark)
+	return c.writeAndTruncate(seq, cs, constraints, indexDefs, watermark)
 }
 
 // writeAndTruncate is phases 2 and 3 of the non-blocking checkpoint: it writes
 // the self-sufficient snapshot from the captured image (lock-free, so writers
 // commit concurrently), then re-acquires the commit lock to prefix-truncate the
 // WAL up to the captured watermark. cs, constraints, and indexDefs are the
-// phase-1 capture; watermark is the durable WAL offset W those reflect.
-func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec, watermark int64) error {
+// phase-1 capture; watermark is the durable WAL offset W those reflect. seq is
+// this attempt's setErr sequence number (rmp #1873), minted once by the
+// calling runNonBlocking and threaded through unchanged.
+func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec, watermark int64) error {
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
 	// Durability invariant (audit gaps F2/F3): the snapshot MUST be a
 	// self-sufficient image of the committed state — CSR adjacency PLUS
@@ -709,7 +749,7 @@ func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snap
 	// stall for this (potentially multi-second) write. The snapshot is a
 	// self-sufficient image of the phase-1 boundary state.
 	if err := c.writeSnapshot(snapDir, cs, constraints, indexDefs); err != nil {
-		c.setErr(err)
+		c.setErr(seq, err)
 		return err
 	}
 	// fsync the WAL so the suffix [watermark, end) — the frames committed
@@ -718,7 +758,7 @@ func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snap
 	// parent-dir fsync) THEN suffix durable THEN truncate the prefix: the
 	// ordering the auditor required (#1508 Q5).
 	if err := c.wlog.Sync(); err != nil {
-		c.setErr(err)
+		c.setErr(seq, err)
 		return err
 	}
 	// Crash-injection point: the new self-sufficient snapshot is published and
@@ -733,7 +773,7 @@ func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snap
 
 	// --- Phase 3: prefix-truncate the WAL under the commit lock, briefly. ---
 	return c.runUnderCommitLock(func() error {
-		return c.truncatePrefixLocked(snapDir, watermark)
+		return c.truncatePrefixLocked(seq, snapDir, watermark)
 	})
 }
 
@@ -744,7 +784,9 @@ func (c *Checkpointer[N, W]) writeAndTruncate(cs *csr.CSR[W], constraints []snap
 // write, in which case the snapshot (captured at the watermark, before the DDL)
 // cannot stand alone and the WAL must be retained — then discards only the WAL
 // bytes in [0, watermark), preserving every frame committed during phase 2.
-func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int64) error {
+// seq is this attempt's setErr sequence number (rmp #1873), threaded
+// unchanged from runNonBlocking via writeAndTruncate.
+func (c *Checkpointer[N, W]) truncatePrefixLocked(seq uint64, snapDir string, watermark int64) error {
 	// Re-source needConstraints / needIndexes from the graph's own counts, NOT
 	// from the phase-1 captured slices: a constraint or index DDL committed
 	// during the lock-free phase-2 write makes HasConstraints / HasIndexes true
@@ -755,7 +797,7 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int6
 	// audit condition C2).
 	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, c.g.HasConstraints(), c.g.HasIndexes())
 	if err != nil {
-		c.setErr(err)
+		c.setErr(seq, err)
 		return err
 	}
 	if !selfSufficient {
@@ -768,7 +810,7 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int6
 		// WAL growth. Surfaced via a metric so operators can detect the mode.
 		metrics.IncCounter("store.checkpoint.truncate_skipped_not_self_sufficient", 1)
 		c.checkpoints.Add(1)
-		c.setErr(nil)
+		c.setErr(seq, nil)
 		return nil
 	}
 	// Discard ONLY the folded prefix [0, watermark); the suffix [watermark,
@@ -778,7 +820,7 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int6
 	// atomic copy-suffix-then-rename.
 	truncated, err := c.wlog.TruncatePrefix(watermark)
 	if err != nil {
-		c.setErr(err)
+		c.setErr(seq, err)
 		return err
 	}
 	if truncated > 0 {
@@ -791,7 +833,7 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(snapDir string, watermark int6
 		metrics.IncCounter("store.checkpoint.wal_truncated_bytes", uint64(truncated))
 	}
 	c.checkpoints.Add(1)
-	c.setErr(nil)
+	c.setErr(seq, nil)
 	return nil
 }
 
@@ -808,12 +850,40 @@ func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W], const
 	return c.snap.WriteSnapshot(snapDir, cs, c.g, c.codec, constraints, indexDefs)
 }
 
-func (c *Checkpointer[N, W]) setErr(err error) {
+// setErr records err as the outcome of the checkpoint attempt identified by
+// seq (rmp #1873), rejecting the write if a later-STARTED attempt already
+// recorded its own outcome: seq < c.lastErrSeq means some other, more
+// recently started run's setErr call already landed first, so this call is
+// stale and must not overwrite it (e.g. a same-outcome or opposite-outcome
+// run that started after this one but happened to finish first).
+//
+// The comparison is seq >= c.lastErrSeq, not seq > c.lastErrSeq: a SINGLE
+// attempt's own three-phase run (runNonBlocking -> writeAndTruncate ->
+// truncatePrefixLocked) calls setErr exactly once on its way out, always
+// with its own unchanging seq, so that one call must always win against
+// whatever was recorded before it — rejecting an equal seq would make an
+// attempt unable to record its own outcome at all. In this codebase's
+// current call graph seq is unique per attempt (minted once by
+// runNonBlocking, never reused), so the equal-seq branch is only ever taken
+// by an attempt overwriting its OWN prior state, never two attempts
+// colliding on the same value.
+//
+// Within a single, non-concurrent series of attempts (the documented,
+// supported usage) each new attempt's seq is strictly greater than the
+// last, so every call always wins and this guard changes nothing versus a
+// plain unconditional overwrite; it only changes behaviour for the specific
+// out-of-order-completion scenario described above, which the documented
+// contract on [Checkpointer.RunCheckpoint] forbids callers from creating in
+// the first place — this is defence in depth, not a sanctioned usage mode.
+func (c *Checkpointer[N, W]) setErr(seq uint64, err error) {
 	c.lastErrMu.Lock()
-	if err == nil {
-		c.lastErr = ""
-	} else {
-		c.lastErr = err.Error()
+	if seq >= c.lastErrSeq {
+		c.lastErrSeq = seq
+		if err == nil {
+			c.lastErr = ""
+		} else {
+			c.lastErr = err.Error()
+		}
 	}
 	c.lastErrMu.Unlock()
 }
