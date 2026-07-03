@@ -10670,13 +10670,17 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 // operators; when any write operator is present it builds a mutator adapter so
 // that write operators can modify the graph.
 //
-// For the current in-memory implementation there is no external transaction
-// manager (lpg.Graph does not support rollback). "Commit on success, rollback
-// on error" means: the pipeline runs to completion with mutations applied
-// eagerly; if any operator returns an error the pipeline is drained no further
-// (standard Volcano error propagation) and the partial mutations remain in the
-// graph. This matches the single-writer, in-memory contract documented in
-// CLAUDE.md.
+// RunInTx is atomic: mutations apply eagerly to the live graph as the pipeline
+// runs, with the inverse of each recorded into an in-memory undo log (see
+// exectx.go's "Atomicity and the undo log" section for the shared mechanism).
+// If the pipeline drain returns an error, a commit-time NOT NULL constraint is
+// violated, the WAL fsync fails, or the pipeline panics, the whole statement
+// rolls back: the undo log replays in reverse inside the write visibility
+// barrier, restoring the graph to its pre-statement state, before the barrier
+// is ever released — so a concurrent [lpg.Graph.View] reader can never
+// observe a partially-applied write. Only once every check passes does the
+// WAL fsync (durability before visibility), after which the undo log is
+// discarded.
 //
 // RunInTx is safe for concurrent use (each call creates an independent
 // operator tree), subject to the single-writer constraint on write queries.
