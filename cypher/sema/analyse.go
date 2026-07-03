@@ -296,6 +296,7 @@ func (a *analyser) matchClause(m *ast.Match) {
 		a.whereClause(m.Where)
 	}
 	a.checkPatternParameterProps(m.Pattern)
+	a.checkNonEmptyRelTypesAndLabels(m.Pattern)
 }
 
 func (a *analyser) optionalMatchClause(m *ast.OptionalMatch) {
@@ -304,6 +305,7 @@ func (a *analyser) optionalMatchClause(m *ast.OptionalMatch) {
 		a.whereClause(m.Where)
 	}
 	a.checkPatternParameterProps(m.Pattern)
+	a.checkNonEmptyRelTypesAndLabels(m.Pattern)
 }
 
 func (a *analyser) unwindClause(u *ast.Unwind) {
@@ -685,6 +687,7 @@ func (a *analyser) createClause(c *ast.Create) {
 	// union types, variable-length and undirected relationships are all
 	// rejected.
 	a.checkCreateRelationshipTypes(c.Pattern, true)
+	a.checkNonEmptyRelTypesAndLabels(c.Pattern)
 	// Validate any property expressions on node or relationship patterns —
 	// in particular flag undefined-variable references (e.g.
 	// CREATE (b {name: missing}) where `missing` is not in scope).
@@ -819,6 +822,7 @@ func (a *analyser) mergeClause(m *ast.Merge) {
 	// creates outgoing when no match exists).
 	a.checkPathPatternRelTypes(m.Pattern, false)
 	a.checkPathPatternParameterProps(m.Pattern)
+	a.checkPathNonEmptyRelTypesAndLabels(m.Pattern)
 	// ON CREATE / ON MATCH SET items reference existing variables.
 	for _, si := range m.OnCreate {
 		a.checkSetItem(si)
@@ -2736,6 +2740,51 @@ func (a *analyser) checkPatternParameterProps(pat *ast.Pattern) {
 	}
 	for _, pp := range pat.Paths {
 		a.checkPathPatternParameterProps(pp)
+	}
+}
+
+// checkNonEmptyRelTypesAndLabels rejects any relationship-type or node-label
+// name that is the empty string. In the openCypher property-graph data model
+// every relationship carries exactly one non-empty type and every label has a
+// non-empty name, so an empty backtick-quoted type or label — e.g.
+// MATCH ()-[:“]->() or MATCH (n:“) — is not a legal predicate. Rejecting it
+// at sema fixes the read-side defect (#1878) where an empty relationship type
+// collided with the exec "no type filter" sentinel and matched EVERY edge
+// (poisoning even an empty-first multi-type filter), and symmetrically rejects
+// the CREATE ()-[:“]->() form that would otherwise persist an edge with an
+// empty type. Property/map keys are not touched (an empty map key is a distinct,
+// TCK-covered construct), only node labels and relationship types in patterns.
+func (a *analyser) checkNonEmptyRelTypesAndLabels(pat *ast.Pattern) {
+	if pat == nil {
+		return
+	}
+	for _, pp := range pat.Paths {
+		a.checkPathNonEmptyRelTypesAndLabels(pp)
+	}
+}
+
+// checkPathNonEmptyRelTypesAndLabels is the per-path counterpart of
+// [checkNonEmptyRelTypesAndLabels], used directly by MERGE (whose Pattern is a
+// single *ast.PathPattern).
+func (a *analyser) checkPathNonEmptyRelTypesAndLabels(pp *ast.PathPattern) {
+	if pp == nil {
+		return
+	}
+	for el := pp.Head; el != nil; el = el.Next {
+		if el.Node != nil {
+			for _, lbl := range el.Node.Labels {
+				if lbl == "" {
+					a.error(invalidBooleanOperandError("node label", "must not be empty", el.Node.Pos))
+				}
+			}
+		}
+		if el.Relationship != nil {
+			for _, ty := range el.Relationship.Types {
+				if ty == "" {
+					a.error(invalidBooleanOperandError("relationship type", "must not be empty", el.Relationship.Pos))
+				}
+			}
+		}
 	}
 }
 
