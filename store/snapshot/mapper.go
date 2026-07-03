@@ -414,12 +414,10 @@ func ReadMapperBytes(r io.Reader) (MapperReadback, error) {
 			return MapperReadback{}, fmt.Errorf("%w: key len %d > %d",
 				ErrMapperCorrupted, keyLen, maxMapperKeyLen)
 		}
-		buf := make([]byte, keyLen)
-		if keyLen > 0 {
-			if _, err := io.ReadFull(br, buf); err != nil {
-				metrics.IncCounter("store.snapshot.ReadMapperBytes.errors", 1)
-				return MapperReadback{}, fmt.Errorf("%w: %w", ErrMapperCorrupted, err)
-			}
+		buf, err := readLenPrefixedValue(br, keyLen)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.ReadMapperBytes.errors", 1)
+			return MapperReadback{}, fmt.Errorf("%w: %w", ErrMapperCorrupted, err)
 		}
 		raw = append(raw, MapperRawPair{ID: graph.NodeID(idRaw), Key: buf})
 	}
@@ -491,12 +489,10 @@ func ReadMapperString(r io.Reader) (MapperReadback, error) {
 			return MapperReadback{}, fmt.Errorf("%w: key len %d > %d",
 				ErrMapperCorrupted, keyLen, maxMapperKeyLen)
 		}
-		buf := make([]byte, keyLen)
-		if keyLen > 0 {
-			if _, err := io.ReadFull(br, buf); err != nil {
-				metrics.IncCounter("store.snapshot.ReadMapperString.errors", 1)
-				return MapperReadback{}, fmt.Errorf("%w: %w", ErrMapperCorrupted, err)
-			}
+		buf, err := readLenPrefixedValue(br, keyLen)
+		if err != nil {
+			metrics.IncCounter("store.snapshot.ReadMapperString.errors", 1)
+			return MapperReadback{}, fmt.Errorf("%w: %w", ErrMapperCorrupted, err)
 		}
 		pairs = append(pairs, MapperPair{ID: graph.NodeID(idRaw), Key: string(buf)})
 	}

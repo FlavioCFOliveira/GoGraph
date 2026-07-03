@@ -49,6 +49,7 @@ package snapshot
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -787,6 +788,42 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	}, nil
 }
 
+// snapshotEagerReadCap bounds the up-front allocation for a length-prefixed
+// value read from an untrusted snapshot component. A value up to this size is
+// pre-sized exactly (a single allocation, identical to the historical make); a
+// larger declared length grows incrementally as bytes actually arrive. This
+// keeps the common case (keys, scalar values, typical strings) unchanged while
+// bounding the pathological case: a forged length up to the per-kind ceiling
+// (maxValueLen / maxMapperKeyLen = 1 GiB) can no longer force a large
+// speculative make ahead of the read failing on the truncated component.
+const snapshotEagerReadCap = 1 << 20
+
+// readLenPrefixedValue reads exactly n bytes from br into a fresh slice without
+// eagerly reserving an untrusted n. The caller has already enforced the
+// per-kind maximum and any fixed-width length; this bounds only the SPECULATIVE
+// allocation. It returns nil for n == 0, and a raw error (io.EOF /
+// io.ErrUnexpectedEOF on a short read) for the caller to wrap with its own
+// corruption sentinel. bytes.Buffer grows geometrically, so on the large-n path
+// the peak transient stays ~2x the bytes truly present, never ~n.
+func readLenPrefixedValue(br *bufio.Reader, n uint32) ([]byte, error) {
+	if n == 0 {
+		return nil, nil
+	}
+	if n <= snapshotEagerReadCap {
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(br, buf); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
+	var b bytes.Buffer
+	b.Grow(snapshotEagerReadCap)
+	if _, err := io.CopyN(&b, br, int64(n)); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
 // readNodePropRecord parses one node property record.
 //
 //nolint:gocyclo // record read: id + keyIdx + kind + length-prefixed value with bounds checks
@@ -819,12 +856,11 @@ func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint6
 	if err := validateFixedLen(out.Kind, valLen); err != nil {
 		return err
 	}
-	if valLen > 0 {
-		out.ValueBytes = make([]byte, valLen)
-		if _, err := io.ReadFull(br, out.ValueBytes); err != nil {
-			return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
-		}
+	vb, err := readLenPrefixedValue(br, valLen)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
+	out.ValueBytes = vb
 	return nil
 }
 
@@ -863,12 +899,11 @@ func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint6
 	if err := validateFixedLen(out.Kind, valLen); err != nil {
 		return err
 	}
-	if valLen > 0 {
-		out.ValueBytes = make([]byte, valLen)
-		if _, err := io.ReadFull(br, out.ValueBytes); err != nil {
-			return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
-		}
+	vb, err := readLenPrefixedValue(br, valLen)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 	}
+	out.ValueBytes = vb
 	return nil
 }
 

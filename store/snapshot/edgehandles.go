@@ -507,8 +507,8 @@ func readEdgeHandleProp(br *bufio.Reader, keys []string) (string, lpg.PropertyVa
 	if valueLen > 1<<30 {
 		return "", lpg.PropertyValue{}, fmt.Errorf("implausible value length %d", valueLen)
 	}
-	raw := make([]byte, valueLen)
-	if _, err := io.ReadFull(br, raw); err != nil {
+	raw, err := readLenPrefixedValue(br, valueLen)
+	if err != nil {
 		return "", lpg.PropertyValue{}, err
 	}
 	val, derr := decodePropertyValue(kind, raw)
