@@ -766,7 +766,13 @@ important stability asymmetry between the two:
   CSR rebuild (for example, a relationship delete can renumber positions). Do
   **not** persist a relationship `id()` and expect to resolve the same
   relationship after a restart.
-- **`elementId()` is not implemented.**
+- **`elementId()` returns that identifier as a decimal string** — the
+  openCypher/Neo4j-recommended replacement for the deprecated `id()`. It is
+  backed by the same underlying integer `id()` returns (a node's interned
+  `NodeID`, a relationship's CSR positional index), so it inherits the same
+  stability asymmetry: a node's `elementId()` survives a store reopen, a
+  relationship's does not. `null` in yields `null` out, and a non-node,
+  non-relationship argument raises a typed error.
 
 Both values are valid identifiers *within* a query — `id(r)` is unique per
 relationship in a result and consistent whether the edge is traversed forwards
@@ -801,4 +807,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-06-28 against commit `3b51a5b`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-07-03 against commit `f1fa1a2`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
