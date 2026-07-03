@@ -936,6 +936,54 @@ OPEN with one task left: #1874 (doc-precision + benchmark-hygiene
 cleanup bundle). Unscheduled backlog now also carries #1875 and
 #1877-1880 forward. Local commits, not pushed.
 
+Incrementally synced at commit `2131689` (2026-07-03, task #1874,
+sprint 263 — CLOSED): +1 `Commit`; +1 `Task` (`1874` COMPLETED). Closed
+the last of the four LOW-severity, doc/fixture-only findings from the
+round-2 audit, with zero production behaviour change: (1) narrowed
+`CountTriangles`' over-count wording from "self-loop or parallel edge"
+to parallel-edge-only, since the rank filter (pairs neighbours only
+with strictly higher rank than the current vertex) makes a self-loop
+structurally incapable of ever triggering it — a self-loop's neighbour
+is the vertex itself, which can never outrank itself; (2) corrected
+`bellmanFordCore`'s SPFA attribution, verified via web research (not
+memory) to have been genuinely wrong — "Bannister-Eppstein 2012"
+(arXiv:1111.5414) describes an unrelated randomized full-pass
+Bellman-Ford variant benchmarked against Yen 1970, not SPFA's
+worklist/queue mechanism — replaced with the historically accurate
+Moore 1959 (queue-based technique) / Duan 1994 (SPFA name and
+independent rediscovery) / Bertsekas 1993 (SLF deque heuristic); (3)
+switched `bench/cypher_alloc`'s shared `gate500` benchmark fixture
+from `newWalker(500)` (NodeIDs 0-499, roughly half inside Go's
+`staticuint64s` free small-int boxing range) to
+`newWalkerFrom(gateAllocNodeIDStart, 500)`, so its `Benchmark*`
+functions — distinct from the `TestZeroAlloc_*` gates task #1863
+already fixed in sprint 262 — stop silently discounting about half
+their reported allocs/op; verified empirically, allocs/op rose to a
+consistent ~1.03/node across all four benchmarks after the fix; (4)
+corrected `docs/benchmarks/cypher-scale.md`'s attribution of
+`BenchmarkExpand1Hop`'s cost from "P1 and P2" to P1-only, per the
+round-2 audit's own controlled A/B measurement (`buildRelationshipValueFromRow`,
+P2's specific mechanism, only fires when a relationship variable is
+bound, which that benchmark's query never does). Edges: `Sprint 263
+-[CONTAINS]-> Commit`; `Task 1874 -[IMPLEMENTED_IN]-> Commit`. No
+`FIXES`/`TOUCHES` edge to any Feature or Package, matching this
+graph's established precedent for pure doc-fidelity fixes (`Task`s
+`1861`/`1862`/`1864`/`1881`): nothing of behavioural substance changed
+for a Feature or Package to be stamped against. Certified by an
+independent go-developer review (ran the full validation pipeline
+itself rather than trusting the change description) — GO, with one
+cosmetic nit applied before commit (reworded an ALL-CAPS emphasis in
+`triangles.go`'s doc that didn't match this codebase's godoc
+conventions) and one left by design (a deliberately mixed citation
+style, quoted-title vs. journal-name, reflecting what could and could
+not be verified in English). No new label or edge type. TCK 3897/3897
+held, full-module `-race` clean. **Sprint 263 ("Audit remediation
+Round 2 2026-07-02") is now CLOSED — all 11 tasks COMPLETED**
+(`1866`-`1874`, `1876`, `1881`), closing out the entire round-2
+production-readiness audit remediation effort. Unscheduled backlog
+carried forward: `1875`, `1877`, `1878`, `1879`, `1880`. Local
+commits, not pushed.
+
 ---
 
 ## Node labels
