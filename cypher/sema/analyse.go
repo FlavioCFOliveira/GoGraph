@@ -1460,6 +1460,12 @@ func (a *analyser) checkExpr(e ast.Expression) {
 
 	case *ast.LabelPredicate:
 		a.checkExpr(v.Receiver)
+		// A label-predicate expression (WHERE n:Label, RETURN n:Label) must
+		// also carry non-empty label names, for policy consistency with the
+		// pattern sites (#1878). An empty label here is benign (it evaluates to
+		// false rather than matching everything), but openCypher has no empty
+		// label, so reject it uniformly.
+		a.checkNonEmptyLabelNames(v.Labels, v.Pos)
 
 	case *ast.BinaryOp:
 		a.exprDepth++

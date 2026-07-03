@@ -48,6 +48,8 @@ func TestEngine_EmptyRelationshipTypeAndLabel_Rejected(t *testing.T) {
 		{"bare WHERE pattern empty type", "MATCH (a) WHERE (a)-[:``]->() RETURN count(a) AS c"},
 		{"EXISTS pattern-form empty type", "MATCH (a) WHERE EXISTS { (a)-[:``]->() } RETURN count(a) AS c"},
 		{"COUNT pattern-form empty type", "MATCH (a) RETURN COUNT { (a)-[:``]->() } AS c"},
+		{"WHERE label predicate empty label", "MATCH (n) WHERE n:`` RETURN count(n) AS c"},
+		{"RETURN label predicate empty label", "MATCH (n) RETURN n:`` AS b"},
 	}
 	for _, tc := range rejectedRead {
 		if _, err := eng.Run(ctx, tc.q, nil); err == nil {
