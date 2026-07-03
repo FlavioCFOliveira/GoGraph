@@ -14,6 +14,17 @@
 #
 # The soak step (SOAK_FULL=1) is excluded from the automated gate because it
 # takes 4+ hours; run it manually before a major release.
+#
+# -timeout=30m on the race run: go test's default per-package timeout is 10
+# minutes. internal/sim (the DST/simulation harness) legitimately takes
+# ~400-420s under -race on a fast local machine (Apple M4), but GitHub-hosted
+# CI runners are slower and have been observed to exceed the 10-minute
+# default, killing the whole run with "panic: test timed out after 10m0s" —
+# a runner-speed artifact, not a hang or a real regression (verified: the
+# identical failure occurs on unrelated commits with no changes to
+# internal/sim). 30m gives roughly 4x headroom over the local measurement,
+# mirroring the precedent set by raising the goreleaser job's own timeout
+# 20m->45m for the same class of issue (see .github/workflows/release.yml).
 set -euo pipefail
 
 VERSION="${1:-}"
@@ -42,7 +53,7 @@ echo ""
 
 run_step "go vet ./..."                go vet ./...
 run_step "go build ./..."              go build ./...
-run_step "go test -race ./..."         go test -race ./...
+run_step "go test -race ./..."         go test -race -timeout=30m ./...
 run_step "golangci-lint run ./..."     golangci-lint run ./...
 
 # TCK conformance gate
