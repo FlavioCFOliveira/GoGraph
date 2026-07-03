@@ -72,6 +72,41 @@ func TestYenKShortest_WeightedMultigraph_MinParallelEdge(t *testing.T) {
 	}
 }
 
+// TestYenKShortest_WeightedMultigraph_DeepRootHop is the companion gate for
+// #1884 (recommended by the fix certification). It places the min-weight
+// parallel hop deep enough that pathCostFast re-charges it as a *candidate's
+// root prefix* (the spur deviation at node 3 gives rootPath [0 1 2 3]), which
+// is a distinct code path from the first-hop case: a spur that merely deviates
+// before the hop would never re-charge it. Pre-fix the 1->2 hop's root cost was
+// charged at 100 instead of the traversed 1, so the k-set was {4,20,108}; the
+// correct k-set is {4,9,20}.
+func TestYenKShortest_WeightedMultigraph_DeepRootHop(t *testing.T) {
+	t.Parallel()
+	c, a := buildWeightedCSRCfg(t, []weightedEdge{
+		{0, 1, 1},
+		{1, 2, 100}, // expensive parallel edge, first in CSR order
+		{1, 2, 1},   // minimum-weight parallel edge on a deep root hop
+		{2, 3, 1},
+		{3, 4, 1},
+		{3, 5, 1},
+		{5, 4, 5},
+		{0, 4, 20},
+	}, adjlist.Config{Directed: true, Multigraph: true})
+	src, _ := a.Mapper().Lookup(0)
+	dst, _ := a.Mapper().Lookup(4)
+
+	got := YenKShortest(c, src, dst, 3)
+	if len(got) != 3 {
+		t.Fatalf("got %d paths, want 3 (paths: %v)", len(got), got)
+	}
+	wantCosts := []int64{4, 9, 20}
+	for i, w := range wantCosts {
+		if got[i].Cost != w {
+			t.Fatalf("got[%d].Cost = %d, want %d (paths: %v)", i, got[i].Cost, w, got)
+		}
+	}
+}
+
 func TestYen_NoPath(t *testing.T) {
 	t.Parallel()
 	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})
