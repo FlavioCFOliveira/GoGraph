@@ -811,6 +811,67 @@ new label or edge type. TCK 3897/3897 held, full-module `-race` clean
 `store/txn`-direct-write pattern this fix addresses). Local commit,
 not pushed.
 
+Incrementally synced at commit `f251bf8` (2026-07-03, task #1872,
+sprint 263, still OPEN): +1 `Commit` (`f251bf8`); `Task` `1872`
+COMPLETED (already existed as a `SPRINT`-status node from #1869's
+scope-expansion sync — see the `⚠️ MERGE gotcha` note below for a real
+duplicate-node bug this exposed and how it was fixed). Closed the
+last three findings from task #1869's own follow-up review: (1) the
+parallel hash-index backfill's poll check used the shared slice's
+absolute index, not one relative to each worker's own range start,
+leaving 5 of 10 workers in the audit's own 20,000-row/10-worker
+scenario unable to see an early cancellation at all — fixed by
+extracting the predicate into a named, directly testable function,
+`shouldPollWorkerRelative(i, lo)`, computing `(i-lo)&mask` instead of
+the absolute `i&mask`; (2) `backfillNodeBTreeIndex`/
+`backfillNodeBTreeIndexNumeric` took no `ctx` at all and polled no
+cancellation — both now do, every 4096 rows; (3) `scanLabelProperty`
+(CREATE CONSTRAINT's pre-existing-data validation, both UNIQUE and NOT
+NULL) took no `ctx` at all — now polls every 4096 rows via a
+named-return early-exit from inside its existing read-barrier closure.
+All three still run strictly before their statement's
+registration/commit step, which remains uncancellable once reached, so
+a mid-scan cancellation aborts cleanly with nothing registered and
+does not regress task #1869's own post-commit cancellation-reporting
+fix. Two independent specialist reviews (concurrency, Go idiom) both
+independently ran the SAME mutation-test experiment (reverting the
+per-worker poll formula in the live source) and found the identical
+gap: the initial regression test proved the formula correct only in
+the abstract, disconnected from the real code the fix changed — closed
+by the `shouldPollWorkerRelative` extraction above, then re-verified
+non-vacuous by reverting that real function's body and confirming the
+dependent tests fail. Edges: `Sprint 263 -[CONTAINS]-> Commit`; `Task
+1872 -[IMPLEMENTED_IN]-> Commit`; `Commit -[FIXES]->` Feature `Cypher
+Engine` (id 12659); `Commit -[TOUCHES]->` Package `cypher` (73); `Task
+1869 -[FOLLOWED_BY]-> Task 1872` (re-pointed from the deleted stale
+node — see below). Feature and Package re-stamped to gitDate
+2026-07-03. 8 new tests. No new label or edge type. TCK 3897/3897
+held, full-module `-race` clean. Local commit, not pushed.
+
+**⚠️ MERGE gotcha discovered and fixed during this sync — a real Cypher
+trap, not specific to this graph's guard-rails.** `Task` `1872` already
+existed (created during #1869's sync, `status:'SPRINT'`, stamped with
+the commit current at that time). Syncing its completion via `MERGE (t:
+Task {id:1872, status:'COMPLETED', ..., gitCommit:'f251bf8', ...})` —
+supplying the FULL, now-different property set in the MERGE pattern
+— matched against NOTHING (the existing node's `status`/`gitCommit`/
+`gitDate` differ), so MERGE correctly-per-spec created a SECOND,
+DUPLICATE `Task {id:1872}` node rather than updating the first — the
+exact classic MERGE pitfall (matching the whole pattern including every
+property, not a "primary key") this graph's own `knowledge-authority`
+skill has flagged as a top Cypher misconception elsewhere in this
+project's practice. Caught by a post-write hygiene check (`MATCH
+(t:Task) WITH t.id AS tid, count(t) AS c WHERE c > 1 RETURN tid, c`).
+Fixed by: re-pointing the stale node's one incoming edge (`Task 1869
+-[FOLLOWED_BY]-> Task 1872`) onto the new, `COMPLETED` node, then
+`DETACH DELETE`-ing the stale node. **Lesson for every future
+completion sync**: when a `Task` node might already exist from an
+earlier partial sync (a scope-expansion, a `FOLLOWED_BY` follow-up
+stub, etc.), `MATCH` it by `id` ALONE first to check for a property
+mismatch before a blind full-property `MERGE`, or use `graph update`'s
+`SET` on a plain `id`-keyed `MATCH` instead of `graph create`'s `MERGE`
+for what is really an update, not a creation.
+
 ---
 
 ## Node labels
