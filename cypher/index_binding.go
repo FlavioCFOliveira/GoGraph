@@ -113,6 +113,25 @@ func newBoundNodeHashIndex(
 // is wall-clock on a huge (millions-of-nodes) DDL backfill.
 const backfillParallelMinNodes = 8192
 
+// pollGranularityMask selects a cancellation checkpoint every 4096 rows —
+// shared by every ctx-polling scan/backfill loop in this file, so the
+// granularity is changed in exactly one place if it is ever retuned.
+const pollGranularityMask = 0xFFF
+
+// shouldPollWorkerRelative reports whether i is a cancellation checkpoint
+// within a worker's own [lo, hi) range (rmp #1872), extracted to a named,
+// directly testable function rather than left as an inline expression inside
+// [Engine.backfillNodeHashIndex]'s processRange closure: i=lo always
+// satisfies (lo-lo)&pollGranularityMask == 0 trivially, so every worker's
+// very first iteration is guaranteed to be a checkpoint regardless of how
+// its range happens to align with the absolute pollGranularityMask boundary
+// — unlike the pre-fix global i&pollGranularityMask==0 check, which placed
+// zero checkpoints inside most workers' own ranges (see processRange's own
+// comment for the audit's 20,000-row/10-worker measurement).
+func shouldPollWorkerRelative(i, lo int) bool {
+	return (i-lo)&pollGranularityMask == 0
+}
+
 // backfillNodeHashIndex inserts every live node of label whose prop holds an
 // indexable string into idx. Callers must hold the engine's writer
 // serialisation so no write transaction can interleave with the scan.
@@ -152,10 +171,16 @@ func (e *Engine) backfillNodeHashIndex(ctx context.Context, idx *indexhash.Index
 	})
 
 	// processRange runs the lock-free phase-2 over refs[lo:hi], inserting into
-	// the concurrent-safe hash index and polling ctx every 4096 nodes.
+	// the concurrent-safe hash index and polling ctx every 4096 nodes via
+	// [shouldPollWorkerRelative], relative to this worker's OWN range start
+	// (rmp #1872) rather than the shared slice's absolute index: a global
+	// i&0xFFF==0 check places zero checkpoints inside most workers' own
+	// ranges whenever lo is not itself a multiple of 4096 (which chunk
+	// boundaries rarely are), leaving those workers unable to observe an
+	// early cancellation request at all.
 	processRange := func(lo, hi int) error {
 		for i := lo; i < hi; i++ {
-			if i&0xFFF == 0 {
+			if shouldPollWorkerRelative(i, lo) {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -317,10 +342,14 @@ func newBoundNodeBTreeIndexNumeric(
 // the float64 companion (#1652). It mirrors [Engine.backfillNodeBTreeIndex]
 // exactly — the same two-phase scan (snapshot interned (id, key) pairs under
 // the mapper shard locks, then resolve liveness/label/property with no shard
-// lock held, #1339) and the same O(n log n) BulkLoad (a per-key Insert loop
-// would be O(n²) on the sorted-array leaves). Callers must hold the engine's
-// writer serialisation so no write transaction can interleave with the scan.
-func (e *Engine) backfillNodeBTreeIndexNumeric(idx *indexbtree.Index[float64], label, prop string) {
+// lock held, #1339), the same ~4096-row cancellation-poll granularity as
+// [Engine.backfillNodeHashIndex] (rmp #1872), and the same O(n log n) BulkLoad
+// (a per-key Insert loop would be O(n²) on the sorted-array leaves). Callers
+// must hold the engine's writer serialisation so no write transaction can
+// interleave with the scan. Returns ctx.Err() if cancelled mid-scan; the
+// index is never registered in that case, so atomicity is unaffected
+// (mirroring the hash path's own contract).
+func (e *Engine) backfillNodeBTreeIndexNumeric(ctx context.Context, idx *indexbtree.Index[float64], label, prop string) error {
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
@@ -336,6 +365,11 @@ func (e *Engine) backfillNodeBTreeIndexNumeric(idx *indexbtree.Index[float64], l
 	values := make([]float64, 0, len(refs))
 	nodes := make([]graph.NodeID, 0, len(refs))
 	for i := range refs {
+		if i&pollGranularityMask == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		r := refs[i]
 		if e.g.IsTombstoned(r.id) {
 			continue
@@ -355,6 +389,7 @@ func (e *Engine) backfillNodeBTreeIndexNumeric(idx *indexbtree.Index[float64], l
 	// BulkLoad cannot fail here: values and nodes are appended in lockstep, so
 	// their lengths are equal by construction.
 	_ = idx.BulkLoad(values, nodes)
+	return nil
 }
 
 // newBoundNodeBTreeIndex builds a btree.Index[string] bound to (label, prop)
@@ -401,6 +436,9 @@ func newBoundNodeBTreeIndex(
 // backfillNodeBTreeIndex bulk-loads every live node of label whose prop holds
 // an indexable string into idx. Callers must hold the engine's writer
 // serialisation so no write transaction can interleave with the scan.
+// Returns ctx.Err() if cancelled mid-scan; the index is never registered in
+// that case, so atomicity is unaffected (mirroring the hash path's own
+// contract).
 //
 // Unlike [Engine.backfillNodeHashIndex], the population uses
 // [btree.Index.BulkLoad] (O(n log n)), not a per-key Insert loop: the sorted-
@@ -409,8 +447,9 @@ func newBoundNodeBTreeIndex(
 // same as the hash backfill: phase 1 snapshots the interned (id, key) pairs
 // under the mapper shard locks; phase 2 resolves liveness/label/property with
 // no shard lock held, so a queued writer cannot deadlock a nested lookup
-// (#1339).
-func (e *Engine) backfillNodeBTreeIndex(idx *indexbtree.Index[string], label, prop string) {
+// (#1339). Polls ctx at the same ~4096-row granularity as the hash path
+// (rmp #1872 — this backfill polled no cancellation at all before).
+func (e *Engine) backfillNodeBTreeIndex(ctx context.Context, idx *indexbtree.Index[string], label, prop string) error {
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
@@ -426,6 +465,11 @@ func (e *Engine) backfillNodeBTreeIndex(idx *indexbtree.Index[string], label, pr
 	values := make([]string, 0, len(refs))
 	nodes := make([]graph.NodeID, 0, len(refs))
 	for i := range refs {
+		if i&pollGranularityMask == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		r := refs[i]
 		if e.g.IsTombstoned(r.id) {
 			continue
@@ -445,6 +489,7 @@ func (e *Engine) backfillNodeBTreeIndex(idx *indexbtree.Index[string], label, pr
 	// BulkLoad cannot fail here: values and nodes are appended in lockstep, so
 	// their lengths are equal by construction.
 	_ = idx.BulkLoad(values, nodes)
+	return nil
 }
 
 // indexFanoutActive reports whether the write path must capture old property
@@ -642,7 +687,9 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			// (BoundNode reports false) — the worst outcome is a scan+filter,
 			// never wrong rows.
 			if boundIdx, bidxErr := newBoundNodeBTreeIndex(e.g, d.Label, d.Property); bidxErr == nil {
-				e.backfillNodeBTreeIndex(boundIdx, d.Label, d.Property)
+				// Recovery must complete: a background context never cancels, so
+				// the backfill never returns an error here.
+				_ = e.backfillNodeBTreeIndex(context.Background(), boundIdx, d.Label, d.Property)
 				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
 			} else {
 				sub := indexbtree.New[string]()
@@ -663,7 +710,9 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			// ErrIndexExists and is absorbed (idempotent rebuild).
 			numName := numericBTreeName(d.Label, d.Property)
 			if numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g, d.Label, d.Property); nerr == nil {
-				e.backfillNodeBTreeIndexNumeric(numIdx, d.Label, d.Property)
+				// Recovery must complete: a background context never cancels, so
+				// the backfill never returns an error here.
+				_ = e.backfillNodeBTreeIndexNumeric(context.Background(), numIdx, d.Label, d.Property)
 				_ = idxMgr.CreateIndex(numName, numIdx) // absorb ErrIndexExists
 			}
 		}

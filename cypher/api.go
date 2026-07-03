@@ -1079,7 +1079,9 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 			_ = e.g.IndexManager().CreateIndex(idxName, sub)
 			e.constraintReg.RegisterUnique(d.Label, d.Property, idxName)
 			e.constraintReg.SetConstraintName(true, d.Label, d.Property, d.Name)
-			values, _ := e.scanLabelProperty(d.Label, d.Property)
+			// Recovery must complete: a background context never cancels, so
+			// the scan never returns an error here.
+			values, _, _ := e.scanLabelProperty(context.Background(), d.Label, d.Property)
 			e.constraintReg.SeedUniqueValuesIgnoringDuplicates(d.Label, d.Property, values)
 		} else {
 			e.constraintReg.RegisterNotNull(d.Label, d.Property)
@@ -1904,7 +1906,7 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if e.store == nil {
 		e.writeMu.Lock()
 		defer e.writeMu.Unlock()
-		return e.createBTreeIndexLocked(p, idxMgr, nil)
+		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
 	}
 	// WAL-backed: open the serialising transaction before the backfill scan so
 	// no concurrent write can slip between the scan and the registration.
@@ -1912,7 +1914,7 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if err != nil {
 		return nil, err
 	}
-	res, rerr := e.createBTreeIndexLocked(p, idxMgr, tx)
+	res, rerr := e.createBTreeIndexLocked(ctx, p, idxMgr, tx)
 	_ = tx.Rollback() // guarded no-op after CommitWALOnly
 	return res, rerr
 }
@@ -1920,11 +1922,12 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 // createBTreeIndexLocked executes the CREATE INDEX (btree) sequence under the
 // writer serialisation held by the caller; tx is the serialising transaction
 // on a WAL-backed engine (nil on a store-less one). It mirrors
-// [Engine.createHashIndexLocked]. Unlike the hash path, the btree backfill
-// ([Engine.backfillNodeBTreeIndex]) does not poll for cancellation — a
-// pre-existing, separate scope boundary from this function's own concerns,
-// not something this signature carries a ctx parameter for.
-func (e *Engine) createBTreeIndexLocked(p *ir.CreateIndex, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
+// [Engine.createHashIndexLocked]. The btree backfill
+// ([Engine.backfillNodeBTreeIndex]/[Engine.backfillNodeBTreeIndexNumeric])
+// polls ctx at the same ~4096-row granularity as the hash path (rmp #1872 —
+// it polled no cancellation at all before); a cancellation there aborts
+// cleanly since nothing has been registered yet.
+func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	if _, gerr := idxMgr.GetIndex(p.Name); gerr == nil {
 		if p.IfNotExists {
 			return emptyDDLResult(), nil
@@ -1939,7 +1942,9 @@ func (e *Engine) createBTreeIndexLocked(p *ir.CreateIndex, idxMgr *index.Manager
 	}
 	// Backfill BEFORE registration: a concurrent reader's plan build either
 	// misses the index (scan+filter, correct) or sees it fully populated.
-	e.backfillNodeBTreeIndex(idx, p.Label, p.Property)
+	if err := e.backfillNodeBTreeIndex(ctx, idx, p.Label, p.Property); err != nil {
+		return nil, err
+	}
 
 	// Build the UNIFIED numeric companion alongside the string btree (#1652):
 	// a btree.Index[float64] under an internal, deterministic name so a numeric
@@ -1957,7 +1962,9 @@ func (e *Engine) createBTreeIndexLocked(p *ir.CreateIndex, idxMgr *index.Manager
 	numName := numericBTreeName(p.Label, p.Property)
 	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g, p.Label, p.Property)
 	if numIdx != nil {
-		e.backfillNodeBTreeIndexNumeric(numIdx, p.Label, p.Property)
+		if err := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, p.Label, p.Property); err != nil {
+			return nil, err
+		}
 	}
 
 	// Wrap BOTH registrations inside one visibility barrier so readers calling
@@ -2221,8 +2228,12 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// so a constraint over already-violating data is rejected with nothing
 	// registered (audit gap H2). The scan runs inside the graph's visibility
 	// barrier (see scanLabelProperty), so it cannot observe a half-applied
-	// transaction.
-	values, anyNull := e.scanLabelProperty(p.Label, p.Property)
+	// transaction. ctx-cancellable (rmp #1872): nothing has been registered
+	// yet, so a cancellation here aborts cleanly with no unwind needed.
+	values, anyNull, serr := e.scanLabelProperty(ctx, p.Label, p.Property)
+	if serr != nil {
+		return nil, serr
+	}
 	if err := validatePreExisting(kind, p.Label, p.Property, values, anyNull); err != nil {
 		return nil, err
 	}
@@ -2419,7 +2430,9 @@ func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kin
 		return errors.Join(cause, fmt.Errorf("cypher: rewind constraint drop: %w", rerr))
 	}
 	if kind == exec.ConstraintUnique {
-		values, _ := e.scanLabelProperty(label, prop)
+		// The rewind is uncancellable by design (see runDDLOp below): a
+		// background context never cancels, so the scan cannot error.
+		values, _, _ := e.scanLabelProperty(context.Background(), label, prop)
 		e.constraintReg.SeedUniqueValuesIgnoringDuplicates(label, prop, values)
 	}
 	return cause
@@ -2527,7 +2540,14 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // is held no [graph.Mapper.Intern] can be queued on a shard. Callers must not
 // already be inside View/ApplyAtomically (the barrier is not re-entrant; the
 // lpg barrier guard panics on misuse).
-func (e *Engine) scanLabelProperty(label, prop string) (values []lpg.PropertyValue, anyNull bool) {
+//
+// Polls ctx at the same ~4096-row granularity as [Engine.backfillNodeHashIndex]
+// (rmp #1872 — this scan polled no cancellation at all before, leaving a large
+// CREATE CONSTRAINT, NOT NULL in particular, uncancellable end-to-end since no
+// other step in createConstraintLocked is ctx-aware). On cancellation err is
+// non-nil and values/anyNull must be ignored — nothing has been registered
+// yet at any call site, so aborting here is always a clean, atomic no-op.
+func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (values []lpg.PropertyValue, anyNull bool, err error) {
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
@@ -2545,6 +2565,12 @@ func (e *Engine) scanLabelProperty(label, prop string) (values []lpg.PropertyVal
 
 		// Phase 2 — resolve graph state with no shard lock held.
 		for i := range refs {
+			if i&pollGranularityMask == 0 {
+				if cerr := ctx.Err(); cerr != nil {
+					err = cerr
+					return
+				}
+			}
 			r := refs[i]
 			if e.g.IsTombstoned(r.id) {
 				continue
@@ -2560,7 +2586,7 @@ func (e *Engine) scanLabelProperty(label, prop string) (values []lpg.PropertyVal
 			values = append(values, v)
 		}
 	})
-	return values, anyNull
+	return values, anyNull, err
 }
 
 // validatePreExisting enforces the at-creation invariant for CREATE CONSTRAINT
