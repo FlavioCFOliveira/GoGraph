@@ -4,6 +4,327 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-07-03
+
+The ninth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release. Its headline is **openCypher completeness and correctness**:
+eight new builtin functions (`elementId`, `timestamp`, `randomUUID`,
+`isNaN`, and the `toStringList`/`toIntegerList`/`toFloatList`/
+`toBooleanList` family), a fix for `MERGE`'s **whole-pattern
+match-or-create semantics** — the single most common Cypher
+graph-building idiom, previously silently incomplete for a pattern with
+a fresh endpoint — and a **rejected-instead-of-silently-dropped**
+parallel edge on a non-multigraph engine, closing a genuine write-loss
+gap on the documented default configuration. Four consecutive
+multi-specialist production-readiness and security audit rounds also
+land a broad **security and denial-of-service hardening pass** across
+the WAL, snapshot, index, Bolt protocol, and CSV/GraphML/JSONL
+interchange formats: bounded allocations, `O(n²)` DoS guards, and
+symlink-attack rejection on every file the engine opens by name.
+
+The bump is **MINOR** under [Semantic Versioning](https://semver.org/):
+the new builtin functions are net-new, additive Cypher surface; every
+other change is an **internal** fix that restores a previously-documented
+contract or closes a hardening gap. No breaking change to the exported Go
+API ships in this release. As a `0.y.z` release the public API remains
+unstable; pin the exact version you depend on.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios, 16 006 / 16 006 steps) and **100 %
+ACID-compliant** across the in-memory engine and every persistence
+backend. The `MERGE` and parallel-edge fixes described above are
+themselves Consistency fixes in the ACID sense: a write that used to
+silently vanish or apply only partially now either fully applies or is
+rejected with a typed error — never a partial, silent result. The Go
+toolchain remains **go1.26.4** (unchanged), and `govulncheck ./...`
+stays clean.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.7.0
+```
+
+This entry is an **exhaustive** accounting of every user-facing change
+landed in the 94 commits between `v0.6.0` and this release
+(`git log --oneline --no-merges v0.6.0..HEAD`), cross-checked against the
+`gograph` roadmap (rmp sprints 257–264). Changes are grouped by
+category; each bullet cites the roadmap task(s) or the area it touches.
+
+### Added
+
+#### Cypher language surface
+
+- **Eight new openCypher builtin functions**, closing a functional-
+  completeness gap that previously fail-stopped a real openCypher/Neo4j
+  workload with `SyntaxError.UnknownFunction`:
+  - `elementId(node|rel)` — a stable string identity (the durable id in
+    decimal), the recommended replacement for the deprecated `id()`.
+  - `timestamp()` — milliseconds since the Unix epoch at the statement's
+    frozen instant; every row of one statement observes the same value,
+    and concurrent statements stay independent.
+  - `randomUUID()` — a `crypto/rand`-backed RFC 4122 v4 UUID string.
+  - `isNaN(number)` — boolean; an integer is never NaN.
+  - `toStringList`, `toIntegerList`, `toFloatList`, `toBooleanList` —
+    element-wise scalar list conversion, `null` per non-convertible
+    element.
+
+  All eight are `null` in → `null` out on a `null` argument, raise a
+  typed error on a non-entity/non-list argument as appropriate, and are
+  TCK-neutral (no TCK scenario references these names), so the
+  3 897-scenario execution baseline is unchanged. (#1832)
+
+### Fixed
+
+#### Cypher conformance and correctness
+
+- **`MERGE` whole-pattern match-or-create semantics.** `MERGE
+  (a:L1{...})-[:R]->(b:L2{...})` with at least one fresh endpoint used to
+  silently create only the first node, dropping the relationship and the
+  second node with no error. A new left-deep join search
+  (`ir.MergePattern`/`exec.MergePattern`) now handles any chain the
+  narrow single-relationship fast path did not already cover — fresh
+  endpoints, multi-hop chains, and node-targeted `ON CREATE`/`ON MATCH`
+  actions — with an atomic create-everything-missing fallback that never
+  decomposes a partial match into independent node reuse. `Engine.Run`
+  now rejects a write-clause query with a clear error pointing at
+  `RunInTx`/`RunAny` instead of an opaque "unsupported IR node", and a
+  cyclic same-pattern variable reuse rejects at plan-build time instead
+  of a confusing runtime error. (#1866)
+- **A parallel edge on a non-multigraph engine is rejected, not silently
+  dropped.** openCypher's data model is a multigraph — `CREATE` never
+  deduplicates, not even a byte-identical repeat. On the documented
+  default engine configuration (`adjlist.Config{Directed: true}`, no
+  `Multigraph`), creating a second relationship between two
+  already-connected nodes used to report success while storing nothing —
+  a silent write loss. It now fails the whole statement up front with a
+  new `ErrParallelEdgeInSimpleGraph` sentinel, before any mutation or WAL
+  frame; `NewEngine` also logs a one-time warning when constructed over a
+  non-multigraph graph. (#1856)
+- **Integer and Float hash consistently in `DISTINCT`/grouping/`UNION`.**
+  `EquivalentHash` hashed an `IntegerValue` and an equal `FloatValue`
+  (e.g. `1` and `1.0`) through two different representations even though
+  `Equal` already treated them as the same value, so
+  `count(DISTINCT [1, 1.0])` over-counted and `UNION` failed to merge
+  equal rows across the two types. An `IntegerValue` now hashes through
+  the same float64 domain `Equal` already uses. (#1857)
+- **Two more `EquivalentHash` gaps closed, plus a sibling `hash_join`
+  bug.** `NodeValue`/`RelationshipValue`/`LazyNodeValue` now hash
+  consistently with the same cross-type numeric identity
+  (`count(DISTINCT [n, id(n)])` no longer over-counts), and the hash
+  join operator's independent key-hashing — which disagreed with
+  `EquivalentHash` in the opposite direction for a large-integer/float
+  pair near the `2^53` precision boundary — now delegates to
+  `expr.EquivalentHash` directly, closing a case where a hash join could
+  silently drop a matching row. (#1868)
+- **`distinctAggregator`'s seen-values set is capped**, bounding
+  `DISTINCT`/`collect(DISTINCT ...)` memory under an adversarial
+  high-cardinality input. (#1867)
+- **`MapValue.Equal` no longer depends on Go's randomized map iteration
+  order.** For a map pair containing both a `NULL`-yielding entry and a
+  `FALSE`-yielding entry comparison, which one the (randomized)
+  iteration order visited first used to decide whether `Equal` returned
+  `Null` or `false` for the same two logical inputs across different
+  calls. Per the three-valued-logic conjunction openCypher's compound
+  equality requires (CIP2016-06-14), a definitive `FALSE` now always
+  wins over a `NULL`, independent of iteration order — matching the
+  sibling `ListValue.Equal`, which was already correct.
+- **Empty relationship type and node label rejected everywhere**,
+  closing the last remaining inconsistent site (the label-predicate
+  expression form, `WHERE n:\`\``/`RETURN n:\`\``) after the pattern
+  sites were closed. (#1878)
+- **`coalesce()` with zero arguments returns a typed `ArityError`**
+  instead of an undefined result. (#1835)
+- **The pre-parse guard counts arithmetic `-`/`*` and comparison/
+  predicate operators**, closing two gaps where a crafted query could
+  bypass the operator-count-based resource guard. (#1831, #1839)
+- **DDL cancellation gaps closed.** The confirmation-drain step no
+  longer re-checks a stale context after a statement already committed;
+  the parallel hash-index backfill's cancellation poll now guarantees a
+  checkpoint on every worker's very first iteration regardless of range
+  alignment; B-tree index backfill and the `NOT NULL` pre-existing-data
+  validation scan are now context-aware end to end. Each gap only
+  affected how promptly a large `CREATE INDEX`/`CREATE CONSTRAINT`
+  responded to cancellation — every statement still completed correctly
+  and atomically before these fixes. (#1869, #1872)
+- **`Yen`'s k-shortest-paths algorithm picks the min-weight parallel
+  edge** in a multigraph's `buildEdgeIndex`, with a new deep-root-hop
+  regression gate. (#1884)
+- **MCMF Bellman-Ford bootstrap honours context cancellation.** (#1834)
+
+#### Storage, durability, and security hardening
+
+Four consecutive multi-specialist audit rounds (rmp sprints 257–264;
+reports under `docs/audit-*.md`) closed a broad set of hardening gaps
+against malicious or corrupted input across every persistence and wire
+format the engine reads by name or from an untrusted source. None of
+these findings affect a well-formed store written by GoGraph itself;
+they close DoS and integrity gaps reachable only from a hostile,
+crafted, or corrupted file.
+
+- **WAL and CSR files are opened with `O_NOFOLLOW`**, rejecting a
+  symlinked component instead of following it — the release's one
+  HIGH-severity finding. (#1843, #1847)
+- **The CSR reader is bounded by the real, `fstat`-measured file size**,
+  not the untrusted manifest's declared `Size` field, closing a
+  time-of-check-to-time-of-use (TOCTOU) window that could otherwise
+  drive an allocation far beyond the actual file. (#1850, #1853)
+- **A mismatched CSR weight-width is rejected on recovery** with a typed
+  `ErrCorrupted`, instead of panicking with an out-of-range index when a
+  forged snapshot declares a narrower weight width than the store's
+  native type. (#1882)
+- **`embedsValidFrame`'s CRC scan is bounded**, defeating an `O(n²)`
+  crafted-torn-tail storm that could otherwise hang WAL recovery for
+  minutes to days at the frame-size cap. (#1883)
+- **Speculative allocation is bounded** for length-prefixed values during
+  snapshot decode and for WAL frame-payload reads, and the index
+  recovery path's `idCount` deserialization bound is tightened to
+  `len(body)/8`. (#1886, #1889, #1885)
+- **`manifest.json` decode is bounded** by `DefaultMaxManifestBytes`, and
+  the `edgehandles` `propCount` map-size hint is clamped against an
+  out-of-memory on a hostile snapshot file. (#1833, #1829)
+- **Checkpoint writers self-heal a registry-capture race.**
+  `WriteLabels`/`WriteProperties` could observe a label or property key
+  interned by a concurrent commit during their lock-free walk but absent
+  from their earlier name-table capture, previously aborting the whole
+  checkpoint attempt; a bounded, monotonic-registry-backed retry now
+  self-heals the race (never a correctness or durability breach — the
+  prior behaviour was fail-stop-safe but could degrade to unbounded WAL
+  growth under sustained new-name interning). (#1880)
+- **`RunCheckpoint`'s godoc no longer falsely claims** that interleaved
+  checkpoint calls are safe (phase 2 is deliberately lock-free by
+  design), and `Stats().LastError` now reflects the most recently
+  *started* attempt rather than the most recently *completed* one.
+  (#1873)
+
+#### Interchange (`io`) hardening
+
+- **GraphML import is streamed, replacing a full-document DOM parse**,
+  and the number of `<key>` elements is capped. (#1851)
+- **A truncated GraphML document tail is rejected all-or-nothing**, and
+  the number of `<data>` children per element is capped. (#1854, #1887)
+- **CSV per-record field count is bounded**, closing a
+  memory-amplification out-of-memory on a hostile file; the `MaxBytes`
+  documentation is corrected to match the enforced behaviour. (#1844,
+  #1888)
+- **JSONL nested-list depth is capped**, bounding decode memory on a
+  deeply nested value. (#1888)
+
+#### Bolt protocol hardening
+
+- **Corrected decoded-memory accounting for the map cost and aggregate
+  payload coverage**, closing an under-count in the per-connection
+  inbound-decode budget. (#1849)
+- **An engine-wide inbound-decode memory ceiling applies across every
+  Bolt connection**, not just per-message. (#1845)
+- **Error-hygiene, cleartext-connection, and empty-image hardening.**
+  (#1846, #1848)
+
+#### Cypher and query-engine resource limits
+
+- **A mandatory default statement-timeout floor applies to autocommit
+  `RUN`**, and stays armed across the `RUN`/`PULL` boundary instead of
+  expiring between them. (#1828)
+- **An engine-wide result-memory ceiling applies across connections**,
+  and pipeline-breaker operators are bounded by estimated bytes rather
+  than row count alone. (#1842, #1841)
+- **`shortestPath`/`allShortestPaths`' exhaustive search modes are
+  bounded by a work budget**, and `ParallelScanProject`'s peak memory is
+  bounded to the engine result budget. (#1840, #1830)
+- **`range()` and other list-producing functions are bounded** by both
+  the per-call evaluation budget and the per-row result budget. (#1852)
+
+#### Concurrency, cancellation, and resource hygiene
+
+- **`TestJohnsonAPSPParallel_CancellationCascades` no longer flakes**
+  under heavy machine-wide CPU contention (as produced by the full
+  `./...` test suite running concurrently, e.g. in `scripts/cover_gate.sh`
+  or CI). The test-only fix widens the algorithm's own uncancelled
+  runtime by roughly three orders of magnitude relative to the
+  cancellation signal, verified stable over 50 consecutive runs; the
+  production cancellation-cascade logic under test was already correct
+  and is unchanged.
+
+#### Test fidelity
+
+- **`AllNodesScan`/`Filter`/`Project`/`ResultSet` regression gates use
+  real `NodeID`s** instead of placeholder values. (#1863)
+- **A deep-root-hop regression gate** pins the Yen multigraph fix.
+  (#1884)
+- **The integrated crash-injection loop's `disk.Crash()` wiring is
+  pinned** against a silent no-op. (#1819)
+
+### Performance
+
+- **The `O(V+E)` edge-type filter is cached across queries.** Every
+  relationship-type-filtered pattern (`-[:TYPE]->`, used by `Expand`,
+  `OptionalExpand`, `VarLengthExpand`, and the predicated shortest-path
+  builder) used to rebuild its filter from a full graph scan on every
+  execution, regardless of selectivity. A new bounded LRU now caches the
+  filter map keyed by the relationship-type set and a monotonic
+  topology-generation counter bumped on every edge mutation — including
+  a direct `store/txn` write that bypasses the Cypher engine's adapters
+  entirely. Measured on a 120k-node / ~960k-edge graph: a repeated
+  selective query against an unchanged graph drops from **≈190 ms /
+  2.16 M allocs/op to ≈30 ms / 336 K allocs/op**. (#1871)
+- **`Dijkstra_Large`'s stray heap escape reclaimed** (5 → 4 allocs/op,
+  −11.97 % B/op), restoring the guard-band regressed since `v0.6.0` by
+  pre-sizing the pooled Dijkstra heap's backing array. (#1820)
+
+### Security
+
+Four consecutive multi-specialist security and production-readiness
+audit rounds (rmp sprints 257–264) ran under this release, closing every
+finding they raised — the complete list is in the
+[Storage, durability, and security hardening](#storage-durability-and-security-hardening),
+[Interchange hardening](#interchange-io-hardening),
+[Bolt protocol hardening](#bolt-protocol-hardening), and
+[Cypher and query-engine resource limits](#cypher-and-query-engine-resource-limits)
+subsections of **Fixed** above. Severity summary:
+
+- **1 HIGH** — WAL/CSR files followed a symlinked path component instead
+  of rejecting it (`O_NOFOLLOW` now enforced). (#1843, #1847)
+- **7 MEDIUM** — denial-of-service and memory-amplification gaps across
+  Bolt inbound-decode accounting, CSV/GraphML/JSONL parsing, snapshot and
+  index deserialization bounds, and a WAL `O(n²)` torn-tail scan.
+- **Several LOW / informational** items — documented rationale for
+  accepted, non-exploitable residual risk (JSONL default cap sizing,
+  FNV shard-hash choice). (#1855)
+
+`govulncheck ./...` remains clean; no Go standard-library or dependency
+CVE affects this release. The Go toolchain is unchanged at **go1.26.4**.
+
+### Documentation
+
+- **`RunInTx`'s godoc no longer makes a false no-rollback claim.** (#1870)
+- **`RunCheckpoint`'s concurrency contract is corrected** to explicitly
+  forbid interleaved calls. (#1873)
+- **`CountTriangles`' simple-graph precondition is documented.** (#1862)
+- **The undirected betweenness-centrality normalisation divisor is
+  corrected in the doc comment.** (#1861)
+- **`docs/cypher.md`'s `elementId()` entry is corrected** — it wrongly
+  claimed the function was unimplemented; `docs/cypher.md` and
+  `docs/bolt.md` freshness footers are re-stamped after a full
+  specialist re-review found both otherwise accurate.
+- **ADRs backfilled** for the two compliance mandates (openCypher TCK,
+  ACID) and prior deferral/value-model decisions. (#1821)
+- **Four production-readiness and security audit reports published**
+  under `docs/`, documenting every finding, remediation, and
+  specialist certification for this release cycle.
+
+### Notes
+
+- **Pre-1.0 stability.** This is a `0.y.z` release. The public Go API
+  may change without a major-version bump until `1.0.0`; pin the exact
+  version you depend on.
+- **Module path.** The Go module path is
+  `github.com/FlavioCFOliveira/GoGraph` with no `/vN` suffix, which is
+  Semantic-Import-Versioning-correct for a `0.x` line.
+
+[0.7.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.7.0
+
 ## [0.6.0] — 2026-06-28
 
 The eighth published release of **GoGraph**, a Go module for graph

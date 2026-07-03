@@ -5,18 +5,21 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.6.0`.** This is the project's **eighth
+**Current release: `v0.7.0`.** This is the project's **ninth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.6.0` is a pre-1.0 **MINOR** release — it widens the analytics and
-Cypher surface with four new centrality measures (Closeness, Harmonic,
-Eigenvector, Katz), node-label round-trip in the JSONL and GraphML
-exporters, Cypher map projection (`n{.name, .*, k: expr}`), and
-`shortestPath()`/`allShortestPaths()` with per-instance relationship
-typing, alongside a deep reliability and openCypher conformance
-hardening pass; every change is additive over `v0.5.0`. The five major
-subsystems below are functional and tested under race, lint, and soak gates.
+`v0.7.0` is a pre-1.0 **MINOR** release — its headline is **openCypher
+completeness and correctness**: eight new builtin functions
+(`elementId`, `timestamp`, `randomUUID`, `isNaN`, and the
+`toStringList`/`toIntegerList`/`toFloatList`/`toBooleanList` family), a
+fix for `MERGE`'s whole-pattern match-or-create semantics, and a
+rejected-instead-of-silently-dropped parallel edge on a non-multigraph
+engine. Four consecutive multi-specialist audit rounds also land a broad
+security and denial-of-service hardening pass across the WAL, snapshot,
+index, Bolt protocol, and CSV/GraphML/JSONL interchange formats; every
+change is additive over `v0.6.0`. The five major subsystems below are
+functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
 (**3 897/3 897 scenarios, 16 006/16 006 steps**) and **100 % ACID-compliant**;
@@ -24,9 +27,9 @@ every change is gated by the project's CI suite (build, vet, race, lint,
 `govulncheck`, TCK conformance, and the deterministic crash-injection
 battery). The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.6.0`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.7.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.6.0.md](release-notes/v0.6.0.md) for the full release
+[release-notes/v0.7.0.md](release-notes/v0.7.0.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)
