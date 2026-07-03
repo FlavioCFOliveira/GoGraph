@@ -113,13 +113,17 @@ const maxRegistryCaptureRetries = 8
 // attached to a node/edge is therefore visible to the enumeration but
 // absent from the already-captured string table: collectNodeLabelRecords
 // / collectEdgeLabelRecords detect this and return a "not in registry
-// snapshot" error rather than emit a record with no valid index (rmp
-// #1880). This aborts the checkpoint attempt cleanly with nothing
-// written or truncated — the identical fail-safe posture
-// [Checkpointer.truncatePrefixLocked] uses for a schema DDL racing
-// phase 2 (#1774) — never a Consistency violation, but a real, if rare,
-// source of a failed checkpoint attempt under concurrent label/property
-// interning; the next attempt retries with a fresh capture.
+// snapshot" error. Rather than abort the whole checkpoint attempt on that
+// race, WriteLabels re-captures and retries as one consistent unit
+// (self-healing, bounded by [maxRegistryCaptureRetries]); because the
+// registry is monotonic and append-only, a re-capture is guaranteed to
+// include the newly-interned name, so the retry converges — in the steady
+// state on the first attempt (#1880). Only sustained, adversarial schema
+// churn that races every attempt exhausts the budget, in which case
+// WriteLabels falls back to the prior fail-stop (return the error with
+// nothing written or truncated — the identical fail-safe posture
+// [Checkpointer.truncatePrefixLocked] uses for a schema DDL racing phase 2,
+// #1774), never a Consistency violation.
 //
 //nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
 func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {

@@ -171,10 +171,14 @@ const propertiesCapHintMax = 1 << 20
 // interned strictly between those two reads and immediately attached
 // to a node/edge is visible to the enumeration but absent from the
 // already-captured key table, which the collectors detect and reject
-// with a "not in registry snapshot" error rather than emit an entry
-// with no valid index (rmp #1880) — a clean, fail-safe abort of this
-// checkpoint attempt (nothing written or truncated), never a silently
-// inconsistent record.
+// with a "not in registry snapshot" error. As in [WriteLabels],
+// WriteProperties re-captures and retries the key-table snapshot plus
+// record collection as one consistent unit (self-healing, bounded by
+// [maxRegistryCaptureRetries]); the monotonic append-only registry
+// guarantees the retry converges (#1880). Budget exhaustion under
+// sustained churn falls back to the prior fail-stop — a clean abort of
+// this checkpoint attempt with nothing written or truncated — never a
+// silently inconsistent record.
 //
 //nolint:gocyclo // properties write: header + key table + node records + edge records, each guarded
 func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
