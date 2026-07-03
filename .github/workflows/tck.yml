@@ -32,11 +32,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Parser-level conformance
-        run: go test ./cypher/tck/... -run 'TestTCKReport|TestTCKParserOnly' -v -count=1 -timeout 60s
-      - name: Conformance gate (≥90%)
+      - name: Parser-level conformance + ≥90% gate
+        # Single TestTCKReport run: capture its output once, then parse the
+        # overall pass-rate from that same output (previously a second,
+        # identical TestTCKReport run existed solely to grep the rate).
+        # set -o pipefail keeps a test failure from being masked by the tee.
+        shell: bash
         run: |
-          RATE=$(go test ./cypher/tck/... -run TestTCKReport -v -count=1 2>&1 | grep -oP 'overall-rate=\K[0-9.]+')
+          set -o pipefail
+          go test ./cypher/tck/... -run 'TestTCKReport|TestTCKParserOnly' -v -count=1 -timeout 60s 2>&1 | tee /tmp/tck-report.txt
+          RATE=$(grep -oP 'overall-rate=\K[0-9.]+' /tmp/tck-report.txt)
           echo "Overall pass rate: ${RATE}%"
           python3 -c "import sys; rate=float('${RATE}'); sys.exit(0 if rate >= 90.0 else 1)"
       - name: TCK execution gate (3897 scenarios)

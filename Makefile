@@ -57,7 +57,7 @@ test-short: ## [layer: short]   PR-CI default — race detector, no build tags
 
 .PHONY: test-short-timings
 test-short-timings: ## [layer: short] Run the short layer (race, -json) and report packages over the 60s/pkg budget (SOFT_BUDGET/HARD_BUDGET overridable)
-	$(GO) test $(RACE_FLAGS) -count=1 -json $(PACKAGES) | bash scripts/pkg_time_budget.sh
+	bash -o pipefail -c '$(GO) test $(RACE_FLAGS) -count=1 -json $(PACKAGES) | bash scripts/pkg_time_budget.sh'
 
 .PHONY: test-soak
 test-soak: ## [layer: soak]    short + soak — race detector, -tags=soak

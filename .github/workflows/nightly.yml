@@ -24,6 +24,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # A newer scheduled or dispatched nightly cancels an unfinished earlier one
+  # so a slow run does not pile up against the next day's trigger.
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
 # Pin the IANA time-zone database so temporal TCK scenarios are deterministic
 # regardless of the runner's system tzdata build (slim vs fat). Go's time
 # package reads ZONEINFO before the system database. See
