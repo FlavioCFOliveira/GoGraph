@@ -44,6 +44,40 @@ const HeaderSize = 4 + 2 + 4 + 4
 // frame would be a worse failure than the allocation it guards against.
 const maxFrameSize = 1 << 30
 
+// framePayloadEagerCap bounds the up-front allocation when reading a frame
+// payload. A payload up to this size is pre-sized exactly in one make (the
+// common case — WAL frames carry single transactions); a larger declared plen
+// grows as bytes actually arrive. This keeps a forged/tampered plen that
+// over-declares past EOF (the poisoned-store-directory threat model) from
+// forcing a speculative allocation up to maxFrameSize before the short read
+// fails — the same defence [readLenPrefixedValue] gives the snapshot readers.
+const framePayloadEagerCap = 1 << 20
+
+// readFramePayload reads exactly plen payload bytes from r into a fresh slice
+// without eagerly reserving an untrusted plen. For plen within
+// [framePayloadEagerCap] it pre-sizes exactly (the historical fast path); above
+// that it grows a bytes.Buffer as bytes arrive so a plen that over-declares past
+// EOF fails on the short read with peak transient ~2x the bytes truly present,
+// never ~plen. The returned slice always holds exactly the bytes consumed (len
+// == plen on success, or the short-read prefix on an EOF-class error) so
+// [Decode]'s torn-vs-corruption discrimination sees the real consumed bytes.
+func readFramePayload(r io.Reader, plen uint32) ([]byte, error) {
+	if plen == 0 {
+		return nil, nil
+	}
+	if plen <= framePayloadEagerCap {
+		payload := make([]byte, plen)
+		n, err := io.ReadFull(r, payload)
+		return payload[:n], err
+	}
+	var b bytes.Buffer
+	b.Grow(framePayloadEagerCap)
+	if _, err := io.CopyN(&b, r, int64(plen)); err != nil {
+		return b.Bytes(), err
+	}
+	return b.Bytes(), nil
+}
+
 // Errors returned by the reader.
 var (
 	// ErrBadMagic indicates the next four bytes did not match Magic.
@@ -168,35 +202,38 @@ func Decode(r io.Reader) (Frame, error) {
 		return Frame{}, ErrFrameTooLarge
 	}
 
-	payload := make([]byte, plen)
-	if plen > 0 {
-		if n, err := io.ReadFull(r, payload); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				metrics.IncCounter("store.wal.Decode.errors", 1)
-				// The payload read ran short of the declared length, hitting
-				// the end of input. This is normally a benign torn tail: the
-				// writer crashed mid-write of the last frame. But a corrupted
-				// length field that OVER-declares past EOF produces the same
-				// EOF — and in that case the bytes the over-long read consumed
-				// (payload[:n]) are not opaque payload at all, they are the
-				// durable frame(s) that physically follow this one. If a valid,
-				// CRC-checking frame begins anywhere inside those consumed
-				// bytes, this "torn" frame is genuine mid-stream corruption
-				// that would otherwise silently swallow durable committed data.
-				// Promote it to a hard error so recovery fail-stops instead of
-				// accepting a truncated prefix as clean. A benign tail's opaque
-				// payload bytes do not form a CRC-valid frame except with the
-				// ~2^-32 per-offset probability of a CRC collision, so a true
-				// torn tail is not misclassified.
-				if embedsValidFrame(payload[:n]) {
-					metrics.IncCounter("store.wal.Decode.tornMasksData", 1)
-					return Frame{}, ErrTornFrameMasksData
-				}
-				return Frame{}, ErrTornFrame
-			}
+	// Read the payload without eagerly reserving the untrusted plen (up to
+	// maxFrameSize = 1 GiB) — readFramePayload pre-sizes exactly for a small
+	// frame (the common case) and grows as bytes arrive for a large one, so a
+	// crafted/tampered WAL that over-declares plen past EOF fails on the short
+	// read without a speculative 1 GiB allocation. On a short read the returned
+	// slice holds exactly the bytes consumed.
+	payload, err := readFramePayload(r, plen)
+	if err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			metrics.IncCounter("store.wal.Decode.errors", 1)
-			return Frame{}, err
+			// The payload read ran short of the declared length, hitting
+			// the end of input. This is normally a benign torn tail: the
+			// writer crashed mid-write of the last frame. But a corrupted
+			// length field that OVER-declares past EOF produces the same
+			// EOF — and in that case the bytes the over-long read consumed
+			// are not opaque payload at all, they are the durable frame(s)
+			// that physically follow this one. If a valid, CRC-checking frame
+			// begins anywhere inside those consumed bytes, this "torn" frame
+			// is genuine mid-stream corruption that would otherwise silently
+			// swallow durable committed data. Promote it to a hard error so
+			// recovery fail-stops instead of accepting a truncated prefix as
+			// clean. A benign tail's opaque payload bytes do not form a
+			// CRC-valid frame except with the ~2^-32 per-offset probability of
+			// a CRC collision, so a true torn tail is not misclassified.
+			if embedsValidFrame(payload) {
+				metrics.IncCounter("store.wal.Decode.tornMasksData", 1)
+				return Frame{}, ErrTornFrameMasksData
+			}
+			return Frame{}, ErrTornFrame
 		}
+		metrics.IncCounter("store.wal.Decode.errors", 1)
+		return Frame{}, err
 	}
 	gotCRC := crc32.Update(0, castagnoli, head[0:10])
 	gotCRC = crc32.Update(gotCRC, castagnoli, payload)
