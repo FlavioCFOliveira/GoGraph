@@ -223,9 +223,27 @@ func Decode(r io.Reader) (Frame, error) {
 // The scan offset advances one byte at a time because the start of the swallowed
 // frame sits at the true (now-unknown) end of the corrupt frame's real payload,
 // which need not be aligned to any boundary the reader can compute from the
-// corrupt header. The scan is bounded by len(buf) and runs only on the torn
-// path (once, during recovery), so its O(len(buf)) cost is not on any hot path.
+// corrupt header. It runs only on the torn path (once, during recovery).
+//
+// A cumulative-work budget keeps the scan strictly linear in len(buf). Without
+// it the cost is quadratic: an attacker can place a magic + supported-version +
+// in-range-length candidate with a deliberately wrong CRC at (nearly) every
+// offset, and each such candidate CRCs up to len(buf) bytes — measured ~53s at
+// 4 MiB, extrapolating to days at the 1 GiB frame-size cap, hanging recovery on
+// a crafted WAL. We therefore cap the total bytes fed through crc32 at
+// crcBudgetFactor·len(buf); on exhaustion the function conservatively returns
+// true (→ [ErrTornFrameMasksData] → recovery fail-stops). That is the safe
+// direction: it never accepts a truncated prefix that might hide durable
+// committed frames. A benign torn tail is opaque payload where the 4-byte magic
+// collides only ~2^-32 per offset, so real tails feed only a handful of bytes
+// through crc32 and never approach the budget — the budget bites only on
+// adversarially-shaped input, which is itself the corruption signal.
 func embedsValidFrame(buf []byte) bool {
+	// crcBudgetFactor·len(buf) bounds the cumulative crc32 input across the
+	// whole scan, making the worst case O(len(buf)) instead of O(len(buf)^2).
+	const crcBudgetFactor = 2
+	crcBudget := crcBudgetFactor * len(buf)
+	crcSpent := 0
 	// A frame needs at least a full header plus the CRC bytes to be verifiable.
 	for off := 0; off+HeaderSize <= len(buf); off++ {
 		if buf[off] != Magic[0] || buf[off+1] != Magic[1] ||
@@ -248,6 +266,15 @@ func embedsValidFrame(buf []byte) bool {
 			// corrupt one), so an unverifiable candidate is not the signal we
 			// want; keep scanning.
 			continue
+		}
+		// Account for the bytes this candidate would feed through crc32
+		// (head[0:10] + the payload) before spending them. On budget
+		// exhaustion, fail-stop-safe: report an embedded frame so the caller
+		// treats the tail as corruption rather than a benign torn write.
+		crcSpent += 10 + int(plen)
+		if crcSpent > crcBudget {
+			metrics.IncCounter("store.wal.Decode.embedScanBudgetExceeded", 1)
+			return true
 		}
 		expectCRC := binary.LittleEndian.Uint32(buf[off+10 : off+14])
 		gotCRC := crc32.Update(0, castagnoli, buf[off:off+10])
