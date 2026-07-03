@@ -73,6 +73,18 @@ type LabelsReadback struct {
 	EdgeLabels []EdgeLabelEntry
 }
 
+// maxRegistryCaptureRetries bounds how many times [WriteLabels] /
+// [WriteProperties] re-snapshot the label / property-key registry when a
+// concurrent commit interns a brand-new name between the registry snapshot and
+// the lock-free node/edge walk (#1880). Because the registries are monotonic
+// and append-only, each re-snapshot is guaranteed to include any name the walk
+// observed, so this self-heals — in the steady state (a bounded schema) the
+// first attempt already succeeds. Only sustained, adversarial schema churn
+// during a single checkpoint could exhaust the budget, in which case the caller
+// falls back to the prior fail-stop (abort the checkpoint attempt, retain the
+// WAL, retry on the next tick) — never a correctness or durability regression.
+const maxRegistryCaptureRetries = 8
+
 // WriteLabels serialises every node and edge label attached to g into
 // w in the labels.bin format documented at the top of this file. It
 // returns the number of bytes written and the CRC32C of the
@@ -126,14 +138,42 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 		return 0, 0, err
 	}
 
-	// Snapshot the label name table in registry order. See the function
-	// doc's "Concurrency contract" above: this is a lock-free read with
-	// no RLock spanning it and the later node/edge enumeration, so a
-	// brand-new name interned in between is visible to the enumeration
-	// but absent here — detected and rejected below, never silently
-	// written as a name with no entry or an entry with no name.
+	// Capture the label name table and collect the node/edge label records as
+	// ONE consistent unit BEFORE writing any of them. The checkpoint's phase 2
+	// is lock-free, so a concurrent commit may intern a brand-new label between
+	// the registry snapshot and the node/edge walk, making that name visible to
+	// the walk but absent from the snapshot; the collectors detect this and
+	// return an error. Because the registry is monotonic and append-only, a
+	// re-snapshot after such a race is guaranteed to include the new name, so a
+	// bounded retry self-heals (typically on the first retry). Exhausting the
+	// budget under sustained adversarial churn falls back to the prior
+	// fail-stop (return the error → the checkpoint attempt aborts, the WAL is
+	// retained, the next tick retries) — no correctness or durability
+	// regression. This replaces the earlier behaviour where a single such race
+	// aborted the whole checkpoint attempt (#1880).
 	reg := g.Registry()
-	names := snapshotRegistry(reg)
+	var names []string
+	var nodeRecs []NodeLabelEntry
+	var edgeRecs []EdgeLabelEntry
+	for attempt := 0; ; attempt++ {
+		names = snapshotRegistry(reg)
+		var cerr error
+		nodeRecs, cerr = collectNodeLabelRecords(g, names)
+		if cerr == nil {
+			edgeRecs, cerr = collectEdgeLabelRecords(g, names)
+		}
+		if cerr == nil {
+			break
+		}
+		if attempt >= maxRegistryCaptureRetries {
+			metrics.IncCounter("store.snapshot.WriteLabels.captureRetryExhausted", 1)
+			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
+			return 0, 0, cerr
+		}
+		metrics.IncCounter("store.snapshot.WriteLabels.captureRetry", 1)
+	}
+
+	// Emit the now-consistent name table.
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(names))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 		return 0, 0, err
@@ -153,16 +193,6 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 		}
 	}
 
-	// Collect node-label records by walking the underlying mapper:
-	// every interned (NodeID, N) pair contributes one record per
-	// label attached to N. The mapper Walk holds each shard's RLock
-	// only across its own slice — concurrent label mutations on
-	// other shards run in parallel.
-	nodeRecs, err := collectNodeLabelRecords(g, names)
-	if err != nil {
-		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
-		return 0, 0, err
-	}
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(nodeRecs))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 		return 0, 0, err
@@ -182,11 +212,6 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 		}
 	}
 
-	edgeRecs, err := collectEdgeLabelRecords(g, names)
-	if err != nil {
-		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
-		return 0, 0, err
-	}
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(edgeRecs))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 		return 0, 0, err

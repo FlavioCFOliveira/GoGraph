@@ -193,13 +193,44 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 		return 0, 0, err
 	}
 
-	// Snapshot the property-key table in interning order. See the
-	// function doc's "Concurrency contract" above: this is a lock-free
-	// read with no RLock spanning it and the later node/edge
-	// enumeration, so a brand-new key interned in between is visible to
-	// the enumeration but absent here — detected and rejected below,
-	// never silently written as an inconsistent fragment.
-	keys := snapshotPropertyKeys(g.PropertyKeys())
+	// Capture the property-key table and collect the node/edge property
+	// records as ONE consistent unit BEFORE writing any of them. Phase 2 is
+	// lock-free, so a concurrent commit may intern a brand-new property key
+	// between the key snapshot and the node/edge walk, making that key visible
+	// to the walk but absent from the snapshot; the collectors detect this and
+	// return an error. Because the registry is monotonic and append-only, a
+	// re-snapshot after such a race includes the new key, so a bounded retry
+	// self-heals (typically first retry). Exhausting the budget under sustained
+	// adversarial churn falls back to the prior fail-stop (return the error →
+	// the checkpoint attempt aborts, the WAL is retained, the next tick
+	// retries) — no correctness or durability regression (#1880). Each attempt
+	// uses a FRESH value arena: the records' ValueBytes are sub-slices into it,
+	// so a discarded attempt's arena must not leak into the written records.
+	var keys []string
+	var nodeRecs []NodePropertyEntry
+	var edgeRecs []EdgePropertyEntry
+	for attempt := 0; ; attempt++ {
+		keys = snapshotPropertyKeys(g.PropertyKeys())
+		// A fresh arena per attempt; the surviving records' ValueBytes are
+		// sub-slices into it and keep its backing arrays alive via the GC.
+		arena := &propValueArena{}
+		var cerr error
+		nodeRecs, cerr = collectNodePropertyRecords(g, keys, arena)
+		if cerr == nil {
+			edgeRecs, cerr = collectEdgePropertyRecords(g, keys, arena)
+		}
+		if cerr == nil {
+			break
+		}
+		if attempt >= maxRegistryCaptureRetries {
+			metrics.IncCounter("store.snapshot.WriteProperties.captureRetryExhausted", 1)
+			metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
+			return 0, 0, cerr
+		}
+		metrics.IncCounter("store.snapshot.WriteProperties.captureRetry", 1)
+	}
+
+	// Emit the now-consistent key table.
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(keys))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 		return 0, 0, err
@@ -219,15 +250,6 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 		}
 	}
 
-	// One value arena shared by the node and edge collectors: the collected
-	// records' ValueBytes are sub-slices into its chunks, which stay alive until
-	// they are written below.
-	arena := &propValueArena{}
-	nodeRecs, err := collectNodePropertyRecords(g, keys, arena)
-	if err != nil {
-		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
-		return 0, 0, err
-	}
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(nodeRecs))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 		return 0, 0, err
@@ -246,11 +268,6 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 		nodeBytes += nb
 	}
 
-	edgeRecs, err := collectEdgePropertyRecords(g, keys, arena)
-	if err != nil {
-		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
-		return 0, 0, err
-	}
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(edgeRecs))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 		return 0, 0, err
