@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,7 +38,7 @@ func assertUntouched(t *testing.T, path string, want []byte) {
 	if err != nil {
 		t.Fatalf("ReadFile victim: %v", err)
 	}
-	if string(got) != string(want) {
+	if !bytes.Equal(got, want) {
 		t.Fatalf("victim file was modified through the symlink: got %q, want %q", got, want)
 	}
 }

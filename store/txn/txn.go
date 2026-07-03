@@ -2014,16 +2014,37 @@ func decodeTxnTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 	switch op.Kind {
 	case OpAddEdge:
+		// rmp #1871: bump the cache-invalidation generation counter on
+		// success. Unconditional (no "already existed" signal available from
+		// plain AddEdge) rather than gated: an extra bump past a genuine
+		// topology change is unobservable (any later reader sees the same
+		// final counter value regardless), so unconditional is the safe
+		// default here, never a source of a false cache hit.
 		var zero W
-		return g.AddEdge(op.Src, op.Dst, zero)
+		if err := g.AddEdge(op.Src, op.Dst, zero); err != nil {
+			return err
+		}
+		g.BumpTopoGeneration()
 	case OpAddEdgeWeighted:
-		return g.AddEdge(op.Src, op.Dst, op.Weight)
+		if err := g.AddEdge(op.Src, op.Dst, op.Weight); err != nil {
+			return err
+		}
+		g.BumpTopoGeneration()
 	case OpAddEdgeH:
 		// Handle-bearing add: idempotent against a slot already carrying
 		// this handle (the snapshot loaded it, or an earlier frame applied
 		// it), so snapshot + full-WAL recovery does not double the edge.
-		if _, err := g.AddEdgeHIfAbsent(op.Src, op.Dst, op.Weight, op.Handle); err != nil {
+		// Only bump on a genuine insert (rmp #1871): a Cypher-driven write
+		// already applied this edge eagerly and bumped the generation once,
+		// through the engine's own adapter, before ever reaching this
+		// replay-time call — inserted is false here for that case, so this
+		// does not double-bump (harmless either way, but pointless).
+		inserted, err := g.AddEdgeHIfAbsent(op.Src, op.Dst, op.Weight, op.Handle)
+		if err != nil {
 			return err
+		}
+		if inserted {
+			g.BumpTopoGeneration()
 		}
 	case OpSetEdgeLabelByHandle:
 		g.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
@@ -2033,6 +2054,7 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		g.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
 	case OpRemoveEdgeInstanceByHandle:
 		g.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
+		g.BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
 	case OpSetNodeLabel:
 		return g.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:
@@ -2066,6 +2088,7 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// its per-pair edge labels/properties (matching recovery replay),
 		// preventing a later re-add from resurrecting them.
 		g.RemoveEdge(op.Src, op.Dst)
+		g.BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
 	case OpSetEdgeProperty:
 		return g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:

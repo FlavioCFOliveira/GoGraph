@@ -54,7 +54,7 @@ func TestFieldGuard_QuotedCommasNotCounted(t *testing.T) {
 func TestFieldGuard_ModerateWideRecordAccepted(t *testing.T) {
 	t.Parallel()
 	var b strings.Builder
-	b.WriteString("src,dst,5")  // src,dst,weight=5
+	b.WriteString("src,dst,5")  // three required columns: src, dst, weight=5
 	for i := 0; i < 1000; i++ { // 1000 surplus columns, well under the cap
 		b.WriteString(",x")
 	}

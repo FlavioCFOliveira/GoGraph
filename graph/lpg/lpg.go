@@ -420,6 +420,31 @@ type Graph[N comparable, W any] struct {
 	edgesAddedCount   atomic.Uint64
 	edgesRemovedCount atomic.Uint64
 
+	// topoGeneration is a dedicated, purely monotonic counter — bumped by
+	// exactly 1 on every edge addition, removal, or undo of either (never
+	// decremented), whether driven through the Cypher engine's write
+	// adapters/undo log ([Graph.IncrEdgesAdded] and siblings) or through a
+	// direct [store/txn.Tx] write with no Cypher statement in the loop
+	// ([Graph.BumpTopoGeneration]) — that a caller can use to tell "has
+	// anything that could change a CSR-position-keyed structure happened
+	// since I last built it" with a single equality check (rmp #1871). It is
+	// deliberately NOT the same counters as edgesAddedCount/edgesRemovedCount
+	// above (which exist for the TCK side-effect comparator, a Cypher-
+	// statement-scoped concern that could change independently in the
+	// future, and that a store-direct write was never part of in the first
+	// place) and deliberately NOT a net/live
+	// count such as Size() (two independent accumulators that only ever
+	// increase can't produce a false-unchanged reading across an add and an
+	// unrelated remove, but a net count can: add X, later remove an
+	// unrelated pre-existing Y, and the net count returns to its original
+	// value even though every CSR position from Y's old slot onward has
+	// shifted). Node-only add/remove (no edge touched) does not bump this:
+	// a fresh node's CSR range is appended after every existing range and a
+	// node can only be removed once it is edge-free (DeleteNode) or after
+	// every incident edge is stripped first (DetachDelete), so a node event
+	// alone never shifts an existing edge's CSR position.
+	topoGeneration atomic.Uint64
+
 	// edgeHandleSeq is the source of stable per-edge handles for this
 	// graph. It is bumped once per logical edge creation by
 	// [Graph.AddEdgeH] / [Graph.nextEdgeHandle]; handles are monotone and
@@ -1701,6 +1726,32 @@ func (g *Graph[N, W]) LiveOrder() uint64 {
 	return total - dead
 }
 
+// TopoGeneration returns the current value of the graph's edge-topology
+// generation counter (rmp #1871): a purely monotonic count of edge
+// additions, removals, and undos of either, since the graph was created.
+// Two reads returning the same value guarantee no edge was added, removed,
+// or had either undone in between, which is exactly the invalidation
+// signal a CSR-position-keyed cache (such as the Cypher engine's
+// edge-type-filter cache) needs. It says nothing about node-only or
+// property-only mutations, which never shift an existing edge's CSR
+// position; see the topoGeneration field doc for why that scope is
+// sufficient and intentional. Safe for concurrent use.
+func (g *Graph[N, W]) TopoGeneration() uint64 { return g.topoGeneration.Load() }
+
+// BumpTopoGeneration advances the edge-topology generation counter by one.
+// Deliberately separate from [Graph.IncrEdgesAdded] / [Graph.IncrEdgesRemoved]
+// (which bump topoGeneration too, alongside the unrelated TCK side-effect
+// counters): a caller that mutates edge topology WITHOUT an enclosing Cypher
+// statement — a direct [store/txn.Store]/[store/txn.Tx] user, bypassing the
+// engine's write adapters entirely — has no Cypher-statement side-effect
+// count to attribute an Incr/Decr to, but the graph's edge topology still
+// changed, so any CSR-position-keyed cache still needs invalidating. Calling
+// this alone leaves edgesAddedCount/edgesRemovedCount untouched, which is
+// correct: those counters answer "how many edges did this Cypher statement
+// add/remove," a question a store-direct write was never part of. Safe for
+// concurrent use.
+func (g *Graph[N, W]) BumpTopoGeneration() { g.topoGeneration.Add(1) }
+
 // SideEffectCounters returns the per-direction counters maintained by the
 // graph: nodes added, nodes removed, edges added, edges removed since
 // SnapshotSideEffectCounters was last called. Used by the Cypher TCK
@@ -1726,10 +1777,16 @@ func (g *Graph[N, W]) IncrNodesAdded() { g.nodesAddedCount.Add(1) }
 func (g *Graph[N, W]) IncrNodesRemoved() { g.nodesRemovedCount.Add(1) }
 
 // IncrEdgesAdded records that one edge was freshly added.
-func (g *Graph[N, W]) IncrEdgesAdded() { g.edgesAddedCount.Add(1) }
+func (g *Graph[N, W]) IncrEdgesAdded() {
+	g.edgesAddedCount.Add(1)
+	g.topoGeneration.Add(1)
+}
 
 // IncrEdgesRemoved records that one edge was removed.
-func (g *Graph[N, W]) IncrEdgesRemoved() { g.edgesRemovedCount.Add(1) }
+func (g *Graph[N, W]) IncrEdgesRemoved() {
+	g.edgesRemovedCount.Add(1)
+	g.topoGeneration.Add(1)
+}
 
 // DecrNodesAdded / DecrNodesRemoved / DecrEdgesAdded / DecrEdgesRemoved are the
 // exact inverses of the Incr* counters above. They exist for one purpose: the
@@ -1749,11 +1806,22 @@ func (g *Graph[N, W]) DecrNodesAdded() { g.nodesAddedCount.Add(^uint64(0)) }
 // DecrNodesRemoved subtracts one from the removed-node counter.
 func (g *Graph[N, W]) DecrNodesRemoved() { g.nodesRemovedCount.Add(^uint64(0)) }
 
-// DecrEdgesAdded subtracts one from the added-edge counter.
-func (g *Graph[N, W]) DecrEdgesAdded() { g.edgesAddedCount.Add(^uint64(0)) }
+// DecrEdgesAdded subtracts one from the added-edge counter. topoGeneration is
+// NOT decremented — it only ever increases, on the Incr side too, because an
+// undo is itself a topology-changing event for any CSR-position-keyed cache:
+// the graph's content afterward differs from the content the moment before
+// the undo ran, even though it matches the content from further back.
+func (g *Graph[N, W]) DecrEdgesAdded() {
+	g.edgesAddedCount.Add(^uint64(0))
+	g.topoGeneration.Add(1)
+}
 
-// DecrEdgesRemoved subtracts one from the removed-edge counter.
-func (g *Graph[N, W]) DecrEdgesRemoved() { g.edgesRemovedCount.Add(^uint64(0)) }
+// DecrEdgesRemoved subtracts one from the removed-edge counter. See
+// [Graph.DecrEdgesAdded] for why topoGeneration still only ever increases.
+func (g *Graph[N, W]) DecrEdgesRemoved() {
+	g.edgesRemovedCount.Add(^uint64(0))
+	g.topoGeneration.Add(1)
+}
 
 // RemoveNodeLabel detaches name from n. No-op if absent.
 func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {

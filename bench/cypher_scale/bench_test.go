@@ -35,6 +35,13 @@ const seedSize = 120_000
 // realistic 1-hop expand fan-out (~960k directed edges total).
 const knowsOutDegree = 8
 
+// mentorsEdgeCount is the number of :MENTORS edges seeded on top of the
+// ~960k :KNOWS edges above — a deliberately rare relationship type (rmp
+// #1871) reproducing the audit's own "8-row-selective query out of 960,000
+// possible" measurement, which found a highly selective relationship-type
+// filter cost the same as an unfiltered full scan.
+const mentorsEdgeCount = 8
+
 // benchGraph is the shared read-only graph seeded in TestMain.
 var benchGraph *lpg.Graph[string, float64]
 
@@ -70,6 +77,18 @@ func TestMain(m *testing.M) {
 			g.SetEdgeLabel(src, dst, "KNOWS")
 		}
 	}
+	// A handful of :MENTORS edges among the first mentorsEdgeCount*2 nodes —
+	// a genuinely rare relationship type buried inside the ~960k :KNOWS
+	// edges above, reproducing the audit's own highly-selective-filter
+	// measurement (rmp #1871).
+	for i := 0; i < mentorsEdgeCount; i++ {
+		src := fmt.Sprintf("n%d", 2*i)
+		dst := fmt.Sprintf("n%d", 2*i+1)
+		if err := g.AddEdge(src, dst, 0); err != nil {
+			log.Fatalf("seed AddEdge (mentors): %v", err)
+		}
+		g.SetEdgeLabel(src, dst, "MENTORS")
+	}
 	benchGraph = g
 	os.Exit(m.Run())
 }
@@ -85,6 +104,35 @@ func runQuery(b *testing.B, query string) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		res, err := engine.Run(ctx, query, nil)
+		if err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+		for res.Next() {
+		}
+		if e := res.Err(); e != nil {
+			b.Fatalf("result.Err: %v", e)
+		}
+		if err := res.Close(); err != nil {
+			b.Fatalf("result.Close: %v", err)
+		}
+	}
+}
+
+// runQueryColdEngine executes query against the shared benchmark graph for
+// b.N iterations, constructing a FRESH Engine (and therefore a fresh, empty
+// edge-type-filter cache) on every iteration. This isolates the
+// [edgeTypeFilterFor] cold-miss cost — the residual, halved-but-still-O(V+E)
+// rebuild — from the steady-state amortised cost runQuery measures with one
+// shared, warming Engine (rmp #1871).
+func runQueryColdEngine(b *testing.B, query string) {
+	b.Helper()
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		engine := cypher.NewEngine(benchGraph)
 		res, err := engine.Run(ctx, query, nil)
 		if err != nil {
 			b.Fatalf("Run: %v", err)
@@ -119,6 +167,32 @@ func BenchmarkFilterProject(b *testing.B) {
 // candidate edge for the :KNOWS type filter, on top of per-row boxing).
 func BenchmarkExpand1Hop(b *testing.B) {
 	runQuery(b, `MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.firstName, b.age`)
+}
+
+// BenchmarkExpand1HopSelective_Warm reproduces the audit's own "8-row-
+// selective query out of 960,000 possible" measurement (rmp #1871): the
+// :MENTORS filter matches exactly mentorsEdgeCount rows out of ~960k total
+// edges. Uses one shared, warming Engine across b.N iterations (the same
+// pattern runQuery already uses for every other benchmark in this file), so
+// after the first iteration every subsequent one hits
+// [edgeTypeFilterFor]'s cache instead of rebuilding — the realistic
+// steady-state cost for a read-mostly workload repeating a query against an
+// unchanged graph.
+func BenchmarkExpand1HopSelective_Warm(b *testing.B) {
+	runQuery(b, `MATCH (a:Person)-[:MENTORS]->(b:Person) RETURN a.firstName, b.age`)
+}
+
+// BenchmarkExpand1HopSelective_Cold isolates the cold-cache cost of the
+// identical selective query: a fresh Engine (and therefore an empty
+// edge-type-filter cache) every iteration, so this always pays the full
+// (halved by the redundant-CSR-build removal, but still O(V+E)) rebuild
+// cost. Compare against BenchmarkExpand1HopSelective_Warm to see the
+// amortisation the cache buys; compare against a pre-#1871 revision to see
+// the redundant-build removal's own halving on this same cold path — the
+// cache alone does not change this benchmark's per-op cost, since a fresh
+// Engine never has a warm entry to hit.
+func BenchmarkExpand1HopSelective_Cold(b *testing.B) {
+	runQueryColdEngine(b, `MATCH (a:Person)-[:MENTORS]->(b:Person) RETURN a.firstName, b.age`)
 }
 
 // TestCypherScale_QueriesRun is a short-layer smoke test verifying the three
@@ -192,6 +266,24 @@ func TestCypherScale_QueriesRun(t *testing.T) {
 		want := seedSize * knowsOutDegree
 		if rows != want {
 			t.Errorf("expand_1hop rows = %d, want %d", rows, want)
+		}
+	})
+
+	t.Run("expand_1hop_selective", func(t *testing.T) {
+		res, err := engine.Run(ctx, `MATCH (a:Person)-[:MENTORS]->(b:Person) RETURN a.firstName, b.age`, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		defer func() { _ = res.Close() }()
+		rows := 0
+		for res.Next() {
+			rows++
+		}
+		if err := res.Err(); err != nil {
+			t.Fatalf("result.Err: %v", err)
+		}
+		if rows != mentorsEdgeCount {
+			t.Errorf("expand_1hop_selective rows = %d, want %d", rows, mentorsEdgeCount)
 		}
 	})
 }

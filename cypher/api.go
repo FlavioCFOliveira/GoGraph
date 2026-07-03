@@ -70,6 +70,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -302,6 +303,16 @@ type buildOpts struct {
 	// reverse-edge traversals). Lazily populated on first use to avoid
 	// building CSR snapshots for queries that never reconstruct paths.
 	edgeIDResolver func(edgeID uint64) (storageSrc, storageDst uint64, ok bool)
+	// edgeTypeFilterCache, when non-nil, is the Engine's shared
+	// [edgeTypeFilterCache] (rmp #1871), consulted by [edgeTypeFilterFor] so
+	// a relationship-type-filtered Expand/OptionalExpand/VarLengthExpand
+	// build, or a predicated shortest-path build ([buildShortestPathWithPred]),
+	// reuses a prior query's O(V+E) filter map instead of rebuilding it, as
+	// long as [lpg.Graph.TopoGeneration] has not advanced since. nil on the
+	// public BuildPlanWithMutator path (no Engine behind the build), in
+	// which case edgeTypeFilterFor falls back to an uncached
+	// [buildEdgeTypeFilter] call — correct, just unamortised.
+	edgeTypeFilterCache *edgeTypeFilterCache
 	// preprojectedCols is the set of schema variable names whose row column
 	// already holds the projection-equivalent value (e.g. an EagerAggregation
 	// grouping-key column carries the pre-evaluated grouping expression, not
@@ -467,6 +478,14 @@ type EngineOptions struct {
 	// it. A negative value is treated as misconfiguration and is
 	// clamped to the default by the constructor.
 	PlanCacheCapacity int
+
+	// EdgeTypeFilterCacheCapacity bounds the number of distinct
+	// relationship-type combinations whose filter map (rmp #1871) the
+	// Engine keeps cached. Zero selects
+	// [DefaultEdgeTypeFilterCacheCapacity]; positive values override it.
+	// A negative value is clamped to the default, mirroring
+	// PlanCacheCapacity.
+	EdgeTypeFilterCacheCapacity int
 
 	// MaxResultRows limits the number of rows a single [Engine.Run] or
 	// [Engine.RunInTx] call may materialise. If a query produces more rows than
@@ -712,10 +731,18 @@ type Engine struct {
 	// under the engine's single-writer serialisation. Every mutation
 	// (recordIndexDef / forgetIndexDef) is followed by syncIndexCount under that
 	// same write lock so the graph's lock-free HasIndexes gate stays in step.
-	indexDefReg   *indexDefRegistry
-	procReg       *procs.Registry
-	cache         *planCache
-	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
+	indexDefReg *indexDefRegistry
+	procReg     *procs.Registry
+	cache       *planCache
+	// edgeTypeFilterCache amortises buildEdgeTypeFilter's O(V+E) rebuild
+	// across queries sharing a relationship-type combination, invalidated
+	// by lpg.Graph.TopoGeneration rather than time or a manual clear
+	// (rmp #1871). Unlike cache (the plan cache), no DDL operator clears
+	// this — schema changes (index/constraint) never affect edge-type
+	// filter results, only edge topology does, which TopoGeneration
+	// already tracks precisely.
+	edgeTypeFilterCache *edgeTypeFilterCache
+	maxResultRows       int64 // zero means no limit; from EngineOptions.MaxResultRows
 	// maxResultBytes is the aggregate-byte budget for a single result, threaded
 	// to the Result drain alongside maxResultRows. Zero means no budget (the
 	// convention the drain checks with maxBytes > 0); the public
@@ -971,18 +998,19 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// function-produced values.
 	reg = newGraphAwareRegistry(reg, g)
 	e := &Engine{
-		g:                g,
-		store:            opts.Store,
-		reg:              reg,
-		constraintReg:    exec.NewConstraintRegistry(),
-		indexDefReg:      newIndexDefRegistry(),
-		procReg:          procs.NewRegistry(),
-		cache:            newPlanCache(opts.PlanCacheCapacity),
-		maxResultRows:    resolveMaxResultRows(opts.MaxResultRows),
-		maxResultBytes:   resolveMaxResultBytes(opts.MaxResultBytes),
-		maxCollectItems:  opts.MaxCollectItems,
-		hashJoinEnabled:  !opts.DisableHashJoin,
-		rangeSeekEnabled: !opts.DisableRangeIndexSeek,
+		g:                   g,
+		store:               opts.Store,
+		reg:                 reg,
+		constraintReg:       exec.NewConstraintRegistry(),
+		indexDefReg:         newIndexDefRegistry(),
+		procReg:             procs.NewRegistry(),
+		cache:               newPlanCache(opts.PlanCacheCapacity),
+		edgeTypeFilterCache: newEdgeTypeFilterCache(opts.EdgeTypeFilterCacheCapacity),
+		maxResultRows:       resolveMaxResultRows(opts.MaxResultRows),
+		maxResultBytes:      resolveMaxResultBytes(opts.MaxResultBytes),
+		maxCollectItems:     opts.MaxCollectItems,
+		hashJoinEnabled:     !opts.DisableHashJoin,
+		rangeSeekEnabled:    !opts.DisableRangeIndexSeek,
 
 		parallelScanEnabled:     !opts.DisableParallelScan,
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
@@ -1613,6 +1641,11 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// result list — the same bound collect() enforces (#1294, #1298).
 		patEval := newPatternEvaluator(e.g, e.maxCollectItems)
 		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
+		// Edge-type-filter cache sharing (#1871): the SAME cache instance
+		// serves every concurrent Run call, so a relationship-type-filtered
+		// pattern amortises its O(V+E) build across the whole Engine's query
+		// stream, not just within one call.
+		bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
 		// Hash-join optimisation gating (#1506): enable only when the Engine
 		// permits it AND the whole-query order-safety scan finds no operator that
 		// would observe the changed row order. Both must hold; otherwise the
@@ -4026,8 +4059,10 @@ func BuildPlanWithMutator(
 ) (op exec.Operator, cols []string, err error) {
 	// The public entry point applies the finite default per-group element budget
 	// (maxCollectItems == 0 → DefaultMaxCollectItems in buildEagerAggregation) so
-	// a collect on this path is never unbounded either.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0)
+	// a collect on this path is never unbounded either. It has no Engine-owned
+	// edge-type-filter cache to share, so a relationship-type-filtered pattern
+	// on this path always rebuilds — correct, just unamortised.
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil)
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -4037,6 +4072,12 @@ func BuildPlanWithMutator(
 // maxCollectItems carries the Engine's per-group element budget for buffering
 // aggregators into the write-path build, using the EngineOptions.MaxCollectItems
 // encoding (0 → default, <0 → no cap, >0 → active).
+//
+// edgeTypeFilterCache, when non-nil, is the Engine's shared
+// [edgeTypeFilterCache] (rmp #1871), threaded into bopts so a
+// relationship-type-filtered pattern inside a write query's MATCH clause
+// (e.g. `MATCH (a)-[:T]->(b) CREATE …`) amortises its filter build the same
+// way the pure-read path does.
 func buildPlanWithMutatorFull(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -4047,6 +4088,7 @@ func buildPlanWithMutatorFull(
 	constraintReg *exec.ConstraintRegistry,
 	idxMgr *index.Manager,
 	maxCollectItems int,
+	edgeTypeFilterCache *edgeTypeFilterCache,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -4058,7 +4100,7 @@ func buildPlanWithMutatorFull(
 	// of `CREATE (n) RETURN n.x` — ProduceResults → Projection → CreateNode
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
-	bopts := &buildOpts{maxCollectItems: maxCollectItems}
+	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache}
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -5515,7 +5557,7 @@ func buildOperator(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = buildEdgeTypeFilter(g, p.RelTypes)
+			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
 		}
 		// Cyphermorphism: pass the schema columns of every sibling
 		// relationship variable already bound in this MATCH pattern so
@@ -5993,7 +6035,7 @@ func buildOperator(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = buildEdgeTypeFilter(g, p.RelTypes)
+			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
 		}
 		return exec.NewOptionalExpand(child, fwd, rev, cfg), nil
 
@@ -6091,7 +6133,7 @@ func buildOperator(
 		edgeType := ""
 		if len(p.RelTypes) > 0 {
 			edgeType = p.RelTypes[0]
-			etFilter = buildEdgeTypeFilter(g, p.RelTypes)
+			etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
 		}
 
 		// Resolve excluded rel-variable names to row column indices via
@@ -10887,7 +10929,7 @@ func (e *Engine) execUnderBarrier(
 		defer replayUndoOnPanic(undo)
 		walker := &lpgNodeWalker{g: e.g}
 		labelSrc := &lpgLabelResolver{g: e.g}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems)
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache)
 		if berr != nil {
 			buildErr = berr
 			return nil
@@ -12137,9 +12179,15 @@ func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
 	return 0, false
 }
 
-// buildEdgeTypeFilter constructs an edge-type filter map for the forward CSR
-// of g.  The map key is the edge's absolute position in the CSR's EdgesSlice;
-// the value is a label attached to that edge in the LPG.
+// buildEdgeTypeFilter constructs an edge-type filter map against fwdCSR, a
+// forward CSR already built by the caller (normally [csrPairFromGraph]'s
+// fwd result — every call site already needs one for its own traversal, so
+// building a second, independent one here was pure waste, rmp #1871). The
+// map key is the edge's absolute position in fwdCSR's EdgesSlice; the value
+// is a label attached to that edge in the LPG. The caller MUST pass the same
+// fwdCSR it will traverse: this function's positions are only meaningful
+// relative to that exact CSR instance, not to some other CSR built from an
+// equivalent-looking but distinct graph snapshot.
 //
 // When relTypes is non-empty an edge passes the filter if ANY of the labels
 // attached to that edge matches one of the listed types; the stored value
@@ -12152,10 +12200,12 @@ func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
 // pair) when one of them equals T. Closes Match7 [29] and unblocks the
 // general "multiple labels per edge" scenario.
 //
-// O(V+E) time; allocates one map entry per labelled edge.
-func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[uint64]string {
+// O(V+E) time; allocates one map entry per labelled edge. Callers needing
+// this filter for a live query should go through [edgeTypeFilterFor]
+// rather than calling this directly, so a repeat query against an unchanged
+// graph reuses a cached result instead of re-paying this cost.
+func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64], relTypes []string) map[uint64]string {
 	adj := g.AdjList()
-	fwdCSR := csr.BuildFromAdjList(adj)
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
 	// handles aligns slot-for-slot with edges when the graph carries
@@ -12253,6 +12303,50 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], relTypes []string) map[u
 		}
 	}
 	return filter
+}
+
+// edgeTypeFilterFor returns the edge-type filter map for relTypes against
+// fwdCSR, the caller's already-built forward CSR (rmp #1871). It transparently
+// reuses a prior query's result from bopts.edgeTypeFilterCache when the
+// graph's [lpg.Graph.TopoGeneration] has not advanced since that result was
+// built, avoiding [buildEdgeTypeFilter]'s O(V+E) rebuild for a read-mostly
+// workload's repeat queries. Falls back to an uncached, correct
+// buildEdgeTypeFilter call when bopts or its cache is nil (the public
+// BuildPlanWithMutator path has no Engine-owned cache to consult).
+func edgeTypeFilterFor(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64], relTypes []string, bopts *buildOpts) map[uint64]string {
+	if bopts == nil || bopts.edgeTypeFilterCache == nil {
+		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
+	}
+	key := canonicalRelTypesKey(relTypes)
+	epoch := g.TopoGeneration()
+	return bopts.edgeTypeFilterCache.getOrBuild(key, epoch, func() map[uint64]string {
+		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
+	})
+}
+
+// canonicalRelTypesKey returns a cache key that is identical for any two
+// relTypes slices naming the same set of types regardless of input order or
+// duplicates — buildEdgeTypeFilter's any-label-match semantics fold relTypes
+// into a set (see its accept map) before ever consulting order, so the cache
+// key must collapse the same way or logically-identical filter requests
+// would miss on each other. Does not mutate relTypes. Joins with NUL rather
+// than a printable separator (comma, pipe) because a backtick-quoted
+// relationship type name may legally contain one. An empty relTypes (the
+// nil/accept-all case, key "") cannot collide with any real, non-empty type
+// set for that same reason — a real key always contains at least one NUL-
+// free type-name byte. A relTypes containing only the pathological
+// empty-string type name (“ MATCH ()-[:“]->() “, a distinct, pre-existing,
+// TCK-uncovered edge case unrelated to this cache) would also canonicalise
+// to "", but every real call site gates on len(relTypes) > 0 before ever
+// reaching edgeTypeFilterFor, so that case never actually reaches here.
+func canonicalRelTypesKey(relTypes []string) string {
+	if len(relTypes) == 0 {
+		return ""
+	}
+	sorted := slices.Clone(relTypes)
+	slices.Sort(sorted)
+	sorted = slices.Compact(sorted)
+	return strings.Join(sorted, "\x00")
 }
 
 // collectAllInstanceLabels returns the union of every per-CREATE label
@@ -12526,7 +12620,7 @@ func buildShortestPathWithPred(
 	var etFilter map[uint64]string
 	if len(p.RelTypes) > 0 {
 		edgeType = p.RelTypes[0]
-		etFilter = buildEdgeTypeFilter(g, p.RelTypes)
+		etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
 	}
 
 	// Translate the IR's "unbounded" sentinel (math.MaxInt) to the operator's
