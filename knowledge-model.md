@@ -708,6 +708,36 @@ suggestion was applied to `emptyDDLResult`'s doc in the same commit. TCK
 3897/3897 held, full-module `-race` clean (all packages). Local commit,
 not pushed.
 
+Incrementally synced at commit `a92bae4` (2026-07-03, task #1870, sprint
+263, still OPEN): +1 `Commit` (`a92bae4`); +1 `Task` (`1870`, COMPLETED).
+Closed a doc-faithfulness finding from the same round-2 audit (doc-only,
+no behaviour change): `Engine.RunInTx`'s exported godoc
+(`cypher/api.go`) falsely claimed the in-memory implementation has no
+rollback support and that a failed write's partial mutations remain in
+the graph — stale since the undo-log mechanism (task #1282) landed.
+Rewrote the doc to describe the real mechanism: mutations apply eagerly
+with the inverse recorded into an in-memory undo log; on a pipeline
+drain error, a commit-time NOT NULL violation, a WAL fsync failure, or a
+pipeline panic, the log replays in reverse inside the write visibility
+barrier, fully restoring the pre-statement graph state before the
+barrier ever releases, so a concurrent `lpg.Graph.View` reader can never
+observe partial state — the same mechanism `ExplicitTx` shares, per
+`exectx.go`'s own "Atomicity and the undo log" section. Edges: `Sprint
+263 -[CONTAINS]-> Commit`; `Task 1870 -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[FIXES]->` Feature `Cypher Engine` (id 12659); `Commit
+-[TOUCHES]->` Package `cypher` (73), matching the #1861/#1862 precedent
+of `FIXES` (not `IMPROVES`) for a corrected false/stale doc claim.
+Feature and Package re-stamped to gitDate 2026-07-03. Certified by a
+storage-focused review that traced every claim in the new text —
+eager mutation, the undo log's existence and reverse-replay, all
+rollback triggers, the fsync-before-visibility ordering, and the
+visibility-barrier mutex semantics — against the actual code, function
+by function; one non-blocking completeness note (the initial draft's
+trigger list of three omitted the real fourth, panic-driven rollback)
+was folded into the same rewrite before closing. No new label or edge
+type. TCK 3897/3897 held (re-run and confirmed explicitly). Local
+commit, not pushed.
+
 ---
 
 ## Node labels
