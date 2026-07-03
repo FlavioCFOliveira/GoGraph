@@ -121,9 +121,18 @@ func TestDBClose_NoLeak_RejectsSubsequentAppend(t *testing.T) {
 	}
 	// The stop must NOT have swallowed a WAL error into LastError: a clean
 	// composed shutdown stops the loop before the WAL is ever closed, so the
-	// loop never touched a closed WAL.
-	if le := s.cp.Stats().LastError; le != "" {
-		t.Fatalf("checkpointer LastError = %q after composed Close; want empty (loop stopped before WAL close)", le)
+	// loop never touched a closed WAL. Checked precisely (does LastError
+	// contain the WAL-closed sentinel's message?) rather than requiring
+	// LastError to be unconditionally empty: this test's own fast 2ms
+	// checkpoint cadence, racing commitEdges's concurrent label interning,
+	// can rarely (and harmlessly) trip an UNRELATED, pre-existing,
+	// fail-safe abort in the snapshot writer's label/property registry
+	// snapshot (rmp #1880 — the checkpoint attempt aborts cleanly with
+	// nothing written or truncated; the next tick retries and succeeds).
+	// That is not the WAL-close-ordering bug this test exists to catch, so
+	// it must not fail this specific assertion.
+	if le := s.cp.Stats().LastError; strings.Contains(le, wal.ErrWriterClosed.Error()) {
+		t.Fatalf("checkpointer LastError = %q after composed Close; want no WAL-closed error (loop stopped before WAL close)", le)
 	}
 }
 

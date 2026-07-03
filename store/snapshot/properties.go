@@ -161,12 +161,19 @@ const propertiesCapHintMax = 1 << 20
 // [lpg.PropertyKeyRegistry] in interning order; the keyIdx written
 // for each (node | edge) record indexes into that table.
 //
-// Concurrency contract: the walk relies on the same lock-free /
-// RLock-only primitives the public LPG accessors expose. Properties
-// added by a concurrent mutator race with the snapshot writer in the
-// same way labels do — the writer either observes the new property
-// (and the matching node/edge entry) or it does not, but never an
-// inconsistent fragment.
+// Concurrency contract: [lpg.PropertyKeyRegistry] is a lock-free,
+// copy-on-write structure (see its own doc), so the walk relies on the
+// same lock-free / RLock-only primitives the public LPG accessors
+// expose, with no RLock held across the key-table snapshot and the
+// later node/edge enumeration — the identical structure [WriteLabels]
+// uses for labels, and the identical narrow race applies: a key
+// interned strictly between those two reads and immediately attached
+// to a node/edge is visible to the enumeration but absent from the
+// already-captured key table, which the collectors detect and reject
+// with a "not in registry snapshot" error rather than emit an entry
+// with no valid index (rmp #1880) — a clean, fail-safe abort of this
+// checkpoint attempt (nothing written or truncated), never a silently
+// inconsistent record.
 //
 //nolint:gocyclo // properties write: header + key table + node records + edge records, each guarded
 func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
@@ -185,12 +192,12 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 		return 0, 0, err
 	}
 
-	// Snapshot the property-key table in interning order. Walking the
-	// registry under its own RLock means a concurrent SetNodeProperty
-	// / SetEdgeProperty that adds a brand-new key is serialised
-	// against the snapshot writer — the writer either observes the
-	// new key (and the matching record below) or it does not, but
-	// never an inconsistent fragment.
+	// Snapshot the property-key table in interning order. See the
+	// function doc's "Concurrency contract" above: this is a lock-free
+	// read with no RLock spanning it and the later node/edge
+	// enumeration, so a brand-new key interned in between is visible to
+	// the enumeration but absent here — detected and rejected below,
+	// never silently written as an inconsistent fragment.
 	keys := snapshotPropertyKeys(g.PropertyKeys())
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(keys))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)

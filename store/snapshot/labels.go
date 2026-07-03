@@ -92,9 +92,22 @@ type LabelsReadback struct {
 // name back in the same order and observes the same LabelID values
 // without an extra remap step.
 //
-// The walk holds the registry's RLock for the duration of the string
-// table emission; node/edge enumeration uses the same lock-free /
-// RLock-only primitives the public LPG accessors expose.
+// [lpg.LabelRegistry] is a lock-free, copy-on-write structure (see its own
+// doc): there is no RLock held across the string-table emission and the
+// later node/edge enumeration, which read the registry and the live
+// graph independently, at different times, via the same lock-free /
+// per-shard-RLock-only primitives the public LPG accessors expose. A
+// name interned strictly between those two reads and immediately
+// attached to a node/edge is therefore visible to the enumeration but
+// absent from the already-captured string table: collectNodeLabelRecords
+// / collectEdgeLabelRecords detect this and return a "not in registry
+// snapshot" error rather than emit a record with no valid index (rmp
+// #1880). This aborts the checkpoint attempt cleanly with nothing
+// written or truncated — the identical fail-safe posture
+// [Checkpointer.truncatePrefixLocked] uses for a schema DDL racing
+// phase 2 (#1774) — never a Consistency violation, but a real, if rare,
+// source of a failed checkpoint attempt under concurrent label/property
+// interning; the next attempt retries with a fresh capture.
 //
 //nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
 func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
@@ -113,12 +126,12 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 		return 0, 0, err
 	}
 
-	// Snapshot the label name table in registry order. Walking the
-	// registry under its own RLock means a concurrent SetNodeLabel /
-	// SetEdgeLabel that adds a brand-new name is serialised against
-	// the snapshot writer — the writer either observes the new name
-	// (and the matching node/edge entry below) or it does not, but
-	// never observes a name with no entry or an entry with no name.
+	// Snapshot the label name table in registry order. See the function
+	// doc's "Concurrency contract" above: this is a lock-free read with
+	// no RLock spanning it and the later node/edge enumeration, so a
+	// brand-new name interned in between is visible to the enumeration
+	// but absent here — detected and rejected below, never silently
+	// written as a name with no entry or an entry with no name.
 	reg := g.Registry()
 	names := snapshotRegistry(reg)
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(names))); err != nil {
