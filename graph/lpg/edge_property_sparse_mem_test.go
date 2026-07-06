@@ -1,3 +1,5 @@
+//go:build soak
+
 package lpg
 
 import (
@@ -12,6 +14,18 @@ import (
 // edge_property_sparse_mem_test.go — resident-heap regression guard for the
 // dense<->sparse edge-property representation (sprint 222 #1641), mirroring the
 // propBag guard in propbag_mem_test.go.
+//
+// Layer: soak (//go:build soak). These two guards each build a several-
+// hundred-thousand-edge graph twice and read process-global runtime.MemStats
+// with forced GC cycles between builds, so they are the dominant cost in the
+// graph/lpg package under `go test -race`. Left in the short layer they pushed
+// the package over the 240 s per-package hard ceiling enforced by the -race
+// timing budget (scripts/pkg_time_budget.sh; docs/test-layers.md), whose
+// documented remedy is exactly this: "move its slow cases to the soak layer".
+// The sparse/dense column code they exercise is also covered in the short
+// layer by TestSparse_PropertyBasedOracle and TestFused_RandomisedEquivalence,
+// so relayering them costs no short-layer coverage of the #1641 representation
+// (measured: 81.7% → 80.9% package statements, well above the 75% floor).
 //
 // It measures LIVE heap bytes for the example-26-shaped workload — one
 // high-degree source node whose out-edges interleave two string properties, each

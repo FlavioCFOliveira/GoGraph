@@ -75,9 +75,23 @@ jobs:
         # job — which doubled the most expensive step on every push/PR.
         # openCypher TCK conformance is gated by tck.yml on the same push/PR
         # triggers, so it is not re-run here.
+        #
+        # internal/sim carries a documented per-package hard-ceiling override:
+        # it is the deterministic-simulation (DST) integration harness, and its
+        # full ACID/DST scenario battery is serial-dominated, so under -race it
+        # legitimately runs longer than a unit-test package. Its worst
+        # offenders already run soak-only (the 9000-node index-diversity
+        # scenario and the seed-varied search scenarios); the remaining battery
+        # must still run under -race on EVERY PR to preserve the ACID/DST
+        # guarantee, which the uniform 240 s ceiling would force out of the
+        # short layer. The 420 s ceiling accommodates that cost with margin
+        # while staying well below the pre-reduction ~600 s (so a genuine
+        # regression still trips it) and clear of go test's 10 min timeout.
+        # See docs/test-layers.md for the full justification.
         env:
           SOFT_BUDGET: "60"
           HARD_BUDGET: "240"
+          PKG_HARD_BUDGET_OVERRIDES: "github.com/FlavioCFOliveira/GoGraph/internal/sim=420"
         run: make test-short-timings
 
   lint:

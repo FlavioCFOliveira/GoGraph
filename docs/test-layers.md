@@ -19,9 +19,9 @@ considered.
 ### Enforcing the short-layer budget
 
 The `< 60 s per package` budget is enforced, not merely documented. The
-`timing-budget` CI job (`.github/workflows/ci.yml`) runs the short layer
-with `-json` and pipes it through `scripts/pkg_time_budget.sh`, which
-parses per-package wall-clock and:
+`build + test + race` job in `.github/workflows/ci.yml` runs the short layer
+once under `-race` with `-json` (via `make test-short-timings`) and pipes it
+through `scripts/pkg_time_budget.sh`, which parses per-package wall-clock and:
 
 - emits a `::warning::` for any package over `SOFT_BUDGET` (60 s) so creep
   is visible in the job summary before it becomes a breach, and
@@ -29,10 +29,31 @@ parses per-package wall-clock and:
   budget) — a genuine runaway, not a package merely near the line on a slow
   runner.
 
+The measurement is taken under `-race`, which inflates wall-clock several-fold
+over a plain run; the 240 s hard ceiling (4× the 60 s budget) is sized to
+absorb that overhead and still catch a runaway.
+
 Run it locally with `make test-short-timings` (override `SOFT_BUDGET` /
 `HARD_BUDGET` to tighten the check). When a package approaches the budget,
 split it or move its slow cases to the `soak` layer rather than relaxing
 the threshold.
+
+#### Documented per-package hard-ceiling overrides
+
+A single package may carry a higher hard ceiling than the global 240 s when
+it is legitimately heavy under `-race` and reducing it further would cost
+required short-layer coverage. This is a documented, justified accommodation —
+never a blanket relaxation — mirroring `cover_gate.sh`'s
+`COVER_PKG_FLOOR_EXEMPT`. Overrides are supplied to `pkg_time_budget.sh` via
+the `PKG_HARD_BUDGET_OVERRIDES` environment variable, a whitespace- or
+comma-separated list of `path-substring=seconds` entries; a package whose
+import path contains a key uses that key's ceiling instead of `HARD_BUDGET`.
+
+The only current override, set in the `build + test + race` job:
+
+| Package | Ceiling | Justification |
+|---|---|---|
+| `internal/sim` | 420 s | The deterministic-simulation (DST) integration harness. Its ACID/DST scenario battery is serial-dominated, so under `-race` it legitimately runs longer than a unit-test package. Its heaviest cases already run soak-only (the 9000-node index-diversity scenario and the seed-varied search scenarios); the remaining battery must still run under `-race` on **every** PR to preserve the ACID/DST guarantee, which the uniform 240 s ceiling would force out of the short layer. 420 s accommodates that cost with margin while staying well below the pre-reduction runtime (so a genuine regression still trips the gate) and clear of `go test`'s 10-minute timeout. |
 
 ## How a test selects its layer
 

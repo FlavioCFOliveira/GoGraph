@@ -7,6 +7,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // TestIndexDiversity_Scenario_Passes runs the index-diversity scenario: a hash
@@ -14,6 +15,17 @@ import (
 // above-threshold graph (parallel backfill) and must stay seek-vs-scan
 // consistent through write churn and every crash/recovery.
 func TestIndexDiversity_Scenario_Passes(t *testing.T) {
+	// Layer: soak. This scenario runs a ~9000-node above-threshold graph with
+	// parallel index backfill through repeated crash/recovery; under `go test
+	// -race` it is by far the most expensive test in the package and pushed
+	// internal/sim over the 240 s per-package hard ceiling (scripts/
+	// pkg_time_budget.sh; docs/test-layers.md). Its numeric seek-vs-scan path is
+	// covered in the short layer by the fast sibling
+	// TestIndexConsistency_NumericBranch, so soak-gating the full-scale scenario
+	// keeps the short layer under budget without losing short-layer coverage of
+	// the checker path.
+	testlayers.RequireSoak(t)
+
 	reg, err := DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)

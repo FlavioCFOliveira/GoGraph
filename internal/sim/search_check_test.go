@@ -10,6 +10,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // buildSearchOracle builds a GraphOracle holding exactly the given Person nodes
@@ -186,6 +187,15 @@ func TestComponentPartitionSig_LabelInvariant(t *testing.T) {
 // several seeds and asserts each is a clean, violation-free pass — the real
 // end-to-end exercise of the battery over a seed-varied live graph.
 func TestSearchScenario_CleanAcrossSeeds(t *testing.T) {
+	// Layer: soak. Running the full catalogue search scenario across four seeds
+	// is the second-heaviest cost in the package under `go test -race`; together
+	// with TestSearchScenario_Deterministic it kept internal/sim over the 240 s
+	// per-package hard ceiling (scripts/pkg_time_budget.sh; docs/test-layers.md).
+	// The CheckSearch extraction/parity logic and the search-algorithm vs
+	// reference agreement are covered in the short layer by TestCheckSearch_* and
+	// TestSearchAlgorithms_AgreeWithReferenceOnFixture, so soak-gating the live
+	// seed-varied scenario costs no short-layer coverage of the checker.
+	testlayers.RequireSoak(t)
 	t.Parallel()
 	reg, err := DefaultRegistry()
 	if err != nil {
@@ -210,6 +220,10 @@ func TestSearchScenario_CleanAcrossSeeds(t *testing.T) {
 // TestSearchScenario_Deterministic runs the same seed twice and asserts both
 // runs reach the identical (clean) outcome.
 func TestSearchScenario_Deterministic(t *testing.T) {
+	// Layer: soak (see TestSearchScenario_CleanAcrossSeeds). Scenario determinism
+	// is also guarded in the short layer by TestSimulator_Reproducibility and
+	// TestRecordTrace_ReplayIsDeterministic.
+	testlayers.RequireSoak(t)
 	t.Parallel()
 	reg, err := DefaultRegistry()
 	if err != nil {
