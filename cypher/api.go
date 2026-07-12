@@ -7918,6 +7918,16 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndex
 		if seekVal.Kind() != expr.KindInteger {
 			return nil, false
 		}
+		// CONTRACT (#F-CY2): an int64 hash index is a Go-API-only building block —
+		// a Cypher CREATE INDEX never builds one (hash indexes are string-keyed;
+		// see newBoundNodeHashIndex / projectStringPropValue). Its equality seek is
+		// NOT a cross-type numeric superset: openCypher numeric equality is
+		// cross-type (5.0 = 5 is true), but this seek returns only nodes whose
+		// property is the INTEGER value, and the hash path carries no residual
+		// filter. Do NOT wire an int64 hash index for Cypher numeric equality: key
+		// it on float64 and keep a residual filter (as the range companion does),
+		// or gate this branch to decline cross-type — otherwise a float-valued node
+		// equal to an integer seek would be silently dropped.
 		return exec.NewNodeByIndexSeek(exec.NewInt64HashIndex(il), seekVal), true
 	}
 	return nil, false
