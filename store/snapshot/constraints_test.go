@@ -126,4 +126,16 @@ func TestConstraints_CorruptionRejected(t *testing.T) {
 			t.Fatalf("got %v, want ErrConstraintsCorrupted", err)
 		}
 	})
+
+	// A large-but-in-bounds count with a truncated body must fail cleanly rather
+	// than pre-allocate a slice sized to the hostile count (#1915: the eager
+	// cap=count hint was dropped so the reader grows incrementally).
+	t.Run("max count truncated body", func(t *testing.T) {
+		b := good()
+		binary.LittleEndian.PutUint32(b[8:12], constraintsMaxCount) // in-bounds
+		b = b[:12]                                                  // header only, no records
+		if _, err := ReadConstraints(bytes.NewReader(b)); !errors.Is(err, ErrConstraintsCorrupted) {
+			t.Fatalf("got %v, want ErrConstraintsCorrupted", err)
+		}
+	})
 }

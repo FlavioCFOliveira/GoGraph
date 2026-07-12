@@ -1023,7 +1023,7 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 	// is verified exactly like the other components.
 	var constraintsParsed ConstraintsReadback
 	if ccEntry := findEntry(m.Files, ConstraintsFile); ccEntry != nil {
-		constraintsParsed, err = readVerifiedConstraints(fsys, filepath.Join(dir, ConstraintsFile), ccEntry.CRC32C)
+		constraintsParsed, err = readVerifiedConstraints(fsys, filepath.Join(dir, ConstraintsFile), ccEntry.CRC32C, ccEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -1267,9 +1267,12 @@ func readVerifiedTombstones(fsys fileSystem, path string, expected uint32) (Tomb
 	return parsed, nil
 }
 
-// readVerifiedConstraints is the dual of [readVerifiedCSR] for
-// constraints.bin.
-func readVerifiedConstraints(fsys fileSystem, path string, expected uint32) (ConstraintsReadback, error) {
+// readVerifiedConstraints is the dual of [readVerifiedCSR] for constraints.bin.
+// size is the manifest-declared component size; the body reader is bounded to it
+// so a corrupt/hostile count or length field cannot drive reads beyond the
+// declared file before the CRC is verified (mirrors [readVerifiedIndexDefs] /
+// [readVerifiedProperties] / [readVerifiedLabels]).
+func readVerifiedConstraints(fsys fileSystem, path string, expected uint32, size int64) (ConstraintsReadback, error) {
 	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return ConstraintsReadback{}, err
@@ -1278,7 +1281,7 @@ func readVerifiedConstraints(fsys fileSystem, path string, expected uint32) (Con
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
-	tee := io.TeeReader(f, hasher)
+	tee := io.TeeReader(boundedComponentReader(f, size), hasher)
 	parsed, err := ReadConstraints(tee)
 	if err != nil {
 		return ConstraintsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)

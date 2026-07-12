@@ -213,7 +213,13 @@ func ReadConstraints(r io.Reader) (ConstraintsReadback, error) {
 			ErrConstraintsCorrupted, count)
 	}
 
-	specs := make([]ConstraintSpec, 0, count)
+	// Grow incrementally rather than pre-allocating cap=count: count is bounded
+	// only by constraintsMaxCount (1<<20) and is read from a possibly-hostile
+	// file before any record is validated, so an eager make(…, 0, count) would
+	// let a tiny corrupt header drive a ~58 MB allocation. A real schema has a
+	// handful of constraints, so amortised append growth costs nothing; a
+	// truncated file fails on the first missing record having allocated little.
+	var specs []ConstraintSpec
 	for i := uint32(0); i < count; i++ {
 		c, err := readConstraintRecord(br)
 		if err != nil {
