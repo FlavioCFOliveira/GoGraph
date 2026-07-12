@@ -27,6 +27,29 @@ import (
 // not import cypher). A user-supplied CREATE INDEX name may not end with it.
 const reservedNumericCompanionSuffix = "_btree_num"
 
+// reservedUniqueBackingPrefix is the name prefix reserved for the internal hash
+// index that backs a UNIQUE constraint (see cypher/exec.uniqueIndexName, which
+// builds "__uniq__<label>.<prop>" — kept in sync here; ir must not import
+// cypher/exec). A user CREATE INDEX / DROP INDEX name may not use it: dropping
+// such an index directly would desynchronise the index catalogue from the
+// constraint set, and creating one would squat the slot a real constraint needs
+// (#1912). Matched case-insensitively so a near-miss cannot squat it either.
+const reservedUniqueBackingPrefix = "__uniq__"
+
+// checkReservedIndexName rejects a user index name that claims a reserved
+// internal namespace (the numeric-companion suffix or the UNIQUE-backing
+// prefix). kind names the statement for an actionable error.
+func checkReservedIndexName(kind, name string) error {
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, reservedNumericCompanionSuffix) {
+		return fmt.Errorf("ir: %s: index name %q uses the reserved %q suffix", kind, name, reservedNumericCompanionSuffix)
+	}
+	if strings.HasPrefix(lower, reservedUniqueBackingPrefix) {
+		return fmt.Errorf("ir: %s: index name %q uses the reserved %q prefix (constraint-backing index)", kind, name, reservedUniqueBackingPrefix)
+	}
+	return nil
+}
+
 // maxSchemaIdentifierLen bounds the byte length of a CREATE/DROP INDEX or
 // CREATE/DROP CONSTRAINT identifier (name, label, or property). It is far above
 // any legitimate schema identifier yet well below both the uint16 length prefix
@@ -137,14 +160,14 @@ func parseCreateIndex(query string) (*CreateIndex, error) {
 	name := ""
 	if r.peekUpper() != "FOR" {
 		name = r.consume()
-		// A user index name may not carry the reserved numeric-companion suffix
-		// (#F-CY5): a btree CREATE INDEX registers an internal
-		// "<label>_<prop>_btree_num" companion, which db.indexes() hides by that
-		// suffix. Allowing a user to claim the suffix would hide their index and
-		// could occupy the slot a real companion needs. Auto-generated names end
-		// in "_hash"/"_btree" and never trip this.
-		if strings.HasSuffix(strings.ToLower(name), reservedNumericCompanionSuffix) {
-			return nil, fmt.Errorf("ir: CREATE INDEX: index name %q uses the reserved %q suffix", name, reservedNumericCompanionSuffix)
+		// A user index name may not carry a reserved internal namespace: the
+		// numeric-companion suffix (#F-CY5) — a btree CREATE INDEX registers an
+		// internal "<label>_<prop>_btree_num" companion that db.indexes() hides
+		// by that suffix — nor the "__uniq__" UNIQUE-constraint-backing prefix
+		// (#1912). Auto-generated names end in "_hash"/"_btree" and never trip
+		// these.
+		if err := checkReservedIndexName("CREATE INDEX", name); err != nil {
+			return nil, err
 		}
 	}
 
@@ -422,6 +445,12 @@ func parseDropIndex(query string) (*DropIndex, error) {
 		return nil, fmt.Errorf("ir: DROP INDEX: missing index name")
 	}
 	if err := checkSchemaIdentifier("DROP INDEX", "name", name); err != nil {
+		return nil, err
+	}
+	// A UNIQUE constraint's backing index may only be dropped via DROP
+	// CONSTRAINT, never by name here — otherwise the index catalogue and the
+	// constraint set desynchronise (#1912).
+	if err := checkReservedIndexName("DROP INDEX", name); err != nil {
 		return nil, err
 	}
 
