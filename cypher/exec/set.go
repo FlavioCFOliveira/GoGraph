@@ -366,16 +366,18 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			}
 			if op.reg != nil {
 				labels := op.mutator.NodeLabels(nodeKey)
+				// Release this node's own old constrained value BEFORE the check,
+				// so an idempotent self-set (SET n.k = its current value) is not
+				// rejected as a duplicate of itself and the old slot is freed
+				// before the overwrite. A UNIQUE constraint guarantees at most one
+				// holder, so releasing first cannot mask a real cross-node
+				// duplicate; if the check then fails, the transaction aborts and
+				// every UNIQUE value-set is rebuilt from the graph (H-C, #1905).
+				if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
+					op.reg.ReleasePropertyValue(labels, op.propertyKey, oldVal)
+				}
 				if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
 					return cerr
-				}
-			}
-			// Capture and release the old value BEFORE overwriting it, so
-			// the old slot is freed in the registry regardless of whether
-			// the new value is equal.
-			if op.reg != nil {
-				if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
 				}
 			}
 			if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
@@ -409,14 +411,14 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		}
 		if op.reg != nil {
 			labels := op.mutator.NodeLabels(nodeKey)
+			// Release the old constrained value BEFORE the check so an idempotent
+			// self-set is not rejected as its own duplicate (H-C, #1905); see the
+			// release-before-check rationale on the eval path above.
+			if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
+				op.reg.ReleasePropertyValue(labels, op.propertyKey, oldVal)
+			}
 			if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
 				return cerr
-			}
-		}
-		// Release the old constrained value before overwriting.
-		if op.reg != nil {
-			if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-				op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
 			}
 		}
 		if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
@@ -430,24 +432,25 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		return nil
 	}
 	if op.merge {
+		// For merge mode (SET n += {…}), read existing props once so we can
+		// release any old constrained value BEFORE checking it, so an idempotent
+		// self-set of a UNIQUE property is not rejected as its own duplicate
+		// (H-C, #1905).
+		existingMerge := op.mutator.NodeProperties(nodeKey)
+		labels := op.mutator.NodeLabels(nodeKey)
 		if op.reg != nil {
-			labels := op.mutator.NodeLabels(nodeKey)
+			for _, p := range op.parsedMap {
+				if oldVal, had := existingMerge[p.key]; had {
+					op.reg.ReleasePropertyValue(labels, p.key, oldVal)
+				}
+			}
 			for _, p := range op.parsedMap {
 				if cerr := op.reg.CheckSetProperty(labels, p.key, p.value, op.mgr); cerr != nil {
 					return cerr
 				}
 			}
 		}
-		// For merge mode (SET n += {…}), read existing props once so we can
-		// release any old constrained value before overwriting it.
-		existingMerge := op.mutator.NodeProperties(nodeKey)
-		labels := op.mutator.NodeLabels(nodeKey)
 		for _, p := range op.parsedMap {
-			if op.reg != nil {
-				if oldVal, had := existingMerge[p.key]; had {
-					op.reg.ReleasePropertyValue(labels, p.key, oldVal)
-				}
-			}
 			if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 				return serr
 			}
@@ -458,26 +461,25 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		return nil
 	}
 	// SET n = {…}: replace all properties.
+	existing := op.mutator.NodeProperties(nodeKey)
+	labels := op.mutator.NodeLabels(nodeKey)
 	if op.reg != nil {
-		labels := op.mutator.NodeLabels(nodeKey)
+		// Release all existing constrained values BEFORE the check so an entry in
+		// the replacement map equal to the node's current value is not rejected
+		// as its own duplicate (H-C, #1905); SET n = {…} replaces every property
+		// anyway, so releasing them all up front is correct.
+		for k, oldVal := range existing {
+			op.reg.ReleasePropertyValue(labels, k, oldVal)
+		}
 		for _, p := range op.parsedMap {
 			if cerr := op.reg.CheckSetProperty(labels, p.key, p.value, op.mgr); cerr != nil {
 				return cerr
 			}
 		}
 	}
-	existing := op.mutator.NodeProperties(nodeKey)
-	// Release all existing constrained values that are being replaced.
-	if op.reg != nil {
-		labels := op.mutator.NodeLabels(nodeKey)
-		for k, oldVal := range existing {
-			op.reg.ReleasePropertyValue(labels, k, oldVal)
-		}
-	}
 	for k := range existing {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}
-	labels := op.mutator.NodeLabels(nodeKey)
 	for _, p := range op.parsedMap {
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 			return serr
