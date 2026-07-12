@@ -439,10 +439,19 @@ func parseDropIndex(query string) (*DropIndex, error) {
 // CREATE CONSTRAINT parser
 // ─────────────────────────────────────────────────────────────────────────────
 
-// parseCreateConstraint parses:
+// parseCreateConstraint parses both the modern and the legacy node-property
+// constraint grammars, which map to the same IR:
 //
+//	CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS UNIQUE
+//	CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS NOT NULL
 //	CREATE CONSTRAINT [name] ON (n:Label) ASSERT n.prop IS UNIQUE [IF NOT EXISTS]
 //	CREATE CONSTRAINT [name] ON (n:Label) ASSERT n.prop IS NOT NULL [IF NOT EXISTS]
+//
+// FOR … REQUIRE is the current Neo4j form (the ON … ASSERT form was removed in
+// Neo4j 5 and is kept here as a legacy alias). Out-of-scope forms — relationship
+// constraints, composite (multi-property) constraints, NODE KEY / relationship
+// key, and property type constraints (IS :: <TYPE>) — are rejected with a
+// specific error.
 //
 //nolint:gocyclo // parser function: complexity reflects DDL grammar, not hidden branching
 func parseCreateConstraint(query string) (*CreateConstraint, error) {
@@ -478,9 +487,12 @@ func parseCreateConstraint(query string) (*CreateConstraint, error) {
 		return nil, err
 	}
 
-	// Optional name (present unless next token is "ON" or "IF")
+	// Optional name (present unless the next token starts the constraint body:
+	// FOR/ON, or IF for IF NOT EXISTS). Excluding FOR is essential — otherwise
+	// the modern FOR … REQUIRE form mis-parses the keyword FOR as the name
+	// (#1906).
 	name := ""
-	if peekUpper() != "ON" && peekUpper() != "IF" {
+	if u := peekUpper(); u != "ON" && u != "FOR" && u != "IF" {
 		name = consume()
 	}
 
@@ -498,8 +510,27 @@ func parseCreateConstraint(query string) (*CreateConstraint, error) {
 		ifNotExists = true
 	}
 
-	if err := expectU("ON"); err != nil {
-		return nil, err
+	// Connective: modern FOR … REQUIRE (Neo4j 4.x+/current) or legacy
+	// ON … ASSERT (Neo4j 3.x, removed in Neo4j 5). Both map to the same IR.
+	var assertKW string
+	switch peekUpper() {
+	case "FOR":
+		assertKW = "REQUIRE"
+	case "ON":
+		assertKW = "ASSERT"
+	default:
+		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: expected FOR or ON, got %q", name, peek())
+	}
+	consume() // FOR | ON
+
+	// Reject relationship constraints (FOR ()-[r:T]-() REQUIRE …): only node
+	// property UNIQUE / NOT NULL is supported. Scan the pattern span up to the
+	// assert keyword for a relationship bracket so the error is specific rather
+	// than a misleading node-pattern parse failure.
+	for i := pos; i < len(tokens) && !strings.EqualFold(tokens[i], assertKW); i++ {
+		if strings.ContainsAny(tokens[i], "[]") {
+			return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: relationship constraints are not supported; only node property UNIQUE and NOT NULL constraints are supported", name)
+		}
 	}
 
 	// (n:Label)
@@ -508,12 +539,13 @@ func parseCreateConstraint(query string) (*CreateConstraint, error) {
 		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: %w", name, err)
 	}
 
-	if err := expectU("ASSERT"); err != nil {
+	if err := expectU(assertKW); err != nil {
 		return nil, err
 	}
 
-	// n.prop  (single token like "n.prop" or two tokens "n" "." "prop")
-	propKey, err := parseAssertPropAccess(tokens, &pos)
+	// n.prop — a single node property. A parenthesised composite (n.a, n.b) is
+	// recognised and rejected (out of scope).
+	propKey, err := parseConstraintProp(tokens, &pos)
 	if err != nil {
 		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: %w", name, err)
 	}
@@ -522,10 +554,11 @@ func parseCreateConstraint(query string) (*CreateConstraint, error) {
 		return nil, err
 	}
 
-	// UNIQUE | NOT NULL
+	// UNIQUE and NOT NULL are supported. NODE KEY, relationship-key, and
+	// property type constraints (IS :: <TYPE> / IS TYPED <TYPE>) are recognised
+	// and rejected with a specific error rather than a misleading parse failure.
 	var kind ConstraintKind
-	nextKw := strings.ToUpper(consume())
-	switch nextKw {
+	switch nextKw := strings.ToUpper(consume()); nextKw {
 	case "UNIQUE":
 		kind = ConstraintUnique
 	case "NOT":
@@ -533,6 +566,12 @@ func parseCreateConstraint(query string) (*CreateConstraint, error) {
 			return nil, err
 		}
 		kind = ConstraintNotNull
+	case "NODE":
+		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: NODE KEY constraints are not supported; declare IS UNIQUE and IS NOT NULL separately", name)
+	case "RELATIONSHIP", "REL", "KEY":
+		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: key constraints are not supported; only node property UNIQUE and NOT NULL are supported", name)
+	case ":", "TYPED":
+		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: property type constraints (IS :: <TYPE>) are not supported", name)
 	default:
 		return nil, fmt.Errorf("ir: CREATE CONSTRAINT %q: expected UNIQUE or NOT NULL after IS, got %q", name, nextKw)
 	}
@@ -569,18 +608,39 @@ func parseCreateConstraint(query string) (*CreateConstraint, error) {
 	return NewCreateConstraint(name, label, propKey, kind, ifNotExists), nil
 }
 
-// parseAssertPropAccess parses a property access expression of the form
-// "n.prop" in the context of an ASSERT clause. The tokeniser may split it as
-// ["n", ".", "prop"] or leave it as a single token "n.prop" (the tokeniser
-// only splits on a fixed set of punctuation that does not include ".").
-// In practice "." is not in the tokeniser's punctuation set, so "n.prop" is
-// always a single token.
-func parseAssertPropAccess(tokens []string, pos *int) (string, error) {
-	if *pos >= len(tokens) {
+// parseConstraintProp parses the property target of a REQUIRE/ASSERT clause and
+// returns the single property key. The tokeniser keeps "n.prop" as one token
+// (it does not split on "."), so the bare form is a single token. A
+// parenthesised form is also accepted: a single "(n.prop)" is unwrapped, while a
+// composite "(n.a, n.b)" is recognised and rejected — composite constraints are
+// out of scope.
+func parseConstraintProp(tokens []string, pos *int) (string, error) {
+	tok, ok := tokAt(tokens, *pos)
+	if !ok {
 		return "", fmt.Errorf("expected n.prop, got end of input")
 	}
-	tok := tokens[*pos]
+	if tok == "(" {
+		(*pos)++ // (
+		first, ok := tokAt(tokens, *pos)
+		if !ok {
+			return "", fmt.Errorf("unterminated property list after '('")
+		}
+		(*pos)++
+		if next, ok := tokAt(tokens, *pos); ok && next == "," {
+			return "", fmt.Errorf("composite constraints (multiple properties) are not supported; constrain a single property")
+		}
+		if closeTok, ok := tokAt(tokens, *pos); !ok || closeTok != ")" {
+			return "", fmt.Errorf("expected ')' after property, got %q", tokDisplay(tokens, *pos))
+		}
+		(*pos)++
+		return propKeyFromAccess(first)
+	}
 	(*pos)++
+	return propKeyFromAccess(tok)
+}
+
+// propKeyFromAccess extracts the property key from an "n.prop" access token.
+func propKeyFromAccess(tok string) (string, error) {
 	dotIdx := strings.LastIndex(tok, ".")
 	if dotIdx < 0 {
 		return "", fmt.Errorf("expected n.prop form, got %q", tok)
