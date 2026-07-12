@@ -2325,6 +2325,14 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 				return e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 			}
 		}
+		// Flip Graph.HasConstraints true INSIDE the barrier, at the same instant
+		// as registration — so a concurrent checkpoint reaching its phase-3
+		// self-sufficiency check can never observe the constraint registered but
+		// the count still stale (which, when WithConstraintSpecs is unwired,
+		// would let it truncate the CREATE frame and lose the constraint on
+		// restart). The deferred syncConstraintCount remains a belt-and-braces
+		// re-sync for the early-return and drop/unwind paths (#1917, refines #1464).
+		e.syncConstraintCount()
 		return nil
 	})
 	if barrierErr != nil {
