@@ -359,8 +359,20 @@ clause:
 CREATE INDEX person_age FOR (n:Person) ON (n.age) OPTIONS {indexType: 'btree'}
 ```
 
-A BTree index supports range queries (`<`, `>`, `<=`, `>=`, `ORDER BY`). A
-hash index only supports equality lookups.
+A BTree index accelerates range predicates (`<`, `>`, `<=`, `>=`); a hash
+index accelerates equality lookups (`=`). Both are transparent optimisations:
+a query using an index returns exactly the same rows as the same query with no
+index (a residual filter refines any over-returned superset). An index never
+changes ordering — it is not used to satisfy `ORDER BY`, which is always
+evaluated by a separate sort operator.
+
+**Dialect and scope.** GoGraph's index kinds are `hash` (equality) and `btree`
+(range), selected via `OPTIONS {indexType: …}`; this differs from Neo4j, whose
+index types are `RANGE`/`TEXT`/`POINT`/`LOOKUP`/`FULLTEXT`/`VECTOR`. Indexes
+cover a single **node** property (`FOR (n:Label) ON (n.prop)`); composite
+(multi-property) and relationship-property indexes are not supported and are
+rejected with an error. These are deliberate scope boundaries: the openCypher
+TCK does not cover index DDL, so the dialect does not affect conformance.
 
 If the index already exists, the engine returns
 `Neo.ClientError.Schema.IndexAlreadyExists` (via the Bolt protocol).
