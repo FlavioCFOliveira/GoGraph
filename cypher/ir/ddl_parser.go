@@ -27,6 +27,29 @@ import (
 // not import cypher). A user-supplied CREATE INDEX name may not end with it.
 const reservedNumericCompanionSuffix = "_btree_num"
 
+// maxSchemaIdentifierLen bounds the byte length of a CREATE/DROP INDEX or
+// CREATE/DROP CONSTRAINT identifier (name, label, or property). It is far above
+// any legitimate schema identifier yet well below both the uint16 length prefix
+// the WAL op-body encoders use (store/txn) and the 64 KiB per-field cap the
+// snapshot reader enforces (store/snapshot), so an accepted identifier can
+// never truncate in the WAL nor be written wider than the snapshot reader will
+// accept (#1903). The DDL parser is a public boundary for untrusted query text,
+// so an over-long identifier is rejected here — a fail-stop typed error —
+// rather than silently mangled or lost at the durable layer (an ACID
+// Consistency/Durability breach) or turned into a snapshot poison-pill.
+const maxSchemaIdentifierLen = 4096
+
+// checkSchemaIdentifier returns a typed error when id exceeds
+// [maxSchemaIdentifierLen]. kind names the statement (e.g. "CREATE CONSTRAINT")
+// and what names the field (e.g. "name") for an actionable message.
+func checkSchemaIdentifier(kind, what, id string) error {
+	if len(id) > maxSchemaIdentifierLen {
+		return fmt.Errorf("ir: %s: %s is too long (%d bytes; maximum %d)",
+			kind, what, len(id), maxSchemaIdentifierLen)
+	}
+	return nil
+}
+
 // IsDDL returns true when query (trimmed, case-insensitive) begins with a
 // known DDL keyword that the lightweight DDL parser handles.
 func IsDDL(query string) bool {
@@ -154,6 +177,14 @@ func parseCreateIndex(query string) (*CreateIndex, error) {
 			suffix = "btree"
 		}
 		name = strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_" + suffix
+	}
+
+	for _, f := range [...]struct{ what, val string }{
+		{"name", name}, {"label", label}, {"property", propKey},
+	} {
+		if err := checkSchemaIdentifier("CREATE INDEX", f.what, f.val); err != nil {
+			return nil, err
+		}
 	}
 
 	return NewCreateIndex(name, label, propKey, idxType, ifNotExists), nil
@@ -390,6 +421,9 @@ func parseDropIndex(query string) (*DropIndex, error) {
 	if name == "" {
 		return nil, fmt.Errorf("ir: DROP INDEX: missing index name")
 	}
+	if err := checkSchemaIdentifier("DROP INDEX", "name", name); err != nil {
+		return nil, err
+	}
 
 	ifExists := false
 	if strings.ToUpper(consume()) == "IF" {
@@ -524,6 +558,14 @@ func parseCreateConstraint(query string) (*CreateConstraint, error) {
 		name = strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_" + suffix
 	}
 
+	for _, f := range [...]struct{ what, val string }{
+		{"name", name}, {"label", label}, {"property", propKey},
+	} {
+		if err := checkSchemaIdentifier("CREATE CONSTRAINT", f.what, f.val); err != nil {
+			return nil, err
+		}
+	}
+
 	return NewCreateConstraint(name, label, propKey, kind, ifNotExists), nil
 }
 
@@ -579,6 +621,9 @@ func parseDropConstraint(query string) (*DropConstraint, error) {
 	name := consume()
 	if name == "" {
 		return nil, fmt.Errorf("ir: DROP CONSTRAINT: missing constraint name")
+	}
+	if err := checkSchemaIdentifier("DROP CONSTRAINT", "name", name); err != nil {
+		return nil, err
 	}
 
 	ifExists := false

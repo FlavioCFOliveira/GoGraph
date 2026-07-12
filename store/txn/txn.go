@@ -1551,12 +1551,12 @@ func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec
 		// Schema record: a one-byte constraint-kind tag followed by three
 		// length-prefixed strings (label, property, name). No node codec is
 		// involved — a constraint carries no endpoints.
-		return appendOpConstraintBody(buf, op), nil
+		return appendOpConstraintBody(buf, op)
 	case OpCreateIndex, OpDropIndex:
 		// Index schema record: a one-byte index-kind tag followed by three
 		// length-prefixed strings (name, label, property). No node codec is
 		// involved — an index definition carries no endpoints.
-		return appendOpIndexBody(buf, op), nil
+		return appendOpIndexBody(buf, op)
 	default: // OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel
 		return encodeOpEdgeWithLabel(buf, op, codec)
 	}
@@ -1571,11 +1571,22 @@ func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec
 //	uint16 nameLen         || [nameLen]byte name
 //
 // The uint16 length prefixes match the label-encoding convention of the
-// sibling body encoders; a constraint label, property, or name longer than a
-// uint16 is rejected upstream (the whole query is capped at 1 MiB by the DML
-// guard, and a real identifier is a handful of bytes). The body is independent
-// of the node [Codec] because a constraint has no endpoints.
-func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) []byte {
+// sibling body encoders. A schema identifier this long is rejected upstream at
+// the DDL boundary (cypher/ir maxSchemaIdentifierLen, #1903); the encoder fails
+// stop here as a last line of defence so a caller that bypasses that boundary
+// (e.g. the embedded Go API) can never silently truncate a label, property, or
+// name and corrupt the WAL — an ACID Consistency/Durability breach. The body is
+// independent of the node [Codec] because a constraint has no endpoints.
+func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byte, error) {
+	if err := checkWALSchemaString("constraint label", op.Label); err != nil {
+		return nil, err
+	}
+	if err := checkWALSchemaString("constraint property", op.Key); err != nil {
+		return nil, err
+	}
+	if err := checkWALSchemaString("constraint name", op.ConstraintName); err != nil {
+		return nil, err
+	}
 	buf = append(buf, byte(op.ConstraintKind))
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
@@ -1583,7 +1594,24 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) []byte
 	buf = append(buf, op.Key...)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
-	return buf
+	return buf, nil
+}
+
+// maxWALSchemaStringLen is the largest byte length the uint16 length prefix in
+// the schema op-body encoders can represent without truncation. Schema
+// identifiers are capped far below this at the DDL boundary (#1903); this bound
+// is the encoder's own fail-stop guard.
+const maxWALSchemaStringLen = 1<<16 - 1
+
+// checkWALSchemaString rejects a schema identifier whose byte length would
+// overflow the uint16 length prefix, converting silent truncation into a
+// fail-stop commit error (#1903).
+func checkWALSchemaString(what, s string) error {
+	if len(s) > maxWALSchemaStringLen {
+		return fmt.Errorf("txn: %s is too long to encode (%d bytes; maximum %d)",
+			what, len(s), maxWALSchemaStringLen)
+	}
+	return nil
 }
 
 // appendOpIndexBody appends the body of an [OpCreateIndex] / [OpDropIndex]
@@ -1595,8 +1623,18 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) []byte
 //	uint16 propLen    || [propLen]byte  property
 //
 // The body is independent of the node [Codec] because an index definition
-// carries no endpoints.
-func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) []byte {
+// carries no endpoints. Like [appendOpConstraintBody] it fails stop on a schema
+// string too long for the uint16 length prefix (#1903).
+func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byte, error) {
+	if err := checkWALSchemaString("index name", op.ConstraintName); err != nil {
+		return nil, err
+	}
+	if err := checkWALSchemaString("index label", op.Label); err != nil {
+		return nil, err
+	}
+	if err := checkWALSchemaString("index property", op.Key); err != nil {
+		return nil, err
+	}
 	buf = append(buf, byte(op.IndexKind))
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
@@ -1604,7 +1642,7 @@ func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) []byte {
 	buf = append(buf, op.Label...)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
-	return buf
+	return buf, nil
 }
 
 // encodeOpNodeOnly writes the [Src, zero, label] tail for OpKinds that

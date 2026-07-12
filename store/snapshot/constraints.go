@@ -141,12 +141,23 @@ func WriteConstraints(w io.Writer, specs []ConstraintSpec) (size int64, crc uint
 // writeConstraintRecord writes one record: a uint8 kind tag followed by three
 // uint32-length-prefixed strings (label, property, name). It returns the
 // number of bytes written.
+//
+// Each field is bounded by [constraintsMaxStringLen] — the same cap
+// [readConstraintString] enforces — before writing, so the writer can never
+// emit a record the reader would reject as corrupt (#1903). Schema identifiers
+// are capped far below this at the DDL boundary; this guard fails stop on a
+// value that reached the snapshot layer by some other path, turning a
+// would-be poison-pill snapshot into a clean checkpoint error.
 func writeConstraintRecord(w io.Writer, c ConstraintSpec) (int64, error) {
 	if _, err := w.Write([]byte{c.Kind}); err != nil {
 		return 0, err
 	}
 	total := int64(1)
 	for _, s := range [...]string{c.Label, c.Property, c.Name} {
+		if len(s) > constraintsMaxStringLen {
+			return 0, fmt.Errorf("%w: field too long to encode (%d bytes; maximum %d)",
+				ErrConstraintsCorrupted, len(s), constraintsMaxStringLen)
+		}
 		if err := binary.Write(w, binary.LittleEndian, uint32(len(s))); err != nil {
 			return 0, err
 		}
