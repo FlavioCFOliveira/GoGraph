@@ -137,6 +137,17 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.Schema.ConstraintDropFailed"
 	}
 
+	// CREATE CONSTRAINT naming a constraint whose (kind, label, property) is
+	// already registered (without IF NOT EXISTS), or requesting a name already
+	// held by a different constraint. Neo4j surfaces these as distinct
+	// constraint-schema faults rather than a generic database error.
+	if errors.Is(err, exec.ErrConstraintAlreadyExists) {
+		return "Neo.ClientError.Schema.ConstraintAlreadyExists"
+	}
+	if errors.Is(err, exec.ErrConstraintNameConflict) {
+		return "Neo.ClientError.Schema.ConstraintWithNameAlreadyExists"
+	}
+
 	// Index errors.
 	if errors.Is(err, index.ErrIndexExists) {
 		return "Neo.ClientError.Schema.IndexAlreadyExists"

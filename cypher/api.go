@@ -2232,13 +2232,31 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// single-writer lock the caller holds — so a concurrent checkpoint can never
 	// observe a stale "no constraints" count and truncate the WAL (#1464).
 	defer e.syncConstraintCount()
-	// IF NOT EXISTS that absorbs an already-registered constraint is a silent
-	// no-op with no schema change and no WAL record — match the operator's
-	// existing semantics and skip validation/durability. Checked under the
-	// writer lock so two concurrent IF NOT EXISTS creations cannot both miss
-	// it and register twice.
-	if p.IfNotExists && e.constraintAlreadyRegistered(kind, p.Label, p.Property) {
-		return emptyDDLResult(), nil
+
+	// Name conflict: the requested name is already held by a DIFFERENT
+	// constraint (distinct kind/label/property). Neo4j requires constraint names
+	// to be unique across the database, so this is always an error — even under
+	// IF NOT EXISTS, and before any pre-existing-data scan. Checked under the
+	// writer lock so two concurrent creations cannot both miss it (#1907).
+	if rk, rl, rp, found := e.constraintReg.NameInUse(p.Name); found &&
+		!(rk == kind && rl == p.Label && rp == p.Property) {
+		return nil, fmt.Errorf("cypher: cannot create constraint %q: %w: name is already used by the %s constraint on (:%s).%s",
+			p.Name, exec.ErrConstraintNameConflict, constraintKindString(rk), rl, rp)
+	}
+
+	// Equivalent constraint already registered (same kind, label, property).
+	// IF NOT EXISTS absorbs it as a silent no-op (no schema change, no WAL
+	// record); otherwise it is a constraint-level already-exists error, returned
+	// before the operator would try to create the backing index (which would
+	// leak the synthetic __uniq__ index name and, for NOT NULL, silently
+	// overwrite the stored name) (#1908). Checked under the writer lock so two
+	// concurrent IF NOT EXISTS creations cannot both register.
+	if e.constraintAlreadyRegistered(kind, p.Label, p.Property) {
+		if p.IfNotExists {
+			return emptyDDLResult(), nil
+		}
+		return nil, fmt.Errorf("cypher: cannot create constraint %q: %w: an equivalent %s constraint on (:%s).%s already exists",
+			p.Name, exec.ErrConstraintAlreadyExists, constraintKindString(kind), p.Label, p.Property)
 	}
 
 	// Validate the pre-existing data and seed the value-set BEFORE registering,
@@ -2461,6 +2479,15 @@ func execConstraintKind(k ir.ConstraintKind) exec.ConstraintKind {
 		return exec.ConstraintNotNull
 	}
 	return exec.ConstraintUnique
+}
+
+// constraintKindString renders a constraint kind for a client-facing message
+// ("UNIQUE" / "NOT NULL"), without leaking any internal identifier.
+func constraintKindString(k exec.ConstraintKind) string {
+	if k == exec.ConstraintNotNull {
+		return "NOT NULL"
+	}
+	return "UNIQUE"
 }
 
 // constraintAlreadyRegistered reports whether a constraint of the given kind is

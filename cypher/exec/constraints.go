@@ -69,6 +69,19 @@ var ErrConstraintViolation = errors.New("exec: constraint violation")
 // claiming success.
 var ErrConstraintNotFound = errors.New("exec: constraint not found")
 
+// ErrConstraintAlreadyExists is the sentinel returned (wrapped) when CREATE
+// CONSTRAINT (without IF NOT EXISTS) names a constraint whose (kind, label,
+// property) identity is already registered. It is the analogue of Neo4j's
+// EquivalentSchemaRuleAlreadyExists / ConstraintAlreadyExists — a constraint-
+// level fault surfaced instead of leaking the synthetic backing-index name.
+var ErrConstraintAlreadyExists = errors.New("exec: constraint already exists")
+
+// ErrConstraintNameConflict is the sentinel returned (wrapped) when CREATE
+// CONSTRAINT requests a name already held by a DIFFERENT constraint (a distinct
+// kind/label/property). Neo4j requires constraint names to be unique across the
+// database; this is the analogue of its ConstraintWithNameAlreadyExists.
+var ErrConstraintNameConflict = errors.New("exec: constraint name already in use")
+
 // ConstraintViolationError carries structured context about which constraint
 // was violated.
 type ConstraintViolationError struct {
@@ -354,26 +367,46 @@ func (r *ConstraintRegistry) UniqueIndexName(label, prop string) (string, bool) 
 // registered through the legacy [RegisterUnique] / [RegisterNotNull] path has
 // no name to match.
 //
-// ResolveByName is safe for concurrent use.
+// ResolveByName is safe for concurrent use. It is deterministic: it scans the
+// UNIQUE names then the NOT NULL names, each in sorted key order, and returns
+// the first match, so a lookup never depends on Go map iteration order. Once
+// constraint names are enforced unique at CREATE time ([ErrConstraintNameConflict])
+// at most one constraint can match, so the sorted scan is belt-and-braces.
 func (r *ConstraintRegistry) ResolveByName(name string) (kind ConstraintKind, label, prop string, found bool) {
 	if name == "" {
 		return 0, "", "", false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for key, n := range r.uniqueNames {
-		if n == name {
-			l, p := splitConstraintKey(key)
-			return ConstraintUnique, l, p, true
-		}
+	if key, ok := firstKeyByName(r.uniqueNames, name); ok {
+		l, p := splitConstraintKey(key)
+		return ConstraintUnique, l, p, true
 	}
-	for key, n := range r.notNullNames {
-		if n == name {
-			l, p := splitConstraintKey(key)
-			return ConstraintNotNull, l, p, true
-		}
+	if key, ok := firstKeyByName(r.notNullNames, name); ok {
+		l, p := splitConstraintKey(key)
+		return ConstraintNotNull, l, p, true
 	}
 	return 0, "", "", false
+}
+
+// firstKeyByName returns the lexicographically-smallest key in names whose value
+// equals name, for deterministic resolution. Callers hold r.mu.
+func firstKeyByName(names map[string]string, name string) (string, bool) {
+	best, found := "", false
+	for key, n := range names {
+		if n == name && (!found || key < best) {
+			best, found = key, true
+		}
+	}
+	return best, found
+}
+
+// NameInUse reports the identity of the constraint currently holding name, or
+// found=false when no constraint carries it. It is the CREATE-time lookup used
+// to reject a name already used by a different constraint. NameInUse is safe
+// for concurrent use and deterministic (see [ResolveByName]).
+func (r *ConstraintRegistry) NameInUse(name string) (kind ConstraintKind, label, prop string, found bool) {
+	return r.ResolveByName(name)
 }
 
 // HasNotNull reports whether a not-null constraint exists for (label, prop).
