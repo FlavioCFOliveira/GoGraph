@@ -76,57 +76,28 @@ func TestNodeByIndexRangeScan_ClosedInterval(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Half-open interval (lo, hi] — exclusive lower bound
+// 2. Exclusive bounds are NOT enforced by the operator — it returns the
+//    inclusive [lo, hi] superset (#F-EXEC1). The operator holds only a NodeID
+//    bitmap, not property values, so it cannot compare a node's value to the
+//    bound; exact open/closed semantics are the caller's residual-filter job.
+//    These fixtures deliberately break the old NodeID==key coincidence (the
+//    node's ID differs from its index key) so the test verifies the real
+//    contract instead of masking the prior NodeID-vs-value confusion.
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestNodeByIndexRangeScan_ExclusiveLower(t *testing.T) {
-	// The test stub range lookup is inclusive by design; exclusion is applied
-	// by the operator itself when Include=false.
-	//
-	// We index NodeIDs as the int64 value for simplicity (1-to-1 mapping).
+func TestNodeByIndexRangeScan_ExclusiveBoundsNotEnforced(t *testing.T) {
+	// Keys 10/20/30 map to unrelated NodeIDs (101/102/103): NodeID != key.
 	entries := map[int64][]uint64{
-		10: {10},
-		20: {20},
-		30: {30},
+		10: {101},
+		20: {102},
+		30: {103},
 	}
 	lookup := newInt64RangeLookup(entries)
 
-	// (10, 30] — should exclude NodeID 10 (which is the boundary).
-	lo := exec.RangeBound{Value: expr.IntegerValue(10), Include: false}
-	hi := exec.RangeBound{Value: expr.IntegerValue(30), Include: true}
-	op := exec.NewNodeByIndexRangeScan(lookup, lo, hi)
-
-	rows, err := exec.Drain(context.Background(), op)
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	// NOTE: The operator's exclusive-bound filter compares the NodeID (not the
-	// index key) against the bound value.  In this fixture the NodeID equals
-	// the key, so the filter works correctly.
-	got := make(map[int64]bool, len(rows))
-	for _, row := range rows {
-		got[int64(row[0].(expr.IntegerValue))] = true
-	}
-	if got[10] {
-		t.Error("NodeID 10 should have been excluded by exclusive lower bound")
-	}
-	if !got[20] || !got[30] {
-		t.Error("NodeIDs 20 and 30 should be present")
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. Open interval (lo, hi) — both exclusive
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestNodeByIndexRangeScan_OpenInterval(t *testing.T) {
-	entries := map[int64][]uint64{
-		10: {10},
-		20: {20},
-		30: {30},
-	}
-	lookup := newInt64RangeLookup(entries)
-
+	// Request (10, 30) — both exclusive. The operator ignores Include and
+	// returns the inclusive superset: all three nodes, INCLUDING the boundary
+	// keys 10 and 30. (A residual Filter, applied by the planner, would then
+	// drop the boundary values — but that is not this operator's job.)
 	lo := exec.RangeBound{Value: expr.IntegerValue(10), Include: false}
 	hi := exec.RangeBound{Value: expr.IntegerValue(30), Include: false}
 	op := exec.NewNodeByIndexRangeScan(lookup, lo, hi)
@@ -139,11 +110,37 @@ func TestNodeByIndexRangeScan_OpenInterval(t *testing.T) {
 	for _, row := range rows {
 		got[int64(row[0].(expr.IntegerValue))] = true
 	}
-	if got[10] || got[30] {
-		t.Error("boundary NodeIDs 10 and 30 should be excluded in open interval")
+	for _, want := range []int64{101, 102, 103} {
+		if !got[want] {
+			t.Errorf("inclusive superset must contain node %d (exclusive bounds are not enforced here)", want)
+		}
 	}
-	if !got[20] {
-		t.Error("NodeID 20 should be present in (10, 30)")
+	if len(got) != 3 {
+		t.Errorf("expected the full inclusive superset (3 nodes), got %d", len(got))
+	}
+}
+
+// TestNodeByIndexRangeScan_NoNodeIDvsBoundConfusion pins the specific defect
+// removed in #F-EXEC1: previously an exclusive numeric bound was enforced by
+// comparing the emitted NodeID to the bound value, so a node whose ID happened
+// to equal the numeric bound was wrongly dropped. Here node 20 carries index
+// key 500 and is in range, while the exclusive lower bound is 20 — the old code
+// would have dropped node 20 (ID == bound); the fixed operator keeps it.
+func TestNodeByIndexRangeScan_NoNodeIDvsBoundConfusion(t *testing.T) {
+	// key 500 -> NodeID 20; a wide range that includes key 500.
+	entries := map[int64][]uint64{500: {20}}
+	lookup := newInt64RangeLookup(entries)
+
+	lo := exec.RangeBound{Value: expr.IntegerValue(20), Include: false} // exclusive lower == NodeID 20
+	hi := exec.RangeBound{Value: expr.IntegerValue(1000), Include: true}
+	op := exec.NewNodeByIndexRangeScan(lookup, lo, hi)
+
+	rows, err := exec.Drain(context.Background(), op)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(rows) != 1 || int64(rows[0][0].(expr.IntegerValue)) != 20 {
+		t.Errorf("node 20 (key 500, in range) must be returned; the old NodeID-vs-bound filter would have dropped it")
 	}
 }
 

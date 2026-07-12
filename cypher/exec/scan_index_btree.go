@@ -5,12 +5,23 @@ package exec
 // NodeByIndexRangeScan performs a range scan on a B+tree index and emits
 // NodeIDs in ascending order as guaranteed by the btree.Index implementation.
 //
-// # Interval semantics
+// # Interval semantics — inclusive superset (#F-EXEC1)
 //
-// The operator supports closed, half-open (either end), and open intervals
-// via the IncludeLo / IncludeHi flags.  The btree index's Range method is
-// fully inclusive ([lo, hi]), so the operator post-filters the boundary
-// NodeIDs when exclusive bounds are requested.
+// The operator emits the INCLUSIVE [lo, hi] superset the index returns. It does
+// NOT enforce exclusive (open) bounds itself, and cannot: it holds only a
+// bitmap of NodeIDs, not the property values those NodeIDs carry, so it has no
+// way to compare a node's value against the bound. Exact open/closed semantics
+// are the caller's responsibility via a residual predicate Filter stacked on
+// top — which the Cypher planner always applies (see cypher/range_seek_plan.go,
+// where the original range predicate is retained as a Selection over the scan).
+// Callers driving this operator directly must apply the same residual filter
+// for exact bounds; the RangeBound.Include flags record the caller's intended
+// inclusivity but are not enforced here.
+//
+// (A prior version post-filtered exclusive bounds by comparing the emitted
+// NodeID to the property-value bound — meaningless, since the two are unrelated
+// — which could drop a node whose ID happened to equal a numeric bound. Removed:
+// the residual Filter is the only correct enforcement point.)
 //
 // # Zero-alloc contract
 //
@@ -43,8 +54,10 @@ type RangeBound struct {
 	// Value is the bound's expr.Value.  Nil means unbounded (use the
 	// minimum or maximum representable value for the index type).
 	Value expr.Value
-	// Include determines whether the bound is inclusive (≤ / ≥) or exclusive
-	// (< / >).
+	// Include records the caller's intended inclusivity (≤ / ≥ vs < / >). It is
+	// metadata only: NodeByIndexRangeScan always emits the inclusive [lo, hi]
+	// superset and relies on a residual predicate Filter for exact open/closed
+	// semantics (see the NodeByIndexRangeScan type doc, #F-EXEC1).
 	Include bool
 }
 
@@ -75,33 +88,20 @@ func (op *NodeByIndexRangeScan) Init(ctx context.Context) error {
 	return nil
 }
 
-// Next emits the next matching NodeID.  Returns (false, nil) at end-of-stream.
+// Next emits the next NodeID in the inclusive [lo, hi] superset. Returns
+// (false, nil) at end-of-stream. Exact open/closed enforcement is the caller's
+// residual-filter responsibility (see the type doc); this operator emits every
+// NodeID the index's range bitmap contains.
 func (op *NodeByIndexRangeScan) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
 	}
-	for op.iter.HasNext() {
-		raw := op.iter.Next()
-		nodeID := expr.IntegerValue(int64(raw))
-
-		// Enforce exclusive lower bound.
-		if op.lo.Value != nil && !op.lo.Include {
-			if expr.IsTruthy(nodeID.Equal(op.lo.Value)) {
-				continue
-			}
-		}
-		// Enforce exclusive upper bound.
-		if op.hi.Value != nil && !op.hi.Include {
-			if expr.IsTruthy(nodeID.Equal(op.hi.Value)) {
-				continue
-			}
-		}
-
-		op.buf[0] = nodeID
-		*out = op.buf[:]
-		return true, nil
+	if !op.iter.HasNext() {
+		return false, nil
 	}
-	return false, nil
+	op.buf[0] = expr.IntegerValue(int64(op.iter.Next()))
+	*out = op.buf[:]
+	return true, nil
 }
 
 // Close releases resources.

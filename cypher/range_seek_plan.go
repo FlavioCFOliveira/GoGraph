@@ -459,11 +459,9 @@ func stringLiteral(e ast.Expression) (expr.StringValue, bool) {
 //     top (stacked by the caller in buildOperator), so any over-return is
 //     removed and null / NaN / cross-type / open-vs-closed-bound cases resolve
 //     exactly as the full scan+filter would.
-//   - The operator is given INCLUSIVE bounds (Include == true) so it returns
-//     the closed [lo, hi] superset and never runs its NodeID-vs-bound equality
-//     post-filter — which, for a numeric bound, could otherwise spuriously drop
-//     a node whose NodeID happens to equal the numeric bound. Exact open/closed
-//     semantics are enforced solely by the residual Filter.
+//   - The operator returns the inclusive [lo, hi] superset (it does not enforce
+//     open bounds itself — see NodeByIndexRangeScan, #F-EXEC1). Exact
+//     open/closed semantics are enforced solely by the residual Filter.
 //   - NaN and null/missing are never indexed (projectNumericPropValue), and a
 //     numeric bound (never NaN) over the btree's total order never returns the
 //     NaN key even if one existed.
@@ -497,10 +495,10 @@ func tryNumericRangeSeek(
 		return nil, false
 	}
 
-	// Inclusive bounds: the operator returns the closed [lo, hi] superset and
-	// skips its NodeID-vs-bound equality post-filter; the residual Selection
-	// Filter enforces the exact open/closed predicate. An unbounded side stays
-	// nil (the adapter widens it to ∓∞).
+	// The operator returns the inclusive [lo, hi] superset; the residual
+	// Selection Filter enforces the exact open/closed predicate (#F-EXEC1). An
+	// unbounded side stays nil (the adapter widens it to ∓∞). Include is set for
+	// documentation only — the operator no longer enforces it.
 	loB := exec.RangeBound{}
 	hiB := exec.RangeBound{}
 	if pred.lo != nil {
