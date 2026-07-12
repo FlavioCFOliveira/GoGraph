@@ -388,22 +388,46 @@ DROP INDEX person_email IF EXISTS
 
 ### CREATE CONSTRAINT
 
-Two constraint types are supported:
+Two constraint types are supported, both node-scoped on a single property:
+`UNIQUE` (at most one node with a given label has a given property value) and
+`NOT NULL` (every node with the label has the property present and non-null).
+
+The modern `FOR … REQUIRE` grammar is the primary form; the legacy
+`ON … ASSERT` grammar (removed in Neo4j 5) is accepted as an alias.
 
 ```cypher
--- uniqueness constraint
+-- uniqueness constraint (modern form)
+CREATE CONSTRAINT person_email_unique
+    FOR (n:Person) REQUIRE n.email IS UNIQUE
+
+-- not-null constraint, idempotent create
+CREATE CONSTRAINT person_name_notnull IF NOT EXISTS
+    FOR (n:Person) REQUIRE n.name IS NOT NULL
+
+-- legacy alias (equivalent to the first statement)
 CREATE CONSTRAINT person_email_unique
     ON (n:Person) ASSERT n.email IS UNIQUE
-
--- not-null constraint
-CREATE CONSTRAINT person_name_notnull
-    ON (n:Person) ASSERT n.name IS NOT NULL
 ```
 
-Both forms enforce the constraint on future writes. Existing data that violates
-the constraint is not checked retroactively.
+Both types enforce the constraint on every future write. `CREATE CONSTRAINT`
+also validates the **existing** data: it fails (rejecting the constraint, with
+nothing registered) if a `UNIQUE` property already has duplicate values, or if a
+`NOT NULL` property is already absent on some node carrying the label.
+
+Constraint names must be unique across the database: creating a constraint whose
+name is already in use by a different constraint is rejected, as is re-declaring
+an already-existing constraint without `IF NOT EXISTS`.
+
+The following forms are **not supported** and are rejected with a specific
+error: relationship constraints (`FOR ()-[r:T]-() REQUIRE …`), composite
+(multi-property) constraints, `NODE KEY` / relationship key, and property type
+constraints (`IS :: <TYPE>`).
 
 ### DROP CONSTRAINT
+
+`DROP CONSTRAINT` removes a constraint by its declared name (the name shown in
+`db.constraints()`). `IF EXISTS` suppresses the error when no such constraint
+exists.
 
 ```cypher
 DROP CONSTRAINT person_email_unique
@@ -434,7 +458,13 @@ Returns all registered constraints.
 CALL db.constraints()
 ```
 
-Yields: `name STRING`, `type STRING`, `label STRING`, `property STRING`
+Yields: `name STRING`, `type STRING`, `label STRING`, `property STRING`. The
+`name` column is the constraint's declared (or auto-generated) name — the same
+name `DROP CONSTRAINT` takes. `type` is `UNIQUE` or `NOT_NULL`.
+
+> Note: GoGraph exposes the schema through the `db.constraints()` / `db.indexes()`
+> procedures. The Neo4j 5 `SHOW CONSTRAINTS` / `SHOW INDEXES` statements are not
+> yet supported.
 
 ### db.labels()
 
