@@ -854,6 +854,14 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction) error {
 	v, err := parsePropValue(act.value)
 	if err != nil {
 		if isNullPropertyValueErr(err) {
+			// SET x.k = null removes the property; release its old constrained
+			// value so a UNIQUE slot is not leaked as a phantom reservation
+			// (#1904).
+			if op.reg != nil {
+				if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
+					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(key), act.key, oldVal)
+				}
+			}
 			op.mutator.DelNodeProperty(key, act.key)
 			return nil
 		}
@@ -861,6 +869,14 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction) error {
 	}
 	if op.reg != nil {
 		labels := op.mutator.NodeLabels(key)
+		// Release this node's own old constrained value BEFORE the check and the
+		// overwrite, so the replaced value is not leaked as a permanent phantom
+		// reservation (#1904) and an idempotent self-set is not rejected as its
+		// own duplicate. UNIQUE guarantees at most one holder, so releasing first
+		// cannot mask a real cross-node duplicate.
+		if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
+			op.reg.ReleasePropertyValue(labels, act.key, oldVal)
+		}
 		if err := op.reg.CheckSetProperty(labels, act.key, v, op.mgr); err != nil {
 			return err
 		}

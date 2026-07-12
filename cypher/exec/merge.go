@@ -442,6 +442,16 @@ func (op *Merge) applyActions(actions []mergeAction, row Row) error {
 		// Constraint enforcement for ON MATCH / ON CREATE action.
 		if op.reg != nil {
 			labels := op.mutator.NodeLabels(nodeKey)
+			// Release this node's own old constrained value BEFORE the check and
+			// the overwrite. Without this the replaced value leaks as a permanent
+			// phantom reservation (no live node holds it yet it is blocked
+			// forever, #1904), and an idempotent MERGE self-set is rejected as its
+			// own duplicate. A UNIQUE constraint guarantees at most one holder, so
+			// releasing first cannot mask a real cross-node duplicate; a failed
+			// check aborts the transaction and rebuilds every value-set.
+			if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
+				op.reg.ReleasePropertyValue(labels, a.key, oldVal)
+			}
 			if cerr := op.reg.CheckSetProperty(labels, a.key, pv, op.mgr); cerr != nil {
 				return cerr
 			}
