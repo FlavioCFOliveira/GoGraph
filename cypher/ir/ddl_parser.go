@@ -172,30 +172,59 @@ func parseOptionalIndexOptions(r *tokenReader, name string) (IndexType, error) {
 	return t, nil
 }
 
+// tokAt returns tokens[pos] and true, or ("", false) when pos is out of range.
+// Every DDL sub-parser reads tokens through tokAt (never a bare tokens[pos]
+// index) so truncated input returns a typed error instead of an
+// index-out-of-range panic (#F-PARSER1): the DDL parser is a public boundary
+// for untrusted query text and must fail with a SyntaxError, not crash.
+func tokAt(tokens []string, pos int) (string, bool) {
+	if pos < 0 || pos >= len(tokens) {
+		return "", false
+	}
+	return tokens[pos], true
+}
+
+// tokDisplay renders tokens[pos] for an error message, or "end of input" when
+// pos is past the end.
+func tokDisplay(tokens []string, pos int) string {
+	if t, ok := tokAt(tokens, pos); ok {
+		return t
+	}
+	return "end of input"
+}
+
 // parseNodePattern parses "(n:Label)" at tokens[*pos] and advances *pos past
-// the closing paren. Returns the Label string.
+// the closing paren. Returns the Label string. Truncated input yields an error.
 func parseNodePattern(tokens []string, pos *int) (string, error) {
-	if !strings.EqualFold(tokens[*pos], "(") {
+	open, ok := tokAt(tokens, *pos)
+	if !ok {
+		return "", fmt.Errorf("expected node pattern (n:Label), got end of input")
+	}
+	if !strings.EqualFold(open, "(") {
 		// Tokens may have included the parenthesis as part of a single token
 		// if the query had no spaces. Try a fallback approach.
 		return parseNodePatternCompact(tokens, pos)
 	}
 	(*pos)++ // (
-	// Skip variable name (before ':')
-	varName := tokens[*pos]
-	_ = varName
+	// Skip variable name (before ':').
+	if _, ok := tokAt(tokens, *pos); !ok {
+		return "", fmt.Errorf("unterminated node pattern: expected variable after '('")
+	}
 	(*pos)++
 	// ':'
-	if tokens[*pos] != ":" {
-		return "", fmt.Errorf("expected ':' in node pattern, got %q", tokens[*pos])
+	if colon, ok := tokAt(tokens, *pos); !ok || colon != ":" {
+		return "", fmt.Errorf("expected ':' in node pattern, got %q", tokDisplay(tokens, *pos))
 	}
 	(*pos)++
 	// Label
-	label := tokens[*pos]
+	label, ok := tokAt(tokens, *pos)
+	if !ok {
+		return "", fmt.Errorf("expected label in node pattern, got end of input")
+	}
 	(*pos)++
 	// )
-	if tokens[*pos] != ")" {
-		return "", fmt.Errorf("expected ')' in node pattern, got %q", tokens[*pos])
+	if closeTok, ok := tokAt(tokens, *pos); !ok || closeTok != ")" {
+		return "", fmt.Errorf("expected ')' in node pattern, got %q", tokDisplay(tokens, *pos))
 	}
 	(*pos)++
 	return label, nil
@@ -204,30 +233,40 @@ func parseNodePattern(tokens []string, pos *int) (string, error) {
 // parseNodePatternCompact handles the case where the pattern is a single token
 // like "(n:Label)".
 func parseNodePatternCompact(tokens []string, pos *int) (string, error) {
-	tok := tokens[*pos]
+	tok, ok := tokAt(tokens, *pos)
+	if !ok {
+		return "", fmt.Errorf("expected node pattern (n:Label), got end of input")
+	}
 	// Strip optional parens.
-	tok = strings.TrimPrefix(tok, "(")
-	tok = strings.TrimSuffix(tok, ")")
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(tok, "("), ")")
 	// Expect "var:Label".
-	colonIdx := strings.Index(tok, ":")
+	colonIdx := strings.Index(trimmed, ":")
 	if colonIdx < 0 {
-		return "", fmt.Errorf("expected node pattern (n:Label), got %q", tokens[*pos])
+		return "", fmt.Errorf("expected node pattern (n:Label), got %q", tok)
 	}
 	(*pos)++
-	return tok[colonIdx+1:], nil
+	return trimmed[colonIdx+1:], nil
 }
 
-// parsePropAccess parses "(n.prop)" and returns the property key.
+// parsePropAccess parses "(n.prop)" and returns the property key. Truncated
+// input yields an error.
 func parsePropAccess(tokens []string, pos *int) (string, error) {
-	if !strings.EqualFold(tokens[*pos], "(") {
+	open, ok := tokAt(tokens, *pos)
+	if !ok {
+		return "", fmt.Errorf("expected property access (n.prop), got end of input")
+	}
+	if !strings.EqualFold(open, "(") {
 		return parsePropAccessCompact(tokens, pos)
 	}
 	(*pos)++ // (
 	// "n.prop"
-	access := tokens[*pos]
+	access, ok := tokAt(tokens, *pos)
+	if !ok {
+		return "", fmt.Errorf("unterminated property access: expected n.prop after '('")
+	}
 	(*pos)++
-	if tokens[*pos] != ")" {
-		return "", fmt.Errorf("expected ')' in property access, got %q", tokens[*pos])
+	if closeTok, ok := tokAt(tokens, *pos); !ok || closeTok != ")" {
+		return "", fmt.Errorf("expected ')' in property access, got %q", tokDisplay(tokens, *pos))
 	}
 	(*pos)++
 	// Extract property key from "n.prop".
@@ -239,15 +278,17 @@ func parsePropAccess(tokens []string, pos *int) (string, error) {
 }
 
 func parsePropAccessCompact(tokens []string, pos *int) (string, error) {
-	tok := tokens[*pos]
-	tok = strings.TrimPrefix(tok, "(")
-	tok = strings.TrimSuffix(tok, ")")
-	dotIdx := strings.LastIndex(tok, ".")
+	tok, ok := tokAt(tokens, *pos)
+	if !ok {
+		return "", fmt.Errorf("expected n.prop form, got end of input")
+	}
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(tok, "("), ")")
+	dotIdx := strings.LastIndex(trimmed, ".")
 	if dotIdx < 0 {
-		return "", fmt.Errorf("expected n.prop form, got %q", tokens[*pos])
+		return "", fmt.Errorf("expected n.prop form, got %q", tok)
 	}
 	(*pos)++
-	return tok[dotIdx+1:], nil
+	return trimmed[dotIdx+1:], nil
 }
 
 // parseIndexOptions parses "{indexType: 'hash'|'btree'}" and returns the
