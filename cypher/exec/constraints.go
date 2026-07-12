@@ -115,17 +115,17 @@ func (e *ConstraintViolationError) Unwrap() error { return ErrConstraintViolatio
 // ConstraintRegistry is safe for concurrent use.
 type ConstraintRegistry struct {
 	mu        sync.RWMutex
-	unique    map[string]string              // "label.prop" → index name
-	notNull   map[string]bool                // "label.prop" → true
-	valueSets map[string]map[string]struct{} // "label.prop" → set of string values in use
+	unique    map[ckey]string              // (label, prop) → index name
+	notNull   map[ckey]bool                // (label, prop) → true
+	valueSets map[ckey]map[string]struct{} // (label, prop) → set of string values in use
 	// uniqueNames / notNullNames carry the user-defined constraint name per
 	// (label, prop) key, tracked separately per kind because a UNIQUE and a
 	// NOT NULL constraint may coexist on the same key. The name is needed so a
 	// constraint round-trips durably through the WAL / snapshot with the name
 	// the client declared. An entry is absent for a constraint registered
 	// without a name (the legacy [RegisterUnique] / [RegisterNotNull] path).
-	uniqueNames  map[string]string // "label.prop" → constraint name (UNIQUE)
-	notNullNames map[string]string // "label.prop" → constraint name (NOT NULL)
+	uniqueNames  map[ckey]string // (label, prop) → constraint name (UNIQUE)
+	notNullNames map[ckey]string // (label, prop) → constraint name (NOT NULL)
 	// notNullByLabel is a label → NOT-NULL-property-keys index maintained
 	// alongside notNull so the commit-time existence check does an O(1) lookup
 	// per touched label instead of scanning the whole notNull map and splitting
@@ -140,11 +140,11 @@ type ConstraintRegistry struct {
 // NewConstraintRegistry creates an empty ConstraintRegistry.
 func NewConstraintRegistry() *ConstraintRegistry {
 	return &ConstraintRegistry{
-		unique:         make(map[string]string),
-		notNull:        make(map[string]bool),
-		valueSets:      make(map[string]map[string]struct{}),
-		uniqueNames:    make(map[string]string),
-		notNullNames:   make(map[string]string),
+		unique:         make(map[ckey]string),
+		notNull:        make(map[ckey]bool),
+		valueSets:      make(map[ckey]map[string]struct{}),
+		uniqueNames:    make(map[ckey]string),
+		notNullNames:   make(map[ckey]string),
 		notNullByLabel: make(map[string][]string),
 	}
 }
@@ -164,8 +164,17 @@ type ConstraintInfo struct {
 	Name string
 }
 
-// constraintKey returns the canonical map key for (label, prop).
-func constraintKey(label, prop string) string { return label + "." + prop }
+// ckey is the registry map key: the (label, property) pair kept as distinct
+// fields. Keeping them structurally separate — rather than joining them into a
+// "label.prop" string and splitting on a dot — eliminates the aliasing where a
+// dotted label or property made ("A.b","c") and ("A","b.c") collide on the same
+// key, which could mis-attribute a constraint (#1916). ckey is comparable, so
+// it is a valid Go map key directly.
+type ckey struct{ label, prop string }
+
+// constraintKey returns the canonical map key for (label, prop). Call sites are
+// unchanged from when the key was a string; only the key type is now unambiguous.
+func constraintKey(label, prop string) ckey { return ckey{label: label, prop: prop} }
 
 // RegisterUnique adds a unique constraint for (label, prop) backed by
 // indexName in the index.Manager.
@@ -214,12 +223,10 @@ func (r *ConstraintRegistry) Constraints() []ConstraintInfo {
 	r.mu.RLock()
 	out := make([]ConstraintInfo, 0, len(r.unique)+len(r.notNull))
 	for key := range r.unique {
-		label, prop := splitConstraintKey(key)
-		out = append(out, ConstraintInfo{KindUnique: true, Label: label, Property: prop, Name: r.uniqueNames[key]})
+		out = append(out, ConstraintInfo{KindUnique: true, Label: key.label, Property: key.prop, Name: r.uniqueNames[key]})
 	}
 	for key := range r.notNull {
-		label, prop := splitConstraintKey(key)
-		out = append(out, ConstraintInfo{KindUnique: false, Label: label, Property: prop, Name: r.notNullNames[key]})
+		out = append(out, ConstraintInfo{KindUnique: false, Label: key.label, Property: key.prop, Name: r.notNullNames[key]})
 	}
 	r.mu.RUnlock()
 
@@ -317,7 +324,7 @@ func (r *ConstraintRegistry) SeedUniqueValuesIgnoringDuplicates(label, prop stri
 // mergeSeed merges seed into the value-set for key, creating the value-set when
 // the key names a registered UNIQUE constraint that has none yet. It is a no-op
 // when key is not a registered UNIQUE constraint. Callers hold r.mu.
-func (r *ConstraintRegistry) mergeSeed(key string, seed map[string]struct{}) {
+func (r *ConstraintRegistry) mergeSeed(key ckey, seed map[string]struct{}) {
 	vs := r.valueSets[key]
 	if vs == nil {
 		if _, ok := r.unique[key]; !ok {
@@ -427,22 +434,21 @@ func (r *ConstraintRegistry) ResolveByName(name string) (kind ConstraintKind, la
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if key, ok := firstKeyByName(r.uniqueNames, name); ok {
-		l, p := splitConstraintKey(key)
-		return ConstraintUnique, l, p, true
+		return ConstraintUnique, key.label, key.prop, true
 	}
 	if key, ok := firstKeyByName(r.notNullNames, name); ok {
-		l, p := splitConstraintKey(key)
-		return ConstraintNotNull, l, p, true
+		return ConstraintNotNull, key.label, key.prop, true
 	}
 	return 0, "", "", false
 }
 
-// firstKeyByName returns the lexicographically-smallest key in names whose value
-// equals name, for deterministic resolution. Callers hold r.mu.
-func firstKeyByName(names map[string]string, name string) (string, bool) {
-	best, found := "", false
+// firstKeyByName returns the smallest key (ordered by label then property) in
+// names whose value equals name, for deterministic resolution. Callers hold r.mu.
+func firstKeyByName(names map[ckey]string, name string) (ckey, bool) {
+	var best ckey
+	found := false
 	for key, n := range names {
-		if n == name && (!found || key < best) {
+		if n == name && (!found || key.label < best.label || (key.label == best.label && key.prop < best.prop)) {
 			best, found = key, true
 		}
 	}
@@ -637,18 +643,16 @@ func (r *ConstraintRegistry) ReleasePropertyValue(labels []string, prop string, 
 // so the scan itself must NOT hold the registry lock.
 func (r *ConstraintRegistry) ReseedFromGraph(scanFn func(label, prop string) []lpg.PropertyValue) {
 	r.mu.RLock()
-	// Snapshot the registered constraints so we can iterate them without
+	// Snapshot the registered constraint keys so we can iterate them without
 	// holding the write lock during the (potentially expensive) scan.
-	type constraintKey struct{ label, prop string }
-	keys := make([]constraintKey, 0, len(r.unique))
+	keys := make([]ckey, 0, len(r.unique))
 	for k := range r.unique {
-		label, prop := splitConstraintKey(k)
-		keys = append(keys, constraintKey{label, prop})
+		keys = append(keys, k)
 	}
 	r.mu.RUnlock()
 
-	for _, ck := range keys {
-		values := scanFn(ck.label, ck.prop)
+	for _, k := range keys {
+		values := scanFn(k.label, k.prop)
 		seed := make(map[string]struct{}, len(values))
 		for _, v := range values {
 			if sv, ok := propertyValueToString(v); ok {
@@ -656,7 +660,6 @@ func (r *ConstraintRegistry) ReseedFromGraph(scanFn func(label, prop string) []l
 			}
 		}
 		r.mu.Lock()
-		k := ck.label + "." + ck.prop
 		if vs := r.valueSets[k]; vs != nil {
 			// Replace the value-set contents in-place so we keep the map header
 			// (avoids an extra allocation) and concurrent readers see the update
@@ -788,31 +791,29 @@ func (r *ConstraintRegistry) ListConstraintRows() [][]expr.Value {
 	// displayName is the declared name for key, or the "label.prop" key itself
 	// when the constraint was registered anonymously — so create -> list -> drop
 	// agrees on the name to use (#1909).
-	displayName := func(names map[string]string, key string) string {
+	displayName := func(names map[ckey]string, key ckey) string {
 		if n := names[key]; n != "" {
 			return n
 		}
-		return key
+		return key.label + "." + key.prop
 	}
 
 	r.mu.RLock()
 	rows := make([][]expr.Value, 0, len(r.unique)+len(r.notNull))
 	for key := range r.unique {
-		label, prop := splitConstraintKey(key)
 		rows = append(rows, []expr.Value{
 			expr.StringValue(displayName(r.uniqueNames, key)),
 			expr.StringValue("UNIQUE"),
-			expr.StringValue(label),
-			expr.StringValue(prop),
+			expr.StringValue(key.label),
+			expr.StringValue(key.prop),
 		})
 	}
 	for key := range r.notNull {
-		label, prop := splitConstraintKey(key)
 		rows = append(rows, []expr.Value{
 			expr.StringValue(displayName(r.notNullNames, key)),
 			expr.StringValue("NOT_NULL"),
-			expr.StringValue(label),
-			expr.StringValue(prop),
+			expr.StringValue(key.label),
+			expr.StringValue(key.prop),
 		})
 	}
 	r.mu.RUnlock()
@@ -829,17 +830,6 @@ func (r *ConstraintRegistry) ListConstraintRows() [][]expr.Value {
 		return false
 	})
 	return rows
-}
-
-// splitConstraintKey splits a "label.prop" key into its two parts.
-// If there is no dot, label is the full key and prop is "".
-func splitConstraintKey(key string) (label, prop string) {
-	for i := len(key) - 1; i >= 0; i-- {
-		if key[i] == '.' {
-			return key[:i], key[i+1:]
-		}
-	}
-	return key, ""
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
