@@ -802,25 +802,36 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// existed (mirrors CreateIndexOp's onSchemaChange contract).
 	e.ClearPlanCache()
 
+	// Record the user index def in the engine registry BEFORE the WAL commit,
+	// while this DDL still holds the single-writer serialisation (#F-STORE1). A
+	// concurrent non-blocking checkpoint captures (WAL watermark, index defs)
+	// under the commit lock + inflight drain; performing the registry update
+	// here — inside the serialised window, before commitIndexTx releases it —
+	// guarantees the checkpoint never observes a watermark past this CREATE
+	// while the def registry still lags. (Recording after the commit left that
+	// window open: the dropped/created def could be captured inconsistently and
+	// the WAL truncated past it, losing or resurrecting the index across a
+	// crash.) It is unwound below if the WAL commit fails, so registered ⇔
+	// durable ⇔ recorded still holds once the operation returns; a crash in the
+	// pre-durable window is harmless because recovery rebuilds the registry from
+	// the WAL, which does not carry the un-fsynced CREATE.
+	e.recordIndexDef(p.Name, true /* hash */, p.Label, p.Property)
+
 	// Durability: append the CREATE INDEX op to the WAL and fsync so the index
 	// definition survives a crash (task #1343). On failure unwind the in-memory
-	// registration: the index would otherwise stay active in this session while
-	// silently vanishing on the next reopen (registered ⇔ durable invariant).
+	// registration AND the def record: the index would otherwise stay active in
+	// this session while silently vanishing on the next reopen (registered ⇔
+	// durable invariant).
 	if tx != nil {
 		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindHash, p.Label, p.Property, p.Name); err != nil {
-			// Best-effort unwind: drop the just-registered index. Errors are
-			// joined but the original cause is always returned.
+			// Best-effort unwind: forget the def and drop the just-registered
+			// index. Errors are joined but the original cause is always returned.
+			e.forgetIndexDef(p.Name)
 			if derr := idxMgr.DropIndex(p.Name); derr != nil {
 				return nil, errors.Join(err, fmt.Errorf("cypher: unwind CREATE INDEX registration: %w", derr))
 			}
 			return nil, err
 		}
 	}
-	// Record the user index def in the engine registry (registered ⇔ durable ⇔
-	// recorded). Reached only on a fully-registered, durably-committed hash
-	// index, so the registry — the source IndexSpecsForSnapshot persists into a
-	// checkpoint — stays exactly in step with the index.Manager and the WAL
-	// (#1755).
-	e.recordIndexDef(p.Name, true /* hash */, p.Label, p.Property)
 	return emptyDDLResult(), nil
 }

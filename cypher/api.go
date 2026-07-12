@@ -2014,13 +2014,25 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 		return emptyDDLResult(), nil
 	}
 
+	// Record the user index def BEFORE the WAL commit, while this DDL still
+	// holds the single-writer serialisation (#F-STORE1). A concurrent
+	// non-blocking checkpoint captures (WAL watermark, index defs) under the
+	// commit lock + inflight drain; updating the registry inside the serialised
+	// window here — not after commitIndexTx releases it — guarantees the
+	// checkpoint never captures a watermark past this CREATE while the registry
+	// lags, which would let a WAL truncation lose the index across a crash. It
+	// is unwound below if the WAL commit fails. The numeric companion is
+	// internal and is NOT recorded.
+	e.recordIndexDef(p.Name, false /* btree */, p.Label, p.Property)
+
 	// Durability: append the CREATE INDEX op and fsync (task #1343). On failure
-	// unwind the in-memory registration (registered ⇔ durable invariant). The
-	// companion is NOT separately persisted (format-neutral), so unwinding it
-	// here keeps the in-memory pair consistent with the durable state: nothing
-	// durable, nothing registered.
+	// unwind the def record AND the in-memory registration (registered ⇔ durable
+	// invariant). The companion is NOT separately persisted (format-neutral), so
+	// unwinding it here keeps the in-memory pair consistent with the durable
+	// state: nothing durable, nothing registered, nothing recorded.
 	if tx != nil {
 		if err := commitIndexTx(tx, txn.OpCreateIndex, txn.IndexKindBTree, p.Label, p.Property, p.Name); err != nil {
+			e.forgetIndexDef(p.Name)
 			var unwind error
 			if derr := idxMgr.DropIndex(p.Name); derr != nil {
 				unwind = errors.Join(unwind, fmt.Errorf("cypher: unwind CREATE INDEX registration: %w", derr))
@@ -2036,12 +2048,6 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 			return nil, err
 		}
 	}
-	// Record the user index def in the engine registry (registered ⇔ durable ⇔
-	// recorded). Reached only on a fully-registered, durably-committed index, so
-	// the registry — the source IndexSpecsForSnapshot persists into a checkpoint
-	// — stays exactly in step with the index.Manager and the WAL (#1755). The
-	// numeric companion is internal and is NOT recorded.
-	e.recordIndexDef(p.Name, false /* btree */, p.Label, p.Property)
 	return emptyDDLResult(), nil
 }
 
@@ -2099,12 +2105,23 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 			// IF EXISTS no-op: nothing was dropped, nothing to record.
 			return res, nil
 		}
+		// Forget the def from the engine registry BEFORE the WAL commit, while
+		// this DDL still holds the single-writer serialisation (#F-STORE1). The
+		// index is already gone from the index.Manager (the DropIndexOp above);
+		// aligning the def-registry removal into the same serialised window means
+		// a concurrent non-blocking checkpoint — which captures (WAL watermark,
+		// index defs) under the commit lock + inflight drain — can never observe
+		// a watermark past this durable DROP while the registry still lists the
+		// index. (Forgetting AFTER the commit left that window open: the stale
+		// def could be captured into indexdefs.bin and the WAL truncated past the
+		// DROP, resurrecting the dropped index on the next restart.) A crash in
+		// the pre-durable window is harmless: recovery replays the WAL, which
+		// still carries the index's CREATE and no DROP, so the index is correctly
+		// re-registered.
+		e.forgetIndexDef(p.Name)
 		if err := commitIndexTx(tx, txn.OpDropIndex, 0, "", "", p.Name); err != nil {
 			return nil, err
 		}
-		// The user index is now durably dropped; forget its def from the engine
-		// registry so a later checkpoint no longer persists it (#1755).
-		e.forgetIndexDef(p.Name)
 		// The user index is now durably dropped; remove its numeric companion
 		// when no other user btree still covers the same (label, property). The
 		// companion is not separately persisted, so this in-memory cleanup keeps
