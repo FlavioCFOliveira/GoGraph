@@ -121,6 +121,32 @@ func TestConstraintRegistry_ListConstraintRows_LabelOnly(t *testing.T) {
 	}
 }
 
+// TestConstraintRegistry_ListConstraintRows_DeclaredName verifies the name
+// column carries the declared constraint name (not the "label.prop" key) so
+// create -> db.constraints() -> DROP CONSTRAINT <name> agrees (#1909).
+func TestConstraintRegistry_ListConstraintRows_DeclaredName(t *testing.T) {
+	t.Parallel()
+	reg := exec.NewConstraintRegistry()
+	reg.RegisterUnique("Person", "email", "__uniq__Person.email")
+	reg.SetConstraintName(true, "Person", "email", "person_email_unique")
+	reg.RegisterNotNull("Post", "title")
+	reg.SetConstraintName(false, "Post", "title", "post_title_exists")
+
+	rows := reg.ListConstraintRows()
+	nameByLabel := make(map[string]string)
+	for _, row := range rows {
+		name := string(row[0].(expr.StringValue))
+		label := string(row[2].(expr.StringValue))
+		nameByLabel[label] = name
+	}
+	if nameByLabel["Person"] != "person_email_unique" {
+		t.Errorf("UNIQUE name column = %q, want person_email_unique", nameByLabel["Person"])
+	}
+	if nameByLabel["Post"] != "post_title_exists" {
+		t.Errorf("NOT NULL name column = %q, want post_title_exists", nameByLabel["Post"])
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Eager operator
 // ─────────────────────────────────────────────────────────────────────────────

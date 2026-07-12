@@ -671,18 +671,31 @@ func encodeListKey(elems []lpg.PropertyValue) string {
 }
 
 // ListConstraintRows returns a [][]expr.Value where each inner slice has four
-// elements: [name, type, label, property]. The name column uses the canonical
-// "label.prop" key; type is "UNIQUE" or "NOT_NULL". Rows are returned in
-// deterministic lexicographic order.
+// elements: [name, type, label, property]. The name column carries the
+// constraint's declared (or auto-generated) name — the same name DROP
+// CONSTRAINT resolves by — falling back to the canonical "label.prop" key only
+// for a constraint registered without a name (the legacy anonymous path). type
+// is "UNIQUE" or "NOT_NULL". Rows are returned in deterministic order (name,
+// type, label, property).
 //
 // ListConstraintRows is safe for concurrent use.
 func (r *ConstraintRegistry) ListConstraintRows() [][]expr.Value {
+	// displayName is the declared name for key, or the "label.prop" key itself
+	// when the constraint was registered anonymously — so create -> list -> drop
+	// agrees on the name to use (#1909).
+	displayName := func(names map[string]string, key string) string {
+		if n := names[key]; n != "" {
+			return n
+		}
+		return key
+	}
+
 	r.mu.RLock()
 	rows := make([][]expr.Value, 0, len(r.unique)+len(r.notNull))
 	for key := range r.unique {
 		label, prop := splitConstraintKey(key)
 		rows = append(rows, []expr.Value{
-			expr.StringValue(key),
+			expr.StringValue(displayName(r.uniqueNames, key)),
 			expr.StringValue("UNIQUE"),
 			expr.StringValue(label),
 			expr.StringValue(prop),
@@ -691,7 +704,7 @@ func (r *ConstraintRegistry) ListConstraintRows() [][]expr.Value {
 	for key := range r.notNull {
 		label, prop := splitConstraintKey(key)
 		rows = append(rows, []expr.Value{
-			expr.StringValue(key),
+			expr.StringValue(displayName(r.notNullNames, key)),
 			expr.StringValue("NOT_NULL"),
 			expr.StringValue(label),
 			expr.StringValue(prop),
@@ -699,16 +712,16 @@ func (r *ConstraintRegistry) ListConstraintRows() [][]expr.Value {
 	}
 	r.mu.RUnlock()
 
-	// Sort for deterministic output.
+	// Sort for deterministic output: name, then type, then label, then property.
 	sort.Slice(rows, func(i, j int) bool {
-		ki := rows[i][0].(expr.StringValue)
-		kj := rows[j][0].(expr.StringValue)
-		if ki != kj {
-			return string(ki) < string(kj)
+		for col := 0; col < 4; col++ {
+			a := string(rows[i][col].(expr.StringValue))
+			b := string(rows[j][col].(expr.StringValue))
+			if a != b {
+				return a < b
+			}
 		}
-		ti := rows[i][1].(expr.StringValue)
-		tj := rows[j][1].(expr.StringValue)
-		return string(ti) < string(tj)
+		return false
 	})
 	return rows
 }
