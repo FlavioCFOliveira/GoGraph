@@ -1036,7 +1036,7 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 	// verified exactly like the other components.
 	var indexDefsParsed IndexDefsReadback
 	if idEntry := findEntry(m.Files, IndexDefsFile); idEntry != nil {
-		indexDefsParsed, err = readVerifiedIndexDefs(fsys, filepath.Join(dir, IndexDefsFile), idEntry.CRC32C)
+		indexDefsParsed, err = readVerifiedIndexDefs(fsys, filepath.Join(dir, IndexDefsFile), idEntry.CRC32C, idEntry.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
@@ -1294,7 +1294,11 @@ func readVerifiedConstraints(fsys fileSystem, path string, expected uint32) (Con
 }
 
 // readVerifiedIndexDefs is the dual of [readVerifiedCSR] for indexdefs.bin.
-func readVerifiedIndexDefs(fsys fileSystem, path string, expected uint32) (IndexDefsReadback, error) {
+// size is the manifest-declared component size; the body reader is bounded to
+// it so a corrupt/hostile count or length field cannot drive reads beyond the
+// declared file before the CRC is verified (#F-STORE-LOW; mirrors
+// [readVerifiedProperties]/[readVerifiedLabels]).
+func readVerifiedIndexDefs(fsys fileSystem, path string, expected uint32, size int64) (IndexDefsReadback, error) {
 	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return IndexDefsReadback{}, err
@@ -1303,7 +1307,7 @@ func readVerifiedIndexDefs(fsys fileSystem, path string, expected uint32) (Index
 	defer func() { _ = f.Close() }()
 
 	hasher := crc32.New(castagnoli)
-	tee := io.TeeReader(f, hasher)
+	tee := io.TeeReader(boundedComponentReader(f, size), hasher)
 	parsed, err := ReadIndexDefs(tee)
 	if err != nil {
 		return IndexDefsReadback{}, fmt.Errorf("%w: %w", ErrCorrupted, err)

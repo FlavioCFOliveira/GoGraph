@@ -55,6 +55,13 @@ const indexDefsMaxCount uint32 = 1 << 20
 // legitimate identifier yet caps a crafted length prefix.
 const indexDefsMaxStringLen = 1 << 16
 
+// indexDefsCapHint caps the eager slice pre-allocation in [ReadIndexDefs]
+// independently of the (implausibility-capped) declared record count, so a
+// corrupt count cannot reserve large memory before any record is read and the
+// CRC verified. A real schema has a handful of indexes; append grows the rare
+// larger set (#F-STORE-LOW).
+const indexDefsCapHint = 1024
+
 // ErrIndexDefsCorrupted is returned by [ReadIndexDefs] when the indexdefs.bin
 // file is structurally malformed (bad magic, unsupported format version,
 // implausible count or string length, or a truncated record).
@@ -206,7 +213,16 @@ func ReadIndexDefs(r io.Reader) (IndexDefsReadback, error) {
 			ErrIndexDefsCorrupted, count)
 	}
 
-	specs := make([]IndexDefSpec, 0, count)
+	// Cap the eager pre-allocation independently of the declared count: count is
+	// already bounded by indexDefsMaxCount, but that ceiling (1<<20) would still
+	// let a corrupt/hostile count reserve tens of MiB before a single record is
+	// read and the CRC verified. Reserve a modest hint and let append grow for a
+	// legitimately large set; the bounded component reader caps the real work.
+	capHint := count
+	if capHint > indexDefsCapHint {
+		capHint = indexDefsCapHint
+	}
+	specs := make([]IndexDefSpec, 0, capHint)
 	for i := uint32(0); i < count; i++ {
 		d, err := readIndexDefRecord(br)
 		if err != nil {
