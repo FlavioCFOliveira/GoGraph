@@ -4,8 +4,9 @@ package exec
 //
 // ConstraintRegistry holds the active set of UNIQUE and NOT NULL constraints.
 // It is consulted by write operators before every mutation to detect violations
-// early. The registry is thread-safe: concurrent reads (CheckSetProperty) are
-// non-blocking; writes (Register/Unregister) acquire a write lock.
+// early. The registry is thread-safe via a single RWMutex: reads
+// (CheckSetProperty, HasUnique, …) take the read lock and run concurrently with
+// each other; writes (Register/Unregister) take the write lock and exclude both.
 //
 // # Unique constraint backing
 //
@@ -281,7 +282,7 @@ func (r *ConstraintRegistry) SeedUniqueValues(label, prop string, values []lpg.P
 				Label:    label,
 				Property: prop,
 				Kind:     "UNIQUE",
-				Detail:   fmt.Sprintf("pre-existing data contains duplicate value %q", strVal),
+				Detail:   fmt.Sprintf("pre-existing data contains duplicate value %s", humanConstraintValue(values[i])),
 			}
 		}
 		seed[strVal] = struct{}{}
@@ -544,7 +545,7 @@ func (r *ConstraintRegistry) CheckSetProperty(labels []string, prop string, valu
 							Label:    label,
 							Property: prop,
 							Kind:     "UNIQUE",
-							Detail:   fmt.Sprintf("value %q already exists", strVal),
+							Detail:   fmt.Sprintf("value %s already exists", humanConstraintValue(value)),
 						}
 					}
 					// Primary value-set is present and definitively reports the
@@ -669,6 +670,36 @@ func (r *ConstraintRegistry) ReseedFromGraph(scanFn func(label, prop string) []l
 		}
 		r.mu.Unlock()
 	}
+}
+
+// humanConstraintValue renders a property value in its natural form for a
+// client-facing constraint-violation message. It is display-only and never used
+// as an identity key — unlike [propertyValueToString], whose kind-tagged output
+// (e.g. "\x00s\x00a@b.com") must never reach a user-facing message (#1914).
+func humanConstraintValue(v lpg.PropertyValue) string {
+	switch v.Kind() {
+	case lpg.PropString:
+		s, _ := v.String()
+		return strconv.Quote(s)
+	case lpg.PropInt64:
+		i, _ := v.Int64()
+		return strconv.FormatInt(i, 10)
+	case lpg.PropFloat64:
+		f, _ := v.Float64()
+		return strconv.FormatFloat(f, 'g', -1, 64)
+	case lpg.PropBool:
+		b, _ := v.Bool()
+		return strconv.FormatBool(b)
+	case lpg.PropTime:
+		t, _ := v.Time()
+		return t.UTC().Format(time.RFC3339Nano)
+	case lpg.PropBytes:
+		raw, _ := v.Bytes()
+		return fmt.Sprintf("<%d bytes>", len(raw))
+	case lpg.PropList:
+		return "<list>"
+	}
+	return "<null>"
 }
 
 // propertyValueToString converts a PropertyValue to a canonical string key
