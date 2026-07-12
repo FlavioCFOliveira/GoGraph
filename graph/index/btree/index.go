@@ -269,6 +269,54 @@ func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 	return out
 }
 
+// RangeFrom returns a Roaring bitmap that is the union of the per-value
+// bitmaps for every key v with lo <= v under the total order, with NO upper
+// bound — it scans from lo to the largest key present. It is the open-ended
+// counterpart of [Index.Range] for an unbounded-above predicate (e.g. a string
+// range n.name >= 'A'), where no finite sentinel key is a true maximum: a
+// variable-length key type such as string has no representable greatest value,
+// so capping the scan at any fixed key would silently exclude every key sorting
+// above it. Scanning to the last leaf is the only superset-complete way to
+// serve an unbounded-above range (#F-CY1). A NaN key is below every other value
+// (see [Index.Range]); a non-NaN lo therefore never returns it.
+//
+// The returned bitmap is freshly allocated; the caller owns it.
+func (i *Index[V]) RangeFrom(lo V) *roaring64.Bitmap {
+	out := roaring64.New()
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	l, off := i.tree.lowerBound(lo)
+	for l != nil {
+		for k := off; k < len(l.keys); k++ {
+			l.sets[k].OrInto(out)
+		}
+		l, off = l.next, 0
+	}
+	return out
+}
+
+// RangeCountFrom returns the exact number of NodeIDs whose value is >= lo under
+// the total order (no upper bound), with the same early-exit-at-budget contract
+// as [Index.RangeCount]. It is the open-ended counterpart used by the
+// unbounded-above selectivity gate so the count and the executed [Index.RangeFrom]
+// scan agree on the same key space (#F-CY1).
+func (i *Index[V]) RangeCountFrom(lo V, budget uint64) (count uint64, exact bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	l, off := i.tree.lowerBound(lo)
+	var total uint64
+	for l != nil {
+		for k := off; k < len(l.keys); k++ {
+			total += l.sets[k].Cardinality()
+			if total > budget {
+				return budget + 1, false
+			}
+		}
+		l, off = l.next, 0
+	}
+	return total, true
+}
+
 // Lookup returns a clone of the bitmap associated with value, or an
 // empty bitmap when value is unknown. Matching uses the total order,
 // so Lookup(NaN) returns the NaN entry when one exists.

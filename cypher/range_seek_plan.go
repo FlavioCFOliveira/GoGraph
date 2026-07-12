@@ -79,7 +79,12 @@ const (
 // be stale/empty.
 type boundStringRange interface {
 	Range(lo, hi string) *roaring64.Bitmap
+	// RangeFrom serves an unbounded-above range: a fixed sentinel is not a true
+	// maximum for a variable-length string key, so an open-ended scan is the
+	// only superset-complete way to serve n.prop >= 'A' (#F-CY1).
+	RangeFrom(lo string) *roaring64.Bitmap
 	RangeCount(lo, hi string, budget uint64) (uint64, bool)
+	RangeCountFrom(lo string, budget uint64) (uint64, bool)
 	BoundNode() (label, property string, ok bool)
 }
 
@@ -205,8 +210,29 @@ func tryStringRangeSeek(
 		return nil, false
 	}
 
-	lo, hi := rangeBoundStrings(pred)
-	if !rangeCountWins(g, lblScan.Label, sub.RangeCount, lo, hi) {
+	// The selectivity count must probe the SAME key space the executed scan
+	// walks: for an unbounded-above range the scan is open-ended (RangeFrom),
+	// so the count uses RangeCountFrom — not a fixed sentinel that would
+	// mis-count (and, in the executed scan, silently drop) any key sorting
+	// above it (#F-CY1). "" is a true minimum for the string order, so an
+	// unbounded-below lower bound needs no such treatment.
+	loKey := ""
+	if pred.lo != nil {
+		if sv, okSv := pred.lo.Value.(expr.StringValue); okSv {
+			loKey = string(sv)
+		}
+	}
+	var countFn func(budget uint64) (uint64, bool)
+	if pred.hi != nil {
+		hiKey := ""
+		if sv, okSv := pred.hi.Value.(expr.StringValue); okSv {
+			hiKey = string(sv)
+		}
+		countFn = func(b uint64) (uint64, bool) { return sub.RangeCount(loKey, hiKey, b) }
+	} else {
+		countFn = func(b uint64) (uint64, bool) { return sub.RangeCountFrom(loKey, b) }
+	}
+	if !rangeCountWinsFn(g, lblScan.Label, countFn) {
 		return nil, false
 	}
 
@@ -237,12 +263,25 @@ func rangeCountWins[K any](
 	rangeCount func(lo, hi K, budget uint64) (uint64, bool),
 	lo, hi K,
 ) bool {
+	return rangeCountWinsFn(g, label, func(b uint64) (uint64, bool) { return rangeCount(lo, hi, b) })
+}
+
+// rangeCountWinsFn is the closure form of the selectivity/population gate: it
+// applies the shared population floor and selectivity ceiling to an arbitrary
+// exact-count-with-budget closure. The string path uses it directly to select
+// between the bounded [lo,hi] count and the open-ended RangeCountFrom for an
+// unbounded-above range (#F-CY1); the generic [rangeCountWins] delegates here.
+func rangeCountWinsFn(
+	g *lpg.Graph[string, float64],
+	label string,
+	rangeCount func(budget uint64) (uint64, bool),
+) bool {
 	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
 	if nLabel < rangeSeekMinLabelPopulation {
 		return false
 	}
 	budget := uint64(float64(nLabel) * rangeSeekMaxSelectivity)
-	count, exact := rangeCount(lo, hi, budget)
+	count, exact := rangeCount(budget)
 	// Over budget (early-exited), unknown, or empty: keep the scan. (An empty
 	// range is correct but pointless to seek; the scan+filter yields the same
 	// zero rows without an index descent.)
@@ -286,37 +325,6 @@ func asBoundStringRange(sub index.Subscriber, label, propKey string) (boundStrin
 		return nil, false
 	}
 	return br, true
-}
-
-// maxStringSentinel is the upper-bound key for an unbounded-above string range
-// count — it mirrors the sentinel exec.StringRangeIndex.RangeBitmap uses, so
-// the selectivity count and the executed scan agree on the same key space.
-const maxStringSentinel = "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
-	"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
-
-// rangeBoundStrings returns the lo/hi string keys for the EXACT count query,
-// using "" for an unbounded lower bound and the maximal string sentinel for an
-// unbounded upper bound — matching exec.StringRangeIndex.RangeBitmap. The count
-// uses the INCLUSIVE [lo,hi] keys (a tiny over-count of at most the two
-// boundary values when a bound is exclusive); inclusivity is enforced at
-// execution by the NodeByIndexRangeScan operator, and the residual Selection
-// Filter re-checks every row regardless, so the count being a slight upper
-// bound only makes the selectivity gate marginally more conservative — never
-// wrong.
-func rangeBoundStrings(pred stringRangePred) (lo, hi string) {
-	lo = ""
-	hi = maxStringSentinel
-	if pred.lo != nil {
-		if sv, ok := pred.lo.Value.(expr.StringValue); ok {
-			lo = string(sv)
-		}
-	}
-	if pred.hi != nil {
-		if sv, ok := pred.hi.Value.(expr.StringValue); ok {
-			hi = string(sv)
-		}
-	}
-	return lo, hi
 }
 
 // extractStringRangePred extracts a single-property string range predicate from

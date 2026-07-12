@@ -153,39 +153,45 @@ func (r *Int64RangeIndex) RangeBitmap(lo, hi expr.Value) *roaring64.Bitmap {
 }
 
 // StringRangeIndex adapts btree.Index[string] to the [rangeLookup] interface.
-// Nil bounds are treated as "" (empty) / "\xff…" (all bytes 0xff, 256 chars).
+// An unbounded lower bound is "" (the true minimum of the string order); an
+// unbounded (or non-string) upper bound routes to the index's open-ended
+// RangeFrom scan rather than a fixed sentinel — no fixed key is a true maximum
+// for a variable-length string, so a sentinel cap would silently drop any key
+// sorting above it (#F-CY1).
 type StringRangeIndex struct {
 	idx interface {
 		Range(lo, hi string) *roaring64.Bitmap
+		RangeFrom(lo string) *roaring64.Bitmap
 	}
 }
 
 // NewStringRangeIndex constructs a StringRangeIndex.
 func NewStringRangeIndex(idx interface {
 	Range(lo, hi string) *roaring64.Bitmap
+	RangeFrom(lo string) *roaring64.Bitmap
 }) *StringRangeIndex {
 	return &StringRangeIndex{idx: idx}
 }
 
-// RangeBitmap implements [rangeLookup].
+// RangeBitmap implements [rangeLookup]. An unbounded-above range (nil/NULL or a
+// non-string upper bound) scans open-ended via RangeFrom so the bitmap is a
+// genuine superset of every key >= lo (#F-CY1); a bounded upper uses the
+// inclusive [lo, hi] Range.
 func (r *StringRangeIndex) RangeBitmap(lo, hi expr.Value) *roaring64.Bitmap {
-	const maxStr = "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
-		"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
-
-	var loVal, hiVal string
-	if lo == nil || expr.IsNull(lo) {
-		loVal = ""
-	} else if sv, ok := lo.(expr.StringValue); ok {
-		loVal = string(sv)
+	var loVal string
+	if lo != nil && !expr.IsNull(lo) {
+		if sv, ok := lo.(expr.StringValue); ok {
+			loVal = string(sv)
+		}
 	}
 	if hi == nil || expr.IsNull(hi) {
-		hiVal = maxStr
-	} else if sv, ok := hi.(expr.StringValue); ok {
-		hiVal = string(sv)
-	} else {
-		hiVal = maxStr
+		return r.idx.RangeFrom(loVal)
 	}
-	return r.idx.Range(loVal, hiVal)
+	sv, ok := hi.(expr.StringValue)
+	if !ok {
+		return r.idx.RangeFrom(loVal)
+	}
+	return r.idx.Range(loVal, string(sv))
 }
 
 // Float64RangeIndex adapts btree.Index[float64] to the [rangeLookup] interface
