@@ -858,6 +858,16 @@ func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegis
 //
 // The underlying graph is taken from store.Graph(). If the graph has no
 // [index.Manager] attached yet, a new empty one is installed.
+//
+// CAVEAT — recovered constraints are NOT re-registered by this constructor. If
+// store was produced by opening a persisted database that had schema
+// constraints, this constructor leaves the constraint registry empty and those
+// UNIQUE / NOT NULL constraints are silently NOT enforced (duplicates and nulls
+// would be accepted). To re-enforce constraints declared before a crash, open
+// with [NewEngineWithStoreAndConstraints] (or [NewEngineWithStoreAndSchema] when
+// there are also secondary indexes), passing the recovery result's constraints.
+// When the store has durable constraints but none are threaded, the engine logs
+// a warning at construction.
 func NewEngineWithStore(store *txn.Store[string, float64]) *Engine {
 	return NewEngineWithOptions(store.Graph(), EngineOptions{Store: store})
 }
@@ -1023,6 +1033,19 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		RelationshipTypes: g.RelationshipTypesInUse,
 		PropertyKeys:      g.PropertyKeysInUse,
 	})
+	// Recovered-constraint trap guard (#1918): the store-direct recovery seeds
+	// Graph.HasConstraints when the opened database had durable constraints. If
+	// the caller threaded none (the plain NewEngineWithStore path), those
+	// constraints will NOT be enforced — a silent Consistency loss. Warn at open
+	// so the misconfiguration surfaces here rather than as accepted
+	// duplicates/nulls. Checked before registerRecoveredConstraints, which
+	// re-drives the count from the (possibly empty) threaded set.
+	if opts.Store != nil && len(opts.RecoveredConstraints) == 0 && g.HasConstraints() {
+		slog.Default().Warn("cypher: engine opened over a store with durable constraints but none were "+
+			"re-registered; constraint enforcement is DISABLED for this session",
+			slog.String("hint", "open with cypher.NewEngineWithStoreAndConstraints (or NewEngineWithStoreAndSchema) "+
+				"passing recovery.Result.Constraints"))
+	}
 	// Re-register constraints recovered from disk and re-seed each UNIQUE
 	// value-set by scanning the recovered graph, so a constraint declared
 	// before a crash is enforced again after recovery (audit gap H1). Without
