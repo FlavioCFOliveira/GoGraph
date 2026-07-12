@@ -209,10 +209,26 @@ func (m *Manager) Count() int {
 }
 
 // Apply fans c out to every registered subscriber under a read lock
-// so subscribers cannot be unregistered mid-update. The Manager
-// itself does not enforce ordering across subscribers — each
-// subscriber is expected to be order-independent on the change
-// stream it observes.
+// so subscribers cannot be unregistered mid-update. The Manager itself
+// does not enforce ordering across subscribers.
+//
+// Ordering contract (what a subscriber may rely on). Changes are
+// delivered in the order the write path emits them — the sole delivery
+// path is an [IndexBuffer] appended in mutation order and drained
+// through [Manager.ApplyBatch]; nothing sorts, coalesces, or
+// parallelises the stream. A subscriber must be:
+//   - idempotent (a replayed change produces no duplicate state), and
+//   - order-independent across changes to DIFFERENT facets of a node —
+//     a property SET interleaved with a label add/remove converges to
+//     the same postings in either order, because inserts are gated on
+//     the node's final [Binding.Eligible]/[Binding.CurrentValue] state.
+//
+// A subscriber need NOT be order-independent across MULTIPLE changes to
+// the SAME property key: those carry old→new payloads and must be
+// applied in mutation order (which the delivery path guarantees).
+// Recovery does not replay this stream at all — it rebuilds each index
+// from the live graph via BulkLoad — so no legal path ever delivers
+// same-key changes out of mutation order.
 func (m *Manager) Apply(c Change) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
