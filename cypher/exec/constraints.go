@@ -125,16 +125,26 @@ type ConstraintRegistry struct {
 	// without a name (the legacy [RegisterUnique] / [RegisterNotNull] path).
 	uniqueNames  map[string]string // "label.prop" → constraint name (UNIQUE)
 	notNullNames map[string]string // "label.prop" → constraint name (NOT NULL)
+	// notNullByLabel is a label → NOT-NULL-property-keys index maintained
+	// alongside notNull so the commit-time existence check does an O(1) lookup
+	// per touched label instead of scanning the whole notNull map and splitting
+	// every key (#1911). Its slices are copy-on-write: RegisterNotNull /
+	// UnregisterNotNull replace the whole slice rather than mutate it in place,
+	// so [NotNullProperties] can hand back the internal slice with zero
+	// allocation and a reader that already holds one is never affected by a
+	// concurrent modification.
+	notNullByLabel map[string][]string
 }
 
 // NewConstraintRegistry creates an empty ConstraintRegistry.
 func NewConstraintRegistry() *ConstraintRegistry {
 	return &ConstraintRegistry{
-		unique:       make(map[string]string),
-		notNull:      make(map[string]bool),
-		valueSets:    make(map[string]map[string]struct{}),
-		uniqueNames:  make(map[string]string),
-		notNullNames: make(map[string]string),
+		unique:         make(map[string]string),
+		notNull:        make(map[string]bool),
+		valueSets:      make(map[string]map[string]struct{}),
+		uniqueNames:    make(map[string]string),
+		notNullNames:   make(map[string]string),
+		notNullByLabel: make(map[string][]string),
 	}
 }
 
@@ -324,7 +334,43 @@ func (r *ConstraintRegistry) mergeSeed(key string, seed map[string]struct{}) {
 func (r *ConstraintRegistry) RegisterNotNull(label, prop string) {
 	r.mu.Lock()
 	r.notNull[constraintKey(label, prop)] = true
+	r.addNotNullByLabel(label, prop)
 	r.mu.Unlock()
+}
+
+// addNotNullByLabel adds prop to the copy-on-write label index, deduplicating.
+// Callers hold r.mu.
+func (r *ConstraintRegistry) addNotNullByLabel(label, prop string) {
+	old := r.notNullByLabel[label]
+	for _, p := range old {
+		if p == prop {
+			return // already present
+		}
+	}
+	next := make([]string, len(old)+1)
+	copy(next, old)
+	next[len(old)] = prop
+	r.notNullByLabel[label] = next
+}
+
+// removeNotNullByLabel removes prop from the copy-on-write label index, dropping
+// the label entry when it becomes empty. Callers hold r.mu.
+func (r *ConstraintRegistry) removeNotNullByLabel(label, prop string) {
+	old := r.notNullByLabel[label]
+	if len(old) == 0 {
+		return
+	}
+	next := make([]string, 0, len(old))
+	for _, p := range old {
+		if p != prop {
+			next = append(next, p)
+		}
+	}
+	if len(next) == 0 {
+		delete(r.notNullByLabel, label)
+		return
+	}
+	r.notNullByLabel[label] = next
 }
 
 // UnregisterUnique removes the unique constraint for (label, prop). No-op if
@@ -345,6 +391,7 @@ func (r *ConstraintRegistry) UnregisterNotNull(label, prop string) {
 	key := constraintKey(label, prop)
 	delete(r.notNull, key)
 	delete(r.notNullNames, key)
+	r.removeNotNullByLabel(label, prop)
 	r.mu.Unlock()
 }
 
@@ -437,23 +484,17 @@ func (r *ConstraintRegistry) HasAnyNotNull() bool {
 // the per-label lookup the commit-time existence check uses to test only the
 // constrained properties of a touched node's labels.
 //
-// The returned slice is freshly allocated and owned by the caller. Most labels
-// carry zero or one existence constraint, so the common return is nil or a
-// one-element slice. NotNullProperties is safe for concurrent use.
+// The lookup is O(1) via the notNullByLabel index and allocates nothing on this
+// hot path: it returns the registry's own copy-on-write slice, which
+// RegisterNotNull / UnregisterNotNull never mutate in place. The caller must
+// treat the result as READ-ONLY (it is shared and must not be appended to or
+// modified). Most labels carry zero or one existence constraint, so the common
+// return is nil or a one-element slice. NotNullProperties is safe for
+// concurrent use.
 func (r *ConstraintRegistry) NotNullProperties(label string) []string {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if len(r.notNull) == 0 {
-		return nil
-	}
-	var out []string
-	for key := range r.notNull {
-		// A key is "label.prop"; match on the label segment via the canonical
-		// splitter so a label that itself contains a dot is handled correctly.
-		if l, p := splitConstraintKey(key); l == label {
-			out = append(out, p)
-		}
-	}
+	out := r.notNullByLabel[label]
+	r.mu.RUnlock()
 	return out
 }
 
