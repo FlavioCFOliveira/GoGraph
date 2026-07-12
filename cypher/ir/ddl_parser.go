@@ -21,6 +21,12 @@ import (
 	"strings"
 )
 
+// reservedNumericCompanionSuffix is the lowercase name suffix reserved for the
+// internal unified-numeric btree companion (see cypher.numericBTreeName /
+// procs.numericCompanionSuffix — kept in sync across the three packages; ir must
+// not import cypher). A user-supplied CREATE INDEX name may not end with it.
+const reservedNumericCompanionSuffix = "_btree_num"
+
 // IsDDL returns true when query (trimmed, case-insensitive) begins with a
 // known DDL keyword that the lightweight DDL parser handles.
 func IsDDL(query string) bool {
@@ -108,6 +114,15 @@ func parseCreateIndex(query string) (*CreateIndex, error) {
 	name := ""
 	if r.peekUpper() != "FOR" {
 		name = r.consume()
+		// A user index name may not carry the reserved numeric-companion suffix
+		// (#F-CY5): a btree CREATE INDEX registers an internal
+		// "<label>_<prop>_btree_num" companion, which db.indexes() hides by that
+		// suffix. Allowing a user to claim the suffix would hide their index and
+		// could occupy the slot a real companion needs. Auto-generated names end
+		// in "_hash"/"_btree" and never trip this.
+		if strings.HasSuffix(strings.ToLower(name), reservedNumericCompanionSuffix) {
+			return nil, fmt.Errorf("ir: CREATE INDEX: index name %q uses the reserved %q suffix", name, reservedNumericCompanionSuffix)
+		}
 	}
 
 	if err := r.expectU("FOR"); err != nil {
@@ -265,6 +280,12 @@ func parsePropAccess(tokens []string, pos *int) (string, error) {
 		return "", fmt.Errorf("unterminated property access: expected n.prop after '('")
 	}
 	(*pos)++
+	// A comma here means a multi-property list — a composite index. Give a
+	// specific, actionable error rather than a bare "expected ')'" (#F-CY4):
+	// composite indexes are out of scope (single node property only).
+	if next, ok := tokAt(tokens, *pos); ok && next == "," {
+		return "", fmt.Errorf("composite indexes (multiple properties) are not supported; index a single property")
+	}
 	if closeTok, ok := tokAt(tokens, *pos); !ok || closeTok != ")" {
 		return "", fmt.Errorf("expected ')' in property access, got %q", tokDisplay(tokens, *pos))
 	}

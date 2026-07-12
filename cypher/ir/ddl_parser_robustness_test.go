@@ -101,6 +101,36 @@ func TestParseDDL_WellFormedStillParses(t *testing.T) {
 	}
 }
 
+// TestParseDDL_ReservedCompanionSuffixRejected pins #F-CY5: a user index name
+// carrying the reserved numeric-companion suffix must be rejected so it cannot
+// be hidden from db.indexes() or occupy a real companion's slot.
+func TestParseDDL_ReservedCompanionSuffixRejected(t *testing.T) {
+	for _, q := range []string{
+		"CREATE INDEX person_age_btree_num FOR (n:Person) ON (n.age)",
+		"CREATE INDEX Person_Age_BTREE_NUM FOR (n:Person) ON (n.age)", // case-insensitive
+	} {
+		if _, err := ParseDDL(q); err == nil {
+			t.Errorf("ParseDDL(%q): expected reserved-suffix rejection, got nil error", q)
+		}
+	}
+	// A name merely containing (not ending with) the token is fine.
+	if _, err := ParseDDL("CREATE INDEX btree_num_early FOR (n:Person) ON (n.age)"); err != nil {
+		t.Errorf("ParseDDL with non-suffix reserved token: unexpected error %v", err)
+	}
+}
+
+// TestParseDDL_CompositeIndexClearError pins #F-CY4: a composite index attempt
+// gives a specific, actionable error rather than a bare "expected ')'".
+func TestParseDDL_CompositeIndexClearError(t *testing.T) {
+	_, err := ParseDDL("CREATE INDEX FOR (n:Person) ON (n.first, n.last)")
+	if err == nil {
+		t.Fatalf("composite index must be rejected")
+	}
+	if !strings.Contains(err.Error(), "composite") {
+		t.Errorf("composite index error should mention 'composite', got: %v", err)
+	}
+}
+
 func typeName(v any) string {
 	switch v.(type) {
 	case *CreateIndex:
