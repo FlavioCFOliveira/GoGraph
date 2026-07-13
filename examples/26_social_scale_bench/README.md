@@ -5,9 +5,21 @@
 Building a large labelled property graph that models a social network and
 measuring **query performance** and **resource consumption** over it: the
 example reports build throughput, Go heap footprint, and the latency of a
-battery of representative Cypher queries (label-scan counts, relationship
-counts, a friend-of-friend traversal, and a trending-articles
-aggregation).
+broad battery of representative Cypher queries. The battery spans three
+groups:
+
+- **Counts and traversal** — label-scan counts, relationship counts, the
+  always-filled date-coverage counts, a friend-of-friend traversal, and a
+  trending-articles grouped aggregation.
+- **Analytical aggregation and subqueries** — the friend out-degree
+  distribution via `min` / `max` / `avg` and `percentileCont` (median); an
+  `EXISTS { }` / `NOT EXISTS { }` subquery split; a `CASE` bucketing
+  projection; a `UNION ALL` of two label-count streams; an `UNWIND $ids`
+  batch point-read; and `id()` / `elementId()` on a matched node.
+- **Temporal functions** — `date()` / `datetime()` constructors, the
+  `duration.between` family (`duration.inDays` / `inSeconds`) with duration
+  component access, `Date − Duration` arithmetic, and `date.truncate` — all
+  anchored to a **fixed reference date** so the results stay deterministic.
 
 ## Domain / scenario
 
@@ -107,40 +119,100 @@ nodes.users=20000
 nodes.articles=2000
 edges.friend=3498025
 edges.like=3006369
-# build.elapsed=3.013s
-# build.node_rate=7302 nodes/s
-# build.edge_rate=2158801 edges/s
-# mem.heap_alloc=151.57 MiB
-# mem.heap_growth=151.22 MiB
-# mem.total_alloc=3.93 GiB
-# mem.sys=474.36 MiB
-# mem.num_gc=68
-# bytes_per_edge=24.4
+# build.elapsed=3.847s
+# build.node_rate=5719 nodes/s
+# build.edge_rate=1690865 edges/s
+# mem.heap_alloc=152.55 MiB
+# mem.heap_growth=152.20 MiB
+# mem.total_alloc=9.12 GiB
+# mem.sys=417.48 MiB
+# mem.num_gc=125
+# bytes_per_edge=24.5
 q.count_users=20000
-# q.count_users.latency=11.466ms
+# q.count_users.latency=2.494ms
 q.count_articles=2000
-# q.count_articles.latency=999µs
+# q.count_articles.latency=119µs
 q.count_friend=3498025
-# q.count_friend.latency=4.236896s
+# q.count_friend.latency=4.212704s
 q.count_like=3006369
-# q.count_like.latency=3.859588s
+# q.count_like.latency=3.848539s
 q.friend_since_filled=3498025
-# q.friend_since_filled.latency=8.453554s
+# q.friend_since_filled.latency=5.476491s
 q.like_when_filled=3006369
-# q.like_when_filled.latency=7.878798s
+# q.like_when_filled.latency=4.957594s
 q.fof_reach=15246
-# q.fof_reach.latency=5.21854s
+# q.fof_reach.latency=175.579ms
 q.top_articles.rows=10
-# q.top_articles.latency=9.813192s
+# q.top_articles.latency=7.150727s
+q.friend_degree.min=150
+q.friend_degree.max=200
+q.friend_degree.avg=174.9013
+q.friend_degree.median=175.0000
+# q.friend_degree.latency=8.303789s
+q.users_with_like=19927
+# q.users_with_like.latency=172.137ms
+q.users_without_like=73
+# q.users_without_like.latency=167.935ms
+q.degree_band.high=6577
+q.degree_band.low=6745
+q.degree_band.mid=6678
+# q.degree_band.latency=8.472216s
+q.union.rows=2
+q.union.users=20000
+q.union.articles=2000
+# q.union.latency=11.326ms
+q.unwind_requested=8
+q.unwind_matched=8
+# q.unwind_batch.latency=11.064ms
+q.sample_node_id=122
+q.sample_element_id=122
+# q.id_pair.latency=4.63ms
+q.temporal.window_days=2192
+# q.temporal.window_days.latency=121µs
+q.temporal.dt_span_seconds=5400
+# q.temporal.dt_span_seconds.latency=53µs
+q.friend_age_days.min=0
+q.friend_age_days.max=2192
+# q.friend_age_days.latency=9.842523s
+q.friend_recent_30d=49502
+# q.friend_recent_30d.latency=6.723331s
+q.friend_by_year.2019=582806
+q.friend_by_year.2020=583777
+q.friend_by_year.2021=582547
+q.friend_by_year.2022=580427
+q.friend_by_year.2023=583308
+q.friend_by_year.2024=583561
+q.friend_by_year.2025=1599
+# q.friend_by_year.latency=7.309185s
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`
 always equal `edges.friend` and `edges.like`, and the date-coverage counts
 `q.friend_since_filled` / `q.like_when_filled` equal them in turn (every
 relationship's date is filled) — the core consistency and always-filled
-invariants the regression test asserts. The `# `-prefixed figures
-(including all latencies) are environment-dependent and are **not** pinned
-by the test.
+invariants the regression test asserts. The added battery pins further
+deterministic invariants:
+
+- **Analytical (`#1971`).** `q.friend_degree.{min,max}` bracket the configured
+  degree range and `q.friend_degree.{avg,median}` summarise the distribution;
+  `q.users_with_like` + `q.users_without_like` = `nodes.users` (the
+  `EXISTS { }` / `NOT EXISTS { }` split); the `q.degree_band.*` counts (bands
+  are the equal-width tertiles of the degree range) sum to `nodes.users`;
+  `q.union.{users,articles}` restate the label totals over two `UNION ALL`
+  streams; `q.unwind_matched` = `q.unwind_requested` (every batched id is
+  real); and `q.sample_element_id` is the decimal string form of the integer
+  `q.sample_node_id` (`id()` is an Integer, `elementId()` a String — the id
+  value itself is deterministic for the seed but implementation-defined).
+- **Temporal (`#1972`).** `q.temporal.window_days=2192` and
+  `q.temporal.dt_span_seconds=5400` are constructor sanity checks with known
+  answers; `q.friend_age_days.{min,max}` span the whole edge-date window
+  `[0, 2192]`; `q.friend_recent_30d` is the friendships dated within 30 days
+  of the fixed reference date (`Date − Duration` arithmetic); and the
+  `q.friend_by_year.*` buckets (`date.truncate('year', …)`) sum to
+  `edges.friend`.
+
+The `# `-prefixed figures (including all latencies) are environment-dependent
+and are **not** pinned by the test.
 
 ## Memory profile and optimizations
 
@@ -351,8 +423,18 @@ would suit edge-centric workloads — tracked in the backlog.
 - `graph/adjlist.Config{Weightless: true}` (passed through `lpg.New`) — build a graph with no per-edge weight column, for a workload queried only by relationship/property; `AddEdge`'s weight argument is ignored and reads return the zero weight. Persisted in the snapshot manifest so a recovered graph stays weightless (`#1650`).
 - `cypher.NewEngine` / `Engine.Run` — query the in-memory graph.
 - `cypher.Result.Next` / `Result.Record` / `Result.Err` / `Result.Close` — iterate result rows and read columns.
-- `cypher/expr.StringValue` / `expr.IntegerValue` — typed query parameters and result cells.
+- `cypher/expr.StringValue` / `expr.IntegerValue` / `expr.FloatValue` / `expr.ListValue` — typed query parameters and result cells (the list is the `$ids` parameter of the `UNWIND` batch read).
 - `runtime.ReadMemStats` — capture the Go heap footprint of the build.
+
+### Cypher language features exercised by the query battery
+
+- **Aggregation** — `count` / `count(*)` / `count(DISTINCT …)`, and (analytical group) `min` / `max` / `avg` / `percentileCont(expr, 0.5)` over a computed friend out-degree distribution.
+- **Subqueries** — `EXISTS { (u)-[:LIKE]->(:ARTICLE) }` and its `NOT EXISTS { … }` complement as `WHERE` filters.
+- **Projection** — a `CASE WHEN … THEN … ELSE … END` bucketing expression over the degree tertiles.
+- **Set operations** — `UNION ALL` combining two label-count streams.
+- **Parameters and list unrolling** — `UNWIND $ids AS id MATCH (u:USER {id:id}) …` batch point-read driven by an `expr.ListValue` parameter.
+- **Entity identity** — `id()` (Integer) and `elementId()` (String) on a matched node.
+- **Temporal functions** — `date($s)` / `datetime($s)` constructors; `duration('P30D')` and `Date − Duration` arithmetic; `duration.inDays(t1, t2)` / `duration.inSeconds(t1, t2)` projections and the `.days` / `.seconds` duration component accessors; and `date.truncate('year', …)` with the `.year` accessor.
 
 ## Further reading
 

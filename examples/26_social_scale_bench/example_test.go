@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -94,6 +95,132 @@ func TestRun(t *testing.T) {
 	if rows := facts["q.top_articles.rows"]; rows != 10 {
 		t.Errorf("q.top_articles.rows = %d, want 10", rows)
 	}
+
+	assertAnalytical(t, out, facts, cfg, friend)
+	assertTemporal(t, out, facts, friend)
+}
+
+// assertAnalytical pins the analytical-aggregation and subquery facts (#1971):
+// exact seed-pinned results plus the conservation laws that must hold for any
+// config (bands and the EXISTS/NOT-EXISTS split partition the users; the UNION
+// streams the label totals; every requested UNWIND id resolves).
+func assertAnalytical(t *testing.T, out string, facts map[string]int64, cfg config, friend int64) {
+	t.Helper()
+
+	// Friend out-degree distribution. min/max equal the configured band; the
+	// avg and median are seed-pinned float facts (asserted textually because
+	// parseFacts keeps only integer facts).
+	if got := facts["q.friend_degree.min"]; got != int64(cfg.friendsMin) {
+		t.Errorf("q.friend_degree.min = %d, want %d", got, cfg.friendsMin)
+	}
+	if got := facts["q.friend_degree.max"]; got != int64(cfg.friendsMax) {
+		t.Errorf("q.friend_degree.max = %d, want %d", got, cfg.friendsMax)
+	}
+	mustContain(t, out, "q.friend_degree.avg=6.5055")    // 13011 friend edges over 2000 users
+	mustContain(t, out, "q.friend_degree.median=6.5000") // the interpolated 50th percentile
+
+	// EXISTS { } and NOT EXISTS { } partition the users exactly.
+	withLike, withoutLike := facts["q.users_with_like"], facts["q.users_without_like"]
+	if withLike+withoutLike != int64(cfg.users) {
+		t.Errorf("users_with_like(%d) + users_without_like(%d) != users(%d)", withLike, withoutLike, cfg.users)
+	}
+	if withLike != 1804 {
+		t.Errorf("q.users_with_like = %d, want 1804", withLike)
+	}
+
+	// CASE bands partition the users, whichever of low/mid/high are populated.
+	var bandSum int64
+	for k, v := range facts {
+		if strings.HasPrefix(k, "q.degree_band.") {
+			bandSum += v
+		}
+	}
+	if bandSum != int64(cfg.users) {
+		t.Errorf("degree bands sum to %d, want users(%d)", bandSum, cfg.users)
+	}
+
+	// UNION ALL streams the two label counts.
+	if facts["q.union.rows"] != 2 {
+		t.Errorf("q.union.rows = %d, want 2", facts["q.union.rows"])
+	}
+	if facts["q.union.users"] != int64(cfg.users) {
+		t.Errorf("q.union.users = %d, want %d", facts["q.union.users"], cfg.users)
+	}
+	if facts["q.union.articles"] != int64(cfg.articles) {
+		t.Errorf("q.union.articles = %d, want %d", facts["q.union.articles"], cfg.articles)
+	}
+
+	// UNWIND batch: every requested id is real, so matched == requested.
+	wantBatch := int64(min(unwindBatch, cfg.users))
+	if facts["q.unwind_requested"] != wantBatch {
+		t.Errorf("q.unwind_requested = %d, want %d", facts["q.unwind_requested"], wantBatch)
+	}
+	if facts["q.unwind_matched"] != wantBatch {
+		t.Errorf("q.unwind_matched = %d, want %d", facts["q.unwind_matched"], wantBatch)
+	}
+
+	// id()/elementId() on the sample user. idPair has already verified the Go
+	// kinds (Integer/String) at runtime. id() is the interned NodeID — a valid
+	// non-negative id, deterministic for the seed but implementation-defined in
+	// value (hash/shard-dependent, not insertion order); elementId() is exactly
+	// its decimal string form, which is the relationship this pins.
+	nodeID := facts["q.sample_node_id"]
+	if nodeID < 0 {
+		t.Errorf("q.sample_node_id = %d, want >= 0", nodeID)
+	}
+	mustContain(t, out, fmt.Sprintf("q.sample_element_id=%d", nodeID))
+}
+
+// assertTemporal pins the temporal-function facts (#1972): the two constructor
+// sanity checks with known answers, the friendship-age extent, the last-30-days
+// window, and the per-year bucket conservation law (buckets sum to the FRIEND
+// edge total).
+func assertTemporal(t *testing.T, out string, facts map[string]int64, friend int64) {
+	t.Helper()
+
+	if got := facts["q.temporal.window_days"]; got != int64(edgeDateWindowDays) {
+		t.Errorf("q.temporal.window_days = %d, want %d", got, edgeDateWindowDays)
+	}
+	if got := facts["q.temporal.dt_span_seconds"]; got != 5400 {
+		t.Errorf("q.temporal.dt_span_seconds = %d, want 5400", got)
+	}
+
+	// Friendship ages span the whole edge-date window [0, edgeDateWindowDays].
+	if got := facts["q.friend_age_days.min"]; got != 0 {
+		t.Errorf("q.friend_age_days.min = %d, want 0", got)
+	}
+	if got := facts["q.friend_age_days.max"]; got != int64(edgeDateWindowDays) {
+		t.Errorf("q.friend_age_days.max = %d, want %d", got, edgeDateWindowDays)
+	}
+
+	// The last-30-days count is a strict, non-empty subset of the friend edges.
+	if r := facts["q.friend_recent_30d"]; r <= 0 || r >= friend {
+		t.Errorf("q.friend_recent_30d = %d, want within (0,%d)", r, friend)
+	}
+
+	// The per-year buckets partition the FRIEND edges.
+	var yearSum int64
+	for k, v := range facts {
+		if strings.HasPrefix(k, "q.friend_by_year.") {
+			yearSum += v
+		}
+	}
+	if yearSum != friend {
+		t.Errorf("friend_by_year buckets sum to %d, want edges.friend %d", yearSum, friend)
+	}
+	mustContain(t, out, "q.friend_by_year.2019=2153")
+}
+
+// mustContain fails the test if out does not contain the exact line s (matched
+// as a full line, so a prefix match cannot pass by accident).
+func mustContain(t *testing.T, out, s string) {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if line == s {
+			return
+		}
+	}
+	t.Errorf("output missing expected fact line %q", s)
 }
 
 // TestRunCompact confirms the implicit-type mode (relTypes=false) is
@@ -112,21 +239,29 @@ func TestRunCompact(t *testing.T) {
 	if err := run(context.Background(), &cb, compact); err != nil {
 		t.Fatalf("run compact: %v", err)
 	}
-	ef := parseFacts(t, eb.String())
-	cf := parseFacts(t, cb.String())
-
-	// Same dataset shape and same query answers, regardless of how the
-	// relationship kind is encoded.
-	for _, k := range []string{
-		"nodes.users", "nodes.articles", "edges.friend", "edges.like",
-		"q.count_users", "q.count_articles", "q.count_friend", "q.count_like",
-		"q.friend_since_filled", "q.like_when_filled",
-		"q.fof_reach", "q.top_articles.rows",
-	} {
-		if ef[k] != cf[k] {
-			t.Errorf("%s: explicit=%d compact=%d (must be equal)", k, ef[k], cf[k])
-		}
+	// The graph shape is identical for the same seed, so every query answer is
+	// identical too: the only deterministic fact line that may differ between
+	// the two relationship-encoding modes is config.rel_types. Asserting the
+	// full fact-line set (minus that one line) is equal covers every fact —
+	// the count/coverage/traversal battery and the analytical + temporal
+	// facts, including the float lines parseFacts cannot capture.
+	e := dropLine(factLines(eb.String()), "config.rel_types=")
+	c := dropLine(factLines(cb.String()), "config.rel_types=")
+	if e != c {
+		t.Errorf("explicit vs compact fact lines differ beyond config.rel_types:\n--- explicit ---\n%s\n--- compact ---\n%s", e, c)
 	}
+}
+
+// dropLine returns lines with every line that has the given prefix removed.
+func dropLine(lines, prefix string) string {
+	var keep []string
+	for _, line := range strings.Split(lines, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.Join(keep, "\n")
 }
 
 // TestRunRejectsBadConfig confirms the boundary validation: asking for

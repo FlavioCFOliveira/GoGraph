@@ -8,6 +8,23 @@
 // consumption — that make this example a benchmark rather than a
 // demonstration.
 //
+// # Query battery
+//
+// The read battery spans the breadth of the engine, in three groups:
+//
+//   - Counts and traversal: label-scan and relationship counts, the
+//     always-filled date-coverage counts, a friend-of-friend traversal, and
+//     the trending-articles grouped aggregation.
+//   - Analytical aggregation and subqueries: the friend out-degree
+//     distribution via min / max / avg and percentileCont (median); an
+//     EXISTS { } / NOT EXISTS { } subquery split; a CASE bucketing
+//     projection; a UNION ALL of two label-count streams; an UNWIND $ids
+//     batch point-read; and id() / elementId() on a matched node.
+//   - Temporal functions: date() / datetime() constructors, the
+//     duration.between family (duration.inDays / inSeconds) with duration
+//     component access, Date − Duration arithmetic, and date.truncate — all
+//     anchored to the fixed reference date so the results stay deterministic.
+//
 // # Model
 //
 //	(:USER    {id, name})                       // id is a 24-char hex string
@@ -84,6 +101,7 @@ import (
 	"math/rand"
 	"os"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -245,7 +263,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		safeDiv(float64(built.HeapAlloc-base.HeapAlloc), float64(stats.friendEdges+stats.likeEdges)))
 
 	eng := cypher.NewEngine(g)
-	if err := runQueries(ctx, eng, cfg, stats.sampleUser, w); err != nil {
+	if err := runQueries(ctx, eng, cfg, &stats, w); err != nil {
 		return fmt.Errorf("queries: %w", err)
 	}
 	return nil
@@ -260,7 +278,8 @@ type buildStats struct {
 	articles    int
 	friendEdges int
 	likeEdges   int
-	sampleUser  string // id of an arbitrary, fixed user for FoF queries
+	sampleUser  string   // id of an arbitrary, fixed user for FoF queries
+	sampleIDs   []string // first unwindBatch user ids, for the UNWIND batch read
 	elapsed     time.Duration
 }
 
@@ -360,9 +379,15 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 		friendEdges: friendEdges,
 		likeEdges:   likeEdges,
 		sampleUser:  userIDs[0],
+		sampleIDs:   append([]string(nil), userIDs[:min(unwindBatch, cfg.users)]...),
 		elapsed:     time.Since(start),
 	}, nil
 }
+
+// unwindBatch is the fixed number of user ids the UNWIND $ids batch read
+// (see analyticalQueries) looks up in one query. Kept small and constant so
+// the deterministic default pins an exact matched-count fact.
+const unwindBatch = 8
 
 // checkEvery bounds how often the build polls ctx for cancellation:
 // often enough that a cancelled multi-minute build stops promptly,
@@ -488,7 +513,7 @@ func realisticTitle(rng *rand.Rand) string {
 // runQueries executes the representative read-query suite against eng,
 // printing one deterministic result line and one volatile latency line
 // ("# ...") per query.
-func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser string, w io.Writer) error {
+func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, stats *buildStats, w io.Writer) error {
 	// Scalar count aggregations over label scans and relationship
 	// patterns — the bread-and-butter of analytics over a social graph.
 	// The relationship patterns differ by mode: with explicit types they
@@ -555,7 +580,7 @@ func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser 
 	{
 		query := "MATCH (u:USER {id:$id})" + friendPat + "(:USER)" + friendPat + "(fof:USER) " +
 			"RETURN count(DISTINCT fof) AS c"
-		params := map[string]expr.Value{"id": expr.StringValue(sampleUser)}
+		params := map[string]expr.Value{"id": expr.StringValue(stats.sampleUser)}
 		n, d, err := scalarCount(ctx, eng, query, params)
 		if err != nil {
 			return fmt.Errorf("fof: %w", err)
@@ -581,6 +606,237 @@ func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, sampleUser 
 		}
 		fmt.Fprintf(w, "q.top_articles.rows=%d\n", rows)
 		fmt.Fprintf(w, "# q.top_articles.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	if err := analyticalQueries(ctx, eng, friendPat, likePat, cfg, stats, w); err != nil {
+		return err
+	}
+	return temporalQueries(ctx, eng, friendRelPat, w)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytical aggregation & subquery battery (rmp #1971)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// analyticalQueries exercises the analytical breadth of the Cypher engine over
+// the seeded graph: distribution aggregates beyond count/sum (avg / min / max /
+// percentileCont median), an EXISTS { } (and NOT EXISTS { }) subquery filter, a
+// CASE bucketing projection, a UNION ALL of two result streams, an
+// UNWIND $ids batch point-read, and id() / elementId() on a matched node. Every
+// deterministic result is emitted as a bare fact line; each query's wall-clock
+// cost is a "# " telemetry line.
+//
+// friendPat / likePat carry the mode-appropriate relationship shape (explicit
+// [:FRIEND] / [:LIKE] or endpoint-inferred -->), so the answers are identical in
+// both -rel-types modes.
+func analyticalQueries(ctx context.Context, eng *cypher.Engine, friendPat, likePat string, cfg config, stats *buildStats, w io.Writer) error {
+	// Friend out-degree distribution: compute each user's FRIEND out-degree,
+	// then aggregate the distribution with avg / min / max and the median via
+	// percentileCont(deg, 0.5). Every user has >= friendsMin friends, so all
+	// users contribute. This is the canonical "beyond count/sum" analytics query.
+	{
+		query := "MATCH (u:USER)" + friendPat + "(:USER) WITH u, count(*) AS deg " +
+			"RETURN min(deg) AS mn, max(deg) AS mx, avg(deg) AS av, percentileCont(deg, 0.5) AS med"
+		dist, err := degreeStats(ctx, eng, query)
+		if err != nil {
+			return fmt.Errorf("friend_degree: %w", err)
+		}
+		fmt.Fprintf(w, "q.friend_degree.min=%d\n", dist.minDeg)
+		fmt.Fprintf(w, "q.friend_degree.max=%d\n", dist.maxDeg)
+		fmt.Fprintf(w, "q.friend_degree.avg=%.4f\n", dist.avg)
+		fmt.Fprintf(w, "q.friend_degree.median=%.4f\n", dist.median)
+		fmt.Fprintf(w, "# q.friend_degree.latency=%s\n", dist.latency.Round(time.Microsecond))
+	}
+
+	// EXISTS { } subquery: count users who have at least one LIKE, and its
+	// complement via NOT EXISTS { }. The two must sum to the user count — the
+	// conservation invariant the regression test asserts.
+	{
+		with := "MATCH (u:USER) WHERE EXISTS { (u)" + likePat + "(:ARTICLE) } RETURN count(u) AS c"
+		without := "MATCH (u:USER) WHERE NOT EXISTS { (u)" + likePat + "(:ARTICLE) } RETURN count(u) AS c"
+		n, d, err := scalarCount(ctx, eng, with, nil)
+		if err != nil {
+			return fmt.Errorf("users_with_like: %w", err)
+		}
+		fmt.Fprintf(w, "q.users_with_like=%d\n", n)
+		fmt.Fprintf(w, "# q.users_with_like.latency=%s\n", d.Round(time.Microsecond))
+		n, d, err = scalarCount(ctx, eng, without, nil)
+		if err != nil {
+			return fmt.Errorf("users_without_like: %w", err)
+		}
+		fmt.Fprintf(w, "q.users_without_like=%d\n", n)
+		fmt.Fprintf(w, "# q.users_without_like.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// CASE projection: bucket each user's FRIEND out-degree into three named
+	// bands and count per band. The band boundaries are the equal-width tertiles
+	// of the configured degree range [friendsMin, friendsMax], so the split is
+	// meaningful at any scale (not just the small default). The bands partition
+	// the users, so the counts sum to the user count.
+	{
+		span := cfg.friendsMax - cfg.friendsMin
+		t1 := cfg.friendsMin + span/3
+		t2 := cfg.friendsMin + 2*span/3
+		query := fmt.Sprintf("MATCH (u:USER)%s(:USER) WITH u, count(*) AS deg "+
+			"WITH CASE WHEN deg <= %d THEN 'low' WHEN deg <= %d THEN 'mid' ELSE 'high' END AS band "+
+			"RETURN band, count(*) AS c ORDER BY band", friendPat, t1, t2)
+		rows, d, err := groupCounts(ctx, eng, query, "band", "c", nil)
+		if err != nil {
+			return fmt.Errorf("degree_band: %w", err)
+		}
+		for _, r := range rows {
+			fmt.Fprintf(w, "q.degree_band.%s=%d\n", r.key, r.count)
+		}
+		fmt.Fprintf(w, "# q.degree_band.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// UNION ALL: combine two label-count streams into one result set. The two
+	// rows carry the user and article totals.
+	{
+		query := "MATCH (u:USER) RETURN 'users' AS kind, count(*) AS c " +
+			"UNION ALL MATCH (a:ARTICLE) RETURN 'articles' AS kind, count(*) AS c"
+		rows, d, err := groupCounts(ctx, eng, query, "kind", "c", nil)
+		if err != nil {
+			return fmt.Errorf("union: %w", err)
+		}
+		fmt.Fprintf(w, "q.union.rows=%d\n", len(rows))
+		for _, r := range rows {
+			fmt.Fprintf(w, "q.union.%s=%d\n", r.key, r.count)
+		}
+		fmt.Fprintf(w, "# q.union.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// UNWIND $ids batch read: look up a list of known user ids in one query.
+	// Every id is real, so the matched count equals the requested count.
+	{
+		ids := make(expr.ListValue, 0, len(stats.sampleIDs))
+		for _, id := range stats.sampleIDs {
+			ids = append(ids, expr.StringValue(id))
+		}
+		query := "UNWIND $ids AS wanted MATCH (u:USER {id: wanted}) RETURN count(u) AS c"
+		n, d, err := scalarCount(ctx, eng, query, map[string]expr.Value{"ids": ids})
+		if err != nil {
+			return fmt.Errorf("unwind_batch: %w", err)
+		}
+		fmt.Fprintf(w, "q.unwind_requested=%d\n", len(stats.sampleIDs))
+		fmt.Fprintf(w, "q.unwind_matched=%d\n", n)
+		fmt.Fprintf(w, "# q.unwind_batch.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// id() / elementId() on a matched node. id() is an Integer (the interned,
+	// reopen-stable NodeID); elementId() is a String. idPair verifies those Go
+	// kinds at runtime and returns the values, which are deterministic for the
+	// fixed seed (the sample user is the first node inserted).
+	{
+		query := "MATCH (u:USER {id:$id}) RETURN id(u) AS iid, elementId(u) AS eid"
+		params := map[string]expr.Value{"id": expr.StringValue(stats.sampleUser)}
+		id, elemID, d, err := idPair(ctx, eng, query, params)
+		if err != nil {
+			return fmt.Errorf("id_pair: %w", err)
+		}
+		fmt.Fprintf(w, "q.sample_node_id=%d\n", id)
+		fmt.Fprintf(w, "q.sample_element_id=%s\n", elemID)
+		fmt.Fprintf(w, "# q.id_pair.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Temporal-function battery (rmp #1972)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// temporalQueries exercises Cypher temporal constructors and arithmetic — not
+// just reading stored Date values, but calling date() / datetime(), duration()
+// / duration.between-family projections, Date − Duration arithmetic, duration
+// component access, and date.truncate. Every predicate is anchored to a FIXED
+// reference date (never the wall clock) so the facts are deterministic.
+//
+// friendRelPat carries the mode-appropriate bound-relationship shape
+// (-[r:FRIEND]-> or -[r]->) so r.since is read in both -rel-types modes.
+func temporalQueries(ctx context.Context, eng *cypher.Engine, friendRelPat string, w io.Writer) error {
+	// Constructor sanity: duration.inDays(date(a), date(b)).days between two
+	// literal dates six years apart is the known window span (2192 days), which
+	// equals edgeDateWindowDays. Exercises date(String), the 2-arg duration.inDays
+	// projection, and the .days duration accessor with a checkable answer.
+	{
+		query := "RETURN duration.inDays(date($lo), date($hi)).days AS c"
+		params := map[string]expr.Value{
+			"lo": expr.StringValue("2019-01-01"),
+			"hi": expr.StringValue("2025-01-01"),
+		}
+		n, d, err := scalarCount(ctx, eng, query, params)
+		if err != nil {
+			return fmt.Errorf("window_days: %w", err)
+		}
+		fmt.Fprintf(w, "q.temporal.window_days=%d\n", n)
+		fmt.Fprintf(w, "# q.temporal.window_days.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// datetime() constructor + duration.inSeconds projection between two zoned
+	// instants 90 minutes apart → 5400 seconds. Exercises datetime(String) and
+	// the .seconds accessor with a checkable answer.
+	{
+		query := "RETURN duration.inSeconds(datetime($a), datetime($b)).seconds AS c"
+		params := map[string]expr.Value{
+			"a": expr.StringValue("2025-01-01T00:00:00Z"),
+			"b": expr.StringValue("2025-01-01T01:30:00Z"),
+		}
+		n, d, err := scalarCount(ctx, eng, query, params)
+		if err != nil {
+			return fmt.Errorf("dt_span_seconds: %w", err)
+		}
+		fmt.Fprintf(w, "q.temporal.dt_span_seconds=%d\n", n)
+		fmt.Fprintf(w, "# q.temporal.dt_span_seconds.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// Friendship age in whole days back from the fixed reference date, over
+	// every FRIEND edge: duration.inDays(r.since, date(ref)).days. since is drawn
+	// from [ref-window, ref], so the ages span [0, window]. Reports min and max.
+	{
+		query := "MATCH (:USER)" + friendRelPat + "(:USER) " +
+			"WITH duration.inDays(r.since, date($ref)).days AS ageDays " +
+			"RETURN min(ageDays) AS mn, max(ageDays) AS mx"
+		params := map[string]expr.Value{"ref": expr.StringValue("2025-01-01")}
+		mn, mx, d, err := twoInts(ctx, eng, query, params, "mn", "mx")
+		if err != nil {
+			return fmt.Errorf("friend_age_days: %w", err)
+		}
+		fmt.Fprintf(w, "q.friend_age_days.min=%d\n", mn)
+		fmt.Fprintf(w, "q.friend_age_days.max=%d\n", mx)
+		fmt.Fprintf(w, "# q.friend_age_days.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// "Created within the last 30 days" relative to the fixed reference date,
+	// using Date − Duration arithmetic: r.since >= date(ref) - duration('P30D').
+	// Exercises duration(String) (ISO-8601), Date − Duration → Date, and a
+	// Date >= Date comparison.
+	{
+		query := "MATCH (:USER)" + friendRelPat + "(:USER) " +
+			"WHERE r.since >= date($ref) - duration('P30D') RETURN count(*) AS c"
+		params := map[string]expr.Value{"ref": expr.StringValue("2025-01-01")}
+		n, d, err := scalarCount(ctx, eng, query, params)
+		if err != nil {
+			return fmt.Errorf("friend_recent_30d: %w", err)
+		}
+		fmt.Fprintf(w, "q.friend_recent_30d=%d\n", n)
+		fmt.Fprintf(w, "# q.friend_recent_30d.latency=%s\n", d.Round(time.Microsecond))
+	}
+
+	// Friendships bucketed by calendar year, using date.truncate('year', …) and
+	// the .year accessor. The per-year counts sum to the FRIEND edge total — the
+	// conservation invariant the regression test asserts.
+	{
+		query := "MATCH (:USER)" + friendRelPat + "(:USER) " +
+			"WITH date.truncate('year', r.since) AS yr RETURN yr.year AS y, count(*) AS c ORDER BY y"
+		rows, d, err := groupCounts(ctx, eng, query, "y", "c", nil)
+		if err != nil {
+			return fmt.Errorf("friend_by_year: %w", err)
+		}
+		for _, r := range rows {
+			fmt.Fprintf(w, "q.friend_by_year.%s=%d\n", r.key, r.count)
+		}
+		fmt.Fprintf(w, "# q.friend_by_year.latency=%s\n", d.Round(time.Microsecond))
 	}
 
 	return nil
@@ -646,6 +902,203 @@ func topArticles(ctx context.Context, eng *cypher.Engine, query string) (int, ti
 		return 0, 0, err
 	}
 	return rows, time.Since(start), nil
+}
+
+// labeledCount is one row of a two-column (key, count) grouped result.
+type labeledCount struct {
+	key   string
+	count int64
+}
+
+// groupCounts runs a query whose rows carry a key column (a String or Integer)
+// and an integer count column, returning the rows in the query's own order plus
+// the wall-clock time. An Integer key is rendered in decimal so it can form a
+// fact-line suffix (e.g. a truncated year). Used for the CASE-band, UNION, and
+// by-year queries.
+func groupCounts(ctx context.Context, eng *cypher.Engine, query, keyCol, countCol string, params map[string]expr.Value) ([]labeledCount, time.Duration, error) {
+	start := time.Now()
+	res, err := eng.Run(ctx, query, params)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = res.Close() }()
+
+	var out []labeledCount
+	for res.Next() {
+		rec := res.Record()
+		key, err := cellString(rec, keyCol)
+		if err != nil {
+			return nil, 0, err
+		}
+		cnt, err := cellInt(rec, countCol)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, labeledCount{key: key, count: cnt})
+	}
+	if err := res.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, time.Since(start), nil
+}
+
+// degreeDist is the decoded single row of the friend out-degree distribution
+// query: the min and max degrees, the mean, the median, and the query latency.
+type degreeDist struct {
+	minDeg, maxDeg int64
+	avg, median    float64
+	latency        time.Duration
+}
+
+// degreeStats runs the friend out-degree distribution query and decodes its
+// single row into a degreeDist.
+func degreeStats(ctx context.Context, eng *cypher.Engine, query string) (degreeDist, error) {
+	start := time.Now()
+	res, err := eng.Run(ctx, query, nil)
+	if err != nil {
+		return degreeDist{}, err
+	}
+	defer func() { _ = res.Close() }()
+
+	var dist degreeDist
+	var got bool
+	for res.Next() {
+		rec := res.Record()
+		if dist.minDeg, err = cellInt(rec, "mn"); err != nil {
+			return degreeDist{}, err
+		}
+		if dist.maxDeg, err = cellInt(rec, "mx"); err != nil {
+			return degreeDist{}, err
+		}
+		if dist.avg, err = cellFloat(rec, "av"); err != nil {
+			return degreeDist{}, err
+		}
+		if dist.median, err = cellFloat(rec, "med"); err != nil {
+			return degreeDist{}, err
+		}
+		got = true
+	}
+	if err := res.Err(); err != nil {
+		return degreeDist{}, err
+	}
+	if !got {
+		return degreeDist{}, fmt.Errorf("degree query returned no rows")
+	}
+	dist.latency = time.Since(start)
+	return dist, nil
+}
+
+// twoInts runs a query whose single row has two integer columns colA/colB and
+// returns them plus the elapsed time.
+func twoInts(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value, colA, colB string) (int64, int64, time.Duration, error) {
+	start := time.Now()
+	res, err := eng.Run(ctx, query, params)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer func() { _ = res.Close() }()
+
+	var a, b int64
+	var got bool
+	for res.Next() {
+		rec := res.Record()
+		if a, err = cellInt(rec, colA); err != nil {
+			return 0, 0, 0, err
+		}
+		if b, err = cellInt(rec, colB); err != nil {
+			return 0, 0, 0, err
+		}
+		got = true
+	}
+	if err := res.Err(); err != nil {
+		return 0, 0, 0, err
+	}
+	if !got {
+		return 0, 0, 0, fmt.Errorf("query returned no rows")
+	}
+	return a, b, time.Since(start), nil
+}
+
+// idPair runs the id()/elementId() query and returns the node's integer id and
+// string element id plus the elapsed time. It verifies the Cypher contract at
+// runtime — id() yields an Integer and elementId() a String — returning a typed
+// error if either column has the wrong kind.
+func idPair(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value) (int64, string, time.Duration, error) {
+	start := time.Now()
+	res, err := eng.Run(ctx, query, params)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	defer func() { _ = res.Close() }()
+
+	var id int64
+	var elemID string
+	var got bool
+	for res.Next() {
+		rec := res.Record()
+		if id, err = cellInt(rec, "iid"); err != nil {
+			return 0, "", 0, fmt.Errorf("id() must be an Integer: %w", err)
+		}
+		if elemID, err = cellString(rec, "eid"); err != nil {
+			return 0, "", 0, fmt.Errorf("elementId() must be a String: %w", err)
+		}
+		got = true
+	}
+	if err := res.Err(); err != nil {
+		return 0, "", 0, err
+	}
+	if !got {
+		return 0, "", 0, fmt.Errorf("id query returned no rows")
+	}
+	return id, elemID, time.Since(start), nil
+}
+
+// cellInt extracts column col from rec as an int64, erroring if it is absent or
+// not an [expr.IntegerValue].
+func cellInt(rec map[string]any, col string) (int64, error) {
+	v, ok := rec[col]
+	if !ok {
+		return 0, fmt.Errorf("column %q missing", col)
+	}
+	iv, ok := v.(expr.IntegerValue)
+	if !ok {
+		return 0, fmt.Errorf("column %q is %T, want expr.IntegerValue", col, v)
+	}
+	return int64(iv), nil
+}
+
+// cellFloat extracts column col from rec as a float64, accepting an
+// [expr.FloatValue] or an [expr.IntegerValue] (widened).
+func cellFloat(rec map[string]any, col string) (float64, error) {
+	v, ok := rec[col]
+	if !ok {
+		return 0, fmt.Errorf("column %q missing", col)
+	}
+	switch n := v.(type) {
+	case expr.FloatValue:
+		return float64(n), nil
+	case expr.IntegerValue:
+		return float64(int64(n)), nil
+	default:
+		return 0, fmt.Errorf("column %q is %T, want a number", col, v)
+	}
+}
+
+// cellString extracts column col from rec as its fact-line string form: an
+// [expr.StringValue] verbatim, an [expr.IntegerValue] in decimal.
+func cellString(rec map[string]any, col string) (string, error) {
+	v, ok := rec[col]
+	if !ok {
+		return "", fmt.Errorf("column %q missing", col)
+	}
+	switch s := v.(type) {
+	case expr.StringValue:
+		return string(s), nil
+	case expr.IntegerValue:
+		return strconv.FormatInt(int64(s), 10), nil
+	default:
+		return "", fmt.Errorf("column %q is %T, want String or Integer", col, v)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
