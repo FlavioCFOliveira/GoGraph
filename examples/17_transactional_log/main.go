@@ -47,6 +47,21 @@
 // string-keyed snapshot is self-sufficient and the WAL can be safely truncated
 // after each checkpoint.
 //
+// # Crash modes
+//
+// The example ships two crash demonstrations. The default is an in-process
+// crash: run drives the commit stream, abandons every in-memory reference, and
+// reopens the store from disk. It is fast and deterministic, so the regression
+// test pins it — but it never exercises OS-level torn-frame handling, because
+// nothing was interrupted mid-write. The -real-crash flag instead re-execs this
+// binary as a child process (runRealCrashDemo): the child commits
+// -crash-committed transfers, each fsynced, appends a torn partial WAL frame
+// modelling an interrupted next commit, and hard-kills itself with SIGKILL; the
+// parent then reopens the data directory with recovery.OpenCtx and proves the
+// ledger balances to exactly the durably-committed prefix — no committed
+// transfer lost, no uncommitted or torn frame accepted. The real-crash path
+// needs SIGKILL and degrades to a no-op on platforms that lack it.
+//
 // # Scale
 //
 // The default is a small, deterministic ledger (200 accounts, 2000 transfers)
@@ -103,6 +118,10 @@ type config struct {
 	checkpointEvery time.Duration
 }
 
+// The real cross-process crash demonstration (main's -real-crash path) is driven
+// by plain local variables rather than config fields, so config stays a compact
+// value type passed by value throughout the in-process flow.
+
 // defaultConfig returns the small, deterministic ledger the regression test
 // pins: 100 accounts, 600 transfers, amounts in [1.00, 10000.00], folded by a
 // checkpointer firing roughly every 5 ms so dozens of checkpoints occur during
@@ -152,10 +171,40 @@ func main() {
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.DurationVar(&cfg.checkpointEvery, "checkpoint-every", cfg.checkpointEvery,
 		"background checkpointer age threshold (how often the WAL is folded into the snapshot)")
+
+	// Real-crash knobs are plain locals (not config fields) so config stays a
+	// compact by-value type. realCrash selects the demo; crashCommitted sizes
+	// it; crashChildDir is the INTERNAL re-exec signal set by runRealCrashDemo.
+	var (
+		realCrash      bool
+		crashCommitted int
+		crashChildDir  string
+	)
+	flag.BoolVar(&realCrash, "real-crash", false,
+		"run the real cross-process kill -9 crash + recovery demonstration instead of the in-process one")
+	flag.IntVar(&crashCommitted, "crash-committed", 50,
+		"real-crash demo: number of durably-committed transfers before the kill")
+	flag.StringVar(&crashChildDir, "crash-child-dir", "",
+		"INTERNAL: crash-child data dir; when set, this process commits -crash-committed transfers, appends torn work, and SIGKILLs itself")
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
-		log.Fatal(err)
+	ctx := context.Background()
+	switch {
+	case crashChildDir != "":
+		// INTERNAL crash-child mode: commit, tear, and self-SIGKILL. On a
+		// supported platform this call does not return; the error path covers
+		// only a pre-crash failure or an unsupported platform.
+		if err := runCrashChild(ctx, cfg, crashChildDir, crashCommitted); err != nil {
+			log.Fatal(err)
+		}
+	case realCrash:
+		if err := runRealCrashDemo(ctx, os.Stdout, cfg, crashCommitted, os.Args[0]); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		if err := run(ctx, os.Stdout, cfg); err != nil {
+			log.Fatal(err)
+		}
 	}
 }
 
