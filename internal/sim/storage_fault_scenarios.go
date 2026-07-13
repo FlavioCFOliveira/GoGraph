@@ -38,6 +38,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
+	"github.com/FlavioCFOliveira/GoGraph/graph/io/graphml"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
@@ -623,15 +624,14 @@ func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, e
 // [SimDisk]: first a clean export/import that must reproduce the graph exactly,
 // then an export under a tight ENOSPC bound that must fail cleanly with a typed
 // error and leave no partial artefact a re-import silently accepts as the graph.
-// GraphML is not covered here — its ergonomic entry point ([graphml.WriteWithProps]
-// / [graphml.ReadWithProps]) round-trips an lpg.Graph with labels and properties
-// rather than the weighted edge list this scenario models, so a faithful
-// comparison needs a property-graph fixture out of scope for this edge-list
-// round-trip. It is deterministic and bit-reproducible.
+// GraphML round-trips an lpg.Graph with labels and properties rather than the
+// weighted edge list the CSV/JSONL phase models, so it is covered by a dedicated
+// property-graph round-trip ([graphmlRoundTripClean] / [graphmlExportFaultFailsClean])
+// alongside the edge-list formats. It is deterministic and bit-reproducible.
 func ioRoundTripFaultScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioIORoundTripFault,
-		Description: "graph/io CSV+JSONL export/import round-trip: exact when clean, clean typed failure with no silently-accepted partial under ENOSPC",
+		Description: "graph/io CSV+JSONL+GraphML export/import round-trip: exact when clean, clean typed failure with no silently-accepted partial under ENOSPC",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x109F0117,
 		run:         runIORoundTripFault,
@@ -707,7 +707,149 @@ func runIORoundTripFault(_ context.Context, seed uint64) (*SimReport, error) {
 			return storageFaultReport(seed, v), nil
 		}
 	}
+
+	// --- GraphML: a labelled/propertied property-graph round-trip (distinct from
+	// the edge-list formats), clean then under an ENOSPC export fault. ---
+	if v, herr := graphmlRoundTripClean(seed); herr != nil {
+		return nil, fmt.Errorf("sim: ST8 graphml clean round-trip: %w", herr)
+	} else if len(v) > 0 {
+		return storageFaultReport(seed, v), nil
+	}
+	if v, herr := graphmlExportFaultFailsClean(seed); herr != nil {
+		return nil, fmt.Errorf("sim: ST8 graphml export-fault: %w", herr)
+	} else if len(v) > 0 {
+		return storageFaultReport(seed, v), nil
+	}
 	return nil, nil
+}
+
+// graphmlModel builds a small deterministic labelled/propertied directed graph
+// for the GraphML round-trip: nodes g0..g3 each carry the label GNode and an
+// integer property w, joined by a fixed edge set.
+func graphmlModel() (*lpg.Graph[string, int64], []string) {
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	keys := []string{"g0", "g1", "g2", "g3"}
+	for i, k := range keys {
+		_ = g.AddNode(k)
+		_ = g.SetNodeLabel(k, "GNode")
+		_ = g.SetNodeProperty(k, "w", lpg.Int64Value(int64(i*10)))
+	}
+	_ = g.AddEdge("g0", "g1", 1)
+	_ = g.AddEdge("g1", "g2", 1)
+	_ = g.AddEdge("g0", "g2", 1)
+	return g, keys
+}
+
+// graphmlEqualsModel reports whether got round-tripped the model faithfully:
+// same order/size and, for every model key, the GNode label and the w property.
+func graphmlEqualsModel(got, want *lpg.Graph[string, int64], keys []string) bool {
+	if got == nil {
+		return false
+	}
+	if got.AdjList().Order() != want.AdjList().Order() || got.AdjList().Size() != want.AdjList().Size() {
+		return false
+	}
+	for _, k := range keys {
+		if !slices.Contains(got.NodeLabels(k), "GNode") {
+			return false
+		}
+		gp, wp := got.NodeProperties(k), want.NodeProperties(k)
+		if gv, wv := gp["w"], wp["w"]; gv != wv {
+			return false
+		}
+	}
+	return true
+}
+
+// graphmlRoundTripClean exports the property-graph model to a fresh SimDisk file
+// via graphml.WriteWithProps, re-imports it via graphml.ReadWithProps, and checks
+// the imported graph reproduces the model (order/size/labels/properties). It
+// returns the exported byte size via the closure so the fault phase can size a
+// sub-full capacity.
+func graphmlRoundTripClean(seed uint64) ([]Violation, error) {
+	model, keys := graphmlModel()
+	const path = "io/graph.graphml"
+	disk := NewSimDisk(NewSeed(seed), 0)
+	wh, err := disk.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+	if err != nil {
+		return nil, fmt.Errorf("open for export: %w", err)
+	}
+	if werr := graphml.WriteWithProps(wh, model); werr != nil {
+		_ = wh.Close()
+		return nil, fmt.Errorf("clean export: %w", werr)
+	}
+	if err := wh.Close(); err != nil {
+		return nil, fmt.Errorf("close after export: %w", err)
+	}
+	rh, err := disk.OpenFile(path, os.O_RDONLY)
+	if err != nil {
+		return nil, fmt.Errorf("open for import: %w", err)
+	}
+	got, _, ierr := graphml.ReadWithProps(rh)
+	_ = rh.Close()
+	if ierr != nil {
+		return nil, fmt.Errorf("clean import: %w", ierr)
+	}
+	if !graphmlEqualsModel(got, model, keys) {
+		return []Violation{{
+			Kind: ViolationOracleDeviation, Op: "<io-graphml-clean>",
+			Message: "GraphML clean round-trip did not reproduce the model (order/size/label/property mismatch)",
+		}}, nil
+	}
+	return nil, nil
+}
+
+// graphmlExportFaultFailsClean exports the model under a sub-full ENOSPC bound
+// and asserts the export fails with a typed ENOSPC error and that a re-import of
+// whatever landed does NOT silently reconstruct the full model.
+func graphmlExportFaultFailsClean(seed uint64) ([]Violation, error) {
+	model, keys := graphmlModel()
+	const path = "io/graph.graphml"
+
+	// Size the full export once to pick a sub-full capacity.
+	var full bytes.Buffer
+	if err := graphml.WriteWithProps(&full, model); err != nil {
+		return nil, fmt.Errorf("size export: %w", err)
+	}
+	if full.Len() < 2 {
+		return nil, fmt.Errorf("graphml export size %d too small to force a fault", full.Len())
+	}
+
+	disk := NewSimDisk(NewSeed(seed), 0)
+	disk.SetCapacity(int64(full.Len()/2), false)
+	wh, err := disk.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+	if err != nil {
+		return nil, fmt.Errorf("open for faulted export: %w", err)
+	}
+	werr := graphml.WriteWithProps(wh, model)
+	_ = wh.Close()
+
+	var v []Violation
+	if werr == nil {
+		return []Violation{{
+			Kind: ViolationOracleDeviation, Op: "<io-graphml-nonvacuity>",
+			Message: "GraphML export under a sub-full ENOSPC bound unexpectedly succeeded — the fault did not bite",
+		}}, nil
+	}
+	if !errors.Is(werr, syscall.ENOSPC) {
+		v = append(v, Violation{
+			Kind: ViolationACIDConsistency, Op: "<io-graphml-fault>",
+			Message: "faulted GraphML export failed with " + werr.Error() + ", want a typed ENOSPC error",
+		})
+	}
+	rh, err := disk.OpenFile(path, os.O_RDONLY)
+	if err != nil {
+		return nil, fmt.Errorf("open for faulted re-import: %w", err)
+	}
+	got, _, ierr := graphml.ReadWithProps(rh)
+	_ = rh.Close()
+	if ierr == nil && graphmlEqualsModel(got, model, keys) {
+		v = append(v, Violation{
+			Kind: ViolationACIDConsistency, Op: "<io-graphml-fault>",
+			Message: "a partial GraphML export re-imported as the full model — a torn artefact was silently accepted",
+		})
+	}
+	return v, nil
 }
 
 // ioRoundTripClean exports the model to a fresh SimDisk file, re-imports it, and
