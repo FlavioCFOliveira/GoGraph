@@ -111,6 +111,79 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// TestStructuralAnalytics pins the deterministic invariants of Stage 4 — the
+// k-core, triangle, diameter, and reachability facts. It asserts correctness
+// invariants (bands and conservation laws), not the exact volatile-looking
+// counts, so a benign internal change to any analytic that preserves the graph
+// property does not break the test. The strongest cross-checks (serial vs
+// parallel triangle totals, per-node sum == 3*total, diameter upper bound not
+// below an observed shortest path, transitive-closure reach == BFS reach) are
+// enforced as hard errors inside run itself, so a regression there surfaces as
+// a returned error rather than a silently-wrong fact.
+func TestStructuralAnalytics(t *testing.T) {
+	cfg := testConfig()
+	var buf bytes.Buffer
+	if err := run(context.Background(), &buf, cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	out := buf.String()
+	ints := parseIntFacts(t, out)
+	strs := parseStrFacts(out)
+
+	// k-core. A BA block with m=2 contains cycles, so the whole graph has a
+	// 2-core at least; the densest core (at k=degeneracy) needs at least
+	// degeneracy+1 vertices and cannot exceed the whole graph.
+	deg := ints["core.degeneracy"]
+	if deg < 2 {
+		t.Errorf("core.degeneracy = %d, want >= 2 (a BA(m=2) graph has a 2-core)", deg)
+	}
+	size := ints["core.size"]
+	if size < deg+1 || size > int64(cfg.users) {
+		t.Errorf("core.size = %d, want within [%d,%d]", size, deg+1, cfg.users)
+	}
+
+	// Triangles. BA neighbourhoods are triangle-rich, so the total is positive;
+	// the global clustering coefficient (transitivity) is 3*triangles/triples,
+	// hence 3*total <= triples and 0 < clustering <= 1.
+	tri := ints["triangles.total"]
+	if tri <= 0 {
+		t.Errorf("triangles.total = %d, want > 0 (BA neighbourhoods are triangle-rich)", tri)
+	}
+	triples := ints["triangles.triples"]
+	if 3*tri > triples {
+		t.Errorf("3*triangles.total (%d) > triples (%d): transitivity would exceed 1", 3*tri, triples)
+	}
+	if c := clustering(t, out); c <= 0 || c > 1 {
+		t.Errorf("triangles.clustering = %.4f, want in (0,1]", c)
+	}
+
+	// Diameter. The graph is connected, so the diameter is at least 1; the
+	// bounds are ordered (lo <= hi enforced in run); and it is small relative to
+	// the node count — the small-world property the example demonstrates.
+	lo := ints["diameter.lo"]
+	hi := ints["diameter.hi"]
+	if lo < 1 {
+		t.Errorf("diameter.lo = %d, want >= 1 (a connected graph with edges)", lo)
+	}
+	if hi < lo {
+		t.Errorf("diameter.hi = %d, want >= diameter.lo (%d)", hi, lo)
+	}
+	if hi >= int64(cfg.users) {
+		t.Errorf("diameter.hi = %d, want << users (%d): small-world", hi, cfg.users)
+	}
+
+	// Reachability. The bridge layer lays a spanning path over the communities,
+	// so the whole graph is one connected component: every user is reachable
+	// from the seed. This is a theorem of the construction, so it is an exact
+	// fact, not a band.
+	if reach := ints["reach.from_seed"]; reach != int64(cfg.users) {
+		t.Errorf("reach.from_seed = %d, want %d (graph is connected by construction)", reach, cfg.users)
+	}
+	if strs["reach.fully_connected"] != "true" {
+		t.Errorf("reach.fully_connected = %q, want \"true\"", strs["reach.fully_connected"])
+	}
+}
+
 // TestDeterministic confirms the data shape is reproducible: two runs with
 // the same config produce identical deterministic fact lines. This guards
 // the determinism trap the generator avoids (no RNG draw is driven from a
@@ -191,6 +264,17 @@ func modularity(t *testing.T, out string) float64 {
 		t.Fatalf("communities.modularity = %q, not a float: %v", v, err)
 	}
 	return q
+}
+
+// clustering extracts the triangles.clustering fact as a float.
+func clustering(t *testing.T, out string) float64 {
+	t.Helper()
+	v := parseStrFacts(out)["triangles.clustering"]
+	c, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		t.Fatalf("triangles.clustering = %q, not a float: %v", v, err)
+	}
+	return c
 }
 
 // parseIntFacts extracts the deterministic "key=int" fact lines (everything

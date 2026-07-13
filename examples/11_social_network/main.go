@@ -1,10 +1,11 @@
 // Example 11_social_network — an end-to-end social-network workload over a
 // labelled property graph (LPG): PageRank influence ranking, Leiden
-// community detection, and a manual friend-of-friend recommendation walk,
-// all over ONE seeded, scale-parametrised social graph.
+// community detection, a manual friend-of-friend recommendation walk, and a
+// structural-analytics pass (k-core, triangles, diameter, reachability), all
+// over ONE seeded, scale-parametrised social graph.
 //
 // It generates a realistic friendship network whose shape is fixed by the
-// RNG seed, freezes it into an immutable CSR snapshot, and reads it three
+// RNG seed, freezes it into an immutable CSR snapshot, and reads it four
 // ways:
 //
 //   - PageRank influence ranking — who is most central, reported as a
@@ -14,12 +15,18 @@
 //     ([community.LeidenCtx]).
 //   - Friend-of-friend recommendation — who a fixed seed user should
 //     befriend next, a manual two-hop walk over the live adjacency list.
+//   - Structural analytics — the dense k-core ([search.KCore]), the global
+//     triangle count and clustering coefficient ([search.CountTriangles]),
+//     the diameter that underwrites the small-world claim ([search.Diameter]),
+//     and the reachable set from the seed user ([search.TransitiveClosure],
+//     cross-checked against a BFS ground truth).
 //
 // The output is split into deterministic *facts* (bare lines: counts,
-// influencer ids, community count, recommendation result — reproducible
-// for a fixed seed) and volatile *telemetry* (lines prefixed with "# ":
-// per-stage wall-clock and live heap — varies per run and per machine).
-// A regression test pins the facts and ignores the telemetry.
+// influencer ids, community count, recommendation result, structural
+// invariants — reproducible for a fixed seed) and volatile *telemetry*
+// (lines prefixed with "# ": per-stage wall-clock, allocations, and live
+// heap — varies per run and per machine). A regression test pins the facts
+// and ignores the telemetry.
 //
 // # Model
 //
@@ -107,6 +114,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 	"github.com/FlavioCFOliveira/GoGraph/search/centrality"
 	"github.com/FlavioCFOliveira/GoGraph/search/community"
 )
@@ -268,6 +276,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return fmt.Errorf("communities: %w", err)
 	}
 	reportRecommendations(w, g, stats, cfg)
+	if err := reportStructure(ctx, w, c, mapper, stats); err != nil {
+		return fmt.Errorf("structure: %w", err)
+	}
 	return nil
 }
 
@@ -789,6 +800,207 @@ func friendsOfFriends(g *lpg.Graph[string, int64], src string) []recommendation 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Stage 4 — Structural analytics (k-core, triangles, diameter, reachability)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// tcLiveCap bounds the live-node count at which the O(V^2)-memory transitive
+// closure is materialised. TransitiveClosure allocates a live*live bit-matrix
+// (live=20000 -> ~50 MiB); above the cap the reachability fact is served by the
+// O(V+E) BFS ground truth instead and the closure is skipped with a telemetry
+// note. The small default and the regression test stay well under the cap, so
+// the closure is always exercised there.
+const tcLiveCap = 20000
+
+// reportStructure runs four read-only structural analytics over the immutable
+// CSR snapshot and reports their deterministic integer facts, with per-analysis
+// wall-clock and allocation counts as telemetry:
+//
+//   - k-core decomposition ([search.KCore]): the graph degeneracy (the largest
+//     k for which a non-empty k-core exists) and the size of that densest core.
+//   - triangle counting ([search.CountTriangles]): the global triangle total,
+//     the number of connected triples, and the global clustering coefficient
+//     (transitivity) 3*triangles/triples.
+//   - diameter ([search.Diameter]): the 2-sweep lower bound and iFUB upper
+//     bound on the longest shortest path — the small-world evidence.
+//   - reachability ([search.TransitiveClosure]): the size of the set reachable
+//     from the seed user, and whether the whole graph is reachable from it.
+//
+// Every analytic is cross-checked against an independent computation so a wrong
+// module result surfaces as a returned error rather than a silently-wrong fact:
+// the serial triangle total must equal the parallel one and three times the
+// per-node total; the reported diameter upper bound must not fall below an
+// observed shortest-path length (the seed user's eccentricity); and the
+// transitive-closure reachable count must equal the BFS reachable count.
+func reportStructure(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string], stats buildStats) error {
+	live := c.LiveNodes() // sorted NodeIDs with >=1 incident edge; excludes ghost slots
+	liveCount := len(live)
+	verts := c.VerticesSlice() // CSR row offsets: a vertex degree is the gap between consecutive offsets
+
+	// ── k-core decomposition ────────────────────────────────────────────────
+	m0 := heapObjects()
+	t0 := time.Now()
+	core, err := search.KCoreCtx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("kcore: %w", err)
+	}
+	kcoreElapsed := time.Since(t0)
+	kcoreAllocs := heapObjects() - m0
+
+	// core is NodeID-indexed (len == MaxNodeID, padded by the sharded Mapper);
+	// iterate only live nodes so ghost slots (coreness 0) cannot skew the
+	// maximum or the count. degeneracy = max coreness; coreSize = the number of
+	// vertices whose coreness equals it — the maximal (densest) k-core.
+	degeneracy := 0
+	maxDegree := uint64(0)
+	for _, id := range live {
+		if core[id] > degeneracy {
+			degeneracy = core[id]
+		}
+		if d := verts[id+1] - verts[id]; d > maxDegree {
+			maxDegree = d
+		}
+	}
+	coreSize := 0
+	for _, id := range live {
+		if core[id] >= degeneracy {
+			coreSize++
+		}
+	}
+	// Invariants: degeneracy cannot exceed the maximum degree, and a non-empty
+	// k-core needs at least k+1 vertices and at most every live vertex.
+	if uint64(degeneracy) > maxDegree {
+		return fmt.Errorf("k-core degeneracy %d exceeds max degree %d", degeneracy, maxDegree)
+	}
+	if coreSize < degeneracy+1 || coreSize > liveCount {
+		return fmt.Errorf("k-core size %d outside [%d,%d]", coreSize, degeneracy+1, liveCount)
+	}
+	fmt.Fprintf(w, "core.degeneracy=%d\n", degeneracy)
+	fmt.Fprintf(w, "core.size=%d\n", coreSize)
+	fmt.Fprintf(w, "# core.kcore.elapsed=%s\n", kcoreElapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# core.kcore.allocs=%d\n", kcoreAllocs)
+
+	// ── triangle count and clustering coefficient ────────────────────────────
+	m0 = heapObjects()
+	t0 = time.Now()
+	triangles, perNode, err := search.CountTrianglesCtx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("triangles: %w", err)
+	}
+	triElapsed := time.Since(t0)
+	triAllocs := heapObjects() - m0
+
+	// Cross-check against the parallel implementation (documented bit-identical)
+	// and against the per-node totals (each triangle is tallied at its three
+	// vertices, so the per-node sum is exactly 3*total).
+	parTotal, _, err := search.CountTrianglesParallelCtx(ctx, c, 0) // 0 -> GOMAXPROCS workers
+	if err != nil {
+		return fmt.Errorf("triangles (parallel): %w", err)
+	}
+	if parTotal != triangles {
+		return fmt.Errorf("CountTrianglesParallel total %d != serial total %d", parTotal, triangles)
+	}
+	var perSum int64
+	for _, id := range live {
+		perSum += perNode[id]
+	}
+	if perSum != 3*triangles {
+		return fmt.Errorf("per-node triangle sum %d != 3*total %d", perSum, 3*triangles)
+	}
+	// Connected triples (wedges): sum_v C(deg(v),2). The global clustering
+	// coefficient (transitivity) is 3*triangles/triples.
+	var triples int64
+	for _, id := range live {
+		d := int64(verts[id+1] - verts[id]) //nolint:gosec // G115: a vertex degree (offset delta) is a small non-negative count, never near int64 range
+		triples += d * (d - 1) / 2
+	}
+	clustering := 0.0
+	if triples > 0 {
+		clustering = 3 * float64(triangles) / float64(triples)
+	}
+	fmt.Fprintf(w, "triangles.total=%d\n", triangles)
+	fmt.Fprintf(w, "triangles.triples=%d\n", triples)
+	fmt.Fprintf(w, "triangles.clustering=%.2f\n", clustering)
+	fmt.Fprintf(w, "# triangles.count.elapsed=%s\n", triElapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# triangles.count.allocs=%d\n", triAllocs)
+	fmt.Fprintf(w, "# triangles.clustering_exact=%.6f\n", clustering)
+
+	// ── diameter (small-world evidence) ──────────────────────────────────────
+	m0 = heapObjects()
+	t0 = time.Now()
+	lo, hi, exact, err := search.DiameterCtx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("diameter: %w", err)
+	}
+	diamElapsed := time.Since(t0)
+	diamAllocs := heapObjects() - m0
+	if lo > hi {
+		return fmt.Errorf("diameter lower bound %d exceeds upper bound %d", lo, hi)
+	}
+
+	// ── reachability from the seed user ──────────────────────────────────────
+	seedID, ok := mapper.Lookup(stats.seedUser)
+	if !ok {
+		return fmt.Errorf("seed user %q has no NodeID", stats.seedUser)
+	}
+	// BFS ground truth: the reachable set from the seed and the seed's
+	// eccentricity (the longest shortest path leaving it). The eccentricity is a
+	// lower bound on the diameter, so it catches an under-reported upper bound.
+	bfsReach, seedEcc := 0, 0
+	if err := search.BFSCtx(ctx, c, seedID, func(_ graph.NodeID, depth int) bool {
+		bfsReach++
+		if depth > seedEcc {
+			seedEcc = depth
+		}
+		return true
+	}); err != nil {
+		return fmt.Errorf("bfs: %w", err)
+	}
+	if hi < seedEcc {
+		return fmt.Errorf("diameter upper bound %d below observed shortest path %d (seed eccentricity)", hi, seedEcc)
+	}
+	fmt.Fprintf(w, "diameter.lo=%d\n", lo)
+	fmt.Fprintf(w, "diameter.hi=%d\n", hi)
+	fmt.Fprintf(w, "diameter.exact=%t\n", exact)
+	fmt.Fprintf(w, "# diameter.elapsed=%s\n", diamElapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# diameter.allocs=%d\n", diamAllocs)
+	fmt.Fprintf(w, "# diameter.seed_ecc=%d\n", seedEcc)
+
+	// TransitiveClosure serves the reachability fact when the live-node count is
+	// within the O(V^2)-memory budget; above tcLiveCap the BFS count above is the
+	// fact and the closure is skipped. When both run, the closure count MUST
+	// equal the BFS count — a direct correctness cross-check on the closure.
+	reach, method := bfsReach, "bfs"
+	if liveCount <= tcLiveCap {
+		m0 = heapObjects()
+		t0 = time.Now()
+		tc, err := search.TransitiveClosureCtx(ctx, c)
+		if err != nil {
+			return fmt.Errorf("transitive closure: %w", err)
+		}
+		tcElapsed := time.Since(t0)
+		tcAllocs := heapObjects() - m0
+		tcReach := 0
+		for _, id := range live {
+			if tc.Reachable(seedID, id) {
+				tcReach++
+			}
+		}
+		if tcReach != bfsReach {
+			return fmt.Errorf("TransitiveClosure reachable %d != BFS reachable %d from seed", tcReach, bfsReach)
+		}
+		reach, method = tcReach, "tc"
+		fmt.Fprintf(w, "# reach.tc.elapsed=%s\n", tcElapsed.Round(time.Microsecond))
+		fmt.Fprintf(w, "# reach.tc.allocs=%d\n", tcAllocs)
+	} else {
+		fmt.Fprintf(w, "# reach.tc=skipped (live=%d > cap=%d, O(V^2) matrix)\n", liveCount, tcLiveCap)
+	}
+	fmt.Fprintf(w, "reach.from_seed=%d\n", reach)
+	fmt.Fprintf(w, "reach.fully_connected=%t\n", reach == liveCount)
+	fmt.Fprintf(w, "# reach.method=%s\n", method)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Telemetry helpers (copied from the reference example 26).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -799,6 +1011,18 @@ func readMem() runtime.MemStats {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m
+}
+
+// heapObjects returns the process-cumulative count of heap objects allocated
+// so far (runtime.MemStats.Mallocs). It is monotonic and unaffected by GC (a
+// collection increments Frees, never decrements Mallocs), so the delta across
+// an operation is that operation's heap-allocation count — the per-analysis
+// "allocs" telemetry. Deliberately no forced GC here (unlike readMem): the
+// measurement is a count of allocations, not a live-heap sample.
+func heapObjects() uint64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.Mallocs
 }
 
 // rate returns count/elapsed in units per second, or 0 for a zero-length

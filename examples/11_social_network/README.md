@@ -3,13 +3,18 @@
 ## What it demonstrates
 
 An end-to-end social-network workload over a labelled property graph (LPG):
-three analytics run over **one** seeded social graph — PageRank influence
+four analytics run over **one** seeded social graph — PageRank influence
 ranking ([`search/centrality.PageRank`](../../search/centrality)), Leiden
 community detection ([`search/community.Leiden`](../../search/community)),
-and a manual friend-of-friend recommendation walk over the live adjacency
-list. The graph is frozen into an immutable CSR snapshot for the two
-centrality/community algorithms, while the recommendation walk reads the
-mutable adjacency list directly.
+a manual friend-of-friend recommendation walk over the live adjacency list,
+and a structural-analytics pass over the [`search`](../../search) package:
+k-core decomposition ([`search.KCore`](../../search)), the global triangle
+count and clustering coefficient ([`search.CountTriangles`](../../search)),
+the diameter ([`search.Diameter`](../../search)), and the reachable set from
+the seed user ([`search.TransitiveClosure`](../../search)). The graph is
+frozen into an immutable CSR snapshot for the centrality, community, and
+structural algorithms, while the recommendation walk reads the mutable
+adjacency list directly.
 
 ## Domain / scenario
 
@@ -88,6 +93,16 @@ fof.candidates=44
 fof.all_same_community=true
 fof.top=u0000006
 fof.top_shared=2
+core.degeneracy=3
+core.size=69
+triangles.total=92
+triangles.triples=3321
+triangles.clustering=0.08
+diameter.lo=12
+diameter.hi=12
+diameter.exact=true
+reach.from_seed=256
+reach.fully_connected=true
 ```
 
 Interleaved with the facts are volatile **telemetry** lines, prefixed with
@@ -114,16 +129,26 @@ pins the influencer *identities*, the community-count band, and a modularity
 From the centrality/community row of the evidence taxonomy:
 
 - **Per-stage wall-clock** — `build.elapsed`, `influence.pagerank.elapsed`,
-  `communities.leiden.elapsed`, `fof.walk.elapsed`.
+  `communities.leiden.elapsed`, `fof.walk.elapsed`, and the structural
+  analytics (`core.kcore.elapsed`, `triangles.count.elapsed`,
+  `diameter.elapsed`, `reach.tc.elapsed`).
 - **Convergence** — `influence.pagerank.iterations`.
+- **Transient allocations** — `core.kcore.allocs`, `triangles.count.allocs`,
+  `diameter.allocs`, `reach.tc.allocs` (mallocs delta per analysis; note the
+  `TransitiveClosure` bit-matrix is O(V²) and dominates on dense graphs).
 - **Live heap** — `mem.heap_alloc` and `mem.heap_growth` (after a forced GC,
   so they reflect reachable bytes).
 - **Result separation** — the influencer scores (`influence.rank.N.score`)
   show how cleanly the BA hubs separate from the tail.
+- **Structure** — `core.degeneracy`/`core.size` (the dense k-core),
+  `triangles.total`/`triangles.clustering` (transitivity),
+  `diameter.exact` (the small-world diameter), and `reach.from_seed`
+  (reachable-set size) characterise the graph's shape.
 
 When scaling up, watch how PageRank's iteration count and wall-clock grow
-with `-users`, how the recovered community count tracks `-communities`, and
-how `mem.heap_alloc` grows with the edge count (≈ `users × m`).
+with `-users`, how the recovered community count tracks `-communities`, how
+the `TransitiveClosure` allocation grows with V², and how `mem.heap_alloc`
+grows with the edge count (≈ `users × m`).
 
 ## Key APIs
 
@@ -134,6 +159,10 @@ how `mem.heap_alloc` grows with the edge count (≈ `users × m`).
 - `search/centrality.PageRankCtx` / `DefaultPageRankOptions` — rank users by influence; context-aware, NodeID-indexed result.
 - `search/community.LeidenCtx` / `DefaultLeidenOptions` — detect communities; the result's `Community` slice maps each `NodeID` to a cluster id.
 - `graph/adjlist.AdjList.Mapper` (`Resolve`, `Lookup`) / `AdjList.Neighbours` — translate `NodeID`s back to ids and walk the live adjacency list for the friend-of-friend recommendation.
+- `search.KCoreCtx` — k-core decomposition; the graph degeneracy and the size of the densest core.
+- `search.CountTrianglesCtx` — the global triangle total, from which the clustering coefficient (transitivity) is derived.
+- `search.DiameterCtx` — the exact diameter (2-sweep lower bound + iFUB upper bound) that underwrites the small-world claim.
+- `search.TransitiveClosureCtx` — the set of users reachable from the seed, cross-checked against a BFS reach.
 
 ## Further reading
 
