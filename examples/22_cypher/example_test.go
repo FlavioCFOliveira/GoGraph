@@ -19,16 +19,20 @@ func testConfig() config {
 		knowsMax: 6,
 		minAge:   30,
 		top:      5,
+		batch:    3,
+		maxHops:  10,
 		seed:     42,
 	}
 }
 
 // TestRun drives run into a buffer and asserts only the deterministic
-// invariants — node count, edge-count bounds, that the query battery
-// agrees with the materialised graph, and that the CREATE incremented the
-// :USER count by exactly one. The volatile telemetry lines (prefixed "# ")
-// are ignored, as required by the examples standard for non-deterministic
-// output.
+// invariants — node count, edge-count bounds, that the read battery agrees
+// with the materialised graph, that the engine's shortestPath length matches
+// the independent search oracle, and that every write's effect is exactly as
+// specified (node/edge deltas, MERGE idempotency, SET/REMOVE read-backs,
+// DELETE / DETACH DELETE removals, and the aggregate end state). The volatile
+// telemetry lines (prefixed "# ") are ignored, as required by the examples
+// standard for non-deterministic output.
 func TestRun(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := testConfig()
@@ -75,15 +79,52 @@ func TestRun(t *testing.T) {
 		t.Errorf("q.older_than = %d, want within (0,%d]", older, cfg.users)
 	}
 
-	// The CREATE adds exactly one :USER node, verified by the before/after
-	// read-back. This is the deterministic effect of the write transaction.
-	if before, after := facts["q.users_before_create"], facts["q.users_after_create"]; before != int64(cfg.users) {
-		t.Errorf("q.users_before_create = %d, want %d", before, cfg.users)
-	} else if after != before+1 {
-		t.Errorf("q.users_after_create = %d, want %d", after, before+1)
+	// Traversal cross-check: the engine's shortestPath length must equal the
+	// independent search.BiBFS oracle (the headline correctness invariant),
+	// and every allShortestPaths row must be a shortest path. sp.len and
+	// asp.count are deterministic for the fixed test seed.
+	if m := facts["sp.len_matches_bibfs"]; m != 1 {
+		t.Errorf("sp.len_matches_bibfs = %d, want 1 (engine vs BiBFS oracle disagree — module bug)", m)
 	}
-	if delta := facts["create.user_delta"]; delta != 1 {
-		t.Errorf("create.user_delta = %d, want 1", delta)
+	if l := facts["sp.len"]; l != 3 {
+		t.Errorf("sp.len = %d, want 3 (seed-dependent shortest-path length)", l)
+	}
+	if m := facts["asp.all_min_length"]; m != 1 {
+		t.Errorf("asp.all_min_length = %d, want 1 (allShortestPaths returned a non-shortest path)", m)
+	}
+	if c := facts["asp.count"]; c != 15 {
+		t.Errorf("asp.count = %d, want 15 (seed-dependent shortest-path multiplicity)", c)
+	}
+
+	// Write battery. Each mutation's effect is a fixed fact for the fresh graph.
+	writeWants := map[string]int64{
+		"create.node_delta":         2, // multi-pattern CREATE: two new users
+		"create.edge_delta":         2, // ... and two new KNOWS edges
+		"unwind.created":            int64(cfg.batch),
+		"merge.created":             1, // first MERGE takes ON CREATE
+		"merge.created_second_pass": 0, // second MERGE creates nothing (idempotent)
+		"merge.matched_second_pass": 1, // ... and takes ON MATCH
+		"set.updated":               1, // SET read-back matched the written value
+		"remove.cleared":            1, // REMOVE left the property null
+		"delete.rel_removed":        1, // DELETE removed exactly one relationship
+		"delete.nodes_kept":         1, // ... and no nodes
+		"detach.node_removed":       1, // DETACH DELETE removed one node
+		"detach.rel_removed":        1, // ... and its remaining edge
+	}
+	for k, want := range writeWants {
+		if got := facts[k]; got != want {
+			t.Errorf("%s = %d, want %d", k, got, want)
+		}
+	}
+
+	// Aggregate end state: the net user count grows by two (CREATE) + batch
+	// (UNWIND) + one (MERGE) − one (DETACH DELETE); the net KNOWS count returns
+	// to the build total, since the writes add two edges and later remove two.
+	if got, want := facts["users.final"], int64(cfg.users+cfg.batch+2); got != want {
+		t.Errorf("users.final = %d, want %d", got, want)
+	}
+	if got := facts["knows.final"]; got != knows {
+		t.Errorf("knows.final = %d, want %d (build total)", got, knows)
 	}
 }
 

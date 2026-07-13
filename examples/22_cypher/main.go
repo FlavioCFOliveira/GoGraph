@@ -2,17 +2,29 @@
 // (100% openCypher TCK compliant at the execution level), driven over a
 // realistic, seeded social graph.
 //
-// It builds a labelled property graph that models a small social network
-// and then exercises the engine with the four Cypher idioms this example
-// teaches:
+// It builds a labelled property graph that models a small social network and
+// exercises the engine across three families of Cypher work:
 //
-//   - a label scan with a property projection and ORDER BY (the oldest
-//     users, with a deterministic name tiebreak);
-//   - a WHERE filter over a node property (users older than a threshold);
-//   - a directed relationship pattern (the KNOWS friendships, plus a
-//     bound-relationship read of the since date property);
-//   - a CREATE inside a write transaction, whose effect is verified by a
-//     follow-up read (the user count increments by exactly one).
+//	Reads — a label scan with a property projection and ORDER BY (the oldest
+//	users, with a deterministic name tiebreak); a WHERE filter over a node
+//	property (users older than a threshold); and a directed relationship
+//	pattern (the KNOWS friendships, plus a bound-relationship read of the
+//	since date).
+//
+//	Traversal — shortestPath and allShortestPaths over the undirected KNOWS
+//	relation between two seeded users, cross-checked against an independent
+//	in-Go oracle. The oracle mirrors the same KNOWS edges into an undirected
+//	graph/csr.CSR and searches it with search.BiBFS; a hand-written BFS over
+//	that CSR picks the farthest reachable user as the destination. If the
+//	engine and the oracle disagree on the path length that is a module bug, so
+//	the agreement is asserted as a fact (sp.len_matches_bibfs=1).
+//
+//	Writes — the mutation surface via Engine.RunInTx, each effect verified by
+//	a follow-up read: a multi-pattern CREATE (a two-hop KNOWS path hung off an
+//	existing user); an UNWIND batch create driven by a list-of-maps parameter;
+//	MERGE with ON CREATE / ON MATCH run twice to prove idempotency (the second
+//	pass creates nothing and takes the ON MATCH branch); SET and REMOVE of a
+//	property; and DELETE of a relationship followed by DETACH DELETE of a node.
 //
 // Every value is read back from the result record and rendered in
 // human-readable form — names, ages and dates, never raw node IDs.
@@ -49,12 +61,16 @@
 // The deterministic data shape is reproducible for a fixed -seed; only the
 // telemetry (lines prefixed with "# ") varies between runs and machines.
 //
-// # Determinism of the CREATE
+// # Determinism of the writes
 //
-// The CREATE mutates the graph, so the example reads the :USER count
-// immediately before and after the write and reports the delta as a fact
-// (create.user_delta=1). Each run builds a fresh graph, so re-runs are
-// independent and the delta is always exactly one.
+// Each run builds a fresh graph, so the write battery's per-step deltas are
+// independent of prior runs and reproducible for a fixed -seed: the
+// multi-pattern CREATE adds two users and two KNOWS edges, the UNWIND adds
+// -batch users, the first MERGE adds one user and the second adds none, and
+// the DELETE / DETACH DELETE remove one relationship and one node (together
+// with that node's remaining edge). The reported deltas and the final counts
+// are therefore fixed facts. Because the writes add two KNOWS edges and later
+// remove two, the final KNOWS count returns to the build total.
 package main
 
 import (
@@ -71,8 +87,11 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 )
 
 // Node labels, relationship types, and property keys. Centralised so the
@@ -100,13 +119,16 @@ type config struct {
 	knowsMax int   // maximum KNOWS out-degree per user (inclusive)
 	minAge   int64 // WHERE-filter threshold: keep users with age > minAge
 	top      int   // ORDER BY ... LIMIT row count for the oldest-users query
+	batch    int   // number of :USER rows the UNWIND write transaction creates
+	maxHops  int   // upper bound N for the shortestPath varlen pattern (KNOWS*..N)
 	seed     int64 // RNG seed; fixes the deterministic data shape
 }
 
 // defaultConfig returns the small, deterministic default the regression
 // test pins: fifty users, three-to-six acquaintances each, a WHERE
-// threshold of 30, and a top-five oldest-users projection. It builds and
-// queries instantly, well under the short-layer 60 s package budget.
+// threshold of 30, a top-five oldest-users projection, a three-row UNWIND
+// batch, and a ten-hop cap on the shortestPath search. It builds and queries
+// instantly, well under the short-layer 60 s package budget.
 func defaultConfig() config {
 	return config{
 		users:    50,
@@ -114,6 +136,8 @@ func defaultConfig() config {
 		knowsMax: 6,
 		minAge:   30,
 		top:      5,
+		batch:    3,
+		maxHops:  10,
 		seed:     1,
 	}
 }
@@ -129,8 +153,14 @@ func (c config) validate() error {
 		return fmt.Errorf("require 0 <= knowsMin <= knowsMax, got [%d,%d]", c.knowsMin, c.knowsMax)
 	case c.knowsMax >= c.users:
 		return fmt.Errorf("knowsMax (%d) exceeds users-1 (%d): not enough distinct acquaintances", c.knowsMax, c.users-1)
+	case c.knowsMin < 1:
+		return fmt.Errorf("knowsMin must be >= 1 so every user has an acquaintance to traverse, got %d", c.knowsMin)
 	case c.top <= 0:
 		return fmt.Errorf("top must be > 0, got %d", c.top)
+	case c.batch <= 0:
+		return fmt.Errorf("batch must be > 0, got %d", c.batch)
+	case c.maxHops <= 0:
+		return fmt.Errorf("maxHops must be > 0, got %d", c.maxHops)
 	}
 	return nil
 }
@@ -142,6 +172,8 @@ func main() {
 	flag.IntVar(&cfg.knowsMax, "knows-max", cfg.knowsMax, "maximum KNOWS out-degree per user")
 	flag.Int64Var(&cfg.minAge, "min-age", cfg.minAge, "WHERE threshold: keep users with age greater than this")
 	flag.IntVar(&cfg.top, "top", cfg.top, "row count for the oldest-users ORDER BY ... LIMIT query")
+	flag.IntVar(&cfg.batch, "batch", cfg.batch, "number of :USER rows the UNWIND write transaction creates")
+	flag.IntVar(&cfg.maxHops, "max-hops", cfg.maxHops, "upper bound N for the shortestPath varlen pattern (KNOWS*..N)")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.Parse()
 
@@ -194,7 +226,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(mem.HeapAlloc))
 
 	eng := cypher.NewEngine(g)
-	if err := runQueries(ctx, eng, cfg, stats, w); err != nil {
+	if err := runQueries(ctx, eng, g, cfg, stats, w); err != nil {
 		return fmt.Errorf("queries: %w", err)
 	}
 	return nil
@@ -208,6 +240,7 @@ type buildStats struct {
 	users      int
 	knowsEdges int
 	anchorName string // name of userIDs[0]; unique, used to anchor a sample read
+	anchorID   string // id of userIDs[0]; unique, anchors the shortestPath source
 	elapsed    time.Duration
 }
 
@@ -277,6 +310,7 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config) (buil
 		users:      cfg.users,
 		knowsEdges: knowsEdges,
 		anchorName: names[0],
+		anchorID:   userIDs[0],
 		elapsed:    time.Since(start),
 	}, nil
 }
@@ -379,11 +413,13 @@ func realisticName(rng *rand.Rand) string {
 // Query battery
 // ─────────────────────────────────────────────────────────────────────────────
 
-// runQueries executes the example's Cypher query set against eng. It
-// reports deterministic result facts as bare lines and per-query latency
-// as "# " telemetry, and renders a small human-readable sample of the
-// projection and relationship-pattern results as "# " sample lines.
-func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, stats buildStats, w io.Writer) error {
+// runQueries executes the example's Cypher query set against eng. It reports
+// deterministic result facts as bare lines and per-query latency as "# "
+// telemetry, and renders a small human-readable sample of the projection and
+// relationship-pattern results as "# " sample lines. The reads run first, then
+// the traversal cross-check, then the write battery, so every read observes the
+// pristine seeded graph before any mutation.
+func runQueries(ctx context.Context, eng *cypher.Engine, g *lpg.Graph[string, float64], cfg config, stats buildStats, w io.Writer) error {
 	// 1. Label scan + projection + ORDER BY ... LIMIT — the oldest users.
 	//    ORDER BY age DESC with a name tiebreak makes the top rows fully
 	//    deterministic: the count is pinned and the first row is rendered
@@ -404,9 +440,15 @@ func runQueries(ctx context.Context, eng *cypher.Engine, cfg config, stats build
 		return err
 	}
 
-	// 4. CREATE inside a write transaction, verified by a follow-up read:
-	//    the :USER count must increment by exactly one.
-	return queryCreate(ctx, eng, w)
+	// 4. shortestPath / allShortestPaths over undirected KNOWS, cross-checked
+	//    against an independent search.BiBFS oracle built from the same edges.
+	if err := queryShortestPaths(ctx, eng, g, cfg, stats, w); err != nil {
+		return err
+	}
+
+	// 5. The write battery: CREATE, UNWIND, MERGE (idempotency), SET, REMOVE,
+	//    DELETE and DETACH DELETE, each verified by a follow-up read.
+	return queryWrites(ctx, eng, cfg, stats, w)
 }
 
 // queryOldestUsers runs the label-scan projection ordered by descending
@@ -514,45 +556,491 @@ func queryKnows(ctx context.Context, eng *cypher.Engine, stats buildStats, w io.
 	return nil
 }
 
-// queryCreate reads the :USER count, runs a CREATE inside a write
-// transaction, then reads the count again. The CREATE's effect is verified
-// by the follow-up read: create.user_delta is the post-minus-pre count and
-// must be exactly one. Each run builds a fresh graph, so the delta is
-// independent of prior runs.
-func queryCreate(ctx context.Context, eng *cypher.Engine, w io.Writer) error {
-	const countQuery = "MATCH (u:USER) RETURN count(u) AS c"
-	before, _, err := scalarCount(ctx, eng, countQuery, nil)
+// ─────────────────────────────────────────────────────────────────────────────
+// Traversal: shortestPath / allShortestPaths, cross-checked against an oracle
+// ─────────────────────────────────────────────────────────────────────────────
+
+// queryShortestPaths runs the engine's shortestPath and allShortestPaths over
+// the undirected KNOWS relation and cross-checks the result against a search
+// oracle built from the same edges.
+//
+// It first mirrors the graph's KNOWS edges into an undirected graph/csr.CSR (a
+// snapshot independent of the engine's query path), runs a hand-written BFS to
+// pick the farthest reachable user from the anchor as the destination, and
+// confirms the distance with search.BiBFS. It then asks the engine for
+// shortestPath((anchor)-[:KNOWS*..maxHops]-(dst)). If the engine's length
+// disagrees with the oracle, that is a module bug: the mismatch is reported as
+// a fact (sp.len_matches_bibfs=0) and surfaced as an error. allShortestPaths is
+// checked for the invariant that every returned path is a shortest one.
+func queryShortestPaths(ctx context.Context, eng *cypher.Engine, g *lpg.Graph[string, float64], cfg config, stats buildStats, w io.Writer) error {
+	oracle, err := buildUndirectedKnows(ctx, g)
 	if err != nil {
-		return fmt.Errorf("create_count_before: %w", err)
+		return fmt.Errorf("shortest_path oracle: %w", err)
+	}
+	oracleCSR := csr.BuildFromAdjList(oracle)
+
+	src, ok := oracle.Mapper().Lookup(stats.anchorID)
+	if !ok {
+		return fmt.Errorf("shortest_path: anchor user %q has no KNOWS edges", stats.anchorID)
 	}
 
-	const createQuery = `CREATE (u:USER {name: "Frank Newcomer", age: 41, city: "Lisbon"})`
-	start := time.Now()
-	res, err := eng.RunInTx(ctx, createQuery, nil)
+	// Hand-written BFS over the oracle CSR: pick the farthest reachable user
+	// (ties broken by the smallest id) as the destination. Sharing no code
+	// with the engine, it is an independent shortest-distance reference.
+	dist, err := bfsDistances(ctx, oracleCSR, src)
 	if err != nil {
-		return fmt.Errorf("create: %w", err)
+		return err
 	}
-	for res.Next() { //nolint:revive // empty body: CREATE yields no rows; drain to completion.
+	dstID, oracleDist := farthest(oracleCSR, oracle, dist)
+	if oracleDist < 0 {
+		return fmt.Errorf("shortest_path: anchor user %q reaches no other user", stats.anchorID)
+	}
+
+	// search.BiBFS on the same pair: the module's own bidirectional search, a
+	// second independent path from the Cypher shortestPath operator.
+	dstNode, _ := oracle.Mapper().Lookup(dstID)
+	bfsPath, err := search.BiBFSCtx(ctx, oracleCSR, src, dstNode)
+	if err != nil {
+		return fmt.Errorf("shortest_path BiBFS: %w", err)
+	}
+	biHops := len(bfsPath) - 1
+
+	// Cypher shortestPath over undirected KNOWS, bounded by -max-hops and
+	// anchored on the two users by their unique id property.
+	params := map[string]expr.Value{
+		"aid": expr.StringValue(stats.anchorID),
+		"bid": expr.StringValue(dstID),
+	}
+	spQuery := fmt.Sprintf(
+		"MATCH (a:USER {id:$aid}),(b:USER {id:$bid}) "+
+			"MATCH p = shortestPath((a)-[:KNOWS*..%d]-(b)) RETURN length(p) AS len", cfg.maxHops)
+	spStart := time.Now()
+	cypherLen, spRows, err := scalarLen(ctx, eng, spQuery, params)
+	if err != nil {
+		return fmt.Errorf("shortest_path: %w", err)
+	}
+	spLatency := time.Since(spStart)
+	if spRows == 0 {
+		return fmt.Errorf("shortest_path: engine found no path within %d hops, but the oracle found one of length %d — module inconsistency", cfg.maxHops, oracleDist)
+	}
+
+	// allShortestPaths: every enumerated path must be a shortest path.
+	aspQuery := fmt.Sprintf(
+		"MATCH (a:USER {id:$aid}),(b:USER {id:$bid}) "+
+			"MATCH p = allShortestPaths((a)-[:KNOWS*..%d]-(b)) RETURN length(p) AS len", cfg.maxHops)
+	aspStart := time.Now()
+	aspLens, err := collectLens(ctx, eng, aspQuery, params)
+	if err != nil {
+		return fmt.Errorf("all_shortest_paths: %w", err)
+	}
+	aspLatency := time.Since(aspStart)
+	allMin := len(aspLens) > 0
+	for _, l := range aspLens {
+		if l != cypherLen {
+			allMin = false
+		}
+	}
+
+	match := cypherLen == int64(biHops) && oracleDist == biHops
+	fmt.Fprintf(w, "sp.len=%d\n", cypherLen)
+	fmt.Fprintf(w, "sp.len_matches_bibfs=%d\n", boolToInt(match))
+	fmt.Fprintf(w, "asp.count=%d\n", len(aspLens))
+	fmt.Fprintf(w, "asp.all_min_length=%d\n", boolToInt(allMin))
+	fmt.Fprintf(w, "# sp.oracle_bfs_dist=%d bibfs_hops=%d\n", oracleDist, biHops)
+	fmt.Fprintf(w, "# sp.latency=%s\n", spLatency.Round(time.Microsecond))
+	fmt.Fprintf(w, "# asp.latency=%s\n", aspLatency.Round(time.Microsecond))
+
+	if !match {
+		return fmt.Errorf("shortest_path length disagreement: cypher=%d bibfs=%d oracle_bfs=%d — module bug", cypherLen, biHops, oracleDist)
+	}
+	return nil
+}
+
+// buildUndirectedKnows returns an undirected adjacency holding exactly the
+// KNOWS edges currently stored in g, mirroring each directed KNOWS into an
+// undirected edge. It reads the same adjacency the engine queries, so a search
+// over it exercises the identical edge set on an independent code path.
+// (csr.BuildFromAdjList on g's own adjacency would yield a directed CSR, which
+// would not match the undirected shortestPath pattern.)
+func buildUndirectedKnows(ctx context.Context, g *lpg.Graph[string, float64]) (*adjlist.AdjList[string, float64], error) {
+	oracle := adjlist.New[string, float64](adjlist.Config{Directed: false})
+	adj := g.AdjList()
+	var walkErr error
+	visited := 0
+	adj.Mapper().Walk(func(nid graph.NodeID, key string) bool {
+		if visited%checkEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				walkErr = err
+				return false
+			}
+		}
+		visited++
+		neighbours, _ := adj.LoadEntry(nid)
+		for _, nb := range neighbours {
+			nbKey, ok := adj.Mapper().Resolve(nb)
+			if !ok {
+				continue
+			}
+			if err := oracle.AddEdge(key, nbKey, 1); err != nil {
+				walkErr = fmt.Errorf("AddEdge %s-%s: %w", key, nbKey, err)
+				return false
+			}
+		}
+		return true
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return oracle, nil
+}
+
+// bfsDistances computes the unweighted hop distance from src to every node of
+// the CSR, returning a slice indexed by NodeID with -1 for unreachable nodes.
+// It is a plain textbook BFS, deliberately sharing no code with the engine.
+func bfsDistances(ctx context.Context, c *csr.CSR[float64], src graph.NodeID) ([]int, error) {
+	dist := make([]int, int(c.MaxNodeID())+1)
+	for i := range dist {
+		dist[i] = -1
+	}
+	dist[src] = 0
+	queue := make([]graph.NodeID, 0, len(dist))
+	queue = append(queue, src)
+	for head := 0; head < len(queue); head++ {
+		if head%checkEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		cur := queue[head]
+		for nb := range c.NeighboursByID(cur) {
+			if dist[nb] < 0 {
+				dist[nb] = dist[cur] + 1
+				queue = append(queue, nb)
+			}
+		}
+	}
+	return dist, nil
+}
+
+// farthest returns the id and distance of the reachable node at the greatest
+// hop distance in dist, breaking ties by the smallest id so the choice is
+// deterministic regardless of the mapper's internal node ordering. The source
+// itself (distance 0) is excluded. dstID is empty and dist -1 when no other
+// node is reachable.
+func farthest(c *csr.CSR[float64], m *adjlist.AdjList[string, float64], dist []int) (dstID string, dstDist int) {
+	dstDist = -1
+	for id := graph.NodeID(0); id <= c.MaxNodeID(); id++ {
+		d := dist[id]
+		if d <= 0 {
+			continue
+		}
+		key, ok := m.Mapper().Resolve(id)
+		if !ok {
+			continue
+		}
+		if d > dstDist || (d == dstDist && key < dstID) {
+			dstDist, dstID = d, key
+		}
+	}
+	return dstID, dstDist
+}
+
+// scalarLen runs a query whose rows each carry a single integer column len and
+// returns the last such value together with the number of rows seen.
+func scalarLen(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value) (int64, int, error) {
+	res, err := eng.Run(ctx, query, params)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = res.Close() }()
+
+	var val int64
+	rows := 0
+	for res.Next() {
+		v := res.Record()["len"]
+		iv, ok := v.(expr.IntegerValue)
+		if !ok {
+			return 0, 0, fmt.Errorf("column len is %T, want expr.IntegerValue", v)
+		}
+		val = int64(iv)
+		rows++
+	}
+	if err := res.Err(); err != nil {
+		return 0, 0, err
+	}
+	return val, rows, nil
+}
+
+// collectLens runs a query whose rows each carry a single integer column len
+// and returns every value in row order.
+func collectLens(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value) ([]int64, error) {
+	res, err := eng.Run(ctx, query, params)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+
+	var out []int64
+	for res.Next() {
+		v := res.Record()["len"]
+		iv, ok := v.(expr.IntegerValue)
+		if !ok {
+			return nil, fmt.Errorf("column len is %T, want expr.IntegerValue", v)
+		}
+		out = append(out, int64(iv))
+	}
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Writes: the full mutation surface via Engine.RunInTx
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Fixed identifiers and property values used by the write battery. The ids are
+// deliberately not 24-char hex, so they never collide with a generated user id;
+// MERGE and every write anchor on id, so the writes are independent of the
+// seeded names.
+const (
+	writeSince = "2020-06-15" // since date carried by the newly created KNOWS edges
+
+	pathBID   = "cx-path-b" // multi-pattern CREATE: first new user (b)
+	pathBName = "Grace Path"
+	pathBAge  = 33
+	pathCID   = "cx-path-c" // multi-pattern CREATE: second new user (c)
+	pathCName = "Henry Path"
+	pathCAge  = 34
+
+	mergeID      = "cx-merge-probe" // MERGE / SET / REMOVE target
+	mergeName    = "Merl Probe"
+	mergeAge     = 50 // age set by ON CREATE
+	mergeSetAge  = 77 // age written by the SET write
+	mergeCityDef = "Lisbon"
+)
+
+// queryWrites drives the full Cypher write surface through Engine.RunInTx over
+// the seeded graph. Each mutation's effect is verified by a follow-up read and
+// reported as a deterministic fact: node/edge deltas, the MERGE idempotency
+// contract (a second identical MERGE creates nothing and takes ON MATCH), the
+// SET and REMOVE read-backs, and the DELETE / DETACH DELETE removals. The final
+// :USER and KNOWS counts pin the aggregate end state.
+func queryWrites(ctx context.Context, eng *cypher.Engine, cfg config, stats buildStats, w io.Writer) error {
+	// A single latched error keeps the sequential body readable: every helper
+	// becomes a no-op once something has failed, and the error surfaces at the
+	// end. Each step still verifies its own effect.
+	var ferr error
+	users := func() int64 {
+		if ferr != nil {
+			return 0
+		}
+		n, _, err := scalarCount(ctx, eng, "MATCH (u:USER) RETURN count(u) AS c", nil)
+		if err != nil {
+			ferr = err
+		}
+		return n
+	}
+	knows := func() int64 {
+		if ferr != nil {
+			return 0
+		}
+		n, _, err := scalarCount(ctx, eng, "MATCH (:USER)-[:KNOWS]->(:USER) RETURN count(*) AS c", nil)
+		if err != nil {
+			ferr = err
+		}
+		return n
+	}
+	do := func(label, query string, params map[string]expr.Value) {
+		if ferr != nil {
+			return
+		}
+		if err := execWrite(ctx, eng, query, params); err != nil {
+			ferr = fmt.Errorf("%s: %w", label, err)
+		}
+	}
+	ageOf := func(id string) int64 {
+		if ferr != nil {
+			return 0
+		}
+		n, _, err := scalarCount(ctx, eng, "MATCH (u:USER {id:$id}) RETURN u.age AS c", map[string]expr.Value{"id": expr.StringValue(id)})
+		if err != nil {
+			ferr = err
+		}
+		return n
+	}
+	tagOf := func(id string) (string, bool) {
+		if ferr != nil {
+			return "", true
+		}
+		v, isNull, err := scalarStringOrNull(ctx, eng,
+			"MATCH (u:USER {id:$id}) RETURN u.mergeTag AS v", map[string]expr.Value{"id": expr.StringValue(id)})
+		if err != nil {
+			ferr = err
+		}
+		return v, isNull
+	}
+
+	start := time.Now()
+	u0, k0 := users(), knows()
+
+	// W1 — multi-pattern CREATE: a two-hop KNOWS path (anchor → b → c) hung off
+	// an existing user, adding two users and two relationships in one statement.
+	do("create_path",
+		"MATCH (a:USER {id:$aid}) "+
+			"CREATE (a)-[:KNOWS {since:$since}]->"+
+			"(b:USER {id:$bid, name:$bname, age:$bage, city:$city})-[:KNOWS {since:$since}]->"+
+			"(c:USER {id:$cid, name:$cname, age:$cage, city:$city})",
+		map[string]expr.Value{
+			"aid": expr.StringValue(stats.anchorID), "since": expr.StringValue(writeSince),
+			"bid": expr.StringValue(pathBID), "bname": expr.StringValue(pathBName), "bage": expr.IntegerValue(pathBAge),
+			"cid": expr.StringValue(pathCID), "cname": expr.StringValue(pathCName), "cage": expr.IntegerValue(pathCAge),
+			"city": expr.StringValue(mergeCityDef),
+		})
+	u1, k1 := users(), knows()
+
+	// W2 — UNWIND batch create driven by a list-of-maps parameter.
+	rows := make(expr.ListValue, cfg.batch)
+	for i := 0; i < cfg.batch; i++ {
+		rows[i] = expr.MapValue{
+			"id":   expr.StringValue(fmt.Sprintf("cx-batch-%d", i)),
+			"name": expr.StringValue(fmt.Sprintf("Batch User %d", i)),
+			"age":  expr.IntegerValue(int64(minUserAge + i)),
+			"city": expr.StringValue(cities[i%len(cities)]),
+		}
+	}
+	do("unwind_create",
+		"UNWIND $rows AS row CREATE (:USER {id: row.id, name: row.name, age: row.age, city: row.city})",
+		map[string]expr.Value{"rows": rows})
+	u2 := users()
+
+	// W3 — MERGE, first pass: the probe user does not exist, so ON CREATE fires.
+	mergeQuery := "MERGE (u:USER {id:$mid}) " +
+		"ON CREATE SET u.name=$name, u.age=$age, u.mergeTag='created' " +
+		"ON MATCH SET u.mergeTag='matched'"
+	mergeParams := map[string]expr.Value{
+		"mid": expr.StringValue(mergeID), "name": expr.StringValue(mergeName), "age": expr.IntegerValue(mergeAge),
+	}
+	do("merge_create", mergeQuery, mergeParams)
+	u3 := users()
+	tagAfterCreate, _ := tagOf(mergeID)
+
+	// W4 — MERGE, second pass: the identical MERGE now matches, so it creates
+	// nothing and takes the ON MATCH branch. This proves idempotency.
+	do("merge_match", mergeQuery, mergeParams)
+	u4 := users()
+	tagAfterMatch, _ := tagOf(mergeID)
+
+	// W5 — SET a property, then read it back.
+	do("set_property",
+		"MATCH (u:USER {id:$mid}) SET u.age=$age",
+		map[string]expr.Value{"mid": expr.StringValue(mergeID), "age": expr.IntegerValue(mergeSetAge)})
+	ageAfterSet := ageOf(mergeID)
+
+	// W6 — REMOVE a property, then confirm it reads back as null.
+	do("remove_property",
+		"MATCH (u:USER {id:$mid}) REMOVE u.mergeTag",
+		map[string]expr.Value{"mid": expr.StringValue(mergeID)})
+	nullCount := int64(0)
+	if ferr == nil {
+		nullCount, _, ferr = scalarCount(ctx, eng,
+			"MATCH (u:USER {id:$mid}) WHERE u.mergeTag IS NULL RETURN count(u) AS c",
+			map[string]expr.Value{"mid": expr.StringValue(mergeID)})
+	}
+
+	// W7 — DELETE a relationship (the b → c edge); both endpoint nodes survive.
+	uPreDel, kPreDel := users(), knows()
+	do("delete_rel",
+		"MATCH (:USER {id:$bid})-[r:KNOWS]->(:USER {id:$cid}) DELETE r",
+		map[string]expr.Value{"bid": expr.StringValue(pathBID), "cid": expr.StringValue(pathCID)})
+	uPostDel, kPostDel := users(), knows()
+
+	// W8 — DETACH DELETE a node (b), which still has the incoming anchor → b
+	// edge: DETACH DELETE removes the node and that remaining relationship.
+	do("detach_delete",
+		"MATCH (u:USER {id:$bid}) DETACH DELETE u",
+		map[string]expr.Value{"bid": expr.StringValue(pathBID)})
+	uFinal, kFinal := users(), knows()
+
+	if ferr != nil {
+		return ferr
+	}
+
+	fmt.Fprintf(w, "create.node_delta=%d\n", u1-u0)
+	fmt.Fprintf(w, "create.edge_delta=%d\n", k1-k0)
+	fmt.Fprintf(w, "unwind.created=%d\n", u2-u1)
+	fmt.Fprintf(w, "merge.created=%d\n", u3-u2)
+	fmt.Fprintf(w, "merge.created_second_pass=%d\n", u4-u3)
+	fmt.Fprintf(w, "merge.matched_second_pass=%d\n", boolToInt(u4-u3 == 0 && tagAfterMatch == "matched"))
+	fmt.Fprintf(w, "set.updated=%d\n", boolToInt(ageAfterSet == mergeSetAge))
+	fmt.Fprintf(w, "remove.cleared=%d\n", boolToInt(nullCount == 1))
+	fmt.Fprintf(w, "delete.rel_removed=%d\n", kPreDel-kPostDel)
+	fmt.Fprintf(w, "delete.nodes_kept=%d\n", boolToInt(uPreDel == uPostDel))
+	fmt.Fprintf(w, "detach.node_removed=%d\n", uPostDel-uFinal)
+	fmt.Fprintf(w, "detach.rel_removed=%d\n", kPostDel-kFinal)
+	fmt.Fprintf(w, "users.final=%d\n", uFinal)
+	fmt.Fprintf(w, "knows.final=%d\n", kFinal)
+	fmt.Fprintf(w, "# write.merge_tag_after_create=%s\n", tagAfterCreate)
+	fmt.Fprintf(w, "# write.merge_tag_after_match=%s\n", tagAfterMatch)
+	fmt.Fprintf(w, "# write.set_age=%d\n", ageAfterSet)
+	fmt.Fprintf(w, "# write.elapsed=%s\n", time.Since(start).Round(time.Microsecond))
+	return nil
+}
+
+// execWrite runs a write query inside a transaction and drains it to
+// completion, applying the mutation atomically. Any rows are discarded; the
+// caller verifies the effect with a separate read.
+func execWrite(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value) error {
+	res, err := eng.RunInTx(ctx, query, params)
+	if err != nil {
+		return err
+	}
+	for res.Next() { //nolint:revive // drain to apply the write; result rows are not needed here.
 	}
 	if err := res.Err(); err != nil {
 		_ = res.Close()
-		return fmt.Errorf("create result: %w", err)
+		return err
 	}
-	if err := res.Close(); err != nil {
-		return fmt.Errorf("create close: %w", err)
-	}
-	d := time.Since(start)
+	return res.Close()
+}
 
-	after, _, err := scalarCount(ctx, eng, countQuery, nil)
+// scalarStringOrNull runs a query whose single row carries a column v and
+// returns its string value, or isNull=true when the column is null (or no row
+// is produced).
+func scalarStringOrNull(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value) (val string, isNull bool, err error) {
+	res, err := eng.Run(ctx, query, params)
 	if err != nil {
-		return fmt.Errorf("create_count_after: %w", err)
+		return "", false, err
 	}
+	defer func() { _ = res.Close() }()
 
-	fmt.Fprintf(w, "q.users_before_create=%d\n", before)
-	fmt.Fprintf(w, "q.users_after_create=%d\n", after)
-	fmt.Fprintf(w, "create.user_delta=%d\n", after-before)
-	fmt.Fprintf(w, "# q.create.latency=%s\n", d.Round(time.Microsecond))
-	return nil
+	got := false
+	for res.Next() {
+		got = true
+		v := res.Record()["v"]
+		if ev, ok := v.(expr.Value); ok && expr.IsNull(ev) {
+			isNull = true
+			continue
+		}
+		if s, ok := v.(expr.StringValue); ok {
+			val = string(s)
+		}
+	}
+	if e := res.Err(); e != nil {
+		return "", false, e
+	}
+	if !got {
+		return "", true, nil
+	}
+	return val, isNull, nil
+}
+
+// boolToInt renders a boolean invariant as a pinnable 0/1 fact value.
+func boolToInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // scalarCount runs a query whose single row has a single integer column c
