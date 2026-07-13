@@ -50,8 +50,25 @@ type Struct struct {
 // WriteValue encodes v into the stream using the Encoder.
 // It dispatches on the concrete type of v.
 //
-//nolint:gocyclo // switch over PackStream's nine value kinds; complexity is irreducible.
+// Encoding is one Go stack frame per nesting level, so an over-deep composite
+// value would overflow the goroutine stack — a fatal, unrecoverable crash — the
+// same hazard the decoder guards against on the read side. WriteValue therefore
+// enforces the symmetric maxValueDepth bound and returns ErrNestingTooDeep
+// instead of recursing past it. See maxValueDepth and readValue.
 func (e *Encoder) WriteValue(v Value) error {
+	return e.writeValue(v, 0)
+}
+
+// writeValue is the depth-bounded recursive worker behind WriteValue. depth is
+// the current nesting level; each composite arm recurses with depth+1 and the
+// bound is enforced at entry, so every recursive entry point (List items, Map
+// values, Struct fields) is covered by a single check — mirroring readValue.
+//
+//nolint:gocyclo // switch over PackStream's nine value kinds; complexity is irreducible.
+func (e *Encoder) writeValue(v Value, depth int) error {
+	if depth > maxValueDepth {
+		return ErrNestingTooDeep
+	}
 	switch x := v.(type) {
 	case nil:
 		return e.WriteNull()
@@ -74,7 +91,7 @@ func (e *Encoder) WriteValue(v Value) error {
 			return err
 		}
 		for _, item := range x {
-			if err := e.WriteValue(item); err != nil {
+			if err := e.writeValue(item, depth+1); err != nil {
 				return err
 			}
 		}
@@ -87,7 +104,7 @@ func (e *Encoder) WriteValue(v Value) error {
 			if err := e.WriteString(k); err != nil {
 				return err
 			}
-			if err := e.WriteValue(val); err != nil {
+			if err := e.writeValue(val, depth+1); err != nil {
 				return err
 			}
 		}
@@ -97,7 +114,7 @@ func (e *Encoder) WriteValue(v Value) error {
 			return err
 		}
 		for _, f := range x.Fields {
-			if err := e.WriteValue(f); err != nil {
+			if err := e.writeValue(f, depth+1); err != nil {
 				return err
 			}
 		}

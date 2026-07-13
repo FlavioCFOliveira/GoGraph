@@ -1819,6 +1819,19 @@ func evalReduceExpr(n *ast.ReduceExpr, row RowContext, params map[string]Value, 
 		if err != nil {
 			return nil, err
 		}
+		// reduce can deepen the accumulator by one nesting level per iteration
+		// (reduce(acc=[0], … | [acc])) while charging only one element against
+		// the element budget, so depth escapes the element ceiling. Reject an
+		// over-deep/over-large accumulator early — on the same stride as the
+		// cancellation check — before it can overflow a downstream recursive
+		// walker's stack (#value-depth). The loop-end check below is the
+		// backstop for a reduce that ends before the first stride.
+		if i%ctxIterCheckStride == 0 && ExceedsValueDepth(acc) {
+			return nil, errValueTooDeep()
+		}
+	}
+	if ExceedsValueDepth(acc) {
+		return nil, errValueTooDeep()
 	}
 	return acc, nil
 }
@@ -1884,6 +1897,14 @@ func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowConte
 		if err != nil {
 			return nil, err
 		}
+		// See evalReduceExpr: bound accumulator nesting depth so a reduce
+		// cannot build a value deep enough to overflow a downstream walker.
+		if i%ctxIterCheckStride == 0 && ExceedsValueDepth(acc) {
+			return nil, errValueTooDeep()
+		}
+	}
+	if ExceedsValueDepth(acc) {
+		return nil, errValueTooDeep()
 	}
 	return acc, nil
 }

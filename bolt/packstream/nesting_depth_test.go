@@ -91,3 +91,71 @@ func TestReadValueNestingJustPastBound(t *testing.T) {
 		t.Fatalf("ReadValue error = %v, want ErrNestingTooDeep", err)
 	}
 }
+
+// nestedListValue builds a Go []Value nested `levels` deep, terminated by a NULL
+// leaf. Encoding it recurses exactly `levels` levels deep.
+func nestedListValue(levels int) packstream.Value {
+	var v packstream.Value // nil == NULL leaf
+	for range levels {
+		v = []packstream.Value{v}
+	}
+	return v
+}
+
+// TestWriteValueNestingTooDeep is the regression test for the write-side of the
+// value-nesting-depth blocker: WriteValue must refuse an over-deep composite
+// with ErrNestingTooDeep instead of recursing one Go stack frame per level into
+// a fatal, unrecoverable stack overflow. Before the fix, encoding a deeply
+// nested value produced by the Cypher engine (e.g. a reduce accumulator) crashed
+// the whole process on the result-return path. The test completing at all — no
+// fatal stack overflow — is itself part of what is being asserted.
+func TestWriteValueNestingTooDeep(t *testing.T) {
+	v := nestedListValue(5000) // far past the 128 bound, cheap to build
+
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	err := enc.WriteValue(v)
+	if err == nil {
+		t.Fatalf("WriteValue accepted an over-deep value, want error")
+	}
+	if !errors.Is(err, packstream.ErrNestingTooDeep) {
+		t.Fatalf("WriteValue error = %v, want ErrNestingTooDeep", err)
+	}
+}
+
+// TestWriteValueNestingAtBound asserts the write bound is inclusive on the safe
+// side and symmetric with the decoder: a value nested exactly to the maximum
+// encodes, and the bytes round-trip back through ReadValue.
+func TestWriteValueNestingAtBound(t *testing.T) {
+	v := nestedListValue(packstream.MaxValueDepthForTest())
+
+	var buf bytes.Buffer
+	enc := packstream.NewEncoder(&buf)
+	if err := enc.WriteValue(v); err != nil {
+		t.Fatalf("WriteValue rejected a value at the depth bound: %v", err)
+	}
+	if err := enc.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	dec := packstream.NewDecoder(bytes.NewReader(buf.Bytes()))
+	got, err := dec.ReadValue()
+	if err != nil {
+		t.Fatalf("ReadValue of at-bound round-trip failed: %v", err)
+	}
+	depth := 0
+	for {
+		list, ok := got.([]packstream.Value)
+		if !ok {
+			break
+		}
+		if len(list) != 1 {
+			t.Fatalf("at level %d: list len = %d, want 1", depth, len(list))
+		}
+		got = list[0]
+		depth++
+	}
+	if depth != packstream.MaxValueDepthForTest() {
+		t.Fatalf("round-trip nesting depth = %d, want %d", depth, packstream.MaxValueDepthForTest())
+	}
+}
