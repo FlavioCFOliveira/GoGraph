@@ -36,7 +36,9 @@ func newServer(ds *dataStore, addr string) *Server {
 	// method yields 405 Method Not Allowed automatically.
 	mux.HandleFunc("POST /query", s.handleQuery)
 	mux.HandleFunc("POST /seed", s.handleSeed)
+	mux.HandleFunc("POST /explain", s.handleExplain)
 	mux.HandleFunc("GET /stats", s.handleStats)
+	mux.HandleFunc("GET /schema", s.handleSchema)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
 	s.http = &http.Server{

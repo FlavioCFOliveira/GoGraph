@@ -10,6 +10,12 @@ It is built on the Go standard library only (`net/http`, zero new
 dependencies) and is **persistent across restarts** and **`kill -9` safe**
 (write-ahead log + snapshot + recovery).
 
+It also demonstrates GoGraph's **schema** surface: Cypher DDL (`CREATE
+CONSTRAINT` / `CREATE INDEX`), `UNIQUE`-constraint enforcement (`409` on a
+duplicate), schema introspection via the built-in `db.*` procedures
+(`GET /schema`), and query-plan explanation (`POST /explain`, index seek vs
+label scan) — all of it durable across a restart.
+
 - Data model, REST contract and query catalogue: [`SPEC.md`](SPEC.md)
 - Runtime reference: the package doc in [`doc.go`](doc.go)
 
@@ -85,10 +91,12 @@ chains — so every maintenance query stays meaningful at scale.
 
 | Method & path | Purpose |
 |---|---|
-| `POST /query` | Run an arbitrary Cypher statement (read or write). |
-| `POST /seed`  | Idempotently load the fixture, optionally at a synthetic scale. |
-| `GET /stats`  | Node/edge counts (facts) **plus** a volatile `telemetry` object. |
-| `GET /healthz`| Liveness probe. |
+| `POST /query`   | Run an arbitrary Cypher statement (read or write). |
+| `POST /seed`    | Idempotently load the fixture, optionally at a synthetic scale. |
+| `POST /explain` | Return the physical plan for a query (index seek vs label scan) without running it. |
+| `GET /stats`    | Node/edge counts (facts) **plus** a volatile `telemetry` object. |
+| `GET /schema`   | The live schema: labels, relationship types, property keys, indexes, constraints. |
+| `GET /healthz`  | Liveness probe. |
 
 ### Seed the graph
 
@@ -320,6 +328,89 @@ ORDER BY at DESC
 
 ---
 
+## Schema, constraints and query plans
+
+At store initialisation the server declares its schema as Cypher DDL,
+idempotently (so re-opening a populated store is a no-op):
+
+```cypher
+CREATE CONSTRAINT component_key_unique IF NOT EXISTS
+       FOR (c:Component) REQUIRE c.key IS UNIQUE
+CREATE INDEX IF NOT EXISTS developer_key_idx
+       FOR (d:Developer) ON (d.key)
+```
+
+The `UNIQUE` constraint guarantees `Component.key` integrity; the secondary
+index accelerates `Developer.key` equality lookups. Because the fixture is
+loaded through the storage layer directly (which does not feed the engine's
+index change fan-out), the DDL is issued **after** the fixture, so each backing
+index is backfilled from the seeded graph; every later write goes through the
+engine (`POST /query`) and maintains the indexes incrementally.
+
+### Inspect the schema
+
+```sh
+curl -s localhost:8080/schema
+```
+```json
+{
+  "labels": ["Code","Component","Developer","Module","People","Repository",
+             "Sprint","Task","Team","Work","WorkflowState"],
+  "relationship_types": ["ASSIGNED_TO","BLOCKS","CONTAINS","DEPENDS_ON",
+                         "HAS_STATE","IN_SPRINT","MEMBER_OF","NEXT",
+                         "SUBTASK_OF","TOUCHES"],
+  "property_keys": ["active","at","..."],
+  "indexes": [{"name":"__uniq__Component.key","type":"hash"},
+              {"name":"developer_key_idx","type":"hash"}],
+  "constraints": [{"name":"component_key_unique","type":"UNIQUE",
+                   "label":"Component","property":"key"}]
+}
+```
+
+The sets are sorted so the output is stable and pinnable as facts. A `UNIQUE`
+constraint's backing hash index is reported under its reserved
+`__uniq__<Label>.<prop>` name alongside the plain index.
+
+### Constraint enforcement
+
+Re-creating an existing `Component.key` violates the `UNIQUE` constraint. The
+write is rejected with `409 Conflict` and rolled back atomically — the graph is
+unchanged:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/query -d @- <<'JSON'
+{"query":"CREATE (c:Component:Code {key:'comp:platform/config.go'})"}
+JSON
+```
+```
+409
+```
+```json
+{"error":"exec: constraint violation: UNIQUE constraint on (Component).key: value \"comp:platform/config.go\" already exists","kind":"conflict"}
+```
+
+### Explain a query plan
+
+`POST /explain` shows whether the declared schema turns an equality lookup into
+an index seek. The Q1/Q6/Q8 filter on `Component.key` and Q4's filter on
+`Developer.key` are served by a `NodeByIndexSeek`:
+
+```sh
+curl -s localhost:8080/explain -d @- <<'JSON'
+{"query":"MATCH (c:Component) WHERE c.key = $k RETURN c","params":{"k":"comp:platform/config.go"}}
+JSON
+```
+```json
+{"plan":"ProduceResults\n└─ Projection\n   └─ NodeByIndexSeek\n","uses_index_seek":true}
+```
+
+An equality on an **un-indexed** property falls back to a full label scan
+(`"uses_index_seek":false`, plan contains `NodeByLabelScan`), which is itself
+evidence: the difference between the two plans is the difference between an O(1)
+seek and an O(N) scan.
+
+---
+
 ## Persistence — survives a crash
 
 Every committed write is fsynced to the WAL before the response returns, so the
@@ -342,8 +433,20 @@ On restart, recovery replays the WAL on top of the last snapshot. A graceful
 SIGTERM additionally writes a fresh snapshot to shorten the next replay. Both
 paths are covered by `cross_process_test.go`.
 
+The **schema survives too**. The `CREATE CONSTRAINT` / `CREATE INDEX` statements
+are WAL-logged writes, and the shutdown snapshot embeds the constraint set and
+index definitions. On open the engine is built with
+`cypher.NewEngineWithStoreAndSchema`, which re-registers both from the recovered
+state and re-backfills each backing index — so the `UNIQUE` constraint still
+rejects duplicates and the index seek still fires after a restart. Both
+`cross_process_test.go` restart paths assert this (constraint present in
+`/schema`, and a duplicate `Component.key` rejected with `409`). Using the plain
+`cypher.NewEngineWithStore` here would silently drop enforcement and revert
+index seeks to full label scans across a restart.
+
 The data directory holds `wal` (the log) and `snapshot/` (manifest plus the
-CSR, labels, properties and mapper images).
+CSR, labels, properties, mapper, and — once the schema is declared —
+`constraints.bin` and `indexdefs.bin` images).
 
 ---
 
@@ -401,11 +504,14 @@ opt-in synthetic scale — zero-scale equals the bare fixture, pinned
 deterministic counts at a fixed seed, structural invariants, and the realism
 properties the queries depend on (`synth_test.go`); every endpoint and error
 path including the scaled `POST /seed` and the `GET /stats` telemetry block
-(`server_test.go`, `synth_test.go`); concurrent readers/writers
+(`server_test.go`, `synth_test.go`); the schema surface — the `GET /schema`
+label/relationship/index/constraint facts, the `409` constraint-violation path
+with atomic rollback, `POST /explain` index-seek vs label-scan, and in-process
+schema durability across reopen (`schema_test.go`); concurrent readers/writers
 (`server_concurrency_test.go`); the Close quiesce-and-reject contract against a
 concurrent write (`close_quiesce_test.go`); in-process reopen
 (`lifecycle_test.go`); and a real process restart under both SIGTERM and
-`kill -9` (`cross_process_test.go`). The synthetic tests assert only
-deterministic facts (counts, structure, presence of telemetry fields) — never
-volatile latency or heap values. `go.uber.org/goleak` guards against goroutine
-leaks via `main_test.go`.
+`kill -9`, each asserting the schema is durable (`cross_process_test.go`). The
+synthetic tests assert only deterministic facts (counts, structure, presence of
+telemetry fields) — never volatile latency or heap values.
+`go.uber.org/goleak` guards against goroutine leaks via `main_test.go`.

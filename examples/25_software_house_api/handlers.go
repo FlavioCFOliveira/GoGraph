@@ -7,8 +7,12 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 )
@@ -109,9 +113,10 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 // Parse-phase rejections (a genuine syntax error, or valid syntax for a
 // feature the engine does not support) are client faults reported as 400.
 // Post-parse semantic faults (undefined variable, type error, bad
-// parameter type) are unprocessable, reported as 422. Cancellation or a
-// deadline is reported as unavailable (503); anything else is a runtime
-// failure (500).
+// parameter type) are unprocessable, reported as 422. A constraint
+// violation (a write that would break a UNIQUE or NOT NULL invariant) is a
+// conflict with existing state, reported as 409. Cancellation or a deadline
+// is reported as unavailable (503); anything else is a runtime failure (500).
 func writeQueryError(w http.ResponseWriter, err error) {
 	var (
 		pe  *parser.ParseError   // syntax error
@@ -124,6 +129,10 @@ func writeQueryError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.As(err, &se), errors.As(err, &pte):
 		writeError(w, http.StatusUnprocessableEntity, "semantic", err.Error())
+	case errors.Is(err, exec.ErrConstraintViolation):
+		// A UNIQUE/NOT NULL violation: the write conflicts with existing data
+		// and was rolled back atomically. 409 Conflict is the semantic match.
+		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
 	default:
@@ -186,7 +195,10 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	start := time.Now()
-	seeded, err := seedFixtureScaled(s.ds.txnStore, scale)
+	// seed loads the fixture and, on the first seed, declares the schema so its
+	// backing indexes are backfilled from the just-seeded graph (see
+	// dataStore.seed). Both run under the exclusive hold already held here.
+	seeded, err := s.ds.seed(r.Context(), scale)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "runtime", "seed failed: "+err.Error())
 		return
@@ -294,4 +306,219 @@ func (s *Server) countOne(ctx context.Context, query string) (int64, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// schemaResponse is the GET /schema body: the graph's live schema surfaced by
+// the built-in db.* introspection procedures. Every field is a deterministic
+// FACT for a fixed seed — the label/relationship-type/property-key sets in use
+// and the declared indexes and constraints — so a test can pin them. The sets
+// are sorted so the JSON is stable regardless of the procedures' internal
+// enumeration order.
+type schemaResponse struct {
+	Labels            []string           `json:"labels"`
+	RelationshipTypes []string           `json:"relationship_types"`
+	PropertyKeys      []string           `json:"property_keys"`
+	Indexes           []schemaIndex      `json:"indexes"`
+	Constraints       []schemaConstraint `json:"constraints"`
+}
+
+// schemaIndex is one row of CALL db.indexes(). A UNIQUE constraint's backing
+// index is reported here under its reserved __uniq__<Label>.<prop> name
+// alongside any plain CREATE INDEX; both are shown faithfully.
+type schemaIndex struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// schemaConstraint is one row of CALL db.constraints().
+type schemaConstraint struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Label    string `json:"label"`
+	Property string `json:"property"`
+}
+
+// handleSchema returns the live schema via the db.* introspection procedures:
+// db.labels(), db.relationshipTypes(), db.propertyKeys(), db.indexes() and
+// db.constraints(). The whole sweep runs under one shared hold so the five
+// procedure calls observe one consistent snapshot of the schema. A request
+// that arrives after the store has been closed is rejected with 503.
+func (s *Server) handleSchema(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	release, err := s.ds.acquire(false)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
+		return
+	}
+	defer release()
+
+	labels, err := s.procColumn(ctx, "CALL db.labels()", "label")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "runtime", "schema: "+err.Error())
+		return
+	}
+	relationshipTypes, err := s.procColumn(ctx, "CALL db.relationshipTypes()", "relationshipType")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "runtime", "schema: "+err.Error())
+		return
+	}
+	propertyKeys, err := s.procColumn(ctx, "CALL db.propertyKeys()", "propertyKey")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "runtime", "schema: "+err.Error())
+		return
+	}
+	indexes, err := s.procIndexes(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "runtime", "schema: "+err.Error())
+		return
+	}
+	constraints, err := s.procConstraints(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "runtime", "schema: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, schemaResponse{
+		Labels:            labels,
+		RelationshipTypes: relationshipTypes,
+		PropertyKeys:      propertyKeys,
+		Indexes:           indexes,
+		Constraints:       constraints,
+	})
+}
+
+// procColumn runs a single-column introspection procedure and returns the
+// sorted, distinct string values of column col. The caller holds the shared
+// hold for the surrounding sweep.
+func (s *Server) procColumn(ctx context.Context, query, col string) ([]string, error) {
+	res, err := s.ds.engine.RunAny(ctx, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+	out := make([]string, 0, 8)
+	for res.Next() {
+		if v, ok := res.Record()[col]; ok {
+			out = append(out, cellString(v))
+		}
+	}
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// procIndexes runs CALL db.indexes() and returns its rows sorted by name.
+func (s *Server) procIndexes(ctx context.Context) ([]schemaIndex, error) {
+	res, err := s.ds.engine.RunAny(ctx, "CALL db.indexes()", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+	out := make([]schemaIndex, 0, 4)
+	for res.Next() {
+		rec := res.Record()
+		out = append(out, schemaIndex{Name: cellString(rec["name"]), Type: cellString(rec["type"])})
+	}
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// procConstraints runs CALL db.constraints() and returns its rows sorted by name.
+func (s *Server) procConstraints(ctx context.Context) ([]schemaConstraint, error) {
+	res, err := s.ds.engine.RunAny(ctx, "CALL db.constraints()", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+	out := make([]schemaConstraint, 0, 4)
+	for res.Next() {
+		rec := res.Record()
+		out = append(out, schemaConstraint{
+			Name:     cellString(rec["name"]),
+			Type:     cellString(rec["type"]),
+			Label:    cellString(rec["label"]),
+			Property: cellString(rec["property"]),
+		})
+	}
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// cellString renders a Cypher record cell (an expr.Value) as its plain string,
+// or "" when it is null or not a string. The db.* procedures yield string
+// columns, so this recovers the underlying Go string.
+func cellString(v any) string {
+	if sv, ok := jsonValue(v).(string); ok {
+		return sv
+	}
+	return ""
+}
+
+// explainRequest is the POST /explain request body. Params is optional.
+type explainRequest struct {
+	Query  string         `json:"query"`
+	Params map[string]any `json:"params"`
+}
+
+// explainResponse is the POST /explain success body: the rendered physical
+// plan and whether it uses an index seek. UsesIndexSeek is a deterministic
+// FACT (it depends only on the query and the declared schema, not on data or
+// timing); Plan is human-readable diagnostic detail.
+type explainResponse struct {
+	Plan          string `json:"plan"`
+	UsesIndexSeek bool   `json:"uses_index_seek"`
+}
+
+// handleExplain returns the physical plan the engine would choose for a query,
+// without executing it. It reports whether the plan uses a NodeByIndexSeek —
+// the operator that proves the equality predicate is served by the constraint
+// or index declared at startup rather than a full NodeByLabelScan. The plan
+// reflects current index availability, so the sweep runs under a shared hold
+// to exclude a concurrent write mutating the structures the planner reads. A
+// request that arrives after the store has been closed is rejected with 503.
+func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxQueryBodyBytes)
+	var req explainRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "request body exceeds the 1 MiB limit")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.Query == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "missing required field \"query\"")
+		return
+	}
+	bound, err := cypher.BindParams(req.Params)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid params: "+err.Error())
+		return
+	}
+
+	release, err := s.ds.acquire(false)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", err.Error())
+		return
+	}
+	defer release()
+
+	plan, err := s.ds.engine.Explain(req.Query, bound)
+	if err != nil {
+		writeQueryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, explainResponse{
+		Plan:          plan,
+		UsesIndexSeek: strings.Contains(plan, "NodeByIndexSeek"),
+	})
 }

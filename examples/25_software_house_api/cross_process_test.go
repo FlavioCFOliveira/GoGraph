@@ -130,6 +130,44 @@ func cpDevCount(t *testing.T, client *http.Client, base string) int64 {
 	return sr.Nodes[typeDeveloper]
 }
 
+// cpAssertSchemaDurable asserts that the schema declared on the first process
+// survived the restart: GET /schema still reports the UNIQUE constraint, and a
+// CREATE duplicating a constrained Component.key is rejected with 409. This is
+// the cross-process proof that the constraint (and its enforcement) is durable,
+// not just recovered in memory.
+func cpAssertSchemaDurable(t *testing.T, client *http.Client, base string) {
+	t.Helper()
+	var sr schemaResponse
+	mustJSON(t, cpReq(t, client, http.MethodGet, base+"/schema", ""), &sr)
+	found := false
+	for _, con := range sr.Constraints {
+		if con.Name == constraintComponentKeyName && con.Type == "UNIQUE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("constraint %q not present after restart; got %+v", constraintComponentKeyName, sr.Constraints)
+	}
+
+	// A duplicate constrained key must still be rejected (409) — enforcement,
+	// not just the definition, survived.
+	body := `{"query":"CREATE (c:Component:Code {key:'comp:platform/config.go'})"}`
+	req, err := http.NewRequest(http.MethodPost, base+"/query", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("duplicate CREATE: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Errorf("duplicate CREATE after restart status = %d, want 409 (%s)", resp.StatusCode, raw)
+	}
+}
+
 func newCPClient(t *testing.T) *http.Client {
 	t.Helper()
 	c := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
@@ -168,6 +206,9 @@ func TestCrossProcessGracefulRestart(t *testing.T) {
 	if seedResp["seeded"] != false {
 		t.Errorf("re-seed after restart: seeded=%v, want false", seedResp["seeded"])
 	}
+	// The schema (constraint + index) declared on the first seed must survive
+	// the graceful restart (snapshot with constraints.bin/indexdefs.bin).
+	cpAssertSchemaDurable(t, client, p2.base)
 }
 
 func TestCrossProcessKill9Recovery(t *testing.T) {
@@ -197,4 +238,8 @@ func TestCrossProcessKill9Recovery(t *testing.T) {
 	if got := cpDevCount(t, client, p2.base); got != 7 {
 		t.Errorf("Developer count after kill -9 recovery = %d, want 7 (WAL not recovered)", got)
 	}
+	// The schema declared on the first seed must survive the crash too: with no
+	// graceful snapshot, its CREATE CONSTRAINT/INDEX frames are recovered from
+	// the WAL and re-registered by NewEngineWithStoreAndSchema.
+	cpAssertSchemaDurable(t, client, p2.base)
 }

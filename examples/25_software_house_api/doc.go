@@ -30,7 +30,7 @@
 // # Endpoints
 //
 // The server listens on the address given by -addr (default :8080) and
-// exposes four routes. Request and response bodies are JSON.
+// exposes six routes. Request and response bodies are JSON.
 //
 //	POST /query
 //	    Run an arbitrary Cypher statement (read or write). Request:
@@ -40,6 +40,18 @@
 //	        {"columns": ["..."], "rows": [{"col": value, ...}]}
 //	    A write-only statement (no RETURN) returns
 //	    {"columns":[],"rows":[]} after the write is durably committed.
+//	    A write that violates a UNIQUE/NOT NULL constraint is rejected with
+//	    409 and rolled back atomically.
+//
+//	POST /explain
+//	    Return the physical plan the engine would choose for a query, without
+//	    executing it. Request:
+//	        {"query": "<cypher>", "params": {<optional>}}
+//	    Success (200):
+//	        {"plan": "<rendered plan>", "uses_index_seek": <bool>}
+//	    uses_index_seek is true when an equality predicate is served by a
+//	    declared index or constraint-backing index (NodeByIndexSeek) rather
+//	    than a full NodeByLabelScan.
 //
 //	POST /seed
 //	    Idempotently load the fixture. An empty body loads the small
@@ -68,14 +80,46 @@
 //	    JSON analogue of the "# " telemetry convention the non-server examples
 //	    use (see docs/examples-standard.md).
 //
+//	GET /schema
+//	    The live schema via the built-in db.* introspection procedures:
+//	        {"labels": [...], "relationship_types": [...],
+//	         "property_keys": [...],
+//	         "indexes": [{"name": "...", "type": "..."}],
+//	         "constraints": [{"name": "...", "type": "...",
+//	                          "label": "...", "property": "..."}]}
+//	    The sets are sorted so the JSON is stable and pinnable as facts. A
+//	    UNIQUE constraint's backing index appears under its reserved
+//	    __uniq__<Label>.<prop> name alongside any plain CREATE INDEX.
+//
 //	GET /healthz
 //	    Liveness probe; returns {"status":"ok"} without touching the graph.
 //
 // Errors use a typed envelope {"error": "<message>", "kind": "<kind>"}
 // with the matching status: 400 (malformed JSON or a Cypher syntax /
-// unsupported-feature error), 405 (wrong method), 413 (body over 1 MiB),
-// 422 (Cypher semantic or bad-parameter error), 500 (runtime), 503
+// unsupported-feature error), 405 (wrong method), 409 (a Cypher constraint
+// violation — a write breaking a UNIQUE/NOT NULL invariant), 413 (body over
+// 1 MiB), 422 (Cypher semantic or bad-parameter error), 500 (runtime), 503
 // (shutting down).
+//
+// # Schema (DDL), constraints and introspection
+//
+// At store initialisation the server declares its schema as Cypher DDL,
+// idempotently (IF NOT EXISTS):
+//
+//	CREATE CONSTRAINT component_key_unique IF NOT EXISTS
+//	       FOR (c:Component) REQUIRE c.key IS UNIQUE
+//	CREATE INDEX IF NOT EXISTS developer_key_idx
+//	       FOR (d:Developer) ON (d.key)
+//
+// The UNIQUE constraint rejects a duplicate Component.key at write time (409)
+// and its backing index makes Component.key equality lookups a NodeByIndexSeek
+// (catalogue queries Q1/Q6/Q8); the secondary index does the same for
+// Developer.key (Q4). Because the fixture is loaded through the txn.Store
+// directly — which does not feed the engine's index change fan-out — the DDL
+// is issued after the fixture (see dataStore.seed) so the backing indexes are
+// backfilled from the seeded graph; every later write goes through the engine
+// and maintains them incrementally. POST /explain and GET /schema expose the
+// plan and the schema for inspection.
 //
 // # Persistence and recovery
 //
@@ -88,6 +132,16 @@
 // the server calls recovery.OpenCtx, which loads the snapshot and replays
 // any WAL tail; on graceful shutdown it writes a final snapshot (an
 // optimisation that shortens the next replay) and closes the WAL.
+//
+// The schema is durable too: CREATE CONSTRAINT / CREATE INDEX are WAL-logged
+// writes, and the shutdown snapshot embeds the constraint set and index
+// definitions (WriteSnapshotFullWithConstraintsAndIndexDefs). On open the
+// engine is built with cypher.NewEngineWithStoreAndSchema, which re-registers
+// both from the recovered store/recovery.Result and re-backfills each backing
+// index — so a constraint declared before a crash is enforced again and an
+// index seek serves live rows immediately. Using the plain
+// cypher.NewEngineWithStore would silently lose enforcement and index seeks
+// across a restart.
 //
 // # Concurrency and isolation
 //

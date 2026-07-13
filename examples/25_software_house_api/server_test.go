@@ -21,8 +21,11 @@ func newTestServer(t *testing.T, seed bool) (*httptest.Server, *http.Client) {
 		t.Fatalf("openStore: %v", err)
 	}
 	if seed {
-		if _, err := seedFixture(ds.txnStore); err != nil {
-			t.Fatalf("seedFixture: %v", err)
+		// Seed through dataStore.seed (fixture + schema declaration), matching
+		// the POST /seed path, so the constraint- and index-backing structures
+		// are backfilled from the seeded graph.
+		if _, err := ds.seed(context.Background(), synthScale{}); err != nil {
+			t.Fatalf("seed: %v", err)
 		}
 	}
 	srv := newServer(ds, "127.0.0.1:0")

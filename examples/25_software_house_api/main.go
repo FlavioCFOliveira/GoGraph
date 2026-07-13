@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -60,7 +61,7 @@ func run(args []string) int {
 	// the build cost and live heap on a "# " telemetry line — the same
 	// fact-vs-telemetry convention the non-server examples use on stdout.
 	if scale.active() {
-		if code := seedAtStartup(ds, scale); code != 0 {
+		if code := seedAtStartup(ctx, ds, scale); code != 0 {
 			_ = ds.Close()
 			return code
 		}
@@ -102,9 +103,14 @@ func run(args []string) int {
 // printed as bare lines; volatile telemetry (elapsed, heap) is printed on
 // "# "-prefixed lines, matching the examples-standard convention. It returns a
 // process exit code: 0 on success, 1 on a seed failure.
-func seedAtStartup(ds *dataStore, scale synthScale) int {
+//
+// Seeding goes through dataStore.seed, which declares the schema after the
+// fixture is loaded so the constraint- and index-backing structures are
+// backfilled from the seeded graph. It runs before the server starts serving,
+// so no serialisation hold is needed.
+func seedAtStartup(ctx context.Context, ds *dataStore, scale synthScale) int {
 	start := time.Now()
-	seeded, err := seedFixtureScaled(ds.txnStore, scale)
+	seeded, err := ds.seed(ctx, scale)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: seed: %v\n", err)
 		return 1
@@ -127,5 +133,23 @@ func seedAtStartup(ds *dataStore, scale synthScale) int {
 	fmt.Fprintf(os.Stderr, "# seed.node_rate=%.0f nodes/s\n", rate(liveNodes, elapsed))
 	fmt.Fprintf(os.Stderr, "# mem.heap_alloc=%s\n", humanBytes(mem.HeapAlloc))
 	fmt.Fprintf(os.Stderr, "# mem.num_gc=%d\n", mem.NumGC)
+	reportSchemaPlan(ds)
 	return 0
+}
+
+// reportSchemaPlan prints, on stderr, the physical plan the engine chooses for
+// a representative keyed lookup (explainDemoQuery). The index-seek verdict is a
+// deterministic FACT (schema.index_seek=<bool>): once the schema is declared,
+// the Developer.key equality lookup must plan as a NodeByIndexSeek. The plan
+// text itself is verbose diagnostic detail, printed on "# " telemetry lines.
+func reportSchemaPlan(ds *dataStore) {
+	plan, err := ds.engine.Explain(explainDemoQuery, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "# explain.error=%v\n", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "schema.index_seek=%t\n", strings.Contains(plan, "NodeByIndexSeek"))
+	for _, line := range strings.Split(strings.TrimRight(plan, "\n"), "\n") {
+		fmt.Fprintf(os.Stderr, "# explain.plan| %s\n", line)
+	}
 }

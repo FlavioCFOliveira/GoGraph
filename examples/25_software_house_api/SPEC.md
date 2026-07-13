@@ -212,7 +212,30 @@ Idempotently load the deterministic fixture. Response (`200`):
 { "seeded": true, "status": "ok" }
 ```
 
-`seeded` is `false` when the graph was already populated (a no-op).
+`seeded` is `false` when the graph was already populated (a no-op). The first
+successful seed also declares the schema (§11), so the constraint- and
+index-backing structures are backfilled from the seeded graph.
+
+### `POST /explain`
+
+Return the physical plan the engine would choose for a query, without executing
+it. Request body (`application/json`):
+
+```json
+{ "query": "MATCH (c:Component) WHERE c.key = $k RETURN c",
+  "params": { "k": "comp:platform/config.go" } }
+```
+
+`params` is optional. Response (`200`):
+
+```json
+{ "plan": "ProduceResults\n└─ Projection\n   └─ NodeByIndexSeek\n",
+  "uses_index_seek": true }
+```
+
+`uses_index_seek` is a deterministic fact: it is `true` when the equality
+predicate is served by a declared index or constraint-backing index
+(`NodeByIndexSeek`), `false` when it falls back to a full `NodeByLabelScan`.
 
 ### `GET /stats`
 
@@ -228,6 +251,29 @@ Counts of nodes by type label and edges by relationship type. Response (`200`):
 
 (Exact counts are fixed by the seed; see the README once implemented.)
 
+### `GET /schema`
+
+Return the live schema via the built-in `db.*` introspection procedures. The
+label, relationship-type and property-key sets, and the declared indexes and
+constraints, are deterministic facts for a fixed seed. Response (`200`):
+
+```json
+{ "labels": ["Code", "Component", "Developer", "Module", "People", "Repository",
+             "Sprint", "Task", "Team", "Work", "WorkflowState"],
+  "relationship_types": ["ASSIGNED_TO", "BLOCKS", "CONTAINS", "DEPENDS_ON",
+                         "HAS_STATE", "IN_SPRINT", "MEMBER_OF", "NEXT",
+                         "SUBTASK_OF", "TOUCHES"],
+  "property_keys": ["active", "at", "..."],
+  "indexes": [ {"name": "__uniq__Component.key", "type": "hash"},
+               {"name": "developer_key_idx", "type": "hash"} ],
+  "constraints": [ {"name": "component_key_unique", "type": "UNIQUE",
+                    "label": "Component", "property": "key"} ] }
+```
+
+Each set is sorted so the JSON is stable regardless of the procedures' internal
+enumeration order. A `UNIQUE` constraint's backing index is reported under its
+reserved `__uniq__<Label>.<prop>` name alongside any plain `CREATE INDEX`.
+
 ### Errors
 
 Every error is a JSON document `{"error": "<message>", "kind": "<kind>"}` with the
@@ -239,6 +285,7 @@ appropriate status:
 | `405`  | `method`      | Wrong HTTP method for the route. |
 | `413`  | `too_large`   | Request body exceeds the limit. |
 | `422`  | `semantic`    | Cypher **semantic** error (unknown function, type error, …). |
+| `409`  | `conflict`    | Cypher **constraint violation** (a write breaking a UNIQUE or NOT NULL invariant); rolled back atomically. |
 | `500`  | `runtime`     | Engine/runtime failure. |
 | `503`  | `unavailable` | Server is shutting down. |
 
@@ -267,6 +314,18 @@ each write is durable at commit time, the store is **`kill -9`-safe**: a crash
 with no clean shutdown still recovers every acknowledged write from the WAL on
 the next boot. The shutdown snapshot is an optimisation (it shortens WAL replay),
 not a correctness requirement.
+
+Schema is durable too (§11). The `CREATE CONSTRAINT` / `CREATE INDEX` statements
+are ordinary WAL-logged writes, and the shutdown snapshot embeds the constraint
+set (`constraints.bin`) and the index definitions (`indexdefs.bin`) via
+`snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs`. On the next boot the
+engine is constructed with `cypher.NewEngineWithStoreAndSchema`, which
+re-registers both from the recovered `store/recovery.Result` and re-backfills
+each backing index by scanning the graph — so a constraint declared before a
+crash is enforced again and an index seek serves live rows immediately. The
+plain `cypher.NewEngineWithStore` would leave the constraint registry empty
+(duplicates silently accepted) and index seeks reverting to a full label scan; a
+durable-schema loss the engine only warns about.
 
 ---
 
@@ -387,3 +446,42 @@ contains at least one bus-factor-1 component (Q3), at least one transitive
 blocking chain (Q5), at least one dependency cycle (Q7), and at least one
 developer holding both completed and planned work (Q4/Q8). The exact node and
 edge counts are those reported by `GET /stats` and are pinned by the tests.
+
+---
+
+## 11. Schema (DDL) & introspection
+
+The example declares its schema as Cypher DDL and exposes it for inspection.
+
+**Declared schema.** Two objects are created with `IF NOT EXISTS`, so re-opening
+a populated store is a no-op:
+
+```cypher
+CREATE CONSTRAINT component_key_unique IF NOT EXISTS
+       FOR (c:Component) REQUIRE c.key IS UNIQUE
+CREATE INDEX IF NOT EXISTS developer_key_idx
+       FOR (d:Developer) ON (d.key)
+```
+
+- The **UNIQUE constraint** guarantees `Component.key` integrity: a second
+  `CREATE (:Component {key: …})` with an existing key is rejected at commit and
+  rolled back atomically (`409 conflict`). Its backing hash index also serves
+  equality lookups on `Component.key`, so catalogue queries Q1/Q6/Q8 plan as a
+  `NodeByIndexSeek`.
+- The **secondary index** on `Developer.key` accelerates the `Developer.key`
+  equality lookup of catalogue query Q4.
+
+**Declaration order.** The fixture is loaded through the `txn.Store` directly,
+which does not feed the engine's index change fan-out. The DDL is therefore
+issued **after** the fixture (see `dataStore.seed`), so each backing index is
+backfilled from the seeded graph; every later write goes through the engine
+(`POST /query`) and maintains the indexes incrementally.
+
+**Durability.** See §7: the schema survives both a graceful restart and a
+`kill -9`, via the WAL and the schema-embedding snapshot, and is re-registered
+and re-backfilled by `cypher.NewEngineWithStoreAndSchema` on open.
+
+**Introspection.** `GET /schema` returns the live schema via the built-in `db.*`
+procedures — `db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`,
+`db.indexes()` and `db.constraints()`. `POST /explain` renders the physical plan
+for a query and reports whether it uses an index seek.

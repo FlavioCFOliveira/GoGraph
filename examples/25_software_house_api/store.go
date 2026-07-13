@@ -177,14 +177,98 @@ func openStore(ctx context.Context, dir string) (*dataStore, error) {
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
 	})
-	return &dataStore{
+	// Re-register the durable schema (UNIQUE constraints and secondary index
+	// definitions) recovered from disk. NewEngineWithStoreAndSchema re-seeds
+	// each constraint's value-set and re-backfills each index by scanning the
+	// recovered graph, so a constraint declared before a crash is enforced
+	// again and an index seek serves live rows immediately on restart. The
+	// plain NewEngineWithStore would leave the constraint registry empty
+	// (duplicates silently accepted) and the index manager unpopulated (index
+	// seeks reverting to a full label scan) — a durable-schema loss the engine
+	// only warns about. res.Constraints / res.Indexes are the reconciliation of
+	// the snapshot's constraints.bin / indexdefs.bin with the WAL tail.
+	ds := &dataStore{
 		dir:      dir,
 		wal:      w,
 		txnStore: ts,
-		engine:   cypher.NewEngineWithStore(ts),
+		engine:   cypher.NewEngineWithStoreAndSchema(ts, res.Constraints, res.Indexes),
 		graph:    res.Graph,
 		res:      res,
-	}, nil
+	}
+	// A recovered store that already holds data gets its schema (re-)declared
+	// now, at open, before any request is served. When the schema was persisted
+	// it is a no-op (the constructor above already re-registered it, and a no-op
+	// IF NOT EXISTS writes no WAL frame); when the store predates the schema (an
+	// older data directory) the DDL creates it and backfills from the recovered
+	// graph. A fresh, empty store declares its schema after the first seed
+	// instead (see dataStore.seed), so the index backfill covers the seeded
+	// nodes rather than an empty graph.
+	if ds.graph.LiveOrder() > 0 {
+		if err := ds.ensureSchema(ctx); err != nil {
+			_ = ds.Close()
+			return nil, fmt.Errorf("open: ensure schema: %w", err)
+		}
+	}
+	return ds, nil
+}
+
+// ensureSchema declares the example's schema (see schemaDDL) through the engine,
+// idempotently. It is called at store initialisation and after the first seed;
+// each statement uses IF NOT EXISTS, so a second call is a no-op that writes no
+// WAL frame. Creating an index or a UNIQUE constraint backfills its backing
+// index from the live graph, so ensureSchema must run only once data is present
+// (a fresh store defers it to just after the seed).
+//
+// ensureSchema issues engine writes (DDL). The caller must hold the store's
+// exclusive serialisation hold, or run before the server starts accepting
+// requests (openStore and the startup seed both satisfy this); ensureSchema
+// does not take the hold itself.
+func (s *dataStore) ensureSchema(ctx context.Context) error {
+	for _, q := range schemaDDL {
+		res, err := s.engine.RunAny(ctx, q, nil)
+		if err != nil {
+			return fmt.Errorf("schema %q: %w", q, err)
+		}
+		for res.Next() { //nolint:revive // drain the (empty) DDL result stream
+		}
+		if err := res.Err(); err != nil {
+			_ = res.Close()
+			return fmt.Errorf("schema %q: %w", q, err)
+		}
+		if err := res.Close(); err != nil {
+			return fmt.Errorf("schema %q: close: %w", q, err)
+		}
+	}
+	return nil
+}
+
+// seed loads the fixture (optionally at a synthetic scale) through the
+// txn.Store and, when it actually wrote data, declares the schema so its
+// backing indexes are backfilled from the just-seeded graph. It returns
+// whether data was written. It is idempotent: a store that already holds the
+// seed writes nothing and returns (false, nil), and the schema it declared on
+// the first seed is recovered on every subsequent open.
+//
+// The order — fixture first, schema second — is required: the fixture is
+// applied through the txn.Store directly, which bypasses the engine's index
+// change fan-out, so a schema declared before the fixture would index an empty
+// graph. Declaring it afterwards backfills the backing indexes from the seeded
+// nodes; every later write goes through the engine (POST /query) and maintains
+// them incrementally.
+//
+// The caller must hold the store's exclusive serialisation hold (or run before
+// the server starts); seed does not take the hold itself.
+func (s *dataStore) seed(ctx context.Context, scale synthScale) (bool, error) {
+	seeded, err := seedFixtureScaled(s.txnStore, scale)
+	if err != nil {
+		return false, err
+	}
+	if seeded {
+		if err := s.ensureSchema(ctx); err != nil {
+			return true, err
+		}
+	}
+	return seeded, nil
 }
 
 // ensureInit creates dir (if missing) and writes a fresh empty snapshot
@@ -220,10 +304,21 @@ func ensureInit(dir string) error {
 // a full snapshot alongside the WAL. It shortens WAL replay on the next
 // open; it is not required for durability, because every committed write
 // is already fsynced to the WAL before the commit is acknowledged.
+//
+// The snapshot embeds the engine's live schema — the UNIQUE constraint set
+// (constraints.bin) and the secondary-index definitions (indexdefs.bin) — via
+// WriteSnapshotFullWithConstraintsAndIndexDefs. That makes the schema durable
+// in the snapshot itself, not only in the WAL, so it survives even a future
+// WAL truncation; with both spec slices empty the output is byte-identical to
+// WriteSnapshotFull, so an unschema'd store is unaffected.
 func (s *dataStore) snapshotNow() error {
 	cs := csr.BuildFromAdjList(s.graph.AdjList())
 	_, snapDir := dataDirPaths(s.dir)
-	if err := snapshot.WriteSnapshotFull(snapDir, cs, s.graph); err != nil {
+	if err := snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs(
+		snapDir, cs, s.graph,
+		s.engine.ConstraintSpecsForSnapshot(),
+		s.engine.IndexSpecsForSnapshot(),
+	); err != nil {
 		return fmt.Errorf("snapshot: %w", err)
 	}
 	return nil
