@@ -36,6 +36,15 @@ func (a *APSP[W]) At(i, j graph.NodeID) (W, bool) {
 	ii := a.compact[int(i)]
 	jj := a.compact[int(j)]
 	if ii < 0 || jj < 0 {
+		// An isolated (degree-0) node has no live matrix slot. Its distance to
+		// itself is nevertheless 0 — textbook APSP defines dist(x,x)=0, matching
+		// BellmanFord.Distance for the same isolated source — so a self-query is
+		// reachable, not (0,false). Its distance to any OTHER node is genuinely
+		// unreachable. (Live nodes fall through to the matrix below, preserving
+		// the negative-cycle diagonal where dist[i][i] may be < 0.)
+		if i == j {
+			return zero, true
+		}
 		return zero, false
 	}
 	idx := ii*a.live + jj
