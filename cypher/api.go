@@ -5010,7 +5010,7 @@ func buildPropsEvalFn(
 		}
 	}
 
-	return func(row exec.Row) []exec.PropEntry {
+	return func(row exec.Row) ([]exec.PropEntry, error) {
 		// Build a RowContext that can resolve variable bindings and node
 		// property accesses from the current row.
 		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
@@ -5018,19 +5018,27 @@ func buildPropsEvalFn(
 		var out []exec.PropEntry
 		for i, k := range keys {
 			v, evalErr := expr.Eval(vals[i], rowCtx, params, reg)
-			if evalErr != nil || v == nil {
-				continue // expression error or nil: skip
+			if evalErr != nil {
+				// Fail-stop: a runtime error evaluating a property value fails
+				// the statement rather than being swallowed into a silently
+				// dropped property (audit 2026-07-13 cypher/security F3).
+				return nil, evalErr
 			}
-			if expr.IsNull(v) {
+			if v == nil || expr.IsNull(v) {
 				continue // openCypher: assigning null to a property is a no-op
+			}
+			if !isStorableProperty(v) {
+				// A map or a nested collection is InvalidPropertyType — reject
+				// rather than store an unserialisable value or drop it silently.
+				return nil, fmt.Errorf("exec: property %s: %w", k, exec.ErrNestedPropertyValue)
 			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
-				continue // unsupported type (e.g. NodeValue): skip
+				continue // e.g. a NodeValue: intentionally dropped (Merge1 flake guard)
 			}
 			out = append(out, exec.PropEntry{Key: k, Value: pv})
 		}
-		return out
+		return out, nil
 	}
 }
 
@@ -5180,8 +5188,15 @@ func isStorableProperty(v expr.Value) bool {
 	case expr.MapValue:
 		return false
 	case expr.ListValue:
+		// openCypher restricts a property value to a primitive or a flat
+		// (homogeneous) list of primitives; a nested list or a map element is
+		// InvalidPropertyType. Rejecting it here keeps the write path aligned
+		// with the storage layer (which cannot serialise a nested PropList) and
+		// with the spec, rather than accepting a value that later stalls a
+		// checkpoint (audit 2026-07-13 security F3).
 		for _, el := range val {
-			if !isStorableProperty(el) {
+			switch el.(type) {
+			case expr.ListValue, expr.MapValue:
 				return false
 			}
 		}
@@ -5214,9 +5229,17 @@ func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {
 	case expr.ListValue:
 		elems := make([]lpg.PropertyValue, 0, len(val))
 		for _, el := range val {
+			// A nested list or map element makes the whole list unstorable
+			// (openCypher InvalidPropertyType); reject rather than silently
+			// dropping the element or building a nested PropList the storage
+			// layer cannot serialise (audit 2026-07-13 security F3).
+			switch el.(type) {
+			case expr.ListValue, expr.MapValue:
+				return lpg.PropertyValue{}, false
+			}
 			pv, ok := exprValueToLPGProp(el)
 			if !ok {
-				continue
+				return lpg.PropertyValue{}, false
 			}
 			elems = append(elems, pv)
 		}

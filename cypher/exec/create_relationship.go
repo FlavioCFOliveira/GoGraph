@@ -174,7 +174,10 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		op.mutator.SetEdgeLabelByHandle(srcLabel, dstLabel, handle, op.relType)
 	}
 
-	props := mergeProps(op.props, op.propsExprFn, childRow)
+	props, mErr := mergeProps(op.props, op.propsExprFn, childRow)
+	if mErr != nil {
+		return false, mErr
+	}
 
 	for _, p := range props {
 		if err := op.mutator.SetEdgeProperty(srcLabel, dstLabel, p.key, p.value); err != nil {

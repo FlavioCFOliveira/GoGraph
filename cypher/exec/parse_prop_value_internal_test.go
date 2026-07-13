@@ -248,16 +248,13 @@ func TestExprListToLPGList(t *testing.T) {
 			t.Fatalf("got %v, want %v", got, want)
 		}
 	})
-	t.Run("nested list", func(t *testing.T) {
+	t.Run("nested list rejected", func(t *testing.T) {
+		// openCypher restricts a property value to a primitive or a flat list of
+		// primitives; a nested list is InvalidPropertyType (audit 2026-07-13 F3).
 		inner := expr.ListValue{expr.IntegerValue(10), expr.IntegerValue(20)}
-		got, err := exprListToLPGList(expr.ListValue{inner})
-		if err != nil {
-			t.Fatalf("exprListToLPGList nested: %v", err)
-		}
-		wantInner := lpg.ListValue([]lpg.PropertyValue{lpg.Int64Value(10), lpg.Int64Value(20)})
-		want := lpg.ListValue([]lpg.PropertyValue{wantInner})
-		if !propValueDeepEqual(got, want) {
-			t.Fatalf("got %v, want %v", got, want)
+		_, err := exprListToLPGList(expr.ListValue{inner})
+		if !errors.Is(err, ErrNestedPropertyValue) {
+			t.Fatalf("exprListToLPGList nested list error = %v, want ErrNestedPropertyValue", err)
 		}
 	})
 	t.Run("unsupported type errors", func(t *testing.T) {

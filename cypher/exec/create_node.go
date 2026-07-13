@@ -55,6 +55,17 @@ import (
 // surface a parse error.
 var ErrPropertyValueIsNull = errors.New("exec: property value is null (skip)")
 
+// ErrNestedPropertyValue is returned when a property value is a nested
+// collection — a list containing a list or a map. openCypher restricts a
+// property value to a primitive or a flat list of primitives; a nested
+// collection is InvalidPropertyType. Unlike a non-literal expression (which is
+// deferred to a runtime PropsEvalFn), this sentinel is a hard, fail-stop error:
+// the CREATE/MERGE literal builders re-raise it rather than silently skipping
+// the property, so an invalid value is never stored (the storage layer cannot
+// serialise a nested PropList) and never silently dropped (audit 2026-07-13
+// security F3).
+var ErrNestedPropertyValue = errors.New("exec: InvalidPropertyType: a nested list or map is not a valid property value")
+
 // synthKeyPrefix is the fixed prefix of every synthetic node key produced by
 // [CreateNode.freshNodeKey]. Kept as a constant so the counter-seeding scan in
 // [seedGlobalNodeCounter] and the formatter in [CreateNode.freshNodeKey] cannot
@@ -139,9 +150,14 @@ type PropEntry struct {
 // whose evaluation yields Null is omitted (openCypher: assigning null to a
 // property is a no-op on a fresh node).
 //
+// It returns a non-nil error to fail-stop the statement — a runtime evaluation
+// error, or a value that is not a valid property (a map or nested collection,
+// InvalidPropertyType) — rather than silently dropping the entry (audit
+// 2026-07-13 security F3 / fail-stop mandate).
+//
 // The closure is constructed once by the physical plan builder and captures
 // the schema, function registry, and query parameters.
-type PropsEvalFn func(row Row) []PropEntry
+type PropsEvalFn func(row Row) ([]PropEntry, error)
 
 // NewCreateNode creates a CreateNode operator.
 //
@@ -241,7 +257,10 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
-	props := mergeProps(op.props, op.propsExprFn, childRow)
+	props, err := mergeProps(op.props, op.propsExprFn, childRow)
+	if err != nil {
+		return false, err
+	}
 
 	// Constraint enforcement: check before any mutation.
 	if op.reg != nil {
@@ -289,13 +308,16 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 // a mixed map like {name: "Alice", age: x} to set the literal "name" and the
 // runtime-evaluated "age". When fn is nil or produces no entries, static is
 // returned unchanged (no allocation).
-func mergeProps(static []propLiteral, fn PropsEvalFn, row Row) []propLiteral {
+func mergeProps(static []propLiteral, fn PropsEvalFn, row Row) ([]propLiteral, error) {
 	if fn == nil {
-		return static
+		return static, nil
 	}
-	dynEntries := fn(row)
+	dynEntries, err := fn(row)
+	if err != nil {
+		return nil, err
+	}
 	if len(dynEntries) == 0 {
-		return static
+		return static, nil
 	}
 	merged := make([]propLiteral, 0, len(static)+len(dynEntries))
 	dynKeys := make(map[string]struct{}, len(dynEntries))
@@ -310,7 +332,7 @@ func mergeProps(static []propLiteral, fn PropsEvalFn, row Row) []propLiteral {
 	for _, dp := range dynEntries {
 		merged = append(merged, propLiteral{key: dp.Key, value: dp.Value})
 	}
-	return merged
+	return merged, nil
 }
 
 // freshNodeKey returns a string key that is guaranteed to be unique within the
@@ -456,6 +478,11 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 		if err != nil {
 			if errors.Is(err, ErrPropertyValueIsNull) {
 				continue // null value: openCypher says do not set the property
+			}
+			if errors.Is(err, ErrNestedPropertyValue) {
+				// A nested collection is a hard InvalidPropertyType error, not a
+				// deferrable non-literal: fail-stop rather than store or drop it (F3).
+				return nil, err
 			}
 			// Non-literal expression (variable ref, property access, arithmetic):
 			// silently defer. The physical builder is responsible for installing a
@@ -767,6 +794,12 @@ func parsePropList(inner string) (lpg.PropertyValue, error) {
 	elems := make([]lpg.PropertyValue, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
+		// A nested list or map element makes the whole value an invalid
+		// property (openCypher InvalidPropertyType). Reject before recursing
+		// so it is never stored (F3).
+		if len(part) > 0 && (part[0] == '[' || part[0] == '{') {
+			return lpg.PropertyValue{}, ErrNestedPropertyValue
+		}
 		pv, err := parsePropValue(part)
 		if err != nil {
 			if errors.Is(err, ErrPropertyValueIsNull) {
@@ -795,12 +828,11 @@ func exprListToLPGList(lv expr.ListValue) (lpg.PropertyValue, error) {
 			pv = lpg.Float64Value(float64(val))
 		case expr.BoolValue:
 			pv = lpg.BoolValue(bool(val))
-		case expr.ListValue:
-			nested, err := exprListToLPGList(val)
-			if err != nil {
-				return lpg.PropertyValue{}, err
-			}
-			pv = nested
+		case expr.ListValue, expr.MapValue:
+			// A nested list or map element makes the whole value an invalid
+			// property (openCypher InvalidPropertyType); fail-stop rather than
+			// build a nested PropList the storage layer cannot serialise (F3).
+			return lpg.PropertyValue{}, ErrNestedPropertyValue
 		default:
 			return lpg.PropertyValue{}, fmt.Errorf("unsupported list element type %T", v)
 		}

@@ -26,6 +26,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -230,7 +231,11 @@ func (op *Merge) runMergeForChild(childRow Row) error {
 
 	propsForRow := op.props
 	if op.propsEvalFn != nil {
-		propsForRow = mergeProps(op.props, op.propsEvalFn, childRow)
+		var mErr error
+		propsForRow, mErr = mergeProps(op.props, op.propsEvalFn, childRow)
+		if mErr != nil {
+			return mErr
+		}
 	}
 
 	var rows []Row
@@ -536,6 +541,10 @@ func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn,
 		return lit, true, false, nil
 	case isNullPropertyValueErr(perr):
 		return lpg.PropertyValue{}, false, false, nil
+	case errors.Is(perr, ErrNestedPropertyValue):
+		// A nested collection is a hard InvalidPropertyType error, not a
+		// deferrable non-literal RHS: fail-stop rather than drop the action (F3).
+		return lpg.PropertyValue{}, false, false, perr
 	default:
 		fn, has := evals[MergeActionEvalKey(a.nodeVar, a.key)]
 		if !has {

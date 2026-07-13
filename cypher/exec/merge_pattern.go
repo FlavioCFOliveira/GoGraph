@@ -232,7 +232,7 @@ func (op *MergePattern) WithNodePropsEvalFn(fn PropsEvalFn) *MergePattern {
 // static literal entries merged with any per-row dynamic entries. Returns
 // n.props unchanged (no allocation) when n has no evaluator, matching
 // [mergeProps]'s zero-cost fast path for the common all-literal case.
-func (op *MergePattern) effectiveNodeProps(n *mergePatternNode, childRow Row) []propLiteral {
+func (op *MergePattern) effectiveNodeProps(n *mergePatternNode, childRow Row) ([]propLiteral, error) {
 	return mergeProps(n.props, n.propsEvalFn, childRow)
 }
 
@@ -496,7 +496,11 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 		}
 		frontier = []binding{{id}}
 	} else {
-		rows, err := searchMergeNodes(op.ctx, op.mutator, first.labels, op.effectiveNodeProps(first, childRow))
+		firstProps, epErr := op.effectiveNodeProps(first, childRow)
+		if epErr != nil {
+			return nil, epErr
+		}
+		rows, err := searchMergeNodes(op.ctx, op.mutator, first.labels, firstProps)
 		if err != nil {
 			return nil, err
 		}
@@ -559,7 +563,10 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 		return nil, nil
 	}
 
-	targetProps := op.effectiveNodeProps(target, childRow)
+	targetProps, tpErr := op.effectiveNodeProps(target, childRow)
+	if tpErr != nil {
+		return nil, tpErr
+	}
 	var out []graph.NodeID
 	seen := map[string]struct{}{}
 	tryNeighbour := func(candKey string, edgeSrc, edgeDst string) {
@@ -690,7 +697,10 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 				return nil, fmt.Errorf("SetNodeLabel %q: %w", n.varName, err)
 			}
 		}
-		props := op.effectiveNodeProps(n, childRow)
+		props, epErr := op.effectiveNodeProps(n, childRow)
+		if epErr != nil {
+			return nil, epErr
+		}
 		if op.reg != nil {
 			for _, p := range props {
 				if err := op.reg.CheckSetProperty(n.labels, p.key, p.value, op.mgr); err != nil {
