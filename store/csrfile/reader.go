@@ -180,10 +180,14 @@ func openBytes(buf []byte) (*Reader, error) {
 
 // allocAligned8 returns a zeroed byte slice of length n whose base
 // address is guaranteed 8-byte aligned, by allocating it as a []uint64
-// and reslicing. A plain make([]byte, n) carries no alignment guarantee,
-// which would make the zero-copy reinterpretation in bindSlices trip the
-// alignment assertion in [Reinterpret] on some allocations; routing the
-// in-memory read through this helper keeps the byte-backed Reader sound.
+// and reslicing. bindSlices reinterprets the backing region directly with
+// unsafe.Slice((*uint64)/(*graph.NodeID)), which requires the region to be
+// 8-byte aligned — a plain make([]byte, n) carries no alignment guarantee,
+// so a later uint64/NodeID access could fault on a strict-alignment
+// architecture. Routing the in-memory read through this helper keeps the
+// byte-backed Reader sound. (The standalone [Reinterpret] helper enforces the
+// same requirement with an explicit assertion; it is used by tests, not by
+// bindSlices.)
 func allocAligned8(n int) []byte {
 	if n <= 0 {
 		// A zero (or negative) length would make backing empty and &backing[0]

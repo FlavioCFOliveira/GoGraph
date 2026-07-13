@@ -1,8 +1,10 @@
 package csrfile
 
 // write_bytes.go — zero-copy little-endian byte views for the bulk writer
-// (sprint 221, #1597). These mirror the read side ([Reinterpret], used by the
-// mmap reader's bindSlices) and the snapshot codec's S210 streaming helpers:
+// (sprint 221, #1597). These mirror the read side's zero-copy reinterpretation
+// (the mmap reader's bindSlices, which reslices the mapped region directly with
+// unsafe.Slice; see also the standalone [Reinterpret] helper) and the snapshot
+// codec's S210 streaming helpers:
 // graph.NodeID and uint64 are 8-byte, 8-aligned, native-endian, and this
 // package already relies on a little-endian host for its mmap reinterpretation,
 // so the byte view is byte-identical to what binary.Write(LittleEndian, ...)
