@@ -181,6 +181,19 @@ func Run(t testing.TB, scenario string, opts Opts) (Out, error) {
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if !isExitError(runErr, &exitErr) {
+			// A non-ExitError with the context already expired means the
+			// deadline fired before the child produced a wait status — e.g.
+			// exec.Start/Wait returning "context deadline exceeded" when a very
+			// short timeout elapses around process startup on a heavily loaded
+			// machine. That is still a timeout, not a harness failure, so report
+			// it consistently with the post-start SIGKILL-on-deadline path
+			// (TimedOut=true) rather than surfacing the raw error. This keeps the
+			// deadline classification stable however early the deadline fires
+			// (fixes a load-induced flake in the full -race suite).
+			if ctxTimedOut {
+				out.TimedOut = true
+				return out, nil
+			}
 			return out, fmt.Errorf("crashinject.Run: exec: %w", runErr)
 		}
 		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
