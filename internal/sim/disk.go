@@ -2,6 +2,7 @@ package sim
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -118,6 +119,22 @@ type SimDisk struct {
 	//
 	// It has no effect when capacityBytes is 0.
 	enospcOnSync bool
+	// parentDirSyncFaultArmed / parentDirSyncFaultPath implement a ONE-SHOT
+	// deterministic fault on [SimDisk.ParentDirSync]: when armed, the next
+	// ParentDirSync whose childPath equals parentDirSyncFaultPath returns
+	// [ErrSimFault] WITHOUT making any dirent durable, then disarms. Like
+	// [SimDisk.ArmSyncFaultAt] it draws NOTHING from the [Seed] — the trigger is a
+	// pure function of the path — so arming it never perturbs the reproducible
+	// fault stream. It is keyed on the exact childPath rather than a call ordinal
+	// because a full-stack checkpoint issues a variable number of ParentDirSync
+	// calls during the snapshot publish before the single WAL-truncate dir-fsync
+	// the fault must target; an ordinal would be fragile against that count,
+	// whereas the WAL path ("<dir>/wal") is stable. It models the post-rename
+	// parent-directory fsync failing in [wal.Writer.TruncatePrefix], which must
+	// poison the writer (store/wal/writer.go poisonAfterRename) yet leave the
+	// on-disk suffix-only WAL intact and recoverable.
+	parentDirSyncFaultArmed bool
+	parentDirSyncFaultPath  string
 }
 
 // simFile is the in-memory backing store for one path. data holds the file
@@ -157,6 +174,43 @@ func NewSimDisk(seed *Seed, faultRate float64) *SimDisk {
 		seed:      seed,
 		dirs:      make(map[string]bool),
 	}
+}
+
+// FaultRate returns the per-sector / per-Sync fault probability the disk was
+// constructed with (see [NewSimDisk]). It is an observability accessor for
+// tests that assert the [DiskConfig.FaultRate] wiring in [New]; faultRate is
+// immutable after construction, so it reads it without the mutex and mutates
+// nothing.
+func (d *SimDisk) FaultRate() float64 { return d.faultRate }
+
+// CorruptRange deterministically corrupts n bytes of the ALREADY-DURABLE image
+// of the file at path, starting at byte offset off, by flipping every byte
+// (XOR 0xFF). It is the direct sector-corruption injector for bytes that are
+// already on stable storage — the [SimFileHandle.Write] fault path only
+// corrupts sectors as they are written, so it cannot damage a frame that was
+// durably committed in an earlier session. Flipping a byte inside a committed
+// WAL frame's header or payload makes that frame fail its CRC32C check on the
+// next replay, modelling a bad disk sector under a durable frame.
+//
+// It draws NOTHING from the [Seed] and holds only [SimDisk]'s own mutex, so it
+// never perturbs the reproducible fault stream. It returns an error wrapping
+// fs.ErrNotExist when the file is absent and a range error when [off, off+n)
+// does not lie wholly within the file. It must be called from the controlling
+// goroutine while no handle is mid-write.
+func (d *SimDisk) CorruptRange(path string, off int64, n int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return &fs.PathError{Op: "corrupt", Path: path, Err: fs.ErrNotExist}
+	}
+	if off < 0 || n <= 0 || off+int64(n) > int64(len(f.data)) {
+		return fmt.Errorf("sim: CorruptRange out of range: off=%d n=%d len=%d", off, n, len(f.data))
+	}
+	for i := int64(0); i < int64(n); i++ {
+		f.data[off+i] ^= 0xFF
+	}
+	return nil
 }
 
 // SetCapacity bounds the disk to capacityBytes total bytes across all files,
@@ -463,10 +517,47 @@ func (d *SimDisk) DirSync(dir string) error {
 	return nil
 }
 
+// ArmParentDirSyncFaultForPath arms a ONE-SHOT durability fault on
+// [SimDisk.ParentDirSync]: the next call whose childPath equals childPath
+// returns [ErrSimFault] and makes NO dirent durable, then the arm clears so no
+// further ParentDirSync is affected. An empty childPath disarms.
+//
+// It is the directory-fsync analogue of [SimDisk.ArmSyncFaultAt], keyed on the
+// exact childPath rather than a call ordinal so it targets a specific fsync
+// robustly (see the field docs on [SimDisk]). It models the post-rename
+// parent-directory fsync failing inside [wal.Writer.TruncatePrefix]: that
+// failure must poison the WAL writer (store/wal/writer.go poisonAfterRename)
+// while the on-disk suffix-only WAL — and any snapshot published before it —
+// stays intact and recoverable. It draws nothing from the [Seed], so arming
+// never perturbs the reproducible fault stream, and must be called from the
+// controlling goroutine before the operation that will trigger it.
+func (d *SimDisk) ArmParentDirSyncFaultForPath(childPath string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if childPath == "" {
+		d.parentDirSyncFaultArmed = false
+		d.parentDirSyncFaultPath = ""
+		return
+	}
+	d.parentDirSyncFaultArmed = true
+	d.parentDirSyncFaultPath = childPath
+}
+
 // ParentDirSync makes the dirent of childPath durable by DirSyncing its parent
 // directory. It is the analogue of the post-rename parent-directory fsync the
-// publish protocols issue.
+// publish protocols issue. When a one-shot fault is armed for this exact
+// childPath ([SimDisk.ArmParentDirSyncFaultForPath]) it returns [ErrSimFault]
+// and disarms WITHOUT making the dirent durable, modelling the directory fsync
+// failing after a rename.
 func (d *SimDisk) ParentDirSync(childPath string) error {
+	d.mu.Lock()
+	if d.parentDirSyncFaultArmed && d.parentDirSyncFaultPath == childPath {
+		d.parentDirSyncFaultArmed = false
+		d.parentDirSyncFaultPath = ""
+		d.mu.Unlock()
+		return ErrSimFault
+	}
+	d.mu.Unlock()
 	return d.DirSync(pathpkg.Dir(childPath))
 }
 

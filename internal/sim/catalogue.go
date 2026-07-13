@@ -110,6 +110,10 @@ func DefaultRegistry() (*Registry, error) {
 		durableCommitCrashScenario(),
 		checkpointTeardownScenario(),
 		readTxIsolationScenario(),
+		csrfilePublishFaultScenario(),
+		walCorruptionFailStopScenario(),
+		checkpointDirFsyncFaultScenario(),
+		ioRoundTripFaultScenario(),
 	)
 }
 

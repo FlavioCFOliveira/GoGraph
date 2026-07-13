@@ -121,6 +121,16 @@ type DiskConfig struct {
 	// ENOSPCOnSync selects where the out-of-space condition surfaces: false
 	// (eager, at the growing Write) or true (delayed, at Sync). See [SimDisk].
 	ENOSPCOnSync bool
+	// FaultRate is the probability (clamped to [0,1]) that any individual Sync on
+	// the SimDisk-backed durable store fails with [ErrSimFault] and that a freshly
+	// written sector is marked faulted (a torn write). It is threaded into the
+	// disk the durable-mode [New] path drives; the zero value (the default every
+	// scenario carries) disables it, keeping the disk fault-free and every
+	// existing scenario byte-identical. It takes effect only on the durable path
+	// — the one a non-zero [DiskConfig.CapacityBytes], [Config.Crash] or
+	// [Config.Checkpoint] selects — because the plain in-memory engine path never
+	// touches the disk.
+	FaultRate float64
 }
 
 // Simulator drives the real cypher.Engine against a shadow [GraphOracle] under
@@ -206,7 +216,10 @@ func New(cfg Config) (*Simulator, error) {
 	checkerSeed := NewSeed(cfg.Seed ^ checkerSeedMix)
 
 	// The disk's fault stream draws from its own sub-seed for the same reason.
-	disk := NewSimDisk(NewSeed(cfg.Seed^diskSeedMix), 0)
+	// FaultRate is threaded from the config (0 — the default — leaves the disk
+	// fault-free, byte-identical to the pre-FaultRate behaviour). It bites only on
+	// the durable path selected below; the plain in-memory path never opens the disk.
+	disk := NewSimDisk(NewSeed(cfg.Seed^diskSeedMix), cfg.Disk.FaultRate)
 
 	s := &Simulator{
 		cfg:      cfg,
