@@ -193,7 +193,7 @@ func CheckCypherSurfaceExtended(tick int64, oracle *GraphOracle, engine *EngineA
 				Message: fmt.Sprintf("%s query error: %v", label, err)})
 			return
 		}
-		if got != nil && got[0] != "true" {
+		if len(got) > 0 && got[0] != "true" {
 			vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: label,
 				Message: fmt.Sprintf("%s: engine invariant did not hold (got %s)", label, got[0])})
 		}
@@ -315,7 +315,7 @@ func CheckCypherSurfaceExtended(tick int64, oracle *GraphOracle, engine *EngineA
 }
 
 // reSName matches a surface-writer Person name (s followed by digits).
-var reSName = regexp.MustCompile(`^s[0-9]+$`)
+var reSName = regexp.MustCompile(`^s\d+$`)
 
 // collectStringCol runs query and returns every col-0 StringValue (unquoted).
 func collectStringCol(ctx context.Context, engine *EngineAdapter, query string) []string {
