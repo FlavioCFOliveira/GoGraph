@@ -28,7 +28,7 @@ func newEng(t *testing.T) (*cypher.Engine, context.Context) {
 
 // runTxErr runs a write statement and returns the error surfaced by either Run
 // or the lazy result stream.
-func runTxErr(t *testing.T, eng *cypher.Engine, ctx context.Context, q string, params map[string]expr.Value) error {
+func runTxErr(ctx context.Context, t *testing.T, eng *cypher.Engine, q string, params map[string]expr.Value) error {
 	t.Helper()
 	res, err := eng.RunInTx(ctx, q, params)
 	if err != nil {
@@ -44,9 +44,9 @@ func runTxErr(t *testing.T, eng *cypher.Engine, ctx context.Context, q string, p
 	return e
 }
 
-func mustReject(t *testing.T, eng *cypher.Engine, ctx context.Context, q string, params map[string]expr.Value) {
+func mustReject(ctx context.Context, t *testing.T, eng *cypher.Engine, q string, params map[string]expr.Value) {
 	t.Helper()
-	err := runTxErr(t, eng, ctx, q, params)
+	err := runTxErr(ctx, t, eng, q, params)
 	if err == nil {
 		t.Fatalf("%q stored/dropped an invalid property silently, want InvalidPropertyType", q)
 	}
@@ -59,16 +59,16 @@ func TestProperty_NestedList_AllWritePathsRejected(t *testing.T) {
 	t.Parallel()
 	eng, ctx := newEng(t)
 	// SET RHS
-	mustReject(t, eng, ctx, "CREATE (n:A) SET n.p = [[1,2],[3,4]]", nil)
+	mustReject(ctx, t, eng, "CREATE (n:A) SET n.p = [[1,2],[3,4]]", nil)
 	// SET map
-	mustReject(t, eng, ctx, "CREATE (n:B) SET n.q = {a:1}", nil)
+	mustReject(ctx, t, eng, "CREATE (n:B) SET n.q = {a:1}", nil)
 	// CREATE inline literal
-	mustReject(t, eng, ctx, "CREATE (n:C {p:[[1,2]]})", nil)
+	mustReject(ctx, t, eng, "CREATE (n:C {p:[[1,2]]})", nil)
 	// CREATE inline via parameter
-	mustReject(t, eng, ctx, "CREATE (n:D {p:$x})",
+	mustReject(ctx, t, eng, "CREATE (n:D {p:$x})",
 		map[string]expr.Value{"x": expr.ListValue{expr.ListValue{expr.IntegerValue(1)}}})
 	// MERGE ON CREATE SET
-	mustReject(t, eng, ctx, "MERGE (n:E {id:1}) ON CREATE SET n.p = [[9]]", nil)
+	mustReject(ctx, t, eng, "MERGE (n:E {id:1}) ON CREATE SET n.p = [[9]]", nil)
 }
 
 // TestProperty_FlatCollectionsAccepted guards against a false positive: a flat
@@ -76,7 +76,7 @@ func TestProperty_NestedList_AllWritePathsRejected(t *testing.T) {
 func TestProperty_FlatCollectionsAccepted(t *testing.T) {
 	t.Parallel()
 	eng, ctx := newEng(t)
-	if err := runTxErr(t, eng, ctx, "CREATE (n:A {tags:['x','y','z'], nums:[1,2,3]}) SET n.more = [true, false]", nil); err != nil {
+	if err := runTxErr(ctx, t, eng, "CREATE (n:A {tags:['x','y','z'], nums:[1,2,3]}) SET n.more = [true, false]", nil); err != nil {
 		t.Fatalf("flat-list properties must be accepted, got: %v", err)
 	}
 	res, err := eng.Run(ctx, "MATCH (n:A) RETURN n.tags AS t, n.nums AS m", nil)

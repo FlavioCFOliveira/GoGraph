@@ -797,7 +797,7 @@ func parsePropList(inner string) (lpg.PropertyValue, error) {
 		// A nested list or map element makes the whole value an invalid
 		// property (openCypher InvalidPropertyType). Reject before recursing
 		// so it is never stored (F3).
-		if len(part) > 0 && (part[0] == '[' || part[0] == '{') {
+		if part != "" && (part[0] == '[' || part[0] == '{') {
 			return lpg.PropertyValue{}, ErrNestedPropertyValue
 		}
 		pv, err := parsePropValue(part)
