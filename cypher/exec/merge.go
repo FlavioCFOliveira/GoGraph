@@ -32,6 +32,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,7 +60,13 @@ type Merge struct {
 	reg             *ConstraintRegistry // nil means no enforcement
 	mgr             *index.Manager      // nil when reg is nil
 	propsEvalFn     PropsEvalFn         // nil when all props are literals
-	ctx             context.Context     //nolint:containedctx // stored for per-Next ctx check
+	// onCreateEvals / onMatchEvals map an action's target (via
+	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
+	// ON CREATE / ON MATCH SET expression (e.g. `SET n.num = n.num + 1`).
+	// nil when every action's RHS is a literal. See [Merge.applyActions].
+	onCreateEvals map[string]ValueEvalFn
+	onMatchEvals  map[string]ValueEvalFn
+	ctx           context.Context //nolint:containedctx // stored for per-Next ctx check
 
 	// iteration state, reset on each Init call
 	matched    []Row
@@ -156,6 +163,17 @@ func (op *Merge) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *M
 	return op
 }
 
+// WithActionEvals attaches per-row RHS evaluators for ON CREATE / ON MATCH
+// property-set items whose right-hand side is a non-literal expression
+// (keyed by [MergeActionEvalKey]). Without these, a self-referential
+// assignment such as `ON MATCH SET n.num = n.num + 1` fails to parse as a
+// literal and is silently dropped (#1965). Returns op for chaining.
+func (op *Merge) WithActionEvals(onCreate, onMatch map[string]ValueEvalFn) *Merge {
+	op.onCreateEvals = onCreate
+	op.onMatchEvals = onMatch
+	return op
+}
+
 // WithPropsEvalFn attaches a per-row property evaluator. When fn is non-nil
 // the operator re-evaluates the MERGE node-pattern property map against each
 // driving row and uses the merged (literal ∪ dynamic) property set both as
@@ -235,11 +253,7 @@ func (op *Merge) runMergeForChild(childRow Row) error {
 		}
 		return op.runOnMatchPath(combined)
 	}
-	if err := op.runOnCreatePathWithProps(propsForRow); err != nil {
-		return err
-	}
-	op.createdRow = op.combineRows(childRow, op.createdRow)
-	return nil
+	return op.runOnCreatePathWithProps(childRow, propsForRow)
 }
 
 // combineRows appends mergeRow's columns to childRow, growing the schema-
@@ -281,7 +295,7 @@ func (op *Merge) resetRunState(ctx context.Context) {
 // search sub-plan and buffers the rows for emission from Next.
 func (op *Merge) runOnMatchPath(rows []Row) error {
 	for i := range rows {
-		if applyErr := op.applyActions(op.onMatchActions, rows[i]); applyErr != nil {
+		if applyErr := op.applyActions(op.onMatchActions, op.onMatchEvals, rows[i]); applyErr != nil {
 			return fmt.Errorf("exec: Merge: ON MATCH: %w", applyErr)
 		}
 	}
@@ -294,7 +308,13 @@ func (op *Merge) runOnMatchPath(rows []Row) error {
 // the operator to emit the freshly created row. It accepts the resolved
 // property set so that row-aware MERGE (`MERGE (p:Person {login: prop.login})`)
 // writes the per-row values rather than the static literal-only set.
-func (op *Merge) runOnCreatePathWithProps(props []propLiteral) error {
+//
+// The created node is combined with childRow BEFORE the ON CREATE actions run
+// so their per-row RHS evaluators see a schema-consistent row — the merge
+// variable at its schema column and every driving-clause binding at its own —
+// exactly as the ON MATCH path already does. Without this an expression
+// action such as `ON CREATE SET n.x = other.y` could not resolve `other`.
+func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) error {
 	if op.reg != nil {
 		for _, p := range props {
 			if cerr := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); cerr != nil {
@@ -322,8 +342,8 @@ func (op *Merge) runOnCreatePathWithProps(props []propLiteral) error {
 		}
 	}
 
-	createdRow := Row{expr.IntegerValue(int64(nodeID))}
-	if applyErr := op.applyActions(op.onCreateActions, createdRow); applyErr != nil {
+	createdRow := op.combineRows(childRow, Row{expr.IntegerValue(int64(nodeID))})
+	if applyErr := op.applyActions(op.onCreateActions, op.onCreateEvals, createdRow); applyErr != nil {
 		return fmt.Errorf("exec: Merge: ON CREATE: %w", applyErr)
 	}
 	op.created = true
@@ -400,22 +420,34 @@ func (op *Merge) freshNodeKey() string {
 
 // applyActions applies a slice of mergeAction to a row. The row is expected to
 // carry an IntegerValue NodeID at column 0 when op.nodeVar is involved.
-func (op *Merge) applyActions(actions []mergeAction, row Row) error {
+//
+// evals maps an action's target (via [MergeActionEvalKey]) to a per-row
+// evaluator for a non-literal RHS expression; it is the ON CREATE or ON MATCH
+// evaluator set depending on which branch is running. When a property-set
+// action's RHS is not a literal, the evaluator computes its value against row
+// so `ON MATCH SET n.num = n.num + 1` reads the node's current value instead
+// of being silently dropped (#1965).
+func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalFn, row Row) error {
 	for _, a := range actions {
 		var nodeKey string
+		var nodeID graph.NodeID
 		var resolved bool
 
 		// Try to resolve via schema first.
-		nodeID, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
+		id, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
 		if schemaErr == nil {
-			nodeKey, resolved = op.mutator.ResolveNodeLabel(nodeID)
+			if nodeKey, resolved = op.mutator.ResolveNodeLabel(id); resolved {
+				nodeID = id
+			}
 		}
 
 		// Fall back: if the action targets op.nodeVar and the created row has
 		// a NodeID at column 0.
 		if !resolved && a.nodeVar == op.nodeVar && len(row) > 0 {
 			if iv, ok := row[0].(expr.IntegerValue); ok {
-				nodeKey, resolved = op.mutator.ResolveNodeLabel(graph.NodeID(iv))
+				if nodeKey, resolved = op.mutator.ResolveNodeLabel(graph.NodeID(iv)); resolved {
+					nodeID = graph.NodeID(iv)
+				}
 			}
 		}
 
@@ -433,10 +465,26 @@ func (op *Merge) applyActions(actions []mergeAction, row Row) error {
 			continue
 		}
 
-		// Property-set action.
-		pv, err := parsePropValue(a.value)
+		// Property-set action. Resolve the value: literal fast path first,
+		// then the per-row expression evaluator for a non-literal RHS.
+		pv, ok, remove, err := op.resolveActionValue(a, evals, row, nodeID)
 		if err != nil {
-			// Non-literal expression: skip.
+			return err
+		}
+		if remove {
+			// The RHS evaluated to null → openCypher removes the property.
+			if op.reg != nil {
+				if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
+					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), a.key, oldVal)
+				}
+			}
+			op.mutator.DelNodeProperty(nodeKey, a.key)
+			continue
+		}
+		if !ok {
+			// Literal null (preserve prior skip behaviour), a non-literal RHS
+			// with no evaluator, or an evaluator no-op (eval error / unstorable
+			// type — matching regular SET). No write.
 			continue
 		}
 		// Constraint enforcement for ON MATCH / ON CREATE action.
@@ -465,6 +513,80 @@ func (op *Merge) applyActions(actions []mergeAction, row Row) error {
 		}
 	}
 	return nil
+}
+
+// resolveActionValue resolves the value for a MERGE property-set action.
+//
+// It returns (value, ok, remove, err):
+//   - a literal RHS returns (pv, true, false, nil) — the fast path;
+//   - a literal null RHS returns (_, false, false, nil) — preserving the prior
+//     skip behaviour of the node-only Merge operator;
+//   - a non-literal RHS with a registered evaluator returns the evaluated
+//     value (pv, true, false, nil), a removal request (_, false, true, nil)
+//     when it evaluates to null, or a no-op (_, false, false, nil) when the
+//     evaluator reports no value (eval error / unstorable type — matching how
+//     regular SET degrades), or a hard error for an unstorable-map RHS;
+//   - a non-literal RHS with no evaluator returns (_, false, false, nil) — the
+//     prior skip behaviour (defensive: every non-literal action is wired with
+//     an evaluator by the physical builder).
+func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn, row Row, nodeID graph.NodeID) (pv lpg.PropertyValue, ok, remove bool, err error) {
+	lit, perr := parsePropValue(a.value)
+	switch {
+	case perr == nil:
+		return lit, true, false, nil
+	case isNullPropertyValueErr(perr):
+		return lpg.PropertyValue{}, false, false, nil
+	default:
+		fn, has := evals[MergeActionEvalKey(a.nodeVar, a.key)]
+		if !has {
+			return lpg.PropertyValue{}, false, false, nil
+		}
+		evalRow := op.actionEvalRow(row, a.nodeVar, nodeID)
+		val, isNull, hasValue, evalErr := fn(evalRow)
+		if evalErr != nil {
+			return lpg.PropertyValue{}, false, false, evalErr
+		}
+		if isNull {
+			return lpg.PropertyValue{}, false, true, nil
+		}
+		if !hasValue {
+			return lpg.PropertyValue{}, false, false, nil
+		}
+		return val, true, false, nil
+	}
+}
+
+// actionEvalRow returns a row for a per-row RHS evaluator: a copy of row with
+// targetVar's NodeID pinned at its schema column so `targetVar.<key>` resolves
+// to the matched/created node's current stored value regardless of how the
+// caller laid out the row. Other columns are preserved so cross-variable
+// references (`SET n.x = other.y`) still resolve. When targetVar has no schema
+// column the row is returned unchanged (best effort).
+func (op *Merge) actionEvalRow(row Row, targetVar string, nodeID graph.NodeID) Row {
+	col, ok := op.schema[targetVar]
+	if !ok {
+		return row
+	}
+	width := len(row)
+	if col+1 > width {
+		width = col + 1
+	}
+	out := make(Row, width)
+	copy(out, row)
+	out[col] = expr.IntegerValue(int64(nodeID))
+	return out
+}
+
+// MergeActionEvalKey composes the map key under which a MERGE ON CREATE /
+// ON MATCH property-set action's per-row RHS evaluator is registered and
+// looked up. targetVar is the entity variable the action writes (a node, a
+// bound endpoint, or a relationship variable) and key is the property key.
+// The NUL separator cannot appear in a Cypher identifier, so the composed key
+// is unambiguous across distinct (variable, property) pairs. The physical
+// builder ([cypher] package) and the operators here must agree on this
+// encoding, so it is defined once and exported.
+func MergeActionEvalKey(targetVar, key string) string {
+	return targetVar + "\x00" + key
 }
 
 // parseMergeActions parses a slice of opaque SET-item strings into structured

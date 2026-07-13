@@ -97,6 +97,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // mergePatternNode describes one node position in the chain.
@@ -163,6 +164,13 @@ type MergePattern struct {
 
 	onCreateActions []mergeAction
 	onMatchActions  []mergeAction
+	// onCreateEvals / onMatchEvals map an action's target (via
+	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
+	// ON CREATE / ON MATCH SET expression targeting any chain node or hop
+	// relationship variable (e.g. `ON MATCH SET n.num = n.num + 1`). nil
+	// when every action's RHS is a literal. See [MergePattern.applyActions].
+	onCreateEvals map[string]ValueEvalFn
+	onMatchEvals  map[string]ValueEvalFn
 
 	mutator GraphMutator
 	reg     *ConstraintRegistry // nil means no enforcement
@@ -294,6 +302,17 @@ func (op *MergePattern) WithActions(onCreateStrs, onMatchStrs []string) (*MergeP
 	return op, nil
 }
 
+// WithActionEvals attaches per-row RHS evaluators for ON CREATE / ON MATCH
+// property-set items whose right-hand side is a non-literal expression
+// (keyed by [MergeActionEvalKey] on the target variable and property key).
+// Without these, an expression such as `ON MATCH SET n.num = n.num + 1`
+// fails to parse as a literal and is dropped (#1965). Returns op for chaining.
+func (op *MergePattern) WithActionEvals(onCreate, onMatch map[string]ValueEvalFn) *MergePattern {
+	op.onCreateEvals = onCreate
+	op.onMatchEvals = onMatch
+	return op
+}
+
 // WithConstraints attaches a ConstraintRegistry and index.Manager for
 // pre-write enforcement of every fresh node's created properties and of
 // every ON CREATE / ON MATCH node property action — mirroring
@@ -396,7 +415,7 @@ func (op *MergePattern) runForRow(childRow Row) error {
 			if err != nil {
 				return err
 			}
-			if err := op.applyActions(b, op.onMatchActions); err != nil {
+			if err := op.applyActions(b, row, op.onMatchActions, op.onMatchEvals); err != nil {
 				return err
 			}
 			op.matched = append(op.matched, row)
@@ -411,7 +430,7 @@ func (op *MergePattern) runForRow(childRow Row) error {
 	if err != nil {
 		return err
 	}
-	if err := op.applyActions(b, op.onCreateActions); err != nil {
+	if err := op.applyActions(b, row, op.onCreateActions, op.onCreateEvals); err != nil {
 		return err
 	}
 	op.created = true
@@ -784,14 +803,19 @@ func (op *MergePattern) emitRow(childRow Row, b binding) (Row, error) {
 // applyActions applies each pre-parsed ON CREATE / ON MATCH action to
 // whichever chain entity its nodeVar names — a fresh or bound node position,
 // or a hop's relationship variable — resolved against b.
-func (op *MergePattern) applyActions(b binding, actions []mergeAction) error {
+// evalRow is the schema-consistent row emitted for this binding (nodes as
+// IntegerValue at their output columns, relationships as RelationshipValue at
+// theirs); it feeds the per-row RHS evaluators in evals so an expression
+// action such as `ON MATCH SET n.num = n.num + 1` reads the entity's current
+// value instead of being dropped as a literal-parse failure (#1965).
+func (op *MergePattern) applyActions(b binding, evalRow Row, actions []mergeAction, evals map[string]ValueEvalFn) error {
 	for _, act := range actions {
 		if idx, ok := op.nodeIndexByVar(act.nodeVar); ok {
 			key, ok := op.mutator.ResolveNodeLabel(b[idx])
 			if !ok {
 				continue
 			}
-			if err := op.applyNodeAction(key, act); err != nil {
+			if err := op.applyNodeAction(key, act, evalRow, evals); err != nil {
 				return err
 			}
 			continue
@@ -804,7 +828,7 @@ func (op *MergePattern) applyActions(b binding, actions []mergeAction) error {
 			if !ok1 || !ok2 {
 				continue
 			}
-			if err := op.applyRelAction(srcKey, dstKey, act); err != nil {
+			if err := op.applyRelAction(srcKey, dstKey, act, evalRow, evals); err != nil {
 				return err
 			}
 			continue
@@ -841,8 +865,9 @@ func (op *MergePattern) hopIndexByRelVar(v string) (int, bool) {
 }
 
 // applyNodeAction applies one mergeAction (a property write or a label-set)
-// to the node identified by key.
-func (op *MergePattern) applyNodeAction(key string, act mergeAction) error {
+// to the node identified by key. evalRow / evals feed the per-row RHS
+// evaluator for a non-literal expression (#1965); see [MergePattern.applyActions].
+func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
 	if len(act.setLabels) > 0 {
 		for _, lbl := range act.setLabels {
 			if err := op.mutator.SetNodeLabel(key, lbl); err != nil {
@@ -851,12 +876,16 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction) error {
 		}
 		return nil
 	}
-	v, err := parsePropValue(act.value)
-	if err != nil {
-		if isNullPropertyValueErr(err) {
-			// SET x.k = null removes the property; release its old constrained
-			// value so a UNIQUE slot is not leaked as a phantom reservation
-			// (#1904).
+	v, parseErr := parsePropValue(act.value)
+	if parseErr != nil {
+		remove, resolved, val, evalErr := op.resolveNonLiteral(act, parseErr, evalRow, evals)
+		if evalErr != nil {
+			return evalErr
+		}
+		if remove {
+			// SET x.k = null (literal or expression→null) removes the property;
+			// release its old constrained value so a UNIQUE slot is not leaked
+			// as a phantom reservation (#1904).
 			if op.reg != nil {
 				if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
 					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(key), act.key, oldVal)
@@ -865,7 +894,12 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction) error {
 			op.mutator.DelNodeProperty(key, act.key)
 			return nil
 		}
-		return fmt.Errorf("exec: MergePattern: parse value %q: %w", act.value, err)
+		if !resolved {
+			// Non-literal RHS with no evaluator, or an evaluator no-op (eval
+			// error / unstorable type — matching regular SET): no write.
+			return nil
+		}
+		v = val
 	}
 	if op.reg != nil {
 		labels := op.mutator.NodeLabels(key)
@@ -897,20 +931,30 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction) error {
 // entity-copy actions on a compound-pattern relationship are not yet
 // supported and are silently skipped, mirroring how such actions on an
 // out-of-scope target are already tolerated elsewhere in this operator).
-func (op *MergePattern) applyRelAction(srcKey, dstKey string, act mergeAction) error {
+func (op *MergePattern) applyRelAction(srcKey, dstKey string, act mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
 	if len(act.setLabels) > 0 {
 		// A relationship has no labels beyond its single type; SET r:Foo
 		// is rejected at compile time (sema), so this shape cannot occur
 		// for a relationship target. Defensive no-op.
 		return nil
 	}
-	v, err := parsePropValue(act.value)
-	if err != nil {
-		if isNullPropertyValueErr(err) {
+	v, parseErr := parsePropValue(act.value)
+	if parseErr != nil {
+		remove, resolved, val, evalErr := op.resolveNonLiteral(act, parseErr, evalRow, evals)
+		if evalErr != nil {
+			return evalErr
+		}
+		if remove {
 			op.mutator.DelEdgeProperty(srcKey, dstKey, act.key)
+			if handle, ok := op.mutator.FirstEdgeHandle(srcKey, dstKey); ok && handle != 0 {
+				op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, act.key)
+			}
 			return nil
 		}
-		return fmt.Errorf("exec: MergePattern: parse value %q: %w", act.value, err)
+		if !resolved {
+			return nil
+		}
+		v = val
 	}
 	if err := op.mutator.SetEdgeProperty(srcKey, dstKey, act.key, v); err != nil {
 		return fmt.Errorf("exec: MergePattern: SetEdgeProperty: %w", err)
@@ -921,6 +965,39 @@ func (op *MergePattern) applyRelAction(srcKey, dstKey string, act mergeAction) e
 		}
 	}
 	return nil
+}
+
+// resolveNonLiteral handles a MergePattern property-set action whose RHS did
+// not parse as a literal. Its four results answer, in order:
+//   - remove: the RHS is a literal null or evaluates to null → the caller
+//     removes the property (openCypher SET-to-null semantics);
+//   - resolved (with val): a registered per-row evaluator produced a value;
+//   - neither, nil err: an evaluator no-op (eval error / unstorable type —
+//     matching how the regular SET operator degrades);
+//   - neither, non-nil err: a non-literal RHS with NO registered evaluator,
+//     which returns the original parse error to preserve this operator's prior
+//     fail-stop behaviour (it never silently dropped such an action). Every
+//     genuine non-literal action is wired with an evaluator by the physical
+//     builder, so the error branch is defensive only.
+func (op *MergePattern) resolveNonLiteral(act mergeAction, parseErr error, evalRow Row, evals map[string]ValueEvalFn) (remove, resolved bool, val lpg.PropertyValue, err error) {
+	if isNullPropertyValueErr(parseErr) {
+		return true, false, lpg.PropertyValue{}, nil
+	}
+	fn, has := evals[MergeActionEvalKey(act.nodeVar, act.key)]
+	if !has {
+		return false, false, lpg.PropertyValue{}, fmt.Errorf("exec: MergePattern: parse value %q: %w", act.value, parseErr)
+	}
+	v, isNull, hasValue, evalErr := fn(evalRow)
+	if evalErr != nil {
+		return false, false, lpg.PropertyValue{}, evalErr
+	}
+	if isNull {
+		return true, false, lpg.PropertyValue{}, nil
+	}
+	if !hasValue {
+		return false, false, lpg.PropertyValue{}, nil
+	}
+	return false, true, v, nil
 }
 
 // isNullPropertyValueErr reports whether err is the sentinel ErrPropertyValueIsNull.

@@ -4681,6 +4681,17 @@ func buildOperatorWrite(
 			}
 			op = op.WithOnMatch(p.RelVar, actions)
 		}
+		// Per-row evaluators for non-literal ON CREATE / ON MATCH SET RHS on
+		// the relationship variable (e.g. `ON MATCH SET r.n = r.n + 1`).
+		// Without these this fast path surfaced a literal-parse error instead
+		// of evaluating the expression (#1965). The schema (copied for
+		// WithSchema above) includes the relationship column so the evaluator
+		// row binds `r` as a RelationshipValue carrying its current properties.
+		relSchema := copySchema(schema)
+		op = op.WithActionEvals(
+			buildMergeActionEvals(p.OnCreateExprs, relSchema, params, reg, mutator, bopts),
+			buildMergeActionEvals(p.OnMatchExprs, relSchema, params, reg, mutator, bopts),
+		)
 		return op, nil
 
 	case *ir.MergePattern:
@@ -4768,6 +4779,16 @@ func buildOperatorWrite(
 		if mp, err = mp.WithActions(p.OnCreate, p.OnMatch); err != nil {
 			return nil, err
 		}
+		// Per-row evaluators for non-literal ON CREATE / ON MATCH SET RHS on
+		// any chain node or relationship variable (#1965). The schema is
+		// captured AFTER every pattern column was assigned above, so it
+		// matches the emitted row the operator hands the evaluator (nodes at
+		// their output columns, relationships at theirs).
+		actionSchema := copySchema(schema)
+		mp.WithActionEvals(
+			buildMergeActionEvals(p.OnCreateExprs, actionSchema, params, reg, mutator, bopts),
+			buildMergeActionEvals(p.OnMatchExprs, actionSchema, params, reg, mutator, bopts),
+		)
 		if constraintReg != nil {
 			mp.WithConstraints(constraintReg, idxMgr)
 		}
@@ -4841,6 +4862,14 @@ func buildOperatorWrite(
 				}
 			}
 		}
+		// Per-row evaluators for non-literal ON CREATE / ON MATCH SET RHS
+		// (e.g. `ON MATCH SET n.num = n.num + 1`). Without these the operator
+		// silently drops the assignment (#1965). schemaCopy matches the
+		// combined row the operator hands the evaluator.
+		m.WithActionEvals(
+			buildMergeActionEvals(p.OnCreateExprs, schemaCopy, params, reg, mutator, bopts),
+			buildMergeActionEvals(p.OnMatchExprs, schemaCopy, params, reg, mutator, bopts),
+		)
 		return m, nil
 
 	default:
@@ -4996,6 +5025,80 @@ func buildPropsEvalFn(
 		}
 		return out
 	}
+}
+
+// scalarColSnapshot copies the scalar-column set (UNWIND element variables,
+// aggregate outputs, and integer-typed projection aliases) from bopts so a
+// per-row RowContext builder does not upgrade a scalar integer that happens to
+// coincide with an internal node id to a NodeValue. Returns nil when there are
+// no scalar columns. Shared by the CREATE/MERGE property evaluators.
+func scalarColSnapshot(bopts *buildOpts) map[string]struct{} {
+	if bopts == nil {
+		return nil
+	}
+	n := len(bopts.scalarCols) + len(bopts.projAliasScalarCols)
+	if n == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, n)
+	for k := range bopts.scalarCols {
+		out[k] = struct{}{}
+	}
+	for k := range bopts.projAliasScalarCols {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
+// buildMergeActionEvals builds the per-row RHS evaluator map for a MERGE
+// operator's ON CREATE / ON MATCH property-set items whose right-hand side is a
+// non-literal expression (e.g. `ON MATCH SET n.num = n.num + 1`). Each
+// evaluator mirrors the regular SetProperty evaluator (see the *ir.SetProperty
+// build case): it builds a RowContext from the matched/created row, evaluates
+// the value expression, and converts the result to an lpg.PropertyValue —
+// degrading to a no-op on an evaluation error or unstorable type exactly as
+// regular SET does, and reporting an unstorable map RHS as InvalidPropertyType.
+//
+// The returned map is keyed by [exec.MergeActionEvalKey] on the item's target
+// variable and property key, the same key the merge operators look up at apply
+// time. Returns nil when exprs is empty (all-literal action set), which keeps
+// the literal fast path byte-identical. #1965.
+func buildMergeActionEvals(
+	exprs []ir.MergeSetExpr,
+	schemaCopy map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	mutator exec.GraphMutator,
+	bopts *buildOpts,
+) map[string]exec.ValueEvalFn {
+	if len(exprs) == 0 {
+		return nil
+	}
+	scalarSnap := scalarColSnapshot(bopts)
+	out := make(map[string]exec.ValueEvalFn, len(exprs))
+	for _, e := range exprs {
+		valAST := e.Value
+		propKey := e.Key
+		out[exec.MergeActionEvalKey(e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
+			rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+			v, evalErr := expr.Eval(valAST, rowCtx, params, reg)
+			if evalErr != nil {
+				return lpg.PropertyValue{}, false, false, nil // surface as no-op (matches regular SET)
+			}
+			if v == nil || expr.IsNull(v) {
+				return lpg.PropertyValue{}, true, false, nil
+			}
+			if !isStorableProperty(v) {
+				return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: MERGE SET %s: InvalidPropertyType: maps cannot be stored as property values", propKey)
+			}
+			pv, ok := exprValueToLPGProp(v)
+			if !ok {
+				return lpg.PropertyValue{}, false, false, nil
+			}
+			return pv, false, true, nil
+		}
+	}
+	return out
 }
 
 // buildRowCtxFromMutator builds an [expr.RowContext] from a row using the

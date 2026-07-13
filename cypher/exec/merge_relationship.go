@@ -63,7 +63,14 @@ type MergeRelationship struct {
 	undirected      bool
 	onCreateActions []MergeRelAction
 	onMatchActions  []MergeRelAction
-	mutator         GraphMutator
+	// onCreateEvals / onMatchEvals map an action's target (via
+	// [MergeActionEvalKey], keyed on the relationship variable and property
+	// key) to a per-row RHS evaluator for a non-literal ON CREATE / ON MATCH
+	// SET expression (e.g. `ON MATCH SET r.n = r.n + 1`). nil when every
+	// action's RHS is a literal. See [MergeRelationship.applyRelActions].
+	onCreateEvals map[string]ValueEvalFn
+	onMatchEvals  map[string]ValueEvalFn
+	mutator       GraphMutator
 	// schema lets entity-copy actions (`SET r = a`) resolve the source
 	// variable name to a row column at write time. nil when the upstream
 	// builder did not thread one in.
@@ -160,6 +167,18 @@ func (op *MergeRelationship) WithOnCreate(relVar string, actions []MergeRelActio
 func (op *MergeRelationship) WithOnMatch(relVar string, actions []MergeRelAction) *MergeRelationship {
 	op.relVar = relVar
 	op.onMatchActions = actions
+	return op
+}
+
+// WithActionEvals attaches per-row RHS evaluators for ON CREATE / ON MATCH
+// property-set items whose right-hand side is a non-literal expression
+// (keyed by [MergeActionEvalKey] on the relationship variable and property
+// key). Without these, `ON MATCH SET r.n = r.n + 1` fails to parse as a
+// literal and, on this fast path, surfaced a parse error instead of
+// incrementing the edge property (#1965). Returns op for chaining.
+func (op *MergeRelationship) WithActionEvals(onCreate, onMatch map[string]ValueEvalFn) *MergeRelationship {
+	op.onCreateEvals = onCreate
+	op.onMatchEvals = onMatch
 	return op
 }
 
@@ -268,7 +287,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		// Resolve the matched edge's by-pair handle so ON MATCH property writes
 		// mirror onto its by-handle store (#1684); 0 ⇒ per-pair store only.
 		matchedHandle, _ := op.mutator.FirstEdgeHandle(srcKey, dstKey)
-		if err := op.applyRelActions(row, srcKey, dstKey, matchedHandle, op.onMatchActions); err != nil {
+		if err := op.applyRelActions(row, srcKey, dstKey, matchedHandle, op.onMatchActions, op.onMatchEvals); err != nil {
 			return false, err
 		}
 		emitted := op.emitRow(row, srcID, dstID, srcKey, dstKey)
@@ -296,7 +315,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		// Reverse-direction match: the edge is stored (dstKey -> srcKey), so
 		// resolve and mirror against that stored pair (#1684).
 		matchedHandle, _ := op.mutator.FirstEdgeHandle(dstKey, srcKey)
-		if err := op.applyRelActions(row, dstKey, srcKey, matchedHandle, op.onMatchActions); err != nil {
+		if err := op.applyRelActions(row, dstKey, srcKey, matchedHandle, op.onMatchActions, op.onMatchEvals); err != nil {
 			return false, err
 		}
 		emitted := op.emitRow(row, dstID, srcID, dstKey, srcKey)
@@ -339,7 +358,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	// ON CREATE actions target the edge just allocated above, so pass its known
 	// handle directly — in a multigraph FirstEdgeHandle could resolve a
 	// pre-existing parallel sibling's slot, not this new edge's (#1684).
-	if err := op.applyRelActions(row, srcKey, dstKey, handle, op.onCreateActions); err != nil {
+	if err := op.applyRelActions(row, srcKey, dstKey, handle, op.onCreateActions, op.onCreateEvals); err != nil {
 		return false, err
 	}
 	*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
@@ -457,7 +476,7 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 // by-handle store stays congruent with the per-pair store (#1684). The
 // mutate form (`SET r += {…}`) and single-property writes are additive: no
 // clear is performed.
-func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, handle uint64, actions []MergeRelAction) error {
+func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, handle uint64, actions []MergeRelAction, evals map[string]ValueEvalFn) error {
 	for _, act := range actions {
 		// Replace-map sentinel: key=="" && value=="" && replace. Clear every
 		// existing edge property absent from retainKeys before the per-key
@@ -520,12 +539,36 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 			}
 			continue
 		}
+		// Single-property write. Literal fast path first; on a non-literal
+		// RHS use the per-row evaluator so `ON MATCH SET r.n = r.n + 1` reads
+		// the edge's current value instead of erroring on a literal parse
+		// failure (#1965).
 		v, err := parsePropValue(act.value)
 		if err != nil {
 			if errors.Is(err, ErrPropertyValueIsNull) {
+				// Literal null RHS: preserve this fast path's prior no-op
+				// (the compound MergePattern and the SET-clause translator
+				// remove the property, but this operator has always skipped;
+				// left unchanged to keep the fix in scope — #1965).
 				continue
 			}
-			return fmt.Errorf("exec: MergeRelationship: parse value %q: %w", act.value, err)
+			fn, has := evals[MergeActionEvalKey(op.relVar, act.key)]
+			if !has {
+				return fmt.Errorf("exec: MergeRelationship: parse value %q: %w", act.value, err)
+			}
+			val, isNull, hasValue, evalErr := fn(op.actionEvalRow(row, srcKey, dstKey))
+			if evalErr != nil {
+				return evalErr
+			}
+			if isNull {
+				// RHS evaluated to null → openCypher removes the property.
+				op.delEdgeProp(srcKey, dstKey, handle, act.key)
+				continue
+			}
+			if !hasValue {
+				continue // eval error / unstorable type → no-op (matches regular SET)
+			}
+			v = val
 		}
 		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, act.key, v); setErr != nil {
 			return fmt.Errorf("exec: MergeRelationship: SetEdgeProperty: %w", setErr)
@@ -537,6 +580,56 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 		}
 	}
 	return nil
+}
+
+// delEdgeProp removes key from the edge's per-pair store and, when handle is
+// non-zero, mirrors the removal to the by-handle store (#1684). Used when an
+// ON CREATE / ON MATCH SET RHS evaluates to null (openCypher removes the
+// property). Previously a null literal on this fast path was a silent skip;
+// removal matches the regular SET operator and the node MERGE path.
+func (op *MergeRelationship) delEdgeProp(srcKey, dstKey string, handle uint64, key string) {
+	op.mutator.DelEdgeProperty(srcKey, dstKey, key)
+	if handle != 0 {
+		op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, key)
+	}
+}
+
+// actionEvalRow returns a row for a per-row RHS evaluator: a copy of the
+// driving row with the relationship variable bound at its schema column as a
+// RelationshipValue carrying the edge's CURRENT properties, so `r.<key>`
+// resolves to the live edge value. The endpoint node columns are preserved so
+// cross-variable references (`SET r.x = a.y`) still resolve. When the operator
+// has no relationship column (anonymous relationship, relCol < 0) the row is
+// returned unchanged — an anonymous relationship cannot be named by a SET item.
+func (op *MergeRelationship) actionEvalRow(row Row, srcKey, dstKey string) Row {
+	if op.relCol < 0 {
+		return row
+	}
+	width := len(row)
+	if op.relCol+1 > width {
+		width = op.relCol + 1
+	}
+	out := make(Row, width)
+	copy(out, row)
+	out[op.relCol] = op.currentRelValue(srcKey, dstKey)
+	return out
+}
+
+// currentRelValue builds a RelationshipValue for the (srcKey, dstKey) edge
+// carrying its current property map, converted to expr values. Used to bind
+// the relationship variable in a per-row RHS evaluation row so a self-
+// referential ON MATCH SET (`r.n = r.n + 1`) reads the live edge value.
+func (op *MergeRelationship) currentRelValue(srcKey, dstKey string) expr.RelationshipValue {
+	var props expr.MapValue
+	if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
+		props = make(expr.MapValue, len(raw))
+		for k, pv := range raw {
+			if v, ok := lpgPropToExprBinding(pv); ok {
+				props[k] = v
+			}
+		}
+	}
+	return expr.RelationshipValue{Type: op.relType, Properties: props}
 }
 
 // clearRelPropsAbsent removes every property currently set on the directed

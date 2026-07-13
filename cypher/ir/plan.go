@@ -1815,8 +1815,32 @@ type Merge struct {
 	// nil when no inline property map is present or when MERGE is shaped as
 	// a relationship MERGE (handled by [MergeRelationship]).
 	NodePropsAST ast.Expression
+	// OnCreateExprs / OnMatchExprs carry the parsed value-expression ASTs of
+	// the ON CREATE / ON MATCH property-set items whose right-hand side is a
+	// non-literal expression (e.g. `ON MATCH SET n.num = n.num + 1`). The
+	// physical builder installs a per-row evaluator for each so the RHS is
+	// evaluated against the matched/created row instead of being dropped as a
+	// literal-parse failure. Literal RHS items are omitted (they use the
+	// opaque-string fast path in [OnCreate]/[OnMatch]).
+	OnCreateExprs []MergeSetExpr
+	OnMatchExprs  []MergeSetExpr
 	// Child is the driving subplan.
 	Child LogicalPlan
+}
+
+// MergeSetExpr carries the parsed value-expression AST for a MERGE
+// ON CREATE / ON MATCH property-set item whose right-hand side is a
+// non-literal expression, so the physical builder can install a per-row
+// evaluator (mirroring the regular SET operator's ValueEvalFn) instead of
+// silently dropping the assignment when the RHS fails to parse as a literal.
+//
+// TargetVar and Key identify which entity property the item writes (the
+// pattern node, bound endpoint, or relationship variable); Value is the
+// right-hand-side expression evaluated per row.
+type MergeSetExpr struct {
+	TargetVar string
+	Key       string
+	Value     ast.Expression
 }
 
 // MergeRelationship is the relationship-pattern variant of [Merge]. It
@@ -1858,6 +1882,13 @@ type MergeRelationship struct {
 	// OnMatch is the list of (key, value) pairs to set on the
 	// relationship when an existing edge is matched.
 	OnMatch []KVAction
+	// OnCreateExprs / OnMatchExprs carry the value-expression ASTs of the
+	// ON CREATE / ON MATCH property-set items whose right-hand side is a
+	// non-literal expression (e.g. `ON MATCH SET r.n = r.n + 1`). See
+	// [MergeSetExpr]; literal RHS items are omitted (handled via the
+	// [KVAction] opaque-string fast path).
+	OnCreateExprs []MergeSetExpr
+	OnMatchExprs  []MergeSetExpr
 	// Child is the driving subplan that binds SrcVar and DstVar.
 	Child LogicalPlan
 }
@@ -2019,7 +2050,13 @@ type MergePattern struct {
 	// variable — any Nodes[i].Var or Hops[i].RelVar, not just one entity.
 	OnCreate []string
 	OnMatch  []string
-	Child    LogicalPlan
+	// OnCreateExprs / OnMatchExprs carry the value-expression ASTs of the
+	// ON CREATE / ON MATCH property-set items whose right-hand side is a
+	// non-literal expression. See [MergeSetExpr]; literal RHS items are
+	// omitted (handled via the opaque-string fast path in [OnCreate]/[OnMatch]).
+	OnCreateExprs []MergeSetExpr
+	OnMatchExprs  []MergeSetExpr
+	Child         LogicalPlan
 }
 
 // NewMergePattern creates a MergePattern operator for the chain described by

@@ -251,6 +251,12 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 						mr := NewMergeRelationshipWithActions(r.srcVar, r.dstVar, r.relVar, r.relType, onCreate, onMatch, child)
 						mr.RelProps = r.relProps
 						mr.Undirected = r.undirected
+						// Carry the non-literal RHS expression ASTs so the
+						// physical builder can evaluate `ON MATCH SET r.n =
+						// r.n + 1` per row instead of dropping it as a
+						// literal-parse failure (fail-silent bug, #1965).
+						mr.OnCreateExprs = extractMergeSetExprs(m.OnCreate)
+						mr.OnMatchExprs = extractMergeSetExprs(m.OnMatch)
 						// MERGE p = (a)-[:R]->(b) on the MergeRelationship
 						// shortcut still needs the NamedPath wrapper so the
 						// projection of p reconstructs a PathValue from the
@@ -289,6 +295,11 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 		if err != nil {
 			return nil, err
 		}
+		// Carry the non-literal RHS expression ASTs so the physical builder
+		// can evaluate expression-valued ON CREATE / ON MATCH SET items per
+		// row instead of dropping them as literal-parse failures (#1965).
+		mp.OnCreateExprs = extractMergeSetExprs(m.OnCreate)
+		mp.OnMatchExprs = extractMergeSetExprs(m.OnMatch)
 		var plan LogicalPlan = mp
 		if m.Pattern.Variable != nil {
 			plan = applyPathVar(m.Pattern, plan)
@@ -324,6 +335,11 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 		if m.Pattern != nil && m.Pattern.Head != nil && m.Pattern.Head.Node != nil {
 			mergeOp.NodePropsAST = m.Pattern.Head.Node.Properties
 		}
+		// Carry the non-literal RHS expression ASTs so the physical builder
+		// can evaluate `ON MATCH SET n.num = n.num + 1` per row instead of
+		// dropping it as a literal-parse failure (fail-silent bug, #1965).
+		mergeOp.OnCreateExprs = extractMergeSetExprs(m.OnCreate)
+		mergeOp.OnMatchExprs = extractMergeSetExprs(m.OnMatch)
 		plan = mergeOp
 	}
 	// MERGE p = (...) binds a path variable just like MATCH p = (...). Wrap
@@ -434,6 +450,39 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 		return nil, false
 	}
 	return out, true
+}
+
+// extractMergeSetExprs returns a [MergeSetExpr] for every ON CREATE / ON MATCH
+// SET item of the form `SET <var>.<key> = <expr>` whose right-hand side is a
+// non-literal expression (arithmetic, property access, function call, etc.).
+//
+// Literal RHS items (`SET n.k = 42`) are omitted: those are handled by the
+// existing opaque-string fast path, which parses the literal at physical-build
+// time. Only the non-literal items need a per-row evaluator, so this keeps the
+// evaluator set minimal and the literal path byte-identical. Label-set items,
+// whole-entity forms (`SET n = {…}` / `SET n += {…}`), and any item whose
+// target is not a simple `<var>.<key>` property access are skipped — those are
+// not property-write expressions the evaluator applies to.
+func extractMergeSetExprs(items []*ast.SetItem) []MergeSetExpr {
+	var out []MergeSetExpr
+	for _, si := range items {
+		if si == nil || len(si.Labels) > 0 || si.Value == nil {
+			continue
+		}
+		prop, isProp := si.Target.(*ast.Property)
+		if !isProp {
+			continue
+		}
+		recv, isVar := prop.Receiver.(*ast.Variable)
+		if !isVar {
+			continue
+		}
+		if isLiteralExpr(si.Value) {
+			continue
+		}
+		out = append(out, MergeSetExpr{TargetVar: recv.Name, Key: prop.Key, Value: si.Value})
+	}
+	return out
 }
 
 // singleHopRel describes the canonical single-hop relationship pattern that
