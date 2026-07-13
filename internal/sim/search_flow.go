@@ -40,7 +40,16 @@ const flowSeedConst uint64 = 0x1f0f10b1c0ffee11
 const (
 	flowMaxFixtures = 4
 	flowCutFixtures = 4
+	// flowMCMFFixtures is how many min-cost-max-flow fixtures flowViolations
+	// generates per tick.
+	flowMCMFFixtures = 4
 )
+
+// flowMaxCost bounds the per-edge integer cost the min-cost-max-flow fixtures
+// emit. Kept small (like [flowMaxCap]) so the flow-times-cost products stay far
+// below the int64 accumulation the algorithm guards, and the hand-reasoning
+// about a fixture stays tractable.
+const flowMaxCost = 10
 
 // flowCapInf is the local "infinite push" sentinel for the reference BFS
 // max-flow. It is the maximum bottleneck seeded into each augmenting search and
@@ -71,6 +80,9 @@ func flowViolations(tick int64) []Violation {
 	}
 	for i := 0; i < flowCutFixtures; i++ {
 		out = append(out, flowCheckMinCut(tick, seed)...)
+	}
+	for i := 0; i < flowMCMFFixtures; i++ {
+		out = append(out, flowCheckMinCostMaxFlow(tick, seed)...)
 	}
 	return out
 }
@@ -122,6 +134,19 @@ func flowCheckMaxFlow(tick int64, seed *Seed) []Violation {
 			Message: fmt.Sprintf(
 				"EdmondsKarp value diverged from independent reference: got=%d ref=%d (n=%d, src=%d, sink=%d, edges=%s)",
 				gotEK, refFlow, n, src, sink, flowFmtEdges(edges)),
+		})
+	}
+
+	// flow.PushRelabelMaxFlow — fresh network, value-only comparison. A third,
+	// algorithmically-distinct max-flow (FIFO push-relabel with the gap
+	// heuristic) held to the same independent reference value as Dinic/EK.
+	gotPR := flow.PushRelabelMaxFlow(flowBuildNetwork(n, edges), src, sink)
+	if gotPR != refFlow {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"PushRelabelMaxFlow value diverged from independent reference: got=%d ref=%d (n=%d, src=%d, sink=%d, edges=%s)",
+				gotPR, refFlow, n, src, sink, flowFmtEdges(edges)),
 		})
 	}
 
@@ -403,6 +428,209 @@ func flowRefGlobalMinCut(n int, w []int) int {
 		return 0
 	}
 	return best
+}
+
+// flowCostEdge is one directed arc of a generated min-cost-max-flow fixture,
+// carrying both a capacity and a per-unit cost (both positive integers).
+type flowCostEdge struct {
+	src, dst, cap, cost int
+}
+
+// flowCheckMinCostMaxFlow builds one directed capacity+cost network from the
+// seed and asserts that:
+//
+//   - flow.MinCostMaxFlow's (flow, cost) equals an INDEPENDENT successive-
+//     shortest-path reference ([flowRefMinCostMaxFlow]) that shares no code with
+//     the production Dijkstra-with-potentials SSP — it augments along Bellman-
+//     Ford (SPFA) cheapest-cost paths on its own residual arrays. Agreement on
+//     BOTH the flow value and the total cost certifies the cost is minimal among
+//     all max-flows (the reference computes exactly the min-cost max-flow);
+//   - the flow VALUE equals the plain Dinic max-flow ([flow.MaxFlow]) on the
+//     same capacity topology (cost ignored) — a structurally-independent
+//     invariant proving MinCostMaxFlow ships the maximum flow, not merely a
+//     cheap sub-maximal one.
+//
+// Every fixture uses a freshly-built network per algorithm call because the
+// flow routines mutate residual capacities in place. Costs are non-negative, so
+// no negative-cycle bootstrap is exercised here (that path has its own unit
+// coverage); the emphasis is the min-cost/max-flow value correctness the DST
+// otherwise never drove. Comparisons are exact integer equalities.
+func flowCheckMinCostMaxFlow(tick int64, seed *Seed) []Violation {
+	const op = "search:MinCostMaxFlow"
+	n, edges := flowGenCostNetwork(seed)
+	src, sink := 0, n-1
+
+	refFlow, refCost := flowRefMinCostMaxFlow(n, edges, src, sink)
+	gotFlow, gotCost := flow.MinCostMaxFlow(flowBuildCostNetwork(n, edges), src, sink)
+
+	var out []Violation
+	if gotFlow != refFlow || gotCost != refCost {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"MinCostMaxFlow (flow,cost) diverged from independent SSP reference: got=(%d,%d) ref=(%d,%d) (n=%d, src=%d, sink=%d, edges=%s)",
+				gotFlow, gotCost, refFlow, refCost, n, src, sink, flowFmtCostEdges(edges)),
+		})
+	}
+
+	// The min-cost max-flow VALUE must equal the plain Dinic max-flow on the
+	// same capacities (cost ignored): MinCostMaxFlow ships the maximum flow.
+	capEdges := make([]flowEdge, len(edges))
+	for i, e := range edges {
+		capEdges[i] = flowEdge{src: e.src, dst: e.dst, cap: e.cap}
+	}
+	dinic := flow.MaxFlow(flowBuildNetwork(n, capEdges), src, sink)
+	if gotFlow != dinic {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"MinCostMaxFlow value %d != Dinic max-flow %d on the same capacity network (n=%d, edges=%s)",
+				gotFlow, dinic, n, flowFmtCostEdges(edges)),
+		})
+	}
+	return out
+}
+
+// flowGenCostNetwork derives a directed capacity+cost network from seed: n nodes
+// (6..10), src=0, sink=n-1, a connected forward spine guaranteeing positive
+// flow, plus seed-chosen extra forward arcs (src index < dst index keeps it a
+// DAG). Every arc carries a capacity in [1, flowMaxCap] and a cost in
+// [1, flowMaxCost]. Arcs are emitted in a fixed index-ordered sequence, so the
+// output never depends on map iteration order.
+func flowGenCostNetwork(seed *Seed) (int, []flowCostEdge) {
+	n := 6 + seed.IntN(5) // 6..10
+	edges := make([]flowCostEdge, 0, n*2)
+	for i := 0; i < n-1; i++ {
+		edges = append(edges, flowCostEdge{
+			src: i, dst: i + 1,
+			cap:  1 + seed.IntN(flowMaxCap),
+			cost: 1 + seed.IntN(flowMaxCost),
+		})
+	}
+	extra := seed.IntN(n + 2)
+	for k := 0; k < extra; k++ {
+		a := seed.IntN(n)
+		b := seed.IntN(n)
+		if a == b {
+			continue
+		}
+		if a > b {
+			a, b = b, a
+		}
+		edges = append(edges, flowCostEdge{
+			src: a, dst: b,
+			cap:  1 + seed.IntN(flowMaxCap),
+			cost: 1 + seed.IntN(flowMaxCost),
+		})
+	}
+	return n, edges
+}
+
+// flowBuildCostNetwork constructs a fresh flow.CostNetwork for one algorithm
+// call (the routines mutate residual capacities in place, so each call needs a
+// clean network).
+func flowBuildCostNetwork(n int, edges []flowCostEdge) *flow.CostNetwork {
+	g := flow.NewCostNetwork(n)
+	for _, e := range edges {
+		g.AddCostEdge(e.src, e.dst, e.cap, e.cost)
+	}
+	return g
+}
+
+// flowRefMinCostMaxFlow is the independent reference for the min-cost-max-flow
+// fixtures. It runs Successive Shortest Paths where each augmenting path is the
+// CHEAPEST (minimum total cost) src->sink path with positive residual capacity,
+// found by a Bellman-Ford / SPFA relaxation on its own residual arrays — sharing
+// no code with the production Dijkstra-with-potentials implementation. Because
+// every augmentation is along a globally cheapest residual path, the loop
+// terminates at the maximum flow whose cost is minimal (the SSP optimality
+// theorem). Costs are non-negative and capacities/costs are small integers, so
+// the arithmetic is exact and no negative cycle can arise.
+func flowRefMinCostMaxFlow(n int, edges []flowCostEdge, src, sink int) (maxFlow, minCost int) {
+	type arc struct {
+		to   int
+		cap  int
+		cost int
+		rev  int
+	}
+	adj := make([][]arc, n)
+	addArc := func(u, v, c, w int) {
+		adj[u] = append(adj[u], arc{to: v, cap: c, cost: w, rev: len(adj[v])})
+		adj[v] = append(adj[v], arc{to: u, cap: 0, cost: -w, rev: len(adj[u]) - 1})
+	}
+	for _, e := range edges {
+		addArc(e.src, e.dst, e.cap, e.cost)
+	}
+
+	const inf = flowCapInf
+	for {
+		// SPFA: shortest-cost path from src over positive-residual arcs.
+		dist := make([]int, n)
+		inQueue := make([]bool, n)
+		parentNode := make([]int, n)
+		parentArc := make([]int, n)
+		for i := range dist {
+			dist[i] = inf
+			parentNode[i] = -1
+		}
+		dist[src] = 0
+		queue := []int{src}
+		inQueue[src] = true
+		for len(queue) > 0 {
+			u := queue[0]
+			queue = queue[1:]
+			inQueue[u] = false
+			du := dist[u]
+			for ai := range adj[u] {
+				a := adj[u][ai]
+				if a.cap <= 0 {
+					continue
+				}
+				if cand := du + a.cost; cand < dist[a.to] {
+					dist[a.to] = cand
+					parentNode[a.to] = u
+					parentArc[a.to] = ai
+					if !inQueue[a.to] {
+						inQueue[a.to] = true
+						queue = append(queue, a.to)
+					}
+				}
+			}
+		}
+		if dist[sink] >= inf {
+			break // no augmenting path remains
+		}
+		// Bottleneck along the cheapest path.
+		push := inf
+		for v := sink; v != src; v = parentNode[v] {
+			if a := adj[parentNode[v]][parentArc[v]]; a.cap < push {
+				push = a.cap
+			}
+		}
+		// Apply the push: decrement forward residual, increment paired reverse.
+		for v := sink; v != src; v = parentNode[v] {
+			u := parentNode[v]
+			ai := parentArc[v]
+			adj[u][ai].cap -= push
+			adj[v][adj[u][ai].rev].cap += push
+		}
+		maxFlow += push
+		minCost += push * dist[sink]
+	}
+	return maxFlow, minCost
+}
+
+// flowFmtCostEdges renders a directed capacity+cost edge list deterministically
+// (input order) for a violation message.
+func flowFmtCostEdges(edges []flowCostEdge) string {
+	s := "["
+	for i, e := range edges {
+		if i > 0 {
+			s += " "
+		}
+		s += fmt.Sprintf("%d->%d:c%d$%d", e.src, e.dst, e.cap, e.cost)
+	}
+	return s + "]"
 }
 
 // flowFmtEdges renders a directed edge list deterministically (input order) for

@@ -279,6 +279,36 @@ func (g *nameGraph) naiveReachable(src int) []int {
 	return boolsToSortedIDs(g.reachMask(src))
 }
 
+// naiveBFSDistance returns per-node directed hop distances from src along
+// KNOWS edges (src itself at 0), with -1 for every node unreachable from src.
+// It is computed by a textbook FIFO BFS and is the independent reference the
+// bidirectional-BFS point-to-point check ([bibfsViolations]) compares against:
+// a shortest hop distance is unique, so it is a sound comparison invariant even
+// though the witnessing path is not.
+func (g *nameGraph) naiveBFSDistance(src int) []int {
+	n := len(g.names)
+	dist := make([]int, n)
+	for i := range dist {
+		dist[i] = -1
+	}
+	if src < 0 || src >= n {
+		return dist
+	}
+	dist[src] = 0
+	queue := []int{src}
+	for len(queue) > 0 {
+		u := queue[0]
+		queue = queue[1:]
+		for _, v := range g.out[u] {
+			if dist[v] == -1 {
+				dist[v] = dist[u] + 1
+				queue = append(queue, v)
+			}
+		}
+	}
+	return dist
+}
+
 // forwardReachAll returns the full forward-reachability matrix: fwd[u][v] is
 // true iff v is reachable from u (u itself included). It backs the SCC and
 // transitive-closure references; its O(n^2) footprint is why the callers gate it

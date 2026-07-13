@@ -109,6 +109,13 @@ func centralityViolations(tick int64) []Violation {
 		want := centralityUnweightedReference(f)
 		vs = append(vs, centralityCompare(tick, "search:BetweennessParallel", f, want, got)...)
 
+		// Serial Betweenness must agree with both the reference and its own
+		// parallel variant within the reassociation tolerance (the serial path
+		// accumulates in yet another order again — see centralityAbsEps).
+		gotSerial := centrality.Betweenness[float64](c)
+		vs = append(vs, centralityCompare(tick, "search:Betweenness", f, want, gotSerial)...)
+		vs = append(vs, centralityCompare(tick, "search:Betweenness", f, got, gotSerial)...)
+
 		// --- Weighted betweenness ---
 		// The library validates weights at its boundary (NaN/Inf -> ErrInvalidInput,
 		// non-positive -> ErrNonPositiveWeight). Every fixture is built with finite,
@@ -122,6 +129,16 @@ func centralityViolations(tick int64) []Violation {
 		} else {
 			wantW := centralityWeightedReference(f)
 			vs = append(vs, centralityCompare(tick, "search:WeightedBetweennessParallel", f, wantW, gotW)...)
+
+			// Serial WeightedBetweenness vs the reference and its parallel variant.
+			gotWSerial, errS := centrality.WeightedBetweenness(c)
+			if errS != nil {
+				vs = append(vs, centralityDiverge(tick, "search:WeightedBetweenness", fmt.Sprintf(
+					"%s: WeightedBetweenness rejected a well-formed positive-weight graph: %v", f.name, errS))...)
+			} else {
+				vs = append(vs, centralityCompare(tick, "search:WeightedBetweenness", f, wantW, gotWSerial)...)
+				vs = append(vs, centralityCompare(tick, "search:WeightedBetweenness", f, gotW, gotWSerial)...)
+			}
 		}
 	}
 	return vs

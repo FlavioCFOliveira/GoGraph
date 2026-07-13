@@ -127,6 +127,119 @@ func tcViolations(tick int64, g *nameGraph, c *csr.CSR[float64], fwd [][]bool) [
 	return nil
 }
 
+// topoOrderingSalt keeps the DAG-fixture topo check's draw stream disjoint from
+// every other per-tick search check.
+const topoOrderingSalt uint64 = 0x70b0_5027_e1d4_9c36
+
+// topoDAGFixtures is how many layered-DAG fixtures topoDAGViolations generates
+// per tick.
+const topoDAGFixtures = 4
+
+// topoDAGViolations exercises the SUCCESS branch of [search.TopologicalSort] on
+// deterministic ACYCLIC fixtures. The live-graph topo check ([topoViolations])
+// runs on the workload graph, which is almost surely cyclic, so the valid-order
+// branch and its edge-forwardness validation would otherwise never fire.
+//
+// Each fixture is a directed acyclic graph built with strictly forward edges
+// (u->v only when v>u), so it is acyclic by construction and TopologicalSort
+// must return a valid order (never [search.ErrCycle]). The returned order is
+// validated independently: it must be a permutation of exactly the edge-incident
+// nodes in which every directed edge runs forward. The order is not unique, so
+// the invariant — not one canonical answer — is what is asserted.
+func topoDAGViolations(tick int64) []Violation {
+	seed := NewSeed(uint64(tick) ^ topoOrderingSalt)
+	var vs []Violation
+	for i := 0; i < topoDAGFixtures; i++ {
+		n, edges := topoGenDAG(seed)
+		c := dirCSRFromEdges(n, edges)
+		order, err := search.TopologicalSort(c)
+		if err != nil {
+			vs = append(vs, topoViolation(tick, fmt.Sprintf(
+				"acyclic DAG fixture but TopologicalSort returned error: %v (n=%d, edges=%v)", err, n, edges))...)
+			continue
+		}
+		vs = append(vs, validateTopoOrderDAG(tick, n, edges, order)...)
+	}
+	return vs
+}
+
+// topoGenDAG builds a deterministic directed acyclic graph: n nodes (5..10), a
+// forward spine 0->1->...->(n-1) (so every node is edge-incident and reachable),
+// plus seed-chosen forward skip edges u->v with u<v. All edges go strictly
+// forward, so the graph is guaranteed acyclic. Parallel edges are avoided (at
+// most one u->v skip per pair) so the incident-node count is unambiguous.
+func topoGenDAG(seed *Seed) (int, [][2]int) {
+	n := 5 + seed.IntN(6) // 5..10
+	seen := make(map[[2]int]struct{})
+	var edges [][2]int
+	add := func(u, v int) {
+		key := [2]int{u, v}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		edges = append(edges, key)
+	}
+	for i := 0; i < n-1; i++ {
+		add(i, i+1)
+	}
+	for u := 0; u < n; u++ {
+		for v := u + 2; v < n; v++ {
+			if seed.IntN(2) == 0 {
+				add(u, v)
+			}
+		}
+	}
+	return n, edges
+}
+
+// validateTopoOrderDAG asserts order is a valid topological order of the DAG
+// (n, edges): a permutation of exactly the edge-incident nodes in which every
+// directed edge is forward. Independent of the nameGraph-based validator.
+func validateTopoOrderDAG(tick int64, n int, edges [][2]int, order []graph.NodeID) []Violation {
+	pos := make([]int, n)
+	for i := range pos {
+		pos[i] = -1
+	}
+	for i, nid := range order {
+		id := int(nid)
+		if id < 0 || id >= n {
+			return topoViolation(tick, fmt.Sprintf("order contains out-of-range NodeID %d", id))
+		}
+		if pos[id] != -1 {
+			return topoViolation(tick, fmt.Sprintf("order contains duplicate NodeID %d", id))
+		}
+		pos[id] = i
+	}
+	incident := make([]bool, n)
+	for _, e := range edges {
+		incident[e[0]] = true
+		incident[e[1]] = true
+	}
+	want := 0
+	for u := 0; u < n; u++ {
+		switch {
+		case incident[u]:
+			want++
+			if pos[u] == -1 {
+				return topoViolation(tick, fmt.Sprintf("edge-incident node %d missing from the order", u))
+			}
+		case pos[u] != -1:
+			return topoViolation(tick, fmt.Sprintf("isolated node %d must not appear in the order", u))
+		}
+	}
+	if len(order) != want {
+		return topoViolation(tick, fmt.Sprintf("order covers %d nodes, want %d edge-incident", len(order), want))
+	}
+	for _, e := range edges {
+		if pos[e[0]] >= pos[e[1]] {
+			return topoViolation(tick, fmt.Sprintf(
+				"edge %d->%d is not forward in the order (pos %d >= %d)", e[0], e[1], pos[e[0]], pos[e[1]]))
+		}
+	}
+	return nil
+}
+
 // tarjanComponents converts the search package's [][]graph.NodeID SCC output to
 // the [][]int form componentsToSig consumes.
 func tarjanComponents(comps [][]graph.NodeID) [][]int {

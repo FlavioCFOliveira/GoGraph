@@ -61,10 +61,17 @@ func CheckSearch(tick int64, oracle *GraphOracle, engine Engine) []Violation {
 	vs = append(vs, flowViolations(tick)...)
 	vs = append(vs, matchingViolations(tick)...)
 	vs = append(vs, eulerViolations(tick)...)
+	vs = append(vs, eulerUndirectedViolations(tick)...)
 	vs = append(vs, centralityViolations(tick)...)
+	vs = append(vs, centralityMeasureViolations(tick)...)
 	vs = append(vs, pagerankViolations(tick)...)
 	vs = append(vs, communityViolations(tick)...)
 	vs = append(vs, kshortestViolations(tick)...)
+	vs = append(vs, negWeightViolations(tick)...)
+	vs = append(vs, topoDAGViolations(tick)...)
+	vs = append(vs, diameterViolations(tick)...)
+	vs = append(vs, bfsDoViolations(tick)...)
+	vs = append(vs, externViolations(tick)...)
 	return vs
 }
 
@@ -117,12 +124,29 @@ func searchAlgorithmViolations(tick int64, g *nameGraph) []Violation {
 	c := g.toCSR()
 
 	// Weakly-connected components: compared as a partition up to relabelling.
+	// The independent union-find reference is computed once and reused for both
+	// the serial and the parallel WCC comparison, so the parallel variant is
+	// held to the same ground truth as the serial one (which transitively pins
+	// serial == parallel without trusting either against the other).
+	refWCCSig := componentPartitionSig(g.naiveWCC())
 	if comp, _, err := search.WCC(c); err != nil {
 		vs = append(vs, searchDeviation(tick, "WCC", err))
-	} else if componentPartitionSig(comp) != componentPartitionSig(g.naiveWCC()) {
+	} else if componentPartitionSig(comp) != refWCCSig {
 		vs = append(vs, Violation{
 			Kind: ViolationSearchDivergence, Tick: tick, Op: "search:WCC",
 			Message: "WCC partition disagrees with the union-find reference",
+		})
+	}
+
+	// Parallel WCC (pinned workers) must induce the same partition as the
+	// independent union-find reference — connected components are a function of
+	// the edge set alone, so the worker count must not change the answer.
+	if comp, _, err := search.WCCParallel(c, searchParallelWorkers); err != nil {
+		vs = append(vs, searchDeviation(tick, "WCCParallel", err))
+	} else if componentPartitionSig(comp) != refWCCSig {
+		vs = append(vs, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: "search:WCCParallel",
+			Message: "WCCParallel partition disagrees with the union-find reference (serial WCC's ground truth)",
 		})
 	}
 
@@ -158,8 +182,23 @@ func searchAlgorithmViolations(tick int64, g *nameGraph) []Violation {
 	// against definition-based references.
 	vs = append(vs, kcoreViolations(tick, g)...)
 	vs = append(vs, bccViolations(tick, g)...)
+
+	// Triangle counting over the simple undirected view (see search_triangles.go),
+	// cross-checked against an O(V*d^2) definition reference and serial == parallel.
+	vs = append(vs, triangleViolations(tick, g)...)
+
+	// Bidirectional BFS point-to-point over the unweighted directed CSR (see
+	// search_bibfs.go), compared on hop distance against the plain-BFS reference.
+	vs = append(vs, bibfsViolations(tick, g, c)...)
 	return vs
 }
+
+// searchParallelWorkers is the worker count pinned for the parallel search
+// variants driven on the live graph (WCCParallel, CountTrianglesParallel). It is
+// fixed so a parallel run is reproducible for a given graph; integer-monoid
+// reductions (component labels, triangle counts) are order-independent, so the
+// pinned count only bounds fan-out — it never changes the answer.
+const searchParallelWorkers = 4
 
 // reachResult is a traversal's reachable set plus whether the traversal yielded
 // any NodeID outside the dense [0,n) range (which must never happen for a graph

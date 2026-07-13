@@ -72,7 +72,103 @@ func kshortestViolations(tick int64) []Violation {
 	for f := 0; f < kshortestFixtures; f++ {
 		vs = append(vs, kshortestFixtureViolations(tick, seed)...)
 	}
+	// Multigraph (parallel-edge) fixtures: exercise the past-real-bug path (#1884)
+	// where Yen/loopless must charge the CHEAPER of two parallel (u,v) edges.
+	for f := 0; f < kshortestParallelFixtures; f++ {
+		vs = append(vs, kshortestParallelFixtureViolations(tick, seed)...)
+	}
 	return vs
+}
+
+// kshortestParallelFixtures is how many parallel-edge (multigraph) fixtures the
+// checker generates per tick.
+const kshortestParallelFixtures = 2
+
+// kshortestParallelFixtureViolations generates one deterministic weighted
+// digraph that lists a (u,v) pair TWICE with different weights, then runs the
+// full K-shortest battery on it. The generator guarantees at least one parallel
+// edge; the reference and validator collapse parallel edges to their minimum, so
+// the check fails unless Yen/loopless/Eppstein all charge the cheaper parallel
+// edge (the #1884 contract).
+func kshortestParallelFixtureViolations(tick int64, seed *Seed) []Violation {
+	n := kshortestNMin + seed.IntN(kshortestNMax-kshortestNMin+1)
+	k := 1 + seed.IntN(kshortestKMax)
+	g := kshortestGenParallelGraph(seed, n)
+	return kshortestCheckParallel(tick, g, k)
+}
+
+// kshortestCheckParallel cross-checks the K-shortest family on a MULTIGRAPH,
+// holding each algorithm to the reference that matches its own documented
+// contract. On a graph that lists a (u,v) pair twice the two families диverge by
+// design (verified against the source):
+//
+//   - YenKShortest identifies a path by its NODE SEQUENCE and charges the
+//     CHEAPEST parallel edge for each hop (see search/yen.go buildEdgeIndex +
+//     the node-sequence dedup), so it is checked against the node-sequence
+//     reference with parallel edges collapsed to their minimum
+//     ([kshortestRefSortedCosts]) — the #1884 "charge the cheaper parallel edge"
+//     contract;
+//   - KShortestPathsLoopless / EppsteinKShortest are a best-first expansion over
+//     the implicit path tree that walks the CSR edges directly, so two parallel
+//     edges yield two DISTINCT paths with the same node sequence at different
+//     costs. They are checked against the per-edge reference
+//     ([kshortestRefPerEdgeSortedCosts]) that enumerates parallel edges as
+//     distinct, since that is exactly what a best-first edge expansion produces.
+//
+// This validates BOTH families against a correct independent oracle without
+// asserting they agree with each other (they do not, on a multigraph — a
+// documented semantic split, not a bug in either).
+func kshortestCheckParallel(tick int64, g *kshortestGraph, k int) []Violation {
+	n := g.n
+	src, dst := graph.NodeID(0), graph.NodeID(n-1)
+	c := kshortestBuildCSR(g)
+	var vs []Violation
+
+	// --- Yen: node-sequence, cheapest parallel edge per hop. ---
+	refMin := kshortestRefSortedCosts(g, 0, n-1, k)
+	yen := search.YenKShortest(c, src, dst, k)
+	vs = append(vs, kshortestCompareExact(tick, "YenKShortest", g, src, dst, k, refMin, yen)...)
+	vs = append(vs, kshortestValidatePaths(tick, "YenKShortest", g, src, dst, yen)...)
+
+	// --- Loopless + Eppstein: parallel edges as distinct paths. ---
+	refPerEdge := kshortestRefPerEdgeSortedCosts(g, 0, n-1, k)
+
+	ksp, kspErr := search.KShortestPathsLooplessCtxWithOpts(
+		context.Background(), c, src, dst, k,
+		search.KShortestPathsLooplessOpts{MaxPops: kshortestMaxPops},
+	)
+	truncated := errors.Is(kspErr, search.ErrResourceBudgetExceeded)
+	if kspErr != nil && !truncated {
+		vs = append(vs, kshortestDiverge(tick, "KShortestPathsLoopless",
+			fmt.Sprintf("unexpected error on multigraph n=%d k=%d: %v", n, k, kspErr))...)
+	} else {
+		vs = append(vs, kshortestCompareBounded(tick, "KShortestPathsLoopless", g, src, dst, k, refPerEdge, ksp, truncated)...)
+		vs = append(vs, kshortestValidatePathsPerEdge(tick, "KShortestPathsLoopless", g, src, dst, ksp)...)
+	}
+
+	epp := search.EppsteinKShortest(c, src, dst, k) //nolint:staticcheck // intentionally exercising the deprecated public alias
+	vs = append(vs, kshortestCompareExact(tick, "EppsteinKShortest", g, src, dst, k, refPerEdge, epp)...)
+	vs = append(vs, kshortestValidatePathsPerEdge(tick, "EppsteinKShortest", g, src, dst, epp)...)
+	return vs
+}
+
+// kshortestGenParallelGraph builds the base forward-DAG fixture and then plants
+// a parallel edge on the spine arc 0->1: a second 0->1 with a DIFFERENT positive
+// weight in [1, kshortestWeicMax]. The parallel weight is derived deterministically
+// from the spine weight so it is always distinct yet in range, guaranteeing the
+// fixture is a genuine multigraph the k-shortest algorithms must handle by
+// charging the cheaper of the two.
+func kshortestGenParallelGraph(seed *Seed, n int) *kshortestGraph {
+	g := kshortestGenGraph(seed, n)
+	// The spine edge 0->1 is always adj[0][0] (added first by kshortestGenGraph).
+	spineW := g.adj[0][0].weight
+	parallelW := (spineW % kshortestWeicMax) + 1 // in [1, WeicMax], != spineW
+	// Insert the parallel edge right after the spine edge so the target order
+	// stays close to ascending (order within a source is not load-bearing for
+	// the CSR or the reference, but keeping it tidy aids reproduction).
+	dup := kshortestEdge{to: 1, weight: parallelW}
+	g.adj[0] = append(g.adj[0][:1], append([]kshortestEdge{dup}, g.adj[0][1:]...)...)
+	return g
 }
 
 // kshortestFixtureViolations generates one deterministic weighted digraph and
@@ -81,9 +177,23 @@ func kshortestFixtureViolations(tick int64, seed *Seed) []Violation {
 	n := kshortestNMin + seed.IntN(kshortestNMax-kshortestNMin+1)
 	k := 1 + seed.IntN(kshortestKMax) // k in [1, kshortestKMax]
 	g := kshortestGenGraph(seed, n)
+	return kshortestCheckGraph(tick, g, k)
+}
+
+// kshortestCheckGraph runs the full K-shortest cross-check battery on a
+// pre-built graph g requesting k paths from node 0 to node n-1. It is shared by
+// the simple-digraph fixtures and the parallel-edge (multigraph) fixture: the
+// reference collapses parallel edges to their cheapest occurrence
+// ([kshortestRefSortedCosts] via [kshortestMinCollapse]) and the validator
+// charges the cheapest parallel edge ([kshortestEdgeWeight]), matching the
+// library's documented node-sequence-at-minimum-weight contract, so a multigraph
+// is judged against the same well-defined answer as a simple graph.
+func kshortestCheckGraph(tick int64, g *kshortestGraph, k int) []Violation {
+	n := g.n
 	src, dst := graph.NodeID(0), graph.NodeID(n-1)
 
-	// Reference: ALL simple src->dst path costs, sorted ascending, first k.
+	// Reference: ALL simple src->dst path costs (parallel edges collapsed to
+	// their minimum), sorted ascending, first k.
 	refCosts := kshortestRefSortedCosts(g, 0, n-1, k)
 
 	c := kshortestBuildCSR(g)
@@ -215,6 +325,12 @@ func kshortestBuildCSR(g *kshortestGraph) *csr.CSR[int] {
 // paths routinely share a cost, so the paths are non-unique while the sorted
 // costs are a well-defined invariant of the k-shortest answer.
 func kshortestRefSortedCosts(g *kshortestGraph, src, dst, k int) []int {
+	// Collapse parallel edges to their minimum weight first: the library
+	// identifies a path by its NODE SEQUENCE and charges the cheapest parallel
+	// edge for each hop (see search/yen.go buildEdgeIndex), so the reference must
+	// enumerate node sequences at minimum cost to describe the same answer. On a
+	// simple graph the collapse is the identity.
+	g = kshortestMinCollapse(g)
 	var costs []int
 	visited := make([]bool, g.n)
 	visited[src] = true
@@ -224,6 +340,130 @@ func kshortestRefSortedCosts(g *kshortestGraph, src, dst, k int) []int {
 		costs = costs[:k]
 	}
 	return costs
+}
+
+// kshortestRefPerEdgeSortedCosts enumerates EVERY simple src->dst path by DFS
+// over the RAW graph (parallel edges NOT collapsed), so two parallel (u,v) edges
+// produce two distinct paths with the same node sequence at different costs. It
+// is the independent oracle for the best-first loopless enumerators, which walk
+// CSR edges directly and therefore treat parallel edges as distinct. Returns the
+// full sorted cost list truncated to k.
+func kshortestRefPerEdgeSortedCosts(g *kshortestGraph, src, dst, k int) []int {
+	var costs []int
+	visited := make([]bool, g.n)
+	visited[src] = true
+	kshortestDFS(g, src, dst, 0, visited, &costs)
+	sort.Ints(costs)
+	if len(costs) > k {
+		costs = costs[:k]
+	}
+	return costs
+}
+
+// kshortestValidatePathsPerEdge validates a per-edge (best-first) result: each
+// path begins at src and ends at dst, is loopless (no repeated node), uses only
+// real directed edges, and the list is sorted by Cost ascending. It deliberately
+// does NOT recompute the exact cost from the node sequence — on a multigraph the
+// hop weight is ambiguous (which parallel edge?), so the reported Cost is instead
+// validated against the per-edge reference multiset by the caller's
+// [kshortestCompareBounded] / [kshortestCompareExact]. It only requires that
+// every hop's reported cost is at least the cheapest available parallel edge and
+// at most the most expensive, a necessary consistency bound.
+func kshortestValidatePathsPerEdge(tick int64, algo string, g *kshortestGraph, src, dst graph.NodeID, paths []search.YenPath[int]) []Violation {
+	var vs []Violation
+	prevCost := 0
+	for pi, p := range paths {
+		if len(p.Nodes) == 0 {
+			vs = append(vs, kshortestDiverge(tick, algo, fmt.Sprintf("path %d is empty", pi))...)
+			continue
+		}
+		if p.Nodes[0] != src || p.Nodes[len(p.Nodes)-1] != dst {
+			vs = append(vs, kshortestDiverge(tick, algo,
+				fmt.Sprintf("path %d endpoints (%d..%d) are not src=%d dst=%d", pi, p.Nodes[0], p.Nodes[len(p.Nodes)-1], src, dst))...)
+		}
+		seen := make(map[graph.NodeID]struct{}, len(p.Nodes))
+		var minSum, maxSum int
+		ok := true
+		for i, node := range p.Nodes {
+			if _, dup := seen[node]; dup {
+				vs = append(vs, kshortestDiverge(tick, algo,
+					fmt.Sprintf("path %d repeats node %d (not loopless): %v", pi, node, p.Nodes))...)
+				ok = false
+				break
+			}
+			seen[node] = struct{}{}
+			if i == 0 {
+				continue
+			}
+			lo, hi, exists := kshortestEdgeWeightRange(g, p.Nodes[i-1], node)
+			if !exists {
+				vs = append(vs, kshortestDiverge(tick, algo,
+					fmt.Sprintf("path %d uses a non-existent edge %d->%d: %v", pi, p.Nodes[i-1], node, p.Nodes))...)
+				ok = false
+				break
+			}
+			minSum += lo
+			maxSum += hi
+		}
+		if ok && (p.Cost < minSum || p.Cost > maxSum) {
+			vs = append(vs, kshortestDiverge(tick, algo,
+				fmt.Sprintf("path %d reported Cost %d outside achievable range [%d,%d]: %v", pi, p.Cost, minSum, maxSum, p.Nodes))...)
+		}
+		if pi > 0 && p.Cost < prevCost {
+			vs = append(vs, kshortestDiverge(tick, algo,
+				fmt.Sprintf("paths not sorted ascending: path %d cost %d < previous %d", pi, p.Cost, prevCost))...)
+		}
+		prevCost = p.Cost
+	}
+	return vs
+}
+
+// kshortestEdgeWeightRange returns the minimum and maximum weight of the
+// directed edge from->to (over any parallel occurrences) and whether it exists.
+func kshortestEdgeWeightRange(g *kshortestGraph, from, to graph.NodeID) (lo, hi int, exists bool) {
+	u := int(from)
+	if u < 0 || u >= g.n {
+		return 0, 0, false
+	}
+	for _, e := range g.adj[u] {
+		if graph.NodeID(e.to) == to {
+			if !exists || e.weight < lo {
+				lo = e.weight
+			}
+			if !exists || e.weight > hi {
+				hi = e.weight
+			}
+			exists = true
+		}
+	}
+	return lo, hi, exists
+}
+
+// kshortestMinCollapse returns a copy of g in which every (u,v) node pair keeps
+// only its minimum-weight edge, in ascending-target order. This makes the
+// reference DFS enumerate each node sequence exactly once at the cheapest
+// realisation — matching the library's node-sequence-at-minimum-weight k-shortest
+// contract on a multigraph. No map iteration reaches any output (targets are
+// collected then sorted), so the collapse is deterministic.
+func kshortestMinCollapse(g *kshortestGraph) *kshortestGraph {
+	out := &kshortestGraph{n: g.n, adj: make([][]kshortestEdge, g.n)}
+	for u := 0; u < g.n; u++ {
+		best := make(map[int]int, len(g.adj[u]))
+		var targets []int
+		for _, e := range g.adj[u] {
+			if w, ok := best[e.to]; !ok {
+				best[e.to] = e.weight
+				targets = append(targets, e.to)
+			} else if e.weight < w {
+				best[e.to] = e.weight
+			}
+		}
+		sort.Ints(targets)
+		for _, t := range targets {
+			out.adj[u] = append(out.adj[u], kshortestEdge{to: t, weight: best[t]})
+		}
+	}
+	return out
 }
 
 // kshortestDFS recursively walks every simple path from cur to dst, accumulating
@@ -357,19 +597,26 @@ func kshortestValidatePaths(tick int64, algo string, g *kshortestGraph, src, dst
 	return vs
 }
 
-// kshortestEdgeWeight returns the weight of the directed edge from->to and
-// whether it exists in g. Linear over from's out-edges (degree is tiny here).
+// kshortestEdgeWeight returns the MINIMUM weight of the directed edge from->to
+// and whether any such edge exists in g. On a multigraph the cheapest parallel
+// edge wins, matching the cost the library charges for a hop; on a simple graph
+// the single edge's weight is returned. Linear over from's out-edges (tiny).
 func kshortestEdgeWeight(g *kshortestGraph, from, to graph.NodeID) (int, bool) {
 	u := int(from)
 	if u < 0 || u >= g.n {
 		return 0, false
 	}
+	best := 0
+	found := false
 	for _, e := range g.adj[u] {
 		if graph.NodeID(e.to) == to {
-			return e.weight, true
+			if !found || e.weight < best {
+				best = e.weight
+				found = true
+			}
 		}
 	}
-	return 0, false
+	return best, found
 }
 
 // kshortestCosts projects the cost field out of a path slice, preserving order.
