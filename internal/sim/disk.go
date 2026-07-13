@@ -87,6 +87,25 @@ type SimDisk struct {
 	// and the requested growth — it draws NOTHING from the [Seed] — so turning a
 	// capacity on never perturbs the reproducible torn-write/Sync fault stream.
 	capacityBytes int64
+	// syncCount counts every [SimFileHandle.Sync] call across all handles of
+	// this disk. It is the ordinal a deterministic Sync-fault is armed against
+	// ([SimDisk.ArmSyncFaultAt]) and is exposed via [SimDisk.SyncCount] so a
+	// concurrent scenario can gate an action (e.g. a teardown) on durable
+	// progress rather than on wall-clock time. It is mutated only under d.mu.
+	syncCount int64
+	// syncFaultArmed / syncFaultAt implement a ONE-SHOT deterministic Sync
+	// fault: when armed, the syncFaultAt-th Sync call returns [ErrSimFault]
+	// exactly once (then disarms). Unlike the probabilistic faultRate path it
+	// draws NOTHING from the [Seed] — the trigger is a pure function of the Sync
+	// ordinal — so arming it never perturbs the reproducible torn-write/Sync
+	// fault stream, exactly like [SimDisk.SetCapacity]. It models a fsync failure
+	// on a CHOSEN commit (the WAL writer then poisons and discards the un-synced
+	// suffix, store/wal/writer.go poison), which is the mid-flight durability
+	// fault the durable-commit crash scenario needs. WHICH commit ends up being
+	// the syncFaultAt-th is non-deterministic under concurrency (interleaving),
+	// but that a fault fires at that ordinal is deterministic (the hybrid model).
+	syncFaultArmed bool
+	syncFaultAt    int64
 	// enospcOnSync selects WHERE the out-of-space condition surfaces:
 	//
 	//   - false (eager mode, the default): a Write / Truncate / TruncatePath
@@ -155,6 +174,42 @@ func (d *SimDisk) SetCapacity(capacityBytes int64, enospcOnSync bool) {
 	}
 	d.capacityBytes = capacityBytes
 	d.enospcOnSync = enospcOnSync
+}
+
+// ArmSyncFaultAt schedules a ONE-SHOT durability fault: the at-th
+// [SimFileHandle.Sync] call on this disk (counting from the current
+// [SimDisk.SyncCount]+1) returns [ErrSimFault], then the arm clears so no
+// further Sync is affected. It resets the Sync counter to zero so `at` is
+// counted from the moment of arming, letting a scenario arm "the K-th commit's
+// fsync" right before it starts issuing. A non-positive at disarms.
+//
+// It models an fsync failure on a chosen durable commit: through the Cypher
+// engine a commit's WAL fsync is a solo-leader [wal.Writer.SyncGroup], so the
+// faulted Sync poisons the writer, which discards its un-synced suffix and fails
+// that commit (the client sees a wire FAILURE, never an ack) while every earlier
+// acked commit stays durable. It draws nothing from the [Seed], so arming never
+// perturbs the reproducible fault stream. It must be called from the controlling
+// goroutine before the workload that will trigger it begins.
+func (d *SimDisk) ArmSyncFaultAt(at int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.syncCount = 0
+	if at <= 0 {
+		d.syncFaultArmed = false
+		return
+	}
+	d.syncFaultArmed = true
+	d.syncFaultAt = at
+}
+
+// SyncCount returns the number of [SimFileHandle.Sync] calls performed across
+// every handle of this disk since the last [SimDisk.ArmSyncFaultAt] reset (or
+// since construction). A concurrent scenario reads it to gate a teardown on
+// durable progress (a bounded condition wait) rather than on wall-clock time.
+func (d *SimDisk) SyncCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.syncCount
 }
 
 // totalBytesLocked returns the sum of every file's data length. The caller must
@@ -667,6 +722,17 @@ func (h *SimFileHandle) Sync() error {
 	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	// Count this Sync first, so the ordinal a one-shot fault is armed against
+	// (ArmSyncFaultAt) and the SyncCount observability surface both include it.
+	h.disk.syncCount++
+	// One-shot deterministic Sync fault: fire ErrSimFault on the armed ordinal
+	// exactly once, then disarm. Checked before the ENOSPC gate and the seed
+	// draw and drawing nothing from the seed, so it neither depends on nor
+	// perturbs the probabilistic fault stream.
+	if h.disk.syncFaultArmed && h.disk.syncCount == h.disk.syncFaultAt {
+		h.disk.syncFaultArmed = false
+		return ErrSimFault
+	}
 	// Delayed-allocation disk-full: the bytes were buffered by Write but the
 	// backing blocks cannot be allocated, so the out-of-space condition only
 	// surfaces here at fsync. Checked before the seed draw and gated on a

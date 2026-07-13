@@ -107,6 +107,9 @@ func DefaultRegistry() (*Registry, error) {
 		cypherSurfaceScenario(),
 		schemaMutationScenario(),
 		mergeRelScenario(),
+		durableCommitCrashScenario(),
+		checkpointTeardownScenario(),
+		readTxIsolationScenario(),
 	)
 }
 
@@ -487,7 +490,7 @@ func runBulkVsOnline(ctx context.Context, seed uint64) (*SimReport, error) {
 		return nil, fmt.Errorf("sim: bulk-vs-online bulk load: %w", *ep)
 	}
 	if !online.Consistent() {
-		return concurrentReport(seed, online), nil
+		return concurrentReport(seed, &online), nil
 	}
 	if bulkRows.Load() != int64(bulkLoadEdges) {
 		return &SimReport{

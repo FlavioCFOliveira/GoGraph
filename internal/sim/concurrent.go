@@ -65,6 +65,28 @@ type ConcurrentResult struct {
 	BoundedRejects   int64 // typed bound errors (overload caps) — acceptable, not a fault
 	BaselineRoutines int   // goroutine count captured before the run
 	FinalRoutines    int   // goroutine count after teardown
+
+	// AckedNames is the UNION, across every writer connection, of the unique
+	// node names whose create was acknowledged (a SUCCESS-terminated PULL). It is
+	// the durability oracle at the NAME granularity the durable-commit crash
+	// scenario needs: every name here MUST survive a crash+recovery (recovered ⊇
+	// acked). Each writer op uses a globally-unique name and is never retried, so
+	// the union is a set with no duplicates. Populated only for the writer role;
+	// nil-safe for read/overload-only runs (stays empty).
+	AckedNames []string
+	// IssuedNames is the UNION of every create name a writer connection SENT
+	// (called RUN for), regardless of outcome. It is the phantom oracle: a
+	// recovered name absent from IssuedNames would be a phantom the durable layer
+	// invented (recovered ⊆ issued).
+	IssuedNames []string
+	// FailedNames is the UNION of every create name whose client observed an
+	// explicit typed FAILURE (a [proto.Failure] at RUN or as the PULL terminal).
+	// It is the atomicity oracle: a commit the client saw fail must have applied
+	// nothing durable, so every FailedNames entry MUST be absent after recovery.
+	// A name that received an IGNORED terminal (the connection was already in the
+	// Bolt FAILED state) is deliberately NOT recorded here — its outcome is
+	// ambiguous, so it is left as merely issued, never asserted-absent.
+	FailedNames []string
 }
 
 // Consistent reports whether the eventual-consistency oracle holds: the engine's
@@ -72,7 +94,7 @@ type ConcurrentResult struct {
 // transport errors. Bounded rejects (overload caps) are expected and do not
 // break consistency because a rejected write is never acknowledged and so is
 // never counted in AckedCreates.
-func (r ConcurrentResult) Consistent() bool {
+func (r *ConcurrentResult) Consistent() bool {
 	return r.Panics == 0 &&
 		r.TransportErrors == 0 &&
 		r.EngineNodeCount == r.AckedCreates
@@ -139,9 +161,17 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 		wg              sync.WaitGroup
 	)
 
+	// Per-connection name logs: each goroutine writes ONLY to its own element,
+	// so there is no sharing and no lock on the hot path (the reliability
+	// mandate's no-hidden-shared-state rule). The harness unions them into the
+	// result AFTER wg.Wait, where the writes are already published by the
+	// wait's happens-before edge. Model: store/txn group_commit_durability_test's
+	// ackedByWorker pattern.
+	writerLogs := make([]writerLog, cfg.Connections)
+
 	for i := 0; i < cfg.Connections; i++ {
 		wg.Add(1)
-		go func(connSeed uint64, role concurrentRole) {
+		go func(connSeed uint64, role concurrentRole, wl *writerLog) {
 			defer wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
@@ -152,8 +182,8 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 				ackedCreates:    &ackedCreates,
 				transportErrors: &transportErrors,
 				boundedRejects:  &boundedRejects,
-			})
-		}(connSeeds[i], roles[i])
+			}, wl)
+		}(connSeeds[i], roles[i], &writerLogs[i])
 	}
 	wg.Wait()
 
@@ -161,6 +191,15 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	res.Panics = panics.Load()
 	res.TransportErrors = transportErrors.Load()
 	res.BoundedRejects = boundedRejects.Load()
+
+	// Union the per-connection name logs now that every writer goroutine has been
+	// joined (wg.Wait publishes their appends). The order is not significant — the
+	// durable-commit scenario compares SETS — so a simple concatenation suffices.
+	for i := range writerLogs {
+		res.AckedNames = append(res.AckedNames, writerLogs[i].acked...)
+		res.IssuedNames = append(res.IssuedNames, writerLogs[i].issued...)
+		res.FailedNames = append(res.FailedNames, writerLogs[i].failed...)
+	}
 
 	// Reconcile the eventual-consistency oracle at quiescence: count the engine's
 	// live nodes over a fresh connection and compare to the acknowledged creates.
@@ -200,18 +239,31 @@ func pickRole(seed *Seed, mix *ConcurrentMix) concurrentRole {
 	return roleOverload
 }
 
-// counters bundles the atomic tallies a connection goroutine updates.
+// counters bundles the atomic tallies a connection goroutine updates. The
+// tallies are SHARED across every connection (they aggregate the whole run), so
+// they are atomics; the per-connection name log is separate and unshared (see
+// [writerLog]).
 type counters struct {
 	ackedCreates    *atomic.Int64
 	transportErrors *atomic.Int64
 	boundedRejects  *atomic.Int64
 }
 
+// writerLog records the create names a single writer connection issued, had
+// acknowledged, and saw explicitly failed. It is owned by exactly one goroutine
+// (never shared), so it needs no synchronisation; the harness reads it only
+// after joining that goroutine. Read/overload connections leave it empty.
+type writerLog struct {
+	issued []string // every create name sent (RUN issued), any outcome
+	acked  []string // create names with a SUCCESS-terminated PULL
+	failed []string // create names with an explicit proto.Failure (never IGNORED)
+}
+
 // runConnection opens one client connection, plays its role for up to opsPerConn
 // operations (stopping early on ctx cancellation), and closes the connection. It
 // never panics out: a transport error stops the connection cleanly (recorded in
 // the counters), so a connection reset by the server does not crash the harness.
-func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn int, c *counters) {
+func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn int, c *counters, wl *writerLog) {
 	client, err := srv.Dial()
 	if err != nil {
 		c.transportErrors.Add(1)
@@ -234,7 +286,7 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 		if ctx.Err() != nil {
 			return
 		}
-		if stop := playOneOp(client, role, seed, uniq, op, c); stop {
+		if stop := playOneOp(client, role, seed, uniq, op, c, wl); stop {
 			return
 		}
 	}
@@ -242,10 +294,10 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 
 // playOneOp performs one operation for the connection's role and returns true if
 // the connection should stop (a transport error indicating the server closed it).
-func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op int, c *counters) (stop bool) {
+func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op int, c *counters, wl *writerLog) (stop bool) {
 	switch role {
 	case roleWriter:
-		return writerOp(client, seed, uniq, op, c)
+		return writerOp(client, seed, uniq, op, c, wl)
 	case roleReader:
 		return readerOp(client, seed, c)
 	case roleOverload:
@@ -256,19 +308,29 @@ func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64,
 }
 
 // writerOp creates one uniquely-named node and counts it as an acknowledged
-// create only when the server confirms the commit (SUCCESS-terminated PULL).
-func writerOp(client *WireClient, seed *Seed, uniq uint64, op int, c *counters) (stop bool) {
+// create only when the server confirms the commit (SUCCESS-terminated PULL). It
+// also records the name into the connection's own [writerLog]: as issued on
+// every attempt, as acked on a SUCCESS terminal, and as failed only on an
+// EXPLICIT [proto.Failure] (never on IGNORED, whose outcome is ambiguous). The
+// name embeds the per-connection seed and the op index, so it is globally unique
+// and never reused, which is what lets the durable-commit scenario compare
+// recovered/acked/issued/failed as sets.
+func writerOp(client *WireClient, seed *Seed, uniq uint64, op int, c *counters, wl *writerLog) (stop bool) {
 	name := fmt.Sprintf("c%d-n%d-%d", uniq, op, seed.Uint64N(1<<32))
+	wl.issued = append(wl.issued, name)
 	resp, err := client.Run(tmplCreatePerson, map[string]any{"name": name, "age": int64(seed.IntN(100))})
 	if err != nil {
 		c.transportErrors.Add(1)
 		return true
 	}
 	if _, ok := resp.(*proto.Failure); ok {
-		// A typed failure on an honest create is unexpected here; record it as a
-		// bounded reject so a flood of them is visible without being a transport
-		// fault.
+		// A typed failure at RUN: the statement never streamed, so nothing was
+		// committed. Record it as a bounded reject (visible without being a
+		// transport fault) and as an explicit failure (asserted absent after a
+		// crash). The connection continues; the Bolt server will IGNORE its later
+		// messages until RESET, which the durable-commit scenario tolerates.
 		c.boundedRejects.Add(1)
+		wl.failed = append(wl.failed, name)
 		return false
 	}
 	_, term, err := client.PullAll()
@@ -276,9 +338,19 @@ func writerOp(client *WireClient, seed *Seed, uniq uint64, op int, c *counters) 
 		c.transportErrors.Add(1)
 		return true
 	}
-	if _, ok := term.(*proto.Success); ok {
+	switch term.(type) {
+	case *proto.Success:
 		c.ackedCreates.Add(1)
-	} else {
+		wl.acked = append(wl.acked, name)
+	case *proto.Failure:
+		// The commit reached the durability point and failed there (e.g. a WAL
+		// fsync fault poisoned the writer, or a subsequent commit hit the sticky
+		// error): the transaction rolled back, so this name applied nothing.
+		c.boundedRejects.Add(1)
+		wl.failed = append(wl.failed, name)
+	default:
+		// IGNORED (connection already FAILED) or any other terminal: ambiguous
+		// outcome, counted as a bounded reject but NOT asserted absent.
 		c.boundedRejects.Add(1)
 	}
 	return false

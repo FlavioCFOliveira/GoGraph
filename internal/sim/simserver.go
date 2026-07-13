@@ -3,6 +3,8 @@ package sim
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -56,12 +58,33 @@ const defaultSimResultRowCap = 100_000
 // (see [SimEngineForServer]). The returned server is already accepting; obtain
 // connections with [SimServer.Dial] and tear it down with [SimServer.Close].
 func NewSimServer(eng *cypher.Engine, clk clock.Clock) (*SimServer, error) {
+	return newSimServerWithLogger(eng, clk, nil)
+}
+
+// quietSimLogger returns a logger that discards everything. The durable-commit /
+// checkpoint scenarios back a SimServer with an engine built by OpenSimStore,
+// which — unlike [SimEngineForServer] — carries no result-row cap, so
+// [server.NewServer] logs a loud (correct, informational) warning per
+// construction, plus the standing NoAuth and no-TLS warnings. Across the
+// multi-iteration DST tests that is a wall of noise on stderr that obscures a
+// real failure; the durable scenarios pass this logger so the wiring is
+// otherwise byte-identical to [NewSimServer] but quiet.
+func quietSimLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// newSimServerWithLogger is the shared constructor behind [NewSimServer]: a nil
+// log preserves the historical behaviour ([server.NewServer] falls back to
+// slog.Default); a non-nil log routes the server's events (including the
+// unbounded-engine / NoAuth / no-TLS warnings) to that logger.
+func newSimServerWithLogger(eng *cypher.Engine, clk clock.Clock, log *slog.Logger) (*SimServer, error) {
 	if eng == nil {
 		return nil, fmt.Errorf("sim: NewSimServer: nil engine")
 	}
 	srv, err := server.NewServer(eng, server.Options{
 		Auth:        server.NoAuthHandler{},
 		ConnTimeout: 30 * time.Second,
+		Logger:      log,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sim: NewSimServer: %w", err)

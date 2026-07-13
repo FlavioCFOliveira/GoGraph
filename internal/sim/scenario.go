@@ -272,7 +272,7 @@ func (sc *Scenario) runConcurrent(ctx context.Context, seed uint64) (*SimReport,
 		return nil, fmt.Errorf("sim: scenario %q concurrent: %w", sc.Name, err)
 	}
 	if !res.Consistent() {
-		return concurrentReport(seed, res), nil
+		return concurrentReport(seed, &res), nil
 	}
 	return nil, nil
 }
@@ -300,7 +300,7 @@ func (sc *Scenario) runLiveness(ctx context.Context, seed uint64) (*SimReport, e
 		return nil, fmt.Errorf("sim: scenario %q liveness safety: %w", sc.Name, err)
 	}
 	if !safety.Consistent() {
-		return concurrentReport(seed, safety), nil
+		return concurrentReport(seed, &safety), nil
 	}
 
 	budget := sc.ConvergeBudget
@@ -332,8 +332,10 @@ func (sc *Scenario) runLiveness(ctx context.Context, seed uint64) (*SimReport, e
 	return nil, nil
 }
 
-// concurrentReport renders a concurrent-mode inconsistency as a SimReport.
-func concurrentReport(seed uint64, res ConcurrentResult) *SimReport {
+// concurrentReport renders a concurrent-mode inconsistency as a SimReport. res
+// is passed by pointer because [ConcurrentResult] is large (it carries the
+// acked/issued/failed name slices); the report only reads it.
+func concurrentReport(seed uint64, res *ConcurrentResult) *SimReport {
 	return &SimReport{
 		Seed:       seed,
 		FailedTick: 0,

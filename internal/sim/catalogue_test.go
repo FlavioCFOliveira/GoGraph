@@ -19,9 +19,9 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	want := []string{
-		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioConstraintEnforce, ScenarioConstraintExistence,
-		ScenarioCrashStorm, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDiskFull, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioOverload,
-		ScenarioReadHeavy, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioTypeCoverage,
+		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioCheckpointTeardown, ScenarioConstraintEnforce, ScenarioConstraintExistence,
+		ScenarioCrashStorm, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDiskFull, ScenarioDurableCommitCrash, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioOverload,
+		ScenarioReadHeavy, ScenarioReadTxIsolation, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioTypeCoverage,
 		ScenarioWriteHeavy,
 	}
 	if r.Len() != len(want) {

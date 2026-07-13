@@ -13,7 +13,7 @@ import (
 // expression battery ([CheckExprLiterals]). It is the single entry point the
 // scenario calls periodically, after each crash/recovery, and at the end.
 func checkSurfaceAll(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
-	var vs []Violation
+	vs := make([]Violation, 0, 8)
 	vs = append(vs, CheckCypherSurface(tick, oracle, engine)...)
 	vs = append(vs, CheckCypherSurfaceExtended(tick, oracle, engine)...)
 	vs = append(vs, CheckExprLiterals(tick, engine)...)
