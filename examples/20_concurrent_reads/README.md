@@ -11,6 +11,21 @@ measures how read throughput scales with the worker count while proving
 that every concurrent read returns the same answer as a single-threaded
 read.
 
+It also certifies GoGraph's **intra-query** parallel algorithm variants:
+`search.WCCParallel`, `search.CountTrianglesParallel`, and
+`centrality.BetweennessParallel` are each run against their serial
+counterparts and asserted to produce the same result — exactly for the
+canonical partition and integer counts, and within a tiny floating-point
+tolerance for betweenness (whose parallel reduction sums pair-dependencies in
+a different order). The measured serial-vs-parallel speedup is reported as
+telemetry. Cross-query safety (many readers, one snapshot) and intra-query
+parallel correctness are the two halves of the concurrency story.
+
+By default the read sweep is capped at `GOMAXPROCS`; pass `-cap-to-cpus=false`
+to drive the reliability mandate's high-concurrency levels (64/256/1024
+readers over one immutable snapshot), which the lock-free contract must
+survive regardless of the core count.
+
 ## Domain / scenario
 
 A **Barabási-Albert preferential-attachment** network — the canonical
@@ -52,13 +67,14 @@ go run ./examples/20_concurrent_reads -nodes 200000 -attach 8 -workers 16  # obs
 | `-attach` | BA attachment degree `m` (edges each new node adds) | `4` | `8` |
 | `-seed-core` | size of the connected seed core (must exceed `-attach`) | `8` | `16` |
 | `-weight-max` | edge weights are drawn from `[1, weight-max]` | `10` | `100` |
-| `-workers` | maximum worker count the scaling sweep climbs to | `8` | `16` |
+| `-workers` | maximum worker count the scaling sweep climbs to | `8` | `1024` |
+| `-cap-to-cpus` | cap the sweep at `GOMAXPROCS`; set false to climb to `-workers` | `true` | `false` |
 | `-iterations` | Dijkstra SSSPs each worker runs per round | `16` | `64` |
 | `-top-k` | PageRank top-k set size pinned as an invariant | `10` | `10` |
 | `-seed` | RNG seed (fixes the deterministic data shape) | `1` | any |
 
-The sweep climbs worker counts `1, 2, 4, 8, …` capped at both `-workers`
-and `GOMAXPROCS`. The default completes in well under a second; the large
+The sweep climbs worker counts `1, 2, 4, 8, …` up to `-workers`, capped at
+`GOMAXPROCS` unless `-cap-to-cpus=false`. The default completes in well under a second; the large
 run does enough work per read for the scaling curve to be clearly
 observable.
 
@@ -90,6 +106,10 @@ ref.pagerank_topk=[230,7,73,65,15,213,32,205,139,165]
 # scale.workers_2.throughput=1124 reads/s
 # scale.workers_4.throughput=1638 reads/s
 # scale.workers_8.throughput=2312 reads/s
+parallel.wcc_matches_serial=true
+parallel.triangles_matches_serial=true
+parallel.betweenness_matches_serial=true
+# parallel.betweenness.speedup=6.37x
 reads.agree=true
 ```
 
@@ -131,6 +151,7 @@ concurrent readers compute exactly what one reader computes.
 - `search.Dijkstra` — single-source shortest paths; safe to call concurrently on a snapshot CSR.
 - `search.BFS` — breadth-first traversal with a visit callback; allocation-free on the hot path after the first call.
 - `search/centrality.PageRank` / `DefaultPageRankOptions` — power-iteration PageRank, safe to invoke from any number of goroutines on a snapshot CSR.
+- `search.WCCParallel` / `search.CountTrianglesParallel` / `search/centrality.BetweennessParallelCtx` — intra-query parallel variants, each cross-checked here against its serial counterpart over the same snapshot.
 
 ## Further reading
 

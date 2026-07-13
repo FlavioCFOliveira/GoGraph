@@ -69,6 +69,18 @@ func TestRun(t *testing.T) {
 		t.Errorf("ref.pagerank_topk has %d entries (%q), want %d", n, topK, cfg.topK)
 	}
 
+	// Intra-query parallel variants must reproduce the serial result exactly
+	// (WCC partition, triangle total) or within tolerance (betweenness float).
+	for _, key := range []string{
+		"parallel.wcc_matches_serial=",
+		"parallel.triangles_matches_serial=",
+		"parallel.betweenness_matches_serial=",
+	} {
+		if got := mustField(t, out, key); got != "true" {
+			t.Errorf("%s%q, want \"true\" (parallel variant diverged from serial)", key, got)
+		}
+	}
+
 	// The headline correctness fact: every concurrent read agreed with
 	// the single-threaded reference at every worker count.
 	if got := mustField(t, out, "reads.agree="); got != "true" {

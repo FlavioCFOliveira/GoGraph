@@ -39,10 +39,17 @@
 //
 //   - Aggregate read throughput (reads/s) of the mixed workload.
 //   - Per-worker-count scaling: the identical workload is run at 1, 2,
-//     4, 8 … workers (capped at GOMAXPROCS), and the throughput at each
-//     level is printed as telemetry. Throughput that climbs with the
-//     worker count is the observable evidence that readers do not
-//     contend on the snapshot.
+//     4, 8 … workers (capped at GOMAXPROCS by default; pass
+//     -cap-to-cpus=false to climb to -workers, e.g. 64/256/1024), and the
+//     throughput at each level is printed as telemetry. Throughput that
+//     climbs with the worker count is the observable evidence that readers
+//     do not contend on the snapshot.
+//   - Intra-query parallel correctness: the parallel variants
+//     search.WCCParallel, search.CountTrianglesParallel and
+//     centrality.BetweennessParallel are cross-checked against their serial
+//     counterparts (exact for the partition and the triangle count, within a
+//     float tolerance for betweenness), with the speedup reported as
+//     telemetry.
 //   - Live heap, so a reader can see the immutable snapshot is shared,
 //     not copied per worker.
 //
@@ -76,8 +83,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -102,6 +111,7 @@ type config struct {
 	workers    int   // maximum worker count the scaling sweep climbs to
 	iterations int   // Dijkstra SSSPs each worker runs per round
 	topK       int   // PageRank top-k set size pinned as an invariant
+	capToCPUs  bool  // cap the sweep at GOMAXPROCS; set false to climb to -workers (e.g. 64/256/1024)
 	seed       int64 // RNG seed; fixes the deterministic data shape
 }
 
@@ -118,6 +128,7 @@ func defaultConfig() config {
 		workers:    8,
 		iterations: 16,
 		topK:       10,
+		capToCPUs:  true,
 		seed:       1,
 	}
 }
@@ -153,6 +164,7 @@ func main() {
 	flag.IntVar(&cfg.seedCore, "seed-core", cfg.seedCore, "size of the connected seed core (must exceed attach)")
 	flag.IntVar(&cfg.weightMax, "weight-max", cfg.weightMax, "edge weights are drawn from [1, weight-max]")
 	flag.IntVar(&cfg.workers, "workers", cfg.workers, "maximum worker count the scaling sweep climbs to")
+	flag.BoolVar(&cfg.capToCPUs, "cap-to-cpus", cfg.capToCPUs, "cap the sweep at GOMAXPROCS; set false to climb to -workers (e.g. 64/256/1024)")
 	flag.IntVar(&cfg.iterations, "iterations", cfg.iterations, "Dijkstra SSSPs each worker runs per round")
 	flag.IntVar(&cfg.topK, "top-k", cfg.topK, "PageRank top-k set size pinned as an invariant")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
@@ -245,10 +257,119 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return fmt.Errorf("sweep: %w", err)
 	}
 
+	// Intra-query parallelism: verify the parallel algorithm variants agree
+	// with their serial counterparts over the same snapshot.
+	if err := reportParallelEquivalence(ctx, w, c, cfg); err != nil {
+		return fmt.Errorf("parallel equivalence: %w", err)
+	}
+
 	// The headline correctness fact: concurrent reads returned the same
 	// answer as the single-threaded reference at every worker count.
 	fmt.Fprintf(w, "reads.agree=%t\n", agreed)
 	return nil
+}
+
+// reportParallelEquivalence runs three intra-query parallel algorithm variants
+// against their serial counterparts over the shared immutable snapshot and
+// asserts each parallel result matches serial. Where the output is a canonical
+// partition or an integer count (WCC, triangle totals) the match is exact;
+// betweenness accumulates floating-point pair-dependencies whose summation
+// order differs across workers, so its check allows a tiny relative tolerance.
+// Serial and parallel wall-clock (and the speedup) are reported as telemetry —
+// the evidence that the parallel variants actually put the extra cores to work
+// while preserving the serial answer. A mismatch here would be a module
+// determinism bug, so each equivalence is pinned as a fact.
+func reportParallelEquivalence(ctx context.Context, w io.Writer, c *csr.CSR[int64], cfg config) error {
+	workers := runtime.GOMAXPROCS(0)
+
+	// WCC: WCCParallel is documented to return exactly the same partition.
+	serialComp, serialK, err := search.WCC(c)
+	if err != nil {
+		return fmt.Errorf("wcc: %w", err)
+	}
+	t0 := time.Now()
+	parComp, parK, err := search.WCCParallel(c, workers)
+	wccPar := time.Since(t0)
+	if err != nil {
+		return fmt.Errorf("wcc parallel: %w", err)
+	}
+	fmt.Fprintf(w, "parallel.wcc_matches_serial=%t\n", serialK == parK && slices.Equal(serialComp, parComp))
+
+	// Triangles: integer totals must be identical.
+	serialTri, _ := search.CountTriangles(c)
+	t0 = time.Now()
+	parTri, _ := search.CountTrianglesParallel(c, workers)
+	triPar := time.Since(t0)
+	fmt.Fprintf(w, "parallel.triangles_matches_serial=%t\n", serialTri == parTri)
+
+	// Betweenness: floating-point, so compare within a small relative tolerance.
+	// Brandes is O(V*(V+E)); to keep the default run fast even under -race, the
+	// betweenness equivalence runs on a bounded subgraph (the full graph would
+	// dominate the run at large -nodes). WCC and triangles above stay on the
+	// full snapshot because they are only O(V+E).
+	betCSR := c
+	if cfg.nodes > betCap {
+		small := cfg
+		small.nodes = betCap
+		bg, err := generate(ctx, small)
+		if err != nil {
+			return fmt.Errorf("betweenness subgraph: %w", err)
+		}
+		betCSR = csr.BuildFromAdjList(bg)
+	}
+	t0 = time.Now()
+	serialBet, err := centrality.BetweennessCtx(ctx, betCSR)
+	betSerial := time.Since(t0)
+	if err != nil {
+		return fmt.Errorf("betweenness: %w", err)
+	}
+	t0 = time.Now()
+	parBet, err := centrality.BetweennessParallelCtx(ctx, betCSR, workers)
+	betPar := time.Since(t0)
+	if err != nil {
+		return fmt.Errorf("betweenness parallel: %w", err)
+	}
+	fmt.Fprintf(w, "parallel.betweenness_matches_serial=%t\n", floatsClose(serialBet, parBet, 1e-6))
+
+	fmt.Fprintf(w, "# parallel.workers=%d\n", workers)
+	fmt.Fprintf(w, "# parallel.wcc.elapsed=%s\n", wccPar.Round(time.Microsecond))
+	fmt.Fprintf(w, "# parallel.triangles.elapsed=%s\n", triPar.Round(time.Microsecond))
+	fmt.Fprintf(w, "# parallel.betweenness.serial=%s\n", betSerial.Round(time.Microsecond))
+	fmt.Fprintf(w, "# parallel.betweenness.parallel=%s\n", betPar.Round(time.Microsecond))
+	fmt.Fprintf(w, "# parallel.betweenness.speedup=%.2fx\n", safeDivDur(betSerial, betPar))
+	return nil
+}
+
+// betCap bounds the node count of the graph the betweenness equivalence check
+// runs on, so the default (and every larger) run stays well under the
+// short-layer package budget even under -race. Brandes is O(V*(V+E)); 1500
+// nodes keeps the serial pass in the tens of milliseconds while still giving a
+// meaningful parallel speedup.
+const betCap = 1500
+
+// floatsClose reports whether two equal-length score slices agree everywhere
+// within a relative tolerance rel (scaled by the larger magnitude), tolerating
+// the different floating-point summation order a parallel reduction produces.
+func floatsClose(a, b []float64, rel float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		diff := math.Abs(a[i] - b[i])
+		scale := math.Max(1, math.Max(math.Abs(a[i]), math.Abs(b[i])))
+		if diff > rel*scale {
+			return false
+		}
+	}
+	return true
+}
+
+// safeDivDur returns num/den as a float ratio, or 0 when den is zero.
+func safeDivDur(num, den time.Duration) float64 {
+	if den <= 0 {
+		return 0
+	}
+	return float64(num) / float64(den)
 }
 
 // readResult is the answer one mixed read produces over the shared CSR:
@@ -336,17 +457,25 @@ func topKByRank(ranks []float64, k int) []graph.NodeID {
 }
 
 // sweep runs the identical mixed workload at a sweep of worker counts
-// (1, 2, 4, … capped at both cfg.workers and GOMAXPROCS) over the one
-// shared snapshot c. For each level it spawns that many readers, has each
-// repeat the mixed read until the round's read budget is consumed,
-// verifies every read agrees with ref, and prints the achieved
-// throughput as telemetry. It returns whether every read at every level
-// agreed with the reference. All goroutines join before each level
-// returns, and a cancelled ctx stops the sweep promptly.
+// (1, 2, 4, … up to cfg.workers) over the one shared snapshot c. For each
+// level it spawns that many readers, has each repeat the mixed read until
+// the round's read budget is consumed, verifies every read agrees with ref,
+// and prints the achieved throughput as telemetry. It returns whether every
+// read at every level agreed with the reference. All goroutines join before
+// each level returns, and a cancelled ctx stops the sweep promptly.
+//
+// By default the sweep is capped at GOMAXPROCS, because beyond the core count
+// throughput plateaus and the extra goroutines only add scheduler overhead. To
+// exercise the reliability mandate's high-concurrency levels (64/256/1024
+// readers over one immutable snapshot), set -cap-to-cpus=false so the sweep
+// climbs all the way to -workers regardless of the core count — the lock-free
+// read contract must hold no matter how many readers pile on.
 func sweep(ctx context.Context, w io.Writer, c *csr.CSR[int64], cfg config, src, dst graph.NodeID, ref readResult) (bool, error) {
 	maxWorkers := cfg.workers
-	if procs := runtime.GOMAXPROCS(0); procs < maxWorkers {
-		maxWorkers = procs
+	if cfg.capToCPUs {
+		if procs := runtime.GOMAXPROCS(0); procs < maxWorkers {
+			maxWorkers = procs
+		}
 	}
 
 	allAgreed := true
