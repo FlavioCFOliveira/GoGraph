@@ -4407,7 +4407,14 @@ func buildOperatorWrite(
 				rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
 				v, evalErr := evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				if evalErr != nil {
-					return lpg.PropertyValue{}, false, false, nil // surface as no-op
+					// Fail-stop: a runtime error evaluating the SET RHS (arithmetic,
+					// type, an unsupported subquery expression, …) must fail the
+					// statement so it rolls back atomically — never be swallowed
+					// into a silent no-op. Swallowing it caused, e.g.,
+					// `SET n.p = COUNT { (n)-->() }` under RunInTx to leave n.p
+					// unset with no diagnostic, while the same RHS raises loudly in
+					// RETURN/WHERE (audit 2026-07-13 cypher F1).
+					return lpg.PropertyValue{}, false, false, evalErr
 				}
 				if v == nil || expr.IsNull(v) {
 					return lpg.PropertyValue{}, true, false, nil
@@ -5083,7 +5090,10 @@ func buildMergeActionEvals(
 			rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
 			v, evalErr := expr.Eval(valAST, rowCtx, params, reg)
 			if evalErr != nil {
-				return lpg.PropertyValue{}, false, false, nil // surface as no-op (matches regular SET)
+				// Fail-stop, matching regular SET: a MERGE ON CREATE/ON MATCH SET
+				// RHS runtime error fails the statement rather than being swallowed
+				// into a silent no-op (audit 2026-07-13 cypher F1).
+				return lpg.PropertyValue{}, false, false, evalErr
 			}
 			if v == nil || expr.IsNull(v) {
 				return lpg.PropertyValue{}, true, false, nil
