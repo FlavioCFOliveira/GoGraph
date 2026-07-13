@@ -181,10 +181,15 @@ func toExprParams(params map[string]any) (map[string]expr.Value, error) {
 
 // toExprValue maps a single Go value to its expr.Value. It supports the scalar
 // kinds the workload binds (string, int, float, bool), a nil (→ the NULL
-// singleton), and a homogeneous-or-mixed list ([]any of supported kinds → an
-// expr.ListValue), so the type-coverage scenario can bind list- and null-valued
-// properties. Temporal values are bound as ISO-8601 strings (the canonical
-// Cypher-visible temporal storage contract), so they need no separate case.
+// singleton), a homogeneous-or-mixed list ([]any of supported kinds → an
+// expr.ListValue), and a string-keyed map (map[string]any → an expr.MapValue),
+// so scenarios can bind list-, null-, and map-valued parameters. A map parameter
+// is what `SET n = $map`, `SET n += $map`, and `MERGE (n $map)` consume to set a
+// SET of scalar properties — openCypher does not permit a map as a single
+// property value, so the map's elements are themselves restricted to the scalar
+// and list kinds above. Temporal values are bound as ISO-8601 strings (the
+// canonical Cypher-visible temporal storage contract), so they need no separate
+// case.
 func toExprValue(v any) (expr.Value, error) {
 	switch t := v.(type) {
 	case nil:
@@ -209,6 +214,16 @@ func toExprValue(v any) (expr.Value, error) {
 			items = append(items, ev)
 		}
 		return items, nil
+	case map[string]any:
+		m := make(expr.MapValue, len(t))
+		for k, e := range t {
+			ev, err := toExprValue(e)
+			if err != nil {
+				return nil, fmt.Errorf("map key %q: %w", k, err)
+			}
+			m[k] = ev
+		}
+		return m, nil
 	default:
 		return nil, fmt.Errorf("unsupported param type %T", v)
 	}
