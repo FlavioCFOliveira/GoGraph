@@ -1532,6 +1532,41 @@ func (g *Graph[N, W]) RemoveStoreConstraint(kind uint8, labelName, property stri
 	g.storeConstraintMu.Unlock()
 }
 
+// StoreConstraint is a durable schema-constraint slot recorded on the graph by
+// the txn.Store apply path or by recovery (see [Graph.AddStoreConstraint]). It
+// carries the constraint's enforcement identity — kind, label, property — but
+// not its user-defined name, which the store-direct path does not retain.
+type StoreConstraint struct {
+	// Kind is the constraint kind (0 = UNIQUE, 1 = NOT NULL), matching the
+	// txn package's ConstraintKind ordinals.
+	Kind uint8
+	// Label is the constrained node label.
+	Label string
+	// Property is the constrained property key.
+	Property string
+}
+
+// StoreConstraints returns a snapshot of the store-direct schema constraints
+// recorded on this graph (seeded by recovery, or by the txn.Store apply path).
+// It lets the cypher engine re-enforce durable UNIQUE / NOT NULL constraints
+// when it opens over a recovered store even if the caller did not thread them
+// explicitly (see cypher.NewEngineWithStore). The returned order is
+// unspecified; the slice is a fresh copy the caller owns.
+//
+// StoreConstraints is safe for concurrent use.
+func (g *Graph[N, W]) StoreConstraints() []StoreConstraint {
+	g.storeConstraintMu.Lock()
+	defer g.storeConstraintMu.Unlock()
+	if len(g.storeConstraints) == 0 {
+		return nil
+	}
+	out := make([]StoreConstraint, 0, len(g.storeConstraints))
+	for k := range g.storeConstraints {
+		out = append(out, StoreConstraint{Kind: k.kind, Label: k.label, Property: k.property})
+	}
+	return out
+}
+
 // ClearStoreConstraints empties the store-direct constraint set, returning the
 // store-direct count to zero. The cypher engine calls it when it takes
 // ownership of a recovered graph: from that point the engine's own count

@@ -1,12 +1,14 @@
 package cypher_test
 
-// constraint_recovered_warn_test.go — regression for #1918: opening a store that
-// has durable constraints with the plain NewEngineWithStore constructor (which
-// does not re-register them) must warn, because the constraints are silently NOT
-// enforced. Uses the WAL harness helpers from constraint_durability_test.go.
+// constraint_recovered_warn_test.go — regression for #1918 / #1981: opening a
+// store that has durable constraints with the plain NewEngineWithStore
+// constructor now AUTO-REGISTERS them (with synthesised names) so UNIQUE / NOT
+// NULL are enforced rather than silently dropped, and logs a warning. Uses the
+// WAL harness helpers from constraint_durability_test.go.
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -18,7 +20,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-func TestNewEngineWithStore_WarnsOnUnregisteredRecoveredConstraints(t *testing.T) {
+func TestNewEngineWithStore_AutoEnforcesRecoveredConstraints(t *testing.T) {
 	dir := t.TempDir()
 
 	// Cycle 1: declare a UNIQUE constraint so it is durable in the WAL.
@@ -51,10 +53,36 @@ func TestNewEngineWithStore_WarnsOnUnregisteredRecoveredConstraints(t *testing.T
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	defer slog.SetDefault(prev)
 
-	// The trap constructor: builds the engine but re-registers no constraints.
-	_ = cypher.NewEngineWithStore(store)
+	// The plain constructor now auto-registers the recovered constraints.
+	eng := cypher.NewEngineWithStore(store)
 
-	if !strings.Contains(buf.String(), "constraint enforcement is DISABLED") {
-		t.Fatalf("expected an unregistered-recovered-constraints warning, got: %q", buf.String())
+	if !strings.Contains(buf.String(), "auto-registering them for enforcement") {
+		t.Fatalf("expected an auto-registration warning, got: %q", buf.String())
 	}
+
+	// Enforcement must be ACTIVE: a duplicate email is rejected even though the
+	// caller did not thread the recovered constraints explicitly (#1981).
+	ctx := context.Background()
+	if err := drainWrite(eng.RunInTx(ctx, `CREATE (:User {email:'a@b.com'})`, nil)); err != nil {
+		t.Fatalf("first insert should succeed: %v", err)
+	}
+	if err := drainWrite(eng.RunInTx(ctx, `CREATE (:User {email:'a@b.com'})`, nil)); err == nil {
+		t.Fatal("BYPASS: duplicate email accepted — recovered UNIQUE constraint not enforced by NewEngineWithStore")
+	}
+}
+
+// drainWrite drains a write Result and returns the error surfaced by Run or the
+// lazy stream (Volcano evaluation defers errors to the first pull).
+func drainWrite(r *cypher.Result, e error) error {
+	if e != nil {
+		return e
+	}
+	if r == nil {
+		return nil
+	}
+	for r.Next() { //nolint:revive // drain to surface the lazy error / commit
+	}
+	err := r.Err()
+	r.Close()
+	return err
 }

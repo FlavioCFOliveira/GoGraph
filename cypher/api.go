@@ -859,15 +859,17 @@ func NewEngineWithRegistry(g *lpg.Graph[string, float64], reg expr.FunctionRegis
 // The underlying graph is taken from store.Graph(). If the graph has no
 // [index.Manager] attached yet, a new empty one is installed.
 //
-// CAVEAT — recovered constraints are NOT re-registered by this constructor. If
-// store was produced by opening a persisted database that had schema
-// constraints, this constructor leaves the constraint registry empty and those
-// UNIQUE / NOT NULL constraints are silently NOT enforced (duplicates and nulls
-// would be accepted). To re-enforce constraints declared before a crash, open
-// with [NewEngineWithStoreAndConstraints] (or [NewEngineWithStoreAndSchema] when
-// there are also secondary indexes), passing the recovery result's constraints.
-// When the store has durable constraints but none are threaded, the engine logs
-// a warning at construction.
+// Recovered constraints: when store was produced by opening a persisted database
+// that had UNIQUE / NOT NULL constraints, this constructor AUTO-REGISTERS them
+// from the graph's durable store-direct set so they are enforced (a duplicate or
+// null is rejected) — enforcement is never silently disabled (#1981). Because the
+// store-direct set does not retain the original user-defined constraint names,
+// the auto-registered names are synthesised deterministically. For the ORIGINAL
+// names, and to also re-register secondary INDEX definitions (which the
+// store-direct set cannot reconstruct and which otherwise repopulate only from
+// live-WAL index events), open with [NewEngineWithStoreAndConstraints] or
+// [NewEngineWithStoreAndSchema], passing the recovery result's schema. The engine
+// logs a warning at construction when it auto-registers.
 func NewEngineWithStore(store *txn.Store[string, float64]) *Engine {
 	return NewEngineWithOptions(store.Graph(), EngineOptions{Store: store})
 }
@@ -1033,18 +1035,36 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		RelationshipTypes: g.RelationshipTypesInUse,
 		PropertyKeys:      g.PropertyKeysInUse,
 	})
-	// Recovered-constraint trap guard (#1918): the store-direct recovery seeds
-	// Graph.HasConstraints when the opened database had durable constraints. If
-	// the caller threaded none (the plain NewEngineWithStore path), those
-	// constraints will NOT be enforced — a silent Consistency loss. Warn at open
-	// so the misconfiguration surfaces here rather than as accepted
-	// duplicates/nulls. Checked before registerRecoveredConstraints, which
-	// re-drives the count from the (possibly empty) threaded set.
+	// Recovered-constraint safety net (#1918, #1981): recovery seeds the graph's
+	// store-direct constraint set, so Graph.HasConstraints reports true when the
+	// opened database had durable UNIQUE / NOT NULL constraints. If the caller
+	// threaded none (the plain NewEngineWithStore path), those constraints would
+	// otherwise be silently NOT enforced — a Consistency loss (accepted
+	// duplicates/nulls). Rather than merely warn, auto-register them from the
+	// graph so enforcement is never silently disabled. The store-direct set
+	// carries the enforcement identity (kind/label/property) but not the original
+	// user-defined name, so names are synthesised deterministically; the
+	// recommended NewEngineWithStoreAndSchema preserves the original names AND
+	// re-registers secondary index definitions (which the store-direct set cannot
+	// reconstruct). A caller that threaded constraints explicitly is untouched.
 	if opts.Store != nil && len(opts.RecoveredConstraints) == 0 && g.HasConstraints() {
-		slog.Default().Warn("cypher: engine opened over a store with durable constraints but none were "+
-			"re-registered; constraint enforcement is DISABLED for this session",
-			slog.String("hint", "open with cypher.NewEngineWithStoreAndConstraints (or NewEngineWithStoreAndSchema) "+
-				"passing recovery.Result.Constraints"))
+		if sc := g.StoreConstraints(); len(sc) > 0 {
+			auto := make([]ConstraintDef, 0, len(sc))
+			for _, c := range sc {
+				auto = append(auto, ConstraintDef{
+					Unique:   c.Kind == uint8(txn.ConstraintUnique),
+					Label:    c.Label,
+					Property: c.Property,
+					Name:     synthRecoveredConstraintName(c),
+				})
+			}
+			opts.RecoveredConstraints = auto
+			slog.Default().Warn("cypher: engine opened over a store with durable constraints that were not "+
+				"explicitly re-registered; auto-registering them for enforcement with synthesised names",
+				slog.Int("count", len(auto)),
+				slog.String("hint", "for the original constraint names and secondary-index re-registration, open with "+
+					"cypher.NewEngineWithStoreAndSchema passing recovery.Result.Constraints/.Indexes"))
+		}
 	}
 	// Re-register constraints recovered from disk and re-seed each UNIQUE
 	// value-set by scanning the recovered graph, so a constraint declared
@@ -1138,6 +1158,21 @@ func ConstraintDefsFromRecovery(recovered []recovery.ConstraintRecord) []Constra
 		})
 	}
 	return out
+}
+
+// synthRecoveredConstraintName produces a deterministic, collision-resistant
+// name for a durable constraint auto-registered from the graph's store-direct
+// set (which does not retain the original user-defined name). The "recovered_"
+// prefix marks it as engine-synthesised so it is distinguishable from a user
+// name and is vanishingly unlikely to collide with one. Used only on the plain
+// [NewEngineWithStore] recovered-store path (#1981); the schema-aware
+// constructors carry the original names.
+func synthRecoveredConstraintName(c lpg.StoreConstraint) string {
+	kind := "unique"
+	if c.Kind != uint8(txn.ConstraintUnique) {
+		kind = "notnull"
+	}
+	return fmt.Sprintf("recovered_%s_%s_%s", kind, c.Label, c.Property)
 }
 
 // IndexDefsFromRecovery converts [store/recovery.Result.Indexes] into the
