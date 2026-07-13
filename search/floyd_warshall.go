@@ -13,8 +13,10 @@ import (
 //
 // APSP is allocated and indexed over the set of live NodeIDs (those
 // with at least one incident edge in the source CSR). The public At
-// method accepts arbitrary NodeIDs and reports the pair as
-// unreachable when either endpoint lies in a ghost slot.
+// method accepts arbitrary NodeIDs and reports a pair with a non-live
+// endpoint (an isolated node or a ghost slot) as unreachable — EXCEPT a
+// self-query At(x, x), which is always 0/reachable (textbook dist(x,x)=0,
+// consistent with BellmanFord.Distance), including for a non-live x.
 //
 // APSP is safe for concurrent reads.
 type APSP[W Weight] struct {
@@ -26,8 +28,10 @@ type APSP[W Weight] struct {
 }
 
 // At returns the shortest-path distance from i to j and a bool
-// reporting reachability. NodeIDs not present in the source CSR
-// (ghost slots) always report unreachable.
+// reporting reachability. A NodeID not present in the source CSR as a
+// live vertex (an isolated node or a ghost slot) reports unreachable to
+// any OTHER node; the sole exception is the self-query At(x, x), which is
+// always 0/reachable (dist(x, x) = 0), matching BellmanFord.Distance.
 func (a *APSP[W]) At(i, j graph.NodeID) (W, bool) {
 	var zero W
 	if int(i) >= a.maxID || int(j) >= a.maxID {
