@@ -121,7 +121,42 @@ running them today would not surface an isolation or torn-write defect.
 
 ## Remediation plan
 
-The gaps are tracked as themed sprints in the `gograph` roadmap (sprints
-271+). Each example update honours the [examples standard](examples-standard.md)
+The gaps were closed as themed sprints in the `gograph` roadmap (271–276),
+each example update honouring the [examples standard](examples-standard.md)
 five-point rubric (seeded generator, scale knobs, subject-appropriate
 evidence, deterministic facts vs `# ` telemetry, a pinning regression test).
+
+## Outcome (2026-07-13)
+
+All six sprints are closed. The examples grew from 26 to **34**:
+
+- **Cypher write path & DDL** (sprint 271) — ex22 now drives the full write
+  surface (multi-pattern `CREATE`, `MERGE` +`ON CREATE`/`ON MATCH`, `SET`,
+  `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`) plus `shortestPath`
+  cross-checked against `BiBFS`; ex25 adds `CREATE INDEX`/`CREATE CONSTRAINT`,
+  a `CALL db.*` schema endpoint, and `EXPLAIN`, durable across restart; ex26
+  adds aggregation breadth, subqueries, `CASE`, `UNION`, `id()`/`elementId()`
+  and temporal functions.
+- **Transactions & durability** (sprint 272) — new ex27 certifies isolation;
+  ex17 adds a real cross-process `kill -9` recovery; ex04 a deliberate atomic
+  rollback; ex18 the `store/bulk` loader.
+- **Observability** (sprint 273) — new ex31 wires a Prometheus backend.
+- **Algorithm coverage** (sprints 274–275) — new ex28 (Bellman-Ford), ex29
+  (APSP), ex30 (MST), ex32 (Euler); ex13 gains WCC + flow variants; ex11 gains
+  k-core/triangles/diameter/reachability; ex16 gains four centralities; ex14
+  gains bidirectional solvers; ex08 gains personalised PageRank + the stateful
+  `PageRanker`; ex20 certifies the intra-query parallel variants and raises the
+  concurrency ceiling.
+- **Bolt & generation** (sprint 276) — new ex34 (Bolt write/tx/auth/TLS), new
+  ex33 (`graph/generation` MVCC), and faithfulness fixes in ex21/ex13.
+
+Exercising the new coverage surfaced and fixed two stale-documentation defects
+(the ex24 write-limitation note and the `elementId()` godoc) and filed five
+verified module findings in the backlog: `NewEngineWithStore` dropping
+recovered schema (`#1981`, documented contract), the silent index desync when
+mixing raw `txn.Store` writes with engine indexes (`#1980`), the `CREATE INDEX
+IF NOT EXISTS` placement divergence (`#1982`), the empty-graph index-key-type
+sharp edge (`#1983`), and the `KShortestPathsLoopless` super-polynomial blowup
+on spatial graphs (`#1997`). The compliance gates remain green throughout
+(openCypher TCK 100%, `go test ./...` and `go test -race ./examples/...` all
+passing).
