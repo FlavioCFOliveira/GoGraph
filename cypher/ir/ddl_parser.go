@@ -152,13 +152,20 @@ func parseCreateIndex(query string) (*CreateIndex, error) {
 		return nil, err
 	}
 
+	// Accept BOTH clause orders around the optional name:
+	//   CREATE INDEX [name] [IF NOT EXISTS] FOR …   (Neo4j / openCypher order)
+	//   CREATE INDEX [IF NOT EXISTS] [name] FOR …   (legacy GoGraph order)
+	// Neo4j places the name before IF NOT EXISTS; the parser historically only
+	// accepted the reverse, rejecting the common migration idiom
+	// `CREATE INDEX myidx IF NOT EXISTS FOR …` (audit 2026-07-13 #1982). Parse
+	// IF NOT EXISTS on either side of the name.
 	ifNotExists, err := parseIfNotExists(r)
 	if err != nil {
 		return nil, err
 	}
 
 	name := ""
-	if r.peekUpper() != "FOR" {
+	if kw := r.peekUpper(); kw != "FOR" && kw != "IF" {
 		name = r.consume()
 		// A user index name may not carry a reserved internal namespace: the
 		// numeric-companion suffix (#F-CY5) — a btree CREATE INDEX registers an
@@ -167,6 +174,15 @@ func parseCreateIndex(query string) (*CreateIndex, error) {
 		// (#1912). Auto-generated names end in "_hash"/"_btree" and never trip
 		// these.
 		if err := checkReservedIndexName("CREATE INDEX", name); err != nil {
+			return nil, err
+		}
+	}
+
+	// Neo4j order: IF NOT EXISTS may follow the name. Only look again when it was
+	// not already consumed before the name.
+	if !ifNotExists {
+		ifNotExists, err = parseIfNotExists(r)
+		if err != nil {
 			return nil, err
 		}
 	}

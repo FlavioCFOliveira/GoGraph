@@ -92,6 +92,29 @@ func TestParseDDL_CreateIndex_IfNotExists(t *testing.T) {
 	}
 }
 
+// TestParseDDL_CreateIndex_NameBeforeIfNotExists pins the Neo4j clause order
+// (name precedes IF NOT EXISTS), the common migration idiom the parser
+// previously rejected (audit 2026-07-13 #1982). Both orders must now parse to
+// the same plan (name set, IfNotExists true).
+func TestParseDDL_CreateIndex_NameBeforeIfNotExists(t *testing.T) {
+	for _, q := range []string{
+		`CREATE INDEX myidx IF NOT EXISTS FOR (n:Person) ON (n.name)`, // Neo4j order
+		`CREATE INDEX IF NOT EXISTS myidx FOR (n:Person) ON (n.name)`, // legacy order
+	} {
+		plan, err := ir.ParseDDL(q)
+		if err != nil {
+			t.Fatalf("ParseDDL(%q): %v", q, err)
+		}
+		ci := plan.(*ir.CreateIndex)
+		if !ci.IfNotExists {
+			t.Errorf("%q: IfNotExists should be true", q)
+		}
+		if ci.Name != "myidx" {
+			t.Errorf("%q: Name = %q, want myidx", q, ci.Name)
+		}
+	}
+}
+
 func TestParseDDL_CreateIndex_BTreeOption(t *testing.T) {
 	plan, err := ir.ParseDDL(`CREATE INDEX mybtree FOR (n:Person) ON (n.name) OPTIONS {indexType: 'btree'}`)
 	if err != nil {
