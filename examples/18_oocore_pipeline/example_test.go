@@ -41,6 +41,24 @@ func TestRun(t *testing.T) {
 		t.Errorf("csr.size = %d, want 17921 (deterministic for the default seed)", got)
 	}
 
+	// Bulk-loader equivalence oracle. The store/bulk high-throughput path
+	// ingested the SAME seeded edge stream into a second csrfile; that file must
+	// be byte-identical to the CSV -> CSR csrfile, and the bulk-built CSR must
+	// have the same vertex and edge set. A regression in any of these three is a
+	// correctness bug in store/bulk, not in the example.
+	if got := facts["bulk.order"]; got != facts["csr.order"] {
+		t.Errorf("bulk.order (%d) != csr.order (%d): the bulk loader built a different vertex set",
+			got, facts["csr.order"])
+	}
+	if got := facts["bulk.size"]; got != facts["csr.size"] {
+		t.Errorf("bulk.size (%d) != csr.size (%d): the bulk loader built a different edge set",
+			got, facts["csr.size"])
+	}
+	if got := facts["bulk.identical"]; got != 1 {
+		t.Errorf("bulk.identical = %d, want 1: the bulk csrfile is NOT byte-identical to the "+
+			"CSV-path csrfile (module bug in store/bulk)", got)
+	}
+
 	// The BFS is seeded from the captured NodeID of the portal page and
 	// reaches a large but bounded fraction of the graph (~54% by the
 	// navigation-link design). Both numbers are deterministic for the default
@@ -66,6 +84,37 @@ func TestRun(t *testing.T) {
 		if got := facts[col]; got != want {
 			t.Errorf("%s = %d, want %d (deterministic for the default seed)", col, got, want)
 		}
+	}
+}
+
+// TestBulkParallelIdentical drives the pipeline with the bulk loader's parallel
+// build engaged. That path builds the CSR through a different construction (a
+// counting sort straight from the buffered edge stream, not the per-edge
+// adjacency the CSV path uses), so its byte-identity to the CSV-path csrfile is
+// an independent oracle: it must hold regardless of which build the loader
+// chose. The deterministic facts are otherwise unchanged, because the parallel
+// build is byte-for-byte identical to the sequential one by contract.
+func TestBulkParallelIdentical(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.bulkParallel = true
+
+	var buf bytes.Buffer
+	if err := run(context.Background(), &buf, cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	facts := parseFacts(t, buf.String())
+
+	if got := facts["bulk.identical"]; got != 1 {
+		t.Errorf("bulk.identical = %d, want 1 under the parallel build "+
+			"(module bug in store/bulk's parallel path)", got)
+	}
+	if facts["bulk.order"] != facts["csr.order"] {
+		t.Errorf("bulk.order (%d) != csr.order (%d) under the parallel build",
+			facts["bulk.order"], facts["csr.order"])
+	}
+	if facts["bulk.size"] != facts["csr.size"] {
+		t.Errorf("bulk.size (%d) != csr.size (%d) under the parallel build",
+			facts["bulk.size"], facts["csr.size"])
 	}
 }
 

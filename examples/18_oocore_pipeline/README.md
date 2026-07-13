@@ -20,6 +20,17 @@ vertex-sized auxiliary state (a visited bitset, the rank vector) in RAM while
 streaming the adjacency from the mapped file — the out-of-core advantage this
 example measures.
 
+Alongside that per-edge build the example also drives the **`store/bulk`
+high-throughput ingest path**: it re-generates the identical seeded edge stream
+and streams it straight into a `bulk.Loader`, which writes a second `csrfile`
+directly. The two files — one built through the CSV → CSR path, the other
+through the bulk loader — are compared byte for byte. Because they are produced
+by two independent ingest paths yet must be identical, that comparison is a
+**self-checking correctness oracle** for the loader (fact `bulk.identical`), and
+the stage reports the loader's ingest throughput as telemetry. See
+[**Bulk high-throughput ingest**](#bulk-high-throughput-ingest-storebulk) below,
+including the WAL-bypass durability caveat.
+
 ## Domain / scenario
 
 A directed, scale-free **hyperlink graph** (a miniature web / citation
@@ -50,11 +61,42 @@ mapper) is discarded — exactly the pattern a real out-of-core consumer follows
 Note the captured seed id (`1280`) is **not** the generator id (`1000`), because
 the CSV interns nodes in edge-appearance order, not numeric order.
 
+## Bulk high-throughput ingest (`store/bulk`)
+
+The `store/bulk` package is GoGraph's high-throughput ingest path: it streams a
+flat edge list through an in-memory adjacency list and writes the resulting CSR
+straight to a Tier 2 `csrfile` — the moral equivalent of running many
+`txn.Commit` calls back to back, but at a fraction of the cost. This example
+exercises it as a **second, independent build of the same graph**: `bulkIngest`
+re-draws the identical seeded edge stream, feeds it to a `bulk.Loader` in
+batches (with `-bulk-parallel` selecting the loader's parallel build), finalises
+a second `csrfile`, and compares that file **byte for byte** against the one the
+CSV → CSR path produced from the same seed — the `bulk.identical` fact. The
+stage reports ingest throughput (edges/s, MiB/s) and on-disk size as telemetry,
+and contrasts the bulk build's wall-clock against the per-edge build.
+
+### Durability caveat — `store/bulk` bypasses the WAL
+
+The bulk loader is a **fast ingest path, not a durable transactional one.** It
+writes the `csrfile` directly, **without going through the write-ahead log**, so
+the module's **ACID recovery guarantees (crash recovery by WAL replay) do NOT
+apply to bulk-loaded data.** The publication of the `csrfile` is itself atomic
+and durable at the *file* level — `csrfile.WriteToFile` writes a temporary file,
+`fsync`s it, renames it into place, and `fsync`s the parent directory, so a
+crash mid-load leaves no partial file — but there is **no per-transaction commit
+acknowledgement and no incremental recovery** of an interrupted load: on failure
+you simply re-run the bulk load. Bulk-loaded data enters the recoverable,
+WAL-backed transactional domain only once a snapshot/checkpoint incorporates it.
+
+Use `store/bulk` to build or rebuild a graph fast from a trusted source; use the
+transactional engine when you need per-commit durability and recovery.
+
 ## How to run
 
 ```sh
 go run ./examples/18_oocore_pipeline                       # small deterministic default
 go run ./examples/18_oocore_pipeline -nodes 2000000 -out-degree 8  # observable-scale run
+go run ./examples/18_oocore_pipeline -nodes 2000000 -bulk-parallel # engage the loader's parallel build
 ```
 
 ## Scale and flags
@@ -67,6 +109,7 @@ go run ./examples/18_oocore_pipeline -nodes 2000000 -out-degree 8  # observable-
 | `-nav-frac` | probability an arriving page gets a forward navigation link | `0.5` | `0.5` |
 | `-top-k` | number of highest-PageRank node ids to report | `10` | `10` |
 | `-seed` | RNG seed (fixes the deterministic data shape) | `7` | any |
+| `-bulk-parallel` | engage the bulk loader's parallel build for the bulk-ingest stage | `false` | `true` |
 
 The default builds, persists, mmaps, and queries in milliseconds — the size the
 regression test pins. The large invocation is where the out-of-core footprint
@@ -91,6 +134,9 @@ config.seed=7
 csv.edges=17921
 csr.order=4000
 csr.size=17921
+bulk.order=4000
+bulk.size=17921
+bulk.identical=1
 bfs.seed_node=1280
 bfs.reachable=2146
 pagerank.top0=3
@@ -103,16 +149,29 @@ pagerank.top6=130
 pagerank.top7=128
 pagerank.top8=32
 pagerank.top9=150
-# stage.csv_ingest=12.099ms        # telemetry — varies per run and per machine
-# stage.csr_build=310µs            # telemetry
-# stage.csrfile_write=14.707ms     # telemetry
-# stage.mmap_open=212µs            # telemetry
-# stage.bfs=170µs                  # telemetry
-# stage.pagerank=1.095ms           # telemetry
-# disk.csrfile=322.25 KiB          # telemetry — on-disk adjacency footprint
-# mem.rank_vector=42.00 KiB        # telemetry — resident working set
-# ooc.disk_over_rank_vector=7.7x   # telemetry — the out-of-core advantage
+# stage.csv_ingest=7.784ms             # telemetry — varies per run and per machine
+# stage.csr_build=107µs                # telemetry
+# stage.csrfile_write=15.249ms         # telemetry
+# stage.mmap_open=94µs                 # telemetry
+# stage.bfs=94µs                       # telemetry
+# stage.pagerank=469µs                 # telemetry
+# disk.csrfile=322.25 KiB              # telemetry — on-disk adjacency footprint
+# mem.rank_vector=42.00 KiB            # telemetry — resident working set
+# ooc.disk_over_rank_vector=7.7x       # telemetry — the out-of-core advantage
+# bulk.parallel=false                  # telemetry — whether the loader's parallel build was engaged
+# bulk.rows=17921                      # telemetry — edges the loader ingested
+# bulk.elapsed=21.038ms                # telemetry — wall-clock of the whole bulk load
+# bulk.throughput_edges_per_s=851856   # telemetry — bulk ingest throughput
+# bulk.throughput_mib_per_s=14.96      # telemetry — csrfile bytes written per second
+# bulk.disk_csrfile=322.25 KiB         # telemetry — matches disk.csrfile (byte-identical file)
+# bulk.speedup_vs_csv_build=1.10x      # telemetry — bulk build vs per-edge CSV → CSR → csrfile build
 ```
+
+The three `bulk.*` bare lines are **deterministic facts**: `bulk.order` and
+`bulk.size` equal `csr.order` and `csr.size`, and `bulk.identical=1` asserts the
+bulk `csrfile` is byte-for-byte equal to the CSV-path `csrfile`. A regression in
+any of the three is a correctness bug in `store/bulk`, and the regression test
+fails on it.
 
 ## Evidence it collects
 
@@ -128,11 +187,18 @@ that subject (per the evidence taxonomy in
   with their ratio `ooc.disk_over_rank_vector`. This is the headline out-of-core
   advantage — scale `-nodes` up and the ratio widens because the adjacency stays
   on disk while only the vertex-sized rank vector grows in RAM.
+- **Bulk ingest throughput**: `bulk.throughput_edges_per_s`,
+  `bulk.throughput_mib_per_s`, and `bulk.elapsed` measure the `store/bulk`
+  high-throughput path, and `bulk.speedup_vs_csv_build` contrasts it against the
+  per-edge `CSV → CSR → csrfile` build. Scale `-nodes` up (and add
+  `-bulk-parallel`) to watch the fast path pull ahead of the per-edge build.
 
 The deterministic facts are the correctness anchor: `csv.edges == csr.size`
 proves the pipeline neither dropped nor duplicated an edge across the
-`CSV -> CSR -> csrfile` boundaries; `bfs.reachable` and the PageRank top-k pin
-the shape and the analytics results for the fixed seed.
+`CSV -> CSR -> csrfile` boundaries; the `bulk.*` facts prove the independent
+`store/bulk` ingest path built a byte-identical `csrfile` from the same seed;
+and `bfs.reachable` and the PageRank top-k pin the shape and the analytics
+results for the fixed seed.
 
 ## Key APIs
 
@@ -141,12 +207,14 @@ the shape and the analytics results for the fixed seed.
 - `graph/csr.BuildFromAdjList` / `csr.CSR.Order` / `csr.CSR.Size` — freeze the adjacency into an immutable Tier 1 CSR snapshot.
 - `store/csrfile.WriteToFile` — atomically persist the CSR snapshot as a Tier 2 memory-mapped file.
 - `store/csrfile.Open` / `csrfile.Reader.SetHint` / `csrfile.AccessSequential` — re-open the file via `mmap` and hint a sequential access pattern.
+- `store/bulk.New` / `bulk.Loader.AddBatch` / `bulk.Loader.Finalise` — the high-throughput, WAL-bypassing ingest path: batch-stream a flat edge list into a Tier 2 `csrfile` directly (with `Options.Parallel` for the parallel build).
 - `search/extern.BFSCtx` — semi-external breadth-first traversal over the mapped region from a seed `NodeID`.
 - `search/extern.PageRankCtx` / `extern.DefaultPageRankOptions` — semi-external PageRank over the mapped region.
 
 ## Further reading
 
 - [`store/csrfile`](../../store/csrfile) — the Tier 2 memory-mapped CSR file format
+- [`store/bulk`](../../store/bulk) — the high-throughput, WAL-bypassing bulk-loader ingest path
 - [`search/extern`](../../search/extern) — semi-external traversal and analytics over mapped graphs
 - [`graph/csr`](../../graph/csr) — the immutable CSR snapshot that backs the file
 - [`graph/io/csv`](../../graph/io/csv) — the CSV edge-list reader
