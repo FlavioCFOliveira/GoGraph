@@ -85,6 +85,28 @@ func TestRun(t *testing.T) {
 		}
 		prev = cost
 	}
+
+	// Bidirectional Dijkstra optimises the same weighted objective, so its cost
+	// must equal the Dijkstra optimum for every seed.
+	if got := facts["bidijkstra.cost"]; got != dij {
+		t.Errorf("bidijkstra.cost = %d, want == dijkstra.cost %d", got, dij)
+	}
+	if got := facts["bidijkstra.cost_matches_dijkstra"]; got != boolFact(true) {
+		t.Errorf("bidijkstra.cost_matches_dijkstra = %d, want true", got)
+	}
+
+	// BiBFS optimises hop count, not weighted cost. It must return a valid
+	// src..dst path, and its hop count (a fewest-hops lower bound) cannot exceed
+	// the hop count of the cheapest-by-cost path.
+	if got := facts["bibfs.valid_path"]; got != boolFact(true) {
+		t.Errorf("bibfs.valid_path = %d, want true", got)
+	}
+	if got := facts["bibfs.hops_le_cheapest_cost_path"]; got != boolFact(true) {
+		t.Errorf("bibfs.hops_le_cheapest_cost_path = %d, want true", got)
+	}
+	if got := facts["bibfs.hops"]; got <= 0 {
+		t.Errorf("bibfs.hops = %d, want > 0", got)
+	}
 }
 
 // TestDeterministic confirms the dataset shape is reproducible: two runs

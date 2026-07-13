@@ -2,14 +2,26 @@
 
 ## What it demonstrates
 
-Three flavours of shortest-path computation over **one** seeded coordinate
+Five flavours of shortest-path computation over **one** seeded coordinate
 routing graph: classical single-source `search.Dijkstra`, Yen's k-shortest
-loopless paths for ranked alternatives (`search.YenKShortest`), and
-`search.AStar` driven by a **coordinate-based Euclidean heuristic**. The A*
-section is the focus, and the evidence the example collects is the
-per-algorithm **nodes-expanded** count: an admissible, consistent heuristic
-lets A* reach the same optimal answer as Dijkstra while settling
-**dramatically fewer nodes**.
+loopless paths for ranked alternatives (`search.YenKShortest`), `search.AStar`
+driven by a **coordinate-based Euclidean heuristic**, and two bidirectional
+single-pair solvers — `search.BidirectionalDijkstra` (weighted) and
+`search.BiBFS` (unweighted, fewest-hops). The A* section is the focus, and the
+evidence the example collects is the per-algorithm **nodes-expanded** count: an
+admissible, consistent heuristic lets A* reach the same optimal answer as
+Dijkstra while settling **dramatically fewer nodes**. The bidirectional
+solvers act as cross-checks: `BidirectionalDijkstra` must return the same
+weighted cost as Dijkstra, while `BiBFS` answers the different "fewest road
+segments" question, whose hop count is a lower bound on the cheapest-by-cost
+path's hop count.
+
+A measured note on k-shortest paths: this example uses Yen's algorithm, not the
+best-first loopless enumerator (`search.KShortestPathsLoopless` /
+`EppsteinKShortest`). On a spatial k-NN mesh the latter enumerates a
+combinatorial number of near-equal-cost detours and does not finish in
+reasonable time at this scale, whereas Yen answers the same query in
+milliseconds — a scalability gap tracked as module finding #1997.
 
 ## Domain / scenario
 
@@ -118,6 +130,11 @@ yen.cost.3=1397
 astar.cost=1396
 astar.hops=17
 astar_cost_equals_dijkstra=true
+bidijkstra.cost=1396
+bidijkstra.cost_matches_dijkstra=true
+bibfs.hops=17
+bibfs.valid_path=true
+bibfs.hops_le_cheapest_cost_path=true
 ```
 
 The lines above are the **deterministic facts** the regression test pins for a
@@ -171,6 +188,10 @@ the build/heap figures show the in-memory footprint of a larger CSR snapshot.
   two nodes, returned in ascending cost order.
 - `search.AStarCtx` — point-to-point shortest path guided by a
   caller-supplied admissible heuristic.
+- `search.BidirectionalDijkstraOnCtx` — bidirectional Dijkstra (forward from
+  src, reverse from dst); returns the same weighted optimum as Dijkstra.
+- `search.BiBFSCtx` — bidirectional breadth-first search for the fewest-hops
+  path (a different objective from the weighted solvers).
 
 ## Further reading
 

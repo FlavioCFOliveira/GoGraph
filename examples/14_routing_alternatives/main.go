@@ -233,8 +233,59 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return err
 	}
+	if err := reportBidirectional(ctx, w, c, net.src, net.dst, dijkstraCost); err != nil {
+		return err
+	}
 	return reportExpansions(ctx, w, c, net.src, net.dst, h, dijkstraCost, astarCost)
 }
+
+// reportBidirectional runs the two bidirectional single-pair solvers and
+// cross-checks them against the results already computed. BidirectionalDijkstra
+// optimises the same weighted objective as Dijkstra, so its cost MUST equal the
+// Dijkstra cost — a direct correctness oracle. BiBFS optimises a DIFFERENT
+// objective (fewest hops / road segments, ignoring distance), so it is not
+// expected to match the weighted cost; instead the example verifies its tour is
+// a valid src..dst path and that its hop count never exceeds the hop count of
+// the cheapest-by-cost path (the fewest-hops route is a lower bound on any
+// route's hop count).
+func reportBidirectional(ctx context.Context, w io.Writer, c *csr.CSR[int64], src, dst graph.NodeID, dijkstraCost int64) error {
+	// The k-NN network is symmetric (addArc stores both directions), so its
+	// transpose equals the forward CSR; pass c as the reverse graph.
+	start := time.Now()
+	biPath, biCost, err := search.BidirectionalDijkstraOnCtx(ctx, c, c, src, dst)
+	biElapsed := time.Since(start)
+	if err != nil {
+		return fmt.Errorf("bidirectional dijkstra: %w", err)
+	}
+	fmt.Fprintf(w, "bidijkstra.cost=%d\n", biCost)
+	fmt.Fprintf(w, "bidijkstra.cost_matches_dijkstra=%t\n", biCost == dijkstraCost)
+	cheapestHops := len(biPath) - 1
+
+	start = time.Now()
+	bfsPath, err := search.BiBFSCtx(ctx, c, src, dst)
+	bfsElapsed := time.Since(start)
+	if err != nil {
+		return fmt.Errorf("bibfs: %w", err)
+	}
+	validEnds := len(bfsPath) >= 2 && bfsPath[0] == src && bfsPath[len(bfsPath)-1] == dst
+	bibfsHops := len(bfsPath) - 1
+	fmt.Fprintf(w, "bibfs.hops=%d\n", bibfsHops)
+	fmt.Fprintf(w, "bibfs.valid_path=%t\n", validEnds)
+	fmt.Fprintf(w, "bibfs.hops_le_cheapest_cost_path=%t\n", bibfsHops <= cheapestHops)
+	fmt.Fprintf(w, "# bidijkstra.latency=%s\n", biElapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# bibfs.latency=%s\n", bfsElapsed.Round(time.Microsecond))
+	return nil
+}
+
+// NOTE on the other k-shortest sibling: search.KShortestPathsLoopless (and its
+// deprecated alias EppsteinKShortest) is a best-first enumeration over the
+// loopless-path tree. On a spatial graph like this one — where a k-NN mesh has
+// a combinatorial number of near-equal-cost detours — that enumeration blows up
+// super-polynomially and does not finish in reasonable time at this example's
+// scale, whereas Yen's deviation algorithm (reportYen) answers the same query
+// in milliseconds. This example therefore uses Yen for k-shortest paths and
+// deliberately does NOT call the loopless enumerator; the scalability gap is
+// tracked as a module finding (gograph #1997).
 
 // reportDijkstra runs a single-source Dijkstra from src, prints the
 // optimal cost to dst as a deterministic fact and the wall-clock as
