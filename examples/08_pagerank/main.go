@@ -234,7 +234,127 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	for i := 0; i < limit; i++ {
 		fmt.Fprintf(w, "# rank.%d.score=%.6f\n", i+1, scored[i].rank)
 	}
+
+	if err := reportPersonalised(ctx, w, c, mapper, stats.pageIDs, scored, cfg.topK); err != nil {
+		return err
+	}
+	if err := reportStateful(ctx, w, c, ranks); err != nil {
+		return err
+	}
 	return nil
+}
+
+// reportPersonalised computes a personalised ("who to read next") PageRank
+// seeded at the single most authoritative page, using the Andersen-Chung-Lang
+// local-push algorithm (centrality.PersonalisedPushPageRank). Where global
+// PageRank ranks pages by importance to the whole web, personalised PageRank
+// ranks them by relevance to ONE seed: mass starts at the seed and pushes out
+// only along the edges it can reach, so the top of the personalised vector is a
+// locally-focused recommendation rather than the global authority list. The
+// seed itself must top its own personalised ranking (teleport returns alpha of
+// the mass to the seed on every step), which the example pins as a fact.
+func reportPersonalised(ctx context.Context, w io.Writer, c *csr.CSR[struct{}], mapper *graph.Mapper[string], pageIDs []string, global []scored, topK int) error {
+	if len(global) == 0 {
+		return nil
+	}
+	seedName := global[0].name // the global #1 authority is the seed
+	seedID, ok := mapper.Lookup(seedName)
+	if !ok {
+		return fmt.Errorf("personalised: seed page %q not interned", seedName)
+	}
+	ppr, err := centrality.PersonalisedPushPageRankCtx(ctx, c, seedID, centrality.DefaultPPRPushOptions())
+	if err != nil {
+		return fmt.Errorf("personalised push pagerank: %w", err)
+	}
+	local, err := rankPages(pageIDs, mapper, ppr)
+	if err != nil {
+		return fmt.Errorf("personalised rank: %w", err)
+	}
+
+	fmt.Fprintf(w, "ppr.seed=%s\n", seedName)
+	fmt.Fprintf(w, "ppr.seed_is_top1=%t\n", len(local) > 0 && local[0].name == seedName)
+	limit := topK
+	if limit > len(local) {
+		limit = len(local)
+	}
+	for i := 0; i < limit; i++ {
+		fmt.Fprintf(w, "ppr.top.%d=%s\n", i+1, local[i].name)
+	}
+	// How different is the local view from the global one? Report the overlap
+	// between the two top-k sets as telemetry — a small overlap is the evidence
+	// that personalisation genuinely re-ranks around the seed.
+	fmt.Fprintf(w, "# ppr.topk_overlap_with_global=%d\n", topKOverlap(global, local, limit))
+	return nil
+}
+
+// reportStateful demonstrates the reusable centrality.PageRanker: a stateful
+// computer that caches the CSR-derived topology so repeated Run calls on one
+// snapshot skip the one-time allocations the one-shot centrality.PageRank pays
+// every call. It verifies the stateful result is bit-for-bit identical to the
+// one-shot result (a correctness fact) and reports the transient allocations of
+// a reused Run versus a fresh one-shot call as telemetry — the evidence for the
+// stateless/stateful split that mirrors search.Dijkstra vs search.DijkstraInto.
+func reportStateful(ctx context.Context, w io.Writer, c *csr.CSR[struct{}], oneShot []float64) error {
+	pr := centrality.NewPageRanker(c)
+	opts := centrality.DefaultPageRankOptions()
+
+	// Warm-up Run pays the one-time buffer allocations the ranker then reuses.
+	warm, _, err := pr.Run(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("pageranker warm-up: %w", err)
+	}
+	// Copy before the next Run invalidates the aliased buffer, then compare
+	// bit-for-bit with the one-shot vector.
+	statefulRanks := append([]float64(nil), warm...)
+	matches := len(statefulRanks) == len(oneShot)
+	for i := 0; matches && i < len(statefulRanks); i++ {
+		if statefulRanks[i] != oneShot[i] {
+			matches = false
+		}
+	}
+	fmt.Fprintf(w, "pageranker.matches_oneshot=%t\n", matches)
+
+	// Reused Run: measure transient allocations of a second Run (buffers cached).
+	const rounds = 8
+	m0 := readMem()
+	for i := 0; i < rounds; i++ {
+		if _, _, rerr := pr.Run(ctx, opts); rerr != nil {
+			return fmt.Errorf("pageranker reuse run: %w", rerr)
+		}
+	}
+	m1 := readMem()
+	reuseAllocs := (m1.Mallocs - m0.Mallocs) / rounds
+
+	// One-shot: the same number of cold PageRank calls, each rebuilding topology.
+	m2 := readMem()
+	for i := 0; i < rounds; i++ {
+		if _, _, rerr := centrality.PageRank(c, opts); rerr != nil {
+			return fmt.Errorf("one-shot pagerank: %w", rerr)
+		}
+	}
+	m3 := readMem()
+	oneShotAllocs := (m3.Mallocs - m2.Mallocs) / rounds
+
+	fmt.Fprintf(w, "pageranker.reuse_allocs_below_oneshot=%t\n", reuseAllocs < oneShotAllocs)
+	fmt.Fprintf(w, "# pageranker.reuse_allocs_per_run=%d\n", reuseAllocs)
+	fmt.Fprintf(w, "# pageranker.oneshot_allocs_per_run=%d\n", oneShotAllocs)
+	return nil
+}
+
+// topKOverlap counts how many page ids appear in the first n entries of both
+// ranked lists.
+func topKOverlap(a, b []scored, n int) int {
+	set := make(map[string]struct{}, n)
+	for i := 0; i < n && i < len(a); i++ {
+		set[a[i].name] = struct{}{}
+	}
+	overlap := 0
+	for i := 0; i < n && i < len(b); i++ {
+		if _, ok := set[b[i].name]; ok {
+			overlap++
+		}
+	}
+	return overlap
 }
 
 // buildStats reports the realised shape of a build (the page and edge

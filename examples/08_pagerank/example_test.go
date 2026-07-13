@@ -90,6 +90,27 @@ func TestRun(t *testing.T) {
 			t.Errorf("rank.%d = %q, want one of the seed-core pages 0..4", i, name)
 		}
 	}
+
+	// Personalised PageRank: the seed is the global #1 authority, and it must
+	// top its own personalised ranking (teleport keeps alpha of the mass at the
+	// seed on every push step).
+	ppr := strFacts(out, "ppr.")
+	if ppr["ppr.seed"] != gotRanks["rank.1"] {
+		t.Errorf("ppr.seed = %q, want the global #1 authority %q", ppr["ppr.seed"], gotRanks["rank.1"])
+	}
+	if ppr["ppr.seed_is_top1"] != "true" {
+		t.Errorf("ppr.seed_is_top1 = %q, want \"true\"", ppr["ppr.seed_is_top1"])
+	}
+
+	// Stateful PageRanker: bit-for-bit identical to the one-shot result, and a
+	// reused Run allocates strictly less than a cold one-shot call.
+	pr := strFacts(out, "pageranker.")
+	if pr["pageranker.matches_oneshot"] != "true" {
+		t.Errorf("pageranker.matches_oneshot = %q, want \"true\"", pr["pageranker.matches_oneshot"])
+	}
+	if pr["pageranker.reuse_allocs_below_oneshot"] != "true" {
+		t.Errorf("pageranker.reuse_allocs_below_oneshot = %q, want \"true\"", pr["pageranker.reuse_allocs_below_oneshot"])
+	}
 }
 
 // TestDeterministic confirms the whole run is reproducible: two runs with

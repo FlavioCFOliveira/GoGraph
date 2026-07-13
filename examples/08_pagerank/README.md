@@ -10,6 +10,21 @@ distribution is heavy-tailed, PageRank is genuinely non-uniform — a stable,
 clearly separated set of authority pages emerges rather than the all-equal
 scores a symmetric cycle would give.
 
+It then exercises two further PageRank capabilities:
+
+- **Personalised PageRank** (`centrality.PersonalisedPushPageRank`, the
+  Andersen-Chung-Lang local-push algorithm) seeded at the top authority —
+  a "who to read next" recommendation that re-ranks the web around one page
+  rather than globally. The seed tops its own personalised ranking, and the
+  overlap between the personalised and global top-k quantifies how much the
+  view shifts.
+- **The reusable `centrality.PageRanker`** — a stateful computer that caches
+  the CSR-derived topology so repeated `Run` calls skip the one-time
+  allocations the one-shot `PageRank` pays every call. The example verifies
+  its result is bit-for-bit identical to the one-shot vector and shows a
+  reused `Run` allocating essentially nothing per call, the same
+  stateless/stateful split as `search.Dijkstra` vs `search.DijkstraInto`.
+
 ## Domain / scenario
 
 A directed web of pages that hyperlink to one another. An edge points from
@@ -87,6 +102,12 @@ rank.8=page0000018
 rank.9=page0000005
 rank.10=page0000012
 distinct_ranks=117
+ppr.seed=page0000003
+ppr.seed_is_top1=true
+ppr.top.1=page0000003
+ppr.top.2=page0000004
+pageranker.matches_oneshot=true
+pageranker.reuse_allocs_below_oneshot=true
 ```
 
 The five highest-ranked pages are exactly the seed-core pages (0..4). The
@@ -139,6 +160,8 @@ graph rather than with the working set.
 - `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR snapshot for the analytics pass.
 - `search/centrality.PageRank` — power-iteration PageRank returning the per-`NodeID` rank slice and the iteration count to convergence.
 - `search/centrality.DefaultPageRankOptions` — the classic Brin-Page parameters (damping 0.85, max 100 iterations, tolerance 1e-6).
+- `search/centrality.PersonalisedPushPageRankCtx` / `DefaultPPRPushOptions` — Andersen-Chung-Lang local-push personalised PageRank seeded at one node.
+- `search/centrality.NewPageRanker` / `PageRanker.Run` — a reusable stateful PageRank computer whose repeated runs reuse cached topology and buffers (bit-for-bit identical to the one-shot result).
 
 ## Further reading
 
