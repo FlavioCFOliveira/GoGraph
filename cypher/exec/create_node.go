@@ -657,6 +657,12 @@ func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propL
 			if errors.Is(err, ErrPropertyValueIsNull) {
 				continue // null value: openCypher says do not set the property
 			}
+			if errors.Is(err, ErrNestedPropertyValue) {
+				// A nested collection (incl. a nested collection reached through a
+				// resolved parameter) is a hard InvalidPropertyType error, not a
+				// deferrable non-literal: fail-stop rather than drop it (F3).
+				return nil, err
+			}
 			// Non-literal expression or unresolvable param: silently defer.
 			// A PropsEvalFn is responsible for evaluating these at runtime.
 			continue //nolint:nilerr // intentional: non-literal values are deferred
@@ -691,6 +697,11 @@ func parsePropValueWithParams(s string, params map[string]expr.Value) (lpg.Prope
 			return lpg.BoolValue(bool(val)), nil
 		case expr.ListValue:
 			return exprListToLPGList(val)
+		case expr.MapValue:
+			// A map parameter is not a valid property value (openCypher
+			// InvalidPropertyType). Return the nested-value sentinel so the
+			// literal builders fail-stop rather than defer-and-drop it (F3).
+			return lpg.PropertyValue{}, ErrNestedPropertyValue
 		default:
 			return lpg.PropertyValue{}, fmt.Errorf("unsupported param type %T for $%s", v, name)
 		}
@@ -735,6 +746,15 @@ func parsePropValue(s string) (lpg.PropertyValue, error) {
 	// List literal: [v1, v2, ...].
 	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
 		return parsePropList(s[1 : len(s)-1])
+	}
+	// Map literal: {k: v, ...}. A map is not a valid property value
+	// (openCypher InvalidPropertyType). Reject with the nested-value sentinel
+	// so the literal builders fail-stop rather than defer-and-drop it (F3). A
+	// leading '{' can only be a bare map here — a quoted string starts with '"'
+	// or '\'', and a temporal constructor with a map argument (datetime({...}))
+	// starts with its function name, so neither reaches this branch.
+	if s[0] == '{' {
+		return lpg.PropertyValue{}, ErrNestedPropertyValue
 	}
 	return parsePropScalar(s)
 }

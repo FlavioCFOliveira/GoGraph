@@ -533,6 +533,12 @@ func parseMapWithNulls(s string, params map[string]expr.Value) (props []propLite
 				nullKeys = append(nullKeys, key)
 				continue
 			}
+			if errors.Is(perr, ErrNestedPropertyValue) {
+				// A nested collection (e.g. a nested list that valueStringIsNonStorable
+				// does not catch) is a hard InvalidPropertyType error, not a
+				// deferrable non-literal: fail-stop rather than drop the key (F3).
+				return nil, nil, fmt.Errorf("InvalidPropertyType: value for key %q: %w", key, perr)
+			}
 			// Non-literal expression or unresolvable param: defer (skip).
 			continue
 		}
