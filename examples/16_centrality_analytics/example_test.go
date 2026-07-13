@@ -90,6 +90,30 @@ func TestRun(t *testing.T) {
 	if len(sizes) != count {
 		t.Errorf("communities.sizes has %d entries, but communities.count=%d", len(sizes), count)
 	}
+
+	// Complementary centralities. Every measure must report a top node, and the
+	// two iterative measures (eigenvector, katz) must converge — eigenvector
+	// only because the example raises the iteration budget for this modular
+	// graph (see reportCentralities). These are the meaningful correctness
+	// facts; the specific top-node ids are seed-dependent and left to the
+	// determinism test.
+	for _, m := range []string{"closeness", "harmonic", "eigenvector", "katz"} {
+		top := mustFactInt(t, out, "centrality."+m+".top=")
+		if top < 0 || top >= 300 {
+			t.Errorf("centrality.%s.top=%d, want a valid node id in [0,300)", m, top)
+		}
+	}
+	mustContain(t, out, "centrality.eigenvector_converged=true")
+	mustContain(t, out, "centrality.katz_converged=true")
+
+	// Disconnected-graph handling: dropping the first bridge splits the chain
+	// into exactly two components; both distance-based centralities must stay
+	// finite (no NaN/Inf), and the Wasserman-Faust normalisation must place the
+	// most central node in the large component, not the isolated cluster.
+	mustContain(t, out, "disconnected.components=2")
+	mustContain(t, out, "disconnected.closeness_finite=true")
+	mustContain(t, out, "disconnected.harmonic_finite=true")
+	mustContain(t, out, "disconnected.closeness_top_in_large_component=true")
 }
 
 // TestRunDeterministic verifies that two runs of the same config produce

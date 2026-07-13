@@ -2,15 +2,31 @@
 
 ## What it demonstrates
 
-Two analytics over one shared, immutable CSR snapshot: exact
+A suite of analytics over one shared, immutable CSR snapshot: exact
 **betweenness centrality** via Brandes' algorithm
-(`search/centrality.BetweennessCtx`), which scores each node by how many
-shortest paths run through it, and **label-propagation community
-detection** (`search/community.LabelPropagationCtx`), which partitions the
-graph into communities. It also shows how to make analytics output
-deterministic in the face of structural ties — the betweenness ranking
-breaks score ties by node id — and reports per-analysis evidence
-(wall-clock, transient allocations, live heap).
+(`search/centrality.BetweennessCtx`); four complementary whole-graph
+centralities — **closeness** and **harmonic** (distance-based),
+**eigenvector** and **Katz** (spectral / walk-based); and
+**label-propagation community detection**
+(`search/community.LabelPropagationCtx`). It shows how the measures rank
+different nodes as "central" (a betweenness bottleneck is not the same as a
+node with the highest closeness or eigenvector score), how to make output
+deterministic in the face of structural ties (betweenness breaks score ties
+by node id), and reports per-analysis evidence (wall-clock, transient
+allocations, live heap). A final pass rebuilds the graph with one bridge
+removed and runs the distance-based centralities on the resulting
+**disconnected** graph, demonstrating they stay finite (no NaN/Inf) and that
+the Wasserman-Faust closeness normalisation rewards reaching more of the
+whole graph rather than being trapped in a small component.
+
+A practical lesson surfaces here: **eigenvector centrality converges slowly
+on a modular graph**. Power iteration converges at a rate set by the gap
+between the top two adjacency eigenvalues, and on several dense clusters of
+near-equal size those eigenvalues are close, so the NetworkX-compatible
+default of 100 iterations is not enough — this chain of clusters needs about
+800. That is a property of the graph's spectrum, not a defect; the example
+raises the iteration budget so the measure converges and reports the realised
+iteration count as telemetry.
 
 ## Domain / scenario
 
@@ -91,7 +107,24 @@ betweenness.top9=250
 betweenness.top10=1
 communities.count=5
 communities.sizes=[50 50 50 50 100]
+centrality.closeness.top=101
+centrality.harmonic.top=101
+centrality.eigenvector.top=26
+centrality.katz.top=161
+centrality.eigenvector_converged=true
+centrality.katz_converged=true
+disconnected.components=2
+disconnected.closeness_finite=true
+disconnected.harmonic_finite=true
+disconnected.closeness_top_in_large_component=true
 ```
+
+The distance-based measures (closeness, harmonic) crown a node near the
+chain's centre, while eigenvector and Katz favour a node inside a dense
+cluster — the measures genuinely disagree on "most central". The regression
+test pins the boolean invariants (convergence, finiteness, the two-component
+split, the Wasserman-Faust reward) and range-checks the top-node ids rather
+than pinning their exact values, which are seed-dependent.
 
 The ten `betweenness.top*` ids are exactly the ten bridge gateways
 `{1, 50, 51, 100, 101, 150, 151, 200, 201, 250}`; their *order* varies with
@@ -129,6 +162,10 @@ the betweenness elapsed grow as O(V·E) while the allocation counts stay flat
 - `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR snapshot for analytics.
 - `graph/adjlist.AdjList.Mapper` / `graph.Mapper.Resolve` — translate compact `NodeID`s back to user-facing node ids.
 - `search/centrality.BetweennessCtx` — exact Brandes betweenness centrality, returned as a `NodeID`-indexed `[]float64`.
+- `search/centrality.ClosenessCtx` / `HarmonicCtx` — distance-based centralities; Closeness uses the Wasserman-Faust normalisation (finite on disconnected graphs), Harmonic sums `1/d` over reachable nodes.
+- `search/centrality.EigenvectorCtx` / `EigenvectorOptions` — eigenvector centrality by power iteration; returns the score slice, the iteration count, and `ErrMaxStepsExceeded` when the budget is exhausted before convergence.
+- `search/centrality.KatzCtx` / `DefaultKatzOptions` — Katz centrality with an auto-selected attenuation factor.
+- `search.WCC` — weakly-connected components, used to confirm the disconnected variant splits into exactly two components.
 - `search/community.LabelPropagationCtx` / `DefaultLabelPropagationOptions` — community detection; `Partition.Community` is a `NodeID`-indexed slice of community IDs and `Partition.NumCommunities` counts the live communities.
 
 ## Further reading

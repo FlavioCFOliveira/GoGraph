@@ -1,7 +1,12 @@
-// Example 16_centrality_analytics — runs two analytics over one shared,
-// immutable CSR snapshot: exact Brandes betweenness centrality and
-// label-propagation community detection — with deterministic
-// tie-breaking, and reports per-analysis evidence.
+// Example 16_centrality_analytics — runs a suite of analytics over one shared,
+// immutable CSR snapshot: exact Brandes betweenness centrality, four
+// complementary whole-graph centralities (closeness and harmonic,
+// distance-based; eigenvector and Katz, spectral/walk-based), and
+// label-propagation community detection — with deterministic tie-breaking,
+// and reports per-analysis evidence. A final pass rebuilds the graph with one
+// bridge removed and runs the distance-based centralities on the resulting
+// DISCONNECTED graph, showing they stay finite (no NaN/Inf) and that the
+// Wasserman-Faust closeness normalisation rewards reaching more of the graph.
 //
 // The example builds a seeded, scale-parametrised synthetic graph with the
 // mutable adjlist builder, freezes it into an immutable CSR snapshot, then
@@ -78,6 +83,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"os"
 	"runtime"
@@ -87,6 +93,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/search"
 	"github.com/FlavioCFOliveira/GoGraph/search/centrality"
 	"github.com/FlavioCFOliveira/GoGraph/search/community"
 )
@@ -176,7 +183,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// snapshot both analytics read. Freezing once and querying the same
 	// snapshot is the idiom: an immutable CSR needs no synchronisation on the
 	// read path, so the two analyses could even run concurrently.
-	a, gen, err := build(ctx, cfg)
+	a, gen, err := build(ctx, cfg, false)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
@@ -196,6 +203,12 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return err
 	}
 	if err := reportCommunities(ctx, w, c); err != nil {
+		return err
+	}
+	if err := reportCentralities(ctx, w, c, mapper); err != nil {
+		return err
+	}
+	if err := reportDisconnected(ctx, w, cfg); err != nil {
 		return err
 	}
 	return nil
@@ -266,6 +279,137 @@ func reportCommunities(ctx context.Context, w io.Writer, c *csr.CSR[struct{}]) e
 	return nil
 }
 
+// reportCentralities runs the four whole-graph centralities that complement
+// Brandes betweenness — Closeness and Harmonic (distance-based), Eigenvector
+// and Katz (spectral / walk-based) — over the same connected snapshot, and
+// reports the single most central node id under each measure as a fact.
+// Eigenvector and Katz are iterative: their per-run iteration count is reported
+// as telemetry and their convergence (no centrality.ErrMaxStepsExceeded) is
+// pinned as a fact, because the convergence loop is exactly where a spectral
+// centrality can silently misbehave on a real graph.
+func reportCentralities(ctx context.Context, w io.Writer, c *csr.CSR[struct{}], mapper *graph.Mapper[int]) error {
+	live := c.LiveNodes()
+
+	closeness, err := centrality.ClosenessCtx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("closeness: %w", err)
+	}
+	harmonic, err := centrality.HarmonicCtx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("harmonic: %w", err)
+	}
+	// Eigenvector power iteration converges at a rate set by the gap between the
+	// top two adjacency eigenvalues. On a modular graph — several dense clusters
+	// of near-equal size — λ1 and λ2 are close, so convergence is slow and the
+	// NetworkX-compatible default of 100 iterations (DefaultEigenvectorOptions)
+	// is not enough: this chain of clusters needs ~800. That is a property of
+	// the graph's spectrum, not a defect; the example raises the budget so the
+	// measure converges and reports the realised iteration count as telemetry.
+	eigenOpts := centrality.EigenvectorOptions{MaxIterations: 2000, Tolerance: 1e-6}
+	eigen, eigenIters, eigenErr := centrality.EigenvectorCtx(ctx, c, eigenOpts)
+	katz, katzIters, katzErr := centrality.KatzCtx(ctx, c, centrality.DefaultKatzOptions())
+
+	for _, m := range []struct {
+		name   string
+		scores []float64
+	}{
+		{"closeness", closeness},
+		{"harmonic", harmonic},
+		{"eigenvector", eigen},
+		{"katz", katz},
+	} {
+		if m.scores == nil {
+			continue // an iterative measure that failed to converge; handled below
+		}
+		top, terr := topKByScore(mapper, live, m.scores, 1)
+		if terr != nil {
+			return fmt.Errorf("%s top: %w", m.name, terr)
+		}
+		fmt.Fprintf(w, "centrality.%s.top=%d\n", m.name, top[0])
+	}
+
+	// The two iterative measures must converge on this well-behaved connected
+	// graph; a non-convergence (ErrMaxStepsExceeded) on such an input would be a
+	// module weakness, so pin convergence as a fact and surface the error.
+	fmt.Fprintf(w, "centrality.eigenvector_converged=%t\n", eigenErr == nil)
+	fmt.Fprintf(w, "centrality.katz_converged=%t\n", katzErr == nil)
+	if eigenErr != nil {
+		return fmt.Errorf("eigenvector did not converge (a module weakness on a connected graph): %w", eigenErr)
+	}
+	if katzErr != nil {
+		return fmt.Errorf("katz did not converge (a module weakness on a connected graph): %w", katzErr)
+	}
+	fmt.Fprintf(w, "# centrality.eigenvector.iterations=%d\n", eigenIters)
+	fmt.Fprintf(w, "# centrality.katz.iterations=%d\n", katzIters)
+	return nil
+}
+
+// reportDisconnected exercises the distance-based centralities on a
+// DISCONNECTED graph — the chain with its first bridge omitted, so cluster 0
+// stands alone and clusters 1..K-1 form a second, larger component. This is
+// where Closeness and Harmonic must not blow up: Harmonic sums 1/d only over
+// reachable nodes, and GoGraph's Closeness uses the Wasserman-Faust
+// normalisation C(u) = (r/(n-1))·(r/Σd), which scores a node that reaches
+// nothing as exactly 0 rather than NaN/Inf. The demonstration asserts every
+// score is finite and shows the WF property that the single most central node
+// by Closeness lies in the LARGE component (WF rewards reaching more of the
+// whole graph), a verifiable distinction from a naive 1/Σd closeness that would
+// over-reward a node trapped in the small component.
+func reportDisconnected(ctx context.Context, w io.Writer, cfg config) error {
+	if cfg.communities < 2 {
+		return nil // a single cluster cannot be split into two components
+	}
+	a, _, err := build(ctx, cfg, true)
+	if err != nil {
+		return fmt.Errorf("build disconnected: %w", err)
+	}
+	c := csr.BuildFromAdjList(a)
+	mapper := a.Mapper()
+
+	_, components, err := search.WCC(c)
+	if err != nil {
+		return fmt.Errorf("wcc: %w", err)
+	}
+	fmt.Fprintf(w, "disconnected.components=%d\n", components)
+
+	closeness, err := centrality.ClosenessCtx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("disconnected closeness: %w", err)
+	}
+	harmonic, err := centrality.HarmonicCtx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("disconnected harmonic: %w", err)
+	}
+	live := c.LiveNodes()
+	fmt.Fprintf(w, "disconnected.closeness_finite=%t\n", allFinite(closeness, live))
+	fmt.Fprintf(w, "disconnected.harmonic_finite=%t\n", allFinite(harmonic, live))
+
+	// The Wasserman-Faust reward for global reach: the top Closeness node is in
+	// the large component (any cluster index >= 1), never the isolated cluster 0.
+	topClose, err := topKByScore(mapper, live, closeness, 1)
+	if err != nil {
+		return fmt.Errorf("disconnected closeness top: %w", err)
+	}
+	inLargeComponent := topClose[0]/cfg.nodesPerCommunity >= 1
+	fmt.Fprintf(w, "disconnected.closeness_top_in_large_component=%t\n", inLargeComponent)
+	return nil
+}
+
+// allFinite reports whether every live node's score is a finite float (neither
+// NaN nor ±Inf) — the invariant the distance-based centralities promise even on
+// a disconnected graph.
+func allFinite(scores []float64, live []graph.NodeID) bool {
+	for _, id := range live {
+		if uint64(id) >= uint64(len(scores)) {
+			return false
+		}
+		if s := scores[id]; math.IsNaN(s) || math.IsInf(s, 0) {
+			return false
+		}
+	}
+	return true
+}
+
 // topKByScore resolves each live NodeID to its user-facing node value, ranks
 // the values by descending score (breaking ties by ascending node value so the
 // result is deterministic for a fixed seed), and returns the top k node values.
@@ -329,7 +473,7 @@ func (c config) nodeID(cluster, offset int) int {
 // extra edges at intraDensity), then the chain of single bridge edges between
 // consecutive clusters' gateways. The build honours ctx cancellation on a
 // coarse interval.
-func build(ctx context.Context, cfg config) (*adjlist.AdjList[int, struct{}], genResult, error) {
+func build(ctx context.Context, cfg config, breakFirstBridge bool) (*adjlist.AdjList[int, struct{}], genResult, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional here — the example
 	// must reproduce a fixed graph for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
@@ -359,6 +503,13 @@ func build(ctx context.Context, cfg config) (*adjlist.AdjList[int, struct{}], ge
 	// the two sides, which is what concentrates betweenness on the gateways and
 	// keeps inter-cluster density near zero for label propagation.
 	for cluster := 0; cluster+1 < cfg.communities; cluster++ {
+		// breakFirstBridge omits the c0==c1 bridge, isolating cluster 0 as its
+		// own component so the graph splits into two connected components. Used
+		// by reportDisconnected to exercise the centralities' disconnected-graph
+		// handling; the default (false) path builds the fully connected chain.
+		if breakFirstBridge && cluster == 0 {
+			continue
+		}
 		if err := addEdge(cfg.nodeID(cluster, 1), cfg.nodeID(cluster+1, 0)); err != nil {
 			return nil, genResult{}, err
 		}
