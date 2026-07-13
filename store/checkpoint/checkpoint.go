@@ -674,6 +674,35 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	var constraints []snapshot.ConstraintSpec
 	var indexDefs []snapshot.IndexDefSpec
 	if err := c.runUnderCommitLock(func() error {
+		// WAL-health gate (rmp #1919). A concurrent schema DDL (CREATE/DROP
+		// CONSTRAINT or INDEX) whose WAL commit failed at fsync poisons the
+		// writer and discards its frame (DurableOffset excludes it), but the
+		// engine's in-memory registry still reflects the attempted change until
+		// the DDL's compensator (cypher unwindConstraintRegistration /
+		// rewindConstraintDrop, or the inline forgetIndexDef) runs — and that
+		// compensator runs OUTSIDE the store single-writer lock, so it can lag
+		// this capture. Folding constraintsFn() / indexDefsFn() in that window
+		// would persist a non-acknowledged schema change into constraints.bin /
+		// indexdefs.bin and enforce it (CREATE) or apply it (DROP) after a clean
+		// restart — an Atomicity violation for a DDL the client saw fail.
+		//
+		// This capture runs only after RunUnderCommitLock drains in-flight
+		// commits to zero, and the DDL's poison is applied inside SyncGroup
+		// BEFORE its in-flight token is released (store/txn markInflight is
+		// visible to the drain, doneInflight fires only after SyncGroup
+		// returns), so a writer poisoned HERE is precisely that transient
+		// window. Abort before capturing the registry or publishing anything.
+		// Detecting the poison now — not at the phase-2 wlog.Sync(), which
+		// fires only AFTER writeSnapshot has already published the transient
+		// component — is what closes the window for BOTH the constraint and the
+		// index DDL paths. The poison is sticky, so if the writer is healthy
+		// here it stays healthy through this capture (no concurrent commit can
+		// run while the commit lock is held), and a DDL that poisons later, in
+		// the lock-free phase 2, is caught by the pre-truncate wlog.Sync() with
+		// the snapshot reflecting only the consistent phase-1 state.
+		if perr := c.wlog.Poisoned(); perr != nil {
+			return perr
+		}
 		// W is the durable WAL offset at a transaction boundary. Captured under
 		// the quiesce boundary (RunUnderCommitLock drains in-flight commits), so
 		// every committed frame is durable and none is mid-flight: W is exactly

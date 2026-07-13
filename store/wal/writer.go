@@ -751,6 +751,36 @@ func (w *Writer) DurableOffset() int64 {
 	return w.durableSize
 }
 
+// Poisoned reports the writer's fail-stop state: it returns the sticky
+// commit-failure error when a prior [Writer.Sync] / [Writer.SyncGroup] flush
+// or fsync has permanently poisoned the writer (see the [Writer] type doc),
+// and nil while the writer is healthy. The returned error is the same sentinel
+// every subsequent Append/Sync returns.
+//
+// It is the WAL-health probe a non-blocking checkpoint consults under the
+// store's quiesce boundary ([txn.Store.RunUnderCommitLock]) BEFORE it captures
+// and publishes a snapshot (rmp #1919). A concurrent schema DDL (CREATE/DROP
+// CONSTRAINT or INDEX) whose commit fails at fsync poisons the writer and
+// discards its frame — [Writer.DurableOffset] then excludes it — yet the
+// engine's in-memory registry still reflects the attempted change until the
+// DDL's out-of-lock compensator unwinds it. Because the poison is applied
+// inside SyncGroup BEFORE the committer's in-flight token is released
+// (store/txn markInflight/doneInflight), and the checkpoint captures only
+// after RunUnderCommitLock drains in-flight commits to zero, a writer observed
+// poisoned at capture time means exactly that transient window: folding the
+// registry into constraints.bin / indexdefs.bin there would persist a
+// non-acknowledged schema change across restart, violating Atomicity. The
+// checkpoint therefore aborts (never publishing) when this returns non-nil,
+// instead of only discovering the poison at the post-publish phase-2 Sync.
+//
+// Concurrency: safe for concurrent use; it reads syncErr under the internal
+// mutex.
+func (w *Writer) Poisoned() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.syncErr
+}
+
 // TruncatePrefix crash-safely discards the WAL bytes in [0, upTo) and
 // preserves every byte in [upTo, end) — the frames committed after the
 // watermark a checkpoint captured. It is the WAL-prefix-reclamation
