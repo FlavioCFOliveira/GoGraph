@@ -32,6 +32,14 @@ type KShortestPathsLooplessOpts struct {
 // k-shortest path. The loopless guard excludes any expansion whose
 // neighbour is already present in the popped path.
 //
+// USE THE RIGHT ENTRY POINT. This bare function is UNBOUNDED and its worst
+// case is exponential in V (see "Complexity and resource budget" below), so it
+// is appropriate ONLY for small, trusted graphs where every k-th path is
+// wanted. For untrusted, arbitrary, or large/spatial-grid inputs, use the
+// resource-bounded [KShortestPathsLooplessCtxWithOpts] (a MaxPops /
+// MaxQueueBytes budget), or the polynomial [YenKShortest] — O(K·V·(E+V log V)),
+// flat on grids where this enumerator blows up.
+//
 // # Complexity and resource budget
 //
 // The algorithm expands the implicit loopless-path tree in best-first

@@ -25,6 +25,17 @@ import "fmt"
 // application values nest only a handful of levels — while 1000 Go stack frames
 // (~a few hundred KiB) is orders of magnitude below the goroutine stack limit,
 // so a value at the cap still walks safely.
+//
+// This construction cap (1000) is intentionally MORE generous than the
+// PackStream wire cap (packstream.maxValueDepth = 128). The wire cap matches
+// Neo4j-driver practice and bounds decode recursion on attacker input; the
+// construction cap gives embedded (Go-API) callers headroom for moderately
+// nested values that never cross Bolt. A value nested deeper than the wire cap
+// is still built and usable in-process but, if returned over Bolt, is rejected
+// GRACEFULLY at encode time with packstream.ErrNestingTooDeep (a clean per-query
+// error, never a crash) — so the two caps compose safely and the difference is
+// a deliberate design choice, not an oversight (audit 2026-07-13 security F, cap
+// alignment note).
 const MaxValueDepth = 1000
 
 // maxDepthProbeVisits bounds the total number of value nodes [ExceedsValueDepth]
