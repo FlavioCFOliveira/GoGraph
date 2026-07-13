@@ -2,15 +2,29 @@
 
 ## What it demonstrates
 
-Two complementary resilience analyses run over **one coherent network**
-derived from a single capacitated edge list: the structural single
-points of failure (articulation points and bridges) found with
-`search.HopcroftTarjanBCC` over an immutable CSR snapshot, and the
-maximum source-to-sink throughput plus its limiting bottleneck (the
-minimum cut), with the max flow computed by `search/flow`. The flow
-network is built from the very same links the structural analysis sees,
-so the two views describe a single network rather than two unrelated
-graphs.
+A suite of resilience analyses over **one coherent network** derived from
+a single capacitated edge list:
+
+- **Structural single points of failure** — articulation points and
+  bridges, found with `search.HopcroftTarjanBCC` over an immutable CSR
+  snapshot.
+- **Connectivity under failure** — the weakly-connected-component count
+  (`search.WCC`) before and after the articulation bridge is removed: it
+  rises from one to two, confirming the bridge is the stub's sole
+  connector. `search.WCCParallel` reproduces the identical partition.
+- **Throughput and its bottleneck** — the maximum source-to-sink flow
+  (Dinic, `search/flow`) plus the minimum cut that limits it.
+- **Max-flow algorithm cross-agreement** — `flow.EdmondsKarp` and
+  `flow.PushRelabelMaxFlow` must return the same value as Dinic, an
+  algorithm-agreement oracle.
+- **Global min-cut and min-cost routing** — `flow.StoerWagner` finds the
+  cheapest undirected cut anywhere in the backbone (the off-spine
+  bridge, cheaper than the source-to-sink cut), and `flow.MinCostMaxFlow`
+  solves a small deterministic per-link-cost routing scenario.
+
+Every analysis but the last is built from the very same links the
+structural analysis sees, so the views describe a single network rather
+than several unrelated graphs.
 
 ## Domain / scenario
 
@@ -83,10 +97,21 @@ nodes.sites=48
 edges.links=108
 spof.articulation_points=2
 spof.bridges=1
+wcc.components_connected=1
+wcc.components_after_bridge_removal=2
+wcc.parallel_matches_serial=true
 flow.max_value=20
 flow.min_cut_size=2
 flow.min_cut_capacity=20
 flow.maxflow_eq_mincut=true
+maxflow.dinic=20
+maxflow.edmondskarp=20
+maxflow.pushrelabel=20
+maxflow.algorithms_agree=true
+stoerwagner.mincut_weight=5
+stoerwagner.smaller_side_sites=8
+mincostflow.flow=20
+mincostflow.cost=136
 ```
 
 Interleaved with the facts are `# `-prefixed **telemetry** lines that vary
@@ -98,9 +123,20 @@ per run and per machine, for example:
 # spof.elapsed=12µs
 # spof.articulation_point=c0s4
 # spof.bridge=c0s4--stub4
+# wcc.serial_elapsed=8µs
+# wcc.parallel_elapsed=10µs
 # flow.elapsed=8µs
 # flow.saturated_link=c2s1--c3s1 (10 Gb/s)
+# maxflow.edmondskarp_elapsed=25µs
+# maxflow.pushrelabel_elapsed=48µs
+# stoerwagner.elapsed=319µs
+# mincostflow.elapsed=2µs
 ```
+
+At an observable-scale run (`-clusters 200 -cluster-size 64`, ~12.9k
+sites) `flow.StoerWagner` is skipped — its O(V³) cost is impractical
+there — and its two facts are replaced by a `# stoerwagner.skipped=…`
+telemetry line; every other fact is unchanged.
 
 A regression test pins the fact lines and ignores every `# ` line.
 
@@ -108,16 +144,23 @@ A regression test pins the fact lines and ignores every `# ` line.
 
 - **Structural analysis wall-clock** (`# spof.elapsed`) — the cost of
   Hopcroft-Tarjan biconnected components over the CSR snapshot, O(V + E).
-- **Max-flow wall-clock** (`# flow.elapsed`) — the cost of Dinic's
-  max-flow to settle the throughput.
+- **Connectivity wall-clock** (`# wcc.serial_elapsed`,
+  `# wcc.parallel_elapsed`) — serial versus parallel weakly-connected
+  components over the severed snapshot.
+- **Per-algorithm max-flow wall-clock** (`# flow.elapsed`,
+  `# maxflow.edmondskarp_elapsed`, `# maxflow.pushrelabel_elapsed`) — the
+  three max-flow algorithms settling the same throughput, side by side.
+- **Global min-cut wall-clock** (`# stoerwagner.elapsed`) — the O(V³)
+  Stoer-Wagner cut over the whole backbone.
 - **Live heap** (`# mem.heap_alloc`, `# mem.heap_growth`) — the resident
   footprint of the snapshot and the flow network after a forced GC.
 - **Build throughput** (`# build.site_rate`, `# build.link_rate`).
 
-Scale it up with `-clusters` / `-cluster-size` and watch the SPOF and
-flow wall-clocks grow with V and E while the deterministic facts (two
-articulation points, one bridge, a two-link 20 Gb/s min-cut) stay fixed:
-the topology's reliability structure is invariant under scale, only the
+Scale it up with `-clusters` / `-cluster-size` and watch the SPOF, WCC,
+and flow wall-clocks grow with V and E while the deterministic facts (two
+articulation points, one bridge, the 1 → 2 component split, a two-link
+20 Gb/s min-cut, and the three algorithms agreeing) stay fixed: the
+topology's reliability structure is invariant under scale, only the
 dense cores widen.
 
 ## Key APIs
@@ -126,7 +169,11 @@ dense cores widen.
 - `graph.Mapper` — intern site names into compact `NodeID`s for SPOF resolution.
 - `graph/csr.BuildFromAdjList` — freeze the backbone into an immutable CSR snapshot for the structural analysis.
 - `search.HopcroftTarjanBCCCtx` — locate articulation points and bridges (single points of failure) in O(V + E), context-aware.
+- `search.WCCCtx` / `search.WCCParallelCtx` — weakly-connected-component count before and after the bridge is severed; the parallel variant must reproduce the serial partition.
 - `search/flow.NewNetwork` / `Network.AddEdge` / `flow.MaxFlowCtx` — Dinic's max-flow, used as the authoritative oracle cross-checked against the example's in-line residual solver, which also exposes the residual graph used to derive the minimum cut.
+- `search/flow.EdmondsKarpCtx` / `search/flow.PushRelabelMaxFlowCtx` — two further max-flow algorithms cross-checked against Dinic's value.
+- `search/flow.StoerWagnerCtx` — global (undirected) minimum cut over the whole backbone.
+- `search/flow.NewCostNetwork` / `CostNetwork.AddCostEdge` / `flow.MinCostMaxFlowCtx` — minimum-cost maximum flow for a small per-link-cost routing scenario.
 
 ## Further reading
 

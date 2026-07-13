@@ -75,7 +75,66 @@ func TestRun(t *testing.T) {
 	if got := facts["flow.maxflow_eq_mincut"]; got != 1 {
 		t.Errorf("flow.maxflow_eq_mincut = %d (bool), want true", got)
 	}
+
+	// Connectivity under failure: the intact backbone is one component;
+	// severing the single articulation bridge splits off the stub, so the
+	// count rises to exactly two.
+	if got := facts["wcc.components_connected"]; got != 1 {
+		t.Errorf("wcc.components_connected = %d, want 1", got)
+	}
+	if got := facts["wcc.components_after_bridge_removal"]; got != 2 {
+		t.Errorf("wcc.components_after_bridge_removal = %d, want 2", got)
+	}
+	// The parallel component analysis must reproduce the serial partition
+	// byte-for-byte; a divergence is a library defect.
+	if got := facts["wcc.parallel_matches_serial"]; got != 1 {
+		t.Errorf("wcc.parallel_matches_serial = %d (bool), want true", got)
+	}
+
+	// Max-flow algorithm cross-agreement: three independent algorithms must
+	// return the same maximum flow. A disagreement is a library defect.
+	if got := facts["maxflow.dinic"]; got != wantFlow {
+		t.Errorf("maxflow.dinic = %d, want %d", got, wantFlow)
+	}
+	if got := facts["maxflow.edmondskarp"]; got != wantFlow {
+		t.Errorf("maxflow.edmondskarp = %d, want %d", got, wantFlow)
+	}
+	if got := facts["maxflow.pushrelabel"]; got != wantFlow {
+		t.Errorf("maxflow.pushrelabel = %d, want %d", got, wantFlow)
+	}
+	if got := facts["maxflow.algorithms_agree"]; got != 1 {
+		t.Errorf("maxflow.algorithms_agree = %d (bool), want true", got)
+	}
+
+	// Global min-cut: Stoer-Wagner ranges over every partition and finds the
+	// off-spine bridge (capBridge Gb/s), strictly cheaper than the
+	// source-to-sink cut. Its smaller side is exactly the stub cluster, so
+	// its size equals cluster-size.
+	if got := facts["stoerwagner.mincut_weight"]; got != capBridge {
+		t.Errorf("stoerwagner.mincut_weight = %d, want %d", got, capBridge)
+	}
+	if got := facts["stoerwagner.smaller_side_sites"]; got != int64(cfg.clusterSize) {
+		t.Errorf("stoerwagner.smaller_side_sites = %d, want %d", got, cfg.clusterSize)
+	}
+
+	// Min-cost routing: the fixed two-provider sub-scenario delivers
+	// wantMinCostFlow at total cost wantMinCostCost, independent of the
+	// backbone config.
+	if got := facts["mincostflow.flow"]; got != wantMinCostFlow {
+		t.Errorf("mincostflow.flow = %d, want %d", got, wantMinCostFlow)
+	}
+	if got := facts["mincostflow.cost"]; got != wantMinCostCost {
+		t.Errorf("mincostflow.cost = %d, want %d", got, wantMinCostCost)
+	}
 }
+
+// The min-cost routing sub-scenario (reportMinCostFlow) is fixed and
+// independent of the backbone config: 20 Gb/s delivered at total cost 136
+// (economy provider 8 Gb/s at 2/Gb/s, premium provider 12 Gb/s at 10/Gb/s).
+const (
+	wantMinCostFlow = 20
+	wantMinCostCost = 136
+)
 
 // TestScaleInvariants confirms the topology guarantees hold across seeds
 // and scales, not just the pinned default — the deterministic acceptance
@@ -116,6 +175,47 @@ func TestScaleInvariants(t *testing.T) {
 			}
 			if got := facts["flow.maxflow_eq_mincut"]; got != 1 {
 				t.Errorf("flow.maxflow_eq_mincut = %d (bool), want true", got)
+			}
+
+			// Connectivity: one component intact, two once the bridge is
+			// severed, and the parallel analysis agrees with the serial one —
+			// for every seed and scale.
+			if got := facts["wcc.components_connected"]; got != 1 {
+				t.Errorf("wcc.components_connected = %d, want 1", got)
+			}
+			if got := facts["wcc.components_after_bridge_removal"]; got != 2 {
+				t.Errorf("wcc.components_after_bridge_removal = %d, want 2", got)
+			}
+			if got := facts["wcc.parallel_matches_serial"]; got != 1 {
+				t.Errorf("wcc.parallel_matches_serial = %d (bool), want true", got)
+			}
+
+			// All three max-flow algorithms agree on the value at every scale.
+			want := int64(spineLinksNarrow * capSpine)
+			for _, key := range []string{"maxflow.dinic", "maxflow.edmondskarp", "maxflow.pushrelabel"} {
+				if got := facts[key]; got != want {
+					t.Errorf("%s = %d, want %d", key, got, want)
+				}
+			}
+			if got := facts["maxflow.algorithms_agree"]; got != 1 {
+				t.Errorf("maxflow.algorithms_agree = %d (bool), want true", got)
+			}
+
+			// The global min-cut is always the off-spine bridge; its smaller
+			// side is always the stub cluster (cluster-size sites).
+			if got := facts["stoerwagner.mincut_weight"]; got != capBridge {
+				t.Errorf("stoerwagner.mincut_weight = %d, want %d", got, capBridge)
+			}
+			if got := facts["stoerwagner.smaller_side_sites"]; got != int64(cfg.clusterSize) {
+				t.Errorf("stoerwagner.smaller_side_sites = %d, want %d", got, cfg.clusterSize)
+			}
+
+			// The min-cost routing sub-scenario is config-independent.
+			if got := facts["mincostflow.flow"]; got != wantMinCostFlow {
+				t.Errorf("mincostflow.flow = %d, want %d", got, wantMinCostFlow)
+			}
+			if got := facts["mincostflow.cost"]; got != wantMinCostCost {
+				t.Errorf("mincostflow.cost = %d, want %d", got, wantMinCostCost)
 			}
 		})
 	}

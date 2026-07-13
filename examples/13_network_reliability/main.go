@@ -1,4 +1,4 @@
-// Example 13_network_reliability — two resilience analyses over ONE
+// Example 13_network_reliability — a suite of resilience analyses over ONE
 // synthetic communication backbone, derived from a single capacitated
 // edge list:
 //
@@ -6,15 +6,29 @@
 //     (gateway sites) and bridges (links) whose individual loss
 //     partitions the network, found with search.HopcroftTarjanBCC over
 //     an immutable CSR snapshot.
-//  2. Throughput and its bottleneck — the maximum flow from a source
+//  2. Connectivity under failure — the weakly-connected-component count
+//     (search.WCC) before and after the articulation bridge is removed:
+//     it rises from one component to two, confirming the bridge is the
+//     sole connector of the off-spine stub. search.WCCParallel is run on
+//     the severed graph and must produce the identical partition.
+//  3. Throughput and its bottleneck — the maximum flow from a source
 //     site to a sink site via Dinic's max-flow (search/flow), followed
 //     by the minimum cut: the saturated links that cap that throughput.
+//  4. Max-flow algorithm cross-agreement — flow.EdmondsKarp and
+//     flow.PushRelabelMaxFlow are run on the same network and must return
+//     the same value as Dinic, an algorithm-agreement oracle.
+//  5. Global min-cut and min-cost routing — flow.StoerWagner finds the
+//     cheapest undirected cut over the whole backbone (the off-spine
+//     bridge, strictly cheaper than the source-to-sink cut), and
+//     flow.MinCostMaxFlow solves a small deterministic min-cost routing
+//     scenario with per-link cost.
 //
-// Both analyses run on the SAME node set and the SAME capacitated edge
-// list. The structural analysis sees the links through a CSR snapshot;
-// the flow analysis sees the very same links as a capacitated
-// flow.Network indexed by the same node space, so the two views describe
-// one network rather than two unrelated graphs.
+// The structural, connectivity, and flow analyses run on the SAME node
+// set and the SAME capacitated edge list. The structural and connectivity
+// analyses see the links through a CSR snapshot; the flow analyses see the
+// very same links as a capacitated flow.Network indexed by the same node
+// space, so the views describe one network rather than several unrelated
+// graphs.
 //
 // # Topology
 //
@@ -206,11 +220,25 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(built.HeapAlloc))
 	fmt.Fprintf(w, "# mem.heap_growth=%s\n", humanBytes(built.HeapAlloc-base.HeapAlloc))
 
-	if err := reportSPOF(ctx, w, net); err != nil {
+	bcc, err := reportSPOF(ctx, w, net)
+	if err != nil {
 		return fmt.Errorf("spof: %w", err)
 	}
-	if err := reportThroughput(ctx, w, net); err != nil {
+	if err := reportConnectivity(ctx, w, net, bcc.Bridges); err != nil {
+		return fmt.Errorf("connectivity: %w", err)
+	}
+	dinic, err := reportThroughput(ctx, w, net)
+	if err != nil {
 		return fmt.Errorf("throughput: %w", err)
+	}
+	if err := reportFlowAgreement(ctx, w, net, dinic); err != nil {
+		return fmt.Errorf("flow-agreement: %w", err)
+	}
+	if err := reportGlobalCut(ctx, w, net); err != nil {
+		return fmt.Errorf("global-cut: %w", err)
+	}
+	if err := reportMinCostFlow(ctx, w); err != nil {
+		return fmt.Errorf("min-cost-flow: %w", err)
 	}
 	return nil
 }
@@ -220,13 +248,13 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // articulation points and bridges — the structural single points of
 // failure. The counts are deterministic facts; the analysis wall-clock is
 // telemetry.
-func reportSPOF(ctx context.Context, w io.Writer, net *network) error {
+func reportSPOF(ctx context.Context, w io.Writer, net *network) (search.BCCResult, error) {
 	c := csr.BuildFromAdjList(net.adj)
 
 	start := time.Now()
 	res, err := search.HopcroftTarjanBCCCtx(ctx, c)
 	if err != nil {
-		return fmt.Errorf("HopcroftTarjanBCC: %w", err)
+		return search.BCCResult{}, fmt.Errorf("HopcroftTarjanBCC: %w", err)
 	}
 	elapsed := time.Since(start)
 
@@ -240,22 +268,22 @@ func reportSPOF(ctx context.Context, w io.Writer, net *network) error {
 	for _, id := range sortedSites(res.Articulation) {
 		name, ok := net.mapper.Resolve(id)
 		if !ok {
-			return fmt.Errorf("unresolved articulation node id %d", id)
+			return search.BCCResult{}, fmt.Errorf("unresolved articulation node id %d", id)
 		}
 		fmt.Fprintf(w, "# spof.articulation_point=%s\n", name)
 	}
 	for _, b := range sortedBridges(res.Bridges) {
 		u, ok := net.mapper.Resolve(b[0])
 		if !ok {
-			return fmt.Errorf("unresolved bridge endpoint id %d", b[0])
+			return search.BCCResult{}, fmt.Errorf("unresolved bridge endpoint id %d", b[0])
 		}
 		v, ok := net.mapper.Resolve(b[1])
 		if !ok {
-			return fmt.Errorf("unresolved bridge endpoint id %d", b[1])
+			return search.BCCResult{}, fmt.Errorf("unresolved bridge endpoint id %d", b[1])
 		}
 		fmt.Fprintf(w, "# spof.bridge=%s--%s\n", u, v)
 	}
-	return nil
+	return res, nil
 }
 
 // reportThroughput computes the maximum flow from source to sink over the
@@ -268,8 +296,10 @@ func reportSPOF(ctx context.Context, w io.Writer, net *network) error {
 // settled residual graph — which is what lets the example derive the
 // minimum cut (the library's Network does not expose its residual). The
 // max-flow value, the min-cut size, and the max-flow == min-cut equality
-// are deterministic facts; the flow wall-clock is telemetry.
-func reportThroughput(ctx context.Context, w io.Writer, net *network) error {
+// are deterministic facts; the flow wall-clock is telemetry. The Dinic value
+// is returned so the caller can cross-check the other max-flow algorithms
+// (Edmonds-Karp, push-relabel) against it — see reportFlowAgreement.
+func reportThroughput(ctx context.Context, w io.Writer, net *network) (int, error) {
 	res := newResidual(net.sites)
 	for _, l := range net.links {
 		res.addUndirected(l.a, l.b, l.cap)
@@ -281,19 +311,14 @@ func reportThroughput(ctx context.Context, w io.Writer, net *network) error {
 
 	// Cross-check against the library's Dinic max-flow built from the
 	// identical link list: the example's residual solver and search/flow
-	// must agree on the answer. Each undirected link is a pair of opposing
-	// directed arcs of equal capacity.
-	g := flow.NewNetwork(net.sites)
-	for _, l := range net.links {
-		g.AddEdge(l.a, l.b, l.cap)
-		g.AddEdge(l.b, l.a, l.cap)
-	}
+	// must agree on the answer.
+	g := buildFlowNetwork(net)
 	libValue, err := flow.MaxFlowCtx(ctx, g, net.source, net.sink)
 	if err != nil {
-		return fmt.Errorf("MaxFlow: %w", err)
+		return 0, fmt.Errorf("MaxFlow: %w", err)
 	}
 	if libValue != flowValue {
-		return fmt.Errorf("max-flow mismatch: residual solver=%d, search/flow=%d", flowValue, libValue)
+		return 0, fmt.Errorf("max-flow mismatch: residual solver=%d, search/flow=%d", flowValue, libValue)
 	}
 
 	// The minimum cut is the set of links crossing from the source-side
@@ -302,7 +327,7 @@ func reportThroughput(ctx context.Context, w io.Writer, net *network) error {
 	// conservation law is asserted by the regression test.
 	cut, cutCap := res.minCut(net.source, net.links)
 	if cutCap != flowValue {
-		return fmt.Errorf("min-cut capacity %d != max flow %d (max-flow min-cut theorem violated)", cutCap, flowValue)
+		return 0, fmt.Errorf("min-cut capacity %d != max flow %d (max-flow min-cut theorem violated)", cutCap, flowValue)
 	}
 
 	fmt.Fprintf(w, "flow.max_value=%d\n", flowValue)
@@ -315,7 +340,7 @@ func reportThroughput(ctx context.Context, w io.Writer, net *network) error {
 		ub, _ := net.mapper.Resolve(net.idOf[l.b])
 		fmt.Fprintf(w, "# flow.saturated_link=%s--%s (%d Gb/s)\n", ua, ub, l.cap)
 	}
-	return nil
+	return flowValue, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
