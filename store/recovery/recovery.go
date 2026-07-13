@@ -1861,16 +1861,32 @@ func decodeRecoveryPropertyValue(buf []byte) (lpg.PropertyValue, []byte, error) 
 // a list capacity hint against the remaining input.
 const recoveryListElemMinBytes = 5
 
+// recoveryListCapHintMax bounds the EAGER slice pre-reservation a single
+// PropList decode may make, in elements. Clamping element count to
+// remaining/[recoveryListElemMinBytes] alone is insufficient: each reserved
+// [lpg.PropertyValue] slot is ~24 bytes, so remaining/5 elements is ~4.8× the
+// remaining wire bytes — up to several GiB for a large frame with a hostile
+// count. Capping the eager reservation at a modest constant keeps the up-front
+// allocation small (~96 KiB) regardless of the untrusted count; append then
+// grows the slice to the element count actually decoded, which the per-element
+// loop bounds to remaining/5 (CWE-770 / CWE-789, audit 2026-07-13 R1).
+const recoveryListCapHintMax = 4096
+
 // recoveryListCapHint returns a safe capacity hint for a PropList decode
-// buffer. count is the untrusted element count from the wire; remaining
-// is the number of bytes left to parse. Because each element consumes at
-// least [recoveryListElemMinBytes] bytes, the hint is clamped to
-// min(count, remaining/recoveryListElemMinBytes), so a hostile count
-// cannot trigger a multi-gigabyte eager reservation.
+// buffer. count is the untrusted element count from the wire; remaining is the
+// number of bytes left to parse. Each element consumes at least
+// [recoveryListElemMinBytes] bytes, so at most remaining/5 elements can follow;
+// the hint is min(count, remaining/5, [recoveryListCapHintMax]) so neither a
+// hostile count NOR a large frame can drive a multi-gigabyte eager reservation
+// (the earlier remaining/5 clamp bounded element COUNT but not the ~24×-larger
+// reserved BYTES).
 func recoveryListCapHint(count uint32, remaining int) int {
 	maxElems := remaining / recoveryListElemMinBytes
 	if int64(count) < int64(maxElems) {
-		return int(count)
+		maxElems = int(count)
+	}
+	if maxElems > recoveryListCapHintMax {
+		return recoveryListCapHintMax
 	}
 	return maxElems
 }
@@ -1887,12 +1903,12 @@ func decodeRecoveryListProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 	}
 	count := binary.LittleEndian.Uint32(buf)
 	buf = buf[4:]
-	// count is an untrusted uint32 (up to ~4.3e9). Each element needs at
-	// least recoveryListElemMinBytes on the wire, so at most
-	// len(buf)/recoveryListElemMinBytes elements can actually follow; clamp
-	// the capacity hint to that ceiling so a hostile count cannot drive a
-	// multi-GB eager reservation. The loop below still validates and bounds
-	// every element.
+	// count is an untrusted uint32 (up to ~4.3e9). recoveryListCapHint bounds
+	// the EAGER pre-reservation to min(count, len(buf)/5, recoveryListCapHintMax)
+	// elements, so neither a hostile count nor a large frame can drive a
+	// multi-GB up-front allocation (each reserved slot is ~24 bytes); append
+	// grows the slice to the element count actually decoded. The loop below
+	// still validates and bounds every element.
 	elems := make([]lpg.PropertyValue, 0, recoveryListCapHint(count, len(buf)))
 	for i := uint32(0); i < count; i++ {
 		if len(buf) < 5 { // kind(1) + payloadLen(4)
