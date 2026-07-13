@@ -247,7 +247,7 @@ func loadIndexesWith(fsys fileSystem, dir string, entries []IndexFileEntry) ([]I
 			return nil, err
 		}
 		filename := filepath.Join(idxDir, e.Name+".bin")
-		buf, err := readIndexFile(fsys, filename)
+		buf, err := readIndexFile(fsys, filename, e.Size)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
 			out = append(out, IndexReadback{Name: e.Name})
@@ -263,17 +263,29 @@ func loadIndexesWith(fsys fileSystem, dir string, entries []IndexFileEntry) ([]I
 	return out, nil
 }
 
-// readIndexFile reads an index component file in full, opening it via
+// readIndexFile reads an index component file, opening it via
 // [openSnapshotComponent] so an indexes/<name>.bin that is a symlink in
 // an untrusted snapshot directory is rejected (O_NOFOLLOW) rather than
 // dereferenced. It is the symlink-safe replacement for os.ReadFile on the
 // snapshot read path.
-func readIndexFile(fsys fileSystem, path string) ([]byte, error) {
+//
+// The read is bounded to the manifest-declared size, matching every sibling
+// verified reader (see boundedComponentReader). Without the bound, a tampered
+// store directory whose manifest declares a tiny size for an indexes/<name>.bin
+// that is actually multi-gigabyte on disk would drive an unbounded io.ReadAll
+// and out-of-memory the process on open, before any CRC check (CWE-770 /
+// CWE-789). The manifest size cannot inflate the read: io.ReadAll grows to the
+// bytes actually read, so a lying (small) size truncates to size — the CRC then
+// fails and the caller degrades to the safe rebuild path — while a lying
+// (large) size is capped by the real file's EOF. A non-positive size falls back
+// to an unbounded read (boundedComponentReader), preserving legacy behaviour for
+// size-less manifests; callers pass the manifest entry's Size.
+func readIndexFile(fsys fileSystem, path string, size int64) ([]byte, error) {
 	f, err := fsys.OpenComponent(path)
 	if err != nil {
 		return nil, err
 	}
 	// best-effort: read-only file, close err is non-actionable for callers.
 	defer func() { _ = f.Close() }()
-	return io.ReadAll(f)
+	return io.ReadAll(boundedComponentReader(f, size))
 }
