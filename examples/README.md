@@ -1,6 +1,6 @@
 # GoGraph examples
 
-This directory contains 26 runnable, self-documenting examples of
+This directory contains 34 runnable, self-documenting examples of
 GoGraph — from a shortest-path query to a persistent, `kill -9`-safe REST
 service. Each example serves the two objectives the project sets for
 examples: it **demonstrates** a capability in a realistic end-to-end
@@ -53,7 +53,8 @@ see [`../docs/examples-standard.md`](../docs/examples-standard.md).
 | [22_cypher](22_cypher/README.md) | The Cypher engine over a seeded social graph: a label scan with projection and `ORDER BY`, a `WHERE` filter, a relationship pattern, and a `CREATE` in a write transaction. | Per-query latency, live heap. |
 | [23_bolt_server](23_bolt_server/README.md) | Bolt v5 end to end over a seeded graph: start the embedded server, connect the official `neo4j-go-driver/v5`, run many queries across concurrent sessions, and shut down cleanly with no goroutine leak. | Query throughput, p50/p95/p99 latency distribution, live heap. |
 | [24_social_network_cli](24_social_network_cli/README.md) | A one-shot CLI over a persistent LPG social network with an opt-in seeded scale mode, walking every layer: LPG, WAL + recovery, manual checkpoints, and Cypher reads streamed as JSON Lines. | Seed throughput, live heap, per-query latency (via the `-evidence` flag). |
-| [25_software_house_api](25_software_house_api/README.md) | A persistent, `kill -9`-safe REST API (stdlib only) over a multi-layer LPG spanning Code/Work/People with an opt-in seeded scale mode, answering change-impact, ownership, and bus-factor questions in Cypher. | Graph size, live heap, bytes per element, per-query/seed latency (via `/stats`). |
+| [25_software_house_api](25_software_house_api/README.md) | A persistent, `kill -9`-safe REST API (stdlib only) over a multi-layer LPG spanning Code/Work/People with an opt-in seeded scale mode, answering change-impact, ownership, and bus-factor questions in Cypher — plus `CREATE INDEX`/`CREATE CONSTRAINT` DDL, a `CALL db.*` schema endpoint, and `EXPLAIN` proving an index seek, all durable across restart. | Graph size, live heap, bytes per element, per-query/seed latency (via `/stats`). |
+| [34_bolt_transactions](34_bolt_transactions/README.md) | The Bolt v5 write/transaction surface via the official `neo4j-go-driver`: BasicAuth (accept/reject), a committed `ExecuteWrite`, a rolled-back explicit transaction, a FAILURE + RESET recovery, and one read over an encrypted `bolt+ssc` (TLS) connection. | Six wire-level guarantees pinned as facts; scenario wall-clock. |
 
 ## Interchange
 
@@ -71,7 +72,11 @@ see [`../docs/examples-standard.md`](../docs/examples-standard.md).
 | [10_dimacs9_routing](10_dimacs9_routing/README.md) | Build a synthetic DIMACS 9 road network at scale, run a concrete `search.Dijkstra` route, and drive a seeded random source-target probe workload. | Query throughput, p50/p95/p99 latency distribution, live heap. |
 | [14_routing_alternatives](14_routing_alternatives/README.md) | Three shortest-path flavours over one seeded k-NN spatial graph: Dijkstra, Yen's k-shortest paths, and `search.AStar` with an admissible Euclidean heuristic. | Per-algorithm timing, nodes expanded (the A* vs Dijkstra advantage), live heap. |
 | [15_task_assignment](15_task_assignment/README.md) | Two bipartite assignment algorithms over a seeded instance: `search.Hungarian` (cheapest one-to-one assignment) and `search.HopcroftKarp` (largest matching). | Per-algorithm timing, live heap. |
-| [16_centrality_analytics](16_centrality_analytics/README.md) | Two analytics over one CSR snapshot of a seeded chain-of-clusters graph: exact Brandes betweenness centrality and label-propagation community detection. | Per-analysis timing, transient allocations, live heap. |
+| [16_centrality_analytics](16_centrality_analytics/README.md) | A centrality suite over one CSR snapshot of a seeded chain-of-clusters graph: Brandes betweenness plus closeness, harmonic, eigenvector and Katz, label-propagation community detection, and a disconnected-graph pass showing the distance-based measures stay finite. | Per-analysis timing, convergence iterations, transient allocations, live heap. |
+| [28_negative_weights](28_negative_weights/README.md) | Negative-weight routing over a seeded layered DAG with rebate edges: `search.BellmanFord` (a negative-cost-optimal route Dijkstra refuses), `ErrNegativeCycle` detection under `-arbitrage`, cross-checked against a Johnson APSP oracle. | Relaxation passes, timing, three-way distance agreement. |
+| [29_all_pairs](29_all_pairs/README.md) | All-pairs shortest paths three ways — `DijkstraAPSP`, `FloydWarshall`, `JohnsonAPSP` — asserted identical, then radius/diameter/eccentricity derived from the result. | Per-algorithm timing, the O(V²) matrix footprint, three-way agreement. |
+| [30_min_spanning_tree](30_min_spanning_tree/README.md) | Minimum spanning tree over a seeded geographic backbone: `PrimMST` and `KruskalMST` cross-checked for equal total weight and edge multiset, with the spanning-forest shape verified via `WCC`. | Per-algorithm timing, total weight, savings vs all links. |
+| [32_euler](32_euler/README.md) | Eulerian route inspection over a network built from edge-disjoint loops: `Hierholzer` (directed) and `HierholzerUndirected` find a circuit using every street once; `-broken` forces `ErrNoEulerian`. | Per-tour timing; each-edge-once and circuit-closure verified as facts. |
 
 ## Real-world recipes
 
@@ -81,7 +86,15 @@ see [`../docs/examples-standard.md`](../docs/examples-standard.md).
 | [12_build_dependency](12_build_dependency/README.md) | Model a seeded build-dependency DAG, derive a valid build order with `search.TopologicalSort` (Kahn), and detect a circular dependency with `search.TarjanSCC`. | Per-algorithm timing, DAG statistics, live heap. |
 | [13_network_reliability](13_network_reliability/README.md) | Two resilience analyses over one seeded transit-stub network: single points of failure (articulation points and bridges) and max throughput plus its limiting min-cut bottleneck. | Per-analysis timing, max-flow value, min-cut size, live heap. |
 | [19_pattern_query](19_pattern_query/README.md) | The fluent `graph/query` API over a seeded dependency LPG: MATCH-style pattern queries combining label and property predicates with a one-hop expansion, reading matched properties back out. | Per-query latency, matched-row counts, live heap. |
-| [20_concurrent_reads](20_concurrent_reads/README.md) | The lock-free read contract of a frozen CSR: Dijkstra, BFS, and PageRank run concurrently over one shared immutable seeded snapshot with zero synchronisation on the snapshot. | Aggregate throughput, scaling across worker counts, live heap. |
+| [20_concurrent_reads](20_concurrent_reads/README.md) | The lock-free read contract of a frozen CSR: Dijkstra, BFS, and PageRank run concurrently over one shared immutable seeded snapshot; plus intra-query parallel variants (`WCCParallel`, `CountTrianglesParallel`, `BetweennessParallel`) cross-checked against serial, and a `-cap-to-cpus=false` sweep to 64/256/1024 readers. | Aggregate throughput, scaling across worker counts, serial-vs-parallel speedup, live heap. |
+
+## Concurrency, transactions and observability
+
+| Example | What it demonstrates | Evidence reported |
+|---|---|---|
+| [27_concurrent_txn](27_concurrent_txn/README.md) | Transactional isolation under concurrency: N writer goroutines run multi-statement `BeginTx` transfers and single-statement `RunInTx` writes while M readers read the total via `BeginReadTx`, over a WAL-backed engine under `-race`. | Total-balance invariant holds on every read, zero lost updates, writer/reader throughput, contention. |
+| [31_metrics_observability](31_metrics_observability/README.md) | The observability facade: install a Prometheus registry via `metrics.SetBackend`, run a mixed workload (Cypher, search, io/csv, Bolt pool), scrape `/metrics`, and assert the documented metric names are present. | Presence of 12 documented metrics (facts); observed latencies and counts (telemetry). |
+| [33_generation_swap](33_generation_swap/README.md) | The read-mostly MVCC snapshot-swap of `graph/generation`: readers `Acquire`/`Release` while a publisher swaps in successively larger CSR snapshots — no torn reads, correct refcount accounting, under `-race`. | Every read consistent, refcount accounted, read throughput, distinct generations observed. |
 
 ## Benchmarks
 
