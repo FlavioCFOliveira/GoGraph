@@ -97,12 +97,14 @@ func runSeed(ctx context.Context, dir string, out io.Writer) error {
 // population on top, all in a single transaction. With cfg.evidence set it
 // follows the JSON fact line with "# "-prefixed telemetry.
 //
-// Writes go through the direct txn.Tx API rather than Engine.RunInTx:
-// the current Cypher engine cannot express multi-edge CREATE patterns
-// nor MATCH+CREATE-relationship statements through the WAL-backed
-// planner, so the simplest and most idiomatic path for bulk loads is
-// the same one used by examples/04_persistence. The query subcommand
-// remains the demonstration of Cypher writes for individual statements.
+// Writes go through the direct txn.Tx API rather than Engine.RunInTx.
+// This is a bulk-load choice, not an engine limitation: the Cypher
+// engine can express multi-edge CREATE patterns and
+// MATCH+CREATE-relationship statements over the WAL-backed store. For a
+// bulk seed the direct txn.Tx path is simpler and commits the whole
+// fixture atomically in a single transaction, the same path used by
+// examples/04_persistence. The query subcommand remains the
+// demonstration of Cypher writes for individual statements.
 func runSeedWithConfig(ctx context.Context, cfg seedConfig, out io.Writer) (retErr error) {
 	o, err := openStore(ctx, cfg.dir)
 	if err != nil {
