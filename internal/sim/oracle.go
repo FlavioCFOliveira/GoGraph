@@ -390,6 +390,12 @@ func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleRes
 	if cypher == tmplSetAge {
 		return o.recordOp(cypher, params, o.setAge(params))
 	}
+	// Schema-mutation templates (REMOVE / SET-label / SET-map) mutate the matched
+	// node's labels/properties; the helper reports whether it recognised the
+	// template so a plain read falls through to the no-op case below.
+	if res, ok := o.applySchemaMutation(cypher, params); ok {
+		return o.recordOp(cypher, params, res)
+	}
 	// Every other MATCH the workload emits is a pure read with no side effects.
 	return o.recordOp(cypher, params, OracleResult{Committed: true})
 }
@@ -412,6 +418,10 @@ func (o *GraphOracle) setAge(params map[string]any) OracleResult {
 // ApplyMerge models [tmplMergePerson]: MERGE by name creates the Person only
 // when absent (setting created=true on the new one) and is a no-op otherwise.
 func (o *GraphOracle) ApplyMerge(cypher string, params map[string]any) OracleResult {
+	// MERGE-relationship with a hit counter (CY3) is modelled by a dedicated helper.
+	if cypher == tmplMergeKnowsN {
+		return o.recordOp(cypher, params, o.applyMergeKnowsN(params))
+	}
 	if cypher != tmplMergePerson {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled MERGE"})
 	}

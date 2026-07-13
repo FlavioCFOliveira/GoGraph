@@ -35,6 +35,8 @@ const (
 	ScenarioEdgeProperties    = "edge-properties"
 	ScenarioIndexDiversity    = "index-diversity"
 	ScenarioCypherSurface     = "cypher-surface"
+	ScenarioSchemaMutation    = "schema-mutation"
+	ScenarioMergeRel          = "merge-rel"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -103,6 +105,8 @@ func DefaultRegistry() (*Registry, error) {
 		edgePropertiesScenario(),
 		indexDiversityScenario(),
 		cypherSurfaceScenario(),
+		schemaMutationScenario(),
+		mergeRelScenario(),
 	)
 }
 

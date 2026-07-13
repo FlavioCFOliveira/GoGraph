@@ -20,8 +20,8 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 	}
 	want := []string{
 		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioConstraintEnforce, ScenarioConstraintExistence,
-		ScenarioCrashStorm, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDiskFull, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioLongRunning, ScenarioMemPressure, ScenarioOverload,
-		ScenarioReadHeavy, ScenarioSchemaChaos, ScenarioSearch, ScenarioSearchCrash, ScenarioTypeCoverage,
+		ScenarioCrashStorm, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDiskFull, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioOverload,
+		ScenarioReadHeavy, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioTypeCoverage,
 		ScenarioWriteHeavy,
 	}
 	if r.Len() != len(want) {
