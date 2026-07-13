@@ -9,6 +9,17 @@ then drop every in-memory reference and rebuild the graph from disk with
 `recovery.Open` — proving that node and edge topology, labels, and typed
 properties all survive a restart.
 
+It also demonstrates **Atomicity on the abort path deliberately**: just before
+the snapshot, two extra transactions run on the same store — a committed
+"survivor" publication and a "phantom" publication that is intentionally
+**rolled back** because its release declares a `DEPENDS_ON` its own owning
+package (a self-dependency the supply-chain invariant forbids). After the reopen
+the recovered graph must equal the pre-transaction state exactly: the survivor
+is present, none of the phantom's nodes/edges/labels/properties are, and the WAL
+holds **no `OpCommit` marker (and not one byte)** of the aborted transaction.
+The all-or-nothing guarantee is asserted, not assumed: a rolled-back mutation
+that survived would be surfaced as a fatal error.
+
 ## Domain / scenario
 
 A software-supply-chain graph, the kind a package registry maintains:
@@ -36,6 +47,27 @@ checkpoint that lets recovery start from a compacted base. The store is written
 under a directory created with `os.MkdirTemp`, so its absolute path differs on
 every run; that path is deliberately kept out of stdout, so the deterministic
 report below is stable.
+
+### The atomic-rollback contrast
+
+Two fixed publications run on the same store just before the snapshot:
+
+- **Survivor** (`hotfix-security-pkg@2.0.0`) — a well-formed publication that
+  legitimately depends on an existing package. It is **committed** and must be
+  present after the reopen.
+- **Phantom** (`phantom-rogue-pkg@9.9.9`) — a full publication (Package and
+  Release nodes with labels and typed properties, a `PUBLISHED` edge, and a
+  `DEPENDS_ON` edge) whose release declares a dependency on its own owning
+  package. That self-dependency violates the supply-chain invariant, so the
+  whole transaction is **aborted with `Tx.Rollback`** instead of committed.
+
+Both publications go through the same builder and differ only in whether the
+caller calls `Commit` or `Rollback`, so the recovered graph is a clean A/B proof
+of Atomicity: the committed one survives, the rolled-back one leaves no trace —
+in the graph or in the WAL. The pre-transaction baseline is captured in memory
+right after the survivor commit and before the phantom transaction, and the
+recovered graph is required to match it exactly (node, edge, label, and
+node-property counts).
 
 ## How to run
 
@@ -74,15 +106,33 @@ nodes.packages=300
 nodes.releases=300
 edges.published=300
 edges.depends_on=1221
-recovered.nodes=600
-recovered.edges=1521
+survivor.committed=1
+rollback.ops_attempted=13
+wal.commit_markers=301
+wal.phantom_frames=0
+recovered.nodes=602
+recovered.edges=1523
 recovered.labels=2
 recovered.snapshot_hit=true
 recovered.sample_name=lib-server-0
 recovered.sample_downloads=24941318
 recovered.sample_coord=lib-server-0@3.19.1
 recovered.sample_published=2021-04-18
+rollback.applied_after_reopen=0
+state.matches_pre_tx=1
+survivor.present=1
 ```
+
+The genesis facts (`nodes.*`, `edges.*`) count the seeded build only; the
+committed survivor adds its two nodes and two edges to `recovered.nodes`
+(`600 → 602`) and `recovered.edges` (`1521 → 1523`). The atomicity facts read:
+`rollback.ops_attempted=13` (mutations the aborted phantom buffered),
+`wal.commit_markers=301` (one per committed transaction — 300 genesis + 1
+survivor, none for the abort), `wal.phantom_frames=0` (the aborted transaction
+left not one byte in the WAL), `rollback.applied_after_reopen=0` (none of its
+entities survived), `state.matches_pre_tx=1` (the recovered graph equals the
+pre-transaction baseline), and `survivor.present=1` (the committed contrast
+survived).
 
 Interleaved with these, the example prints volatile **telemetry** lines
 prefixed with `# `, for example:
@@ -113,10 +163,17 @@ For the persistence / recovery subject (per the examples standard taxonomy):
 - **Live heap before vs after recovery** — `# mem.heap_before`,
   `# mem.heap_after`, `# mem.heap_growth` (each after a forced GC, so they
   reflect reachable bytes).
+- **Atomicity on the abort path** — `rollback.ops_attempted`,
+  `wal.commit_markers`, `wal.phantom_frames`, `rollback.applied_after_reopen`,
+  `state.matches_pre_tx`, and the `survivor.*` contrast facts: a
+  correctness/reliability check, not a performance one, that the durability
+  path preserves all-or-nothing when a transaction is rolled back.
 
 When you scale `-packages` up, watch how recovery wall-clock and on-disk bytes
 grow against the recovered node/edge counts, and how the snapshot checkpoint
-keeps `recovery.wal_ops` replay bounded.
+keeps `recovery.wal_ops` replay bounded. The atomicity facts stay constant
+(`0`/`1`, `13`, and `packages+1`) at every scale — they are invariants, not
+measurements.
 
 ## Key APIs
 
@@ -124,8 +181,15 @@ keeps `recovery.wal_ops` replay bounded.
 - `store/txn.NewStoreWithOptions` / `Store.Begin` / `Tx.Commit` — apply
   transactions to the LPG and append them to the WAL atomically, with a typed
   weight codec so edge weights are durable (`OpAddEdgeWeighted`).
+- `store/txn.Tx.Rollback` — abort a buffered transaction; it discards the
+  buffered ops without touching the WAL or the graph, so an aborted transaction
+  writes neither op frames nor an `OpCommit` marker (the atomicity demo relies
+  on exactly this).
 - `store/txn.Tx.SetNodeLabel` / `SetEdgeLabel` / `SetNodeProperty` /
   `SetEdgeProperty` — record labels and typed properties through the WAL.
+- `store/wal.OpenReader` / `Reader.Frames` + `store/recovery.Decode` — read the
+  closed WAL back frame by frame and count `txn.OpCommit` markers, the
+  structural proof that the aborted transaction wrote nothing durable.
 - `graph/csr.BuildFromAdjList` — freeze the live adjacency list into the CSR
   view the snapshot persists.
 - `store/snapshot.WriteSnapshotFull` — write the v2 snapshot (`csr.bin` +

@@ -8,6 +8,17 @@ import (
 	"testing"
 )
 
+// Expected shape of the committed survivor and the aborted phantom, pinned
+// here independently of the example's own accounting so the test is a genuine
+// external check. survivorNodes/survivorEdges are what the committed survivor
+// adds on top of the genesis build; phantomOps is the number of mutations the
+// aborted phantom transaction buffers before it is rolled back.
+const (
+	survivorNodes = 2  // survivor Package + Release
+	survivorEdges = 2  // survivor PUBLISHED + DEPENDS_ON
+	phantomOps    = 13 // mutations buffered by the aborted phantom transaction
+)
+
 // testConfig is a small version of the default specification: the same
 // model and code path, sized to persist, snapshot and recover well under
 // the short-layer 60 s package budget. The shape is deterministic for the
@@ -45,33 +56,66 @@ func TestRun(t *testing.T) {
 	facts := parseFacts(t, out)
 
 	// Node counts are exact and independent of the RNG: one Release per
-	// Package, so packages == releases and the recovered node total is 2N.
+	// Package (2N for the genesis build) plus the committed survivor's two
+	// nodes (its Package and Release). The aborted phantom adds none.
 	if got := facts["nodes.packages"]; got != int64(cfg.packages) {
 		t.Errorf("nodes.packages = %d, want %d", got, cfg.packages)
 	}
 	if got := facts["nodes.releases"]; got != int64(cfg.packages) {
 		t.Errorf("nodes.releases = %d, want %d", got, cfg.packages)
 	}
-	if got := facts["recovered.nodes"]; got != int64(2*cfg.packages) {
-		t.Errorf("recovered.nodes = %d, want %d", got, 2*cfg.packages)
+	if got, want := facts["recovered.nodes"], int64(2*cfg.packages+survivorNodes); got != want {
+		t.Errorf("recovered.nodes = %d, want %d (2N genesis + survivor)", got, want)
 	}
 
-	// Exactly one PUBLISHED edge per package.
+	// Exactly one PUBLISHED edge per package (genesis only; the survivor's
+	// PUBLISHED edge is not counted in this genesis fact).
 	if got := facts["edges.published"]; got != int64(cfg.packages) {
 		t.Errorf("edges.published = %d, want %d", got, cfg.packages)
 	}
 
 	// DEPENDS_ON out-degree is in [depsMin, depsMax] per release, so the
-	// total lands in the corresponding band.
+	// total lands in the corresponding band (genesis only).
 	deps := facts["edges.depends_on"]
 	if lo, hi := int64(cfg.packages*cfg.depsMin), int64(cfg.packages*cfg.depsMax); deps < lo || deps > hi {
 		t.Errorf("edges.depends_on = %d, want within [%d,%d]", deps, lo, hi)
 	}
 
-	// The recovered edge total must equal what was committed: every
-	// PUBLISHED and DEPENDS_ON edge survived the round-trip.
-	if got, want := facts["recovered.edges"], facts["edges.published"]+deps; got != want {
-		t.Errorf("recovered.edges = %d, want %d (published+depends_on)", got, want)
+	// The recovered edge total must equal every committed edge: the genesis
+	// PUBLISHED and DEPENDS_ON edges plus the survivor's two edges. The aborted
+	// phantom's edges must not appear.
+	if got, want := facts["recovered.edges"], facts["edges.published"]+deps+survivorEdges; got != want {
+		t.Errorf("recovered.edges = %d, want %d (genesis published+depends_on + survivor)", got, want)
+	}
+
+	// ── Atomicity of the aborted transaction ─────────────────────────────────
+	// The phantom transaction buffers a fixed number of mutations, then aborts.
+	if got := facts["rollback.ops_attempted"]; got != phantomOps {
+		t.Errorf("rollback.ops_attempted = %d, want %d", got, phantomOps)
+	}
+	// The WAL holds one OpCommit marker per committed transaction — every
+	// genesis commit plus the single survivor — and none for the aborted one.
+	if got, want := facts["wal.commit_markers"], int64(cfg.packages+1); got != want {
+		t.Errorf("wal.commit_markers = %d, want %d (genesis + survivor, phantom leaves none)", got, want)
+	}
+	// Not one byte of the aborted transaction reached the durable log.
+	if got := facts["wal.phantom_frames"]; got != 0 {
+		t.Errorf("wal.phantom_frames = %d, want 0 (aborted tx must leave no trace in the WAL)", got)
+	}
+	// After the reopen, none of the phantom's entities are present, the state
+	// equals the pre-tx baseline, and both the write- and recovery-phase
+	// survivor facts confirm the committed transaction persisted.
+	if got := facts["rollback.applied_after_reopen"]; got != 0 {
+		t.Errorf("rollback.applied_after_reopen = %d, want 0 (rolled-back mutations must not survive)", got)
+	}
+	if got := facts["state.matches_pre_tx"]; got != 1 {
+		t.Errorf("state.matches_pre_tx = %d, want 1 (recovered graph must equal the pre-tx baseline)", got)
+	}
+	if got := facts["survivor.committed"]; got != 1 {
+		t.Errorf("survivor.committed = %d, want 1", got)
+	}
+	if got := facts["survivor.present"]; got != 1 {
+		t.Errorf("survivor.present = %d, want 1 (committed survivor must survive the reopen)", got)
 	}
 
 	// Both labels (Package, Release) are in use after recovery.
@@ -106,6 +150,38 @@ func TestRun(t *testing.T) {
 	// Downloads is a non-negative int64.
 	if dls := facts["recovered.sample_downloads"]; dls < 0 {
 		t.Errorf("recovered.sample_downloads = %d, want >= 0", dls)
+	}
+}
+
+// TestAtomicRollbackLeavesNoTrace is the focused regression pin for task
+// #1976: a deliberately aborted transaction must leave no trace after a reopen
+// from disk, while a committed transaction in the same run survives. run
+// fail-stops on any ACID violation, so a non-nil error here is itself the
+// signal that atomicity or durability regressed; the fact assertions document
+// the expected clean values.
+func TestAtomicRollbackLeavesNoTrace(t *testing.T) {
+	cfg := testConfig()
+	var buf bytes.Buffer
+	if err := run(context.Background(), &buf, cfg); err != nil {
+		t.Fatalf("run reported an ACID violation: %v", err)
+	}
+	facts := parseFacts(t, buf.String())
+
+	for _, c := range []struct {
+		key  string
+		want int64
+	}{
+		{"rollback.ops_attempted", phantomOps},          // the phantom buffered K mutations
+		{"rollback.applied_after_reopen", 0},            // none of them survived the reopen
+		{"wal.phantom_frames", 0},                       // and none reached the WAL
+		{"wal.commit_markers", int64(cfg.packages + 1)}, // one marker per committed tx, none for the abort
+		{"state.matches_pre_tx", 1},                     // recovered graph equals the pre-tx baseline
+		{"survivor.committed", 1},                       // the contrast: a committed tx ...
+		{"survivor.present", 1},                         // ... survives the same reopen
+	} {
+		if got := facts[c.key]; got != c.want {
+			t.Errorf("%s = %d, want %d", c.key, got, c.want)
+		}
 	}
 }
 

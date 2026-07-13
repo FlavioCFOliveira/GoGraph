@@ -17,6 +17,18 @@
 //     recovery.Open rebuilds the graph from the snapshot plus the WAL
 //     tail. The recovered graph is then queried back through the LPG
 //     read API to confirm counts and sample property values round-trip.
+//  4. Atomicity on the abort path is demonstrated deliberately: two extra
+//     transactions run on the same store just before the snapshot — a
+//     committed "survivor" publication that must persist, and a "phantom"
+//     publication whose release accidentally declares a DEPENDS_ON its own
+//     owning package (a self-dependency the supply-chain invariant forbids),
+//     so it is intentionally aborted with Tx.Rollback instead of committed.
+//     After the reopen the recovered graph must equal the pre-transaction
+//     state exactly: the survivor is present, none of the phantom's nodes,
+//     edges, labels or properties are, and the WAL holds no OpCommit marker
+//     (and not one byte) of the aborted transaction. A rolled-back mutation
+//     that survived would be an Atomicity violation and is surfaced as a
+//     fatal error, not hidden.
 //
 // # Model
 //
@@ -57,6 +69,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -68,6 +81,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -97,6 +111,36 @@ const (
 
 	// Typed edge properties.
 	propConstraint = "constraint" // DEPENDS_ON.constraint (string, e.g. "^1.4.0")
+)
+
+// Fixed identities for the atomicity demonstration. They are deliberately
+// literal (never seed-derived) so the survivor and phantom are byte-stable
+// across seeds, and shaped so they cannot collide with a generated package
+// name (which is always "<prefix>-<noun>-<index>" with a numeric suffix).
+const (
+	// survivor* names the committed transaction that must survive the reopen.
+	survivorPkgKey           = "hotfix-security-pkg"
+	survivorRelKey           = "hotfix-security-pkg@2.0.0"
+	survivorVersion          = "2.0.0"
+	survivorDownloads  int64 = 4_200_000
+	survivorConstraint       = "^1.0.0"
+
+	// phantom* names the intentionally aborted transaction that must leave no
+	// trace. Its release declares a self-dependency on its own owning package,
+	// which violates the supply-chain invariant and triggers the rollback.
+	phantomPkgKey           = "phantom-rogue-pkg"
+	phantomRelKey           = "phantom-rogue-pkg@9.9.9"
+	phantomVersion          = "9.9.9"
+	phantomDownloads  int64 = 9_000_000
+	phantomConstraint       = "^9.0.0"
+)
+
+// Fixed publish timestamps for the survivor and phantom releases, anchored to
+// constants rather than the wall clock so the demonstration stays reproducible.
+// Immutable after init.
+var (
+	survivorPub = time.Date(2024, time.June, 1, 0, 0, 0, 0, time.UTC)
+	phantomPub  = time.Date(2023, time.March, 15, 0, 0, 0, 0, time.UTC)
 )
 
 // config captures every scale and shape knob of the example. The zero
@@ -183,8 +227,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	// Phase 1: build the graph through WAL-committed transactions.
-	stats, err := commit(ctx, dir, cfg, w)
+	// Phase 1: build the graph through WAL-committed transactions, then run the
+	// committed-survivor / aborted-phantom atomicity contrast on the same store.
+	stats, rb, err := commit(ctx, dir, cfg, w)
 	if err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -192,8 +237,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return err
 	}
 
-	// Phase 2: drop every in-memory reference and rebuild from disk.
-	if err := restore(ctx, dir, &stats, w); err != nil {
+	// Phase 2: drop every in-memory reference and rebuild from disk, proving
+	// the committed data survived and the aborted transaction left no trace.
+	if err := restore(ctx, dir, &stats, &rb, w); err != nil {
 		return fmt.Errorf("restore: %w", err)
 	}
 	return nil
@@ -217,14 +263,36 @@ type commitStats struct {
 	samplePub   time.Time
 }
 
+// rollbackStats captures the atomicity demonstration: the committed survivor,
+// the intentionally aborted phantom, the pre-transaction baseline the abort
+// must not disturb, and the WAL's structural proof that the abort wrote
+// nothing. The pre-tx baseline is snapshotted from the in-memory graph after
+// the survivor commit and before the phantom transaction, so it is the durable
+// state as of the last commit — exactly what the recovered graph must equal.
+type rollbackStats struct {
+	opsAttempted  int // mutations buffered by the aborted phantom transaction (K)
+	walMarkers    int // OpCommit markers in the WAL (genesis commits + survivor)
+	phantomFrames int // WAL frames whose payload contains the phantom name (must be 0)
+
+	preNodes     uint64 // in-memory node count at the pre-tx baseline
+	preEdges     uint64 // in-memory edge count at the pre-tx baseline
+	preLabels    int    // distinct node labels in use at the pre-tx baseline
+	preNodeProps int    // total node properties at the pre-tx baseline
+
+	survivorDep string // the DEPENDS_ON target of the committed survivor
+	phantomDep  string // the (self-referential) DEPENDS_ON target of the phantom
+}
+
 // commit builds the seeded supply-chain graph entirely through WAL
 // transactions -- one committed transaction per package (package node,
-// release node, and their PUBLISHED/DEPENDS_ON edges) -- and takes a v2
-// snapshot. It returns the realised shape and the on-disk byte footprint.
-// The write loop polls ctx for cancellation every cfg.batch packages.
+// release node, and their PUBLISHED/DEPENDS_ON edges) -- then runs the
+// committed-survivor / aborted-phantom atomicity contrast on the same store,
+// and takes a v2 snapshot. It returns the realised shape, the atomicity
+// demonstration's facts, and the on-disk byte footprint. The write loop polls
+// ctx for cancellation every cfg.batch packages.
 //
 //nolint:gocyclo // one linear build pipeline: nodes+labels+props, then edges+props, one tx per package.
-func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitStats, error) {
+func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitStats, rollbackStats, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional — the example must
 	// reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
@@ -233,7 +301,7 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 	walPath := filepath.Join(dir, "wal")
 	wl, err := wal.Open(walPath)
 	if err != nil {
-		return commitStats{}, fmt.Errorf("wal.Open: %w", err)
+		return commitStats{}, rollbackStats{}, fmt.Errorf("wal.Open: %w", err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	store := txn.NewStoreWithOptions(g, wl, txn.Options[string, int64]{
@@ -263,7 +331,7 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 		if i%cfg.batch == 0 {
 			if err := ctx.Err(); err != nil {
 				_ = wl.Close()
-				return commitStats{}, err
+				return commitStats{}, rollbackStats{}, err
 			}
 		}
 		tx := store.Begin()
@@ -271,16 +339,16 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 		// Package node, its label and typed properties.
 		pkg, rel := pkgKeys[i], relKeys[i]
 		if err := txSetNode(tx, pkg, labelPackage); err != nil {
-			return commitStats{}, abort(tx, wl, err)
+			return commitStats{}, rollbackStats{}, abort(tx, wl, err)
 		}
 		if err := tx.SetNodeProperty(pkg, propName, lpg.StringValue(pkg)); err != nil {
-			return commitStats{}, abort(tx, wl, fmt.Errorf("set %s.name: %w", pkg, err))
+			return commitStats{}, rollbackStats{}, abort(tx, wl, fmt.Errorf("set %s.name: %w", pkg, err))
 		}
 		if err := tx.SetNodeProperty(pkg, propLanguage, lpg.StringValue(languages[i%len(languages)])); err != nil {
-			return commitStats{}, abort(tx, wl, fmt.Errorf("set %s.language: %w", pkg, err))
+			return commitStats{}, rollbackStats{}, abort(tx, wl, fmt.Errorf("set %s.language: %w", pkg, err))
 		}
 		if err := tx.SetNodeProperty(pkg, propDownloads, lpg.Int64Value(downloads[i])); err != nil {
-			return commitStats{}, abort(tx, wl, fmt.Errorf("set %s.downloads: %w", pkg, err))
+			return commitStats{}, rollbackStats{}, abort(tx, wl, fmt.Errorf("set %s.downloads: %w", pkg, err))
 		}
 
 		// Release node, its label and typed properties.
@@ -289,21 +357,21 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 			st.samplePub = published
 		}
 		if err := txSetNode(tx, rel, labelRelease); err != nil {
-			return commitStats{}, abort(tx, wl, err)
+			return commitStats{}, rollbackStats{}, abort(tx, wl, err)
 		}
 		if err := tx.SetNodeProperty(rel, propCoord, lpg.StringValue(rel)); err != nil {
-			return commitStats{}, abort(tx, wl, fmt.Errorf("set %s.coord: %w", rel, err))
+			return commitStats{}, rollbackStats{}, abort(tx, wl, fmt.Errorf("set %s.coord: %w", rel, err))
 		}
 		if err := tx.SetNodeProperty(rel, propVersion, lpg.StringValue(versionOf(rel))); err != nil {
-			return commitStats{}, abort(tx, wl, fmt.Errorf("set %s.version: %w", rel, err))
+			return commitStats{}, rollbackStats{}, abort(tx, wl, fmt.Errorf("set %s.version: %w", rel, err))
 		}
 		if err := tx.SetNodeProperty(rel, propPublishedt, lpg.TimeValue(published)); err != nil {
-			return commitStats{}, abort(tx, wl, fmt.Errorf("set %s.published: %w", rel, err))
+			return commitStats{}, rollbackStats{}, abort(tx, wl, fmt.Errorf("set %s.published: %w", rel, err))
 		}
 
 		// PUBLISHED edge: the package owns its release (weight = 1).
 		if err := txAddLabeledEdge(tx, pkg, rel, 1, relPublished); err != nil {
-			return commitStats{}, abort(tx, wl, err)
+			return commitStats{}, rollbackStats{}, abort(tx, wl, err)
 		}
 		st.publishedE++
 
@@ -321,10 +389,10 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 		rank := int64(1)
 		for j := range deps {
 			if err := txAddLabeledEdge(tx, rel, pkgKeys[j], rank, relDependsOn); err != nil {
-				return commitStats{}, abort(tx, wl, err)
+				return commitStats{}, rollbackStats{}, abort(tx, wl, err)
 			}
 			if err := tx.SetEdgeProperty(rel, pkgKeys[j], propConstraint, lpg.StringValue(constraintOf(rng))); err != nil {
-				return commitStats{}, abort(tx, wl, fmt.Errorf("set constraint: %w", err))
+				return commitStats{}, rollbackStats{}, abort(tx, wl, fmt.Errorf("set constraint: %w", err))
 			}
 			st.dependsOnE++
 			rank++
@@ -332,18 +400,39 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 
 		if err := tx.Commit(); err != nil {
 			_ = wl.Close()
-			return commitStats{}, fmt.Errorf("commit tx at package %d: %w", i, err)
+			return commitStats{}, rollbackStats{}, fmt.Errorf("commit tx at package %d: %w", i, err)
 		}
 		st.commits++
 	}
+
+	// Atomicity demonstration on the same store and WAL: commit a survivor
+	// publication, then attempt a phantom publication that violates the
+	// supply-chain invariant and abort it with Rollback. The survivor must
+	// survive the reopen; the phantom must leave no trace.
+	rb, err := demonstrateAtomicRollback(store, g, pkgKeys[0])
+	if err != nil {
+		_ = wl.Close()
+		return commitStats{}, rollbackStats{}, fmt.Errorf("atomic-rollback demo: %w", err)
+	}
+	st.commits++ // the committed survivor transaction
 	_ = wl.Close()
 
 	// Take a v2 snapshot (CSR + labels.bin + properties.bin) as a checkpoint
-	// alongside the WAL, the same protocol a background checkpointer uses.
+	// alongside the WAL, the same protocol a background checkpointer uses. It
+	// reflects the graph after the survivor commit and the phantom rollback, so
+	// the phantom is absent from the checkpoint by construction.
 	cs := csr.BuildFromAdjList(g.AdjList())
 	snapDir := filepath.Join(dir, "snapshot")
 	if err := snapshot.WriteSnapshotFull(snapDir, cs, g); err != nil {
-		return commitStats{}, fmt.Errorf("WriteSnapshotFull: %w", err)
+		return commitStats{}, rollbackStats{}, fmt.Errorf("WriteSnapshotFull: %w", err)
+	}
+
+	// Structural proof, read straight from the closed WAL: exactly one OpCommit
+	// marker per committed transaction (genesis + survivor) and not a single
+	// byte of the aborted phantom anywhere in the log.
+	rb.walMarkers, rb.phantomFrames, err = inspectWAL(walPath, phantomPkgKey)
+	if err != nil {
+		return commitStats{}, rollbackStats{}, fmt.Errorf("inspectWAL: %w", err)
 	}
 
 	st.elapsed = time.Since(start)
@@ -356,6 +445,26 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 	fmt.Fprintf(w, "edges.published=%d\n", st.publishedE)
 	fmt.Fprintf(w, "edges.depends_on=%d\n", st.dependsOnE)
 
+	// Deterministic facts of the atomicity demonstration.
+	fmt.Fprintf(w, "survivor.committed=1\n")
+	fmt.Fprintf(w, "rollback.ops_attempted=%d\n", rb.opsAttempted)
+	fmt.Fprintf(w, "wal.commit_markers=%d\n", rb.walMarkers)
+	fmt.Fprintf(w, "wal.phantom_frames=%d\n", rb.phantomFrames)
+
+	// Fail-stop: the WAL must carry one marker per committed transaction and no
+	// trace of the aborted one. A mismatch means the rolled-back transaction
+	// leaked to the durable log — an Atomicity violation, surfaced, not hidden.
+	if rb.walMarkers != st.commits {
+		return commitStats{}, rollbackStats{}, fmt.Errorf(
+			"ATOMICITY VIOLATION: WAL holds %d OpCommit markers, want %d (one per committed transaction); the aborted transaction may have leaked a marker",
+			rb.walMarkers, st.commits)
+	}
+	if rb.phantomFrames != 0 {
+		return commitStats{}, rollbackStats{}, fmt.Errorf(
+			"ATOMICITY VIOLATION: the aborted transaction's identity appears in %d WAL frame(s); a rolled-back mutation reached the durable log",
+			rb.phantomFrames)
+	}
+
 	// Volatile telemetry: write throughput and on-disk footprint.
 	edges := st.publishedE + st.dependsOnE
 	fmt.Fprintf(w, "# commit.elapsed=%s\n", st.elapsed.Round(time.Millisecond))
@@ -364,7 +473,7 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 	fmt.Fprintf(w, "# disk.wal_bytes=%s\n", humanBytes(st.walBytes))
 	fmt.Fprintf(w, "# disk.snapshot_bytes=%s\n", humanBytes(st.snapBytes))
 	fmt.Fprintf(w, "# disk.bytes_per_edge=%.1f\n", safeDiv(float64(st.walBytes+st.snapBytes), float64(edges)))
-	return st, nil
+	return st, rb, nil
 }
 
 // restore drops the in-memory graph, rebuilds it from disk with
@@ -374,7 +483,7 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 // wall-clock and the live heap before vs after recovery.
 //
 //nolint:gocyclo // the recovery-verification step is a flat sequence of independent property round-trip checks.
-func restore(ctx context.Context, dir string, st *commitStats, w io.Writer) error {
+func restore(ctx context.Context, dir string, st *commitStats, rb *rollbackStats, w io.Writer) error {
 	before := readMem()
 
 	start := time.Now()
@@ -436,6 +545,45 @@ func restore(ctx context.Context, dir string, st *commitStats, w io.Writer) erro
 		return err
 	}
 	fmt.Fprintf(w, "recovered.sample_published=%s\n", st.samplePub.UTC().Format("2006-01-02"))
+
+	// ── Atomicity of the aborted transaction ─────────────────────────────────
+	// Count how many of the phantom transaction's entities (nodes, labels, node
+	// property, both edges, edge property) survived into the recovered graph.
+	// Atomicity on the abort path demands zero.
+	applied := countPhantomSurvivors(g, adj, rb)
+	fmt.Fprintf(w, "rollback.applied_after_reopen=%d\n", applied)
+
+	// The recovered graph must equal the pre-transaction baseline exactly —
+	// same node, edge, label and node-property counts.
+	recProps := countNodeProperties(g, adj)
+	matches := adj.Order() == rb.preNodes &&
+		adj.Size() == rb.preEdges &&
+		len(g.NodeLabelsInUse()) == rb.preLabels &&
+		recProps == rb.preNodeProps
+	fmt.Fprintf(w, "state.matches_pre_tx=%d\n", b2i(matches))
+
+	// The committed survivor, by contrast, must be fully present.
+	survived := survivorPresent(g, adj, rb)
+	fmt.Fprintf(w, "survivor.present=%d\n", b2i(survived))
+
+	// Fail-stop: a rolled-back mutation that survived, a pre-tx baseline that
+	// drifted, or a lost committed survivor is an ACID violation — surface it
+	// with the concrete divergence rather than reporting success.
+	if applied != 0 {
+		return fmt.Errorf(
+			"ATOMICITY VIOLATION: %d entit(y/ies) of the rolled-back transaction (%s / %s) survived into the recovered graph",
+			applied, phantomPkgKey, phantomRelKey)
+	}
+	if !matches {
+		return fmt.Errorf(
+			"ATOMICITY VIOLATION: recovered state diverged from the pre-tx baseline (nodes %d want %d, edges %d want %d, labels %d want %d, node-props %d want %d)",
+			adj.Order(), rb.preNodes, adj.Size(), rb.preEdges,
+			len(g.NodeLabelsInUse()), rb.preLabels, recProps, rb.preNodeProps)
+	}
+	if !survived {
+		return fmt.Errorf(
+			"DURABILITY VIOLATION: the committed survivor %q was lost after reopen", survivorPkgKey)
+	}
 
 	// Volatile telemetry: recovery cost and the live-heap footprint of the
 	// recovered graph (after a forced GC, so it reflects reachable bytes).
@@ -524,6 +672,268 @@ func abort(tx *txn.Tx[string, int64], wl *wal.Writer, cause error) error {
 	_ = tx.Rollback()
 	_ = wl.Close()
 	return cause
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Atomicity demonstration: a committed survivor vs an aborted phantom
+// ─────────────────────────────────────────────────────────────────────────────
+
+// demonstrateAtomicRollback runs the committed-survivor / aborted-phantom
+// contrast on store, sharing the same WAL as the genesis build. It commits a
+// well-formed "survivor" publication (which must persist), snapshots the
+// in-memory graph as the pre-transaction baseline, then buffers a "phantom"
+// publication and aborts it with Rollback because its release declares a
+// DEPENDS_ON its own owning package — a self-dependency the supply-chain
+// invariant forbids. survivorDep is an existing package the survivor legitimately
+// depends on (genesis package 0). It returns the demonstration's facts; the WAL
+// marker/phantom-frame counts are filled in by the caller after the WAL closes.
+func demonstrateAtomicRollback(store *txn.Store[string, int64], g *lpg.Graph[string, int64], survivorDep string) (rollbackStats, error) {
+	rb := rollbackStats{survivorDep: survivorDep, phantomDep: phantomPkgKey}
+
+	// (a) The committed survivor — a routine publication that satisfies every
+	// invariant, so it commits and must survive the reopen.
+	if err := commitSurvivor(store, survivorDep); err != nil {
+		return rollbackStats{}, fmt.Errorf("survivor: %w", err)
+	}
+
+	// Capture the pre-transaction baseline: the durable state as of the last
+	// commit, against which the aborted transaction must leave no trace.
+	adj := g.AdjList()
+	rb.preNodes = adj.Order()
+	rb.preEdges = adj.Size()
+	rb.preLabels = len(g.NodeLabelsInUse())
+	rb.preNodeProps = countNodeProperties(g, adj)
+
+	// (b) The aborted phantom — a publication buffered in full, then rolled
+	// back because it violates the supply-chain invariant.
+	k, err := attemptPhantom(store, phantomPkgKey, rb.phantomDep)
+	if err != nil {
+		return rollbackStats{}, fmt.Errorf("phantom: %w", err)
+	}
+	rb.opsAttempted = k
+	return rb, nil
+}
+
+// commitSurvivor buffers a well-formed publication and commits it, so the whole
+// transaction becomes durable and must survive the reopen. survivorDep is the
+// existing package it declares a DEPENDS_ON edge to.
+func commitSurvivor(store *txn.Store[string, int64], survivorDep string) error {
+	tx := store.Begin()
+	if _, err := buildPublication(tx, survivorPkgKey, survivorRelKey,
+		survivorDownloads, survivorVersion, survivorPub, survivorDep, survivorConstraint); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("build: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// attemptPhantom buffers a full publication for owningPkg/phantomRelKey whose
+// release declares a DEPENDS_ON edge to depTarget, then enforces the
+// supply-chain invariant that a release must not depend on its own owning
+// package. Because depTarget is owningPkg here, the invariant is violated and
+// the whole transaction is rolled back: Atomicity guarantees none of the k
+// buffered mutations reach the WAL or the graph. It returns k, the number of
+// mutations that were buffered before the abort.
+func attemptPhantom(store *txn.Store[string, int64], owningPkg, depTarget string) (int, error) {
+	tx := store.Begin()
+	k, err := buildPublication(tx, owningPkg, phantomRelKey,
+		phantomDownloads, phantomVersion, phantomPub, depTarget, phantomConstraint)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("build: %w", err)
+	}
+	// Consistency invariant: a Release must not DEPENDS_ON its own owning
+	// Package. When the buffered publication violates it, abort before commit.
+	if depTarget == owningPkg {
+		if rerr := tx.Rollback(); rerr != nil {
+			return 0, fmt.Errorf("rollback: %w", rerr)
+		}
+		return k, nil
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return 0, fmt.Errorf("commit: %w", cerr)
+	}
+	return k, nil
+}
+
+// buildPublication buffers a complete package publication into tx — the Package
+// and Release nodes with their labels and typed properties, the PUBLISHED edge,
+// and one DEPENDS_ON edge (with a version-constraint property) to depTarget —
+// and returns the number of mutations buffered. It neither commits nor rolls
+// back: the caller owns the transaction's fate, so the committed survivor and
+// the aborted phantom go through this one builder and differ only in whether
+// the caller calls Commit or Rollback.
+func buildPublication(tx *txn.Tx[string, int64], pkg, rel string, downloads int64, version string, published time.Time, depTarget, constraint string) (int, error) {
+	ops := 0
+	add := func(err error) error {
+		if err == nil {
+			ops++
+		}
+		return err
+	}
+
+	// Package node, label and typed properties.
+	if err := add(tx.SetNodeLabel(pkg, labelPackage)); err != nil {
+		return ops, fmt.Errorf("pkg label: %w", err)
+	}
+	if err := add(tx.SetNodeProperty(pkg, propName, lpg.StringValue(pkg))); err != nil {
+		return ops, fmt.Errorf("pkg name: %w", err)
+	}
+	if err := add(tx.SetNodeProperty(pkg, propLanguage, lpg.StringValue("Go"))); err != nil {
+		return ops, fmt.Errorf("pkg language: %w", err)
+	}
+	if err := add(tx.SetNodeProperty(pkg, propDownloads, lpg.Int64Value(downloads))); err != nil {
+		return ops, fmt.Errorf("pkg downloads: %w", err)
+	}
+
+	// Release node, label and typed properties.
+	if err := add(tx.SetNodeLabel(rel, labelRelease)); err != nil {
+		return ops, fmt.Errorf("rel label: %w", err)
+	}
+	if err := add(tx.SetNodeProperty(rel, propCoord, lpg.StringValue(rel))); err != nil {
+		return ops, fmt.Errorf("rel coord: %w", err)
+	}
+	if err := add(tx.SetNodeProperty(rel, propVersion, lpg.StringValue(version))); err != nil {
+		return ops, fmt.Errorf("rel version: %w", err)
+	}
+	if err := add(tx.SetNodeProperty(rel, propPublishedt, lpg.TimeValue(published))); err != nil {
+		return ops, fmt.Errorf("rel published: %w", err)
+	}
+
+	// PUBLISHED edge: the package owns its release (weight = 1).
+	if err := add(tx.AddEdge(pkg, rel, 1)); err != nil {
+		return ops, fmt.Errorf("PUBLISHED edge: %w", err)
+	}
+	if err := add(tx.SetEdgeLabel(pkg, rel, relPublished)); err != nil {
+		return ops, fmt.Errorf("PUBLISHED label: %w", err)
+	}
+
+	// DEPENDS_ON edge to depTarget, with a version-constraint property.
+	if err := add(tx.AddEdge(rel, depTarget, 1)); err != nil {
+		return ops, fmt.Errorf("DEPENDS_ON edge: %w", err)
+	}
+	if err := add(tx.SetEdgeLabel(rel, depTarget, relDependsOn)); err != nil {
+		return ops, fmt.Errorf("DEPENDS_ON label: %w", err)
+	}
+	if err := add(tx.SetEdgeProperty(rel, depTarget, propConstraint, lpg.StringValue(constraint))); err != nil {
+		return ops, fmt.Errorf("DEPENDS_ON constraint: %w", err)
+	}
+
+	return ops, nil
+}
+
+// inspectWAL reads the closed WAL back frame by frame and returns the number of
+// OpCommit markers it holds and the number of frames whose raw payload contains
+// phantom (the aborted transaction's package name — the string codec stores raw
+// UTF-8, so a committed phantom op would leave its bytes here). For a correct
+// module the marker count equals the number of committed transactions and the
+// phantom-frame count is zero: the aborted transaction wrote neither a marker
+// nor a single op frame.
+func inspectWAL(walPath, phantom string) (markers, phantomFrames int, err error) {
+	r, err := wal.OpenReader(walPath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("wal.OpenReader: %w", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	needle := []byte(phantom)
+	for f := range r.Frames() {
+		if op, derr := recovery.Decode(f.Payload); derr == nil && op.Kind == txn.OpCommit {
+			markers++
+		}
+		if bytes.Contains(f.Payload, needle) {
+			phantomFrames++
+		}
+	}
+	if te := r.TailError(); te != nil {
+		return markers, phantomFrames, fmt.Errorf("wal tail: %w", te)
+	}
+	return markers, phantomFrames, nil
+}
+
+// countNodeProperties returns the total number of node properties in g, walking
+// every interned node via the mapper. It is used to snapshot the pre-tx
+// baseline and to confirm the recovered graph carries exactly the same number
+// of node properties — a rolled-back property write would inflate the count.
+func countNodeProperties(g *lpg.Graph[string, int64], adj *adjlist.AdjList[string, int64]) int {
+	total := 0
+	adj.Mapper().Walk(func(id graph.NodeID, _ string) bool {
+		g.NodePropertiesByIDFunc(id, func(string, lpg.PropertyValue) { total++ })
+		return true
+	})
+	return total
+}
+
+// countPhantomSurvivors counts how many of the aborted phantom transaction's
+// entities are present in the recovered graph: the two nodes, the node label,
+// a node property, both edges, and the edge property. Atomicity on the abort
+// path requires the result to be zero.
+func countPhantomSurvivors(g *lpg.Graph[string, int64], adj *adjlist.AdjList[string, int64], rb *rollbackStats) int {
+	n := 0
+	if _, ok := adj.Mapper().Lookup(phantomPkgKey); ok {
+		n++ // phantom package node
+	}
+	if _, ok := adj.Mapper().Lookup(phantomRelKey); ok {
+		n++ // phantom release node
+	}
+	if g.HasNodeLabel(phantomPkgKey, labelPackage) {
+		n++ // phantom node label
+	}
+	if _, ok := g.GetNodeProperty(phantomPkgKey, propName); ok {
+		n++ // phantom node property
+	}
+	if adj.HasEdge(phantomPkgKey, phantomRelKey) {
+		n++ // phantom PUBLISHED edge
+	}
+	if adj.HasEdge(phantomRelKey, rb.phantomDep) {
+		n++ // phantom DEPENDS_ON (self-dependency) edge
+	}
+	if _, ok := g.GetEdgeProperty(phantomRelKey, rb.phantomDep, propConstraint); ok {
+		n++ // phantom edge property
+	}
+	return n
+}
+
+// survivorPresent reports whether every entity of the committed survivor
+// transaction is present in the recovered graph — the two nodes, both labels,
+// a node property, both edges, and the edge property.
+func survivorPresent(g *lpg.Graph[string, int64], adj *adjlist.AdjList[string, int64], rb *rollbackStats) bool {
+	if _, ok := adj.Mapper().Lookup(survivorPkgKey); !ok {
+		return false
+	}
+	if !g.HasNodeLabel(survivorPkgKey, labelPackage) {
+		return false
+	}
+	if _, ok := g.GetNodeProperty(survivorPkgKey, propName); !ok {
+		return false
+	}
+	if !g.HasNodeLabel(survivorRelKey, labelRelease) {
+		return false
+	}
+	if !adj.HasEdge(survivorPkgKey, survivorRelKey) { // PUBLISHED
+		return false
+	}
+	if !g.HasEdgeLabel(survivorPkgKey, survivorRelKey, relPublished) {
+		return false
+	}
+	if !adj.HasEdge(survivorRelKey, rb.survivorDep) { // DEPENDS_ON
+		return false
+	}
+	if _, ok := g.GetEdgeProperty(survivorRelKey, rb.survivorDep, propConstraint); !ok {
+		return false
+	}
+	return true
+}
+
+// b2i maps a boolean invariant to a deterministic 1/0 fact value.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
