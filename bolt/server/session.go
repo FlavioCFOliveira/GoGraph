@@ -1252,6 +1252,14 @@ func (s *Session) handleCommit() ([]any, error) {
 	if s.state != StateTxReady {
 		return s.failTransition(m)
 	}
+	// Defence in depth (CWE-306): a client that sent LOGOFF while a transaction
+	// was open (which leaves the session in TX_READY but unauthenticated) must
+	// not be able to finalise it. RUN/BEGIN/ROUTE are already auth-gated; gate
+	// the transaction-finalising transitions the same way (audit 2026-07-13
+	// security F5).
+	if !s.authenticated {
+		return s.failTransition(m)
+	}
 
 	// Commit the transaction if one is active.
 	if s.tx != nil {
@@ -1289,6 +1297,11 @@ func (s *Session) handleCommit() ([]any, error) {
 func (s *Session) handleRollback() ([]any, error) {
 	m := &proto.Rollback{}
 	if s.state != StateTxReady {
+		return s.failTransition(m)
+	}
+	// See handleCommit: an unauthenticated (post-LOGOFF) session must not drive
+	// a transaction transition (CWE-306, audit 2026-07-13 security F5).
+	if !s.authenticated {
 		return s.failTransition(m)
 	}
 
