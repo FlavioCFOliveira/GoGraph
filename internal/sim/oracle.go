@@ -562,6 +562,22 @@ func (o *GraphOracle) personNamesSorted() []string {
 	return names
 }
 
+// personsWithOutgoingKnows returns how many Person nodes have at least one
+// outgoing KNOWS edge — the independent reference for the EXISTS { (n)-[:KNOWS]->() }
+// subquery count in the Cypher-surface battery.
+func (o *GraphOracle) personsWithOutgoingKnows() int {
+	srcs := make(map[uint64]bool)
+	for k := range o.edges {
+		if k.label != "KNOWS" {
+			continue
+		}
+		if n, ok := o.nodes[k.src]; ok && hasLabel(n, "Person") {
+			srcs[k.src] = true
+		}
+	}
+	return len(srcs)
+}
+
 // knowsCount returns how many KNOWS edges the oracle models.
 func (o *GraphOracle) knowsCount() int {
 	c := 0

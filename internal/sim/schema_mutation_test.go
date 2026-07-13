@@ -117,7 +117,9 @@ func TestSchemaMutation_OracleModelsMutations(t *testing.T) {
 	create(tmplAddVip, map[string]any{"name": name},
 		func() { oracle.ApplyMatch(tmplAddVip, map[string]any{"name": name}) })
 	create(tmplMergeProps, map[string]any{"name": name, "props": map[string]any{"score": int64(7)}},
-		func() { oracle.ApplyMatch(tmplMergeProps, map[string]any{"name": name, "props": map[string]any{"score": int64(7)}}) })
+		func() {
+			oracle.ApplyMatch(tmplMergeProps, map[string]any{"name": name, "props": map[string]any{"score": int64(7)}})
+		})
 	create(tmplRemoveTag, map[string]any{"name": name},
 		func() { oracle.ApplyMatch(tmplRemoveTag, map[string]any{"name": name}) })
 	create(tmplRemoveVip, map[string]any{"name": name},
