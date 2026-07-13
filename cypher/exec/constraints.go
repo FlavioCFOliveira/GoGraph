@@ -711,16 +711,18 @@ func humanConstraintValue(v lpg.PropertyValue) string {
 // UNIQUE constraint does not constrain (null-handling is the NOT NULL
 // constraint's job) — so callers skip the uniqueness check for it.
 //
-// Every non-null kind produces a key, and the key is namespaced by a
-// kind-specific tag so two values of different kinds never collide (e.g. the
-// string "1", the integer 1, and the float 1.0 map to three distinct keys).
-// The encoding is injective within a kind: integers and times use their exact
-// integral representation, floats use their IEEE-754 bit pattern (so +0/-0 and
-// every NaN payload are distinguished, matching value identity rather than
-// numeric equality), bytes use base64. This mirrors the canonical property
-// encoding the snapshot layer uses (store/snapshot/properties.go), so a
-// constraint enforced in memory and one re-seeded from a recovered graph agree
-// on what counts as a duplicate.
+// Numbers use VALUE-EQUIVALENCE semantics so the UNIQUE check agrees with
+// openCypher = and with MERGE (#1240): an integral float within int64 range
+// folds onto the identical integer, so the integer 1 and the float 1.0 (and
+// +0.0 / -0.0) map to ONE key, while a distinct kind such as the string "1"
+// stays separate. All NaN values collapse to a single key (NaN ≡ NaN, matching
+// value-equivalence). A non-integral or out-of-int64-range float keeps its
+// IEEE-754 bits. Value-equivalence is exact-value-based and therefore transitive
+// — the property a value-set map key requires — so two integers beyond 2^53 that
+// share a float64 rounding are NOT folded together (they are distinct values).
+// Times use an injective RFC3339Nano form, bytes base64. Both the live check and
+// the recovery re-seed apply this same function to the lpg.PropertyValue, so
+// they agree on what counts as a duplicate.
 func propertyValueToString(value lpg.PropertyValue) (string, bool) {
 	switch value.Kind() {
 	case lpg.PropString:
@@ -728,13 +730,10 @@ func propertyValueToString(value lpg.PropertyValue) (string, bool) {
 		return "\x00s\x00" + s, true
 	case lpg.PropInt64:
 		i, _ := value.Int64()
-		return "\x00i\x00" + strconv.FormatInt(i, 10), true
+		return numericCanonicalKey(i), true
 	case lpg.PropFloat64:
 		f, _ := value.Float64()
-		// IEEE-754 bit pattern: injective over all float64 values (including
-		// the sign of zero and every NaN payload), unlike %g which collapses
-		// them.
-		return "\x00f\x00" + strconv.FormatUint(math.Float64bits(f), 16), true
+		return floatCanonicalKey(f), true
 	case lpg.PropBool:
 		b, _ := value.Bool()
 		if b {
@@ -756,6 +755,33 @@ func propertyValueToString(value lpg.PropertyValue) (string, bool) {
 	}
 	// Zero PropertyValue (Kind == 0): null. Not subject to a UNIQUE check.
 	return "", false
+}
+
+// numericCanonicalKey is the value-set key for an integer: the shared numeric
+// namespace an equal integral float folds into (see [floatCanonicalKey]).
+func numericCanonicalKey(i int64) string {
+	return "\x00#\x00" + strconv.FormatInt(i, 10)
+}
+
+// float64IntBound is 2^63 as a float64 (exactly representable). A finite float
+// strictly below it in magnitude, and >= -2^63, converts to int64 without
+// overflow; the guard keeps the int64(f) conversion well-defined.
+const float64IntBound = 9223372036854775808.0 // 2^63
+
+// floatCanonicalKey is the value-set key for a float. A finite, integral float
+// within int64 range folds onto the identical integer key (so 1.0 ≡ 1, and
+// +0.0 / -0.0 ≡ 0); every NaN collapses to one key (NaN ≡ NaN); any other float
+// keeps its IEEE-754 bits (injective and distinct from every integer).
+func floatCanonicalKey(f float64) string {
+	if math.IsNaN(f) {
+		return "\x00#nan\x00" // all NaN are value-equivalent
+	}
+	if !math.IsInf(f, 0) && f == math.Trunc(f) && f >= -float64IntBound && f < float64IntBound {
+		if n := int64(f); float64(n) == f {
+			return numericCanonicalKey(n) // integral: fold onto the integer
+		}
+	}
+	return "\x00#f\x00" + strconv.FormatUint(math.Float64bits(f), 16)
 }
 
 // encodeListKey builds an injective canonical key for a PropList by joining
