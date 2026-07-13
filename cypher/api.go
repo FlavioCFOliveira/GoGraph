@@ -710,6 +710,23 @@ type ConstraintDef struct {
 // Write queries remain subject to the underlying store's single-writer
 // constraint: when the Engine is backed by a [txn.Store], concurrent
 // [Engine.RunInTx] calls serialise on the store's writer mutex.
+//
+// # Write-path contract (secondary indexes)
+//
+// Secondary indexes the Engine maintains (via CREATE INDEX, and the backing
+// indexes of UNIQUE constraints) are updated ONLY by writes that go through the
+// Engine — [Engine.RunInTx] / [Engine.RunAny]. When an Engine maintains such
+// indexes over a [txn.Store], DO NOT also issue raw writes directly against the
+// same store (txn.Tx AddNode / SetNodeLabel / SetNodeProperty / …): those bypass
+// the Engine's index maintenance, so the secondary indexes go stale relative to
+// the graph (an index-accelerated MATCH may miss nodes a label scan still finds)
+// until the next restart, which rebuilds them. This is an intentional layering
+// boundary — [txn.Store] is deliberately agnostic of Engine-maintained indexes.
+// Pick one write path per graph: either drive all writes through the Engine, or
+// use the raw txn.Store API on a graph without Engine-maintained indexes. The
+// desync is never durable corruption (recovery rebuilds indexes from the
+// WAL-correct graph), and it cannot occur for constraints/indexes declared
+// through the store-direct DDL path (audit 2026-07-13 #1980).
 type Engine struct {
 	g             *lpg.Graph[string, float64]
 	store         *txn.Store[string, float64] // non-nil when WAL-backed
