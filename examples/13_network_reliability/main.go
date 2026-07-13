@@ -336,8 +336,15 @@ func reportThroughput(ctx context.Context, w io.Writer, net *network) (int, erro
 	fmt.Fprintf(w, "flow.maxflow_eq_mincut=%t\n", cutCap == flowValue)
 	fmt.Fprintf(w, "# flow.elapsed=%s\n", elapsed.Round(time.Microsecond))
 	for _, l := range cut {
-		ua, _ := net.mapper.Resolve(net.idOf[l.a])
-		ub, _ := net.mapper.Resolve(net.idOf[l.b])
+		ua, okA := net.mapper.Resolve(net.idOf[l.a])
+		ub, okB := net.mapper.Resolve(net.idOf[l.b])
+		if !okA || !okB {
+			// Every cut endpoint was interned during the build, so a miss would
+			// be a mapper bug; surface it in the telemetry rather than printing a
+			// silent zero value.
+			fmt.Fprintf(w, "# flow.saturated_link=<unresolved %v--%v>\n", net.idOf[l.a], net.idOf[l.b])
+			continue
+		}
 		fmt.Fprintf(w, "# flow.saturated_link=%s--%s (%d Gb/s)\n", ua, ub, l.cap)
 	}
 	return flowValue, nil

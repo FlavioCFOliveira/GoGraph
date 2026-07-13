@@ -211,8 +211,14 @@ func (net *network) addSpineBoundaries(cfg config) error {
 // adjacency edge weight is the capacity, purely so the CSR snapshot is a
 // faithful copy of the link list; the structural analysis ignores weights.
 func (net *network) addLink(a, b, capacity int) error {
-	na, _ := net.mapper.Resolve(net.idOf[a])
-	nb, _ := net.mapper.Resolve(net.idOf[b])
+	na, ok := net.mapper.Resolve(net.idOf[a])
+	if !ok {
+		return fmt.Errorf("addLink: site %d (id %v) not interned", a, net.idOf[a])
+	}
+	nb, ok := net.mapper.Resolve(net.idOf[b])
+	if !ok {
+		return fmt.Errorf("addLink: site %d (id %v) not interned", b, net.idOf[b])
+	}
 	if err := net.adj.AddEdge(na, nb, int64(capacity)); err != nil {
 		return fmt.Errorf("AddEdge %s-%s: %w", na, nb, err)
 	}

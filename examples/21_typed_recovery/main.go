@@ -602,21 +602,33 @@ func reportSampleProperties(w io.Writer, g *lpg.Graph[int64, float64], gen genRe
 	if !ok {
 		return fmt.Errorf("recovered graph missing node %d.%s", gen.sampleNode, propName)
 	}
-	ns, _ := name.String()
+	// Assert the recovered value round-trips as the type it was written with:
+	// a discarded conversion ok would let a type regression print a zero value
+	// as if it were a genuine fact, defeating the point of a typed-recovery demo.
+	ns, ok := name.String()
+	if !ok {
+		return fmt.Errorf("recovered node %d.%s did not round-trip as a string (typed-property regression)", gen.sampleNode, propName)
+	}
 	fmt.Fprintf(w, "sample.node_name=%s\n", ns)
 
 	zone, ok := g.GetNodeProperty(gen.sampleNode, propZone)
 	if !ok {
 		return fmt.Errorf("recovered graph missing node %d.%s", gen.sampleNode, propZone)
 	}
-	zi, _ := zone.Int64()
+	zi, ok := zone.Int64()
+	if !ok {
+		return fmt.Errorf("recovered node %d.%s did not round-trip as an int64 (typed-property regression)", gen.sampleNode, propZone)
+	}
 	fmt.Fprintf(w, "sample.node_zone=%d\n", zi)
 
 	dist, ok := g.GetEdgeProperty(gen.sampleSrc, gen.sampleDst, propDistance)
 	if !ok {
 		return fmt.Errorf("recovered graph missing edge (%d,%d).%s", gen.sampleSrc, gen.sampleDst, propDistance)
 	}
-	df, _ := dist.Float64()
+	df, ok := dist.Float64()
+	if !ok {
+		return fmt.Errorf("recovered edge (%d,%d).%s did not round-trip as a float64 (typed-property regression)", gen.sampleSrc, gen.sampleDst, propDistance)
+	}
 	// Echo the distance as its raw IEEE-754 bits so the value is pinned
 	// exactly (a decimal rendering could round); this is a deterministic
 	// fact, not telemetry.
@@ -626,7 +638,10 @@ func reportSampleProperties(w io.Writer, g *lpg.Graph[int64, float64], gen genRe
 	if !ok {
 		return fmt.Errorf("recovered graph missing edge (%d,%d).%s", gen.sampleSrc, gen.sampleDst, propToll)
 	}
-	tb, _ := toll.Bool()
+	tb, ok := toll.Bool()
+	if !ok {
+		return fmt.Errorf("recovered edge (%d,%d).%s did not round-trip as a bool (typed-property regression)", gen.sampleSrc, gen.sampleDst, propToll)
+	}
 	fmt.Fprintf(w, "sample.edge_toll=%t\n", tb)
 	return nil
 }
