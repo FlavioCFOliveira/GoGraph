@@ -11,6 +11,7 @@ package snapshot
 // pins that readIndexFile now does too.
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,7 +58,7 @@ func TestReadIndexFile_ReadsHonestFileInFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readIndexFile: %v", err)
 	}
-	if string(buf) != string(payload) {
+	if !bytes.Equal(buf, payload) {
 		t.Fatalf("readIndexFile returned %q, want %q", buf, payload)
 	}
 }
@@ -79,7 +80,7 @@ func TestReadIndexFile_NonPositiveSizeUnbounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readIndexFile: %v", err)
 	}
-	if string(buf) != string(payload) {
+	if !bytes.Equal(buf, payload) {
 		t.Fatalf("readIndexFile(size=0) returned %q, want full file %q", buf, payload)
 	}
 }

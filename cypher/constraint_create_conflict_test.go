@@ -23,7 +23,7 @@ func newPlainEngine(t *testing.T) (*cypher.Engine, context.Context) {
 }
 
 // runDDL runs a DDL statement and returns its error.
-func runDDL(eng *cypher.Engine, ctx context.Context, q string) error {
+func runDDL(ctx context.Context, eng *cypher.Engine, q string) error {
 	_, err := eng.Run(ctx, q, nil)
 	return err
 }
@@ -32,16 +32,16 @@ func TestCreateConstraint_DuplicateNameRejected(t *testing.T) {
 	t.Parallel()
 	eng, ctx := newPlainEngine(t)
 
-	if err := runDDL(eng, ctx, `CREATE CONSTRAINT dup FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
+	if err := runDDL(ctx, eng, `CREATE CONSTRAINT dup FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
 		t.Fatalf("first CREATE: %v", err)
 	}
 	// Same name, different (label, property): must be a name conflict.
-	err := runDDL(eng, ctx, `CREATE CONSTRAINT dup FOR (n:B) REQUIRE n.y IS UNIQUE`)
+	err := runDDL(ctx, eng, `CREATE CONSTRAINT dup FOR (n:B) REQUIRE n.y IS UNIQUE`)
 	if !errors.Is(err, exec.ErrConstraintNameConflict) {
 		t.Fatalf("expected ErrConstraintNameConflict, got: %v", err)
 	}
 	// Same name, different kind: also a conflict.
-	err = runDDL(eng, ctx, `CREATE CONSTRAINT dup FOR (n:C) REQUIRE n.z IS NOT NULL`)
+	err = runDDL(ctx, eng, `CREATE CONSTRAINT dup FOR (n:C) REQUIRE n.z IS NOT NULL`)
 	if !errors.Is(err, exec.ErrConstraintNameConflict) {
 		t.Fatalf("expected ErrConstraintNameConflict across kinds, got: %v", err)
 	}
@@ -53,10 +53,10 @@ func TestCreateConstraint_EquivalentAlreadyExists(t *testing.T) {
 
 	// UNIQUE: re-declaring the same (label, property) under a different name is
 	// an equivalent-already-exists error that must not leak the __uniq__ index.
-	if err := runDDL(eng, ctx, `CREATE CONSTRAINT c1 FOR (n:A) REQUIRE n.email IS UNIQUE`); err != nil {
+	if err := runDDL(ctx, eng, `CREATE CONSTRAINT c1 FOR (n:A) REQUIRE n.email IS UNIQUE`); err != nil {
 		t.Fatalf("first UNIQUE CREATE: %v", err)
 	}
-	err := runDDL(eng, ctx, `CREATE CONSTRAINT c1b FOR (n:A) REQUIRE n.email IS UNIQUE`)
+	err := runDDL(ctx, eng, `CREATE CONSTRAINT c1b FOR (n:A) REQUIRE n.email IS UNIQUE`)
 	if !errors.Is(err, exec.ErrConstraintAlreadyExists) {
 		t.Fatalf("expected ErrConstraintAlreadyExists for UNIQUE, got: %v", err)
 	}
@@ -66,10 +66,10 @@ func TestCreateConstraint_EquivalentAlreadyExists(t *testing.T) {
 
 	// NOT NULL: re-declaring must ALSO be a hard error (previously silently
 	// succeeded and overwrote the stored name).
-	if err := runDDL(eng, ctx, `CREATE CONSTRAINT n1 FOR (n:B) REQUIRE n.title IS NOT NULL`); err != nil {
+	if err := runDDL(ctx, eng, `CREATE CONSTRAINT n1 FOR (n:B) REQUIRE n.title IS NOT NULL`); err != nil {
 		t.Fatalf("first NOT NULL CREATE: %v", err)
 	}
-	err = runDDL(eng, ctx, `CREATE CONSTRAINT n1 FOR (n:B) REQUIRE n.title IS NOT NULL`)
+	err = runDDL(ctx, eng, `CREATE CONSTRAINT n1 FOR (n:B) REQUIRE n.title IS NOT NULL`)
 	if !errors.Is(err, exec.ErrConstraintAlreadyExists) {
 		t.Fatalf("expected ErrConstraintAlreadyExists for NOT NULL, got: %v", err)
 	}
@@ -79,10 +79,10 @@ func TestCreateConstraint_IfNotExistsAbsorbsEquivalent(t *testing.T) {
 	t.Parallel()
 	eng, ctx := newPlainEngine(t)
 
-	if err := runDDL(eng, ctx, `CREATE CONSTRAINT c FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
+	if err := runDDL(ctx, eng, `CREATE CONSTRAINT c FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
 		t.Fatalf("first CREATE: %v", err)
 	}
-	if err := runDDL(eng, ctx, `CREATE CONSTRAINT c IF NOT EXISTS FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
+	if err := runDDL(ctx, eng, `CREATE CONSTRAINT c IF NOT EXISTS FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
 		t.Fatalf("IF NOT EXISTS must be a silent no-op, got: %v", err)
 	}
 }
@@ -94,13 +94,13 @@ func TestDropConstraint_ByNameDeterministic(t *testing.T) {
 	t.Parallel()
 	eng, ctx := newPlainEngine(t)
 
-	if err := runDDL(eng, ctx, `CREATE CONSTRAINT c_a FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
+	if err := runDDL(ctx, eng, `CREATE CONSTRAINT c_a FOR (n:A) REQUIRE n.x IS UNIQUE`); err != nil {
 		t.Fatalf("CREATE c_a: %v", err)
 	}
-	if err := runDDL(eng, ctx, `CREATE CONSTRAINT c_b FOR (n:B) REQUIRE n.y IS UNIQUE`); err != nil {
+	if err := runDDL(ctx, eng, `CREATE CONSTRAINT c_b FOR (n:B) REQUIRE n.y IS UNIQUE`); err != nil {
 		t.Fatalf("CREATE c_b: %v", err)
 	}
-	if err := runDDL(eng, ctx, `DROP CONSTRAINT c_a`); err != nil {
+	if err := runDDL(ctx, eng, `DROP CONSTRAINT c_a`); err != nil {
 		t.Fatalf("DROP c_a: %v", err)
 	}
 

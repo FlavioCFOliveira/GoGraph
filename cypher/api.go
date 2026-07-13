@@ -2262,7 +2262,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// IF NOT EXISTS, and before any pre-existing-data scan. Checked under the
 	// writer lock so two concurrent creations cannot both miss it (#1907).
 	if rk, rl, rp, found := e.constraintReg.NameInUse(p.Name); found &&
-		!(rk == kind && rl == p.Label && rp == p.Property) {
+		(rk != kind || rl != p.Label || rp != p.Property) {
 		return nil, fmt.Errorf("cypher: cannot create constraint %q: %w: name is already used by the %s constraint on (:%s).%s",
 			p.Name, exec.ErrConstraintNameConflict, constraintKindString(rk), rl, rp)
 	}

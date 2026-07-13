@@ -19,7 +19,7 @@ func TestDropIndex_CannotDropConstraintBackingIndex(t *testing.T) {
 
 	// The backing index is named __uniq__Person.email; dropping it directly
 	// must be refused.
-	if err := runDDL(eng, ctx, `DROP INDEX __uniq__Person.email`); err == nil {
+	if err := runDDL(ctx, eng, `DROP INDEX __uniq__Person.email`); err == nil {
 		t.Fatal("expected DROP INDEX of the __uniq__ backing index to be rejected, got nil")
 	}
 

@@ -33,7 +33,7 @@ func TestCreateConstraint_HasConstraintsSynced(t *testing.T) {
 		t.Fatal("Graph.HasConstraints must be true after CREATE CONSTRAINT")
 	}
 
-	if err := runDDL(eng, ctx, `DROP CONSTRAINT u`); err != nil {
+	if err := runDDL(ctx, eng, `DROP CONSTRAINT u`); err != nil {
 		t.Fatalf("DROP CONSTRAINT: %v", err)
 	}
 	if g.HasConstraints() {
