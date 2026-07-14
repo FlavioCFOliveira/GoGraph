@@ -4,6 +4,376 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-07-14
+
+The tenth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release. Its headline is **correctness and security hardening**: three
+consecutive multi-specialist audits — of the INDEX feature, the
+CONSTRAINT feature, and a whole-module production-readiness review with
+a round-2 re-audit — close a broad set of Consistency, Atomicity,
+Durability, and denial-of-service gaps across the schema DDL path, the
+snapshot and WAL recovery readers, and the Bolt protocol. The one
+net-new, backward-compatible capability is acceptance of the **modern
+openCypher `FOR ... REQUIRE` constraint syntax** that every current
+Neo4j driver, shell, and migration tool emits — previously the main
+production-interoperability blocker for the constraint feature. A Go
+**toolchain bump to `go1.26.5`** also clears an open `crypto/tls`
+advisory (`GO-2026-5856` / `CVE-2026-42505`).
+
+The bump is **MINOR** under [Semantic Versioning](https://semver.org/):
+the `FOR ... REQUIRE` grammar is net-new, additive Cypher surface; every
+other change is an **internal** fix, a security/DoS hardening, a
+toolchain patch, or test/documentation work that restores a
+previously-documented contract or closes a hardening gap. No breaking
+change to the exported Go API ships in this release. Per the project's
+own rule, the examples and the deterministic-simulation (DST) harness
+are **not part of the module** — they exercise it but expand no public
+API, and are reported under [Testing and tooling](#testing-and-tooling),
+not as new functionality. As a `0.y.z` release the public API remains
+unstable; pin the exact version you depend on.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios, 16 006 / 16 006 steps) and **100 %
+ACID-compliant** across the in-memory engine and every persistence
+backend. Several fixes in this release **strengthen** the ACID guarantee
+directly: a failed schema-DDL statement can no longer persist across a
+restart (Atomicity), recovered `UNIQUE`/`NOT NULL` constraints are no
+longer silently left unenforced (Consistency), and a nested or map
+property value that the snapshot codec cannot serialise is now rejected
+fail-stop instead of stored (Consistency/Durability). The Go toolchain
+is now **go1.26.5** (bumped from `go1.26.4` for the CVE above), and
+`govulncheck ./...` reports no vulnerabilities.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.8.0
+```
+
+This entry is an **exhaustive** accounting of every user-facing change
+landed in the 86 commits between `v0.7.0` and this release
+(`git log --oneline --no-merges v0.7.0..HEAD`), cross-checked against the
+`gograph` roadmap (rmp sprints 265–278). Changes are grouped by category;
+each bullet cites the roadmap task(s), audit finding, or the area it
+touches.
+
+### Added
+
+#### Cypher constraint syntax
+
+- **Modern openCypher `FOR ... REQUIRE` constraint grammar.**
+  `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop
+  IS UNIQUE | IS NOT NULL` is now accepted as the primary syntax, with
+  the legacy `ON (n:Label) ASSERT ...` form kept as an alias; both map to
+  the same IR and are actually registered and enforced. Neo4j deprecated
+  `ON ... ASSERT` in 4.x and removed it in 5, so every current driver,
+  shell, and migration script emits `FOR ... REQUIRE` — which GoGraph
+  previously rejected with a misleading "expected ON" error while
+  mis-parsing the `FOR` keyword as the constraint name. This was the main
+  production-interoperability blocker for the constraint feature.
+  Out-of-scope forms are now recognised and rejected with a specific,
+  actionable error instead of a confusing parse failure: relationship
+  constraints, composite (multi-property) constraints, `NODE KEY` /
+  relationship key, and property-type constraints (`IS :: <TYPE>`). This
+  is the sole net-new module capability in this release; it is additive
+  and TCK-neutral (index/constraint DDL is not TCK-covered), so the
+  3 897-scenario execution baseline is unchanged. (#1906)
+
+### Changed
+
+- **Go toolchain pinned to `go1.26.5`** (from `go1.26.4`); see
+  [Security](#security) for the CVE it clears. (#2003)
+- **`CREATE INDEX` accepts Neo4j's clause order.** The common migration
+  idiom `CREATE INDEX myidx IF NOT EXISTS FOR ...` (name before
+  `IF NOT EXISTS`) used to fail with "expected FOR, got IF"; the parser
+  now accepts `IF NOT EXISTS` on either side of the optional name, so
+  both the Neo4j order and the legacy GoGraph order map to the same plan.
+  Index DDL is not TCK-covered, so this is a Neo4j-compatibility
+  improvement with no conformance impact. (#1982)
+- **`UNIQUE` numeric identity now uses value-equivalence.** The integer
+  `1` and the float `1.0` are treated as the same constrained value (and
+  `+0.0 == -0.0 == 0`, and every `NaN` collapses to one key), matching
+  openCypher `=`, GoGraph's own `MERGE` (aligned in #1240), and Neo4j.
+  Equivalence is exact-value based and therefore transitive, so two
+  integers beyond `2^53` that round to the same `float64` remain distinct
+  (a value-set map key requires transitivity). (#1910)
+- **Constraint names are required unique**, and a re-declared equivalent
+  constraint reports a consistent, backing-index-free error. Two
+  constraints could previously share a name (making `DROP CONSTRAINT
+  <name>` non-deterministic), and re-declaring diverged between kinds
+  (`NOT NULL` silently overwrote the name; `UNIQUE` errored with a message
+  leaking the internal `__uniq__<label>.<prop>` backing-index name).
+  (#1907, #1908)
+- **`db.constraints()` returns the declared constraint name** in its name
+  column — the key `DROP CONSTRAINT` resolves by — with fully
+  deterministic row ordering. (#1909)
+- **Reserved index-name namespaces are protected.** A user
+  `CREATE INDEX` / `DROP INDEX` is rejected when its name uses the
+  constraint-backing `__uniq__` prefix or the internal `_btree_num`
+  suffix, and a composite-index attempt (`ON (n.a, n.b)`) returns a
+  specific "not supported" message instead of a bare "expected ')'".
+  (#1912, #1899)
+- **DDL identifier length is capped** (`maxSchemaIdentifierLen = 4096`) at
+  the parser boundary, and the WAL/snapshot durable encoders are
+  reconciled to fail-stop rather than silently truncate an oversized
+  name, label, or property. (#1903)
+- **Constraint-violation messages render the human-readable value**
+  instead of the internal kind-tagged dedup key, so a client no longer
+  sees `\x00`-prefixed or IEEE-754-hex/base64 values. (#1914)
+
+### Fixed
+
+#### Cypher conformance and correctness
+
+- **`MERGE ... ON CREATE / ON MATCH SET` evaluates an expression
+  right-hand side.** A non-literal RHS such as `MERGE (n) ON MATCH SET
+  n.num = n.num + 1` used to commit but silently drop the write (or error
+  on a stringified form) — a fail-silent Consistency defect the
+  openCypher TCK does not cover (its `ON MATCH SET` scenarios use a
+  constant or cross-variable RHS). The IR now carries the non-literal
+  set-item value ASTs to the physical builder, which evaluates each
+  against a schema-consistent row with the matched node/relationship and
+  its current properties bound. Discovered by the DST `merge-rel`
+  scenario. (#1965)
+- **`SET` / `MERGE`-`SET` right-hand-side evaluation errors are surfaced,
+  not swallowed.** The write-path closure discarded any evaluation error
+  and returned a silent no-op, so `SET n.p = COUNT { (n)-->() }` left
+  `n.p` unset with no diagnostic (the identical RHS is rejected loudly in
+  `RETURN`/`WHERE`), and it hid arithmetic/type errors on any `SET` RHS.
+  Both closures now propagate the error, so the statement aborts and rolls
+  back atomically. (sprint 277, Cypher F1)
+- **Nested-collection and map property values are rejected fail-stop with
+  `InvalidPropertyType` on every write path.** openCypher restricts a
+  property value to a primitive or a flat list of primitives; a nested
+  list or a map is invalid. The write path previously stored or silently
+  dropped such values — a store inconsistency, because the snapshot codec
+  cannot serialise a nested `PropList`, so a later checkpoint would stall.
+  New sentinels (`ErrNestedPropertyValue`, `exec.ErrNestedPropertyValue`)
+  now fail-stop `CREATE` inline (node + relationship, literal + parameter),
+  `MERGE ON CREATE`/`ON MATCH SET`, `MERGE`-pattern search props, and
+  whole-entity `SET n =` / `SET n +=`; flat lists of primitives remain
+  valid. (findings F3; sprints 277–278)
+- **A `UNIQUE`-constrained idempotent self-set now succeeds.** Setting a
+  `UNIQUE` property to the value the node already holds (`SET n.k = n.k`,
+  a same literal, `SET n += {...}`, `SET n = {...}`) was rejected as a
+  duplicate of itself, because the uniqueness check ran before the node's
+  own value was released. All `SET` paths and both `MERGE` set executors
+  now release the replaced value before the check and overwrite (a
+  `UNIQUE` constraint guarantees at most one holder, so releasing first
+  cannot mask a real cross-node duplicate); the previously-leaked phantom
+  reservation on the replaced value is also fixed. (#1905, #1904)
+- **Recovered `UNIQUE` / `NOT NULL` constraints are auto-enforced by
+  `NewEngineWithStore`.** Opening a persisted database with the plain
+  constructor left durable constraints unregistered and silently
+  unenforced (duplicates and nulls accepted). The constructor now
+  auto-registers them from the graph's durable store-direct set (using
+  synthesised deterministic names, since that set does not retain the
+  originals), and warns at construction if durable constraints are present
+  but none were re-registered. A new `lpg.Graph.StoreConstraints` getter
+  exposes the set. (#1981)
+- **The unbounded-above string range seek is open-ended.** The upper bound
+  used a fixed 32-byte `0xFF` sentinel, which is not a true maximum for a
+  variable-length key, so a value sorting above it was silently dropped
+  versus a full scan (seek ≠ scan). New `btree.Index.RangeFrom` /
+  `RangeCountFrom` scan to the last leaf. Not reachable with valid UTF-8,
+  so the TCK baseline is unaffected. (#1895)
+- **`NodeByIndexRangeScan` drops a bogus exclusive-bound `NodeID`
+  comparison.** The operator compared the emitted `NodeID` to a
+  property-value bound — meaningless, since it holds only a `NodeID`
+  bitmap — and could drop a node whose ID happened to equal a numeric
+  bound. It now honestly emits the inclusive `[lo, hi]` superset and
+  leaves exact open/closed semantics to the residual `Filter` the planner
+  always stacks. Harmless for the Cypher engine; a fail-silent trap for a
+  direct `exec` caller. (#1897)
+- **The DDL parser returns a typed `SyntaxError`, not a panic, on
+  truncated input.** Bare token-slice indexing raised
+  index-out-of-range on truncations such as `CREATE INDEX x FOR (`; every
+  read now routes through a bounds-safe `tokAt` helper, so a public
+  untrusted-text boundary fails with a clear error rather than crashing.
+  (#1896)
+- **The constraint registry is struct-keyed to remove dot aliasing.** The
+  registry keyed maps on `label + "." + prop` and split on the last dot,
+  so `("A.b","c")` and `("A","b.c")` both keyed to `"A.b.c"` and could be
+  mis-attributed to each other. Reachable via the Go API and via recovery
+  of an externally-authored constraint, so the ACID Consistency mandate
+  requires the pair to be exact; a comparable `ckey{label, prop}` struct
+  is now the map key. (#1916)
+
+#### Constraint and index durability
+
+- **A failed `CREATE` / `DROP` schema-DDL statement no longer persists
+  across a restart under a concurrent checkpoint.** A DDL whose WAL commit
+  failed at fsync poisons the writer and discards its frame, but the
+  in-memory registry still reflected the attempted change until its
+  compensator ran outside the store single-writer lock — so a
+  non-blocking checkpoint could capture the transient registry and publish
+  it into `constraints.bin` / `indexdefs.bin`, then enforce (CREATE) or
+  apply (DROP) on restart a change the client saw fail (an Atomicity
+  violation). The checkpoint's phase-1 capture now consults a new
+  `wal.Writer.Poisoned()` probe and aborts before capturing or publishing
+  when the writer is poisoned, closing the window for both the constraint
+  and index DDL paths. (#1902, #1919)
+- **Index-def registry updates happen inside the DDL single-writer
+  window.** `recordIndexDef` / `forgetIndexDef` now run before
+  `commitIndexTx` (while the DDL still holds the single-writer
+  serialisation) in all three WAL-backed paths, so a WAL-truncating
+  checkpoint can never capture a `(watermark, defs)` pair inconsistent
+  with the WAL — closing a HIGH-severity gap where a dropped index could
+  be resurrected or a created index lost across a crash. (#1894)
+- **`Graph.HasConstraints` flips inside the `CREATE CONSTRAINT` barrier.**
+  The count sync previously ran only on `defer`, after the single-writer
+  semaphore was released, so a checkpoint reaching its self-sufficiency
+  check in that window could read a stale count, deem the snapshot
+  self-sufficient, truncate the CREATE frame, and lose the constraint on
+  restart. It now flips atomically with registration. (#1917)
+- **A dropped constraint is not resurrected across a checkpoint**
+  (regression gate added alongside the existing index-drop-survival
+  test). (#1920)
+- **`constraints.bin` and `indexdefs.bin` reads are hardened** — see
+  [Security](#security).
+
+#### Search, crash-injection, and test fidelity
+
+- **APSP `At(x, x)` on an isolated (degree-0) node returns `0` /
+  reachable**, matching textbook APSP and `BellmanFord.Distance`, instead
+  of the `unreachable` an over-narrow live-node matrix index produced.
+  (finding F4)
+- **`crashinject.Run` classifies a startup-deadline as `TimedOut`**,
+  not a raw hard error, when a very short timeout elapses around process
+  startup — removing a load-induced flake in a 1 ms-timeout gate test
+  under the full `-race ./...` suite. Normal generous-timeout runs are
+  unchanged.
+- **`FuzzCSRFileReader`'s seed uses the real `GGCS` magic** (it previously
+  tripped `ErrBadMagic`, so the fuzzer only ever exercised `DecodeHeader`),
+  and now drives the full `openBytes` validate/reinterpret path on an
+  8-byte-aligned input. Two stale reader comments were corrected to
+  describe what is actually implemented. (sprint 277)
+
+### Performance
+
+- **The `NOT NULL` existence check is O(1) and allocation-free at commit
+  time.** A copy-on-write `label → NOT-NULL-properties` index replaces a
+  per-node locked full-map scan plus a fresh slice allocation.
+  `BenchmarkNotNullProperties` over 257 constraints reports 6.3 ns/op,
+  0 B/op, 0 allocs/op. (#1911)
+- **No measured performance regressions.** This release contains no
+  performance-focused work; the guard-band benchmarks are unchanged versus
+  `v0.7.0`. See [docs/benchmarks/v0.8.0.md](docs/benchmarks/v0.8.0.md) for
+  the authoritative measured figures.
+
+### Security
+
+Sprints 277–278 remediated a 2026-07-13 five-specialist
+production-readiness audit and its round-2 re-audit. None of the
+memory-bound findings affect a well-formed store or a trusted caller;
+they close denial-of-service, out-of-memory, and defence-in-depth gaps
+reachable only from a hostile query, a crafted or corrupted file, or a
+state-transition edge case.
+
+- **Toolchain bumped to `go1.26.5` to clear `GO-2026-5856` /
+  `CVE-2026-42505`** — a `crypto/tls` Encrypted Client Hello
+  de-anonymization advisory, reachable by symbol through the Bolt TLS
+  path. GoGraph never configures ECH, so the vulnerable behaviour is
+  unreachable in practice, but a release must not pin a toolchain with an
+  open `crypto/tls` advisory. `govulncheck ./...` reports no
+  vulnerabilities on `go1.26.5`. (#2003)
+- **Value nesting-depth is capped to close an authenticated stack-overflow
+  DoS.** A short query — `reduce(acc=[0], x IN range(1, 4900000) |
+  [acc])` — could build a ~5 M-deep nested value inside the element budget
+  and overflow the goroutine stack in a recursive walker (a fatal crash
+  `recover()` cannot catch). `reduce()` now rejects an over-deep or
+  over-large accumulator with a typed `EvalError` (via iterative,
+  alias-robust `expr.ExceedsValueDepth` against `expr.MaxValueDepth`), and
+  PackStream `WriteValue` enforces the symmetric `maxValueDepth` bound
+  (`ErrNestingTooDeep`). (finding F1)
+- **`store/snapshot`'s `readIndexFile` is bounded by the
+  manifest-declared size.** An unbounded `io.ReadAll` drove an
+  out-of-memory crash on adopting a tampered store whose manifest declares
+  a tiny size for a multi-gigabyte `indexes/<name>.bin`, before the CRC
+  check. It was the one snapshot reader that missed the manifest-size
+  bound every sibling reader applies. (finding F2, CWE-770 / CWE-789)
+- **`constraints.bin` and `indexdefs.bin` reads are bounded** before the
+  CRC is verified, with eager pre-allocation from the untrusted record
+  count dropped in favour of incremental growth — matching the hardened
+  properties/labels readers. (#1915, #1901)
+- **`PropList` recovery decode caps its eager reservation.** The reserved
+  slice was clamped by element count, but each `~24`-byte slot made the
+  clamp roughly `4.8×` the remaining wire bytes — up to several GiB for a
+  hostile count, a fatal out-of-memory at store-open that recovery cannot
+  catch and that re-fires on every restart. (round-2 finding R1, CWE-770 /
+  CWE-789)
+- **Bolt `COMMIT` and `ROLLBACK` require authentication.** A session that
+  sent `LOGOFF` while a transaction was open (left in `TX_READY` but
+  unauthenticated) could still finalise the transaction; both handlers now
+  also require `s.authenticated`, mirroring `RUN`/`BEGIN`/`ROUTE`.
+  Defence in depth — only already-authorised writes were ever reachable,
+  so there was no privilege escalation. (finding F5, CWE-306)
+
+### Documentation
+
+- Corrected `docs/cypher.md` to present `FOR ... REQUIRE` as the primary
+  constraint grammar (with `ON ... ASSERT` as a legacy alias), document
+  retroactive validation of pre-existing data, constraint-name
+  uniqueness, and the rejected unsupported forms; and corrected the false
+  "btree index supports `ORDER BY`" claim to the real range-predicate-only
+  capability, with the deliberate dialect and scope boundaries stated.
+  (#1913, index F-DOC1)
+- Documented the secondary-index write-path contract — pick one write path
+  per graph, because raw `txn.Store` writes bypass the Engine-managed
+  index-update path and leave those indexes stale until the next restart
+  rebuilds them (an intentional layering boundary, never durable
+  corruption). (#1980)
+- Corrected a stale `fnID` godoc that wrongly claimed `elementId()` is
+  unimplemented. (#1978)
+- Documented the `int64` hash-index Go-API contract, the `Index.Apply`
+  subscriber-ordering contract, and steered `KShortestPathsLoopless`
+  callers toward the bounded `KShortestPathsLooplessCtxWithOpts` or the
+  polynomial `YenKShortest` for untrusted or large inputs. (#1900, #1898,
+  #2006)
+
+### Testing and tooling
+
+The examples and the deterministic-simulation (DST) harness are **not
+part of the GoGraph module** — the module neither imports nor depends on
+them. They exercise the module's behaviour and are recorded here as
+evidence and tooling, not as new module surface.
+
+- **Deterministic-simulation (DST) coverage expanded across sprints
+  267–270.** New crash- and checkpoint-recovery scenarios drive
+  schema-mutation and `MERGE`-relationship clauses (#1925–#1928); a
+  broadened Cypher surface — `DISTINCT`, three-valued logic, string
+  predicates, pagination, aggregates, subqueries, `UNION`, `CASE`,
+  comprehensions, temporal constructors, and `db.*` introspection
+  (#1929–#1940); 16 previously-uncovered search algorithms cross-checked
+  against independent reference implementations (#1941–#1956); and
+  concurrent durable-commit, checkpointer-teardown, read-transaction, and
+  storage fault-injection scenarios — atomic publish, WAL-corruption
+  fail-stop, dir-fsync fault, and CSV/JSONL/GraphML round-trip under
+  `ENOSPC` (#1957–#1964). The DST also surfaced the `MERGE ON MATCH SET`
+  expression-RHS defect fixed above (#1965). New map-valued parameter
+  binding was added to the simulation engine adapter to unblock this
+  coverage (#1924).
+- **The examples suite grew from 26 to 34.** New examples: negative-weight
+  routing (28), all-pairs shortest paths (29), minimum spanning tree (30),
+  observability and Prometheus metrics (31), Eulerian circuits (32),
+  generation snapshot-swap MVCC (33), and Bolt transactions/auth/TLS (34).
+  Examples 04, 08, 11, 13, 14, 16, 17, 18, 20, 22, 25, and 26 were
+  extended to exercise atomic transaction rollback, personalised PageRank,
+  structural analytics, additional centralities, real cross-process
+  `kill -9` recovery, the bulk loader, intra-query parallel algorithms,
+  the full Cypher write surface, DDL/introspection/`EXPLAIN`, and
+  analytical aggregation. (sprints 271–276, #1969–#1996)
+- **CI and timing-budget reconciliation.** The `-race` short-layer
+  per-package timing budget was brought green (heavy resident-heap and DST
+  scenarios moved to the soak layer, with a documented per-package ceiling
+  override), and the release-path guard was reconciled with the split
+  release gate so no release path publishes while skipping a gate.
+  (d3cfe9f, 415371f)
+
+[0.8.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.8.0
+
 ## [0.7.0] — 2026-07-03
 
 The ninth published release of **GoGraph**, a Go module for graph
