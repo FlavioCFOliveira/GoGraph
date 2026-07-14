@@ -326,7 +326,7 @@ The module is organised around three concerns:
 
 ## Examples
 
-Examples are **not an integral part of the GoGraph module** — the module neither imports nor depends on them. They are **instruments**: their sole role is to exercise GoGraph's features, both individually and in combination, under realistic conditions so that the module's behaviour can be observed and measured.
+Examples are **not an integral part of the GoGraph module** — the module neither imports nor depends on them. They are **instruments**: their sole role is to exercise GoGraph's features, both individually and in combination, under realistic conditions so that the module's behaviour — both its **correctness** (the assertiveness of its results) and its **performance** (its efficiency in the use of CPU, RAM, and storage) — can be observed and measured.
 
 ### Organisation
 
@@ -342,7 +342,7 @@ Every example serves **three equally important objectives**:
 
 1. **Demonstration** — a didactic, end-to-end illustration of how GoGraph can be used for a given scenario or purpose.
 2. **Exercise** — drive the GoGraph features most appropriate to the example's scenario and overall purpose. Exercise the module not only through its most basic features but also through its most advanced ones, including the **combination of multiple features** working together.
-3. **Evidence** — enable the objective and explicit collection of evidence while the features are exercised, so that **all** of GoGraph's performance vectors — memory (RAM), CPU, and storage — can be evaluated clearly.
+3. **Evidence** — enable the objective and explicit collection of evidence while the features are exercised, so that GoGraph can be evaluated clearly along two complementary axes: its **correctness** — the assertiveness of the results it produces — and its **performance** across **all** resource vectors: memory (RAM), CPU, and storage.
 
 ### Evidence and tooling
 
