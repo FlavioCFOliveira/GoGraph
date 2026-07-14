@@ -185,7 +185,8 @@ and reports execution conformance. The progression from baseline to 100 %:
   Expand+VLE named-path leading-hop reconstruction (R64).
 
 The `tckExecutionBaseline` constant in `cypher/tck/runner_test.go` enforces 3 897
-on every PR. The historical feature-area gap table from Sprint 46 is preserved
+on every local `go test ./cypher/tck/...` run (folded into `make ci`). The
+historical feature-area gap table from Sprint 46 is preserved
 in Category 5 below for audit purposes; all items listed there are now closed.
 
 ---
@@ -223,8 +224,9 @@ historical audit purposes.
 | Temporal types | ~200 | **RESOLVED** — Date, DateTime, LocalDateTime, Duration values and functions. |
 | Subquery support (EXISTS, COUNT) | ~100 | **RESOLVED** (partially in task #396, fully in rounds R58–R64). |
 
-The `tckExecutionBaseline` constant enforces 3 897/3 897 on every PR;
-any regression is a CI failure.
+The `tckExecutionBaseline` constant enforces 3 897/3 897 on every local
+`go test ./cypher/tck/...` run (folded into `make ci`); any regression fails
+that test and must not be merged.
 
 ---
 

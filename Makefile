@@ -52,7 +52,7 @@ race: ## Run unit tests with the race detector
 # See docs/test-layers.md for the full specification.
 
 .PHONY: test-short
-test-short: ## [layer: short]   PR-CI default — race detector, no build tags
+test-short: ## [layer: short]   local default — race detector, no build tags
 	$(GO) test $(RACE_FLAGS) -count=1 $(PACKAGES)
 
 .PHONY: test-short-timings
@@ -82,10 +82,10 @@ test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tag
 # test-nightly passes but this CI subset does not, so they compile out here.
 # Under the race detector they alone exceed the 600 s go-test default timeout on
 # a fast workstation and would blow the 50m timeout / 90m job budget on a GitHub
-# runner. Their scenario run-path is still covered on every PR (short-layer
-# TestCatalogue_SmokeSubsetRunsClean) and at a small budget by the soak-layer
-# TestCatalogue_EachScenarioRunsClean; the endurance budget is a periodic
-# stability watch, not a CI release gate (see CLAUDE.md soak-gate policy).
+# runner. Their scenario run-path is still covered by the short layer (part
+# of `make ci`: TestCatalogue_SmokeSubsetRunsClean) and at a small budget by
+# the soak-layer TestCatalogue_EachScenarioRunsClean; the endurance budget is
+# a periodic stability watch, not a release gate (see CLAUDE.md soak-gate policy).
 #
 # Use test-nightly (no -ci suffix) for a complete local run or on machines
 # with ≥ 16 GB RAM. The manual-heavy.yml workflow (workflow_dispatch only)
@@ -106,10 +106,11 @@ test-crashinject: ## Run crash-injection battery (requires gograph_crashinject b
 		./store/recovery/...
 
 .PHONY: check-soak-build
-check-soak-build: ## Verify soak- AND nightly-tagged files compile and vet clean (PR-time guard for the deferred test layers)
+check-soak-build: ## Verify soak- AND nightly-tagged files compile and vet clean (pre-push guard for the deferred test layers)
 	# The short layer (go test ./..., no tags) never compiles soak/nightly
 	# files, so a compile break in those ACID-gating tests would otherwise
-	# surface only in the next scheduled run, decoupled from the offending PR.
+	# surface only when the soak or nightly layer is next run, long after the
+	# offending change landed.
 	# -tags=soak covers `soak` and `soak || nightly` files; -tags=soak,nightly
 	# additionally covers `nightly`-only files. Running both also catches any
 	# `soak && !nightly` file.
@@ -187,7 +188,7 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 	goreleaser release --snapshot --clean --skip=publish
 
 .PHONY: release-accuracy
-release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-notes/README/SECURITY/benchmark-doc consistency for VERSION. This is the gate the release.yml CI job runs; correctness (vet/build/-race/lint/TCK), coverage and the crash battery are enforced per-push by ci.yml/tck.yml/crash.yml.
+release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-notes/README/SECURITY/benchmark-doc consistency for VERSION. This is the only gate the release.yml CI job runs; correctness (vet/build/-race/lint/TCK), coverage and the crash battery are enforced LOCALLY by `make release-preflight` before the tag is pushed.
 	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@echo "release-accuracy: VERSION=$$VERSION"
 	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
@@ -208,7 +209,7 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	@echo "release-accuracy: all accuracy checks passed"
 
 .PHONY: release-preflight
-release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + coverage + bench + the full correctness gate (scripts/pre-release.sh). NOTE: the release.yml CI job runs only `release-accuracy`; -race/TCK/coverage/crash run per-push in ci.yml/tck.yml/crash.yml.
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + coverage + bench + the full correctness gate (scripts/pre-release.sh). NOTE: the release.yml CI job runs only `release-accuracy`; -race/TCK/coverage/crash are covered here and must be run locally before tagging.
 	@$(MAKE) release-accuracy
 	@echo "release-preflight: running coverage gate…"
 	@$(MAKE) cover-gate

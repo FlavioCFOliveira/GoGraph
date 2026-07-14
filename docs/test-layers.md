@@ -6,7 +6,7 @@ strict supersets of the shallower ones.
 
 | Layer | Budget | Selector | Default? |
 |---|---|---|---|
-| `short` | < 60 s per package | none (default) | yes — every PR |
+| `short` | < 60 s per package | none (default) | yes — the default local run |
 | `soak` | minutes | `-tags=soak` or `SOAK_FULL=1` | no |
 | `nightly` | hours | `-tags=nightly` or `GOGRAPH_NIGHTLY=1` | no |
 
@@ -19,9 +19,9 @@ considered.
 ### Enforcing the short-layer budget
 
 The `< 60 s per package` budget is enforced, not merely documented. The
-`build + test + race` job in `.github/workflows/ci.yml` runs the short layer
-once under `-race` with `-json` (via `make test-short-timings`) and pipes it
-through `scripts/pkg_time_budget.sh`, which parses per-package wall-clock and:
+`make test-short-timings` target runs the short layer once under `-race`
+with `-json` and pipes it through `scripts/pkg_time_budget.sh`, which parses
+per-package wall-clock and:
 
 - emits a `::warning::` for any package over `SOFT_BUDGET` (60 s) so creep
   is visible in the job summary before it becomes a breach, and
@@ -116,7 +116,7 @@ near-instant; the cost is the `t.Skip` call itself.
 | `GOGRAPH_NIGHTLY=1` | activates the nightly layer at runtime via the helpers (and implies soak) |
 
 `SOAK_FULL` is preserved verbatim from the pre-existing toolchain so
-existing CI workflows and developer aliases continue to work.
+existing scripts and developer aliases continue to work.
 `GOGRAPH_NIGHTLY` is new; it pairs with the new `nightly` build tag.
 
 The two mechanisms are independent: build tags gate compilation, env
@@ -138,18 +138,18 @@ discipline is enforced by tooling, not folklore.
 | `make test-soak` | soak | `go test -race -count=1 -tags=soak ./...` |
 | `make test-nightly` | nightly | `go test -race -count=1 -tags=nightly ./...` |
 
-Three composite CI pipeline targets wrap these:
+Three composite pipeline targets wrap these:
 
 | Target | Purpose |
 |---|---|
-| `make ci` | Full PR-CI gate: tidy + fmt + vet + build + **test-short** + lint + cover-gate |
+| `make ci` | Full local gate: tidy + fmt + vet + build + **test-short** + lint + cover-gate |
 | `make ci-soak` | Like `ci` but runs **test-soak** instead of test-short |
 | `make ci-nightly` | Like `ci` but runs **test-nightly** instead of test-short |
 
 ## Sample invocations
 
 ```bash
-# Short layer only (PR-CI default) — via make or directly.
+# Short layer only (the default local run) — via make or directly.
 make test-short
 go test ./... -count=1 -race
 
@@ -164,46 +164,49 @@ go test -tags=nightly ./... -count=1 -race
 GOGRAPH_NIGHTLY=1 go test ./... -count=1 -race
 ```
 
-## GitHub Actions workflows
+## How each layer is run
 
-| Workflow file | Trigger | Layer | Target |
-|---|---|---|---|
-| `.github/workflows/ci.yml` | every PR + push to main | **short** | `make test-short` |
-| `.github/workflows/soak.yml` | weekly schedule | **soak** | dedicated soak harness |
-| `.github/workflows/nightly.yml` | daily 03:00 UTC | **nightly** | `make test-nightly` |
+There is no per-push or scheduled CI; the only GitHub Actions workflow is
+`.github/workflows/release.yml` (tag-triggered). Each layer is run locally
+by developer discipline before pushing or tagging:
 
-`nightly.yml` also runs benchmarks with `-cpuprofile` and `-memprofile`
-and uploads the resulting pprof files as artefacts (30-day retention)
-so nightly regressions can be investigated with `go tool pprof`.
+| Layer | When to run | Command |
+|---|---|---|
+| **short** | before every push (also folded into `make ci`) | `make test-short` |
+| **soak** | periodically and before a major release | dedicated soak harness / `SOAK_FULL=1 make soak` |
+| **nightly** | periodically | `make test-nightly` |
+
+The nightly target can also run benchmarks with `-cpuprofile` and
+`-memprofile` so nightly regressions can be investigated with
+`go tool pprof`.
 
 ## Relationship to the existing `stress` tag
 
 The `internal/stress/` package is gated by `//go:build stress` and was
 introduced before the three-layer scheme. It runs a short concurrent
-workload under `-race` to catch scheduler-dependent issues, and is
-wired into the `stress` job of `.github/workflows/ci.yml`. The
-`stress` tag is considered part of the **soak family**: anything
-gated by `stress` belongs conceptually to the soak layer, even though
-it uses a distinct tag for historical and CI-scheduling reasons.
+workload under `-race` to catch scheduler-dependent issues, run locally
+via its `stress` build tag. The `stress` tag is considered part of the
+**soak family**: anything gated by `stress` belongs conceptually to the
+soak layer, even though it uses a distinct tag for historical reasons.
 There is no plan to rename it; new soak-layer work should use the
 `soak` tag or `SOAK_FULL=1` instead.
 
 The longer-running 4-hour Bolt soak in `bench/soak/` continues to use
-its own `soakfull` tag (see `.github/workflows/soak.yml`). Like
-`stress`, it is considered part of the soak family.
+its own `soakfull` tag. Like `stress`, it is considered part of the
+soak family.
 
 The `soakfull` tag also gates the two multi-hour DST endurance scenarios
 in `internal/sim/phase4_long_running_soak_test.go` (2,000,000 and
 1,000,000 ticks). Under the race detector these alone exceed the 600 s
-`go test` default timeout, so they are excluded from the scheduled
+`go test` default timeout, so they are excluded from the
 `make test-nightly-ci` subset — which passes only `-tags=soak,nightly`
 — while the full `make test-nightly` target passes
 `-tags=soak,nightly,soakfull` and runs them. Excluding them loses no
-scenario coverage: the `ScenarioLongRunning` run-path is exercised on
-every PR by the short-layer `TestCatalogue_SmokeSubsetRunsClean` and at a
-2,000-tick budget by the soak-layer `TestCatalogue_EachScenarioRunsClean`;
+scenario coverage: the `ScenarioLongRunning` run-path is exercised by the
+short-layer `TestCatalogue_SmokeSubsetRunsClean` (part of `make ci`) and at
+a 2,000-tick budget by the soak-layer `TestCatalogue_EachScenarioRunsClean`;
 the endurance budget is a periodic heap/goroutine-stability watch, not a
-CI release gate. This is the per-test analogue of the package-level
+release gate. This is the per-test analogue of the package-level
 `search/extern` exclusion in `NIGHTLY_CI_PKGS`.
 
 ## Helpers reference

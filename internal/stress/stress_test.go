@@ -1,9 +1,10 @@
 //go:build stress
 
-// Package stress holds CI-only stress tests: a short concurrent
+// Package stress holds stress tests: a short concurrent
 // workload that exercises the read-mostly hot path under -race so
 // scheduler-dependent issues surface in regression. Activated by
-// the 'stress' build tag (and the stress job in .github/workflows/ci.yml).
+// the 'stress' build tag, run locally under -race (e.g.
+// `go test -tags=stress -race ./internal/stress/...`).
 package stress
 
 import (

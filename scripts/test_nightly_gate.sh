@@ -2,7 +2,7 @@
 # test_nightly_gate.sh — self-contained gate test for the nightly failure-
 # detection logic.
 #
-# Verifies that the detection logic used in nightly.yml catches failure
+# Verifies that the nightly-layer failure-detection logic catches failure
 # conditions that do NOT emit a "^FAIL" line, such as OOM kills (exit 137)
 # or other process-level crashes that only produce "*** Error N" in the log.
 #
@@ -23,7 +23,7 @@ FAIL_COUNT=0
 #   - check_nightly_log <log> returns 0 when tests passed, 1 when tests failed.
 check_nightly_log() {
   local log="$1"
-  # Detection logic (mirrors nightly.yml):
+  # Detection logic for the nightly test layer:
   #   A run is healthy when the log contains at least one "^ok " line
   #   AND the test process exited 0.  Either condition absent = failure.
   #   "^FAIL" is also caught, but is NOT required to be the sole signal.

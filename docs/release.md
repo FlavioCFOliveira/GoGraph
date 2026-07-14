@@ -44,9 +44,22 @@ Before tagging a new release:
 ## Branch and tag protection policy
 
 The `main` branch and the `v*` tag namespace are protected on GitHub.
-The policy below is enforced via repo Settings → Branches and is
-mirrored here as the canonical reference; changes to the repo
-configuration must be reflected in this file.
+The GitHub-native rules below are enforced via repo Settings →
+Branches/Tags and are mirrored here as the canonical reference;
+changes to the repo configuration must be reflected in this file.
+
+Correctness and compliance are **not** enforced by GitHub status
+checks — there is no per-push or per-PR CI. The only GitHub Actions
+workflow is `.github/workflows/release.yml`, which runs on a `v*` tag
+push. Every correctness and compliance gate (`go vet`, `go build`,
+`go test -race ./...`, `golangci-lint`, the openCypher TCK
+execution + conformance gate, the coverage gate, the crash-injection
+battery, `govulncheck`, and `go mod tidy`) runs **locally** before a
+developer pushes or tags — via `make ci` for day-to-day work and the
+canonical `make release-preflight` gate before tagging a release.
+Enforcement is by developer discipline plus the local
+`make release-preflight` gate; a change that fails any gate must not
+be merged or tagged.
 
 ### `main` branch
 
@@ -56,14 +69,6 @@ configuration must be reflected in this file.
   self-approval does not count.
 - **Dismiss stale approvals on push.** A force-pushed branch loses
   its review and must be re-approved.
-- **Require status checks to pass.** The following checks from
-  `.github/workflows/ci.yml` are required:
-  - `build + test + race`
-  - `golangci-lint`
-  - `concurrency stress (race)`
-  - `govulncheck`
-  - `coverage gate`
-  - `benchstat regression gate` (PRs only)
 - **Require linear history.** Merge commits on `main` are rejected;
   use rebase or squash.
 - **Require signed commits** for repository contributors with
@@ -71,11 +76,11 @@ configuration must be reflected in this file.
   SSH and GPG keys.
 - **Restrict push for tags `v*`.** Only members of the `releasers`
   team may push a release tag. The `Release` workflow at
-  `.github/workflows/release.yml` re-runs `go vet`, `go build`,
-  `go test -race`, and the module-integrity check on the release
-  commit before goreleaser publishes — the upstream protection
-  prevents an unreviewed tag from reaching this step in the first
-  place.
+  `.github/workflows/release.yml` runs the release-accuracy gate and
+  then goreleaser; it does not re-run the correctness gates, which the
+  releaser has already run locally via `make release-preflight` before
+  pushing the tag. The GitHub tag restriction prevents an unreviewed
+  tag from reaching this workflow in the first place.
 
 ### `v*` tags
 
@@ -88,10 +93,11 @@ configuration must be reflected in this file.
 ## Go toolchain upgrade workflow
 
 GoGraph pins both a language version (`go 1.26`) and an explicit
-toolchain version (`toolchain go1.26.3`) in `go.mod`. CI workflows
-(`.github/workflows/ci.yml`, `release.yml`, `tck.yml`) all consume
-the toolchain via `go-version-file: go.mod`, so a single edit to
-`go.mod` propagates the bump to every CI job — there is exactly one
+toolchain version (`toolchain go1.26.3`) in `go.mod`. The release
+workflow (`.github/workflows/release.yml`) consumes the toolchain via
+`go-version-file: go.mod`, and the local gates (`make ci`,
+`make release-preflight`) use the same `go.mod` directive, so a single
+edit to `go.mod` propagates the bump everywhere — there is exactly one
 source of truth.
 
 To bump the toolchain to a new patch level (for example `go1.26.4`):
@@ -162,18 +168,18 @@ git push origin vX.Y.Z
 ```
 
 The `Release` workflow at `.github/workflows/release.yml` triggers
-on the tag push and runs `VERSION=<tag> make release-preflight` —
-**the same canonical gate the local `make release` path runs** (see the
-gate list below) — before invoking goreleaser with `GITHUB_TOKEN` from
-the default actions secret. The result is a **draft** release on
-GitHub — review the artefact list (source tarballs, soak-harness
-binaries for linux/darwin × amd64/arm64, checksums) and publish
-manually.
+on the tag push and runs `VERSION=<tag> make release-accuracy` — the
+release-doc consistency gate — and then invokes goreleaser with
+`GITHUB_TOKEN` from the default actions secret. The result is a
+**draft** release on GitHub — review the artefact list (source tarballs,
+soak-harness binaries for linux/darwin × amd64/arm64, checksums) and
+publish manually.
 
-Both the workflow and the local fallback share one source of truth —
-`make release-preflight` — so neither path can publish while bypassing a
-release gate. (Before #1444 the workflow ran only `scripts/pre-release.sh`
-and silently skipped the release-accuracy gates.)
+The workflow deliberately does **not** re-run the correctness gates.
+Before pushing the tag, the releaser must run the canonical
+`VERSION=<tag> make release-preflight` gate locally (see the gate list
+below); that gate — not GitHub — is what guarantees the tagged commit
+passes vet/build/-race/lint/TCK/coverage before it is published.
 
 ## Local fallback
 
@@ -186,9 +192,10 @@ VERSION=vX.Y.Z make release
 ```
 
 The local `release` target requires `goreleaser` on the PATH and a
-clean working tree. It also depends on the `release-preflight` target —
-the single canonical gate also invoked by `.github/workflows/release.yml`
-— which enforces ALL of the following BEFORE goreleaser is invoked:
+clean working tree. It depends on the `release-preflight` target — the
+single canonical gate the releaser runs before publishing (whether via
+`make release` here or by pushing a tag for the workflow) — which
+enforces ALL of the following BEFORE goreleaser is invoked:
 
 1. `VERSION` is set.
 2. CHANGELOG.md contains a `## [VERSION]` entry (the Unreleased
@@ -200,8 +207,9 @@ the single canonical gate also invoked by `.github/workflows/release.yml`
    numbers).
 7. `make cover-gate` is green (aggregate ≥ 85 %, per-package ≥ 75 %).
 8. `scripts/run_headline_bench.sh` exits zero when present (informational
-   per-tag run; the canonical comparison gate is the PR-time
-   `benchstat regression gate` in `.github/workflows/ci.yml`).
+   per-tag run; the benchstat comparison gate `scripts/bench_gate.sh` is
+   run locally before a change lands, comparing the candidate against its
+   baseline).
 9. The correctness gate `scripts/pre-release.sh` passes: `go vet`,
    `go build`, `go test -race ./...`, `golangci-lint run ./...`, and the
    TCK conformance check (overall-rate ≥ 90 %).

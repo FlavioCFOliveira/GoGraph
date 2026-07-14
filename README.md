@@ -25,9 +25,10 @@ functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
 (**3 897/3 897 scenarios, 16 006/16 006 steps**) and **100 % ACID-compliant**;
-every change is gated by the project's CI suite (build, vet, race, lint,
-`govulncheck`, TCK conformance, and the deterministic crash-injection
-battery). The module uses
+every change is gated by the project's local validation pipeline (build,
+vet, race, lint, `govulncheck`, TCK conformance, and the deterministic
+crash-injection battery), run via `make ci`/`make release-preflight` before
+it lands. The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
 fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.8.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
@@ -242,8 +243,9 @@ Benchmarks (Apple M4, Go 1.26.3):
 > workflow). Per-run variance is captured by `benchstat` and the
 > headline numbers above are the median of five runs at `-count=5`.
 > Hardware deltas should be reported in CHANGELOG.md alongside
-> any number that changes by more than the 5 % CI gate
-> (`benchstat regression gate` in `.github/workflows/ci.yml`).
+> any number that regresses beyond the local `benchstat` regression
+> gate (`scripts/bench_gate.sh`), which is run locally to compare a
+> candidate against its baseline before the change lands.
 
 The `v0.3.1` performance cycle lifts the write, analytics, and query
 paths without regressing the single-threaded figures above: **group

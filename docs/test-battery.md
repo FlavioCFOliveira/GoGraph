@@ -313,11 +313,11 @@ in `TestMain` to gate conditional generation logic.
 | **nightly** | `-tags=nightly` | `GOGRAPH_NIGHTLY=1` | `make test-nightly` | hours |
 
 Each layer is a strict superset: `nightly` always includes `soak` and
-`short`. The short-layer `< 60 s/pkg` budget is enforced by the
-`timing-budget` CI job via `make test-short-timings`
-(`scripts/pkg_time_budget.sh`): a warning above 60 s/pkg, a hard failure
-above 240 s/pkg. See [docs/test-layers.md](test-layers.md) for the full
-specification, CI workflow table, and Makefile targets.
+`short`. The short-layer `< 60 s/pkg` budget is enforced locally by
+`make test-short-timings` (`scripts/pkg_time_budget.sh`): a warning above
+60 s/pkg, a hard failure above 240 s/pkg. See
+[docs/test-layers.md](test-layers.md) for the full specification and
+Makefile targets.
 
 ### Runnable godoc examples
 
@@ -419,4 +419,4 @@ and update the "Last reviewed" footer at the bottom of this file.
 
 ---
 
-*Last reviewed: 2026-06-28 against commit `3b51a5b`. This document is tracked by the doc-freshness CI gate in `.github/workflows/ci.yml`.*
+*Last reviewed: 2026-07-14 against commit `908a83e`. This document's freshness is checked by `scripts/check_doc_freshness.sh`, run locally.*

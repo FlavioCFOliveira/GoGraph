@@ -26,9 +26,9 @@ compliant* invariant, which must hold on every host.
 
 ### How it is used
 
-`zoneinfo-slim.zip` is a vendored, slim-format IANA database. The CI workflows
-and the `Makefile` test targets set the `ZONEINFO` environment variable to its
-absolute path. Go's `time` package consults `ZONEINFO` **before** the system
+`zoneinfo-slim.zip` is a vendored, slim-format IANA database. The `Makefile`
+test targets (and the release workflow) set the `ZONEINFO` environment variable
+to its absolute path. Go's `time` package consults `ZONEINFO` **before** the system
 database, so the test process reads deterministic time-zone data regardless of
 the host OS.
 
@@ -39,12 +39,14 @@ reader rejects compressed entries (`"unsupported compression"`) and then
 with `zip -0`, and `TestZoneinfoFixtureIsUsableAndSlim` (in `cypher/tck`) fails
 the build if any entry is ever compressed.
 
-- Workflows: `.github/workflows/ci.yml`, `tck.yml`, `nightly.yml` set
+- Release workflow: `.github/workflows/release.yml` sets
   `ZONEINFO: ${{ github.workspace }}/cypher/tck/testdata/zoneinfo-slim.zip`.
 - Local: the `Makefile` exports
   `ZONEINFO := $(CURDIR)/cypher/tck/testdata/zoneinfo-slim.zip`, so `make test-*`
-  is deterministic on every platform. A bare `go test` that bypasses `make`
-  inherits the host database unless you export `ZONEINFO` yourself.
+  is deterministic on every platform. The TCK is exercised locally via
+  `make` (there is no per-push CI), so this export is the primary guarantee
+  of determinism. A bare `go test` that bypasses `make` inherits the host
+  database unless you export `ZONEINFO` yourself.
 
 ### Provenance and regeneration
 

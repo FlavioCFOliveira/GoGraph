@@ -7,7 +7,7 @@ import (
 
 // TestNightlyGate guards #1448: it runs the self-contained test for
 // scripts/test_nightly_gate.sh, which proves the nightly failure-detection
-// logic (mirrored from nightly.yml) catches conditions that emit no "^FAIL"
+// logic (for the nightly test layer) catches conditions that emit no "^FAIL"
 // line — OOM kills (exit 137), signal terminations, and empty logs — and
 // accepts a healthy run with "^ok " lines.
 //

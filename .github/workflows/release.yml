@@ -8,12 +8,14 @@ on:
 permissions:
   contents: write
 
-# Pin the IANA time-zone database so temporal TCK scenarios in the
-# pre-release gate are deterministic regardless of the runner's system
-# tzdata build (slim vs fat). Go's time package reads ZONEINFO before the
-# system database. Mirrors ci.yml / tck.yml / nightly.yml. Without this the
-# pre-1879 Europe/Stockholm offset in Temporal2.feature diverges and the TCK
-# gate fails. See cypher/tck/testdata/README.md.
+# Pin the IANA time-zone database so any temporal-sensitive Go time
+# behaviour in this job is deterministic regardless of the runner's
+# system tzdata build (slim vs fat). Go's time package reads ZONEINFO
+# before the system database. This pin is retained as a defensive
+# default; the temporal openCypher TCK scenarios themselves (e.g. the
+# pre-1879 Europe/Stockholm offset in Temporal2.feature) are exercised
+# by the local `make release-preflight` gate before the tag is pushed,
+# not by this job. See cypher/tck/testdata/README.md.
 env:
   ZONEINFO: ${{ github.workspace }}/cypher/tck/testdata/zoneinfo-slim.zip
 
@@ -22,9 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     # The job runs the fast Phase-A release-accuracy checks and THEN goreleaser
     # cross-compiles four platforms with SBOM generation. The heavy
-    # correctness/coverage/TCK gates were removed from this job — they run
-    # per-push in ci.yml/tck.yml/crash.yml — so 45m is now a generous ceiling
-    # dominated by the goreleaser build.
+    # correctness/coverage/TCK gates are not part of this job — they are
+    # enforced LOCALLY by `make release-preflight` before the tag is pushed —
+    # so 45m is now a generous ceiling dominated by the goreleaser build.
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -41,12 +43,11 @@ jobs:
       # README current-release, SECURITY.md version table, docs/benchmarks/VERSION.md.
       #
       # Correctness (vet/build/`go test -race ./...`/golangci-lint), the coverage
-      # gate, the full TCK execution and the crash-injection battery are enforced
-      # on EVERY push/PR to main by ci.yml, tck.yml and crash.yml. The tagged
-      # commit is always on main, so those workflows have already validated this
-      # SHA; this job therefore does not re-run them — it only checks release
-      # accuracy, then publishes via goreleaser. NOTE: this job does not itself
-      # block on those workflows; it trusts they ran green on this commit.
+      # gate, the full TCK execution and the crash-injection battery are NOT run
+      # by this job. They are enforced LOCALLY by the `make release-preflight`
+      # gate (release-accuracy + coverage + headline bench + scripts/pre-release.sh)
+      # which the releaser runs before pushing the tag. This job therefore only
+      # checks release accuracy, then publishes via goreleaser.
       - name: "Release-accuracy gate (Phase A: release-doc consistency)"
         run: VERSION="${GITHUB_REF_NAME}" make release-accuracy
       - name: Install cyclonedx-gomod (SBOM generator)

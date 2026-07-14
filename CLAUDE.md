@@ -15,7 +15,7 @@ These two properties are non-negotiable invariants of the module. Every change �
 The module is **100% compliant with the openCypher TCK** (Technology Compatibility Kit) at the execution level, as published at <https://opencypher.org/>. Every development must guarantee that the module remains 100% compatible with the openCypher specification.
 
 - The full openCypher TCK execution suite is fully green: every scenario in `cypher/tck/features/` passes, with no `failed`, no `undefined`, and no `pending` steps.
-- The regression gate in `cypher/tck/runner_test.go` (`const tckExecutionBaseline`) is set to the full scenario count. Any pull request that lowers the passing count is rejected by CI.
+- The regression gate in `cypher/tck/runner_test.go` (`const tckExecutionBaseline`) is set to the full scenario count. Any change that lowers the passing count fails `go test ./cypher/tck/...` — run locally as part of `make ci` before every push — and must not be merged.
 - Conformance is evidence-based: do not claim openCypher behaviour from memory. When a question arises, consult the openCypher 9 specification, the relevant TCK feature file, or the upstream openCypher reference implementation before changing behaviour.
 - New features that the openCypher TCK does not cover are allowed only when they do not conflict with any TCK-covered semantics.
 
@@ -178,7 +178,7 @@ Before writing a single line of code for any non-trivial component, conduct a **
 - **Package naming** — single-word, lowercase, no underscores; package names must not stutter with their exported identifiers (`graph.Graph` is acceptable; `graph.GraphGraph` is not).
 - **Tests** — table-driven tests with `t.Run`; property-based tests with `testing/quick` or `pgregory.net/rapid` for algorithms where invariants can be expressed generically.
 - **Test layers** — every test belongs to one of three layers:
-  - `short` — the default; runs on `go test ./...` with no tags. Every PR runs this layer; each package must stay under 60 s.
+  - `short` — the default; runs on `go test ./...` with no tags. Run this layer on every change (via `make ci`); each package must stay under 60 s.
   - `soak` — minutes-long workloads. Activated by the `soak` build tag or by setting `SOAK_FULL=1`. The pre-existing `stress` and `soakfull` build tags are considered part of the soak family.
   - `nightly` — hours-long workloads. Activated by the `nightly` build tag or by setting `GOGRAPH_NIGHTLY=1`; implies soak.
 
@@ -194,7 +194,7 @@ This module must operate **without failure under sustained high load and high co
 
 ### Correctness under concurrency
 
-- **Zero data races.** `go test -race ./...` must pass on every change. No exceptions. CI must block merges if the race detector reports any access.
+- **Zero data races.** `go test -race ./...` must pass on every change. No exceptions. Run it locally via `make ci` before every push; a change with a reported race must not be merged.
 - **Explicit concurrency contract.** Every exported type carries a godoc clause stating whether it is safe for concurrent use, and if so under which operations. Ambiguity is a defect.
 - **No hidden global state.** Package-level mutable variables are forbidden outside of carefully reviewed registries; every shared resource is passed explicitly.
 - **Context-aware blocking.** Every public API that may block on I/O, a channel, a lock, or a long computation accepts a `context.Context` and honours cancellation and deadlines.
@@ -225,12 +225,12 @@ This module must operate **without failure under sustained high load and high co
 - **Every long-lived goroutine is observable.** Name (via `pprof.SetGoroutineLabels`), lifecycle metrics (started, running, exited), and recent activity timestamp.
 - **Every cache, pool, and bounded queue exports utilisation metrics.** Size, capacity, hit ratio, eviction count, blocked-acquire count.
 - **Latency histograms on every public blocking API.** Prometheus exposition format, with consistent label names across the module.
-- **Race-detector and `goleak` integration in CI.** Both run on every PR; both must be green to merge.
+- **Race-detector and `goleak` integration in the local gate.** Both run under `make ci` (`go test -race ./...`); both must be green before a change is pushed or merged.
 
 ### Acceptance gates
 
 - **Soak test (periodic reliability exercise; not a release gate).** A multi-hour mixed-workload run under `GODEBUG=gctrace=1` should show zero growth in heap, file descriptors, and goroutine count after warm-up. Run it periodically — and ideally before a major release — but it does **not** block a release.
-- **Concurrency stress test in CI.** A short variant of the soak workload runs on every PR with the race detector enabled.
+- **Concurrency stress test in the local gate.** A short variant of the soak workload runs as part of the race-enabled short test layer (`make ci`) before every push.
 - **Load-test report alongside benchmarks.** Each release ships latency and throughput numbers at multiple concurrency levels (1, 8, 64, 256, 1024 goroutines), recorded in `docs/benchmarks/`.
 
 ---
@@ -265,7 +265,7 @@ go mod init github.com/FlavioCFOliveira/GoGraph
 # Build
 go build ./...
 
-# Test all packages (short layer only — PR-CI default)
+# Test all packages (short layer only — the default local run)
 go test ./...
 
 # Test all packages — short + soak

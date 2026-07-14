@@ -61,7 +61,7 @@ printf "  %-50s " "TCK overall-rate >= 90%..."
 # -v -count=1 are required: the report rate is emitted via t.Logf, which the
 # go test runner suppresses for a cached/non-verbose pass — without these the
 # earlier `go test -race ./...` cache yields "ok (cached)" with no rate line,
-# leaving RATE empty. Mirrors the tck.yml conformance-gate invocation.
+# leaving RATE empty. This is the canonical TCK conformance-gate invocation.
 RATE=$(go test -run=TestTCKReport -v -count=1 ./cypher/tck/... 2>&1 | grep -oE 'overall-rate=[0-9.]+' | cut -d= -f2)
 if [ -z "$RATE" ]; then
   echo "FAIL (could not parse rate)"

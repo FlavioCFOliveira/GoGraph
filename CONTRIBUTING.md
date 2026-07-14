@@ -52,8 +52,8 @@ expected to satisfy the following:
    invariants the caller must uphold (e.g. lifetime, mutability,
    alignment).
 3. Race-detector tests cover the helper.
-4. `go vet`, `golangci-lint`, and the project's CI pipeline are
-   green.
+4. `go vet`, `golangci-lint`, and the project's local validation
+   pipeline (`make ci`) are green.
 
 The public helper [`csrfile.Reinterpret`](store/csrfile/reinterpret.go)
 is the recommended primitive for new code that needs to retype the
@@ -72,13 +72,14 @@ Every change must pass `make ci`, which runs:
 - the coverage gate (`cover-gate`): **≥ 85 % aggregate** and
   **≥ 75 % per-package** statement coverage
 
-In addition, PR CI compiles the deferred test layers via
+In addition, the deferred test layers must be compiled via
 `make check-soak-build` (build + `go vet` under `-tags=soak` and
 `-tags=soak,nightly`). The short layer never compiles `soak`/`nightly`-tagged
 files, so without this guard a compile break in those long-running ACID and
-crash-safety tests would pass every PR gate and surface only in the next
-scheduled run. Run `make check-soak-build` locally before opening a PR that
-touches any `//go:build soak` or `//go:build nightly` file.
+crash-safety tests would pass the short gate and surface only when the soak
+or nightly layer is next run. Run `make check-soak-build` locally before
+pushing a change that touches any `//go:build soak` or `//go:build nightly`
+file.
 
 Benchmarks must be run for hot-path changes; the per-package
 README or task summary should record the measured numbers.
@@ -87,10 +88,13 @@ README or task summary should record the measured numbers.
 
 The `main` branch and the `v*` tag namespace are protected on GitHub.
 Contributors cannot push directly to `main`; every change lands via
-a pull request that must pass the required CI checks and obtain at
-least one approving review. Release tags (`v[0-9]*`) can only be
-pushed by the `releasers` team and must be signed. The full policy
-is documented in [docs/release.md](docs/release.md#branch-and-tag-protection-policy);
+a pull request that obtains at least one approving review. There are
+no GitHub status checks — correctness and compliance are enforced
+locally via `make ci` (and `make release-preflight` before tagging),
+which every contributor must run green before pushing. Release tags
+(`v[0-9]*`) can only be pushed by the `releasers` team and must be
+signed. The full policy is documented in
+[docs/release.md](docs/release.md#branch-and-tag-protection-policy);
 any change to the repo settings must be reflected there.
 
 ## Dependency policy
@@ -105,22 +109,24 @@ dependencies:
    bumping a version is a discrete, reviewable change rather than an
    incidental side-effect of `go get -u ./...`.
 
-2. **No incidental drift.** The `Tidy check` step in
-   `.github/workflows/ci.yml` runs `go mod tidy` on every PR and
-   fails when `go.mod` or `go.sum` is not already idempotent. Anyone
-   adding, removing or upgrading a dependency must commit the
-   resulting tidy delta together with their code change so reviewers
-   see the dependency move alongside the code that needs it.
+2. **No incidental drift.** `make ci` runs `go mod tidy` (the `tidy`
+   step) and fails when `go.mod` or `go.sum` is not already idempotent;
+   run it locally before pushing. Anyone adding, removing or upgrading
+   a dependency must commit the resulting tidy delta together with their
+   code change so reviewers see the dependency move alongside the code
+   that needs it.
 
-3. **Integrity check.** The same workflow runs `go mod download` and
-   `go mod verify` after the tidy check. Verification fails if any
-   downloaded module's content does not match its checksum in
-   `go.sum`, catching tampered proxies, mid-flight corruption, and
-   any forged `go.sum` entries.
+3. **Integrity check.** The release pre-flight (see
+   [docs/release.md](docs/release.md#pre-flight-manual)) runs
+   `go mod download` and `go mod verify` after the tidy check.
+   Verification fails if any downloaded module's content does not match
+   its checksum in `go.sum`, catching tampered proxies, mid-flight
+   corruption, and any forged `go.sum` entries.
 
-4. **Periodic CVE scan.** `govulncheck ./...` runs daily (cron
-   `13 4 * * *`) and on every PR. A new CVE against a pinned version
-   surfaces as a CI failure, prompting an explicit bump.
+4. **Periodic CVE scan.** Run `govulncheck ./...` locally before
+   pushing a dependency change and before tagging a release. A new CVE
+   against a pinned version surfaces as a failure, prompting an explicit
+   bump.
 
 5. **Upgrade workflow.** To upgrade a dependency:
 

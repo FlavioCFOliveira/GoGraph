@@ -92,18 +92,20 @@ baseline when **all** of the following conditions are met:
 
 1. **Execution-level TCK ≥ 95 %.** The openCypher TCK execution runner
    (`cypher/tck`) must pass at least 95 % of the scenarios it runs (i.e.
-   ≥ 3 702 / 3 897). The CI gate in `.github/workflows/tck.yml` must be
-   green at this threshold. Current status as of 2026-05-26 (Sprint 84
-   close): **80.0 %** (median 3 118 / 3 897 across 5 runs). The 80 %
-   interim milestone was reached during Sprint 84 audit rounds 7-9 (see
-   `cypher/tck/runner_test.go` header history). The 95 % target raises
-   the bar from interim release-candidate quality to feature-complete
-   stable. See [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md) for the
-   authoritative table updated by the same workflow.
+   ≥ 3 702 / 3 897). The local TCK conformance gate (`scripts/pre-release.sh`,
+   invoked by `make release-preflight`) must be green at this threshold.
+   Current status as of 2026-05-26 (Sprint 84 close): **80.0 %** (median
+   3 118 / 3 897 across 5 runs). The 80 % interim milestone was reached
+   during Sprint 84 audit rounds 7-9 (see `cypher/tck/runner_test.go`
+   header history). The 95 % target raises the bar from interim
+   release-candidate quality to feature-complete stable. See
+   [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md) for the authoritative
+   table.
 
-2. **All CI checks green.** Every job in the CI pipeline must pass on the
-   release commit: build, test, race detector, lint (`golangci-lint`),
-   vet, TCK, soak (short variant), and govulncheck.
+2. **All local gates green.** Every gate must pass on the release commit,
+   run locally via `make ci` and `make release-preflight`: build, test,
+   race detector, lint (`golangci-lint`), vet, TCK, the coverage gate, the
+   crash-injection battery, and a clean `govulncheck ./...`.
 
 3. **All T-series tasks closed.** Every task prefixed `T-` in
    `docs/tck/DIVERGENCES.md` must be marked resolved. T-series tasks
@@ -112,14 +114,12 @@ baseline when **all** of the following conditions are met:
 4. **Soak test green.** The full soak test (`SOAK_FULL=1`,
    1 024 connections, 4 hours) must pass with zero goroutine leaks and
    zero race conditions. The soak report in `soak-artefacts/` must reflect
-   a run against the release commit. The canonical execution path is the
-   `Soak` GitHub Actions workflow at
-   [`.github/workflows/soak.yml`](../.github/workflows/soak.yml), which
-   runs weekly (Sunday 02:00 UTC) and on `workflow_dispatch`. Operators
-   may also run the soak locally via `SOAK_FULL=1 make soak`, but the
-   CI workflow run is what the release gate consumes — its artefacts
-   (soak.log, heap profiles, bolt-soak-ci-report.md) are retained on
-   the workflow run for 30/90 days respectively.
+   a run against the release commit. The canonical execution path is to
+   run the soak locally via `SOAK_FULL=1 make soak`; its artefacts
+   (soak.log, heap profiles, bolt-soak-ci-report.md) are what the
+   release gate consumes. As noted in `CLAUDE.md`, the soak is a periodic
+   reliability exercise run before a major release rather than an
+   automated per-push gate.
 
 ### Pre-release candidates
 
