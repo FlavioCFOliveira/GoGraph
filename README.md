@@ -5,22 +5,20 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.8.0`.** This is the project's **tenth
+**Current release: `v0.8.1`.** This is the project's **eleventh
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.8.0` is a pre-1.0 **MINOR** release — its headline is **correctness
-and security hardening**: three consecutive multi-specialist audits (of
-the INDEX feature, the CONSTRAINT feature, and a whole-module
-production-readiness review with a round-2 re-audit) close a broad set of
-Consistency, Atomicity, Durability, and denial-of-service gaps across the
-schema-DDL path, the snapshot and WAL recovery readers, and the Bolt
-protocol. The one net-new, backward-compatible capability is acceptance
-of the modern openCypher `FOR ... REQUIRE` constraint syntax that every
-current Neo4j driver, shell, and migration tool emits. A Go toolchain
-bump to `go1.26.5` also clears an open `crypto/tls` advisory
-(`GO-2026-5856` / `CVE-2026-42505`); every change is additive over
-`v0.7.0`. The five major subsystems below are
+`v0.8.1` is a pre-1.0 **PATCH** release: a correctness-only fix to Cypher
+**pattern-predicate** and **pattern-comprehension** relationship-type
+matching over **parallel edges**, so a query such as
+`WHERE NOT (a)-[:TYPE]->()` now inspects every relationship type between
+an ordered node pair instead of only the first-stored one. It carries
+**no new public API** and **no breaking change**, and is additive over
+`v0.8.0`; the preceding `v0.8.0` release remains the substantive feature
+and hardening milestone (the modern openCypher `FOR ... REQUIRE`
+constraint syntax, schema-DDL durability and atomicity fixes, a
+denial-of-service hardening pass, and the `go1.26.5` toolchain bump). The five major subsystems below are
 functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
@@ -30,9 +28,9 @@ vet, race, lint, `govulncheck`, TCK conformance, and the deterministic
 crash-injection battery), run via `make ci`/`make release-preflight` before
 it lands. The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.8.0`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.8.1`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.8.0.md](release-notes/v0.8.0.md) for the full release
+[release-notes/v0.8.1.md](release-notes/v0.8.1.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)

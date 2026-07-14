@@ -4,6 +4,89 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] — 2026-07-14
+
+The eleventh published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **PATCH**
+release with a single, focused module change: it **fixes a Cypher
+pattern-predicate and pattern-comprehension correctness bug** on graphs
+that hold **parallel edges** (two or more relationships of different
+types between the same ordered pair of nodes). It is **API-additive**
+over `v0.8.0` — no exported identifier was added, removed, or renamed,
+there is **no breaking change**, and there is **no new user-facing public
+API**. It is a **recommended upgrade** for anyone who runs pattern
+predicates (`WHERE [NOT] (a)-[:TYPE]->()`), pattern comprehensions, or
+binds a relationship variable over a multigraph.
+
+Both compliance invariants continue to hold without regression: the
+module is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios, 16 006 / 16 006 steps) and **100 %
+ACID-compliant**. The fix aligns behaviour with the openCypher pattern
+semantics without moving the execution baseline: parallel-edge type
+selection is not exercised by a TCK scenario, so
+`tckExecutionBaseline = 3897` in `cypher/tck/runner_test.go` is unchanged.
+The Go toolchain remains **go1.26.5** (unchanged), and `govulncheck ./...`
+stays clean. This is a correctness-only patch that touches no traversal
+or execution hot path — the sole production source change is in
+`cypher/pattern_eval.go` — so the benchmark figures are **inherited
+unchanged from `v0.8.0`** (see
+[docs/benchmarks/v0.8.1.md](docs/benchmarks/v0.8.1.md)).
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.8.1
+```
+
+### Fixed
+
+- **Pattern-predicate and pattern-comprehension relationship-type
+  matching over parallel edges (correctness).** When two or more
+  relationships of different types connected the same ordered pair of
+  nodes, the pattern evaluator inspected only the **first** stored type of
+  the pair (`EdgeLabels(pair)[0]`), so any non-first parallel type was
+  reported as non-existent. Over a graph with
+  `(a)-[:FIRST]->(b)` and `(a)-[:SECOND]->(b)`, the predicate
+  `WHERE NOT (a)-[:SECOND]->()` wrongly kept `a` (it judged the `:SECOND`
+  edge absent), and a bound relationship variable's `type(r)` could report
+  the first-stored type instead of the pattern-selected one. The
+  single-relationship chokepoint `edgeMatchesRel` now tests **every** type
+  of the endpoint couple — fixing the outgoing, incoming, undirected,
+  variable-length, and comprehension paths at once — and `relValueFromHop`
+  reuses the canonical `pickEdgeType` resolver so `type(r)` on the
+  pattern-comprehension fallback path reports the pattern-selected type.
+  Three regression tests guard the fix
+  (`cypher/rel_multitype_pattern_test.go`), each verified red without the
+  change and green with it. Pattern-based relationship-type selection over
+  parallel edges is not covered by a TCK scenario, so the execution
+  baseline is unaffected. (#2016)
+
+### Changed
+
+- **Release engineering: CI consolidated to a release-only workflow, with
+  all correctness gating enforced locally.** The GitHub Actions surface is
+  reduced to the single `release.yml` workflow (tag-triggered goreleaser
+  publish plus the fast Phase-A release-accuracy check); the correctness,
+  coverage, TCK-execution, and crash-injection gates now run **only**
+  locally through `make ci` / `make release-preflight` before a tag is
+  pushed. The local release gate was **de-duplicated** so the
+  race-enabled, coverage-instrumented suite runs **once** — `make
+  release-preflight` is now `release-accuracy` + `make ci` + the headline
+  benchmark, and `scripts/pre-release.sh` is a standalone,
+  no-coverage convenience gate rather than a second full run.
+
+### Testing
+
+- **Soak-layer test compilation repaired** after the `PropsEvalFn`
+  error-return and `btree.RangeFrom` additions landed in `v0.8.0`, so the
+  `soak` build tag compiles cleanly again.
+- **PackStream allocation-charge upper-bound test** is skipped under
+  coverage instrumentation, where the compiler's coverage counters perturb
+  the measured allocation budget; the assertion still runs in the normal
+  and `-race` passes.
+
+[0.8.1]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.8.1
+
 ## [0.8.0] — 2026-07-14
 
 The tenth published release of **GoGraph**, a Go module for graph
