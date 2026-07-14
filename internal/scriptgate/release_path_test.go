@@ -20,7 +20,7 @@ func readRepoFile(t *testing.T, rel string) string {
 // TestReleasePathsConverge guards #1444: neither release path may publish
 // while bypassing the release gate.
 //
-// GitHub Actions now runs ONLY the release workflow
+// GitHub Actions runs ONLY the release workflow
 // (.github/workflows/release.yml) — the per-push ci.yml/tck.yml/crash.yml
 // workflows were removed. Correctness, coverage, TCK, and crash gating are no
 // longer enforced by GitHub; they run LOCALLY via `make release-preflight`
@@ -32,17 +32,25 @@ func readRepoFile(t *testing.T, rel string) string {
 //     re-runs none of the heavy correctness gates; it relies on the developer
 //     having run `make release-preflight` locally before pushing the tag.
 //   - Local path (`make release`): depends on release-preflight, which folds
-//     in release-accuracy, the coverage gate, the bench gate, and the full
-//     correctness gate (scripts/pre-release.sh: vet + build + test -race +
-//     golangci-lint + TCK).
+//     in release-accuracy, the headline bench, and — as the correctness AND
+//     coverage gate — `make ci`. `make ci` is
+//     `tidy fmt vet build test-short lint cover-gate`, where `test-short`
+//     runs the race detector over every package (`go test -race ./...`) and
+//     the openCypher TCK execution baseline (TestTCKExecution) runs inside
+//     that pass.
+//
+// The correctness gate therefore lives in `make ci`, not in
+// scripts/pre-release.sh: since the release-gate de-duplication (commit
+// af8eefc) release-preflight invokes `make ci`, and scripts/pre-release.sh is
+// a standalone, no-coverage convenience gate that is NOT on the release path.
 //
 // The assertions are static (file content), not a live release run, so the
 // gate is cheap and deterministic. Because no per-push CI stands behind the
 // tag-push path any more, the local `make release-preflight` gate is the sole
 // line of defence — so this test asserts its completeness. If a future change
 // drops release-accuracy from the tag-push path, or removes release-preflight
-// or any correctness command from the local path, this test fails, flagging
-// the reintroduced bypass (#1444).
+// or the `make ci` correctness/coverage gate from the local path, this test
+// fails, flagging the reintroduced bypass (#1444).
 func TestReleasePathsConverge(t *testing.T) {
 	// 1. Tag-push path runs the Phase-A release-accuracy gate.
 	releaseYML := readRepoFile(t, ".github/workflows/release.yml")
@@ -52,30 +60,56 @@ func TestReleasePathsConverge(t *testing.T) {
 	}
 
 	// 2. Local path (`make release`) is the sole correctness gate now that no
-	//    per-push CI exists. It must depend on release-preflight, which folds
-	//    in the coverage gate and the full correctness gate.
+	//    per-push CI exists. It must depend on release-preflight, which in turn
+	//    must invoke `make ci` (the correctness + coverage gate).
 	makefile := readRepoFile(t, "Makefile")
 	if !strings.Contains(makefile, "release: release-preflight") {
 		t.Errorf("Makefile `release` target no longer depends on `release-preflight`; " +
 			"the local release path would bypass the canonical gate")
 	}
-	if !strings.Contains(makefile, "cover-gate") {
-		t.Errorf("release-preflight no longer invokes the coverage gate; the local " +
-			"release path would publish without the coverage gate")
-	}
-	if !strings.Contains(makefile, "scripts/pre-release.sh") {
-		t.Errorf("release-preflight no longer invokes scripts/pre-release.sh; the " +
-			"correctness gate (vet/build/test -race/golangci-lint/TCK) would be skipped")
+	if !strings.Contains(makefile, "$(MAKE) ci") {
+		t.Errorf("release-preflight no longer invokes `make ci`; the local release path " +
+			"would publish without the correctness + coverage gate (#1444)")
 	}
 
-	// 3. The correctness gate itself must still run every mandated check. With
-	//    no per-push CI behind the release, scripts/pre-release.sh is the last
-	//    line of defence, so assert each gate command is present.
-	preRelease := readRepoFile(t, "scripts/pre-release.sh")
-	for _, want := range []string{"go vet", "go build", "go test -race", "golangci-lint", "TestTCKReport"} {
-		if !strings.Contains(preRelease, want) {
-			t.Errorf("scripts/pre-release.sh no longer runs %q; the correctness gate would "+
-				"skip it, and there is no per-push CI to catch the gap (#1444)", want)
-		}
+	// 3. `make ci` must still run every mandated gate — it is the last line of
+	//    defence now that no per-push CI exists. Assert its composition:
+	//    vet + build + the race/TCK test pass + lint + the coverage gate.
+	if !strings.Contains(makefile, "ci: tidy fmt vet build test-short lint cover-gate") {
+		t.Errorf("the `ci` target no longer runs the full `tidy fmt vet build test-short " +
+			"lint cover-gate` pipeline; a mandated correctness or coverage gate would be " +
+			"skipped on the release path (#1444)")
+	}
+
+	// 4. `test-short` (the gate `make ci` runs) must exercise the race detector
+	//    over every package — this is also the pass in which the openCypher TCK
+	//    execution baseline runs.
+	if !strings.Contains(makefile, ":= -race") {
+		t.Errorf("RACE_FLAGS is no longer `-race`; the release gate would run the test " +
+			"suite without the race detector (#1444)")
+	}
+	if !strings.Contains(makefile, "test-short:") ||
+		!strings.Contains(makefile, "$(GO) test $(RACE_FLAGS) -count=1 $(PACKAGES)") {
+		t.Errorf("the `test-short` gate no longer runs `go test -race ... ./...`; the " +
+			"release gate would skip the race/TCK test pass (#1444)")
+	}
+
+	// 5. The openCypher TCK execution baseline must run in the short layer, so
+	//    `test-short`'s `./...` pass includes it. Assert the test exists and
+	//    carries no build constraint that would exclude it from the default
+	//    build (a constraint would sit above the package clause).
+	tckRunner := readRepoFile(t, "cypher/tck/runner_test.go")
+	if !strings.Contains(tckRunner, "func TestTCKExecution(") {
+		t.Errorf("cypher/tck/runner_test.go no longer defines TestTCKExecution; the " +
+			"release gate would publish without the TCK execution baseline (#1444)")
+	}
+	header := tckRunner
+	if idx := strings.Index(tckRunner, "\npackage "); idx >= 0 {
+		header = tckRunner[:idx]
+	}
+	if strings.Contains(header, "//go:build") {
+		t.Errorf("cypher/tck/runner_test.go carries a build tag; TestTCKExecution would be " +
+			"excluded from the default `test-short ./...` pass and the release gate would " +
+			"skip the TCK baseline (#1444)")
 	}
 }

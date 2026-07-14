@@ -84,6 +84,15 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.8.1
   coverage instrumentation, where the compiler's coverage counters perturb
   the measured allocation budget; the assertion still runs in the normal
   and `-race` passes.
+- **Release-path guard reconciled with the de-duplicated gate.** The
+  `TestReleasePathsConverge` release-integrity check
+  (`internal/scriptgate`) had still asserted the pre-de-duplication path
+  (`release-preflight` → `scripts/pre-release.sh`). It now enforces the
+  same anti-bypass invariant against the current pipeline —
+  `release` → `release-preflight` → `make ci` (the
+  `tidy`/`fmt`/`vet`/`build`/`test-short` `-race ./...`/`lint`/`cover-gate`
+  gate, with the TCK execution baseline inside the race pass) — after the
+  correctness gate moved out of `scripts/pre-release.sh` and into `make ci`.
 
 [0.8.1]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.8.1
 
