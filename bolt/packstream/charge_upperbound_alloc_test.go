@@ -47,6 +47,18 @@ func measureRetainedAlloc(build func() any) uint64 {
 // (list) allocation is measured — key string data is charged separately against
 // the wire byte budget in production.
 func TestDecoder_ChargeUpperBoundsGoAllocation(t *testing.T) {
+	// Coverage instrumentation, like the race detector this file already
+	// excludes via //go:build !race, adds allocations the decoded-memory budget
+	// deliberately does not — and must not — account for, inflating
+	// measureRetainedAlloc's process-wide TotalAlloc delta well past the
+	// production charge (observed on a linux/amd64 CI runner under -coverpkg: an
+	// n=0 empty list "retaining" ~5 KiB, a physical impossibility for real
+	// retained memory). The budget bounds PRODUCTION memory, so this test must
+	// measure uninstrumented production allocation only.
+	if testing.CoverMode() != "" {
+		t.Skip("allocation measurement is unreliable under coverage instrumentation; see the //go:build !race rationale at the top of this file")
+	}
+
 	mapBase := int64(packstream.MapCollectionCostForTest())
 	mapPer := int64(packstream.MapEntryCostForTest())
 	listBase := int64(packstream.CollectionCostForTest())
