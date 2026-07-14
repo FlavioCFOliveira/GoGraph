@@ -92,8 +92,10 @@ baseline when **all** of the following conditions are met:
 
 1. **Execution-level TCK ≥ 95 %.** The openCypher TCK execution runner
    (`cypher/tck`) must pass at least 95 % of the scenarios it runs (i.e.
-   ≥ 3 702 / 3 897). The local TCK conformance gate (`scripts/pre-release.sh`,
-   invoked by `make release-preflight`) must be green at this threshold.
+   ≥ 3 702 / 3 897). The local TCK conformance gate — the `cypher/tck`
+   `TestTCKExecution` baseline (`const tckExecutionBaseline`), run inside
+   `make ci` (which `make release-preflight` invokes) — must be green at this
+   threshold.
    Current status as of 2026-05-26 (Sprint 84 close): **80.0 %** (median
    3 118 / 3 897 across 5 runs). The 80 % interim milestone was reached
    during Sprint 84 audit rounds 7-9 (see `cypher/tck/runner_test.go`

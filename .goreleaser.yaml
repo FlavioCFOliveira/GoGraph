@@ -13,7 +13,11 @@ project_name: gograph
 before:
   hooks:
     - go mod tidy
-    - go vet ./...
+    # `go vet ./...` is deliberately NOT run here: it is enforced by the local
+    # `make ci` gate (via `make release-preflight`) before the tag is pushed,
+    # and re-running it in this hook would contradict the release workflow's
+    # Phase-A-only contract (see .github/workflows/release.yml). `go mod tidy`
+    # is kept so the SBOM below reflects a tidy module graph.
     # Software Bill of Materials (CycloneDX JSON, schema 1.5).
     # Emit one document for the whole module — every archive ships
     # the same Go module graph regardless of OS/arch, so a per-archive

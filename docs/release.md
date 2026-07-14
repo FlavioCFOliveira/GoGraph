@@ -7,11 +7,18 @@ GoGraph follows a tag-driven release process orchestrated by
 
 Before tagging a new release:
 
-1. All tests pass:
+1. The canonical local gate is green:
 
    ```bash
-   make ci
+   VERSION=vX.Y.Z make release-preflight
    ```
+
+   `make release-preflight` **subsumes** `make ci` — it runs the
+   release-accuracy checks, then the full `make ci` correctness+coverage
+   gate exactly once, then the headline benchmark. Do **not** run `make ci`
+   separately as well; that would execute the whole `go test -race ./...`
+   and coverage suite a second time for no added assurance. Run `make ci`
+   on its own only for day-to-day iteration between releases.
 
 2. Dependency integrity holds:
 
@@ -194,8 +201,10 @@ VERSION=vX.Y.Z make release
 The local `release` target requires `goreleaser` on the PATH and a
 clean working tree. It depends on the `release-preflight` target — the
 single canonical gate the releaser runs before publishing (whether via
-`make release` here or by pushing a tag for the workflow) — which
-enforces ALL of the following BEFORE goreleaser is invoked:
+`make release` here or by pushing a tag for the workflow) — which runs,
+in order, BEFORE goreleaser is invoked:
+
+**Release-accuracy** (`make release-accuracy` — release-doc consistency):
 
 1. `VERSION` is set.
 2. CHANGELOG.md contains a `## [VERSION]` entry (the Unreleased
@@ -205,14 +214,25 @@ enforces ALL of the following BEFORE goreleaser is invoked:
 5. SECURITY.md supported-versions table names `VERSION`'s `vX.Y.x` line.
 6. docs/benchmarks/VERSION.md exists (per-release benchmark/load-test
    numbers).
-7. `make cover-gate` is green (aggregate ≥ 85 %, per-package ≥ 75 %).
+
+**Correctness + coverage** (`make ci`, run exactly once):
+
+7. `make ci` is green — the full correctness+coverage gate: `go mod tidy`,
+   `gofmt`/`goimports`, `go vet ./...`, `go build ./...`,
+   `go test -race ./...` (which includes the `cypher/tck`
+   `TestTCKExecution` =100 % execution baseline, so a TCK regression fails
+   this gate), `golangci-lint run ./...`, and `make cover-gate`
+   (aggregate ≥ 85 %, per-package ≥ 75 %). The suite runs once here — the
+   gate does not re-run it. (`scripts/pre-release.sh` is a separate
+   standalone convenience gate that runs vet/build/-race/lint without
+   coverage; it is **not** invoked by `release-preflight`.)
+
+**Performance** (informational on a release tag):
+
 8. `scripts/run_headline_bench.sh` exits zero when present (informational
    per-tag run; the benchstat comparison gate `scripts/bench_gate.sh` is
    run locally before a change lands, comparing the candidate against its
    baseline).
-9. The correctness gate `scripts/pre-release.sh` passes: `go vet`,
-   `go build`, `go test -race ./...`, `golangci-lint run ./...`, and the
-   TCK conformance check (overall-rate ≥ 90 %).
 
 Each failure exits non-zero with a one-line explanation of what is
 missing. Run `make release-preflight` on its own to dry-run the gates

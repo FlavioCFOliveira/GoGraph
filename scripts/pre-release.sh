@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
-# pre-release.sh — run the full release validation gate before tagging.
+# pre-release.sh — standalone correctness gate (no coverage).
+#
+# This is a convenience gate for a quick vet/build/-race/lint sweep WITHOUT the
+# slow coverage-instrumented run. It is NOT the canonical release gate: that is
+# `make release-preflight`, which runs `make ci` (vet/build/test-short[-race]/
+# lint/cover-gate) exactly once plus release-accuracy and the headline bench.
 #
 # Usage:
 #   bash scripts/pre-release.sh [version]
 #
 # Steps:
 #   1. go vet ./...
-#   2. go test -race ./... (includes bench, cypher, tck, bolt)
-#   3. TCK conformance check (overall-rate >= 90%)
+#   2. go build ./...
+#   3. go test -race ./... (includes bench, cypher, tck, bolt)
 #   4. golangci-lint run ./...
-#   5. go build ./...
-#   6. Print PASS / FAIL summary
+#   5. Print PASS / FAIL summary
+#
+# openCypher TCK conformance is NOT re-checked here: the =100% execution
+# baseline (cypher/tck TestTCKExecution, const tckExecutionBaseline) already
+# runs inside step 3's `go test -race ./cypher/tck/...`, so any regression fails
+# this gate without a separate — and strictly weaker — pass-rate re-run. The
+# former `TestTCKReport overall-rate >= 90%` step was removed because it was
+# redundant with that baseline and rewrote docs/tck/parser-report.md as a side
+# effect, which could dirty the working tree ahead of `make release`'s
+# clean-tree check.
 #
 # The soak step (SOAK_FULL=1) is excluded from the automated gate because it
 # takes 4+ hours; run it manually before a major release.
@@ -55,24 +68,6 @@ run_step "go vet ./..."                go vet ./...
 run_step "go build ./..."              go build ./...
 run_step "go test -race ./..."         go test -race -timeout=30m ./...
 run_step "golangci-lint run ./..."     golangci-lint run ./...
-
-# TCK conformance gate
-printf "  %-50s " "TCK overall-rate >= 90%..."
-# -v -count=1 are required: the report rate is emitted via t.Logf, which the
-# go test runner suppresses for a cached/non-verbose pass — without these the
-# earlier `go test -race ./...` cache yields "ok (cached)" with no rate line,
-# leaving RATE empty. This is the canonical TCK conformance-gate invocation.
-RATE=$(go test -run=TestTCKReport -v -count=1 ./cypher/tck/... 2>&1 | grep -oE 'overall-rate=[0-9.]+' | cut -d= -f2)
-if [ -z "$RATE" ]; then
-  echo "FAIL (could not parse rate)"
-  FAIL=$((FAIL + 1))
-elif python3 -c "import sys; sys.exit(0 if float('$RATE') >= 90.0 else 1)" 2>/dev/null; then
-  echo "OK (${RATE}%)"
-  PASS=$((PASS + 1))
-else
-  echo "FAIL (${RATE}% < 90%)"
-  FAIL=$((FAIL + 1))
-fi
 
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="

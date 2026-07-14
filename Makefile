@@ -209,18 +209,16 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	@echo "release-accuracy: all accuracy checks passed"
 
 .PHONY: release-preflight
-release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + coverage + bench + the full correctness gate (scripts/pre-release.sh). NOTE: the release.yml CI job runs only `release-accuracy`; -race/TCK/coverage/crash are covered here and must be run locally before tagging.
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
 	@$(MAKE) release-accuracy
-	@echo "release-preflight: running coverage gate…"
-	@$(MAKE) cover-gate
+	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
+	@$(MAKE) ci
 	@if [ -x scripts/run_headline_bench.sh ]; then \
 	  echo "release-preflight: running headline bench regression gate (informational on a release tag — see docs/release.md for the canonical PR-time gate)…"; \
 	  ./scripts/run_headline_bench.sh > /tmp/release-preflight-bench.txt || { echo "release-preflight: headline bench failed; see /tmp/release-preflight-bench.txt"; exit 1; }; \
 	else \
 	  echo "release-preflight: scripts/run_headline_bench.sh not present — skipping bench gate"; \
 	fi
-	@echo "release-preflight: running the correctness gate (scripts/pre-release.sh: vet + build + test -race + golangci-lint + TCK)…"
-	@bash scripts/pre-release.sh "$$VERSION"
 	@echo "release-preflight: all checks passed"
 
 .PHONY: release

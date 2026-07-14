@@ -45,9 +45,11 @@ jobs:
       # Correctness (vet/build/`go test -race ./...`/golangci-lint), the coverage
       # gate, the full TCK execution and the crash-injection battery are NOT run
       # by this job. They are enforced LOCALLY by the `make release-preflight`
-      # gate (release-accuracy + coverage + headline bench + scripts/pre-release.sh)
-      # which the releaser runs before pushing the tag. This job therefore only
-      # checks release accuracy, then publishes via goreleaser.
+      # gate (release-accuracy + `make ci` + headline bench) which the releaser
+      # runs before pushing the tag. `make ci` runs the correctness+coverage
+      # suite exactly once (vet/build/test-short[-race]/lint/cover-gate; the TCK
+      # =100% baseline runs inside the -race and coverage passes). This job
+      # therefore only checks release accuracy, then publishes via goreleaser.
       - name: "Release-accuracy gate (Phase A: release-doc consistency)"
         run: VERSION="${GITHUB_REF_NAME}" make release-accuracy
       - name: Install cyclonedx-gomod (SBOM generator)
