@@ -849,4 +849,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-07-03 against commit `f1fa1a2`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-07-14 against commit `a38bf91`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
