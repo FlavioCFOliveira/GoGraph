@@ -53,10 +53,10 @@ func TestCreateNode_MergeProps_DynamicOverridesStatic(t *testing.T) {
 	}
 
 	// Attach a PropsEvalFn that returns {name: "Bob"} — must override "Alice".
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "name", Value: lpg.StringValue("Bob")},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -112,8 +112,8 @@ func TestCreateNode_MergeProps_EmptyDynamic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCreateNode: %v", err)
 	}
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
-		return nil // empty dynamic — static path is returned unchanged
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
+		return nil, nil // empty dynamic — static path is returned unchanged
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -165,13 +165,13 @@ func TestCreateRelationship_PropBinding_ScalarTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCreateRelationship: %v", err)
 	}
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "name", Value: lpg.StringValue("edge-name")},
 			{Key: "count", Value: lpg.Int64Value(7)},
 			{Key: "score", Value: lpg.Float64Value(3.14)},
 			{Key: "active", Value: lpg.BoolValue(true)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -217,13 +217,13 @@ func TestCreateRelationship_PropBinding_ListType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCreateRelationship: %v", err)
 	}
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "tags", Value: lpg.ListValue([]lpg.PropertyValue{
 				lpg.StringValue("x"),
 				lpg.StringValue("y"),
 			})},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -262,10 +262,10 @@ func TestCreateRelationship_PropBinding_TemporalDate(t *testing.T) {
 
 	// Encode a date as PropString with SOH prefix 0x01 ("date" tag).
 	dateStr := "\x01" + "2024-03-15"
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "d", Value: lpg.StringValue(dateStr)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -300,10 +300,10 @@ func TestCreateRelationship_PropBinding_TemporalDuration(t *testing.T) {
 
 	// Duration tag is 0x06, body is ISO 8601 duration.
 	durationStr := "\x06" + "P1Y2M3DT4H5M6S"
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "dur", Value: lpg.StringValue(durationStr)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -335,10 +335,10 @@ func TestCreateRelationship_PropBinding_TemporalLocalDateTime(t *testing.T) {
 		t.Fatalf("NewCreateRelationship: %v", err)
 	}
 	ldtStr := "\x02" + "2024-03-15T10:20:30"
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "ldt", Value: lpg.StringValue(ldtStr)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -369,10 +369,10 @@ func TestCreateRelationship_PropBinding_TemporalDateTime(t *testing.T) {
 		t.Fatalf("NewCreateRelationship: %v", err)
 	}
 	dtStr := "\x03" + "2024-03-15T10:20:30+01:00"
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "dt", Value: lpg.StringValue(dtStr)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -403,10 +403,10 @@ func TestCreateRelationship_PropBinding_TemporalLocalTime(t *testing.T) {
 		t.Fatalf("NewCreateRelationship: %v", err)
 	}
 	ltStr := "\x04" + "10:20:30"
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "lt", Value: lpg.StringValue(ltStr)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -437,10 +437,10 @@ func TestCreateRelationship_PropBinding_TemporalTime(t *testing.T) {
 		t.Fatalf("NewCreateRelationship: %v", err)
 	}
 	tStr := "\x05" + "10:20:30+01:00"
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "t", Value: lpg.StringValue(tStr)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -925,6 +925,17 @@ func (a *stringRangeAdapter) Range(lo, hi string) *roaring64.Bitmap {
 	return bm
 }
 
+// RangeFrom is the unbounded-above ([lo, +inf)) counterpart of Range, mirroring
+// btree.Index[string].RangeFrom (#1895): the single test element "k" is in range
+// whenever lo <= "k".
+func (a *stringRangeAdapter) RangeFrom(lo string) *roaring64.Bitmap {
+	bm := roaring64.New()
+	if lo <= "k" {
+		bm.Add(1)
+	}
+	return bm
+}
+
 // int64HashAdapter is a minimal test double for hash.Index[int64].
 type int64HashAdapter struct{}
 
@@ -1051,10 +1062,10 @@ func TestMerge_WithPropsEvalFn(t *testing.T) {
 	}
 
 	// Attach a dynamic property evaluator.
-	op.WithPropsEvalFn(func(_ exec.Row) []exec.PropEntry {
+	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {
 		return []exec.PropEntry{
 			{Key: "dynamic", Value: lpg.Int64Value(999)},
-		}
+		}, nil
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
