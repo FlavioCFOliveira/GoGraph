@@ -341,17 +341,29 @@ func nodeValueForID(g *lpg.Graph[string, float64], id graph.NodeID) expr.NodeVal
 // (forward ? srcKey→dstKey : dstKey→srcKey) — callers pass forward=true
 // when the traversal followed the storage direction and false for the
 // reverse leg of an undirected / incoming match.
-func relValueFromHop(g *lpg.Graph[string, float64], hop candidateHop, _ *ast.RelationshipPattern) expr.RelationshipValue {
+func relValueFromHop(g *lpg.Graph[string, float64], hop candidateHop, rel *ast.RelationshipPattern) expr.RelationshipValue {
 	srcKey, dstKey := hop.srcKey, hop.dstKey
 	startID, endID := uint64(hop.srcID), uint64(hop.dstID)
 	if !hop.forward {
 		srcKey, dstKey = hop.dstKey, hop.srcKey
 		startID, endID = endID, startID
 	}
-	var typeName string
-	if labels := g.EdgeLabels(srcKey, dstKey); len(labels) > 0 {
-		typeName = labels[0]
+	var relTypes []string
+	if rel != nil {
+		relTypes = rel.Types
 	}
+	// Reuse the engine's canonical multi-label resolver: prefer a label that
+	// the pattern's type filter accepts, else the deterministic
+	// alphabetically-smallest label. [Graph.EdgeLabels] returns the UNION of
+	// the types over all parallel edges between the pair, in unspecified order,
+	// so a `[r:SECOND]` hop over a multi-type parallel pair such as
+	// (a)-[:FIRST]->(b) / (a)-[:SECOND]->(b) must report SECOND rather than
+	// whichever type EdgeLabels happened to list first (rmp #2016, sibling of
+	// the edgeMatchesRel fix). An untyped `[r]` hop over such a pair remains
+	// inherently ambiguous for this key-based enumerator (it cannot tell which
+	// parallel instance produced the hop); the RollUpApply lowering — the
+	// primary comprehension path — resolves that case per instance.
+	typeName := pickEdgeType(g.EdgeLabels(srcKey, dstKey), relTypes)
 	// Stream the coalesced properties straight into the expr map (M2 / #1662),
 	// dropping the transient lpg map the prior two-step build allocated per hop.
 	props := edgePropsToExprMap(g, srcKey, dstKey)
@@ -702,11 +714,20 @@ func (pe *patternEvaluator) edgeMatchesRel(srcKey, dstKey string, rel *ast.Relat
 	if len(labels) == 0 {
 		return false
 	}
-	// openCypher OR semantics: match if edge label equals any listed type.
-	edgeLabel := labels[0]
-	for _, t := range rel.Types {
-		if edgeLabel == t {
-			return true
+	// openCypher OR semantics: the pattern matches when the pair
+	// (srcKey → dstKey) carries at least one edge whose relationship type is
+	// among rel.Types. [Graph.EdgeLabels] returns the UNION of the types over
+	// all parallel edges between the pair, in unspecified order, so every
+	// label must be tested — not only labels[0]. A multigraph pair such as
+	// (a)-[:FIRST]->(b) and (a)-[:SECOND]->(b) reports both types, and a
+	// `[:SECOND]` predicate must match even when SECOND is not the first entry
+	// (rmp #2016: the pre-fix labels[0] check reported every non-first type as
+	// non-existent).
+	for _, edgeLabel := range labels {
+		for _, t := range rel.Types {
+			if edgeLabel == t {
+				return true
+			}
 		}
 	}
 	return false
