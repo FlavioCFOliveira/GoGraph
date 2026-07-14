@@ -36,6 +36,8 @@ These properties must be preserved both for the in-memory engine and for every p
 
 You are **not authorised** to make decisions unilaterally. Whenever instructions are insufficient, unclear, non-specific, ambiguous, or contradictory, you **must always ask the user** how to proceed before taking any action.
 
+**Boundary between acting and asking:** obvious, low-risk corrections — for example, a pre-existing bug with an unambiguous fix — proceed immediately. Any decision that changes the **scope**, the **expected behaviour**, the **architecture**, or the **requirements** must be put to the user first.
+
 When asking for clarification:
 - Present multiple options labelled `a)`, `b)`, `c)`, … and explicitly state which option you recommend.
 - When there are multiple open questions, ask them **one at a time**, sequentially — never bundle several questions into a single prompt.
@@ -64,9 +66,13 @@ Every development cycle must be **self-contained**: never deliver only part of a
 - All code is **full-fledged**. Never use `t.Skip` or placeholder stubs to pass off **unfinished or unimplemented** work as "done". This does not forbid deliberate, sanctioned skips: the soak/nightly layer gates (`testlayers.RequireSoak`/`RequireNightly`, which skip when their layer is inactive) and genuine environment-precondition skips (for example, when an optional external tool is absent) are expected wherever the test-layer rules below call for them.
 - When you encounter a pre-existing bug, fix small, clear, in-scope defects immediately and then resume the work you were doing. For a bug that is large, risky, or would materially widen the scope of the current task, follow the [Decision autonomy](#decision-autonomy) rule and ask the user how to proceed before acting.
 
+### Regression prevention
+
+Whenever you identify a bug, create the regression tests needed to guarantee that the same defect cannot reappear as a consequence of future development. A fix is not complete until a test that fails on the old behaviour and passes on the corrected behaviour is in place.
+
 ### Production-grade by default
 
-Across the entire cycle — analysis → planning → development → testing — the result must be **production-grade**. Apply your full knowledge and effort so that every change yields code ready to run in production, never a prototype or a partial solution.
+Across the entire cycle — analysis → planning → development → testing — the result must be **production-grade**, and this standard applies to **every action you take**: development, fixes, evaluations, analyses, and audits alike. Apply your full knowledge and effort so that every change yields code ready to run in production, never a prototype or a partial solution.
 
 ### Never guess — evidence over assumption
 
@@ -80,13 +86,23 @@ Base every action **exclusively on verified knowledge**; never guess the intende
 
 Whenever you must assess **performance**, **completeness**, or **correctness**, gather evidence from the project and decide **empirically** — never by intuition. Benchmarks, test results, profiles, and Knowledge Graph queries are the basis for every such decision. This is the umbrella principle; the benchmarking mandates in [Performance-First Engineering](#performance-first-engineering) are its concrete, authoritative application to performance work.
 
+### Decision framework — correct → secure → fast
+
+When deciding what the project should deliver — in audits and evaluations as much as in implementation — apply this priority order:
+
+1. **Is it correct?** Does the result meet the objective, the project specification, and the applicable authoritative sources (RFCs, standards, the openCypher specification, the ACID contract)?
+2. **Is it secure?** Does the decision introduce nothing that compromises the safe use of the deliverable?
+3. **Is it fast?** Is it as fast as it can be without compromising correctness or security, and what more can be done to maximise the deliverable's performance?
+
+Correctness outranks security, and security outranks speed: never trade a higher priority for a lower one. This order governs **trade-off priority**, whereas [Performance-First Engineering](#performance-first-engineering) governs the **rigour** of the performance work itself, which is pursued only once correctness and security are assured. When these criteria conflict, or are hard to satisfy together, stop and ask the user how to proceed, presenting the available options.
+
 ---
 
 ## Planning and Task Execution
 
 ### Single source of truth
 
-Use the `rmp` CLI (available system-wide) as the **sole source of truth** for all planning and task tracking in this project. No other tool or method should be used for this purpose.
+Use the `rmp` CLI (available system-wide) as the **sole source of truth** for all planning and task tracking in this project. No other tool or method should be used for this purpose. Drive every task- and sprint-related operation through the `roadmap-manager` skill, which is the sole operator of the `rmp` CLI.
 
 The same `rmp` instance also hosts the project **Knowledge Graph** (see [Knowledge Graph](#knowledge-graph)) — the authoritative model of what the project *is* (its components, features, and provenance), distinct from rmp's role as the source of truth for *planning and tasks*. Consult it throughout planning to understand the components involved, their relationships, and the scope and impact of the proposed work.
 
@@ -108,6 +124,10 @@ When the work spans multiple sprints, complete the full sprint list first, then 
 
 Use the **Knowledge Graph** to identify the **foundational and highest-leverage tasks** — those that unblock the most downstream work or carry the widest impact — and sequence the plan to tackle them first.
 
+**Prioritisation.** By default, always work from the highest-gain, highest-impact tasks down to the least essential. Foundational tasks, and tasks that unblock other tasks or features, are always tackled first.
+
+**Task sizing.** When a task is too large to be completed in a single pass by an AI agent, subdivide it into parts, each of which still honours the self-contained-development principle.
+
 ### Execution
 
 Task execution is the natural continuation of planning. For each unit of work, follow this sequence using `rmp`:
@@ -115,20 +135,24 @@ Task execution is the natural continuation of planning. For each unit of work, f
 1. Check whether any open task is already in progress and, if so, continue it.
 2. Identify the next task to start.
 3. Read and fully understand the task — its objective, functional and technical requirements, and acceptance criteria — consulting the **Knowledge Graph** to gauge its scope and impact.
-4. Implement the task, then verify that **all** acceptance criteria are satisfied before considering it done.
-5. Close the task with a concise summary of what was done.
-6. Create a **git commit** following conventional-commit conventions and describing what was done, before moving to the next task.
-7. Update the **Knowledge Graph** to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
+4. Determine the most appropriate sub-agent for the work and delegate its execution to that specialist (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
+5. Implement the task, then verify that **all** acceptance criteria are satisfied before considering it done.
+6. Close the task with a concise summary of what was done.
+7. Create a **git commit** following conventional-commit conventions and describing what was done, before moving to the next task.
+8. Update the **Knowledge Graph** to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
 
 **Sequencing rules:**
 - Sprints are always executed **sequentially**.
 - Tasks within a sprint may run in **parallel** only when there is clear justification (no shared state, no dependency between them).
+- **Evaluations and audits** may run in parallel, but any such parallel execution **always requires the user's explicit prior authorisation** (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
+
+**Model and effort.** Wherever possible, match the model and its reasoning-effort level to the demands of each individual operation within a task.
 
 ---
 
 ## Knowledge Graph
 
-Maintain a project **Knowledge Graph (KG)** using the graph features of `rmp` (its built-in *Groadmap* graph). The KG is the authoritative, queryable model of the project, and you must keep it as current as possible. To **locate and understand project structure** — components, features, tests, and provenance — query the graph first and fall back to reading source files only when the graph cannot answer. This is a navigation shortcut, not authority over the code: for any question of *actual behaviour* — above all openCypher conformance — the primary sources still govern, so consult the specification, the relevant TCK feature files, and the source itself as the [Compliance Mandates](#compliance-mandates) require.
+Maintain a project **Knowledge Graph (KG)** using the graph features of `rmp` (its built-in *Groadmap* graph), driven through the `knowledge-authority` skill — the empirical single source of truth about the project's own contents, which queries the graph store first and reads source files only as a fallback. The KG is the authoritative, queryable model of the project, and you must keep it as current as possible. To **locate and understand project structure** — components, features, tests, and provenance — query the graph first and fall back to reading source files only when the graph cannot answer. This is a navigation shortcut, not authority over the code: for any question of *actual behaviour* — above all openCypher conformance — the primary sources still govern, so consult the specification, the relevant TCK feature files, and the source itself as the [Compliance Mandates](#compliance-mandates) require.
 
 ### What the graph must capture
 
@@ -237,7 +261,7 @@ This module must operate **without failure under sustained high load and high co
 
 ## Sub-Agents (Specialists)
 
-The following sub-agents are available and **must be actively consulted** to maximise output quality. Do not implement a component in isolation when a relevant specialist can provide material input.
+Your working team comprises **all available sub-agents** — global, user, and project. Use them collaboratively and complementarily so that every task is completed with the greatest possible confidence, effectiveness, and assertiveness, with each specialist contributing its expertise proactively. The specialists in the table below **must be actively consulted** to maximise output quality — do not implement a component in isolation when a relevant specialist can provide material input — but treat the table as the key specialists, not the limit of the team.
 
 | Agent | When to invoke |
 |---|---|
@@ -251,7 +275,8 @@ The following sub-agents are available and **must be actively consulted** to max
 
 - **`graph-theory-expert` must be consulted** before finalising the representation of any graph type and before selecting any search or traversal algorithm.
 - **`go-developer` must validate** all Go code for idiom conformance before a task is closed.
-- Specialists may be invoked **in parallel** when their inputs are independent (e.g., consulting `graph-theory-expert` on algorithm choice while `go-developer` reviews an adjacent module).
+- Specialists may be **consulted in parallel** — to inform in-flight implementation — when their inputs are independent (e.g., consulting `graph-theory-expert` on algorithm choice while `go-developer` drafts an adjacent module).
+- **Evaluations and audits run in parallel only with the user's explicit prior authorisation.** Parallel *consultation* that informs implementation is always allowed when inputs are independent; running standalone *evaluations or audits* concurrently is not — it must be authorised by the user beforehand.
 - Findings from specialists must be summarised in the task description or in a code comment when they influence a non-obvious design decision.
 
 ---
