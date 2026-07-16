@@ -715,7 +715,12 @@ func newSetAllForValue(entityVar string, value ast.Expression, isReplace bool, c
 	case *ast.Parameter:
 		return NewSetAllPropertiesFromParam(entityVar, v.Name, isReplace, child)
 	case *ast.MapLiteral:
-		return NewSetAllPropertiesFromMap(entityVar, v.String(), isReplace, child)
+		sap := NewSetAllPropertiesFromMap(entityVar, v.String(), isReplace, child)
+		// Retain the map AST so the physical builder can install a per-row
+		// evaluator when the map carries a non-literal value (e.g.
+		// `SET n += {x: row.y}`); without it such a value is silently dropped.
+		sap.MapAST = v
+		return sap
 	case *ast.NullLiteral:
 		// `SET n = null` clears all properties (equivalent to `SET n = {}`);
 		// `SET n += null` is a no-op. Routing through an empty map literal

@@ -4505,6 +4505,16 @@ func buildOperatorWrite(
 			if bErr != nil {
 				return nil, bErr
 			}
+			// Row-aware source map: when it carries a non-literal value (a
+			// variable reference, property access, or arithmetic — e.g.
+			// `SET n += {x: row.y}`), install a per-row evaluator so the value
+			// is written (and null-valued keys removed) rather than silently
+			// dropped by the literal-only parser — a fail-silent Consistency
+			// defect. The schema includes the entity var, so a self-reference
+			// like `SET n += {x: n.id + 1}` resolves against the pre-SET state.
+			if fn := maybeMapEvalFn(p.MapAST, schemaCopy, params, reg, mutator, bopts); fn != nil {
+				sap = sap.WithMapEvalFn(fn)
+			}
 		}
 		if len(params) > 0 {
 			var pErr error
@@ -5143,6 +5153,81 @@ func maybePropsEvalFn(
 		return nil
 	}
 	return buildPropsEvalFn(ml, schema, params, reg, mutator, bopts)
+}
+
+// maybeMapEvalFn returns a per-row [exec.MapEvalFn] for the SET-map source map
+// mapAST when it is a *ast.MapLiteral carrying at least one non-literal value,
+// or nil otherwise (an absent map, a non-map expression, or an all-literal /
+// $param-only map that WithParams resolves at build time). It is the SET-map
+// analogue of [maybePropsEvalFn]; the difference is that its evaluator reports
+// null-valued keys (see [buildMapEvalFn]) because SET-map semantics REMOVE such
+// keys rather than omit them.
+func maybeMapEvalFn(
+	mapAST ast.Expression,
+	schema map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	mutator exec.GraphMutator,
+	bopts *buildOpts,
+) exec.MapEvalFn {
+	ml, ok := mapAST.(*ast.MapLiteral)
+	if !ok || ml == nil || !mapLiteralHasNonLiteralValue(ml) {
+		return nil
+	}
+	return buildMapEvalFn(ml, schema, params, reg, mutator, bopts)
+}
+
+// buildMapEvalFn constructs an [exec.MapEvalFn] closure that evaluates the
+// key→expression pairs in ml against each incoming row for a `SET x = {…}` /
+// `SET x += {…}` operator. It mirrors [buildPropsEvalFn] but, instead of
+// silently omitting a key whose value evaluates to null, it reports that key in
+// nullKeys — SET-map semantics delete such keys from the target (openCypher:
+// `SET n += {k: null}` removes k). Runtime evaluation errors and invalid
+// property types (a map or nested collection) fail-stop; a node/relationship-
+// valued entry is dropped (consistent with [buildPropsEvalFn] and the shared
+// scalar-vs-NodeID guard). A nil ml produces a nil closure.
+func buildMapEvalFn(
+	ml *ast.MapLiteral,
+	schemaCopy map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	mutator exec.GraphMutator,
+	bopts *buildOpts,
+) exec.MapEvalFn {
+	if ml == nil {
+		return nil
+	}
+	keys := make([]string, len(ml.Keys))
+	copy(keys, ml.Keys)
+	vals := make([]ast.Expression, len(ml.Values))
+	copy(vals, ml.Values)
+	scalarSnap := scalarColSnapshot(bopts)
+
+	return func(row exec.Row) ([]exec.PropEntry, []string, error) {
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		var entries []exec.PropEntry
+		var nullKeys []string
+		for i, k := range keys {
+			v, evalErr := expr.Eval(vals[i], rowCtx, params, reg)
+			if evalErr != nil {
+				return nil, nil, evalErr
+			}
+			if v == nil || expr.IsNull(v) {
+				// SET-map null: mark the key for removal (not a silent omit).
+				nullKeys = append(nullKeys, k)
+				continue
+			}
+			if !isStorableProperty(v) {
+				return nil, nil, fmt.Errorf("exec: property %s: %w", k, exec.ErrNestedPropertyValue)
+			}
+			pv, ok := exprValueToLPGProp(v)
+			if !ok {
+				continue // e.g. a NodeValue: dropped (shared scalar-vs-NodeID guard)
+			}
+			entries = append(entries, exec.PropEntry{Key: k, Value: pv})
+		}
+		return entries, nullKeys, nil
+	}
 }
 
 // scalarColSnapshot copies the scalar-column set (UNWIND element variables,

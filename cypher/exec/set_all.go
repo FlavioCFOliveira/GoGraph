@@ -68,9 +68,26 @@ type SetAllProperties struct {
 	// source map. Such keys must be removed from the target (openCypher
 	// semantics for explicit null assignment via SET map).
 	nullKeys []string
+	// mapEvalFn evaluates the source map against the current row when it holds
+	// a non-literal value (a variable reference, property access, or arithmetic
+	// — e.g. `SET n += {x: row.y}` or `SET n = {x: n.id + 1}`). nil when every
+	// map value is a literal ($param references are resolved at build time into
+	// parsedMap/nullKeys via [SetAllProperties.WithParams]). It supersedes the
+	// static parsedMap/nullKeys for that row — without it a row-driven map value
+	// is silently dropped (the target keeps null / stale data), a fail-silent
+	// Consistency defect matching the literal-only CREATE/MERGE class.
+	mapEvalFn MapEvalFn
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 }
+
+// MapEvalFn is a per-row evaluator for a whole property map used by a
+// `SET x = {…}` / `SET x += {…}` operator. Unlike [PropsEvalFn] it also reports
+// the keys whose value evaluated to null (nullKeys): SET-map semantics REMOVE
+// such keys from the target (openCypher: `SET n += {k: null}` deletes k),
+// whereas PropsEvalFn omits null entries because a null on CREATE is a no-op.
+// entries carries the non-null (key, value) pairs; nullKeys the keys to delete.
+type MapEvalFn func(row Row) (entries []PropEntry, nullKeys []string, err error)
 
 // NewSetAllPropertiesFromEntity creates a SetAllProperties operator copying
 // every property from sourceVar (a bound node or relationship) to entityVar.
@@ -160,6 +177,19 @@ func (op *SetAllProperties) WithParams(params map[string]expr.Value) (*SetAllPro
 		}
 	}
 	return op, nil
+}
+
+// WithMapEvalFn attaches a per-row evaluator for the source map when it holds a
+// non-literal value (a variable reference, property access, or arithmetic — e.g.
+// `SET n += {x: row.y}`). The evaluator's output supersedes the static
+// parsedMap/nullKeys for each row, so the map's row-driven values are written
+// (and null-valued keys removed) exactly as the literal map is. Without it the
+// literal-only parser drops the non-literal entry and the target keeps null or
+// stale data — the same fail-silent defect the CREATE/MERGE property evaluators
+// exist to prevent. Pass nil to clear. Returns op for chaining.
+func (op *SetAllProperties) WithMapEvalFn(fn MapEvalFn) *SetAllProperties {
+	op.mapEvalFn = fn
+	return op
 }
 
 // WithRelCols marks entityVar as a relationship variable and records the row
@@ -305,11 +335,33 @@ func (op *SetAllProperties) Next(out *Row) (bool, error) {
 			return false, applyErr
 		}
 	} else {
-		op.applyMap(target)
+		if applyErr := op.applyMap(target, childRow); applyErr != nil {
+			return false, applyErr
+		}
 	}
 
 	*out = childRow
 	return true, nil
+}
+
+// effectiveMap returns the (entries, nullKeys) to apply for the current row:
+// the static parsedMap/nullKeys when the map is all-literal (or $param-sourced),
+// or the per-row evaluation from mapEvalFn when the map holds a non-literal
+// value. The dynamic path evaluates the WHOLE map (literal entries included),
+// so it fully supersedes the static parse for that row.
+func (op *SetAllProperties) effectiveMap(row Row) ([]propLiteral, []string, error) {
+	if op.mapEvalFn == nil {
+		return op.parsedMap, op.nullKeys, nil
+	}
+	entries, nullKeys, err := op.mapEvalFn(row)
+	if err != nil {
+		return nil, nil, err
+	}
+	props := make([]propLiteral, 0, len(entries))
+	for _, e := range entries {
+		props = append(props, propLiteral{key: e.Key, value: e.Value})
+	}
+	return props, nullKeys, nil
 }
 
 // targetIsNullRow reports whether the row's target column carries a null
@@ -360,17 +412,26 @@ func (op *SetAllProperties) applyEntityCopy(target entityBinding, row Row) error
 	return nil
 }
 
-// applyMap writes the parsed literal map (or parameter map) to the target.
-func (op *SetAllProperties) applyMap(target entityBinding) {
+// applyMap writes the source map to the target for the given row: the static
+// literal/parameter map, or the per-row evaluation when the map holds a
+// non-literal value (see [SetAllProperties.effectiveMap]). Null-valued keys are
+// removed (openCypher SET-map null semantics) before the non-null entries are
+// written.
+func (op *SetAllProperties) applyMap(target entityBinding, row Row) error {
+	parsedMap, nullKeys, err := op.effectiveMap(row)
+	if err != nil {
+		return err
+	}
 	if op.isReplace {
 		op.clearTarget(target)
 	}
-	for _, k := range op.nullKeys {
+	for _, k := range nullKeys {
 		op.deleteOne(target, k)
 	}
-	for _, p := range op.parsedMap {
+	for _, p := range parsedMap {
 		op.writeOne(target, p.key, p.value)
 	}
+	return nil
 }
 
 // clearTarget removes every property from the target entity. Used to

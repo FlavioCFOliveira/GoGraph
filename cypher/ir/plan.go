@@ -1575,6 +1575,14 @@ type SetAllProperties struct {
 	// produced by the AST printer. Empty when the source is a SourceVar or a
 	// parameter reference.
 	MapLiteral string
+	// MapAST carries the source map-literal AST when it contains a non-literal
+	// value (a variable reference, property access, or arithmetic — e.g.
+	// `SET n += {x: row.y}`). The physical builder installs a per-row map
+	// evaluator from it so the row-driven values are written (and null-valued
+	// keys removed). nil when the map is absent or every value is a literal
+	// (or a $param, resolved at build time via the opaque MapLiteral string).
+	// Without it a row-driven map value silently degrades to null on the target.
+	MapAST ast.Expression
 	// ParamName holds the `$name` reference text (without the dollar sign)
 	// when the source is a parameter. Empty otherwise.
 	ParamName string
